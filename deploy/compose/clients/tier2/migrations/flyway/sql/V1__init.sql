@@ -1,0 +1,19 @@
+CREATE TABLE customer (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  email VARCHAR(191) NOT NULL,
+  name VARCHAR(100),
+  prefs JSON,
+  credit DECIMAL(12,2) NOT NULL DEFAULT 0,
+  created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  email_lc VARCHAR(191) AS (LOWER(email)) STORED,
+  UNIQUE KEY uk_email (email),
+  CONSTRAINT ck_credit CHECK (credit >= 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE orders (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  customer_id BIGINT UNSIGNED NOT NULL,
+  total DECIMAL(12,2) NOT NULL,
+  status ENUM('new','paid','shipped') NOT NULL DEFAULT 'new',
+  KEY k_status ((CAST(status AS CHAR(10)))),
+  CONSTRAINT fk_orders_customer FOREIGN KEY (customer_id) REFERENCES customer (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

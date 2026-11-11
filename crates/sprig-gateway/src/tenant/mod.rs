@@ -32,6 +32,8 @@ pub mod password;
 pub mod pins_sql;
 // Chapter 52: recommendations in SQL.
 pub mod rec_sql;
+// Chapter 29: row-level security (R4).
+pub mod rls;
 pub mod session;
 pub mod settings_sql;
 pub mod stored_names;
@@ -150,6 +152,8 @@ impl TenantServices {
         let extensions: Vec<Arc<dyn CatalogExtension>> = vec![
             Arc::new(AuthExtension),
             Arc::new(sprig_auth::authz::AuthzExtension),
+            // Chapter 29: row-level security policies (R4).
+            Arc::new(sprig_auth::authz::rls::RlsExtension),
             // Chapter 32: types and record hierarchies.
             Arc::new(sprig_types::TypesExtension),
             // Chapter 45: event streams (R9).
@@ -168,6 +172,8 @@ impl TenantServices {
             Arc::new(crate::exec::router::ShardingExtension),
             // Chapter 31: collections, their indexes and field columns (R5).
             Arc::new(crate::mongo::catalog::DocExtension),
+            // Chapter 39: search indexes and analyzers (R5 round 5).
+            Arc::new(crate::search::catalog::SearchExtension),
         ];
         let source = MariaSource::new(Arc::clone(&dyn_locator), extensions)?;
         let feed = DirectoryWatch::start(Arc::clone(&global))?;
@@ -231,6 +237,8 @@ impl TenantServices {
         crate::inherited::outbox::start_sweeper(&svc);
         crate::inherited::broadcast::start_fan_out(&svc);
         crate::inherited::lifecycle::start_sweeper(&svc);
+        // R9 (r9queue): members' failed inherited sink deploys, on a timer.
+        crate::inherited::sinks::retry::start(&svc);
         Ok(svc)
     }
 }

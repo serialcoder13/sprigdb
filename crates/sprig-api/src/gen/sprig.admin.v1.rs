@@ -5419,3 +5419,1225 @@ pub mod recommendations_server {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
+/// Generated client implementations.
+pub mod operators_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    /// Named operator accounts, their sessions and their tokens (chapter 14,
+    /// "Operators"). Gateways relay these calls to the controller with the
+    /// caller's credential, as every admin call; the controller's guard decides
+    /// (decision OP12). `Login` and `Enrol` take no credential; the others take
+    /// an operator's session (`Authorization: Bearer sprigop_...`), a token or
+    /// the bootstrap token as the guard allows.
+    #[derive(Debug, Clone)]
+    pub struct OperatorsClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl<T> OperatorsClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> OperatorsClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            OperatorsClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        /// body_json: {"name", "password", "code" | "recovery_code", "client"}.
+        /// Replies with a session token, or with an enrolment ticket and an
+        /// otpauth:// URI when the operator has no second factor yet.
+        pub async fn login(
+            &mut self,
+            request: impl tonic::IntoRequest<super::BodyRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.admin.v1.Operators/Login",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.admin.v1.Operators", "Login"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// body_json: {"name", "ticket", "code"}: the first code from the
+        /// authenticator.
+        /// Replies with a session token and the recovery codes, shown once.
+        pub async fn enrol(
+            &mut self,
+            request: impl tonic::IntoRequest<super::BodyRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.admin.v1.Operators/Enrol",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.admin.v1.Operators", "Enrol"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Ends the calling session.
+        pub async fn logout(
+            &mut self,
+            request: impl tonic::IntoRequest<super::BodyRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.admin.v1.Operators/Logout",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.admin.v1.Operators", "Logout"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// The caller as the guard sees them: name, role, DCs, scopes, expiry.
+        pub async fn who_am_i(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.admin.v1.Operators/WhoAmI",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.admin.v1.Operators", "WhoAmI"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_operators(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.admin.v1.Operators/ListOperators",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.admin.v1.Operators", "ListOperators"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// body_json: {"name", "role": "platform_operator" | "dc_operator", "dcs",
+        /// "password", "display_name", "email", "reason"}. Needs a platform
+        /// operator's login session.
+        pub async fn create_operator(
+            &mut self,
+            request: impl tonic::IntoRequest<super::BodyRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.admin.v1.Operators/CreateOperator",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.admin.v1.Operators", "CreateOperator"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_operator(
+            &mut self,
+            request: impl tonic::IntoRequest<super::NameRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.admin.v1.Operators/GetOperator",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.admin.v1.Operators", "GetOperator"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// body_json: {"reason"}. Revokes the operator's sessions and tokens.
+        pub async fn disable_operator(
+            &mut self,
+            request: impl tonic::IntoRequest<super::NameRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.admin.v1.Operators/DisableOperator",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.admin.v1.Operators", "DisableOperator"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn enable_operator(
+            &mut self,
+            request: impl tonic::IntoRequest<super::NameRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.admin.v1.Operators/EnableOperator",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.admin.v1.Operators", "EnableOperator"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// body_json: {"reason"}. The operator enrols again at the next login.
+        pub async fn reset_operator_factor(
+            &mut self,
+            request: impl tonic::IntoRequest<super::NameRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.admin.v1.Operators/ResetOperatorFactor",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("sprig.admin.v1.Operators", "ResetOperatorFactor"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// body_json: {"password", "current", "reason"}; "current" is the old
+        /// password when operators change their own.
+        pub async fn set_operator_password(
+            &mut self,
+            request: impl tonic::IntoRequest<super::NameRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.admin.v1.Operators/SetOperatorPassword",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("sprig.admin.v1.Operators", "SetOperatorPassword"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// body_json: {"label", "scopes", "dcs", "expires_in_days", "service",
+        /// "service_kind", "never_expires", "reason"}. Issued only from a login session
+        /// (OP5).
+        pub async fn create_token(
+            &mut self,
+            request: impl tonic::IntoRequest<super::BodyRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.admin.v1.Operators/CreateToken",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.admin.v1.Operators", "CreateToken"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Query: owner.
+        pub async fn list_tokens(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.admin.v1.Operators/ListTokens",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.admin.v1.Operators", "ListTokens"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// name: the token's key id.
+        pub async fn revoke_token(
+            &mut self,
+            request: impl tonic::IntoRequest<super::NameRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.admin.v1.Operators/RevokeToken",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.admin.v1.Operators", "RevokeToken"));
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod operators_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with OperatorsServer.
+    #[async_trait]
+    pub trait Operators: std::marker::Send + std::marker::Sync + 'static {
+        /// body_json: {"name", "password", "code" | "recovery_code", "client"}.
+        /// Replies with a session token, or with an enrolment ticket and an
+        /// otpauth:// URI when the operator has no second factor yet.
+        async fn login(
+            &self,
+            request: tonic::Request<super::BodyRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
+        /// body_json: {"name", "ticket", "code"}: the first code from the
+        /// authenticator.
+        /// Replies with a session token and the recovery codes, shown once.
+        async fn enrol(
+            &self,
+            request: tonic::Request<super::BodyRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
+        /// Ends the calling session.
+        async fn logout(
+            &self,
+            request: tonic::Request<super::BodyRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
+        /// The caller as the guard sees them: name, role, DCs, scopes, expiry.
+        async fn who_am_i(
+            &self,
+            request: tonic::Request<super::ListRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
+        async fn list_operators(
+            &self,
+            request: tonic::Request<super::ListRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
+        /// body_json: {"name", "role": "platform_operator" | "dc_operator", "dcs",
+        /// "password", "display_name", "email", "reason"}. Needs a platform
+        /// operator's login session.
+        async fn create_operator(
+            &self,
+            request: tonic::Request<super::BodyRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
+        async fn get_operator(
+            &self,
+            request: tonic::Request<super::NameRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
+        /// body_json: {"reason"}. Revokes the operator's sessions and tokens.
+        async fn disable_operator(
+            &self,
+            request: tonic::Request<super::NameRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
+        async fn enable_operator(
+            &self,
+            request: tonic::Request<super::NameRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
+        /// body_json: {"reason"}. The operator enrols again at the next login.
+        async fn reset_operator_factor(
+            &self,
+            request: tonic::Request<super::NameRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
+        /// body_json: {"password", "current", "reason"}; "current" is the old
+        /// password when operators change their own.
+        async fn set_operator_password(
+            &self,
+            request: tonic::Request<super::NameRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
+        /// body_json: {"label", "scopes", "dcs", "expires_in_days", "service",
+        /// "service_kind", "never_expires", "reason"}. Issued only from a login session
+        /// (OP5).
+        async fn create_token(
+            &self,
+            request: tonic::Request<super::BodyRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
+        /// Query: owner.
+        async fn list_tokens(
+            &self,
+            request: tonic::Request<super::ListRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
+        /// name: the token's key id.
+        async fn revoke_token(
+            &self,
+            request: tonic::Request<super::NameRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
+    }
+    /// Named operator accounts, their sessions and their tokens (chapter 14,
+    /// "Operators"). Gateways relay these calls to the controller with the
+    /// caller's credential, as every admin call; the controller's guard decides
+    /// (decision OP12). `Login` and `Enrol` take no credential; the others take
+    /// an operator's session (`Authorization: Bearer sprigop_...`), a token or
+    /// the bootstrap token as the guard allows.
+    #[derive(Debug)]
+    pub struct OperatorsServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> OperatorsServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for OperatorsServer<T>
+    where
+        T: Operators,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/sprig.admin.v1.Operators/Login" => {
+                    #[allow(non_camel_case_types)]
+                    struct LoginSvc<T: Operators>(pub Arc<T>);
+                    impl<T: Operators> tonic::server::UnaryService<super::BodyRequest>
+                    for LoginSvc<T> {
+                        type Response = super::JsonReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::BodyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Operators>::login(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = LoginSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.admin.v1.Operators/Enrol" => {
+                    #[allow(non_camel_case_types)]
+                    struct EnrolSvc<T: Operators>(pub Arc<T>);
+                    impl<T: Operators> tonic::server::UnaryService<super::BodyRequest>
+                    for EnrolSvc<T> {
+                        type Response = super::JsonReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::BodyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Operators>::enrol(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = EnrolSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.admin.v1.Operators/Logout" => {
+                    #[allow(non_camel_case_types)]
+                    struct LogoutSvc<T: Operators>(pub Arc<T>);
+                    impl<T: Operators> tonic::server::UnaryService<super::BodyRequest>
+                    for LogoutSvc<T> {
+                        type Response = super::JsonReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::BodyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Operators>::logout(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = LogoutSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.admin.v1.Operators/WhoAmI" => {
+                    #[allow(non_camel_case_types)]
+                    struct WhoAmISvc<T: Operators>(pub Arc<T>);
+                    impl<T: Operators> tonic::server::UnaryService<super::ListRequest>
+                    for WhoAmISvc<T> {
+                        type Response = super::JsonReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Operators>::who_am_i(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = WhoAmISvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.admin.v1.Operators/ListOperators" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListOperatorsSvc<T: Operators>(pub Arc<T>);
+                    impl<T: Operators> tonic::server::UnaryService<super::ListRequest>
+                    for ListOperatorsSvc<T> {
+                        type Response = super::JsonReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Operators>::list_operators(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListOperatorsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.admin.v1.Operators/CreateOperator" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateOperatorSvc<T: Operators>(pub Arc<T>);
+                    impl<T: Operators> tonic::server::UnaryService<super::BodyRequest>
+                    for CreateOperatorSvc<T> {
+                        type Response = super::JsonReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::BodyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Operators>::create_operator(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateOperatorSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.admin.v1.Operators/GetOperator" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetOperatorSvc<T: Operators>(pub Arc<T>);
+                    impl<T: Operators> tonic::server::UnaryService<super::NameRequest>
+                    for GetOperatorSvc<T> {
+                        type Response = super::JsonReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::NameRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Operators>::get_operator(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetOperatorSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.admin.v1.Operators/DisableOperator" => {
+                    #[allow(non_camel_case_types)]
+                    struct DisableOperatorSvc<T: Operators>(pub Arc<T>);
+                    impl<T: Operators> tonic::server::UnaryService<super::NameRequest>
+                    for DisableOperatorSvc<T> {
+                        type Response = super::JsonReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::NameRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Operators>::disable_operator(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = DisableOperatorSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.admin.v1.Operators/EnableOperator" => {
+                    #[allow(non_camel_case_types)]
+                    struct EnableOperatorSvc<T: Operators>(pub Arc<T>);
+                    impl<T: Operators> tonic::server::UnaryService<super::NameRequest>
+                    for EnableOperatorSvc<T> {
+                        type Response = super::JsonReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::NameRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Operators>::enable_operator(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = EnableOperatorSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.admin.v1.Operators/ResetOperatorFactor" => {
+                    #[allow(non_camel_case_types)]
+                    struct ResetOperatorFactorSvc<T: Operators>(pub Arc<T>);
+                    impl<T: Operators> tonic::server::UnaryService<super::NameRequest>
+                    for ResetOperatorFactorSvc<T> {
+                        type Response = super::JsonReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::NameRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Operators>::reset_operator_factor(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ResetOperatorFactorSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.admin.v1.Operators/SetOperatorPassword" => {
+                    #[allow(non_camel_case_types)]
+                    struct SetOperatorPasswordSvc<T: Operators>(pub Arc<T>);
+                    impl<T: Operators> tonic::server::UnaryService<super::NameRequest>
+                    for SetOperatorPasswordSvc<T> {
+                        type Response = super::JsonReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::NameRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Operators>::set_operator_password(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SetOperatorPasswordSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.admin.v1.Operators/CreateToken" => {
+                    #[allow(non_camel_case_types)]
+                    struct CreateTokenSvc<T: Operators>(pub Arc<T>);
+                    impl<T: Operators> tonic::server::UnaryService<super::BodyRequest>
+                    for CreateTokenSvc<T> {
+                        type Response = super::JsonReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::BodyRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Operators>::create_token(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CreateTokenSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.admin.v1.Operators/ListTokens" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListTokensSvc<T: Operators>(pub Arc<T>);
+                    impl<T: Operators> tonic::server::UnaryService<super::ListRequest>
+                    for ListTokensSvc<T> {
+                        type Response = super::JsonReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Operators>::list_tokens(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListTokensSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.admin.v1.Operators/RevokeToken" => {
+                    #[allow(non_camel_case_types)]
+                    struct RevokeTokenSvc<T: Operators>(pub Arc<T>);
+                    impl<T: Operators> tonic::server::UnaryService<super::NameRequest>
+                    for RevokeTokenSvc<T> {
+                        type Response = super::JsonReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::NameRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Operators>::revoke_token(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RevokeTokenSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for OperatorsServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "sprig.admin.v1.Operators";
+    impl<T> tonic::server::NamedService for OperatorsServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}

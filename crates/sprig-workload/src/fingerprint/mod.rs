@@ -30,6 +30,7 @@
 //! and shape predicates name slots in their `args`.
 
 mod cache;
+pub mod compound;
 mod keywords;
 mod normalize;
 

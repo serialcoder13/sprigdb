@@ -105,3 +105,47 @@ fn scratch_shapes() {
         println!("{sql}\n  {}\n", shape_of(sql).to_json());
     }
 }
+
+/// R6 round 6 (decision K3): a JSON path predicate records its function
+/// and the condition as it would be on a column, also in an `IN` list, so
+/// the advisor can propose a field column for `JSON_VALUE`.
+#[test]
+fn json_paths_keep_their_function_and_condition() {
+    let s = shape_of(
+        "SELECT id FROM orders WHERE JSON_VALUE(email, '$.a') = ? AND JSON_VALUE(email, '$.b') \
+         IN ('x', 'y') AND JSON_VALUE(email, '$.c') > 3 AND JSON_EXTRACT(email, '$.d') IS NULL \
+         AND JSON_VALUE(email, '$.e') LIKE 'a%'",
+    );
+    let ops: Vec<String> = s
+        .predicates
+        .iter()
+        .map(|p| serde_json::to_string(&p.op).unwrap())
+        .collect();
+    assert_eq!(
+        ops,
+        [
+            r#"{"op":"json_path","path":"$.a","func":"JSON_VALUE","cmp":{"op":"eq"}}"#,
+            r#"{"op":"json_path","path":"$.b","func":"JSON_VALUE","cmp":{"op":"in","list":true}}"#,
+            r#"{"op":"json_path","path":"$.c","func":"JSON_VALUE","cmp":{"op":"range","lo":true,"hi":false}}"#,
+            r#"{"op":"json_path","path":"$.d","func":"JSON_EXTRACT","cmp":{"op":"is_null"}}"#,
+            r#"{"op":"json_path","path":"$.e","func":"JSON_VALUE","cmp":{"op":"like"}}"#,
+        ]
+    );
+    // JSON_VALUE in =, IN, a range or IS NULL can use a field column; the
+    // others can't, and a shape of only those stays all unsargable.
+    let field: Vec<bool> = s.predicates.iter().map(|p| p.op.is_field_sargable()).collect();
+    assert_eq!(field, [true, true, true, false, false]);
+    assert!(!s.all_unsargable());
+    assert!(shape_of("SELECT id FROM orders WHERE JSON_VALUE(email, '$.e') LIKE 'a%'").all_unsargable());
+    // Shapes recorded before still read.
+    let old: PredOp =
+        serde_json::from_str(r#"{"op":"json_path","path":"$.a"}"#).unwrap();
+    assert_eq!(
+        old,
+        PredOp::JsonPath {
+            path: "$.a".into(),
+            func: None,
+            cmp: None
+        }
+    );
+}

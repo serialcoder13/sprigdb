@@ -111,7 +111,9 @@ impl ExecSettingsSource {
                 static MEMO: std::sync::Mutex<Memo> = std::sync::Mutex::new(None);
                 let snap = live.snapshot();
                 let i = usize::from(persona == Persona::MariaDb);
-                let mut memo = MEMO.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut memo = MEMO
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Some((s, d, v)) = memo.as_ref()
                     && std::sync::Arc::ptr_eq(s, &snap)
                     && d == dc

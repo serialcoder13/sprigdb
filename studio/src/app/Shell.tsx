@@ -8,6 +8,7 @@ import { Explorer } from '../catalog/Explorer';
 import { setTheme, currentTheme, type Theme } from './theme';
 import { useTabs } from '../editor/tabs';
 import { useOpenCount } from '../approvals/InboxPage';
+import { operatorSession } from '../ops/ops';
 
 export function Shell() {
   const { tenant = '' } = useParams();
@@ -80,7 +81,7 @@ export function Shell() {
           <NavLink to={`${base}/security`}>
             <FormattedMessage id="nav.security" />
           </NavLink>
-          {me?.platform_roles.includes('operator') && (
+          {(me?.platform_roles.includes('operator') || operatorSession()) && (
             <NavLink to="/ops/clusters" data-testid="nav-operator">
               <FormattedMessage id="nav.operator" />
             </NavLink>

@@ -46,6 +46,9 @@ pub fn split(sql: &Bytes) -> Vec<Bytes> {
             b'#' => i = skip_line(b, i),
             b'-' if is_dash_comment(b, i) => i = skip_line(b, i),
             b'/' if b.get(i + 1) == Some(&b'*') => i = skip_block(b, i),
+            // A `$$ ... $$` body (logic functions and triggers, sink
+            // scripts, R9 r9queue): its semicolons don't end the statement.
+            b'$' if b.get(i + 1) == Some(&b'$') && dollar_starts(b, i) => i = skip_dollar(b, i),
             b';' => {
                 push_piece(&mut out, sql, start, i);
                 i += 1;
@@ -57,6 +60,24 @@ pub fn split(sql: &Bytes) -> Vec<Bytes> {
     }
     push_piece(&mut out, sql, start, b.len());
     out
+}
+
+/// Whether the `$$` at `i` opens a body (not part of a name like `a$$`).
+fn dollar_starts(b: &[u8], i: usize) -> bool {
+    i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_' || b[i - 1] == b'$')
+}
+
+/// Past the `$$ ... $$` body opening at `i` (the end of the text when it
+/// isn't closed).
+fn skip_dollar(b: &[u8], i: usize) -> usize {
+    let mut j = i + 2;
+    while j + 1 < b.len() {
+        if b[j] == b'$' && b[j + 1] == b'$' {
+            return j + 2;
+        }
+        j += 1;
+    }
+    b.len()
 }
 
 fn push_piece(out: &mut Vec<Bytes>, sql: &Bytes, start: usize, end: usize) {
@@ -490,6 +511,23 @@ mod tests {
             .iter()
             .map(|b| String::from_utf8_lossy(b).trim().to_owned())
             .collect()
+    }
+
+    #[test]
+    fn dollar_bodies_stay_whole() {
+        let sql = Bytes::from_static(
+            b"CREATE SINK s FROM STREAM ev TO SCRIPT LANGUAGE javascript AS $$ \
+              export function deliver(b, c) { const x = 1; return true; } $$; SELECT 1",
+        );
+        let v = split(&sql);
+        assert_eq!(v.len(), 2, "{v:?}");
+        assert!(v[0].ends_with(b"$$"));
+        assert_eq!(&v[1][..], b" SELECT 1");
+        // `$$` inside a name isn't a body.
+        assert_eq!(
+            split(&Bytes::from_static(b"SELECT a$$b; SELECT 2")).len(),
+            2
+        );
     }
 
     #[test]

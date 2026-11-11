@@ -27,6 +27,7 @@
 //! ```
 
 mod disconnect;
+pub mod redact;
 mod table;
 mod task;
 
@@ -466,6 +467,17 @@ pub struct Session {
     /// TODO(chapter 04 step 7): `MemCharge`, memory charged to the gateway,
     /// tenant and user.
     pub mem: Option<()>,
+    /// Statements the front end answered itself (`SELECT @@version_comment`,
+    /// `KILL`, `SHOW PROCESSLIST`), and how many were `SELECT`s: counted
+    /// in the session's `SHOW STATUS` (gaps row 46).
+    pub local_questions: u64,
+    /// See [`Self::local_questions`].
+    pub local_selects: u64,
+    /// The MySQL client's connection attributes (`_client_name`,
+    /// `program_name`, ...), as kept after `gateway.max_connect_attrs_bytes`:
+    /// 3306's `performance_schema.session_connect_attrs` (chapter 28, R4
+    /// round 4).
+    pub connect_attrs: Vec<(String, String)>,
     state: SessionState,
     handle: Arc<SessionHandle>,
     registration: Arc<Registration>,
@@ -553,9 +565,14 @@ impl Session {
     }
 
     /// A command starts: `Command` and `Info` show it, and `Time` restarts.
-    /// Clears a `KILL QUERY` aimed at an earlier statement.
+    /// Clears a `KILL QUERY` aimed at an earlier statement. Passwords and
+    /// credentials in `info` are shown as `<secret>` ([`redact::info`]).
     pub fn begin_command(&self, command: &'static str, info: Option<String>) {
         self.flags().take_kill_query();
+        let info = info.map(|i| match redact::info(&i) {
+            std::borrow::Cow::Borrowed(_) => i,
+            std::borrow::Cow::Owned(r) => r,
+        });
         let now = self.registration.table.clock().now();
         let mut a = self.handle.activity();
         a.command = command;

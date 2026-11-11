@@ -842,7 +842,9 @@ pub async fn handle(
                 },
             }
         }
-        (_, p) if p == "/v1/ops" || p.starts_with("/v1/ops/") => ops::route(core, info, req).await,
+        (_, p) if p == "/v1/ops" || p.starts_with("/v1/ops/") || p.starts_with("/v1/ops:") => {
+            ops::route(core, info, req).await
+        }
         (_, p) if logic::is_logic_path(p) => logic::route(core, info, req).await,
         (_, p) if messaging::is_messaging_path(p) => messaging::route(core, info, req).await,
         ("POST", "/v1/policies:testAs") => policies::test_as(core, info, req).await,

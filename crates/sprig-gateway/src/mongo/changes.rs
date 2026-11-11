@@ -255,6 +255,21 @@ impl ChangeFeed {
     }
 }
 
+/// The feed's parts as [`ChangeFeed::new`] builds them, for other
+/// consumers in the gateway (chapter 39's search runtimes).
+///
+/// # Errors
+/// The registry's.
+#[allow(clippy::type_complexity)]
+pub(crate) fn feed_parts(
+    global: Arc<dyn MetaStore>,
+    dc: Arc<dyn MetaStore>,
+    catalogs: Arc<dyn CatalogLocator>,
+) -> Result<(Arc<dyn Clusters>, Arc<dyn PlacementView>, Arc<dyn Resolver>)> {
+    let f = ChangeFeed::new(global, dc, catalogs)?;
+    Ok((f.clusters, f.placement, f.names))
+}
+
 /// `fullDocument` and `fullDocumentBeforeChange`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Images {

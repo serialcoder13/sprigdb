@@ -225,8 +225,10 @@ test.describe.serial('Studio round 4: MongoDB', () => {
     await expect(asha).toContainText('9007199254740993');
     await axe(page, 'mongo-tree');
     await shot(page, 'mongo-tree');
-    // Edit Ben's score; his int64 `visits` (relaxed: 7) must stay int64.
+    // Edit Ben's score; his int64 `visits` (7) must stay int64.
     const ben = page.getByTestId('doc-1');
+    // Round 5: canonical output, so Ben's small int64 shows as int64, not int.
+    await expect(ben.locator('[data-type="int64"]')).toHaveCount(1);
     await ben.getByRole('button', { name: 'Edit score' }).click();
     await expect(page.getByTestId('edit-type')).toHaveValue('double');
     await page.getByTestId('edit-value').fill('2.5');

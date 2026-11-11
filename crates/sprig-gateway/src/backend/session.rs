@@ -26,6 +26,11 @@ use super::writer::WriterSelector as _;
 use super::{Backends, unavailable};
 use crate::reads::{self, GtidSet, ReadTarget};
 
+/// The rendezvous key whose Galera writer is the cluster's lock node
+/// (chapter 28, "Locks"; R4 round 4): not a shard, a fixed key every
+/// gateway hashes the same way.
+pub(crate) const LOCK_NODE_KEY: ShardId = ShardId(u32::MAX);
+
 /// Options of a session's backend side, from its login.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionOpts {
@@ -560,6 +565,8 @@ impl BackendSession {
     /// server's error for a failed sync (after one retry); 39100 without a
     /// writer.
     pub async fn query(&mut self, info: &StmtInfo, sql: &[u8]) -> Result<()> {
+        let views = self.policy_views(sql);
+        let sql = views.as_deref().unwrap_or(sql);
         self.check_packet(sql.len() + 1)?;
         if let Some(r) = self.redo.as_mut() {
             r.before(info, sql);
@@ -576,6 +583,24 @@ impl BackendSession {
             Some(limit) if len > limit => Err(super::packet_too_large()),
             _ => Ok(()),
         }
+    }
+
+    /// Chapter 29 (decision RL18): `sql` reading the session's protected
+    /// tables through their policy views, if it reads any. The session's
+    /// account can't read the tables themselves, so a reference this
+    /// misses fails (1142) rather than reading unfiltered rows.
+    fn policy_views(&self, sql: &[u8]) -> Option<Vec<u8>> {
+        let v = self.vars();
+        let swap = v.rls_views.as_ref()?;
+        let mode = v.vars.get("sql_mode").map(|m| m.to_ascii_uppercase());
+        let lex = sprig_sql::lex::LexOptions {
+            ansi_quotes: mode.as_deref().is_some_and(|m| m.contains("ANSI_QUOTES")),
+            no_backslash_escapes: mode
+                .as_deref()
+                .is_some_and(|m| m.contains("NO_BACKSLASH_ESCAPES")),
+            ..sprig_sql::lex::LexOptions::mariadb()
+        };
+        swap.apply(sql, &lex, v.schema.as_deref())
     }
 
     /// Whether this connection records its writes for a held branch's
@@ -607,6 +632,8 @@ impl BackendSession {
         sql: &[u8],
         build: &mut (dyn FnMut(&BackendStmt) -> ProtoResult<Bytes> + Send + Sync),
     ) -> Result<()> {
+        let views = self.policy_views(sql);
+        let sql = views.as_deref().unwrap_or(sql);
         if let Some(r) = self.redo.as_mut() {
             r.before_binary(info, sql);
         }
@@ -621,6 +648,8 @@ impl BackendSession {
     /// # Errors
     /// As [`query`](Self::query); the server's error for a bad statement.
     pub async fn prepare(&mut self, info: &StmtInfo, sql: &[u8]) -> Result<BackendStmt> {
+        let views = self.policy_views(sql);
+        let sql = views.as_deref().unwrap_or(sql);
         let mut out = None;
         self.run(info, Req::Prepare { sql, out: &mut out }).await?;
         self.finish().await?;
@@ -1285,7 +1314,16 @@ impl BackendSession {
         exclude: &mut Vec<NodeId>,
         deadline: Instant,
     ) -> Result<(BackendLease, RouteKind, Wait)> {
-        let shard = self.opts.shard;
+        // Chapter 28, "Locks" (R4 round 4): on Galera, user-level lock
+        // functions run on one node of the cluster, the writer of
+        // `LOCK_NODE_KEY` that every gateway's rendezvous agrees on, so
+        // sessions on any gateway (and any shard) meet on the same locks.
+        // Lock names are scoped per tenant, so tenants share the node.
+        let shard = if info.user_lock && view.topology == TopologyKind::Galera {
+            LOCK_NODE_KEY
+        } else {
+            self.opts.shard
+        };
         // With autocommit = 0 every statement, a plain read too, opens a
         // transaction (chapter 06, "Pins"): it belongs on the writer, where
         // the rest of that transaction runs.

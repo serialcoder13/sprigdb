@@ -211,6 +211,17 @@ pub struct Input {
     pub split_bytes: f64,
     /// The tenant's pins (`SPRIG PIN`, chapter 15's `group_pins`).
     pub pins: Vec<Pin>,
+    /// Chapter 33's key-value units (a key table with its element
+    /// tables), placed by [`super::kv::imply`] (decision R28, R6 round 5).
+    pub kv: Vec<super::kv::KvUnit>,
+    /// `sharding.split_write_share_pct` as a ratio, for the key-value load
+    /// rule (0: the default, 0.5).
+    pub split_write_share: f64,
+    /// Lines the key-value rule left for the run's evidence.
+    pub notes: Vec<String>,
+    /// Objects the key-value rule placed (their implied pins aren't
+    /// reported as client pins).
+    pub kv_decided: Vec<Obj>,
 }
 
 impl Input {
@@ -253,6 +264,7 @@ impl Input {
             .sort_by(|a, b| a.writes.cmp(&b.writes).then(a.weight.total_cmp(&b.weight)));
         self.pins.sort_by_key(|p| p.object);
         self.pins.dedup_by_key(|p| p.object);
+        self.kv.sort_by_key(|u| u.key);
     }
 
     /// Total weight of the statements and units, as `units_sampled`.
@@ -551,7 +563,17 @@ fn derive(
 #[must_use]
 #[allow(clippy::too_many_lines)] // the book's five steps, pins first
 pub fn structural(input: &Input, s: &AdvisorSettings) -> (Design, Vec<String>) {
-    let mut evidence = Vec::new();
+    // Key-value units first (decision R28): their pins are implied.
+    let owned;
+    let input = if input.kv.is_empty() {
+        input
+    } else {
+        let mut i = input.clone();
+        super::kv::imply(&mut i, s);
+        owned = i;
+        &owned
+    };
+    let mut evidence = input.notes.clone();
     let mut design = Design::default();
     let name = |o: Obj| {
         input
@@ -563,7 +585,9 @@ pub fn structural(input: &Input, s: &AdvisorSettings) -> (Design, Vec<String>) {
     for t in &input.tables {
         match input.pin(t.object) {
             Some(PinKind::Unsharded) => {
-                evidence.push(format!("{}: pinned UNSHARDED", t.name));
+                if !input.kv_decided.contains(&t.object) {
+                    evidence.push(format!("{}: pinned UNSHARDED", t.name));
+                }
                 out.insert(t.object);
             }
             Some(PinKind::Reference) => {
@@ -1159,6 +1183,7 @@ fn groups_count(d: &Design) -> usize {
 pub fn search(input: &Input, s: &AdvisorSettings) -> SearchResult {
     let mut input = input.clone();
     input.normalize();
+    super::kv::imply(&mut input, s);
     let (mut d, evidence) = structural(&input, s);
     let mut sc = score(&input, &d, s);
     let mut seen: Vec<(Design, Score)> = vec![(d.clone(), sc)];

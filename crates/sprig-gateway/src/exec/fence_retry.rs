@@ -152,8 +152,12 @@ pub(super) async fn met_fence(
         match tokio::time::timeout(settle, locator.maps_token_fresh(tenant)).await {
             Ok(Ok(fresh)) if !fresh.2 && fresh == *before => return false,
             Ok(Ok(_)) => confirmed = true,
-            Ok(Err(e)) => tracing::debug!(%tenant, error = %e, "can't read the tenant's maps; waiting for the watch"),
-            Err(_) => tracing::debug!(%tenant, "etcd didn't list the tenant's maps in time; waiting for the watch"),
+            Ok(Err(e)) => {
+                tracing::debug!(%tenant, error = %e, "can't read the tenant's maps; waiting for the watch");
+            }
+            Err(_) => {
+                tracing::debug!(%tenant, "etcd didn't list the tenant's maps in time; waiting for the watch");
+            }
         }
     }
     // A fence etcd showed: wait (bounded) until the watch shows it too, so
@@ -320,6 +324,9 @@ impl PassSession {
             let gate = self.dc_write_gate(&req).await?;
             if !counted {
                 self.count_traffic(cx, &req);
+                // The session's SHOW STATUS counters (gaps row 46): once
+                // per request, however often a fence makes it run again.
+                self.count_request(&req, cx.session);
                 counted = true;
             }
             let watch = self.tenant.as_deref().map(|ts| {

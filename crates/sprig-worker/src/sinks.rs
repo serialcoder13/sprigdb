@@ -38,6 +38,8 @@ pub struct SinksEnv {
     worker: String,
     /// The worker's live settings (global `sink.*`).
     settings: crate::settings::WorkerSettings,
+    /// The DC's gateways (queue sources, the script `db` handle; R9).
+    peer: Option<Arc<dyn sprig_sinks::peer::SinkPeer>>,
 }
 
 impl std::fmt::Debug for SinksEnv {
@@ -81,7 +83,15 @@ impl SinksEnv {
             ),
             worker: worker.to_owned(),
             settings: env.settings.clone(),
+            peer: None,
         }
+    }
+
+    /// Statements as sinks' owners go through `gateways` (R9, r9queue).
+    #[must_use]
+    pub fn with_peer(mut self, gateways: Arc<dyn sprig_sinks::peer::SinkPeer>) -> Self {
+        self.peer = Some(gateways);
+        self
     }
 }
 
@@ -90,6 +100,10 @@ impl SinkEnv for SinksEnv {
     async fn catalog(&self, tenant: TenantId) -> Result<(Pool, String)> {
         let ep = self.locator.writer(tenant).await?;
         Ok((ep.pool, ep.store.schema().to_owned()))
+    }
+
+    fn peer(&self) -> Option<Arc<dyn sprig_sinks::peer::SinkPeer>> {
+        self.peer.clone()
     }
 
     async fn shard_pool(&self, tenant: TenantId) -> Result<Pool> {
@@ -147,7 +161,7 @@ impl JobHandler for SinkTask {
     }
 
     fn class(&self) -> JobClass {
-        JobClass::Other
+        JobClass::Consumer
     }
 
     async fn run(&self, cx: &JobCtx) -> std::result::Result<Value, String> {

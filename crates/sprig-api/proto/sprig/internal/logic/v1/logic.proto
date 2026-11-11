@@ -10,6 +10,11 @@ service LogicPeer {
   // One run: a record of a stream, or the next message of a queue, in one
   // transaction of a session as the trigger's definer.
   rpc RunTrigger(RunTriggerRequest) returns (RunTriggerReply);
+  // R9 (r9queue): statements of a sink task in a session as the sink's
+  // owner (chapter 51): a script sink's read-only `db` reads, each in a
+  // read-only transaction, and a queue source's sprig.mq_get, mq_ack and
+  // mq_nack calls.
+  rpc SinkSql(SinkSqlRequest) returns (SinkSqlReply);
 }
 
 message RunTriggerRequest {
@@ -19,5 +24,15 @@ message RunTriggerRequest {
 
 message RunTriggerReply {
   // sprig_logic::messages::RunReply as JSON.
+  string reply_json = 1;
+}
+
+message SinkSqlRequest {
+  // sprig_sinks::peer::SqlRequest as JSON.
+  string request_json = 1;
+}
+
+message SinkSqlReply {
+  // sprig_sinks::peer::SqlReply as JSON.
   string reply_json = 1;
 }

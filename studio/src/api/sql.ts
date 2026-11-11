@@ -31,6 +31,7 @@ export function execute(
       transaction: opts.transaction,
       multi_statements: opts.multi ?? false,
       ...(opts.language && opts.language !== 'sql' ? { language: opts.language } : {}),
+      ...(opts.language === 'mongo' ? { output: MONGO_OUTPUT } : {}),
       ...(opts.maxRows ? { max_rows: opts.maxRows } : {}),
       ...(opts.timeoutMs ? { timeout_ms: opts.timeoutMs } : {}),
     },
@@ -89,6 +90,10 @@ export interface QueryCaps {
   language?: QueryLanguage;
 }
 
+/** Documents come back as canonical Extended JSON, so the JSON tree shows
+ * each number's exact BSON type (int32, int64, double; Studio round 5). */
+export const MONGO_OUTPUT = 'canonical_ejson';
+
 /** The languages Sql.Query runs (chapter 37, bugfix4). */
 export type QueryLanguage = 'sql' | 'cypher' | 'gql' | 'mongo';
 
@@ -125,6 +130,7 @@ export function query(db: string | null | undefined, sql: string, h: StreamHandl
         ...(caps.maxBytes ? { max_bytes: caps.maxBytes } : {}),
         ...(caps.timeoutMs ? { timeout_ms: caps.timeoutMs } : {}),
         ...(caps.language && caps.language !== 'sql' ? { language: caps.language } : {}),
+        ...(caps.language === 'mongo' ? { output: MONGO_OUTPUT } : {}),
       }),
     };
     worker.onmessage = (ev: MessageEvent<FromWorker>) => {

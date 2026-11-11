@@ -325,7 +325,7 @@ impl GatewayGraphs {
                     "graph mirrors still building: the applier didn't catch up"
                 ),
                 Err(e) => {
-                    tracing::warn!(graph = g.graph_id, error = %e, "graph mirror drain failed")
+                    tracing::warn!(graph = g.graph_id, error = %e, "graph mirror drain failed");
                 }
             }
             me.mirrors

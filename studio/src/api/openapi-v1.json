@@ -1694,7 +1694,7 @@
             "description": "An error"
           }
         },
-        "summary": "Tables, views, routines and columns of one database, read with the caller's rights; ETag as ListObjects",
+        "summary": "Tables, views, routines, graphs (labels and relationship types the caller may read) and columns of one database, read with the caller's rights; ETag as ListObjects",
         "tags": [
           "sprig.v1.Catalog"
         ]
@@ -1863,6 +1863,462 @@
         },
         "tags": [
           "sprig.v1.Functions"
+        ]
+      }
+    },
+    "/v1/databases/{database}/logic": {
+      "get": {
+        "operationId": "Logic.ListModules",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "The database's logic modules",
+        "tags": [
+          "sprig.v1.Logic"
+        ]
+      }
+    },
+    "/v1/databases/{database}/logic/{kind}/{name}": {
+      "get": {
+        "operationId": "Logic.GetModule",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "A module with its versions, binding, schedule and (for routine administrators) source and PL/SQL",
+        "tags": [
+          "sprig.v1.Logic"
+        ]
+      }
+    },
+    "/v1/databases/{database}/logic/{kind}/{name}/deadLetters": {
+      "get": {
+        "operationId": "Logic.ListDeadLetters",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "The module's dead letters (state)",
+        "tags": [
+          "sprig.v1.Logic"
+        ]
+      }
+    },
+    "/v1/databases/{database}/logic/{kind}/{name}/deadLetters:discard": {
+      "post": {
+        "operationId": "Logic.DiscardDeadLetters",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Discards dead letters ({ids} or {all: true})",
+        "tags": [
+          "sprig.v1.Logic"
+        ]
+      }
+    },
+    "/v1/databases/{database}/logic/{kind}/{name}/deadLetters:replay": {
+      "post": {
+        "operationId": "Logic.ReplayDeadLetters",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Replays dead letters ({ids} or {all: true})",
+        "tags": [
+          "sprig.v1.Logic"
+        ]
+      }
+    },
+    "/v1/databases/{database}/logic/{kind}/{name}/logs": {
+      "get": {
+        "operationId": "Logic.TailLogs",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "The module's log lines after an id (after, limit)",
+        "tags": [
+          "sprig.v1.Logic"
+        ]
+      }
+    },
+    "/v1/databases/{database}/logic/{kind}/{name}/versions/{version}": {
+      "get": {
+        "operationId": "Logic.GetVersion",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "version",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "One version's source and PL/SQL",
+        "tags": [
+          "sprig.v1.Logic"
+        ]
+      }
+    },
+    "/v1/databases/{database}/logic:compile": {
+      "post": {
+        "operationId": "Logic.Compile",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "A dry run of a CREATE FUNCTION or PROCEDURE: tier, reasons, signature, PL/SQL; nothing recorded",
+        "tags": [
+          "sprig.v1.Logic"
         ]
       }
     },
@@ -2296,6 +2752,47 @@
         ]
       }
     },
+    "/v1/databases/{database}/mq": {
+      "get": {
+        "operationId": "Mq.GetTopology",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "The database's virtual host with its exchanges, queues and bindings",
+        "tags": [
+          "sprig.v1.Mq"
+        ]
+      }
+    },
     "/v1/databases/{database}/namespaces/{namespace}:delete": {
       "post": {
         "operationId": "KeyValue.Delete",
@@ -2644,6 +3141,153 @@
         ]
       }
     },
+    "/v1/databases/{database}/sinks/{sink}/deadLetters": {
+      "get": {
+        "operationId": "Sinks.ListDeadLetters",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sink",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "The sink's dead letters",
+        "tags": [
+          "sprig.v1.Sinks"
+        ]
+      }
+    },
+    "/v1/databases/{database}/sinks/{sink}/deadLetters:discard": {
+      "post": {
+        "operationId": "Sinks.DiscardDeadLetters",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sink",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Discards dead letters ({ids} or {all: true})",
+        "tags": [
+          "sprig.v1.Sinks"
+        ]
+      }
+    },
+    "/v1/databases/{database}/sinks/{sink}/deadLetters:replay": {
+      "post": {
+        "operationId": "Sinks.ReplayDeadLetters",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sink",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Marks dead letters for replay ({ids} or {all: true})",
+        "tags": [
+          "sprig.v1.Sinks"
+        ]
+      }
+    },
     "/v1/databases/{database}/sql:check": {
       "post": {
         "operationId": "Sql.Check",
@@ -2792,6 +3436,55 @@
         },
         "tags": [
           "sprig.v1.Sql"
+        ]
+      }
+    },
+    "/v1/databases/{database}/streams/{stream}/groups": {
+      "get": {
+        "operationId": "Streams.ListGroups",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "stream",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Partitions with log start and high watermark, and consumer groups with offsets and lag",
+        "tags": [
+          "sprig.v1.Streams"
         ]
       }
     },
@@ -3496,6 +4189,37 @@
         "summary": "Recommendations awaiting approval",
         "tags": [
           "sprig.v1.Indexing"
+        ]
+      }
+    },
+    "/v1/policies:testAs": {
+      "post": {
+        "operationId": "Policies.TestAs",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "One read-only statement run as another user of the tenant ({tenant, user, host, database, sql})",
+        "tags": [
+          "sprig.v1.Policies"
         ]
       }
     },

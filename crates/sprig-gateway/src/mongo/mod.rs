@@ -337,10 +337,13 @@ impl MongoFrontend {
             records: retry::Records::default(),
             failpoints: failpoint::FailPoints::default(),
             engine: match &docs {
+                // Chapter 39: text and search indexes through the
+                // gateway's search service.
                 Some(c) => sprig_doc::engine::Engine::with_catalog(
                     sprig_doc::engine::EngineConfig::default(),
                     Arc::clone(c) as Arc<dyn sprig_doc::catalog::DocCatalog>,
-                ),
+                )
+                .with_text(Arc::new(crate::search::docs::DocSearch::default())),
                 None => sprig_doc::engine::Engine::default(),
             },
             feed,

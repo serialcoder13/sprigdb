@@ -20,7 +20,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use sprig_api::proto::logic_peer::logic_peer_server::{LogicPeer, LogicPeerServer};
-use sprig_api::proto::logic_peer::{RunTriggerReply, RunTriggerRequest};
+use sprig_api::proto::logic_peer::{
+    RunTriggerReply, RunTriggerRequest, SinkSqlReply, SinkSqlRequest,
+};
 use sprig_auth::{LoginSource, Principal};
 use sprig_common::ids::{TenantId, UserId};
 use sprig_common::{Result, SprigCode, SprigError};
@@ -67,56 +69,83 @@ impl LogicPeerService {
 
     /// The definer's principal.
     async fn principal(&self, req: &RunRequest) -> Result<Principal> {
-        let LoginSource::Catalog(cl) = self.0.login.source() else {
-            return Err(SprigError::new(
-                SprigCode::LogicEngineUnavailable,
-                "this gateway has no tenant catalogs (accounts-file logins)",
-            ));
-        };
-        let tenant = cl
-            .tenants()
-            .lookup(&req.source.tenant_name)
-            .await?
-            .filter(|t| t.id == TenantId(req.tenant))
-            .ok_or_else(|| {
-                not_found(format!(
-                    "tenant {} ({}) is gone or renamed",
-                    req.source.tenant_name, req.tenant
-                ))
-            })?;
-        if tenant.suspended {
-            return Err(SprigError::new(
-                SprigCode::TenantSuspended,
-                format!("tenant {} is suspended", tenant.name),
-            ));
-        }
-        let catalog = cl.catalogs().catalog(tenant.id).await?;
-        let auth = sprig_auth::cache::TenantAuth::of(&catalog)
-            .ok_or_else(|| not_found("the tenant's catalog has no accounts"))?;
-        let user = auth
-            .user(UserId(req.source.definer_user_id))
-            .cloned()
-            .ok_or_else(|| {
-                not_found(format!(
-                    "the trigger's definer (user {}) no longer exists",
-                    req.source.definer_user_id
-                ))
-            })?;
-        let backend = cl.backend_of(&tenant, &user)?;
-        Ok(Principal {
-            tenant: Some(tenant.id),
-            tenant_name: Some(tenant.name.clone()),
-            user_id: Some(user.row.user_id),
-            user: user.row.name.clone(),
-            host: user.row.host.clone(),
-            client_ip: std::net::IpAddr::from([127, 0, 0, 1]),
-            must_change_password: false,
-            limits: user.row.limits,
-            auth_version: catalog.auth_version,
-            backend,
-        })
+        principal_of(
+            &self.0.login,
+            req.tenant,
+            &req.source.tenant_name,
+            req.source.definer_user_id,
+        )
+        .await
     }
 
+    /// `SinkSql` (R9, r9queue): a sink's statements as its owner
+    /// ([`crate::sink_peer`]).
+    pub async fn sink_sql(
+        &self,
+        req: sprig_sinks::peer::SqlRequest,
+    ) -> sprig_sinks::peer::SqlReply {
+        crate::sink_peer::serve(&self.0.login, &self.0.engine, req).await
+    }
+}
+
+/// The principal of user `user_id` of tenant `tenant_name` (whose id must
+/// be `tenant`), as an API-key login builds it, without a password (the
+/// peer service is mutual TLS between SprigDB's own processes).
+///
+/// # Errors
+/// 39860 for a tenant or user that is gone or renamed; 39xxx for a
+/// suspended tenant; the catalog's.
+pub(crate) async fn principal_of(
+    login: &sprig_auth::LoginService,
+    tenant_id: u64,
+    tenant_name: &str,
+    user_id: u32,
+) -> Result<Principal> {
+    let LoginSource::Catalog(cl) = login.source() else {
+        return Err(SprigError::new(
+            SprigCode::LogicEngineUnavailable,
+            "this gateway has no tenant catalogs (accounts-file logins)",
+        ));
+    };
+    let tenant = cl
+        .tenants()
+        .lookup(tenant_name)
+        .await?
+        .filter(|t| t.id == TenantId(tenant_id))
+        .ok_or_else(|| {
+            not_found(format!(
+                "tenant {tenant_name} ({tenant_id}) is gone or renamed"
+            ))
+        })?;
+    if tenant.suspended {
+        return Err(SprigError::new(
+            SprigCode::TenantSuspended,
+            format!("tenant {} is suspended", tenant.name),
+        ));
+    }
+    let catalog = cl.catalogs().catalog(tenant.id).await?;
+    let auth = sprig_auth::cache::TenantAuth::of(&catalog)
+        .ok_or_else(|| not_found("the tenant's catalog has no accounts"))?;
+    let user = auth
+        .user(UserId(user_id))
+        .cloned()
+        .ok_or_else(|| not_found(format!("user {user_id} no longer exists")))?;
+    let backend = cl.backend_of(&tenant, &user)?;
+    Ok(Principal {
+        tenant: Some(tenant.id),
+        tenant_name: Some(tenant.name.clone()),
+        user_id: Some(user.row.user_id),
+        user: user.row.name.clone(),
+        host: user.row.host.clone(),
+        client_ip: std::net::IpAddr::from([127, 0, 0, 1]),
+        must_change_password: false,
+        limits: user.row.limits,
+        auth_version: catalog.auth_version,
+        backend,
+    })
+}
+
+impl LogicPeerService {
     /// One run (see the module docs).
     pub async fn run(&self, req: &RunRequest) -> RunReply {
         match self.run_inner(req).await {
@@ -173,6 +202,19 @@ impl LogicPeer for LogicPeerService {
             .map_err(|e| tonic::Status::invalid_argument(format!("request_json: {e}")))?;
         let reply = self.run(&req).await;
         Ok(tonic::Response::new(RunTriggerReply {
+            reply_json: serde_json::to_string(&reply).unwrap_or_default(),
+        }))
+    }
+
+    async fn sink_sql(
+        &self,
+        request: tonic::Request<SinkSqlRequest>,
+    ) -> std::result::Result<tonic::Response<SinkSqlReply>, tonic::Status> {
+        let req: sprig_sinks::peer::SqlRequest =
+            serde_json::from_str(&request.get_ref().request_json)
+                .map_err(|e| tonic::Status::invalid_argument(format!("request_json: {e}")))?;
+        let reply = LogicPeerService::sink_sql(self, req).await;
+        Ok(tonic::Response::new(SinkSqlReply {
             reply_json: serde_json::to_string(&reply).unwrap_or_default(),
         }))
     }

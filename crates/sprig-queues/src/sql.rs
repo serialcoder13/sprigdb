@@ -511,6 +511,54 @@ impl SqlVhost {
         self.v.wake.notify_one();
     }
 
+    /// The feed-driven forwarder's step (R9, r9fwd): forwards the outbox
+    /// rows of `ids` still there, in the order of `ids` (commit order),
+    /// waiting for every destination's confirm, then deletes them. Rows
+    /// already gone (the polling forwarder's fallback, an earlier attempt)
+    /// are skipped; a row forwarded twice is a no-op (the forward ledger).
+    /// Returns (forwarded, already gone).
+    ///
+    /// # Errors
+    /// The store's (39260 `OWNER_MOVED` for a store or owner that can't be
+    /// reached); nothing is deleted then, and the caller tries again.
+    pub async fn forward_outbox(
+        &self,
+        ids: &[crate::store::MsgId],
+    ) -> Result<(usize, usize), MqError> {
+        let e = self
+            .v
+            .engine
+            .upgrade()
+            .ok_or_else(|| MqError::new(MqCode::OwnerMoved, "engine stopped"))?;
+        let store = e.deps.catalog.store(&self.v.r).await?;
+        let rows = store
+            .outbox_rows(ids)
+            .await
+            .map_err(|err| MqError::new(MqCode::OwnerMoved, err.to_string()))?;
+        let gone = ids.len() - rows.len();
+        if rows.is_empty() {
+            return Ok((0, gone));
+        }
+        // Rows routed now (an exchange destination) need the latest
+        // bindings; the rest were routed at publish.
+        if rows
+            .iter()
+            .any(|r| matches!(r.dest, crate::store::OutDest::Exchange { .. }))
+        {
+            e.deps.catalog.refresh(&self.v.r).await?;
+        }
+        drop(e);
+        self.v.forward(&rows).await?;
+        let done: Vec<_> = rows.iter().map(|r| r.out_id).collect();
+        store
+            .outbox_done(&done)
+            .await
+            .map_err(|err| MqError::new(MqCode::OwnerMoved, err.to_string()))?;
+        metrics::counter!("sprig_queue_published_total", "path" => "outbox_feed")
+            .increment(done.len() as u64);
+        Ok((done.len(), gone))
+    }
+
     /// `mq_get`: up to `max` messages, each held for `lease_ms` unless
     /// acknowledged.
     ///
@@ -599,6 +647,21 @@ impl SqlVhost {
                 id: t.id,
                 committed,
             });
+        }
+    }
+
+    /// Acknowledges a delivery with its owner, outside any transaction
+    /// (the owner deletes the message): a fan-in queue sink's settle of a
+    /// member's message (chapter 51, R9, r9queue).
+    pub fn ack(&self, t: &TokenData) {
+        if let Some(h) = self.v.slot_of(t.id.queue) {
+            let _ = h.send(Cmd::Settle(
+                Holder {
+                    origin: ANY_HOLDER,
+                    conn: self.cx.conn,
+                },
+                vec![(t.id, Settlement::Ack)],
+            ));
         }
     }
 

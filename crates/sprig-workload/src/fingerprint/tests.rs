@@ -68,3 +68,26 @@ fn scratch_print() {
         );
     }
 }
+
+/// bugfix-24 (ST48): statements carrying passwords or a connection's
+/// credentials keep no literals, so none is ever sampled.
+#[test]
+fn credentials_and_passwords_are_sensitive() {
+    for (sql, sensitive) in [
+        ("CREATE USER 'u'@'%' IDENTIFIED BY 'pw'", true),
+        ("SET PASSWORD FOR u = 'pw'", true),
+        (
+            "CREATE CONNECTION c TYPE webhook WITH (url = 'http://h') CREDENTIALS (token = 'tok')",
+            true,
+        ),
+        ("ALTER CONNECTION c SET CREDENTIALS (token = 'tok')", true),
+        ("SELECT * FROM t WHERE credentials_id = 'x'", false),
+        ("SELECT * FROM t WHERE a = 'x'", false),
+    ] {
+        let n = normalize(sql.as_bytes(), &LexOptions::mariadb(), Some("shop"), false);
+        assert_eq!(n.sensitive, sensitive, "{sql}");
+        if sensitive {
+            assert!(n.literals.is_empty(), "{sql}: {:?}", n.literals);
+        }
+    }
+}

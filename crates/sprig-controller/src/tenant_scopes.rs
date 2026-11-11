@@ -213,6 +213,20 @@ impl TenantScopes {
         }
     }
 
+    /// The rows of `tenant` as of now: the directory is asked whatever the
+    /// cached copy's age (one linearizable etcd read), so a change committed
+    /// a moment ago is seen. For rare decisions that must not act on a
+    /// stale mode (chapter 52's vector gate; approvals round 3).
+    pub async fn get_fresh(&self, tenant: TenantId) -> Option<Arc<TenantSettings>> {
+        match self.refresh(tenant).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!(%tenant, error = %e, "tenant settings not read");
+                lock(&self.cache).get(&tenant).map(|c| Arc::clone(&c.rows))
+            }
+        }
+    }
+
     /// Checks the directory and reads the catalog when its version moved.
     async fn refresh(&self, tenant: TenantId) -> Result<Option<Arc<TenantSettings>>> {
         let Some(e) = self.directory.get(tenant).await? else {

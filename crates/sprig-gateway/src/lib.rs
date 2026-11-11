@@ -78,12 +78,17 @@ pub mod mongo;
 pub mod mysql;
 pub mod observe;
 pub mod offload;
+// R9 (r9fwd): the feed-driven outbox forwarder's gateway side.
+pub mod outbox_feed;
 pub mod peer;
 pub mod pipeline;
 pub mod reads;
 pub mod redis;
 pub mod registry;
+// Chapter 39 (R5 round 5): full-text search.
+pub mod search;
 pub mod session;
+pub mod sink_peer;
 pub mod tenant;
 pub mod tls;
 // Chapter 41 (R9): workers' runs of triggers on streams and queues.
@@ -401,6 +406,26 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             u32::from(sessions.slot()),
         )
     });
+    // Full-text search (chapter 39, R5 round 5): index copies in this
+    // gateway, fed by the change feed; SQL and MongoDB use it.
+    if let Some(t) = &tenants
+        && let Err(e) = search::SearchService::start(
+            search::SearchDeps {
+                tenants: Arc::clone(t),
+                dc_store: Arc::clone(&stores.dc),
+                login: Arc::clone(&login),
+                executor: Arc::clone(&shared_exec),
+                sessions: Arc::clone(&sessions),
+                live: live.clone(),
+                dc: dc.clone(),
+                gateway_id: gateway_id.clone(),
+                peer_tls: peer_tls.clone(),
+            },
+            stop.clone(),
+        )
+    {
+        tracing::warn!(error = %e, "full-text search unavailable");
+    }
     // MongoDB (chapter 30, R5): catalog logins through SCRAM; the
     // document engine runs in the user's executor session.
     let mongo_fe = Arc::new(mongo::MongoFrontend::start(
@@ -442,9 +467,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     // are a tenant's objects.
     let bolt_svc = Arc::new(bolt::BoltGraphService::new(
         Arc::clone(&login),
-        tenants
-            .as_ref()
-            .map(|t| Arc::new(graphs::GatewayGraphs::new(Arc::clone(t)))),
+        tenants.as_ref().map(graphs::GatewayGraphs::shared),
         live.clone(),
         dc.clone(),
     ));

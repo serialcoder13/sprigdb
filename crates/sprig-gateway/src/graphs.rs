@@ -39,8 +39,8 @@ use sprig_catalog::ddl::{database_key, object_key};
 use sprig_catalog::store::{Namespace, ObjectFlags, ObjectKind, ObjectRow, ObjectState};
 use sprig_catalog::version::VersionKind;
 use sprig_catalog::{CatalogLocator, Freshness, TenantCatalog};
+use sprig_common::ids::GroupId;
 use sprig_common::ids::{ClusterId, DbId, ObjectId, TenantId, UserId};
-use sprig_common::ids::{DcId, GroupId};
 use sprig_common::{Result, SprigCode, SprigError};
 use sprig_graph::ast::{Entity, Schema};
 use sprig_graph::catalog::{GraphCatalog, GraphDef, GraphState, MODULE, Tables, backend_error};
@@ -113,8 +113,6 @@ pub struct GatewayGraphs {
     next_replica: std::sync::atomic::AtomicUsize,
     /// Bookmark keys by tenant (the tenant's `graph_keys` secret).
     keys: Mutex<HashMap<u64, Arc<ring::hmac::Key>>>,
-    /// Shard map caches by home DC (graph groups' maps).
-    maps: Mutex<HashMap<DcId, ShardMapCache>>,
     /// Shard schemas known to have `__sprig_dtx`: (cluster, schema).
     dtx_ready: Mutex<HashSet<(String, String)>>,
     /// Chapter 18's coordinator pieces for Bolt transactions.
@@ -158,32 +156,37 @@ impl GatewayGraphs {
             replicas: Mutex::new(HashMap::new()),
             next_replica: std::sync::atomic::AtomicUsize::new(0),
             keys: Mutex::new(HashMap::new()),
-            maps: Mutex::new(HashMap::new()),
             dtx_ready: Mutex::new(HashSet::new()),
             coord: txn::CoordServices::new(),
             mirrors: mirror::MirrorState::default(),
         }
     }
 
-    /// The shard map cache of `tenant`'s home DC (started at first use).
+    /// The process's graph services over `svc`: one per tenant services,
+    /// shared by Bolt and SQL (`GRAPH_TABLE`, graph DDL), so their caches,
+    /// pools and mirror state are made once (R8 round 6; before, each SQL
+    /// statement made its own, with a shard map cache of its own).
+    #[must_use]
+    pub fn shared(svc: &Arc<TenantServices>) -> Arc<Self> {
+        static ALL: Mutex<Vec<(usize, Arc<GatewayGraphs>)>> = Mutex::new(Vec::new());
+        // The entry holds `svc`, so its address isn't reused.
+        let key = Arc::as_ptr(svc) as usize;
+        let mut all = ALL.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((_, g)) = all.iter().find(|(k, _)| *k == key) {
+            return Arc::clone(g);
+        }
+        let g = Arc::new(Self::new(Arc::clone(svc)));
+        all.push((key, Arc::clone(&g)));
+        g
+    }
+
+    /// The shard map cache of `tenant`'s home DC: the router's own (R8
+    /// round 6), so graph statements and SQL statements see one map.
     ///
     /// # Errors
     /// `Internal` never in practice.
     pub fn map_cache(&self, tenant: TenantId) -> Result<ShardMapCache> {
-        let home = self.svc.locator.home_of(tenant);
-        let mut m = self.maps.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(c) = m.get(&home) {
-            return Ok(c.clone());
-        }
-        let dc = self.svc.locator.dc_store();
-        let store = if home == self.svc.dc {
-            dc
-        } else {
-            TierView::over(&dc, Tier::Dc(home.clone()))
-        };
-        let c = ShardMapCache::spawn(store)?;
-        m.insert(home, c.clone());
-        Ok(c)
+        crate::exec::router::map_cache(&self.svc, tenant)
     }
 
     /// A linearizable map store over `tenant`'s home DC tier.
@@ -278,23 +281,32 @@ impl GatewayGraphs {
             ));
         };
         let map = self.shard_map(tenant, group).await?;
+        // R8 round 6: the router's view of the group (the same map cache,
+        // schemas and epochs `Plan::Graph` shows).
+        let routed = sprig_router::topology::catalog::numeric_group(
+            tenant.0,
+            def.db_id,
+            &sprig_router::topology::catalog::CatalogGroup {
+                id: group,
+                spec: KeySpec::new(vec![KeyClass::Numeric])?,
+                map: Arc::clone(&map),
+            },
+        );
         let mut held: Option<u64> = None;
-        let shards: Vec<ShardLoc> = map
-            .ranges
+        let shards: Vec<ShardLoc> = routed
+            .shards
             .iter()
             .map(|r| {
-                if r.state == sprig_shard::shardmap::RangeState::Held {
-                    let u = r.hold_until_ms.unwrap_or(0);
+                if let Some(u) = r.held_until_ms {
                     held = Some(held.map_or(u, |h| h.max(u)));
                 }
-                let schema = shard_schema(tenant, DbId(def.db_id), GroupId(group), r.shard);
                 ShardLoc {
-                    shard: r.shard.0,
+                    shard: r.shard,
                     lo: r.lo,
                     epoch: r.epoch,
-                    cluster: r.cluster.to_string(),
-                    tables: Tables::of(&schema, def.graph_id),
-                    schema,
+                    cluster: r.cluster.clone(),
+                    tables: Tables::of(&r.schema, def.graph_id),
+                    schema: r.schema.clone(),
                 }
             })
             .collect();
@@ -444,10 +456,27 @@ impl GatewayGraphs {
         a: Action,
     ) -> bool {
         let Some(g) = g else { return true };
+        let db_key = database_key(db, self.lctn(cat));
+        // Chapter 29: a mapped graph over a table whose policies bind the
+        // session would read it unfiltered: refused.
+        if a == Action::Select
+            && object.is_some_and(|o| {
+                g.row_filter(
+                    Target::Object {
+                        db_key: &db_key,
+                        db: db_id,
+                        object: ObjectId(o),
+                    },
+                    a,
+                )
+                .is_some()
+            })
+        {
+            return false;
+        }
         if g.unrestricted() || g.allows(a, Target::Tenant) {
             return true;
         }
-        let db_key = database_key(db, self.lctn(cat));
         if g.allows(a, Target::Database { db_key: &db_key }) {
             return true;
         }

@@ -75,6 +75,14 @@ pub(crate) struct Stmt {
     /// Tenant sessions: what the statement's privileges were checked with
     /// at prepare, checked again at execute (chapter 29).
     pub recheck: Option<crate::tenant::authz::Recheck>,
+    /// Tenant sessions: the client's text as it came, before any rewrite
+    /// (chapter 29, RL15: prepared again when its row-level security
+    /// predicates change).
+    pub client: Option<Bytes>,
+    /// Tenant sessions (chapter 39, R5 round 6): `deferred` holds a text
+    /// with placeholders (`MATCH ... AGAINST (?)` on a search index), run
+    /// at each execute with the bound values as literals.
+    pub deferred_params: bool,
 }
 
 impl Stmt {
@@ -96,6 +104,8 @@ impl Stmt {
             deferred: None,
             logical: None,
             recheck: None,
+            client: None,
+            deferred_params: false,
         }
     }
 
@@ -118,6 +128,7 @@ impl Stmt {
             deferred: Some(sql.clone()),
             logical: None,
             recheck: None,
+            client: None,
             sql,
         }
     }

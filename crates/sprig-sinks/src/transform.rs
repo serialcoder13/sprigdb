@@ -99,14 +99,33 @@ pub async fn source_of(
     db_id: u32,
     name: &str,
 ) -> Result<Option<(String, u64, String, Value)>> {
+    source_at(c, catalog_schema, db_id, name, None).await
+}
+
+/// [`source_of`] for version `version` of the function (`None`: the
+/// active one): `transform_version` pins a sink to one (R9, r9fwd).
+///
+/// # Errors
+/// The catalog's.
+pub async fn source_at(
+    c: &mut mysql_async::Conn,
+    catalog_schema: &str,
+    db_id: u32,
+    name: &str,
+    version: Option<u64>,
+) -> Result<Option<(String, u64, String, Value)>> {
     use mysql_async::prelude::Queryable;
     let q = sprig_common::names::quote(catalog_schema);
+    let which = match version {
+        Some(v) => format!("v.version = {v}"),
+        None => "v.version = m.active_version".to_owned(),
+    };
     let r: std::result::Result<Option<(String, u64, String, String)>, mysql_async::Error> = c
         .exec_first(
             format!(
                 "SELECT m.runtime, v.version, v.source, CAST(v.signature AS CHAR) \
                  FROM {q}.logic_modules m JOIN {q}.logic_versions v \
-                 ON v.module_id = m.module_id AND v.version = m.active_version \
+                 ON v.module_id = m.module_id AND {which} \
                  WHERE m.db_id = ? AND m.name = ? AND m.kind = 'function' AND m.state = 'active'"
             ),
             (db_id, name),
@@ -129,6 +148,29 @@ pub async fn source_of(
     }
 }
 
+/// Whether a version's recorded signature says `DETERMINISTIC` (R9,
+/// r9fwd: `CREATE FUNCTION ... DETERMINISTIC` records it).
+#[must_use]
+pub fn is_deterministic(sig: &Value) -> bool {
+    sig.get("deterministic").and_then(Value::as_bool) == Some(true)
+}
+
+/// The determinism check under `EXACTLY ONCE` (39219): a transform runs
+/// again on every delivery attempt, so a replayed record must come out
+/// the same.
+///
+/// # Errors
+/// 39219 for a version not declared `DETERMINISTIC`.
+pub fn check_deterministic(name: &str, version: u64, sig: &Value) -> Result<()> {
+    if is_deterministic(sig) {
+        return Ok(());
+    }
+    Err(invalid(format!(
+        "TRANSFORM {name}: version {version} isn't declared DETERMINISTIC, which EXACTLY ONCE needs \
+         (CREATE OR REPLACE FUNCTION ... DETERMINISTIC)"
+    )))
+}
+
 impl Transform {
     /// Compiles `name`'s active version.
     ///
@@ -142,11 +184,35 @@ impl Transform {
         name: &str,
         budget: Duration,
     ) -> Result<Arc<Self>> {
+        Self::load_at(c, catalog_schema, db_id, name, None, false, budget).await
+    }
+
+    /// Compiles version `version` of `name` (`None`: the active one),
+    /// checking it is `DETERMINISTIC` when `exactly_once`.
+    ///
+    /// # Errors
+    /// As [`Transform::load`]; 39219 for a missing version or one that
+    /// isn't deterministic under `EXACTLY ONCE`.
+    pub async fn load_at(
+        c: &mut mysql_async::Conn,
+        catalog_schema: &str,
+        db_id: u32,
+        name: &str,
+        version: Option<u64>,
+        exactly_once: bool,
+        budget: Duration,
+    ) -> Result<Arc<Self>> {
         let Some((runtime, version, source, sig)) =
-            source_of(c, catalog_schema, db_id, name).await?
+            source_at(c, catalog_schema, db_id, name, version).await?
         else {
-            return Err(invalid(format!("TRANSFORM {name}: no such function")));
+            return Err(invalid(match version {
+                Some(v) => format!("TRANSFORM {name}: no version {v} of the function"),
+                None => format!("TRANSFORM {name}: no such function"),
+            }));
         };
+        if exactly_once {
+            check_deterministic(name, version, &sig)?;
+        }
         Self::compile(name, &runtime, version, &source, &sig, budget).map(Arc::new)
     }
 
@@ -273,6 +339,15 @@ mod tests {
     use super::*;
     use crate::model::Position;
     use serde_json::json;
+
+    #[test]
+    fn exactly_once_needs_deterministic() {
+        assert!(check_deterministic("f", 3, &json!({"deterministic": true})).is_ok());
+        let e = check_deterministic("f", 3, &json!({"params": []})).unwrap_err();
+        assert_eq!(e.code(), Some(SprigCode::SinkTransformInvalid));
+        assert!(e.message.contains("version 3"), "{}", e.message);
+        assert!(!is_deterministic(&Value::Null));
+    }
 
     fn rec() -> SinkRecord {
         SinkRecord {

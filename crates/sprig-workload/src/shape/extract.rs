@@ -868,12 +868,18 @@ impl Ex<'_> {
                     Expr::Tuple(items) => items.iter().filter_map(|i| self.as_col(i)).collect(),
                     other => self.as_col(other).into_iter().collect(),
                 };
+                let list_slot =
+                    slots.len() == 1 && self.norm.list_slots.binary_search(&slots[0]).is_ok();
+                // A wrapped column in a list: `JSON_VALUE(v, '$.x') IN (...)`
+                // (R6 round 6).
+                if all_const && cols.is_empty() && !*negated && !matches!(&**expr, Expr::Tuple(_)) {
+                    self.wrapped(expr, &PredOp::In { list: list_slot }, slots);
+                    return;
+                }
                 if !all_const || cols.is_empty() {
                     self.unsargable_all(e, &Unsargable::Expression);
                     return;
                 }
-                let list_slot =
-                    slots.len() == 1 && self.norm.list_slots.binary_search(&slots[0]).is_ok();
                 for c in cols {
                     let op = if *negated {
                         PredOp::Ne
@@ -1067,13 +1073,26 @@ impl Ex<'_> {
                 op: BinaryOperator::Arrow | BinaryOperator::LongArrow,
                 right,
             } => match (self.as_col(left), string_value(right)) {
-                (Some(c), Some(path)) => self.json_pred(&c, path, op, args),
+                (Some(c), Some(path)) => {
+                    let func = if matches!(
+                        strip_nested(e),
+                        Expr::BinaryOp {
+                            op: BinaryOperator::LongArrow,
+                            ..
+                        }
+                    ) {
+                        "->>"
+                    } else {
+                        "->"
+                    };
+                    self.json_pred(&c, path, func, op, args);
+                }
                 _ => self.unsargable_all(e, &Unsargable::Expression),
             },
             Expr::Function(f) => {
                 let name = last_name(&f.name);
                 if let Some((c, path)) = self.json_call(&name, f) {
-                    self.json_pred(&c, path, op, args);
+                    self.json_pred(&c, path, &name, op, args);
                 } else if name == "JSON_UNQUOTE" {
                     // JSON_UNQUOTE(JSON_EXTRACT(doc, '$.x')).
                     if let Some(inner) = func_args(f).into_iter().next() {
@@ -1093,9 +1112,16 @@ impl Ex<'_> {
         }
     }
 
-    fn json_pred(&mut self, c: &Col, path: String, op: &PredOp, args: Vec<u32>) {
-        let _ = op;
-        self.pred(c, PredOp::JsonPath { path }, args);
+    fn json_pred(&mut self, c: &Col, path: String, func: &str, op: &PredOp, args: Vec<u32>) {
+        self.pred(
+            c,
+            PredOp::JsonPath {
+                path,
+                func: Some(func.to_owned()),
+                cmp: Some(Box::new(op.clone())),
+            },
+            args,
+        );
     }
 
     /// `JSON_VALUE(col, '$.x')`, `JSON_EXTRACT(col, '$.x')`: the column and

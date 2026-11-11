@@ -18,8 +18,8 @@
 //!   joined on the key and the number:
 //!
 //!   ```text
-//!   (SELECT o.amt, o.cid AS `_sprig_lk0`, ROW_NUMBER() OVER (...) AS `_sprig_rn`
-//!      FROM o) AS l ... ON l.`_sprig_lk0` = c.id AND l.`_sprig_rn` <= 2
+//!   (SELECT o.amt, o.cid AS `_lat_k0`, ROW_NUMBER() OVER (...) AS `_lat_rn`
+//!      FROM o) AS l ... ON l.`_lat_k0` = c.id AND l.`_lat_rn` <= 2
 //!   ```
 //!
 //!   The conditions go into the join's `ON` (`JOIN`, `LEFT JOIN ... ON
@@ -35,6 +35,8 @@
 //! apply (running the derived table per batch of outer rows) isn't built.
 //! The rewrite is plain SQL, so stored bodies could use it too; they don't
 //! yet (chapter 28 step 12).
+
+use std::fmt::Write as _;
 
 use sqlparser::ast::{
     BinaryOperator, Expr, FunctionArguments, LimitClause, Query, Select, SelectItem, SetExpr,
@@ -102,15 +104,15 @@ struct Toks<'a> {
 
 impl Toks<'_> {
     fn word(&self, j: usize, w: &[u8]) -> bool {
-        self.t
-            .get(j)
-            .is_some_and(|tk| tk.kind == TokenKind::Word && tk.bytes(self.sql).eq_ignore_ascii_case(w))
+        self.t.get(j).is_some_and(|tk| {
+            tk.kind == TokenKind::Word && tk.bytes(self.sql).eq_ignore_ascii_case(w)
+        })
     }
 
     fn punct(&self, j: usize, c: u8) -> bool {
-        self.t
-            .get(j)
-            .is_some_and(|tk| matches!(tk.kind, TokenKind::Punct | TokenKind::Op) && tk.bytes(self.sql) == [c])
+        self.t.get(j).is_some_and(|tk| {
+            matches!(tk.kind, TokenKind::Punct | TokenKind::Op) && tk.bytes(self.sql) == [c]
+        })
     }
 
     fn ident(&self, j: usize) -> Option<String> {
@@ -152,7 +154,7 @@ struct Lateral {
     comma: bool,
     left: bool,
     /// `LATERAL`, `(`, `)`.
-    lateral: usize,
+    kw: usize,
     open: usize,
     close: usize,
     alias: String,
@@ -188,7 +190,14 @@ pub fn rewrite(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
     }
     // No `*` or `l.*` outside: the hidden columns would show.
     for j in 0..tk.t.len() {
-        if (j < l.lateral || j > l.alias_end) && tk.punct(j, b'*') && j > 0 && (tk.punct(j - 1, b',') || tk.punct(j - 1, b'.') || tk.word(j - 1, b"SELECT") || tk.word(j - 1, b"DISTINCT")) {
+        if (j < l.kw || j > l.alias_end)
+            && tk.punct(j, b'*')
+            && j > 0
+            && (tk.punct(j - 1, b',')
+                || tk.punct(j - 1, b'.')
+                || tk.word(j - 1, b"SELECT")
+                || tk.word(j - 1, b"DISTINCT"))
+        {
             return None;
         }
     }
@@ -226,7 +235,13 @@ fn plain_select(q: &Query) -> Option<&Select> {
         sqlparser::ast::GroupByExpr::Expressions(e, m) => !e.is_empty() || !m.is_empty(),
         sqlparser::ast::GroupByExpr::All(_) => true,
     };
-    if grouped || sel.distinct.is_some() || sel.having.is_some() || !sel.named_window.is_empty() || sel.from.is_empty() || sel.into.is_some() {
+    if grouped
+        || sel.distinct.is_some()
+        || sel.having.is_some()
+        || !sel.named_window.is_empty()
+        || sel.from.is_empty()
+        || sel.into.is_some()
+    {
         return None;
     }
     Some(sel)
@@ -259,8 +274,8 @@ fn table_names(sel: &Select) -> Option<Vec<String>> {
 /// The qualifiers of column references in `e` (lower case), and whether
 /// it has an unqualified column.
 fn qualifiers(e: &Expr, out: &mut Vec<String>) {
-    use std::ops::ControlFlow;
     use sqlparser::ast::Visit;
+    use std::ops::ControlFlow;
     struct V<'a>(&'a mut Vec<String>);
     impl sqlparser::ast::Visitor for V<'_> {
         type Break = ();
@@ -284,7 +299,10 @@ fn is_outer(e: &Expr, inner: &[String]) -> bool {
 
 /// Splits `WHERE` into the correlation equalities `(inner expr, outer
 /// expr)` and the rest. `None` when an outer reference appears elsewhere.
-fn correlation(where_: Option<&Expr>, inner: &[String]) -> Option<(Vec<(Expr, Expr)>, Option<Expr>)> {
+/// The correlation equalities `(inner, outer)` and the other conditions.
+type Correlation = (Vec<(Expr, Expr)>, Option<Expr>);
+
+fn correlation(where_: Option<&Expr>, inner: &[String]) -> Option<Correlation> {
     let mut conj = Vec::new();
     if let Some(w) = where_ {
         split_and(w, &mut conj);
@@ -292,9 +310,15 @@ fn correlation(where_: Option<&Expr>, inner: &[String]) -> Option<(Vec<(Expr, Ex
     let mut keys = Vec::new();
     let mut rest: Vec<Expr> = Vec::new();
     for c in conj {
-        if let Expr::BinaryOp { left, op: BinaryOperator::Eq, right } = &c {
+        if let Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        } = &c
+        {
             let lo = matches!(left.as_ref(), Expr::CompoundIdentifier(_)) && is_outer(left, inner);
-            let ro = matches!(right.as_ref(), Expr::CompoundIdentifier(_)) && is_outer(right, inner);
+            let ro =
+                matches!(right.as_ref(), Expr::CompoundIdentifier(_)) && is_outer(right, inner);
             if lo && !ro && !is_outer(right, inner) {
                 keys.push(((**right).clone(), (**left).clone()));
                 continue;
@@ -319,11 +343,23 @@ fn correlation(where_: Option<&Expr>, inner: &[String]) -> Option<(Vec<(Expr, Ex
 
 fn split_and(e: &Expr, out: &mut Vec<Expr>) {
     match e {
-        Expr::BinaryOp { left, op: BinaryOperator::And, right } => {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => {
             split_and(left, out);
             split_and(right, out);
         }
-        Expr::Nested(inner) if matches!(inner.as_ref(), Expr::BinaryOp { op: BinaryOperator::And, .. }) => {
+        Expr::Nested(inner)
+            if matches!(
+                inner.as_ref(),
+                Expr::BinaryOp {
+                    op: BinaryOperator::And,
+                    ..
+                }
+            ) =>
+        {
             split_and(inner, out);
         }
         _ => out.push(e.clone()),
@@ -343,7 +379,9 @@ fn all_aggregates(sel: &Select) -> bool {
         item_expr(it).is_some_and(|(e, _)| match e {
             Expr::Function(f) => {
                 let name = f.name.to_string().to_ascii_uppercase();
-                AGGREGATES.contains(&name.as_str()) && f.over.is_none() && !matches!(f.args, FunctionArguments::None)
+                AGGREGATES.contains(&name.as_str())
+                    && f.over.is_none()
+                    && !matches!(f.args, FunctionArguments::None)
             }
             _ => false,
         })
@@ -351,7 +389,11 @@ fn all_aggregates(sel: &Select) -> bool {
 }
 
 fn from_text(sel: &Select) -> String {
-    sel.from.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+    sel.from
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The name an item's column goes by outside: its alias, its column name,
@@ -360,7 +402,9 @@ fn output_name(e: &Expr, alias: Option<&str>) -> String {
     match (alias, e) {
         (Some(a), _) => a.to_owned(),
         (None, Expr::Identifier(i)) => i.value.clone(),
-        (None, Expr::CompoundIdentifier(p)) => p.last().map(|i| i.value.clone()).unwrap_or_default(),
+        (None, Expr::CompoundIdentifier(p)) => {
+            p.last().map(|i| i.value.clone()).unwrap_or_default()
+        }
         (None, e) => e.to_string(),
     }
 }
@@ -415,7 +459,11 @@ fn find_lateral(tk: &Toks<'_>) -> Option<Lateral> {
                     break;
                 }
                 d -= 1;
-            } else if d == 0 && (tk.punct(k, b',') || tk.punct(k, b';') || CLAUSE_END.iter().any(|w| tk.word(k, w))) {
+            } else if d == 0
+                && (tk.punct(k, b',')
+                    || tk.punct(k, b';')
+                    || CLAUSE_END.iter().any(|w| tk.word(k, w)))
+            {
                 break;
             }
             last = k;
@@ -430,7 +478,7 @@ fn find_lateral(tk: &Toks<'_>) -> Option<Lateral> {
         join_start,
         comma,
         left,
-        lateral,
+        kw: lateral,
         open,
         close,
         alias,
@@ -461,16 +509,30 @@ fn apply(sql: &[u8], mut edits: Vec<(usize, usize, String)>) -> Vec<u8> {
 }
 
 /// The aggregate shape: the join goes, `l.c` becomes a scalar subquery.
-fn aggregate_rewrite(tk: &Toks<'_>, l: &Lateral, sel: &Select, from: &str, q: &Query) -> Option<Vec<u8>> {
+fn aggregate_rewrite(
+    tk: &Toks<'_>,
+    l: &Lateral,
+    sel: &Select,
+    from: &str,
+    q: &Query,
+) -> Option<Vec<u8>> {
     if !on_is_true(tk, l) || q.limit_clause.is_some() {
         return None;
     }
-    let where_ = sel.selection.as_ref().map(|w| format!(" WHERE {w}")).unwrap_or_default();
+    let where_ = sel
+        .selection
+        .as_ref()
+        .map(|w| format!(" WHERE {w}"))
+        .unwrap_or_default();
     let mut cols = Vec::new();
     for it in &sel.projection {
         let (e, alias) = item_expr(it)?;
         let name = output_name(e, alias.as_deref());
-        cols.push((name.to_lowercase(), name, format!("(SELECT {e} FROM {from}{where_})")));
+        cols.push((
+            name.to_lowercase(),
+            name,
+            format!("(SELECT {e} FROM {from}{where_})"),
+        ));
     }
     let a = l.alias.to_lowercase();
     let end = l.on.map_or(l.alias_end, |(_, e)| e);
@@ -498,7 +560,10 @@ fn aggregate_rewrite(tk: &Toks<'_>, l: &Lateral, sel: &Select, from: &str, q: &Q
         } else if tk.t[j].kind.is_ident_like() && !(j > 0 && tk.punct(j - 1, b'.')) {
             // An unqualified name of a lateral column: give up.
             let x = tk.ident(j)?.to_lowercase();
-            if cols.iter().any(|(n, _, _)| *n == x) && !tk.punct(j + 1, b'.') && !tk.punct(j + 1, b'(') {
+            if cols.iter().any(|(n, _, _)| *n == x)
+                && !tk.punct(j + 1, b'.')
+                && !tk.punct(j + 1, b'(')
+            {
                 return None;
             }
         }
@@ -525,11 +590,15 @@ fn whole_item(tk: &Toks<'_>, a: usize, b: usize) -> bool {
         return false;
     }
     let before = tk.punct(a - 1, b',') || tk.word(a - 1, b"SELECT") || tk.word(a - 1, b"DISTINCT");
-    let after = b + 1 >= tk.t.len() || tk.punct(b + 1, b',') || tk.punct(b + 1, b';') || tk.word(b + 1, b"FROM");
+    let after = b + 1 >= tk.t.len()
+        || tk.punct(b + 1, b',')
+        || tk.punct(b + 1, b';')
+        || tk.word(b + 1, b"FROM");
     before && after
 }
 
 /// The rows shape: numbered per key, joined on the key and the number.
+#[allow(clippy::too_many_lines, clippy::many_single_char_names)] // one statement assembled
 fn rows_rewrite(
     tk: &Toks<'_>,
     l: &Lateral,
@@ -541,7 +610,11 @@ fn rows_rewrite(
 ) -> Option<Vec<u8>> {
     let (limit, offset) = match &q.limit_clause {
         None => (None, None),
-        Some(LimitClause::LimitOffset { limit, offset, limit_by }) => {
+        Some(LimitClause::LimitOffset {
+            limit,
+            offset,
+            limit_by,
+        }) => {
             if !limit_by.is_empty() {
                 return None;
             }
@@ -552,7 +625,20 @@ fn rows_rewrite(
                 },
                 _ => None,
             };
-            (limit.as_ref().map(n).map(|x| x.ok_or(())).transpose().ok()?, offset.as_ref().map(|o| n(&o.value)).map(|x| x.ok_or(())).transpose().ok()?)
+            (
+                limit
+                    .as_ref()
+                    .map(n)
+                    .map(|x| x.ok_or(()))
+                    .transpose()
+                    .ok()?,
+                offset
+                    .as_ref()
+                    .map(|o| n(&o.value))
+                    .map(|x| x.ok_or(()))
+                    .transpose()
+                    .ok()?,
+            )
         }
         Some(LimitClause::OffsetCommaLimit { offset, limit }) => {
             let n = |e: &Expr| match e {
@@ -571,41 +657,326 @@ fn rows_rewrite(
     let mut conds = Vec::new();
     let partition: Vec<String> = keys.iter().map(|(i, _)| i.to_string()).collect();
     for (n, (i, o)) in keys.iter().enumerate() {
-        inner.push_str(&format!(", {i} AS `_sprig_lk{n}`"));
-        conds.push(format!("{a}.`_sprig_lk{n}` = {o}"));
+        let _ = write!(inner, ", {i} AS `_lat_k{n}`");
+        conds.push(format!("{a}.`_lat_k{n}` = {o}"));
     }
     if limit.is_some() || offset.is_some() {
         let order = q
             .order_by
             .as_ref()
-            .map(|o| o.to_string())
+            .map(ToString::to_string)
             .unwrap_or_default();
-        inner.push_str(&format!(
-            ", ROW_NUMBER() OVER (PARTITION BY {}{}{}) AS `_sprig_rn`",
+        let _ = write!(
+            inner,
+            ", ROW_NUMBER() OVER (PARTITION BY {}{}{}) AS `_lat_rn`",
             partition.join(", "),
             if order.is_empty() { "" } else { " " },
             order
-        ));
+        );
         let off = offset.unwrap_or(0);
         if off > 0 {
-            conds.push(format!("{a}.`_sprig_rn` > {off}"));
+            conds.push(format!("{a}.`_lat_rn` > {off}"));
         }
         if let Some(n) = limit {
-            conds.push(format!("{a}.`_sprig_rn` <= {}", off + n));
+            conds.push(format!("{a}.`_lat_rn` <= {}", off + n));
         }
     }
-    inner.push_str(&format!(" FROM {from}"));
+    let _ = write!(inner, " FROM {from}");
     if let Some(r) = rest {
-        inner.push_str(&format!(" WHERE {r}"));
+        let _ = write!(inner, " WHERE {r}");
     }
     let cond = conds.join(" AND ");
-    let mut edits = vec![(tk.start(l.lateral), tk.end(l.close), format!("({inner})"))];
+    let mut edits = vec![(tk.start(l.kw), tk.end(l.close), format!("({inner})"))];
+    edits.extend(placement(tk, l, &cond));
+    let _ = l.left;
+    Some(apply(tk.sql, edits))
+}
+
+/// What marks the derived table in [`ApplyPlan`]'s final statement.
+const DERIVED_MARK: &str = "\u{0}sprig-lateral\u{0}";
+
+/// Most outer key tuples one statement may apply (chapter 28's
+/// `translator.lateral_max_outer_rows`, a constant until settings carry
+/// it): more fail with 39601.
+pub const MAX_OUTER_ROWS: usize = 10_000;
+
+/// Outer key tuples per round trip (`translator.lateral_batch`).
+pub const BATCH: usize = 500;
+
+/// Chapter 28's gateway apply for a `LATERAL` derived table the rewrite
+/// can't express as SQL (R4 round 4): the gateway reads the distinct
+/// outer values the subquery uses ([`ApplyPlan::keys_sql`]), runs the
+/// subquery for each batch of them with the values written in
+/// ([`ApplyPlan::batch_sql`]), and runs the statement with the rows as a
+/// derived table joined on those values ([`ApplyPlan::final_sql`]), so
+/// MariaDB still computes everything outside the derived table.
+#[derive(Debug, Clone)]
+pub struct ApplyPlan {
+    /// `SELECT DISTINCT <outer references> FROM <the outer tables>`.
+    pub keys_sql: String,
+    /// The outer references, as written (`c.id`).
+    pub outer: Vec<String>,
+    /// The subquery's text in pieces: text, or the index of an outer
+    /// reference.
+    template: Vec<Piece>,
+    /// The statement with [`DERIVED_MARK`] in place of the derived table.
+    final_template: String,
+}
+
+#[derive(Debug, Clone)]
+enum Piece {
+    Text(String),
+    Outer(usize),
+}
+
+impl ApplyPlan {
+    /// One batch: the subquery for each key tuple (SQL literals, in
+    /// [`Self::outer`]'s order), tagged with the tuple.
+    #[must_use]
+    pub fn batch_sql(&self, keys: &[Vec<String>]) -> String {
+        let mut parts = Vec::with_capacity(keys.len());
+        for k in keys {
+            let mut q = String::new();
+            for p in &self.template {
+                match p {
+                    Piece::Text(t) => q.push_str(t),
+                    Piece::Outer(i) => q.push_str(&k[*i]),
+                }
+            }
+            let tags: Vec<String> = k
+                .iter()
+                .enumerate()
+                .map(|(i, v)| format!("{v} AS `_lat_k{i}`"))
+                .collect();
+            parts.push(format!(
+                "SELECT {}, `_lat_q`.* FROM ({q}) AS `_lat_q`",
+                tags.join(", ")
+            ));
+        }
+        parts.join(" UNION ALL ")
+    }
+
+    /// The statement with `derived` (the batches' rows, keys first) as the
+    /// lateral's derived table.
+    #[must_use]
+    pub fn final_sql(&self, derived: &str) -> String {
+        self.final_template.replacen(DERIVED_MARK, derived, 1)
+    }
+}
+
+/// A plan for applying the statement's (first) `LATERAL` in the gateway;
+/// `None` when the statement isn't a `SELECT` with a `LATERAL` at its top
+/// level that the plan can carry (column aliases on the lateral, `*`
+/// outside, a subquery other than one `SELECT`, no outer reference).
+#[must_use]
+#[allow(clippy::too_many_lines, clippy::many_single_char_names)] // one pass over the statement
+pub fn apply_plan(sql: &[u8], opts: &LexOptions) -> Option<ApplyPlan> {
+    if !sql.windows(7).any(|w| w.eq_ignore_ascii_case(b"LATERAL")) {
+        return None;
+    }
+    let tokens = lex::lex(sql, opts).ok()?;
+    let tk = Toks {
+        sql,
+        t: tokens.into_iter().filter(|t| !t.kind.is_trivia()).collect(),
+    };
+    if !tk.word(0, b"SELECT") {
+        return None;
+    }
+    let l = find_lateral(&tk)?;
+    // At the statement's top level, after its FROM.
+    let mut depth = 0i32;
+    let mut from = None;
+    for j in 0..l.kw {
+        if tk.punct(j, b'(') {
+            depth += 1;
+        } else if tk.punct(j, b')') {
+            depth -= 1;
+        } else if depth == 0 && tk.word(j, b"FROM") {
+            from = Some(j);
+        }
+    }
+    let from = from?;
+    if depth != 0 {
+        return None;
+    }
+    // No `*` or `l.*` outside: the key columns would show.
+    for j in 1..tk.t.len() {
+        if (j < l.kw || j > l.alias_end)
+            && tk.punct(j, b'*')
+            && (tk.punct(j - 1, b',')
+                || tk.punct(j - 1, b'.')
+                || tk.word(j - 1, b"SELECT")
+                || tk.word(j - 1, b"DISTINCT"))
+        {
+            return None;
+        }
+    }
+    let inner_text = std::str::from_utf8(&sql[tk.end(l.open)..tk.start(l.close)]).ok()?;
+    let q = parse_query(inner_text)?;
+    let SetExpr::Select(sel) = q.body.as_ref() else {
+        return None;
+    };
+    let inner = table_names(sel)?;
+    // The outer references: `x.c` with `x` not one of the subquery's
+    // tables, as sqlparser reads them.
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    {
+        use sqlparser::ast::Visit;
+        use std::ops::ControlFlow;
+        struct V<'a>(&'a [String], &'a mut Vec<(String, String)>);
+        impl sqlparser::ast::Visitor for V<'_> {
+            type Break = ();
+            fn pre_visit_expr(&mut self, e: &Expr) -> ControlFlow<()> {
+                if let Expr::CompoundIdentifier(p) = e
+                    && p.len() == 2
+                {
+                    let qual = p[0].value.to_lowercase();
+                    let col = p[1].value.to_lowercase();
+                    if !self.0.contains(&qual) && !self.1.contains(&(qual.clone(), col.clone())) {
+                        self.1.push((qual, col));
+                    }
+                }
+                ControlFlow::Continue(())
+            }
+        }
+        let _ = q.visit(&mut V(&inner, &mut pairs));
+    }
+    if pairs.is_empty() {
+        return None;
+    }
+    // The subquery's tokens, outer references as pieces.
+    let inner_toks: Vec<Token> = lex::lex(inner_text.as_bytes(), opts)
+        .ok()?
+        .into_iter()
+        .filter(|t| !t.kind.is_trivia())
+        .collect();
+    let it = Toks {
+        sql: inner_text.as_bytes(),
+        t: inner_toks,
+    };
+    let mut outer: Vec<String> = Vec::new();
+    let mut template = Vec::new();
+    let mut at = 0;
+    let mut j = 0;
+    while j + 2 < it.t.len() + 1 {
+        let pair = (it.ident(j), it.punct(j + 1, b'.'), it.ident(j + 2));
+        let after_dot = j > 0 && it.punct(j - 1, b'.');
+        let table_pos = j > 0 && (it.word(j - 1, b"FROM") || it.word(j - 1, b"JOIN"));
+        if let (Some(a), true, Some(b)) = pair
+            && !after_dot
+            && !table_pos
+            && !it.punct(j + 3, b'.')
+            && pairs.contains(&(a.to_lowercase(), b.to_lowercase()))
+        {
+            let written = String::from_utf8_lossy(&it.sql[it.start(j)..it.end(j + 2)]).into_owned();
+            let idx = if let Some(i) = outer.iter().position(|o| o.eq_ignore_ascii_case(&written)) {
+                i
+            } else {
+                outer.push(written);
+                outer.len() - 1
+            };
+            template.push(Piece::Text(inner_text[at..it.start(j)].to_owned()));
+            template.push(Piece::Outer(idx));
+            at = it.end(j + 2);
+            j += 3;
+            continue;
+        }
+        j += 1;
+    }
+    template.push(Piece::Text(inner_text[at..].to_owned()));
+    if outer.is_empty() {
+        return None;
+    }
+    // The outer tables: FROM's list without the lateral's join.
+    let join_end = l.on.map_or(l.alias_end, |(_, e)| e);
+    let mut stop = tk.t.len();
+    let mut d = 0i32;
+    for k in join_end + 1..tk.t.len() {
+        if tk.punct(k, b'(') {
+            d += 1;
+        } else if tk.punct(k, b')') {
+            d -= 1;
+        } else if d == 0
+            && (tk.punct(k, b';')
+                || [
+                    &b"WHERE"[..],
+                    b"GROUP",
+                    b"HAVING",
+                    b"ORDER",
+                    b"LIMIT",
+                    b"WINDOW",
+                    b"UNION",
+                    b"FOR",
+                    b"LOCK",
+                    b"INTO",
+                ]
+                .iter()
+                .any(|w| tk.word(k, w)))
+        {
+            stop = k;
+            break;
+        }
+    }
+    let head = String::from_utf8_lossy(&sql[tk.end(from)..tk.start(l.join_start)]);
+    let tail = if stop > join_end + 1 {
+        String::from_utf8_lossy(&sql[tk.end(join_end)..tk.start(stop)]).into_owned()
+    } else {
+        String::new()
+    };
+    let keys_sql = format!("SELECT DISTINCT {} FROM{head}{tail}", outer.join(", "));
+    // The final statement: the derived table, joined on the keys.
+    let a = quote(&l.alias);
+    let cond: Vec<String> = outer
+        .iter()
+        .enumerate()
+        .map(|(i, o)| format!("{a}.`_lat_k{i}` <=> {o}"))
+        .collect();
+    let mut edits = vec![(tk.start(l.kw), tk.end(l.close), DERIVED_MARK.to_owned())];
+    edits.extend(placement(&tk, &l, &cond.join(" AND ")));
+    let final_template = String::from_utf8(apply(sql, edits)).ok()?;
+    Some(ApplyPlan {
+        keys_sql,
+        outer,
+        template,
+        final_template,
+    })
+}
+
+/// A value of an internal result as an SQL literal: numbers (`numeric`
+/// columns) as written, `NULL`, anything else a string.
+#[must_use]
+pub fn literal(v: Option<&[u8]>, numeric: bool, no_backslash_escapes: bool) -> String {
+    match v {
+        None => "NULL".to_owned(),
+        Some(b)
+            if numeric
+                && !b.is_empty()
+                && b.iter().all(|c| {
+                    c.is_ascii_digit() || matches!(c, b'-' | b'.' | b'e' | b'E' | b'+')
+                }) =>
+        {
+            String::from_utf8_lossy(b).into_owned()
+        }
+        Some(b) => {
+            crate::names::rewrite::sql_string(&String::from_utf8_lossy(b), no_backslash_escapes)
+        }
+    }
+}
+
+/// Where the join conditions `cond` of the lateral `l` go: its `ON`, a new
+/// `ON`, or (a comma join) the statement's `WHERE`.
+fn placement(tk: &Toks<'_>, l: &Lateral, cond: &str) -> Vec<(usize, usize, String)> {
+    let mut edits = Vec::new();
     match (l.comma, l.on) {
         (_, Some((_, e))) => {
             // `ON TRUE AND ...` keeps the user's condition.
             edits.push((tk.end(e), tk.end(e), format!(" AND {cond}")));
         }
-        (false, None) => edits.push((tk.end(l.alias_end), tk.end(l.alias_end), format!(" ON {cond}"))),
+        (false, None) => edits.push((
+            tk.end(l.alias_end),
+            tk.end(l.alias_end),
+            format!(" ON {cond}"),
+        )),
         (true, None) => {
             // A comma join: the conditions join the WHERE clause.
             let mut d = 0;
@@ -620,9 +991,19 @@ fn rows_rewrite(
                     where_at = Some(j);
                     break;
                 } else if d == 0
-                    && ([&b"GROUP"[..], b"HAVING", b"ORDER", b"LIMIT", b"WINDOW", b"UNION", b"FOR", b"INTO", b"LOCK"]
-                        .iter()
-                        .any(|w| tk.word(j, w))
+                    && ([
+                        &b"GROUP"[..],
+                        b"HAVING",
+                        b"ORDER",
+                        b"LIMIT",
+                        b"WINDOW",
+                        b"UNION",
+                        b"FOR",
+                        b"INTO",
+                        b"LOCK",
+                    ]
+                    .iter()
+                    .any(|w| tk.word(j, w))
                         || tk.punct(j, b';'))
                 {
                     stop = Some(j);
@@ -643,8 +1024,7 @@ fn rows_rewrite(
             }
         }
     }
-    let _ = l.left;
-    Some(apply(tk.sql, edits))
+    edits
 }
 
 #[cfg(test)]
@@ -656,11 +1036,49 @@ mod tests {
     }
 
     #[test]
+    fn gateway_apply_plans() {
+        let o = LexOptions::mysql84();
+        // A correlation the rewrite can't express: an inequality.
+        let sql = b"SELECT c.name, l.amt FROM c JOIN LATERAL (SELECT o.amt FROM o WHERE o.cid > c.id AND o.amt < c.lim ORDER BY o.amt LIMIT 1) AS l ON TRUE WHERE c.id < 9 ORDER BY 1";
+        assert!(rewrite(sql, &o).is_none());
+        let p = apply_plan(sql, &o).unwrap();
+        assert_eq!(p.outer, vec!["c.id".to_owned(), "c.lim".to_owned()]);
+        assert_eq!(p.keys_sql, "SELECT DISTINCT c.id, c.lim FROM c ");
+        assert_eq!(
+            p.batch_sql(&[
+                vec!["1".into(), "5".into()],
+                vec!["2".into(), "NULL".into()]
+            ]),
+            "SELECT 1 AS `_lat_k0`, 5 AS `_lat_k1`, `_lat_q`.* FROM (SELECT o.amt FROM o WHERE o.cid > 1 AND o.amt < 5 ORDER BY o.amt LIMIT 1) AS `_lat_q` UNION ALL SELECT 2 AS `_lat_k0`, NULL AS `_lat_k1`, `_lat_q`.* FROM (SELECT o.amt FROM o WHERE o.cid > 2 AND o.amt < NULL ORDER BY o.amt LIMIT 1) AS `_lat_q`"
+        );
+        assert_eq!(
+            p.final_sql("(SELECT 1 AS `_lat_k0`, 5 AS `_lat_k1`, 10 AS amt)"),
+            "SELECT c.name, l.amt FROM c JOIN (SELECT 1 AS `_lat_k0`, 5 AS `_lat_k1`, 10 AS amt) AS l ON TRUE AND `l`.`_lat_k0` <=> c.id AND `l`.`_lat_k1` <=> c.lim WHERE c.id < 9 ORDER BY 1"
+        );
+        // A comma join with other tables: the keys come from all of them.
+        let p = apply_plan(b"SELECT t.a, l.x FROM t, u, LATERAL (SELECT v.x FROM v WHERE v.k BETWEEN t.a AND u.b) l WHERE t.a = u.a", &o).unwrap();
+        assert_eq!(p.keys_sql, "SELECT DISTINCT t.a, u.b FROM t, u");
+        assert!(p.final_sql("(D)").ends_with("FROM t, u, (D) l WHERE `l`.`_lat_k0` <=> t.a AND `l`.`_lat_k1` <=> u.b AND t.a = u.a"), "{}", p.final_sql("(D)"));
+        // `*` outside, or no outer reference: no plan.
+        assert!(
+            apply_plan(
+                b"SELECT * FROM c, LATERAL (SELECT o.a FROM o WHERE o.c > c.id) l",
+                &o
+            )
+            .is_none()
+        );
+        assert!(apply_plan(b"SELECT l.a FROM c, LATERAL (SELECT o.a FROM o) l", &o).is_none());
+        assert_eq!(literal(Some(b"007"), false, false), "'007'");
+        assert_eq!(literal(Some(b"-1.5"), true, false), "-1.5");
+        assert_eq!(literal(None, true, false), "NULL");
+    }
+
+    #[test]
     fn top_n_becomes_a_numbered_join() {
         assert_eq!(
             rw("SELECT c.name, l.amt FROM c JOIN LATERAL (SELECT o.amt FROM o WHERE o.cid = c.id ORDER BY o.amt DESC LIMIT 2) AS l ORDER BY c.name, l.amt").unwrap(),
-            "SELECT c.name, l.amt FROM c JOIN (SELECT o.amt, o.cid AS `_sprig_lk0`, ROW_NUMBER() OVER (PARTITION BY o.cid ORDER BY o.amt DESC) AS `_sprig_rn` FROM o) AS l \
-             ON `l`.`_sprig_lk0` = c.id AND `l`.`_sprig_rn` <= 2 ORDER BY c.name, l.amt"
+            "SELECT c.name, l.amt FROM c JOIN (SELECT o.amt, o.cid AS `_lat_k0`, ROW_NUMBER() OVER (PARTITION BY o.cid ORDER BY o.amt DESC) AS `_lat_rn` FROM o) AS l \
+             ON `l`.`_lat_k0` = c.id AND `l`.`_lat_rn` <= 2 ORDER BY c.name, l.amt"
         );
     }
 
@@ -668,8 +1086,8 @@ mod tests {
     fn comma_joins_use_where() {
         assert_eq!(
             rw("SELECT c.name, l.amt FROM c, LATERAL (SELECT amt FROM o WHERE o.cid = c.id AND o.amt > 6 ORDER BY amt LIMIT 1) l ORDER BY c.name").unwrap(),
-            "SELECT c.name, l.amt FROM c, (SELECT amt, o.cid AS `_sprig_lk0`, ROW_NUMBER() OVER (PARTITION BY o.cid ORDER BY amt) AS `_sprig_rn` FROM o WHERE o.amt > 6) l \
-             WHERE `l`.`_sprig_lk0` = c.id AND `l`.`_sprig_rn` <= 1 ORDER BY c.name"
+            "SELECT c.name, l.amt FROM c, (SELECT amt, o.cid AS `_lat_k0`, ROW_NUMBER() OVER (PARTITION BY o.cid ORDER BY amt) AS `_lat_rn` FROM o WHERE o.amt > 6) l \
+             WHERE `l`.`_lat_k0` = c.id AND `l`.`_lat_rn` <= 1 ORDER BY c.name"
         );
         assert_eq!(
             rw("SELECT * FROM c, LATERAL (SELECT amt FROM o WHERE o.cid = c.id) l"),
@@ -677,7 +1095,7 @@ mod tests {
         );
         assert_eq!(
             rw("SELECT c.id, l.amt FROM c, LATERAL (SELECT amt FROM o WHERE o.cid = c.id) l WHERE c.id > 1").unwrap(),
-            "SELECT c.id, l.amt FROM c, (SELECT amt, o.cid AS `_sprig_lk0` FROM o) l WHERE `l`.`_sprig_lk0` = c.id AND c.id > 1"
+            "SELECT c.id, l.amt FROM c, (SELECT amt, o.cid AS `_lat_k0` FROM o) l WHERE `l`.`_lat_k0` = c.id AND c.id > 1"
         );
     }
 
@@ -685,8 +1103,8 @@ mod tests {
     fn left_join_on_true_keeps_outer_rows() {
         assert_eq!(
             rw("SELECT c.name, l.amt FROM c LEFT JOIN LATERAL (SELECT o.amt FROM o WHERE o.cid = c.id ORDER BY o.amt LIMIT 1) AS l ON TRUE ORDER BY c.name").unwrap(),
-            "SELECT c.name, l.amt FROM c LEFT JOIN (SELECT o.amt, o.cid AS `_sprig_lk0`, ROW_NUMBER() OVER (PARTITION BY o.cid ORDER BY o.amt) AS `_sprig_rn` FROM o) AS l \
-             ON TRUE AND `l`.`_sprig_lk0` = c.id AND `l`.`_sprig_rn` <= 1 ORDER BY c.name"
+            "SELECT c.name, l.amt FROM c LEFT JOIN (SELECT o.amt, o.cid AS `_lat_k0`, ROW_NUMBER() OVER (PARTITION BY o.cid ORDER BY o.amt) AS `_lat_rn` FROM o) AS l \
+             ON TRUE AND `l`.`_lat_k0` = c.id AND `l`.`_lat_rn` <= 1 ORDER BY c.name"
         );
     }
 
@@ -702,7 +1120,9 @@ mod tests {
         );
         // An unqualified reference to the lateral's column: left alone.
         assert_eq!(
-            rw("SELECT name, n FROM c, LATERAL (SELECT COUNT(*) AS n FROM o WHERE o.cid = c.id) AS l"),
+            rw(
+                "SELECT name, n FROM c, LATERAL (SELECT COUNT(*) AS n FROM o WHERE o.cid = c.id) AS l"
+            ),
             None
         );
     }
@@ -713,7 +1133,15 @@ mod tests {
         assert_eq!(rw("SELECT lateral FROM t"), None);
         // No correlation, a GROUP BY inside, a non-equality correlation.
         assert_eq!(rw("SELECT x.a FROM c, LATERAL (SELECT a FROM o) x"), None);
-        assert_eq!(rw("SELECT x.a FROM c, LATERAL (SELECT cid AS a FROM o WHERE o.cid = c.id GROUP BY cid) x"), None);
-        assert_eq!(rw("SELECT x.a FROM c, LATERAL (SELECT amt AS a FROM o WHERE o.amt > c.id) x"), None);
+        assert_eq!(
+            rw(
+                "SELECT x.a FROM c, LATERAL (SELECT cid AS a FROM o WHERE o.cid = c.id GROUP BY cid) x"
+            ),
+            None
+        );
+        assert_eq!(
+            rw("SELECT x.a FROM c, LATERAL (SELECT amt AS a FROM o WHERE o.amt > c.id) x"),
+            None
+        );
     }
 }

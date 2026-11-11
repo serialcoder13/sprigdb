@@ -383,6 +383,10 @@ pub async fn execute(
         Plan::NotRouted | Plan::ViaLookup(_) | Plan::ViaParent(_) | Plan::NeedIds(_) => Err(
             SprigError::internal("execute of a statement the router doesn't route"),
         ),
+        // The gateway runs the graph calls and plans the bound statement.
+        Plan::Graph(_) => Err(SprigError::internal(
+            "execute of a graph plan (the gateway binds its rows first)",
+        )),
     }
 }
 
@@ -2122,6 +2126,88 @@ impl ExplainRows {
     }
 }
 
+/// `EXPLAIN FORMAT=SPRIG` of a graph statement whose outer statement isn't
+/// routed (the tenant has no sharded table): the graph's rows and a
+/// `Forward` row, without a backend.
+#[must_use]
+pub fn explain_graph(g: &crate::graph::GraphPlan) -> Output {
+    let mut rows = ExplainRows::default();
+    graph_rows(&mut rows, g);
+    rows.push(
+        None,
+        "Forward",
+        "session's cluster".into(),
+        "the statement with the rows runs as it is (no table the router distributes)".into(),
+    );
+    let columns = ["id", "parent", "operator", "target", "detail"]
+        .iter()
+        .map(|n| text_column(n))
+        .collect();
+    Output::Rows {
+        columns,
+        rows: rows
+            .0
+            .into_iter()
+            .map(|r| r.into_iter().map(|s| Some(Bytes::from(s))).collect())
+            .collect(),
+        warnings: 0,
+    }
+}
+
+/// `Plan::Graph`'s rows (R8 round 6): per call its graph, Cypher, tiers
+/// and shards, and the key joins that narrow the outer read.
+fn graph_rows(rows: &mut ExplainRows, g: &crate::graph::GraphPlan) {
+    let top = rows.push(
+        None,
+        "Graph",
+        "gateway".into(),
+        format!(
+            "{} GRAPH_TABLE call(s) run first; their rows join as derived tables of literal rows, \
+             on every shard of the read",
+            g.calls.len()
+        ),
+    );
+    for (i, c) in g.calls.iter().enumerate() {
+        let step = g.steps.iter().find(|s| s.call == i);
+        let call = rows.push(
+            Some(top),
+            "GraphCall",
+            step.map_or_else(|| c.graph.clone(), |s| s.graph.clone()),
+            c.cypher.clone(),
+        );
+        let Some(s) = step else { continue };
+        for t in &s.tiers {
+            rows.push(Some(call), "GraphStep", "tier".into(), t.trim().to_owned());
+        }
+        let shards: Vec<String> = s
+            .shards
+            .iter()
+            .map(|sh| format!("shard {} {} {}", sh.shard, sh.cluster, sh.schema))
+            .collect();
+        rows.push(
+            Some(call),
+            "GraphShards",
+            match s.group {
+                Some(id) => format!("group {id}: {} shards", s.shards.len()),
+                None => format!("{} schema", s.shards.len()),
+            },
+            shards.join(", "),
+        );
+        for k in g.keys.iter().filter(|k| k.call == i) {
+            rows.push(
+                Some(call),
+                "KeyJoin",
+                format!("group {}", k.group.id),
+                format!(
+                    "{} = {}: the read keeps the shards of the rows' values",
+                    k.table,
+                    c.columns.get(k.column).map_or("?", String::as_str)
+                ),
+            );
+        }
+    }
+}
+
 async fn explain(p: &Plan, be: &mut dyn ShardBackend, budget: &mut Budget) -> Result<Output> {
     let mut rows = ExplainRows::default();
     let mut shard_sql: Vec<&Target> = Vec::new();
@@ -2156,6 +2242,10 @@ async fn explain(p: &Plan, be: &mut dyn ShardBackend, budget: &mut Budget) -> Re
                 ),
             );
             p
+        }
+        Plan::Graph(g) => {
+            graph_rows(&mut rows, g);
+            &g.outer_plan
         }
         Plan::ViaParent(v) => {
             let top = rows.push(
@@ -2285,11 +2375,19 @@ async fn explain(p: &Plan, be: &mut dyn ShardBackend, budget: &mut Budget) -> Re
                 );
             }
         }
+        Plan::NotRouted => {
+            rows.push(
+                None,
+                "Forward",
+                "session's cluster".into(),
+                "the statement runs as it is (no table the router distributes)".into(),
+            );
+        }
         Plan::Explain(_)
-        | Plan::NotRouted
         | Plan::ViaLookup(_)
         | Plan::ViaParent(_)
-        | Plan::NeedIds(_) => {}
+        | Plan::NeedIds(_)
+        | Plan::Graph(_) => {}
     }
     // One representative shard's MariaDB plan.
     for t in shard_sql {

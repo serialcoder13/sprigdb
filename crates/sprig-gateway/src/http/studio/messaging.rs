@@ -40,6 +40,24 @@ use super::{hdr, invalid, json_response, parse_json, read_body, rows_of, run_sql
 /// Dead letters listed at most.
 const MAX_DEAD: u32 = 1000;
 
+/// A committed offset: group, partition, offset, when, generation, state.
+type Off = (String, u32, u64, String, Option<u32>, Option<String>);
+/// An exchange row: id, name, type, durable, auto-delete, internal, arguments.
+type Ex = (u64, Vec<u8>, String, bool, bool, bool, Option<String>);
+/// A queue row: id, name, type, durable, auto-delete, arguments, lanes, state.
+type Qu = (
+    u64,
+    Vec<u8>,
+    String,
+    bool,
+    bool,
+    Option<String>,
+    u16,
+    String,
+);
+/// A binding row: source, destination, destination kind, key, arguments.
+type Bind = (u64, u64, String, Vec<u8>, Option<String>);
+
 /// Whether `path` is one of these routes.
 #[must_use]
 pub fn is_messaging_path(path: &str) -> bool {
@@ -228,11 +246,10 @@ async fn groups(
         ));
     };
     for p in 0..u64::from(partitions) {
-        parts
-            .entry(p)
-            .or_insert_with(|| json!({"partition": p, "log_start": null, "high_watermark": 0, "records": 0}));
+        parts.entry(p).or_insert_with(
+            || json!({"partition": p, "log_start": null, "high_watermark": 0, "records": 0}),
+        );
     }
-    type Off = (String, u32, u64, String, Option<u32>, Option<String>);
     let offs: Vec<Off> = match conn
         .exec(
             format!(
@@ -287,6 +304,7 @@ fn json_text(s: Option<String>) -> Value {
 }
 
 /// The database's virtual host and its topology.
+#[allow(clippy::too_many_lines)] // one query and one mapping per object kind
 async fn topology(
     core: &Arc<Core>,
     caller: &Caller,
@@ -314,7 +332,6 @@ async fn topology(
         }
         Err(e) => return Err(db_err(&e)),
     };
-    type Ex = (u64, Vec<u8>, String, bool, bool, bool, Option<String>);
     let ex: Vec<Ex> = conn
         .exec(
             format!(
@@ -325,7 +342,6 @@ async fn topology(
         )
         .await
         .map_err(|e| db_err(&e))?;
-    type Qu = (u64, Vec<u8>, String, bool, bool, Option<String>, u16, String);
     let qs: Vec<Qu> = conn
         .exec(
             format!(
@@ -336,7 +352,7 @@ async fn topology(
         )
         .await
         .map_err(|e| db_err(&e))?;
-    let bs: Vec<(u64, u64, String, Vec<u8>, Option<String>)> = conn
+    let bs: Vec<Bind> = conn
         .exec(
             format!(
                 "SELECT source_id, dest_id, CAST(dest_kind AS CHAR), binding_key, CAST(arguments AS CHAR) \
@@ -439,13 +455,18 @@ async fn sink_dead(
             .and_then(Value::as_array)
             .map(|xs| {
                 xs.iter()
-                    .filter_map(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
+                    .filter_map(|x| {
+                        x.as_u64()
+                            .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+                    })
                     .collect()
             })
             .unwrap_or_default();
         let all = body.get("all").and_then(Value::as_bool).unwrap_or(false);
         if ids.is_empty() && !all {
-            return Err(invalid("name the dead letters (ids) or ask for all of them"));
+            return Err(invalid(
+                "name the dead letters (ids) or ask for all of them",
+            ));
         }
         let state = if verb.ends_with(":replay") {
             "replaying"
@@ -463,7 +484,10 @@ async fn sink_dead(
                    "attempts": r.attempts, "state": r.state, "at": r.created_at})
         })
         .collect();
-    Ok(json_response(200, &json!({"sink": name, "dead_letters": list})))
+    Ok(json_response(
+        200,
+        &json!({"sink": name, "dead_letters": list}),
+    ))
 }
 
 #[cfg(test)]
@@ -473,9 +497,15 @@ mod tests {
     #[test]
     fn messaging_paths() {
         assert!(is_messaging_path("/v1/databases/shop/mq"));
-        assert!(is_messaging_path("/v1/databases/shop/streams/orders/groups"));
-        assert!(is_messaging_path("/v1/databases/shop/sinks/out/deadLetters"));
-        assert!(is_messaging_path("/v1/databases/shop/sinks/out/deadLetters:replay"));
+        assert!(is_messaging_path(
+            "/v1/databases/shop/streams/orders/groups"
+        ));
+        assert!(is_messaging_path(
+            "/v1/databases/shop/sinks/out/deadLetters"
+        ));
+        assert!(is_messaging_path(
+            "/v1/databases/shop/sinks/out/deadLetters:replay"
+        ));
         assert!(!is_messaging_path("/v1/databases/shop/streams/orders"));
         assert!(!is_messaging_path("/v1/databases/shop/sql:query"));
         assert_eq!(decode("a%20b%2Fc"), "a b/c");
@@ -485,8 +515,12 @@ mod tests {
     #[test]
     fn sink_admins() {
         let l = |xs: &[&str]| xs.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        assert!(sink_admin(&l(&["GRANT SPRIG_SINK_ADMIN ON *.* TO `a`@`%`"])));
-        assert!(sink_admin(&l(&["GRANT SPRIG_TENANT_ADMIN ON *.* TO `a`@`%`"])));
+        assert!(sink_admin(&l(&[
+            "GRANT SPRIG_SINK_ADMIN ON *.* TO `a`@`%`"
+        ])));
+        assert!(sink_admin(&l(&[
+            "GRANT SPRIG_TENANT_ADMIN ON *.* TO `a`@`%`"
+        ])));
         assert!(!sink_admin(&l(&["GRANT SELECT ON `shop`.* TO `a`@`%`"])));
     }
 }

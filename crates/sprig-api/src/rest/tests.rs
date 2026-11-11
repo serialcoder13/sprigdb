@@ -11,6 +11,7 @@ fn annotated() -> Vec<(String, String, String, String)> {
         "sprig/v1/kv.proto",
         "sprig/v1/vectors.proto",
         "sprig/v1/analytics.proto",
+        "sprig/v1/search.proto",
         "sprig/admin/v1/admin.proto",
     ] {
         let text = std::fs::read_to_string(root.join(file)).unwrap();
@@ -90,6 +91,58 @@ fn templates_match_paths() {
     assert!(path_known("/v1/databases/x/sql:query"));
     let m = find("POST", "/v1/databases/my%20db/sql:query").unwrap();
     assert_eq!(m.vars["database"], "my db");
+}
+
+/// The operator routes (decision OP12): custom methods on the collection
+/// and on one operator don't fall into each other's templates.
+#[test]
+fn operator_routes_match() {
+    let cases = [
+        ("POST", "/admin/v1/operators:login", "Operators.Login", None),
+        ("POST", "/admin/v1/operators:enrol", "Operators.Enrol", None),
+        ("POST", "/admin/v1/operators:logout", "Operators.Logout", None),
+        ("GET", "/admin/v1/operators:whoami", "Operators.WhoAmI", None),
+        ("GET", "/admin/v1/operators", "Operators.ListOperators", None),
+        ("POST", "/admin/v1/operators", "Operators.CreateOperator", None),
+        ("GET", "/admin/v1/operators/alice", "Operators.GetOperator", Some("alice")),
+        (
+            "POST",
+            "/admin/v1/operators/alice:disable",
+            "Operators.DisableOperator",
+            Some("alice"),
+        ),
+        (
+            "POST",
+            "/admin/v1/operators/alice:resetFactor",
+            "Operators.ResetOperatorFactor",
+            Some("alice"),
+        ),
+        (
+            "POST",
+            "/admin/v1/operators/alice:setPassword",
+            "Operators.SetOperatorPassword",
+            Some("alice"),
+        ),
+        ("GET", "/admin/v1/operator-tokens", "Operators.ListTokens", None),
+        ("POST", "/admin/v1/operator-tokens", "Operators.CreateToken", None),
+        (
+            "POST",
+            "/admin/v1/operator-tokens/k1:revoke",
+            "Operators.RevokeToken",
+            Some("k1"),
+        ),
+    ];
+    for (method, path, rpc, name) in cases {
+        let m = find(method, path).unwrap_or_else(|| panic!("{method} {path}"));
+        assert_eq!(m.route.short_name(), rpc, "{method} {path}");
+        assert_eq!(m.vars.get("name").map(String::as_str), name, "{path}");
+        assert!(m.route.is_admin());
+    }
+    assert!(find("GET", "/admin/v1/operators:login").is_none());
+    assert!(find("POST", "/admin/v1/operators/alice").is_none());
+    assert!(find("POST", "/admin/v1/operators/alice:frobnicate").is_none());
+    assert!(path_known("/admin/v1/operators:login"));
+    assert!(by_name("Operators.WhoAmI").is_some());
 }
 
 #[test]

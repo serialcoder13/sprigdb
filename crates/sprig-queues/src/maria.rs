@@ -1,7 +1,7 @@
 //! The MariaDB message store (chapter 50, "Shard tables"; build step 4):
 //! `__sprig_qm` (messages), `__sprig_qs` (owner state per lane),
-//! `__sprig_qd` (delayed messages) and `__sprig_qo` (the queue outbox) in
-//! one shard schema.
+//! `__sprig_qd` (delayed messages), `__sprig_qo` (the queue outbox) and
+//! `__sprig_qf` (the forward ledger, R9 r9fwd) in one shard schema.
 //!
 //! **As built, against the book:**
 //! - The tables live in the vhost database's default shard (its first
@@ -30,7 +30,7 @@ use crate::store::{
 };
 
 /// The shard tables, created on first use.
-pub const DDL: [&str; 4] = [
+pub const DDL: [&str; 5] = [
     "CREATE TABLE IF NOT EXISTS {s}.`__sprig_qm` (
   queue_id       BIGINT UNSIGNED NOT NULL,
   lane           SMALLINT UNSIGNED NOT NULL,
@@ -85,6 +85,18 @@ pub const DDL: [&str; 4] = [
   body           LONGBLOB NOT NULL,
   deaths         BLOB NULL,
   PRIMARY KEY (out_id)
+) ENGINE=InnoDB",
+    // The forward ledger (R9, r9fwd): one row per message an outbox
+    // forward enqueued, written in the owner's batch with the message, so
+    // a forward replayed after the message was consumed stays a no-op.
+    // Rows go once their outbox row is gone and they are old enough
+    // (`MsgStore::purge_ledger`).
+    "CREATE TABLE IF NOT EXISTS {s}.`__sprig_qf` (
+  queue_id       BIGINT UNSIGNED NOT NULL,
+  out_id         BINARY(16) NOT NULL,
+  at_ms          BIGINT NOT NULL,
+  PRIMARY KEY (queue_id, out_id),
+  KEY k_at (at_ms)
 ) ENGINE=InnoDB",
 ];
 
@@ -467,15 +479,20 @@ impl MsgStore for MariaStore {
         let mut out = Vec::new();
         for chunk in ids.chunks(CHUNK) {
             let marks = vec!["?"; chunk.len()].join(", ");
+            // A locking read: waits for a transaction that holds the row
+            // (an acknowledgement inside a transaction) to end. With the
+            // forward ledger: forwarded before, maybe consumed already.
             let mut params: Vec<Value> = vec![queue.into()];
             params.extend(chunk.iter().map(|i| Value::from(i.to_vec())));
-            // A locking read: waits for a transaction that holds the row
-            // (an acknowledgement inside a transaction) to end.
+            params.push(queue.into());
+            params.extend(chunk.iter().map(|i| Value::from(i.to_vec())));
             let rows: Vec<Vec<u8>> = c
                 .exec(
                     format!(
-                        "SELECT msg_id FROM {} WHERE queue_id = ? AND msg_id IN ({marks}) LOCK IN SHARE MODE",
-                        self.t("__sprig_qm")
+                        "(SELECT msg_id FROM {} WHERE queue_id = ? AND msg_id IN ({marks}) LOCK IN SHARE MODE) \
+                         UNION ALL (SELECT out_id FROM {} WHERE queue_id = ? AND out_id IN ({marks}))",
+                        self.t("__sprig_qm"),
+                        self.t("__sprig_qf")
                     ),
                     Params::Positional(params),
                 )
@@ -596,6 +613,24 @@ impl MsgStore for MariaStore {
                 .await
                 .map_err(|e| self.fail(&e))?;
         }
+        for chunk in b.forwarded.chunks(CHUNK) {
+            let marks = vec!["(?, ?, ?)"; chunk.len()].join(", ");
+            // When it was forwarded (the purge's margin counts from here).
+            let at = crate::store::msg_id_ms(&crate::store::new_msg_id());
+            let mut params: Vec<Value> = Vec::with_capacity(chunk.len() * 3);
+            for id in chunk {
+                params.extend([b.queue.into(), id.to_vec().into(), at.into()]);
+            }
+            tx.exec_drop(
+                format!(
+                    "INSERT IGNORE INTO {} (queue_id, out_id, at_ms) VALUES {marks}",
+                    self.t("__sprig_qf")
+                ),
+                Params::Positional(params),
+            )
+            .await
+            .map_err(|e| self.fail(&e))?;
+        }
         tx.commit().await.map_err(|e| self.fail(&e))?;
         if b.inserts.is_empty() {
             return Ok(());
@@ -652,7 +687,7 @@ impl MsgStore for MariaStore {
 
     async fn drop_queue(&self, queue: u64) -> Result<(), StoreError> {
         let mut c = self.conn().await?;
-        for t in ["__sprig_qm", "__sprig_qs"] {
+        for t in ["__sprig_qm", "__sprig_qs", "__sprig_qf"] {
             c.exec_drop(
                 format!("DELETE FROM {} WHERE queue_id = ?", self.t(t)),
                 (queue,),
@@ -705,6 +740,64 @@ impl MsgStore for MariaStore {
             .map_err(|e| self.fail(&e))?;
         }
         Ok(())
+    }
+
+    async fn outbox_rows(&self, ids: &[MsgId]) -> Result<Vec<OutboxRow>, StoreError> {
+        let mut c = self.conn().await?;
+        let mut found: Vec<OutboxRow> = Vec::with_capacity(ids.len());
+        for chunk in ids.chunks(CHUNK * 8) {
+            let marks = vec!["?"; chunk.len()].join(", ");
+            let rows: Vec<mysql_async::Row> = c
+                .exec(
+                    format!(
+                        "SELECT {OUT_COLS} FROM {} WHERE out_id IN ({marks})",
+                        self.t("__sprig_qo")
+                    ),
+                    Params::Positional(chunk.iter().map(|i| Value::from(i.to_vec())).collect()),
+                )
+                .await
+                .map_err(|e| self.fail(&e))?;
+            found.extend(rows.into_iter().filter_map(outbox_of));
+        }
+        // In the order asked (commit order), not the table's.
+        let mut by_id: std::collections::HashMap<MsgId, OutboxRow> =
+            found.into_iter().map(|r| (r.out_id, r)).collect();
+        Ok(ids.iter().filter_map(|i| by_id.remove(i)).collect())
+    }
+
+    async fn outbox_due(
+        &self,
+        limit: usize,
+        publish_before: MsgId,
+    ) -> Result<Vec<OutboxRow>, StoreError> {
+        let mut c = self.conn().await?;
+        let rows: Vec<mysql_async::Row> = c
+            .exec(
+                format!(
+                    "SELECT {OUT_COLS} FROM {} WHERE kind <> 'publish' OR out_id < ? \
+                     ORDER BY out_id LIMIT ?",
+                    self.t("__sprig_qo")
+                ),
+                (publish_before.to_vec(), limit as u64),
+            )
+            .await
+            .map_err(|e| self.fail(&e))?;
+        Ok(rows.into_iter().filter_map(outbox_of).collect())
+    }
+
+    async fn purge_ledger(&self, before_ms: i64) -> Result<u64, StoreError> {
+        let mut c = self.conn().await?;
+        c.exec_drop(
+            format!(
+                "DELETE FROM {} WHERE at_ms < ? AND out_id NOT IN (SELECT out_id FROM {}) LIMIT 5000",
+                self.t("__sprig_qf"),
+                self.t("__sprig_qo")
+            ),
+            (before_ms,),
+        )
+        .await
+        .map_err(|e| self.fail(&e))?;
+        Ok(c.affected_rows())
     }
 
     async fn delay(&self, row: &DelayedRow) -> Result<(), StoreError> {

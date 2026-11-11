@@ -1,0 +1,77 @@
+// sprig.v1: the Search API (chapter 39, "Queries"; chapter 37). A search
+// index on a table or collection is queried by name; hits are re-read
+// through the caller's session, so a caller only ever gets keys, rows and
+// highlights of rows it may SELECT (privileges and row-level security).
+syntax = "proto3";
+
+package sprig.v1;
+
+import "google/api/annotations.proto";
+
+// Full-text search.
+service Search {
+  // One page of an index's hits, best first, with highlights and facets.
+  rpc Query(SearchQueryRequest) returns (SearchQueryResponse) {
+    option (google.api.http) = {
+      post: "/v1/databases/{database}/search/{index}:query"
+      body: "*"
+    };
+  }
+}
+
+message SearchQueryRequest {
+  string database = 1;
+  string index = 2;
+  // A query string, as sprig_search() takes it: terms, "phrases"~slop,
+  // +must, -not, field:term, term~1, prefix*, term^2, AND, OR, NOT.
+  string query_string = 3;
+  // Or an Atlas Search operator as JSON (text, phrase, compound,
+  // autocomplete, range, equals, exists, wildcard, regex, queryString).
+  string query = 4;
+  // Atlas operators every hit must also match, unscored: a JSON object or
+  // an array of them (filter clauses, run inside the index).
+  string filter = 5;
+  // Hits per page (default 10, at most search.max_window).
+  uint32 limit = 6;
+  // The `after` of the previous page.
+  string after = 7;
+  // Text fields to highlight.
+  repeated string highlight = 8;
+  // Facets as $searchMeta takes them, JSON: {"brands": {"type": "string",
+  // "path": "brand", "numBuckets": 10}, "prices": {"type": "number",
+  // "path": "price", "boundaries": [0, 50, 100]}}.
+  string facets = 9;
+  // stale_ok (the default, search.default_consistency), own_writes or
+  // latest.
+  string consistency = 10;
+  // A commit token from a write (own_writes); served as latest (S5).
+  string commit_token = 11;
+  // Each hit's row: a table's columns as a JSON object, a collection's
+  // document as relaxed Extended JSON.
+  bool include_row = 12;
+  // Only by score in this release; anything else answers 39823.
+  string sort = 13;
+}
+
+message SearchHit {
+  // The key as JSON: a table's key columns as an object, a collection's
+  // {"_id": ...}.
+  string key = 1;
+  double score = 2;
+  // {"field": [{"text": "...", "hits": [[start, end], ...]}]}; empty for
+  // none.
+  string highlights = 3;
+  // With include_row; empty otherwise.
+  string row = 4;
+}
+
+message SearchQueryResponse {
+  repeated SearchHit hits = 1;
+  // {"name": {"buckets": [{"_id": value, "count": n}]}}; empty without
+  // facets.
+  string facets = 2;
+  // The cursor of the next page; empty after the last.
+  string after = 3;
+  // The feed positions the answering copy had applied, JSON.
+  string applied = 4;
+}

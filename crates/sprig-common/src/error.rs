@@ -411,6 +411,25 @@ sprig_codes! {
     /// suspended, while it was connected; the session closes
     /// (`auth.close_sessions_on_revoke`, chapter 14).
     SessionRevoked = 39306, "ER_SPRIG_SESSION_REVOKED", "SprigSessionRevoked", SQLSTATE_CONNECTION, false;
+    /// Named operators are in use (chapter 14, "Operators"): the bootstrap
+    /// token, a legacy DC-operator token or no credential at all is refused;
+    /// log in with `sprigctl login`.
+    OperatorLoginRequired = 39310, "ER_SPRIG_OPERATOR_LOGIN_REQUIRED", "SprigOperatorLoginRequired", SQLSTATE_GENERAL, false;
+    /// An operator login needs a second-factor code (chapter 14,
+    /// "Operators").
+    OperatorMfaRequired = 39311, "ER_SPRIG_OPERATOR_MFA_REQUIRED", "SprigOperatorMfaRequired", SQLSTATE_GENERAL, false;
+    /// An operator login failed: unknown name, wrong password or code, a
+    /// disabled or temporarily locked account (one message for all).
+    OperatorLoginFailed = 39312, "ER_SPRIG_OPERATOR_LOGIN_FAILED", "SprigOperatorLoginFailed", SQLSTATE_SYNTAX_ACCESS, false;
+    /// The operator's role, DC or token scopes don't cover the call.
+    OperatorForbidden = 39313, "ER_SPRIG_OPERATOR_FORBIDDEN", "SprigOperatorForbidden", SQLSTATE_SYNTAX_ACCESS, false;
+    /// An operator of that name exists.
+    OperatorExists = 39314, "ER_SPRIG_OPERATOR_EXISTS", "SprigOperatorExists", SQLSTATE_GENERAL, false;
+    /// No operator, or no operator token, by that name or id.
+    OperatorNotFound = 39315, "ER_SPRIG_OPERATOR_NOT_FOUND", "SprigOperatorNotFound", SQLSTATE_GENERAL, false;
+    /// The operator token is expired or revoked, or its owner is disabled:
+    /// log in again.
+    OperatorTokenExpired = 39316, "ER_SPRIG_OPERATOR_TOKEN_EXPIRED", "SprigOperatorTokenExpired", SQLSTATE_GENERAL, false;
     /// The tenant name is taken (chapter 29; the `tenant-names/` guard of
     /// chapter 23).
     TenantExists = 39360, "ER_SPRIG_TENANT_EXISTS", "SprigTenantExists", SQLSTATE_GENERAL, false;
@@ -420,6 +439,15 @@ sprig_codes! {
     /// A tenant with children can't be dropped (chapter 29; chapter 23's
     /// delete guard).
     TenantHasChildren = 39362, "ER_SPRIG_TENANT_HAS_CHILDREN", "SprigTenantHasChildren", SQLSTATE_GENERAL, false;
+    /// A new row version fails a row-level security policy's `WITH CHECK`
+    /// (or an upsert's conflicting row fails `UPDATE`'s `USING`) (chapter
+    /// 29, "Row-level security").
+    RlsCheckFailed = 39363, "ER_SPRIG_RLS_CHECK_FAILED", "SprigRlsCheckFailed", SQLSTATE_SYNTAX_ACCESS, false;
+    /// A policy expression is non-deterministic, names an internal object,
+    /// reads a variable or calls an unknown function (chapter 29).
+    RlsPolicyInvalid = 39364, "ER_SPRIG_RLS_POLICY_INVALID", "SprigRlsPolicyInvalid", SQLSTATE_GENERAL, false;
+    /// Policy subqueries would form a cycle between tables (chapter 29).
+    RlsPolicyCycle = 39365, "ER_SPRIG_RLS_POLICY_CYCLE", "SprigRlsPolicyCycle", SQLSTATE_GENERAL, false;
     /// The tenant's authorization engine filters rows of a table the
     /// statement touches, and the gateway can't apply such a filter yet
     /// (chapter 29, "Pluggable authorization").
@@ -737,6 +765,34 @@ sprig_codes! {
     /// The tenant's map moved to another cluster but the move's handoff
     /// record isn't readable yet; the feed waits (chapter 38).
     FeedHandoffPending = 39813, "ER_SPRIG_FEED_HANDOFF_PENDING", "SprigFeedHandoffPending", SQLSTATE_GENERAL, true;
+    /// No search index by that name (chapter 39).
+    SearchIndexNotFound = 39820, "ER_SPRIG_SEARCH_INDEX_NOT_FOUND", "SprigSearchIndexNotFound", SQLSTATE_GENERAL, false;
+    /// No search index covers the columns of a `MATCH` (chapter 39).
+    SearchNoIndexForMatch = 39821, "ER_SPRIG_SEARCH_NO_INDEX_FOR_MATCH", "SprigSearchNoIndexForMatch", SQLSTATE_GENERAL, false;
+    /// A search query string or operator is malformed (chapter 39).
+    SearchQuerySyntax = 39822, "ER_SPRIG_SEARCH_QUERY_SYNTAX", "SprigSearchQuerySyntax", SQLSTATE_SYNTAX_ACCESS, false;
+    /// A search feature SprigDB doesn't offer (chapter 39).
+    SearchUnsupported = 39823, "ER_SPRIG_SEARCH_UNSUPPORTED", "SprigSearchUnsupported", SQLSTATE_GENERAL, false;
+    /// The search index is still being built (chapter 39).
+    SearchIndexNotReady = 39824, "ER_SPRIG_SEARCH_INDEX_NOT_READY", "SprigSearchIndexNotReady", SQLSTATE_RETRY, true;
+    /// No ready copy of a search partition (chapter 39).
+    SearchUnavailable = 39825, "ER_SPRIG_SEARCH_UNAVAILABLE", "SprigSearchUnavailable", SQLSTATE_RETRY, true;
+    /// A search's consistency target wasn't reached in time (chapter 39).
+    SearchWaitTimeout = 39826, "ER_SPRIG_SEARCH_WAIT_TIMEOUT", "SprigSearchWaitTimeout", SQLSTATE_RETRY, true;
+    /// A search read more hits than `search.max_window` (chapter 39).
+    SearchWindowExceeded = 39827, "ER_SPRIG_SEARCH_WINDOW_EXCEEDED", "SprigSearchWindowExceeded", SQLSTATE_GENERAL, false;
+    /// A search analyzer or language that isn't defined (chapter 39).
+    SearchAnalyzerUnknown = 39828, "ER_SPRIG_SEARCH_ANALYZER_UNKNOWN", "SprigSearchAnalyzerUnknown", SQLSTATE_GENERAL, false;
+    /// A search field's type can't take that kind (chapter 39).
+    SearchFieldType = 39829, "ER_SPRIG_SEARCH_FIELD_TYPE", "SprigSearchFieldType", SQLSTATE_GENERAL, false;
+    /// More search indexes on one object than `search.max_indexes_per_object`
+    /// (chapter 39).
+    SearchIndexLimit = 39830, "ER_SPRIG_SEARCH_INDEX_LIMIT", "SprigSearchIndexLimit", SQLSTATE_GENERAL, false;
+    /// No place may hold a search index's copies (chapter 39).
+    SearchNoPlacement = 39831, "ER_SPRIG_SEARCH_NO_PLACEMENT", "SprigSearchNoPlacement", SQLSTATE_GENERAL, false;
+    /// Warning: a search inside a transaction that wrote the object reads
+    /// committed data only (chapter 39).
+    SearchStaleInTxn = 39832, "ER_SPRIG_SEARCH_STALE_IN_TXN", "SprigSearchStaleInTxn", SQLSTATE_GENERAL, false;
     /// Unknown function, version or binding (chapter 41).
     LogicNotFound = 39860, "ER_SPRIG_LOGIC_NOT_FOUND", "SprigLogicNotFound", SQLSTATE_GENERAL, false;
     /// Parse or type error at deploy, with its location (chapter 41).
@@ -1056,6 +1112,11 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::VectorLimitInvalid
         | SprigCode::VectorFilterNotIndexed
         | SprigCode::VectorTooManyIndexes
+        | SprigCode::SearchNoIndexForMatch
+        | SprigCode::SearchQuerySyntax
+        | SprigCode::SearchWindowExceeded
+        | SprigCode::SearchAnalyzerUnknown
+        | SprigCode::SearchFieldType
         | SprigCode::DimUnknownMember
         | SprigCode::DimInvalidModel
         | SprigCode::DimTzUnavailable
@@ -1065,6 +1126,7 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::GeoTooComplex
         | SprigCode::ApprovalWindowInvalid
         | SprigCode::StudioViewAsNotReadOnly
+        | SprigCode::RlsPolicyInvalid
         | SprigCode::ApprovalPolicyInvalid => (Code::InvalidArgument, 400),
         SprigCode::SettingLocked
         | SprigCode::BinlogUnsupported
@@ -1112,6 +1174,9 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::RecoveryFenced
         | SprigCode::AdmissionBackoff
         | SprigCode::FeedHandoffPending
+        | SprigCode::SearchUnavailable
+        | SprigCode::SearchWaitTimeout
+        | SprigCode::SearchIndexNotReady
         | SprigCode::ShardMapUnavailable
         | SprigCode::IdBlockUnavailable
         | SprigCode::LookupUnavailable
@@ -1171,17 +1236,20 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::SinkNotFound
         | SprigCode::KvNamespaceNotFound
         | SprigCode::VectorIndexNotFound
+        | SprigCode::SearchIndexNotFound
         | SprigCode::DimModelNotFound
         | SprigCode::StudioDisabled
         | SprigCode::StudioCursorUnknown
-        | SprigCode::RecommendationNotFound => (Code::NotFound, 404),
+        | SprigCode::RecommendationNotFound
+        | SprigCode::OperatorNotFound => (Code::NotFound, 404),
         SprigCode::ClusterExists
         | SprigCode::TenantExists
         | SprigCode::FeedSubscriptionExists
         | SprigCode::SpaceExists
         | SprigCode::StreamExists
         | SprigCode::SinkExists
-        | SprigCode::KvKeyExists => (Code::AlreadyExists, 409),
+        | SprigCode::KvKeyExists
+        | SprigCode::OperatorExists => (Code::AlreadyExists, 409),
         SprigCode::ClusterStateInvalid
         | SprigCode::KvVersionMismatch
         | SprigCode::KvWrongType
@@ -1228,6 +1296,7 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::InheritRunAsPrivilege
         | SprigCode::InheritOutboxPending
         | SprigCode::AuthorizerUnknownToGateways
+        | SprigCode::RlsPolicyCycle
         | SprigCode::StreamAppendOnly
         | SprigCode::LogicTriggerPositionMoved
         | SprigCode::StreamOffsetTxnUnsupported
@@ -1241,6 +1310,10 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::GraphIdNotRoutable
         | SprigCode::SinkState
         | SprigCode::RecommendationState
+        | SprigCode::SearchUnsupported
+        | SprigCode::SearchIndexLimit
+        | SprigCode::SearchNoPlacement
+        | SprigCode::SearchStaleInTxn
         | SprigCode::RecommendationStale => (Code::FailedPrecondition, 409),
         SprigCode::TenantSuspended
         | SprigCode::RemoteAccessDenied
@@ -1248,6 +1321,7 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::LogicOutboundDenied
         | SprigCode::BoltImpersonation
         | SprigCode::RlsUnsupported
+        | SprigCode::RlsCheckFailed
         | SprigCode::TxnHandleForbidden
         | SprigCode::SpaceAccessDenied
         | SprigCode::SinkPrivilege
@@ -1268,7 +1342,8 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::StudioOperatorCertRequired
         | SprigCode::StudioOperatorModeDisabled
         | SprigCode::StudioViewAsDenied
-        | SprigCode::ApprovalDenied => (Code::PermissionDenied, 403),
+        | SprigCode::ApprovalDenied
+        | SprigCode::OperatorForbidden => (Code::PermissionDenied, 403),
         SprigCode::LoginRateLimited
         | SprigCode::TenantConnectionLimit
         | SprigCode::AdmissionTimeout
@@ -1292,6 +1367,10 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         SprigCode::StreamOffsetOutOfRange => (Code::OutOfRange, 416),
         SprigCode::TransportUnsupported => (Code::FailedPrecondition, 415),
         SprigCode::AdminUnauthenticated
+        | SprigCode::OperatorLoginRequired
+        | SprigCode::OperatorMfaRequired
+        | SprigCode::OperatorLoginFailed
+        | SprigCode::OperatorTokenExpired
         | SprigCode::BoltAuthScheme
         | SprigCode::SessionRevoked
         | SprigCode::TenantAmbiguous

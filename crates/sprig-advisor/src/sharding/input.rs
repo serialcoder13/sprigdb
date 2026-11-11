@@ -17,7 +17,7 @@ use sprig_common::ids::{DbId, TenantId};
 use sprig_common::names::SchemaName;
 use sprig_common::{Result, SprigCode, SprigError};
 use sprig_shard::KeyClass;
-use sprig_shard::pins::{Pin, PinKind, PinStore};
+use sprig_shard::pins::PinStore;
 use sprig_workload::fingerprint::FpKind;
 use sprig_workload::shape::{JoinOp, PredOp, Shape, WriteKind};
 use sprig_workload::store::WorkloadTables;
@@ -25,6 +25,7 @@ use sprig_workload::store::WorkloadTables;
 use sprig_shard::colocate::SqlType;
 
 use super::design::{Column, ForeignKey, Input, JoinEdge, Obj, Rules, Stmt, Table, Touch, Unit};
+use super::kv::KvUnit;
 
 fn db_err(what: &str, e: &mysql_async::Error) -> SprigError {
     SprigError::new(SprigCode::CatalogUnavailable, format!("{what}: {e}"))
@@ -193,7 +194,7 @@ pub async fn tables(
             .map_err(|e| db_err("foreign keys", &e))?;
         for (name, bytes) in tbls {
             // Chapter 33's element tables follow their key table
-            // ([`kv_followers`]); other internal tables stay out.
+            // ([`kv_units`]); other internal tables stay out.
             if sprig_common::names::is_internal_object(&name) && kv_key_table(&name).is_none() {
                 continue;
             }
@@ -289,24 +290,13 @@ pub fn kv_key_table(name: &str) -> Option<&str> {
     })
 }
 
-/// The distribution-key column of chapter 33's tables.
-const KV_DK: &str = "_sprig_dk";
-
-/// Chapter 33's element tables in the same group as their key table, on
-/// the same key (R6 round 4). Clients can't pin `__sprig_` tables, so the
-/// pins are implied:
-///
-/// - an element table whose key table isn't in the input leaves it;
-/// - a key table pinned `UNSHARDED` or `REFERENCE` keeps its element tables
-///   unsharded;
-/// - otherwise each element table is `COLOCATE WITH` its key table on the
-///   key table's pinned key, `_sprig_dk` when it has no pin (the key table
-///   then gets `SHARD KEY (_sprig_dk)`: hash-tagged keys and their
-///   elements stay together, as Redis Cluster keeps them in one slot).
-pub fn kv_followers(tables: &mut Vec<Table>, located: &mut Vec<Located>, pins: &mut Vec<Pin>) {
-    use sprig_common::ids::ObjectId;
+/// Chapter 33's units (decision R28): each key table with its element
+/// tables, sized. Element tables whose key table isn't in the input leave
+/// it. Distinct `_sprig_dk` values and write shares are filled later
+/// ([`kv_samples`], [`kv_write_shares`]).
+pub fn kv_units(tables: &mut Vec<Table>, located: &mut Vec<Located>) -> Vec<KvUnit> {
     let mut drop: Vec<Obj> = Vec::new();
-    let mut add: Vec<Pin> = Vec::new();
+    let mut units: Vec<KvUnit> = Vec::new();
     for e in tables.iter() {
         let Some(key_name) = kv_key_table(&e.name) else {
             continue;
@@ -318,48 +308,108 @@ pub fn kv_followers(tables: &mut Vec<Table>, located: &mut Vec<Located>, pins: &
             drop.push(e.object);
             continue;
         };
-        if pins.iter().any(|p| p.object.0 == e.object) {
-            continue;
-        }
-        let key_pin = pins
-            .iter()
-            .find(|p| p.object.0 == k.object)
-            .map(|p| &p.kind);
-        let kind = match key_pin {
-            Some(PinKind::Unsharded | PinKind::Reference) => PinKind::Unsharded,
-            Some(PinKind::ShardKey { columns }) => PinKind::Colocate {
-                parent: ObjectId(k.object),
-                columns: columns.clone(),
-            },
-            Some(PinKind::Colocate { .. }) => continue,
-            None => {
-                if !k.columns.iter().any(|c| c.name == KV_DK) {
-                    continue;
-                }
-                if !add.iter().any(|p| p.object.0 == k.object) {
-                    add.push(Pin {
-                        object: ObjectId(k.object),
-                        db: DbId(k.db),
-                        kind: PinKind::ShardKey {
-                            columns: vec![KV_DK.to_owned()],
-                        },
-                    });
-                }
-                PinKind::Colocate {
-                    parent: ObjectId(k.object),
-                    columns: vec![KV_DK.to_owned()],
-                }
+        match units.iter_mut().find(|u| u.key == k.object) {
+            Some(u) => {
+                u.elements.push(e.object);
+                u.bytes += e.size_bytes;
             }
-        };
-        add.push(Pin {
-            object: ObjectId(e.object),
-            db: DbId(e.db),
-            kind,
-        });
+            None => units.push(KvUnit {
+                key: k.object,
+                db: k.db,
+                elements: vec![e.object],
+                bytes: k.size_bytes + e.size_bytes,
+                ..KvUnit::default()
+            }),
+        }
     }
     tables.retain(|t| !drop.contains(&t.object));
     located.retain(|l| !drop.contains(&l.object));
-    pins.extend(add);
+    units.sort_by_key(|u| u.key);
+    units
+}
+
+/// Keys sampled per key table for `_sprig_dk`'s statistics.
+const KV_SAMPLE_ROWS: u64 = 100_000;
+
+/// Fills each unit's distinct `_sprig_dk` values and its top value's
+/// share from a sample of up to [`KV_SAMPLE_ROWS`] keys (the key table
+/// has no index on `_sprig_dk`, so `InnoDB` has no cardinality for it).
+/// A sample that is all distinct is scaled to the table's row estimate.
+///
+/// # Errors
+/// MariaDB's.
+pub async fn kv_samples(c: &mut Conn, located: &[Located], units: &mut [KvUnit]) -> Result<()> {
+    for u in units.iter_mut() {
+        let Some(l) = located.iter().find(|l| l.object == u.key) else {
+            continue;
+        };
+        let t = format!(
+            "{}.{}",
+            sprig_common::names::quote(&l.schema),
+            sprig_common::names::quote(&l.name)
+        );
+        let row: Option<(u64, u64, Option<u64>)> = c
+            .query_first(format!(
+                "SELECT COUNT(*), COUNT(DISTINCT d), MAX(c) FROM (SELECT _sprig_dk d, \
+                 COUNT(*) OVER (PARTITION BY _sprig_dk) c FROM (SELECT _sprig_dk FROM {t} \
+                 LIMIT {KV_SAMPLE_ROWS}) s0) s"
+            ))
+            .await
+            .map_err(|e| db_err("key-value sample", &e))?;
+        let Some((n, d, top)) = row else { continue };
+        if n == 0 {
+            u.dk_ndv = Some(0.0);
+            continue;
+        }
+        let rows: Option<u64> = c
+            .exec_first(
+                "SELECT TABLE_ROWS FROM information_schema.TABLES \
+                 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+                (l.schema.as_str(), l.name.as_str()),
+            )
+            .await
+            .map_err(|e| db_err("key-value rows", &e))?
+            .flatten();
+        #[allow(clippy::cast_precision_loss)]
+        let (nf, df) = (n as f64, d as f64);
+        let ndv = match rows {
+            #[allow(clippy::cast_precision_loss)]
+            Some(r) if n >= KV_SAMPLE_ROWS && df >= 0.9 * nf => df * (r as f64).max(nf) / nf,
+            _ => df,
+        };
+        u.dk_ndv = Some(ndv);
+        #[allow(clippy::cast_precision_loss)]
+        let top_share = top.map(|t| t as f64 / nf);
+        u.dk_top_share = top_share;
+    }
+    Ok(())
+}
+
+/// Each unit's share of its database's write executions over the window
+/// (statements writing one of its tables, of all statements writing a
+/// table of that database).
+pub fn kv_write_shares(tables: &[Table], stmts: &[Stmt], units: &mut [KvUnit]) {
+    let db_of = |o: Obj| tables.iter().find(|t| t.object == o).map(|t| t.db);
+    for u in units.iter_mut() {
+        let mine = |o: Obj| o == u.key || u.elements.contains(&o);
+        let (mut all, mut ours) = (0.0, 0.0);
+        for s in stmts {
+            let writes: Vec<Obj> = s
+                .touches
+                .iter()
+                .filter(|t| t.write && db_of(t.object) == Some(u.db))
+                .map(|t| t.object)
+                .collect();
+            if writes.is_empty() {
+                continue;
+            }
+            all += s.weight;
+            if writes.iter().any(|o| mine(*o)) {
+                ours += s.weight;
+            }
+        }
+        u.write_share = if all > 0.0 { ours / all } else { 0.0 };
+    }
 }
 
 /// Which equality a fingerprint kind's joins use (chapter 22, "Comparison
@@ -522,8 +572,11 @@ pub async fn assemble(
     }
     let catalog = SchemaName::catalog(tenant).to_string();
     // Chapter 16's pins (empty before the `sharding` module's format 3).
-    let mut pins = PinStore.load(c, &catalog).await?;
-    kv_followers(&mut tables, &mut located, &mut pins);
+    let pins = PinStore.load(c, &catalog).await?;
+    // Chapter 33's units (decision R28): placed by the design's rule.
+    let mut kv = kv_units(&mut tables, &mut located);
+    kv_samples(c, &located, &mut kv).await?;
+    kv_write_shares(&tables, &stmts, &mut kv);
     let version: Option<String> = c
         .query_first(format!(
             "SELECT CAST(value AS CHAR) FROM `{catalog}`.settings WHERE scope_kind = 'tenant' \
@@ -539,6 +592,8 @@ pub async fn assemble(
             units,
             split_bytes,
             pins,
+            kv,
+            ..Input::default()
         },
         located,
         first_seen,
@@ -556,6 +611,7 @@ mod tests {
     use crate::sharding::design::{Routing, structural};
     use crate::sharding::settings::AdvisorSettings;
     use sprig_common::ids::ObjectId;
+    use sprig_shard::pins::{Pin, PinKind};
 
     fn col(n: &str, class: Option<KeyClass>) -> Column {
         Column {
@@ -606,13 +662,17 @@ mod tests {
             kv(4, "__sprig_ke_gone"),
         ];
         let mut located: Vec<Located> = tables.iter().map(at).collect();
-        let mut pins = Vec::new();
-        kv_followers(&mut tables, &mut located, &mut pins);
+        let mut units = kv_units(&mut tables, &mut located);
         assert_eq!(tables.len(), 3);
         assert_eq!(located.len(), 3);
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].elements, vec![2, 3]);
+        assert!((units[0].bytes - 3e6).abs() < 1.0);
+        // A database that asked for shards: grouped on `_sprig_dk`.
+        units[0].min_shards = 2;
         let input = Input {
             tables,
-            pins,
+            kv: units,
             ..Input::default()
         };
         let (d, why) = structural(&input, &AdvisorSettings::default());
@@ -636,16 +696,47 @@ mod tests {
     fn element_tables_of_an_unsharded_key_table_stay_unsharded() {
         let mut tables = vec![kv(1, "kvs"), kv(2, "__sprig_ke_kvs")];
         let mut located: Vec<Located> = tables.iter().map(at).collect();
-        let mut pins = vec![Pin {
-            object: ObjectId(1),
-            db: DbId(1),
-            kind: PinKind::Unsharded,
-        }];
-        kv_followers(&mut tables, &mut located, &mut pins);
-        assert_eq!(pins.len(), 2);
-        assert_eq!(pins[1].kind, PinKind::Unsharded);
+        let mut units = kv_units(&mut tables, &mut located);
+        units[0].min_shards = 4;
+        let mut input = Input {
+            tables,
+            kv: units,
+            pins: vec![Pin {
+                object: ObjectId(1),
+                db: DbId(1),
+                kind: PinKind::Unsharded,
+            }],
+            ..Input::default()
+        };
+        crate::sharding::kv::imply(&mut input, &AdvisorSettings::default());
+        assert_eq!(input.pins.len(), 2);
+        assert_eq!(input.pins[1].kind, PinKind::Unsharded);
         assert_eq!(kv_key_table("__sprig_kz_x"), Some("x"));
         assert_eq!(kv_key_table("__sprig_doc_x"), None);
         assert_eq!(kv_key_table("__sprig_ke_"), None);
+    }
+
+    #[test]
+    fn write_shares_count_the_units_writes_in_its_database() {
+        let tables = vec![kv(1, "db0"), kv(2, "__sprig_ke_db0"), kv(5, "orders")];
+        let w = |o: Obj, weight: f64| Stmt {
+            weight,
+            fingerprint: o,
+            touches: vec![Touch {
+                object: o,
+                write: true,
+                ..Touch::default()
+            }],
+            joins: Vec::new(),
+        };
+        let stmts = vec![w(1, 10.0), w(2, 30.0), w(5, 60.0)];
+        let mut units = vec![KvUnit {
+            key: 1,
+            db: 1,
+            elements: vec![2],
+            ..KvUnit::default()
+        }];
+        kv_write_shares(&tables, &stmts, &mut units);
+        assert!((units[0].write_share - 0.4).abs() < 1e-9);
     }
 }

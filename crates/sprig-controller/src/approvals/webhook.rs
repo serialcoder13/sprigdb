@@ -30,7 +30,7 @@ use async_trait::async_trait;
 use hyper::body::Bytes;
 use mysql_async::Pool;
 use mysql_async::prelude::Queryable;
-use serde_json::{Map, Value, json};
+use serde_json::{Map, json};
 use sprig_catalog::CatalogLocator;
 use sprig_common::ids::{DcId, TenantId};
 use sprig_common::names::quote;
@@ -390,7 +390,8 @@ impl SinkEnv for Webhooks {
     }
 
     async fn residency_of(&self, tenant: TenantId) -> Result<Box<dyn Residency>> {
-        residency_of(&*self.global, tenant).await
+        // The sink workers' rule, from `sprig-residency` (approvals round 3).
+        sprig_sinks::residency::residency_of(&*self.global, tenant).await
     }
 
     fn secret_dir(&self) -> PathBuf {
@@ -404,93 +405,6 @@ impl SinkEnv for Webhooks {
     fn settings(&self) -> Option<(sprig_settings::Snapshot, DcId)> {
         self.live.as_ref().map(|l| (l.snapshot(), self.dc.clone()))
     }
-}
-
-/// A tenant's residency for webhook destinations: the policies of the
-/// tenant and its ancestors from their directory entries, each evaluated
-/// against a destination's tags as if they were a DC's; a residency block
-/// without any readable policy admits nothing. The same rule as the sink
-/// workers' (`sprig-worker`'s `PolicyResidency`), which this crate can't
-/// call.
-struct PolicyResidency {
-    policies: Vec<crate::residency::policy::Policy>,
-    closed: bool,
-}
-
-impl Residency for PolicyResidency {
-    fn pinned(&self) -> bool {
-        true
-    }
-
-    fn admits(&self, tags: &Map<String, Value>) -> bool {
-        if self.closed && self.policies.is_empty() {
-            return false;
-        }
-        let Ok(id) = DcId::new("sink-destination") else {
-            return false;
-        };
-        let dc = sprig_meta::bootstrap::DcRecord {
-            dc_id: id,
-            kind: "full".into(),
-            state: "active".into(),
-            dc_epoch: 0,
-            tags: tags.clone(),
-            global_voter: false,
-        };
-        self.policies.iter().all(|p| p.admits(&dc))
-    }
-}
-
-/// [`PolicyResidency`] of `tenant` from the global tier.
-async fn residency_of(global: &dyn MetaStore, tenant: TenantId) -> Result<Box<dyn Residency>> {
-    let entry = |id: u64| async move {
-        let key = global.tier().key(&format!("tenants/{id}"))?;
-        Ok::<_, SprigError>(
-            global
-                .get(&key, sprig_meta::Consistency::Serializable)
-                .await?
-                .and_then(|kv| serde_json::from_slice::<Value>(&kv.value).ok()),
-        )
-    };
-    let Some(me) = entry(tenant.0).await? else {
-        return Ok(Box::new(Unpinned));
-    };
-    let path: Vec<u64> = me
-        .get("path")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .split('/')
-        .filter_map(|x| x.parse().ok())
-        .collect();
-    let mut policies = Vec::new();
-    let mut block = false;
-    for id in path {
-        let e = if id == tenant.0 {
-            Some(me.clone())
-        } else {
-            entry(id).await?
-        };
-        let Some(r) = e
-            .as_ref()
-            .and_then(|e| e.get("residency"))
-            .filter(|r| !r.is_null())
-        else {
-            continue;
-        };
-        block = true;
-        if let Some(p) = r.get("policy").and_then(Value::as_str)
-            && !p.trim().is_empty()
-        {
-            policies.push(crate::residency::policy::Policy::parse(p)?);
-        }
-    }
-    if !block {
-        return Ok(Box::new(Unpinned));
-    }
-    Ok(Box::new(PolicyResidency {
-        policies,
-        closed: true,
-    }))
 }
 
 #[cfg(test)]

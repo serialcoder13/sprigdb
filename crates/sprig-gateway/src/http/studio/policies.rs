@@ -22,8 +22,12 @@
 //! 5. Audited as `studio.view_as` (caller, user, tenant, rows, a hash of
 //!    the text).
 //!
-//! Not built (decision ST46): simulated claims and attributes (`C`, `A`),
-//! and the projected `USING` predicate of each policy as a column.
+//! 6. Optional `claims` and `attributes` (JSON objects) stand in for the
+//!    user's token claims and over its attributes while the statement runs
+//!    (`SPRIG_CLAIM`, `SPRIG_USER_ATTR`; RLS round 2), and the response's
+//!    `policies` lists each policy the rewrite applied, with its predicate
+//!    as bound for this run: Studio shows it as a column of the policy
+//!    table.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -40,7 +44,9 @@ use tonic::body::Body;
 
 use super::super::sql::{CHANNEL_DEPTH, Caller, Caps, SqlCall, collect};
 use super::super::{ConnInfo, Core};
-use super::{hdr, invalid, json_response, parse_json, read_body, rows_of, run_sql, tenant_tree, text};
+use super::{
+    hdr, invalid, json_response, parse_json, read_body, rows_of, run_sql, tenant_tree, text,
+};
 
 fn denied(why: impl Into<String>) -> SprigError {
     SprigError::new(SprigCode::StudioViewAsDenied, why)
@@ -151,6 +157,7 @@ pub fn read_only(sql: &str) -> Result<(), SprigError> {
 ///
 /// # Errors
 /// As the module docs say.
+#[allow(clippy::too_many_lines)] // the checks in the module docs' order, then the run
 pub async fn test_as(
     core: &Arc<Core>,
     info: &ConnInfo,
@@ -217,7 +224,9 @@ pub async fn test_as(
     )
     .await?;
     if target.tenant == me.tenant && target.user_id == me.user_id {
-        return Err(denied("test as another user; you see your own view already"));
+        return Err(denied(
+            "test as another user; you see your own view already",
+        ));
     }
     let as_user = Caller {
         principal: target.clone(),
@@ -251,7 +260,17 @@ pub async fn test_as(
         sql: sql.clone(),
         multi: false,
     };
-    tokio::spawn(async move { engine.run_capped(&c2, call, None, caps, tx).await });
+    let obj = |k: &str| b.get(k).filter(|v| v.is_object()).cloned();
+    let sim = Arc::new(crate::tenant::rls::Simulated {
+        claims: obj("claims").map(Arc::new),
+        attrs: obj("attributes"),
+        ..Default::default()
+    });
+    let simulated = sim.claims.is_some() || sim.attrs.is_some();
+    let scoped = Arc::clone(&sim);
+    tokio::spawn(crate::tenant::rls::SIMULATED.scope(scoped, async move {
+        engine.run_capped(&c2, call, None, caps, tx).await;
+    }));
     let r = collect(
         rx,
         core.engine.settings().max_buffered,
@@ -269,7 +288,20 @@ pub async fn test_as(
     tracing::info!(target: "sprig_audit", event = "studio.view_as",
         caller = %format!("{home}.{}", me.user), user = %format!("{tenant}.{}", target.user),
         tenant = %tenant, database = %database, statement = %digest, rows = rows.len(),
-        "a statement was run as another user");
+        simulated, "a statement was run as another user");
+    let mut seen = sim
+        .seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    seen.sort();
+    seen.dedup();
+    let policies: Vec<Value> = seen
+        .into_iter()
+        .map(|(table, policy, mode, predicate)| {
+            json!({"table": table, "policy": policy, "mode": mode, "predicate": predicate})
+        })
+        .collect();
     Ok(json_response(
         200,
         &json!({
@@ -278,6 +310,7 @@ pub async fn test_as(
             "rows": rows,
             "truncated": truncated,
             "max_rows": max_rows,
+            "policies": policies,
         }),
     ))
 }

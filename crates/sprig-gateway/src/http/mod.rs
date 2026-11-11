@@ -42,6 +42,8 @@ pub mod lang;
 /// Live `vector.*` and `analytics.*` settings (R6 round 3).
 pub mod model_settings;
 pub mod rest;
+// Chapter 39 (R5 round 6): Search.Query.
+pub mod search;
 pub mod settings;
 pub mod sink;
 pub mod sql;

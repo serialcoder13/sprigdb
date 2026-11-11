@@ -10,11 +10,15 @@
 //!   original idempotency keys; they settle on their own (they are below
 //!   the group's offsets).
 //!
-//! Not built: queue sources in workers (queue owners live in gateways
-//! until the relay between them exists; the runtime's
-//! `SourceReader::reject` is ready for them) and change-feed sources
-//! (`CHANGES OF`; a change topic `t.changes` read as a stream gives the
-//! same records).
+//! - [`QueueSource`] (R9, r9queue): a durable queue, consumed through a
+//!   gateway's queue engine as the sink's owner ([`crate::peer`]):
+//!   `sprig.mq_get` holds each message for `sink.queue_lease_ms`, a
+//!   delivered record is acknowledged (`mq_ack`), and a record that fails
+//!   for good is rejected without requeue (`mq_nack`) when the sink has no
+//!   `DEAD LETTER TO`, so the queue's own dead-lettering applies. Its
+//!   idempotency key is `q/<queue id>/<message id>`.
+//!
+//! `CHANGES OF` reads the tables' change topics (`t.changes`) as streams.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -536,6 +540,16 @@ impl FanInSource {
     }
 }
 
+/// A position with its member slot replaced by the instance's own id.
+fn unslot(mut p: Position, real: u64) -> Position {
+    match &mut p {
+        Position::Stream { stream, .. } => *stream = real,
+        Position::Queue { queue, .. } => *queue = real,
+        Position::Change { .. } => {}
+    }
+    p
+}
+
 /// A change topic's record as a change record (`CHANGES OF`).
 fn change(mut r: SinkRecord, packed: u64) -> SinkRecord {
     if let Position::Stream { stream, .. } = &mut r.pos {
@@ -557,9 +571,16 @@ fn change(mut r: SinkRecord, packed: u64) -> SinkRecord {
 }
 
 fn tag(mut r: SinkRecord, c: &Child) -> SinkRecord {
-    if let Position::Stream { stream, .. } = &mut r.pos {
-        *stream = c.packed;
-        r.idem_key = format!("{}:{}", c.member.tenant, r.idem_key);
+    match &mut r.pos {
+        Position::Stream { stream, .. } => {
+            *stream = c.packed;
+            r.idem_key = format!("{}:{}", c.member.tenant, r.idem_key);
+        }
+        Position::Queue { queue, msg_id, .. } if !msg_id.starts_with("replay:") => {
+            *queue = c.packed;
+            r.idem_key = format!("{}:{}", c.member.tenant, r.idem_key);
+        }
+        _ => {}
     }
     if !r.headers.iter().any(|(k, _)| k == TENANT_HEADER) {
         r.headers
@@ -622,8 +643,11 @@ impl SourceReader for FanInSource {
     async fn settle(&mut self, done: &[Position]) -> Result<()> {
         let mut by: HashMap<u64, Vec<Position>> = HashMap::new();
         for p in done {
-            if let Position::Stream { stream, .. } = p {
-                by.entry(*stream).or_default().push(p.clone());
+            match p {
+                Position::Stream { stream: slot, .. } | Position::Queue { queue: slot, .. } => {
+                    by.entry(*slot).or_default().push(p.clone());
+                }
+                Position::Change { .. } => {}
             }
         }
         for (packed, list) in by {
@@ -631,18 +655,24 @@ impl SourceReader for FanInSource {
                 continue;
             };
             let real = c.member.stream;
-            let list: Vec<Position> = list
-                .into_iter()
-                .map(|mut p| {
-                    if let Position::Stream { stream, .. } = &mut p {
-                        *stream = real;
-                    }
-                    p
-                })
-                .collect();
+            let list: Vec<Position> = list.into_iter().map(|p| unslot(p, real)).collect();
             c.src.settle(&list).await?;
         }
         Ok(())
+    }
+
+    async fn reject(&mut self, rec: &SinkRecord, reason: &str) -> Result<bool> {
+        let slot = match &rec.pos {
+            Position::Stream { stream, .. } => *stream,
+            Position::Queue { queue, .. } => *queue,
+            Position::Change { .. } => return Ok(false),
+        };
+        let Some(c) = self.child_of(slot) else {
+            return Ok(false);
+        };
+        let mut r = rec.clone();
+        r.pos = unslot(r.pos, c.member.stream);
+        c.src.reject(&r, reason).await
     }
 
     async fn seek_after(&mut self, pos: &Position) -> Result<()> {
@@ -655,6 +685,316 @@ impl SourceReader for FanInSource {
             }
             c.src.seek_after(&p).await?;
         }
+        Ok(())
+    }
+}
+
+// ----------------------------------------------------------------------
+// Queue sources (chapter 51; R9, r9queue).
+// ----------------------------------------------------------------------
+
+/// The queue id and message id (hex) a delivery token names, read
+/// without checking its MAC (the gateway checks it at settle time).
+/// Chapter 50's layout: `q1.` and base64url of tenant (8 bytes), database
+/// (4), queue (8), lane (2), class (1), sequence (8), message id (16),
+/// owner epoch (8), then 16 bytes of MAC.
+#[must_use]
+pub fn token_parts(token: &str) -> Option<(u64, String)> {
+    use base64::Engine as _;
+    let b = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(token.strip_prefix("q1.")?)
+        .ok()?;
+    if b.len() < 55 {
+        return None;
+    }
+    let queue = u64::from_be_bytes(b[12..20].try_into().ok()?);
+    let mut hex = String::with_capacity(32);
+    for x in &b[31..47] {
+        hex.push_str(&format!("{x:02x}"));
+    }
+    Some((queue, hex))
+}
+
+/// Where a queue source reads: the sink's own queue, or a member's
+/// instance of a queue definition (fan-in).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueueAt {
+    /// The sink's tenant's queue `id`, in database (vhost) `db`.
+    Own {
+        /// The queue id.
+        id: u64,
+        /// The vhost's database.
+        db: String,
+    },
+    /// Member `member`'s instance of definition `def`, in database `db`.
+    Member {
+        /// The definition (declarer, object).
+        def: (u64, u64),
+        /// The member.
+        member: u64,
+        /// The instance's database.
+        db: String,
+    },
+}
+
+/// A queue source for one task (see the module docs).
+pub struct QueueSource {
+    peer: std::sync::Arc<dyn crate::peer::SinkPeer>,
+    run_as: crate::peer::RunAs,
+    at: QueueAt,
+    queue: String,
+    lease_ms: u64,
+    seed: u64,
+    idle_ms: u64,
+}
+
+impl std::fmt::Debug for QueueSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QueueSource")
+            .field("queue", &self.queue)
+            .field("at", &self.at)
+            .finish_non_exhaustive()
+    }
+}
+
+impl QueueSource {
+    /// A source over `queue` at `at`, read as `run_as` through `peer`.
+    #[must_use]
+    pub fn new(
+        peer: std::sync::Arc<dyn crate::peer::SinkPeer>,
+        run_as: crate::peer::RunAs,
+        at: QueueAt,
+        queue: String,
+        lease_ms: u64,
+        seed: u64,
+    ) -> Self {
+        Self {
+            peer,
+            run_as,
+            at,
+            queue,
+            lease_ms,
+            seed,
+            idle_ms: 0,
+        }
+    }
+
+    async fn run(&self, op: crate::peer::SqlOp) -> Result<crate::peer::SqlReply> {
+        self.peer
+            .sql(self.seed, &self.run_as.request(op))
+            .await?
+            .ok()
+    }
+
+    /// Settles tokens: acknowledged (`ack`) or rejected without requeue.
+    async fn settle_tokens(&self, tokens: Vec<String>, ack: bool) -> Result<()> {
+        use crate::peer::{SqlOp, quote};
+        for chunk in tokens.chunks(200) {
+            let op = match &self.at {
+                QueueAt::Own { .. } => SqlOp::Queue {
+                    statements: chunk
+                        .iter()
+                        .map(|t| {
+                            if ack {
+                                format!("CALL sprig.mq_ack({})", quote(t))
+                            } else {
+                                format!("CALL sprig.mq_nack({}, 0)", quote(t))
+                            }
+                        })
+                        .collect(),
+                },
+                QueueAt::Member { .. } => SqlOp::FanInSettle {
+                    tokens: chunk.to_vec(),
+                    ack,
+                },
+            };
+            let r = self.run(op).await?;
+            for (t, res) in chunk.iter().zip(&r.results) {
+                if let Some(e) = &res.error {
+                    // Already settled: its lease passed and the queue gave
+                    // it out again (at least once); anything else is
+                    // logged, the message returns after its lease.
+                    tracing::debug!(token = %t, code = e.code, error = %e.message, "queue sink: a settle failed");
+                    metrics::counter!("sprig_sink_queue_settle_failures_total").increment(1);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A queue message's record: the body as the value, the routing key as
+/// the key (lanes keep one routing key's messages in order), application
+/// headers and `amqp.*` fields as headers.
+fn queue_record(
+    at: &QueueAt,
+    res: &crate::peer::SqlResult,
+    row: &[Option<String>],
+) -> Option<SinkRecord> {
+    use crate::peer::SqlResult as R;
+    let col = |n: &str| res.col(n);
+    let token = R::text(row, col("delivery_token")?)?;
+    let (qid, msg) = token_parts(&token)?;
+    let queue = match at {
+        QueueAt::Own { id, .. } => *id,
+        QueueAt::Member { .. } => qid,
+    };
+    let body = col("body").and_then(|i| R::bytes(row, i));
+    let props: serde_json::Value = col("properties")
+        .and_then(|i| R::text(row, i))
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    let rk = col("routing_key")
+        .and_then(|i| R::text(row, i))
+        .unwrap_or_default();
+    let mut headers: Vec<(String, Vec<u8>)> = Vec::new();
+    if let Some(h) = props.get("headers").and_then(serde_json::Value::as_object) {
+        for (k, v) in h {
+            // The delivery token settles the message: never sent on.
+            if k == "x-sprig-delivery" {
+                continue;
+            }
+            let t = match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            headers.push((k.clone(), t.into_bytes()));
+        }
+    }
+    let mut amqp = |k: &str, v: Option<String>| {
+        if let Some(v) = v {
+            headers.push((format!("amqp.{k}"), v.into_bytes()));
+        }
+    };
+    amqp("routing_key", Some(rk.clone()));
+    amqp("exchange", col("exchange").and_then(|i| R::text(row, i)));
+    amqp(
+        "delivery_count",
+        col("delivery_count").and_then(|i| R::text(row, i)),
+    );
+    for k in ["message_id", "content_type", "correlation_id", "type"] {
+        amqp(
+            k,
+            props
+                .get(k)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        );
+    }
+    let ts_ms = props
+        .get("timestamp")
+        .and_then(serde_json::Value::as_i64)
+        .map_or_else(
+            || {
+                i64::try_from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_millis()),
+                )
+                .unwrap_or(0)
+            },
+            |s| s.saturating_mul(1000),
+        );
+    Some(SinkRecord {
+        key: (!rk.is_empty()).then(|| rk.into_bytes()),
+        value: body,
+        headers,
+        op: None,
+        before: None,
+        after: None,
+        ts_ms,
+        idem_key: format!("q/{queue}/{msg}"),
+        pos: Position::Queue {
+            queue,
+            msg_id: msg,
+            delivery: token,
+        },
+    })
+}
+
+#[async_trait]
+impl SourceReader for QueueSource {
+    async fn next_batch(
+        &mut self,
+        max_records: usize,
+        _max_bytes: u64,
+        wait: Duration,
+    ) -> Result<Vec<SinkRecord>> {
+        use crate::peer::{SqlOp, quote};
+        let n = u32::try_from(max_records.clamp(1, 1000)).unwrap_or(1000);
+        let op = match &self.at {
+            QueueAt::Own { db, .. } => SqlOp::Queue {
+                statements: vec![format!(
+                    "CALL sprig.mq_get({}, {n}, {}, {})",
+                    quote(&self.queue),
+                    self.lease_ms,
+                    quote(db)
+                )],
+            },
+            QueueAt::Member { def, member, db } => SqlOp::FanInGet {
+                def_tenant: def.0,
+                def_object: def.1,
+                member: *member,
+                db: db.clone(),
+                queue: self.queue.clone(),
+                max: n,
+                lease_ms: self.lease_ms,
+            },
+        };
+        let r = self.run(op).await?;
+        let res = r.results.into_iter().next().unwrap_or_default();
+        if let Some(e) = &res.error {
+            return Err(e.error());
+        }
+        let out: Vec<SinkRecord> = res
+            .rows
+            .iter()
+            .filter_map(|row| queue_record(&self.at, &res, row))
+            .collect();
+        if out.is_empty() {
+            // Nothing waiting: ask again after 100 ms, doubling to 1 s.
+            self.idle_ms = (self.idle_ms * 2).clamp(100, 1000);
+            tokio::time::sleep(wait.min(Duration::from_millis(self.idle_ms))).await;
+        } else {
+            self.idle_ms = 0;
+        }
+        Ok(out)
+    }
+
+    async fn settle(&mut self, done: &[Position]) -> Result<()> {
+        let tokens: Vec<String> = done
+            .iter()
+            .filter_map(|p| match p {
+                Position::Queue {
+                    msg_id, delivery, ..
+                } if !msg_id.starts_with("replay:") && !delivery.is_empty() => {
+                    Some(delivery.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        if tokens.is_empty() {
+            return Ok(());
+        }
+        self.settle_tokens(tokens, true).await
+    }
+
+    async fn reject(&mut self, rec: &SinkRecord, reason: &str) -> Result<bool> {
+        let Position::Queue {
+            msg_id, delivery, ..
+        } = &rec.pos
+        else {
+            return Ok(false);
+        };
+        if msg_id.starts_with("replay:") || delivery.is_empty() {
+            return Ok(false);
+        }
+        tracing::info!(queue = %self.queue, message = %msg_id, reason, "queue sink: rejected to the queue's dead-lettering");
+        self.settle_tokens(vec![delivery.clone()], false).await?;
+        Ok(true)
+    }
+
+    async fn seek_after(&mut self, _pos: &Position) -> Result<()> {
         Ok(())
     }
 }

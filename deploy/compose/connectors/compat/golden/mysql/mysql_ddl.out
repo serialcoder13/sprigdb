@@ -1,0 +1,71 @@
+c_md_g	CREATE TABLE `c_md_g` (
+  `a` int DEFAULT NULL,
+  `b` int GENERATED ALWAYS AS ((`a` + 1)) VIRTUAL NOT NULL,
+  `c` int GENERATED ALWAYS AS ((`a` * 2)) STORED NOT NULL,
+  `d` int GENERATED ALWAYS AS (`a`) VIRTUAL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+a	YES	
+b	NO	VIRTUAL GENERATED
+c	NO	STORED GENERATED
+d	YES	VIRTUAL GENERATED
+0
+a	int	YES		NULL	
+b	int	NO		NULL	VIRTUAL GENERATED
+c	int	NO		NULL	STORED GENERATED
+d	int	YES		NULL	VIRTUAL GENERATED
+ERROR 1048 (23000): Column 'b' cannot be null
+1	2	2	1
+c_md_g0	CREATE TABLE `c_md_g0` (
+  `a` int DEFAULT NULL,
+  `e` int GENERATED ALWAYS AS ((`a` + 5)) VIRTUAL NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+c_md_u	CREATE TABLE `c_md_u` (
+  `c` varchar(5) CHARACTER SET utf8mb3 COLLATE utf8mb3_general_ci DEFAULT NULL,
+  `d` varchar(5) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci DEFAULT NULL,
+  `e` varchar(5) CHARACTER SET ucs2 COLLATE ucs2_general_ci DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+c	utf8mb3_general_ci
+d	utf8mb4_0900_ai_ci
+e	ucs2_general_ci
+utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
+utf8mb4_0900_ai_ci	xutf8mb4_0900_ai_ci
+collation_connection	utf8mb4_0900_ai_ci
+collation_database	utf8mb4_0900_ai_ci
+collation_server	utf8mb4_0900_ai_ci
+a	20
+a	30
+b	5
+b	7
+a	10
+b	7
+a	10
+b	5
+c	NULL
+a	60	30
+b	12	7
+c	NULL	NULL
+a	3
+b	2
+c	0
+c_md_f	CREATE TABLE `c_md_f` (
+  `id` int NOT NULL,
+  `email` varchar(64) NOT NULL,
+  `d` date DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `c_md_fi` ((lower(`email`))),
+  KEY `c_md_fy` ((year(`d`)) DESC)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+c_md_f	0	PRIMARY	1	id	A	2	NULL	NULL		BTREE			YES	NULL
+c_md_f	1	c_md_fi	1	NULL	A	2	NULL	NULL	YES	BTREE			YES	lower(`email`)
+c_md_f	1	c_md_fy	1	NULL	D	2	NULL	NULL	YES	BTREE			YES	year(`d`)
+c_md_fi	NULL	lower(`email`)
+c_md_fy	NULL	year(`d`)
+PRIMARY	id	NULL
+1
+1	A@x.org	2024-05-01
+2	b@X.org	2025-01-02
+c_md_fc	NULL	1
+c_md_lp	ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`%` PROCEDURE `c_md_lp`()
+SELECT GET_LOCK('c_md_jobs', 0), RELEASE_LOCK('c_md_jobs')	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci
+SELECT GET_LOCK('c_md_jobs', 0), RELEASE_LOCK('c_md_jobs')
+1	1

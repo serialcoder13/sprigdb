@@ -37,6 +37,8 @@ twox-hash.workspace = true
 [dev-dependencies]
 futures.workspace = true
 proptest.workspace = true
+# Lexer options for shapes extracted in tests (R6 round 6).
+sprig-sql.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]

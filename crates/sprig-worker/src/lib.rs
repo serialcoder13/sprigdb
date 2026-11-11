@@ -18,9 +18,13 @@ pub mod logic;
 // Chapter 41 (R9): triggers on streams and queues.
 pub mod msg_triggers;
 pub mod permit;
+// Chapter 50 (R9, r9fwd): the feed-driven queue outbox forwarder.
+pub mod queue_forwarder;
 // Chapter 25 (R2): errant_extract and node_rebuild.
 pub mod recovery;
 pub mod runtime;
+// Chapter 39 (R5 round 6): the search role.
+pub mod search;
 // Chapters 08 and 23: live settings for every job (r2final).
 pub mod settings;
 // Chapter 45 (R9): stream sequencers.
@@ -70,6 +74,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     );
     let registry = ClusterRegistry::new(Arc::clone(&global), dc.clone())?;
     let registry_logic = registry.clone();
+    let registry_search = registry.clone();
     let sweep_registry = registry.clone();
     let recovery_env = recovery::RecoveryEnv {
         dc: dc.clone(),
@@ -229,19 +234,53 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         opts: env.opts.clone(),
         settings: live.clone(),
     };
+    // R9 (r9queue): sink tasks reach the gateways too.
+    let sinks_env = sinks_env.with_peer(Arc::clone(&msg_env.gateways) as Arc<_>);
+    // R9 (r9fwd): the feed-driven queue outbox forwarder, through the
+    // gateways too.
+    let forwarder_env = queue_forwarder::ForwarderEnv {
+        dc: dc_logic.clone(),
+        locator: Arc::clone(&env.locator),
+        clusters: Arc::clone(&env.clusters) as Arc<dyn sprig_feed::Clusters>,
+        peer: Arc::clone(&msg_env.gateways) as Arc<dyn sprig_sinks::peer::SinkPeer>,
+    };
+    // Chapter 39 (R5 round 6): the search role, when SPRIG_SEARCH_LISTEN
+    // names this worker's search address.
+    let search_role = search::SearchRole::from_env(
+        search::SearchDeps {
+            worker_id: worker.clone(),
+            dc_id: cfg.node.dc.clone(),
+            dc: dc_logic.clone(),
+            registry: registry_search,
+            clusters: Arc::clone(&env.clusters) as Arc<dyn sprig_feed::Clusters>,
+            locator: Arc::clone(&env.locator),
+            gateways: Arc::clone(&msg_env.gateways),
+            tls: cfg
+                .tls
+                .as_ref()
+                .map(msg_triggers::PeerPems::from_config)
+                .transpose()?,
+            live: live.live().cloned(),
+        },
+        ctx.shutdown.clone(),
+    )?;
+    if let Some(r) = &search_role {
+        r.serve().await?;
+    }
     // Decision RC2: agents' internal services over mutual TLS with `[tls]`.
     let mut rebuild_handler = recovery::NodeRebuild::new(recovery_env);
     if let Some(t) = cfg.tls.as_ref() {
         rebuild_handler = rebuild_handler
             .with_tls(sprig_cluster::failover::internal_tls::InternalTls::from_config(t)?);
     }
-    let jobs = runtime::WorkerRuntime::new(dc_logic, Arc::new(SystemClock), worker.clone())
+    let mut jobs = runtime::WorkerRuntime::new(dc_logic, Arc::new(SystemClock), worker.clone())
         .with_handler(Arc::new(logic::LogicTrigger(env.clone())))
         .with_handler(Arc::new(logic::LogicSchedule(env)))
         .with_handler(Arc::new(inherit::InheritCopy(inherit_env)))
         .with_handler(Arc::new(graph_mirror::GraphMirror(graph_mirror_env)))
         .with_handler(Arc::new(streams::StreamSequencer(streams_env)))
         .with_handler(Arc::new(sinks::SinkTask(sinks_env)))
+        .with_handler(Arc::new(queue_forwarder::QueueForwarder(forwarder_env)))
         .with_handler(Arc::new(msg_triggers::StreamTrigger(msg_env.clone())))
         .with_handler(Arc::new(msg_triggers::QueueTrigger(msg_env)))
         .with_handler(Arc::new(kv_sweep::KvSweep {
@@ -253,6 +292,11 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         }))
         .with_handler(Arc::new(errant_extract))
         .with_handler(Arc::new(rebuild_handler));
+    if let Some(r) = search_role {
+        jobs = jobs
+            .with_handler(Arc::new(search::SearchCopyJob(r)))
+            .with_extra_slots(&[search::SearchRole::slots()]);
+    }
     ctx.health.set_ready();
     tracing::info!(%role, %worker, "ready: running mover and logic jobs");
     let shutdown = ctx.shutdown.clone();

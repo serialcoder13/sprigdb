@@ -360,8 +360,19 @@ impl Validator for RsuValidator {
         match &mut ddl {
             Err(e) => abort(&mut r, format!("DDL session: {e}")),
             Ok(d) => {
+                // A field-column candidate's columns (R6 round 6) go to the
+                // whole cluster (TOI, instant, invisible and without
+                // storage), so no node's rows differ from another's; only
+                // the index is built in RSU. They stay afterwards.
+                let fields = match super::node::add_fields_sql(t, &plan.candidate.def) {
+                    Some(sql) => watch.mon.exec(&sql).await,
+                    None => Ok(()),
+                };
                 let sql = add_def_sql(t, &name, &plan.candidate.def, false);
-                let (res, took, synced, why) = rsu_statement(d, &mut watch, &sql, plan).await;
+                let (res, took, synced, why) = match fields {
+                    Ok(()) => rsu_statement(d, &mut watch, &sql, plan).await,
+                    Err(e) => (Err(e), 0, None, None),
+                };
                 r.build_ms = Some(took);
                 r.resync_ms = synced;
                 match (res, why) {

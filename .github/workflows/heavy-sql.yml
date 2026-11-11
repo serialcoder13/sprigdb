@@ -34,7 +34,7 @@ on:
   workflow_dispatch:
     inputs:
       jobs:
-        description: "Which jobs: all, or a comma-separated list of clients, hibernate-orm, mysql-test-run"
+        description: "Which jobs: all, or a comma-separated list of clients, hibernate-orm, mysql-test-run, tier2"
         required: false
         default: all
 
@@ -184,6 +184,54 @@ jobs:
         if: always()
         with:
           name: heavy-sql-mysql-test-run-${{ matrix.persona }}
+          path: |
+            target/ci-results
+            deploy/compose/.gateway-dev/*.log
+          if-no-files-found: ignore
+      - name: Stop
+        if: always()
+        run: deploy/compose/ci/stack-down.sh
+
+  # R4 round 4: tier 2 frameworks (deploy/compose/clients/tier2/run.sh),
+  # each against MySQL 8.4.11 and then through 3306; a test that passes on
+  # MySQL and not through the gateway fails the job (deploy/compose/ci/
+  # tier2.sh). django, prisma and migrations also run on a laptop; the
+  # others are their own suites, defined here and not yet run.
+  tier2:
+    name: Tier 2 ${{ matrix.framework }}
+    if: >-
+      github.event_name == 'schedule' ||
+      inputs.jobs == 'all' || contains(inputs.jobs, 'tier2')
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { framework: django, minutes: 240, modules: "" }
+          - { framework: prisma, minutes: 30, modules: "-" }
+          - { framework: migrations, minutes: 30, modules: "-" }
+          - { framework: gorm, minutes: 60, modules: "-" }
+          - { framework: sequelize, minutes: 120, modules: "-" }
+          - { framework: typeorm, minutes: 180, modules: "-" }
+          - { framework: rails, minutes: 180, modules: "-" }
+          - { framework: laravel, minutes: 90, modules: "-" }
+    env:
+      SPRIG_TIER2_MEMORY: 4g
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/sprig-stack
+      - name: Start the reference server
+        run: deploy/compose/ci/refs.sh up mysql
+      - name: Run (reference, then gateway)
+        run: |
+          # Django in full: an empty module list runs Django's whole suite.
+          if [ "${{ matrix.modules }}" != "-" ]; then export SPRIG_TIER2_DJANGO_MODULES="${{ matrix.modules }}"; fi
+          deploy/compose/ci/tier2.sh ${{ matrix.framework }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: heavy-sql-tier2-${{ matrix.framework }}
           path: |
             target/ci-results
             deploy/compose/.gateway-dev/*.log

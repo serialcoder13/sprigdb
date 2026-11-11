@@ -35,6 +35,9 @@ struct App {
     /// `[controller] gateway_token_file`: accepted on the tenant routes
     /// gateways call on their own behalf ([`authorize_gateway`]).
     gateway_token: Option<String>,
+    /// Behind the operators' guard (chapter 14, "Operators"): the caller
+    /// comes in its header instead of the tokens above.
+    guarded: bool,
 }
 
 /// The `/admin/v1/` routes over `svc`; with `token`, every call must
@@ -50,11 +53,26 @@ pub fn router_with(
     token: Option<String>,
     gateway_token: Option<String>,
 ) -> Router {
-    let app = Arc::new(App {
+    routes(Arc::new(App {
         svc,
         token,
         gateway_token,
-    });
+        guarded: false,
+    }))
+}
+
+/// The routes behind [`crate::operators::guard::layer`], which
+/// authenticates every call and hands the caller over in its header.
+pub fn router_guarded(svc: Arc<AdminService>) -> Router {
+    routes(Arc::new(App {
+        svc,
+        token: None,
+        gateway_token: None,
+        guarded: true,
+    }))
+}
+
+fn routes(app: Arc<App>) -> Router {
     Router::new()
         .route(
             "/admin/v1/clusters",
@@ -259,8 +277,19 @@ pub(crate) fn unauthenticated() -> SprigError {
     )
 }
 
-/// The Admin token, when one is configured.
+/// The Admin token, when one is configured; behind the guard, any caller
+/// but a gateway's service identity (the guard checked roles and scopes).
 fn authorize(app: &App, headers: &HeaderMap) -> Result<()> {
+    if app.guarded {
+        let p = crate::operators::http::principal(headers)?;
+        if p.is_gateway() {
+            return Err(crate::operators::forbidden(format!(
+                "service identity {} reaches only the routes gateways call",
+                p.name
+            )));
+        }
+        return Ok(());
+    }
     match &app.token {
         None => Ok(()),
         Some(want) if token_matches(headers, want) => Ok(()),
@@ -273,6 +302,9 @@ fn authorize(app: &App, headers: &HeaderMap) -> Result<()> {
 /// them only for the caller's own tenant, after checking the caller's
 /// privileges, and records the caller as the actor.
 fn authorize_gateway(app: &App, headers: &HeaderMap) -> Result<()> {
+    if app.guarded {
+        return crate::operators::http::principal(headers).map(|_| ());
+    }
     if app
         .gateway_token
         .as_deref()

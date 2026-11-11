@@ -1043,6 +1043,25 @@ fn sprigctl_try(bin: &str, args: &[&str]) -> Option<serde_json::Value> {
     serde_json::from_slice(&out.stdout).ok()
 }
 
+/// Where the split and move tests move their second and third shards:
+/// `SPRIG_TEST_MOVE_TO` (comma-separated cluster ids), by default the two
+/// other dev clusters. R8 round 6 ran them with `dc-a-c2,dc-a-c2` while
+/// the dev Galera cluster was degraded.
+fn move_targets() -> Vec<String> {
+    env("SPRIG_TEST_MOVE_TO").map_or_else(
+        || vec!["dc-a-c2".to_owned(), "dc-a-c3".to_owned()],
+        |v| v.split(',').map(|c| c.trim().to_owned()).collect(),
+    )
+}
+
+/// How many clusters the shards sit on after moving to `targets` (the
+/// first shard stays on the tenant's cluster, `dc-a-c1`).
+fn moved_clusters(targets: &[String]) -> usize {
+    let mut c: std::collections::BTreeSet<&str> = targets.iter().map(String::as_str).collect();
+    c.insert("dc-a-c1");
+    c.len()
+}
+
 /// Waits for mover job `id` to commit (or fails the test).
 async fn wait_job(bin: &str, id: &str) -> Duration {
     let t = Instant::now();
@@ -1229,7 +1248,8 @@ async fn sharded_graph_split_and_move() {
     // Move two shards to the other clusters.
     let (_, shards) = graph_shards(&ctl, &tenant, &group_name);
     assert_eq!(shards.len(), 3, "{shards:?}");
-    for ((s, _), to) in shards.iter().skip(1).zip(["dc-a-c2", "dc-a-c3"]) {
+    let targets = move_targets();
+    for ((s, _), to) in shards.iter().skip(1).zip(targets.iter()) {
         let s = s.to_string();
         let j = sprigctl(&ctl, &["shard", "move", &tenant, &gid, &s, "--to", to]);
         let id = j["id"].as_str().expect("job id").to_owned();
@@ -1244,7 +1264,7 @@ async fn sharded_graph_split_and_move() {
     let (_, shards) = graph_shards(&ctl, &tenant, &group_name);
     let clusters: std::collections::BTreeSet<&str> =
         shards.iter().map(|(_, c)| c.as_str()).collect();
-    assert_eq!(clusters.len(), 3, "{shards:?}");
+    assert_eq!(clusters.len(), moved_clusters(&targets), "{shards:?}");
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let (ok, retried) = writer.await.expect("writer");
     let w = c
@@ -2141,7 +2161,8 @@ async fn round_five_async_mirrors() {
     same(&mut c, &db, &corpus, &before, "after the split").await;
     let (_, shards) = graph_shards(&ctl, &tenant, &group_name);
     assert_eq!(shards.len(), 3, "{shards:?}");
-    for ((s, _), to) in shards.iter().skip(1).zip(["dc-a-c2", "dc-a-c3"]) {
+    let targets = move_targets();
+    for ((s, _), to) in shards.iter().skip(1).zip(targets.iter()) {
         let s = s.to_string();
         let j = sprigctl(&ctl, &["shard", "move", &tenant, &gid, &s, "--to", to]);
         let id = j["id"].as_str().expect("job id").to_owned();
@@ -2157,6 +2178,9 @@ async fn round_five_async_mirrors() {
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let (ok, retried) = writer.await.expect("writer");
     let (checked, wrong) = check_task.await.expect("checker");
+    // A long move under load can outlast the idle close (twice
+    // `bolt.recv_timeout_seconds`): a new connection for the checks.
+    let mut c = connect(&addr, &user, &pw).await.expect("login again");
     // Every write landed once.
     let w = c
         .query(
@@ -2195,7 +2219,7 @@ async fn round_five_async_mirrors() {
     assert_eq!(rels, mirrors, "one mirror per relationship");
     let clusters: std::collections::BTreeSet<&str> =
         shards.iter().map(|(_, c)| c.as_str()).collect();
-    assert_eq!(clusters.len(), 3, "{shards:?}");
+    assert_eq!(clusters.len(), moved_clusters(&targets), "{shards:?}");
     // The commit check and DETACH DELETE see incoming edges (scatter).
     let e = c
         .query("MATCH (n:R {i: 0}) DELETE n", vec![], db.clone())

@@ -1,17 +1,187 @@
 import { useState, type ReactNode } from 'react';
 import { NavLink, Navigate, useParams } from 'react-router';
-import { FormattedMessage } from 'react-intl';
+import { FormattedMessage, useIntl } from 'react-intl';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { json } from '../api/client';
 import { errorText } from '../api/errors';
 import { useSession } from '../auth/session';
-import { confirmTyped, fmtMs, moveLag, type Dc, type Job, type MoverJob, type OpsCluster, type OpsTenant, type Placement } from './ops';
+import { RecoveryCodes } from '../auth/Factors';
+import { QrCode } from '../auth/QrCode';
+import {
+  confirmTyped,
+  fmtMs,
+  loginBody,
+  moveLag,
+  operatorHeaders,
+  operatorSession,
+  secretOf,
+  sessionOf,
+  setOperatorSession,
+  type Dc,
+  type Job,
+  type MoverJob,
+  type OperatorLogin,
+  type OpsCluster,
+  type OpsTenant,
+  type Placement,
+} from './ops';
 
 const AREAS = ['dcs', 'clusters', 'tenants', 'moves', 'jobs', 'failovers', 'txns'] as const;
 type Area = (typeof AREAS)[number];
 
 function ops<T>(path: string, init?: { body: unknown }): Promise<T> {
-  return json<T>(`/v1/ops/${path}`, init ? { body: init.body } : {});
+  const headers = operatorHeaders();
+  return json<T>(`/v1/ops/${path}`, init ? { body: init.body, headers } : { headers });
+}
+
+/** Signs a named operator in (chapter 14): password, then a TOTP code or
+ * a recovery code in the same field; the first sign-in enrols the
+ * authenticator (QR code, secret and link) and shows the recovery codes
+ * once. */
+function OperatorSignIn({ onSignedIn }: { onSignedIn: () => void }) {
+  const intl = useIntl();
+  const [name, setName] = useState('');
+  const [password, setPassword] = useState('');
+  const [code, setCode] = useState('');
+  const [needCode, setNeedCode] = useState(false);
+  const [enrol, setEnrol] = useState<{ ticket: string; uri: string } | null>(null);
+  const [codes, setCodes] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const done = (r: OperatorLogin) => {
+    const s = sessionOf(r);
+    if (!s) return;
+    setOperatorSession(s);
+    if (r.recovery_codes?.length) setCodes(r.recovery_codes);
+    else onSignedIn();
+  };
+  const submit = async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      if (enrol) {
+        done(await json<OperatorLogin>('/v1/ops:enrol', { body: { name: name.trim(), ticket: enrol.ticket, code: code.trim() }, auth: false }));
+        return;
+      }
+      const r = await json<OperatorLogin>('/v1/ops:login', { body: loginBody(name, password, needCode ? code : ''), auth: false });
+      if (r.enrol_ticket) {
+        setEnrol({ ticket: r.enrol_ticket, uri: r.otpauth_uri ?? '' });
+        setCode('');
+        return;
+      }
+      done(r);
+    } catch (e: unknown) {
+      if ((e as { code?: number }).code === 39311 && !needCode) setNeedCode(true);
+      else setError(errorText(e));
+      setCode('');
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (codes.length) {
+    return <RecoveryCodes codes={codes} onDone={onSignedIn} />;
+  }
+  return (
+    <form
+      className="stack"
+      aria-label="Operator sign-in"
+      data-testid="ops-signin"
+      style={{ maxWidth: '36rem' }}
+      onSubmit={(e) => {
+        e.preventDefault();
+        void submit();
+      }}
+    >
+      <p className="muted">Sign in as a platform or DC operator (your operator account, not a tenant login).</p>
+      {!enrol && (
+        <>
+          <label className="stack">
+            <span>Operator</span>
+            <input value={name} required autoComplete="username" readOnly={needCode} onChange={(e) => setName(e.target.value)} data-testid="ops-name" />
+          </label>
+          <label className="stack">
+            <span>Password</span>
+            <input
+              type="password"
+              value={password}
+              required
+              autoComplete="current-password"
+              readOnly={needCode}
+              onChange={(e) => setPassword(e.target.value)}
+              data-testid="ops-password"
+            />
+          </label>
+        </>
+      )}
+      {enrol && (
+        <>
+          <h2>
+            <FormattedMessage id="mfa.enrolTitle" />
+          </h2>
+          <p>
+            <FormattedMessage id="mfa.enrolHint" />
+          </p>
+          <QrCode text={enrol.uri} label={intl.formatMessage({ id: 'mfa.qrLabel' })} />
+          <dl className="kv">
+            <dt>Secret</dt>
+            <dd className="mono" data-testid="ops-secret">
+              {secretOf(enrol.uri)}
+            </dd>
+            <dt>Link</dt>
+            <dd className="mono" style={{ wordBreak: 'break-all' }} data-testid="ops-otpauth">
+              {enrol.uri}
+            </dd>
+          </dl>
+        </>
+      )}
+      {(needCode || enrol) && (
+        <div className="stack">
+          <label className="stack">
+            <span>
+              <FormattedMessage id="mfa.code" />
+            </span>
+            <input
+              value={code}
+              required
+              name="one-time-code"
+              autoComplete="one-time-code"
+              aria-describedby={enrol ? undefined : 'ops-code-hint'}
+              onChange={(e) => setCode(e.target.value)}
+              data-testid="ops-code"
+            />
+          </label>
+          {!enrol && (
+            <span className="muted" id="ops-code-hint">
+              <FormattedMessage id="mfa.hint" />
+            </span>
+          )}
+        </div>
+      )}
+      <div className="row">
+        <button className="primary" type="submit" disabled={busy} data-testid="ops-signin-submit">
+          {enrol ? <FormattedMessage id="mfa.confirm" /> : 'Sign in'}
+        </button>
+        {(needCode || enrol) && (
+          <button
+            type="button"
+            onClick={() => {
+              setEnrol(null);
+              setNeedCode(false);
+              setCode('');
+              setError(null);
+            }}
+          >
+            <FormattedMessage id="mfa.restart" />
+          </button>
+        )}
+      </div>
+      {error && (
+        <p className="error" role="alert" data-testid="ops-signin-error">
+          {error}
+        </p>
+      )}
+    </form>
+  );
 }
 
 function Loading({ q, children }: { q: { isLoading: boolean; error: unknown }; children: ReactNode }) {
@@ -326,9 +496,27 @@ function Jobs() {
 export function OpsPage() {
   const { area = 'clusters' } = useParams();
   const me = useSession((s) => s.me);
-  const entered = useQuery({ queryKey: ['ops', 'enter'], queryFn: () => ops<{ operator: string }>(''), staleTime: Infinity });
-  if (me && !me.platform_roles.includes('operator')) return <Navigate to="/" replace />;
+  const qc = useQueryClient();
+  const [op, setOp] = useState(() => operatorSession());
+  const entered = useQuery({
+    queryKey: ['ops', 'enter', op?.token ?? ''],
+    queryFn: () => ops<{ operator?: string; principal?: { name: string } }>(''),
+    staleTime: Infinity,
+    retry: false,
+  });
   if (!AREAS.includes(area as Area)) return <Navigate to="/ops/clusters" replace />;
+  const legacy = me?.platform_roles.includes('operator') ?? false;
+  const signIn = !op && (!legacy || entered.isError);
+  const signOut = async () => {
+    try {
+      await json('/v1/ops:logout', { body: {}, headers: operatorHeaders(op), auth: false });
+    } catch {
+      // The session may already have ended.
+    }
+    setOperatorSession(null);
+    setOp(null);
+    void qc.invalidateQueries({ queryKey: ['ops'] });
+  };
   return (
     <div className="shell">
       <header className="topbar">
@@ -344,15 +532,27 @@ export function OpsPage() {
           <FormattedMessage id="ops.leave" />
         </NavLink>
         <span className="muted" data-testid="whoami">
-          {me?.principal.login}
+          {op ? `operator ${op.name}` : me?.principal.login}
         </span>
+        {op && (
+          <button onClick={() => void signOut()} data-testid="ops-signout">
+            Sign out
+          </button>
+        )}
       </header>
       <main className="main" id="content" tabIndex={-1}>
         <div className="stack">
           <h1>
             <FormattedMessage id={`ops.${area}`} />
           </h1>
-          {entered.error ? (
+          {signIn ? (
+            <OperatorSignIn
+              onSignedIn={() => {
+                setOp(operatorSession());
+                void qc.invalidateQueries({ queryKey: ['ops'] });
+              }}
+            />
+          ) : entered.error ? (
             <p className="error" role="alert" data-testid="ops-refused">
               {errorText(entered.error)}
             </p>

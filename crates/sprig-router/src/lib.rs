@@ -24,6 +24,9 @@
 //! - **Analytic reads** (R3): a gathered `SELECT` the analytic guard
 //!   accepts runs in DataFusion over streams of the shards' rows instead,
 //!   on keys that compare as MariaDB compares ([`analytics`]).
+//! - **Graph** (R8 round 6): a statement with `GRAPH_TABLE` ([`graph`]):
+//!   the graph calls run first, then the statement with their rows as
+//!   derived tables plans again; literal rows join inside each shard.
 //! - **Reject**: `ER_SPRIG_STATEMENT_NOT_DISTRIBUTABLE` (39420) with a
 //!   reason code; never a different answer.
 //!
@@ -46,6 +49,7 @@ pub mod compound;
 pub mod exec;
 pub mod fk;
 pub mod gather;
+pub mod graph;
 pub mod plan;
 pub mod planner;
 pub mod reject;
@@ -60,10 +64,11 @@ pub use exec::{
     execute_to,
 };
 pub use gather::{GatherLimits, GatherPlan, Scratch};
+pub use graph::{CallRows, GraphCall, GraphLit, GraphPlan, GraphStep};
 pub use plan::{Plan, ShardAt, Target};
 pub use planner::{
     ParamLit, PlanCtx, PreparedPlan, Template, metadata_sql, parse_template, plan, plan_gathered,
-    plan_prepared, render_params,
+    plan_graph, plan_prepared, render_params,
 };
 pub use reject::{Reason, Rejection};
 pub use settings::RouterConfig;

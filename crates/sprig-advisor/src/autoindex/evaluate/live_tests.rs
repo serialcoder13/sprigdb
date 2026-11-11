@@ -282,3 +282,190 @@ async fn live_evaluation_proposes_the_expected_index() {
     )
     .await;
 }
+
+/// Chapter 33's hash view over a namespace `cache` (R6 round 5): the
+/// directory maps the view object to its element table.
+struct KvDirectory {
+    metas: BTreeMap<ObjectId, ObjectMeta>,
+}
+
+impl ObjectDirectory for KvDirectory {
+    fn meta(&self, object: ObjectId) -> Option<ObjectMeta> {
+        self.metas.get(&object).cloned()
+    }
+
+    fn kv_view(&self, object: ObjectId) -> Option<crate::autoindex::kv::KvTarget> {
+        (object == KV_VIEW).then_some(crate::autoindex::kv::KvTarget {
+            elements: KV_ELEMS,
+            view: crate::autoindex::kv::KvView::Hash,
+        })
+    }
+}
+
+const KV_VIEW: ObjectId = ObjectId(1301);
+const KV_ELEMS: ObjectId = ObjectId(1302);
+
+/// SQL over a hash view, looking a field's value up across keys: the
+/// evaluation moves it onto the element table and proposes `(e(255),
+/// v(64))`, which MariaDB then uses for the view's statement.
+#[tokio::test]
+async fn live_hash_field_lookup_gets_an_element_table_index() {
+    with_schema(
+        "live_hash_field_lookup_gets_an_element_table_index",
+        |pool, schema| async move {
+            let mut c = pool.get_conn().await.unwrap();
+            c.query_drop(format!("USE {}", quote(&schema)))
+                .await
+                .unwrap();
+            // Chapter 33's tables and hash view for namespace `cache`, as
+            // `sprig_kv::layout` and `sprig_kv::api::view_ddl` make them.
+            for s in [
+                "CREATE TABLE cache (k VARBINARY(1024) NOT NULL, \
+                 type ENUM('string','hash','list','set','zset') NOT NULL DEFAULT 'string', \
+                 v LONGBLOB NULL, n BIGINT UNSIGNED NOT NULL DEFAULT 0, \
+                 lh BIGINT NOT NULL DEFAULT 0, lt BIGINT NOT NULL DEFAULT 0, \
+                 g BIGINT UNSIGNED NOT NULL, _v BIGINT UNSIGNED NOT NULL, \
+                 expires_at DATETIME(3) NULL, \
+                 _sprig_dk VARBINARY(1024) NOT NULL DEFAULT '' INVISIBLE, \
+                 _sprig_rk BIGINT UNSIGNED NULL INVISIBLE, PRIMARY KEY (k), \
+                 KEY _sprig_exp (expires_at), KEY _sprig_rk (_sprig_rk)) ENGINE=InnoDB",
+                "CREATE TABLE __sprig_ke_cache (k VARBINARY(1024) NOT NULL, \
+                 g BIGINT UNSIGNED NOT NULL, o BIGINT NOT NULL, \
+                 e VARBINARY(2024) NOT NULL DEFAULT '', v LONGBLOB NULL, \
+                 _sprig_dk VARBINARY(1024) NOT NULL DEFAULT '' INVISIBLE, \
+                 _sprig_rk BIGINT UNSIGNED NULL INVISIBLE, PRIMARY KEY (k, g, o, e), \
+                 KEY _sprig_rk (_sprig_rk)) ENGINE=InnoDB",
+                "CREATE SQL SECURITY INVOKER VIEW cache__hash AS SELECT t.k AS k, \
+                 e.e AS field, e.v AS value FROM cache AS t JOIN __sprig_ke_cache AS e \
+                 ON e.k = t.k AND e.g = t.g WHERE t.type = 'hash' AND \
+                 (t.expires_at IS NULL OR t.expires_at > UTC_TIMESTAMP(3))",
+            ] {
+                c.query_drop(s).await.unwrap();
+            }
+            // 4,000 hashes of 5 fields; `email` is unique per key.
+            c.query_drop(
+                "INSERT INTO cache (k, type, n, g, _v) SELECT CONCAT('user:', seq), 'hash', 5, 1, 1 \
+                 FROM seq_1_to_4000"
+            )
+            .await
+            .unwrap();
+            c.query_drop(
+                "INSERT INTO __sprig_ke_cache (k, g, o, e, v) SELECT CONCAT('user:', s.seq), 1, \
+                 CRC32(f.f), f.f, IF(f.f = 'email', CONCAT('u', s.seq, '@x.io'), REPEAT('z', 40)) \
+                 FROM seq_1_to_4000 s JOIN (SELECT 'email' f UNION ALL SELECT 'name' \
+                 UNION ALL SELECT 'city' UNION ALL SELECT 'plan' UNION ALL SELECT 'note') f"
+            )
+            .await
+            .unwrap();
+            Migrator::new(&[AUTOINDEX_MODULE])
+                .unwrap()
+                .run(&mut c, &schema, &MigrateOpts::default())
+                .await
+                .unwrap();
+            let view = "cache__hash".to_owned();
+            let elems = "__sprig_ke_cache".to_owned();
+            let shape = Shape::from_json(
+                &serde_json::json!({
+                    "v": 1, "type": "select",
+                    "tables": [{"alias": "h", "object_id": KV_VIEW.0, "table": view}],
+                    "predicates": [
+                        {"t": "h", "col": "field", "op": "eq", "args": [0]},
+                        {"t": "h", "col": "value", "op": "eq", "args": [1]}],
+                    "joins": [], "order_by": [], "group_by": [],
+                    "select": {"h": ["k"]},
+                    "limit": false, "writes": null, "or_groups": 0})
+                .to_string(),
+            )
+            .unwrap();
+            let w = probed(
+                win(0x7a5e, Arc::new(shape), 2_000, 30.0, 60.0),
+                40,
+                20_000.0,
+                1.0,
+            );
+
+            let evaluator = Evaluator::new(Arc::new(ManualClock::new()));
+            let settings = MemSettings::new(registry());
+            let dc = DcId::new("mum1").unwrap();
+            let dir = KvDirectory {
+                metas: directory(&[(KV_VIEW, None), (KV_ELEMS, None)]),
+            };
+            let stats = NodeStats {
+                pool: pool.clone(),
+                tables: [(KV_ELEMS, (schema.clone(), elems.clone()))]
+                    .into_iter()
+                    .collect(),
+                reader: StatsReader::default(),
+            };
+            let store = CatalogStore::new(pool.clone(), &schema);
+            let decisions = MemDecisions::default();
+            let src = StaticSource {
+                windows: vec![SourcedWindow::client(w)],
+                ..StaticSource::default()
+            };
+            let cx = EvalCx {
+                tenant: TENANT,
+                settings: &settings,
+                ctx: SettingCtx::process(&dc).for_tenant(TENANT, &[]),
+                workload: &src,
+                objects: &dir,
+                stats: &stats,
+                store: &store,
+                decisions: &decisions,
+            };
+            let ev = evaluator.evaluate(&cx).await.unwrap();
+            assert_eq!(ev.qualified.len(), 1, "{:?}", ev.not_qualified);
+            let t = &ev.tables[0];
+            assert_eq!(t.object, KV_ELEMS);
+            assert!(t.error.is_none(), "{:?}", t.error);
+            assert_eq!(t.queued.len(), 1, "{:#?}", t.candidates);
+            let q = &t.queued[0];
+            assert_eq!(q.candidate.def.ddl_columns(), "`e`(255), `v`(64)");
+            assert_eq!(q.target.table, elems);
+            eprintln!(
+                "hash-field candidate {} route {:?} estimate {:?}",
+                q.candidate.def.canonical(),
+                q.route,
+                t.candidates[0].estimate.as_ref().map(|e| (e.benefit_ms_h, e.write_ms_h, e.bytes))
+            );
+
+            // Built as the rollout would, MariaDB uses it for the view.
+            let sql = format!(
+                "SELECT k FROM {} WHERE field = 'email' AND value = 'u77@x.io'",
+                quote(&view)
+            );
+            let rows_before: Vec<(Option<String>, Option<String>)> = c
+                .query(format!("EXPLAIN {sql}"))
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|r: mysql_async::Row| (r.get::<Option<String>, _>(2).flatten(), r.get::<Option<String>, _>(5).flatten()))
+                .collect();
+            c.query_drop(format!(
+                "ALTER TABLE {} ADD {}",
+                quote(&elems),
+                q.candidate.def.add_clause()
+            ))
+            .await
+            .unwrap();
+            let explain: Vec<(Option<String>, Option<String>)> = c
+                .query(format!("EXPLAIN {sql}"))
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|r: mysql_async::Row| (r.get::<Option<String>, _>(2).flatten(), r.get::<Option<String>, _>(5).flatten()))
+                .collect();
+            let name = q.candidate.def.name();
+            assert!(
+                explain
+                    .iter()
+                    .any(|(t, k)| t.as_deref() == Some("e") && k.as_deref() == Some(name.as_str())),
+                "before {rows_before:?}, after {explain:?}"
+            );
+            let got: Vec<String> = c.query(&sql).await.unwrap();
+            assert_eq!(got, ["user:77"]);
+            eprintln!("EXPLAIN before {rows_before:?}, after {explain:?}");
+        },
+    )
+    .await;
+}

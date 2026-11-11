@@ -437,7 +437,19 @@ pub async fn replay(
         };
         let forms = select_form(&st.sql, &target.pk).and_then(|f| {
             let db = st.context.database.as_deref().or(cur.database.as_deref());
-            let a = with_ignore_index(&f.sql, &target.schema, &target.table, &target.index, db)?;
+            let a =
+                match with_ignore_index(&f.sql, &target.schema, &target.table, &target.index, db) {
+                    // Chapter 33's views read an element table (R6 round 5).
+                    Err(Unreplayable::TableNotFound) => super::kv::ignore_through_view(
+                        &f.sql,
+                        &target.schema,
+                        &target.table,
+                        &target.index,
+                        db,
+                    )
+                    .ok_or(Unreplayable::TableNotFound)?,
+                    r => r?,
+                };
             Ok((
                 format!("ANALYZE FORMAT=JSON {a}"),
                 format!("ANALYZE FORMAT=JSON {}", f.sql),

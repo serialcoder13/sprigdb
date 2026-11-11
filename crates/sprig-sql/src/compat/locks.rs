@@ -226,9 +226,130 @@ pub fn rewrite(sql: &[u8], opts: &LexOptions, prefix: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// The text of a stored program or view as the client wrote it: every
+/// scoped lock name ([`rewrite`]'s `CONCAT('t<id>:', LEFT(SHA2(..), 50))`)
+/// back to its argument, and the column alias the rewrite added dropped
+/// (R4 round 3: `SHOW CREATE` and `information_schema` showed the tenant's
+/// internal id). `None` when there is nothing to undo.
+#[must_use]
+pub fn unscope(text: &str) -> Option<String> {
+    if !text.contains("CONCAT('t") || !text.contains(", 256), 50))") {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    let mut i = 0;
+    let mut changed = false;
+    while let Some(off) = text[i..].find("CONCAT('t") {
+        let begin = i + off;
+        let mut digits = begin + "CONCAT('t".len();
+        while digits < bytes.len() && bytes[digits].is_ascii_digit() {
+            digits += 1;
+        }
+        let head = ":', LEFT(SHA2(";
+        if digits == begin + "CONCAT('t".len() || !text[digits..].starts_with(head) {
+            i = begin + 1;
+            continue;
+        }
+        let mut arg = digits + head.len();
+        let lower = text[arg..].starts_with("LOWER(");
+        if lower {
+            arg += "LOWER(".len();
+        }
+        // The argument: up to the matching parenthesis.
+        let mut depth = 0i32;
+        let mut pos = arg;
+        let mut quote: Option<u8> = None;
+        while pos < bytes.len() {
+            let ch = bytes[pos];
+            match quote {
+                Some(open) if ch == b'\\' && open != b'`' => pos += 1,
+                Some(open) if ch == open => quote = None,
+                None if matches!(ch, b'\'' | b'"' | b'`') => quote = Some(ch),
+                None if ch == b'(' => depth += 1,
+                None if ch == b')' && depth == 0 => break,
+                None if ch == b')' => depth -= 1,
+                None if ch == b',' && depth == 0 && !lower => break,
+                _ => {}
+            }
+            pos += 1;
+        }
+        let arg_end = pos;
+        let mut tail = pos;
+        if lower {
+            tail += 1; // `)` of LOWER
+        }
+        if !text[tail..].starts_with(", 256), 50))") {
+            i = begin + 1;
+            continue;
+        }
+        let end = tail + ", 256), 50))".len();
+        out.push_str(&text[at..begin]);
+        out.push_str(&text[arg..arg_end]);
+        at = end;
+        i = end;
+        changed = true;
+    }
+    if !changed {
+        return None;
+    }
+    out.push_str(&text[at..]);
+    // The aliases the rewrite added: ` AS `F(arg, ..)`` right after `F(arg, ..)`.
+    for f in ["GET_LOCK", "RELEASE_LOCK", "IS_FREE_LOCK", "IS_USED_LOCK"] {
+        let mut s = 0;
+        while let Some(p) = out[s..]
+            .to_ascii_uppercase()
+            .find(&format!("{f}("))
+            .map(|p| p + s)
+        {
+            // The call's end.
+            let ob = out.as_bytes();
+            let mut d = 0i32;
+            let mut e = p + f.len();
+            while e < ob.len() {
+                if ob[e] == b'(' {
+                    d += 1;
+                } else if ob[e] == b')' {
+                    d -= 1;
+                    if d == 0 {
+                        break;
+                    }
+                }
+                e += 1;
+            }
+            if e >= ob.len() {
+                break;
+            }
+            let call = out[p..=e].to_owned();
+            let alias = format!(" AS `{}`", call.replace('`', "``"));
+            if out[e + 1..].starts_with(&alias) {
+                out.replace_range(e + 1..e + 1 + alias.len(), "");
+            }
+            s = e + 1;
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stored_text_shows_the_written_names() {
+        let body = "CREATE PROCEDURE lp() SELECT GET_LOCK(CONCAT('t2947606000000:', LEFT(SHA2(LOWER('jobs'), 256), 50)), 0) AS `GET_LOCK('jobs', 0)`, SLEEP(4), RELEASE_LOCK(CONCAT('t42:', LEFT(SHA2(@n, 256), 50))) x";
+        assert_eq!(
+            unscope(body).unwrap(),
+            "CREATE PROCEDURE lp() SELECT GET_LOCK('jobs', 0), SLEEP(4), RELEASE_LOCK(@n) x"
+        );
+        assert_eq!(unscope("SELECT CONCAT('t1', 'x')"), None);
+        // Round trip through the rewrite.
+        let opts = LexOptions::for_persona(Persona::MySql84);
+        let src = "CREATE FUNCTION f() RETURNS INT RETURN IS_FREE_LOCK(CONCAT('a', ')'))";
+        let scoped = String::from_utf8(rewrite(src.as_bytes(), &opts, "t7:").unwrap()).unwrap();
+        assert_eq!(unscope(&scoped).unwrap(), src);
+    }
 
     fn rw(sql: &str, persona: Persona) -> String {
         let opts = LexOptions::for_persona(persona);

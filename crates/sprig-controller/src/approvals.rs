@@ -180,6 +180,15 @@ impl ControllerApprovals {
         &self.directory
     }
 
+    /// Brings this controller's copy of `tenant`'s setting rows up to the
+    /// directory's catalog version now, so the next resolution sees a change
+    /// made a moment ago (approvals round 3: the vector gate).
+    pub async fn refresh_tenant(&self, tenant: TenantId) {
+        if let Some(s) = &self.scopes {
+            let _ = s.get_fresh(tenant).await;
+        }
+    }
+
     /// Resolves `key` for a subject: object, database, tenant (with its
     /// ancestors' copies), cluster, DC, global.
     pub async fn resolve(

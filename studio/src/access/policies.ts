@@ -8,7 +8,28 @@ const account = (s: string) => {
   return `'${u.replace(/'/g, "''")}'@'${(h ?? '%').replace(/'/g, "''")}'`;
 };
 
-export const POLICY_FUNCTIONS = ['CURRENT_USER()', "SPRIG_CLAIM('sub')", "SPRIG_USER_ATTR('k')", 'SPRIG_TENANT()'];
+/** Chapter 29's session functions a policy may call. */
+export const POLICY_FUNCTIONS = [
+  'CURRENT_USER()',
+  'SPRIG_USER_ID()',
+  'SPRIG_TENANT_ID()',
+  'SPRIG_HOME_TENANT_ID()',
+  "SPRIG_CLAIM('sub')",
+  "SPRIG_USER_ATTR('k')",
+  'SPRIG_SESSION_SPACE()',
+];
+
+/** `ALTER TABLE ... ENABLE | DISABLE | FORCE | NO FORCE ROW LEVEL SECURITY`. */
+export function rowSecurity(db: string, table: string, mode: 'ENABLE' | 'DISABLE' | 'FORCE' | 'NO FORCE'): string {
+  if (!table) throw new Error('choose the table');
+  return `ALTER TABLE ${ident(db)}.${ident(table)} ${mode} ROW LEVEL SECURITY`;
+}
+
+/** `DROP POLICY name ON db.table`. */
+export function dropPolicy(name: string, db: string, table: string): string {
+  if (!name || !table) throw new Error('name the policy and its table');
+  return `DROP POLICY ${ident(name)} ON ${ident(db)}.${ident(table)}`;
+}
 
 export function createRole(role: string): string {
   return `CREATE ROLE ${account(role)}`;

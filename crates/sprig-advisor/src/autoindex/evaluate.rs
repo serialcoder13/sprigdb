@@ -122,6 +122,14 @@ pub struct ObjectMeta {
 pub trait ObjectDirectory: Send + Sync {
     /// `object`'s description, `None` for an unknown object.
     fn meta(&self, object: ObjectId) -> Option<ObjectMeta>;
+
+    /// Chapter 33's views over a key-value namespace (`<ns>__hash`,
+    /// `<ns>__set`): the element table a view object reads; `None` for
+    /// other objects (R6 round 5).
+    fn kv_view(&self, object: ObjectId) -> Option<super::kv::KvTarget> {
+        let _ = object;
+        None
+    }
 }
 
 impl ObjectDirectory for BTreeMap<ObjectId, ObjectMeta> {
@@ -785,6 +793,7 @@ impl Evaluator {
             .checked_sub(Duration::from_secs(u64::from(window_hours) * 3600))
             .unwrap_or(SystemTime::UNIX_EPOCH);
         let mut entries = cx.workload.window(cx.tenant, from, now).await?;
+        kv_views(cx, &mut entries);
 
         // Every object the window references, with its settings.
         let mut objects: BTreeSet<ObjectId> = BTreeSet::new();
@@ -820,6 +829,7 @@ impl Evaluator {
         }
         if !cut.is_empty() {
             entries = since_served(cx, entries, &cut, now).await?;
+            kv_views(cx, &mut entries);
         }
         let mut metas: BTreeMap<ObjectId, ObjectMeta> = BTreeMap::new();
         let mut policies: BTreeMap<ObjectId, ObjectPolicy> = BTreeMap::new();
@@ -1478,6 +1488,7 @@ impl Evaluator {
                 model: match f.candidate.def.kind {
                     IndexKind::Vector => DataModel::Vector,
                     IndexKind::Spatial | IndexKind::S2 => DataModel::Geo,
+                    _ if super::kv::is_kv(&f.candidate) => DataModel::Kv,
                     _ => DataModel::Sql,
                 },
                 kind: StoredKind::from(f.candidate.def.kind),
@@ -1561,6 +1572,16 @@ struct Written<'a, 'b> {
 ///
 /// # Errors
 /// The workload store's.
+/// Moves shapes that read chapter 33's views onto the element tables
+/// (`super::kv::translate`, R6 round 5).
+fn kv_views(cx: &EvalCx<'_>, entries: &mut [super::qualify::SourcedWindow]) {
+    for e in entries.iter_mut() {
+        if let Some(s) = super::kv::translate(&e.window.shape, &|o| cx.objects.kv_view(o)) {
+            e.window.shape = Arc::new(s);
+        }
+    }
+}
+
 async fn since_served(
     cx: &EvalCx<'_>,
     entries: Vec<super::qualify::SourcedWindow>,

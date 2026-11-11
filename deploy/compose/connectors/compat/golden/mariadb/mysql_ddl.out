@@ -1,0 +1,42 @@
+ERROR 1064 (42000): You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near 'NOT NULL, c INT GENERATED ALWAYS AS (a*2) STORED NOT NULL, d INT AS (a) VIRTU...' at line 1
+ERROR 1146 (42S02): Table '@DB@.c_md_g' doesn't exist
+0
+ERROR 1146 (42S02): Table '@DB@.c_md_g' doesn't exist
+ERROR 1146 (42S02): Table '@DB@.c_md_g' doesn't exist
+ERROR 1146 (42S02): Table '@DB@.c_md_g' doesn't exist
+ERROR 1146 (42S02): Table '@DB@.c_md_g' doesn't exist
+ERROR 1064 (42000): You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near 'NOT NULL' at line 1
+c_md_g0	CREATE TABLE `c_md_g0` (
+  `a` int(11) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci
+c_md_u	CREATE TABLE `c_md_u` (
+  `c` varchar(5) CHARACTER SET utf8mb3 COLLATE utf8mb3_uca1400_ai_ci DEFAULT NULL,
+  `d` varchar(5) DEFAULT NULL,
+  `e` varchar(5) CHARACTER SET ucs2 COLLATE ucs2_uca1400_ai_ci DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci
+c	utf8mb3_uca1400_ai_ci
+d	utf8mb4_uca1400_ai_ci
+e	ucs2_uca1400_ai_ci
+utf8mb4_0900_ai_ci	utf8mb4_uca1400_ai_ci	utf8mb4_uca1400_ai_ci
+utf8mb4_0900_ai_ci	xutf8mb4_uca1400_ai_ci
+collation_connection	utf8mb4_0900_ai_ci
+collation_database	utf8mb4_uca1400_ai_ci
+collation_server	utf8mb4_uca1400_ai_ci
+ERROR 1064 (42000): You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near '(SELECT o.amt FROM c_md_o o WHERE o.cid = c.id ORDER BY o.amt DESC LIMIT 2) A...' at line 1
+ERROR 1064 (42000): You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near '(SELECT amt FROM c_md_o o WHERE o.cid = c.id AND o.amt > 6 ORDER BY amt LIMIT...' at line 1
+ERROR 1064 (42000): You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near '(SELECT o.amt FROM c_md_o o WHERE o.cid = c.id ORDER BY o.amt LIMIT 1) AS l O...' at line 1
+ERROR 1064 (42000): You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near '(SELECT SUM(o.amt) AS total, MAX(o.amt) AS top FROM c_md_o o WHERE o.cid = c....' at line 1
+ERROR 1064 (42000): You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near '(SELECT COUNT(*) AS n FROM c_md_o o WHERE o.cid = c.id) AS l ORDER BY c.name' at line 1
+ERROR 1064 (42000): You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near '(lower(email))), KEY c_md_fy ((year(d)) DESC))' at line 1
+ERROR 1146 (42S02): Table '@DB@.c_md_f' doesn't exist
+ERROR 1146 (42S02): Table '@DB@.c_md_f' doesn't exist
+ERROR 1146 (42S02): Table '@DB@.c_md_f' doesn't exist
+ERROR 1054 (42S22): Unknown column 'EXPRESSION' in 'SELECT'
+ERROR 1146 (42S02): Table '@DB@.c_md_f' doesn't exist
+ERROR 1146 (42S02): Table '@DB@.c_md_f' doesn't exist
+ERROR 1064 (42000): You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near '(CAST(id * 2 AS UNSIGNED)))' at line 1
+ERROR 1054 (42S22): Unknown column 'EXPRESSION' in 'SELECT'
+c_md_lp	STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION	CREATE DEFINER=`root`@`%` PROCEDURE `c_md_lp`()
+SELECT GET_LOCK('c_md_jobs', 0), RELEASE_LOCK('c_md_jobs')	utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_uca1400_ai_ci
+SELECT GET_LOCK('c_md_jobs', 0), RELEASE_LOCK('c_md_jobs')
+1	1

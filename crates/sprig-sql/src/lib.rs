@@ -39,4 +39,6 @@ pub mod names;
 pub mod pin_stmt;
 // Chapter 52: recommendations in SQL.
 pub mod rec_stmt;
+// Chapter 29: row-level security (policies and the rewrite, R4).
+pub mod rls;
 pub mod settings_stmt;

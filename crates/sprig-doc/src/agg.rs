@@ -1451,7 +1451,11 @@ pub fn parse_sort(d: &Document) -> Result<SortSpec, MongoError> {
             Some(1) => Ok((k.clone(), 1)),
             Some(-1) => Ok((k.clone(), -1)),
             _ => match v {
-                Bson::Document(m) if m.contains_key("$meta") => Ok((k.clone(), -1)),
+                // A `$meta` key sorts by the score the search stage left
+                // (chapter 39), whatever the key's name.
+                Bson::Document(m) if m.contains_key("$meta") => {
+                    Ok((crate::engine::models::SCORE_FIELD.to_owned(), -1))
+                }
                 _ => Err(loc(
                     15975,
                     "$sort key ordering must be 1 (for ascending) or -1 (for descending)",

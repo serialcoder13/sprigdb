@@ -263,7 +263,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Tables, views, routines and columns of one database, read with the caller's rights; ETag as ListObjects */
+        /** Tables, views, routines, graphs (labels and relationship types the caller may read) and columns of one database, read with the caller's rights; ETag as ListObjects */
         get: operations["Catalog.Snapshot"];
         put?: never;
         post?: never;
@@ -317,6 +317,142 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["Functions.Call"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/databases/{database}/logic": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The database's logic modules */
+        get: operations["Logic.ListModules"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/databases/{database}/logic/{kind}/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** A module with its versions, binding, schedule and (for routine administrators) source and PL/SQL */
+        get: operations["Logic.GetModule"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/databases/{database}/logic/{kind}/{name}/deadLetters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The module's dead letters (state) */
+        get: operations["Logic.ListDeadLetters"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/databases/{database}/logic/{kind}/{name}/deadLetters:discard": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Discards dead letters ({ids} or {all: true}) */
+        post: operations["Logic.DiscardDeadLetters"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/databases/{database}/logic/{kind}/{name}/deadLetters:replay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Replays dead letters ({ids} or {all: true}) */
+        post: operations["Logic.ReplayDeadLetters"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/databases/{database}/logic/{kind}/{name}/logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The module's log lines after an id (after, limit) */
+        get: operations["Logic.TailLogs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/databases/{database}/logic/{kind}/{name}/versions/{version}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One version's source and PL/SQL */
+        get: operations["Logic.GetVersion"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/databases/{database}/logic:compile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** A dry run of a CREATE FUNCTION or PROCEDURE: tier, reasons, signature, PL/SQL; nothing recorded */
+        post: operations["Logic.Compile"];
         delete?: never;
         options?: never;
         head?: never;
@@ -397,6 +533,23 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["Analytics.Query"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/databases/{database}/mq": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The database's virtual host with its exchanges, queues and bindings */
+        get: operations["Mq.GetTopology"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -499,6 +652,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/databases/{database}/sinks/{sink}/deadLetters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The sink's dead letters */
+        get: operations["Sinks.ListDeadLetters"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/databases/{database}/sinks/{sink}/deadLetters:discard": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Discards dead letters ({ids} or {all: true}) */
+        post: operations["Sinks.DiscardDeadLetters"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/databases/{database}/sinks/{sink}/deadLetters:replay": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Marks dead letters for replay ({ids} or {all: true}) */
+        post: operations["Sinks.ReplayDeadLetters"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/databases/{database}/sql:check": {
         parameters: {
             query?: never;
@@ -542,6 +746,23 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["Sql.Query"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/databases/{database}/streams/{stream}/groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Partitions with log start and high watermark, and consumer groups with offsets and lag */
+        get: operations["Streams.ListGroups"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -741,6 +962,23 @@ export interface paths {
         get: operations["Indexing.ListRecommendations"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/policies:testAs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** One read-only statement run as another user of the tenant ({tenant, user, host, database, sql}) */
+        post: operations["Policies.TestAs"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1921,6 +2159,272 @@ export interface operations {
             };
         };
     };
+    "Logic.ListModules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                database: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Logic.GetModule": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                database: string;
+                kind: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Logic.ListDeadLetters": {
+        parameters: {
+            query?: {
+                state?: string;
+            };
+            header?: never;
+            path: {
+                database: string;
+                kind: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Logic.DiscardDeadLetters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                database: string;
+                kind: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Logic.ReplayDeadLetters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                database: string;
+                kind: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Logic.TailLogs": {
+        parameters: {
+            query?: {
+                after?: string;
+                limit?: string;
+            };
+            header?: never;
+            path: {
+                database: string;
+                kind: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Logic.GetVersion": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                database: string;
+                kind: string;
+                name: string;
+                version: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Logic.Compile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                database: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     "Analytics.ListModels": {
         parameters: {
             query?: {
@@ -2201,6 +2705,37 @@ export interface operations {
             };
         };
     };
+    "Mq.GetTopology": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                database: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     "KeyValue.Delete": {
         parameters: {
             query?: never;
@@ -2417,6 +2952,102 @@ export interface operations {
             };
         };
     };
+    "Sinks.ListDeadLetters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                database: string;
+                sink: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Sinks.DiscardDeadLetters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                database: string;
+                sink: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Sinks.ReplayDeadLetters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                database: string;
+                sink: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     "Sql.Check": {
         parameters: {
             query?: never;
@@ -2509,6 +3140,38 @@ export interface operations {
                 };
                 content: {
                     "application/x-ndjson": components["schemas"]["QueryResponse"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Streams.ListGroups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                database: string;
+                stream: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
                 };
             };
             /** @description An error */
@@ -2968,6 +3631,35 @@ export interface operations {
                 db?: string;
                 table?: string;
             };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Policies.TestAs": {
+        parameters: {
+            query?: never;
             header?: never;
             path?: never;
             cookie?: never;

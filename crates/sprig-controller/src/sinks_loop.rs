@@ -112,7 +112,10 @@ impl Reconciler for SinksLoop {
                     cx.clock.as_ref(),
                     NewJob {
                         kind: JOB_KIND.into(),
-                        class: JobClass::Other,
+                        // Long-running and mostly waiting, like triggers
+                        // on streams: the consumer pool, not the 8 slots
+                        // of other jobs (R9, r9queue).
+                        class: JobClass::Consumer,
                         tenant_id: None,
                         clusters: Vec::new(),
                         priority: 0,

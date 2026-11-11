@@ -306,6 +306,11 @@ pub struct SessionVars {
     /// A literal `SET sql_mode` on its way: its view and backend value,
     /// recorded when the backend reports the same value.
     pub pending_sql_mode: Option<(String, String)>,
+    /// Chapter 29 (policy views, decision RL18): the protected tables this
+    /// session's policies bind, whose views its statements read instead.
+    /// Not a variable: [`super::session::BackendSession`] applies it to
+    /// every statement it sends.
+    pub rls_views: Option<std::sync::Arc<sprig_sql::rls::views::ViewSwap>>,
 }
 
 /// The persona baselines (chapter 06, "New connections").
@@ -421,7 +426,10 @@ impl SessionVars {
         };
         // The session's own map (the MySQL persona's), else the server's.
         let own = self.vars.get("character_set_collations").cloned();
-        let Some(map) = own.as_deref().or_else(|| base.get("character_set_collations")) else {
+        let Some(map) = own
+            .as_deref()
+            .or_else(|| base.get("character_set_collations"))
+        else {
             return;
         };
         let coll = charset::mapped(map, &cs).or_else(|| charset::compiled_default(&cs));
@@ -629,7 +637,7 @@ pub fn sync_prefix(
         });
         next.role.clone_from(&session.role);
     }
-    let reads: Vec<&String> = if stmt.reads_all_user_vars {
+    let mut reads: Vec<&String> = if stmt.reads_all_user_vars {
         session
             .user_vars
             .keys()
@@ -638,6 +646,15 @@ pub fn sync_prefix(
     } else {
         stmt.reads_user_vars.iter().collect()
     };
+    // Chapter 29: row-level security's context, which MariaDB's triggers
+    // read for any write, follows the session on every connection.
+    reads.extend(
+        session
+            .user_vars
+            .keys()
+            .chain(applied.user_vars.keys())
+            .filter(|v| v.as_str() == RLS_CONTEXT_VAR),
+    );
     let mut user_sets = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for v in reads {
@@ -663,6 +680,10 @@ pub fn sync_prefix(
     }
     Ok((out, next))
 }
+
+/// The user variable holding a session's row-level security context
+/// (chapter 29; `sprig_sql::rls::triggers::CONTEXT_VAR`).
+pub const RLS_CONTEXT_VAR: &str = "sprig_rls";
 
 /// What session tracking reported for one client statement, sorted by the
 /// replay rules.

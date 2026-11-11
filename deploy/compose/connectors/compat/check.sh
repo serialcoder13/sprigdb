@@ -79,11 +79,34 @@ c_int_meta() {
     grep -E '^(Field +[0-9]+:|Type:|ERROR)' | paste - - | sed -E 's/Field +[0-9]+: +//; s/[[:space:]]+Type: +/ /'
 }
 c_mysql_compat() { admin "$(corpus mysql_compat)"; }
+# R4 round 3: generated NOT NULL, default collations, LATERAL, functional
+# key parts; and per-session status counters (a fresh login of its own).
+c_mysql_ddl() { admin "$(corpus mysql_ddl)"; }
+c_session_status() { admin "$(corpus session_status)"; }
+# R4 round 4: performance_schema and sys (3306 only).
+c_perf_schema() { admin "$(corpus perf_schema)"; }
+# R4 round 4: LATERAL and rollup inside views and stored programs; MySQL's
+# printing of expressions in SHOW CREATE TABLE (3306 only).
+c_mysql_stored() { admin "$(corpus mysql_stored)"; }
 
-CHECKS=${SPRIG_COMPAT_CHECKS:-"sql_mode max_execution_time errors show_index show_grants roles gis stored_mode group_by int_meta mysql_compat"}
+CHECKS=${SPRIG_COMPAT_CHECKS:-"sql_mode max_execution_time errors show_index show_grants roles gis stored_mode group_by int_meta mysql_compat mysql_ddl session_status perf_schema mysql_stored"}
 for check in $CHECKS; do
   if [[ $check == gis && $SPRIG_PERSONA != mysql ]]; then
     emit gis n/a "MySQL's SRID 4326 semantics are the MySQL persona's only"
+    continue
+  fi
+  if [[ $check == mysql_stored && $SPRIG_PERSONA != mysql ]]; then
+    emit mysql_stored n/a "MySQL's LATERAL and rollup rules and expression printing are 3306's"
+    continue
+  fi
+  if [[ $check == perf_schema && $SPRIG_PERSONA != mysql ]]; then
+    emit perf_schema n/a "3306 answers performance_schema and sys; 3307 relays MariaDB's"
+    continue
+  fi
+  if [[ $check == session_status && $SPRIG_PERSONA != mysql ]]; then
+    # The gateway counts by MySQL's rules on both ports; MariaDB also
+    # counts SHOW STATUS as a SELECT (decisions/r4-interim.md Z4).
+    emit session_status n/a "counted by MySQL's rules on both ports"
     continue
   fi
   t0=$(now_ms)

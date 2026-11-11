@@ -203,6 +203,15 @@ impl WorkerRuntime {
         self
     }
 
+    /// Adds slots of classes the defaults leave out (the search role's).
+    #[must_use]
+    pub fn with_extra_slots(mut self, slots: &[(JobClass, u32)]) -> Self {
+        for (c, n) in slots {
+            self.slots.insert(*c, *n);
+        }
+        self
+    }
+
     /// Sets the slots per class this worker offers.
     #[must_use]
     pub fn with_slots(mut self, slots: BTreeMap<JobClass, u32>) -> Self {

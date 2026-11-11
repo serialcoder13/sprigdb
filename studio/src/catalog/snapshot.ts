@@ -10,10 +10,22 @@ import { cachedJson } from '../api/client';
 
 export interface ObjectInfo {
   name: string;
-  kind: 'table' | 'view' | 'procedure' | 'function';
+  kind: 'table' | 'view' | 'procedure' | 'function' | 'graph';
   rows: number | null;
   engine: string | null;
   comment: string;
+  /** Graphs: `native` or `mapped`. */
+  graph_kind?: string;
+  /** Graphs: the labels and relationship types the user may read. */
+  labels?: string[];
+  types?: string[];
+  /** Graphs: readable only through grants on single labels or types. */
+  partial?: boolean;
+}
+
+/** The database's graphs in a snapshot (chapter 43; Studio round 5). */
+export function graphsOf(snap: Pick<DbSnapshot, 'objects'> | undefined): ObjectInfo[] {
+  return (snap?.objects ?? []).filter((o) => o.kind === 'graph');
 }
 
 export interface ColumnInfo {

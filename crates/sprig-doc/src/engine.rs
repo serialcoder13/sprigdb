@@ -56,7 +56,7 @@ pub struct SqlError {
 }
 
 impl SqlError {
-    fn is(&self, n: u16) -> bool {
+    pub(crate) fn is(&self, n: u16) -> bool {
         self.errno == Some(n)
     }
 }
@@ -84,6 +84,11 @@ pub trait SqlRunner: Send {
     /// for a [`DocCatalog`] that keeps metadata per tenant.
     fn tenant(&self) -> u64 {
         0
+    }
+    /// The session's tenant name and user id, when it has a user: the
+    /// definer of a search index created through it (chapter 39).
+    fn principal_hint(&self) -> Option<(String, u32)> {
+        None
     }
 }
 
@@ -125,6 +130,12 @@ pub struct EngineConfig {
     pub max_array_paths: usize,
     /// Rows per internal read.
     pub chunk_rows: usize,
+    /// `vector.ann_min_rows`: a vector index with at least this many
+    /// vectors answers approximate `$vectorSearch` from its side table
+    /// (chapter 34, decision R33).
+    pub vector_ann_min_rows: u64,
+    /// How often a vector side table is brought up to date (ms).
+    pub vector_sync_ms: u64,
 }
 
 impl Default for EngineConfig {
@@ -136,6 +147,8 @@ impl Default for EngineConfig {
             update_retry_max: 10,
             max_array_paths: 1000,
             chunk_rows: 1000,
+            vector_ann_min_rows: 1000,
+            vector_sync_ms: 1000,
         }
     }
 }
@@ -197,7 +210,7 @@ pub fn replace_comment() -> String {
     format!("/*sprig h={h:016x} o=r*/ ")
 }
 
-fn now_date() -> DateTime {
+pub(crate) fn now_date() -> DateTime {
     DateTime::now()
 }
 
@@ -361,6 +374,9 @@ pub struct Engine {
     pub cfg: EngineConfig,
     /// Collection metadata.
     pub catalog: Arc<dyn DocCatalog>,
+    /// Text and search indexes (chapter 39); `None`: `$text` and `$search`
+    /// are refused.
+    pub text: Option<Arc<dyn crate::text::TextSearch>>,
 }
 
 impl Default for Engine {
@@ -380,7 +396,18 @@ impl Engine {
     /// An engine with `cfg` over `catalog`.
     #[must_use]
     pub fn with_catalog(cfg: EngineConfig, catalog: Arc<dyn DocCatalog>) -> Self {
-        Self { cfg, catalog }
+        Self {
+            cfg,
+            catalog,
+            text: None,
+        }
+    }
+
+    /// With the gateway's text and search indexes (chapter 39).
+    #[must_use]
+    pub fn with_text(mut self, t: Arc<dyn crate::text::TextSearch>) -> Self {
+        self.text = Some(t);
+        self
     }
 
     fn opts(&self) -> RenderOpts {
@@ -532,6 +559,8 @@ impl Engine {
         ))
         .await
         .map_err(|e| mongo_error(&e))?;
+        // Chapter 34 (R33): the vector indexes' side tables.
+        self.drop_vector_sides(sql, ns, &m.table, None).await;
         self.catalog.unregister(sql, ns).await?;
         Ok(true)
     }
@@ -763,6 +792,10 @@ impl Engine {
         ns: &Ns,
         spec: FindSpec,
     ) -> Result<CursorPlan, MongoError> {
+        // Chapter 39: `$text`.
+        if let Some((t, rest)) = crate::text::split_text(&spec.filter)? {
+            return Box::pin(self.find_text(sql, ns, &spec, t, &rest)).await;
+        }
         let pred = filter::parse(&spec.filter)?;
         let projection = spec
             .projection
@@ -1490,7 +1523,9 @@ impl Engine {
     ) -> Result<(usize, usize, bool), MongoError> {
         let existed = self.meta(sql, ns).await?.is_some();
         let mut m = self.meta_or_create(sql, ns).await?;
-        let before = m.indexes.len() + 1;
+        let texts = self.text_index_specs(sql, ns).await?.len();
+        let before = m.indexes.len() + 1 + texts;
+        let mut text_made = 0usize;
         for s in specs {
             let key = s.get_document("key").map_err(|_| {
                 MongoError::new(
@@ -1503,6 +1538,19 @@ impl Engine {
                     code::CANNOT_CREATE_INDEX,
                     "Index keys cannot be empty.",
                 ));
+            }
+            // Chapter 39: a `text` index is a search index.
+            if crate::text::is_text_key(key) {
+                let t = self.text.as_ref().ok_or_else(|| {
+                    MongoError::new(
+                        code::SPRIG_DOC_FEATURE_UNSUPPORTED,
+                        "text indexes need the gateway's search service",
+                    )
+                })?;
+                t.create(sql, ns, &m, crate::text::TextCreate::Text(s.clone()))
+                    .await?;
+                text_made += 1;
+                continue;
             }
             // Chapter 36 (R6 round 3): a single-path `2dsphere` index.
             let geo_path = Self::geo_key(key)?;
@@ -1634,7 +1682,9 @@ impl Engine {
             m.next_index += 1;
             self.catalog.save_indexes(sql, ns, &m).await?;
         }
-        Ok((before, m.indexes.len() + 1, !existed))
+        let after = m.indexes.len() + 1 + self.text_index_specs(sql, ns).await?.len();
+        let _ = text_made;
+        Ok((before, after, !existed))
     }
 
     /// `listIndexes`; `None` when the collection doesn't exist.
@@ -1651,6 +1701,7 @@ impl Engine {
         };
         let mut out = vec![doc! {"v": 2, "key": {"_id": 1}, "name": "_id_"}];
         out.extend(m.indexes.iter().map(IndexDef::spec));
+        out.extend(self.text_index_specs(sql, ns).await?);
         Ok(Some(out))
     }
 
@@ -1671,9 +1722,19 @@ impl Engine {
                 format!("ns not found {ns}"),
             ));
         };
-        let before = m.indexes.len() + 1;
+        let text_specs = self.text_index_specs(sql, ns).await?;
+        let text_names: Vec<String> = text_specs
+            .iter()
+            .filter_map(|d| d.get_str("name").ok().map(str::to_owned))
+            .collect();
+        let before = m.indexes.len() + 1 + text_names.len();
         let names: Vec<String> = match which {
-            Bson::String(s) if s == "*" => m.indexes.iter().map(|i| i.name.clone()).collect(),
+            Bson::String(s) if s == "*" => m
+                .indexes
+                .iter()
+                .map(|i| i.name.clone())
+                .chain(text_names.iter().cloned())
+                .collect(),
             Bson::String(s) => vec![s.clone()],
             Bson::Array(a) => a
                 .iter()
@@ -1693,8 +1754,15 @@ impl Engine {
                         )
                     })
                     .collect();
+                let text_key = text_specs
+                    .iter()
+                    .find(|d| {
+                        d.get_document("key").is_ok_and(|x| x == k) || crate::text::is_text_key(k)
+                    })
+                    .and_then(|d| d.get_str("name").ok().map(str::to_owned));
                 match m.indexes.iter().find(|i| i.key == pat) {
                     Some(i) => vec![i.name.clone()],
+                    None if text_key.is_some() => vec![text_key.unwrap_or_default()],
                     None if pat == [("_id".to_owned(), 1)] => vec!["_id_".into()],
                     None => {
                         return Err(MongoError::new(
@@ -1712,6 +1780,12 @@ impl Engine {
                     code::INVALID_OPTIONS,
                     "cannot drop _id index",
                 ));
+            }
+            if text_names.contains(n) {
+                if let Some(t) = &self.text {
+                    t.drop_index(sql, ns, n).await?;
+                }
+                continue;
             }
             let Some(pos) = m.indexes.iter().position(|i| &i.name == n) else {
                 return Err(MongoError::new(
@@ -1815,6 +1889,19 @@ impl Engine {
         } else {
             pipeline
         };
+        // Chapter 39: `$text` in the first `$match`.
+        let mut first = first;
+        if first.is_none()
+            && !ns.coll.is_empty()
+            && let Some(m0) = stages.first().and_then(|s| s.get_document("$match").ok())
+            && let Some((t, rest)) = crate::text::split_text(m0)?
+        {
+            first = Some(match self.meta(sql, ns).await? {
+                Some(m) => self.text_docs(sql, ns, &m, t, &rest).await?,
+                None => Vec::new(),
+            });
+            stages = &stages[1..];
+        }
         let mut conds: Vec<Bson> = Vec::new();
         while first.is_none()
             && let Some(s) = stages.first()
@@ -1948,7 +2035,61 @@ impl Engine {
             };
         }
         models::strip_scores(&mut docs);
+        crate::text::strip(&mut docs);
         Ok(docs)
+    }
+
+    /// `find` with `$text` (chapter 39): the scored matches, sorted,
+    /// skipped, limited and projected, from a buffer.
+    async fn find_text(
+        &self,
+        sql: &mut dyn SqlRunner,
+        ns: &Ns,
+        spec: &FindSpec,
+        t: Document,
+        rest: &Document,
+    ) -> Result<CursorPlan, MongoError> {
+        let projection = spec
+            .projection
+            .as_ref()
+            .filter(|p| !p.is_empty())
+            .map(Projection::parse)
+            .transpose()?;
+        let sort = spec
+            .sort
+            .as_ref()
+            .map(agg::parse_sort)
+            .transpose()?
+            .unwrap_or_default();
+        let Some(m) = self.meta(sql, ns).await? else {
+            return Err(MongoError::new(
+                code::INDEX_NOT_FOUND,
+                "text index required for $text query",
+            ));
+        };
+        let mut docs = self.text_docs(sql, ns, &m, t, rest).await?;
+        if !sort.is_empty() {
+            crate::heavy::run(docs.len(), || agg::sort_docs(&mut docs, &sort));
+        }
+        let skip = usize::try_from(spec.skip).unwrap_or(usize::MAX);
+        let take = if spec.limit > 0 {
+            usize::try_from(spec.limit).unwrap_or(usize::MAX)
+        } else {
+            usize::MAX
+        };
+        let docs: Vec<Document> = docs.into_iter().skip(skip).take(take).collect();
+        let mut docs = match &projection {
+            Some(p) => docs
+                .iter()
+                .map(|d| p.apply(d, now_date()))
+                .collect::<Result<_, _>>()?,
+            None => docs,
+        };
+        models::strip_scores(&mut docs);
+        crate::text::strip(&mut docs);
+        let mut plan = CursorPlan::from_docs(ns.clone(), docs);
+        plan.table = m.table;
+        Ok(plan)
     }
 
     /// `$merge` on `_id`: `whenMatched` `merge` (the default), `replace`,

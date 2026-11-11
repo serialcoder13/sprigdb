@@ -304,8 +304,9 @@ async fn run_local(
             let e2 = Arc::clone(engine);
             let c2 = caller.clone();
             let txn = (!transaction.is_empty()).then_some(transaction);
-            // `language`: sql (default), cypher, gql or mongo (tui T2).
-            let language = s(body, "language");
+            // `language`: sql (default), cypher, gql or mongo (tui T2);
+            // `output`: canonical_ejson for mongo (Studio round 5).
+            let language = super::lang::with_output(&s(body, "language"), &s(body, "output"));
             tokio::spawn(async move {
                 e2.run_in(&c2, &language, call, txn.as_deref(), caps, tx)
                     .await;
@@ -342,6 +343,10 @@ async fn run_local(
         }
         r if r.starts_with("KeyValue.") => {
             let v = super::kv::call(engine, caller, r, &request_json(m, body)).await?;
+            Ok((200, Local::Json(v)))
+        }
+        r if r.starts_with("Search.") => {
+            let v = super::search::call(engine, caller, r, &request_json(m, body)).await?;
             Ok((200, Local::Json(v)))
         }
         r if r.starts_with("Vectors.") => {

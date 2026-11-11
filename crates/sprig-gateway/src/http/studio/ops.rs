@@ -24,6 +24,17 @@
 //!    studio.operator_action
 //! 6. no operator_token_file → 503 naming it
 //! ```
+//!
+//! **Named operators** (chapter 14, "Operators"; this is how operator mode
+//! works once the deployment has operators): Studio signs the operator in
+//! with `POST /v1/ops:login` (and `:enrol` for the first second factor),
+//! which the gateway relays to the controller's `operators:login` with no
+//! credential of its own. Studio keeps the operator's session token and
+//! sends it as `x-sprig-operator` on every `/v1/ops/` call; the gateway
+//! forwards it as the bearer token, so the controller checks the
+//! operator's role, DCs and scopes and audits the person. Only checks 1
+//! and 4 above apply; no Studio login list and no operator token file.
+//! `POST /v1/ops:logout` ends the session.
 
 use std::sync::Arc;
 
@@ -141,7 +152,135 @@ pub fn forward_body(method: &Method, body: &[u8], login: &str) -> Result<Bytes, 
     Ok(Bytes::from(v.to_string()))
 }
 
-/// Answers `/v1/ops/...`.
+/// The header that carries a named operator's session token.
+pub const OPERATOR_HEADER: &str = "x-sprig-operator";
+
+fn mode_and_cert(core: &Arc<Core>, info: &ConnInfo) -> Result<(), SprigError> {
+    use sprig_studio::settings as k;
+    let st = &core.studio;
+    if st.tenant_get(&k::OPERATOR_MODE, None, None).as_ref() != "on" {
+        return Err(disabled("operator mode is off (studio.operator_mode)"));
+    }
+    if st.tenant_get(&k::OPERATOR_MTLS, None, None).as_ref() == "required"
+        && !info.tls.as_ref().is_some_and(|t| t.client_cert)
+    {
+        return Err(SprigError::new(
+            SprigCode::StudioOperatorCertRequired,
+            "operator mode needs a client certificate (studio.operator_mtls)",
+        ));
+    }
+    Ok(())
+}
+
+/// `POST /v1/ops:login`, `:enrol` and `:logout` (named operators).
+async fn session_call(
+    core: &Arc<Core>,
+    info: &ConnInfo,
+    req: Request<Incoming>,
+    call: &str,
+) -> Result<Response<Body>, SprigError> {
+    mode_and_cert(core, info)?;
+    if req.method() != Method::POST {
+        return Err(SprigError::new(
+            SprigCode::AdminRequestInvalid,
+            "operator sign-in calls are POST",
+        ));
+    }
+    let token = req
+        .headers()
+        .get(OPERATOR_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|t| format!("Bearer {}", t.trim()));
+    let body = read_body(req).await?;
+    let (path, auth, body) = match call {
+        "login" | "enrol" => {
+            let mut v = parse_json(&body)?;
+            if let Value::Object(o) = &mut v {
+                o.insert("client".into(), json!("studio"));
+            }
+            (
+                format!("/admin/v1/operators:{call}"),
+                None,
+                Bytes::from(v.to_string()),
+            )
+        }
+        "logout" => (
+            "/admin/v1/operators:logout".to_owned(),
+            token,
+            Bytes::from_static(b"{}"),
+        ),
+        other => {
+            return Err(SprigError::new(
+                SprigCode::AdminRequestInvalid,
+                format!("no route /v1/ops:{other}"),
+            ));
+        }
+    };
+    tracing::info!(target: "sprig_audit", event = "studio.operator_session", call,
+        client_ip = %info.peer.ip(), "operator sign-in call from Studio");
+    let r = core
+        .admin
+        .forward(&Method::POST, &path, auth.as_deref(), body)
+        .await?;
+    Ok(operator_reply(r.status, r.body))
+}
+
+/// The controller's answer to a named operator's call as it is: a 401
+/// (an ended session, 39316) is the operator's to see, not a gateway
+/// credential problem as [`passthrough`] reports it for internal calls.
+fn operator_reply(status: u16, body: Bytes) -> Response<Body> {
+    if status == 401 {
+        let v: Value = serde_json::from_slice(&body).unwrap_or_else(|_| json!({}));
+        return super::json_response(401, &v);
+    }
+    passthrough(status, body)
+}
+
+/// `/v1/ops/...` with a named operator's session token.
+async fn named(
+    core: &Arc<Core>,
+    info: &ConnInfo,
+    req: Request<Incoming>,
+    token: String,
+    rest: String,
+    query: Option<String>,
+) -> Result<Response<Body>, SprigError> {
+    mode_and_cert(core, info)?;
+    let method = req.method().clone();
+    let auth = format!("Bearer {token}");
+    if rest.is_empty() {
+        // Entering operator mode: who the controller takes the token for.
+        let r = core
+            .admin
+            .forward(
+                &Method::GET,
+                "/admin/v1/operators:whoami",
+                Some(&auth),
+                Bytes::new(),
+            )
+            .await?;
+        return Ok(operator_reply(r.status, r.body));
+    }
+    let body = read_body(req).await?;
+    let body = if method == Method::GET || method == Method::HEAD {
+        Bytes::new()
+    } else {
+        // Writes still carry a reason; the controller records the operator.
+        forward_body(&method, &body, "operator")?
+    };
+    let path = match query {
+        Some(q) => format!("/admin/v1/{rest}?{q}"),
+        None => format!("/admin/v1/{rest}"),
+    };
+    metrics::counter!("sprig_studio_requests_total", "area" => "operator").increment(1);
+    let r = core
+        .admin
+        .forward(&method, &path, Some(&auth), body)
+        .await?;
+    Ok(operator_reply(r.status, r.body))
+}
+
+/// Answers `/v1/ops/...` and `/v1/ops:...`.
 ///
 /// # Errors
 /// As the module notes; the controller's answer otherwise.
@@ -150,6 +289,10 @@ pub(super) async fn route(
     info: &ConnInfo,
     req: Request<Incoming>,
 ) -> Result<Response<Body>, SprigError> {
+    if let Some(call) = req.uri().path().strip_prefix("/v1/ops:") {
+        let call = call.to_owned();
+        return session_call(core, info, req, &call).await;
+    }
     let method = req.method().clone();
     let rest = req
         .uri()
@@ -167,6 +310,15 @@ pub(super) async fn route(
             SprigCode::AdminRequestInvalid,
             "bad operator path",
         ));
+    }
+    if let Some(token) = req
+        .headers()
+        .get(OPERATOR_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty())
+    {
+        return named(core, info, req, token, rest, query).await;
     }
     let (caller, s) = session_caller(core, info, &req).await?;
     check(core, info, &caller, &s.claims.amr)?;

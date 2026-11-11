@@ -33,8 +33,8 @@ use hyper::{Method, Request, Response};
 use serde_json::{Value, json};
 use sprig_common::{SprigCode, SprigError};
 use sprig_logic::LogicStore;
-use sprig_logic::declare::{Declaration, Kind};
 use sprig_logic::compiler::{Options, Runtime, StaticColumns};
+use sprig_logic::declare::{Declaration, Kind};
 use tonic::body::Body;
 
 use super::super::sql::Caller;
@@ -254,9 +254,7 @@ pub async fn route(
         (&Method::GET, ["logic"]) => list(core, &caller, &db).await,
         (&Method::GET, ["logic", kind, name]) => show(core, &caller, &db, kind, name).await,
         (&Method::GET, ["logic", kind, name, "versions", v]) => {
-            let v: u64 = v
-                .parse()
-                .map_err(|_| invalid("a version is a number"))?;
+            let v: u64 = v.parse().map_err(|_| invalid("a version is a number"))?;
             version(core, &caller, &db, kind, name, v).await
         }
         (&Method::GET, ["logic", kind, name, "logs"]) => {
@@ -332,7 +330,11 @@ async fn show(
         "schedule": schedule,
         "routines": a.routines,
     });
-    if a.routines && let Some(v) = m.active_version.or_else(|| versions.first().map(|x| x.version)) {
+    if a.routines
+        && let Some(v) = m
+            .active_version
+            .or_else(|| versions.first().map(|x| x.version))
+    {
         out["source"] = json!(st.source(&mut conn, m.module_id, v).await.ok());
         out["plsql"] = json!(st.plsql(&mut conn, m.module_id, v).await.ok().flatten());
         out["source_version"] = json!(v);
@@ -403,7 +405,10 @@ async fn dead_letters(
     let (mut conn, st, db_id) = store(core, caller, db).await?;
     let m = module_of(&st, &mut conn, db_id, kind, name).await?;
     let Some(b) = st.binding(&mut conn, m.module_id).await? else {
-        return Ok(json_response(200, &json!({"dead_letters": [], "binding": null})));
+        return Ok(json_response(
+            200,
+            &json!({"dead_letters": [], "binding": null}),
+        ));
     };
     let state = query_str(query, "state");
     if let Some(s) = state
@@ -438,13 +443,18 @@ async fn settle(
         .and_then(Value::as_array)
         .map(|xs| {
             xs.iter()
-                .filter_map(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.parse().ok())))
+                .filter_map(|x| {
+                    x.as_u64()
+                        .or_else(|| x.as_str().and_then(|s| s.parse().ok()))
+                })
                 .collect()
         })
         .unwrap_or_default();
     let all = body.get("all").and_then(Value::as_bool).unwrap_or(false);
     if ids.is_empty() && !all {
-        return Err(invalid("name the dead letters (ids) or ask for all of them"));
+        return Err(invalid(
+            "name the dead letters (ids) or ask for all of them",
+        ));
     }
     let (mut conn, st, db_id) = store(core, caller, db).await?;
     let m = module_of(&st, &mut conn, db_id, kind, name).await?;
@@ -514,11 +524,18 @@ async fn compile(
     }
     let sql = body.get("sql").and_then(Value::as_str).unwrap_or("");
     if sql.trim().is_empty() {
-        return Err(invalid("sql holds the CREATE FUNCTION or PROCEDURE to compile"));
+        return Err(invalid(
+            "sql holds the CREATE FUNCTION or PROCEDURE to compile",
+        ));
     }
     let decl = match sprig_logic::declare::parse(sql) {
         Ok(d) => d,
-        Err(e) => return Ok(json_response(200, &json!({"ok": false, "diagnostics": [diagnostic(&e)]}))),
+        Err(e) => {
+            return Ok(json_response(
+                200,
+                &json!({"ok": false, "diagnostics": [diagnostic(&e)]}),
+            ));
+        }
     };
     if !matches!(decl.kind, Kind::Function | Kind::Procedure) || decl.source.is_some() {
         return Err(SprigError::new(
@@ -566,14 +583,17 @@ pub async fn dry_run(d: &Declaration, cols: &StaticColumns, show_plsql: bool) ->
     };
     let engine = placed.tier == sprig_logic::placement::Tier::Engine;
     let mut diagnostics = Vec::new();
-    if engine && d.runtime == Runtime::Kirun {
-        if let Err(e) = sprig_logic::service::engine_check(d).await {
-            diagnostics.push(diagnostic(&e));
-        }
-    } else if script && engine {
-        if let Err(e) = sprig_logic::service::script_check(d) {
-            diagnostics.push(diagnostic(&e));
-        }
+    if engine
+        && d.runtime == Runtime::Kirun
+        && let Err(e) = sprig_logic::service::engine_check(d).await
+    {
+        diagnostics.push(diagnostic(&e));
+    }
+    if engine
+        && script
+        && let Err(e) = sprig_logic::service::script_check(d)
+    {
+        diagnostics.push(diagnostic(&e));
     }
     let signature = compiled.ir.as_ref().map_or(Value::Null, |f| {
         json!({
@@ -588,8 +608,7 @@ pub async fn dry_run(d: &Declaration, cols: &StaticColumns, show_plsql: bool) ->
         compiled
             .plsql
             .as_ref()
-            .map(|p| Value::String(p.statements.join(";\n\n")))
-            .unwrap_or(Value::Null)
+            .map_or(Value::Null, |p| Value::String(p.statements.join(";\n\n")))
     } else {
         Value::Null
     };
@@ -678,15 +697,16 @@ mod tests {
         assert_eq!(v["runtime"], "javascript");
         assert!(v["tier"] == "engine" || v["tier"] == "mariadb", "{v}");
         if v["tier"] == "engine" {
-            assert!(!v["placement"]["reasons"].as_array().unwrap().is_empty(), "{v}");
+            assert!(
+                !v["placement"]["reasons"].as_array().unwrap().is_empty(),
+                "{v}"
+            );
         }
         // Not shown without the routine privilege.
         let hidden = dry_run(&d, &cols, false).await;
         assert!(hidden["plsql"].is_null());
         // A KIRun definition that isn't JSON is a diagnostic, not a 500.
-        let bad = sprig_logic::declare::parse(
-            "CREATE PROCEDURE p LANGUAGE kirun AS '{not json'",
-        );
+        let bad = sprig_logic::declare::parse("CREATE PROCEDURE p LANGUAGE kirun AS '{not json'");
         if let Ok(bad) = bad {
             let v = dry_run(&bad, &cols, true).await;
             assert_eq!(v["ok"], false);

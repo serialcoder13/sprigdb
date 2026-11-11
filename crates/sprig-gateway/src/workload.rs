@@ -99,7 +99,13 @@ struct Inner {
     gateway_id: u32,
     clock: Arc<dyn Clock>,
     settings: CaptureSettings,
+    /// Weights of writes inside compound statements not yet counted as a
+    /// run, by tenant and fingerprint (decision A4).
+    inner_weights: std::sync::Mutex<std::collections::HashMap<(TenantId, u64), f64>>,
 }
+
+/// Inner-write weights kept at most (the map is emptied above it).
+const MAX_INNER_WEIGHTS: usize = 100_000;
 
 /// The gateway's workload capture (module docs). Cheap to clone.
 #[derive(Clone)]
@@ -149,6 +155,7 @@ impl GatewayWorkload {
             gateway_id,
             clock,
             settings,
+            inner_weights: std::sync::Mutex::new(std::collections::HashMap::new()),
         }))
     }
 
@@ -398,6 +405,49 @@ impl SessionCapture {
                 }
             }
         }
+    }
+
+    /// One write statement inside a compound statement that ran (R6
+    /// round 6, decision A4: chapter 40's guarded batches), recorded as if
+    /// it had been sent alone: a run each time its `weight`s (the share of
+    /// the compound's runs it is expected to run in,
+    /// `sprig_workload::fingerprint::compound`) add up to a whole one; one
+    /// row, no time of its own (the compound has the time), no sample and
+    /// no transaction footprint. What it adds is the write load chapter
+    /// 13's cost model reads.
+    pub fn record_inner(&self, tenant: TenantId, conn: ConnId, fp: &Fingerprint, weight: f64) {
+        let runs = {
+            let mut m = self
+                .wl
+                .0
+                .inner_weights
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if m.len() > MAX_INNER_WEIGHTS {
+                m.clear();
+            }
+            let acc = m.entry((tenant, fp.id.0)).or_insert(0.0);
+            *acc += weight.clamp(0.0, 1.0);
+            let whole = acc.floor();
+            *acc -= whole;
+            whole
+        };
+        if runs < 1.0 {
+            return;
+        }
+        let ex = ExecSummary {
+            latency_us: 0,
+            error: false,
+            rows_returned: 0,
+            rows_affected: 1,
+            shards: 1,
+            clusters: 1,
+            scatter: false,
+            in_list_max: 0,
+            examined: None,
+            session: self.wl.session_hash(conn),
+        };
+        self.wl.0.recorder.record(tenant, fp, &ex);
     }
 
     /// The session ended or reset: an open transaction records nothing.

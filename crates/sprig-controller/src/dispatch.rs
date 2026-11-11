@@ -138,7 +138,16 @@ pub enum JobClass {
     /// ([`CONSUMER_SLOTS`] per worker) and never starve `Other` jobs or each
     /// other. No per-cluster limit.
     Consumer,
+    /// Search copies (chapter 39, R5 round 6): one long-running job per
+    /// copy of an index. Only workers with the search role offer these
+    /// slots. No per-cluster limit. Jobs whose spec names a `spread` key
+    /// go to a worker holding no other live job with that key when one
+    /// has a free slot (the copies of one index on different workers).
+    Search,
 }
+
+/// Slots a worker with the search role offers for [`JobClass::Search`].
+pub const SEARCH_SLOTS: u32 = 256;
 
 /// Slots a worker offers for [`JobClass::Consumer`] jobs.
 pub const CONSUMER_SLOTS: u32 = 256;
@@ -777,7 +786,7 @@ fn slot_limit(cx: &LoopCx, class: JobClass) -> Option<u32> {
         JobClass::Copy => Some(s.max_copies_per_cluster),
         JobClass::Build => Some(s.max_builds_per_cluster),
         JobClass::Recovery => Some(s.max_rebuilds_per_cluster),
-        JobClass::Other | JobClass::Consumer => None,
+        JobClass::Other | JobClass::Consumer | JobClass::Search => None,
     }
 }
 
@@ -793,10 +802,22 @@ struct Held {
     tenant_classes: HashMap<TenantId, HashSet<JobClass>>,
     tenant_active: HashSet<TenantId>,
     tenant_exclusive: HashSet<TenantId>,
+    /// (worker, spread key) of live jobs with a `spread` key.
+    spread: HashSet<(String, String)>,
+}
+
+/// A job's `spread` key (`spec.spread`), if any.
+fn spread_of(job: &Job) -> Option<&str> {
+    job.spec.get("spread").and_then(Value::as_str)
 }
 
 impl Held {
     fn take(&mut self, job: &Job) {
+        if job.state.is_owned()
+            && let (Some(o), Some(k)) = (&job.owner, spread_of(job))
+        {
+            self.spread.insert((o.worker_id.clone(), k.to_owned()));
+        }
         if job.state.is_owned() {
             for c in &job.clusters {
                 *self.slots.entry((job.class, c.clone())).or_default() += 1;
@@ -970,9 +991,13 @@ pub async fn dispatch_pass(cx: &LoopCx) -> Result<PassReport> {
                 used < cap
             })
             .min_by_key(|w| {
+                // A worker already holding a job of the same spread key
+                // last (search copies of one index).
+                let crowded = spread_of(&job)
+                    .is_some_and(|k| held.spread.contains(&(w.id.clone(), k.to_owned())));
                 let other_zone = job.zone.as_ref().is_some_and(|z| *z != w.registration.zone);
                 let load = held.per_worker.get(&w.id).copied().unwrap_or(0);
-                (other_zone, load, w.id.clone())
+                (crowded, other_zone, load, w.id.clone())
             });
         let Some(w) = pick else { continue };
         // e. Assign, guarded by the job and the worker's registration.

@@ -139,7 +139,7 @@ impl std::fmt::Debug for ConsumerSpec {
     }
 }
 
-type Reply<T> = oneshot::Sender<Result<T, MqError>>;
+pub(crate) type Reply<T> = oneshot::Sender<Result<T, MqError>>;
 
 /// A command to an owner.
 pub enum Cmd {
@@ -342,6 +342,9 @@ struct Entry {
     expires_at_ms: Option<i64>,
     deaths: Option<FieldValue>,
     size: u64,
+    /// Enqueued by an outbox forward: recorded in the forward ledger with
+    /// its insert.
+    fwd: bool,
 }
 
 impl Entry {
@@ -692,6 +695,7 @@ impl Core {
             expires_at_ms: m.expires_at_ms,
             deaths,
             size,
+            fwd: false,
         })
     }
 
@@ -879,6 +883,7 @@ impl Core {
                 delivery_count: 0,
                 deaths: inc.deaths,
                 size,
+                fwd: inc.dedup,
             };
             let pending = self.inserts.len() as u64;
             if self.full_for(size, pending) {
@@ -1076,6 +1081,11 @@ impl Core {
             deletes: std::mem::take(&mut self.deletes),
             counts: std::mem::take(&mut self.counts),
             outbox: std::mem::take(&mut self.outbox),
+            forwarded: inserts
+                .iter()
+                .filter(|(e, _)| e.fwd)
+                .map(|(e, _)| e.msg_id)
+                .collect(),
             state: LaneState {
                 next_seq: self.next_seq,
                 delivered_hwm: self.hwm_target.max(self.hwm),

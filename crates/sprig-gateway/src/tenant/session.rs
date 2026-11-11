@@ -76,6 +76,8 @@ pub struct TenantSession {
     pub types: crate::exec::types::TypesSession,
     /// Chapter 42: the session's space.
     pub inherit: crate::exec::inherit::InheritSession,
+    /// Chapter 29: row-level security (claims, the covered tables).
+    pub rls: super::rls::RlsSession,
     long_data_max: Arc<AtomicU64>,
     watch: Option<JoinHandle<()>>,
 }
@@ -124,6 +126,7 @@ impl TenantSession {
             authz: super::authz::SessionAuthz::default(),
             types: crate::exec::types::TypesSession::default(),
             inherit: crate::exec::inherit::InheritSession::default(),
+            rls: super::rls::RlsSession::default(),
             long_data_max: Arc::new(AtomicU64::new(LONG_DATA_MAX_BYTES.default)),
             watch: None,
         })

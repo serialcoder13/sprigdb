@@ -29,6 +29,16 @@ pub fn msg_id_ms(id: &MsgId) -> i64 {
     i64::try_from(u64::from_be_bytes(b)).unwrap_or(i64::MAX)
 }
 
+/// The smallest message id made at `ms` (UUIDv7 order is time order):
+/// ids below it were made before `ms`.
+#[must_use]
+pub fn msg_id_floor(ms: i64) -> MsgId {
+    let mut a = [0u8; 16];
+    let b = u64::try_from(ms.max(0)).unwrap_or(0).to_be_bytes();
+    a[..6].copy_from_slice(&b[2..]);
+    a
+}
+
 /// Why a store call failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
@@ -237,6 +247,10 @@ pub struct WriteBatch {
     pub counts: Vec<(MsgRef, u32)>,
     /// Dead letters, in the same transaction as their deletes.
     pub outbox: Vec<OutboxRow>,
+    /// Ids of inserted messages that came from an outbox: recorded in the
+    /// forward ledger (`__sprig_qf`) in the same transaction, so a forward
+    /// replayed after the message was consumed is still a no-op.
+    pub forwarded: Vec<MsgId>,
     /// The lane state after the batch.
     pub state: LaneState,
 }
@@ -300,6 +314,40 @@ pub trait MsgStore: Send + Sync + 'static {
 
     /// Deletes forwarded outbox rows.
     async fn outbox_done(&self, ids: &[MsgId]) -> Result<(), StoreError>;
+
+    /// The outbox rows of `ids` that are still there, in the order of
+    /// `ids` (the feed-driven forwarder's batch, in commit order).
+    async fn outbox_rows(&self, ids: &[MsgId]) -> Result<Vec<OutboxRow>, StoreError> {
+        let all = self.outbox(100_000).await?;
+        Ok(ids
+            .iter()
+            .filter_map(|i| all.iter().find(|r| r.out_id == *i).cloned())
+            .collect())
+    }
+
+    /// Up to `limit` rows the polling forwarder takes when the feed-driven
+    /// forwarder runs: rows the owners wrote (dead letters, due delayed
+    /// messages) at once, and transactional publishes only when their id
+    /// is below `publish_before` (older than the fallback delay).
+    async fn outbox_due(
+        &self,
+        limit: usize,
+        publish_before: MsgId,
+    ) -> Result<Vec<OutboxRow>, StoreError> {
+        Ok(self
+            .outbox(limit)
+            .await?
+            .into_iter()
+            .filter(|r| r.kind != OutKind::Publish || r.out_id < publish_before)
+            .collect())
+    }
+
+    /// Removes forward-ledger rows written before `before_ms` whose outbox
+    /// row is gone (nothing can forward them again); how many went.
+    async fn purge_ledger(&self, before_ms: i64) -> Result<u64, StoreError> {
+        let _ = before_ms;
+        Ok(0)
+    }
 
     /// Stores a delayed message.
     async fn delay(&self, row: &DelayedRow) -> Result<(), StoreError>;

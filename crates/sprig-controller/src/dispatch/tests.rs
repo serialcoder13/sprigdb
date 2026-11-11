@@ -311,6 +311,58 @@ fn consumer_jobs_have_their_own_pool() {
     });
 }
 
+/// R5 round 6: search copies go only to workers with the search role,
+/// and the copies of one index (one `spread` key) to different workers,
+/// however loaded the other worker is.
+#[test]
+fn search_copies_spread_over_search_workers() {
+    paused().block_on(async {
+        let (_s, stores, clock) = mem("dc-a");
+        let l = lead(&stores, &clock).await;
+        let _w0 = worker(&stores, &clock, "w0", "z1", &[(JobClass::Other, 8)]).await;
+        let _w1 = worker(
+            &stores,
+            &clock,
+            "w1",
+            "z1",
+            &[(JobClass::Search, SEARCH_SLOTS)],
+        )
+        .await;
+        let _w2 = worker(
+            &stores,
+            &clock,
+            "w2",
+            "z1",
+            &[(JobClass::Search, SEARCH_SLOTS)],
+        )
+        .await;
+        let (cx, _stop) = cx_for(&stores, &clock, Some(l.clone()), ControlSettings::default());
+        let copy = |index: u64, n: u32| {
+            let mut j = job("search_copy", JobClass::Search, None, &[], 0, "search");
+            j.spec = json!({"tenant": 7, "index": index, "copy": n, "spread": format!("search:7:{index}")});
+            j
+        };
+        // Index 1's copy 0 first: w1 (lowest id), then w2 holds fewer jobs.
+        let a0 = submit(&l, &*clock, copy(1, 0)).await.unwrap();
+        let b0 = submit(&l, &*clock, copy(2, 0)).await.unwrap();
+        let c0 = submit(&l, &*clock, copy(3, 0)).await.unwrap();
+        let r = dispatch_pass(&cx).await.unwrap();
+        let first: HashMap<JobId, String> = r.assigned.into_iter().collect();
+        assert_eq!(first.len(), 3, "{first:?}");
+        assert!(first.values().all(|w| w != "w0"), "w0 has no search slots");
+        // Each second copy lands on the worker without the first, even when
+        // that worker holds more jobs.
+        let a1 = submit(&l, &*clock, copy(1, 1)).await.unwrap();
+        let b1 = submit(&l, &*clock, copy(2, 1)).await.unwrap();
+        let c1 = submit(&l, &*clock, copy(3, 1)).await.unwrap();
+        let r = dispatch_pass(&cx).await.unwrap();
+        let second: HashMap<JobId, String> = r.assigned.into_iter().collect();
+        for (x0, x1) in [(a0, a1), (b0, b1), (c0, c1)] {
+            assert_ne!(first[&x0], second[&x1], "two copies of one index on one worker");
+        }
+    });
+}
+
 #[test]
 fn lost_owners_requeue_with_backoff_then_fail() {
     paused().block_on(async {

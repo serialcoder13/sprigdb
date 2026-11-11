@@ -289,8 +289,7 @@ export default function DocTree({
       <div className="row">
         <span className="muted">{docs.length} documents</span>
         <span className="muted">
-          Whole numbers within 32 bits show as int even when stored as int64 (the API's relaxed Extended JSON); a save changes
-          only the fields you edit.
+          Types are exact (canonical Extended JSON); a save changes only the fields you edit.
         </span>
         <button onClick={exportEjson} data-testid="export-ejson">
           Export Extended JSON

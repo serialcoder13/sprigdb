@@ -36,6 +36,8 @@ struct Inner {
     lanes: HashMap<(u64, u16), Lane>,
     ids: HashMap<(u64, MsgId), (u16, u8, u64)>,
     outbox: BTreeMap<MsgId, OutboxRow>,
+    /// The forward ledger (`__sprig_qf`): (queue, out id) → when.
+    ledger: HashMap<(u64, MsgId), i64>,
     delayed: BTreeMap<(i64, MsgId), DelayedRow>,
     faults: Faults,
     writes: u64,
@@ -159,7 +161,9 @@ impl MsgStore for MemStore {
         let g = self.lock();
         Ok(ids
             .iter()
-            .filter(|id| g.ids.contains_key(&(queue, **id)))
+            .filter(|id| {
+                g.ids.contains_key(&(queue, **id)) || g.ledger.contains_key(&(queue, **id))
+            })
             .copied()
             .collect())
     }
@@ -206,6 +210,10 @@ impl MsgStore for MemStore {
         for o in &b.outbox {
             g.outbox.insert(o.out_id, o.clone());
         }
+        let at = crate::store::msg_id_ms(&crate::store::new_msg_id());
+        for id in &b.forwarded {
+            g.ledger.entry((b.queue, *id)).or_insert(at);
+        }
         l.state = b.state;
         g.writes += 1;
         if lose {
@@ -247,6 +255,7 @@ impl MsgStore for MemStore {
         let mut g = self.lock();
         g.lanes.retain(|(q, _), _| *q != queue);
         g.ids.retain(|(q, _), _| *q != queue);
+        g.ledger.retain(|(q, _), _| *q != queue);
         Ok(())
     }
 
@@ -260,6 +269,24 @@ impl MsgStore for MemStore {
             g.outbox.remove(id);
         }
         Ok(())
+    }
+
+    async fn outbox_rows(&self, ids: &[MsgId]) -> Result<Vec<OutboxRow>, StoreError> {
+        let g = self.lock();
+        Ok(ids
+            .iter()
+            .filter_map(|i| g.outbox.get(i).cloned())
+            .collect())
+    }
+
+    async fn purge_ledger(&self, before_ms: i64) -> Result<u64, StoreError> {
+        let mut g = self.lock();
+        let g = &mut *g;
+        let n = g.ledger.len();
+        let outbox = &g.outbox;
+        g.ledger
+            .retain(|(_, id), at| *at >= before_ms || outbox.contains_key(id));
+        Ok((n - g.ledger.len()) as u64)
     }
 
     async fn delay(&self, row: &DelayedRow) -> Result<(), StoreError> {

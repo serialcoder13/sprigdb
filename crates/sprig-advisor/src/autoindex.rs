@@ -38,6 +38,7 @@ pub mod cost;
 pub mod evaluate;
 #[cfg(test)]
 mod fixtures;
+pub mod kv;
 pub mod model;
 pub mod observe;
 pub mod policy;

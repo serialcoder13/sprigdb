@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Flyway and Liquibase against a MySQL endpoint (R4 round 4, tier 2).
+     Flyway 11 community and Liquibase 4.x are Apache-2.0 (Liquibase 5 isn't:
+     stay on 4.x). MySQL Connector/J is the JDBC driver, as for the suites. -->
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>sprig</groupId>
+  <artifactId>tier2-migrations</artifactId>
+  <version>1</version>
+  <packaging>pom</packaging>
+  <properties>
+    <db.url>jdbc:mysql://localhost:3306/tiertwo_mig</db.url>
+    <db.user>root</db.user>
+    <db.password></db.password>
+  </properties>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.flywaydb</groupId>
+        <artifactId>flyway-maven-plugin</artifactId>
+        <version>11.14.1</version>
+        <configuration>
+          <url>${db.url}</url>
+          <user>${db.user}</user>
+          <password>${db.password}</password>
+          <locations><location>filesystem:flyway/sql</location></locations>
+          <cleanDisabled>false</cleanDisabled>
+        </configuration>
+        <dependencies>
+          <dependency><groupId>org.flywaydb</groupId><artifactId>flyway-mysql</artifactId><version>11.14.1</version></dependency>
+          <dependency><groupId>com.mysql</groupId><artifactId>mysql-connector-j</artifactId><version>9.4.0</version></dependency>
+        </dependencies>
+      </plugin>
+      <plugin>
+        <groupId>org.liquibase</groupId>
+        <artifactId>liquibase-maven-plugin</artifactId>
+        <version>4.33.0</version>
+        <configuration>
+          <url>${db.url}</url>
+          <username>${db.user}</username>
+          <password>${db.password}</password>
+          <changeLogFile>liquibase/changelog.xml</changeLogFile>
+          <searchPath>${project.basedir}</searchPath>
+        </configuration>
+        <dependencies>
+          <dependency><groupId>com.mysql</groupId><artifactId>mysql-connector-j</artifactId><version>9.4.0</version></dependency>
+        </dependencies>
+      </plugin>
+    </plugins>
+  </build>
+</project>

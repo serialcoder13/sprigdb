@@ -131,6 +131,12 @@ struct Rows {
     widened: bool,
     /// JSON columns.
     json: Vec<usize>,
+    /// A traditional `EXPLAIN` (R4 round 3): `partitions` goes in at
+    /// [`sprig_sql::compat::explain::PARTITIONS_AT`] (text rows).
+    explain: bool,
+    /// `EXPLAIN FORMAT=TREE` or `EXPLAIN ANALYZE` (R4 round 4): MariaDB's
+    /// JSON plan rendered as MySQL's tree; `(analyze, outer LIMIT)`.
+    tree: Option<(bool, Option<u64>)>,
 }
 
 impl<'a> IntMetaSink<'a> {
@@ -156,6 +162,7 @@ impl<'a> IntMetaSink<'a> {
         let starts = |w: &[u8]| t.len() >= w.len() && t[..w.len()].eq_ignore_ascii_case(w);
         // `EXECUTE`, `CALL` and `TABLE`: no plan, but JSON values.
         starts(b"WITH")
+            || starts(b"EXPLAIN")
             || starts(b"SELECT")
             || starts(b"EXECUTE")
             || starts(b"CALL")
@@ -181,6 +188,42 @@ impl<'a> IntMetaSink<'a> {
     /// Starts a resultset: the client's columns, and the row state.
     fn start(&mut self, columns: &[ColumnDef], format: RowFormat) -> Option<Vec<ColumnDef>> {
         self.cur = None;
+        // MySQL's twelve EXPLAIN columns (chapter 28, R4 round 3).
+        // Binary rows too (a prepared EXPLAIN, R4 round 4).
+        if sprig_sql::compat::explain::is_explain_extended(columns.iter().map(|c| &c.name[..]))
+        {
+            let after = explain_columns(columns);
+            self.cur = Some(Rows {
+                format,
+                before: columns.to_vec(),
+                after: after.clone(),
+                widened: false,
+                json: Vec::new(),
+                explain: true,
+                tree: None,
+            });
+            return Some(after);
+        }
+        // MySQL's tree formats from MariaDB's JSON (R4 round 4).
+        if format == RowFormat::Text
+            && columns.len() == 1
+            && (&columns[0].name[..] == b"EXPLAIN" || &columns[0].name[..] == b"ANALYZE")
+            && let Some(analyze) = sprig_sql::compat::explain::tree_request(self.sql, &self.lex)
+        {
+            let limit = sprig_sql::compat::explain::outer_limit(self.sql, &self.lex);
+            let mut after = columns.to_vec();
+            after[0].name = Bytes::from_static(b"EXPLAIN");
+            self.cur = Some(Rows {
+                format,
+                before: columns.to_vec(),
+                after: after.clone(),
+                widened: false,
+                json: Vec::new(),
+                explain: false,
+                tree: Some((analyze, limit)),
+            });
+            return Some(after);
+        }
         let fixed = self.fixed(columns);
         let after = fixed.as_deref().unwrap_or(columns);
         let json: Vec<usize> = after
@@ -197,10 +240,50 @@ impl<'a> IntMetaSink<'a> {
                 after: after.to_vec(),
                 widened,
                 json,
+                explain: false,
+                tree: None,
             });
         }
         fixed
     }
+}
+
+/// MariaDB's `EXPLAIN EXTENDED` columns as MySQL 8.4's `EXPLAIN` has
+/// them: `partitions` (`MEDIUM_BLOB`) after `table`, `rows` a `LONGLONG`.
+fn explain_columns(columns: &[ColumnDef]) -> Vec<ColumnDef> {
+    use sprig_proto_mysql::resultset::column_type;
+    let mut after = columns.to_vec();
+    if let Some(rows) = after.get_mut(8) {
+        rows.col_type = column_type::LONGLONG;
+        rows.charset = 63;
+        rows.length = 21;
+        rows.decimals = 0;
+        // NUM and BINARY, as MySQL sends them.
+        rows.flags = (1 << 15) | (1 << 7);
+    }
+    let mut partitions = columns[2].clone();
+    partitions.name = Bytes::from_static(b"partitions");
+    partitions.org_name = Bytes::from_static(b"partitions");
+    partitions.col_type = column_type::MEDIUM_BLOB;
+    partitions.length = 25_264_128;
+    partitions.flags = 1 << 4;
+    after.insert(sprig_sql::compat::explain::PARTITIONS_AT, partitions);
+    after
+}
+
+/// A prepared EXPLAIN's binary row as MySQL 8.4 sends it: `partitions`
+/// (`NULL`) after `table`, and `rows` an integer (MariaDB sends it as
+/// text). R4 round 4.
+fn explain_binary(mut vals: Vec<sprig_proto_mysql::Value>) -> Vec<sprig_proto_mysql::Value> {
+    use sprig_proto_mysql::Value;
+    if let Some(v) = vals.get_mut(8)
+        && let Value::Bytes(b) = v
+        && let Some(n) = std::str::from_utf8(b).ok().and_then(|t| t.parse::<i64>().ok())
+    {
+        *v = Value::Int(n);
+    }
+    vals.insert(sprig_sql::compat::explain::PARTITIONS_AT, Value::Null);
+    vals
 }
 
 /// One JSON value printed MySQL's way, if that changes it.
@@ -219,7 +302,19 @@ impl Rows {
         use sprig_proto_mysql::resultset::{
             decode_binary_row, decode_text_row, encode_binary_row, encode_text_row,
         };
+        if let (RowFormat::Text, Some((analyze, limit))) = (self.format, self.tree) {
+            let vals = decode_text_row(payload, 1).ok()?;
+            let plan = vals.first().copied().flatten()?;
+            let t = sprig_sql::compat::explain::tree(plan, analyze, limit)?;
+            return Some(encode_text_row([Some(t.as_bytes())]));
+        }
         match self.format {
+            RowFormat::Text if self.explain => {
+                let vals = decode_text_row(payload, self.before.len()).ok()?;
+                let mut out: Vec<Option<&[u8]>> = vals;
+                out.insert(sprig_sql::compat::explain::PARTITIONS_AT, None);
+                Some(encode_text_row(out))
+            }
             RowFormat::Text => {
                 if self.json.is_empty() {
                     return None;
@@ -241,6 +336,10 @@ impl Rows {
                 Some(encode_text_row(
                     vals.iter().zip(&fixed).map(|(v, f)| f.as_deref().or(*v)),
                 ))
+            }
+            RowFormat::Binary if self.explain => {
+                let vals = decode_binary_row(payload, &self.before).ok()?;
+                encode_binary_row(&explain_binary(vals), &self.after).ok()
             }
             RowFormat::Binary => {
                 let mut vals = decode_binary_row(payload, &self.before).ok()?;
@@ -297,6 +396,27 @@ impl ResultSink for IntMetaSink<'_> {
     }
 
     async fn row(&mut self, values: RowValues<'_>) -> Result<()> {
+        if let (Some(cur), RowValues::Text(vals)) = (&self.cur, &values)
+            && cur.explain
+        {
+            let mut out: Vec<Option<&[u8]>> = vals.to_vec();
+            out.insert(sprig_sql::compat::explain::PARTITIONS_AT, None);
+            return self.inner.row(RowValues::Text(&out)).await;
+        }
+        // A prepared EXPLAIN's decoded binary rows (R4 round 4).
+        if let (Some(cur), RowValues::Binary(vals)) = (&self.cur, &values)
+            && cur.explain
+        {
+            let out = explain_binary(vals.to_vec());
+            return self.inner.row(RowValues::Binary(&out)).await;
+        }
+        if let (Some(cur), RowValues::Text(vals)) = (&self.cur, &values)
+            && let Some((analyze, limit)) = cur.tree
+            && let Some(Some(plan)) = vals.first()
+            && let Some(t) = sprig_sql::compat::explain::tree(plan, analyze, limit)
+        {
+            return self.inner.row(RowValues::Text(&[Some(t.as_bytes())])).await;
+        }
         // Rows the gateway built (sharded tenants): JSON text values.
         if let (Some(cur), RowValues::Text(vals)) = (&self.cur, &values)
             && !cur.json.is_empty()
@@ -365,9 +485,15 @@ impl ResultSink for IntMetaSink<'_> {
 pub(super) fn prepared_columns(
     sql: &[u8],
     lex: sprig_sql::lex::LexOptions,
-    cols: &mut [ColumnDef],
+    cols: &mut Vec<ColumnDef>,
 ) {
     use sprig_sql::compat::intmeta;
+    // A prepared EXPLAIN gets MySQL's twelve columns too (R4 round 4: PDO
+    // compares it with the emulated one).
+    if sprig_sql::compat::explain::is_explain_extended(cols.iter().map(|c| &c.name[..])) {
+        *cols = explain_columns(cols);
+        return;
+    }
     if IntMetaSink::wanted(sql)
         && intmeta::candidates(cols)
         && let Some(plan) = intmeta::plan(sql, &lex)

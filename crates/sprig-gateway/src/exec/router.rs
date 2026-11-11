@@ -31,6 +31,7 @@
 mod backend;
 mod binary;
 mod fk_ddl;
+pub(super) mod graph;
 mod ids;
 pub(crate) mod layout;
 mod txn;
@@ -153,6 +154,18 @@ fn services(svc: &TenantServices) -> &'static Services {
     })
 }
 
+/// The router's shard map cache of `tenant`'s home DC (R8 round 6: the
+/// graph store reads its groups' maps here too).
+///
+/// # Errors
+/// `Internal` never in practice.
+pub(crate) fn map_cache(
+    svc: &TenantServices,
+    tenant: sprig_common::ids::TenantId,
+) -> Result<ShardMapCache> {
+    services(svc).layouts.cache(&svc.locator.home_of(tenant))
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -205,6 +218,13 @@ pub(crate) struct RouterState {
     /// An `INSERT … SELECT` or `LOAD DATA` runs its parts (R3): they never
     /// start another.
     write_form: bool,
+    /// R8 round 6: the `GRAPH_TABLE` calls of the statement under way,
+    /// placeholders in its text until the router path binds their rows
+    /// ([`graph`]).
+    pub(super) graph: Option<graph::Pending>,
+    /// R8 round 6: the bound statement's graph plan and rows, which narrow
+    /// its read to the shards of the rows' keys.
+    graph_bound: Option<graph::Bound>,
 }
 
 impl std::fmt::Debug for RouterState {
@@ -523,12 +543,21 @@ impl PassSession {
         let rs = services(svc);
         let home = svc.locator.home_of(ts.tenant);
         let cache = rs.layouts.cache(&home).ok()?;
-        let mut layout = rs.layouts.get(cat, &cache)?;
-        if !layout.missing.is_empty() {
-            // The cache may still be loading.
+        let layout = rs.layouts.get(cat, &cache);
+        // The cache may still be loading. With none of the groups' maps in
+        // yet the layout is empty (`None`), and a gateway's first statement
+        // of a sharded tenant went unrouted, to the database's first
+        // schema: 1146 for every regrouped table (bugfix5).
+        let loading = match &layout {
+            Some(l) => !l.missing.is_empty(),
+            None => Layouts::has_groups(cat),
+        };
+        let layout = if loading {
             let _ = tokio::time::timeout(Duration::from_secs(5), cache.ready()).await;
-            layout = rs.layouts.get(cat, &cache)?;
-        }
+            rs.layouts.get(cat, &cache)?
+        } else {
+            layout?
+        };
         Some((layout, cache))
     }
 
@@ -689,7 +718,10 @@ impl PassSession {
     /// statements inside a coordinator transaction).
     fn home_ref(&self) -> ShardRef {
         let schema = self.bs.as_ref().and_then(|b| b.vars().schema.clone());
-        let map = self.tenant.as_deref().map(|ts| ts.map());
+        let map = self
+            .tenant
+            .as_deref()
+            .map(crate::tenant::session::TenantSession::map);
         home_ref_of(schema, map.as_deref().map(|m| m as &dyn NameMap))
     }
 
@@ -1062,6 +1094,15 @@ impl PassSession {
         map: &dyn NameMap,
         out: &mut dyn ResultSink,
     ) -> Result<Step> {
+        // R8 round 6: `GRAPH_TABLE` placeholders get their rows (or the
+        // statement its EXPLAIN) before the router plans it.
+        let sql =
+            match Box::pin(self.graph_bind(cx, sql, original, more, format, &mapper, map, out))
+                .await?
+            {
+                graph::Bind::Done(step) => return Ok(step),
+                graph::Bind::Run(sql) => sql,
+            };
         let layout = self.router_layout().await;
         let (Some((mut layout, cache)), Ok(text)) = (layout, std::str::from_utf8(&sql)) else {
             return self
@@ -1307,7 +1348,7 @@ impl PassSession {
                     .iter()
                     .flat_map(|t| &t.sources)
                     .for_each(|t| note(&t.at.schema)),
-                Plan::Explain(_) | Plan::NotRouted | Plan::Reject(_) => {}
+                Plan::Explain(_) | Plan::NotRouted | Plan::Reject(_) | Plan::Graph(_) => {}
             }
         }
     }
@@ -1391,6 +1432,12 @@ impl PassSession {
             |p| p,
         );
         self.router.ids = None;
+        // R8 round 6: a bound graph statement reads only the shards of its
+        // graph rows' keys.
+        let plan = match &self.router.graph_bound {
+            Some(b) if b.text == text => b.plan.narrow(plan, &b.rows),
+            _ => plan,
+        };
         let Plan::NeedIds(f) = &plan else {
             return Ok(plan);
         };

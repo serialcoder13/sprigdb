@@ -31,6 +31,7 @@ pub mod grammar;
 pub mod job;
 pub mod meta;
 pub mod model;
+pub mod peer;
 pub mod policy;
 pub mod residency;
 pub mod runtime;

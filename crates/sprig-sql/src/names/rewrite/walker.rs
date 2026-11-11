@@ -713,7 +713,9 @@ impl Walker<'_, '_> {
         }
         let raw = ident_value(self.bytes(tok));
         let name = String::from_utf8_lossy(&raw);
-        if !is_internal_column(&name) {
+        // The hidden column of a MySQL functional key part, which the 3306
+        // translator writes into the statement (chapter 28, R4 round 3).
+        if !is_internal_column(&name) || crate::compat::fxindex::is_fx_column(&name) {
             return Ok(());
         }
         if self.creating_cols {

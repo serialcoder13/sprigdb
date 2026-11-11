@@ -66,6 +66,7 @@ pub enum Effect {
 
 /// The facts about one statement that pools, sync and routing need.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // independent facts about one statement
 pub struct StmtInfo {
     /// Plain read or not.
     pub class: StmtClass,
@@ -91,6 +92,10 @@ pub struct StmtInfo {
     /// `wsrep_sync_wait`; lower case). The gateway keeps the client's
     /// values and restores its own on the connection afterwards.
     pub sets_gateway_vars: Vec<String>,
+    /// It calls a user-level lock function (`GET_LOCK`, `RELEASE_LOCK`,
+    /// `RELEASE_ALL_LOCKS`, `IS_FREE_LOCK`, `IS_USED_LOCK`): on Galera it
+    /// runs on the cluster's lock node (chapter 28, "Locks"; R4 round 4).
+    pub user_lock: bool,
 }
 
 impl StmtInfo {
@@ -107,6 +112,7 @@ impl StmtInfo {
             effects: Vec::new(),
             scoped_vars: Vec::new(),
             sets_gateway_vars: Vec::new(),
+            user_lock: false,
         }
     }
 
@@ -244,14 +250,23 @@ impl StmtInfo {
             match w {
                 "GET_LOCK" if call => {
                     info.effects.push(Effect::GetLock);
+                    info.user_lock = true;
                     side_effects = true;
                 }
                 "RELEASE_LOCK" if call => {
                     info.effects.push(Effect::ReleaseLock);
+                    info.user_lock = true;
                     side_effects = true;
                 }
                 "RELEASE_ALL_LOCKS" if call => {
                     info.effects.push(Effect::ReleaseAllLocks);
+                    info.user_lock = true;
+                    side_effects = true;
+                }
+                // R4 round 4: the lock checks read the lock node's state,
+                // so they go where the locks are taken, not to a reader.
+                "IS_FREE_LOCK" | "IS_USED_LOCK" if call => {
+                    info.user_lock = true;
                     side_effects = true;
                 }
                 "LASTVAL" if call => {
@@ -740,6 +755,19 @@ mod tests {
         assert_eq!(c("SELECT a INTO @x FROM t").assigns_user_vars, vec!["x"]);
         assert_eq!(c("SELECT @x := 1").assigns_user_vars, vec!["x"]);
         assert_eq!(c("SELECT GET_LOCK('a', 1)").effects, vec![Effect::GetLock]);
+        // R4 round 4: every lock function marks the statement, and the
+        // checks stay off the readers.
+        for q in [
+            "SELECT GET_LOCK('a', 1)",
+            "SELECT RELEASE_LOCK('a')",
+            "DO RELEASE_ALL_LOCKS()",
+            "SELECT IS_FREE_LOCK('a')",
+            "SELECT IS_USED_LOCK('a') AS u",
+        ] {
+            assert!(c(q).user_lock, "{q}");
+        }
+        assert_eq!(c("SELECT IS_FREE_LOCK('a')").class, StmtClass::Write);
+        assert!(!c("SELECT 'IS_FREE_LOCK(x)'").user_lock);
     }
 
     #[test]

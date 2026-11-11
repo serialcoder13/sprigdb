@@ -319,6 +319,14 @@ pub trait Topology: Send + Sync {
         let _ = schema;
         None
     }
+
+    /// Sharded group `id`, whatever its members are (R8 round 6: a
+    /// graph's group has no table the router plans, but `Plan::Graph`
+    /// shows its shards and the gateway's graph store reads them).
+    fn group(&self, id: u32) -> Option<Arc<Group>> {
+        let _ = id;
+        None
+    }
 }
 
 /// A key value, as the router extracts it from a literal.
@@ -346,6 +354,8 @@ pub struct StaticTopology {
     words: HashSet<String>,
     /// Per default schema, the foreign keys the gateway keeps.
     fks: HashMap<String, Arc<crate::fk::FkGraph>>,
+    /// Sharded groups by id ([`Topology::group`]).
+    groups: HashMap<u32, Arc<Group>>,
 }
 
 impl StaticTopology {
@@ -361,6 +371,11 @@ impl StaticTopology {
     pub fn set_fk_graph(&mut self, schema: &str, graph: crate::fk::FkGraph) {
         self.fks
             .insert(schema.to_ascii_lowercase(), Arc::new(graph));
+    }
+
+    /// Adds sharded group `g` (by its id; see [`Topology::group`]).
+    pub fn insert_group(&mut self, g: Arc<Group>) {
+        self.groups.insert(g.id, g);
     }
 
     /// Whether no table is known.
@@ -430,6 +445,10 @@ impl Topology for StaticTopology {
 
     fn fk_graph(&self, schema: &str) -> Option<Arc<crate::fk::FkGraph>> {
         self.fks.get(&schema.to_ascii_lowercase()).cloned()
+    }
+
+    fn group(&self, id: u32) -> Option<Arc<Group>> {
+        self.groups.get(&id).cloned()
     }
 }
 

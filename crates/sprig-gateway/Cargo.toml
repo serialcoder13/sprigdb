@@ -71,6 +71,8 @@ sprig-proto-amqp = { path = "../sprig-proto-amqp" }
 # engine, and BSON (MIT).
 sprig-proto-mongo = { path = "../sprig-proto-mongo" }
 sprig-doc = { path = "../sprig-doc" }
+# Full-text search (chapter 39, R5 round 5).
+sprig-search.workspace = true
 # The Redis front end (chapter 40, R6) over the key-value engine (chapter 33).
 sprig-redis = { path = "../sprig-redis" }
 sprig-proto-redis = { path = "../sprig-proto-redis" }

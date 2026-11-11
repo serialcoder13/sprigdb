@@ -80,6 +80,8 @@ pub mod logic_loop;
 // Chapter 45 (R9): one sequencer job per stream.
 pub mod migrate;
 pub mod monitor;
+// Chapter 14 (operators): named platform and DC operators.
+pub mod operators;
 pub mod registration;
 pub mod residency;
 pub mod runtime;
@@ -92,6 +94,10 @@ pub mod standby;
 pub mod streams_loop;
 // Chapter 43 (R8 round 5): the graph mirror applier jobs.
 pub mod graph_mirror_loop;
+// Chapter 39 (R5 round 6): search copies on workers.
+pub mod search_loop;
+// Chapter 50 (R9, r9fwd): the feed-driven queue outbox forwarder jobs.
+pub mod queue_forwarder_loop;
 // Chapter 33 (R6): the key-value sweeper job.
 pub mod kv_sweep_loop;
 // Chapter 51 (R9): sink tasks.
@@ -573,6 +579,8 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .with_loop(Loop::new(inherit_loop::InheritLoop))
         .with_loop(Loop::new(streams_loop::StreamsLoop))
         .with_loop(Loop::new(graph_mirror_loop::GraphMirrorLoop))
+        .with_loop(Loop::new(search_loop::SearchPlacementLoop))
+        .with_loop(Loop::new(queue_forwarder_loop::QueueForwarderLoop))
         .with_loop(Loop::new(kv_sweep_loop::KvSweepLoop::new(Some((
             settings.live.clone(),
             dc.clone(),
@@ -657,7 +665,37 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .as_deref()
         .map(http::load_token)
         .transpose()?;
-    let listener = http::bind(cfg.controller.admin_addr, token.as_deref()).await?;
+    // Chapter 14 (operators): the operator directory in the global tier,
+    // and the guard in front of the whole Admin API.
+    let operators = Arc::new(operators::Operators::new(
+        Arc::clone(&stores.global),
+        Arc::clone(&clock),
+        match &cfg.controller.workload_key_file {
+            Some(p) => Some(Arc::new(operators::keys::OperatorKeys(
+                sprig_workload::keyring::MasterKeyring::from_file(p)?,
+            )) as Arc<dyn sprig_auth::mfa::FactorKeys>),
+            None => None,
+        },
+        Some(settings.live.clone()),
+        dc.clone(),
+    ));
+    let mut services: Vec<(String, String)> = Vec::new();
+    if let Some(g) = &gateway_token {
+        services.push(("gateway".to_owned(), g.clone()));
+    }
+    for (name, path) in &cfg.controller.service_token_files {
+        services.push((name.clone(), http::load_token(path)?));
+    }
+    let named = operators.switched().await.unwrap_or(false);
+    let listener = http::bind(
+        cfg.controller.admin_addr,
+        if named {
+            Some("operators")
+        } else {
+            token.as_deref()
+        },
+    )
+    .await?;
     let admin_addr = listener
         .local_addr()
         .map_err(|e| SprigError::internal("admin listener address").with_source(e))?;
@@ -687,14 +725,27 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
             Some(Arc::clone(&settings_admin) as Arc<dyn settings_admin::SettingsAdmin>),
         )),
         Some(Arc::clone(&svc)),
-        token.clone(),
-        gateway_token.clone(),
-        dc_token,
+        None,
+        None,
+        None,
         dc.clone(),
     )));
+    let guard = Arc::new(operators::guard::Guard::new(
+        Arc::clone(&operators),
+        token,
+        dc_token,
+        services,
+        cfg.controller.admin_token_break_glass,
+    ));
     let admin = tokio::spawn(http::serve(
         listener,
-        http::router_with(svc, token, gateway_token).merge(recs),
+        http::router_guarded(svc)
+            .merge(recs)
+            .merge(operators::http::router(operators))
+            .layer(axum::middleware::from_fn_with_state(
+                guard,
+                operators::guard::layer,
+            )),
         ctx.shutdown.clone(),
     ));
     // Gateways find the leader's Admin API here (chapter 37 step 4).

@@ -47,6 +47,9 @@ use crate::pipeline::{EndOfRows, ExecCtx, ResultSink, RowFormat, RowValues, Wire
 pub(super) struct Collect {
     wire: Wire,
     pub(super) columns: Vec<String>,
+    /// The columns' MySQL types (R4 round 4: `LATERAL`'s gateway apply
+    /// inlines numbers as numbers).
+    pub(super) types: Vec<u8>,
     pub(super) rows: Vec<Vec<Option<Vec<u8>>>>,
     pub(super) affected: Option<u64>,
     pub(super) error: Option<SprigError>,
@@ -58,6 +61,7 @@ impl Collect {
         Self {
             wire,
             columns: Vec::new(),
+            types: Vec::new(),
             rows: Vec::new(),
             affected: None,
             error: None,
@@ -76,6 +80,7 @@ impl ResultSink for Collect {
             .iter()
             .map(|c| String::from_utf8_lossy(&c.name).into_owned())
             .collect();
+        self.types = columns.iter().map(|c| c.col_type).collect();
         Ok(())
     }
     async fn row(&mut self, values: RowValues<'_>) -> Result<()> {

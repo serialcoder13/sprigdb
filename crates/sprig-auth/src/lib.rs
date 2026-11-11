@@ -62,6 +62,7 @@ pub mod handoff;
 pub mod http;
 pub mod mfa;
 pub mod mysql;
+pub mod operator;
 pub mod policy;
 pub mod portable;
 pub mod ratelimit;

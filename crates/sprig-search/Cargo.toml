@@ -8,5 +8,25 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+async-trait.workspace = true
+metrics.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sprig-binlog.workspace = true
+sprig-common.workspace = true
+sprig-feed.workspace = true
+sprig-meta.workspace = true
+sprig-settings.workspace = true
+tantivy.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "rt"] }
+tracing.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+# The live test through a gateway.
+mysql_async.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
 [lints]
 workspace = true

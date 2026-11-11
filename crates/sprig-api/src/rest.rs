@@ -286,6 +286,13 @@ pub static ROUTES: &[Route] = &[
         "DrillRequest"
     ),
     r!(
+        "sprig.v1.Search",
+        "Query",
+        "POST",
+        "/v1/databases/{database}/search/{index}:query",
+        "SearchQueryRequest"
+    ),
+    r!(
         "sprig.admin.v1.Clusters",
         "RegisterCluster",
         "POST",
@@ -606,6 +613,103 @@ pub static ROUTES: &[Route] = &[
         "POST",
         "/admin/v1/recommendations:subscriptions",
         "BodyRequest"
+    ),    r!(
+        "sprig.admin.v1.Operators",
+        "Login",
+        "POST",
+        "/admin/v1/operators:login",
+        "BodyRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Operators",
+        "Enrol",
+        "POST",
+        "/admin/v1/operators:enrol",
+        "BodyRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Operators",
+        "Logout",
+        "POST",
+        "/admin/v1/operators:logout",
+        "BodyRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Operators",
+        "WhoAmI",
+        "GET",
+        "/admin/v1/operators:whoami",
+        "ListRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Operators",
+        "ListOperators",
+        "GET",
+        "/admin/v1/operators",
+        "ListRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Operators",
+        "CreateOperator",
+        "POST",
+        "/admin/v1/operators",
+        "BodyRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Operators",
+        "GetOperator",
+        "GET",
+        "/admin/v1/operators/{name}",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Operators",
+        "DisableOperator",
+        "POST",
+        "/admin/v1/operators/{name}:disable",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Operators",
+        "EnableOperator",
+        "POST",
+        "/admin/v1/operators/{name}:enable",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Operators",
+        "ResetOperatorFactor",
+        "POST",
+        "/admin/v1/operators/{name}:resetFactor",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Operators",
+        "SetOperatorPassword",
+        "POST",
+        "/admin/v1/operators/{name}:setPassword",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Operators",
+        "CreateToken",
+        "POST",
+        "/admin/v1/operator-tokens",
+        "BodyRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Operators",
+        "ListTokens",
+        "GET",
+        "/admin/v1/operator-tokens",
+        "ListRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Operators",
+        "RevokeToken",
+        "POST",
+        "/admin/v1/operator-tokens/{name}:revoke",
+        "NameRequest"
     ),
 ];
 
@@ -818,6 +922,7 @@ fn response_type(r: &Route) -> &'static str {
 fn reply(r: &Route) -> &'static str {
     match (r.service, r.rpc) {
         ("sprig.v1.Analytics", "Query") => "AnalyticsResult",
+        ("sprig.v1.Search", "Query") => "SearchQueryResponse",
         (_, "Query") => "QueryResponse",
         (_, "Execute") => "ExecuteResponse",
         (_, "Begin") => "Transaction",

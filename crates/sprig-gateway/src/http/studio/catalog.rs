@@ -4,7 +4,7 @@
 //! | Route | RPC | Does |
 //! |---|---|---|
 //! | `GET /v1/catalog` | `Catalog.ListObjects` (databases) | The logical databases the caller can see |
-//! | `GET /v1/databases/{db}/catalog` | `Catalog.Snapshot` | Tables, views, routines and columns of one database |
+//! | `GET /v1/databases/{db}/catalog` | `Catalog.Snapshot` | Tables, views, routines, graphs (with their labels and relationship types) and columns of one database |
 //! | `GET /v1/databases/{db}/catalog/{kind}/{name}` | `Catalog.GetObject` | One object: columns, indexes, definition |
 //! | `POST /v1/databases/{db}/sql:check` | `Sql.Check` | Each statement's class, and its errors with positions, without running it |
 //!
@@ -499,6 +499,7 @@ pub(super) async fn snapshot(
             "rows": null, "engine": null, "comment": "",
         })
     }));
+    objs.extend(graphs_of(core, caller, db).await);
     Ok(with_etag(
         json_response(
             200,
@@ -506,6 +507,90 @@ pub(super) async fn snapshot(
         ),
         tag.as_deref(),
     ))
+}
+
+/// The database's graphs the caller may read (chapter 43; Studio round 5):
+/// `SELECT` on the graph or its database, or grants on single labels and
+/// relationship types (decision G42), which then are the only ones listed.
+/// Each is `{kind: "graph", name, graph_kind, labels, types}`; the labels
+/// and types feed the Cypher editor's completion and graph picker.
+async fn graphs_of(core: &Arc<Core>, caller: &Caller, db: &str) -> Vec<Value> {
+    use sprig_auth::authz::Action;
+    use sprig_catalog::store::{Namespace, ObjectKind, ObjectState};
+    use sprig_graph::catalog::{GraphState, MODULE};
+
+    let (Some(svc), Some(tenant)) = (core.studio.tenants.as_ref(), caller.principal.tenant) else {
+        return Vec::new();
+    };
+    let gg = crate::graphs::GatewayGraphs::shared(svc);
+    let Ok(cat) = gg
+        .catalog(tenant, sprig_catalog::Freshness::Cached { min_version: 0 })
+        .await
+    else {
+        return Vec::new();
+    };
+    let lctn = gg.lctn(&cat);
+    let Some(row) = cat.database(&sprig_catalog::ddl::database_key(db, lctn)) else {
+        return Vec::new();
+    };
+    let Some(state) = cat.ext.get::<GraphState>(MODULE) else {
+        return Vec::new();
+    };
+    let grants = gg.grants(&cat, caller.principal.user_id);
+    let mut out: Vec<(String, Value)> = Vec::new();
+    for (_, id) in cat.objects.names(row.db_id, Namespace::Graph) {
+        let Some(o) = cat
+            .objects
+            .get(id)
+            .filter(|o| o.kind == ObjectKind::Graph && o.state == ObjectState::Active)
+        else {
+            continue;
+        };
+        let Some(def) = state.graphs.get(&o.object_id.0) else {
+            continue;
+        };
+        let whole = gg.allows(
+            grants.as_deref(),
+            &cat,
+            &row.name,
+            row.db_id,
+            Some(o.object_id.0),
+            Action::Select,
+        );
+        let part = if whole {
+            None
+        } else {
+            match grants
+                .as_deref()
+                .and_then(|g| crate::graphs::GatewayGraphs::visible(g, o.object_id.0))
+            {
+                Some(v) => Some(v),
+                None => continue,
+            }
+        };
+        let mut labels: Vec<&String> = def
+            .labels
+            .values()
+            .filter(|l| part.as_ref().is_none_or(|v| v.labels.contains(*l)))
+            .collect();
+        let mut types: Vec<&String> = def
+            .types
+            .values()
+            .filter(|t| part.as_ref().is_none_or(|v| v.types.contains(*t)))
+            .collect();
+        labels.sort();
+        types.sort();
+        out.push((
+            o.name.clone(),
+            json!({
+                "name": o.name, "kind": "graph", "rows": null, "engine": null, "comment": "",
+                "graph_kind": def.kind, "labels": labels, "types": types,
+                "partial": part.is_some(),
+            }),
+        ));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.into_iter().map(|(_, v)| v).collect()
 }
 
 fn quote_ident(s: &str) -> String {

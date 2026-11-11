@@ -293,6 +293,19 @@ impl<'a> TableContext<'a> {
         self.stats.rows() * (key + self.stats.pk_length() + ENTRY_OVERHEAD_BYTES) / FILL_FACTOR
     }
 
+    /// `S` of a field-column index (R6 round 6): the columns don't exist
+    /// yet, so each part counts the value's average length, at most its
+    /// prefix.
+    #[must_use]
+    pub fn field_bytes(&self, parts: &[super::model::KeyPart]) -> f64 {
+        let v = self.stats.avg_length(super::kv::VALUE_COLUMN);
+        let key: f64 = parts
+            .iter()
+            .map(|p| p.prefix.map_or(v, |n| v.min(f64::from(n))))
+            .sum();
+        self.stats.rows() * (key + self.stats.pk_length() + ENTRY_OVERHEAD_BYTES) / FILL_FACTOR
+    }
+
     /// `Wc`: ms per hour of index maintenance for an index over `parts`.
     #[must_use]
     pub fn write_cost(&self, parts: &[super::model::KeyPart]) -> f64 {
@@ -405,17 +418,19 @@ impl CostModel for Model {
             let Some((input, _)) = t.reads.get(fp) else {
                 continue;
             };
-            let (t_hat, entries) = if c.def.kind == super::model::IndexKind::BTree {
-                t.predict(&c.def.parts, *fp)
-                    .unwrap_or((input.mean_ms, input.examined_per_run))
-            } else {
-                // Spatial and vector indexes (R6 round 3): the run reads
-                // about the entries the generator expects instead of the
-                // rows it examines now; time scales with that share.
-                let entries = c.evidence.entries_per_run.unwrap_or(input.examined_per_run);
-                let share = (entries / input.examined_per_run.max(1.0)).min(1.0);
-                (input.mean_ms * share, entries)
-            };
+            let (t_hat, entries) =
+                if c.def.kind == super::model::IndexKind::BTree && !super::kv::is_kv(c) {
+                    t.predict(&c.def.parts, *fp)
+                        .unwrap_or((input.mean_ms, input.examined_per_run))
+                } else {
+                    // Spatial and vector indexes (R6 round 3) and key-value
+                    // element tables (round 5): the run reads
+                    // about the entries the generator expects instead of the
+                    // rows it examines now; time scales with that share.
+                    let entries = c.evidence.entries_per_run.unwrap_or(input.examined_per_run);
+                    let share = (entries / input.examined_per_run.max(1.0)).min(1.0);
+                    (input.mean_ms * share, entries)
+                };
             let per_hour = t.per_hour(*fp);
             benefit += per_hour * (input.mean_ms - t_hat).max(0.0);
             per_fp.push(FpEstimate {
@@ -427,8 +442,16 @@ impl CostModel for Model {
                 entries,
             });
         }
-        let write = t.write_cost(&c.def.parts);
-        let bytes = t.bytes(&c.def.parts);
+        // A field column's index changes with `v` (R6 round 6).
+        let write = t
+            .writes
+            .touching(super::kv::maintained_columns(&c.def).iter().map(String::as_str))
+            * p.maintenance_cost_ms;
+        let bytes = if c.def.kind == super::model::IndexKind::FieldColumn {
+            t.field_bytes(&c.def.parts)
+        } else {
+            t.bytes(&c.def.parts)
+        };
         let build_seconds = bytes / p.build_rate_bytes_per_sec.max(1.0);
         let mut e = Estimate {
             benefit_ms_h: benefit,

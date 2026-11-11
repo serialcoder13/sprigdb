@@ -146,6 +146,32 @@ pub fn split_args(line: &str) -> Result<Vec<String>> {
     crate::lang::redis_argv(line)
 }
 
+/// The unexpired session token `sprigctl login` keeps for `endpoint`
+/// (`$SPRIGCTL_SESSIONS`, default `~/.config/sprigctl/sessions.json`).
+#[must_use]
+pub fn sprigctl_session(endpoint: &str) -> Option<String> {
+    let path = std::env::var_os("SPRIGCTL_SESSIONS")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join(".config/sprigctl/sessions.json"))
+        })?;
+    session_in(&std::fs::read(path).ok()?, endpoint)
+}
+
+/// The unexpired token for `endpoint` in a sessions file's bytes.
+fn session_in(bytes: &[u8], endpoint: &str) -> Option<String> {
+    let all: Value = serde_json::from_slice(bytes).ok()?;
+    let s = all.get(endpoint.trim_end_matches('/'))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    let expires = u128::from(s.get("expires_ms")?.as_u64()?);
+    (expires > now)
+        .then(|| s.get("token")?.as_str().map(str::to_owned))
+        .flatten()
+}
+
 /// Admin API reads for the dashboards (the same routes `sprigctl` calls).
 #[derive(Debug, Clone)]
 pub struct AdminApi {
@@ -183,7 +209,9 @@ impl AdminApi {
                         .to_owned(),
                 )
             }
-            None => None,
+            // Chapter 14: the operator's login session, kept by `sprig
+            // admin login` (`sprigctl login`) for this endpoint.
+            None => sprigctl_session(&url),
         };
         let ca = p.ca_file.as_deref().map(crate::profile::expand);
         Ok(Some(Self {
@@ -235,6 +263,20 @@ impl AdminApi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn login_sessions_by_endpoint() {
+        let f = br#"{"http://127.0.0.1:7480": {"token": "sprigop_a", "operator": "alice",
+            "expires_ms": 99999999999999},
+            "http://old:7480": {"token": "sprigop_b", "operator": "bob", "expires_ms": 1}}"#;
+        assert_eq!(
+            session_in(f, "http://127.0.0.1:7480/").as_deref(),
+            Some("sprigop_a")
+        );
+        assert_eq!(session_in(f, "http://old:7480"), None, "expired");
+        assert_eq!(session_in(f, "http://other:7480"), None);
+        assert_eq!(session_in(b"not json", "http://127.0.0.1:7480"), None);
+    }
 
     #[test]
     fn env_from_profile() {

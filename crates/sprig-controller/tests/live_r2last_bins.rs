@@ -2475,8 +2475,8 @@ async fn bins_approvals_dc_move_escalates_tenant_ancestor_platform() {
     for c in clients {
         let _ = c.await;
     }
-    let (acked, lost) =
-        check_appends(&root_url(ams1_port), kid, &tally.lock().expect("lock")).await;
+    let tally = std::mem::take(&mut *tally.lock().expect("lock"));
+    let (acked, lost) = check_appends(&root_url(ams1_port), kid, &tally).await;
     eprintln!("5. {acked} acknowledged appends, {} lost", lost.len());
     assert!(lost.is_empty(), "lost {lost:?}");
     eprintln!("done in {:?}", t_all.elapsed());

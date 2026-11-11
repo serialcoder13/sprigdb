@@ -5,6 +5,7 @@
 //! |---|---|
 //! | 1. Input assembly from the catalog and chapter 12's store | [`input`] |
 //! | 2-6. Graph, structural design, key filters, scoring, search, confidence, verdicts | [`design`] |
+//! | 4. Key-value units: shard a Redis database or namespace only when a rule says so | [`kv`] |
 //! | 7. `advisor_runs` and decision-log evidence | [`runs`] |
 //! | 9. The first-design plan: regroup by `RENAME` under a hold, `_sprig_rk`, back-fill | [`apply`] |
 //!
@@ -22,6 +23,7 @@
 pub mod apply;
 pub mod design;
 pub mod input;
+pub mod kv;
 pub mod runs;
 pub mod settings;
 

@@ -23,6 +23,7 @@
 pub mod broadcast;
 pub mod fanin;
 pub mod fanin_mq;
+pub mod fanin_sink;
 pub mod fanin_triggers;
 pub mod lifecycle;
 pub mod mq;

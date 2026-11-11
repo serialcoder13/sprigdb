@@ -350,6 +350,8 @@ pub async fn serve(
     if let Some(r) = redis_peer {
         routes = routes.add_service(r.server());
     }
+    // Chapter 39 (R5 round 6): seeds of search copies on workers.
+    routes = routes.add_service(crate::search::seed::SeedService::server());
     let routes = routes.prepare();
     tracing::info!(bind = %local, mtls = acceptor.is_some(), "peer service listening");
     let task = tokio::spawn(async move {

@@ -184,7 +184,7 @@ impl CommandLoop {
     pub(crate) fn new(
         shared: Arc<Shared>,
         ctx: Arc<GatewayContext>,
-        session: Session,
+        mut session: Session,
         l: LoggedIn,
         settings: FrontendSettings,
     ) -> Self {
@@ -195,7 +195,8 @@ impl CommandLoop {
         let mut framed =
             Framed::with_capacity(crate::offload::Paced::new(l.stream), codec, WRITE_CAPACITY);
         framed.set_backpressure_boundary(settings.relay_buffer.max(WRITE_CAPACITY));
-        let _ = l.attrs;
+        // 3306's performance_schema.session_connect_attrs (R4 round 4).
+        session.connect_attrs = l.attrs;
         Self {
             shared,
             ctx,
@@ -338,6 +339,11 @@ impl CommandLoop {
                 self.session
                     .begin_command("Query", Some(info_of(&sql, 1024)));
                 let r = if let Some(l) = local::classify(&sql) {
+                    // Counted in the session's SHOW STATUS (gaps row 46).
+                    self.session.local_questions += 1;
+                    if matches!(l, Local::Variables(_)) {
+                        self.session.local_selects += 1;
+                    }
                     self.local(l).await
                 } else {
                     self.run_answered(Request::Query { sql, attrs }).await

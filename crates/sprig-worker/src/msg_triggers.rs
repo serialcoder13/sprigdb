@@ -173,12 +173,62 @@ impl Gateways {
     }
 
     fn client(&self, g: &GwRecord) -> Result<LogicPeerClient<Channel>> {
+        self.channel(g).map(LogicPeerClient::new)
+    }
+
+    /// One `SearchSeed.SeedPage` (chapter 39, R5 round 6) on the first
+    /// gateway, in rendezvous order for `seed`, that answers; the reply's
+    /// JSON.
+    ///
+    /// # Errors
+    /// 39788 (retryable) when none does.
+    pub async fn seed_page(&self, seed: u64, request_json: String) -> Result<String> {
+        use sprig_api::proto::internal::SeedPageRequest;
+        use sprig_api::proto::internal::search_seed_client::SearchSeedClient;
+        let mut gws = self.ready().await?;
+        if gws.is_empty() {
+            return Err(unreachable_gw(
+                "no ready gateway with a peer port in this DC",
+            ));
+        }
+        gws.sort_by_key(|g| std::cmp::Reverse(rendezvous(seed, &g.gateway_id)));
+        let mut last = None;
+        for g in &gws {
+            let ch = match self.channel(g) {
+                Ok(c) => c,
+                Err(e) => {
+                    last = Some(e);
+                    continue;
+                }
+            };
+            match SearchSeedClient::new(ch)
+                .max_decoding_message_size(256 << 20)
+                .seed_page(SeedPageRequest {
+                    request_json: request_json.clone(),
+                })
+                .await
+            {
+                Ok(r) => return Ok(r.into_inner().reply_json),
+                Err(s) => {
+                    last = Some(unreachable_gw(format!(
+                        "gateway {}: {}",
+                        g.gateway_id,
+                        s.message()
+                    )));
+                    *self.listed.lock().unwrap_or_else(PoisonError::into_inner) = None;
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| unreachable_gw("no gateway answered")))
+    }
+
+    fn channel(&self, g: &GwRecord) -> Result<Channel> {
         let port = g.listeners.get("peer").copied().unwrap_or(7403);
         let scheme = if self.tls.is_some() { "https" } else { "http" };
         let uri = format!("{scheme}://{}:{port}", g.addr);
         let mut channels = self.channels.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(c) = channels.get(&uri) {
-            return Ok(LogicPeerClient::new(c.clone()));
+            return Ok(c.clone());
         }
         let mut ep = Endpoint::from_shared(uri.clone())
             .map_err(|e| unreachable_gw(format!("peer address {uri}: {e}")))?
@@ -195,7 +245,7 @@ impl Gateways {
         }
         let ch = ep.connect_lazy();
         channels.insert(uri, ch.clone());
-        Ok(LogicPeerClient::new(ch))
+        Ok(ch)
     }
 
     /// One run on the first gateway, in rendezvous order for `seed`, that
@@ -239,6 +289,57 @@ impl Gateways {
                         s.message()
                     )));
                     // The list may be stale.
+                    *self.listed.lock().unwrap_or_else(PoisonError::into_inner) = None;
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| unreachable_gw("no gateway answered")))
+    }
+}
+
+// R9 (r9queue): sink tasks' statements as their owners (queue sources,
+// the script `db` handle), through the same gateways.
+#[async_trait]
+impl sprig_sinks::peer::SinkPeer for Gateways {
+    async fn sql(
+        &self,
+        seed: u64,
+        req: &sprig_sinks::peer::SqlRequest,
+    ) -> Result<sprig_sinks::peer::SqlReply> {
+        let mut gws = self.ready().await?;
+        if gws.is_empty() {
+            return Err(unreachable_gw(
+                "no ready gateway with a peer port in this DC",
+            ));
+        }
+        gws.sort_by_key(|g| std::cmp::Reverse(rendezvous(seed, &g.gateway_id)));
+        let body = serde_json::to_string(req)
+            .map_err(|e| SprigError::internal(format!("a sink request: {e}")))?;
+        let mut last = None;
+        for g in &gws {
+            let mut c = match self.client(g) {
+                Ok(c) => c,
+                Err(e) => {
+                    last = Some(e);
+                    continue;
+                }
+            };
+            match c
+                .sink_sql(sprig_api::proto::logic_peer::SinkSqlRequest {
+                    request_json: body.clone(),
+                })
+                .await
+            {
+                Ok(r) => {
+                    return serde_json::from_str(&r.get_ref().reply_json)
+                        .map_err(|e| SprigError::internal(format!("a sink reply: {e}")));
+                }
+                Err(s) => {
+                    last = Some(unreachable_gw(format!(
+                        "gateway {}: {}",
+                        g.gateway_id,
+                        s.message()
+                    )));
                     *self.listed.lock().unwrap_or_else(PoisonError::into_inner) = None;
                 }
             }

@@ -30,7 +30,7 @@
 *-mysql fail testsuite.regression.CachedRowsetTest.testBug5188 :: fails on plain MySQL 8.4.11 too: class testsuite.regression.CachedRowsetTest cannot access class com.sun.rowset.CachedRowSetImpl (in module java.sql.rowset) because module java.sql.ro
 gateway-mysql fail testsuite.regression.CallableStatementRegressionTest.testBug57022 :: not investigated (r4close): No operations allowed after statement closed.
 gateway-mysql fail testsuite.regression.CallableStatementRegressionTest.testBug95796 :: decision D4
-gateway-mysql fail testsuite.regression.CharsetRegressionTest.testBug95139 :: gaps row 60: @@collation_connection reads MariaDB's utf8mb4_uca1400_ai_ci where MySQL says utf8mb4_0900_ai_ci (connects since gaps row 54 was fixed)
+gateway-mysql flaky testsuite.regression.CharsetRegressionTest.testBug95139 :: built in R4 round 3 (r4three), expected to pass; not rerun here (CI runs it): was gaps row 60: @@collation_connection reads MariaDB's utf8mb4_uca1400_ai_ci where MySQL says utf8mb4_0900_ai_ci (connects since gaps row 54 was fixed)
 gateway-mysql fail testsuite.regression.ConnectionRegressionTest.testAuthTestPlugin :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (mysql.plugin)
 gateway-mysql fail testsuite.regression.ConnectionRegressionTest.testBug102404 :: session-state tracking of SET NAMES
 gateway-mysql fail testsuite.regression.ConnectionRegressionTest.testBug11237 :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (SET GLOBAL)
@@ -42,7 +42,7 @@ gateway-mysql fail testsuite.regression.ConnectionRegressionTest.testBug37570 ::
 *-mysql fail testsuite.regression.ConnectionRegressionTest.testBug68400 :: fails on plain MySQL 8.4.11 too: Unable to make field private java.lang.Object java.lang.ref.Reference.referent accessible: module java.base does not "opens java.lang.ref" to unnamed 
 gateway-mysql fail testsuite.regression.ConnectionRegressionTest.testBug68733 :: SHOW PROCESSLIST times are the gateway's
 gateway-mysql fail testsuite.regression.ConnectionRegressionTest.testBug70785 :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (CONNECTION_ADMIN)
-*-mysql fail testsuite.regression.ConnectionRegressionTest.testBug79612 :: fails on plain MySQL 8.4.11 too: Incorrect number of entries for key "_runtime_version": 0 ==> expected: <true> but was: <false>
+*-mysql flaky testsuite.regression.ConnectionRegressionTest.testBug79612 :: passed through 3306 in R4 round 4 (r4four); fails on plain MySQL 8.4.11 too: Incorrect number of entries for key "_runtime_version": 0 ==> expected: <true> but was: <false>
 gateway-mysql fail testsuite.regression.ConnectionRegressionTest.testBug86741 :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (SET GLOBAL)
 gateway-mysql fail testsuite.regression.ConnectionRegressionTest.testBug90753 :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (SET GLOBAL)
 gateway-mysql fail testsuite.regression.ConnectionRegressionTest.testDefaultUserWithPasswordAuthentication :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (mysql.user)
@@ -84,16 +84,16 @@ gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug107107 ::
 *-mysql fail testsuite.regression.StatementRegressionTest.testBug107543_IntoFile :: fails on plain MySQL 8.4.11 too: /var/lib/mysql-files
 gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug109339 :: out-of-range check on a server-prepared statement differs
 gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug112090 :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (SHOW BINARY LOG STATUS: REPLICATION CLIENT)
-gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug113509 :: gaps row 46 (Prepared_stmt_count)
+gateway-mysql flaky testsuite.regression.StatementRegressionTest.testBug113509 :: built in R4 round 3 (r4three), expected to pass; not rerun here (CI runs it): was gaps row 46 (Prepared_stmt_count)
 gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug119245 :: gaps row 47: MariaDB refuses an unquoted identifier outside the BMP
 gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug17881458 :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (SET GLOBAL)
 gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug21132376 :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (SET GLOBAL)
 *-mysql fail testsuite.regression.StatementRegressionTest.testBug21876798 :: fails on plain MySQL 8.4.11 too: Case: 0 [ - | - ] ==> expected: <true> but was: <false>
-gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug41532 :: gaps row 46: session status counters are the pooled connection's
-gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug48172 :: gaps row 46
+gateway-mysql flaky testsuite.regression.StatementRegressionTest.testBug41532 :: built in R4 round 3 (r4three), expected to pass; not rerun here (CI runs it): was gaps row 46: session status counters are the pooled connection's
+gateway-mysql flaky testsuite.regression.StatementRegressionTest.testBug48172 :: built in R4 round 3 (r4three), expected to pass; not rerun here (CI runs it): was gaps row 46
 gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug68916 :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (mysql.time_zone_name)
 gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug71396 :: decision D4
-gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug74932 :: gaps row 46 (Prepared_stmt_count)
+gateway-mysql flaky testsuite.regression.StatementRegressionTest.testBug74932 :: built in R4 round 3 (r4three), expected to pass; not rerun here (CI runs it): was gaps row 46 (Prepared_stmt_count)
 gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug74998 :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (SET GLOBAL)
 gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug77658 :: statement cancellation, as testBug103796
 *-mysql fail testsuite.regression.StatementRegressionTest.testBug78313 :: fails on plain MySQL 8.4.11 too: expected: <true> but was: <false>
@@ -119,10 +119,10 @@ gateway-mysql fail testsuite.simple.ConnectionTest.testDeadlockDetection :: tena
 gateway-mysql fail testsuite.simple.ConnectionTest.testDriverConnectPropertiesPrecedence :: decision D4: no RSA key exchange; the gateway's 1045 says so
 gateway-mysql fail testsuite.simple.ConnectionTest.testUseCompress :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (SET GLOBAL)
 gateway-mysql fail testsuite.simple.MetaDataTest.testForeignKeys :: gaps row 39: DROP TABLE IF EXISTS in a missing database
-gateway-mysql fail testsuite.simple.MetaDataTest.testGeneratedColumns :: gaps row 49: NOT NULL on a generated column
+gateway-mysql flaky testsuite.simple.MetaDataTest.testGeneratedColumns :: built in R4 round 3 (r4three), expected to pass; not rerun here (CI runs it): was gaps row 49: NOT NULL on a generated column
 gateway-mysql fail testsuite.simple.MetaDataTest.testGetBestRowIdentifier :: gaps row 51: metadata calls without a catalog walk every database, and SHOW INDEX ... FROM performance_schema gives 1142, not the 1146 root gets
 gateway-mysql fail testsuite.simple.MetaDataTest.testGetColumnPrivileges :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (GRANT on the test database's tables as the suite expects)
-gateway-mysql fail testsuite.simple.MetaDataTest.testGetImportedKeys :: gaps row 51
+gateway-mysql flaky testsuite.simple.MetaDataTest.testGetImportedKeys :: gaps row 51; passed through 3306 in R4 round 4 (r4four), flaky until CI confirms
 gateway-mysql fail testsuite.simple.MetaDataTest.testGetIndexInfo :: gaps row 51
 gateway-mysql fail testsuite.simple.MetaDataTest.testGetTablePrivileges :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (mysql.tables_priv)
 gateway-mysql fail testsuite.simple.QueryAttributesTest.cachedServerPreparedStatementsWithQueryAttributes :: tenant model: needs the mysql schema, SUPER-class or global privileges a tenant account doesn't have (as for a MySQL user without them) (reads mysql.component to find the query-attributes component)
@@ -151,3 +151,4 @@ gateway-mysql fail testsuite.simple.StatementsTest.testReadOnlySafeStatements ::
 gateway-mysql flaky testsuite.simple.StatementsTest.testResultSetProducingQueries :: standalone VALUES ROW: fixed after the measured run (compat::rowsyntax); expected to pass
 gateway-mysql flaky testsuite.simple.ConnectionTest.testIPv6 :: 39070 catalog unavailable: the shared dev controller's catalog didn't answer during r4two's run (10 November)
 gateway-mysql flaky testsuite.regression.StatementRegressionTest.testBug51666 :: gaps row 46: Com_select is the pooled backend connection's counter; passes only when the session keeps one connection
+gateway-mysql flaky testsuite.regression.MetaDataRegressionTest.testBug33594 :: R4 round 4 (r4four): Com_stmt_prepare read 5, not 1, in the full chunk; passes alone (the count depends on the statements before it)

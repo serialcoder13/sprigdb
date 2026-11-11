@@ -26,6 +26,7 @@
 //! type needs a column's definition.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use crate::lex::{self, LexOptions, Token, TokenKind};
 
@@ -54,7 +55,11 @@ pub fn fx_column(e: &str) -> String {
 /// Whether a column name is a functional part's hidden column.
 #[must_use]
 pub fn is_fx_column(name: &str) -> bool {
-    name.len() > FX_PREFIX.len() && name[..FX_PREFIX.len()].eq_ignore_ascii_case(FX_PREFIX)
+    name.len() == FX_PREFIX.len() + 8
+        && name[..FX_PREFIX.len()].eq_ignore_ascii_case(FX_PREFIX)
+        && name[FX_PREFIX.len()..]
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit())
 }
 
 struct Sig<'a> {
@@ -64,15 +69,15 @@ struct Sig<'a> {
 
 impl Sig<'_> {
     fn word(&self, j: usize, w: &[u8]) -> bool {
-        self.t
-            .get(j)
-            .is_some_and(|tk| tk.kind == TokenKind::Word && tk.bytes(self.sql).eq_ignore_ascii_case(w))
+        self.t.get(j).is_some_and(|tk| {
+            tk.kind == TokenKind::Word && tk.bytes(self.sql).eq_ignore_ascii_case(w)
+        })
     }
 
     fn punct(&self, j: usize, c: u8) -> bool {
-        self.t
-            .get(j)
-            .is_some_and(|tk| matches!(tk.kind, TokenKind::Punct | TokenKind::Op) && tk.bytes(self.sql) == [c])
+        self.t.get(j).is_some_and(|tk| {
+            matches!(tk.kind, TokenKind::Punct | TokenKind::Op) && tk.bytes(self.sql) == [c]
+        })
     }
 
     fn ident(&self, j: usize) -> Option<String> {
@@ -116,7 +121,8 @@ impl Sig<'_> {
     }
 
     fn text(&self, a: usize, b: usize) -> String {
-        String::from_utf8_lossy(&self.sql[self.t[a].start as usize..self.t[b].end as usize]).into_owned()
+        String::from_utf8_lossy(&self.sql[self.t[a].start as usize..self.t[b].end as usize])
+            .into_owned()
     }
 }
 
@@ -147,7 +153,12 @@ const ATTRIBUTE: &[&[u8]] = &[
 fn column_types(s: &Sig<'_>, elems: &[(usize, usize)]) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for &(a, b) in elems {
-        if a >= b || !s.t[a].kind.is_ident_like() || key_element(s, a).is_some() || s.word(a, b"CONSTRAINT") || s.word(a, b"CHECK") {
+        if a >= b
+            || !s.t[a].kind.is_ident_like()
+            || key_element(s, a).is_some()
+            || s.word(a, b"CONSTRAINT")
+            || s.word(a, b"CHECK")
+        {
             continue;
         }
         let Some(name) = s.ident(a) else { continue };
@@ -173,7 +184,10 @@ fn key_element(s: &Sig<'_>, a: usize) -> Option<usize> {
     let mut j = a;
     if s.word(j, b"CONSTRAINT") {
         j += 1;
-        if s.t.get(j).is_some_and(|t| t.kind.is_ident_like()) && !s.word(j, b"UNIQUE") && !s.word(j, b"PRIMARY") {
+        if s.t.get(j).is_some_and(|t| t.kind.is_ident_like())
+            && !s.word(j, b"UNIQUE")
+            && !s.word(j, b"PRIMARY")
+        {
             j += 1;
         }
     }
@@ -200,22 +214,42 @@ fn key_element(s: &Sig<'_>, a: usize) -> Option<usize> {
 /// MariaDB's type for MySQL's `CAST(.. AS t)` target `t`.
 fn cast_type(t: &str) -> Option<String> {
     let up = t.trim().to_ascii_uppercase();
-    let word = up.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').next().unwrap_or("");
+    let word = up
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .next()
+        .unwrap_or("");
     Some(match word {
         "CHAR" if up.contains('(') => format!("VARCHAR{}", &t.trim()[4..]),
         "BINARY" if up.contains('(') => format!("VARBINARY{}", &t.trim()[6..]),
         "SIGNED" => "BIGINT".to_owned(),
         "UNSIGNED" => "BIGINT UNSIGNED".to_owned(),
-        "DATE" | "DATETIME" | "TIME" | "DECIMAL" | "DOUBLE" | "FLOAT" | "REAL" | "YEAR" => t.trim().to_owned(),
+        "DATE" | "DATETIME" | "TIME" | "DECIMAL" | "DOUBLE" | "FLOAT" | "REAL" | "YEAR" => {
+            t.trim().to_owned()
+        }
         _ => return None,
     })
 }
 
 fn is_integer_type(t: &str) -> bool {
     let up = t.trim_start().to_ascii_uppercase();
-    ["TINYINT", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT", "BOOL", "BOOLEAN"]
-        .iter()
-        .any(|w| up.starts_with(w) && up[w.len()..].chars().next().is_none_or(|c| !c.is_ascii_alphabetic()))
+    [
+        "TINYINT",
+        "SMALLINT",
+        "MEDIUMINT",
+        "INT",
+        "INTEGER",
+        "BIGINT",
+        "BOOL",
+        "BOOLEAN",
+    ]
+    .iter()
+    .any(|w| {
+        up.starts_with(w)
+            && up[w.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_ascii_alphabetic())
+    })
 }
 
 fn is_string_type(t: &str) -> bool {
@@ -225,26 +259,39 @@ fn is_string_type(t: &str) -> bool {
 
 /// The type MySQL gives the expression `[a, b]`, as MariaDB DDL; `None`
 /// when it isn't known (see the module docs).
+#[allow(clippy::many_single_char_names)]
 fn infer(s: &Sig<'_>, a: usize, b: usize, cols: &BTreeMap<String, String>) -> Option<String> {
     let col_type = |j: usize| -> Option<&String> {
         // `c` or `t.c`.
-        let name = if s.punct(j + 1, b'.') { s.ident(j + 2)? } else { s.ident(j)? };
+        let name = if s.punct(j + 1, b'.') {
+            s.ident(j + 2)?
+        } else {
+            s.ident(j)?
+        };
         cols.get(&name.to_lowercase())
     };
     // CAST(x AS t), CONVERT(x, t)
-    if (s.word(a, b"CAST") || s.word(a, b"CONVERT")) && s.punct(a + 1, b'(') && s.matching(a + 1) == Some(b) {
+    if (s.word(a, b"CAST") || s.word(a, b"CONVERT"))
+        && s.punct(a + 1, b'(')
+        && s.matching(a + 1) == Some(b)
+    {
         let mut d = 0;
         for k in a + 2..b {
             if s.punct(k, b'(') {
                 d += 1;
             } else if s.punct(k, b')') {
                 d -= 1;
-            } else if d == 0 && ((s.word(a, b"CAST") && s.word(k, b"AS")) || (s.word(a, b"CONVERT") && s.punct(k, b','))) {
+            } else if d == 0
+                && ((s.word(a, b"CAST") && s.word(k, b"AS"))
+                    || (s.word(a, b"CONVERT") && s.punct(k, b',')))
+            {
                 if k + 1 > b - 1 {
                     return None;
                 }
                 let t = s.text(k + 1, b - 1);
-                if t.to_ascii_uppercase().contains("ARRAY") || t.to_ascii_uppercase().starts_with("JSON") {
+                if t.to_ascii_uppercase().contains("ARRAY")
+                    || t.to_ascii_uppercase().starts_with("JSON")
+                {
                     return None;
                 }
                 return cast_type(&t);
@@ -261,41 +308,72 @@ fn infer(s: &Sig<'_>, a: usize, b: usize, cols: &BTreeMap<String, String>) -> Op
             if single { col_type(x).cloned() } else { None }
         });
         return match f.as_str() {
-            "lower" | "upper" | "lcase" | "ucase" | "trim" | "ltrim" | "rtrim" | "reverse" | "left"
-            | "right" | "substring" | "substr" | "mid" => first_col.filter(|t| is_string_type(t)),
-            "year" | "month" | "day" | "dayofmonth" | "dayofweek" | "dayofyear" | "hour" | "minute"
-            | "second" | "quarter" | "week" | "weekday" | "weekofyear" => Some("INT".to_owned()),
+            "lower" | "upper" | "lcase" | "ucase" | "trim" | "ltrim" | "rtrim" | "reverse"
+            | "left" | "right" | "substring" | "substr" | "mid" => {
+                first_col.filter(|t| is_string_type(t))
+            }
+            "year" | "month" | "day" | "dayofmonth" | "dayofweek" | "dayofyear" | "hour"
+            | "minute" | "second" | "quarter" | "week" | "weekday" | "weekofyear" => {
+                Some("INT".to_owned())
+            }
             "date" => Some("DATE".to_owned()),
             "md5" => Some("CHAR(32)".to_owned()),
             "sha1" | "sha" => Some("CHAR(40)".to_owned()),
             "crc32" => Some("INT UNSIGNED".to_owned()),
-            "length" | "char_length" | "character_length" | "octet_length" | "bit_length" => Some("BIGINT".to_owned()),
-            "abs" => first_col.filter(|t| is_integer_type(t)).map(|_| "BIGINT".to_owned()),
+            "length" | "char_length" | "character_length" | "octet_length" | "bit_length" => {
+                Some("BIGINT".to_owned())
+            }
+            "abs" => first_col
+                .filter(|t| is_integer_type(t))
+                .map(|_| "BIGINT".to_owned()),
             _ => None,
         };
     }
-    // Arithmetic over integer columns and integer literals.
+    // `c COLLATE x` over a string column (R4 round 4): the column's type
+    // with that collation.
+    if b == a + 2 && s.word(a + 1, b"COLLATE") && s.t[a + 2].kind.is_ident_like() {
+        let t = col_type(a)?.clone();
+        if !is_string_type(&t) {
+            return None;
+        }
+        let base = t.split(" COLLATE ").next().unwrap_or(&t).to_owned();
+        return Some(format!("{base} COLLATE {}", s.text(a + 2, a + 2)));
+    }
+    // Arithmetic over numeric columns and literals: integers alone give
+    // `BIGINT`; a `/`, a decimal literal or a non-integer column (R4
+    // round 4) gives `DOUBLE`.
     let mut any_col = false;
+    let mut real = false;
     for k in a..=b {
         let tk = &s.t[k];
         match tk.kind {
             TokenKind::Number if tk.bytes(s.sql).iter().all(u8::is_ascii_digit) => {}
+            TokenKind::Number => real = true,
             TokenKind::Op if matches!(tk.bytes(s.sql), b"+" | b"-" | b"*") => {}
+            TokenKind::Op if tk.bytes(s.sql) == b"/" => real = true,
             TokenKind::Punct if matches!(tk.bytes(s.sql), b"(" | b")" | b".") => {}
             _ if tk.kind.is_ident_like() => {
                 if s.punct(k + 1, b'.') {
                     continue;
                 }
                 let name = s.ident(k)?.to_lowercase();
-                if !cols.get(&name).is_some_and(|t| is_integer_type(t)) {
-                    return None;
+                let t = cols.get(&name)?;
+                if !is_integer_type(t) {
+                    let up = t.trim_start().to_ascii_uppercase();
+                    if !["DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC"]
+                        .iter()
+                        .any(|n| up.starts_with(n))
+                    {
+                        return None;
+                    }
+                    real = true;
                 }
                 any_col = true;
             }
             _ => return None,
         }
     }
-    any_col.then(|| "BIGINT".to_owned())
+    any_col.then(|| if real { "DOUBLE" } else { "BIGINT" }.to_owned())
 }
 
 /// One functional part found: the part's `(` and `)`, its expression's
@@ -353,6 +431,52 @@ fn apply(sql: &[u8], mut edits: Vec<(usize, usize, String)>) -> Vec<u8> {
 /// `None` when nothing changes or a part's type isn't known.
 #[must_use]
 pub fn rewrite(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
+    rewrite_with(sql, opts, &BTreeMap::new())
+}
+
+/// The table whose column types a `CREATE INDEX` or `ALTER TABLE ... ADD
+/// INDEX` with functional parts needs (its text as written, perhaps
+/// qualified), when [`rewrite`] can't type a part from the statement
+/// alone (R4 round 4: the gateway reads them from `information_schema`
+/// and calls [`rewrite_with`]).
+#[must_use]
+pub fn needs_types(sql: &[u8], opts: &LexOptions) -> Option<String> {
+    if !(sql.windows(2).any(|w| w == b"((") || sql.windows(3).any(|w| w == b"( (")) {
+        return None;
+    }
+    if rewrite(sql, opts).is_some() {
+        return None;
+    }
+    let tokens = lex::lex(sql, opts).ok()?;
+    let s = Sig {
+        sql,
+        t: tokens.into_iter().filter(|t| !t.kind.is_trivia()).collect(),
+    };
+    if s.word(0, b"CREATE") {
+        let j = if s.word(1, b"UNIQUE") { 2 } else { 1 };
+        if !s.word(j, b"INDEX") {
+            return None;
+        }
+        let on = (j + 2..s.t.len()).find(|&k| s.word(k, b"ON"))?;
+        let list = (on + 1..s.t.len()).find(|&k| s.punct(k, b'('))?;
+        return Some(s.text(on + 1, list - 1));
+    }
+    if s.word(0, b"ALTER") && s.word(1, b"TABLE") {
+        let add = (2..s.t.len()).find(|&k| s.word(k, b"ADD"))?;
+        return Some(s.text(2, add - 1));
+    }
+    None
+}
+
+/// [`rewrite`] with the table's column types known (`known`: lower-case
+/// name to type), for `CREATE INDEX` and `ALTER TABLE`.
+#[must_use]
+#[allow(clippy::too_many_lines)] // the three statement forms
+pub fn rewrite_with(
+    sql: &[u8],
+    opts: &LexOptions,
+    known: &BTreeMap<String, String>,
+) -> Option<Vec<u8>> {
     // A functional part always has `((` once whitespace is gone, or
     // `( (`; cheap test on the parenthesis pair.
     if !(sql.windows(2).any(|w| w == b"((") || sql.windows(3).any(|w| w == b"( (")) {
@@ -366,14 +490,18 @@ pub fn rewrite(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
     let st = |j: usize| s.t[j].start as usize;
     let en = |j: usize| s.t[j].end as usize;
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
-    if s.word(0, b"CREATE") && (s.word(1, b"TABLE") || (s.word(1, b"TEMPORARY") && s.word(2, b"TABLE"))) {
+    if s.word(0, b"CREATE")
+        && (s.word(1, b"TABLE") || (s.word(1, b"TEMPORARY") && s.word(2, b"TABLE")))
+    {
         let open = (0..s.t.len()).find(|&j| s.punct(j, b'('))?;
         let close = s.matching(open)?;
         let elems = s.split(open + 1, close);
         let cols = column_types(&s, &elems);
         let mut defs: BTreeMap<String, String> = BTreeMap::new();
         for &(a, _) in &elems {
-            let Some(list) = key_element(&s, a) else { continue };
+            let Some(list) = key_element(&s, a) else {
+                continue;
+            };
             for p in parts(&s, list, &cols)? {
                 edits.push((st(p.open), en(p.close), format!("`{}`", p.column)));
                 defs.insert(p.column, p.definition);
@@ -383,7 +511,11 @@ pub fn rewrite(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
             return None;
         }
         let at = st(close);
-        edits.push((at, at, defs.values().map(|d| format!(", {d}")).collect()));
+        let text = defs.values().fold(String::new(), |mut s, d| {
+            let _ = write!(s, ", {d}");
+            s
+        });
+        edits.push((at, at, text));
         return Some(apply(sql, edits));
     }
     // CREATE [UNIQUE] INDEX i [USING ..] ON t (parts) -> ALTER TABLE
@@ -400,7 +532,7 @@ pub fn rewrite(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
         let on = (j + 2..s.t.len()).find(|&k| s.word(k, b"ON"))?;
         let list = (on + 1..s.t.len()).find(|&k| s.punct(k, b'('))?;
         let table = s.text(on + 1, list - 1);
-        let ps = parts(&s, list, &BTreeMap::new())?;
+        let ps = parts(&s, list, known)?;
         if ps.is_empty() {
             return None;
         }
@@ -416,7 +548,7 @@ pub fn rewrite(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
         let mut seen = Vec::new();
         for p in &ps {
             if !seen.contains(&p.column) {
-                cols.push_str(&format!("ADD COLUMN IF NOT EXISTS {}, ", p.definition));
+                let _ = write!(cols, "ADD COLUMN IF NOT EXISTS {}, ", p.definition);
                 seen.push(p.column.clone());
             }
         }
@@ -443,8 +575,10 @@ pub fn rewrite(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
             if !s.word(start, b"ADD") {
                 continue;
             }
-            let Some(list) = key_element(&s, start + 1) else { continue };
-            for p in parts(&s, list, &BTreeMap::new())? {
+            let Some(list) = key_element(&s, start + 1) else {
+                continue;
+            };
+            for p in parts(&s, list, known)? {
                 edits.push((st(p.open), en(p.close), format!("`{}`", p.column)));
                 if !defs.iter().any(|(c, _)| *c == p.column) {
                     defs.push((p.column, p.definition));
@@ -457,7 +591,11 @@ pub fn rewrite(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
         // The columns come first: `ADD INDEX` names them.
         let first_add = (2..s.t.len()).find(|&k| s.word(k, b"ADD"))?;
         let at = st(first_add);
-        edits.push((at, at, defs.iter().map(|(_, d)| format!("ADD COLUMN IF NOT EXISTS {d}, ")).collect()));
+        let text = defs.iter().fold(String::new(), |mut s, (_, d)| {
+            let _ = write!(s, "ADD COLUMN IF NOT EXISTS {d}, ");
+            s
+        });
+        edits.push((at, at, text));
         return Some(apply(sql, edits));
     }
     None
@@ -469,6 +607,52 @@ mod tests {
 
     fn rw(s: &str) -> Option<String> {
         rewrite(s.as_bytes(), &LexOptions::mysql84()).map(|v| String::from_utf8(v).unwrap())
+    }
+
+    #[test]
+    fn collate_and_real_arithmetic() {
+        let o = LexOptions::mysql84();
+        let known: BTreeMap<String, String> = [
+            ("title".to_owned(), "varchar(100)".to_owned()),
+            ("height".to_owned(), "double".to_owned()),
+            ("weight".to_owned(), "int".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        let r = |sql: &str| {
+            rewrite_with(sql.as_bytes(), &o, &known).map(|v| String::from_utf8(v).unwrap())
+        };
+        let out = r("CREATE INDEX i ON t ((`title` COLLATE `utf8mb4_esperanto_ci`) DESC)").unwrap();
+        assert!(out.contains("varchar(100) COLLATE `utf8mb4_esperanto_ci` GENERATED ALWAYS"), "{out}");
+        let out = r("CREATE INDEX i ON t (((`height` / (`weight` + 5))))").unwrap();
+        assert!(out.contains("` DOUBLE GENERATED ALWAYS AS ((`height` / (`weight` + 5)))"), "{out}");
+        let out = r("CREATE INDEX i ON t ((`weight` + 0.0))").unwrap();
+        assert!(out.contains("` DOUBLE GENERATED"), "{out}");
+        let out = r("CREATE INDEX i ON t ((`weight` * 2))").unwrap();
+        assert!(out.contains("` BIGINT GENERATED"), "{out}");
+    }
+
+    #[test]
+    fn create_index_with_known_types() {
+        let o = LexOptions::mysql84();
+        let sql = b"CREATE UNIQUE INDEX u ON `t` ((LOWER(`name`)), `rank`)";
+        assert!(rewrite(sql, &o).is_none());
+        assert_eq!(needs_types(sql, &o).as_deref(), Some("`t`"));
+        let known: BTreeMap<String, String> = [("name".to_owned(), "varchar(50)".to_owned())]
+            .into_iter()
+            .collect();
+        let c = fx_column("LOWER(`name`)");
+        assert_eq!(
+            String::from_utf8(rewrite_with(sql, &o, &known).unwrap()).unwrap(),
+            format!(
+                "ALTER TABLE `t` ADD COLUMN IF NOT EXISTS `{c}` varchar(50) GENERATED ALWAYS AS (LOWER(`name`)) VIRTUAL INVISIBLE, ADD UNIQUE INDEX `u` (`{c}`, `rank`)"
+            )
+        );
+        assert_eq!(
+            needs_types(b"ALTER TABLE s.t ADD INDEX i ((upper(a)))", &o).as_deref(),
+            Some("s.t")
+        );
+        assert!(needs_types(b"CREATE INDEX i ON t (a)", &o).is_none());
     }
 
     #[test]
@@ -486,10 +670,17 @@ mod tests {
         let k = fx_column("cast(j->>'$.k' as char(20))");
         let out = rw("CREATE TABLE t (d DATE, j JSON, KEY a (id, (year(d)) DESC), UNIQUE KEY b ((cast(j->>'$.k' as char(20)))))").unwrap();
         assert!(
-            out.starts_with(&format!("CREATE TABLE t (d DATE, j JSON, KEY a (id, `{y}` DESC), UNIQUE KEY b (`{k}`), ")),
+            out.starts_with(&format!(
+                "CREATE TABLE t (d DATE, j JSON, KEY a (id, `{y}` DESC), UNIQUE KEY b (`{k}`), "
+            )),
             "{out}"
         );
-        assert!(out.contains(&format!("`{y}` INT GENERATED ALWAYS AS (year(d)) VIRTUAL INVISIBLE")), "{out}");
+        assert!(
+            out.contains(&format!(
+                "`{y}` INT GENERATED ALWAYS AS (year(d)) VIRTUAL INVISIBLE"
+            )),
+            "{out}"
+        );
         assert!(
             out.contains(&format!("`{k}` VARCHAR(20) GENERATED ALWAYS AS (cast(j->>'$.k' as char(20))) VIRTUAL INVISIBLE")),
             "{out}"
@@ -525,7 +716,9 @@ mod tests {
         let c = fx_column("a + b * 2");
         assert_eq!(
             rw("CREATE TABLE t (a INT, b BIGINT UNSIGNED, KEY ((a + b * 2)))").unwrap(),
-            format!("CREATE TABLE t (a INT, b BIGINT UNSIGNED, KEY (`{c}`), `{c}` BIGINT GENERATED ALWAYS AS (a + b * 2) VIRTUAL INVISIBLE)")
+            format!(
+                "CREATE TABLE t (a INT, b BIGINT UNSIGNED, KEY (`{c}`), `{c}` BIGINT GENERATED ALWAYS AS (a + b * 2) VIRTUAL INVISIBLE)"
+            )
         );
     }
 }

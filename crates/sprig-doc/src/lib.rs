@@ -33,5 +33,7 @@ pub mod keyenc;
 pub mod meta;
 pub mod sessions;
 pub mod sql;
+/// `$text`, `$search` and `$searchMeta` (chapter 39, R5 round 5).
+pub mod text;
 pub mod translate;
 pub mod update;

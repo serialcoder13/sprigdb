@@ -397,7 +397,11 @@ async fn copy_swap(
         tenant: cx.tenant,
         cluster: cx.view.cluster.clone(),
         table: t.clone(),
-        ddl: add_index_clause(def),
+        // The shadow is offline: a field column and its index together.
+        ddl: match crate::autoindex::kv::add_fields_clause(def) {
+            Some(cols) => format!("{cols}, {}", add_index_clause(def)),
+            None => add_index_clause(def),
+        },
     };
     let started = std::time::Instant::now();
     match m.copy_swap(&req).await {

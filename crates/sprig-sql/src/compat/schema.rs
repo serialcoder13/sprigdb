@@ -130,7 +130,10 @@ pub fn fx_join(phys: &str, lit: Lit<'_>) -> String {
          `GENERATION_EXPRESSION` AS `_sprig_fe` FROM information_schema.COLUMNS \
          WHERE `TABLE_SCHEMA` = {phys} AND `COLUMN_NAME` LIKE {} LIMIT 4294967295) AS `_sprig_f` \
          ON `_sprig_ft` = `TABLE_NAME` AND {FX_COL} = `COLUMN_NAME`",
-        lit(&format!("{}%", super::fxindex::FX_PREFIX.replace('_', "\\_")))
+        lit(&format!(
+            "{}%",
+            super::fxindex::FX_PREFIX.replace('_', "\\_")
+        ))
     )
 }
 
@@ -157,24 +160,33 @@ pub fn mysql_functional_parts(text: &str) -> String {
     }
     let mut exprs: Vec<(String, String)> = Vec::new();
     for line in text.split('\n') {
-        let Some((name, at)) = column_line_name(line) else { continue };
+        let Some((name, at)) = column_line_name(line) else {
+            continue;
+        };
         if !super::fxindex::is_fx_column(&name) {
             continue;
         }
         let rest = &line[at..];
-        let Some(g) = rest.find(" GENERATED ALWAYS AS (") else { continue };
+        let Some(g) = rest.find(" GENERATED ALWAYS AS (") else {
+            continue;
+        };
         let body = &rest[g + " GENERATED ALWAYS AS ".len()..];
-        let Some(v) = body.rfind(") VIRTUAL") else { continue };
-        let e = body[1..v]
-            .replace("lcase(", "lower(")
-            .replace("ucase(", "upper(");
+        let Some(v) = body.rfind(") VIRTUAL") else {
+            continue;
+        };
+        // R4 round 4: MySQL's printing (gaps row 64).
+        let raw = &body[1..v];
+        let e = super::exprprint::mysql_expr(raw, super::exprprint::table_charset(text))
+            .unwrap_or_else(|| raw.replace("lcase(", "lower(").replace("ucase(", "upper("));
         exprs.push((format!("`{}`", name.replace('`', "``")), e));
     }
     if exprs.is_empty() {
         return text.to_owned();
     }
     text.split('\n')
-        .filter(|line| !column_line_name(line).is_some_and(|(n, _)| super::fxindex::is_fx_column(&n)))
+        .filter(|line| {
+            !column_line_name(line).is_some_and(|(n, _)| super::fxindex::is_fx_column(&n))
+        })
         .map(|line| {
             let t = line.trim_start();
             if t.starts_with("KEY ") || t.starts_with("UNIQUE KEY ") {
@@ -368,7 +380,10 @@ pub fn mysql_view(table: &str, lit: Lit<'_>) -> Option<Vec<(&'static str, Src)>>
             ));
             // Functional key parts (R4 round 3, [`super::fxindex`]):
             // no column, and the expression (see [`fx_join`]).
-            v[7] = ("COLUMN_NAME", Sql(format!("IF({FX_COL} IS NULL, `COLUMN_NAME`, NULL)")));
+            v[7] = (
+                "COLUMN_NAME",
+                Sql(format!("IF({FX_COL} IS NULL, `COLUMN_NAME`, NULL)")),
+            );
             v.push(("EXPRESSION", Sql(fx_expression(lit))));
             v
         }
@@ -1202,10 +1217,11 @@ pub fn mysql_create_table(text: &str) -> String {
             prev.pop();
         }
     }
-    mysql_collations(&lines.join("\n"))
+    // R4 round 4: expressions printed the MySQL way (gaps row 62).
+    super::exprprint::mysql_expressions(&mysql_collations(&lines.join("\n")))
 }
 
-/// The column of a `  CONSTRAINT `_sprig_nn_<c>` CHECK (...)` line.
+/// The column of a ``  CONSTRAINT `_sprignn_<c>` CHECK (...)`` line.
 fn nn_check_line(line: &str) -> Option<String> {
     let rest = line.strip_prefix("  CONSTRAINT ")?;
     let (name, _) = column_line_name(&format!("  {rest}"))?;

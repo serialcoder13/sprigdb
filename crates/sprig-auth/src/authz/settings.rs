@@ -91,6 +91,40 @@ pub static GRANTS_ON_DROP: Setting<Cow<'static, str>> = Setting {
 };
 sprig_settings::register!(GRANTS_ON_DROP);
 
+/// `rls.backend_enforcement` (chapter 29, "Inside MariaDB"): what MariaDB
+/// enforces of row-level security besides the gateway's rewrite. `views`:
+/// write checks (triggers) and policy views, with the accounts of bound
+/// users reading the tables only through the views; `triggers`: write
+/// checks only; `off`: neither (the rewrite alone). Read at the protected
+/// table's database.
+pub static RLS_BACKEND_ENFORCEMENT: Setting<Cow<'static, str>> = Setting {
+    key: "rls.backend_enforcement",
+    default: Cow::Borrowed("views"),
+    scopes: DB_TENANT_GLOBAL,
+    hard: HardBounds::one_of(&["views", "triggers", "off"]),
+    apply: Apply::Live,
+    operator_only: false,
+    owner: 29,
+    doc: "views (write checks and policy views), triggers (write checks only) or off (the gateway's rewrite alone)",
+};
+sprig_settings::register!(RLS_BACKEND_ENFORCEMENT);
+
+/// `rls.inline_subtree_max` (chapter 29, "What a policy may reference"):
+/// the most tenant ids `SPRIG_TENANT_IN_SUBTREE` and
+/// `SPRIG_TENANT_MANAGED` inline into a statement; a larger set is
+/// refused (39366) until `__sprig_subtree` exists.
+pub static RLS_INLINE_SUBTREE_MAX: Setting<u64> = Setting {
+    key: "rls.inline_subtree_max",
+    default: 1000,
+    scopes: Scopes::TREE,
+    hard: HardBounds::range(1, 100_000),
+    apply: Apply::Live,
+    operator_only: false,
+    owner: 29,
+    doc: "Tenant ids inlined for SPRIG_TENANT_IN_SUBTREE and SPRIG_TENANT_MANAGED",
+};
+sprig_settings::register!(RLS_INLINE_SUBTREE_MAX);
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]

@@ -29,7 +29,7 @@ function DbNode({ tenant, db, filter, open: initial }: { tenant: string; db: str
           {items.map((o) => (
             <li key={`${o.kind}:${o.name}`}>
               <NavLink to={`${base}/obj/${o.kind}/${encodeURIComponent(o.name)}`} title={o.kind}>
-                <span aria-hidden="true">{o.kind === 'view' ? '◇ ' : o.kind === 'table' ? '▤ ' : 'ƒ '}</span>
+                <span aria-hidden="true">{o.kind === 'view' ? '◇ ' : o.kind === 'table' ? '▤ ' : o.kind === 'graph' ? '◎ ' : 'ƒ '}</span>
                 {o.name}
               </NavLink>
             </li>

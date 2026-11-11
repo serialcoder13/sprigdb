@@ -19,8 +19,26 @@
 //! pushed when the translator says it is exact, otherwise candidates are
 //! read in pages and rechecked. `numCandidates` is checked but every search
 //! is exact: an approximate graph over a collection needs a side table
-//! (MariaDB refuses a vector index on a generated column: 1252), which
-//! belongs with chapter 39's search build.
+//! (MariaDB refuses a vector index on a generated column: 1252).
+//!
+//! **Approximate vectors (R5 round 5, decision R33).** Each vector index
+//! has a side table `__sprig_doc_vx_<hash>` (`_id`, the vector, the
+//! document's `_v`) with MariaDB's HNSW `VECTOR INDEX`. It is kept in step
+//! on read, not on write: before an approximate search, rows whose `_v`
+//! is newer than the side table's newest minus a margin are copied in
+//! (an upsert, read through an index on `_v`), at most every
+//! `vector_sync_ms` (1 s) per gateway, and every minute rows of deleted
+//! documents are removed; approximate results are thus up to about a
+//! second behind writes, as Atlas Vector Search is eventually consistent.
+//! A missing side table (a new index, or one a move didn't carry) is
+//! created and filled the same way (MariaDB limits a vector index's
+//! primary key to 256 bytes with its length: documents whose encoded
+//! `_id` is over 254 bytes stay out of approximate searches). An approximate search reads
+//! `numCandidates` nearest `_id`s from the side table, then the documents
+//! themselves, rechecks the filter, and ranks by the exact distance of
+//! the stored vector, so a stale side row can cost recall but never a
+//! wrong result. Below `vector.ann_min_rows` vectors the search stays
+//! exact.
 
 use bson::{Bson, Document, doc};
 use sprig_proto_mongo::errors::{MongoError, code};
@@ -39,6 +57,29 @@ pub const SCORE_FIELD: &str = "__sprig_vector_score";
 
 /// The hidden table of search index definitions in each database.
 const SEARCH_TABLE: &str = "__sprig_doc_search_ix";
+
+/// How far back (in `_v` units: ms << 16) each side-table sync re-reads:
+/// writers' clocks and transactions that commit late.
+const SIDE_MARGIN: u64 = 30_000 << 16;
+
+/// Side tables synced, and when (this process): at most once a second.
+static SYNCED: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, u64)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Side tables purged of deleted documents, and when (this process).
+static PURGED: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// The side table of vector index `name` on collection table `table`.
+#[must_use]
+pub fn vector_side_table(table: &str, name: &str) -> String {
+    let mut k = table.as_bytes().to_vec();
+    k.push(0);
+    k.extend_from_slice(name.as_bytes());
+    format!("__sprig_doc_vx_{:016x}", crate::meta::fnv64(&k))
+}
 
 fn bad(msg: impl Into<String>) -> MongoError {
     MongoError::new(code::BAD_VALUE, msg)
@@ -112,9 +153,13 @@ fn no_index(what: &str) -> MongoError {
 #[must_use]
 pub fn meta_value(arg: &Bson, root: Option<&Bson>) -> Bson {
     match (arg.as_str(), root) {
-        (Some("vectorSearchScore"), Some(Bson::Document(d))) => {
+        (Some("vectorSearchScore" | "textScore" | "searchScore"), Some(Bson::Document(d))) => {
             d.get(SCORE_FIELD).cloned().unwrap_or(Bson::Null)
         }
+        (Some("searchHighlights"), Some(Bson::Document(d))) => d
+            .get(crate::text::HIGHLIGHT_FIELD)
+            .cloned()
+            .unwrap_or_else(|| Bson::Array(Vec::new())),
         _ => Bson::Null,
     }
 }
@@ -233,6 +278,15 @@ impl VectorIndex {
         str_lit(&json_path(&parts, &[]))
     }
 
+    /// The side table's distance function (the one its index uses).
+    fn side_distance(&self) -> (&'static str, &'static str) {
+        if self.similarity == "euclidean" {
+            ("VEC_DISTANCE_EUCLIDEAN", "euclidean")
+        } else {
+            ("VEC_DISTANCE_COSINE", "cosine")
+        }
+    }
+
     /// Rows whose path holds a numeric array of the right length.
     fn valid_sql(&self) -> String {
         let p = self.path_lit();
@@ -342,7 +396,13 @@ impl Engine {
         ns: &Ns,
         pipeline: &[Document],
     ) -> Result<Option<Vec<Document>>, MongoError> {
-        const OWN: [&str; 3] = ["$geoNear", "$vectorSearch", "$listSearchIndexes"];
+        const OWN: [&str; 5] = [
+            "$geoNear",
+            "$vectorSearch",
+            "$listSearchIndexes",
+            "$search",
+            "$searchMeta",
+        ];
         // Empty `$match` stages optimize away, as in MongoDB.
         let pipeline: Vec<&Document> = pipeline
             .iter()
@@ -380,6 +440,9 @@ impl Engine {
         Ok(Some(match name.as_str() {
             "$geoNear" => self.geo_near(sql, ns, spec).await?,
             "$vectorSearch" => self.vector_search(sql, ns, spec).await?,
+            // Chapter 39 (R5 round 5).
+            "$search" => self.search_stage(sql, ns, spec).await?,
+            "$searchMeta" => self.search_meta_stage(sql, ns, spec).await?,
             _ => {
                 let name = spec.get_str("name").ok();
                 self.list_search_indexes(sql, ns, name).await?
@@ -572,7 +635,7 @@ impl Engine {
         ns: &Ns,
         name: Option<&str>,
     ) -> Result<Vec<Document>, MongoError> {
-        Ok(self
+        let mut out: Vec<Document> = self
             .search_rows(sql, ns, name)
             .await?
             .into_iter()
@@ -580,7 +643,24 @@ impl Engine {
                 doc! {"id": id, "name": name, "type": t, "status": "READY", "queryable": true,
                 "latestDefinition": def}
             })
-            .collect())
+            .collect();
+        // Chapter 39: full-text search indexes.
+        if let Some(t) = &self.text {
+            for i in t.list(sql, ns).await? {
+                if i.kind != crate::text::TextKind::Search || name.is_some_and(|n| n != i.name) {
+                    continue;
+                }
+                out.push(doc! {"id": i.id, "name": i.name, "type": "search",
+                "status": if i.ready { "READY" } else { "BUILDING" }, "queryable": i.ready,
+                "latestDefinition": i.spec});
+            }
+            out.sort_by(|a, b| {
+                a.get_str("name")
+                    .unwrap_or("")
+                    .cmp(b.get_str("name").unwrap_or(""))
+            });
+        }
+        Ok(out)
     }
 
     /// `createSearchIndexes`: the created indexes' `{id, name}`.
@@ -594,21 +674,44 @@ impl Engine {
         ns: &Ns,
         specs: &[Document],
     ) -> Result<Vec<Document>, MongoError> {
-        if self.meta(sql, ns).await?.is_none() {
+        let Some(m) = self.meta(sql, ns).await? else {
             return Err(MongoError::new(
                 code::NAMESPACE_NOT_FOUND,
                 format!("Collection '{ns}' does not exist."),
             ));
-        }
+        };
         self.search_table(sql, &ns.db).await?;
         let mut out = Vec::new();
         for s in specs {
             let t = s.get_str("type").unwrap_or("search");
+            if t == "search" {
+                // Chapter 39 (R5 round 5): full-text search indexes.
+                let hook = self.text.as_ref().ok_or_else(|| {
+                    MongoError::new(
+                        code::SPRIG_DOC_FEATURE_UNSUPPORTED,
+                        "full-text search indexes need the gateway's search service",
+                    )
+                })?;
+                let def = s
+                    .get_document("definition")
+                    .map_err(|_| bad("a search index needs a 'definition'"))?;
+                let name = s.get_str("name").unwrap_or("default").to_owned();
+                let i = hook
+                    .create(
+                        sql,
+                        ns,
+                        &m,
+                        crate::text::TextCreate::Search {
+                            name,
+                            definition: def.clone(),
+                        },
+                    )
+                    .await?;
+                out.push(doc! {"id": i.id, "name": i.name});
+                continue;
+            }
             if t != "vectorSearch" {
-                return Err(MongoError::new(
-                    code::SPRIG_DOC_FEATURE_UNSUPPORTED,
-                    "search indexes of type 'search' (full text, chapter 39) are not supported in this release",
-                ));
+                return Err(bad(format!("unknown search index type '{t}'")));
             }
             let def = s
                 .get_document("definition")
@@ -656,7 +759,16 @@ impl Engine {
         name: &str,
         def: &Document,
     ) -> Result<(), MongoError> {
+        if let Some(t) = &self.text
+            && t.update(sql, ns, name, def).await?
+        {
+            return Ok(());
+        }
         VectorIndex::parse(def)?;
+        // A new definition: its side table is rebuilt on the next search.
+        if let Some(m) = self.meta(sql, ns).await? {
+            self.drop_vector_sides(sql, ns, &m.table, Some(name)).await;
+        }
         let json = Bson::Document(def.clone())
             .into_relaxed_extjson()
             .to_string();
@@ -696,6 +808,14 @@ impl Engine {
         ns: &Ns,
         name: &str,
     ) -> Result<(), MongoError> {
+        if let Some(t) = &self.text
+            && t.drop_index(sql, ns, name).await?
+        {
+            return Ok(());
+        }
+        if let Some(m) = self.meta(sql, ns).await? {
+            self.drop_vector_sides(sql, ns, &m.table, Some(name)).await;
+        }
         match sql
             .exec(&format!(
                 "DELETE FROM {}.{} WHERE coll = {} AND name = {}",
@@ -821,6 +941,17 @@ impl Engine {
         let dist = vx.distance_sql(&q);
         let cond = format!("{} AND ({})", vx.valid_sql(), sqlp.sql);
         let cx = AggExpr { now: now_date() };
+        // R33: approximate, from the side table's HNSW index.
+        if !exact {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let nc = spec.get("numCandidates").and_then(num).unwrap_or(0.0) as usize;
+            if let Some(out) = self
+                .vector_ann(sql, ns, &m, index, &vx, &q, &dist, &cond, &pred, limit, nc)
+                .await?
+            {
+                return Ok(out);
+            }
+        }
         let page = if sqlp.exact {
             limit
         } else {
@@ -862,6 +993,225 @@ impl Engine {
                 return Ok(out);
             }
             offset += n;
+        }
+    }
+
+    /// Drops the side tables of `table`'s vector indexes (`name`: that
+    /// one only). Failures are ignored: a leftover side table is harmless
+    /// (a new index with the name rebuilds it from the documents).
+    pub(crate) async fn drop_vector_sides(
+        &self,
+        sql: &mut dyn SqlRunner,
+        ns: &Ns,
+        table: &str,
+        name: Option<&str>,
+    ) {
+        let Ok(rows) = self.search_rows(sql, ns, name).await else {
+            return;
+        };
+        for (_, n, t, _) in rows {
+            if t != "vectorSearch" {
+                continue;
+            }
+            let side = vector_side_table(table, &n);
+            let _ = sql
+                .exec(&format!(
+                    "DROP TABLE IF EXISTS {}.{}",
+                    ident(&ns.db),
+                    ident(&side)
+                ))
+                .await;
+        }
+    }
+
+    /// Brings the side table of vector index `name` up to date (creating
+    /// and filling it when missing); its vector count.
+    async fn vector_sync(
+        &self,
+        sql: &mut dyn SqlRunner,
+        ns: &Ns,
+        m: &crate::meta::CollMeta,
+        name: &str,
+        vx: &VectorIndex,
+    ) -> Result<u64, MongoError> {
+        let side = vector_side_table(&m.table, name);
+        let st = format!("{}.{}", ident(&ns.db), ident(&side));
+        let coll = format!("{}.{}", ident(&ns.db), ident(&m.table));
+        let sync_key = format!("{}.{side}", ns.db);
+        if let Some((at, n)) = SYNCED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&sync_key)
+            && at.elapsed() < std::time::Duration::from_millis(self.cfg.vector_sync_ms)
+        {
+            return Ok(*n);
+        }
+        let probe = format!("SELECT COUNT(*), COALESCE(MAX(_v), 0) FROM {st}");
+        let (count, newest) = match sql.query(&probe).await {
+            Ok(r) => {
+                let row = r.into_iter().next().unwrap_or_default();
+                (
+                    text(row.first().and_then(Option::as_ref))
+                        .parse::<u64>()
+                        .unwrap_or(0),
+                    text(row.get(1).and_then(Option::as_ref))
+                        .parse::<u64>()
+                        .unwrap_or(0),
+                )
+            }
+            Err(e) if e.is(1146) => {
+                let (_, metric) = vx.side_distance();
+                // The documents' `_v`, for the syncs' range reads.
+                sql.exec(&format!(
+                    "ALTER TABLE {coll} ADD INDEX IF NOT EXISTS _sprig_dix_v (_v)"
+                ))
+                .await
+                .map_err(|e| mongo_error(&e))?;
+                sql.exec(&format!(
+                    "CREATE TABLE IF NOT EXISTS {st} (_id VARBINARY(254) NOT NULL, \
+                     v VECTOR({}) NOT NULL, _v BIGINT UNSIGNED NOT NULL, PRIMARY KEY (_id), KEY by_v (_v), \
+                     VECTOR INDEX (v) M=16 DISTANCE={metric}) ENGINE=InnoDB",
+                    vx.dims
+                ))
+                .await
+                .map_err(|e| mongo_error(&e))?;
+                (0, 0)
+            }
+            Err(e) => return Err(mongo_error(&e)),
+        };
+        let lower = if count == 0 {
+            0
+        } else {
+            newest.saturating_sub(SIDE_MARGIN)
+        };
+        let done = sql
+            .exec(&format!(
+                "INSERT INTO {st} (_id, v, _v) SELECT _id, VEC_FromText(JSON_EXTRACT(doc, {p})), _v FROM {coll} \
+                 WHERE _v > {lower} AND LENGTH(_id) <= 254 AND {valid} \
+                 ON DUPLICATE KEY UPDATE v = VALUES(v), _v = VALUES(_v)",
+                p = vx.path_lit(),
+                valid = vx.valid_sql()
+            ))
+            .await
+            .map_err(|e| mongo_error(&e))?;
+        let due = {
+            let mut g = PURGED
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let key = format!("{}.{side}", ns.db);
+            let due = g
+                .get(&key)
+                .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(60));
+            if due {
+                g.insert(key, std::time::Instant::now());
+            }
+            due
+        };
+        if due {
+            // Documents deleted, or whose vector went away.
+            sql.exec(&format!(
+                "DELETE FROM {st} WHERE _id NOT IN (SELECT _id FROM {coll} WHERE {})",
+                vx.valid_sql()
+            ))
+            .await
+            .map_err(|e| mongo_error(&e))?;
+        }
+        let n = count + done.affected;
+        SYNCED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(sync_key, (std::time::Instant::now(), n));
+        Ok(n)
+    }
+
+    /// Approximate `$vectorSearch` (R33): `None` when the index is too
+    /// small for it (the exact search runs).
+    #[allow(clippy::too_many_arguments)]
+    async fn vector_ann(
+        &self,
+        sql: &mut dyn SqlRunner,
+        ns: &Ns,
+        m: &crate::meta::CollMeta,
+        name: &str,
+        vx: &VectorIndex,
+        q: &str,
+        dist: &str,
+        cond: &str,
+        pred: &Pred,
+        limit: usize,
+        num_candidates: usize,
+    ) -> Result<Option<Vec<Document>>, MongoError> {
+        let n = self.vector_sync(sql, ns, m, name, vx).await?;
+        if n < self.cfg.vector_ann_min_rows {
+            return Ok(None);
+        }
+        let side = format!(
+            "{}.{}",
+            ident(&ns.db),
+            ident(&vector_side_table(&m.table, name))
+        );
+        let (f, _) = vx.side_distance();
+        let cx = AggExpr { now: now_date() };
+        let mut nc = num_candidates.max(limit);
+        loop {
+            let ids = sql
+                .query(&format!(
+                    "SELECT _id FROM {side} ORDER BY {f}(v, VEC_FromText({})) LIMIT {nc}",
+                    str_lit(q)
+                ))
+                .await
+                .map_err(|e| mongo_error(&e))?;
+            let got = ids.len();
+            let keys: Vec<String> = ids
+                .into_iter()
+                .filter_map(|mut r| r.first_mut().and_then(Option::take))
+                .map(|k| crate::sql::bin_lit(&k))
+                .collect();
+            let mut ranked: Vec<(f64, Vec<u8>, Document)> = Vec::new();
+            for chunk in keys.chunks(500) {
+                let rows = sql
+                    .query(&format!(
+                        "SELECT _id, doc, _types, {dist} AS d FROM {}.{} WHERE _id IN ({}) AND {cond}",
+                        ident(&ns.db),
+                        ident(&m.table),
+                        chunk.join(", ")
+                    ))
+                    .await
+                    .map_err(|e| mongo_error(&e))?;
+                for r in rows {
+                    let d = crate::json::to_bson(
+                        &text(r.get(1).and_then(Option::as_ref)),
+                        r.get(2)
+                            .and_then(Option::as_ref)
+                            .map(|b| String::from_utf8_lossy(b))
+                            .as_deref(),
+                    )?;
+                    if !pred.matches_with(&d, &cx) {
+                        continue;
+                    }
+                    let dv: f64 = text(r.get(3).and_then(Option::as_ref))
+                        .parse()
+                        .unwrap_or(f64::MAX);
+                    let k = r.first().cloned().flatten().unwrap_or_default();
+                    ranked.push((dv, k, d));
+                }
+            }
+            // A filter that removed too many: look further, up to 10,000.
+            if ranked.len() < limit && got == nc && nc < 10_000 {
+                nc = (nc * 4).min(10_000);
+                continue;
+            }
+            ranked.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+            return Ok(Some(
+                ranked
+                    .into_iter()
+                    .take(limit)
+                    .map(|(dv, _, mut d)| {
+                        d.insert(SCORE_FIELD, Bson::Double(vx.score(dv)));
+                        d
+                    })
+                    .collect(),
+            ));
         }
     }
 

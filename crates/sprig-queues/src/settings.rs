@@ -90,6 +90,24 @@ key!(
     HardBounds::range(0, 86_400), "Least time between two moves of one queue's owner"
 );
 
+key!(
+    /// `queue.forwarder`: who forwards transactional publishes from the
+    /// queue outbox (R9, r9fwd). `feed`: the tenant's feed-driven
+    /// forwarder (a worker job), in commit order; the gateways' polling
+    /// forwarder takes only rows older than `queue.forward_fallback_ms`.
+    /// `poll`: the gateways' polling forwarder at once, in insert order.
+    FORWARDER: Text = "queue.forwarder", Cow::Borrowed("feed"), Scopes::DATA,
+    HardBounds::one_of(&["feed", "poll"]), "Forward transactional publishes from the change feed (commit order) or by polling"
+);
+key!(
+    /// `queue.forward_fallback_ms`: with `queue.forwarder = feed`, a
+    /// transactional publish still in the outbox this long is forwarded
+    /// by the gateways' polling forwarder (the feed is behind or its
+    /// forwarder down); commit order isn't kept for such rows.
+    FORWARD_FALLBACK_MS: u64 = "queue.forward_fallback_ms", 2_000, Scopes::DATA,
+    HardBounds::range(200, 3_600_000), "Polling forwarder takes outbox rows older than this when the feed forwarder lags, in ms"
+);
+
 /// What one vhost's queues run with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueSettings {
@@ -119,6 +137,10 @@ pub struct QueueSettings {
     pub owner_move_after_ms: u64,
     /// `queue.owner_move_cooldown_seconds`, in ms.
     pub owner_move_cooldown_ms: u64,
+    /// `queue.forwarder = feed`.
+    pub forward_feed: bool,
+    /// `queue.forward_fallback_ms`.
+    pub forward_fallback_ms: u64,
 }
 
 impl Default for QueueSettings {
@@ -137,6 +159,8 @@ impl Default for QueueSettings {
             takeover_grace_ms: 2000,
             owner_move_after_ms: 60_000,
             owner_move_cooldown_ms: 300_000,
+            forward_feed: true,
+            forward_fallback_ms: 2_000,
         }
     }
 }

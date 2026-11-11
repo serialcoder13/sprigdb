@@ -16,8 +16,8 @@
 mod graphs;
 mod ops;
 mod rekey;
-pub use ops::{GroupView, ManualJob, ShardRow, design_from_json};
 pub use graphs::{GraphIndexRow, GraphPartition, GraphRow, GraphShardRow, GraphView};
+pub use ops::{GroupView, ManualJob, ShardRow, design_from_json};
 pub use rekey::RekeyRequest;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -298,15 +298,29 @@ impl ShardingLoop {
             .or_else(|| p.evidence.get("bytes"))
             .and_then(serde_json::Value::as_f64)
             .unwrap_or(1.0);
+        // The item's identity leaves out a split's points: they are chosen
+        // from index-dive samples and differ from one proposal to the next,
+        // which made a fresh proposal supersede the approved item instead
+        // of running it (approvals round 3, live). They go in the evidence.
+        let mut job = p.job.clone();
+        let mut evidence = p.evidence.clone();
+        if let shards::ShardJob::Split { points, .. } = &mut job {
+            if !points.is_empty()
+                && let serde_json::Value::Object(o) = &mut evidence
+            {
+                o.insert("split_points".into(), serde_json::json!(points));
+            }
+            points.clear();
+        }
         let gp = Proposal {
             kind,
             subject: a.subject(tenant).await,
             target: format!("t{tenant}/g{}/{subject}", p.group),
             action: Action {
                 text: format!("sprigctl shard {} {subject}", p.job.kind()),
-                machine: serde_json::to_value(&p.job).unwrap_or_default(),
+                machine: serde_json::to_value(&job).unwrap_or_default(),
             },
-            evidence: p.evidence.clone(),
+            evidence,
             score,
             summary: format!("{} of {subject} ({:?})", p.job.kind(), p.reason),
             emergency: false,
@@ -321,7 +335,12 @@ impl ShardingLoop {
     }
 
     /// Reports a shard job an approval let through.
-    async fn approval_done(&self, ticket: Option<&sprig_approvals::Ticket>, ok: bool, detail: &str) {
+    async fn approval_done(
+        &self,
+        ticket: Option<&sprig_approvals::Ticket>,
+        ok: bool,
+        detail: &str,
+    ) {
         if let (Some(t), Some(a)) = (ticket, self.approvals.get()) {
             a.finished(t, ok, detail).await;
         }
@@ -545,6 +564,45 @@ impl ShardingLoop {
         Ok(report)
     }
 
+    /// What chapter 33's key-value rule (decision R28, R6 round 5) needs
+    /// beyond the input: each unit's database's `sharding.min_shards`, and
+    /// whether its shard (the database's default group, shard 1) is
+    /// write-hot by chapter 20's load rule.
+    fn kv_rule_inputs(
+        &self,
+        tenant: TenantId,
+        ts: &TenantSettings,
+        home: &ClusterId,
+        asm: &mut input::Assembled,
+    ) {
+        asm.input.split_write_share = ts.sharding.split_write_share;
+        let sustain = usize::try_from(ts.sharding.sustain.as_secs() / 60)
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let hot = self
+            .write_load
+            .as_ref()
+            .is_some_and(|w| w.cluster_hot(home));
+        for u in &mut asm.input.kv {
+            u.min_shards = self.settings.min_shards(tenant, DbId(u.db));
+            let at = asm
+                .located
+                .iter()
+                .find(|l| l.object == u.key)
+                .and_then(|l| l.schema.parse::<SchemaName>().ok());
+            u.write_hot = match (at, self.write_load.as_ref()) {
+                (Some(SchemaName::Shard { group, shard, .. }), Some(w)) if hot => {
+                    let v = w.write_shares(tenant, group, shard, None);
+                    v.len() >= sustain
+                        && v[v.len() - sustain..]
+                            .iter()
+                            .all(|x| *x >= ts.sharding.split_write_share)
+                }
+                _ => false,
+            };
+        }
+    }
+
     /// Step 1: the advisor's first design when the first split is due.
     #[allow(clippy::too_many_lines, clippy::many_single_char_names)] // the book's run, step by step
     async fn first_design(
@@ -557,8 +615,9 @@ impl ShardingLoop {
         manual: bool,
     ) -> Result<()> {
         let now = SystemTime::now();
-        let asm =
+        let mut asm =
             input::assemble(c, tenant, now, ts.advisor.window, ts.sharding.split_bytes).await?;
+        self.kv_rule_inputs(tenant, ts, home, &mut asm);
         let total: f64 = asm.input.tables.iter().map(|t| t.size_bytes).sum();
         let due = total > ts.sharding.split_bytes || ts.sharding.min_shards > 1;
         if !due && !manual {
@@ -1177,14 +1236,8 @@ impl ShardingLoop {
             let adm = if matches!(adm, Admission::Recommend) && ddl_jobs.is_empty() {
                 let mut on = ts.sharding;
                 on.mode = ShardingMode::On;
-                let would = shards::admit(
-                    &p,
-                    running,
-                    &on,
-                    &cluster,
-                    &lock(&self.backoff),
-                    now_ms(),
-                );
+                let would =
+                    shards::admit(&p, running, &on, &cluster, &lock(&self.backoff), now_ms());
                 if matches!(would, Admission::Submit) {
                     gated = true;
                     match self
@@ -1294,11 +1347,19 @@ impl ShardingLoop {
                         report.waiting.push((subject.clone(), why));
                         metrics::counter!("sprig_balancer_jobs_waiting_total", "blocked_by" => why)
                             .increment(1);
-                        self.approval_done(ticket.as_ref(), false, &format!("job {} withdrawn: {why}", id.0))
-                            .await;
+                        self.approval_done(
+                            ticket.as_ref(),
+                            false,
+                            &format!("job {} withdrawn: {why}", id.0),
+                        )
+                        .await;
                     } else {
-                        self.approval_done(ticket.as_ref(), true, &format!("job {} submitted", id.0))
-                            .await;
+                        self.approval_done(
+                            ticket.as_ref(),
+                            true,
+                            &format!("job {} submitted", id.0),
+                        )
+                        .await;
                     }
                 }
             }

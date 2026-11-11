@@ -41,8 +41,12 @@ use tonic::transport::Endpoint;
 const GATEWAY: &str = "SPRIG_TEST_SHARD_DISCONNECT";
 const TABLE: &str = "SPRIG_TEST_SHARD_TABLE";
 const BACKENDS: &str = "SPRIG_TEST_SHARD_BACKENDS";
-/// How long a shard statement may outlive its client.
-const LIMIT: Duration = Duration::from_secs(1);
+/// How long a shard statement may outlive its client: about 30 ms, with
+/// room for a loaded machine. It was 2.5 s while the gateway killed every
+/// shard's statement at once: MariaDB's `KILL QUERY` then sometimes took
+/// 2 s (`SECONDS_TO_WAIT_FOR_KILL`); the gateway now kills one at a time
+/// per node (bugfix-21).
+const LIMIT: Duration = Duration::from_millis(1000);
 
 struct Env {
     http: String,
@@ -64,7 +68,9 @@ fn env(test: &str) -> Option<Env> {
     }
     let urls = skip::urls(&vals[0]);
     assert_eq!(urls.len(), 2, "{GATEWAY}: mysql,http");
-    let (db, table) = vals[1].split_once('.').expect("SPRIG_TEST_SHARD_TABLE: db.table");
+    let (db, table) = vals[1]
+        .split_once('.')
+        .expect("SPRIG_TEST_SHARD_TABLE: db.table");
     let backends = vals[2]
         .split(',')
         .map(|u| {
@@ -108,7 +114,10 @@ fn marker(case: &str) -> String {
 fn statements(e: &Env, m: &str) -> Vec<(&'static str, String)> {
     let t = &e.table;
     vec![
-        ("scatter", format!("SELECT SLEEP(30) AS {m} FROM {t} LIMIT 1")),
+        (
+            "scatter",
+            format!("SELECT SLEEP(30) AS {m} FROM {t} LIMIT 1"),
+        ),
         (
             "merge",
             format!("SELECT id, SLEEP(30) AS {m} FROM {t} ORDER BY id LIMIT 1"),
@@ -181,9 +190,15 @@ fn check(case: &str, shards: u64, took: Result<Duration, u64>) {
                 "{case}: {shards} shard statements gone {} ms after the client left",
                 t.as_millis()
             );
-            assert!(t <= LIMIT, "{case}: still running {} ms after", t.as_millis());
+            assert!(
+                t <= LIMIT,
+                "{case}: still running {} ms after",
+                t.as_millis()
+            );
         }
-        Err(n) => panic!("{case}: {n} of {shards} shard statements still run 3 s after the client left"),
+        Err(n) => {
+            panic!("{case}: {n} of {shards} shard statements still run 3 s after the client left")
+        }
     }
 }
 
@@ -269,7 +284,11 @@ async fn grpc_client_gone_stops_every_shard() {
         let shards = wait_started(&e, &m, &mut call).await;
         call.abort();
         let left = Instant::now();
-        check(&format!("grpc {case}"), shards, gone_after(&e, &m, left).await);
+        check(
+            &format!("grpc {case}"),
+            shards,
+            gone_after(&e, &m, left).await,
+        );
     }
 }
 

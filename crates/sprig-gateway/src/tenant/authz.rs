@@ -198,7 +198,12 @@ impl AuthzServices {
         let Some(engine) = engine_for(svc, cat) else {
             return Ok(());
         };
-        let want = engine.backend_grants(cat, auth);
+        let mut want = engine.backend_grants(cat, auth);
+        // Chapter 29 (RLS round 2, RL18): accounts bound by a table's
+        // policies read it only through its policy view.
+        if let Err(e) = super::rls::narrow_backend(svc, cat, cluster, &mut want).await {
+            tracing::warn!(tenant = %cat.tenant, %cluster, error = %e, "row-level security grants not narrowed; MariaDB doesn't filter bound users' reads until the next reconcile");
+        }
         let hash = {
             let mut h = std::collections::hash_map::DefaultHasher::new();
             want.hash(&mut h);
@@ -595,6 +600,10 @@ pub struct CheckCtx<'a> {
     pub lctn: bool,
     /// The session's temporary tables.
     pub temp: &'a dyn Fn(Option<&str>, &str) -> bool,
+    /// Chapter 29: protected tables the statement's row-level security
+    /// rewrite covered (their policies are in the text, or MariaDB's
+    /// triggers check its writes).
+    pub covered: &'a [sprig_common::ids::ObjectId],
 }
 
 impl CheckCtx<'_> {
@@ -632,7 +641,9 @@ impl CheckCtx<'_> {
         if let Some(a) = any.iter().find(|a| self.p.allows(*a, target)) {
             // The row-level hook: no engine filters rows yet, and a
             // filter this gateway can't inject must not be skipped.
-            if self.p.row_filter(target, a).is_some() {
+            if self.p.row_filter(target, a).is_some()
+                && !matches!(target, Target::Object { object, .. } if self.covered.contains(&object))
+            {
                 return Err(row_filter_unsupported(name));
             }
             return Ok(());
@@ -878,9 +889,20 @@ pub struct Recheck {
     lex: LexOptions,
     current: Option<String>,
     compiled: Arc<dyn SessionGrants>,
+    /// Chapter 29: the tables the prepare-time rewrite covered.
+    covered: Vec<sprig_common::ids::ObjectId>,
+    /// Chapter 29: the row-level security context the text's predicates
+    /// were bound with, when it covers protected tables.
+    rls_context: Option<String>,
 }
 
 impl Recheck {
+    /// The default database the statement was prepared in.
+    #[must_use]
+    pub fn current(&self) -> Option<&str> {
+        self.current.as_deref()
+    }
+
     /// The facts of a statement just checked at prepare; `None` for a
     /// session without a snapshot.
     #[must_use]
@@ -897,9 +919,21 @@ impl Recheck {
             text: bytes::Bytes::copy_from_slice(text),
             lex,
             current: current.map(str::to_owned),
+            rls_context: rls_context(ts, &cat),
             compiled: privileges(ts, &cat),
+            covered: ts.rls.covered.clone(),
         })
     }
+}
+
+/// The session's row-level security context when its last rewrite
+/// covered protected tables (what a prepared text's predicates depend on).
+fn rls_context(ts: &TenantSession, cat: &TenantCatalog) -> Option<String> {
+    if ts.rls.covered.is_empty() {
+        return None;
+    }
+    let rls = privileges(ts, cat).row_policies()?;
+    Some(super::rls::SessionValues::of(ts, cat).context(&rls))
 }
 
 /// Checks a prepared statement again at execute when the session's
@@ -916,6 +950,16 @@ pub fn recheck(ts: &TenantSession, persona: Persona, rc: &Recheck) -> Result<()>
     if Arc::ptr_eq(&p, &rc.compiled) {
         return Ok(());
     }
+    // Chapter 29: the text's policy predicates were bound at prepare; a
+    // new role set or policy change needs a new text (MySQL's 1615, which
+    // connectors answer by preparing again).
+    if rc.rls_context.is_some() && rls_context(ts, &cat) != rc.rls_context {
+        return Err(SprigError::standard(
+            1615,
+            *b"HY000",
+            "Prepared statement needs to be re-prepared".to_owned(),
+        ));
+    }
     let client_host = ts.principal.client_ip.to_string();
     let lctn = ts.lower_case_table_names();
     let temp = |db: Option<&str>, name: &str| ts.is_temp(db, name);
@@ -929,6 +973,7 @@ pub fn recheck(ts: &TenantSession, persona: Persona, rc: &Recheck) -> Result<()>
         current: rc.current.as_deref(),
         lctn,
         temp: &temp,
+        covered: &rc.covered,
     };
     let r = check_text(&cx, rc.kind, &rc.text, rc.lex);
     if r.is_err() {
@@ -992,6 +1037,7 @@ pub fn check_session(
         current,
         lctn,
         temp: &temp,
+        covered: &ts.rls.covered,
     };
     let r = check(&cx, sp, original, lex);
     if r.is_err() {

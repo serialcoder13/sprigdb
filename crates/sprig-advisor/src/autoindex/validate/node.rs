@@ -88,8 +88,33 @@ impl NodeSql {
             .collect())
     }
 
+    /// Which of `columns` the table lacks.
+    pub(crate) async fn missing_columns(
+        &mut self,
+        t: &IndexTarget,
+        columns: &[String],
+    ) -> Result<Vec<String>, ProbeError> {
+        if columns.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = self
+            .rows(&format!(
+                "SELECT LOWER(COLUMN_NAME) AS c FROM information_schema.COLUMNS WHERE                  TABLE_SCHEMA = {} AND TABLE_NAME = {}",
+                literal(&t.schema),
+                literal(&t.table)
+            ))
+            .await?;
+        let have: Vec<&str> = rows.iter().filter_map(|r| col(r, "c")).collect();
+        Ok(columns
+            .iter()
+            .filter(|c| !have.contains(&c.to_ascii_lowercase().as_str()))
+            .cloned()
+            .collect())
+    }
+
     /// The table's columns and indexes except `skip`: a change means user
-    /// DDL ran during the validation.
+    /// DDL ran during the validation. Field columns (`_sprig_p_*`) don't
+    /// count: a field-column candidate adds its own (R6 round 6).
     pub(crate) async fn table_signature(
         &mut self,
         t: &IndexTarget,
@@ -99,7 +124,7 @@ impl NodeSql {
             .scalar(&format!(
                 "SELECT GROUP_CONCAT(CONCAT_WS(':', COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE) ORDER BY \
                  ORDINAL_POSITION SEPARATOR ',') FROM information_schema.COLUMNS WHERE \
-                 TABLE_SCHEMA = {} AND TABLE_NAME = {}",
+                 TABLE_SCHEMA = {} AND TABLE_NAME = {} AND COLUMN_NAME NOT LIKE '\\_sprig\\_p\\_%'",
                 literal(&t.schema),
                 literal(&t.table)
             ))
@@ -213,7 +238,12 @@ pub(crate) fn add_def_sql(
     def: &crate::autoindex::model::IndexDef,
     online: bool,
 ) -> String {
-    if def.kind == crate::autoindex::model::IndexKind::BTree {
+    // Field columns (R6 round 6) are added first, by
+    // [`add_fields_sql`]; their index builds online like a B-tree.
+    if matches!(
+        def.kind,
+        crate::autoindex::model::IndexKind::BTree | crate::autoindex::model::IndexKind::FieldColumn
+    ) {
         return add_index_sql(t, name, &def.ddl_columns(), online);
     }
     format!(
@@ -222,6 +252,16 @@ pub(crate) fn add_def_sql(
         quote(&t.table),
         def.add_clause_named(name)
     )
+}
+
+/// The field columns of `def` (R6 round 6, decision K3), added before
+/// its index: `ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...,
+/// ALGORITHM=INSTANT`; `None` for other kinds.
+pub(crate) fn add_fields_sql(
+    t: &IndexTarget,
+    def: &crate::autoindex::model::IndexDef,
+) -> Option<String> {
+    crate::autoindex::kv::add_fields_sql(&t.schema, &t.table, def)
 }
 
 /// `ALTER TABLE ... DROP INDEX IF EXISTS name`.

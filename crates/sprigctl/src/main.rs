@@ -58,6 +58,8 @@ mod index;
 // Chapter 52: approvals and recommendations.
 mod logic;
 mod mover;
+// Chapter 14: named operators, login and tokens.
+mod operator;
 mod placement;
 mod recommendations;
 mod render;
@@ -451,7 +453,12 @@ fn cli() -> Command {
         .subcommand(space::group())
         .subcommand(txn::group())
         .subcommand(sink::group())
-        .subcommand(graph::group());
+        .subcommand(graph::group())
+        .subcommand(operator::login_cmd())
+        .subcommand(operator::logout_cmd())
+        .subcommand(operator::whoami_cmd())
+        .subcommand(operator::operator_group())
+        .subcommand(operator::token_group());
     for &(group, about, subs) in GROUPS {
         let mut g = Command::new(group)
             .about(about)
@@ -498,6 +505,7 @@ fn main() -> ExitCode {
     let implemented = match group {
         "dc" | "cluster" | "settings" | "index" | "job" | "gateway" | "check" | "advisor"
         | "shard" | "space" | "txn" | "sink" | "graph" | "recommendations" => true,
+        "login" | "logout" | "whoami" | "operator" | "token" => true,
         "explain" => matches!(name.as_str(), "query" | "decision" | "placement"),
         "tenant" => !TENANT_LATER.contains(&name.as_str()),
         "logic" => logic::implemented(&name),
@@ -521,6 +529,11 @@ fn main() -> ExitCode {
         let client = client(&matches)?;
         match group {
             "dc" => run_dc(&client, &matches, sub).await,
+            "login" | "logout" | "whoami" | "operator" | "token" => {
+                operator::run(&client, &matches, group, sub, output(&matches))
+                    .await
+                    .map(|()| ExitCode::SUCCESS)
+            }
             "tenant" => run_tenant(&client, &matches, sub).await,
             "settings" => settings::run(&client, &matches, sub, output(&matches))
                 .await
@@ -593,7 +606,9 @@ fn client(m: &ArgMatches) -> Result<AdminClient, Failed> {
                 .trim()
                 .to_owned(),
         ),
-        None => None,
+        // Chapter 14: the login session `sprigctl login` keeps for this
+        // endpoint.
+        None => operator::session_token(endpoint),
     };
     Ok(AdminClient::new(endpoint, token)?)
 }

@@ -273,7 +273,27 @@ fn maybe_auto(engine: &Arc<SqlEngine>, caller: &Caller, def: &IndexDef) {
     // Chapter 52: `vector.auto_ann` holds the graph for an approval.
     let mode = super::model_settings::vector_auto_ann(engine, caller, &def.database);
     let tenant = caller.principal.tenant;
+    let (engine, caller) = (Arc::clone(engine), caller.clone());
     tokio::spawn(async move {
+        // `on` builds at once: once the index is due, read the mode again
+        // from a catalog at least as new as the directory's, so an
+        // `approve` set a moment ago holds the graph (approvals round 3).
+        // Not due yet: nothing to build; the next write asks again.
+        let mode = if mode == "on" {
+            if index::rows(&mut sql, &def)
+                .await
+                .is_ok_and(|n| n < settings.ann_min_rows)
+            {
+                building()
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&key);
+                return;
+            }
+            super::model_settings::vector_auto_ann_fresh(&engine, &caller, &def.database).await
+        } else {
+            mode
+        };
         let ticket = match ann_gate(&mut sql, &def, &settings, &mode, tenant, &key).await {
             AnnGate::Go(t) => t,
             AnnGate::Skip => {

@@ -298,8 +298,20 @@ impl Validator for CanaryValidator {
         let started = Instant::now();
         let (res, killed) = match lock {
             Ok(()) => {
-                let sql = add_def_sql(t, &name, &plan.candidate.def, true);
-                run_watched(&mut ddl, &mut watch, &sql, set.poll).await
+                // A field-column candidate's columns first (R6 round 6): on
+                // the writer, replicated, and left in place if the canary
+                // is dropped (invisible, without storage).
+                let fields = match super::node::add_fields_sql(t, &plan.candidate.def) {
+                    Some(sql) => ddl.exec(&sql).await,
+                    None => Ok(()),
+                };
+                match fields {
+                    Ok(()) => {
+                        let sql = add_def_sql(t, &name, &plan.candidate.def, true);
+                        run_watched(&mut ddl, &mut watch, &sql, set.poll).await
+                    }
+                    Err(e) => (Err(e), None),
+                }
             }
             Err(e) => (Err(e), None),
         };

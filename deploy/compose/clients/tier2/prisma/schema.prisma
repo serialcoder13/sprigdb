@@ -1,0 +1,43 @@
+// Prisma ORM's migrations and drift check against a MySQL endpoint (R4
+// round 4, tier 2).
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique @db.VarChar(191)
+  name      String?
+  role      Role     @default(USER)
+  profile   Json?
+  balance   Decimal  @default(0) @db.Decimal(12, 2)
+  createdAt DateTime @default(now()) @db.DateTime(3)
+  updatedAt DateTime @updatedAt
+  posts     Post[]
+}
+
+model Post {
+  id        BigInt   @id @default(autoincrement())
+  title     String   @db.VarChar(200)
+  body      String?  @db.Text
+  published Boolean  @default(false)
+  score     Float?
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  authorId  Int
+  tags      Tag[]
+
+  @@index([title, published])
+  @@index([authorId])
+}
+
+model Tag {
+  id    Int    @id @default(autoincrement())
+  name  String @unique @db.VarChar(64)
+  posts Post[]
+}

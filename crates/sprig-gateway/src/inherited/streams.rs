@@ -114,6 +114,20 @@ fn found(cat: &Arc<TenantCatalog>, def: &Definition) -> Option<(Arc<StreamDef>, 
     Some((s, db))
 }
 
+/// The member's active instance of `def` in snapshot `cat`, if it has
+/// one (never creates it).
+#[must_use]
+pub fn existing(cat: &Arc<TenantCatalog>, def: &Definition) -> Option<StreamInstance> {
+    let (stream, db_name) = found(cat, def)?;
+    Some(StreamInstance {
+        tenant: cat.tenant,
+        cat: Arc::clone(cat),
+        stream,
+        db_name,
+        created: false,
+    })
+}
+
 /// The member's instance of stream definition `def`, created if needed
 /// (see the module docs). `chain` is the member's.
 ///

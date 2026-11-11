@@ -5,26 +5,22 @@
 //! CONNECTION` (R9, r9more).
 
 use serde_json::Value;
+use sprig_common::Result;
 use sprig_common::ids::TenantId;
-use sprig_common::{Result, SprigError};
 use sprig_meta::MetaStore;
 
 /// A tenant's residency for sink destinations (chapter 51, "Destinations,
-/// allowlist and residency"; chapter 26): the policies of the tenant and
-/// its ancestors from their directory entries (`residency.policy`), each
-/// evaluated against a destination's tags as if they were a DC's. A
-/// tenant with a residency block but no readable policy anywhere on its
-/// path admits nothing (fail closed). No block on the path: unpinned.
-pub struct PolicyResidency {
-    policies: Vec<sprig_residency::Policy>,
-    closed: bool,
-}
+/// allowlist and residency"; chapter 26): [`sprig_residency::destinations`]
+/// behind this crate's [`crate::policy::Residency`] trait. A tenant with a
+/// residency block but no readable policy anywhere on its path admits
+/// nothing (fail closed). No block on the path: unpinned.
+pub struct PolicyResidency(sprig_residency::destinations::TenantResidency);
 
 impl std::fmt::Debug for PolicyResidency {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PolicyResidency")
-            .field("policies", &self.policies.len())
-            .field("closed", &self.closed)
+            .field("policies", &self.0.len())
+            .field("closed", &self.0.closed())
             .finish()
     }
 }
@@ -36,11 +32,9 @@ impl PolicyResidency {
     /// # Errors
     /// 39506 for a policy that doesn't parse.
     pub fn new(texts: &[String], closed: bool) -> Result<Self> {
-        let mut policies = Vec::new();
-        for t in texts {
-            policies.push(sprig_residency::Policy::parse(t)?);
-        }
-        Ok(Self { policies, closed })
+        Ok(Self(sprig_residency::destinations::TenantResidency::new(
+            texts, closed,
+        )?))
     }
 }
 
@@ -50,21 +44,7 @@ impl crate::policy::Residency for PolicyResidency {
     }
 
     fn admits(&self, tags: &serde_json::Map<String, Value>) -> bool {
-        if self.closed && self.policies.is_empty() {
-            return false;
-        }
-        let Ok(id) = sprig_common::ids::DcId::new("sink-destination") else {
-            return false;
-        };
-        let dc = sprig_meta::bootstrap::DcRecord {
-            dc_id: id,
-            kind: "full".into(),
-            state: "active".into(),
-            dc_epoch: 0,
-            tags: tags.clone(),
-            global_voter: false,
-        };
-        self.policies.iter().all(|p| p.admits(&dc))
+        self.0.admits_tags(tags)
     }
 }
 
@@ -76,51 +56,12 @@ pub async fn residency_of(
     global: &dyn MetaStore,
     tenant: TenantId,
 ) -> Result<Box<dyn crate::policy::Residency>> {
-    let entry = |id: u64| async move {
-        let key = global.tier().key(&format!("tenants/{id}"))?;
-        Ok::<_, SprigError>(
-            global
-                .get(&key, sprig_meta::Consistency::Serializable)
-                .await?
-                .and_then(|kv| serde_json::from_slice::<Value>(&kv.value).ok()),
-        )
-    };
-    let Some(me) = entry(tenant.0).await? else {
-        return Ok(Box::new(crate::policy::Unpinned));
-    };
-    let path: Vec<u64> = me
-        .get("path")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .split('/')
-        .filter_map(|x| x.parse().ok())
-        .collect();
-    let mut texts = Vec::new();
-    let mut block = false;
-    for id in path {
-        let e = if id == tenant.0 {
-            Some(me.clone())
-        } else {
-            entry(id).await?
-        };
-        let Some(r) = e
-            .as_ref()
-            .and_then(|e| e.get("residency"))
-            .filter(|r| !r.is_null())
-        else {
-            continue;
-        };
-        block = true;
-        if let Some(p) = r.get("policy").and_then(Value::as_str)
-            && !p.trim().is_empty()
-        {
-            texts.push(p.to_owned());
-        }
-    }
-    if !block {
-        return Ok(Box::new(crate::policy::Unpinned));
-    }
-    Ok(Box::new(PolicyResidency::new(&texts, true)?))
+    Ok(
+        match sprig_residency::destinations::of_tenant(global, tenant).await? {
+            Some(r) => Box::new(PolicyResidency(r)),
+            None => Box::new(crate::policy::Unpinned),
+        },
+    )
 }
 
 #[cfg(test)]

@@ -314,16 +314,313 @@ pub async fn ensure_for_stream(
     si: &StreamInstance,
 ) {
     for s in on_stream(chain, stream_def) {
-        if let Err(e) = ensure_one(svc, chain, &s, si).await {
-            tracing::warn!(tenant = %si.tenant, def = %s.key(), error = %e, "inherited sink not deployed");
-            let _ = record(
-                svc,
-                si.tenant,
-                &s,
-                json!({"error": e.to_string(), "code": e.code().map(sprig_common::SprigCode::number)}),
-                InstanceState::Creating,
+        match ensure_one(svc, chain, &s, si).await {
+            Ok(true) => {
+                // It had failed before: no retry is due any more.
+                let _ = retry::clear(svc, si.tenant, s.key()).await;
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(tenant = %si.tenant, def = %s.key(), error = %e, "inherited sink not deployed; retried on a timer");
+                let _ = record(
+                    svc,
+                    si.tenant,
+                    &s,
+                    json!({"error": e.to_string(), "code": e.code().map(sprig_common::SprigCode::number)}),
+                    InstanceState::Creating,
+                )
+                .await;
+                let _ = retry::schedule(svc, si.tenant, s.key(), stream_def.key(), &e).await;
+            }
+        }
+    }
+}
+
+/// Retrying members' failed sink deploys on a timer (chapter 51, R9,
+/// r9queue; r9more's item 60). A deploy that fails (the member's allowlist
+/// or residency refuses the destination, a name the member uses itself, a
+/// catalog error) leaves `inherit-sink-retry/<member>/<sink definition>` in
+/// the DC tier. Every 5 s each gateway lists the entries that are due;
+/// one gateway claims each (an etcd compare on the entry's revision, which
+/// also pushes its next try a minute out) and deploys it again. Success
+/// removes the entry; failure keeps the error in the instance row and
+/// waits 5 s, 10 s, 20 s ... up to 5 minutes. An entry whose member is
+/// gone, whose sink definition no longer reaches it, or whose stream
+/// instance is gone is dropped.
+pub mod retry {
+    use super::{
+        Arc, Chain, DefKey, DefKind, DefState, Deserialize, InstanceState, Result, Serialize,
+        SprigError, TenantId, TenantServices, json,
+    };
+    use sprig_meta::{Cmp, ListOpts, Op, Record, Txn, Versioned};
+    use std::time::Duration;
+
+    /// One member's sink deploy to try again.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct Entry {
+        /// The member.
+        pub tenant: TenantId,
+        /// The sink definition.
+        pub sink: DefKey,
+        /// Its source stream definition.
+        pub stream: DefKey,
+        /// Failed tries so far.
+        pub attempts: u32,
+        /// Not before this (ms since the epoch).
+        pub next_ms: u64,
+        /// The last error.
+        pub error: String,
+    }
+
+    impl Versioned for Entry {
+        const V: u32 = 1;
+    }
+
+    /// The wait after `attempts` failed tries: 5 s doubling, at most 5 min.
+    #[must_use]
+    pub fn delay_ms(attempts: u32) -> u64 {
+        5_000u64
+            .saturating_mul(1u64 << attempts.saturating_sub(1).min(20))
+            .min(300_000)
+    }
+
+    fn key(svc: &TenantServices, t: TenantId, sink: DefKey) -> Result<sprig_meta::Key> {
+        svc.locator
+            .dc_store()
+            .tier()
+            .key(&format!("inherit-sink-retry/{t}/{sink}"))
+    }
+
+    /// Records (or advances) member `t`'s retry of sink definition `sink`.
+    ///
+    /// # Errors
+    /// The store's.
+    pub async fn schedule(
+        svc: &TenantServices,
+        t: TenantId,
+        sink: DefKey,
+        stream: DefKey,
+        e: &SprigError,
+    ) -> Result<()> {
+        let store = svc.locator.dc_store();
+        let k = key(svc, t, sink)?;
+        let attempts = match store.get(&k, sprig_meta::Consistency::Linearizable).await? {
+            Some(kv) => Record::<Entry>::decode(&kv.value).map_or(0, |r| r.body.attempts),
+            None => 0,
+        } + 1;
+        let entry = Entry {
+            tenant: t,
+            sink,
+            stream,
+            attempts,
+            next_ms: sprig_inherit::msg::store::now_ms() + delay_ms(attempts),
+            error: e.to_string().chars().take(500).collect(),
+        };
+        store
+            .txn(Txn {
+                when: Vec::new(),
+                then: vec![Op::Put {
+                    key: k,
+                    value: Record::new(entry).encode()?,
+                    lease: None,
+                }],
+                otherwise: Vec::new(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Removes member `t`'s retry of `sink`.
+    ///
+    /// # Errors
+    /// The store's.
+    pub async fn clear(svc: &TenantServices, t: TenantId, sink: DefKey) -> Result<()> {
+        svc.locator
+            .dc_store()
+            .txn(Txn {
+                when: Vec::new(),
+                then: vec![Op::Delete(key(svc, t, sink)?)],
+                otherwise: Vec::new(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Starts this gateway's retry pass: every 5 s.
+    pub fn start(svc: &Arc<TenantServices>) {
+        let weak = Arc::downgrade(svc);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let Some(svc) = weak.upgrade() else { return };
+                match pass(&svc).await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::debug!(n, "inherited sink deploys retried"),
+                    Err(e) => tracing::debug!(error = %e, "inherited sink retry pass"),
+                }
+            }
+        });
+    }
+
+    /// One pass: the due entries this gateway claims, tried again.
+    ///
+    /// # Errors
+    /// The store's.
+    pub async fn pass(svc: &Arc<TenantServices>) -> Result<usize> {
+        let store = svc.locator.dc_store();
+        let prefix = store.tier().key("inherit-sink-retry/")?;
+        let page = store
+            .list(
+                &prefix,
+                ListOpts {
+                    limit: 10_000,
+                    ..ListOpts::default()
+                },
             )
-            .await;
+            .await?;
+        let now = sprig_inherit::msg::store::now_ms();
+        let mut n = 0;
+        for kv in page.kvs {
+            let Ok(r) = Record::<Entry>::decode(&kv.value) else {
+                continue;
+            };
+            let mut e = r.body;
+            if e.next_ms > now {
+                continue;
+            }
+            // Claim it: whoever moves it first tries it; the others see
+            // it a minute out.
+            let claimed = Entry {
+                next_ms: now + 60_000,
+                ..e.clone()
+            };
+            let won = store
+                .txn(Txn {
+                    when: vec![Cmp::ModRev(kv.key.clone(), kv.mod_revision)],
+                    then: vec![Op::Put {
+                        key: kv.key.clone(),
+                        value: Record::new(claimed).encode()?,
+                        lease: None,
+                    }],
+                    otherwise: Vec::new(),
+                })
+                .await?
+                .succeeded;
+            if !won {
+                continue;
+            }
+            n += 1;
+            match try_once(svc, &e).await {
+                Ok(Some(())) => {
+                    tracing::info!(tenant = %e.tenant, def = %e.sink, attempts = e.attempts, "inherited sink deployed on retry");
+                    metrics::counter!("sprig_inherit_sink_retries_total", "result" => "deployed")
+                        .increment(1);
+                    clear(svc, e.tenant, e.sink).await?;
+                }
+                Ok(None) => {
+                    metrics::counter!("sprig_inherit_sink_retries_total", "result" => "dropped")
+                        .increment(1);
+                    clear(svc, e.tenant, e.sink).await?;
+                }
+                Err(err) => {
+                    metrics::counter!("sprig_inherit_sink_retries_total", "result" => "failed")
+                        .increment(1);
+                    tracing::debug!(tenant = %e.tenant, def = %e.sink, error = %err, "inherited sink retry failed");
+                    e.attempts += 1;
+                    e.next_ms = sprig_inherit::msg::store::now_ms() + delay_ms(e.attempts);
+                    e.error = err.to_string().chars().take(500).collect();
+                    store
+                        .txn(Txn {
+                            when: Vec::new(),
+                            then: vec![Op::Put {
+                                key: kv.key.clone(),
+                                value: Record::new(e).encode()?,
+                                lease: None,
+                            }],
+                            otherwise: Vec::new(),
+                        })
+                        .await?;
+                }
+            }
+        }
+        Ok(n)
+    }
+
+    /// Deploys `e` again: `Some` when deployed, `None` when there is
+    /// nothing to deploy any more.
+    async fn try_once(svc: &Arc<TenantServices>, e: &Entry) -> Result<Option<()>> {
+        let Some(d) = super::super::dir_entry(svc, e.tenant).await? else {
+            return Ok(None);
+        };
+        if matches!(d.state.as_str(), "deleting" | "deleted") {
+            return Ok(None);
+        }
+        let cat = super::super::catalog(svc, e.tenant).await?;
+        let chain: Chain = super::super::chain(svc, &cat).await?;
+        let Some(s) = chain
+            .reaching(DefKind::Sink)
+            .into_iter()
+            .find(|d| d.key() == e.sink && d.state == DefState::Active)
+        else {
+            return Ok(None);
+        };
+        let Some(stream_def) = chain
+            .reaching(DefKind::Stream)
+            .into_iter()
+            .find(|d| d.key() == e.stream)
+        else {
+            return Ok(None);
+        };
+        let Some(si) = super::super::streams::existing(&cat, &stream_def) else {
+            return Ok(None);
+        };
+        match super::ensure_one(svc, &chain, &s, &si).await {
+            Ok(_) => Ok(Some(())),
+            Err(err) => {
+                let _ = super::record(
+                    svc,
+                    e.tenant,
+                    &s,
+                    json!({"error": err.to_string(), "code": err.code().map(sprig_common::SprigCode::number), "retries": e.attempts}),
+                    InstanceState::Creating,
+                )
+                .await;
+                Err(err)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn backoff_doubles_to_five_minutes() {
+            assert_eq!(delay_ms(1), 5_000);
+            assert_eq!(delay_ms(2), 10_000);
+            assert_eq!(delay_ms(4), 40_000);
+            assert_eq!(delay_ms(7), 300_000);
+            assert_eq!(delay_ms(u32::MAX), 300_000);
+        }
+
+        #[test]
+        fn entries_round_trip() {
+            let e = Entry {
+                tenant: TenantId((1 << 40) + 1),
+                sink: DefKey {
+                    tenant: TenantId(26_306_000_001),
+                    object: 9,
+                },
+                stream: DefKey {
+                    tenant: TenantId(26_306_000_001),
+                    object: 4,
+                },
+                attempts: 2,
+                next_ms: 10,
+                error: "39214".into(),
+            };
+            let b = Record::new(e.clone()).encode().unwrap();
+            assert_eq!(Record::<Entry>::decode(&b).unwrap().body, e);
         }
     }
 }
@@ -380,12 +677,14 @@ async fn record(
 }
 
 #[allow(clippy::too_many_lines)]
+/// Deploys member `si.tenant`'s instance of sink definition `s`: true
+/// when its last deploy had failed (see [`retry`]).
 async fn ensure_one(
     svc: &Arc<TenantServices>,
     chain: &Chain,
     s: &Arc<Definition>,
     si: &StreamInstance,
-) -> Result<()> {
+) -> Result<bool> {
     let t = si.tenant;
     let spec: SinkSpec = serde_json::from_value(s.definition.clone()).unwrap_or_default();
     let name = super::tenant_name(svc, t).await?;
@@ -420,13 +719,14 @@ async fn ensure_one(
         }
     };
     let phys = row.as_ref().and_then(|r| r.physical.clone());
+    let had_error = phys.as_ref().is_some_and(|p| p.get("error").is_some());
     if phys
         .as_ref()
         .and_then(|p| p.get("applied"))
         .and_then(Value::as_str)
         == Some(sig.as_str())
     {
-        return Ok(());
+        return Ok(false);
     }
     let missing: Vec<String> = conns
         .iter()
@@ -435,7 +735,7 @@ async fn ensure_one(
     if !missing.is_empty() {
         metrics::counter!("sprig_inherit_refused_total", "reason" => "waiting_config").increment(1);
         tracing::info!(tenant = %t, def = %s.key(), missing = ?missing, "inherited sink waits for its configuration (39241)");
-        return record(
+        record(
             svc,
             t,
             s,
@@ -446,7 +746,8 @@ async fn ensure_one(
             }),
             InstanceState::Creating,
         )
-        .await;
+        .await?;
+        return Ok(had_error);
     }
     // The member's sprig_inherited: the definition's GRANTS, and reading
     // the stream's instance.
@@ -623,11 +924,14 @@ async fn ensure_one(
             if si.created || si.stream.created_at_ms >= s.created_at_ms {
                 cs.start_at = StartAt::Earliest;
             } else if cs.start_at == StartAt::Latest {
-                // "Latest" is the deploy, not the task's first run: a task
-                // that can't start yet (a destination down, a credential
-                // still missing) misses nothing published meanwhile.
+                // "Latest" is the definition's creation, not the deploy or
+                // the task's first run (R9, r9queue): the publish whose use
+                // of the instance deploys the sink was stamped before the
+                // deploy, and a task that can't start yet (a destination
+                // down, a credential still missing, a deploy retried on the
+                // timer) misses nothing published after the definition.
                 cs.start_at = StartAt::Timestamp {
-                    ms: i64::try_from(sprig_inherit::msg::store::now_ms()).unwrap_or(i64::MAX),
+                    ms: i64::try_from(s.created_at_ms).unwrap_or(i64::MAX),
                 };
             }
             cs.options = opts
@@ -674,7 +978,8 @@ async fn ensure_one(
         }),
         InstanceState::Active,
     )
-    .await
+    .await?;
+    Ok(had_error)
 }
 
 /// Drops member `t`'s instance of sink definition `s` (its ordinary sink,

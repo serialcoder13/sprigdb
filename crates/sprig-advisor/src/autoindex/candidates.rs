@@ -528,10 +528,22 @@ impl Generator {
                 continue;
             };
             let acc = access(f, &t.alias, object, stats);
-            let mut cands = self.for_table(&acc, stats);
-            // Chapter 13's other models (R6 round 3): spatial and vector.
-            cands.extend(model_candidates(f, &t.alias, object, stats));
-            if cands.is_empty() {
+            // Chapter 33's element tables (R6 round 5) get only their own
+            // shapes' indexes (`super::kv`).
+            let cands = if super::kv::is_element_table(stats) {
+                super::kv::candidates(f, &t.alias, object, stats)
+            } else {
+                let mut cands = self.for_table(&acc, stats);
+                // Chapter 13's other models (R6 round 3): spatial and vector.
+                cands.extend(model_candidates(f, &t.alias, object, stats));
+                // Value fields of key-value keys (R6 round 6, decision K3).
+                cands.extend(super::kv::field_candidates(f, &t.alias, object, stats));
+                cands
+            };
+            if cands.is_empty() && super::kv::value_field(f, &t.alias, stats) {
+                // A path MariaDB doesn't substitute (`LIKE`, `->`, a number).
+                out.skipped.push(skip("kv_value_field"));
+            } else if cands.is_empty() {
                 let reason = acc
                     .unsargable
                     .first()

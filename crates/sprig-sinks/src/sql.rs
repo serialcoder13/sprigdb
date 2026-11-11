@@ -127,6 +127,28 @@ pub trait Host: Send {
     async fn function_source(&mut self, _db: u32, _name: &str) -> Result<Option<(String, String)>> {
         Ok(None)
     }
+    /// Version `version` (`None`: the active one) of the live logic
+    /// function `name` of `db`: its runtime, version, source and recorded
+    /// signature (`TRANSFORM` with `transform_version` and `EXACTLY ONCE`,
+    /// R9 r9fwd). The default asks [`Self::function_source`] and knows no
+    /// version or signature.
+    ///
+    /// # Errors
+    /// The catalog's.
+    async fn function_version(
+        &mut self,
+        db: u32,
+        name: &str,
+        version: Option<u64>,
+    ) -> Result<Option<(String, u64, String, Value)>> {
+        if version.is_some() {
+            return Ok(None);
+        }
+        Ok(self
+            .function_source(db, name)
+            .await?
+            .map(|(r, s)| (r, 0, s, Value::Null)))
+    }
     /// The change topic (`t.changes`) of table object `table` in `db`: its
     /// stream id and partitions, when the table's change topic is on.
     fn change_stream(&self, _db: u32, _table: u64) -> Option<(u64, u32)> {
@@ -140,6 +162,32 @@ pub trait Host: Send {
     /// # Errors
     /// `UNDER` names no tenant below this one; the catalog's.
     async fn fan_in_stream(
+        &mut self,
+        _db: &str,
+        _name: &str,
+        _under: Option<&str>,
+    ) -> Result<Option<FanInDef>> {
+        Ok(None)
+    }
+
+    /// The durable queue `name` of database `db` (its vhost): its id
+    /// (R9, r9queue). `None` when there is none, or this host can't tell.
+    fn queue(&self, _db: u32, _name: &str) -> Option<u64> {
+        None
+    }
+
+    /// Whether the user may `DELETE` (consume) `db.name` (a queue).
+    fn can_delete(&self, db: &str, name: &str) -> bool {
+        self.can_select(db, name)
+    }
+
+    /// The `FOR EACH TENANT` queue definition `db.name` a fan-in sink of
+    /// this tenant may read (`SPRIG_FAN_IN` checked), and `UNDER t`'s id
+    /// (R9, r9queue); `partitions` is 0.
+    ///
+    /// # Errors
+    /// `UNDER` names no tenant below this one; the catalog's.
+    async fn fan_in_queue(
         &mut self,
         _db: &str,
         _name: &str,
@@ -975,10 +1023,75 @@ async fn create_sink(h: &mut dyn Host, c: grammar::CreateSink) -> Result<Handled
             }
         }
         grammar::SourceAst::Queue(q) => {
-            return Err(bad_option(format!(
-                "queue sources (FROM QUEUE {}) don't run in workers yet: queue owners live in gateways until the relay between them is built",
-                q.name
-            )));
+            // A durable queue of the database's vhost (chapter 50), which
+            // the sink consumes: SELECT and DELETE on it (R9, r9queue).
+            let (qdb, qdbname) = db_of(h, q.db.as_deref().or(Some(&dbname)))?;
+            let id = h.queue(qdb, &q.name).ok_or_else(|| {
+                err(
+                    SprigCode::SinkOptionInvalid,
+                    format!("no durable queue {} in vhost {qdbname}", q.name),
+                )
+            })?;
+            if !h.can_select(&qdbname, &q.name) || !h.can_delete(&qdbname, &q.name) {
+                return Err(err(
+                    SprigCode::SinkPrivilege,
+                    format!(
+                        "you need SELECT and DELETE on queue {} (a sink consumes it)",
+                        q.name
+                    ),
+                ));
+            }
+            if qdb != db {
+                return Err(bad_option(
+                    "a queue sink's queue must be in the sink's database (its vhost)",
+                ));
+            }
+            SourceSpec::Queue {
+                id,
+                name: q.name.clone(),
+            }
+        }
+        grammar::SourceAst::FanInQueue { queue: q, under } => {
+            let qdbname = q.db.clone().unwrap_or_else(|| dbname.clone());
+            if !h.fan_in() {
+                return Err(err(
+                    SprigCode::SinkPrivilege,
+                    "Access denied; you need (at least one of) the SPRIG_FAN_IN privilege(s) for a fan-in sink",
+                ));
+            }
+            if !h.can_select(&qdbname, &q.name) || !h.can_delete(&qdbname, &q.name) {
+                return Err(err(
+                    SprigCode::SinkPrivilege,
+                    format!(
+                        "you need SELECT and DELETE on queue {} (a sink consumes it)",
+                        q.name
+                    ),
+                ));
+            }
+            let d = h
+                .fan_in_queue(&qdbname, &q.name, under.as_deref())
+                .await?
+                .ok_or_else(|| {
+                    err(
+                        SprigCode::SinkOptionInvalid,
+                        format!(
+                            "no FOR EACH TENANT queue {qdbname}.{} in reach for FAN IN",
+                            q.name
+                        ),
+                    )
+                })?;
+            if c.guarantee == Guarantee::ExactlyOnce {
+                return Err(bad_option(
+                    "EXACTLY ONCE isn't built for fan-in sinks yet: they deliver at least once, each record with its tenant-prefixed idempotency key",
+                ));
+            }
+            SourceSpec::FanInQueue {
+                def_tenant: d.def_tenant,
+                def_object: d.def_object,
+                db: qdbname,
+                name: q.name.clone(),
+                under: d.under,
+            }
         }
         grammar::SourceAst::Changes(ts) => {
             // Read through each table's change topic (chapter 45), which
@@ -1017,15 +1130,38 @@ async fn create_sink(h: &mut dyn Host, c: grammar::CreateSink) -> Result<Handled
     };
     // TRANSFORM f: a live JavaScript, KIRun or Lua function of the sink's
     // database whose text uses no data or outside calls (R9, r9more).
+    // R9 (r9fwd): `transform_version = n` pins a version, and `EXACTLY
+    // ONCE` needs the version declared `DETERMINISTIC`.
     if let Some(f) = &c.transform {
-        match h.function_source(db, f).await? {
+        let pinned = grammar::options_map(&c.options)
+            .get("transform_version")
+            .map(|v| {
+                v.trim().parse::<u64>().map_err(|_| {
+                    bad_option(format!(
+                        "transform_version must be a whole number, not '{v}'"
+                    ))
+                })
+            })
+            .transpose()?
+            .filter(|v| *v > 0);
+        match h.function_version(db, f, pinned).await? {
             None => {
                 return Err(err(
                     SprigCode::SinkTransformInvalid,
-                    format!("TRANSFORM {f}: no function {f} in database {dbname}"),
+                    match pinned {
+                        Some(v) => format!(
+                            "TRANSFORM {f}: no version {v} of function {f} in database {dbname}"
+                        ),
+                        None => format!("TRANSFORM {f}: no function {f} in database {dbname}"),
+                    },
                 ));
             }
-            Some((runtime, source)) => crate::transform::check(f, &runtime, &source)?,
+            Some((runtime, version, source, sig)) => {
+                crate::transform::check(f, &runtime, &source)?;
+                if c.guarantee == Guarantee::ExactlyOnce {
+                    crate::transform::check_deterministic(f, version, &sig)?;
+                }
+            }
         }
     }
     // DEAD LETTER TO STREAM d: a stream of this tenant (its events go
@@ -1248,6 +1384,14 @@ pub fn render_sink(d: &SinkDef) -> String {
             db, name, under, ..
         } => {
             s.push_str(&format!("STREAM `{db}`.`{name}` FAN IN"));
+            if let Some(u) = under {
+                s.push_str(&format!(" UNDER {u}"));
+            }
+        }
+        SourceSpec::FanInQueue {
+            db, name, under, ..
+        } => {
+            s.push_str(&format!("QUEUE `{db}`.`{name}` FAN IN"));
             if let Some(u) = under {
                 s.push_str(&format!(" UNDER {u}"));
             }

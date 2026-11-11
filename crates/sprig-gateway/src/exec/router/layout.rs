@@ -522,6 +522,14 @@ impl Layouts {
         }
     }
 
+    /// Whether `cat` has sharded or reference tables (its groups' maps
+    /// aside): a layout without any map loaded is still to come.
+    pub(crate) fn has_groups(cat: &TenantCatalog) -> bool {
+        cat.ext
+            .get::<ShardingState>(sprig_shard::groups::MODULE)
+            .is_some_and(|s| s.migrated && !s.members.is_empty())
+    }
+
     /// `cat`'s layout with the maps of `cache` now; `None` for a tenant
     /// without sharded or reference tables.
     pub(crate) fn get(
@@ -704,8 +712,20 @@ fn build(cat: &TenantCatalog, state: &ShardingState, cache: &ShardMapCache) -> T
             member,
         });
     }
-    let topo =
+    let mut topo =
         sprig_router::topology::catalog::build_with_fks(tenant.0, &groups, &tables, &state.fks);
+    // R8 round 6: groups without a table the router plans (a graph's
+    // group), by id, in their database's schemas (`Plan::Graph`'s shards).
+    for g in &groups {
+        let used = tables
+            .iter()
+            .any(|t| matches!(&t.member, Membership::Sharded { group, .. } if *group == g.id));
+        if let (false, Some(m)) = (used, state.members.iter().find(|m| m.group == g.id)) {
+            topo.insert_group(Arc::new(sprig_router::topology::catalog::numeric_group(
+                tenant.0, m.db, g,
+            )));
+        }
+    }
     let mut epochs = HashMap::new();
     for (_, e) in topo.entries() {
         if e.is_reference() {

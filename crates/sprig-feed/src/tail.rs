@@ -73,6 +73,15 @@ pub struct TailOptions {
     /// chapter 45's sequencers read their outboxes (`__sprig_eo_`).
     /// Empty: filter rule 1 drops every internal table.
     pub keep_internal: Vec<String>,
+    /// Follow the tenant when it moves (the default). `false` pins the
+    /// tail to its starting cluster: chapter 39's search copies read every
+    /// cluster that may hold the tenant's shards, one tail each.
+    pub follow_moves: bool,
+    /// Also send a progress item (at most every `progress_every`) after
+    /// transactions the filters dropped, so a consumer's position moves on
+    /// a cluster busy with other tenants' writes, where the source is
+    /// never idle (chapter 39's waits for `latest`).
+    pub progress_on_filtered: bool,
 }
 
 impl Default for TailOptions {
@@ -83,6 +92,8 @@ impl Default for TailOptions {
             handoff_alert: Duration::from_secs(300),
             retry: Duration::from_millis(100),
             keep_internal: Vec::new(),
+            follow_moves: true,
+            progress_on_filtered: false,
         }
     }
 }
@@ -299,7 +310,7 @@ impl TenantTail {
 
     /// The handoff out of the current segment, once known.
     fn find_next(&mut self, history: &[Handoff]) {
-        if self.next.is_some() {
+        if self.next.is_some() || !self.opts.follow_moves {
             return;
         }
         if let Some(h) = history.iter().find(|h| h.map_version > self.segment) {
@@ -319,7 +330,7 @@ impl TenantTail {
     /// Looks for a committed move out of the segment (at most every
     /// `handoff_poll` unless `force`).
     async fn check_handoff(&mut self, force: bool) -> Result<()> {
-        if self.next.is_some() {
+        if self.next.is_some() || !self.opts.follow_moves {
             return Ok(());
         }
         if !force
@@ -809,6 +820,16 @@ impl TenantTail {
                     let after = t.after();
                     self.on_txn(t).await?;
                     self.pos = after;
+                    if self.opts.progress_on_filtered
+                        && self.out.is_empty()
+                        && self.until.is_none()
+                        && self.last_progress.elapsed() >= self.opts.progress_every
+                    {
+                        self.last_progress = Instant::now();
+                        return Ok(FeedItem::Progress {
+                            token: self.progress_token(),
+                        });
+                    }
                 }
                 SourceItem::Idle { pos } => {
                     if pos.reached(&self.pos) {

@@ -328,6 +328,13 @@ pub enum SourceAst {
         /// `UNDER t`.
         under: Option<String>,
     },
+    /// `FROM QUEUE q FAN IN [UNDER t]` (R9, r9queue).
+    FanInQueue {
+        /// The inherited queue's name.
+        queue: QName,
+        /// `UNDER t`.
+        under: Option<String>,
+    },
 }
 
 /// `TO ...` as written.
@@ -1078,10 +1085,18 @@ fn create_sink(p: &mut P<'_>) -> Result<Stmt> {
                 };
                 SourceAst::FanIn { stream: q, under }
             }
+            SourceAst::Queue(q) => {
+                let under = if p.kw("UNDER") {
+                    Some(p.qname()?.name)
+                } else {
+                    None
+                };
+                SourceAst::FanInQueue { queue: q, under }
+            }
             _ => {
                 return Err(err(
                     SprigCode::SinkOptionInvalid,
-                    "FAN IN is built for stream sources only (QUEUE q FAN IN comes with queue sources)",
+                    "FAN IN reads a stream or a queue, not CHANGES OF",
                 ));
             }
         }
@@ -1517,7 +1532,19 @@ mod tests {
             panic!("not a sink");
         };
         assert!(matches!(c.source, SourceAst::FanIn { under: None, .. }));
-        assert!(parse("CREATE SINK a FROM QUEUE q FAN IN TO WEBHOOK CONNECTION h").is_err());
+        // R9 (r9queue): QUEUE q FAN IN.
+        let Some(Stmt::CreateSink(c)) =
+            parse("CREATE SINK a FROM QUEUE jobs.work FAN IN UNDER x TO WEBHOOK CONNECTION h")
+                .unwrap()
+        else {
+            panic!("not a sink");
+        };
+        assert!(matches!(
+            c.source,
+            SourceAst::FanInQueue { ref queue, ref under }
+                if queue.name == "work" && under.as_deref() == Some("x")
+        ));
+        assert!(parse("CREATE SINK a FROM CHANGES OF t FAN IN TO WEBHOOK CONNECTION h").is_err());
     }
 
     #[test]

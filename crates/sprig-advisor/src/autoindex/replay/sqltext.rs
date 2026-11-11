@@ -885,7 +885,10 @@ pub fn with_ignore_index(
 ) -> Result<String, Unreplayable> {
     let toks = lex(sql)?;
     let hint = format!(" IGNORE INDEX ({})", sprig_common::names::quote(index));
-    let points = table_ref_ends(sql, &toks, schema, table, default_db);
+    let points: Vec<usize> = table_ref_ends(sql, &toks, schema, table, default_db)
+        .into_iter()
+        .map(|r| r.end)
+        .collect();
     if points.is_empty() {
         return Err(Unreplayable::TableNotFound);
     }
@@ -900,7 +903,36 @@ pub fn with_ignore_index(
     Ok(out)
 }
 
-/// Byte offsets right after each matching table reference and its alias.
+/// One reference to a table in a statement, as byte offsets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableRefSpan {
+    /// Where `[schema .] table` starts.
+    pub start: usize,
+    /// Right after the table name.
+    pub name_end: usize,
+    /// Right after the reference with its alias.
+    pub end: usize,
+    /// It has an alias.
+    pub aliased: bool,
+}
+
+/// Every reference to `schema.table` in a `SELECT`, as [`with_ignore_index`]
+/// finds them.
+///
+/// # Errors
+/// Lexing errors.
+pub fn table_refs(
+    sql: &str,
+    schema: &str,
+    table: &str,
+    default_db: Option<&str>,
+) -> Result<Vec<TableRefSpan>, Unreplayable> {
+    let toks = lex(sql)?;
+    Ok(table_ref_ends(sql, &toks, schema, table, default_db))
+}
+
+/// Each matching table reference, with the offset right after it and its
+/// alias.
 #[allow(clippy::too_many_lines)]
 fn table_ref_ends(
     sql: &str,
@@ -908,7 +940,7 @@ fn table_ref_ends(
     schema: &str,
     table: &str,
     default_db: Option<&str>,
-) -> Vec<usize> {
+) -> Vec<TableRefSpan> {
     // Per depth: inside a FROM clause, and whether a table name may come
     // next.
     let mut in_from: Vec<bool> = vec![false];
@@ -982,7 +1014,9 @@ fn table_ref_ends(
                 None => default_db.is_some_and(|d| d.eq_ignore_ascii_case(schema)),
             };
             if db_ok && name.eq_ignore_ascii_case(table) {
-                let mut end = toks[j - 1].end;
+                let start = t.start;
+                let name_end = toks[j - 1].end;
+                let mut end = name_end;
                 // PARTITION (p0, p1)
                 if toks.get(j).is_some_and(|n| n.is_kw(sql, "PARTITION"))
                     && toks.get(j + 1).is_some_and(|n| n.is_punct(b'('))
@@ -1009,7 +1043,12 @@ fn table_ref_ends(
                     end = toks[j].end;
                     j += 1;
                 }
-                out.push(end);
+                out.push(TableRefSpan {
+                    start,
+                    name_end,
+                    end,
+                    aliased: end != name_end,
+                });
             }
             i = j;
             continue;

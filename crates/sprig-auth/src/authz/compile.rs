@@ -95,6 +95,9 @@ pub struct CompiledPrivileges {
     /// Graph element grants (chapter 43, R8), by (graph, relationship
     /// type?, label or type name).
     pub elements: HashMap<(ObjectId, bool, String), ActionSet>,
+    /// Row-level security (chapter 29): the protected tables that bind
+    /// this session and their policies (`super::rls::compile`).
+    pub rls: std::sync::Arc<super::rls::SessionRls>,
 }
 
 /// The tenant-level actions cut from each database by partial revokes,

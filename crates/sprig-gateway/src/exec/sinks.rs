@@ -216,6 +216,26 @@ impl Host for GwHost<'_> {
         let lctn = self.lctn();
         let db_key = database_key(db_name, lctn);
         let name_key = object_key(ObjectKind::Table, name, lctn);
+        // Chapter 29: a sink would export a table whose policies bind the
+        // session unfiltered: refused.
+        if let Some(row) = self.cat.database(&db_key)
+            && let Some(o) = self.cat.object(
+                row.db_id,
+                sprig_catalog::store::Namespace::Relation,
+                &name_key,
+            )
+            && g.row_filter(
+                Target::Object {
+                    db_key: &db_key,
+                    db: row.db_id,
+                    object: o.object_id,
+                },
+                Action::Select,
+            )
+            .is_some()
+        {
+            return false;
+        }
         g.allows(
             Action::Select,
             Target::Named {
@@ -223,6 +243,41 @@ impl Host for GwHost<'_> {
                 name_key: &name_key,
             },
         ) || g.allows(Action::Select, Target::Database { db_key: &db_key })
+    }
+
+    fn can_delete(&self, db_name: &str, name: &str) -> bool {
+        let Some(ts) = self.ts() else {
+            return false;
+        };
+        let g = crate::tenant::authz::privileges(ts, &self.cat);
+        if g.unrestricted() {
+            return true;
+        }
+        let lctn = self.lctn();
+        let db_key = database_key(db_name, lctn);
+        let name_key = object_key(ObjectKind::Table, name, lctn);
+        g.allows(
+            Action::Delete,
+            Target::Named {
+                db_key: &db_key,
+                name_key: &name_key,
+            },
+        ) || g.allows(Action::Delete, Target::Database { db_key: &db_key })
+    }
+
+    // R9 (r9queue): a durable queue of the database's vhost, from the
+    // snapshot's `mq` module.
+    fn queue(&self, db: u32, name: &str) -> Option<u64> {
+        let st = self
+            .cat
+            .ext
+            .get::<sprig_queues::catalog::MqState>(sprig_queues::catalog::MODULE)?;
+        st.dbs
+            .get(&db)?
+            .queues
+            .get(name)
+            .filter(|q| q.durable && q.temp_on.is_none())
+            .map(|q| q.id)
     }
 
     fn setting(&self, key: &str, db: u32) -> Option<String> {
@@ -381,6 +436,16 @@ impl Host for GwHost<'_> {
             .map(|(runtime, _, source, _)| (runtime, source)))
     }
 
+    async fn function_version(
+        &mut self,
+        db: u32,
+        name: &str,
+        version: Option<u64>,
+    ) -> Result<Option<(String, u64, String, serde_json::Value)>> {
+        let (mut c, schema) = self.catalog_conn().await?;
+        sprig_sinks::transform::source_at(&mut c, &schema, db, name, version).await
+    }
+
     async fn platform_granted(&mut self) -> Result<Vec<PlatformConnection>> {
         let global = Arc::clone(
             &self
@@ -477,6 +542,59 @@ impl Host for GwHost<'_> {
             def_tenant: k.tenant.0,
             def_object: k.object,
             partitions,
+            under,
+        }))
+    }
+
+    // R9 (r9queue): `FROM QUEUE q FAN IN`.
+    async fn fan_in_queue(
+        &mut self,
+        db: &str,
+        name: &str,
+        under: Option<&str>,
+    ) -> Result<Option<sprig_sinks::sql::FanInDef>> {
+        let svc = Arc::clone(
+            self.ts()
+                .ok_or_else(|| SprigError::internal("no tenant"))?
+                .services(),
+        );
+        let me = self.cat.tenant;
+        let fresh = crate::inherited::catalog(&svc, me).await?;
+        let user = self.ts().and_then(|t| t.principal.user_id);
+        let g = crate::tenant::authz::grants_of(&svc, &fresh, user);
+        if !g.unrestricted() && !g.allows(Action::FanIn, Target::Tenant) {
+            return Err(SprigError::new(
+                SprigCode::SinkPrivilege,
+                "Access denied; you need (at least one of) the SPRIG_FAN_IN privilege(s) for a \
+                 fan-in sink",
+            ));
+        }
+        let chain = crate::inherited::chain(&svc, &self.cat).await?;
+        let Some(d) = crate::inherited::fanin_mq::queue_definition(&chain, db, name) else {
+            return Ok(None);
+        };
+        let under = match under {
+            None => None,
+            Some(u) => {
+                let id = crate::inherited::tenant_by_name(&svc, u)
+                    .await?
+                    .ok_or_else(|| crate::inherited::target_err(format!("no tenant '{u}'")))?;
+                let e = crate::inherited::dir_entry(&svc, id)
+                    .await?
+                    .unwrap_or_default();
+                if id != me && !e.path_ids().contains(&me.0) {
+                    return Err(crate::inherited::target_err(format!(
+                        "tenant '{u}' isn't below this one"
+                    )));
+                }
+                Some(id.0)
+            }
+        };
+        let k = d.key();
+        Ok(Some(sprig_sinks::sql::FanInDef {
+            def_tenant: k.tenant.0,
+            def_object: k.object,
+            partitions: 0,
             under,
         }))
     }

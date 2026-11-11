@@ -70,6 +70,24 @@ impl RecApp {
     }
 
     fn who(&self, headers: &HeaderMap) -> Result<Who> {
+        // Behind the operators' guard (chapter 14, "Operators"): the
+        // caller it established, by role.
+        if headers.contains_key(crate::operators::guard::AUTHN_HEADER) {
+            let p = crate::operators::http::principal(headers)?;
+            return if p.is_gateway() {
+                Ok(Who::Gateway)
+            } else if p.platform {
+                Ok(Who::Platform)
+            } else if p.dcs.contains(&self.dc) {
+                Ok(Who::DcOperator)
+            } else {
+                Err(denied(&format!(
+                    "{} doesn't operate dc {}",
+                    p.audit_name(),
+                    self.dc
+                )))
+            };
+        }
         if self
             .gateway_token
             .as_deref()
@@ -101,7 +119,13 @@ impl RecApp {
         claim: Option<Caller>,
         actor: Option<&str>,
     ) -> Result<Caller> {
-        let actor = actor.filter(|a| !a.is_empty()).unwrap_or("admin");
+        let named = crate::operators::http::principal(headers)
+            .ok()
+            .and_then(|p| p.actor());
+        let actor = named
+            .as_deref()
+            .or(actor.filter(|a| !a.is_empty()))
+            .unwrap_or("admin");
         let who = self.who(headers)?;
         let header_claim = headers
             .get("x-sprig-caller")
@@ -118,7 +142,15 @@ impl RecApp {
         }
         match who {
             Who::Platform => Ok(Caller::platform(format!("op:{actor}"))),
-            Who::DcOperator => Ok(Caller::dc_operator(format!("dc:{actor}"), self.dc.clone())),
+            Who::DcOperator => Ok(Caller::dc_operator(
+                // A named DC operator is a person like any other operator.
+                if named.is_some() {
+                    format!("op:{actor}")
+                } else {
+                    format!("dc:{actor}")
+                },
+                self.dc.clone(),
+            )),
             // The gateway credential always carries a claim (handled above).
             Who::Gateway => Err(invalid("the gateway credential needs a caller claim")),
         }

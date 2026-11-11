@@ -81,6 +81,55 @@ pub trait SinkEnv: Send + Sync {
     fn settings(&self) -> Option<(sprig_settings::Snapshot, sprig_common::ids::DcId)> {
         None
     }
+    /// The DC's gateways, for statements as the sink's owner (queue
+    /// sources, the script `db` handle; R9, r9queue). `None`: none here.
+    fn peer(&self) -> Option<Arc<dyn crate::peer::SinkPeer>> {
+        None
+    }
+}
+
+/// Who a sink's statements run as on a gateway: its owner, in its
+/// tenant (by name) and database.
+///
+/// # Errors
+/// The directory's (the tenant's name).
+async fn run_as(
+    env: &dyn SinkEnv,
+    tenant: TenantId,
+    def: &SinkDef,
+    opts: &Opts,
+) -> Result<crate::peer::RunAs> {
+    let global = env.global().ok_or_else(|| {
+        SprigError::new(
+            SprigCode::SinkOptionInvalid,
+            "this worker has no global tier to name the sink's tenant",
+        )
+    })?;
+    Ok(crate::peer::RunAs {
+        tenant: tenant.0,
+        tenant_name: crate::peer::tenant_name(global.as_ref(), tenant.0).await?,
+        user_id: def.owner_user_id,
+        database: opts.get("__db_name").unwrap_or("").to_owned(),
+    })
+}
+
+/// The script `db` handle of a script sink in this worker (R9, r9queue):
+/// reads through a gateway as the sink's owner. `None` for other targets
+/// or without gateways.
+async fn script_db(
+    env: &dyn SinkEnv,
+    tenant: TenantId,
+    def: &SinkDef,
+    opts: &Opts,
+) -> Result<Option<Arc<dyn crate::target::script::ReadOnlyDb>>> {
+    if def.target.kind() != TargetKind::Script {
+        return Ok(None);
+    }
+    let Some(peer) = env.peer() else {
+        return Ok(None);
+    };
+    let who = run_as(env, tenant, def, opts).await?;
+    Ok(Some(Arc::new(crate::peer::PeerReadOnly::new(peer, who))))
 }
 
 /// `opts` with every `sink.*` key set at the global scope of `etcd` (in
@@ -620,9 +669,21 @@ async fn load_transform(
         SprigError::new(SprigCode::CatalogUnavailable, "catalog unavailable").with_source(e)
     })?;
     let budget = Duration::from_millis(opts.u64("transform_budget_ms", 50)?);
-    crate::transform::Transform::load(&mut c, schema, def.db_id, f, budget)
-        .await
-        .map(Some)
+    // `transform_version = n` pins a version (0 or absent: the active
+    // one, followed at each task start); `EXACTLY ONCE` needs it
+    // `DETERMINISTIC` (R9, r9fwd).
+    let version = opts.u64("transform_version", 0)?;
+    crate::transform::Transform::load_at(
+        &mut c,
+        schema,
+        def.db_id,
+        f,
+        (version > 0).then_some(version),
+        def.guarantee == Guarantee::ExactlyOnce,
+        budget,
+    )
+    .await
+    .map(Some)
 }
 
 /// Builds the target of a sink.
@@ -630,12 +691,23 @@ async fn load_transform(
 /// # Errors
 /// The target's.
 pub async fn build_target(ctx: &TargetCtx) -> Result<Box<dyn Target>> {
+    build_target_with(ctx, None).await
+}
+
+/// [`build_target`] with a script sink's `db` handle.
+///
+/// # Errors
+/// The target's.
+pub async fn build_target_with(
+    ctx: &TargetCtx,
+    db: Option<Arc<dyn crate::target::script::ReadOnlyDb>>,
+) -> Result<Box<dyn Target>> {
     match ctx.sink.target.kind() {
         TargetKind::Webhook => crate::target::webhook::build(ctx),
         TargetKind::Kafka => crate::target::kafka::build(ctx),
         TargetKind::S3 => crate::target::s3::build(ctx),
         TargetKind::Database => crate::target::db::build(ctx).await,
-        TargetKind::Script => crate::target::script::build(ctx, None),
+        TargetKind::Script => crate::target::script::build(ctx, db),
     }
 }
 
@@ -678,8 +750,13 @@ pub async fn run_sink_task(
         def.target.kind(),
     )?;
     let per_task = u32::try_from(opts.u64("partitions_per_task", 4)?).unwrap_or(4);
-    if let SourceSpec::FanIn { .. } | SourceSpec::Changes { .. } = &def.source {
+    if let SourceSpec::FanIn { .. } | SourceSpec::FanInQueue { .. } | SourceSpec::Changes { .. } =
+        &def.source
+    {
         return run_fan_in_task(env, tenant, sink, task_no, cancel, c, store, def, opts).await;
+    }
+    if let SourceSpec::Queue { .. } = &def.source {
+        return run_queue_task(env, tenant, sink, task_no, cancel, c, store, def, opts).await;
     }
     let (stream, partitions_n) = match &def.source {
         SourceSpec::Stream { id, partitions, .. } => (*id, *partitions),
@@ -746,7 +823,8 @@ pub async fn run_sink_task(
     if def.target.kind() == TargetKind::S3 {
         crate::target::s3::run_settings_override(&opts, &mut settings)?;
     }
-    let target = build_target(&ctx).await?;
+    let db = script_db(env.as_ref(), tenant, &def, &opts).await?;
+    let target = build_target_with(&ctx, db).await?;
     // The stream's log shard.
     let shard = env.shard_pool(tenant).await?;
     let log_schema = stream_log_schema(&cat_pool, &cat_schema, tenant, stream).await?;
@@ -1097,7 +1175,8 @@ async fn run_fan_in_task(
     if def.target.kind() == TargetKind::S3 {
         crate::target::s3::run_settings_override(&opts, &mut settings)?;
     }
-    let target = build_target(&ctx).await?;
+    let db = script_db(env.as_ref(), tenant, &def, &opts).await?;
+    let target = build_target_with(&ctx, db).await?;
     let refresh = Duration::from_secs(opts.u64("fanin_refresh_seconds", 30)?.max(1));
     // Whole seconds: change topics' records carry their commit time in
     // seconds, so a record committed in the sink's creation second counts.
@@ -1121,6 +1200,36 @@ async fn run_fan_in_task(
                     start: def.start_at,
                     sink,
                     sink_created_ms,
+                }),
+                refresh,
+            )
+            .await?
+        }
+        SourceSpec::FanInQueue {
+            def_tenant,
+            def_object,
+            under,
+            db,
+            name,
+        } => {
+            let peer = env.peer().ok_or_else(|| {
+                err(
+                    SprigCode::SinkOptionInvalid,
+                    "queue sources need the DC's gateways, and this worker reaches none",
+                )
+            })?;
+            crate::source::FanInSource::open(
+                Box::new(EnvFanInQueue {
+                    env: Arc::clone(&env),
+                    peer,
+                    run_as: run_as(env.as_ref(), tenant, &def, &opts).await?,
+                    tenant: tenant.0,
+                    def: (*def_tenant, *def_object),
+                    under: *under,
+                    db: db.clone(),
+                    queue: name.clone(),
+                    lease_ms: opts.u64("queue_lease_ms", 300_000)?.max(1000),
+                    seed: sink.0,
                 }),
                 refresh,
             )
@@ -1166,6 +1275,8 @@ async fn run_fan_in_task(
         sink,
         stream: CatalogDead::target(env.as_ref(), tenant, &cat_pool, &cat_schema, &def).await?,
     });
+    let reject_via_source =
+        matches!(def.source, SourceSpec::FanInQueue { .. }) && def.dead_letter.is_none();
     tracing::info!(tenant = %tenant, sink = sink.0, task = task_no.0, members = source.members().len(), "fan-in sink task started");
     metrics::gauge!("sprig_sink_tasks", "state" => "running").increment(1.0);
     let end = run_task(
@@ -1178,13 +1289,260 @@ async fn run_fan_in_task(
             prepare: Arc::new(prepare),
             settings,
             seed: None,
-            reject_via_source: false,
+            reject_via_source,
         },
         cancel,
     )
     .await;
     metrics::gauge!("sprig_sink_tasks", "state" => "running").decrement(1.0);
     tracing::info!(tenant = %tenant, sink = sink.0, task = task_no.0, end = ?end, "fan-in sink task ended");
+    end
+}
+
+/// Lists and opens a fan-in queue sink's member instances (chapter 51,
+/// "Fan-in sinks"; R9, r9queue): the DC's `inherit-instances/` index of
+/// the queue definition, members below the sink's tenant (and `UNDER t`),
+/// members denying remote access left out; each read through a gateway
+/// as the sink's owner (`FanInGet`).
+struct EnvFanInQueue {
+    env: Arc<dyn SinkEnv>,
+    peer: Arc<dyn crate::peer::SinkPeer>,
+    run_as: crate::peer::RunAs,
+    tenant: u64,
+    def: (u64, u64),
+    under: Option<u64>,
+    db: String,
+    queue: String,
+    lease_ms: u64,
+    seed: u64,
+}
+
+#[async_trait]
+impl crate::source::FanInOpener for EnvFanInQueue {
+    async fn members(&self) -> Result<Vec<(crate::source::FanInMember, Vec<u32>)>> {
+        let dc = self.env.dc();
+        let prefix = dc.tier().key("inherit-instances/")?;
+        let page = dc
+            .list(
+                &prefix,
+                sprig_meta::ListOpts {
+                    limit: 1_000_000,
+                    ..sprig_meta::ListOpts::default()
+                },
+            )
+            .await?;
+        let Some(global) = self.env.global() else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        for kv in &page.kvs {
+            let Ok(v) = serde_json::from_slice::<Value>(&kv.value) else {
+                continue;
+            };
+            let def = (
+                v.pointer("/def/tenant").and_then(Value::as_u64),
+                v.pointer("/def/object").and_then(Value::as_u64),
+            );
+            if def != (Some(self.def.0), Some(self.def.1))
+                || v.get("kind").and_then(Value::as_str) != Some("queue")
+            {
+                continue;
+            }
+            let (Some(member), Some(queue)) = (
+                v.get("tenant").and_then(Value::as_u64),
+                v.get("instance_id").and_then(Value::as_u64),
+            ) else {
+                continue;
+            };
+            let Some(e) = global
+                .get(
+                    &global.tier().key(&format!("tenants/{member}"))?,
+                    sprig_meta::Consistency::Serializable,
+                )
+                .await?
+                .and_then(|kv| serde_json::from_slice::<Value>(&kv.value).ok())
+            else {
+                continue;
+            };
+            let path: Vec<u64> = e
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .split('/')
+                .filter_map(|x| x.parse().ok())
+                .collect();
+            if member == self.tenant || !path.contains(&self.tenant) {
+                continue;
+            }
+            if self.under.is_some_and(|u| !path.contains(&u)) {
+                continue;
+            }
+            if e.pointer("/residency/deny_remote_access")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                metrics::counter!("sprig_inherit_fanin_skipped_total", "reason" => "residency")
+                    .increment(1);
+                continue;
+            }
+            let name = e
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            out.push((
+                crate::source::FanInMember {
+                    tenant: member,
+                    name,
+                    stream: queue,
+                },
+                Vec::new(),
+            ));
+        }
+        Ok(out)
+    }
+
+    async fn open(
+        &self,
+        m: &crate::source::FanInMember,
+        _partitions: Vec<u32>,
+    ) -> Result<Box<dyn crate::runtime::SourceReader>> {
+        Ok(Box::new(crate::source::QueueSource::new(
+            Arc::clone(&self.peer),
+            self.run_as.clone(),
+            crate::source::QueueAt::Member {
+                def: self.def,
+                member: m.tenant,
+                db: self.db.clone(),
+            },
+            self.queue.clone(),
+            self.lease_ms,
+            self.seed ^ m.tenant,
+        )))
+    }
+}
+
+/// A queue sink's task (R9, r9queue): the sink's own durable queue,
+/// consumed through a gateway as its owner (see `source::QueueSource`).
+#[allow(clippy::too_many_arguments)]
+async fn run_queue_task(
+    env: Arc<dyn SinkEnv>,
+    tenant: TenantId,
+    sink: SinkId,
+    task_no: TaskNo,
+    cancel: Cancel,
+    mut c: mysql_async::Conn,
+    store: SinksStore,
+    def: Arc<SinkDef>,
+    opts: Opts,
+) -> Result<TaskEnd> {
+    let (cat_pool, cat_schema) = env.catalog(tenant).await?;
+    let SourceSpec::Queue { id, name } = &def.source else {
+        return Ok(TaskEnd::Stopped);
+    };
+    let peer = env.peer().ok_or_else(|| {
+        err(
+            SprigCode::SinkOptionInvalid,
+            "queue sources need the DC's gateways, and this worker reaches none",
+        )
+    })?;
+    let who = run_as(env.as_ref(), tenant, &def, &opts).await?;
+    let epoch = store
+        .claim_task(
+            &mut c,
+            sink,
+            task_no,
+            &json!({"source": "queue", "queue": name}),
+            &env.worker_id(),
+        )
+        .await?;
+    let mut conns = Vec::new();
+    for r in &def.connections {
+        conns.push(open_conn(env.as_ref(), tenant, &mut c, &store, r, &opts).await?);
+    }
+    drop(c);
+    let info = TaskInfo {
+        tenant: tenant.0,
+        sink: sink.0,
+        task_no: task_no.0,
+        epoch,
+    };
+    let (conn, extra) = if def.target.kind() == TargetKind::Script {
+        (None, conns)
+    } else {
+        let mut it = conns.into_iter();
+        (it.next(), it.collect())
+    };
+    let ctx = TargetCtx {
+        task: info.clone(),
+        sink: Arc::clone(&def),
+        conn,
+        extra,
+        opts: opts.clone(),
+        db_name: opts.get("__db_name").unwrap_or("").to_owned(),
+    };
+    let mut settings = run_settings(&opts, &def)?;
+    if def.target.kind() == TargetKind::S3 {
+        crate::target::s3::run_settings_override(&opts, &mut settings)?;
+    }
+    let db = script_db(env.as_ref(), tenant, &def, &opts).await?;
+    let target = build_target_with(&ctx, db).await?;
+    let source = crate::source::QueueSource::new(
+        peer,
+        who.clone(),
+        crate::source::QueueAt::Own {
+            id: *id,
+            db: who.database.clone(),
+        },
+        name.clone(),
+        opts.u64("queue_lease_ms", 300_000)?.max(1000),
+        sink.0,
+    );
+    let prepare = SinkPrepare {
+        condition: def
+            .filter_sql
+            .as_deref()
+            .map(crate::filter::parse)
+            .transpose()?,
+        projection: def.projection.clone(),
+        transform: load_transform(&cat_pool, &cat_schema, &def, &opts).await?,
+    };
+    let control = Arc::new(CatalogControl {
+        pool: cat_pool.clone(),
+        store: store.clone(),
+        sink,
+        task: task_no,
+        epoch,
+        definition_ver: def.definition_ver,
+        delivered: AtomicU64::new(0),
+    });
+    let dead = Arc::new(CatalogDead {
+        pool: cat_pool.clone(),
+        store: store.clone(),
+        sink,
+        stream: CatalogDead::target(env.as_ref(), tenant, &cat_pool, &cat_schema, &def).await?,
+    });
+    tracing::info!(tenant = %tenant, sink = sink.0, task = task_no.0, queue = %name, "queue sink task started");
+    metrics::gauge!("sprig_sink_tasks", "state" => "running").increment(1.0);
+    let end = run_task(
+        TaskParts {
+            info,
+            source: Box::new(source),
+            target,
+            dead,
+            control,
+            prepare: Arc::new(prepare),
+            settings,
+            seed: None,
+            // No DEAD LETTER TO: the queue's own dead-lettering (a reject
+            // without requeue), as chapter 51 says.
+            reject_via_source: def.dead_letter.is_none(),
+        },
+        cancel,
+    )
+    .await;
+    metrics::gauge!("sprig_sink_tasks", "state" => "running").decrement(1.0);
+    tracing::info!(tenant = %tenant, sink = sink.0, task = task_no.0, end = ?end, "queue sink task ended");
     end
 }
 

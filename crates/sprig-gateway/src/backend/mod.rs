@@ -142,6 +142,8 @@ pub struct Backends {
     /// read), and when it was read.
     packet_limits: Mutex<HashMap<ClusterId, (Option<usize>, Instant)>>,
     budgets: Mutex<HashMap<NodeKey, Arc<PreparedBudget>>>,
+    /// One `KILL QUERY` at a time per node (see [`Backends::kill_query`]).
+    kill_gates: Mutex<HashMap<NodeKey, Arc<tokio::sync::Mutex<()>>>>,
     gateways_in_dc: u32,
     read_spread: std::sync::atomic::AtomicU64,
     shutdown: CancellationToken,
@@ -179,6 +181,7 @@ impl Backends {
             gw_refused: Mutex::new(HashMap::new()),
             packet_limits: Mutex::new(HashMap::new()),
             budgets: Mutex::new(HashMap::new()),
+            kill_gates: Mutex::new(HashMap::new()),
             // Registration (chapter 04 step 7) will say how many gateways
             // share a DC; until then this gateway takes the whole share.
             gateways_in_dc: 1,
@@ -541,6 +544,17 @@ impl Backends {
     /// `KILL QUERY <thread_id>` on a node, through a side connection as
     /// `target` (the session's own connection is busy).
     ///
+    /// The kills of one node run one at a time (bugfix-21). MariaDB wakes
+    /// a victim that waits on a condition by trying, for up to 2 seconds
+    /// (`SECONDS_TO_WAIT_FOR_KILL`), to lock the mutex it waits with,
+    /// while holding the victim's own locks. `SLEEP()` (and other waits)
+    /// share one mutex server-wide, so when several statements are killed
+    /// at once (a sharded statement's per-shard statements, all stopped
+    /// together), a woken victim that holds that mutex and needs its own
+    /// locks back blocks behind its killer, which spins on the mutex: 1 or
+    /// 2 of 4 such kills took 2.06 s, while one at a time each takes about
+    /// a millisecond. Connecting stays parallel; only the statement waits.
+    ///
     /// # Errors
     /// 39030 if the node can't be reached; the server's error.
     pub async fn kill_query(
@@ -557,7 +571,16 @@ impl Backends {
         let mut c = self
             .side_connection(&n, target, Duration::from_secs(2))
             .await?;
+        let gate = Arc::clone(
+            self.kill_gates
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(node.clone())
+                .or_default(),
+        );
+        let turn = gate.lock().await;
         let r = c.query_drop(&format!("KILL QUERY {thread_id}")).await;
+        drop(turn);
         c.quit().await;
         r.map_err(|e| match e.server_error() {
             Some(err) => SprigError::backend(err.code, err.sqlstate, err.message.clone()),

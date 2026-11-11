@@ -272,12 +272,23 @@ impl Validator for ReplicaValidator {
 
         // 4. Build, watched.
         let mut built = false;
+        let mut added_fields: Vec<String> = Vec::new();
         match &mut ddl {
             Err(e) => abort(&mut r, format!("DDL session: {e}")),
             Ok(ddl) => {
+                // A field-column candidate's columns first (R6 round 6),
+                // binlog off like the index; the ones this validation adds
+                // go again in the clean-up.
+                let fields = add_fields(ddl, &mut watch.mon, t, &plan.candidate.def).await;
                 let sql = add_def_sql(t, &name, &plan.candidate.def, true);
                 let started = Instant::now();
-                let (res, killed) = run_watched(ddl, &mut watch, &sql, set.poll).await;
+                let (res, killed) = match fields {
+                    Ok(added) => {
+                        added_fields = added;
+                        run_watched(ddl, &mut watch, &sql, set.poll).await
+                    }
+                    Err(e) => (Err(e), None),
+                };
                 r.build_ms = Some(ms_since(started));
                 match (res, killed) {
                     (_, Some(why)) => abort(&mut r, format!("build stopped: {why}")),
@@ -325,7 +336,7 @@ impl Validator for ReplicaValidator {
         cleanup(
             &self.node,
             plan,
-            &name,
+            (&name, &added_fields),
             keep,
             ddl.ok(),
             &mut watch.mon,
@@ -353,11 +364,33 @@ impl Validator for ReplicaValidator {
     }
 }
 
+/// Adds `def`'s field columns the table lacks (R6 round 6) on `ddl`;
+/// returns the ones added.
+pub(crate) async fn add_fields(
+    ddl: &mut NodeSql,
+    mon: &mut NodeSql,
+    t: &super::IndexTarget,
+    def: &crate::autoindex::model::IndexDef,
+) -> std::result::Result<Vec<String>, ProbeError> {
+    let cols: Vec<String> = crate::autoindex::kv::fields_of(def)
+        .into_iter()
+        .map(|(c, _)| c)
+        .collect();
+    let missing = mon.missing_columns(t, &cols).await?;
+    if missing.is_empty() {
+        return Ok(missing);
+    }
+    if let Some(sql) = super::node::add_fields_sql(t, def) {
+        ddl.exec(&sql).await?;
+    }
+    Ok(missing)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn cleanup(
     ep: &NodeEndpoint,
     plan: &ValidationPlan,
-    name: &str,
+    (name, added_fields): (&str, &[String]),
     keep: bool,
     ddl: Option<NodeSql>,
     mon: &mut NodeSql,
@@ -398,6 +431,15 @@ async fn cleanup(
         r.drop_ms = Some(ms_since(started));
         if let Err(e) = res {
             r.node_check.bad(format!("drop of {name} failed: {e}"));
+        } else if let Some(sql) = crate::autoindex::kv::drop_fields_sql(&t.schema, &t.table, added_fields) {
+            // The field columns this validation added: the primary lacks
+            // them, so they must not stay on the replica.
+            match drop_with_retries(&mut ddl, &sql).await {
+                Ok(()) => r
+                    .node_check
+                    .ok(format!("field columns dropped: {}", added_fields.join(","))),
+                Err(e) => r.node_check.bad(format!("drop of field columns failed: {e}")),
+            }
         }
         if let Some(s) = stats {
             match s.restore(&mut ddl).await {

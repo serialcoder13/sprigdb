@@ -70,6 +70,13 @@ key!(
     HardBounds::range(1, 3600), false, "How often a fan-in sink looks for new member instances"
 );
 key!(
+    /// `sink.queue_lease_ms` (R9, r9queue): how long a queue source holds
+    /// each message it took before it returns to the queue unsettled (a
+    /// worker that died, a batch still retrying).
+    QUEUE_LEASE_MS: u64 = "sink.queue_lease_ms", 300_000, Scopes::DATA,
+    HardBounds::range(1_000, 86_400_000), false, "How long a queue sink holds a message it took before the queue gives it out again"
+);
+key!(
     /// `sink.fanin_instances_per_task`: member instance partitions one
     /// fan-in task reads.
     FANIN_INSTANCES_PER_TASK: u64 = "sink.fanin_instances_per_task", 256, Scopes::DATA,
@@ -271,6 +278,7 @@ pub static U64_KEYS: &[&Setting<u64>] = &[
     &PARTITIONS_PER_TASK,
     &FANIN_REFRESH_SECONDS,
     &FANIN_INSTANCES_PER_TASK,
+    &QUEUE_LEASE_MS,
     &LANES,
     &BATCH_MAX_RECORDS,
     &BATCH_MAX_BYTES,

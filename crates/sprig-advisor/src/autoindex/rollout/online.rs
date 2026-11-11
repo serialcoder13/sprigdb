@@ -235,7 +235,18 @@ pub async fn build(
         return r.unwrap_or(BuildOutcome::Built(report));
     }
 
-    // 2. Build, with lock-safe retries.
+    // 2. A field-column definition's columns first (R6 round 6): instant,
+    // replicated; MariaDB refuses them online in the index's statement.
+    if let Some(sql) = crate::autoindex::kv::add_fields_sql(&t.schema, &t.table, def)
+        && let Err(e) = w.mon.exec(&sql).await
+    {
+        close(w).await;
+        return BuildOutcome::Failed {
+            error: format!("field columns: {e}"),
+        };
+    }
+
+    // 3. Build, with lock-safe retries.
     let sql = format!(
         "ALTER TABLE {}.{} {}, ALGORITHM=INPLACE, LOCK=NONE",
         sprig_common::names::quote(&t.schema),

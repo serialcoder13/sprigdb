@@ -1,0 +1,12 @@
+Com_delete	0
+Com_insert	0
+Com_set_option	0
+Com_show_status	1
+Com_update	0
+Com_delete	1
+Com_insert	1
+Com_insert_select	1
+Com_set_option	1
+Com_show_status	2
+Com_update	1
+Com_set_option	1

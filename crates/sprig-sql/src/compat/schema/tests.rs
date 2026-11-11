@@ -373,10 +373,10 @@ fn generated_not_null_shows_as_mysql_writes_it() {
     // MariaDB 11.8.9's text for a table created through 3306 from
     // `CREATE TABLE g (a INT, b INT AS (a+1) NOT NULL, c INT GENERATED
     // ALWAYS AS (a*2) STORED NOT NULL)` (R4 round 3).
-    let maria = "CREATE TABLE `g` (\n  `a` int(11) DEFAULT NULL,\n  `b` int(11) GENERATED ALWAYS AS (`a` + 1) VIRTUAL,\n  `c` int(11) GENERATED ALWAYS AS (`a` * 2) STORED,\n  CONSTRAINT `_sprig_nn_b` CHECK (`b` is not null),\n  CONSTRAINT `_sprig_nn_c` CHECK (`c` is not null)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci";
+    let maria = "CREATE TABLE `g` (\n  `a` int(11) DEFAULT NULL,\n  `b` int(11) GENERATED ALWAYS AS (`a` + 1) VIRTUAL,\n  `c` int(11) GENERATED ALWAYS AS (`a` * 2) STORED,\n  CONSTRAINT `_sprignn_b` CHECK (`b` is not null),\n  CONSTRAINT `_sprignn_c` CHECK (`c` is not null)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci";
     assert_eq!(
         mysql_create_table(maria),
-        "CREATE TABLE `g` (\n  `a` int DEFAULT NULL,\n  `b` int GENERATED ALWAYS AS (`a` + 1) VIRTUAL NOT NULL,\n  `c` int GENERATED ALWAYS AS (`a` * 2) STORED NOT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
+        "CREATE TABLE `g` (\n  `a` int DEFAULT NULL,\n  `b` int GENERATED ALWAYS AS ((`a` + 1)) VIRTUAL NOT NULL,\n  `c` int GENERATED ALWAYS AS ((`a` * 2)) STORED NOT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
     );
 }
 
@@ -388,5 +388,8 @@ fn functional_parts_show_as_mysql_writes_them() {
         out,
         "CREATE TABLE `u` (\n  `id` int(11) NOT NULL,\n  `email` varchar(255) NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `i` ((lower(`email`)))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci"
     );
-    assert_eq!(mysql_functional_parts("CREATE TABLE `t` (\n  `a` int\n)"), "CREATE TABLE `t` (\n  `a` int\n)");
+    assert_eq!(
+        mysql_functional_parts("CREATE TABLE `t` (\n  `a` int\n)"),
+        "CREATE TABLE `t` (\n  `a` int\n)"
+    );
 }

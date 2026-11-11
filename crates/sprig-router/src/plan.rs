@@ -540,6 +540,10 @@ pub enum Plan {
     /// A gathered read (R3): the rows copied to the session's cluster and
     /// the statement run there over the copies.
     Gather(Box<crate::gather::GatherPlan>),
+    /// A statement with `GRAPH_TABLE` (R8 round 6, chapter 43): the graph
+    /// calls run first in the gateway, then the statement with their rows
+    /// is planned again ([`crate::graph`]).
+    Graph(Box<crate::graph::GraphPlan>),
     /// No exact plan.
     Reject(Rejection),
 }
@@ -559,6 +563,7 @@ impl Plan {
             Self::NeedIds(_) => "need_ids",
             Self::Explain(_) => "explain",
             Self::Gather(_) => "gather",
+            Self::Graph(_) => "graph",
             Self::Reject(_) => "reject",
         }
     }

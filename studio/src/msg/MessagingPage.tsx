@@ -13,6 +13,7 @@ import { json } from '../api/client';
 import { errorText } from '../api/errors';
 import { begin, execute, rollback, rows as rowsOf } from '../api/sql';
 import { useDatabases } from '../catalog/snapshot';
+import { binaryText } from './body';
 import {
   alterInherited,
   alterSink,
@@ -29,20 +30,25 @@ import {
 } from './statements';
 
 const GraphView = lazy(() => import('../graph/GraphView'));
+const SinkForms = lazy(() => import('./SinkForms'));
+const ScriptEditor = lazy(() => import('./SinkForms').then((m) => ({ default: m.ScriptEditor })));
 
 type Tab = 'streams' | 'queues' | 'sinks' | 'inherited';
 
-interface Table {
+export interface Table {
   columns: string[];
   rows: (string | null)[][];
 }
 
-async function table(db: string | null, sql: string): Promise<Table> {
+export async function table(db: string | null, sql: string): Promise<Table> {
   const r = await rowsOf(db, sql);
-  return { columns: r.columns.map((c) => c.name), rows: r.rows };
+  // Binary columns (a stream's key and value) arrive as base64: shown as
+  // text when they are UTF-8, else as hex (chapter 44, "Bodies").
+  const bin = r.columns.map((c) => !!c.binary);
+  return { columns: r.columns.map((c) => c.name), rows: r.rows.map((row) => row.map((v, i) => (bin[i] ? binaryText(v) : v))) };
 }
 
-function col(t: Table, row: (string | null)[], ...names: string[]): string | null {
+export function col(t: Table, row: (string | null)[], ...names: string[]): string | null {
   for (const n of names) {
     const i = t.columns.findIndex((c) => c.toLowerCase() === n.toLowerCase());
     if (i >= 0) return row[i] ?? null;
@@ -50,7 +56,7 @@ function col(t: Table, row: (string | null)[], ...names: string[]): string | nul
   return null;
 }
 
-function Generic({ t, testid, onPick, pickLabel }: Readonly<{ t: Table; testid: string; onPick?: (row: (string | null)[]) => void; pickLabel?: string }>) {
+export function Generic({ t, testid, onPick, pickLabel }: Readonly<{ t: Table; testid: string; onPick?: (row: (string | null)[]) => void; pickLabel?: string }>) {
   return (
     <div className="table-scroll" tabIndex={0} role="region" aria-label={testid}>
       <table className="table" data-testid={testid}>
@@ -84,12 +90,13 @@ function Generic({ t, testid, onPick, pickLabel }: Readonly<{ t: Table; testid: 
   );
 }
 
-/** Runs a statement after showing it. */
-function useStatement(db: string) {
+/** Runs a statement after showing it; `shown` is the text on screen when it
+ * differs (credential values masked, round 5). */
+export function useStatement(db: string) {
   const [c, setC] = useState<{ sql: string; resolve: (ok: boolean) => void } | null>(null);
   const [msg, setMsg] = useState<{ text: string; error: boolean } | null>(null);
-  const run = async (sql: string): Promise<boolean> => {
-    const ok = await new Promise<boolean>((resolve) => setC({ sql, resolve }));
+  const run = async (sql: string, shown?: string): Promise<boolean> => {
+    const ok = await new Promise<boolean>((resolve) => setC({ sql: shown ?? sql, resolve }));
     setC(null);
     if (!ok) return false;
     try {
@@ -511,6 +518,9 @@ function Sinks({ db }: Readonly<{ db: string }>) {
   const [sel, setSel] = useState<string | null>(null);
   return (
     <div className="stack">
+      <Suspense fallback={<p className="muted">Loading…</p>}>
+        <SinkForms db={db} onCreated={() => void list.refetch()} />
+      </Suspense>
       {list.error && (
         <p className="error" role="alert">
           {errorText(list.error)}
@@ -611,7 +621,12 @@ function SinkDetail({ db, name }: Readonly<{ db: string; name: string }>) {
         </>
       )}
       {msg && <p role="status">{msg}</p>}
-      <p className="muted">Connection forms with write-only credentials and dry runs (Sinks.Test, Connections.Test) aren&apos;t built yet (decision ST45).</p>
+      {def.data && (
+        <Suspense fallback={null}>
+          <ScriptEditor db={db} name={name} create={def.data.rows.map((r) => r[r.length - 1] ?? '').join('\n')} onSaved={() => void def.refetch()} />
+        </Suspense>
+      )}
+      <p className="muted">Dry runs (Sinks.Test, Connections.Test) aren&apos;t built yet (decisions ST45, ST50).</p>
       {st.node}
     </section>
   );

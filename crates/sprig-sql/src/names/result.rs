@@ -484,6 +484,15 @@ impl ResultMapper {
 
     fn definition(&mut self, text: &str, ctx: &OutputCtx<'_>) -> String {
         let text = stored::restore_str(text);
+        // Stored code pointed at row-level security's policy views reads
+        // as written (chapter 29, RL20).
+        let text = match crate::rls::views::unswap(&text) {
+            std::borrow::Cow::Owned(o) => std::borrow::Cow::Owned(o),
+            std::borrow::Cow::Borrowed(_) => text,
+        };
+        // Lock names scoped inside stored code read as written (R4 round 3).
+        let unscoped = crate::compat::locks::unscope(&text);
+        let text = unscoped.as_deref().unwrap_or(&text);
         let un = unrewrite(text.as_bytes(), ctx.map, &ctx.lex);
         let m = map_bytes(&un, ctx);
         self.foreign += m.foreign as u64;

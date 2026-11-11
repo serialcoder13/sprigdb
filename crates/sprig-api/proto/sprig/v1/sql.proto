@@ -89,6 +89,11 @@ message QueryRequest {
   // Privileges are the native protocols'. Other languages than SQL take no
   // `transaction` and no `multi_statements` (39794).
   string language = 8;
+  // How "mongo" writes documents: "relaxed_ejson" (or empty) or
+  // "canonical_ejson", which keeps int32, int64 and double apart (chapter
+  // 37's `Documents` option, for Studio's JSON tree). Other languages take
+  // no output (39794).
+  string output = 9;
 }
 
 // One column of a result.

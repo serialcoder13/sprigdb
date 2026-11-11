@@ -124,8 +124,56 @@ impl PassSession {
             tables: &tables,
             sample,
         };
+        let failed = done.error;
         if let Some(wl) = self.wl.as_mut() {
             wl.finish(tenant, cx.session.id, &p, done);
+        }
+        if !failed {
+            self.wl_compound_writes(cx, logical);
+        }
+    }
+
+    /// The writes inside a compound statement that ran (R6 round 6,
+    /// decision A4): chapter 40's guarded batches, one per Redis or
+    /// key-value write command, have no shape, so each `INSERT`,
+    /// `REPLACE`, `UPDATE` and `DELETE` in the body is fingerprinted and
+    /// counted on its own (weighted by its `IF` branches), and the tables'
+    /// write load includes them.
+    fn wl_compound_writes(&self, cx: &ExecCtx<'_>, logical: &[u8]) {
+        if !logical
+            .get(..5)
+            .is_some_and(|b| b.eq_ignore_ascii_case(b"BEGIN"))
+        {
+            return;
+        }
+        let (Some(wl), Some(ts)) = (self.wl.as_ref(), self.tenant.as_deref()) else {
+            return;
+        };
+        let (lex, _) = self.lex_opts();
+        let inner = sprig_workload::fingerprint::compound::writes(logical, &lex);
+        if inner.is_empty() {
+            return;
+        }
+        let current = self.current_logical();
+        let cat = ts.catalog().map(AsRef::as_ref);
+        let map = ts.map();
+        let lower = ts.lower_case_table_names();
+        let ctx = SqlCtx {
+            lex,
+            current_db: current.as_deref(),
+            db_id: db_id_of(ts, cat, current.as_deref()),
+            front_end: FrontEnd::of_persona(self.persona),
+            caller: crate::workload::task_caller(),
+            lower_case_table_names: lower,
+            max_text_bytes: wl.workload().max_text_bytes(),
+        };
+        let resolver = CatalogResolver::new(cat, &*map, lower);
+        for w in inner {
+            let Some(text) = logical.get(w.range) else {
+                continue;
+            };
+            let fp = wl.fingerprint(ts.tenant, text, &ctx, &resolver);
+            wl.record_inner(ts.tenant, cx.session.id, &fp, w.weight);
         }
     }
 

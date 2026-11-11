@@ -149,7 +149,7 @@ fn binary_row(columns: &[ColumnDef], row: &[Option<Bytes>]) -> Vec<Value> {
 }
 
 /// Sends a local answer.
-async fn send_local(
+pub(super) async fn send_local(
     out: &mut dyn ResultSink,
     ans: &LocalAnswer,
     format: RowFormat,
@@ -538,6 +538,10 @@ impl PassSession {
         if let Some(ts) = self.tenant.as_deref() {
             super::logic_bound::warm_validations(ts);
         }
+        // Chapter 29: no earlier statement's rewrite covers this one.
+        if let Some(ts) = self.tenant.as_deref_mut() {
+            ts.rls.covered.clear();
+        }
         // Chapter 41: `ALTER TABLE ... ADD c TYPE AS (f(...))` with a logic
         // function `f` becomes a generated column (R7 order 3).
         if sprig_logic::enforce::is_computed_candidate(&String::from_utf8_lossy(text)) {
@@ -829,6 +833,11 @@ impl PassSession {
             };
         }
 
+        // Chapter 29: row-level security statements (R4).
+        if let Some(step) = Box::pin(self.tenant_policy(cx, text, more, format, out)).await? {
+            return Ok(step);
+        }
+
         // Settings statements (chapter 42's `ALTER TABLE ... SPRIG
         // INHERITABLE` and `SPRIG RESET <table>` are not).
         if let Some(parsed) = settings_stmt::parse(text, &lex)
@@ -918,9 +927,52 @@ impl PassSession {
             }
             None => text,
         };
+        // 3306: the rules inside views and stored bodies, and 39602
+        // (chapter 28 step 12, R4 round 4).
+        let stored_owned;
+        let text: &Bytes = match sprig_sql::compat::stored::rewrite(text, &lex) {
+            None => text,
+            Some(Ok(t)) => {
+                stored_owned = Bytes::from(t);
+                &stored_owned
+            }
+            Some(Err(e)) => {
+                let e = SprigError::standard(e.code, e.sqlstate, e.message);
+                return self.fail(out, &e).await;
+            }
+        };
+        // 3306: `performance_schema` and `sys` (chapter 28 step 13, R4
+        // round 4), before the name layer scopes their PROCESSLIST.
+        let ps_owned;
+        let text: &Bytes = match self.ps_rewrite(cx, text) {
+            None => text,
+            Some(Ok(t)) => {
+                ps_owned = Bytes::from(t);
+                &ps_owned
+            }
+            Some(Err(e)) => return self.fail(out, &e).await,
+        };
         // 3306: `SET sql_mode` and `max_execution_time` as MySQL 8.4
         // reads them (chapter 28, R4).
         let set_rewritten;
+        // 3306: functional key parts of CREATE INDEX and ALTER TABLE,
+        // typed from the table's columns (chapter 28 step 10, R4 round 4).
+        let fx_owned;
+        let text: &Bytes = match Box::pin(self.fx_typed(cx, text)).await {
+            Ok(Some(t)) => {
+                fx_owned = t;
+                &fx_owned
+            }
+            Ok(None) => text,
+            Err(e) => return self.fail(out, &e).await,
+        };
+        // 3306: a LATERAL the text rewrite left, applied in the gateway
+        // (chapter 28 step 9, R4 round 4).
+        if let Some(step) =
+            Box::pin(self.tenant_lateral_apply(cx, text, attrs, more, format, out)).await?
+        {
+            return Ok(step);
+        }
         // 3306: nearest neighbours (`ORDER BY ST_Distance(...) LIMIT k`)
         // with a growing radius (chapter 36, R6 round 3).
         if self.persona == Persona::MySql84
@@ -965,6 +1017,12 @@ impl PassSession {
         } else {
             text
         };
+        // Chapter 39 (R5 round 5): search DDL and MySQL FULLTEXT DDL.
+        if let Some(step) =
+            Box::pin(self.tenant_search_ddl(cx, text, attrs, more, format, out)).await?
+        {
+            return Ok(step);
+        }
         // Chapter 45: stream DDL, publishing and reads (R9).
         if let Some(step) = self
             .tenant_streams(cx, text, attrs, more, format, &cat, out)
@@ -991,6 +1049,13 @@ impl PassSession {
         // Chapter 43 (R8 round 3): GRAPH_TABLE, run and inlined.
         if let Some(step) =
             Box::pin(self.tenant_graph_table(cx, text, attrs, more, format, out)).await?
+        {
+            return Ok(step);
+        }
+        // Chapter 39 (R5 round 5): MATCH ... AGAINST and sprig_search(),
+        // searched and inlined.
+        if let Some(step) =
+            Box::pin(self.tenant_search_rewrite(cx, text, attrs, more, format, out)).await?
         {
             return Ok(step);
         }
@@ -1055,6 +1120,16 @@ impl PassSession {
                 &scoped_locks
             }
             None => text,
+        };
+        // Chapter 29: every protected table's policies (R4).
+        let rls_owned;
+        let text: &Bytes = match Box::pin(self.tenant_rls(cx, text, &lex)).await {
+            Ok(Some(t)) => {
+                rls_owned = t;
+                &rls_owned
+            }
+            Ok(None) => text,
+            Err(e) => return self.fail(out, &e).await,
         };
         let attr_owned = attr_pairs(attrs);
         let mut retried = false;
@@ -1913,6 +1988,21 @@ impl PassSession {
     ) -> Result<ExecSummary> {
         let (lex, ignore_space) = self.lex_opts();
         let charset = cx.proto.collation;
+        let client_text = sql.clone();
+        // Chapter 39 (R5 round 6): `MATCH ... AGAINST (?)` on a search
+        // index is prepared for its metadata without the call, and run as
+        // text with the bound values at each execute.
+        if let Some(prep) = self.search_prepare_text(&sql).await? {
+            let summary = Box::pin(self.tenant_prepare(cx, Bytes::from(prep))).await?;
+            if let Some(meta) = &summary.prepared
+                && let Ok(s) = self.stmts.get_mut(meta.stmt)
+            {
+                s.deferred = Some(sql);
+                s.deferred_params = true;
+                s.client = Some(client_text);
+            }
+            return Ok(summary);
+        }
         let Some(ts) = self.tenant.as_deref_mut() else {
             return Err(SprigError::internal("no tenant"));
         };
@@ -1953,6 +2043,34 @@ impl PassSession {
                 _ => Vec::new(),
             };
             keep = deferred(cols)?;
+        } else if let Some(parsed) = sprig_sql::rls::stmt::parse(&sql, &lex) {
+            // Chapter 29: run at execute time, as text.
+            if sandbox {
+                return Err(must_reset());
+            }
+            let cols = match parsed? {
+                sprig_sql::rls::stmt::PolicyStmt::Show { .. } => [
+                    "Database",
+                    "Table",
+                    "Policy",
+                    "Mode",
+                    "Commands",
+                    "Roles",
+                    "Using",
+                    "With_check",
+                    "Enabled",
+                    "Forced",
+                ]
+                .iter()
+                .map(|c| crate::pipeline::text_column(c, charset))
+                .collect(),
+                sprig_sql::rls::stmt::PolicyStmt::ShowCreate { .. } => vec![
+                    crate::pipeline::text_column("Policy", charset),
+                    crate::pipeline::text_column("Create Policy", charset),
+                ],
+                _ => Vec::new(),
+            };
+            keep = deferred(cols)?;
         } else if let Some(parsed) = settings_stmt::parse(&sql, &lex) {
             if sandbox {
                 return Err(must_reset());
@@ -1962,6 +2080,14 @@ impl PassSession {
                 settings_stmt::SettingsStmt::Alter { .. } => Vec::new(),
             };
             keep = deferred(cols)?;
+        } else if std::str::from_utf8(&sql).is_ok_and(|t| {
+            sprig_router::graph::mentions(t)
+                && sprig_router::graph::find(t).is_ok_and(|v| !v.is_empty())
+        }) {
+            // Chapter 43 (R8 round 6): `GRAPH_TABLE` runs as text at
+            // execute time (its plan depends on the graph's rows); its
+            // columns come with the result.
+            keep = deferred(Vec::new())?;
         }
         if let Some(columns) = keep {
             return Ok(self.prepared_deferred(sql, columns));
@@ -1979,6 +2105,15 @@ impl PassSession {
         let sql = match sprig_sql::compat::mysql_text_rewrites(&sql, &lex, BACKEND_VERSION) {
             Some(t) => Bytes::from(t),
             None => sql,
+        };
+        let sql = match sprig_sql::compat::stored::rewrite(&sql, &lex) {
+            None => sql,
+            Some(Ok(t)) => Bytes::from(t),
+            Some(Err(e)) => return Err(SprigError::standard(e.code, e.sqlstate, e.message)),
+        };
+        let sql = match self.ps_rewrite(cx, &sql) {
+            None => sql,
+            Some(r) => Bytes::from(r?),
         };
         // 3306: SRID 4326 as MySQL reads it (chapters 28 and 36, R4).
         let sql = if self.persona == Persona::MySql84 {
@@ -2022,6 +2157,11 @@ impl PassSession {
             sprig_sql::compat::locks::rewrite(&sql, &lex, &p)
         }) {
             Some(t) => Bytes::from(t),
+            None => sql,
+        };
+        // Chapter 29: every protected table's policies (R4).
+        let sql = match Box::pin(self.tenant_rls(cx, &sql, &lex)).await? {
+            Some(t) => t,
             None => sql,
         };
         let grouped = self.grouped_tables().await;
@@ -2139,6 +2279,7 @@ impl PassSession {
                 s.columns.clone_from(&meta.columns);
                 s.logical = Some(sql.clone());
                 s.recheck = recheck;
+                s.client = Some(client_text);
             }
             // 3306: MySQL's integer result types (chapter 28, R4).
             if self.persona == Persona::MySql84 {

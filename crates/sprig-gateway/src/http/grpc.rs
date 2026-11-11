@@ -1,5 +1,6 @@
 //! The gRPC services on 8080 (h2c) and 8443 (ALPN h2): `sprig.v1.Sql`,
-//! `sprig.v1.Transactions`, every `sprig.admin.v1` service and
+//! `sprig.v1.Transactions`, every `sprig.admin.v1` service (`Operators`
+//! too: sign-in and tokens relay to the controller, whose guard decides) and
 //! `grpc.health.v1.Health` (chapter 37 steps 2, 4 and 6).
 //!
 //! They run the same code as REST: SQL through [`SqlEngine`](super::sql::SqlEngine),
@@ -135,7 +136,7 @@ fn query_json(r: &QueryRequest) -> serde_json::Value {
         "database": r.database, "sql": r.sql, "transaction": r.transaction,
         "multi_statements": r.multi_statements,
         "max_rows": r.max_rows, "max_bytes": r.max_bytes, "timeout_ms": r.timeout_ms,
-        "language": r.language,
+        "language": r.language, "output": r.output,
     })
 }
 
@@ -186,7 +187,7 @@ impl Sql for SqlSvc {
             multi: r.multi_statements,
         };
         let txn = (!r.transaction.is_empty()).then_some(r.transaction);
-        let language = r.language;
+        let language = super::lang::with_output(&r.language, &r.output);
         tokio::spawn(async move {
             engine
                 .run_in(&c, &language, call, txn.as_deref(), caps, tx)
@@ -223,7 +224,7 @@ impl Sql for SqlSvc {
             multi: r.multi_statements,
         };
         let txn = (!r.transaction.is_empty()).then_some(r.transaction);
-        let language = r.language;
+        let language = super::lang::with_output(&r.language, &r.output);
         tokio::spawn(async move {
             engine
                 .run_in(&c, &language, call, txn.as_deref(), caps, tx)
@@ -791,6 +792,22 @@ admin_service!(RecommendationsSvc, recommendations_server::Recommendations, Reco
     list_subscriptions: ListRequest => "ListSubscriptions",
     set_subscription: BodyRequest => "SetSubscription",
 });
+admin_service!(OperatorsSvc, operators_server::Operators, OperatorsServer, "Operators", {
+    login: BodyRequest => "Login",
+    enrol: BodyRequest => "Enrol",
+    logout: BodyRequest => "Logout",
+    who_am_i: ListRequest => "WhoAmI",
+    list_operators: ListRequest => "ListOperators",
+    create_operator: BodyRequest => "CreateOperator",
+    get_operator: NameRequest => "GetOperator",
+    disable_operator: NameRequest => "DisableOperator",
+    enable_operator: NameRequest => "EnableOperator",
+    reset_operator_factor: NameRequest => "ResetOperatorFactor",
+    set_operator_password: NameRequest => "SetOperatorPassword",
+    create_token: BodyRequest => "CreateToken",
+    list_tokens: ListRequest => "ListTokens",
+    revoke_token: NameRequest => "RevokeToken",
+});
 
 #[derive(Clone)]
 struct HealthSvc(Arc<Core>);
@@ -866,6 +883,10 @@ pub fn routes(core: &Arc<Core>) -> tonic::service::Routes {
             )
             .max_decoding_message_size(max),
         )
+        .add_service(
+            sprig_api::proto::v1::search_server::SearchServer::new(super::search::SearchSvc(c()))
+                .max_decoding_message_size(max),
+        )
         .add_service(HealthServer::new(HealthSvc(c())))
         .add_service(ClustersServer::new(ClustersSvc(c())))
         .add_service(DataCentersServer::new(DcsSvc(c())))
@@ -880,6 +901,9 @@ pub fn routes(core: &Arc<Core>) -> tonic::service::Routes {
             sprig_api::proto::admin::recommendations_server::RecommendationsServer::new(
                 RecommendationsSvc(c()),
             ),
+        )
+        .add_service(
+            sprig_api::proto::admin::operators_server::OperatorsServer::new(OperatorsSvc(c())),
         )
         .prepare()
 }

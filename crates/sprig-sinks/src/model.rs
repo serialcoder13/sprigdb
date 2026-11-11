@@ -297,6 +297,21 @@ pub enum SourceSpec {
         /// `UNDER t`: only that tenant's subtree.
         under: Option<u64>,
     },
+    /// `FROM QUEUE q FAN IN [UNDER t]`: every member's instance of an
+    /// inherited queue definition below the sink's tenant (chapter 51,
+    /// "Fan-in sinks"; R9, r9queue).
+    FanInQueue {
+        /// The declaring tenant.
+        def_tenant: u64,
+        /// The definition's object id there.
+        def_object: u64,
+        /// The database (vhost) of the instances.
+        db: String,
+        /// The queue's name.
+        name: String,
+        /// `UNDER t`: only that tenant's subtree.
+        under: Option<u64>,
+    },
 }
 
 impl SourceSpec {
@@ -305,7 +320,7 @@ impl SourceSpec {
     pub fn kind(&self) -> SourceKind {
         match self {
             SourceSpec::Stream { .. } | SourceSpec::FanIn { .. } => SourceKind::Stream,
-            SourceSpec::Queue { .. } => SourceKind::Queue,
+            SourceSpec::Queue { .. } | SourceSpec::FanInQueue { .. } => SourceKind::Queue,
             SourceSpec::Changes { .. } => SourceKind::Changes,
         }
     }
@@ -316,7 +331,9 @@ impl SourceSpec {
         match self {
             SourceSpec::Stream { id, .. } | SourceSpec::Queue { id, .. } => vec![*id],
             SourceSpec::Changes { objects } => objects.iter().map(|o| o.0).collect(),
-            SourceSpec::FanIn { def_object, .. } => vec![*def_object],
+            SourceSpec::FanIn { def_object, .. } | SourceSpec::FanInQueue { def_object, .. } => {
+                vec![*def_object]
+            }
         }
     }
 
@@ -326,7 +343,8 @@ impl SourceSpec {
         match self {
             SourceSpec::Stream { name, .. }
             | SourceSpec::Queue { name, .. }
-            | SourceSpec::FanIn { name, .. } => name.clone(),
+            | SourceSpec::FanIn { name, .. }
+            | SourceSpec::FanInQueue { name, .. } => name.clone(),
             SourceSpec::Changes { objects } => objects
                 .iter()
                 .map(|o| o.1.as_str())

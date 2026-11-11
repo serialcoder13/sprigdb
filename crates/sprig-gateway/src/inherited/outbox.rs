@@ -237,6 +237,8 @@ pub async fn ensure_table(
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .insert(key);
+    // R9 (r9fwd): the tenant's feed-driven forwarder reads this table.
+    crate::outbox_feed::subscribe(svc, tenant);
     Ok(())
 }
 
@@ -291,6 +293,21 @@ pub fn after_request(session: u64, in_txn: bool) {
     };
     for p in taken.into_iter().flatten() {
         let Some(svc) = p.svc.upgrade() else { continue };
+        // R9 (r9fwd): with `queue.forwarder = feed` the tenant's
+        // feed-driven forwarder takes the rows in commit order; forwarding
+        // them here could pass an earlier transaction's rows. The sweeper
+        // stays the fallback.
+        let db = p
+            .schema
+            .parse::<sprig_common::names::SchemaName>()
+            .ok()
+            .and_then(|s| match s {
+                sprig_common::names::SchemaName::Shard { db, .. } => Some(db),
+                _ => None,
+            });
+        if crate::outbox_feed::feed_on(&svc, p.tenant, db) {
+            continue;
+        }
         tokio::spawn(async move {
             if let Err(e) = forward(&svc, p.tenant, &p.schema, Some(&p.ids), 0).await {
                 tracing::debug!(tenant = %p.tenant, error = %e, "cross-tenant outbox: forward deferred to the sweeper");
@@ -320,11 +337,33 @@ pub async fn forward(
     only: Option<&[[u8; 16]]>,
     older_ms: u64,
 ) -> Result<usize> {
-    forward_with(svc, tenant, schema, only, older_ms, false).await
+    forward_with(svc, tenant, schema, only, older_ms, false, false)
+        .await
+        .map(|(n, _)| n)
+}
+
+/// The feed-driven forwarder's step (R9, r9fwd; [`crate::outbox_feed`]):
+/// forwards the rows of `ids` still there, each destination's in the
+/// order of `ids` (commit order). It waits for rows a commit hook or the
+/// sweeper holds (`FOR UPDATE`, not `SKIP LOCKED`), so a row is never
+/// passed over while an earlier one is in flight. Returns (forwarded,
+/// gone, left for later: a destination backing off or unreachable).
+///
+/// # Errors
+/// The clusters'.
+pub async fn forward_ordered(
+    svc: &Arc<TenantServices>,
+    tenant: TenantId,
+    schema: &str,
+    ids: &[[u8; 16]],
+) -> Result<(usize, usize, usize)> {
+    let (n, found) = forward_with(svc, tenant, schema, Some(ids), 0, false, true).await?;
+    Ok((n, ids.len().saturating_sub(found), found.saturating_sub(n)))
 }
 
 /// [`forward`], also trying destinations that are backing off when
-/// `force` (a `DROP DATABASE` draining its outbox).
+/// `force` (a `DROP DATABASE` draining its outbox); `ordered`: the feed
+/// forwarder's mode ([`forward_ordered`]). Returns (forwarded, rows read).
 #[allow(clippy::too_many_lines)]
 async fn forward_with(
     svc: &Arc<TenantServices>,
@@ -333,7 +372,14 @@ async fn forward_with(
     only: Option<&[[u8; 16]]>,
     older_ms: u64,
     force: bool,
-) -> Result<usize> {
+    ordered: bool,
+) -> Result<(usize, usize)> {
+    // One forward at a time per gateway (R9, r9fwd): a forward holds a
+    // `sprig_ctl` connection in its transaction while it delivers, and the
+    // delivery takes more from the same pool (4 per cluster). Sixteen
+    // commit hooks at once held all four and waited for a fifth forever
+    // (seen live: every outbox of the cluster stopped, the sweeper too).
+    let _slot = forward_slot().acquire().await.ok();
     let cluster = svc.locator.cluster(tenant).await?;
     let pool = svc.locator.ctl_pool(&cluster).await?;
     let mut c = pool
@@ -349,27 +395,49 @@ async fn forward_with(
             "out_id IN ({})",
             ids.iter().map(|i| hex(i)).collect::<Vec<_>>().join(", ")
         ),
-        Some(_) => return Ok(0),
+        Some(_) => return Ok((0, 0)),
         None => format!(
             "created_at < UTC_TIMESTAMP(3) - INTERVAL {} MICROSECOND",
             older_ms * 1000
         ),
     };
+    // The feed forwarder waits for rows another forwarder holds (at most
+    // 10 s): skipping them could pass an earlier row of a destination.
+    let (wait, lock) = if ordered {
+        (
+            "SET STATEMENT innodb_lock_wait_timeout = 10 FOR ",
+            "FOR UPDATE",
+        )
+    } else {
+        ("", "FOR UPDATE SKIP LOCKED")
+    };
+    let limit = only.map_or(500, |i| i.len().max(1));
     let rows: std::result::Result<Vec<mysql_async::Row>, _> = tx
         .query(format!(
-            "SELECT out_id, CAST(dest AS CHAR), k, v, CAST(headers AS CHAR), partition_no, \
+            "{wait}SELECT out_id, CAST(dest AS CHAR), k, v, CAST(headers AS CHAR), partition_no, \
              TIMESTAMPDIFF(MICROSECOND, '1970-01-01', created_at) DIV 1000 \
-             FROM {}.{} WHERE {filter} ORDER BY out_id LIMIT 500 FOR UPDATE SKIP LOCKED",
+             FROM {}.{} WHERE {filter} ORDER BY out_id LIMIT {limit} {lock}",
             quote(schema),
             quote(TABLE)
         ))
         .await;
-    let rows = match rows {
+    let mut rows = match rows {
         Ok(r) => r,
         // No table (yet, or dropped with its database): nothing to do.
-        Err(mysql_async::Error::Server(s)) if matches!(s.code, 1146 | 1049) => return Ok(0),
+        Err(mysql_async::Error::Server(s)) if matches!(s.code, 1146 | 1049) => return Ok((0, 0)),
         Err(e) => return Err(sprig_streams::maria::map_err(e)),
     };
+    // The order asked (commit order), not the ids' (insert order).
+    if ordered && let Some(ids) = only {
+        let pos = |r: &mysql_async::Row| {
+            let id: Vec<u8> = r.get(0).unwrap_or_default();
+            ids.iter()
+                .position(|i| i[..] == id[..])
+                .unwrap_or(usize::MAX)
+        };
+        rows.sort_by_key(pos);
+    }
+    let found = rows.len();
     let mut by_dest: BTreeMap<String, (Dest, Vec<Row>)> = BTreeMap::new();
     for r in rows {
         let id: Vec<u8> = r.get(0).unwrap_or_default();
@@ -430,7 +498,12 @@ async fn forward_with(
         metrics::counter!("sprig_inherit_publishes_total", "kind" => "stream", "path" => "outbox")
             .increment(n as u64);
     }
-    Ok(n)
+    Ok((n, found))
+}
+
+fn forward_slot() -> &'static tokio::sync::Semaphore {
+    static S: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+    S.get_or_init(|| tokio::sync::Semaphore::new(1))
 }
 
 type Backoff = HashMap<String, (u32, Instant)>;
@@ -642,7 +715,7 @@ pub async fn drain_for_drop(
             if pending_rows(svc, tenant, s).await? == 0 {
                 continue;
             }
-            if let Err(e) = forward_with(svc, tenant, s, None, 0, true).await {
+            if let Err(e) = forward_with(svc, tenant, s, None, 0, true, false).await {
                 tracing::debug!(%tenant, schema = %s, error = %e, "DROP DATABASE: outbox forward failed; retried");
             }
             left += pending_rows(svc, tenant, s).await?;

@@ -809,7 +809,10 @@ mod fanin_tests {
         assert_eq!(fanin_cached(26_306_000_002, FANIN_FLAG | 3), None);
         assert!(is_fanin(FANIN_FLAG | 3));
         assert!(!is_fanin(41));
-        assert!(!is_fanin(DEF_FLAG | FANIN_FLAG | 0x29), "a definition's topic");
+        assert!(
+            !is_fanin(DEF_FLAG | FANIN_FLAG | 0x29),
+            "a definition's topic"
+        );
         assert_eq!(fanin_cached(26_306_000_001, 3), None);
         let n = fanin_name("client_x", "security", "user_events");
         assert_eq!(n, "__t.client_x.security.user_events");

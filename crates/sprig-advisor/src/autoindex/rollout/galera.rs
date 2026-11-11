@@ -253,6 +253,36 @@ async fn prepare(
     Ok((w, nodes.clone(), wi))
 }
 
+/// A field-column definition's columns (R6 round 6), added on the writer
+/// in TOI (instant, so every node gets them at once) before any index
+/// build; the column signature is taken again after.
+async fn add_fields(
+    mut w: GWatch,
+    wi: usize,
+    t: &ShardTable,
+    def: &IndexDef,
+) -> Result<GWatch, BuildOutcome> {
+    let Some(sql) = crate::autoindex::kv::add_fields_sql(&t.schema, &t.table, def) else {
+        return Ok(w);
+    };
+    let res = match w.mons[wi].exec(&sql).await {
+        Ok(()) => w.mons[wi].columns_signature(t).await,
+        Err(e) => Err(e),
+    };
+    match res {
+        Ok(sig) => {
+            w.signature = sig;
+            Ok(w)
+        }
+        Err(e) => {
+            w.close().await;
+            Err(BuildOutcome::Failed {
+                error: format!("field columns: {e}"),
+            })
+        }
+    }
+}
+
 /// Every node has `def` with its parts: `None`, else the nodes without.
 async fn missing_on(w: &mut GWatch, t: &ShardTable, def: &IndexDef) -> Vec<String> {
     let name = def.name();
@@ -275,8 +305,12 @@ pub async fn build_rsu(
     s: &RolloutSettings,
     marker: &dyn NodeMarker,
 ) -> BuildOutcome {
-    let (mut w, eps, wi) = match prepare(view, t, s).await {
+    let (w, eps, wi) = match prepare(view, t, s).await {
         Ok(x) => x,
+        Err(o) => return o,
+    };
+    let mut w = match add_fields(w, wi, t, def).await {
+        Ok(w) => w,
         Err(o) => return o,
     };
     let name = def.name();
@@ -455,8 +489,12 @@ pub async fn build_toi(
     def: &IndexDef,
     s: &RolloutSettings,
 ) -> BuildOutcome {
-    let (mut w, eps, wi) = match prepare(view, t, s).await {
+    let (w, eps, wi) = match prepare(view, t, s).await {
         Ok(x) => x,
+        Err(o) => return o,
+    };
+    let mut w = match add_fields(w, wi, t, def).await {
+        Ok(w) => w,
         Err(o) => return o,
     };
     let mut rep = report(t, "galera_toi");

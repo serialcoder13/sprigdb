@@ -21,6 +21,8 @@
 pub mod collation;
 pub mod ddl;
 pub mod errmap;
+pub mod explain;
+pub mod exprprint;
 pub mod funcs;
 pub mod fxindex;
 pub mod geo;
@@ -31,11 +33,13 @@ pub mod keywords;
 pub mod lateral;
 pub mod locks;
 pub mod meta;
+pub mod perfschema;
 pub mod rollup;
 pub mod rowsyntax;
 pub mod schema;
 pub mod setvar;
 pub mod sqlmode;
+pub mod stored;
 pub mod vars;
 
 use crate::lex::{self, LexOptions, TokenKind};
@@ -447,7 +451,7 @@ pub fn mysql_text_rewrites(sql: &[u8], opts: &LexOptions, backend_version: u32) 
     }
     let mut out: Option<Vec<u8>> =
         lex::versioned::expand_text_for_mariadb(sql, opts, backend_version);
-    let steps: [TextStep; 10] = [
+    let steps: [TextStep; 12] = [
         rewrite_json_casts,
         name_checks,
         rewrite_srid_attribute,
@@ -462,10 +466,14 @@ pub fn mysql_text_rewrites(sql: &[u8], opts: &LexOptions, backend_version: u32) 
         // MySQL's default collations in database DDL (gaps row 58).
         ddl::generated_not_null,
         ddl::database_collation,
+        // R4 round 4: `DROP CHECK` as `DROP CONSTRAINT`.
+        ddl::drop_check,
         // R4 round 3: LATERAL derived tables (step 9) and functional key
         // parts (step 10).
         lateral::rewrite,
         fxindex::rewrite,
+        // R4 round 3: EXPLAIN with MySQL's columns (step 11).
+        explain::rewrite,
     ];
     for step in steps {
         if let Some(v) = step(out.as_deref().unwrap_or(sql), opts) {

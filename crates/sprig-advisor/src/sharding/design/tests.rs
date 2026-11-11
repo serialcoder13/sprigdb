@@ -184,6 +184,7 @@ fn shop() -> Input {
         }],
         split_bytes: 32.0 * 1_073_741_824.0,
         pins: Vec::new(),
+        ..Input::default()
     }
 }
 

@@ -1,0 +1,130 @@
+# Chapter 40's Java and Go Redis client suites (R6 done-when: "Redis client
+# suites pass (redis-py, Jedis, Lettuce, ioredis, go-redis)"), which need
+# downloads the laptop doesn't allow (decisions/r6-interim.md, R34 and the
+# lead's choices on round 5): they run here, on CI runners.
+#
+#   java      Jedis 5.2.0 and Lettuce 6.5.1.RELEASE (RESP3), from Maven
+#             Central at the versions in deploy/compose/r6/redis-clients/java/pom.xml
+#   go-redis  go-redis v9.7.0 (RESP3), the version pinned in
+#             deploy/compose/r6/redis-clients/go/go.mod and go.sum
+#
+# Each job starts a SprigDB stack (.github/actions/sprig-stack: Compose's
+# MariaDB 11.8 node, a release controller, worker and gateway in catalog
+# mode, tenant acme) with the Redis listener on 127.0.0.1:26379, plain user
+# names bound to tenant acme (deploy/compose/ci/listeners.sh), and a
+# reference Redis 7.4.11 (the version the laptop's differential suites use,
+# decision R12) on 127.0.0.1:6379. deploy/compose/r6/redis-clients/run.sh
+# then runs the suite's one scenario (strings, hashes, lists, sets, sorted
+# sets, expiry, SCAN, pipelines, MULTI/EXEC, WATCH, EVAL/EVALSHA, geo,
+# pub/sub, a blocked pop woken by another connection) on both and fails on
+# any difference. Every download happens on the runner; licences are in
+# run.sh (the clients MIT and BSD-2-Clause, test-only dependencies Apache-2.0,
+# MIT, MIT-0 and Public Domain).
+#
+# Defined, not yet run (R6 round 6). Nightly and on demand; the `jobs` input
+# picks java, go-redis or all.
+name: heavy-redis
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: "Jobs to run: all, or a comma-separated list of java, go-redis"
+        required: false
+        default: all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: heavy-redis-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  java:
+    name: R6 Redis Jedis 5.2.0 and Lettuce 6.5.1 (Redis 7.4.11 and SprigDB)
+    if: >-
+      github.event_name == 'schedule' || inputs.jobs == 'all' || contains(inputs.jobs, 'java')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: ./.github/actions/sprig-stack
+        with:
+          listeners: redis
+      - name: Start the Redis 7.4.11 reference
+        run: |
+          docker run -d --name ci-ref-redis --memory 512m -p 127.0.0.1:6379:6379 redis:7.4.11-alpine
+          timeout 60 bash -c 'until docker exec ci-ref-redis redis-cli ping | grep -q PONG; do sleep 1; done'
+      - name: Jedis and Lettuce on both, compared
+        env:
+          R6_SUITES: java
+          R6_CLIENTS_DIR: ${{ github.workspace }}/target/r6-redis-clients
+        run: |
+          mkdir -p target/ci-results
+          deploy/compose/r6/redis-clients/run.sh 127.0.0.1:6379 127.0.0.1:26379 app sprig-dev-app \
+            2>&1 | tee target/ci-results/redis-java.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: heavy-redis-java
+          path: |
+            target/ci-results
+            deploy/compose/.gateway-dev/*.log
+          if-no-files-found: ignore
+      - name: Stop
+        if: always()
+        run: |
+          docker rm -f ci-ref-redis || true
+          deploy/compose/ci/stack-down.sh
+
+  go-redis:
+    name: R6 Redis go-redis v9.7.0 (Redis 7.4.11 and SprigDB)
+    if: >-
+      github.event_name == 'schedule' || inputs.jobs == 'all' || contains(inputs.jobs, 'go-redis')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.4"
+          cache: false
+      - uses: ./.github/actions/sprig-stack
+        with:
+          listeners: redis
+      - name: Start the Redis 7.4.11 reference
+        run: |
+          docker run -d --name ci-ref-redis --memory 512m -p 127.0.0.1:6379:6379 redis:7.4.11-alpine
+          timeout 60 bash -c 'until docker exec ci-ref-redis redis-cli ping | grep -q PONG; do sleep 1; done'
+      - name: go-redis on both, compared
+        env:
+          R6_SUITES: go
+          R6_CLIENTS_DIR: ${{ github.workspace }}/target/r6-redis-clients
+        run: |
+          mkdir -p target/ci-results
+          deploy/compose/r6/redis-clients/run.sh 127.0.0.1:6379 127.0.0.1:26379 app sprig-dev-app \
+            2>&1 | tee target/ci-results/redis-go.txt
+          grep -q "go-redis v9.7.0 (RESP3): [0-9]* checks, 0 differences" target/ci-results/redis-go.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: heavy-redis-go
+          path: |
+            target/ci-results
+            deploy/compose/.gateway-dev/*.log
+          if-no-files-found: ignore
+      - name: Stop
+        if: always()
+        run: |
+          docker rm -f ci-ref-redis || true
+          deploy/compose/ci/stack-down.sh

@@ -761,6 +761,10 @@ impl VShared {
     /// destination's confirm. `Ok` when every row is done.
     pub(crate) async fn forward(self: &Arc<Self>, rows: &[OutboxRow]) -> Result<(), MqError> {
         let mut waits = Vec::new();
+        // One command per queue with every row for it, in row order: the
+        // owner checks the replays of a whole command in one lookup.
+        let mut per_queue: Vec<(Arc<QueueDef>, Vec<(Incoming, Option<owner::Reply<()>>)>)> =
+            Vec::new();
         for row in rows {
             let mut m = match msg::rebuild(
                 row.fmt,
@@ -792,8 +796,8 @@ impl VShared {
             }
             for q in targets {
                 let (tx, rx) = oneshot::channel();
-                let h = self.slot(&q);
-                if h.send(Cmd::Enqueue(vec![(
+                waits.push(rx);
+                let item = (
                     Incoming {
                         msg: Arc::clone(&m),
                         msg_id: row.out_id,
@@ -801,10 +805,16 @@ impl VShared {
                         deaths: deaths.clone(),
                     },
                     Some(tx),
-                )])) {
-                    waits.push(rx);
+                );
+                match per_queue.iter_mut().find(|(d, _)| d.id == q.id) {
+                    Some((_, items)) => items.push(item),
+                    None => per_queue.push((q, vec![item])),
                 }
             }
+        }
+        for (q, items) in per_queue {
+            // A closed slot drops the replies: their waits fail below.
+            let _ = self.slot(&q).send(Cmd::Enqueue(items));
         }
         for w in waits {
             match w.await {
@@ -819,17 +829,25 @@ impl VShared {
     }
 
     /// One pass over a store's outbox; `release`: move due delayed
-    /// messages first (the lease holder only).
+    /// messages first (the lease holder only). `publish_before`: with the
+    /// feed-driven forwarder on (`queue.forwarder = feed`), transactional
+    /// publishes are taken only below this id (older than the fallback
+    /// delay); the feed forwards the rest in commit order.
     async fn forward_store(
         self: &Arc<Self>,
         store: &Arc<dyn MsgStore>,
         now_ms: i64,
         release: bool,
+        publish_before: Option<crate::store::MsgId>,
     ) -> usize {
         if release && let Err(e) = store.release_due(now_ms, 500).await {
             tracing::debug!(error = %e, "delayed release failed");
         }
-        let rows = match store.outbox(500).await {
+        let rows = match publish_before {
+            Some(b) => store.outbox_due(500, b).await,
+            None => store.outbox(500).await,
+        };
+        let rows = match rows {
             Ok(r) => r,
             Err(e) => {
                 tracing::debug!(error = %e, "outbox read failed");
@@ -852,6 +870,12 @@ impl VShared {
             return 0;
         }
         let n = rows.len();
+        if publish_before.is_some() {
+            let late = rows.iter().filter(|r| r.kind == OutKind::Publish).count();
+            if late > 0 {
+                metrics::counter!("sprig_queue_forward_fallback_total").increment(late as u64);
+            }
+        }
         match self.forward(&rows).await {
             Ok(()) => {
                 let ids: Vec<_> = rows.iter().map(|r| r.out_id).collect();
@@ -878,6 +902,7 @@ impl VShared {
         let fwd_object = FORWARDER_OBJECT | u64::from(self.r.db_id);
         let mut lease: Option<CancellationToken> = None;
         let mut next_try = 0i64;
+        let mut next_purge = 0i64;
         let mut durable: Option<Arc<dyn MsgStore>> = None;
         loop {
             let woken = tokio::select! {
@@ -887,7 +912,7 @@ impl VShared {
             };
             let now = deps.clock.now_ms();
             let mem: Arc<dyn MsgStore> = Arc::clone(&self.mem) as Arc<dyn MsgStore>;
-            while self.forward_store(&mem, now, true).await > 0 {}
+            while self.forward_store(&mem, now, true, None).await > 0 {}
             if lease.as_ref().is_some_and(CancellationToken::is_cancelled) {
                 lease = None;
             }
@@ -912,7 +937,25 @@ impl VShared {
             }
             if let Some(s) = &durable {
                 let release = lease.is_some();
-                while self.forward_store(s, now, release).await > 0 {}
+                let qs = deps.catalog.settings(&self.r);
+                let before =
+                    qs.forward_feed.then(|| {
+                        crate::store::msg_id_floor(now.saturating_sub(
+                            i64::try_from(qs.forward_fallback_ms).unwrap_or(i64::MAX),
+                        ))
+                    });
+                while self.forward_store(s, now, release, before).await > 0 {}
+                // The lease holder trims the forward ledger: rows whose
+                // outbox row is gone, older than the longest a forward
+                // that read the row before its delete may still run.
+                if release && now >= next_purge {
+                    next_purge = now + 30_000;
+                    match s.purge_ledger(now - LEDGER_KEEP_MS).await {
+                        Ok(n) if n > 0 => tracing::debug!(rows = n, "forward ledger trimmed"),
+                        Ok(_) => {}
+                        Err(e) => tracing::debug!(error = %e, "forward ledger trim failed"),
+                    }
+                }
             }
         }
         if lease.is_some() {
@@ -995,6 +1038,11 @@ enum Plan {
 
 /// The forwarder lease's object id: this bit plus the database id.
 pub const FORWARDER_OBJECT: u64 = 1 << 62;
+
+/// How long a forward-ledger row stays after its outbox row is gone: a
+/// forward that read the row before it was deleted finishes (or times
+/// out, `amqp.publish_timeout_ms` at most 10 minutes) well within it.
+pub const LEDGER_KEEP_MS: i64 = 900_000;
 
 /// Delivers to a local connection, counting credit for re-attachment.
 pub(crate) struct LocalSink {

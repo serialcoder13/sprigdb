@@ -113,6 +113,14 @@ impl<'a> For<'a> {
             let cat = svc.cache.cached(caller.principal.tenant?)?;
             Some((svc, cat))
         });
+        Self::over(engine, tenant, database)
+    }
+
+    fn over(
+        engine: &'a SqlEngine,
+        tenant: Option<(&'a TenantServices, Arc<TenantCatalog>)>,
+        database: &str,
+    ) -> Self {
         let db = tenant.as_ref().and_then(|(_, cat)| {
             (!database.is_empty() && database != "-")
                 .then(|| {
@@ -313,6 +321,43 @@ pub async fn admit(tenant: u64, limits: Analytics) -> Result<Admitted> {
             return Err(e);
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// [`vector_auto_ann`] once this gateway's copy of the tenant's catalog
+/// holds the directory's catalog version as read now (linearizable), so a
+/// `vector.auto_ann` change made a moment ago on any gateway is seen
+/// (approvals round 3: an automatic graph was built 0.3 s after `approve`
+/// was set, before the settings cache had it). Falls back to the cached
+/// value when the directory or the catalog can't be read.
+pub async fn vector_auto_ann_fresh(engine: &SqlEngine, caller: &Caller, database: &str) -> String {
+    let cached = vector_auto_ann(engine, caller, database);
+    if !matches!(engine.api, ApiSettingsSource::Live { .. }) {
+        return cached;
+    }
+    let (Some(svc), Some(t)) = (engine.tenants.as_deref(), caller.principal.tenant) else {
+        return cached;
+    };
+    let Ok(key) = svc.global.tier().key(&format!("tenants/{}", t.0)) else {
+        return cached;
+    };
+    let want = match svc
+        .global
+        .get(&key, sprig_meta::Consistency::Linearizable)
+        .await
+    {
+        Ok(Some(kv)) => serde_json::from_slice::<serde_json::Value>(&kv.value)
+            .ok()
+            .and_then(|v| v.get("catalog_version")?.as_u64())
+            .unwrap_or(0),
+        _ => return cached,
+    };
+    let fresh = sprig_catalog::cache::Freshness::Cached { min_version: want };
+    match svc.cache.get(t, fresh).await {
+        Ok(cat) => For::over(engine, Some((svc, cat)), database)
+            .get(&sprig_approvals::settings::VECTOR_AUTO_ANN)
+            .into_owned(),
+        Err(_) => cached,
     }
 }
 

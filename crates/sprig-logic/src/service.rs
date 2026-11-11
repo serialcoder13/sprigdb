@@ -405,6 +405,14 @@ pub async fn deploy_at(
             signature["returns"] = serde_json::Value::String(r.clone());
         }
     }
+    // R9 (r9fwd): `DETERMINISTIC` is recorded with the version, so a sink
+    // with `EXACTLY ONCE` can check its `TRANSFORM` (chapter 51).
+    if d.deterministic {
+        if !signature.is_object() {
+            signature = serde_json::json!({});
+        }
+        signature["deterministic"] = serde_json::Value::Bool(true);
+    }
     let plsql_text = compiled.plsql.as_ref().map(|p| p.statements.join(";\n\n"));
     if at.version.is_none() {
         store

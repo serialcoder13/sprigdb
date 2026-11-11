@@ -149,10 +149,16 @@ impl Shape {
     }
 
     /// Whether every predicate is unsargable (chapter 13's trigger records
-    /// a reason and makes no candidate). False when there are none.
+    /// a reason and makes no candidate). False when there are none, and
+    /// when one is a field path an index on a field column could serve
+    /// ([`PredOp::is_field_sargable`], R6 round 6).
     #[must_use]
     pub fn all_unsargable(&self) -> bool {
-        !self.predicates.is_empty() && self.predicates.iter().all(|p| !p.op.is_sargable())
+        !self.predicates.is_empty()
+            && self
+                .predicates
+                .iter()
+                .all(|p| !p.op.is_sargable() && !p.op.is_field_sargable())
     }
 
     /// The shape as the JSON stored in `workload_fingerprints.shape`.
@@ -351,6 +357,16 @@ pub enum PredOp {
     JsonPath {
         /// The JSON path, as written in the statement.
         path: String,
+        /// The function, upper case: `JSON_VALUE`, `JSON_EXTRACT`,
+        /// `JSON_QUERY`, or `->` and `->>` (R6 round 6; absent in shapes
+        /// recorded before).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        func: Option<String>,
+        /// The condition as it would be on a column (`eq`, `in`, `range`,
+        /// `is_null`, ...), so a field column over the path can be judged
+        /// like a column (R6 round 6, decision K3).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cmp: Option<Box<PredOp>>,
     },
     /// No index on the column can serve the condition.
     Unsargable {
@@ -373,6 +389,25 @@ impl PredOp {
                 | Self::IsNull
                 | Self::NotNull
         )
+    }
+
+    /// `JSON_VALUE(col, '<path>')` in `=`, `IN`, `IS NULL` or a range: a
+    /// field column of the expression's type with an index serves it,
+    /// since MariaDB 11.8 substitutes the column for the expression (R6
+    /// round 6, decision K3).
+    #[must_use]
+    pub fn is_field_sargable(&self) -> bool {
+        match self {
+            Self::JsonPath {
+                func: Some(f),
+                cmp: Some(c),
+                ..
+            } => {
+                f == "JSON_VALUE"
+                    && matches!(**c, Self::Eq | Self::In { .. } | Self::Range { .. } | Self::IsNull)
+            }
+            _ => false,
+        }
     }
 
     /// The operator's name in the JSON.

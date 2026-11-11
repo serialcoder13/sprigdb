@@ -41,6 +41,8 @@ pub mod stmt;
 mod logic;
 // Chapter 41: validations, triggers, schedules, computed fields (R7 orders 3, 5).
 mod logic_bound;
+// Chapter 29: row-level security (R4).
+mod rls;
 mod tenant;
 // Chapter 32: typed tables and record hierarchies.
 pub(crate) mod inherit;
@@ -65,8 +67,14 @@ mod offsets;
 mod groupby;
 // Chapter 36 (R6 round 3): nearest neighbours with a growing radius on 3306.
 mod geo_knn;
-// Per-session status counters (gaps rows 46 and 61).
+// Chapter 28 (R4 round 4): LATERAL's gateway apply on 3306.
+mod lateral;
+// Chapter 28 (R4 round 4): functional key parts typed from the catalog.
+mod fxindex;
+// Per-session status counters (gaps rows 46 and 61; chapter 28).
 pub(crate) mod status;
+// Chapter 39 (R5 round 5): search DDL, MATCH ... AGAINST, sprig_search().
+pub(crate) mod search;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -466,6 +474,46 @@ impl PassSession {
         })
     }
 
+    /// Prepares statement `stmt`'s client text again (chapter 29, RL15):
+    /// its row-level security predicates were bound under another role
+    /// set or policy version. `false` (the client gets 1615) when the text
+    /// can't be prepared the same way: another default database now, or
+    /// other parameters or columns.
+    async fn reprepare(&mut self, cx: &mut ExecCtx<'_>, stmt: StmtRef) -> Result<bool> {
+        let current = self.current_logical();
+        let s = self.stmts.get_mut(stmt)?;
+        let (Some(logical), Some(rc)) = (s.client.clone(), s.recheck.as_ref()) else {
+            return Ok(false);
+        };
+        if rc.current() != current.as_deref() {
+            return Ok(false);
+        }
+        let (params, columns) = (s.params, s.columns.len());
+        let summary = self.tenant_prepare(cx, logical).await?;
+        let Some(meta) = summary.prepared else {
+            return Ok(false);
+        };
+        let Some(new) = self.stmts.remove(meta.stmt) else {
+            return Ok(false);
+        };
+        metrics::gauge!("sprig_mysql_prepared_statements", "persona" => self.persona.as_str())
+            .decrement(1.0);
+        if new.deferred.is_some() || new.params != params || new.columns.len() != columns {
+            return Ok(false);
+        }
+        let s = self.stmts.get_mut(stmt)?;
+        s.sql = new.sql;
+        s.info = new.info;
+        s.mapper = new.mapper;
+        s.recheck = new.recheck;
+        s.logical = new.logical;
+        s.renames = new.renames;
+        s.nowait = new.nowait;
+        s.session_status = new.session_status;
+        metrics::counter!("sprig_rls_reprepares_total").increment(1);
+        Ok(true)
+    }
+
     #[allow(clippy::too_many_lines)] // the execute path, deferred and relayed
     async fn execute(
         &mut self,
@@ -481,6 +529,21 @@ impl PassSession {
         self.wl_multi = false;
         let s = self.stmts.get_mut(stmt)?;
         if let Some(text) = s.deferred.clone() {
+            // Chapter 39 (R5 round 6): the bound values as literals.
+            let text = if s.deferred_params {
+                let values: Vec<String> = s
+                    .params_for_backend(params, persona)?
+                    .iter()
+                    .map(search::param_literal)
+                    .collect();
+                std::str::from_utf8(&text)
+                    .ok()
+                    .and_then(|t| sprig_search::sqlscan::interpolate(t, &values))
+                    .map(Bytes::from)
+                    .ok_or_else(|| SprigError::internal("a prepared search's parameters"))?
+            } else {
+                text
+            };
             // A statement the gateway answers itself, planned again now.
             let step = self
                 .tenant_text(
@@ -523,7 +586,18 @@ impl PassSession {
             && let Some(ts) = self.tenant.as_deref_mut()
         {
             ts.refresh().await?;
-            crate::tenant::authz::recheck(ts, persona, rc)?;
+            match crate::tenant::authz::recheck(ts, persona, rc) {
+                // Chapter 29 (RL15, round 2): a text whose row-level
+                // security predicates changed is prepared again, under the
+                // same id, and the execute goes on.
+                Err(e) if e.protocol().mysql_errno == 1615 => {
+                    if !Box::pin(self.reprepare(cx, stmt)).await? {
+                        return Err(e);
+                    }
+                    return Box::pin(self.execute(cx, stmt, raw, params, out)).await;
+                }
+                r => r?,
+            }
         }
         // Chapter 17: a sharded tenant's statement is routed (see
         // `router::PassSession::routed_execute`).
@@ -1001,7 +1075,7 @@ impl SessionExec for PassSession {
         let txn_word = queues::txn_word(&req);
         // Holds, promotions (RL13), the DC's write gate (chapter 25), and
         // a mover's fence met on the way (RL14): `fence_retry`.
-        let r = match self.run_followed(cx, req, out).await {
+        let r = match Box::pin(self.run_followed(cx, req, out)).await {
             Ok(r) => r,
             Err(e) => return Err(self.map_error(e)),
         };
@@ -1143,27 +1217,8 @@ impl PassSession {
         if split::is_session_status(piece) {
             Some(relay::ConnStatus::of(proto).with_rows(self.status_rows()))
         } else if split::is_show_variables(piece) {
-            // The client's own values of gateway-owned variables (`SET
-            // wait_timeout = ...`), which `@@` reads already answer.
-            const OWNED: &[&str] = &[
-                "wait_timeout",
-                "interactive_timeout",
-                "net_read_timeout",
-                "net_write_timeout",
-                "session_track_schema",
-                "session_track_state_change",
-                "session_track_system_variables",
-                "session_track_transaction_info",
-                "wsrep_sync_wait",
-            ];
             let mut rows = self.persona_vars().show_rows();
-            if let Some(bs) = &self.bs {
-                for (k, v) in &bs.vars().gateway_vars {
-                    if let Some(name) = OWNED.iter().find(|n| n.eq_ignore_ascii_case(k)) {
-                        rows.push((name, v.clone()));
-                    }
-                }
-            }
+            rows.extend(self.owned_var_rows());
             let st = relay::ConnStatus::from_rows(rows);
             // 3306: `collation_*` in MySQL's names (gaps row 60).
             Some(if self.persona == Persona::MySql84 {
@@ -1174,6 +1229,61 @@ impl PassSession {
         } else {
             None
         }
+    }
+
+    /// The client's own values of gateway-owned variables (`SET
+    /// wait_timeout = ...`), which `@@` reads already answer.
+    fn owned_var_rows(&self) -> Vec<(&'static str, String)> {
+        const OWNED: &[&str] = &[
+            "wait_timeout",
+            "interactive_timeout",
+            "net_read_timeout",
+            "net_write_timeout",
+            "session_track_schema",
+            "session_track_state_change",
+            "session_track_system_variables",
+            "session_track_transaction_info",
+            "wsrep_sync_wait",
+        ];
+        let mut rows = Vec::new();
+        if let Some(bs) = &self.bs {
+            for (k, v) in &bs.vars().gateway_vars {
+                if let Some(name) = OWNED.iter().find(|n| n.eq_ignore_ascii_case(k)) {
+                    rows.push((*name, v.clone()));
+                }
+            }
+        }
+        rows
+    }
+
+    /// 3306: `performance_schema` and `sys` as derived tables over the
+    /// session and the tenant's sessions (chapter 28 step 13, R4 round 4;
+    /// `compat::perfschema`). `None` when nothing changes.
+    pub(super) fn ps_rewrite(&self, cx: &ExecCtx<'_>, sql: &[u8]) -> Option<Result<Vec<u8>>> {
+        if self.persona != Persona::MySql84 {
+            return None;
+        }
+        let current = self.current_logical();
+        if !sprig_sql::compat::perfschema::wanted(sql, current.as_deref()) {
+            return None;
+        }
+        let (lex, _) = self.lex_opts();
+        let vars = self.persona_vars();
+        let owned = self.owned_var_rows();
+        let status = relay::ConnStatus::of(cx.proto)
+            .with_rows(self.status_rows())
+            .into_rows();
+        let s = sprig_sql::compat::perfschema::PsSession {
+            vars: &vars,
+            owned_vars: &owned,
+            status: &status,
+            uptime: status::uptime_secs(),
+            connection_id: u64::from(cx.session.id.0),
+            connect_attrs: &cx.session.connect_attrs,
+            current_db: current.as_deref(),
+        };
+        sprig_sql::compat::perfschema::rewrite(sql, &lex, &s)
+            .map(|r| r.map_err(|e| SprigError::standard(e.code, e.sqlstate, e.message)))
     }
 
     /// The gateway's rewrites of a statement's text for this session: the
@@ -1232,7 +1342,6 @@ impl PassSession {
         req: Request,
         out: &mut dyn ResultSink,
     ) -> Result<ExecSummary> {
-        self.count_request(&req);
         match req {
             Request::Query { sql, attrs } => {
                 if self.tenant.is_some() {

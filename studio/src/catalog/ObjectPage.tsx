@@ -20,6 +20,7 @@ export function ObjectPage() {
   const [tab, setTab] = useState<Tab>(kind === 'table' || kind === 'view' ? 'data' : 'ddl');
   const cols = snap.data?.columns[name] ?? [];
   const isTable = kind === 'table' || kind === 'view';
+  const isGraph = kind === 'graph';
   const indexes = useQuery({
     queryKey: ['obj', db, name, 'indexes'],
     queryFn: () => objects(db, `SHOW INDEX FROM ${qualified(db, name)}`),
@@ -33,9 +34,10 @@ export function ObjectPage() {
       const i = r.columns.findIndex((c) => /^Create /i.test(c.name));
       return r.rows[0]?.[i >= 0 ? i : 1] ?? '';
     },
-    enabled: tab === 'ddl',
+    enabled: tab === 'ddl' && !isGraph,
   });
-  const tabs: Tab[] = isTable ? (kind === 'table' ? ['data', 'columns', 'indexes', 'ddl'] : ['data', 'columns', 'ddl']) : ['ddl'];
+  const graph = isGraph ? snap.data?.objects.find((o) => o.kind === 'graph' && o.name === name) : undefined;
+  const tabs: Tab[] = isTable ? (kind === 'table' ? ['data', 'columns', 'indexes', 'ddl'] : ['data', 'columns', 'ddl']) : isGraph ? [] : ['ddl'];
   return (
     <div className="stack">
       <nav aria-label="Breadcrumb" className="muted">
@@ -45,7 +47,9 @@ export function ObjectPage() {
         <h1 style={{ margin: 0 }}>{name}</h1>
         <button
           onClick={() => {
-            const t = addTab({ db, sql: isTable ? `SELECT * FROM ${qualified(null, name)} LIMIT 100;` : '', title: name });
+            const t = isGraph
+              ? addTab({ db, graph: name, language: 'cypher', sql: 'MATCH (n)-[r]->(m) RETURN n, r, m LIMIT 25;', title: name })
+              : addTab({ db, sql: isTable ? `SELECT * FROM ${qualified(null, name)} LIMIT 100;` : '', title: name });
             void navigate(`/t/${encodeURIComponent(tenant)}/q/${t.id}`);
           }}
         >
@@ -126,7 +130,29 @@ export function ObjectPage() {
           </table>
         </div>
       )}
-      {tab === 'ddl' && (ddl.error ? <p className="error">{ddl.error.message}</p> : <pre data-testid="ddl">{ddl.data ?? '…'}</pre>)}
+      {isGraph && (
+        <section className="stack" aria-label="Graph" data-testid="graph-object">
+          {!graph && !snap.isLoading && <p className="muted">No such graph, or you can't read it.</p>}
+          {graph && (
+            <>
+              <dl className="kv">
+                <dt>Kind</dt>
+                <dd>{graph.graph_kind ?? ''}</dd>
+                <dt>Labels</dt>
+                <dd className="mono" data-testid="graph-labels">
+                  {(graph.labels ?? []).join(', ') || '—'}
+                </dd>
+                <dt>Relationship types</dt>
+                <dd className="mono" data-testid="graph-types">
+                  {(graph.types ?? []).join(', ') || '—'}
+                </dd>
+              </dl>
+              {graph.partial && <p className="muted">You may read only some of this graph's labels and relationship types (grants on single elements).</p>}
+            </>
+          )}
+        </section>
+      )}
+      {tab === 'ddl' && !isGraph && (ddl.error ? <p className="error">{ddl.error.message}</p> : <pre data-testid="ddl">{ddl.data ?? '…'}</pre>)}
       {tab === 'data' && isTable && cols.length > 0 && <Browse key={`${db}.${name}`} db={db} table={name} cols={cols} editable={kind === 'table'} />}
     </div>
   );

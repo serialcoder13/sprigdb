@@ -42,7 +42,8 @@ pub struct Normalized {
     /// The statement type, from its first keyword.
     pub stmt_type: StmtType,
     /// The statement carries a password: `IDENTIFIED BY`, `PASSWORD`,
-    /// `MASTER_PASSWORD`. Its literals are already dropped.
+    /// `MASTER_PASSWORD`, or credentials (`CREDENTIALS (...)`). Its
+    /// literals are already dropped.
     pub sensitive: bool,
     /// The statement couldn't be lexed whole (an unterminated string,
     /// identifier or comment, or more than 4 GiB): count it under the
@@ -686,7 +687,9 @@ impl Walker<'_> {
 
         if !quoted
             && (info.kw == Kw::Identified
-                || info.kw == Kw::None && w.len() >= 8 && contains_password(w))
+                || info.kw == Kw::None && w.len() >= 8 && contains_password(w)
+                // Chapter 51's `CREDENTIALS (k = 'v', ...)` (bugfix-24).
+                || info.kw == Kw::None && w.eq_ignore_ascii_case(b"CREDENTIALS"))
         {
             self.sensitive = true;
         }

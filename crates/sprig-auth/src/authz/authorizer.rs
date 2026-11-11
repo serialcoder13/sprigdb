@@ -213,6 +213,13 @@ pub trait SessionGrants: Send + Sync + std::fmt::Debug {
         None
     }
 
+    /// The session's row-level security in chapter 29's model (the
+    /// policies the gateway's rewrite injects), for engines that use it;
+    /// `None` for an engine without it.
+    fn row_policies(&self) -> Option<std::sync::Arc<super::rls::SessionRls>> {
+        None
+    }
+
     /// Grants on single labels and relationship types of graph `graph`
     /// (chapter 43, R8): (relationship type?, name, actions). The graph
     /// layer reads them when the graph or its database doesn't give the
@@ -286,6 +293,52 @@ pub trait Authorizer: Send + Sync + std::fmt::Debug {
     ) -> Result<Option<u64>>;
 }
 
+/// Deletes the row-level security rows of dropped tables in one auth
+/// change; the version, if anything was deleted.
+async fn forget_policies(
+    catalog: &MariaCatalog,
+    cat: &TenantCatalog,
+    dropped: &[Dropped],
+) -> Result<Option<u64>> {
+    let Some(st) = super::rls::RlsState::of(cat).filter(|s| s.is_migrated()) else {
+        return Ok(None);
+    };
+    let has = |o: ObjectId| st.security(o).is_some() || st.policies_of(o).next().is_some();
+    let mut gone = Vec::new();
+    for d in dropped {
+        match d {
+            Dropped::Object { object, .. } if has(*object) => gone.push(*object),
+            Dropped::Database { db, .. } => gone.extend(
+                cat.objects
+                    .iter()
+                    .filter(|o| o.db_id == *db && has(o.object_id))
+                    .map(|o| o.object_id),
+            ),
+            Dropped::Object { .. } => {}
+        }
+    }
+    if gone.is_empty() {
+        return Ok(None);
+    }
+    let mut change = catalog
+        .change_with(cat.tenant, VersionKind::Auth, ChangeOpts::default())
+        .await?;
+    let r = {
+        let (core, q) = change.tx().parts();
+        super::rls::RlsStore::new(core.schema())
+            .forget_objects(q, &gone)
+            .await
+    };
+    match r {
+        Ok(()) => Ok(Some(change.commit().await?)),
+        Err(e) => {
+            let _ = change.rollback().await;
+            let _ = catalog.settle(cat.tenant, VersionKind::Auth).await;
+            Err(e)
+        }
+    }
+}
+
 // ---- the mysql_grants engine ----
 
 impl SessionGrants for CompiledPrivileges {
@@ -307,6 +360,40 @@ impl SessionGrants for CompiledPrivileges {
 
     fn graph_elements(&self, graph: ObjectId) -> Vec<(bool, String, ActionSet)> {
         CompiledPrivileges::graph_elements(self, graph)
+    }
+
+    fn row_filter(&self, table: Target<'_>, action: Action) -> Option<RowFilter> {
+        let Target::Object { object, .. } = table else {
+            return None;
+        };
+        let t = self.rls.tables.get(&object)?;
+        let bit = match action {
+            Action::Insert => super::rls::cmd::INSERT,
+            Action::Update => super::rls::cmd::UPDATE,
+            Action::Delete => super::rls::cmd::DELETE,
+            _ => super::rls::cmd::SELECT,
+        };
+        let c = t.combination(bit, super::rls::Clause::Using);
+        let or: Vec<String> = c
+            .permissive
+            .iter()
+            .map(|x| format!("({})", x.expr))
+            .collect();
+        let mut p = if or.is_empty() {
+            "FALSE".to_owned()
+        } else {
+            format!("({})", or.join(" OR "))
+        };
+        for r in &c.restrictive {
+            p.push_str(" AND (");
+            p.push_str(r.expr);
+            p.push(')');
+        }
+        Some(RowFilter { predicate: p })
+    }
+
+    fn row_policies(&self) -> Option<Arc<super::rls::SessionRls>> {
+        Some(Arc::clone(&self.rls))
     }
 
     fn settings(&self, op: SettingsOp<'_>) -> std::result::Result<(), SettingsDenied> {
@@ -404,12 +491,11 @@ impl Authorizer for MysqlGrants {
 
     fn session(&self, cat: &TenantCatalog, subject: &Subject<'_>) -> Arc<dyn SessionGrants> {
         let resolve = |d: &str, n: &str| relation(cat, d, n);
-        Arc::new(CompiledPrivileges::compile_at(
-            state_of(cat),
-            &resolve,
-            subject.user,
-            subject.roles,
-        ))
+        let mut c =
+            CompiledPrivileges::compile_at(state_of(cat), &resolve, subject.user, subject.roles);
+        // Chapter 29: the protected tables that bind the session.
+        c.rls = Arc::new(super::rls::compile(cat, &c, subject.user));
+        Arc::new(c)
     }
 
     fn backend_grants(&self, cat: &TenantCatalog, auth: &TenantAuth) -> BackendState {
@@ -426,7 +512,11 @@ impl Authorizer for MysqlGrants {
         cat: &TenantCatalog,
         dropped: &[Dropped],
     ) -> Result<Option<u64>> {
-        apply_ops(catalog, cat, &drop_plan(state_of(cat), cat, dropped)).await
+        let v = apply_ops(catalog, cat, &drop_plan(state_of(cat), cat, dropped)).await?;
+        // Chapter 29: a dropped table's policies go with it, as in
+        // PostgreSQL.
+        let w = forget_policies(catalog, cat, dropped).await?;
+        Ok(v.max(w))
     }
 
     async fn objects_renamed(
@@ -1044,6 +1134,53 @@ mod tests {
         assert_eq!(
             tables(&catalog(again, select_only)),
             vec![("orders".to_owned(), ActionSet::of(&[Action::Select]))]
+        );
+    }
+
+    /// bugfix-19: a `db.*` grant reaches every schema of the database
+    /// (groups the advisor makes later, splits, the reference schema), not
+    /// only the default group's first shard; a `*.*` grant stays the
+    /// tenant's pattern.
+    #[test]
+    fn database_grants_reach_every_schema_of_the_database() {
+        use crate::authz::backend::BackendTarget;
+        let auth = TenantAuth::build(
+            vec![crate::cache::tests::row(APP.0, "app", "%", 1)],
+            &[],
+            Vec::new(),
+        );
+        let acct = backend::account(TenantId(42), APP);
+        let cat = catalog(
+            Vec::new(),
+            vec![grant(
+                PrivTarget::Database("shop".into()),
+                &[Action::Select, Action::Insert],
+            )],
+        );
+        let want = MysqlGrants.backend_grants(&cat, &auth);
+        let dbs: Vec<(String, ActionSet)> = want
+            .get(&acct)
+            .unwrap()
+            .iter()
+            .filter_map(|(t, a)| match t {
+                BackendTarget::Db(p) => Some((p.clone(), *a)),
+                _ => None,
+            })
+            .collect();
+        let ctt = ActionSet::of(&[Action::CreateTemporaryTables]);
+        assert_eq!(
+            dbs,
+            vec![
+                (
+                    "t42\\_d%".to_owned(),
+                    ActionSet::EMPTY.union(ctt),
+                ),
+                (
+                    "t42\\_d1\\_%".to_owned(),
+                    ActionSet::of(&[Action::Select, Action::Insert]).union(ctt),
+                ),
+            ],
+            "one pattern row for the database (no per-schema rows)"
         );
     }
 

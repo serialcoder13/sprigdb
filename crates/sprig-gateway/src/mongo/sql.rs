@@ -163,6 +163,8 @@ pub struct SqlSession {
     pub in_txn: bool,
     /// The session runs at READ COMMITTED ([`Self::read_committed`]).
     read_committed: bool,
+    /// The principal's tenant name and user id (chapter 39's definers).
+    hint: Option<(String, u32)>,
 }
 
 impl std::fmt::Debug for SqlSession {
@@ -174,6 +176,12 @@ impl std::fmt::Debug for SqlSession {
 }
 
 impl SqlSession {
+    /// The gateway session's id (chapter 29: internal exemptions).
+    #[must_use]
+    pub fn session_id(&self) -> sprig_common::ids::ConnId {
+        self.session.id
+    }
+
     /// Opens a session for `principal`.
     ///
     /// # Errors
@@ -219,6 +227,10 @@ impl SqlSession {
             tenant: principal.tenant.map_or(0, |t| t.0),
             in_txn: false,
             read_committed: false,
+            hint: principal
+                .tenant_name
+                .clone()
+                .zip(principal.user_id.map(|u| u.0)),
         })
     }
 
@@ -291,5 +303,9 @@ impl SqlRunner for SqlSession {
 
     fn tenant(&self) -> u64 {
         self.tenant
+    }
+
+    fn principal_hint(&self) -> Option<(String, u32)> {
+        self.hint.clone()
     }
 }

@@ -53,6 +53,14 @@
 # records them in the state directory, so status and down need only
 # SPRIG_GATEWAY_DEV_STATE; while an instance is up, its recorded values win.
 #
+# Skipping clusters (SPRIG_GATEWAY_SKIP_CLUSTERS): a comma-separated list of
+# cluster names (dc-a-single, dc-a-repl, dc-a-galera) up doesn't register,
+# or `down` for every cluster with a node that doesn't accept connections
+# (one dead Galera node then doesn't stop every private deployment). A
+# skipped cluster takes no number, so a later one gets another id than
+# gateway-accounts.dev.toml names: allowed in catalog mode (with a warning),
+# refused in accounts_file mode. A later up registers it once it is back.
+#
 # Tenant ids (SPRIG_TENANT_ID_BASE): instances share the MariaDB servers, so
 # each must hand out its own tenant ids. up sets the global settings
 # tenant.id_min = base and tenant.id_max = base + 99,999; the controller then
@@ -325,13 +333,30 @@ make_certs() {
 # Registers the three Compose clusters unless they are, and checks they got
 # the ids the accounts file names. Checks before registering anything, so a
 # wrong order leaves etcd as it was.
+# Whether up skips cluster $1 (ports $2): SPRIG_GATEWAY_SKIP_CLUSTERS names
+# it, or is `down` and a node of it doesn't accept connections.
+skipped() {
+    local name=$1 ports=$2 s p
+    local IFS=','
+    for s in ${SPRIG_GATEWAY_SKIP_CLUSTERS:-}; do
+        s=${s// /}
+        [[ $s == "$name" ]] && return 0
+        if [[ $s == down ]]; then
+            for p in $ports; do
+                listening "$p" || return 0
+            done
+        fi
+    done
+    return 1
+}
+
 register_clusters() {
     local list max next name topology ports want have
     list=$(ctl -o json cluster list)
     max=$(etcd_range /sprig/g/cluster-ids/ |
         jq '[.kvs[]? | .key | @base64d | split("/") | last | tonumber] | max // 0')
     next=$max
-    local todo=()
+    local todo=() skips=0
     for c in "${clusters[@]}"; do
         IFS='|' read -r name topology ports want <<<"$c"
         have=$(jq -r --arg n "$name" '.clusters[] | select(.name == $n) | .cluster_id' <<<"$list")
@@ -340,10 +365,21 @@ register_clusters() {
   Run '$0 down' (it removes clusters up registered), or remove the registrations by hand."
             continue
         fi
+        if skipped "$name" "$ports"; then
+            say "skipping $name (SPRIG_GATEWAY_SKIP_CLUSTERS=${SPRIG_GATEWAY_SKIP_CLUSTERS}): not registered"
+            skips=$((skips + 1))
+            continue
+        fi
         next=$((next + 1))
-        [[ $dc-c$next == "$want" ]] || die "$name would be registered as $dc-c$next, but gateway-accounts.dev.toml expects $want:
+        if [[ $dc-c$next != "$want" ]]; then
+            if ((skips > 0)) && [[ $login_mode == catalog ]]; then
+                say "warning: $name will be $dc-c$next, not $want, because a cluster before it was skipped"
+            else
+                die "$name would be registered as $dc-c$next, but gateway-accounts.dev.toml expects $want:
   cluster numbers are allocated max + 1 across the deployment, and /sprig/g/cluster-ids/ already goes up to $max.
   Remove the other registrations (or run '$0 down' if this script made them) and try again."
+            fi
+        fi
         todo+=("$c")
     done
 
@@ -372,7 +408,7 @@ TOML
         have=$(jq -r '.cluster.cluster_id // empty' <<<"$out")
         [[ -n $have ]] || die "$name wasn't registered: $(jq -c '.precheck' <<<"$out")"
         echo "$have $(jq -r '.cluster.cluster_number' <<<"$out")" >>"$state/clusters"
-        [[ $have == "$want" ]] || die "$name got $have, but gateway-accounts.dev.toml expects $want"
+        [[ $have == "$want" ]] || ((skips > 0)) || die "$name got $have, but gateway-accounts.dev.toml expects $want"
         say "$name is $have ($(jq -r '.cluster.admin_state' <<<"$out"))"
     done
 }

@@ -13,7 +13,7 @@ import { useDatabases, useSnapshot } from '../catalog/snapshot';
 import { useSession } from '../auth/session';
 import type { CompletionSource } from '../editor/Monaco';
 import { KEYWORDS } from '../editor/keywords';
-import { createPolicy, createRole, grantRole, grantToRole, POLICY_FUNCTIONS, type PolicyForm } from './policies';
+import { createPolicy, createRole, dropPolicy, grantRole, grantToRole, POLICY_FUNCTIONS, rowSecurity, type PolicyForm } from './policies';
 
 const Monaco = lazy(() => import('../editor/Monaco'));
 
@@ -235,13 +235,65 @@ function Policies() {
         <button className="primary" onClick={() => void r.run(stmt)} disabled={!stmt}>
           Create policy…
         </button>
+        {(['ENABLE', 'FORCE', 'NO FORCE', 'DISABLE'] as const).map((m) => (
+          <button key={m} onClick={() => void r.run(rowSecurity(db, f.table, m))} disabled={!f.table} data-testid={`pol-${m.replace(' ', '-').toLowerCase()}`}>
+            {m.charAt(0) + m.slice(1).toLowerCase()} row-level security…
+          </button>
+        ))}
       </div>
       <p className="muted">
-        The gateway enforces policies once chapter 29&apos;s row-level security is built (build step 21); until then it refuses CREATE
-        POLICY, and the tester shows what the user&apos;s privileges allow (decision ST46).
+        A table&apos;s policies apply once its row-level security is enabled (then no policy means no rows). Users holding ALTER on the
+        table manage it and aren&apos;t bound unless it is forced; BYPASS RLS frees a user. The tester runs as the user, with their
+        policies.
       </p>
+      <PolicyList db={db} onDrop={(name, table) => void r.run(dropPolicy(name, db, table))} />
       {r.node}
     </section>
+  );
+}
+
+/** `SHOW POLICIES FROM db`: the database's policies and switches. */
+function PolicyList({ db, onDrop }: { db: string; onDrop: (name: string, table: string) => void }) {
+  const [list, setList] = useState<(string | null)[][] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const load = async () => {
+    try {
+      setErr(null);
+      setList((await rowsOf('-', `SHOW POLICIES FROM \`${db.replace(/`/g, '``')}\``)).rows);
+    } catch (e) {
+      setErr(errorText(e));
+    }
+  };
+  return (
+    <div className="stack">
+      <div className="row">
+        <button onClick={() => void load()} disabled={!db} data-testid="pol-list">
+          Show policies in {db || '…'}
+        </button>
+      </div>
+      {err && <p className="error">{err}</p>}
+      {list && (
+        <table className="grid" data-testid="pol-rows">
+          <thead>
+            <tr>
+              {['Table', 'Policy', 'Mode', 'Commands', 'Roles', 'Using', 'With check', 'Enabled', 'Forced', ''].map((h) => (
+                <th key={h}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {list.map((row, i) => (
+              <tr key={i}>
+                {row.slice(1).map((c, j) => (
+                  <td key={j}>{c ?? ''}</td>
+                ))}
+                <td>{row[2] && <button onClick={() => onDrop(row[2] ?? '', row[1] ?? '')}>Drop…</button>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
   );
 }
 
@@ -251,6 +303,15 @@ interface TestAsResult {
   rows: (string | null)[][];
   truncated: boolean;
   max_rows: number;
+  policies?: { table: string; policy: string; mode: string; predicate: string }[];
+}
+
+/** A JSON object from the text, or undefined when empty; throws on bad JSON. */
+function jsonObject(text: string, what: string): Record<string, unknown> | undefined {
+  if (!text.trim()) return undefined;
+  const v: unknown = JSON.parse(text);
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) throw new Error(`${what} must be a JSON object`);
+  return v as Record<string, unknown>;
 }
 
 function ViewAs() {
@@ -260,6 +321,8 @@ function ViewAs() {
   const [tenant, setTenant] = useState('');
   const [db, setDb] = useState('');
   const [sql, setSql] = useState('');
+  const [claims, setClaims] = useState('');
+  const [attrs, setAttrs] = useState('');
   const [out, setOut] = useState<TestAsResult | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -270,7 +333,14 @@ function ViewAs() {
     try {
       setOut(
         await json<TestAsResult>('/v1/policies:testAs', {
-          body: { user, tenant: tenant || undefined, database: db || dbs.data?.[0] || '-', sql },
+          body: {
+            user,
+            tenant: tenant || undefined,
+            database: db || dbs.data?.[0] || '-',
+            sql,
+            claims: jsonObject(claims, 'Claims'),
+            attributes: jsonObject(attrs, 'Attributes'),
+          },
         }),
       );
     } catch (e) {
@@ -322,6 +392,16 @@ function ViewAs() {
       </div>
       <textarea rows={3} aria-label="Statement" value={sql} onChange={(e) => setSql(e.target.value)} data-testid="viewas-sql" className="mono" />
       <div className="row">
+        <label className="stack">
+          Simulated claims (SPRIG_CLAIM), JSON
+          <textarea rows={2} className="mono" value={claims} onChange={(e) => setClaims(e.target.value)} placeholder='{"sub": "u_123"}' data-testid="viewas-claims" />
+        </label>
+        <label className="stack">
+          Simulated attributes (SPRIG_USER_ATTR), JSON
+          <textarea rows={2} className="mono" value={attrs} onChange={(e) => setAttrs(e.target.value)} placeholder='{"org": "acme"}' data-testid="viewas-attrs" />
+        </label>
+      </div>
+      <div className="row">
         <button className="primary" onClick={() => void run()} disabled={busy || !user || !sql.trim()} data-testid="viewas-run">
           Run as {user || 'the user'}
         </button>
@@ -336,6 +416,29 @@ function ViewAs() {
           <p className="muted">
             As {out.as}: {out.rows.length} rows{out.truncated ? ` (cut at ${out.max_rows})` : ''}
           </p>
+          {(out.policies?.length ?? 0) > 0 && (
+            <table className="table" data-testid="viewas-policies">
+              <caption>Policies applied, with this run's values bound</caption>
+              <thead>
+                <tr>
+                  <th>Table</th>
+                  <th>Policy</th>
+                  <th>Mode</th>
+                  <th>Predicate</th>
+                </tr>
+              </thead>
+              <tbody>
+                {out.policies?.map((p) => (
+                  <tr key={`${p.table}.${p.policy}.${p.predicate}`}>
+                    <td>{p.table}</td>
+                    <td>{p.policy}</td>
+                    <td>{p.mode}</td>
+                    <td className="mono">{p.predicate}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
           <div className="table-scroll" tabIndex={0} role="region" aria-label="Rows the user sees">
             <table className="table">
               <thead>

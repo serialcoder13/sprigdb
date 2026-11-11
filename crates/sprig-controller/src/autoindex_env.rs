@@ -23,7 +23,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use mysql_async::Conn;
-use sprig_advisor::autoindex::evaluate::{CatalogStore, EvalCx, Evaluator, NodeStats, ObjectMeta};
+use sprig_advisor::autoindex::evaluate::{
+    CatalogStore, EvalCx, Evaluator, NodeStats, ObjectDirectory, ObjectMeta,
+};
+use sprig_advisor::autoindex::kv::KvTarget;
 use sprig_advisor::autoindex::observe::ObserveSettings;
 use sprig_advisor::autoindex::policy::{Layered, ObjectPolicy, SettingSource, SharedLimits};
 use sprig_advisor::autoindex::qualify::WorkloadSource as QualifySource;
@@ -373,6 +376,49 @@ impl AutoIndexEnv for ControllerEnv {
     }
 }
 
+/// Chapter 33's views over key-value structures (`<ns>__hash`,
+/// `<ns>__set`) and the element table each reads (R6 round 5).
+fn kv_views(cat: &TenantCatalog) -> BTreeMap<ObjectId, KvTarget> {
+    let mut kv_views: BTreeMap<ObjectId, KvTarget> = BTreeMap::new();
+    for o in cat.objects.iter() {
+        let Some((ns, view)) = sprig_advisor::autoindex::kv::view_of(&o.name) else {
+            continue;
+        };
+        let elements = sprig_advisor::autoindex::kv::elements_of(ns);
+        if let Some(e) = cat
+            .objects
+            .iter()
+            .find(|e| e.db_id == o.db_id && e.name.eq_ignore_ascii_case(&elements))
+        {
+            kv_views.insert(
+                o.object_id,
+                KvTarget {
+                    elements: e.object_id,
+                    view,
+                },
+            );
+        }
+    }
+    kv_views
+}
+
+/// The evaluator's object directory: the catalog's objects, and which
+/// element table each key-value view reads.
+struct Directory {
+    metas: BTreeMap<ObjectId, ObjectMeta>,
+    kv_views: BTreeMap<ObjectId, KvTarget>,
+}
+
+impl ObjectDirectory for Directory {
+    fn meta(&self, object: ObjectId) -> Option<ObjectMeta> {
+        self.metas.get(&object).cloned()
+    }
+
+    fn kv_view(&self, object: ObjectId) -> Option<KvTarget> {
+        self.kv_views.get(&object).copied()
+    }
+}
+
 /// Trigger evaluation and selection for the loop: builds the evaluator's
 /// context from the tenant's catalog snapshot, its cluster (statistics from
 /// the writer) and the settings, and runs
@@ -459,6 +505,8 @@ impl CandidateSource for EvalShim {
                 tables.insert(o.object_id, (s.to_string(), o.name.clone()));
             }
         }
+        let kv_views = kv_views(&cat);
+        let metas = Directory { metas, kv_views };
         let stats = NodeStats {
             pool: env.locator.pools().writer(&cluster).await?,
             tables,

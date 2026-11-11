@@ -343,3 +343,206 @@ async fn live_engine_on_mariadb() {
     assert!(e.drop(&mut s, &ns).await.unwrap());
     e.drop_database(&mut s, db).await.unwrap();
 }
+
+/// R33: approximate `$vectorSearch` from the side table's HNSW index,
+/// validated by recall against the exact search, and kept in step with
+/// inserts, updates and deletes. Uses `r5search_vxtest`, dropped at the end.
+#[tokio::test]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation,
+    clippy::too_many_lines,
+    clippy::items_after_statements
+)]
+async fn live_vector_ann_recall() {
+    let Ok(url) = std::env::var("SPRIG_TEST_DOC_MARIADB") else {
+        eprintln!("SPRIG_TEST_DOC_MARIADB not set: skipped");
+        return;
+    };
+    let conn = mysql_async::Conn::new(mysql_async::Opts::from_url(&url).unwrap())
+        .await
+        .unwrap();
+    let mut s = Direct(conn);
+    let e = Engine::default();
+    let db = "r5search_vxtest";
+    let _ = s.exec(&format!("DROP DATABASE IF EXISTS {db}")).await;
+    let ns = Ns {
+        db: db.into(),
+        coll: "items".into(),
+    };
+    const DIMS: usize = 16;
+    let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut rnd = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % 20_000) as f64 / 10_000.0 - 1.0
+    };
+    let mut vec_of = |n: usize| -> Vec<Vec<f64>> {
+        (0..n).map(|_| (0..DIMS).map(|_| rnd()).collect()).collect()
+    };
+    let vs = vec_of(3000);
+    let docs: Vec<Document> = vs
+        .iter()
+        .enumerate()
+        .map(|(i, v)| doc! {"_id": i as i64, "kind": if i % 2 == 0 { "even" } else { "odd" }, "v": v.clone()})
+        .collect();
+    for chunk in docs.chunks(500) {
+        let (n, errs) = e.insert(&mut s, &ns, chunk.to_vec(), true).await.unwrap();
+        assert_eq!((n, errs.len()), (chunk.len() as u64, 0));
+    }
+    e.create_search_indexes(
+        &mut s,
+        &ns,
+        &[doc! {"name": "vx", "type": "vectorSearch", "definition": {"fields": [
+            {"type": "vector", "path": "v", "numDimensions": DIMS as i32, "similarity": "euclidean"},
+            {"type": "filter", "path": "kind"}]}}],
+    )
+    .await
+    .unwrap();
+    let search_nc = |q: &Vec<f64>, exact: bool, filter: Option<Document>, nc: i32| {
+        let mut st = doc! {"index": "vx", "path": "v", "queryVector": q.clone(), "limit": 10};
+        if exact {
+            st.insert("exact", true);
+        } else {
+            st.insert("numCandidates", nc);
+        }
+        if let Some(f) = filter {
+            st.insert("filter", f);
+        }
+        vec![doc! {"$vectorSearch": st}, doc! {"$project": {"_id": 1}}]
+    };
+    let search =
+        |q: &Vec<f64>, exact: bool, filter: Option<Document>| search_nc(q, exact, filter, 100);
+    let ids =
+        |d: Vec<Document>| -> Vec<i64> { d.iter().map(|x| x.get_i64("_id").unwrap()).collect() };
+    let queries = vec_of(40);
+    let (mut hit, mut total) = (0usize, 0usize);
+    let started = std::time::Instant::now();
+    for q in &queries {
+        let ex = ids(e
+            .aggregate(&mut s, &ns, &search(q, true, None))
+            .await
+            .unwrap());
+        let ap = ids(e
+            .aggregate(&mut s, &ns, &search(q, false, None))
+            .await
+            .unwrap());
+        assert_eq!(ap.len(), 10);
+        total += ex.len();
+        hit += ex.iter().filter(|x| ap.contains(x)).count();
+    }
+    let recall = hit as f64 / total as f64;
+    let mut exact_ids = Vec::new();
+    for q in &queries {
+        exact_ids.push(ids(e
+            .aggregate(&mut s, &ns, &search(q, true, None))
+            .await
+            .unwrap()));
+    }
+    let t_ann = std::time::Instant::now();
+    let mut hit10 = 0usize;
+    for (q, ex) in queries.iter().zip(&exact_ids) {
+        let ap = ids(e
+            .aggregate(&mut s, &ns, &search_nc(q, false, None, 10))
+            .await
+            .unwrap());
+        hit10 += ex.iter().filter(|x| ap.contains(x)).count();
+    }
+    let ann_ms = t_ann.elapsed().as_millis() / 40;
+    let t_ex = std::time::Instant::now();
+    for q in &queries {
+        let _ = e
+            .aggregate(&mut s, &ns, &search(q, true, None))
+            .await
+            .unwrap();
+    }
+    let ex_ms = t_ex.elapsed().as_millis() / 40;
+    println!(
+        "vector ANN: 3000 x {DIMS} dims, 40 queries: recall@10 {recall:.3} at numCandidates 100, {:.3} at 10; \
+         {ann_ms} ms per approximate search, {ex_ms} ms per exact one ({:?} in all)",
+        hit10 as f64 / total as f64,
+        started.elapsed()
+    );
+    assert!(recall >= 0.9, "recall@10 {recall}");
+    // The side table holds every vector, through the HNSW index.
+    let side =
+        super::models::vector_side_table(&e.meta(&mut s, &ns).await.unwrap().unwrap().table, "vx");
+    let n = s
+        .query(&format!("SELECT COUNT(*) FROM {db}.{side}"))
+        .await
+        .unwrap();
+    assert_eq!(n[0][0].as_deref(), Some(&b"3000"[..]));
+    // With a filter on a declared field: only matching documents.
+    let f = ids(e
+        .aggregate(
+            &mut s,
+            &ns,
+            &search(&queries[0], false, Some(doc! {"kind": "odd"})),
+        )
+        .await
+        .unwrap());
+    assert_eq!(f.len(), 10);
+    assert!(f.iter().all(|x| x % 2 == 1));
+    // Writes: a new document is its own nearest; moved and deleted ones
+    // follow (after the side table's next sync, at most a second).
+    let fresh = vec_of(1).remove(0);
+    e.insert(
+        &mut s,
+        &ns,
+        vec![doc! {"_id": 5000_i64, "kind": "even", "v": fresh.clone()}],
+        true,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    assert_eq!(
+        ids(e
+            .aggregate(&mut s, &ns, &search(&fresh, false, None))
+            .await
+            .unwrap())[0],
+        5000
+    );
+    let moved = vec_of(1).remove(0);
+    e.update(
+        &mut s,
+        &ns,
+        &doc! {"_id": 7_i64},
+        &Bson::Document(doc! {"$set": {"v": moved.clone()}}),
+        false,
+        false,
+        &[],
+        None,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    assert_eq!(
+        ids(e
+            .aggregate(&mut s, &ns, &search(&moved, false, None))
+            .await
+            .unwrap())[0],
+        7
+    );
+    e.delete(&mut s, &ns, &doc! {"_id": 5000_i64}, true, None)
+        .await
+        .unwrap();
+    assert!(
+        !ids(e
+            .aggregate(&mut s, &ns, &search(&fresh, false, None))
+            .await
+            .unwrap())
+        .contains(&5000)
+    );
+    // Dropping the index drops its side table.
+    e.drop_search_index(&mut s, &ns, "vx").await.unwrap();
+    let left = s
+        .query(&format!(
+            "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = '{db}' AND TABLE_NAME = '{side}'"
+        ))
+        .await
+        .unwrap();
+    assert_eq!(left[0][0].as_deref(), Some(&b"0"[..]));
+    let _ = s.exec(&format!("DROP DATABASE IF EXISTS {db}")).await;
+}

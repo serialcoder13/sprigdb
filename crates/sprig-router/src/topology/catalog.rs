@@ -767,6 +767,14 @@ fn lookup_ref(
     })
 }
 
+/// Group `g` as database `db` sees it, keyed by an integer (a graph's
+/// `part`, R8 round 6): its shards with their schemas, clusters and
+/// epochs, for [`StaticTopology::insert_group`].
+#[must_use]
+pub fn numeric_group(tenant: u64, db: u32, g: &CatalogGroup) -> Group {
+    group_of(tenant, db, g, Some(KeyClass::Int))
+}
+
 fn group_of(tenant: u64, db: u32, g: &CatalogGroup, class: Option<KeyClass>) -> Group {
     let shards = g
         .map

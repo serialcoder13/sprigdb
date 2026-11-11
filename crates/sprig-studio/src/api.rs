@@ -38,7 +38,51 @@ pub fn paths() -> Value {
     if let (Value::Object(m), Value::Object(r)) = (&mut v, recommendation_paths()) {
         m.extend(r);
     }
+    if let (Value::Object(m), Value::Object(r)) = (&mut v, round4_paths()) {
+        m.extend(r);
+    }
     v
+}
+
+/// Studio round 4 (chapter 44 steps 18, 26, 28–31): the logic editors'
+/// `Logic` routes, the stream, queue and sink views' routes, and
+/// `Policies.TestAs`.
+fn round4_paths() -> Value {
+    let p = |name: &str| json!({"name": name, "in": "path", "required": true, "schema": {"type": "string"}});
+    let q = |name: &str| json!({"name": name, "in": "query", "required": false, "schema": {"type": "string"}});
+    let one = [p("database"), p("kind"), p("name")];
+    json!({
+        "/v1/databases/{database}/logic": {"get": with_params(op("Logic.ListModules", "sprig.v1.Logic",
+            "The database's logic modules", None, "JsonReply"), &[p("database")])},
+        "/v1/databases/{database}/logic:compile": {"post": with_params(op("Logic.Compile", "sprig.v1.Logic",
+            "A dry run of a CREATE FUNCTION or PROCEDURE: tier, reasons, signature, PL/SQL; nothing recorded", None, "JsonReply"),
+            &[p("database")])},
+        "/v1/databases/{database}/logic/{kind}/{name}": {"get": with_params(op("Logic.GetModule", "sprig.v1.Logic",
+            "A module with its versions, binding, schedule and (for routine administrators) source and PL/SQL", None, "JsonReply"), &one)},
+        "/v1/databases/{database}/logic/{kind}/{name}/versions/{version}": {"get": with_params(op("Logic.GetVersion", "sprig.v1.Logic",
+            "One version's source and PL/SQL", None, "JsonReply"), &[p("database"), p("kind"), p("name"), p("version")])},
+        "/v1/databases/{database}/logic/{kind}/{name}/logs": {"get": with_params(op("Logic.TailLogs", "sprig.v1.Logic",
+            "The module's log lines after an id (after, limit)", None, "JsonReply"), &[p("database"), p("kind"), p("name"), q("after"), q("limit")])},
+        "/v1/databases/{database}/logic/{kind}/{name}/deadLetters": {"get": with_params(op("Logic.ListDeadLetters", "sprig.v1.Logic",
+            "The module's dead letters (state)", None, "JsonReply"), &[p("database"), p("kind"), p("name"), q("state")])},
+        "/v1/databases/{database}/logic/{kind}/{name}/deadLetters:replay": {"post": with_params(op("Logic.ReplayDeadLetters", "sprig.v1.Logic",
+            "Replays dead letters ({ids} or {all: true})", None, "JsonReply"), &one)},
+        "/v1/databases/{database}/logic/{kind}/{name}/deadLetters:discard": {"post": with_params(op("Logic.DiscardDeadLetters", "sprig.v1.Logic",
+            "Discards dead letters ({ids} or {all: true})", None, "JsonReply"), &one)},
+        "/v1/databases/{database}/streams/{stream}/groups": {"get": with_params(op("Streams.ListGroups", "sprig.v1.Streams",
+            "Partitions with log start and high watermark, and consumer groups with offsets and lag", None, "JsonReply"),
+            &[p("database"), p("stream")])},
+        "/v1/databases/{database}/mq": {"get": with_params(op("Mq.GetTopology", "sprig.v1.Mq",
+            "The database's virtual host with its exchanges, queues and bindings", None, "JsonReply"), &[p("database")])},
+        "/v1/databases/{database}/sinks/{sink}/deadLetters": {"get": with_params(op("Sinks.ListDeadLetters", "sprig.v1.Sinks",
+            "The sink's dead letters", None, "JsonReply"), &[p("database"), p("sink")])},
+        "/v1/databases/{database}/sinks/{sink}/deadLetters:replay": {"post": with_params(op("Sinks.ReplayDeadLetters", "sprig.v1.Sinks",
+            "Marks dead letters for replay ({ids} or {all: true})", None, "JsonReply"), &[p("database"), p("sink")])},
+        "/v1/databases/{database}/sinks/{sink}/deadLetters:discard": {"post": with_params(op("Sinks.DiscardDeadLetters", "sprig.v1.Sinks",
+            "Discards dead letters ({ids} or {all: true})", None, "JsonReply"), &[p("database"), p("sink")])},
+        "/v1/policies:testAs": {"post": op("Policies.TestAs", "sprig.v1.Policies",
+            "One read-only statement run as another user of the tenant ({tenant, user, host, database, sql})", None, "JsonReply")},
+    })
 }
 
 /// Chapter 52's approvals inbox.
@@ -163,7 +207,7 @@ fn core_paths() -> Value {
             "The logical databases the caller can see; ETag of the catalog and auth versions (If-None-Match gives 304)",
             None, "CatalogDatabases")},
         "/v1/databases/{database}/catalog": {"get": with_params(op("Catalog.Snapshot", "sprig.v1.Catalog",
-            "Tables, views, routines and columns of one database, read with the caller's rights; ETag as ListObjects",
+            "Tables, views, routines, graphs (labels and relationship types the caller may read) and columns of one database, read with the caller's rights; ETag as ListObjects",
             None, "CatalogSnapshot"), &[p("database")])},
         "/v1/databases/{database}/catalog/{kind}/{name}": {"get": with_params(op("Catalog.GetObject", "sprig.v1.Catalog",
             "One object (kind table, view, procedure or function): columns, indexes, definition",

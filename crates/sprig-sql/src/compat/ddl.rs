@@ -23,11 +23,14 @@
 //!   `character_set_collations` (the backend session gives every other
 //!   statement MySQL's defaults, chapter 06).
 
+use std::fmt::Write as _;
+
 use crate::lex::{self, LexOptions, Token, TokenKind};
 
 /// The name prefix of the checks that hold a generated column's
-/// `NOT NULL`. Chapter 07 reserves `_sprig_`.
-pub const NN_PREFIX: &str = "_sprig_nn_";
+/// `NOT NULL`. Not chapter 07's reserved `_sprig_`: the planner refuses
+/// those names in client statements, and this one is the client's.
+pub const NN_PREFIX: &str = "_sprignn_";
 
 /// The longest column name whose `NOT NULL` check fits MariaDB's 64
 /// characters.
@@ -56,9 +59,9 @@ struct Sig<'a> {
 
 impl Sig<'_> {
     fn word(&self, j: usize, w: &[u8]) -> bool {
-        self.t
-            .get(j)
-            .is_some_and(|tk| tk.kind == TokenKind::Word && tk.bytes(self.sql).eq_ignore_ascii_case(w))
+        self.t.get(j).is_some_and(|tk| {
+            tk.kind == TokenKind::Word && tk.bytes(self.sql).eq_ignore_ascii_case(w)
+        })
     }
 
     fn punct(&self, j: usize, c: u8) -> bool {
@@ -114,6 +117,7 @@ impl Sig<'_> {
 /// ranges of `NULL` / `NOT NULL` after a generation clause, and whether
 /// one of them is `NOT NULL`. `None` when the column isn't generated or
 /// has neither.
+#[allow(clippy::many_single_char_names)]
 fn generated_nullability(s: &Sig<'_>, a: usize, b: usize) -> Option<(Vec<(usize, usize)>, bool)> {
     // `AS (` at depth 0 of the definition, after the type.
     let mut k = a + 1;
@@ -172,6 +176,7 @@ fn apply(sql: &[u8], mut edits: Vec<(usize, usize, String)>) -> Vec<u8> {
 /// `NOT NULL` and `NULL` on generated columns (see the module docs).
 /// `None` when nothing changes.
 #[must_use]
+#[allow(clippy::too_many_lines)] // CREATE and ALTER in one pass
 pub fn generated_not_null(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
     let has = |n: &[u8]| sql.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n));
     if !has(b"NULL") || !has(b"AS") {
@@ -186,7 +191,11 @@ pub fn generated_not_null(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
     let drop_tokens = |edits: &mut Vec<(usize, usize, String)>, drops: &[(usize, usize)]| {
         for &(x, y) in drops {
             // The attribute and the space before it.
-            let from = if x > 0 { s.t[x - 1].end as usize } else { s.t[x].start as usize };
+            let from = if x > 0 {
+                s.t[x - 1].end as usize
+            } else {
+                s.t[x].start as usize
+            };
             edits.push((from, s.t[y].end as usize, String::new()));
         }
     };
@@ -220,11 +229,12 @@ pub fn generated_not_null(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
             }
             drop_tokens(&mut edits, &drops);
             if not_null {
-                checks.push_str(&format!(
+                let _ = write!(
+                    checks,
                     ", CONSTRAINT {} CHECK ({} IS NOT NULL)",
                     quote(&nn_check_name(&col)),
                     quote(&col)
-                ));
+                );
             }
         }
         if !checks.is_empty() {
@@ -269,15 +279,19 @@ pub fn generated_not_null(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
             }
             drop_tokens(&mut edits, &drops);
             if not_null {
-                adds.push_str(&format!(
+                let _ = write!(
+                    adds,
                     ", ADD CONSTRAINT {} CHECK ({} IS NOT NULL)",
                     quote(&nn_check_name(&col)),
                     quote(&col)
-                ));
+                );
             }
         }
         if !adds.is_empty() {
-            let last = s.t.iter().rposition(|t| !(t.kind == TokenKind::Punct && sql[t.start as usize] == b';'))?;
+            let last = s
+                .t
+                .iter()
+                .rposition(|t| !(t.kind == TokenKind::Punct && sql[t.start as usize] == b';'))?;
             let at = s.t[last].end as usize;
             edits.push((at, at, adds));
         }
@@ -326,7 +340,10 @@ pub fn mysql_default_collation(charset: &str) -> Option<&'static str> {
 #[must_use]
 pub fn database_collation(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
     let has = |n: &[u8]| sql.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n));
-    if !(has(b"DATABASE") || has(b"SCHEMA")) || !(has(b"CHARSET") || has(b"CHARACTER")) || has(b"COLLATE") {
+    if !(has(b"DATABASE") || has(b"SCHEMA"))
+        || !(has(b"CHARSET") || has(b"CHARACTER"))
+        || has(b"COLLATE")
+    {
         return None;
     }
     let tokens = lex::lex(sql, opts).ok()?;
@@ -334,7 +351,9 @@ pub fn database_collation(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
         sql,
         t: tokens.into_iter().filter(|t| !t.kind.is_trivia()).collect(),
     };
-    if !(s.word(0, b"CREATE") || s.word(0, b"ALTER")) || !(s.word(1, b"DATABASE") || s.word(1, b"SCHEMA")) {
+    if !(s.word(0, b"CREATE") || s.word(0, b"ALTER"))
+        || !(s.word(1, b"DATABASE") || s.word(1, b"SCHEMA"))
+    {
         return None;
     }
     for k in 2..s.t.len() {
@@ -345,14 +364,23 @@ pub fn database_collation(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
         } else {
             continue;
         };
-        let v = if s.punct(after, b'=') || (s.t.get(after).is_some_and(|t| t.kind == TokenKind::Op && t.bytes(sql) == b"=")) {
+        let v = if s.punct(after, b'=')
+            || (s
+                .t
+                .get(after)
+                .is_some_and(|t| t.kind == TokenKind::Op && t.bytes(sql) == b"="))
+        {
             after + 1
         } else {
             after
         };
         let tk = s.t.get(v)?;
         let cs = match tk.kind {
-            TokenKind::String => String::from_utf8_lossy(&lex::string_value(tk.bytes(sql), opts.no_backslash_escapes)?).into_owned(),
+            TokenKind::String => String::from_utf8_lossy(&lex::string_value(
+                tk.bytes(sql),
+                opts.no_backslash_escapes,
+            )?)
+            .into_owned(),
             _ if tk.kind.is_ident_like() => s.ident(v)?,
             _ => return None,
         };
@@ -361,6 +389,42 @@ pub fn database_collation(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
         return Some(apply(sql, vec![(at, at, format!(" COLLATE {coll}"))]));
     }
     None
+}
+
+/// MySQL's `ALTER TABLE ... DROP CHECK c` as MariaDB's `DROP CONSTRAINT
+/// c` (R4 round 4; Django's schema editor removes check constraints so).
+/// `None` when nothing changes.
+#[must_use]
+pub fn drop_check(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
+    if !sql.windows(5).any(|w| w.eq_ignore_ascii_case(b"CHECK")) {
+        return None;
+    }
+    let t: Vec<Token> = lex::lex(sql, opts)
+        .ok()?
+        .into_iter()
+        .filter(|t| !t.kind.is_trivia())
+        .collect();
+    let word = |k: usize, w: &[u8]| {
+        t.get(k)
+            .is_some_and(|x| x.kind == TokenKind::Word && x.bytes(sql).eq_ignore_ascii_case(w))
+    };
+    if !(word(0, b"ALTER") && word(1, b"TABLE")) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(sql.len() + 8);
+    let mut at = 0;
+    for k in 2..t.len() {
+        if word(k, b"DROP") && word(k + 1, b"CHECK") {
+            out.extend_from_slice(&sql[at..t[k + 1].start as usize]);
+            out.extend_from_slice(b"CONSTRAINT");
+            at = t[k + 1].end as usize;
+        }
+    }
+    if at == 0 {
+        return None;
+    }
+    out.extend_from_slice(&sql[at..]);
+    Some(out)
 }
 
 #[cfg(test)]
@@ -385,7 +449,7 @@ mod tests {
             nn("CREATE TABLE g (a INT, b INT AS (a+1) NOT NULL, c INT GENERATED ALWAYS AS (a*2) STORED NOT NULL, d INT AS (a) VIRTUAL NULL)")
                 .unwrap(),
             "CREATE TABLE g (a INT, b INT AS (a+1), c INT GENERATED ALWAYS AS (a*2) STORED, d INT AS (a) VIRTUAL, \
-             CONSTRAINT `_sprig_nn_b` CHECK (`b` IS NOT NULL), CONSTRAINT `_sprig_nn_c` CHECK (`c` IS NOT NULL))"
+             CONSTRAINT `_sprignn_b` CHECK (`b` IS NOT NULL), CONSTRAINT `_sprignn_c` CHECK (`c` IS NOT NULL))"
         );
         // Other attributes stay; a NULL inside the expression is the
         // expression's.
@@ -393,11 +457,17 @@ mod tests {
             nn("CREATE TABLE t (id INT PRIMARY KEY, `x y` VARCHAR(5) AS (IFNULL(n, NULL)) STORED NOT NULL COMMENT 'c' UNIQUE)")
                 .unwrap(),
             "CREATE TABLE t (id INT PRIMARY KEY, `x y` VARCHAR(5) AS (IFNULL(n, NULL)) STORED COMMENT 'c' UNIQUE, \
-             CONSTRAINT `_sprig_nn_x y` CHECK (`x y` IS NOT NULL))"
+             CONSTRAINT `_sprignn_x y` CHECK (`x y` IS NOT NULL))"
         );
         // Plain columns and keys are left alone.
-        assert_eq!(nn("CREATE TABLE t (a INT NOT NULL, b INT AS (a) VIRTUAL)"), None);
-        assert_eq!(nn("CREATE TABLE t (a INT NOT NULL DEFAULT 1, KEY k (a))"), None);
+        assert_eq!(
+            nn("CREATE TABLE t (a INT NOT NULL, b INT AS (a) VIRTUAL)"),
+            None
+        );
+        assert_eq!(
+            nn("CREATE TABLE t (a INT NOT NULL DEFAULT 1, KEY k (a))"),
+            None
+        );
         assert_eq!(nn("CREATE TABLE t AS SELECT 1 AS a"), None);
         assert_eq!(nn("SELECT a AS b FROM t WHERE c IS NOT NULL"), None);
     }
@@ -405,16 +475,20 @@ mod tests {
     #[test]
     fn alter_add_generated_not_null() {
         assert_eq!(
-            nn("ALTER TABLE s.t ADD COLUMN e INT AS (a+5) VIRTUAL NOT NULL AFTER a, ADD INDEX (a)").unwrap(),
+            nn("ALTER TABLE s.t ADD COLUMN e INT AS (a+5) VIRTUAL NOT NULL AFTER a, ADD INDEX (a)")
+                .unwrap(),
             "ALTER TABLE s.t ADD COLUMN e INT AS (a+5) VIRTUAL AFTER a, ADD INDEX (a), \
-             ADD CONSTRAINT `_sprig_nn_e` CHECK (`e` IS NOT NULL)"
+             ADD CONSTRAINT `_sprignn_e` CHECK (`e` IS NOT NULL)"
         );
         assert_eq!(
             nn("ALTER TABLE t ADD f INT AS (a) NULL;").unwrap(),
             "ALTER TABLE t ADD f INT AS (a);"
         );
         assert_eq!(nn("ALTER TABLE t MODIFY a INT NOT NULL"), None);
-        assert_eq!(nn("ALTER TABLE t ADD CONSTRAINT c CHECK (a IS NOT NULL)"), None);
+        assert_eq!(
+            nn("ALTER TABLE t ADD CONSTRAINT c CHECK (a IS NOT NULL)"),
+            None
+        );
     }
 
     #[test]
@@ -438,7 +512,25 @@ mod tests {
             "ALTER DATABASE d CHARACTER SET ucs2 COLLATE ucs2_general_ci"
         );
         assert_eq!(db("CREATE DATABASE d CHARACTER SET utf8mb4"), None);
-        assert_eq!(db("CREATE DATABASE d CHARACTER SET utf8mb3 COLLATE utf8mb3_bin"), None);
-        assert_eq!(db("CREATE TABLE t (a VARCHAR(5) CHARACTER SET utf8mb3)"), None);
+        assert_eq!(
+            db("CREATE DATABASE d CHARACTER SET utf8mb3 COLLATE utf8mb3_bin"),
+            None
+        );
+        assert_eq!(
+            db("CREATE TABLE t (a VARCHAR(5) CHARACTER SET utf8mb3)"),
+            None
+        );
+    }
+
+    #[test]
+    fn drop_check_is_drop_constraint() {
+        let o = LexOptions::mysql84();
+        let r = |q: &str| drop_check(q.as_bytes(), &o).map(|v| String::from_utf8(v).unwrap());
+        assert_eq!(
+            r("ALTER TABLE `schema_author` DROP CHECK `schema_author_chk_1`").as_deref(),
+            Some("ALTER TABLE `schema_author` DROP CONSTRAINT `schema_author_chk_1`")
+        );
+        assert_eq!(r("ALTER TABLE t ADD CHECK (a > 0)"), None);
+        assert_eq!(r("SELECT 'DROP CHECK'"), None);
     }
 }

@@ -4,11 +4,14 @@
 //! `CREATE [OR REPLACE] PROPERTY GRAPH` makes a mapped graph (round 3);
 //! `ALTER GRAPH` answers 39901.
 //!
-//! SQL/PGQ's `GRAPH_TABLE (g MATCH ... COLUMNS (...))` in any statement
-//! (round 3): each one runs as a Cypher read through
+//! SQL/PGQ's `GRAPH_TABLE (g MATCH ... COLUMNS (...))` in any statement:
+//! in a single `SELECT` (or `EXPLAIN FORMAT=SPRIG SELECT`) each call
+//! becomes a placeholder and the router path binds its rows and plans the
+//! statement (R8 round 6, `Plan::Graph`: `exec::router::graph`); in other
+//! statements each one runs as a Cypher read through
 //! [`GatewayGraphs::query_read`] and is replaced by its rows as a derived
-//! table ([`sprig_graph::pgq`]); the rewritten statement then runs as
-//! usual.
+//! table before the pipeline (round 3), and the rewritten statement runs
+//! as usual.
 //!
 //! `CREATE GRAPH` needs `CREATE` on the database, `DROP GRAPH` needs
 //! `DROP` on the graph or its database (chapter 29); `CREATE PROPERTY
@@ -35,15 +38,25 @@ fn mentions_graph(text: &[u8]) -> bool {
 }
 
 fn mentions_graph_table(text: &[u8]) -> bool {
-    text.len() < (1 << 20)
-        && text
-            .windows(11)
-            .any(|w| w.eq_ignore_ascii_case(b"graph_table"))
+    std::str::from_utf8(text).is_ok_and(sprig_router::graph::mentions)
+}
+
+/// A graph value as the router takes it.
+fn lit(v: &sprig_graph::value::Value) -> sprig_router::GraphLit {
+    use sprig_graph::value::Value;
+    match v {
+        Value::Null => sprig_router::GraphLit::Null,
+        Value::Int(i) => sprig_router::GraphLit::Int(*i),
+        Value::String(s) => sprig_router::GraphLit::Str(s.clone()),
+        other => sprig_router::GraphLit::Other(sprig_graph::pgq::literal(other)),
+    }
 }
 
 impl PassSession {
-    /// `GRAPH_TABLE` in a statement: runs each one and runs the statement
-    /// with its rows in place; `None` when the text has none.
+    /// `GRAPH_TABLE` in a statement: a single `SELECT` continues with
+    /// placeholders for the router path to bind (R8 round 6); any other
+    /// statement runs each call now and continues with its rows in place.
+    /// `None` when the text has none.
     pub(super) async fn tenant_graph_table(
         &mut self,
         cx: &mut ExecCtx<'_>,
@@ -59,17 +72,23 @@ impl PassSession {
         let Ok(sql) = std::str::from_utf8(text) else {
             return Ok(None);
         };
-        let calls = match sprig_graph::pgq::find(sql) {
+        let calls = match sprig_router::graph::find(sql) {
             Ok(v) if v.is_empty() => return Ok(None),
             Ok(v) => v,
             Err(e) => return Ok(Some(self.fail(out, &e).await?)),
         };
+        if let Some((pending, placeheld)) = super::router::graph::placeholders(sql, calls.clone()) {
+            self.router.graph = Some(pending);
+            let placeheld = Bytes::from(placeheld);
+            let r = Box::pin(self.tenant_text(cx, &placeheld, attrs, more, format, out)).await;
+            self.router.graph = None;
+            return r.map(Some);
+        }
         let rewritten: Result<String> = async {
             let Some(ts) = self.tenant.as_deref() else {
                 return Err(SprigError::internal("no tenant"));
             };
-            let graphs =
-                std::sync::Arc::new(GatewayGraphs::new(std::sync::Arc::clone(ts.services())));
+            let graphs = GatewayGraphs::shared(ts.services());
             let cat = graphs.catalog(ts.tenant, Freshness::Latest).await?;
             let grants = graphs.grants(&cat, ts.principal.user_id);
             let user = ts.principal.user.clone();
@@ -84,9 +103,21 @@ impl PassSession {
                 let o = graphs
                     .query_read(&cat, grants.as_deref(), &user, &db, &c.graph, &c.cypher)
                     .await?;
+                let rows: Vec<Vec<sprig_router::GraphLit>> =
+                    o.rows.iter().map(|r| r.iter().map(lit).collect()).collect();
+                let body = sprig_router::graph::rows_sql(&c.columns, &rows);
+                if body.len() > sprig_graph::pgq::MAX_INLINE_BYTES {
+                    return Err(sprig_graph::exec::budget_error(
+                        "rows",
+                        format!(
+                            "a GRAPH_TABLE result is larger than {} bytes",
+                            sprig_graph::pgq::MAX_INLINE_BYTES
+                        ),
+                    ));
+                }
                 s.push_str(&sql[last..c.span.0]);
                 s.push('(');
-                s.push_str(&sprig_graph::pgq::rows_sql(&c.columns, &o.rows)?);
+                s.push_str(&body);
                 s.push(')');
                 last = c.span.1;
             }
@@ -143,7 +174,7 @@ impl PassSession {
         let Some(ts) = self.tenant.as_deref() else {
             return Err(SprigError::internal("no tenant"));
         };
-        let graphs = GatewayGraphs::new(std::sync::Arc::clone(ts.services()));
+        let graphs = GatewayGraphs::shared(ts.services());
         let (tenant, user) = (ts.tenant, ts.principal.user_id);
         let pick = |db: Option<String>| {
             db.or_else(|| current.clone())
@@ -246,7 +277,7 @@ impl PassSession {
                 {
                     return Err(denied("DROP", &db, &name));
                 }
-                graphs.drop(tenant, &db, &name, if_exists).await?;
+                GatewayGraphs::drop(&graphs, tenant, &db, &name, if_exists).await?;
                 Ok(())
             }
         }

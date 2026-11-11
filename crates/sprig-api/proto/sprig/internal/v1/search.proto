@@ -1,0 +1,58 @@
+// sprig.internal.v1: full-text search between SprigDB's own processes
+// (chapter 39, "Interfaces"; R5 round 6), with mutual TLS from the
+// internal CA (chapter 04). Never exposed to clients.
+//
+// - SearchPartition: a worker with the search role (its own port,
+//   SPRIG_SEARCH_LISTEN; 7401 in the design) serving the copies it holds.
+// - SearchSeed: a gateway, on the peer port (7403), reading an index's
+//   object for a copy being built, as the index's definer.
+syntax = "proto3";
+
+package sprig.internal.v1;
+
+service SearchPartition {
+  // One query over one copy: request_json and reply_json are
+  // sprig_search::rpc::{QueryRequest, QueryReply}.
+  rpc Query(SearchPartitionQueryRequest) returns (SearchPartitionQueryReply);
+  // A ready copy's committed files, for a new copy of the same generation
+  // (peer seeding): one message per chunk, files in path order.
+  rpc CopySegments(CopySegmentsRequest) returns (stream SegmentChunk);
+}
+
+message SearchPartitionQueryRequest {
+  string request_json = 1;
+}
+
+message SearchPartitionQueryReply {
+  string reply_json = 1;
+}
+
+message CopySegmentsRequest {
+  uint64 tenant_id = 1;
+  uint64 index_id = 2;
+  uint32 generation = 3;
+}
+
+message SegmentChunk {
+  // The file's path inside the copy's directory (p<n>/<name>).
+  string path = 1;
+  uint64 offset = 2;
+  bytes data = 3;
+  // The file's last chunk.
+  bool last = 4;
+}
+
+service SearchSeed {
+  // One page of the index's object, read by the index's definer without
+  // row-level security (decisions S6 and RL17): request_json and
+  // reply_json are sprig_search::copy::{SeedRequest, SeedReply}.
+  rpc SeedPage(SeedPageRequest) returns (SeedPageReply);
+}
+
+message SeedPageRequest {
+  string request_json = 1;
+}
+
+message SeedPageReply {
+  string reply_json = 1;
+}

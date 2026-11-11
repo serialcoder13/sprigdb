@@ -31,6 +31,8 @@ pub mod compile;
 pub mod definers;
 pub mod engine_guard;
 pub mod privilege;
+// Chapter 29: row-level security (R4).
+pub mod rls;
 pub mod settings;
 pub mod show;
 pub mod state;

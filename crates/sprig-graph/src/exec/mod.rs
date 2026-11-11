@@ -182,8 +182,10 @@ fn clauses_write(cs: &[Clause]) -> bool {
     })
 }
 
-/// The plan `EXPLAIN` shows: one line per clause and hop, with its tier.
-fn explain(q: &Query) -> Vec<String> {
+/// The plan `EXPLAIN` shows: one line per clause and hop, with its tier
+/// (`EXPLAIN FORMAT=SPRIG` of `GRAPH_TABLE` shows them too, R8 round 6).
+#[must_use]
+pub fn explain(q: &Query) -> Vec<String> {
     let mut out = Vec::new();
     for part in &q.parts {
         for c in &part.clauses {

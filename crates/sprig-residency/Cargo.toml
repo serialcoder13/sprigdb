@@ -13,5 +13,9 @@ serde_json.workspace = true
 sprig-common.workspace = true
 sprig-meta.workspace = true
 
+[dev-dependencies]
+# `destinations`' test reads a tenant tree from a MemStore.
+tokio.workspace = true
+
 [lints]
 workspace = true

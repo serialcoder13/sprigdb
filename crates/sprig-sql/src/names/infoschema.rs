@@ -337,6 +337,14 @@ const PASS_THROUGH: &[&str] = &[
     "ENABLED_ROLES",
     "APPLICABLE_ROLES",
     "USER_PRIVILEGES",
+    // R4 round 4: what `SHOW VARIABLES` and `SHOW SESSION STATUS` already
+    // show, and the sources of 3306's `performance_schema` variable and
+    // status tables (chapter 28, `compat::perfschema`). `GLOBAL_STATUS`
+    // stays denied: its counters add up every tenant's statements.
+    "SESSION_VARIABLES",
+    "GLOBAL_VARIABLES",
+    "SYSTEM_VARIABLES",
+    "SESSION_STATUS",
 ];
 
 /// What happens to a reference to `information_schema.<table>`.
@@ -1353,6 +1361,22 @@ fn column_sql(
                 lit(&quote(p), ctx),
                 lit(&quote(l), ctx)
             );
+        }
+        // Lock names scoped inside stored code read as written, and the
+        // aliases their rewrite added go (chapter 28, R4 round 3;
+        // `compat::locks::unscope` for `SHOW CREATE`).
+        for (pat, rep) in [
+            (
+                r"CONCAT\('t[0-9]+:', LEFT\(SHA2\(LOWER\((.+?)\), 256\), 50\)\)",
+                r"\1",
+            ),
+            (
+                r"CONCAT\('t[0-9]+:', LEFT\(SHA2\((.+?), 256\), 50\)\)",
+                r"\1",
+            ),
+            (r" AS `(GET|RELEASE|IS_FREE|IS_USED)_LOCK\([^`]*\)`", ""),
+        ] {
+            e = format!("REGEXP_REPLACE({e}, {}, {})", lit(pat, ctx), lit(rep, ctx));
         }
         e
     } else {

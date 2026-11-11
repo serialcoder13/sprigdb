@@ -353,3 +353,112 @@ service Recommendations {
     };
   }
 }
+
+// Named operator accounts, their sessions and their tokens (chapter 14,
+// "Operators"). Gateways relay these calls to the controller with the
+// caller's credential, as every admin call; the controller's guard decides
+// (decision OP12). `Login` and `Enrol` take no credential; the others take
+// an operator's session (`Authorization: Bearer sprigop_...`), a token or
+// the bootstrap token as the guard allows.
+service Operators {
+  // body_json: {"name", "password", "code" | "recovery_code", "client"}.
+  // Replies with a session token, or with an enrolment ticket and an
+  // otpauth:// URI when the operator has no second factor yet.
+  rpc Login(BodyRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      post: "/admin/v1/operators:login"
+      body: "*"
+    };
+  }
+  // body_json: {"name", "ticket", "code"}: the first code from the
+  // authenticator.
+  // Replies with a session token and the recovery codes, shown once.
+  rpc Enrol(BodyRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      post: "/admin/v1/operators:enrol"
+      body: "*"
+    };
+  }
+  // Ends the calling session.
+  rpc Logout(BodyRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      post: "/admin/v1/operators:logout"
+      body: "*"
+    };
+  }
+  // The caller as the guard sees them: name, role, DCs, scopes, expiry.
+  rpc WhoAmI(ListRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      get: "/admin/v1/operators:whoami"
+    };
+  }
+  rpc ListOperators(ListRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      get: "/admin/v1/operators"
+    };
+  }
+  // body_json: {"name", "role": "platform_operator" | "dc_operator", "dcs",
+  // "password", "display_name", "email", "reason"}. Needs a platform
+  // operator's login session.
+  rpc CreateOperator(BodyRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      post: "/admin/v1/operators"
+      body: "*"
+    };
+  }
+  rpc GetOperator(NameRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      get: "/admin/v1/operators/{name}"
+    };
+  }
+  // body_json: {"reason"}. Revokes the operator's sessions and tokens.
+  rpc DisableOperator(NameRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      post: "/admin/v1/operators/{name}:disable"
+      body: "*"
+    };
+  }
+  rpc EnableOperator(NameRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      post: "/admin/v1/operators/{name}:enable"
+      body: "*"
+    };
+  }
+  // body_json: {"reason"}. The operator enrols again at the next login.
+  rpc ResetOperatorFactor(NameRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      post: "/admin/v1/operators/{name}:resetFactor"
+      body: "*"
+    };
+  }
+  // body_json: {"password", "current", "reason"}; "current" is the old
+  // password when operators change their own.
+  rpc SetOperatorPassword(NameRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      post: "/admin/v1/operators/{name}:setPassword"
+      body: "*"
+    };
+  }
+  // body_json: {"label", "scopes", "dcs", "expires_in_days", "service",
+  // "service_kind", "never_expires", "reason"}. Issued only from a login session
+  // (OP5).
+  rpc CreateToken(BodyRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      post: "/admin/v1/operator-tokens"
+      body: "*"
+    };
+  }
+  // Query: owner.
+  rpc ListTokens(ListRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      get: "/admin/v1/operator-tokens"
+    };
+  }
+  // name: the token's key id.
+  rpc RevokeToken(NameRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      post: "/admin/v1/operator-tokens/{name}:revoke"
+      body: "*"
+    };
+  }
+}

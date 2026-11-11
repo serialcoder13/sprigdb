@@ -4,7 +4,7 @@ import { FormattedMessage, useIntl } from 'react-intl';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSession } from '../auth/session';
 import { addTab, closeTab, loadTabs, updateTab, useTabs, type Tab } from './tabs';
-import { invalidateCatalog, useDatabases, useSnapshot } from '../catalog/snapshot';
+import { graphsOf, invalidateCatalog, useDatabases, useSnapshot } from '../catalog/snapshot';
 import { classify, needsConfirmation, splitStatements, statementAt, type Statement } from '../lib/sql';
 import { runStatement, type RunHandle } from './runner';
 import { ResultView, type ResultItem } from '../results/ResultView';
@@ -17,6 +17,11 @@ import { mongoAt, MongoshError, splitMongo, toCommand } from '../docs/mongosh';
 import { MONGO_WORDS } from '../docs/words';
 
 const EDITOR_LANG: Record<QueryLanguage, EditorLanguage> = { sql: 'mysql', cypher: 'cypher', gql: 'cypher', mongo: 'javascript' };
+
+/** The distinct names of two lists, sorted. */
+export function union(a: readonly string[] | undefined, b: readonly string[] | undefined): string[] {
+  return [...new Set([...(a ?? []), ...(b ?? [])])].sort();
+}
 
 /** Where a tab's statements run: Bolt's `db.graph` for graph languages. */
 export function targetOf(t: Pick<Tab, 'db' | 'graph' | 'language'>): string | null {
@@ -103,14 +108,17 @@ export function QueryPage() {
     },
     staleTime: 60_000,
   });
+  // The tab's graph as the catalog snapshot lists it (labels and types the
+  // user may read), which also fills the graph picker.
+  const snapGraph = graphsOf(snap.data).find((g) => g.name === tab?.graph);
   const completion: CompletionSource = useMemo(
     () => ({
       keywords: lang === 'sql' ? KEYWORDS : lang === 'mongo' ? MONGO_WORDS : CYPHER_KEYWORDS,
       objects: () =>
         lang === 'cypher' || lang === 'gql'
           ? [
-              ...(graphMeta.data?.labels ?? []).map((l) => ({ name: l, detail: 'label' })),
-              ...(graphMeta.data?.types ?? []).map((t) => ({ name: t, detail: 'relationship type' })),
+              ...union(graphMeta.data?.labels, snapGraph?.labels).map((l) => ({ name: l, detail: 'label' })),
+              ...union(graphMeta.data?.types, snapGraph?.types).map((t) => ({ name: t, detail: 'relationship type' })),
             ]
           : lang === 'mongo'
             ? (snap.data?.objects ?? []).map((o) => ({ name: o.name, detail: o.kind }))
@@ -125,7 +133,7 @@ export function QueryPage() {
               cols.map((c) => ({ name: c.name, detail: `${t}.${c.name} ${c.type}` })),
             ),
     }),
-    [dbs.data, snap.data, lang, graphMeta.data],
+    [dbs.data, snap.data, lang, graphMeta.data, snapGraph],
   );
 
   // Check markers: Sql.Check 500 ms after typing stops; the gateway parses
@@ -405,8 +413,14 @@ export function QueryPage() {
               onChange={(e) => updateTab(tab.id, { graph: e.target.value.trim() || undefined })}
               placeholder="graph"
               size={14}
+              list={`graphs-${tab.id}`}
               data-testid="graph-input"
             />
+            <datalist id={`graphs-${tab.id}`} data-testid="graph-list">
+              {graphsOf(snap.data).map((g) => (
+                <option key={g.name} value={g.name} />
+              ))}
+            </datalist>
           </label>
         )}
         <button className="primary" onClick={() => void run(false)} disabled={busy} title="Ctrl/⌘ + Enter">

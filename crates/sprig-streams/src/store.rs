@@ -564,9 +564,8 @@ impl StreamsStore {
         stream: u64,
     ) -> Result<u64> {
         let t = self.t("stream_fanin_topics");
-        let sel = format!(
-            "SELECT fanin_id FROM {t} WHERE instance_tenant_id = ? AND stream_id = ?"
-        );
+        let sel =
+            format!("SELECT fanin_id FROM {t} WHERE instance_tenant_id = ? AND stream_id = ?");
         if let Some(id) = q
             .exec_first::<u64, _, _>(sel.as_str(), (member, stream))
             .await

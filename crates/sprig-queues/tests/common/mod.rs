@@ -48,6 +48,8 @@ pub struct Server {
     pub user: String,
     pub pass: String,
     pub catalog: Option<Arc<MemCatalog>>,
+    /// The in-process engine (`None` against a gateway).
+    pub engine: Option<Arc<QueueEngine>>,
 }
 
 /// The server: `SPRIG_AMQP_ADDR`'s gateway, or one in process with
@@ -59,6 +61,7 @@ pub async fn server_with(settings: QueueSettings) -> Server {
             user: var("SPRIG_AMQP_USER").unwrap(),
             pass: var("SPRIG_AMQP_PASSWORD").unwrap(),
             catalog: None,
+            engine: None,
         };
     }
     let catalog = Arc::new(MemCatalog::new(
@@ -77,7 +80,7 @@ pub async fn server_with(settings: QueueSettings) -> Server {
     }));
     let svc = Services {
         identity: Arc::new(TestIdentity),
-        backend: engine,
+        backend: Arc::clone(&engine) as Arc<dyn sprig_proto_amqp::backend::QueueBackend>,
         replies: DirectReplyTo::new(1),
     };
     let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -102,6 +105,7 @@ pub async fn server_with(settings: QueueSettings) -> Server {
         user: "acme.app".into(),
         pass: "secret".into(),
         catalog: Some(catalog),
+        engine: Some(engine),
     }
 }
 

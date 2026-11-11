@@ -1,6 +1,8 @@
-// Documents with their BSON types (chapter 44 step 20, "JSON tree"). The
-// gateway sends each document as relaxed Extended JSON (chapter 37,
-// "Languages"), so this parser keeps every number's text: an integer within
+// Documents with their BSON types (chapter 44 step 20, "JSON tree"). Studio
+// asks the gateway for canonical Extended JSON (`output = canonical_ejson`,
+// round 5), whose `$numberInt`, `$numberLong` and `$numberDouble` wrappers
+// give exact types. Relaxed text (an export, a pasted document) is still
+// read: this parser keeps every number's text, and an integer within
 // 32 bits is int32, a larger one int64, one with a fraction or exponent a
 // double; `$oid`, `$date`, `$numberLong`, `$numberDecimal`, `$binary`,
 // `$timestamp`, `$regularExpression`, `$minKey` and `$maxKey` wrappers keep

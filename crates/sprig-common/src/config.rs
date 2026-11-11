@@ -324,6 +324,19 @@ pub struct ControllerConfig {
     /// Chapter 52: the private key (PEM) of `smtp_client_cert_file`.
     #[serde(default)]
     pub smtp_client_key_file: Option<PathBuf>,
+    /// Chapter 14, "Operators": named service identities, each a file
+    /// holding the secret a gateway presents to the Admin API for the
+    /// calls it makes on its own behalf (`[gateway] controller_token_file`).
+    /// The key is the identity's name, recorded in the audit:
+    /// `service_token_files = { gw-fra1 = "/etc/sprig/gw-fra1.token" }`.
+    /// `gateway_token_file` is the identity named `gateway`.
+    #[serde(default)]
+    pub service_token_files: std::collections::BTreeMap<String, PathBuf>,
+    /// Chapter 14, "Operators": break glass. Once named operators are in
+    /// use, `admin_token_file` is refused (39310); `true` accepts it again,
+    /// and every call made with it is audited as `breakglass.admin_token`.
+    #[serde(default)]
+    pub admin_token_break_glass: bool,
 }
 
 impl Default for ControllerConfig {
@@ -345,6 +358,8 @@ impl Default for ControllerConfig {
             smtp_ca_file: None,
             smtp_client_cert_file: None,
             smtp_client_key_file: None,
+            service_token_files: std::collections::BTreeMap::new(),
+            admin_token_break_glass: false,
         }
     }
 }

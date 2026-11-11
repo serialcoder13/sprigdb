@@ -218,7 +218,7 @@ test.describe.serial('Studio round 3', () => {
       const secret = (await page.getByTestId('totp-secret').textContent())!.trim();
       expect(secret).toHaveLength(32);
       await axe(page, 'security-enrol');
-      await page.getByLabel('Code').fill(totp(secret));
+      await page.getByLabel('Code', { exact: true }).fill(totp(secret));
       await page.getByRole('button', { name: 'Confirm' }).click();
       await expect(page.getByTestId('recovery-codes').locator('li')).toHaveCount(10);
       const codes = (await page.getByTestId('recovery-codes').locator('li').allTextContents()).map((c) => c.trim());
@@ -240,11 +240,11 @@ test.describe.serial('Studio round 3', () => {
       await expect(page.getByRole('heading', { name: 'Second factor' })).toBeVisible();
       await axe(page, 'login-mfa');
       await shot(page, 'login-mfa');
-      await page.getByLabel('Code').fill('000000');
+      await page.getByLabel('Code', { exact: true }).fill('000000');
       await page.getByRole('button', { name: 'Verify' }).click();
       await expect(page.getByTestId('mfa-error')).toContainText('1045');
       await nextStep(page);
-      await page.getByLabel('Code').fill(totp(secret));
+      await page.getByLabel('Code', { exact: true }).fill(totp(secret));
       await page.getByRole('button', { name: 'Verify' }).click();
       await expect(page.getByTestId('whoami')).toHaveText(`acme.${user}`);
       await page.getByRole('link', { name: 'Security' }).click();
@@ -257,7 +257,7 @@ test.describe.serial('Studio round 3', () => {
       await page.getByLabel('User', { exact: true }).fill(`acme.${user}`);
       await page.getByLabel('Password').fill('sprig-dev-mfa');
       await page.getByRole('button', { name: 'Sign in' }).click();
-      await page.getByLabel('Code').fill(codes[0]!);
+      await page.getByLabel('Code', { exact: true }).fill(codes[0]!);
       await page.getByRole('button', { name: 'Verify' }).click();
       await expect(page.getByTestId('whoami')).toHaveText(`acme.${user}`);
       await page.getByRole('link', { name: 'Security' }).click();

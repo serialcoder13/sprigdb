@@ -117,18 +117,17 @@ impl ConnStatus {
         let Some(Value::Bytes(name)) = vals.first() else {
             return None;
         };
-        let v = match self
+        let v = if let Some((_, v)) = self
             .vars
             .iter()
             .find(|(n, _)| n.as_bytes().eq_ignore_ascii_case(name))
         {
-            Some((_, v)) => v.clone(),
-            None => {
-                let Some(Value::Bytes(value)) = vals.get(1) else {
-                    return None;
-                };
-                self.mysql_collation(name, value)?
-            }
+            v.clone()
+        } else {
+            let Some(Value::Bytes(value)) = vals.get(1) else {
+                return None;
+            };
+            self.mysql_collation(name, value)?
         };
         *vals.get_mut(1)? = Value::Bytes(Bytes::from(v));
         encode_binary_row(&vals, &cols).ok()
@@ -147,6 +146,12 @@ impl ConnStatus {
     pub(crate) fn with_rows(mut self, rows: Vec<(&'static str, String)>) -> Self {
         self.vars.extend(rows);
         self
+    }
+
+    /// The rows, by name (3306's `performance_schema.session_status`, R4
+    /// round 4).
+    pub(crate) fn into_rows(self) -> Vec<(&'static str, String)> {
+        self.vars
     }
 
     /// `collation_*` rows in MySQL's names too (3306's `SHOW VARIABLES`).
@@ -718,14 +723,24 @@ mod tests {
 
     #[test]
     fn mysql_persona_shows_mysql_collation_names() {
-        let cs = ConnStatus::from_rows(vec![("version", "8.4.8-SprigDB".into())]).with_mysql_collations();
-        let row = encode_text_row([Some(&b"collation_connection"[..]), Some(&b"utf8mb4_uca1400_ai_ci"[..])]);
+        let cs = ConnStatus::from_rows(vec![("version", "8.4.8-SprigDB".into())])
+            .with_mysql_collations();
+        let row = encode_text_row([
+            Some(&b"collation_connection"[..]),
+            Some(&b"utf8mb4_uca1400_ai_ci"[..]),
+        ]);
         assert_eq!(
             cs.rewrite(&row).unwrap(),
-            encode_text_row([Some(&b"collation_connection"[..]), Some(&b"utf8mb4_0900_ai_ci"[..])])
+            encode_text_row([
+                Some(&b"collation_connection"[..]),
+                Some(&b"utf8mb4_0900_ai_ci"[..])
+            ])
         );
         // A MySQL name already, another variable, or 3307: unchanged.
-        let same = encode_text_row([Some(&b"collation_server"[..]), Some(&b"utf8mb3_general_ci"[..])]);
+        let same = encode_text_row([
+            Some(&b"collation_server"[..]),
+            Some(&b"utf8mb3_general_ci"[..]),
+        ]);
         assert!(cs.rewrite(&same).is_none());
         let other = encode_text_row([Some(&b"character_set_server"[..]), Some(&b"utf8mb4"[..])]);
         assert!(cs.rewrite(&other).is_none());

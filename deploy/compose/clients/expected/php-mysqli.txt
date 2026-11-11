@@ -21,16 +21,12 @@
 # that met the shared cluster's outages during that run; rerun them.
 gateway-mysql fail *bug55283.phpt* :: not investigated (r4close): --
 gateway-mysql fail *mysqli_change_user.phpt* :: tenant login: USER() shows the user's name (app), not the login (r4close.app)
-gateway-mysql fail *mysqli_change_user_set_names.phpt* :: collation defaults after COM_CHANGE_USER
+gateway-mysql flaky *mysqli_change_user_set_names.phpt* :: collation defaults after COM_CHANGE_USER; passed through 3306 in R4 round 4 (r4four), flaky until CI confirms
 gateway-mysql fail *mysqli_connect.phpt* :: gaps row 59 (decision D4): a failed plaintext login needs the RSA exchange the gateway doesn't offer; mysqlnd reports 2006 where MySQL answers 1045 (r4two)
 gateway-mysql fail *mysqli_connect_oo.phpt* :: gaps row 59, as mysqli_connect.phpt
 gateway-mysql fail *mysqli_connect_oo_defaults.phpt* :: tenant model: USER() names the tenant's user (`app`), not the login name `r4two.app` (r4two)
 gateway-mysql fail *mysqli_execute_query.phpt* :: not investigated (r4close): --
-gateway-mysql fail *mysqli_fetch_field.phpt* :: gaps row 58: a utf8mb3 column without a collation gets MariaDB's default collation (metadata 192) where MySQL's is utf8mb3_general_ci (33); fails on plain MariaDB 11.8.9 too
 gateway-mysql flaky *mysqli_fetch_field_flags.phpt* :: times out (120 s): dozens of CREATE TABLEs through the shared dev controller's catalog are slower than run-tests allows (r4two, 10 November)
-gateway-mysql fail *mysqli_fetch_field_oo.phpt* :: gaps row 58, as mysqli_fetch_field.phpt
-gateway-mysql fail *mysqli_fetch_fields.phpt* :: gaps row 58, as mysqli_fetch_field.phpt
-gateway-mysql fail *mysqli_field_seek.phpt* :: gaps row 58, as mysqli_fetch_field.phpt
 gateway-mysql fail *mysqli_get_client_stats.phpt* :: tenant model: the test's DROP TABLE of a FEDERATED table needs FEDERATED ADMIN
 gateway-mysql fail *mysqli/tests/mysqli_info.phpt* :: not investigated (r4close): 001+ [010] Expecting string/any_non_empty, got NULL/
 gateway-mysql fail *mysqli_more_results.phpt* :: not investigated (r4close): [004]
@@ -40,7 +36,6 @@ gateway-mysql fail *mysqli_report.phpt* :: not investigated (r4close): 001- Warn
 gateway-mysql fail *mysqli_report_new.phpt* :: decision D4, as mysqli_connect
 gateway-mysql fail *mysqli_stmt_get_result.phpt* :: not investigated (r4close): --
 gateway-mysql flaky *mysqli_stmt_get_result_bit.phpt* :: times out (120 s): 46 CREATE TABLEs through the shared dev controller's catalog (r4two, 10 November)
-gateway-mysql fail *mysqli_stmt_get_result_metadata_fetch_field.phpt* :: gaps row 58, as mysqli_fetch_field.phpt
 gateway-mysql fail *mysqli_thread_id.phpt* :: KILL of another session's id (gaps rows 32-33)
 gateway-mariadb fail *bug55283.phpt* :: not investigated (r4close): --
 gateway-mariadb fail *mysqli_change_user.phpt* :: tenant login: USER() shows the user's name (app), not the login (r4close.app)
@@ -66,3 +61,5 @@ gateway-mariadb fail *mysqli_report_new.phpt* :: decision D4, as mysqli_connect
 *-mariadb fail *mysqli_stmt_get_result.phpt* :: fails on plain MariaDB 11.8.9 too: --
 *-mariadb fail *mysqli_stmt_get_result_metadata_fetch_field.phpt* :: fails on plain MariaDB 11.8.9 too: --
 *-mariadb fail *mysqli_thread_id.phpt* :: fails on plain MariaDB 11.8.9 too: 001+ [042] [1927] Connection was killed
+# The five mysqli_fetch_field* tests of gaps row 58 pass on 3306 since R4
+# round 3 (r4three, 11 November): utf8mb3 columns get utf8mb3_general_ci.

@@ -1,5 +1,5 @@
-//! Per-session status counters (chapter 06, "Status variables"; chapter
-//! 28, R4 round 3; gaps rows 46 and 61).
+//! Per-session status counters (chapter 28, "Output on port 3306", R4
+//! round 3; gaps rows 46 and 61).
 //!
 //! A client's backend connections are pooled: MariaDB's session counters
 //! (`Com_select`, `Questions`, ...) count every session that ever used the
@@ -112,7 +112,10 @@ impl SessionStatus {
                 (n, v.to_string())
             })
             .collect();
-        rows.push(("Questions", (self.questions + self.local_questions).to_string()));
+        rows.push((
+            "Questions",
+            (self.questions + self.local_questions).to_string(),
+        ));
         rows.push(("Uptime", up.clone()));
         rows.push(("Uptime_since_flush_status", up));
         rows.push(("Prepared_stmt_count", prepared.to_string()));
@@ -123,7 +126,11 @@ impl SessionStatus {
 impl super::PassSession {
     /// Counts a request in the session's status before it runs, as MySQL
     /// counts at dispatch.
-    pub(super) fn count_request(&mut self, req: &crate::pipeline::Request, session: &crate::session::Session) {
+    pub(super) fn count_request(
+        &mut self,
+        req: &crate::pipeline::Request,
+        session: &crate::session::Session,
+    ) {
         use crate::pipeline::Request;
         self.status.local_questions = session.local_questions;
         self.status.local_selects = session.local_selects;
@@ -266,8 +273,7 @@ fn command_of(sql: &[u8]) -> Option<&'static str> {
         "COMMIT" => "Com_commit",
         "ROLLBACK" if !has_top_word(sql, "TO") => "Com_rollback",
         "SET" => match w.get(1).map(String::as_str) {
-            Some("PASSWORD" | "ROLE" | "DEFAULT" | "RESOURCE") => return None,
-            Some("TRANSACTION") => return None,
+            Some("PASSWORD" | "ROLE" | "DEFAULT" | "RESOURCE" | "TRANSACTION") => return None,
             _ => "Com_set_option",
         },
         "SHOW" => match (w.get(1).map(String::as_str), w.get(2).map(String::as_str)) {
@@ -294,9 +300,9 @@ fn multi_table_update(sql: &[u8]) -> bool {
 /// USING ...`.
 fn multi_table_delete(sql: &[u8]) -> bool {
     let w = words(sql, 2);
-    let from_first = w.get(1).is_some_and(|s| {
-        matches!(s.as_str(), "FROM" | "LOW_PRIORITY" | "QUICK" | "IGNORE")
-    });
+    let from_first = w
+        .get(1)
+        .is_some_and(|s| matches!(s.as_str(), "FROM" | "LOW_PRIORITY" | "QUICK" | "IGNORE"));
     if !from_first {
         return true;
     }
@@ -312,18 +318,30 @@ mod tests {
         let c = |s: &str| command_of(s.as_bytes());
         assert_eq!(c("select 1"), Some("Com_select"));
         assert_eq!(c("/* x */ (SELECT 1) UNION (SELECT 2)"), Some("Com_select"));
-        assert_eq!(c("WITH a AS (SELECT 1) SELECT * FROM a"), Some("Com_select"));
+        assert_eq!(
+            c("WITH a AS (SELECT 1) SELECT * FROM a"),
+            Some("Com_select")
+        );
         assert_eq!(c("TABLE t"), Some("Com_select"));
         assert_eq!(c("INSERT INTO t VALUES (1)"), Some("Com_insert"));
-        assert_eq!(c("INSERT INTO t SELECT * FROM u"), Some("Com_insert_select"));
+        assert_eq!(
+            c("INSERT INTO t SELECT * FROM u"),
+            Some("Com_insert_select")
+        );
         assert_eq!(c("insert into t values ('SELECT')"), Some("Com_insert"));
         assert_eq!(c("REPLACE INTO t VALUES (1)"), Some("Com_replace"));
         assert_eq!(c("UPDATE t SET a = 1"), Some("Com_update"));
         assert_eq!(c("UPDATE t, u SET t.a = u.a"), Some("Com_update_multi"));
-        assert_eq!(c("UPDATE t JOIN u ON t.id = u.id SET t.a = 1"), Some("Com_update_multi"));
+        assert_eq!(
+            c("UPDATE t JOIN u ON t.id = u.id SET t.a = 1"),
+            Some("Com_update_multi")
+        );
         assert_eq!(c("UPDATE t SET a = 1, b = 2"), Some("Com_update"));
         assert_eq!(c("DELETE FROM t WHERE a = 1"), Some("Com_delete"));
-        assert_eq!(c("DELETE t FROM t JOIN u ON t.a = u.a"), Some("Com_delete_multi"));
+        assert_eq!(
+            c("DELETE t FROM t JOIN u ON t.a = u.a"),
+            Some("Com_delete_multi")
+        );
         assert_eq!(c("DELETE FROM t USING t, u"), Some("Com_delete_multi"));
         assert_eq!(c("BEGIN"), Some("Com_begin"));
         assert_eq!(c("START TRANSACTION READ ONLY"), Some("Com_begin"));
@@ -333,7 +351,10 @@ mod tests {
         assert_eq!(c("SET autocommit = 0"), Some("Com_set_option"));
         assert_eq!(c("SET NAMES utf8mb4"), Some("Com_set_option"));
         assert_eq!(c("SET PASSWORD = 'x'"), None);
-        assert_eq!(c("SHOW SESSION STATUS LIKE 'Com_select'"), Some("Com_show_status"));
+        assert_eq!(
+            c("SHOW SESSION STATUS LIKE 'Com_select'"),
+            Some("Com_show_status")
+        );
         assert_eq!(c("SHOW VARIABLES"), Some("Com_show_variables"));
         assert_eq!(c("SHOW TABLES"), None);
         assert_eq!(c("CREATE TABLE t (a INT)"), None);

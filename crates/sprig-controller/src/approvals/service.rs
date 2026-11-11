@@ -620,6 +620,10 @@ impl RecommendationsService {
             .ok_or_else(|| invalid(format!("{kind}: gateways ask the gate for vector.ann only")))?;
         let t = TenantId(tenant);
         let db_id = self.db_id(t, &db).await?;
+        // A gateway asks once an index is due, at most once a minute: read
+        // the tenant's rows as of now, so an `approve` set a moment ago
+        // isn't answered with the old `on` (approvals round 3).
+        self.ctl.refresh_tenant(t).await;
         let policy = self
             .ctl
             .policy(kind, Some(t), Some(db_id), None, None)

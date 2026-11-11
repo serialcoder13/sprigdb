@@ -11,6 +11,18 @@
 //! cargo test -p sprig-inherit --test inherit_live -- --nocapture --test-threads 1
 //! ```
 //!
+//! The two model tests need a deployment without a worker process: the
+//! controller's `inherit` loop would give the tree a copy worker, which
+//! orphans overrides across tenants while the read-through model expects
+//! them hidden, and keeps copying while the materialized test has stopped
+//! its own worker (R6 round 5: both tests fail that way,
+//! deterministically, and pass without one). They check that themselves
+//! (R6 round 6, decision T1): when the deployment's etcd
+//! (`SPRIG_TEST_ETCD`, default `http://127.0.0.1:2379`) has a live worker
+//! that takes `other` jobs, or the tree has an `inherit_copy` job that
+//! isn't finished, they say so and skip (and fail under
+//! `SPRIG_TEST_STRICT=1`).
+//!
 //! Without the variable every test reports what it needs and passes (or
 //! fails under `SPRIG_TEST_STRICT=1`). Each test uses its own database
 //! (`r6inh_<test>_<persona>`) in every tenant and drops it at the end.
@@ -340,11 +352,38 @@ async fn teardown(conns: &mut [Conn], db: &str, p: &str, t: &[String]) {
     }
 }
 
+/// Skips (`true`) when a worker process could copy the tree (module
+/// docs, decision T1).
+async fn worker_copies_the_tree(test: &str) -> bool {
+    match copyw::tree_copier(&tenants()[0]).await {
+        Ok(None) => false,
+        Ok(Some(why)) => {
+            assert!(
+                std::env::var("SPRIG_TEST_STRICT").ok().as_deref() != Some("1"),
+                "{test}: {why}"
+            );
+            eprintln!(
+                "{test}: skipped: {why}. This test needs a deployment without a worker \
+                 process (stop the worker, or run it on its own deployment)"
+            );
+            true
+        }
+        Err(e) => {
+            // No etcd: nothing can dispatch a copy worker either.
+            eprintln!("{test}: workers not checked ({e})");
+            false
+        }
+    }
+}
+
 #[tokio::test]
 async fn merged_views_match_the_model() {
     let Some(eps) = endpoints("merged_views_match_the_model") else {
         return;
     };
+    if worker_copies_the_tree("merged_views_match_the_model").await {
+        return;
+    }
     model_run(&eps, None).await;
 }
 
@@ -612,6 +651,9 @@ async fn materialized_views_converge_to_the_model() {
     let Some(eps) = endpoints("materialized_views_converge_to_the_model") else {
         return;
     };
+    if worker_copies_the_tree("materialized_views_converge_to_the_model").await {
+        return;
+    }
     let mut w = copyw::Worker::new(&tenants()[0]).await;
     model_run(&eps, Some(&mut w)).await;
     w.stop().await;
@@ -1094,6 +1136,73 @@ mod copyw {
         pub(crate) epoch: u64,
         handle: Option<tokio::task::JoinHandle<()>>,
         stop: CancellationToken,
+    }
+
+    /// Why a worker process could copy the tree rooted at `root_name`, or
+    /// `None` (decision T1): a live worker of the DC with slots for
+    /// `other` jobs (the class of `inherit_copy`), or an `inherit_copy` job
+    /// of the tree that isn't finished.
+    pub(crate) async fn tree_copier(root_name: &str) -> Result<Option<String>, String> {
+        let meta = MetaConfig {
+            dc_seeds: vec![
+                std::env::var("SPRIG_TEST_ETCD").unwrap_or_else(|_| "http://127.0.0.1:2379".into()),
+            ],
+            global_seeds: Vec::new(),
+            deployment_id: "sprigdb-dev".into(),
+        };
+        let tiers = sprig_meta::etcd::connect_tiers(
+            DcId::new("dc-a").map_err(|e| e.to_string())?,
+            &meta,
+            None,
+            Duration::from_secs(5),
+            true,
+        )
+        .await
+        .map_err(|e| format!("etcd: {e}"))?;
+        let dc: Arc<dyn sprig_meta::MetaStore> = Arc::new(tiers.dc);
+        let workers: Vec<String> = sprig_controller::dispatch::live_workers(dc.as_ref())
+            .await
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|w| {
+                w.registration.slots.is_empty()
+                    || w.registration
+                        .slots
+                        .get(&sprig_controller::dispatch::JobClass::Other)
+                        .is_some_and(|n| *n > 0)
+            })
+            .map(|w| w.id)
+            .collect();
+        if !workers.is_empty() {
+            return Ok(Some(format!(
+                "worker process {} is live and would copy the tree",
+                workers.join(", ")
+            )));
+        }
+        let root = match tiers.global {
+            Some(g) => sprig_controller::tree::Directory::new(Arc::new(g))
+                .list()
+                .await
+                .map_err(|e| e.to_string())?
+                .iter()
+                .map(sprig_controller::tree::StoredEntry::body)
+                .find(|e| e.name == root_name)
+                .map(|e| e.tenant_id.0),
+            None => None,
+        };
+        let jobs = sprig_controller::dispatch::list_jobs(dc.as_ref())
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(jobs
+            .iter()
+            .map(sprig_controller::dispatch::StoredJob::job)
+            .find(|j| {
+                j.kind == sprig_inherit::subs::JOB_KIND
+                    && !j.state.is_final()
+                    && j.owner.is_some()
+                    && root.is_none_or(|r| j.spec["root"].as_u64() == Some(r))
+            })
+            .map(|j| format!("copy job {} of the tree is owned by a worker", j.job_id)))
     }
 
     impl Worker {

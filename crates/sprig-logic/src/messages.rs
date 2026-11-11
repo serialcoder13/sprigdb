@@ -1132,7 +1132,7 @@ mod tests {
     #[test]
     fn fan_in_source_ids() {
         // Rows written before migration 4 packed the declarer.
-        let packed = FANIN_SOURCE_FLAG | (26_306_000_002 << FANIN_OBJECT_BITS) | 77;
+        let packed = FANIN_SOURCE_FLAG | (0x6_1FF5_B482 << FANIN_OBJECT_BITS) | 0x4d;
         assert_eq!(legacy_fanin_parts(packed), Some((26_306_000_002, 77)));
         assert_eq!(legacy_fanin_parts(77), None);
         let mut row = SourceRow {

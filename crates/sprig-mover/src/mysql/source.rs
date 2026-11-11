@@ -112,13 +112,16 @@ fn digest_of(t: &TableMeta, r: MyRow) -> RowDigest {
 /// must stay in the same schema as the writes they commit with, and
 /// chapter 50's queue tables (messages, owner state, delayed messages and
 /// the queue outbox), and chapter 42's cross-tenant outbox
-/// (`__sprig_xo`), whose rows commit with the shard's writes.
+/// (`__sprig_xo`), whose rows commit with the shard's writes; and the
+/// queue forward ledger (`__sprig_qf`, R9 r9fwd), which commits with the
+/// owners' enqueues.
 pub const MOVED_INTERNAL: &[&str] = &[
     "__sprig_ldone",
     "__sprig_qm",
     "__sprig_qs",
     "__sprig_qd",
     "__sprig_qo",
+    "__sprig_qf",
     "__sprig_xo",
 ];
 
@@ -133,8 +136,21 @@ pub const MOVED_INTERNAL: &[&str] = &[
 /// and the uniqueness claims (`__sprig_gu_`, routed by the claim's hash);
 /// and chapter 33's key-value element tables (`__sprig_ke_<ns>`,
 /// `__sprig_kz_<ns>`), grouped with their key table on `_sprig_dk`, every
-/// row carrying its key's `_sprig_rk`.
+/// row carrying its key's `_sprig_rk`; and the engines' tables in each
+/// logical database's default-group schema, which commit with the
+/// database's writes: chapter 31's document engine (`__sprig_doc_`:
+/// retryable-write records and transaction outcomes, search index
+/// definitions, vector side tables), chapter 40's scripts
+/// (`__sprig_redis_`), chapter 35's models (`__sprig_dim_`) and chapter
+/// 42's broadcast logs and retry lists (`__sprig_ib_`, `__sprig_ibr_`).
+/// Chapter 42's materialized copies (`__sprig_ih_`) stay behind: a target
+/// without them reads through and seeds them again.
 pub const MOVED_INTERNAL_PREFIXES: &[&str] = &[
+    "__sprig_doc_",
+    "__sprig_redis_",
+    "__sprig_dim_",
+    "__sprig_ib_",
+    "__sprig_ibr_",
     "__sprig_ke_",
     "__sprig_kz_",
     "__sprig_eo_",
@@ -890,5 +906,43 @@ impl SourceIo for MysqlSource {
                 "deleted tenant purged from the retained source's cluster");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::internal;
+
+    /// Engine tables in a database's schema move with it (R5 round 6: a
+    /// tenant move left MongoDB databases without `__sprig_doc_sessions`,
+    /// and their next write failed with 1146); the mover's own tables and
+    /// fences don't.
+    #[test]
+    fn engine_tables_move_with_their_schema() {
+        for t in [
+            "__sprig_doc_sessions",
+            "__sprig_doc_search_ix",
+            "__sprig_doc_meta",
+            "__sprig_doc_vx_00ff00ff00ff00ff",
+            "__sprig_redis_scripts",
+            "__sprig_dim_models",
+            "__sprig_ib_41",
+            "__sprig_ibr_41",
+            "__sprig_ke_cart",
+            "__sprig_qf",
+            "orders",
+        ] {
+            assert!(!internal(t), "{t} must move");
+        }
+        for t in [
+            "__sprig_f_orders",
+            "__sprig_cs_orders",
+            "__sprig_mover_pos",
+            "__sprig_ih_7",
+            "__sprig_ih_state",
+            "__sprig_dtx",
+        ] {
+            assert!(internal(t), "{t} must stay");
+        }
     }
 }

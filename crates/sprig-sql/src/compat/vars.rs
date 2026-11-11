@@ -165,6 +165,9 @@ impl PersonaVars {
             }
             // mysqldump 8.4 sets it; MySQL's default.
             (Persona::MySql84, "terminology_use_previous") => Some(Cow::Borrowed("NONE")),
+            // R4 round 4: 3306 answers `performance_schema` and `sys`
+            // (`compat::perfschema`), so the switch reads `ON`.
+            (Persona::MySql84, "performance_schema") => Some(Cow::Borrowed("ON")),
             (Persona::MySql84, "sql_mode") if global => {
                 Some(Cow::Owned(super::sqlmode::MYSQL84_DEFAULT.render()))
             }
@@ -190,6 +193,9 @@ impl PersonaVars {
         if let Some(m) = &self.sql_mode {
             rows.push(("sql_mode", m.clone()));
         }
+        if self.persona == Persona::MySql84 {
+            rows.push(("performance_schema", "ON".to_owned()));
+        }
         if let Some(n) = self.max_connections {
             rows.push(("max_connections", n.to_string()));
         }
@@ -202,16 +208,22 @@ impl PersonaVars {
 
 /// The collation variables whose values 3306 shows in MySQL's names (gaps
 /// row 60): MariaDB's UCA 14.0 defaults become MySQL's `*_0900_*`.
-const MYSQL_NAMED_COLLATIONS: &[&str] =
-    &["collation_connection", "collation_database", "collation_server"];
+const MYSQL_NAMED_COLLATIONS: &[&str] = &[
+    "collation_connection",
+    "collation_database",
+    "collation_server",
+];
 
 /// Whether the token at `sig[k]` is a whole select item without an alias:
 /// at nesting depth 0, after `SELECT` (or `DISTINCT`) or a comma, and
 /// followed by the end, a comma, `;`, or a clause keyword.
 fn whole_item(tokens: &[lex::Token], sig: &[usize], sql: &[u8], k: usize) -> bool {
-    let punct = |i: usize, c: u8| tokens[i].kind == TokenKind::Punct && sql[tokens[i].start as usize] == c;
+    let punct =
+        |i: usize, c: u8| tokens[i].kind == TokenKind::Punct && sql[tokens[i].start as usize] == c;
     let word = |i: usize, w: &[&[u8]]| {
-        tokens[i].kind == TokenKind::Word && w.iter().any(|x| tokens[i].bytes(sql).eq_ignore_ascii_case(x))
+        tokens[i].kind == TokenKind::Word
+            && w.iter()
+                .any(|x| tokens[i].bytes(sql).eq_ignore_ascii_case(x))
     };
     let mut depth = 0i32;
     for &i in &sig[..k] {
@@ -236,8 +248,18 @@ fn whole_item(tokens: &[lex::Token], sig: &[usize], sql: &[u8], k: usize) -> boo
                 || word(
                     n,
                     &[
-                        b"FROM", b"INTO", b"UNION", b"WHERE", b"LIMIT", b"ORDER", b"GROUP",
-                        b"HAVING", b"WINDOW", b"FOR", b"EXCEPT", b"INTERSECT",
+                        b"FROM",
+                        b"INTO",
+                        b"UNION",
+                        b"WHERE",
+                        b"LIMIT",
+                        b"ORDER",
+                        b"GROUP",
+                        b"HAVING",
+                        b"WINDOW",
+                        b"FOR",
+                        b"EXCEPT",
+                        b"INTERSECT",
                     ],
                 )
         }
@@ -437,27 +459,38 @@ mod tests {
             &my(),
         )
         .unwrap();
-        assert!(sql.starts_with("SELECT CASE @@collation_connection WHEN "), "{sql}");
+        assert!(
+            sql.starts_with("SELECT CASE @@collation_connection WHEN "),
+            "{sql}"
+        );
         assert!(
             sql.contains(" WHEN 'utf8mb4_uca1400_ai_ci' THEN 'utf8mb4_0900_ai_ci' "),
             "{sql}"
         );
         assert!(!sql.contains("'utf8mb4_bin'"), "{sql}");
         assert!(sql.contains(" ELSE @@collation_connection END AS `@@collation_connection`, CASE @@session.collation_database"), "{sql}");
-        assert!(sql.contains(" ELSE @@session.collation_database END AS d, "), "{sql}");
+        assert!(
+            sql.contains(" ELSE @@session.collation_database END AS d, "),
+            "{sql}"
+        );
         assert!(sql.contains("CONCAT(CASE @@collation_server WHEN"), "{sql}");
         assert!(!sql.contains("AS `@@collation_server`"), "{sql}");
         assert_eq!(r[0].written, "@@collation_connection");
         // `SET @old = @@collation_connection` reads the MySQL name too.
         let (sql, _) = rw("SET @c = @@collation_connection", &my()).unwrap();
-        assert!(sql.starts_with("SET @c = CASE @@collation_connection WHEN"), "{sql}");
+        assert!(
+            sql.starts_with("SET @c = CASE @@collation_connection WHEN"),
+            "{sql}"
+        );
         assert!(!sql.contains(" AS `"), "{sql}");
         // 3307 shows MariaDB's names.
-        assert!(rw(
-            "SELECT @@collation_connection",
-            &PersonaVars::new(Persona::MariaDb, "11.8.3-MariaDB-SprigDB")
-        )
-        .is_none());
+        assert!(
+            rw(
+                "SELECT @@collation_connection",
+                &PersonaVars::new(Persona::MariaDb, "11.8.3-MariaDB-SprigDB")
+            )
+            .is_none()
+        );
     }
 
     #[test]

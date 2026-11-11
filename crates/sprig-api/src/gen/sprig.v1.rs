@@ -41,6 +41,12 @@ pub struct QueryRequest {
     /// `transaction` and no `multi_statements` (39794).
     #[prost(string, tag = "8")]
     pub language: ::prost::alloc::string::String,
+    /// How "mongo" writes documents: "relaxed_ejson" (or empty) or
+    /// "canonical_ejson", which keeps int32, int64 and double apart (chapter
+    /// 37's `Documents` option, for Studio's JSON tree). Other languages take
+    /// no output (39794).
+    #[prost(string, tag = "9")]
+    pub output: ::prost::alloc::string::String,
 }
 /// One column of a result.
 #[allow(clippy::all)]
@@ -3956,6 +3962,376 @@ pub mod analytics_server {
     /// Generated gRPC service name
     pub const SERVICE_NAME: &str = "sprig.v1.Analytics";
     impl<T> tonic::server::NamedService for AnalyticsServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SearchQueryRequest {
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub index: ::prost::alloc::string::String,
+    /// A query string, as sprig_search() takes it: terms, "phrases"~slop,
+    /// +must, -not, field:term, term~1, prefix\*, term^2, AND, OR, NOT.
+    #[prost(string, tag = "3")]
+    pub query_string: ::prost::alloc::string::String,
+    /// Or an Atlas Search operator as JSON (text, phrase, compound,
+    /// autocomplete, range, equals, exists, wildcard, regex, queryString).
+    #[prost(string, tag = "4")]
+    pub query: ::prost::alloc::string::String,
+    /// Atlas operators every hit must also match, unscored: a JSON object or
+    /// an array of them (filter clauses, run inside the index).
+    #[prost(string, tag = "5")]
+    pub filter: ::prost::alloc::string::String,
+    /// Hits per page (default 10, at most search.max_window).
+    #[prost(uint32, tag = "6")]
+    pub limit: u32,
+    /// The `after` of the previous page.
+    #[prost(string, tag = "7")]
+    pub after: ::prost::alloc::string::String,
+    /// Text fields to highlight.
+    #[prost(string, repeated, tag = "8")]
+    pub highlight: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Facets as $searchMeta takes them, JSON: {"brands": {"type": "string",
+    /// "path": "brand", "numBuckets": 10}, "prices": {"type": "number",
+    /// "path": "price", "boundaries": \[0, 50, 100\]}}.
+    #[prost(string, tag = "9")]
+    pub facets: ::prost::alloc::string::String,
+    /// stale_ok (the default, search.default_consistency), own_writes or
+    /// latest.
+    #[prost(string, tag = "10")]
+    pub consistency: ::prost::alloc::string::String,
+    /// A commit token from a write (own_writes); served as latest (S5).
+    #[prost(string, tag = "11")]
+    pub commit_token: ::prost::alloc::string::String,
+    /// Each hit's row: a table's columns as a JSON object, a collection's
+    /// document as relaxed Extended JSON.
+    #[prost(bool, tag = "12")]
+    pub include_row: bool,
+    /// Only by score in this release; anything else answers 39823.
+    #[prost(string, tag = "13")]
+    pub sort: ::prost::alloc::string::String,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SearchHit {
+    /// The key as JSON: a table's key columns as an object, a collection's
+    /// {"\_id": ...}.
+    #[prost(string, tag = "1")]
+    pub key: ::prost::alloc::string::String,
+    #[prost(double, tag = "2")]
+    pub score: f64,
+    /// {"field": \[{"text": "...", "hits": \[\[start, end\], ...\]}\]}; empty for
+    /// none.
+    #[prost(string, tag = "3")]
+    pub highlights: ::prost::alloc::string::String,
+    /// With include_row; empty otherwise.
+    #[prost(string, tag = "4")]
+    pub row: ::prost::alloc::string::String,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SearchQueryResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub hits: ::prost::alloc::vec::Vec<SearchHit>,
+    /// {"name": {"buckets": \[{"\_id": value, "count": n}\]}}; empty without
+    /// facets.
+    #[prost(string, tag = "2")]
+    pub facets: ::prost::alloc::string::String,
+    /// The cursor of the next page; empty after the last.
+    #[prost(string, tag = "3")]
+    pub after: ::prost::alloc::string::String,
+    /// The feed positions the answering copy had applied, JSON.
+    #[prost(string, tag = "4")]
+    pub applied: ::prost::alloc::string::String,
+}
+/// Generated client implementations.
+pub mod search_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    /// Full-text search.
+    #[derive(Debug, Clone)]
+    pub struct SearchClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl<T> SearchClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> SearchClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            SearchClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        /// One page of an index's hits, best first, with highlights and facets.
+        pub async fn query(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SearchQueryRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SearchQueryResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/sprig.v1.Search/Query");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.Search", "Query"));
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod search_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with SearchServer.
+    #[async_trait]
+    pub trait Search: std::marker::Send + std::marker::Sync + 'static {
+        /// One page of an index's hits, best first, with highlights and facets.
+        async fn query(
+            &self,
+            request: tonic::Request<super::SearchQueryRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SearchQueryResponse>,
+            tonic::Status,
+        >;
+    }
+    /// Full-text search.
+    #[derive(Debug)]
+    pub struct SearchServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> SearchServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for SearchServer<T>
+    where
+        T: Search,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/sprig.v1.Search/Query" => {
+                    #[allow(non_camel_case_types)]
+                    struct QuerySvc<T: Search>(pub Arc<T>);
+                    impl<
+                        T: Search,
+                    > tonic::server::UnaryService<super::SearchQueryRequest>
+                    for QuerySvc<T> {
+                        type Response = super::SearchQueryResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SearchQueryRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Search>::query(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = QuerySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for SearchServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "sprig.v1.Search";
+    impl<T> tonic::server::NamedService for SearchServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
 }

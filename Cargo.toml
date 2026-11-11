@@ -156,6 +156,13 @@ sprig-approvals = { path = "crates/sprig-approvals" }
 # preserve_order and float_roundtrip wherever it is linked.
 sprig-logic-js = { path = "crates/sprig-logic-js" }
 kirun = "2.2"
+# Full-text search (chapter 39, R5 round 5): Tantivy (MIT), pinned. Without
+# default features: memory-mapped directories, stop words, Snowball stemmers
+# (frostem, BSD-3-Clause) and LZ4 doc-store compression (lz4_flex, MIT, already
+# in the tree). Its new transitive crates are MIT, Apache-2.0, BSD, Zlib or
+# Unicode, or offer one of them (listed in decisions/r5-interim.md, S-items).
+sprig-search = { path = "crates/sprig-search" }
+tantivy = { version = "=0.27.0", default-features = false, features = ["mmap", "stopwords", "stemmer", "lz4-compression"] }
 
 [workspace.lints.rust]
 # `deny`, not `forbid`, so vetted spots can opt out with a `SAFETY:` comment

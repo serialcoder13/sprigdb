@@ -48,7 +48,10 @@ sprig-shard.workspace = true
 # Chapter 18's resolver drains prepared branches at mover cutovers.
 sprig-txn.workspace = true
 tokio.workspace = true
-tonic = { workspace = true, features = ["codegen", "channel", "tls-ring"] }
+tonic = { workspace = true, features = ["codegen", "channel", "tls-ring", "server"] }
+# Chapter 39 (R5 round 6): the search role's copies and service.
+sprig-search.workspace = true
+tokio-stream = { workspace = true, features = ["net"] }
 tracing.workspace = true
 
 [dev-dependencies]

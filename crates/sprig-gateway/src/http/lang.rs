@@ -22,7 +22,9 @@
 //!   document engine, its privileges, its stall guard. It is data, never
 //!   code: the engine refuses `$where`, and JavaScript has no JSON form.
 //!   A cursor's documents are drained with `getMore`, one row each in a
-//!   single `document` column (relaxed Extended JSON); any other reply is
+//!   single `document` column (relaxed Extended JSON, or canonical with
+//!   `output = canonical_ejson`, which keeps int32, int64 and double
+//!   apart; [`with_output`]); any other reply is
 //!   one row (without `ok`, `$clusterTime` and `operationTime`).
 //!   Authentication and fail-point commands are refused (39794).
 //!
@@ -104,6 +106,44 @@ impl Language {
 
 fn invalid(m: impl Into<String>) -> SprigError {
     SprigError::new(SprigCode::QueryLanguageInvalid, m)
+}
+
+/// `language` and `output` of a request as one text for [`SqlEngine::run_in`]:
+/// `mongo;output=canonical_ejson` (chapter 37's `Documents` option, which
+/// Studio's JSON tree asks for to show exact BSON types). Empty `output`
+/// leaves `language` as it is.
+#[must_use]
+pub fn with_output(language: &str, output: &str) -> String {
+    if output.trim().is_empty() {
+        language.to_owned()
+    } else {
+        format!("{};output={}", language.trim(), output.trim())
+    }
+}
+
+/// How documents are written: relaxed (the default) or canonical Extended
+/// JSON v2.
+///
+/// # Errors
+/// 39794 for an unknown output, or an output for another language than
+/// `mongo`.
+fn split_output(spec: &str) -> Result<(&str, bool)> {
+    let Some((lang, out)) = spec.split_once(";output=") else {
+        return Ok((spec, false));
+    };
+    let canonical = match out.trim().to_ascii_lowercase().as_str() {
+        "" | "relaxed_ejson" => false,
+        "canonical_ejson" => true,
+        other => {
+            return Err(invalid(format!(
+                "unknown output {other:?}: use relaxed_ejson or canonical_ejson"
+            )));
+        }
+    };
+    if canonical && Language::parse(lang)? != Language::Mongo {
+        return Err(invalid("output = canonical_ejson is for language mongo"));
+    }
+    Ok((lang, canonical))
 }
 
 /// The front ends other languages run through, set once they start.
@@ -268,17 +308,20 @@ impl SqlEngine {
         caps: Caps,
         tx: mpsc::Sender<Item>,
     ) {
-        let lang = match Language::parse(language) {
-            Ok(Language::Sql) => {
-                return self.run_capped(caller, call, txn, caps, tx).await;
-            }
-            Ok(l) => l,
-            Err(e) => {
-                let _ = tx.send(Item::Error(e)).await;
-                return;
-            }
-        };
-        let r = self.run_other(caller, lang, call, txn, caps, &tx).await;
+        let (lang, canonical) =
+            match split_output(language).and_then(|(l, c)| Ok((Language::parse(l)?, c))) {
+                Ok((Language::Sql, _)) => {
+                    return self.run_capped(caller, call, txn, caps, tx).await;
+                }
+                Ok(l) => l,
+                Err(e) => {
+                    let _ = tx.send(Item::Error(e)).await;
+                    return;
+                }
+            };
+        let r = self
+            .run_other(caller, lang, canonical, call, txn, caps, &tx)
+            .await;
         if let Err(e) = r
             && !tx.is_closed()
         {
@@ -286,10 +329,12 @@ impl SqlEngine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_other(
         &self,
         caller: &Caller,
         lang: Language,
+        canonical: bool,
         call: SqlCall,
         txn: Option<&str>,
         caps: Caps,
@@ -316,7 +361,10 @@ impl SqlEngine {
         let batch = self.settings().batch_rows;
         let work = async {
             match lang {
-                Language::Mongo => self.run_mongo(caller, &call, caps, batch, tx).await,
+                Language::Mongo => {
+                    self.run_mongo(caller, &call, caps, batch, canonical, tx)
+                        .await
+                }
                 _ => self.run_graph(caller, &call, caps, batch, tx).await,
             }
         };
@@ -468,6 +516,7 @@ impl SqlEngine {
         call: &SqlCall,
         caps: Caps,
         batch: usize,
+        canonical: bool,
         tx: &mpsc::Sender<Item>,
     ) -> Result<()> {
         let shared = self.languages.mongo.get().ok_or_else(|| {
@@ -508,7 +557,7 @@ impl SqlEngine {
         // first command too.
         conn.sql()
             .map_err(|e| SprigError::new(SprigCode::QueryLanguageInvalid, e.to_string()))?;
-        let r = mongo_command(&mut conn, cmd, &call.database, caps, batch, tx).await;
+        let r = mongo_command(&mut conn, cmd, &call.database, caps, batch, canonical, tx).await;
         if let Some(s) = conn.sql.take() {
             s.close().await;
         }
@@ -578,6 +627,7 @@ async fn mongo_command(
     db: &str,
     caps: Caps,
     batch: usize,
+    canonical: bool,
     tx: &mpsc::Sender<Item>,
 ) -> Result<()> {
     let Some(reply) = dispatch(conn, &cmd, tx).await? else {
@@ -598,7 +648,8 @@ async fn mongo_command(
         }
         let r: std::result::Result<(), Gone> = async {
             out.header(vec![column("document", "JSON")]).await?;
-            out.row(vec![Some(ext_json(Bson::Document(d)))]).await?;
+            out.row(vec![Some(ext_json(Bson::Document(d), canonical))])
+                .await?;
             out.end(affected, String::new()).await
         }
         .await;
@@ -619,7 +670,7 @@ async fn mongo_command(
     }
     loop {
         for d in docs {
-            match out.row(vec![Some(ext_json(d))]).await {
+            match out.row(vec![Some(ext_json(d, canonical))]).await {
                 Ok(true) => {}
                 Ok(false) => {
                     kill_cursor(conn, db, &coll, id, tx).await;
@@ -676,8 +727,12 @@ async fn kill_cursor(
     }
 }
 
-fn ext_json(b: Bson) -> String {
-    b.into_relaxed_extjson().to_string()
+fn ext_json(b: Bson, canonical: bool) -> String {
+    if canonical {
+        b.into_canonical_extjson().to_string()
+    } else {
+        b.into_relaxed_extjson().to_string()
+    }
 }
 
 /// A reply's error, or its first write error, as a [`SprigError`].
@@ -909,6 +964,39 @@ mod tests {
         assert_eq!(Language::parse("mongo").unwrap(), Language::Mongo);
         let e = Language::parse("redis").unwrap_err();
         assert_eq!(e.code(), Some(SprigCode::QueryLanguageInvalid));
+    }
+
+    #[test]
+    fn outputs_split_and_check() {
+        assert_eq!(with_output("mongo", ""), "mongo");
+        assert_eq!(
+            with_output("mongo", "canonical_ejson"),
+            "mongo;output=canonical_ejson"
+        );
+        assert_eq!(split_output("mongo").unwrap(), ("mongo", false));
+        assert_eq!(
+            split_output("mongo;output=canonical_ejson").unwrap(),
+            ("mongo", true)
+        );
+        assert_eq!(
+            split_output("mongo;output=relaxed_ejson").unwrap(),
+            ("mongo", false)
+        );
+        for bad in [
+            "mongo;output=xml",
+            "sql;output=canonical_ejson",
+            "cypher;output=canonical_ejson",
+        ] {
+            let e = split_output(bad).unwrap_err();
+            assert_eq!(e.code(), Some(SprigCode::QueryLanguageInvalid), "{bad}");
+        }
+        // Canonical keeps int32, int64 and double apart; relaxed doesn't.
+        let d = Bson::Document(doc! {"i": 1_i32, "l": 2_i64, "f": 3.0_f64});
+        assert_eq!(
+            ext_json(d.clone(), true),
+            r#"{"i":{"$numberInt":"1"},"l":{"$numberLong":"2"},"f":{"$numberDouble":"3.0"}}"#
+        );
+        assert_eq!(ext_json(d, false), r#"{"i":1,"l":2,"f":3.0}"#);
     }
 
     #[test]

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.29.xsd">
+  <changeSet id="1" author="sprig">
+    <createTable tableName="item">
+      <column name="id" type="BIGINT" autoIncrement="true"><constraints primaryKey="true"/></column>
+      <column name="sku" type="VARCHAR(64)"><constraints nullable="false" unique="true"/></column>
+      <column name="price" type="DECIMAL(10,2)" defaultValueNumeric="0"/>
+      <column name="attrs" type="JSON"/>
+      <column name="created" type="DATETIME" defaultValueComputed="CURRENT_TIMESTAMP"/>
+    </createTable>
+  </changeSet>
+  <changeSet id="2" author="sprig">
+    <createTable tableName="stock">
+      <column name="id" type="BIGINT" autoIncrement="true"><constraints primaryKey="true"/></column>
+      <column name="item_id" type="BIGINT"><constraints nullable="false"/></column>
+      <column name="qty" type="INT" defaultValueNumeric="0"/>
+    </createTable>
+    <addForeignKeyConstraint baseTableName="stock" baseColumnNames="item_id" constraintName="fk_stock_item"
+        referencedTableName="item" referencedColumnNames="id" onDelete="CASCADE"/>
+    <createIndex tableName="stock" indexName="ix_stock_qty"><column name="qty"/></createIndex>
+  </changeSet>
+  <changeSet id="3" author="sprig">
+    <addColumn tableName="item"><column name="name" type="VARCHAR(100)"/></addColumn>
+    <renameColumn tableName="item" oldColumnName="name" newColumnName="title" columnDataType="VARCHAR(100)"/>
+  </changeSet>
+  <changeSet id="4" author="sprig">
+    <insert tableName="item"><column name="sku" value="A-1"/><column name="price" valueNumeric="9.50"/></insert>
+    <rollback><delete tableName="item"><where>sku = 'A-1'</where></delete></rollback>
+  </changeSet>
+</databaseChangeLog>

@@ -9,11 +9,15 @@
 //! | Sprig privilege | MariaDB grant |
 //! |---|---|
 //! | `*.*` | `` ON `t42\_d%`.* ``: every shard and reference schema of the tenant, now and later; never `t42_sprig` |
-//! | `db.*` | `` ON `t42\_d1\_g1\_s1`.* `` per schema of the database, with the `*.*` actions too (MariaDB uses the most specific matching database row only) |
+//! | `db.*` | `` ON `t42\_d1\_%`.* ``: every group, shard and reference schema of the database, now and later, with the `*.*` actions too (MariaDB uses the most specific matching database row only) |
 //! | `db.t` | `` ON `t42_d1_g1_s1`.`t` `` per schema |
 //! | `db.t (c)` | the column, per schema |
 //! | `db.t` held by name (a dropped table's, `auth.grants_on_drop = keep`) | as `db.t` while a table of that name exists; before that only if it includes `CREATE` (MariaDB refuses others on a missing table), so the user can create it again |
 //! | `db.f` (routine) | `` ON FUNCTION `t42_d1_g1_s1`.`f` `` per schema |
+//!
+//! Every database row also carries `CREATE TEMPORARY TABLES`, for the
+//! gateway's own temporary tables (gathered and analytic reads); the
+//! gateway checks the privilege itself for users' statements.
 //!
 //! Only data and object actions reach MariaDB (`SELECT` ... `TRIGGER`,
 //! `EXECUTE`, `CREATE ROUTINE`, `EVENT`, `LOCK TABLES`, temporary tables);
@@ -329,12 +333,14 @@ pub fn desired(cat: &TenantCatalog, state: &AuthzState, auth: &TenantAuth) -> Ba
                     continue;
                 };
                 let tenant_part = t_bits.minus(cut.get(&name).copied().unwrap_or_default());
-                for s in shard_schemas(tenant, d) {
-                    add(
-                        BackendTarget::Db(escape_db(&s.to_string())),
-                        bits.union(tenant_part),
-                    );
-                }
+                // One pattern row per database, not one row per schema:
+                // it covers every group, shard and reference schema the
+                // database has now or gets later (regroups, splits, moves,
+                // merges, re-keys), with no reconcile in between.
+                add(
+                    BackendTarget::Db(db_pattern(tenant, d.db_id)),
+                    bits.union(tenant_part),
+                );
             }
             for p in rest {
                 let (d, o, column) = match &p.target {
@@ -408,9 +414,93 @@ pub fn desired(cat: &TenantCatalog, state: &AuthzState, auth: &TenantAuth) -> Ba
         add(BackendTarget::Db(tenant_pattern.clone()), compiled_tenant);
         redo_marker_grants(&mut grants, &tenant_pattern);
         doc_session_grants(&mut grants, &tenant_pattern);
+        scratch_grants(&mut grants, &tenant_pattern);
         out.insert(account(tenant, uid), grants);
     }
     out
+}
+
+/// The `mysql.db` pattern of every schema of database `db`:
+/// `` `t42\_d1\_%` `` matches `t42_d1_g<group>_s<shard>` and `t42_d1_ref`,
+/// never another database's (`t42_d10_…` has no `_` after `d1`). As a
+/// longer literal prefix than the tenant's `` `t42\_d%` ``, MariaDB picks it
+/// first for the database's schemas.
+#[must_use]
+pub fn db_pattern(tenant: TenantId, db: sprig_common::ids::DbId) -> String {
+    format!("{}\\_%", escape_db(&format!("t{tenant}_d{db}")))
+}
+
+/// Whether the MariaDB `mysql.db` pattern `pattern` (escaped `\_`, `\%`
+/// and `\\`, wildcards `_` and `%`) matches schema name `name`.
+fn db_matches(pattern: &str, name: &str) -> bool {
+    fn go(p: &[char], n: &[char]) -> bool {
+        match p.split_first() {
+            None => n.is_empty(),
+            Some(('%', rest)) => (0..=n.len()).any(|i| go(rest, &n[i..])),
+            Some(('_', rest)) => !n.is_empty() && go(rest, &n[1..]),
+            Some(('\\', rest)) if !rest.is_empty() => {
+                n.first() == Some(&rest[0]) && go(&rest[1..], &n[1..])
+            }
+            Some((c, rest)) => n.first() == Some(c) && go(rest, &n[1..]),
+        }
+    }
+    let p: Vec<char> = pattern.chars().collect();
+    let n: Vec<char> = name.chars().collect();
+    go(&p, &n)
+}
+
+/// The `mysql.db` row MariaDB uses for schema `schema`: the matching
+/// pattern with the longest literal prefix (a name without wildcards
+/// first), as its ACL sort does. MariaDB never adds two matching rows.
+pub(crate) fn db_row_for(
+    grants: &BTreeMap<BackendTarget, ActionSet>,
+    schema: &str,
+) -> Option<ActionSet> {
+    fn prefix(p: &str) -> usize {
+        let mut chars = p.chars();
+        let mut i = 0;
+        while let Some(c) = chars.next() {
+            match c {
+                '%' | '_' => return i,
+                '\\' => {
+                    chars.next();
+                    i += 2;
+                }
+                _ => i += 1,
+            }
+        }
+        usize::MAX
+    }
+    grants
+        .iter()
+        .filter_map(|(t, a)| match t {
+            BackendTarget::Db(p) if db_matches(p, schema) => Some((prefix(p), *a)),
+            _ => None,
+        })
+        .max_by_key(|(len, _)| *len)
+        .map(|(_, a)| a)
+}
+
+/// The gateway's own temporary tables (chapter 17, "Gathered reads"; the
+/// analytic reads' column probes): they are created by a connection of
+/// the session's backend account in the schema the statement names, so
+/// every database row of the account carries `CREATE TEMPORARY TABLES`,
+/// and the tenant's pattern row exists for schemas no other row covers.
+/// A temporary table holds only rows the account read with its own
+/// `SELECT`, and only that connection sees it, so this widens nothing a
+/// user can read. Users never create one without the privilege: the
+/// gateway checks `CREATE TEMPORARY TABLES` itself before a statement
+/// reaches MariaDB.
+fn scratch_grants(grants: &mut BTreeMap<BackendTarget, ActionSet>, tenant_pattern: &str) {
+    let ctt = ActionSet::of(&[Action::CreateTemporaryTables]);
+    grants
+        .entry(BackendTarget::Db(tenant_pattern.to_owned()))
+        .or_default();
+    for (t, a) in grants.iter_mut() {
+        if matches!(t, BackendTarget::Db(_)) {
+            *a = a.union(ctt);
+        }
+    }
 }
 
 /// Chapter 30's retryable-write records (R5, `decisions/r5-interim.md`
@@ -453,7 +543,7 @@ fn doc_session_grants(grants: &mut BTreeMap<BackendTarget, ActionSet>, tenant_pa
         })
         .collect();
     for s in schemas {
-        if covered(grants, &escape_db(&s)) {
+        if db_row_for(grants, &s).is_some_and(|a| a.intersect(need) == need) {
             continue;
         }
         let t = BackendTarget::Table(s, DOC_SESSIONS_TABLE.into());
@@ -490,7 +580,7 @@ fn redo_marker_grants(grants: &mut BTreeMap<BackendTarget, ActionSet>, tenant_pa
         })
         .collect();
     for s in schemas {
-        if inserts_in(grants, &escape_db(&s)) {
+        if db_row_for(grants, &s).is_some_and(|a| a.has(Action::Insert)) {
             continue;
         }
         let t = BackendTarget::Table(s, "__sprig_redo".into());
@@ -925,6 +1015,77 @@ mod tests {
         );
         doc_session_grants(&mut g, "t1\\_d%");
         assert_eq!(g.len(), 2);
+    }
+
+    #[test]
+    fn database_patterns_match_only_their_databases_schemas() {
+        let p = db_pattern(TenantId(42), sprig_common::ids::DbId(1));
+        assert_eq!(p, "t42\\_d1\\_%");
+        for yes in ["t42_d1_g1_s1", "t42_d1_g7_s3", "t42_d1_g90001_s12", "t42_d1_ref"] {
+            assert!(db_matches(&p, yes), "{yes}");
+        }
+        for no in ["t42_d10_g1_s1", "t42_d2_g1_s1", "t420_d1_g1_s1", "t42_sprig", "t42xd1_g1_s1"] {
+            assert!(!db_matches(&p, no), "{no}");
+        }
+        assert!(db_matches("t42\\_d%", "t42_d10_g1_s1"));
+        assert!(!db_matches("t42\\_d%", "t42_sprig"));
+    }
+
+    #[test]
+    fn the_most_specific_database_row_wins() {
+        let mut g = BTreeMap::new();
+        g.insert(
+            BackendTarget::Db("t1\\_d%".into()),
+            ActionSet::of(&[Action::Select, Action::Insert]),
+        );
+        g.insert(
+            BackendTarget::Db("t1\\_d1\\_%".into()),
+            ActionSet::of(&[Action::Select]),
+        );
+        assert_eq!(
+            db_row_for(&g, "t1_d1_g3_s2"),
+            Some(ActionSet::of(&[Action::Select]))
+        );
+        assert_eq!(
+            db_row_for(&g, "t1_d2_g1_s1"),
+            Some(ActionSet::of(&[Action::Select, Action::Insert]))
+        );
+        // A table-level writer of a database whose row lacks INSERT gets
+        // the redo marker; one whose database row has it doesn't.
+        g.insert(
+            BackendTarget::Table("t1_d1_g3_s2".into(), "orders".into()),
+            ActionSet::of(&[Action::Insert]),
+        );
+        redo_marker_grants(&mut g, "t9\\_d%");
+        assert!(g.contains_key(&BackendTarget::Table(
+            "t1_d1_g3_s2".into(),
+            "__sprig_redo".into()
+        )));
+    }
+
+    #[test]
+    fn every_database_row_can_create_temporary_tables() {
+        let ctt = ActionSet::of(&[Action::CreateTemporaryTables]);
+        // Table grants only: the tenant row appears, with CTT alone.
+        let mut g = BTreeMap::new();
+        g.insert(
+            BackendTarget::Table("t1_d1_g1_s1".into(), "orders".into()),
+            ActionSet::of(&[Action::Select]),
+        );
+        scratch_grants(&mut g, "t1\\_d%");
+        assert_eq!(g.get(&BackendTarget::Db("t1\\_d%".into())).copied(), Some(ctt));
+        // A database row keeps its own actions and gets CTT too, so the
+        // more specific row still covers temporary tables.
+        let mut g = BTreeMap::new();
+        g.insert(
+            BackendTarget::Db("t1\\_d1\\_%".into()),
+            ActionSet::of(&[Action::Select]),
+        );
+        scratch_grants(&mut g, "t1\\_d%");
+        assert_eq!(
+            db_row_for(&g, "t1_d1_g4_s1"),
+            Some(ActionSet::of(&[Action::Select]).union(ctt))
+        );
     }
 
     #[test]

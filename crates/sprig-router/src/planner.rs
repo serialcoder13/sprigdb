@@ -190,6 +190,14 @@ pub struct PreparedPlan {
 /// The rejection (reason `parse`) for text the router's parser doesn't
 /// read.
 pub fn parse_template(sql: &str, topo: &dyn Topology) -> R<Option<Template>> {
+    // R8 round 6: a statement with `GRAPH_TABLE` has no template; its plan
+    // depends on the graph's rows (the gateway runs it as text).
+    if crate::graph::mentions(sql) && crate::graph::find(sql).is_ok_and(|v| !v.is_empty()) {
+        return reject(
+            Reason::Unsupported,
+            "GRAPH_TABLE in a prepared statement's template (it runs as text)",
+        );
+    }
     if !topo.mentions(sql) {
         return Ok(None);
     }
@@ -452,6 +460,7 @@ fn add_suffix(p: &mut Plan, lock: &str) {
         | Plan::ViaParent(_)
         | Plan::NeedIds(_)
         | Plan::Gather(_)
+        | Plan::Graph(_)
         | Plan::Reject(_) => {}
     }
 }
@@ -572,6 +581,8 @@ fn plan_stmt(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> {
                 },
                 // Plain EXPLAIN of a gathered read: refused as before.
                 Plan::Gather(g) => Ok(Plan::Reject(g.fallback.clone())),
+                // Never planned from text (the gateway plans graph calls).
+                Plan::Graph(_) => reject(Reason::Unsupported, "plain EXPLAIN of GRAPH_TABLE"),
                 p @ (Plan::Reject(_) | Plan::Explain(_)) => Ok(p),
             }
         }
@@ -873,6 +884,11 @@ struct Rel<'a> {
     nullable: bool,
     /// The FROM item of the block it sits in (comma-joined items).
     item: usize,
+    /// A derived table of literal rows: no table, the same rows on every
+    /// shard (R8 round 6, [`graph::constant_relation`]).
+    constant: bool,
+    /// A `GRAPH_TABLE` call's placeholder: the call.
+    graph: Option<usize>,
 }
 
 impl Rel<'_> {
@@ -940,6 +956,9 @@ fn conjuncts<'q>(e: &'q Expr, out: &mut Vec<&'q Expr>) {
 }
 
 fn relation<'a>(tf: &TableFactor, cx: &PlanCtx<'a>, item: usize) -> Option<Rel<'a>> {
+    if let Some(r) = graph::constant_relation(tf, item) {
+        return Some(r);
+    }
     let TableFactor::Table {
         name, alias, args, ..
     } = tf
@@ -969,6 +988,8 @@ fn relation<'a>(tf: &TableFactor, cx: &PlanCtx<'a>, item: usize) -> Option<Rel<'
         loc: loc_of(name),
         nullable: false,
         item,
+        constant: false,
+        graph: None,
     })
 }
 
@@ -1605,6 +1626,8 @@ fn plan_query(stmt: &Statement, q: &Query, src: &Src<'_>, cx: &PlanCtx<'_>) -> R
                             top,
                         },
                     )),
+                    // Literal rows are on every shard (R8 round 6).
+                    None if r.constant => {}
                     None => unsharded = true,
                 }
             }
@@ -3839,6 +3862,8 @@ fn empty_select(
 }
 
 mod fk;
+mod graph;
+pub use graph::plan_graph;
 pub(crate) mod gather;
 mod ids;
 mod lookups;

@@ -402,6 +402,8 @@ impl MqCatalog for GatewayMq {
         let s = Arc::new(MariaStore::new(pool, schema).with_replicas(replicas));
         s.set_confirm_replica(self.settings(v).confirm_replica);
         s.ensure().await.map_err(unavailable)?;
+        // R9 (r9fwd): the tenant's feed-driven outbox forwarder.
+        crate::outbox_feed::subscribe(&self.svc, tenant);
         lock(&self.maria).insert((v.tenant, v.db_id), Arc::clone(&s));
         let s: Arc<dyn MsgStore> = s;
         stores.insert((v.tenant, v.db_id), Arc::clone(&s));
@@ -457,6 +459,8 @@ impl MqCatalog for GatewayMq {
             takeover_grace_ms: n(&qs::TAKEOVER_GRACE_MS),
             owner_move_after_ms: n(&qs::OWNER_MOVE_AFTER_SECONDS).saturating_mul(1000),
             owner_move_cooldown_ms: n(&qs::OWNER_MOVE_COOLDOWN_SECONDS).saturating_mul(1000),
+            forward_feed: t(&qs::FORWARDER) == "feed",
+            forward_fallback_ms: n(&qs::FORWARD_FALLBACK_MS),
         }
     }
 }

@@ -20,6 +20,8 @@
 //! takes `\"` and `\\` escapes. Tag values that aren't JSON strings
 //! compare by their JSON text.
 
+pub mod destinations;
+
 use std::collections::BTreeSet;
 use std::fmt;
 
