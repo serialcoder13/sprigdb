@@ -99,10 +99,13 @@ async fn client(addr: &str, user: &str, pw: &str) -> mongodb::Client {
 }
 
 /// Up to `n` events of `stream` within `secs` seconds, as `op:_id`.
-async fn collect_events<T>(stream: &mut mongodb::change_stream::ChangeStream<T>, n: usize, secs: u64) -> Vec<String>
-where
-    T: serde::de::DeserializeOwned + Unpin + Send + Sync,
-{
+async fn collect_events(
+    stream: &mut mongodb::change_stream::ChangeStream<
+        mongodb::change_stream::event::ChangeStreamEvent<Document>,
+    >,
+    n: usize,
+    secs: u64,
+) -> Vec<String> {
     let mut seen = Vec::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
     while seen.len() < n && tokio::time::Instant::now() < deadline {

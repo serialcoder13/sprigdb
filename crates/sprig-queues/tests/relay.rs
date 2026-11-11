@@ -716,3 +716,78 @@ async fn the_owner_follows_its_consumers_without_redelivering() {
     let _ = ca.close(200, "bye".into()).await;
     let _ = cc.close(200, "bye".into()).await;
 }
+
+/// R9 (r9tests): messages taken by `mq_get` under a lease tag go back to
+/// the queue at once when `mq_release` names the tag, through any gateway:
+/// gets through B (relayed to the owner), the release through C. Messages
+/// held by a session without a tag, or under another tag, stay held.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lease_tags_are_released_through_any_gateway() {
+    let net = Net::new(quick());
+    let a = net.gateway(1).await;
+    let b = net.gateway(2).await;
+    let c = net.gateway(3).await;
+    let ca = connect(&a).await;
+    let pa = ca.create_channel().await.unwrap();
+    let q = common::uniq("tagrel");
+    declare(&pa, &q).await;
+    pa.confirm_select(ConfirmSelectOptions::default())
+        .await
+        .unwrap();
+    for i in 0..10 {
+        assert!(publish_confirmed(&pa, &q, &format!("m-{i}"), &format!("m-{i}")).await);
+    }
+    let p = Arc::new(Principal {
+        tenant_id: 42,
+        tenant: "acme".into(),
+        user: "app".into(),
+        user_id: Some(1),
+        handle: None,
+    });
+    let body = |d: &sprig_proto_amqp::message::Delivery| {
+        String::from_utf8_lossy(&sprig_queues::sql::body_bytes(d)).into_owned()
+    };
+    // The dead task's gets: four under its tag, ten-minute leases. Two more
+    // by a plain session, two under another tag.
+    let vb = b.engine.sql_vhost(Arc::clone(&p), "/", 7).await.unwrap();
+    let dead = vb
+        .get_tagged(&q, 4, 600_000, Some("s9/0/3"))
+        .await
+        .unwrap();
+    assert_eq!(dead.iter().map(body).collect::<Vec<_>>(), ["m-0", "m-1", "m-2", "m-3"]);
+    let plain = vb.get(&q, 2, 600_000).await.unwrap();
+    assert_eq!(plain.len(), 2);
+    let other = vb
+        .get_tagged(&q, 2, 600_000, Some("s9/1/1"))
+        .await
+        .unwrap();
+    assert_eq!(other.len(), 2);
+    // The new task, on another gateway and session, releases the tag.
+    let vc = c.engine.sql_vhost(Arc::clone(&p), "/", 8).await.unwrap();
+    vc.release_tag(&q, "s9/0/3").await.unwrap();
+    let mut again = Vec::new();
+    for _ in 0..50 {
+        again.extend(vc.get(&q, 10, 600_000).await.unwrap());
+        if again.len() >= 6 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let mut got: Vec<String> = again.iter().map(body).collect();
+    got.sort();
+    assert_eq!(
+        got,
+        ["m-0", "m-1", "m-2", "m-3", "m-8", "m-9"],
+        "the tag's four came back at once; the plain and other-tag ones stayed held"
+    );
+    for d in again.iter().filter(|d| body(d) < "m-4".to_owned()) {
+        assert!(d.redelivered, "{} is a redelivery", body(d));
+        assert_eq!(d.delivery_count, 1, "a release counts as a failed delivery");
+    }
+    // Releasing an unknown tag, or the same tag twice, changes nothing.
+    vc.release_tag(&q, "s9/0/3").await.unwrap();
+    vc.release_tag(&q, "nobody").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(vc.get(&q, 10, 600_000).await.unwrap().is_empty());
+    let _ = ca.close(200, "bye".into()).await;
+}

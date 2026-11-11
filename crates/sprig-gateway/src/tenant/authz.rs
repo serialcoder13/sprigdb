@@ -123,6 +123,9 @@ pub struct AuthzServices {
     placed: Mutex<HashMap<TenantId, Checked>>,
     gates: Mutex<HashMap<(TenantId, ClusterId), Gate>>,
     migrating: Mutex<HashSet<TenantId>>,
+    /// Tenants being deleted or deleted (decision bugfix-32): their
+    /// backend accounts are never made again here.
+    gone: Mutex<HashSet<TenantId>>,
 }
 
 impl std::fmt::Debug for AuthzServices {
@@ -142,6 +145,24 @@ impl AuthzServices {
     /// file).
     pub fn configure(&self, per_user: Option<PerUser>) {
         self.per_user.store(per_user.map(Arc::new));
+    }
+
+    /// `tenant` is being deleted (or is gone): from now on [`Self::ensure`]
+    /// refuses it, so no session that still runs a statement, and no new
+    /// login, makes its backend accounts again after the tenant's cleanup
+    /// dropped them (decision bugfix-32).
+    pub fn deleting(&self, tenant: TenantId) {
+        lock(&self.gone).insert(tenant);
+    }
+
+    fn refuse_gone(&self, tenant: TenantId) -> Result<()> {
+        if lock(&self.gone).contains(&tenant) {
+            return Err(SprigError::new(
+                sprig_common::SprigCode::TenantNotReady,
+                format!("tenant {tenant} is being deleted"),
+            ));
+        }
+        Ok(())
     }
 
     /// Forgets what was reconciled for `tenant` (it was deleted).
@@ -210,6 +231,7 @@ impl AuthzServices {
         if self.per_user.load().is_none() {
             return Ok(());
         }
+        self.refuse_gone(cat.tenant)?;
         let placement = crate::exec::router::placement_digest(svc, cat);
         // Chapter 29 (RL30): a changed `rls.backend_enforcement` (a global
         // value changes no catalog version) narrows or widens grants now.
@@ -316,6 +338,8 @@ impl AuthzServices {
             Some(_) => false,
             None => true,
         };
+        // A deletion that began while this reconcile waited.
+        self.refuse_gone(cat.tenant)?;
         let pool = svc.locator.ctl_pool(cluster).await?;
         let mut conn = pool.get_conn().await.map_err(|e| {
             SprigError::new(

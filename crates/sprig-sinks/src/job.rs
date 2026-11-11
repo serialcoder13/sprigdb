@@ -1570,6 +1570,55 @@ impl crate::source::FanInOpener for EnvFanInQueue {
     }
 }
 
+/// The lease tag a queue sink's task takes its messages under (R9,
+/// r9tests): `mq_get`'s fifth argument, one per task claim.
+#[must_use]
+pub fn lease_tag(sink: SinkId, task_no: TaskNo, epoch: TaskEpoch) -> String {
+    format!("sink/{}/{}/{}", sink.0, task_no.0, epoch.0)
+}
+
+/// The lease of worker `worker`'s registration (`workers/<id>` in the DC
+/// tier), which identifies the process now running under that id; `None`
+/// when it isn't registered. An error reads as `Some(-1)`: never taken
+/// for a process that is gone.
+async fn worker_lease(dc: &dyn MetaStore, worker: &str) -> Option<i64> {
+    let key = match dc.tier().key(&format!("workers/{worker}")) {
+        Ok(k) => k,
+        Err(_) => return Some(-1),
+    };
+    match dc.get(&key, sprig_meta::Consistency::Linearizable).await {
+        Ok(kv) => kv.map(|kv| kv.lease.map_or(0, |l| l.0)),
+        Err(e) => {
+            tracing::debug!(worker, error = %e, "can't read a worker's registration");
+            Some(-1)
+        }
+    }
+}
+
+/// The lease tag of a queue task's predecessor whose worker process is
+/// gone (R9, r9tests), so the new task gives its messages back at once:
+/// the predecessor recorded its worker's registration lease when it
+/// claimed the task, and that worker's registration is now missing
+/// (`reg` is `Some(None)`) or bound to another lease (a new process under
+/// the same id). `None` when there is no predecessor, it predates lease
+/// tags, or its process may still run: its messages then return after
+/// their lease, as before.
+#[must_use]
+pub fn dead_lease_tag(
+    sink: SinkId,
+    task_no: TaskNo,
+    prev: Option<&(TaskEpoch, Option<String>, Value)>,
+    reg: Option<Option<i64>>,
+) -> Option<String> {
+    let (epoch, _, part) = prev?;
+    let had = part.get("worker_lease").and_then(Value::as_i64)?;
+    let now = reg?;
+    if had <= 0 || now == Some(had) || now == Some(-1) {
+        return None;
+    }
+    Some(lease_tag(sink, task_no, *epoch))
+}
+
 /// A queue sink's task (R9, r9queue): the sink's own durable queue,
 /// consumed through a gateway as its owner (see `source::QueueSource`).
 #[allow(clippy::too_many_arguments)]
@@ -1595,13 +1644,28 @@ async fn run_queue_task(
         )
     })?;
     let who = run_as(env.as_ref(), tenant, &def, &opts).await?;
+    // R9 (r9tests): the task's predecessor, and whether its worker process
+    // is gone (its etcd registration expired, or a new process took the
+    // worker's id): its leased messages are then given back at once.
+    let me = env.worker_id();
+    let my_lease = worker_lease(env.dc().as_ref(), &me).await;
+    let prev = store.task_claim(&mut c, sink, task_no).await?;
+    let prev_reg = match &prev {
+        Some((_, Some(w), _)) => Some(worker_lease(env.dc().as_ref(), w).await),
+        _ => None,
+    };
+    let release = dead_lease_tag(sink, task_no, prev.as_ref(), prev_reg);
     let epoch = store
         .claim_task(
             &mut c,
             sink,
             task_no,
-            &json!({"source": "queue", "queue": name}),
-            &env.worker_id(),
+            &json!({
+                "source": "queue",
+                "queue": name,
+                "worker_lease": my_lease,
+            }),
+            &me,
         )
         .await?;
     let mut conns = Vec::new();
@@ -1652,7 +1716,9 @@ async fn run_queue_task(
     if queue_order {
         settings.lanes = 1;
     }
-    let source = source.with_queue_order(queue_order);
+    let source = source
+        .with_queue_order(queue_order)
+        .with_lease_tag(lease_tag(sink, task_no, epoch), release);
     let prepare = SinkPrepare {
         condition: def
             .filter_sql
@@ -1852,6 +1918,40 @@ mod tests {
         assert!(!queue_ordering(&o("key")).unwrap());
         assert!(!queue_ordering(&Opts::default()).unwrap());
         assert!(queue_ordering(&o("partition")).is_err());
+    }
+
+    #[test]
+    fn a_dead_predecessors_lease_tag() {
+        // R9 (r9tests): give back a predecessor's leases only when its
+        // worker process is gone.
+        let (s, t) = (SinkId(7), TaskNo(0));
+        let prev = |lease: Value| {
+            (
+                TaskEpoch(3),
+                Some("wkr-1".to_owned()),
+                json!({"source": "queue", "queue": "q", "worker_lease": lease}),
+            )
+        };
+        let p = prev(json!(11));
+        assert_eq!(lease_tag(s, t, TaskEpoch(3)), "sink/7/0/3");
+        // Registration gone, or a new process under the same id.
+        assert_eq!(
+            dead_lease_tag(s, t, Some(&p), Some(None)).as_deref(),
+            Some("sink/7/0/3")
+        );
+        assert_eq!(
+            dead_lease_tag(s, t, Some(&p), Some(Some(12))).as_deref(),
+            Some("sink/7/0/3")
+        );
+        // The same process still runs, or etcd couldn't say.
+        assert_eq!(dead_lease_tag(s, t, Some(&p), Some(Some(11))), None);
+        assert_eq!(dead_lease_tag(s, t, Some(&p), Some(Some(-1))), None);
+        assert_eq!(dead_lease_tag(s, t, Some(&p), None), None);
+        // No predecessor, or one from before lease tags.
+        assert_eq!(dead_lease_tag(s, t, None, Some(None)), None);
+        let old = (TaskEpoch(3), Some("wkr-1".to_owned()), json!({"source": "queue"}));
+        assert_eq!(dead_lease_tag(s, t, Some(&old), Some(None)), None);
+        assert_eq!(dead_lease_tag(s, t, Some(&prev(Value::Null)), Some(None)), None);
         // Change topics keep whole seconds.
         assert_eq!(
             fan_in_created_ms(Some(1_794_000_000_900), true),

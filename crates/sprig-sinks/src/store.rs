@@ -817,6 +817,35 @@ impl SinksStore {
         e.map(TaskEpoch).ok_or_else(|| bad("task row vanished"))
     }
 
+    /// The task's last claim (R9, r9tests): its epoch, worker and source
+    /// part, read before a new claim (a queue task's dead predecessor).
+    pub async fn task_claim<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        sink: SinkId,
+        task_no: TaskNo,
+    ) -> Result<Option<(TaskEpoch, Option<String>, Value)>> {
+        let r: Option<(u64, Option<String>, Option<String>)> = q
+            .exec_first(
+                format!(
+                    "SELECT epoch, worker_id, CAST(source_part AS CHAR) FROM {} \
+                     WHERE sink_id = ? AND task_no = ?",
+                    self.t("sink_tasks")
+                ),
+                (sink.0, task_no.0),
+            )
+            .await
+            .map_err(map_err)?;
+        Ok(r.map(|(e, w, p)| {
+            (
+                TaskEpoch(e),
+                w,
+                p.and_then(|p| serde_json::from_str(&p).ok())
+                    .unwrap_or(Value::Null),
+            )
+        }))
+    }
+
     /// The task's current epoch.
     pub async fn task_epoch<Q: Queryable + Send>(
         &self,

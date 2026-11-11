@@ -16,7 +16,9 @@ pub enum Storage {
     /// The root table holds the shared columns; each subtype adds an
     /// extension table under the same key.
     Joined,
-    /// Every column in the root table (not built in this release).
+    /// Every column in the root table; each subtype keeps an empty table
+    /// of its name with only the key (names, privileges and dump tools
+    /// see it), never read or written.
     SingleTable,
     /// No storage: an entity type for other models.
     None,
@@ -108,6 +110,59 @@ impl FieldDef {
     }
 }
 
+/// The value of a discriminator column that marks a row as one subtype
+/// (`INHERITS (p) WHERE vtype = 'TRUCK'`), as the clause wrote it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DiscValue {
+    /// A string literal's value.
+    Str(String),
+    /// A number's text (`5`, `-1`, `2.5`).
+    Num(String),
+}
+
+impl DiscValue {
+    /// The value as an SQL literal.
+    #[must_use]
+    pub fn sql(&self, no_backslash_escapes: bool) -> String {
+        match self {
+            DiscValue::Str(s) => crate::rewrite::quote_str(s, no_backslash_escapes),
+            DiscValue::Num(n) => n.clone(),
+        }
+    }
+
+    /// The catalog's JSON for a subtype's value.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            DiscValue::Str(s) => serde_json::json!({ "value": s }),
+            DiscValue::Num(n) => serde_json::json!({ "number": n }),
+        }
+    }
+
+    /// Whether `other` (a literal a statement wrote) is this value: strings
+    /// byte for byte, ignoring trailing spaces as `PAD SPACE` collations do;
+    /// numbers by value.
+    #[must_use]
+    pub fn same(&self, other: &DiscValue) -> bool {
+        match (self, other) {
+            (DiscValue::Str(a), DiscValue::Str(b)) => a.trim_end_matches(' ') == b.trim_end_matches(' '),
+            (DiscValue::Num(a), DiscValue::Num(b)) => {
+                a == b
+                    || matches!((a.parse::<f64>(), b.parse::<f64>()), (Ok(x), Ok(y)) if (x - y).abs() == 0.0)
+            }
+            (DiscValue::Num(n), DiscValue::Str(s)) | (DiscValue::Str(s), DiscValue::Num(n)) => {
+                matches!((n.parse::<f64>(), s.trim().parse::<f64>()), (Ok(x), Ok(y)) if (x - y).abs() == 0.0)
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for DiscValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.sql(false))
+    }
+}
+
 /// One type (a `types` row with its own fields).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeDef {
@@ -133,6 +188,13 @@ pub struct TypeDef {
     pub key_fields: Vec<String>,
     /// The fields this type declares; a root's include the key.
     pub own_fields: Vec<FieldDef>,
+    /// A root's discriminator column: the user column whose value says
+    /// which type a row is (`SPRIG_DISCRIMINATOR`, or the column of its
+    /// subtypes' `WHERE`). `None` for subtypes and for roots typed by
+    /// SprigDB's own `_type`.
+    pub discriminator: Option<String>,
+    /// A subtype's discriminator value (`WHERE vtype = 'TRUCK'`).
+    pub disc_value: Option<DiscValue>,
     /// State.
     pub state: TypeState,
     /// Bumped on every change to the row.
@@ -316,7 +378,8 @@ pub struct ResolvedField {
     pub name: String,
     /// The type that declares it (the root for key fields).
     pub owner: TypeId,
-    /// That type's table.
+    /// The table that holds it: the owner's, or the root's in single-table
+    /// storage.
     pub owner_table: String,
     /// Whether it is a key column (every table of the chain has it).
     pub is_key: bool,
@@ -457,13 +520,18 @@ impl DbTypes {
         let Some(root) = chain.first() else {
             return Vec::new();
         };
+        let single = root.storage == Storage::SingleTable;
         let mut out = Vec::new();
         for t in &chain {
             for f in &t.own_fields {
                 out.push(ResolvedField {
                     name: f.name.clone(),
                     owner: t.id,
-                    owner_table: t.name.clone(),
+                    owner_table: if single {
+                        root.name.clone()
+                    } else {
+                        t.name.clone()
+                    },
                     is_key: root.is_key(&f.name),
                 });
             }
@@ -484,6 +552,32 @@ impl DbTypes {
     #[must_use]
     pub fn name_taken(&self, id: TypeId, name: &str) -> bool {
         self.field(id, name).is_some() || self.descendants(id).iter().any(|d| d.owns(name))
+    }
+
+    /// The discriminator column of `id`'s hierarchy, if it has one.
+    #[must_use]
+    pub fn discriminator(&self, id: TypeId) -> Option<String> {
+        self.root_of(id)?.discriminator.clone()
+    }
+
+    /// The storage of `id`'s hierarchy (the root's).
+    #[must_use]
+    pub fn storage(&self, id: TypeId) -> Storage {
+        self.root_of(id).map_or(Storage::Joined, |r| r.storage)
+    }
+
+    /// The type a row of `root`'s hierarchy is when its discriminator
+    /// holds `v`: the subtype that declares `v`, else the root (open
+    /// values: an undeclared value belongs to the root).
+    #[must_use]
+    pub fn type_of_value(&self, root: TypeId, v: &DiscValue) -> Option<Arc<TypeDef>> {
+        let r = self.types.get(&root)?;
+        Some(
+            self.descendants(root)
+                .into_iter()
+                .find(|t| t.disc_value.as_ref().is_some_and(|d| d.same(v)))
+                .unwrap_or_else(|| Arc::clone(r)),
+        )
     }
 
     /// The root key field definitions of `id`'s hierarchy, in key order.
@@ -589,6 +683,8 @@ pub(crate) mod fixtures {
             storage: Storage::Joined,
             key_fields: vec!["id".into()],
             own_fields: own,
+            discriminator: None,
+            disc_value: None,
             state: TypeState::Active,
             version: 1,
         };

@@ -751,6 +751,11 @@ pub struct QueueSource {
     queue_order: bool,
     /// Earlier leases are out of the way (or `queue_order` is off).
     leases_clear: bool,
+    /// This task's lease tag (R9, r9tests): `mq_get` holds its messages
+    /// under it, so a later task can give them back with `mq_release`.
+    tag: Option<String>,
+    /// A dead earlier task's lease tag, released before the first read.
+    release: Option<String>,
 }
 
 impl std::fmt::Debug for QueueSource {
@@ -783,6 +788,56 @@ impl QueueSource {
             idle_ms: 0,
             queue_order: false,
             leases_clear: true,
+            tag: None,
+            release: None,
+        }
+    }
+
+    /// Takes messages under lease tag `tag`, and first gives back those a
+    /// dead earlier task held under `release` (R9, r9tests: chapter 51,
+    /// "Queue sources after a crash"): they return to the queue at once
+    /// instead of after `sink.queue_lease_ms`. The sink's own queue only.
+    #[must_use]
+    pub fn with_lease_tag(mut self, tag: String, release: Option<String>) -> Self {
+        if matches!(self.at, QueueAt::Own { .. }) {
+            self.tag = Some(tag);
+            self.release = release;
+        }
+        self
+    }
+
+    /// Gives back the dead task's messages (see [`Self::with_lease_tag`]).
+    /// A failure is logged: those messages then return after their lease.
+    async fn release_dead(&mut self) {
+        use crate::peer::{SqlOp, quote};
+        let (Some(tag), QueueAt::Own { db, .. }) = (self.release.take(), &self.at) else {
+            return;
+        };
+        let op = SqlOp::Queue {
+            statements: vec![format!(
+                "CALL sprig.mq_release({}, {}, {})",
+                quote(&self.queue),
+                quote(&tag),
+                quote(db)
+            )],
+        };
+        let outcome = match self.run(op).await {
+            Ok(r) => match r.results.into_iter().next().and_then(|x| x.error) {
+                None => Ok(()),
+                Some(e) => Err(e.message),
+            },
+            Err(e) => Err(e.to_string()),
+        };
+        match outcome {
+            Ok(()) => {
+                tracing::info!(queue = %self.queue, tag = %tag, "queue sink: a dead task's leased messages given back");
+                metrics::counter!("sprig_sink_queue_dead_leases_released_total").increment(1);
+            }
+            Err(e) => {
+                tracing::warn!(queue = %self.queue, tag = %tag, error = %e, "queue sink: couldn't give back a dead task's leased messages; they return after their lease");
+                metrics::counter!("sprig_sink_queue_dead_lease_release_failures_total")
+                    .increment(1);
+            }
         }
     }
 
@@ -995,18 +1050,30 @@ impl SourceReader for QueueSource {
         wait: Duration,
     ) -> Result<Vec<SinkRecord>> {
         use crate::peer::{SqlOp, quote};
+        if self.release.is_some() {
+            self.release_dead().await;
+        }
         if !self.leases_clear {
             self.wait_out_leases().await?;
         }
         let n = u32::try_from(max_records.clamp(1, 1000)).unwrap_or(1000);
         let op = match &self.at {
             QueueAt::Own { db, .. } => SqlOp::Queue {
-                statements: vec![format!(
-                    "CALL sprig.mq_get({}, {n}, {}, {})",
-                    quote(&self.queue),
-                    self.lease_ms,
-                    quote(db)
-                )],
+                statements: vec![match &self.tag {
+                    Some(t) => format!(
+                        "CALL sprig.mq_get({}, {n}, {}, {}, {})",
+                        quote(&self.queue),
+                        self.lease_ms,
+                        quote(db),
+                        quote(t)
+                    ),
+                    None => format!(
+                        "CALL sprig.mq_get({}, {n}, {}, {})",
+                        quote(&self.queue),
+                        self.lease_ms,
+                        quote(db)
+                    ),
+                }],
             },
             QueueAt::Member { def, member, db } => SqlOp::FanInGet {
                 def_tenant: def.0,
@@ -1029,6 +1096,12 @@ impl SourceReader for QueueSource {
         };
         let res = r.results.into_iter().next().unwrap_or_default();
         if let Some(e) = &res.error {
+            // A gateway older than lease tags refuses mq_get's fifth
+            // argument (1318): take messages without a tag from then on.
+            if e.code == 1318 && self.tag.take().is_some() {
+                tracing::warn!(queue = %self.queue, "queue sink: the gateway doesn't take lease tags; a crash's leased messages return after their lease");
+                return Ok(Vec::new());
+            }
             self.leases_clear = !self.queue_order;
             return Err(e.error());
         }

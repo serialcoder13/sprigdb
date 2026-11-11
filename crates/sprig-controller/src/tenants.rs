@@ -1087,6 +1087,19 @@ where
             jobs = settled.finished.len(), "deleted tenant's records removed");
         // 6. The entry and its name.
         self.directory.remove(&e).await?;
+        // 7. Decision bugfix-32: a gateway that hadn't seen the deletion
+        //    yet may have made one of the tenant's backend accounts again
+        //    after step 3 (a session's statement, a new login). Look again
+        //    a little later, by exact names, accounts only.
+        if self.locator.schema(id) == SchemaName::catalog(id).to_string() {
+            let pools = Arc::clone(self.locator.pools());
+            tokio::spawn(async move {
+                for wait in LATE_ACCOUNT_SWEEPS {
+                    tokio::time::sleep(wait).await;
+                    late_account_sweep(&*pools, id, &mark).await;
+                }
+            });
+        }
         Ok(Cleanup::Done)
     }
 
@@ -1175,6 +1188,47 @@ where
 
     async fn delete(&self, name: &str, guard: Vec<Cmp>) -> Result<TenantView> {
         TenantService::delete(self, name, &guard).await
+    }
+}
+
+/// When a deleted tenant's backend accounts are looked for again after
+/// its cleanup (decision bugfix-32).
+const LATE_ACCOUNT_SWEEPS: [Duration; 2] = [Duration::from_secs(10), Duration::from_secs(60)];
+
+/// Drops deleted tenant `id`'s backend accounts and name rows that a
+/// gateway made again after its cleanup, on every cluster of the DC, by
+/// exact names (`sprig_cluster::purge`; no schema is touched). A cluster
+/// whose `t<id>_sprig` carries another tenant's mark is left alone.
+async fn late_account_sweep(pools: &dyn crate::catalogs::ClusterPools, id: TenantId, mark: &str) {
+    let clusters = match pools.sweepable().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(tenant = %id, error = %e, "late account sweep: clusters not listed");
+            return;
+        }
+    };
+    for c in clusters {
+        let r = async {
+            let pool = pools.writer(&c).await?;
+            let mut conn = crate::catalogs::acquire(&pool, "late account sweep").await?;
+            let known = sprig_cluster::purge::Known {
+                owner_mark: Some(mark.to_owned()),
+                ..sprig_cluster::purge::Known::default()
+            };
+            sprig_cluster::purge::purge(&mut conn, id, &known).await
+        }
+        .await;
+        match r {
+            Ok(p) if !p.drop_accounts.is_empty() => {
+                tracing::warn!(alert = "TenantAccountMadeAgain", tenant = %id, cluster = %c,
+                    accounts = ?p.drop_accounts.iter().map(|a| a.user.as_str()).collect::<Vec<_>>(),
+                    "a deleted tenant's backend account was made again after its cleanup; dropped");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(tenant = %id, cluster = %c, error = %e, "late account sweep failed");
+            }
+        }
     }
 }
 

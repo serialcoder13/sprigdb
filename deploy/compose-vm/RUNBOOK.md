@@ -87,6 +87,8 @@ One VM is a single point of failure, and its upgrades refuse writes while its ga
 4. On VM 1: `./sprig-vm.sh up` (it registers MariaDB at `SPRIG_PRIVATE_HOST:SPRIG_BACKEND_PORT`), then on VM 2 and VM 3: `./sprig-vm.sh up` (they don't configure anything; the DC's settings are VM 1's).
 5. `./sprig-vm.sh status` on any VM lists the three etcd members, and `./sprig-vm.sh ctl dc show <dc>` names the DC leader.
 
+**Admin calls that only the DC leader serves** (tenant deletion, for example) get 39504 "send the request to the leader, ctl-N" from the other controllers. Run `./sprig-vm.sh ctl` on the VM whose controller leads (`ctl dc show <dc>` names it), or point `sprigctl` at any gateway's HTTPS port (`--endpoint https://<gateway>:<SPRIG_HTTPS_PORT>`), which relays to the leader.
+
 **Kafka clients** connect to each gateway directly (Kafka's Metadata lists every gateway as a broker, at its registered address, which is `SPRIG_PRIVATE_HOST` in this layout), so Kafka clients must reach the VMs' private addresses on the Kafka port; the load balancer only serves their first connection. (`configure` doesn't set the DC-wide `kafka.advertised_host` here: it would name VM 1 for every gateway.)
 
 Open between the VMs only: etcd's client and peer ports, MariaDB's port, the controllers' Admin and internal ports, and the gateways' peer port. The client ports face the load balancer.

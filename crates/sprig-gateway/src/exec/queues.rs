@@ -288,7 +288,8 @@ impl PassSession {
         let n = call.args.len();
         let (lo, hi, name) = match call.call {
             MqCall::Publish => (4, 6, "sprig.mq_publish"),
-            MqCall::Get => (1, 4, "sprig.mq_get"),
+            MqCall::Get => (1, 5, "sprig.mq_get"),
+            MqCall::Release => (2, 3, "sprig.mq_release"),
             MqCall::Ack => (1, 1, "sprig.mq_ack"),
             MqCall::Nack => (1, 2, "sprig.mq_nack"),
             MqCall::Info => (1, 2, "sprig.mq_info"),
@@ -389,7 +390,13 @@ impl PassSession {
                     .sql_vhost(principal, &vhost(3), session)
                     .await
                     .map_err(|e| sql_error(&e))?;
-                let ds = v.get(&queue, max, lease).await.map_err(|e| sql_error(&e))?;
+                // R9 (r9tests): an optional lease tag, so `mq_release` can
+                // give the messages back (a queue sink's dead task's).
+                let tag = text(4);
+                let ds = v
+                    .get_tagged(&queue, max, lease, tag.as_deref())
+                    .await
+                    .map_err(|e| sql_error(&e))?;
                 let rows = ds
                     .iter()
                     .map(|d| {
@@ -424,6 +431,17 @@ impl PassSession {
                     ],
                     rows,
                 ))
+            }
+            // R9 (r9tests): a lease tag's messages back to the queue now.
+            MqCall::Release => {
+                let v = engine
+                    .sql_vhost(principal, &vhost(2), session)
+                    .await
+                    .map_err(|e| sql_error(&e))?;
+                v.release_tag(&text(0).unwrap_or_default(), &text(1).unwrap_or_default())
+                    .await
+                    .map_err(|e| sql_error(&e))?;
+                Ok(Reply::Ok(0))
             }
             // R9 (r9cluster), for Studio's queue pages (ST50).
             MqCall::Info => {

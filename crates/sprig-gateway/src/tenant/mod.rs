@@ -268,23 +268,40 @@ fn close_deleted_tenants(svc: &Arc<TenantServices>) {
             match store.watch(&prefix, 0).await {
                 Ok(mut w) => {
                     while let Some(ev) = w.next().await {
-                        let Ok(WatchEvent::Delete { key, .. }) = ev else {
-                            if ev.is_err() {
-                                break;
-                            }
-                            continue;
+                        let id_of = |key: &sprig_meta::Key| {
+                            key.as_str()
+                                .strip_prefix(prefix.as_str())
+                                .and_then(|r| r.parse::<u64>().ok())
+                                .map(TenantId)
                         };
-                        let Some(t) = key
-                            .as_str()
-                            .strip_prefix(prefix.as_str())
-                            .and_then(|r| r.parse::<u64>().ok())
-                            .map(TenantId)
-                        else {
+                        let key = match ev {
+                            Ok(WatchEvent::Delete { key, .. }) => key,
+                            // Decision bugfix-32: a tenant marked `deleting`
+                            // gets no backend account made again here.
+                            Ok(WatchEvent::Put(kv)) => {
+                                let deleting = sprig_meta::Record::<
+                                    crate::inherited::DirEntry,
+                                >::decode(&kv.value)
+                                .is_ok_and(|r| {
+                                    matches!(r.body.state.as_str(), "deleting" | "deleted")
+                                });
+                                if deleting
+                                    && let (Some(t), Some(svc)) = (id_of(&kv.key), weak.upgrade())
+                                {
+                                    svc.authz.deleting(t);
+                                }
+                                continue;
+                            }
+                            Ok(_) => continue,
+                            Err(_) => break,
+                        };
+                        let Some(t) = id_of(&key) else {
                             continue;
                         };
                         let Some(svc) = weak.upgrade() else {
                             return;
                         };
+                        svc.authz.deleting(t);
                         svc.locator.retire_tenant(t);
                         svc.authz.forget(t);
                         tracing::info!(tenant = %t, "tenant deleted: its backend connections closed");
