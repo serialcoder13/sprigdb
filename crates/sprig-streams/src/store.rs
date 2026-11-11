@@ -89,6 +89,20 @@ pub const ALTER_STREAM_OFFSETS_INSTANCE: &str = "ALTER TABLE stream_offsets \
   DROP PRIMARY KEY, \
   ADD PRIMARY KEY (group_name, instance_tenant_id, stream_id, partition_no)";
 
+/// `stream_fanin_topics` (chapter 45, R9, r9queue): the ids under which a
+/// fan-in reader sees its members' instances as Kafka topics. A topic's
+/// stream id is bit 62 plus `fanin_id`, so any 64-bit tenant id and stream
+/// id work (the earlier packing of both into the id capped tenant ids at
+/// 2^38). Rows are never changed; a member's instance keeps its id.
+pub const DDL_STREAM_FANIN_TOPICS: &str = "CREATE TABLE IF NOT EXISTS stream_fanin_topics (
+  fanin_id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  instance_tenant_id BIGINT UNSIGNED NOT NULL,
+  stream_id          BIGINT UNSIGNED NOT NULL,
+  created_at         DATETIME(3) NOT NULL,
+  PRIMARY KEY (fanin_id),
+  UNIQUE KEY uk_fanin_instance (instance_tenant_id, stream_id)
+) ENGINE=InnoDB";
+
 /// The module's migrations.
 pub static STREAMS_MIGRATIONS: &[Migration] = &[
     Migration {
@@ -102,6 +116,12 @@ pub static STREAMS_MIGRATIONS: &[Migration] = &[
         phase: Phase::Expand,
         name: "stream_offsets.instance_tenant_id (fan-in positions)",
         statements: &[ALTER_STREAM_OFFSETS_INSTANCE],
+    },
+    Migration {
+        format: 3,
+        phase: Phase::Expand,
+        name: "stream_fanin_topics (fan-in topic ids for any tenant id)",
+        statements: &[DDL_STREAM_FANIN_TOPICS],
     },
 ];
 
@@ -531,6 +551,65 @@ impl StreamsStore {
         .map_err(map_err)
     }
 
+    /// The fan-in topic id of member `member`'s instance stream `stream`
+    /// in this (the reader's) catalog, assigned on first use
+    /// (`stream_fanin_topics`).
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn fanin_topic_id<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        member: u64,
+        stream: u64,
+    ) -> Result<u64> {
+        let t = self.t("stream_fanin_topics");
+        let sel = format!(
+            "SELECT fanin_id FROM {t} WHERE instance_tenant_id = ? AND stream_id = ?"
+        );
+        if let Some(id) = q
+            .exec_first::<u64, _, _>(sel.as_str(), (member, stream))
+            .await
+            .map_err(map_err)?
+        {
+            return Ok(id);
+        }
+        q.exec_drop(
+            format!(
+                "INSERT IGNORE INTO {t} (instance_tenant_id, stream_id, created_at) \
+                 VALUES (?, ?, UTC_TIMESTAMP(3))"
+            ),
+            (member, stream),
+        )
+        .await
+        .map_err(map_err)?;
+        q.exec_first::<u64, _, _>(sel.as_str(), (member, stream))
+            .await
+            .map_err(map_err)?
+            .ok_or_else(|| SprigError::internal("a fan-in topic id vanished"))
+    }
+
+    /// `(member, stream)` of fan-in topic id `id` in this catalog; `None`
+    /// for an id never assigned.
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn fanin_topic<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        id: u64,
+    ) -> Result<Option<(u64, u64)>> {
+        q.exec_first(
+            format!(
+                "SELECT instance_tenant_id, stream_id FROM {} WHERE fanin_id = ?",
+                self.t("stream_fanin_topics")
+            ),
+            (id,),
+        )
+        .await
+        .map_err(map_err)
+    }
+
     /// Every committed offset of a group (`OffsetFetch` without topics),
     /// by stream and partition.
     ///
@@ -737,9 +816,11 @@ mod tests {
     #[test]
     fn module_is_well_formed() {
         Migrator::new(&[STREAMS_MODULE]).unwrap();
-        assert_eq!(STREAMS_MODULE.newest(), 2);
+        assert_eq!(STREAMS_MODULE.newest(), 3);
         // Migration 2 (R9 fan-in): the column and the key with it.
         assert!(STREAMS_MIGRATIONS[1].statements[0].contains("instance_tenant_id"));
+        // Migration 3 (r9queue): fan-in topic ids by lookup.
+        assert!(STREAMS_MIGRATIONS[2].statements[0].contains("stream_fanin_topics"));
         for ddl in STREAMS_MIGRATIONS[0].statements {
             assert!(ddl.starts_with("CREATE TABLE IF NOT EXISTS "));
         }

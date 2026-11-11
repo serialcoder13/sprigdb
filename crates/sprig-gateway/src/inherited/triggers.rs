@@ -494,6 +494,7 @@ async fn deploy(
             tenant_name: &tname,
             source_db: (db_row.db_id.0, &db_row.name),
             object_id: src.object_id,
+            fanin_declarer: 0,
         },
     )
     .await

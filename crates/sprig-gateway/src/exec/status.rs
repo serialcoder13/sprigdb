@@ -64,6 +64,10 @@ pub(crate) struct SessionStatus {
     /// multi-statement and each prepared-statement command.
     questions: u64,
     counts: BTreeMap<&'static str, u64>,
+    /// The front end's own answers (`Session::local_questions`,
+    /// `local_selects`), as last seen.
+    local_questions: u64,
+    local_selects: u64,
 }
 
 impl SessionStatus {
@@ -100,9 +104,15 @@ impl SessionStatus {
         let up = uptime_secs().to_string();
         let mut rows: Vec<(&'static str, String)> = COUNTED
             .iter()
-            .map(|&n| (n, self.counts.get(n).copied().unwrap_or(0).to_string()))
+            .map(|&n| {
+                let mut v = self.counts.get(n).copied().unwrap_or(0);
+                if n == "Com_select" {
+                    v += self.local_selects;
+                }
+                (n, v.to_string())
+            })
             .collect();
-        rows.push(("Questions", self.questions.to_string()));
+        rows.push(("Questions", (self.questions + self.local_questions).to_string()));
         rows.push(("Uptime", up.clone()));
         rows.push(("Uptime_since_flush_status", up));
         rows.push(("Prepared_stmt_count", prepared.to_string()));
@@ -113,8 +123,10 @@ impl SessionStatus {
 impl super::PassSession {
     /// Counts a request in the session's status before it runs, as MySQL
     /// counts at dispatch.
-    pub(super) fn count_request(&mut self, req: &crate::pipeline::Request) {
+    pub(super) fn count_request(&mut self, req: &crate::pipeline::Request, session: &crate::session::Session) {
         use crate::pipeline::Request;
+        self.status.local_questions = session.local_questions;
+        self.status.local_selects = session.local_selects;
         match req {
             Request::Query { sql, .. } => {
                 if sql.contains(&b';') {
@@ -342,7 +354,8 @@ mod tests {
         assert_eq!(rows["Com_stmt_prepare"], "1");
         assert_eq!(rows["Com_show_status"], "1");
         assert_eq!(rows["Com_update"], "0");
-        assert_eq!(rows["Questions"], "5");
+        // The prepare isn't a question, as in MySQL.
+        assert_eq!(rows["Questions"], "4");
         assert_eq!(rows["Prepared_stmt_count"], "1");
         assert!(rows["Uptime"].parse::<u64>().is_ok());
     }

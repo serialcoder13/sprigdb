@@ -371,25 +371,27 @@ impl SourceReader for StreamSource {
 /// The header naming a record's member.
 pub const TENANT_HEADER: &str = "x-sprig-tenant";
 
-/// The stream id a fan-in task's positions carry for member `member`'s
-/// instance stream `stream` (as the Kafka fan-in topics pack them: bit
-/// 62, the member's id shifted by 24, the stream id), so positions of
-/// two members never collide. Members below 2^38, streams below 2^24.
-#[must_use]
-pub fn fanin_stream_id(member: u64, stream: u64) -> Option<u64> {
-    (member < (1 << 38) && stream < (1 << 24)).then_some((1 << 62) | (member << 24) | stream)
-}
+/// Marks a fan-in task's position stream ids: bit 62 plus the member
+/// instance's slot in the task (R9, r9queue). Slots are numbered as
+/// members join and are never reused within a task, so positions of two
+/// members never collide, for any 64-bit tenant and stream ids. (r9final
+/// packed the member's id and the stream id into it, which capped tenant
+/// ids at 2^38.) Positions of fan-in tasks live only in the task: a
+/// member instance's offsets are stored with its own stream id and
+/// `instance_tenant_id`.
+pub const FANIN_SLOT_FLAG: u64 = 1 << 62;
 
-/// The member a fan-in record came from (its position's packed stream
-/// id); `None` for a record of the sink's own tenant.
+/// The member a fan-in record came from: the `<member>:` its idempotency
+/// key starts with (keys of other sources start with `s/`, `q/` or `c/`,
+/// and replayed dead letters keep their keys); `None` for a record of the
+/// sink's own tenant.
 #[must_use]
 pub fn record_member(r: &crate::model::SinkRecord) -> Option<u64> {
-    match &r.pos {
-        crate::model::Position::Stream { stream, .. } if stream & (1 << 62) != 0 => {
-            Some((stream >> 24) & ((1 << 38) - 1))
-        }
-        _ => None,
+    let (head, _) = r.idem_key.split_once(':')?;
+    if head.is_empty() || !head.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
     }
+    head.parse().ok()
 }
 
 /// One member's instance, as a fan-in task reads it.
@@ -425,8 +427,9 @@ struct Child {
 
 /// A fan-in task's source: every member instance it reads, in turn; new
 /// instances join at each refresh. Records are tagged with their member
-/// (`x-sprig-tenant`), their idempotency keys start with the member's id,
-/// and their positions carry [`fanin_stream_id`].
+/// (`x-sprig-tenant`), their idempotency keys start with the member's id
+/// (`<member>:`), and their positions carry the member's slot
+/// ([`FANIN_SLOT_FLAG`]).
 pub struct FanInSource {
     opener: Box<dyn FanInOpener>,
     /// `CHANGES OF`: the tables' change topics of the sink's own tenant;
@@ -437,6 +440,8 @@ pub struct FanInSource {
     refresh: Duration,
     next_refresh: tokio::time::Instant,
     turn: usize,
+    /// The next member instance's slot ([`FANIN_SLOT_FLAG`]).
+    next_slot: u64,
 }
 
 impl std::fmt::Debug for FanInSource {
@@ -461,6 +466,7 @@ impl FanInSource {
             refresh,
             next_refresh: tokio::time::Instant::now(),
             turn: 0,
+            next_slot: 0,
         };
         s.refresh_members().await?;
         Ok(s)
@@ -480,6 +486,7 @@ impl FanInSource {
             refresh: Duration::from_secs(3600),
             next_refresh: tokio::time::Instant::now(),
             turn: 0,
+            next_slot: 0,
         };
         s.refresh_members().await?;
         Ok(s)
@@ -502,18 +509,12 @@ impl FanInSource {
             {
                 continue;
             }
-            let Some(packed) = fanin_stream_id(m.tenant, m.stream) else {
-                tracing::warn!(
-                    member = m.tenant,
-                    stream = m.stream,
-                    "fan-in sink: member or stream id too large to read"
-                );
-                continue;
-            };
+            let packed = FANIN_SLOT_FLAG | self.next_slot;
             match self.opener.open(&m, parts).await {
                 Ok(src) => {
                     tracing::debug!(member = m.tenant, "fan-in sink: member joined");
                     metrics::counter!("sprig_sink_fanin_members_joined_total").increment(1);
+                    self.next_slot += 1;
                     self.children.push(Child {
                         member: m,
                         packed,
@@ -780,9 +781,13 @@ mod fan_in_tests {
         // A header the record already had is kept (inherited instances are
         // stamped by the server).
         assert_eq!(tag(a[1]).as_deref(), Some("forged-stays"));
-        let pa = fanin_stream_id(11, 7).unwrap();
-        let pb = fanin_stream_id(12, 7).unwrap();
-        assert_ne!(pa, pb);
+        let pa = FANIN_SLOT_FLAG;
+        let pb = FANIN_SLOT_FLAG | 1;
+        assert_eq!(record_member(a[0]), Some(11));
+        assert!(
+            got.iter()
+                .any(|r| matches!(r.pos, Position::Stream { stream, .. } if stream == pb))
+        );
         assert!(matches!(a[0].pos, Position::Stream { stream, .. } if stream == pa));
         // Settling goes back to each member with its own stream id.
         let done: Vec<Position> = got.iter().map(|r| r.pos.clone()).collect();
@@ -796,12 +801,54 @@ mod fan_in_tests {
         assert_eq!(st.iter().filter(|(m, _)| *m == 11).count(), 2);
     }
 
-    #[test]
-    fn packing_limits() {
-        assert!(fanin_stream_id(1 << 38, 1).is_none());
-        assert!(fanin_stream_id(1, 1 << 24).is_none());
-        assert_eq!(fanin_stream_id(3, 5), Some((1 << 62) | (3 << 24) | 5));
-        let packed = fanin_stream_id(252_530_600_004, 7).unwrap();
-        assert_eq!((packed >> 24) & ((1 << 38) - 1), 252_530_600_004);
+    #[tokio::test]
+    async fn members_beyond_2_38_and_own_changes_untagged() {
+        // R9 (r9queue): any 64-bit member id.
+        let big = (1u64 << 40) + 3;
+        let settled = Arc::new(Mutex::new(Vec::new()));
+        let mut s = FanInSource::open(
+            Box::new(Opener {
+                members: vec![(big, "big"), (u64::MAX - 1, "max")],
+                settled: Arc::clone(&settled),
+            }),
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        assert_eq!(s.members(), vec![big, u64::MAX - 1]);
+        let got = s.next_batch(100, 1 << 20, Duration::ZERO).await.unwrap();
+        assert_eq!(got.len(), 4);
+        let mut members: Vec<u64> = got.iter().filter_map(record_member).collect();
+        members.dedup();
+        assert_eq!(members, vec![big, u64::MAX - 1]);
+        let done: Vec<Position> = got.iter().map(|r| r.pos.clone()).collect();
+        s.settle(&done).await.unwrap();
+        let st = settled.lock().unwrap();
+        assert_eq!(st.iter().filter(|(m, _)| *m == big).count(), 2);
+        assert!(
+            st.iter()
+                .all(|(_, p)| matches!(p, Position::Stream { stream: 7, .. }))
+        );
+        // Records of other sources name no member.
+        assert_eq!(record_member(&rec(7, 0, None)), None);
+        let mut r = rec(7, 0, None);
+        r.idem_key = "q/412/01JC7A3M4Z".into();
+        assert_eq!(record_member(&r), None);
+        r.idem_key = ":x".into();
+        assert_eq!(record_member(&r), None);
+    }
+
+    #[tokio::test]
+    async fn change_topics_are_not_members() {
+        let settled = Arc::new(Mutex::new(Vec::new()));
+        let mut s = FanInSource::open_changes(Box::new(Opener {
+            members: vec![(26_306_000_001, "")],
+            settled: Arc::clone(&settled),
+        }))
+        .await
+        .unwrap();
+        let got = s.next_batch(100, 1 << 20, Duration::ZERO).await.unwrap();
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().all(|r| record_member(r).is_none()));
     }
 }

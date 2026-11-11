@@ -79,6 +79,26 @@ pub const DDL_MESSAGE_SOURCES: &str = "CREATE TABLE IF NOT EXISTS logic_message_
   KEY by_module (module_id)
 ) ENGINE=InnoDB";
 
+/// Migration 4 (R9, r9queue): a fan-in trigger's definition is named by
+/// `fanin_declarer` and `object_id` = [`FANIN_SOURCE_FLAG`] | the
+/// definition's object id, so any 64-bit declarer id works. Earlier rows
+/// packed the declarer into `object_id` (declarers below 2^38); the two
+/// updates rewrite them, the binding's `object_id` first (it is read
+/// through the source row's old value), each once (`fanin_declarer = 0`).
+pub const DDL_SOURCES_FANIN_DECLARER: &str = "ALTER TABLE logic_message_sources \
+     ADD COLUMN IF NOT EXISTS fanin_declarer BIGINT UNSIGNED NOT NULL DEFAULT 0";
+/// Migration 4: the bindings of packed fan-in sources.
+pub const DML_BINDINGS_FANIN_UNPACK: &str = "UPDATE logic_bindings b \
+     JOIN logic_message_sources s ON s.binding_id = b.binding_id \
+     SET b.object_id = (1 << 62) | (s.object_id & 16777215) \
+     WHERE s.fanin_declarer = 0 AND (s.object_id & (1 << 62)) <> 0 AND (s.object_id >> 63) = 0";
+/// Migration 4: packed fan-in sources (MariaDB assigns left to right, so
+/// `fanin_declarer` reads the old `object_id`).
+pub const DML_SOURCES_FANIN_UNPACK: &str = "UPDATE logic_message_sources \
+     SET fanin_declarer = (object_id & ~(1 << 62)) >> 24, \
+         object_id = (1 << 62) | (object_id & 16777215) \
+     WHERE fanin_declarer = 0 AND (object_id & (1 << 62)) <> 0 AND (object_id >> 63) = 0";
+
 /// The job kind of a trigger on a stream.
 pub const STREAM_JOB_KIND: &str = "logic_stream_trigger";
 /// The job kind of a trigger on a queue.
@@ -105,6 +125,26 @@ pub struct SourceRow {
     pub definer_user_id: u32,
     /// The tenant's name (a definer session is opened by name).
     pub tenant_name: String,
+    /// A fan-in trigger's definition's declaring tenant; 0 otherwise
+    /// (migration 4).
+    #[serde(default)]
+    pub fanin_declarer: u64,
+}
+
+impl SourceRow {
+    /// `(declarer, object)` of a fan-in trigger's definition; `None` for
+    /// an ordinary trigger. Rows written before migration 4 carry both in
+    /// `object_id`.
+    #[must_use]
+    pub fn fanin_definition(&self) -> Option<(u64, u64)> {
+        if self.object_id & FANIN_SOURCE_FLAG == 0 || self.object_id >> 63 != 0 {
+            return None;
+        }
+        if self.fanin_declarer != 0 {
+            return Some((self.fanin_declarer, self.object_id & !FANIN_SOURCE_FLAG));
+        }
+        legacy_fanin_parts(self.object_id)
+    }
 }
 
 impl<'de> Deserialize<'de> for SourceKind {
@@ -134,20 +174,22 @@ pub async fn put_source(c: &mut Conn, schema: &str, s: &SourceRow) -> Result<()>
     c.exec_drop(
         format!(
             "REPLACE INTO {}.logic_message_sources (binding_id, module_id, kind, db_id, db_name, \
-             name, object_id, definer_user_id, tenant_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             name, object_id, definer_user_id, tenant_name, fanin_declarer) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             quote(schema)
         ),
-        (
-            s.binding_id,
-            s.module_id,
-            s.kind.as_str(),
-            s.db_id,
-            &s.db_name,
-            &s.name,
-            s.object_id,
-            s.definer_user_id,
-            &s.tenant_name,
-        ),
+        mysql_async::Params::Positional(vec![
+            s.binding_id.into(),
+            s.module_id.into(),
+            s.kind.as_str().into(),
+            s.db_id.into(),
+            s.db_name.as_str().into(),
+            s.name.as_str().into(),
+            s.object_id.into(),
+            s.definer_user_id.into(),
+            s.tenant_name.as_str().into(),
+            s.fanin_declarer.into(),
+        ]),
     )
     .await
     .map_err(map_err)
@@ -159,24 +201,39 @@ pub async fn put_source(c: &mut Conn, schema: &str, s: &SourceRow) -> Result<()>
 /// # Errors
 /// 39070 or a backend error other than a missing table.
 pub async fn source(c: &mut Conn, schema: &str, binding_id: u64) -> Result<Option<SourceRow>> {
-    type T = (u64, u64, String, u32, String, String, u64, u32, String);
-    let r: std::result::Result<Option<T>, _> = c
-        .exec_first(
-            format!(
-                "SELECT binding_id, module_id, kind, db_id, db_name, name, object_id, \
-                 definer_user_id, tenant_name FROM {}.logic_message_sources WHERE binding_id = ?",
-                quote(schema)
-            ),
-            (binding_id,),
+    type T = (u64, u64, String, u32, String, String, u64, u32, String, u64);
+    let q = |declarer: &str| {
+        format!(
+            "SELECT binding_id, module_id, kind, db_id, db_name, name, object_id, \
+             definer_user_id, tenant_name, {declarer} FROM {}.logic_message_sources \
+             WHERE binding_id = ?",
+            quote(schema)
         )
-        .await;
+    };
+    let mut r: std::result::Result<Option<T>, _> =
+        c.exec_first(q("fanin_declarer"), (binding_id,)).await;
+    if matches!(&r, Err(mysql_async::Error::Server(s)) if s.code == 1054) {
+        // A catalog before migration 4 (its rows decode the old way).
+        r = c.exec_first(q("0"), (binding_id,)).await;
+    }
     let row = match r {
         Ok(r) => r,
         Err(mysql_async::Error::Server(s)) if s.code == 1146 => return Ok(None),
         Err(e) => return Err(map_err(e)),
     };
     Ok(row.map(
-        |(binding_id, module_id, kind, db_id, db_name, name, object_id, definer, tenant_name)| {
+        |(
+            binding_id,
+            module_id,
+            kind,
+            db_id,
+            db_name,
+            name,
+            object_id,
+            definer,
+            tenant_name,
+            fanin_declarer,
+        )| {
             SourceRow {
                 binding_id,
                 module_id,
@@ -191,6 +248,7 @@ pub async fn source(c: &mut Conn, schema: &str, binding_id: u64) -> Result<Optio
                 object_id,
                 definer_user_id: definer,
                 tenant_name,
+                fanin_declarer,
             }
         },
     ))
@@ -242,17 +300,18 @@ impl MsgIndex {
 pub const FANIN_SOURCE_FLAG: u64 = 1 << 62;
 const FANIN_OBJECT_BITS: u32 = 24;
 
-/// A fan-in trigger's source id for definition `(declarer, object)`;
-/// `None` when the ids don't fit (declarer up to 2^38, object up to 2^24).
+/// A fan-in trigger's source `object_id` for its definition's object id
+/// `object` (the declarer goes into `fanin_declarer`, R9 r9queue); `None`
+/// for an id that doesn't fit below the flag.
 #[must_use]
-pub fn fanin_source_id(declarer: u64, object: u64) -> Option<u64> {
-    (declarer < (1 << 38) && object < (1 << FANIN_OBJECT_BITS))
-        .then_some(FANIN_SOURCE_FLAG | (declarer << FANIN_OBJECT_BITS) | object)
+pub fn fanin_source_id(object: u64) -> Option<u64> {
+    (object < FANIN_SOURCE_FLAG).then_some(FANIN_SOURCE_FLAG | object)
 }
 
-/// `(declarer, object)` of a fan-in trigger's source id.
+/// `(declarer, object)` of a source `object_id` written before migration
+/// 4, which packed the declarer (below 2^38) above a 24-bit object id.
 #[must_use]
-pub fn fanin_source_parts(id: u64) -> Option<(u64, u64)> {
+fn legacy_fanin_parts(id: u64) -> Option<(u64, u64)> {
     (id & FANIN_SOURCE_FLAG != 0 && id & (1 << 63) == 0).then_some((
         (id & !FANIN_SOURCE_FLAG) >> FANIN_OBJECT_BITS,
         id & ((1 << FANIN_OBJECT_BITS) - 1),
@@ -523,6 +582,8 @@ pub struct MsgTarget<'a> {
     pub source_db: (u32, &'a str),
     /// The stream's or queue's id.
     pub object_id: u64,
+    /// A fan-in trigger's definition's declaring tenant; 0 otherwise.
+    pub fanin_declarer: u64,
 }
 
 /// What [`deploy`] did.
@@ -832,6 +893,7 @@ pub async fn deploy(d: &Declaration, t: MsgTarget<'_>) -> Result<Deployed> {
         object_id: t.object_id,
         definer_user_id: t.user_id,
         tenant_name: t.tenant_name.to_owned(),
+        fanin_declarer: t.fanin_declarer,
     };
     put_source(t.catalog, t.catalog_schema, &row).await?;
     if moved && let Some(o) = &old_source {
@@ -1069,11 +1131,30 @@ mod tests {
 
     #[test]
     fn fan_in_source_ids() {
-        let id = fanin_source_id(26_306_000_002, 77).unwrap();
-        assert_eq!(fanin_source_parts(id), Some((26_306_000_002, 77)));
-        assert_eq!(fanin_source_parts(77), None);
-        assert_eq!(fanin_source_id(1 << 38, 1), None);
-        assert_eq!(fanin_source_id(1, 1 << 24), None);
+        // Rows written before migration 4 packed the declarer.
+        let packed = FANIN_SOURCE_FLAG | (26_306_000_002 << FANIN_OBJECT_BITS) | 77;
+        assert_eq!(legacy_fanin_parts(packed), Some((26_306_000_002, 77)));
+        assert_eq!(legacy_fanin_parts(77), None);
+        let mut row = SourceRow {
+            binding_id: 1,
+            module_id: 2,
+            kind: SourceKind::Stream,
+            db_id: 1,
+            db_name: "security".into(),
+            name: "user_events".into(),
+            object_id: packed,
+            definer_user_id: 1,
+            tenant_name: "system".into(),
+            fanin_declarer: 0,
+        };
+        assert_eq!(row.fanin_definition(), Some((26_306_000_002, 77)));
+        // Now: any 64-bit declarer (r9queue).
+        row.object_id = fanin_source_id(77).unwrap();
+        row.fanin_declarer = (1 << 40) + 5;
+        assert_eq!(row.fanin_definition(), Some(((1 << 40) + 5, 77)));
+        assert_eq!(fanin_source_id(1 << 62), None);
+        row.object_id = 77;
+        assert_eq!(row.fanin_definition(), None, "an ordinary trigger");
     }
 
     #[test]

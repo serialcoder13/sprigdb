@@ -44,6 +44,8 @@ pub mod logic;
 pub mod messaging;
 pub mod mfa;
 pub mod ops;
+// Round 4: the row-level security tester (chapter 44 step 18).
+pub mod policies;
 // Chapter 52: the approvals inbox.
 pub mod recommendations;
 pub mod session;
@@ -843,6 +845,7 @@ pub async fn handle(
         (_, p) if p == "/v1/ops" || p.starts_with("/v1/ops/") => ops::route(core, info, req).await,
         (_, p) if logic::is_logic_path(p) => logic::route(core, info, req).await,
         (_, p) if messaging::is_messaging_path(p) => messaging::route(core, info, req).await,
+        ("POST", "/v1/policies:testAs") => policies::test_as(core, info, req).await,
         ("GET", p) if p == "/v1/shards" || p.starts_with("/v1/shards/") => {
             match core
                 .caller(info, hdr(&req, "authorization"), None, hdr(&req, "host"))

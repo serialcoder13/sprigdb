@@ -88,6 +88,9 @@ export function Shell() {
           <NavLink to={`${base}/settings`}>
             <FormattedMessage id="nav.settings" />
           </NavLink>
+          <NavLink to={`${base}/policies`}>
+            <FormattedMessage id="nav.policies" />
+          </NavLink>
           <NavLink to={`${base}/access/users`}>
             <FormattedMessage id="nav.access" />
           </NavLink>

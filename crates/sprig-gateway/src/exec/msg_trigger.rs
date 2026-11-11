@@ -207,7 +207,7 @@ impl PassSession {
                 if !allows(sprig_auth::authz::Action::Select, &def.db_name, &def.name) {
                     return Err(denied(ts, "SELECT", &def.db_name, &def.name));
                 }
-                let id = messages::fanin_source_id(def.declarer.0, def.object_id)
+                let id = messages::fanin_source_id(def.object_id)
                     .ok_or_else(|| SprigError::internal("a definition id too large for fan-in"))?;
                 let r = cat
                     .database(&database_key(&def.db_name, lctn))
@@ -300,6 +300,7 @@ impl PassSession {
                 tenant_name: &tenant_name,
                 source_db: (source_db_row.db_id.0, &source_db_row.name),
                 object_id,
+                fanin_declarer: fanin_def.as_ref().map_or(0, |d| d.declarer.0),
             },
         )
         .await?;

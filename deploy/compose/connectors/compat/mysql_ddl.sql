@@ -1,0 +1,39 @@
+-- Translator rules of R4 round 3 (chapter 28): NOT NULL on generated
+-- columns (gaps row 49), MySQL's default collations (rows 58, 60),
+-- LATERAL (step 9) and functional key parts (step 10).
+DROP TABLE IF EXISTS c_md_g, c_md_u, c_md_c, c_md_o, c_md_f;
+CREATE TABLE c_md_g (a INT, b INT AS (a+1) NOT NULL, c INT GENERATED ALWAYS AS (a*2) STORED NOT NULL, d INT AS (a) VIRTUAL NULL);
+SHOW CREATE TABLE c_md_g;
+SELECT COLUMN_NAME, IS_NULLABLE, EXTRA FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'c_md_g' ORDER BY ORDINAL_POSITION;
+SELECT COUNT(*) FROM information_schema.CHECK_CONSTRAINTS WHERE CONSTRAINT_SCHEMA = DATABASE();
+SHOW COLUMNS FROM c_md_g;
+INSERT INTO c_md_g (a) VALUES (1);
+INSERT INTO c_md_g (a) VALUES (NULL);
+SELECT * FROM c_md_g;
+ALTER TABLE c_md_g ADD COLUMN e INT AS (a + 5) VIRTUAL NOT NULL;
+SHOW CREATE TABLE c_md_g;
+CREATE TABLE c_md_u (c VARCHAR(5) CHARACTER SET utf8mb3, d VARCHAR(5) CHARACTER SET utf8mb4, e VARCHAR(5) CHARSET ucs2);
+SHOW CREATE TABLE c_md_u;
+SELECT COLUMN_NAME, COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'c_md_u' ORDER BY ORDINAL_POSITION;
+SELECT @@collation_connection, @@collation_database, @@collation_server;
+SELECT @@session.collation_connection AS cc, CONCAT('x', @@collation_server) AS cs;
+SHOW VARIABLES LIKE 'collation%';
+CREATE TABLE c_md_c (id INT PRIMARY KEY, name VARCHAR(10));
+CREATE TABLE c_md_o (id INT PRIMARY KEY, cid INT, amt INT, KEY (cid));
+INSERT INTO c_md_c VALUES (1,'a'),(2,'b'),(3,'c');
+INSERT INTO c_md_o VALUES (1,1,10),(2,1,30),(3,1,20),(4,2,5),(5,2,7);
+SELECT c.name, l.amt FROM c_md_c c JOIN LATERAL (SELECT o.amt FROM c_md_o o WHERE o.cid = c.id ORDER BY o.amt DESC LIMIT 2) AS l ORDER BY c.name, l.amt;
+SELECT c.name, l.amt FROM c_md_c c, LATERAL (SELECT amt FROM c_md_o o WHERE o.cid = c.id AND o.amt > 6 ORDER BY amt LIMIT 1) l ORDER BY c.name;
+SELECT c.name, l.amt FROM c_md_c c LEFT JOIN LATERAL (SELECT o.amt FROM c_md_o o WHERE o.cid = c.id ORDER BY o.amt LIMIT 1) AS l ON TRUE ORDER BY c.name;
+SELECT c.name, l.total, l.top FROM c_md_c c JOIN LATERAL (SELECT SUM(o.amt) AS total, MAX(o.amt) AS top FROM c_md_o o WHERE o.cid = c.id) AS l ORDER BY c.name;
+SELECT c.name, l.n FROM c_md_c c, LATERAL (SELECT COUNT(*) AS n FROM c_md_o o WHERE o.cid = c.id) AS l ORDER BY c.name;
+CREATE TABLE c_md_f (id INT PRIMARY KEY, email VARCHAR(64) NOT NULL, d DATE, INDEX c_md_fi ((lower(email))), KEY c_md_fy ((year(d)) DESC));
+INSERT INTO c_md_f VALUES (1, 'A@x.org', '2024-05-01'), (2, 'b@X.org', '2025-01-02');
+SHOW CREATE TABLE c_md_f;
+SHOW INDEX FROM c_md_f;
+SELECT INDEX_NAME, COLUMN_NAME, EXPRESSION FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'c_md_f' ORDER BY INDEX_NAME, SEQ_IN_INDEX;
+SELECT id FROM c_md_f WHERE lower(email) = 'a@x.org';
+SELECT * FROM c_md_f ORDER BY id;
+CREATE INDEX c_md_fc ON c_md_f ((CAST(id * 2 AS UNSIGNED)));
+SELECT INDEX_NAME, COLUMN_NAME, EXPRESSION IS NOT NULL FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'c_md_f' AND INDEX_NAME = 'c_md_fc';
+DROP TABLE c_md_g, c_md_u, c_md_c, c_md_o, c_md_f;

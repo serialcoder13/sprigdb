@@ -1220,6 +1220,9 @@ fn mapped_view(spec: &Spec, push: &Pushdown, ctx: &InfoSchemaCtx<'_>) -> Result<
         let p = lit(phys, ctx);
         let join = if mysql.is_some() && spec.table == "COLUMNS" {
             schema::json_join(&p, &|v| lit(v, ctx))
+        } else if mysql.is_some() && spec.table == "STATISTICS" {
+            // R4 round 3: functional key parts' expressions.
+            schema::fx_join(&p, &|v| lit(v, ctx))
         } else {
             String::new()
         };
@@ -1252,7 +1255,15 @@ fn mapped_view(spec: &Spec, push: &Pushdown, ctx: &InfoSchemaCtx<'_>) -> Result<
         {
             let _ = write!(sql, " AND LEFT({}, 11) <> 'sprig_auto_'", quote(ix));
         }
-        let col_cond = hidden_column_cond("COLUMN_NAME", *vis);
+        let mut col_cond = hidden_column_cond("COLUMN_NAME", *vis);
+        // 3306 shows functional key parts' indexes (R4 round 3): their
+        // hidden column is MySQL's own hidden column.
+        if mysql.is_some()
+            && matches!(spec.extra, Extra::Index)
+            && let Some(c) = col_cond.as_mut()
+        {
+            *c = format!("({c}) AND LEFT(`COLUMN_NAME`, 10) <> '_sprig_fx_'");
+        }
         match (spec.extra, &col_cond) {
             (Extra::Index, Some(cond)) => {
                 let _ = write!(

@@ -22,6 +22,7 @@ pub mod collation;
 pub mod ddl;
 pub mod errmap;
 pub mod funcs;
+pub mod fxindex;
 pub mod geo;
 pub mod groupby;
 pub mod intmeta;
@@ -446,7 +447,7 @@ pub fn mysql_text_rewrites(sql: &[u8], opts: &LexOptions, backend_version: u32) 
     }
     let mut out: Option<Vec<u8>> =
         lex::versioned::expand_text_for_mariadb(sql, opts, backend_version);
-    let steps: [TextStep; 9] = [
+    let steps: [TextStep; 10] = [
         rewrite_json_casts,
         name_checks,
         rewrite_srid_attribute,
@@ -461,8 +462,10 @@ pub fn mysql_text_rewrites(sql: &[u8], opts: &LexOptions, backend_version: u32) 
         // MySQL's default collations in database DDL (gaps row 58).
         ddl::generated_not_null,
         ddl::database_collation,
-        // R4 round 3: LATERAL derived tables (step 9).
+        // R4 round 3: LATERAL derived tables (step 9) and functional key
+        // parts (step 10).
         lateral::rewrite,
+        fxindex::rewrite,
     ];
     for step in steps {
         if let Some(v) = step(out.as_deref().unwrap_or(sql), opts) {

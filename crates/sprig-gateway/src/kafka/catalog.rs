@@ -593,18 +593,28 @@ impl GroupStore for CatalogGroups {
             .start_transaction(mysql_async::TxOpts::default())
             .await
             .map_err(store_err)?;
+        // A fan-in topic's position is on its member's instance (chapter
+        // 45, R9): its id is looked up before the transaction.
+        let mut parts = Vec::with_capacity(offsets.len());
         for o in offsets {
+            parts.push(
+                super::data::fanin_parts(&self.svc, tenant, o.stream_id)
+                    .await
+                    .map_err(store_err)?,
+            );
+        }
+        for (o, part) in offsets.iter().zip(parts) {
+            if super::data::is_fanin(o.stream_id) && part.is_none() {
+                // An id this reader never had: nothing to commit it to.
+                continue;
+            }
             store
                 .commit_offset(
                     &mut tx,
                     &sprig_streams::store::CommittedOffset {
                         group: group.to_owned(),
-                        // A fan-in topic's position is on its member's
-                        // instance (chapter 45, R9).
-                        instance_tenant: super::data::fanin_parts(o.stream_id).map_or(0, |x| x.0),
-                        stream: sprig_streams::StreamId(
-                            super::data::fanin_parts(o.stream_id).map_or(o.stream_id, |x| x.1),
-                        ),
+                        instance_tenant: part.map_or(0, |x| x.0),
+                        stream: sprig_streams::StreamId(part.map_or(o.stream_id, |x| x.1)),
                         partition: sprig_streams::PartitionNo(
                             u32::try_from(o.partition).unwrap_or(0),
                         ),
@@ -630,20 +640,26 @@ impl GroupStore for CatalogGroups {
             .group_offsets(&mut conn, group)
             .await
             .map_err(store_err)?;
+        drop(conn);
+        let mut ids = Vec::with_capacity(rows.len());
+        for o in &rows {
+            ids.push(if o.instance_tenant == 0 {
+                o.stream.0
+            } else {
+                super::data::fanin_id(&self.svc, tenant, o.instance_tenant, o.stream.0)
+                    .await
+                    .map_err(store_err)?
+            });
+        }
         Ok(rows
             .into_iter()
-            .filter_map(|o| {
-                Some(CommittedOffset {
-                    stream_id: if o.instance_tenant == 0 {
-                        o.stream.0
-                    } else {
-                        super::data::fanin_id(o.instance_tenant, o.stream.0)?
-                    },
-                    partition: i32::try_from(o.partition.0).unwrap_or(i32::MAX),
-                    offset: i64::try_from(o.offset).unwrap_or(i64::MAX),
-                    leader_epoch: o.leader_epoch.and_then(|e| i32::try_from(e).ok()),
-                    metadata: o.metadata,
-                })
+            .zip(ids)
+            .map(|(o, stream_id)| CommittedOffset {
+                stream_id,
+                partition: i32::try_from(o.partition.0).unwrap_or(i32::MAX),
+                offset: i64::try_from(o.offset).unwrap_or(i64::MAX),
+                leader_epoch: o.leader_epoch.and_then(|e| i32::try_from(e).ok()),
+                metadata: o.metadata,
             })
             .filter(|c| only.is_none_or(|k| k.contains(&(c.stream_id, c.partition))))
             .collect())

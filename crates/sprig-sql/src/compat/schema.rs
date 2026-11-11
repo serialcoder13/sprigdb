@@ -116,6 +116,81 @@ fn is_nullable(lit: Lit<'_>) -> String {
     format!("IF({NN_COL} IS NULL, `IS_NULLABLE`, {})", lit("NO"))
 }
 
+/// The alias of the functional-key-part side table in `STATISTICS` (see
+/// [`fx_join`]).
+const FX_COL: &str = "`_sprig_fc`";
+
+/// The `LEFT JOIN` that finds the hidden columns of functional key parts
+/// ([`super::fxindex`]) of one schema and their expressions, for the
+/// `STATISTICS` branch restricted to `phys` (a quoted literal).
+#[must_use]
+pub fn fx_join(phys: &str, lit: Lit<'_>) -> String {
+    format!(
+        " LEFT JOIN (SELECT `TABLE_NAME` AS `_sprig_ft`, `COLUMN_NAME` AS {FX_COL}, \
+         `GENERATION_EXPRESSION` AS `_sprig_fe` FROM information_schema.COLUMNS \
+         WHERE `TABLE_SCHEMA` = {phys} AND `COLUMN_NAME` LIKE {} LIMIT 4294967295) AS `_sprig_f` \
+         ON `_sprig_ft` = `TABLE_NAME` AND {FX_COL} = `COLUMN_NAME`",
+        lit(&format!("{}%", super::fxindex::FX_PREFIX.replace('_', "\\_")))
+    )
+}
+
+/// A functional key part's expression as MySQL prints it: MariaDB's
+/// generation expression with MySQL's names for `lcase` and `ucase`.
+fn fx_expression(lit: Lit<'_>) -> String {
+    format!(
+        "REPLACE(REPLACE(`_sprig_fe`, {}, {}), {}, {})",
+        lit("lcase("),
+        lit("lower("),
+        lit("ucase("),
+        lit("upper(")
+    )
+}
+
+/// `SHOW CREATE TABLE` text with functional key parts written back as
+/// MySQL writes them (3306, before chapter 07's filter hides `_sprig_`
+/// columns): each key's `` `_sprig_fx_..` `` part becomes `(expr)` and the
+/// hidden column's line goes.
+#[must_use]
+pub fn mysql_functional_parts(text: &str) -> String {
+    if !text.contains(super::fxindex::FX_PREFIX) {
+        return text.to_owned();
+    }
+    let mut exprs: Vec<(String, String)> = Vec::new();
+    for line in text.split('\n') {
+        let Some((name, at)) = column_line_name(line) else { continue };
+        if !super::fxindex::is_fx_column(&name) {
+            continue;
+        }
+        let rest = &line[at..];
+        let Some(g) = rest.find(" GENERATED ALWAYS AS (") else { continue };
+        let body = &rest[g + " GENERATED ALWAYS AS ".len()..];
+        let Some(v) = body.rfind(") VIRTUAL") else { continue };
+        let e = body[1..v]
+            .replace("lcase(", "lower(")
+            .replace("ucase(", "upper(");
+        exprs.push((format!("`{}`", name.replace('`', "``")), e));
+    }
+    if exprs.is_empty() {
+        return text.to_owned();
+    }
+    text.split('\n')
+        .filter(|line| !column_line_name(line).is_some_and(|(n, _)| super::fxindex::is_fx_column(&n)))
+        .map(|line| {
+            let t = line.trim_start();
+            if t.starts_with("KEY ") || t.starts_with("UNIQUE KEY ") {
+                let mut l = line.to_owned();
+                for (q, e) in &exprs {
+                    l = l.replace(q.as_str(), &format!("({e})"));
+                }
+                l
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// `COLUMN_TYPE` without integer display widths, as MySQL 8.4 shows it
 /// (`tinyint(1)` and `ZEROFILL` columns keep theirs).
 fn column_type(expr: &str, lit: Lit<'_>) -> String {
@@ -291,7 +366,10 @@ pub fn mysql_view(table: &str, lit: Lit<'_>) -> Option<Vec<(&'static str, Src)>>
                     lit("YES")
                 )),
             ));
-            v.push(("EXPRESSION", Sql("CAST(NULL AS CHAR)".to_owned())));
+            // Functional key parts (R4 round 3, [`super::fxindex`]):
+            // no column, and the expression (see [`fx_join`]).
+            v[7] = ("COLUMN_NAME", Sql(format!("IF({FX_COL} IS NULL, `COLUMN_NAME`, NULL)")));
+            v.push(("EXPRESSION", Sql(fx_expression(lit))));
             v
         }
         "TABLE_CONSTRAINTS" => {
@@ -575,11 +653,11 @@ pub fn show_index_sql(schema: &str, table: &str, filter: Option<&[u8]>, lit: Lit
     let inner = format!(
         "SELECT `TABLE_NAME` AS `Table`, `NON_UNIQUE` AS `Non_unique`, \
          `INDEX_NAME` AS `Key_name`, `SEQ_IN_INDEX` AS `Seq_in_index`, \
-         `COLUMN_NAME` AS `Column_name`, `COLLATION` AS `Collation`, \
+         IF({fx} IS NULL, `COLUMN_NAME`, NULL) AS `Column_name`, `COLLATION` AS `Collation`, \
          `CARDINALITY` AS `Cardinality`, `SUB_PART` AS `Sub_part`, `PACKED` AS `Packed`, \
          `NULLABLE` AS `Null`, `INDEX_TYPE` AS `Index_type`, `COMMENT` AS `Comment`, \
          `INDEX_COMMENT` AS `Index_comment`, IF(`IGNORED` = {yes}, {no}, {yes}) AS `Visible`, \
-         CAST(NULL AS CHAR) AS `Expression` FROM information_schema.STATISTICS \
+         {expr} AS `Expression` FROM information_schema.STATISTICS{join} \
          WHERE `TABLE_SCHEMA` = {} AND `TABLE_NAME` = {} \
          AND (SELECT 1 FROM {}.{} LIMIT 0) IS NULL",
         lit(schema),
@@ -588,6 +666,9 @@ pub fn show_index_sql(schema: &str, table: &str, filter: Option<&[u8]>, lit: Lit
         quote(table),
         yes = lit("YES"),
         no = lit("NO"),
+        fx = FX_COL,
+        expr = fx_expression(lit),
+        join = fx_join(&lit(schema), lit),
     );
     match filter {
         Some(f) => {

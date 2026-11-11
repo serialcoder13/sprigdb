@@ -225,8 +225,15 @@ impl LimitSource {
     fn current(&self) -> Limits {
         match self {
             Self::Fixed(l) => *l,
-            Self::Live { live, dc } => {
-                let snap = live.snapshot();
+            Self::Live { live, .. } => self.current_in(&live.snapshot()),
+        }
+    }
+
+    /// The limits in `snap` (fixed values ignore it).
+    fn current_in(&self, snap: &sprig_settings::watch::Snapshot) -> Limits {
+        match self {
+            Self::Fixed(l) => *l,
+            Self::Live { dc, .. } => {
                 let ctx = SettingCtx::process(dc);
                 let g = snap.get(&MEMORY_LIMIT_MB, &ctx);
                 Limits {
@@ -277,6 +284,10 @@ struct State {
 /// The gateway's limits.
 pub struct Limiter {
     source: LimitSource,
+    /// The limits last resolved, with the settings snapshot they came from
+    /// (decision PF7): every statement asks, and resolving seven keys each
+    /// time was 4% of a point select's gateway CPU.
+    memo: Mutex<Option<(sprig_settings::watch::Snapshot, Limits)>>,
     connections: AtomicUsize,
     memory: AtomicUsize,
     state: Mutex<State>,
@@ -391,6 +402,7 @@ impl Limiter {
     pub fn new(source: LimitSource) -> Arc<Self> {
         Arc::new(Self {
             source,
+            memo: Mutex::new(None),
             connections: AtomicUsize::new(0),
             memory: AtomicUsize::new(0),
             state: Mutex::new(State::default()),
@@ -410,7 +422,19 @@ impl Limiter {
     /// The limits in force now.
     #[must_use]
     pub fn limits(&self) -> Limits {
-        self.source.current()
+        let LimitSource::Live { live, .. } = &self.source else {
+            return self.source.current();
+        };
+        let snap = live.snapshot();
+        let mut memo = self.memo.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((s, l)) = memo.as_ref()
+            && Arc::ptr_eq(s, &snap)
+        {
+            return *l;
+        }
+        let l = self.source.current_in(&snap);
+        *memo = Some((snap, l));
+        l
     }
 
     /// Client connections now.

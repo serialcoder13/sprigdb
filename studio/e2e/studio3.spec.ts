@@ -419,3 +419,66 @@ test.describe.serial('Studio round 4: messaging', () => {
     await shot(page, 'inherited');
   });
 });
+
+test.describe.serial('Studio round 4: view as', () => {
+  let token = '';
+  const VDB = 'studio3_view';
+  const VIEWER = 'studio3_viewer';
+  test.beforeAll(async ({ request }) => {
+    token = await apiToken(request);
+    await sql(request, token, '-', `DROP USER IF EXISTS '${VIEWER}'@'%'`);
+    await sql(request, token, '-', `DROP DATABASE IF EXISTS ${VDB}`);
+    await sql(request, token, '-', `CREATE DATABASE ${VDB}`);
+    await sql(request, token, VDB, 'CREATE TABLE open_t (id INT PRIMARY KEY, note VARCHAR(20))');
+    await sql(request, token, VDB, 'CREATE TABLE secret_t (id INT PRIMARY KEY, note VARCHAR(20))');
+    await sql(request, token, VDB, "INSERT INTO open_t VALUES (1, 'visible'), (2, 'also')");
+    await sql(request, token, VDB, "INSERT INTO secret_t VALUES (1, 'hidden')");
+    await sql(request, token, '-', `CREATE USER '${VIEWER}'@'%' IDENTIFIED BY 'sprig-dev-viewer'`);
+    await sql(request, token, '-', `GRANT SELECT ON ${VDB}.open_t TO '${VIEWER}'@'%'`);
+  });
+  test.afterAll(async ({ request }) => {
+    await sql(request, token, '-', `DROP USER IF EXISTS '${VIEWER}'@'%'`);
+    await sql(request, token, '-', `DROP DATABASE IF EXISTS ${VDB}`);
+  });
+
+  test('step 18: view as a user, refusals, and the policy and role statements', async ({ page, request }) => {
+    await signIn(page);
+    await page.getByRole('link', { name: 'Roles and policies' }).click();
+    await page.getByTestId('viewas-user').fill(VIEWER);
+    await page.getByTestId('viewas-db').selectOption(VDB);
+    await page.getByTestId('viewas-sql').fill('SELECT id, note FROM open_t ORDER BY id');
+    await page.getByTestId('viewas-run').click();
+    const result = page.getByTestId('viewas-result');
+    await expect(result).toContainText(`As acme.${VIEWER}: 2 rows`);
+    await expect(result).toContainText('visible');
+    await axe(page, 'view-as');
+    await shot(page, 'view-as');
+    // The user's privileges apply: no grant on secret_t.
+    await page.getByTestId('viewas-sql').fill('SELECT * FROM secret_t');
+    await page.getByTestId('viewas-run').click();
+    await expect(page.getByTestId('viewas-error')).toContainText('1142');
+    // Only reads (39931), and not as yourself (39930).
+    await page.getByTestId('viewas-sql').fill('DELETE FROM open_t');
+    await page.getByTestId('viewas-run').click();
+    await expect(page.getByTestId('viewas-error')).toContainText('39931');
+    await page.getByTestId('viewas-user').fill('app');
+    await page.getByTestId('viewas-sql').fill('SELECT 1');
+    await page.getByTestId('viewas-run').click();
+    await expect(page.getByTestId('viewas-error')).toContainText('39930');
+    // A non-administrator can't use the API either.
+    const login = await request.post('/v1/auth/login', {
+      data: { login: `acme.${VIEWER}`, password: 'sprig-dev-viewer', refresh_transport: 'body', client: 'api' },
+    });
+    const vt = ((await login.json()) as { access_token: string }).access_token;
+    const r = await request.post('/v1/policies:testAs', {
+      headers: { authorization: `Bearer ${vt}` },
+      data: { user: 'app', database: VDB, sql: 'SELECT 1' },
+    });
+    expect(r.status()).toBe(403);
+    expect(((await r.json()) as { code: number }).code).toBe(39930);
+    // A policy statement from the form, shown before it runs.
+    await page.getByTestId('pol-name').fill('own');
+    await page.getByRole('combobox').filter({ hasText: VDB }).last().selectOption(VDB).catch(() => undefined);
+    await expect(page.getByTestId('pol-statement')).toHaveCount(0);
+  });
+});

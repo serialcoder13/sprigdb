@@ -146,6 +146,7 @@ fn template(binding: u64) -> Template {
                 object_id: 41,
                 definer_user_id: 7,
                 tenant_name: "system".into(),
+                fanin_declarer: 0,
             },
             version: 1,
             record: None,

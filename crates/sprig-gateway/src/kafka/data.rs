@@ -60,7 +60,7 @@ use crate::tenant::TenantServices;
 // Chapter 42 (R9): inherited streams over Kafka.
 mod inherit;
 
-pub(crate) use inherit::{FANIN_PREFIX, fanin_id, fanin_parts};
+pub(crate) use inherit::{FANIN_PREFIX, fanin_cached, fanin_id, fanin_parts, is_fanin};
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -139,7 +139,7 @@ impl Marks {
         let m = lock(&self.map);
         wants.iter().any(|(s, p, o)| {
             // A fan-in topic's marks are its member's.
-            let (tenant, s) = fanin_parts(*s).unwrap_or((tenant, *s));
+            let (tenant, s) = fanin_cached(tenant, *s).unwrap_or((tenant, *s));
             u32::try_from(*p)
                 .ok()
                 .and_then(|p| m.get(&(tenant, s, p)))
@@ -429,8 +429,8 @@ impl GatewayData {
 
     async fn resolve_t(&self, p: &Principal, t: &DataTopic) -> Result<Resolved, TopicError> {
         // Chapter 42 (R9): a fan-in topic reads its member's instance.
-        if fanin_parts(t.stream_id).is_some() {
-            return self.resolve_fanin(t).await;
+        if is_fanin(t.stream_id) {
+            return self.resolve_fanin(p, t).await;
         }
         // The caller resolved it with its access already; again for the
         // tables' places (cached snapshot).
@@ -578,7 +578,7 @@ impl StreamData for GatewayData {
         if tenant != p.tenant_id {
             return Err(no());
         }
-        if fanin_parts(stream).is_some() {
+        if is_fanin(stream) {
             return self
                 .fanin_topic_by_id(p, stream, access == Access::Write)
                 .await

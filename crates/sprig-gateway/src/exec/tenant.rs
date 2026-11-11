@@ -368,7 +368,13 @@ impl PassSession {
         }
         let mut ignore_space = false;
         if let Some(mode) = self.bs.as_ref().and_then(|b| b.vars().vars.get("sql_mode")) {
-            let m = mode.to_ascii_uppercase();
+            // MariaDB reports `sql_mode` in capitals: copy only otherwise
+            // (decision PF7; this runs several times per statement).
+            let m: std::borrow::Cow<'_, str> = if mode.bytes().any(|b| b.is_ascii_lowercase()) {
+                std::borrow::Cow::Owned(mode.to_ascii_uppercase())
+            } else {
+                std::borrow::Cow::Borrowed(mode.as_str())
+            };
             lex = lex
                 .ansi_quotes(m.contains("ANSI_QUOTES") || m.contains("ANSI,") || m == "ANSI")
                 .no_backslash_escapes(m.contains("NO_BACKSLASH_ESCAPES"));

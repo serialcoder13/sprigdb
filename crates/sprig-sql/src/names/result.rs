@@ -453,7 +453,16 @@ impl ResultMapper {
                 }
                 Role::Definition => Some(self.definition(&s, ctx)),
                 Role::CreateTable => {
-                    let mut filtered = filter_create_table(&s, &self.vis);
+                    // 3306: functional key parts as MySQL writes them (R4
+                    // round 3), before their hidden columns are filtered.
+                    let fx;
+                    let src: &str = if self.persona == Persona::MySql84 {
+                        fx = crate::compat::schema::mysql_functional_parts(&s);
+                        &fx
+                    } else {
+                        &s
+                    };
+                    let mut filtered = filter_create_table(src, &self.vis);
                     if self.persona == Persona::MySql84 {
                         filtered = crate::compat::schema::mysql_create_table(&filtered);
                     }

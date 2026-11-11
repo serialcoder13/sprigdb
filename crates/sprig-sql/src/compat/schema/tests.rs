@@ -379,3 +379,14 @@ fn generated_not_null_shows_as_mysql_writes_it() {
         "CREATE TABLE `g` (\n  `a` int DEFAULT NULL,\n  `b` int GENERATED ALWAYS AS (`a` + 1) VIRTUAL NOT NULL,\n  `c` int GENERATED ALWAYS AS (`a` * 2) STORED NOT NULL\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci"
     );
 }
+
+#[test]
+fn functional_parts_show_as_mysql_writes_them() {
+    let maria = "CREATE TABLE `u` (\n  `id` int(11) NOT NULL,\n  `email` varchar(255) NOT NULL,\n  `_sprig_fx_1a2b3c4d` varchar(255) GENERATED ALWAYS AS (lcase(`email`)) VIRTUAL INVISIBLE,\n  PRIMARY KEY (`id`),\n  KEY `i` (`_sprig_fx_1a2b3c4d`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci";
+    let out = mysql_functional_parts(maria);
+    assert_eq!(
+        out,
+        "CREATE TABLE `u` (\n  `id` int(11) NOT NULL,\n  `email` varchar(255) NOT NULL,\n  PRIMARY KEY (`id`),\n  KEY `i` ((lower(`email`)))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci"
+    );
+    assert_eq!(mysql_functional_parts("CREATE TABLE `t` (\n  `a` int\n)"), "CREATE TABLE `t` (\n  `a` int\n)");
+}

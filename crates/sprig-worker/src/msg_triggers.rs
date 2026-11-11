@@ -386,8 +386,8 @@ impl MsgEnv {
         }
         // The source itself (a fan-in trigger's: its definition, R9).
         let alive = match source.kind {
-            SourceKind::Stream if messages::fanin_source_parts(source.object_id).is_some() => {
-                let (dt, dobj) = messages::fanin_source_parts(source.object_id).unwrap_or((0, 0));
+            SourceKind::Stream if source.fanin_definition().is_some() => {
+                let (dt, dobj) = source.fanin_definition().unwrap_or((0, 0));
                 self.definition_active(TenantId(dt), dobj).await?
             }
             SourceKind::Stream => StreamsStore::new(schema.clone())
@@ -843,7 +843,7 @@ impl JobHandler for StreamTrigger {
             let _ = messages::delete_index(env.dc.as_ref(), tenant, binding).await;
             return Ok(json!({"end": "gone", "binding": binding}));
         };
-        if let Some(def) = messages::fanin_source_parts(l.source.object_id) {
+        if let Some(def) = l.source.fanin_definition() {
             return run_fan_in(env, cx, tenant, binding, &l, def).await;
         }
         let def = {

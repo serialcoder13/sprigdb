@@ -164,6 +164,17 @@ pub static LOGIC_MIGRATIONS: &[Migration] = &[
             crate::messages::DDL_MESSAGE_SOURCES,
         ],
     },
+    // R9 (r9queue): fan-in triggers' declarers of any 64-bit id.
+    Migration {
+        format: 4,
+        phase: Phase::Expand,
+        name: "logic_message_sources.fanin_declarer",
+        statements: &[
+            crate::messages::DDL_SOURCES_FANIN_DECLARER,
+            crate::messages::DML_BINDINGS_FANIN_UNPACK,
+            crate::messages::DML_SOURCES_FANIN_UNPACK,
+        ],
+    },
 ];
 
 /// The module, for [`Migrator::new`](sprig_catalog::Migrator::new) and

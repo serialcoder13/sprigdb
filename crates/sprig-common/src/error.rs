@@ -802,6 +802,12 @@ sprig_codes! {
     /// An export ticket is malformed, expired, or its session ended
     /// (chapter 44).
     StudioExportTicketInvalid = 39929, "ER_SPRIG_STUDIO_EXPORT_TICKET_INVALID", "SprigStudioExportTicketInvalid", SQLSTATE_GENERAL, false;
+    /// The row-level security tester isn't allowed for this user: `studio.view_as`
+    /// off, the caller not an administrator over the tenant, or the user an
+    /// administrator over the caller's tenant (chapter 44, round 4).
+    StudioViewAsDenied = 39930, "ER_SPRIG_STUDIO_VIEW_AS_DENIED", "SprigStudioViewAsDenied", SQLSTATE_GENERAL, false;
+    /// The tester runs only one read-only statement (chapter 44, round 4).
+    StudioViewAsNotReadOnly = 39931, "ER_SPRIG_STUDIO_VIEW_AS_NOT_READ_ONLY", "SprigStudioViewAsNotReadOnly", SQLSTATE_GENERAL, false;
     /// The binary was built without Studio's files (chapter 44).
     StudioNotBuilt = 39932, "ER_SPRIG_STUDIO_NOT_BUILT", "SprigStudioNotBuilt", SQLSTATE_GENERAL, false;
     /// No open cursor has this name, or it belongs to another user
@@ -1058,6 +1064,7 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::GeoUnsupportedExpression
         | SprigCode::GeoTooComplex
         | SprigCode::ApprovalWindowInvalid
+        | SprigCode::StudioViewAsNotReadOnly
         | SprigCode::ApprovalPolicyInvalid => (Code::InvalidArgument, 400),
         SprigCode::SettingLocked
         | SprigCode::BinlogUnsupported
@@ -1260,6 +1267,7 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::StudioOperatorMfaRequired
         | SprigCode::StudioOperatorCertRequired
         | SprigCode::StudioOperatorModeDisabled
+        | SprigCode::StudioViewAsDenied
         | SprigCode::ApprovalDenied => (Code::PermissionDenied, 403),
         SprigCode::LoginRateLimited
         | SprigCode::TenantConnectionLimit

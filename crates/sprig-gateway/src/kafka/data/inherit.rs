@@ -410,34 +410,136 @@ impl GatewayData {
 // the read-only topic `__t.<T>.<db>.<stream>`. A consumer group subscribing
 // to the pattern `__t\..*\.<db>\.<stream>` reads every member; its offsets
 // go to P's `stream_offsets` with `instance_tenant_id = T`. The topic's
-// stream id carries the member: [`FANIN_FLAG`] | T << 24 | the instance's
-// stream id in T, so the broker's group code (keyed by stream id) needs no
-// change. Members whose residency sets `deny_remote_access` are left out.
+// stream id is [`FANIN_FLAG`] | an id P's catalog assigns to (T, the
+// instance's stream id) in `stream_fanin_topics` (R9, r9queue: any 64-bit
+// tenant id works; r9next packed T into the id, which capped tenant ids at
+// 2^38), so the broker's group code (keyed by stream id) needs no change.
+// Ids are cached per gateway; a row never changes once written. Members
+// whose residency sets `deny_remote_access` are left out.
 // ---------------------------------------------------------------------------
 
 /// Marks a fan-in topic's stream id.
 pub(crate) const FANIN_FLAG: u64 = 1 << 62;
 /// A fan-in topic's name starts with this.
 pub(crate) const FANIN_PREFIX: &str = "__t.";
-const FANIN_STREAM_BITS: u32 = 24;
-const FANIN_TENANT_LIMIT: u64 = 1 << 38;
 
-/// The stream id of member `member`'s instance stream `stream` as a fan-in
-/// topic; `None` when the ids don't fit (tenant ids up to 2^38, instance
-/// stream ids up to 2^24).
+/// Whether stream id `id` is a fan-in topic's.
 #[must_use]
-pub(crate) fn fanin_id(member: u64, stream: u64) -> Option<u64> {
-    (member < FANIN_TENANT_LIMIT && stream < (1 << FANIN_STREAM_BITS))
-        .then_some(FANIN_FLAG | (member << FANIN_STREAM_BITS) | stream)
+pub(crate) const fn is_fanin(id: u64) -> bool {
+    id & FANIN_FLAG != 0 && id & DEF_FLAG == 0
 }
 
-/// `(member, stream)` of a fan-in topic's stream id.
+/// Fan-in topic ids this gateway has seen: `(reader, topic stream id)` to
+/// `(member, instance stream id)` and back.
+#[derive(Default)]
+struct FanInIds {
+    by_id: std::collections::HashMap<(u64, u64), (u64, u64)>,
+    by_instance: std::collections::HashMap<(u64, u64, u64), u64>,
+    migrated: std::collections::HashSet<String>,
+}
+
+fn fanin_ids() -> std::sync::MutexGuard<'static, FanInIds> {
+    static M: std::sync::OnceLock<std::sync::Mutex<FanInIds>> = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn remember(reader: u64, id: u64, member: u64, stream: u64) {
+    let mut m = fanin_ids();
+    m.by_id.insert((reader, id), (member, stream));
+    m.by_instance.insert((reader, member, stream), id);
+}
+
+/// `(member, stream)` of reader `reader`'s fan-in topic `id`, if this
+/// gateway has seen it (the topic was resolved before it is fetched).
 #[must_use]
-pub(crate) fn fanin_parts(id: u64) -> Option<(u64, u64)> {
-    (id & FANIN_FLAG != 0 && id & DEF_FLAG == 0).then_some((
-        (id & !FANIN_FLAG) >> FANIN_STREAM_BITS,
-        id & ((1 << FANIN_STREAM_BITS) - 1),
-    ))
+pub(crate) fn fanin_cached(reader: u64, id: u64) -> Option<(u64, u64)> {
+    if !is_fanin(id) {
+        return None;
+    }
+    fanin_ids().by_id.get(&(reader, id)).copied()
+}
+
+/// The reader's catalog connection, its streams module migrated.
+async fn reader_catalog(
+    svc: &crate::tenant::TenantServices,
+    reader: u64,
+) -> sprig_common::Result<(mysql_async::Conn, String)> {
+    use sprig_catalog::CatalogLocator as _;
+    let ep = svc
+        .locator
+        .writer(sprig_common::ids::TenantId(reader))
+        .await?;
+    let mut c = ep
+        .pool
+        .get_conn()
+        .await
+        .map_err(sprig_streams::maria::map_err)?;
+    let schema = ep.store.schema().to_owned();
+    if !fanin_ids().migrated.contains(&schema) {
+        sprig_streams::store::migrate(&mut c, &schema).await?;
+        fanin_ids().migrated.insert(schema.clone());
+    }
+    Ok((c, schema))
+}
+
+/// The stream id of member `member`'s instance stream `stream` as reader
+/// `reader`'s fan-in topic, assigned in the reader's catalog on first use.
+///
+/// # Errors
+/// The reader's catalog's.
+pub(crate) async fn fanin_id(
+    svc: &crate::tenant::TenantServices,
+    reader: u64,
+    member: u64,
+    stream: u64,
+) -> sprig_common::Result<u64> {
+    if let Some(id) = fanin_ids()
+        .by_instance
+        .get(&(reader, member, stream))
+        .copied()
+    {
+        return Ok(id);
+    }
+    let (mut c, schema) = reader_catalog(svc, reader).await?;
+    let n = sprig_streams::StreamsStore::new(schema)
+        .fanin_topic_id(&mut c, member, stream)
+        .await?;
+    if n >= FANIN_FLAG {
+        return Err(sprig_common::SprigError::internal(
+            "fan-in topic ids are exhausted",
+        ));
+    }
+    let id = FANIN_FLAG | n;
+    remember(reader, id, member, stream);
+    Ok(id)
+}
+
+/// `(member, stream)` of reader `reader`'s fan-in topic `id`; `None` for
+/// an id that isn't a fan-in topic's or was never assigned.
+///
+/// # Errors
+/// The reader's catalog's.
+pub(crate) async fn fanin_parts(
+    svc: &crate::tenant::TenantServices,
+    reader: u64,
+    id: u64,
+) -> sprig_common::Result<Option<(u64, u64)>> {
+    if !is_fanin(id) {
+        return Ok(None);
+    }
+    if let Some(x) = fanin_cached(reader, id) {
+        return Ok(Some(x));
+    }
+    let (mut c, schema) = reader_catalog(svc, reader).await?;
+    let got = sprig_streams::StreamsStore::new(schema)
+        .fanin_topic(&mut c, id & !FANIN_FLAG)
+        .await?;
+    if let Some((member, stream)) = got {
+        remember(reader, id, member, stream);
+    }
+    Ok(got)
 }
 
 /// `__t.<tenant>.<db>.<stream>`.
@@ -613,7 +715,9 @@ impl GatewayData {
             .get::<sprig_streams::StreamsState>(sprig_streams::MODULE)
             .and_then(|st| st.all().find(|s| s.id.0 == inst.instance_id).cloned())
             .ok_or_else(|| unknown(name))?;
-        let id = fanin_id(t.0, s.id.0).ok_or_else(|| unknown(name))?;
+        let id = fanin_id(&self.svc, p.tenant_id, t.0, s.id.0)
+            .await
+            .map_err(|e| kafka_err(&e))?;
         let max = self.svc.settings.get(
             &sprig_streams::settings::MAX_MESSAGE_BYTES,
             &tcat.setting_ctx(&self.svc.dc),
@@ -641,7 +745,10 @@ impl GatewayData {
         write: bool,
     ) -> Result<DataTopic, TopicError> {
         let no = || unknown("");
-        let (member, stream) = fanin_parts(id).ok_or_else(no)?;
+        let (member, stream) = fanin_parts(&self.svc, p.tenant_id, id)
+            .await
+            .map_err(|e| kafka_err(&e))?
+            .ok_or_else(no)?;
         let t = sprig_common::ids::TenantId(member);
         let tname = self.fanin_member(p, t).await.ok_or_else(no)?;
         let tcat = inherited::catalog(&self.svc, t)
@@ -658,8 +765,15 @@ impl GatewayData {
     }
 
     /// The member's catalog and stream of a fan-in topic, for reads.
-    pub(super) async fn resolve_fanin(&self, t: &DataTopic) -> Result<super::Resolved, TopicError> {
-        let (member, stream) = fanin_parts(t.stream_id).ok_or_else(|| unknown(&t.name))?;
+    pub(super) async fn resolve_fanin(
+        &self,
+        p: &Principal,
+        t: &DataTopic,
+    ) -> Result<super::Resolved, TopicError> {
+        let (member, stream) = fanin_parts(&self.svc, p.tenant_id, t.stream_id)
+            .await
+            .map_err(|e| kafka_err(&e))?
+            .ok_or_else(|| unknown(&t.name))?;
         let cat = inherited::catalog(&self.svc, sprig_common::ids::TenantId(member))
             .await
             .map_err(|e| kafka_err(&e))?;
@@ -686,13 +800,17 @@ mod fanin_tests {
 
     #[test]
     fn fan_in_ids_and_names() {
-        let id = fanin_id(26_306_000_003, 41).unwrap();
-        assert_eq!(fanin_parts(id), Some((26_306_000_003, 41)));
-        assert!(id & DEF_FLAG == 0, "never a definition's topic");
-        assert_eq!(fanin_parts(41), None);
-        assert_eq!(fanin_parts(DEF_FLAG | 0x29), None);
-        assert_eq!(fanin_id(1 << 38, 1), None);
-        assert_eq!(fanin_id(1, 1 << 24), None);
+        // Any 64-bit member id: the id is a lookup, not a packing.
+        remember(26_306_000_001, FANIN_FLAG | 3, (1 << 40) + 7, 1 << 30);
+        assert_eq!(
+            fanin_cached(26_306_000_001, FANIN_FLAG | 3),
+            Some(((1 << 40) + 7, 1 << 30))
+        );
+        assert_eq!(fanin_cached(26_306_000_002, FANIN_FLAG | 3), None);
+        assert!(is_fanin(FANIN_FLAG | 3));
+        assert!(!is_fanin(41));
+        assert!(!is_fanin(DEF_FLAG | FANIN_FLAG | 0x29), "a definition's topic");
+        assert_eq!(fanin_cached(26_306_000_001, 3), None);
         let n = fanin_name("client_x", "security", "user_events");
         assert_eq!(n, "__t.client_x.security.user_events");
         assert_eq!(

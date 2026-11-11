@@ -104,10 +104,29 @@ impl ExecSettingsSource {
         };
         match self {
             ExecSettingsSource::Fixed(_) => setting.default.clone().into_owned(),
-            ExecSettingsSource::Live { live, dc } => live
-                .snapshot()
-                .get(setting, &SettingCtx::process(dc))
-                .into_owned(),
+            ExecSettingsSource::Live { live, dc } => {
+                // Decision PF7: asked several times per statement (the
+                // lexer's options); resolved once per settings snapshot.
+                type Memo = Option<(sprig_settings::Snapshot, DcId, [String; 2])>;
+                static MEMO: std::sync::Mutex<Memo> = std::sync::Mutex::new(None);
+                let snap = live.snapshot();
+                let i = usize::from(persona == Persona::MariaDb);
+                let mut memo = MEMO.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some((s, d, v)) = memo.as_ref()
+                    && std::sync::Arc::ptr_eq(s, &snap)
+                    && d == dc
+                {
+                    return v[i].clone();
+                }
+                let ctx = SettingCtx::process(dc);
+                let v = [
+                    snap.get(&MYSQL_SERVER_VERSION, &ctx).into_owned(),
+                    snap.get(&MARIADB_SERVER_VERSION, &ctx).into_owned(),
+                ];
+                let out = v[i].clone();
+                *memo = Some((snap, dc.clone(), v));
+                out
+            }
         }
     }
 }
