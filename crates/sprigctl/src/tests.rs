@@ -422,6 +422,90 @@ fn golden_precheck_and_dc_output() {
     );
 }
 
+// --- HTTPS (chapter 37, "Admin API over TLS") --------------------------------
+
+#[tokio::test]
+async fn the_client_over_https_with_the_deployment_ca() {
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
+    let dir = std::env::temp_dir().join(format!("sprigctl-https-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut cap = CertificateParams::new(Vec::<String>::new()).unwrap();
+    cap.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let cak = KeyPair::generate().unwrap();
+    let ca_cert = cap.self_signed(&cak).unwrap();
+    let issuer = Issuer::new(cap, cak);
+    let lk = KeyPair::generate().unwrap();
+    let leaf = CertificateParams::new(vec!["localhost".to_owned()])
+        .unwrap()
+        .signed_by(&lk, &issuer)
+        .unwrap();
+    let (ca, cert, key) = (dir.join("ca.pem"), dir.join("c.pem"), dir.join("k.pem"));
+    std::fs::write(&ca, ca_cert.pem()).unwrap();
+    std::fs::write(&cert, leaf.pem()).unwrap();
+    std::fs::write(&key, lk.serialize_pem()).unwrap();
+
+    let tls = sprig_common::https::server_config(&cert, &key, None).unwrap();
+    let l = http::bind("127.0.0.1:0".parse().unwrap(), Some("tok"))
+        .await
+        .unwrap();
+    let port = l.local_addr().unwrap().port();
+    let stop = sprig_common::CancellationToken::new();
+    let app = axum::Router::new().route(
+        "/admin/v1/ping",
+        axum::routing::get(|h: axum::http::HeaderMap| async move {
+            serde_json::json!({
+                "auth": h.get("authorization").and_then(|v| v.to_str().ok()),
+            })
+            .to_string()
+        }),
+    );
+    let server = tokio::spawn(http::serve_tls(l, app, Some(tls), stop.clone()));
+    let endpoint = format!("https://localhost:{port}");
+
+    // Without --ca-file: refused before any call.
+    let e = AdminClient::new(&endpoint, None).unwrap_err();
+    assert!(e.to_string().contains("--ca-file"), "{e}");
+    // With it: the call goes through, the token with it.
+    let files = client::TlsFiles {
+        ca_file: Some(ca.clone()),
+        client: None,
+    };
+    let c = AdminClient::with_tls(&endpoint, Some("tok".into()), &files).unwrap();
+    let v: serde_json::Value = c.get("/admin/v1/ping").await.unwrap();
+    assert_eq!(v["auth"], "Bearer tok");
+    // Plain HTTP to the HTTPS port fails.
+    let plain = AdminClient::new(&format!("http://127.0.0.1:{port}"), None).unwrap();
+    assert!(
+        plain
+            .get::<serde_json::Value>("/admin/v1/ping")
+            .await
+            .is_err()
+    );
+    // A CA that didn't sign the certificate: refused.
+    let other = KeyPair::generate().unwrap();
+    let mut op = CertificateParams::new(Vec::<String>::new()).unwrap();
+    op.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let other_ca = dir.join("other.pem");
+    std::fs::write(&other_ca, op.self_signed(&other).unwrap().pem()).unwrap();
+    let bad = AdminClient::with_tls(
+        &endpoint,
+        None,
+        &client::TlsFiles {
+            ca_file: Some(other_ca),
+            client: None,
+        },
+    )
+    .unwrap();
+    let e = bad
+        .get::<serde_json::Value>("/admin/v1/ping")
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("TLS"), "{e}");
+    stop.cancel();
+    server.await.unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // --- The client against an in-process Admin API ----------------------------
 
 #[tokio::test]

@@ -421,7 +421,16 @@ pub async fn layer(State(g): State<Arc<Guard>>, req: Request, next: Next) -> Res
     };
     if let Err(e) = g.authorize(&p, &method, &path, parts.uri.query(), json.as_ref()) {
         if write {
-            record(&g, &p, &client, &method, &path, 403, json.as_ref(), "admin.denied");
+            record(
+                &g,
+                &p,
+                &client,
+                &method,
+                &path,
+                403,
+                json.as_ref(),
+                "admin.denied",
+            );
         }
         return error_response(&e);
     }
@@ -470,7 +479,16 @@ pub async fn layer(State(g): State<Arc<Guard>>, req: Request, next: Next) -> Res
     }
     if write {
         let event = format!("admin.{}", op::area_of(&path).replace('-', "_"));
-        record(&g, &p, &client, &method, &path, status, json.as_ref(), &event);
+        record(
+            &g,
+            &p,
+            &client,
+            &method,
+            &path,
+            status,
+            json.as_ref(),
+            &event,
+        );
     }
     resp
 }

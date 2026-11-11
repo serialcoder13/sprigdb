@@ -237,10 +237,13 @@ pub async fn serve_tls(
         return serve(listener, router, shutdown).await;
     };
     let l = sprig_common::https::TlsListener::new(listener, tls)?.tap_io(|_| {});
-    axum::serve(l, router.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(async move { shutdown.cancelled().await })
-        .await
-        .map_err(|e| SprigError::internal("the Admin API server failed").with_source(e))
+    axum::serve(
+        l,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move { shutdown.cancelled().await })
+    .await
+    .map_err(|e| SprigError::internal("the Admin API server failed").with_source(e))
 }
 
 /// The Admin API's TLS configuration from `[controller]`: `None` without

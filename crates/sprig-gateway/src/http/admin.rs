@@ -296,7 +296,9 @@ impl AdminApi {
         };
         let resp = tokio::time::timeout(ADMIN_TIMEOUT, sent)
             .await
-            .map_err(|_| unavailable(format!("the controller at {addr} didn't answer in time")))??;
+            .map_err(|_| {
+                unavailable(format!("the controller at {addr} didn't answer in time"))
+            })??;
         let status = resp.status().as_u16();
         let body = resp
             .into_body()
@@ -365,5 +367,79 @@ impl AdminApi {
                 format!("unknown Gateways call {rpc}"),
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn header<'a>(r: &'a Request<Full<Bytes>>, n: &str) -> Option<&'a str> {
+        r.headers().get(n).and_then(|v| v.to_str().ok())
+    }
+
+    #[test]
+    fn a_relayed_call_carries_the_client_only_with_the_gateways_identity() {
+        use sprig_common::https::{CLIENT_ADDR_HEADER, RELAY_AUTH_HEADER};
+        let ip: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+        let r = relay_request(
+            "https://ctl:7480/admin/v1/operators:login",
+            &Method::POST,
+            None,
+            Some(ip),
+            Some("gw-secret"),
+            Bytes::from_static(b"{}"),
+        )
+        .unwrap();
+        assert_eq!(r.uri().scheme_str(), Some("https"));
+        assert_eq!(header(&r, CLIENT_ADDR_HEADER), Some("203.0.113.7"));
+        assert_eq!(header(&r, RELAY_AUTH_HEADER), Some("gw-secret"));
+        assert_eq!(header(&r, "authorization"), None);
+        assert_eq!(header(&r, "x-sprig-forwarded"), Some("1"));
+
+        // Without the gateway's service secret the address isn't sent:
+        // the controller would ignore it anyway.
+        let r = relay_request(
+            "http://ctl:7480/admin/v1/clusters",
+            &Method::GET,
+            Some("Bearer sprigop_x"),
+            Some(ip),
+            None,
+            Bytes::new(),
+        )
+        .unwrap();
+        assert_eq!(header(&r, CLIENT_ADDR_HEADER), None);
+        assert_eq!(header(&r, RELAY_AUTH_HEADER), None);
+        assert_eq!(header(&r, "authorization"), Some("Bearer sprigop_x"));
+
+        // The gateway's own calls name no client.
+        let r = relay_request(
+            "http://ctl:7480/admin/v1/dcs",
+            &Method::GET,
+            None,
+            None,
+            Some("gw-secret"),
+            Bytes::new(),
+        )
+        .unwrap();
+        assert_eq!(header(&r, CLIENT_ADDR_HEADER), None);
+        assert_eq!(header(&r, RELAY_AUTH_HEADER), None);
+        // Only these headers exist: nothing a client sent is copied.
+        let names: Vec<&str> = r
+            .headers()
+            .keys()
+            .map(hyper::header::HeaderName::as_str)
+            .collect();
+        assert_eq!(names, ["content-type", "x-sprig-forwarded"]);
+    }
+
+    #[test]
+    fn the_registration_says_whether_the_admin_api_is_https() {
+        let old: ControllerRecord =
+            serde_json::from_str(r#"{"admin_addr":"ctl:7480","version":"x"}"#).unwrap();
+        assert!(!old.admin_tls);
+        let new: ControllerRecord =
+            serde_json::from_str(r#"{"admin_addr":"ctl:7480","admin_tls":true}"#).unwrap();
+        assert!(new.admin_tls);
     }
 }

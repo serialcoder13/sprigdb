@@ -6784,11 +6784,13 @@ name = "sprigctl"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "axum",
  "clap",
  "http-body-util",
  "hyper",
  "hyper-util",
  "mysql_async",
+ "rcgen",
  "serde",
  "serde_json",
  "sha2 0.10.9",

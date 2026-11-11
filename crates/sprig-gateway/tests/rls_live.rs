@@ -174,7 +174,7 @@ async fn setup(admin: &mut Conn, db: &str) {
         format!("CREATE DATABASE {db}"),
         format!(
             "CREATE TABLE {db}.docs (id INT PRIMARY KEY, owner VARCHAR(64) NOT NULL, team INT, \
-             secret VARCHAR(32), amount INT, KEY k_secret (secret))"
+             secret VARCHAR(32), amount INT, hid INT INVISIBLE DEFAULT 7, KEY k_secret (secret))"
         ),
         format!("CREATE TABLE {db}.members (uid VARCHAR(64), team INT)"),
         format!("CREATE TABLE {db}.notes (id INT PRIMARY KEY, doc_id INT, body VARCHAR(32))"),
@@ -312,6 +312,43 @@ async fn reads(ck: &mut Checks, c: &mut Conn, user: &str, reader: bool, tag: &st
             || format!("{sql}: got {got:?}, want {}", set_text(&want)),
         );
     }
+    // RL28: `docs` has an invisible column (`hid`; a split adds
+    // `_sprig_rk`): `*` never shows it, naming it reads it, through the
+    // policy views for bound users.
+    let star: Result<Vec<Row>, String> = c
+        .query("SELECT * FROM docs ORDER BY id LIMIT 1")
+        .await
+        .map_err(|e| e.to_string());
+    let width = star
+        .as_ref()
+        .ok()
+        .and_then(|r| r.first().map(|r| r.columns_ref().len()));
+    ck.ok(
+        &format!("{tag} {user} star hides invisible columns"),
+        width == Some(5) || (want.is_empty() && star.as_ref().is_ok_and(Vec::is_empty)),
+        || format!("{star:?}"),
+    );
+    let got = ids(c, "SELECT id FROM docs WHERE hid = 7").await;
+    ck.ok(
+        &format!("{tag} {user} read naming an invisible column"),
+        got.as_ref() == Ok(&want),
+        || format!("got {got:?}, want {}", set_text(&want)),
+    );
+    // `*` with an invisible column named: refused under policy views
+    // (the all-columns view would widen `*`), never a hidden row.
+    let got = ids(c, "SELECT *, hid FROM docs").await;
+    ck.ok(
+        &format!("{tag} {user} star with an invisible column"),
+        got.as_ref().map_or(true, |g| g == &want),
+        || format!("got {got:?}"),
+    );
+    let got = one(c, "SELECT SUM(hid) FROM docs").await;
+    let want_sum = (!want.is_empty()).then(|| (7 * want.len()).to_string());
+    ck.ok(
+        &format!("{tag} {user} invisible column summed"),
+        got.as_ref() == Ok(&want_sum),
+        || format!("got {got:?}, want {want_sum:?}"),
+    );
     // Counting and aggregates.
     let cnt = one(c, "SELECT COUNT(*) FROM docs").await;
     ck.ok(
@@ -629,12 +666,8 @@ async fn direct_probe(ck: &mut Checks, db: &str) {
         ))
         .await
         .unwrap();
-    // A split table has invisible columns and no view (RL18): nothing to
-    // probe there.
-    if schemas.is_empty() && std::env::var("SPRIG_TEST_RLS_SHARDED").is_ok() {
-        eprintln!("direct probe: no policy view next to docs (a split table)");
-        return;
-    }
+    // `docs` has invisible columns (`hid`, and `_sprig_rk` once split):
+    // its policy views name their columns (RL28), so it has views too.
     ck.ok("policy views exist", !schemas.is_empty(), || "none".into());
     let account = format!("t{tid}_u{uid}");
     let pw = sprig_auth::authz::backend::BackendKey::new(secret.as_bytes())
@@ -668,6 +701,33 @@ async fn direct_probe(ck: &mut Checks, db: &str) {
         ck.ok(&format!("direct: view read in {s}"), got.is_ok(), || {
             format!("{got:?}")
         });
+        // RL28: the policy view has the visible columns only; the
+        // all-columns view has the invisible ones and the same rows.
+        let cols: Result<Vec<Row>, String> = b
+            .query(format!("SELECT * FROM `{s}`.__sprig_rls_docs LIMIT 1"))
+            .await
+            .map_err(|e| e.to_string());
+        let names: Vec<String> = cols
+            .as_ref()
+            .ok()
+            .and_then(|r| r.first())
+            .map(|r| r.columns_ref().iter().map(|c| c.name_str().into_owned()).collect())
+            .unwrap_or_default();
+        ck.ok(
+            &format!("direct: view columns visible only in {s}"),
+            names.len() == 5 && !names.iter().any(|n| n == "hid" || n.starts_with("_sprig")),
+            || format!("{cols:?}"),
+        );
+        let full = ids(
+            &mut b,
+            &format!("SELECT id FROM `{s}`.__sprig_rlsh_docs WHERE hid = 7"),
+        )
+        .await;
+        ck.ok(
+            &format!("direct: all-columns view filtered in {s}"),
+            full == got,
+            || format!("{full:?} vs {got:?}"),
+        );
         seen.extend(got.unwrap_or_default());
         b.query_drop("SET @sprig_rls = NULL").await.unwrap();
     }

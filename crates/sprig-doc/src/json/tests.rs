@@ -18,7 +18,47 @@ fn round_trip(d: &Document) -> (String, Option<String>) {
         s.doc,
         s.types
     );
+    // R5 round 8: the direct writer gives the same bytes.
+    assert_eq!(
+        to_raw(&s.doc, s.types.as_deref()).unwrap(),
+        bson::to_vec(d).unwrap(),
+        "to_raw of {}",
+        s.doc
+    );
     (s.doc, s.types)
+}
+
+/// R5 round 8: `to_raw` equals `to_bson` then `bson::to_vec` on text SQL
+/// may have written: MariaDB's spacing, escapes, a name twice, numbers of
+/// every width, deep nesting and long objects.
+#[test]
+fn raw_matches_document_path() {
+    let long: String = (0..40)
+        .map(|i| format!("\"f{i}\": {i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let cases = [
+        r#"{"_id": "a", "x": {"y": [1, 2.5, -3e2, 4294967296, true, false, null, "s\"q\u00e9\ud83d\ude00"]}}"#.to_owned(),
+        r#"{"_id": 1, "a": 1, "a": 2}"#.to_owned(),
+        r#"{"_id": 1, "o": {"b": 1, "c": 2, "b": {"z": 1}}}"#.to_owned(),
+        format!("{{\"_id\": 2, {long}, \"f3\": 9}}"),
+        format!("{{\"_id\": 3, {long}}}"),
+        r#"{ "_id" : 4 , "e" : { } , "a" : [ ] }"#.to_owned(),
+        r#"{"_id": 5, "big": 123456789012345678901234567890, "neg": -2147483649}"#.to_owned(),
+    ];
+    for c in &cases {
+        let want = bson::to_vec(&to_bson(c, None).unwrap()).unwrap();
+        assert_eq!(to_raw(c, None).unwrap(), want, "{c}");
+    }
+    let typed = r#"{"_id": "6721c5a4e1b2c3d4e5f60718", "n": [1, {"d": "2026-11-07T10:15:00.000Z"}], "n2": 3}"#;
+    let types = r#"{"_id": "objectId", "n.1.d": "date", "n2": "long"}"#;
+    assert_eq!(
+        to_raw(typed, Some(types)).unwrap(),
+        bson::to_vec(&to_bson(typed, Some(types)).unwrap()).unwrap()
+    );
+    assert!(to_raw(r#"{"_id": 1"#, None).is_err());
+    assert!(to_raw(r#"{"_id": 1} x"#, None).is_err());
+    assert!(to_raw(r#"{"_id": "\xff"}"#, None).is_err());
 }
 
 #[test]

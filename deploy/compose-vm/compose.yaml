@@ -49,6 +49,9 @@ x-sprigdb: &sprigdb
   environment: &sprigdb-env
     SPRIGDB_NODE_DC: ${SPRIG_DC:-dc1}
     SPRIGDB_META_DEPLOYMENT_ID: ${SPRIG_DEPLOYMENT_ID:-sprigdb}
+    # Every etcd member's client URL (RUNBOOK.md, "High availability"); one
+    # VM: the local member only.
+    SPRIGDB_META_DC_SEEDS: '${SPRIG_ETCD_SEEDS:-["https://etcd:2379"]}'
     SPRIGDB_TELEMETRY_LOG_FORMAT: json
     SPRIGDB_TELEMETRY_BOOTSTRAP_LOG_LEVEL: ${SPRIG_LOG_LEVEL:-info}
     # Full-text index copies (chapter 39) and the audit spool (chapter 47)
@@ -69,15 +72,22 @@ services:
     logging: *logging
     networks: [sprig]
     mem_limit: ${ETCD_MEM_LIMIT:-512m}
+    # One VM: one member, `etcd-0`, inside the Compose network. Three VMs:
+    # one member per VM, each listening (and published) on the same port
+    # numbers it advertises at SPRIG_PRIVATE_HOST (RUNBOOK.md, "High
+    # availability"). The initial-cluster values are read on a member's
+    # first start only.
     command:
       - etcd
-      - --name=etcd-0
+      - --name=${SPRIG_ETCD_NAME:-etcd-0}
       - --data-dir=/etcd-data/data
-      - --listen-client-urls=https://0.0.0.0:2379
-      - --advertise-client-urls=https://etcd:2379
-      - --listen-peer-urls=https://0.0.0.0:2380
-      - --initial-advertise-peer-urls=https://etcd:2380
-      - --initial-cluster=etcd-0=https://etcd:2380
+      - --listen-client-urls=https://0.0.0.0:${SPRIG_ETCD_CLIENT_PORT:-2379}
+      - --advertise-client-urls=https://${SPRIG_PRIVATE_HOST:-etcd}:${SPRIG_ETCD_CLIENT_PORT:-2379}
+      - --listen-peer-urls=https://0.0.0.0:${SPRIG_ETCD_PEER_PORT:-2380}
+      - --initial-advertise-peer-urls=https://${SPRIG_PRIVATE_HOST:-etcd}:${SPRIG_ETCD_PEER_PORT:-2380}
+      - --initial-cluster=${SPRIG_ETCD_INITIAL_CLUSTER:-etcd-0=https://etcd:2380}
+      - --initial-cluster-state=${SPRIG_ETCD_CLUSTER_STATE:-new}
+      - --initial-cluster-token=${SPRIG_DEPLOYMENT_ID:-sprigdb}-etcd
       - --client-cert-auth
       - --trusted-ca-file=/tls/ca.pem
       - --cert-file=/tls/etcd.pem
@@ -97,7 +107,7 @@ services:
       test:
         - CMD
         - etcdctl
-        - --endpoints=https://127.0.0.1:2379
+        - --endpoints=https://127.0.0.1:${SPRIG_ETCD_CLIENT_PORT:-2379}
         - --cacert=/tls/ca.pem
         - --cert=/tls/client.pem
         - --key=/tls/client-key.pem
@@ -136,6 +146,9 @@ services:
       - ./config/mariadb/initdb:/docker-entrypoint-initdb.d:ro
       - ./backups:/backups
       - ./config/mariadb/health.sh:/usr/local/bin/sprig-health.sh:ro
+      # The backups' public key (sprig-vm.sh backup encrypts inside this
+      # container, so no plaintext copy reaches the disk).
+      - ./secrets/backup:/run/sprig/backup:ro
     healthcheck:
       test: ["CMD", "/usr/local/bin/sprig-health.sh"]
       interval: 5s
@@ -149,13 +162,25 @@ services:
     mem_limit: ${CONTROLLER_MEM_LIMIT:-1g}
     environment:
       <<: *sprigdb-env
-      SPRIGDB_NODE_ID: ctl-1
+      SPRIGDB_NODE_ID: ctl-${SPRIG_VM_ID:-1}
+      # The Admin API and the internal port (permits) bind on the numbers
+      # they are published on, and are advertised at SPRIG_PRIVATE_HOST, so
+      # gateways on other VMs reach them (RUNBOOK.md, "High availability").
+      SPRIGDB_CONTROLLER_ADMIN_ADDR: 0.0.0.0:${SPRIG_ADMIN_PORT:-7480}
+      SPRIGDB_CONTROLLER_ADMIN_ADVERTISE: ${SPRIG_PRIVATE_HOST:-controller}:${SPRIG_ADMIN_PORT:-7480}
+      SPRIGDB_CONTROLLER_INTERNAL_ADDR: 0.0.0.0:${SPRIG_INTERNAL_PORT:-7481}
+      SPRIGDB_CONTROLLER_INTERNAL_ADVERTISE: ${SPRIG_PRIVATE_HOST:-controller}:${SPRIG_INTERNAL_PORT:-7481}
+      # Only the first VM's controller writes the deployment records.
+      SPRIGDB_CONTROLLER_BOOTSTRAP: ${SPRIG_CONTROLLER_BOOTSTRAP:-true}
     volumes:
       - controller-data:/var/lib/sprigdb
       - ./config/controller.toml:/etc/sprigdb/controller.toml:ro
       - ./secrets/tls:/run/sprig/tls:ro
       - ./secrets/sprig:/run/sprig/sprig:ro
-    ports: ["127.0.0.1:${SPRIG_ADMIN_PORT:-7480}:7480"]
+    # The Admin API is HTTPS (config/controller.toml). One VM: loopback
+    # only. Several VMs: SPRIG_ADMIN_BIND_IP is the private address, so the
+    # other VMs' gateways can relay admin calls to whichever controller leads.
+    ports: ["${SPRIG_ADMIN_BIND_IP:-127.0.0.1}:${SPRIG_ADMIN_PORT:-7480}:${SPRIG_ADMIN_PORT:-7480}"]
     healthcheck: &ready
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9180 && printf 'GET /readyz HTTP/1.0\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q ' 200 '"]
       interval: 5s
@@ -171,7 +196,7 @@ services:
     mem_limit: ${WORKER_MEM_LIMIT:-1g}
     environment:
       <<: *sprigdb-env
-      SPRIGDB_NODE_ID: wkr-1
+      SPRIGDB_NODE_ID: wkr-${SPRIG_VM_ID:-1}
     volumes:
       - ./config/controller.toml:/etc/sprigdb/controller.toml:ro
       - ./secrets/tls:/run/sprig/tls:ro
@@ -188,8 +213,11 @@ services:
     stop_grace_period: 45s   # gateway.drain_timeout_seconds (30) + margin
     environment:
       <<: *sprigdb-env
-      SPRIGDB_NODE_ID: gw-1
-      SPRIGDB_GATEWAY_ADVERTISE_ADDR: ${SPRIG_PUBLIC_HOST:-127.0.0.1}
+      SPRIGDB_NODE_ID: gw-${SPRIG_VM_ID:-1}
+      # What other gateways (the peer service: KILL, drains, queue and
+      # pub/sub relays) and sprigctl reach this gateway at.
+      SPRIGDB_GATEWAY_ADVERTISE_ADDR: ${SPRIG_PRIVATE_HOST:-${SPRIG_PUBLIC_HOST:-127.0.0.1}}
+      SPRIGDB_GATEWAY_LISTEN_OVERRIDE: '{ peer = "0.0.0.0:${SPRIG_PEER_PORT:-7403}" }'
     volumes:
       - gateway-data:/var/lib/sprigdb
       - ./config/gateway.toml:/etc/sprigdb/gateway.toml:ro

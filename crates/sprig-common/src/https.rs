@@ -123,9 +123,11 @@ pub fn server_config(
             builder.with_client_cert_verifier(v)
         }
     };
-    let mut cfg = builder
-        .with_single_cert(chain, key)
-        .map_err(|e| config_err(format!("[controller] admin_tls_cert and admin_tls_key: {e}")))?;
+    let mut cfg = builder.with_single_cert(chain, key).map_err(|e| {
+        config_err(format!(
+            "[controller] admin_tls_cert and admin_tls_key: {e}"
+        ))
+    })?;
     cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(Arc::new(cfg))
 }

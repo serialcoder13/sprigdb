@@ -1,8 +1,10 @@
 //! The Admin API client (chapter 47, "sprigctl reference"; chapter 37).
 //!
 //! JSON over HTTP/1.1 to `--endpoint`. Errors come back as `{code, name,
-//! message, trace_id}`. `https://` endpoints wait for the gateway's 8443
-//! listener; the controller serves plain HTTP on loopback.
+//! message, trace_id}`. An `https://` endpoint (a controller with
+//! `[controller] admin_tls_cert`, chapter 37 "Admin API over TLS") is
+//! checked against `--ca-file`, and `--client-cert` and `--client-key` are
+//! presented when the controller requires a client certificate.
 
 use std::fmt;
 use std::time::Duration;
@@ -48,6 +50,17 @@ pub(crate) struct AdminClient {
     base: String,
     token: Option<String>,
     http: Client<HttpConnector, Full<Bytes>>,
+    /// For an `https://` endpoint.
+    tls: Option<std::sync::Arc<sprig_common::https::ClientConfig>>,
+}
+
+/// TLS options for an `https://` endpoint.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TlsFiles {
+    /// The CA the endpoint's certificate is checked against.
+    pub(crate) ca_file: Option<std::path::PathBuf>,
+    /// A client certificate chain and its key.
+    pub(crate) client: Option<(std::path::PathBuf, std::path::PathBuf)>,
 }
 
 impl AdminClient {
@@ -57,28 +70,50 @@ impl AdminClient {
     /// # Errors
     /// For an endpoint that isn't an `http://` URL.
     pub(crate) fn new(endpoint: &str, token: Option<String>) -> Result<Self, CallError> {
+        Self::with_tls(endpoint, token, &TlsFiles::default())
+    }
+
+    /// A client of `endpoint` (`http://` or `https://host:port`); an
+    /// `https://` endpoint needs `tls.ca_file`.
+    ///
+    /// # Errors
+    /// For an endpoint that isn't an `http://` or `https://` URL, an
+    /// `https://` one without a CA file, or TLS files that can't be read.
+    pub(crate) fn with_tls(
+        endpoint: &str,
+        token: Option<String>,
+        tls: &TlsFiles,
+    ) -> Result<Self, CallError> {
         let base = endpoint.trim_end_matches('/').to_owned();
         let uri: Uri = base
             .parse()
             .map_err(|e| CallError::Transport(format!("endpoint {endpoint:?}: {e}")))?;
-        match uri.scheme_str() {
-            Some("http") => {}
+        let tls = match uri.scheme_str() {
+            Some("http") => None,
             Some("https") => {
-                return Err(CallError::Transport(format!(
-                    "endpoint {endpoint}: https needs the gateway's 8443 listener, which \
-                     doesn't serve the Admin API yet; use the controller's http:// address"
-                )));
+                let ca = tls.ca_file.as_deref().ok_or_else(|| {
+                    CallError::Transport(format!(
+                        "endpoint {endpoint}: https needs --ca-file (or SPRIGCTL_CA_FILE), \
+                         the CA that signed the Admin API's certificate"
+                    ))
+                })?;
+                let client = tls.client.as_ref().map(|(c, k)| (c.as_path(), k.as_path()));
+                Some(
+                    sprig_common::https::client_config(ca, client)
+                        .map_err(|e| CallError::Transport(e.message.clone()))?,
+                )
             }
             _ => {
                 return Err(CallError::Transport(format!(
-                    "endpoint {endpoint:?}: expected http://host:port"
+                    "endpoint {endpoint:?}: expected http://host:port or https://host:port"
                 )));
             }
-        }
+        };
         Ok(Self {
             base,
             token,
             http: Client::builder(TokioExecutor::new()).build_http(),
+            tls,
         })
     }
 
@@ -146,7 +181,13 @@ impl AdminClient {
         let req = b
             .body(Full::new(Bytes::from(body.unwrap_or_default())))
             .map_err(|e| CallError::Transport(format!("{url}: {e}")))?;
-        let resp = tokio::time::timeout(CALL_TIMEOUT, self.http.request(req))
+        let sent = async {
+            match &self.tls {
+                Some(tls) => sprig_common::https::send(tls, req).await,
+                None => self.http.request(req).await.map_err(|e| e.to_string()),
+            }
+        };
+        let resp = tokio::time::timeout(CALL_TIMEOUT, sent)
             .await
             .map_err(|_| CallError::Transport(format!("{url}: no answer within {CALL_TIMEOUT:?}")))?
             .map_err(|e| CallError::Transport(format!("{url}: {e}")))?;

@@ -139,7 +139,7 @@ pub async fn handle(core: &Arc<Core>, info: &ConnInfo, req: Request<Incoming>) -
     let rpc = m.route.short_name();
     metrics::counter!("sprig_api_requests_total", "service" => m.route.service, "method" => m.route.rpc, "protocol" => "rest").increment(1);
     let r = if m.route.is_admin() {
-        admin(core, m, req).await
+        admin(core, info, m, req).await
     } else {
         data(core, info, &rpc, m, req).await
     };
@@ -148,9 +148,12 @@ pub async fn handle(core: &Arc<Core>, info: &ConnInfo, req: Request<Incoming>) -
 
 async fn admin(
     core: &Arc<Core>,
+    info: &ConnInfo,
     m: Matched,
     req: Request<Incoming>,
 ) -> Result<Response<Body>, SprigError> {
+    // `studio.operator_mtls` covers the Operators routes (ST47).
+    super::studio::ops::operators_cert(core, info, req.uri().path())?;
     let auth = header(&req, "authorization");
     if m.route.service == "sprig.admin.v1.Gateways" {
         let v = core
@@ -170,9 +173,10 @@ async fn admin(
         .map_or_else(|| req.uri().path().to_owned(), |p| p.as_str().to_owned());
     let max = core.engine.settings().max_request;
     let body = read_body(req, max).await?;
+    // The controller records the client's address (ST47).
     let r = core
         .admin
-        .forward(&method, &pq, auth.as_deref(), body)
+        .forward_from(&method, &pq, auth.as_deref(), body, Some(info.peer.ip()))
         .await?;
     Ok(bytes_response(r.status, r.body))
 }

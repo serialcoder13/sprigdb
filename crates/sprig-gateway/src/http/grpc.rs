@@ -661,8 +661,23 @@ async fn admin_call<R: AdminReq>(
         return Ok(Response::new(r));
     }
     let auth = meta(&req, "authorization");
+    let info = req.extensions().get::<ConnInfo>().cloned();
     let r = req.into_inner();
     let route = by_name(rpc).ok_or_else(|| Status::unimplemented(rpc.to_owned()))?;
+    // `studio.operator_mtls` covers the Operators service (ST47).
+    if route.service == "sprig.admin.v1.Operators" {
+        let mtls = core
+            .studio
+            .tenant_get(&sprig_studio::settings::OPERATOR_MTLS, None, None);
+        super::studio::ops::operators_cert_check(
+            mtls.as_ref(),
+            info.as_ref()
+                .and_then(|i| i.tls.as_ref())
+                .is_some_and(|t| t.client_cert),
+            "/admin/v1/operators",
+        )
+        .map_err(|e| st(&e))?;
+    }
     let (vars, query, body) = r.parts();
     if route.service == "sprig.admin.v1.Gateways" {
         let v = core
@@ -688,13 +703,15 @@ async fn admin_call<R: AdminReq>(
         path.push_str(query.trim_start_matches('?'));
     }
     let method = Method::from_bytes(route.method.as_bytes()).unwrap_or(Method::GET);
+    // The controller records the client's address (ST47).
     let reply = core
         .admin
-        .forward(
+        .forward_from(
             &method,
             &path,
             auth.as_deref(),
             Bytes::from(body.to_owned()),
+            info.as_ref().map(|i| i.peer.ip()),
         )
         .await
         .map_err(|e| st(&e))?;

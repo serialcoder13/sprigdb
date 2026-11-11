@@ -85,6 +85,38 @@ pub struct Conn {
     pub(crate) hello_done: bool,
     /// A fail point closes the connection without a reply.
     pub(crate) close_now: bool,
+    /// A reply a handler built as BSON bytes (R5 round 8: `find` by
+    /// `_id`), its fields before `ok`; the handler returned an empty
+    /// document, and [`Conn::dispatch`] answers with these bytes.
+    pub(crate) raw: Option<RawDocumentBuf>,
+}
+
+/// A command's reply: a document, or BSON bytes built directly (R5 round
+/// 8).
+#[derive(Debug)]
+pub(crate) enum Reply {
+    Doc(Document),
+    Raw(RawDocumentBuf),
+}
+
+impl Reply {
+    /// The reply as a document.
+    pub(crate) fn into_document(self) -> Document {
+        match self {
+            Self::Doc(d) => d,
+            Self::Raw(r) => r.to_document().unwrap_or_else(|e| {
+                MongoError::new(code::INTERNAL_ERROR, e.to_string()).to_doc()
+            }),
+        }
+    }
+
+    /// `ok` is 1.
+    fn ok(&self) -> bool {
+        match self {
+            Self::Doc(d) => d.get_f64("ok") == Ok(1.0),
+            Self::Raw(r) => r.get_f64("ok") == Ok(1.0),
+        }
+    }
 }
 
 impl std::fmt::Debug for Conn {
@@ -127,6 +159,7 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
         restore: false,
         hello_done: false,
         close_now: false,
+        raw: None,
     };
     let close = conn.close_soon.clone();
     let mut next_id = 1i32;
@@ -235,7 +268,7 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
                         )
                         && m.body.get("topologyVersion").ok().flatten().is_some()
                         && m.body.get("maxAwaitTimeMS").ok().flatten().is_some();
-                    let (name, body) = Box::pin(st.guarded_dispatch(m, msg.len())).await;
+                    let (name, body) = Box::pin(st.guarded_reply(m, msg.len())).await;
                     if st.close_now {
                         return Ok(());
                     }
@@ -243,13 +276,18 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
                     if more {
                         (None, None)
                     } else {
-                        let raw = RawDocumentBuf::from_document(&body).unwrap_or_else(|e| {
-                            RawDocumentBuf::from_document(
-                                &MongoError::new(code::INTERNAL_ERROR, e.to_string()).to_doc(),
-                            )
-                            .unwrap_or_default()
-                        });
-                        let stream_on = streaming && body.get_f64("ok") == Ok(1.0);
+                        let stream_on = streaming && body.ok();
+                        let raw = match body {
+                            Reply::Raw(r) => r,
+                            Reply::Doc(body) => RawDocumentBuf::from_document(&body)
+                                .unwrap_or_else(|e| {
+                                    RawDocumentBuf::from_document(
+                                        &MongoError::new(code::INTERNAL_ERROR, e.to_string())
+                                            .to_doc(),
+                                    )
+                                    .unwrap_or_default()
+                                }),
+                        };
                         if stream_on {
                             again = Some(msg.clone());
                         }
@@ -592,6 +630,13 @@ impl Conn {
     /// backend connection closes and rolls back); the next command opens
     /// another.
     pub(crate) async fn guarded_dispatch(&mut self, m: OpMsg, size: usize) -> (String, Document) {
+        let (name, r) = self.guarded_reply(m, size).await;
+        (name, r.into_document())
+    }
+
+    /// [`Self::guarded_dispatch`], its reply as [`Reply`] (BSON bytes for
+    /// the replies built that way).
+    pub(crate) async fn guarded_reply(&mut self, m: OpMsg, size: usize) -> (String, Reply) {
         let threshold = usize::try_from(self.shared.large_request_bytes()).unwrap_or(usize::MAX);
         let Some(h) = self.sql.as_ref().map(SqlSession::handle) else {
             return crate::offload::run(size, threshold, Box::pin(self.dispatch(m))).await;
@@ -619,20 +664,18 @@ impl Conn {
         metrics::counter!("sprig_mongo_commands_total", "command" => name.clone(), "result" => "interrupted").increment(1);
         (
             name,
-            MongoError::new(code::INTERRUPTED, "operation was interrupted").to_doc(),
+            Reply::Doc(MongoError::new(code::INTERRUPTED, "operation was interrupted").to_doc()),
         )
     }
 
     /// Dispatches one `OP_MSG`: returns the command name and the reply.
-    pub(crate) async fn dispatch(&mut self, m: OpMsg) -> (String, Document) {
+    pub(crate) async fn dispatch(&mut self, m: OpMsg) -> (String, Reply) {
+        self.raw = None;
         let started = std::time::Instant::now();
         let mut body = match m.body.to_document() {
             Ok(d) => d,
             Err(e) => {
-                return (
-                    String::new(),
-                    MongoError::new(code::BAD_VALUE, format!("invalid BSON: {e}")).to_doc(),
-                );
+                return (String::new(), Reply::Doc(MongoError::new(code::BAD_VALUE, format!("invalid BSON: {e}")).to_doc()));
             }
         };
         let name = body.keys().next().cloned().unwrap_or_default();
@@ -640,7 +683,7 @@ impl Conn {
         for s in &m.sequences {
             for d in &s.docs {
                 if let Err(e) = sprig_doc::json::check_raw(d) {
-                    return (name, e.to_doc());
+                    return (name, Reply::Doc(e.to_doc()));
                 }
             }
             let docs: Vec<Bson> = s
@@ -663,19 +706,16 @@ impl Conn {
                 if let bson::RawBsonRef::Document(raw) = d
                     && let Err(e) = sprig_doc::json::check_raw(raw)
                 {
-                    return (name, e.to_doc());
+                    return (name, Reply::Doc(e.to_doc()));
                 }
             }
         }
         if self.principal.is_none() && !PRE_AUTH.contains(&name.as_str()) {
-            return (
-                name.clone(),
-                MongoError::new(
+            return (name.clone(), Reply::Doc(MongoError::new(
                     code::UNAUTHORIZED,
                     format!("Command {name} requires authentication"),
                 )
-                .to_doc(),
-            );
+                .to_doc()));
         }
         // Driver test suites' fail point (D18), when the operator allows it.
         let tenant = self
@@ -692,7 +732,7 @@ impl Conn {
                     "no such command: 'configureFailPoint'",
                 ))
             };
-            return (name, r.unwrap_or_else(|e| e.to_doc()));
+            return (name, Reply::Doc(r.unwrap_or_else(|e| e.to_doc())));
         }
         let injected = if self.principal.is_some() && self.shared.test_commands() {
             let app = self
@@ -711,7 +751,7 @@ impl Conn {
             }
             if i.close {
                 self.close_now = true;
-                return (name, Document::new());
+                return (name, Reply::Doc(Document::new()));
             }
             if let Some(c) = i.error_code {
                 let mut e = MongoError::new(c, "Failing command via 'failCommand' failpoint");
@@ -745,7 +785,7 @@ impl Conn {
                         e = e.label("TransientTransactionError");
                     }
                 }
-                return (name, e.to_doc());
+                return (name, Reply::Doc(e.to_doc()));
             }
         }
         // The other two fail points of the drivers' tests.
@@ -783,7 +823,7 @@ impl Conn {
                 ) {
                     e = e.label("ResumableChangeStreamError");
                 }
-                return (name, e.to_doc());
+                return (name, Reply::Doc(e.to_doc()));
             }
             if super::retry::applies(&name, &body)
                 && let Some(i) = self
@@ -796,7 +836,7 @@ impl Conn {
                     if super::retry::retryable_code(c) {
                         e = e.label("RetryableWriteError");
                     }
-                    return (name, e.to_doc());
+                    return (name, Reply::Doc(e.to_doc()));
                 }
                 close_after = i.close;
             }
@@ -817,12 +857,43 @@ impl Conn {
         if close_after {
             // The write committed; the client never hears.
             self.close_now = true;
-            return (name, Document::new());
+            return (name, Reply::Doc(Document::new()));
         }
         let result = if r.is_ok() { "ok" } else { "error" };
         metrics::counter!("sprig_mongo_commands_total", "command" => name.clone(), "result" => result).increment(1);
         metrics::histogram!("sprig_mongo_command_duration_seconds", "command" => name.clone())
             .record(started.elapsed().as_secs_f64());
+        // R5 round 8: a reply the handler built as BSON bytes gets the
+        // same fields as a document reply (below), appended.
+        let wce = injected
+            .as_ref()
+            .is_some_and(|i| i.write_concern_error.is_some());
+        let r = match (r, self.raw.take()) {
+            (Ok(d), Some(mut raw)) if d.is_empty() && !wce => {
+                use bson::RawBson;
+                raw.append("ok", RawBson::Double(1.0));
+                let ts = cluster_time();
+                raw.append("operationTime", RawBson::Timestamp(ts));
+                let mut sig = RawDocumentBuf::new();
+                sig.append(
+                    "hash",
+                    RawBson::Binary(bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: vec![0; 20],
+                    }),
+                );
+                sig.append("keyId", RawBson::Int64(0));
+                let mut ct = RawDocumentBuf::new();
+                ct.append("clusterTime", RawBson::Timestamp(ts));
+                ct.append("signature", RawBson::Document(sig));
+                raw.append("$clusterTime", RawBson::Document(ct));
+                return (name, Reply::Raw(raw));
+            }
+            (Ok(d), Some(raw)) if d.is_empty() => Ok(raw
+                .to_document()
+                .unwrap_or_else(|e| MongoError::new(code::INTERNAL_ERROR, e.to_string()).to_doc())),
+            (r, _) => r,
+        };
         let doc = match r {
             Ok(mut d) => {
                 if !d.contains_key("ok") {
@@ -864,7 +935,7 @@ impl Conn {
             }
             Err(e) => e.to_doc(),
         };
-        (name, doc)
+        (name, Reply::Doc(doc))
     }
 }
 

@@ -45,6 +45,9 @@
 //! `[controller] admin_addr` (default `http://127.0.0.1:7480`) until the
 //! gateway's 8443 listener serves it; `--endpoint` or `SPRIGCTL_ENDPOINT`
 //! names it, and `--token-file` or `SPRIGCTL_TOKEN_FILE` its bearer token.
+//! An `https://` endpoint (`[controller] admin_tls_cert`) needs `--ca-file`
+//! (`SPRIGCTL_CA_FILE`), plus `--client-cert` and `--client-key` when the
+//! controller requires a client certificate.
 
 mod check;
 mod client;
@@ -409,6 +412,29 @@ fn cli() -> Command {
                 .help("A file holding the Admin API bearer token"),
         )
         .arg(
+            Arg::new("ca-file")
+                .long("ca-file")
+                .env("SPRIGCTL_CA_FILE")
+                .global(true)
+                .help("For an https:// endpoint: the CA (PEM) its certificate is checked against"),
+        )
+        .arg(
+            Arg::new("client-cert")
+                .long("client-cert")
+                .env("SPRIGCTL_CLIENT_CERT")
+                .global(true)
+                .requires("client-key")
+                .help("For an https:// endpoint that requires one: a client certificate (PEM)"),
+        )
+        .arg(
+            Arg::new("client-key")
+                .long("client-key")
+                .env("SPRIGCTL_CLIENT_KEY")
+                .global(true)
+                .requires("client-cert")
+                .help("The private key (PEM) of --client-cert"),
+        )
+        .arg(
             Arg::new("dc")
                 .long("dc")
                 .global(true)
@@ -614,7 +640,14 @@ fn client(m: &ArgMatches) -> Result<AdminClient, Failed> {
         // endpoint.
         None => operator::session_token(endpoint),
     };
-    Ok(AdminClient::new(endpoint, token)?)
+    let tls = client::TlsFiles {
+        ca_file: m.get_one::<String>("ca-file").map(Into::into),
+        client: m
+            .get_one::<String>("client-cert")
+            .zip(m.get_one::<String>("client-key"))
+            .map(|(c, k)| (c.into(), k.into())),
+    };
+    Ok(AdminClient::with_tls(endpoint, token, &tls)?)
 }
 
 /// Output formats. YAML is printed as JSON, which every YAML 1.2 parser

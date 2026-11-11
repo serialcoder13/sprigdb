@@ -976,6 +976,69 @@ impl Engine {
         Ok(plan)
     }
 
+    /// A find by `_id` alone, answered as BSON bytes built straight from
+    /// the stored JSON (R5 round 8, decision D35's third part): `None` when
+    /// `filter` isn't a point condition here (the caller plans the find as
+    /// usual), `Some(None)` when nothing matches, else the document's
+    /// bytes. The statement is S26's prepared point read, through the
+    /// caller's session as every engine statement (chapter 29's privileges
+    /// and row policies apply). The recheck of decision D4 is left out: the
+    /// row was found by its encoded `_id`, the whole condition, and equal
+    /// keys are equal values in MongoDB's comparison.
+    ///
+    /// # Errors
+    /// Parse errors; SQL errors.
+    pub async fn find_point_raw(
+        &self,
+        sql: &mut dyn SqlRunner,
+        ns: &Ns,
+        filter: &Document,
+    ) -> Result<Option<Option<Vec<u8>>>, MongoError> {
+        if crate::collation::active().is_some()
+            || filter.len() != 1
+            || !filter.contains_key("_id")
+            || crate::text::split_text(filter)?.is_some()
+        {
+            return Ok(None);
+        }
+        let pred = filter::parse(filter)?;
+        if models::near_of(&pred).is_some() {
+            return Ok(None);
+        }
+        let Some(m) = self.meta(sql, ns).await? else {
+            return Ok(Some(None));
+        };
+        let sqlp = translate(&pred, &m);
+        let Some(key) = sqlp.point_key() else {
+            return Ok(None);
+        };
+        let q = format!(
+            "SELECT _id, doc, _types FROM {}.{} WHERE _id = ? LIMIT 1",
+            ident(&ns.db),
+            ident(&m.table),
+        );
+        let rows = match sql.query_bound(&q, &[Param::Bin(key)]).await {
+            Ok(r) => r,
+            Err(e) if e.is(1146) => return Ok(Some(None)),
+            Err(e) => return Err(mongo_error(&e)),
+        };
+        let Some(r) = rows.first() else {
+            return Ok(Some(None));
+        };
+        let doc = r.get(1).and_then(Option::as_deref).unwrap_or_default();
+        let types = r.get(2).and_then(Option::as_ref).map(|b| String::from_utf8_lossy(b));
+        let raw = json::to_raw(
+            std::str::from_utf8(doc)
+                .map_or_else(
+                    |_| std::borrow::Cow::Owned(String::from_utf8_lossy(doc).into_owned()),
+                    std::borrow::Cow::Borrowed,
+                )
+                .as_ref(),
+            types.as_deref(),
+        )?;
+        Ok(Some(Some(raw)))
+    }
+
     /// Every matching document, in `_id` order, within `max_bytes`.
     async fn scan(
         &self,

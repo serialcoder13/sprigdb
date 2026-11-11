@@ -331,16 +331,34 @@ async fn deleted_tenants_finish_and_close_their_connections() {
             }
         }
     };
+    // Within 10 s of a tenant's going, the node has no connection of its
+    // accounts (the gateway's idle timeout is 300 s).
+    let closed = |name: String| {
+        let e = &e;
+        let id = ids[&name];
+        async move {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            let (conns, _) = left_on_node(e, id).await;
+            eprintln!("{name}: {conns} connections 10 s after it went");
+            (conns > 0).then(|| format!("{name}: {conns} connections 10 s after its deletion"))
+        }
+    };
     match wait_gone(mem.clone()).await {
-        Some(d) => eprintln!("{mem} gone after {d:?}"),
+        Some(d) => {
+            eprintln!("{mem} gone after {d:?}");
+            failed.extend(closed(mem.clone()).await);
+        }
         None => failed.push(format!("{mem} still listed after {} s", e.secs)),
     }
     for t in [&decl, &plain] {
         ctl(&e, &["tenant", "delete", t, "--yes"]).expect("delete");
     }
-    for t in [&decl, &plain] {
+    for t in [&plain, &decl] {
         match wait_gone(t.clone()).await {
-            Some(d) => eprintln!("{t} gone after {d:?}"),
+            Some(d) => {
+                eprintln!("{t} gone after {d:?}");
+                failed.extend(closed(t.clone()).await);
+            }
             None => failed.push(format!("{t} still listed after {} s", e.secs)),
         }
     }

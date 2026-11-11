@@ -27,13 +27,9 @@ fn per_user(dir: &Path, extra: &str) -> sprig_common::Result<PerUser> {
 }
 
 fn credential(p: &PerUser) -> Credential {
-    p.target(
-        ClusterId::new("dc1-main").unwrap(),
-        TenantId(7),
-        UserId(3),
-    )
-    .credential()
-    .unwrap()
+    p.target(ClusterId::new("dc1-main").unwrap(), TenantId(7), UserId(3))
+        .credential()
+        .unwrap()
 }
 
 /// The options the backend pool builds for `c` (`backend::Backends::tls_for`).
@@ -141,11 +137,7 @@ fn skip_verify_ignores_the_ca_file() {
 async fn verify_trusts_the_private_ca_and_nothing_else() {
     let d = TempDir::new();
     let ca = TestCa::new();
-    std::fs::write(
-        d.path().join("ca.pem"),
-        pem_of(&ca.der),
-    )
-    .unwrap();
+    std::fs::write(d.path().join("ca.pem"), pem_of(&ca.der)).unwrap();
     let leaf = ca.leaf("mariadb-1", (2099, 1, 1));
     let p = per_user(d.path(), "ca_file = \"ca.pem\"\n").unwrap();
     let config = options(&credential(&p)).build().unwrap();

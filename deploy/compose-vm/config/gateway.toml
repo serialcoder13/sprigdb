@@ -7,6 +7,7 @@
 dc = "dc1"
 
 [meta]
+# compose.yaml sets SPRIGDB_META_DC_SEEDS (every etcd member) instead.
 dc_seeds = ["https://etcd:2379"]
 global_seeds = []
 deployment_id = "sprigdb"
@@ -23,6 +24,8 @@ login_mode = "catalog"
 backends_file = "/run/sprig/sprig/backends.toml"
 workload_key_file = "/run/sprig/sprig/workload-keys"
 controller_token_file = "/run/sprig/sprig/gateway-token"
+# The controllers' HTTPS Admin API is checked against [tls] ca (the
+# deployment CA); `controller_ca_file` would name another.
 
 [telemetry]
 bootstrap_log_level = "info"

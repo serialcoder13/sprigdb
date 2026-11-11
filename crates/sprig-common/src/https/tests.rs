@@ -84,7 +84,10 @@ async fn server(cfg: Arc<rustls::ServerConfig>) -> String {
     format!("https://localhost:{}", addr.port())
 }
 
-async fn get_peer(cfg: &Arc<rustls::ClientConfig>, base: &str) -> std::result::Result<String, String> {
+async fn get_peer(
+    cfg: &Arc<rustls::ClientConfig>,
+    base: &str,
+) -> std::result::Result<String, String> {
     let req = Request::get(format!("{base}/peer"))
         .body(Full::new(Bytes::new()))
         .unwrap();
@@ -138,7 +141,11 @@ async fn a_client_ca_requires_a_client_certificate() {
 
     // No client certificate: refused (the error shows on the first read
     // under TLS 1.3, so either step may fail).
-    assert!(get_peer(&client_config(&ca_file, None).unwrap(), &base).await.is_err());
+    assert!(
+        get_peer(&client_config(&ca_file, None).unwrap(), &base)
+            .await
+            .is_err()
+    );
 
     // One from the deployment CA: accepted.
     let (cc, ck) = files(&d, &ca, "client", &["sprig-client"]);

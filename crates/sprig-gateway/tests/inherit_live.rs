@@ -2884,6 +2884,11 @@ async fn fan_in_sink_end_to_end() {
     let _ = sql(&mut sys, "DROP SINK r9fsink.dl").await;
     ok(&mut sys, "CREATE STREAM r9fsink.ev PARTITIONS 1").await;
     ok(&mut sys, "CREATE STREAM r9fsink.dead PARTITIONS 1").await;
+    // The sink's task starts only after the three records (its worker is
+    // down meanwhile): START AT LATEST counts from the sink's creation, so
+    // they still come (r9fanin: it counted from the task's first start,
+    // seconds later under load, and this step got nothing).
+    let killed = kill_worker(&e);
     ok(
         &mut sys,
         "CREATE SINK r9fsink.dl FROM STREAM ev TO WEBHOOK CONNECTION hook \
@@ -2897,6 +2902,10 @@ async fn fan_in_sink_end_to_end() {
             &format!("INSERT INTO r9fsink.ev (`key`, `value`) VALUES ('k', '{v}')"),
         )
         .await;
+    }
+    if killed {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        start_worker(&e);
     }
     let n = wait_count(&mut sys, "SELECT COUNT(*) FROM r9fsink.dead", 1, 120).await;
     let dl = ok(

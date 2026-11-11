@@ -857,6 +857,91 @@ fn first_batch(body: &Document, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// The fields a find may carry and still be answered by [`find_point`].
+const POINT_FIND_KEYS: [&str; 18] = [
+    "find",
+    "filter",
+    "$db",
+    "lsid",
+    "$clusterTime",
+    "$readPreference",
+    "readConcern",
+    "comment",
+    "maxTimeMS",
+    "limit",
+    "singleBatch",
+    "batchSize",
+    "projection",
+    "sort",
+    "skip",
+    "apiVersion",
+    "apiStrict",
+    "apiDeprecationErrors",
+];
+
+/// R5 round 8 (the rest of decision D35): a find whose filter is `_id`
+/// alone, with no projection, sort, skip, collation or `let`, outside
+/// transactions and snapshot reads, is answered by
+/// [`sprig_doc::engine::Engine::find_point_raw`]: the document's BSON is
+/// written straight from its stored JSON into the reply, which goes into
+/// `c.raw` (`true`). The reply is the one the general path gives: the
+/// document, or none, in `firstBatch`, cursor id 0. Anything else, or a
+/// filter that isn't a point here, is `false` and plans as usual.
+async fn find_point(
+    c: &mut Conn,
+    sql: &mut SqlSession,
+    ns: &Ns,
+    body: &Document,
+    limit: i64,
+    single: bool,
+) -> Result<bool, MongoError> {
+    if sql.in_txn {
+        return Ok(false);
+    }
+    if !body.keys().all(|k| POINT_FIND_KEYS.contains(&k.as_str()))
+        || body.get_document("projection").is_ok_and(|p| !p.is_empty())
+        || body.get_document("sort").is_ok_and(|p| !p.is_empty())
+        || body.contains_key("projection") && body.get_document("projection").is_err()
+        || body.contains_key("sort") && body.get_document("sort").is_err()
+        || i64_of(body, "skip").unwrap_or(0) != 0
+        || body
+            .get_document("readConcern")
+            .ok()
+            .and_then(|r| r.get_str("level").ok())
+            == Some("snapshot")
+    {
+        return Ok(false);
+    }
+    // The general path's cursor is exhausted after the first batch (id
+    // 0) when a limit or `singleBatch` ends it, or when the batch has room
+    // for more than one document.
+    let first = first_batch(body, 101);
+    if first == 0 || !(limit != 0 || single || first >= 2) {
+        return Ok(false);
+    }
+    let Ok(filter) = body.get_document("filter") else {
+        return Ok(false);
+    };
+    let engine = c.shared.engine.clone();
+    let Some(found) = engine.find_point_raw(sql, ns, filter).await? else {
+        return Ok(false);
+    };
+    let mut batch = bson::RawArrayBuf::new();
+    if let Some(bytes) = found {
+        let d = bson::RawDocumentBuf::from_bytes(bytes)
+            .map_err(|e| MongoError::new(code::INTERNAL_ERROR, e.to_string()))?;
+        batch.push(d);
+    }
+    let mut cursor = bson::RawDocumentBuf::new();
+    cursor.append("firstBatch", batch);
+    cursor.append("id", 0i64);
+    cursor.append("ns", ns.to_string());
+    let mut reply = bson::RawDocumentBuf::new();
+    reply.append("cursor", cursor);
+    c.raw = Some(reply);
+    Ok(true)
+}
+
 #[allow(clippy::too_many_lines)]
 async fn exec(
     c: &mut Conn,
@@ -1026,6 +1111,11 @@ async fn exec(
             let ns = ns_of("find")?;
             let limit = i64_of(body, "limit").unwrap_or(0);
             let single = body.get_bool("singleBatch").unwrap_or(false) || limit < 0;
+            // R5 round 8 (D35): a find by `_id` alone answers from the
+            // stored JSON as BSON bytes (`Conn::raw`).
+            if find_point(c, sql, &ns, body, limit, single).await? {
+                return Ok(Document::new());
+            }
             let spec = FindSpec {
                 filter: body.get_document("filter").cloned().unwrap_or_default(),
                 sort: body.get_document("sort").ok().cloned(),

@@ -773,6 +773,15 @@ pub async fn run_sink_task(
         per_task
     };
     let parts = task_partitions(partitions_n, k, task_no.0);
+    // `START AT LATEST` (the default) means from the sink's creation, not
+    // from its task's first start: the task starts seconds later under load,
+    // and records published in between were skipped (r9fanin; the dead
+    // letter step of `fan_in_sink_end_to_end` lost all three).
+    let start = instance_start(
+        def.start_at,
+        0,
+        fan_in_created_ms(sink_created_at(&mut c, &cat_schema, sink).await?, false),
+    );
     let epoch = store
         .claim_task(
             &mut c,
@@ -836,7 +845,7 @@ pub async fn run_sink_task(
         sprig_streams::StreamId(stream),
         parts,
         def.group(),
-        def.start_at,
+        start,
         sink,
     )
     .await?;
@@ -1018,6 +1027,27 @@ impl crate::source::FanInOpener for EnvFanIn {
     }
 }
 
+/// When sink `sink` was made (ms since the Unix epoch), from its catalog
+/// row.
+async fn sink_created_at(
+    c: &mut mysql_async::Conn,
+    cat_schema: &str,
+    sink: SinkId,
+) -> Result<Option<i64>> {
+    c.exec_first(
+        format!(
+            "SELECT CAST(UNIX_TIMESTAMP(created_at) * 1000 AS SIGNED) FROM {}.sinks \
+             WHERE sink_id = ?",
+            sprig_common::names::quote(cat_schema)
+        ),
+        (sink.0,),
+    )
+    .await
+    .map_err(|e| {
+        SprigError::new(SprigCode::CatalogUnavailable, "catalog unavailable").with_source(e)
+    })
+}
+
 /// A fan-in sink's creation time as its sources compare it: milliseconds
 /// for stream instances, whole seconds for change topics (`changes`).
 #[must_use]
@@ -1144,19 +1174,7 @@ async fn run_fan_in_task(
     opts: Opts,
 ) -> Result<TaskEnd> {
     let (cat_pool, cat_schema) = env.catalog(tenant).await?;
-    let created: Option<i64> = c
-        .exec_first(
-            format!(
-                "SELECT CAST(UNIX_TIMESTAMP(created_at) * 1000 AS SIGNED) FROM {}.sinks \
-                 WHERE sink_id = ?",
-                sprig_common::names::quote(&cat_schema)
-            ),
-            (sink.0,),
-        )
-        .await
-        .map_err(|e| {
-            SprigError::new(SprigCode::CatalogUnavailable, "catalog unavailable").with_source(e)
-        })?;
+    let created = sink_created_at(&mut c, &cat_schema, sink).await?;
     let epoch = store
         .claim_task(
             &mut c,

@@ -1,0 +1,58 @@
+# The second and third VMs of a data center (RUNBOOK.md, "High
+# availability"): no MariaDB, and
+#
+#   etcd        this VM's etcd member (three members, one per VM);
+#   controller  a second (third) controller: it serves permits too, so
+#               restarting any one controller no longer fences writes, and
+#               it takes over as DC leader when the leader stops;
+#   gateway     a second (third) gateway behind the same load balancer;
+#   worker      optional (profile `worker`).
+#
+# Set in this VM's .env:
+#
+#   COMPOSE_FILE=compose.gateway-vm.yaml
+#   SPRIG_VM_ID=2                      # node ids ctl-2, gw-2, wkr-2
+#   SPRIG_CONTROLLER_BOOTSTRAP=false   # the first VM's controller bootstraps
+#
+# plus the same SPRIG_ETCD_* values as the first VM, with this VM's own
+# SPRIG_ETCD_NAME, SPRIG_PRIVATE_HOST and SPRIG_PRIVATE_IP. Copy the first
+# VM's secrets/ here, without secrets/ca and secrets/backup/backup-key.pem.
+# The services, limits and healthchecks are compose.yaml's.
+
+name: ${COMPOSE_PROJECT_NAME:-sprigdb}
+
+services:
+  etcd:
+    extends: { file: compose.yaml, service: etcd }
+    ports:
+      - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_ETCD_CLIENT_PORT:-2379}:${SPRIG_ETCD_CLIENT_PORT:-2379}"
+      - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_ETCD_PEER_PORT:-2380}:${SPRIG_ETCD_PEER_PORT:-2380}"
+
+  controller:
+    extends: { file: compose.yaml, service: controller }
+    depends_on: !override
+      etcd: { condition: service_healthy }
+    ports:
+      - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_INTERNAL_PORT:-7481}:${SPRIG_INTERNAL_PORT:-7481}"
+
+  gateway:
+    extends: { file: compose.yaml, service: gateway }
+    depends_on: !override
+      controller: { condition: service_healthy }
+    ports:
+      - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_PEER_PORT:-7403}:${SPRIG_PEER_PORT:-7403}"
+
+  worker:
+    extends: { file: compose.yaml, service: worker }
+    profiles: [worker]
+    depends_on: !override
+      controller: { condition: service_healthy }
+
+networks:
+  sprig: {}
+
+volumes:
+  etcd-data: {}
+  controller-data: {}
+  worker-data: {}
+  gateway-data: {}

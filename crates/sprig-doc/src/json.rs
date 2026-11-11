@@ -614,6 +614,15 @@ impl Parser<'_> {
 
     fn string(&mut self) -> Result<String, MongoError> {
         self.expect(b'"')?;
+        // Most strings have no escapes: one copy of the slice (R5 round 8).
+        let rest = &self.s[self.at..];
+        if let Some(end) = rest.iter().position(|&c| c == b'"' || c == b'\\')
+            && rest[end] == b'"'
+        {
+            let t = std::str::from_utf8(&rest[..end]).map_err(|_| self.err("string is not UTF-8"))?;
+            self.at += end + 1;
+            return Ok(t.to_owned());
+        }
         let mut out: Vec<u8> = Vec::new();
         loop {
             let Some(&c) = self.s.get(self.at) else {
@@ -696,7 +705,11 @@ impl Parser<'_> {
         if depth > 200 {
             return Err(self.err("too deep"));
         }
-        let entry = self.types.get(path.as_str()).map(String::as_str);
+        let entry = if self.types.is_empty() {
+            None
+        } else {
+            self.types.get(path.as_str()).map(String::as_str)
+        };
         match self.peek() {
             Some(b'{') => {
                 if entry == Some("javascriptWithScope") {
@@ -731,10 +744,12 @@ impl Parser<'_> {
                 }
                 loop {
                     let len = path.len();
-                    if !path.is_empty() {
-                        path.push('.');
+                    if !self.types.is_empty() {
+                        if !path.is_empty() {
+                            path.push('.');
+                        }
+                        let _ = write!(path, "{}", a.len());
                     }
-                    let _ = write!(path, "{}", a.len());
                     let v = self.value(path, depth + 1)?;
                     path.truncate(len);
                     a.push(v);
@@ -784,10 +799,12 @@ impl Parser<'_> {
             let k = self.string()?;
             self.expect(b':')?;
             let len = path.len();
-            if !path.is_empty() {
-                path.push('.');
+            if !self.types.is_empty() {
+                if !path.is_empty() {
+                    path.push('.');
+                }
+                path.push_str(&escape_name(&k));
             }
-            path.push_str(&escape_name(&k));
             let v = self.value(path, depth)?;
             path.truncate(len);
             d.insert(k, v);
@@ -916,6 +933,299 @@ pub fn to_bson(doc: &str, types: Option<&str>) -> Result<Document, MongoError> {
         return Err(p.err("trailing characters"));
     }
     Ok(d)
+}
+
+/// The BSON bytes of the document stored as `doc` with type map `types`:
+/// the bytes `bson::to_vec(&to_bson(doc, types)?)` gives, written straight
+/// from the JSON text without building the document first (R5 round 8,
+/// the third part of decision D35). A document with a field name twice at
+/// one level (only SQL can store one) goes the long way, so the result is
+/// the same as [`to_bson`]'s, which keeps the first position and the last
+/// value.
+///
+/// # Errors
+/// As [`to_bson`].
+pub fn to_raw(doc: &str, types: Option<&str>) -> Result<Vec<u8>, MongoError> {
+    let map = match types {
+        Some(t) if !t.is_empty() => parse_types(t)?,
+        _ => HashMap::new(),
+    };
+    let mut p = Parser {
+        s: doc.as_bytes(),
+        at: 0,
+        types: &map,
+    };
+    let mut out = Vec::with_capacity(doc.len() + 64);
+    let mut path = String::new();
+    match p.raw_document(&mut out, &mut path, 0) {
+        Ok(()) => {}
+        Err(RawStop::Duplicate) => {
+            let d = to_bson(doc, types)?;
+            return bson::to_vec(&d).map_err(|e| invalid(format!("BSON: {e}")));
+        }
+        Err(RawStop::Error(e)) => return Err(e),
+    }
+    p.ws();
+    if p.at != p.s.len() {
+        return Err(p.err("trailing characters"));
+    }
+    Ok(out)
+}
+
+/// Why [`to_raw`] stopped.
+enum RawStop {
+    /// A field name twice at one level.
+    Duplicate,
+    Error(MongoError),
+}
+
+impl From<MongoError> for RawStop {
+    fn from(e: MongoError) -> Self {
+        Self::Error(e)
+    }
+}
+
+/// Fields past this many at one level are checked for duplicates through a
+/// hash set; fewer, by comparing.
+const RAW_DUP_LINEAR: usize = 32;
+
+/// Appends an element's name as a C string.
+fn raw_key(out: &mut Vec<u8>, key: &[u8]) -> Result<(), MongoError> {
+    if key.contains(&0) {
+        return Err(invalid("a field name holds a NUL character"));
+    }
+    out.extend_from_slice(key);
+    out.push(0);
+    Ok(())
+}
+
+/// Appends one element `key: v`, for the values the type map makes (rare:
+/// the plain JSON values are written directly).
+fn raw_bson_element(out: &mut Vec<u8>, key: &str, v: Bson) -> Result<(), MongoError> {
+    let mut d = Document::new();
+    d.insert(key, v);
+    let b = bson::to_vec(&d).map_err(|e| invalid(format!("BSON: {e}")))?;
+    // The document's length (4 bytes) and its trailing NUL are not the
+    // element's.
+    out.extend_from_slice(&b[4..b.len() - 1]);
+    Ok(())
+}
+
+fn patch_len(out: &mut [u8], at: usize) -> Result<(), MongoError> {
+    let n = i32::try_from(out.len() - at).map_err(|_| invalid("document too large"))?;
+    out[at..at + 4].copy_from_slice(&n.to_le_bytes());
+    Ok(())
+}
+
+impl Parser<'_> {
+    /// A JSON string's text appended as BSON string bytes (length, text,
+    /// NUL), the escapes decoded.
+    fn raw_string(&mut self, out: &mut Vec<u8>) -> Result<(), MongoError> {
+        self.expect(b'"')?;
+        let len_at = out.len();
+        out.extend_from_slice(&[0; 4]);
+        let start = out.len();
+        let rest = &self.s[self.at..];
+        if let Some(end) = rest.iter().position(|&c| c == b'"' || c == b'\\')
+            && rest[end] == b'"'
+        {
+            std::str::from_utf8(&rest[..end]).map_err(|_| self.err("string is not UTF-8"))?;
+            out.extend_from_slice(&rest[..end]);
+            self.at += end + 1;
+        } else {
+            // Rare: escapes. The owned parse, then its bytes.
+            self.at -= 1;
+            let t = self.string()?;
+            out.extend_from_slice(t.as_bytes());
+        }
+        out.push(0);
+        let n = i32::try_from(out.len() - start).map_err(|_| self.err("string too long"))?;
+        out[len_at..len_at + 4].copy_from_slice(&n.to_le_bytes());
+        Ok(())
+    }
+
+    /// The JSON object at the cursor appended as a BSON document.
+    fn raw_document(
+        &mut self,
+        out: &mut Vec<u8>,
+        path: &mut String,
+        depth: usize,
+    ) -> Result<(), RawStop> {
+        self.expect(b'{')?;
+        let doc_at = out.len();
+        out.extend_from_slice(&[0; 4]);
+        // Each field name's place in `out`, for the duplicate check.
+        let mut names: Vec<(usize, usize)> = Vec::new();
+        let mut set: Option<std::collections::HashSet<Vec<u8>>> = None;
+        if self.peek() == Some(b'}') {
+            self.at += 1;
+        } else {
+            loop {
+                // The element's type byte, filled in once the value is
+                // seen; then its name.
+                let type_at = out.len();
+                out.push(0);
+                let key_at = out.len();
+                let k = self.string()?;
+                raw_key(out, k.as_bytes())?;
+                let key = (key_at, out.len() - 1);
+                // A name seen before at this level.
+                let name = &out[key.0..key.1];
+                if let Some(s) = set.as_mut() {
+                    if !s.insert(name.to_vec()) {
+                        return Err(RawStop::Duplicate);
+                    }
+                } else {
+                    if names.iter().any(|&(a, b)| &out[a..b] == name) {
+                        return Err(RawStop::Duplicate);
+                    }
+                    names.push(key);
+                    if names.len() > RAW_DUP_LINEAR {
+                        set = Some(names.iter().map(|&(a, b)| out[a..b].to_vec()).collect());
+                    }
+                }
+                self.expect(b':')?;
+                let len = path.len();
+                if !self.types.is_empty() {
+                    if !path.is_empty() {
+                        path.push('.');
+                    }
+                    path.push_str(&escape_name(&k));
+                }
+                self.raw_value(out, type_at, &k, path, depth)?;
+                path.truncate(len);
+                match self.peek() {
+                    Some(b',') => self.at += 1,
+                    Some(b'}') => {
+                        self.at += 1;
+                        break;
+                    }
+                    _ => return Err(self.err("expected ',' or '}'").into()),
+                }
+            }
+        }
+        out.push(0);
+        patch_len(out, doc_at)?;
+        Ok(())
+    }
+
+    /// The JSON value at the cursor appended as an element's value, its
+    /// type byte written at `type_at` (the element's name follows it).
+    fn raw_value(
+        &mut self,
+        out: &mut Vec<u8>,
+        type_at: usize,
+        key: &str,
+        path: &mut String,
+        depth: usize,
+    ) -> Result<(), RawStop> {
+        if depth > 200 {
+            return Err(self.err("too deep").into());
+        }
+        let entry = if self.types.is_empty() {
+            None
+        } else {
+            self.types.get(path.as_str()).map(String::as_str)
+        };
+        if entry.is_some() {
+            // A typed value: the document parse's conversion. Its element
+            // replaces the one begun at `type_at`.
+            let v = self.value(path, depth)?;
+            out.truncate(type_at);
+            raw_bson_element(out, key, v)?;
+            return Ok(());
+        }
+        match self.peek() {
+            Some(b'{') => {
+                out[type_at] = 0x03;
+                self.raw_document(out, path, depth + 1)
+            }
+            Some(b'[') => {
+                out[type_at] = 0x04;
+                self.at += 1;
+                let arr_at = out.len();
+                out.extend_from_slice(&[0; 4]);
+                if self.peek() == Some(b']') {
+                    self.at += 1;
+                } else {
+                    let mut i = 0usize;
+                    let mut idx = String::new();
+                    loop {
+                        let t = out.len();
+                        out.push(0);
+                        idx.clear();
+                        let _ = write!(idx, "{i}");
+                        out.extend_from_slice(idx.as_bytes());
+                        out.push(0);
+                        let len = path.len();
+                        if !self.types.is_empty() {
+                            if !path.is_empty() {
+                                path.push('.');
+                            }
+                            path.push_str(&idx);
+                        }
+                        let k = idx.clone();
+                        self.raw_value(out, t, &k, path, depth + 1)?;
+                        path.truncate(len);
+                        i += 1;
+                        match self.peek() {
+                            Some(b',') => self.at += 1,
+                            Some(b']') => {
+                                self.at += 1;
+                                break;
+                            }
+                            _ => return Err(self.err("expected ',' or ']'").into()),
+                        }
+                    }
+                }
+                out.push(0);
+                patch_len(out, arr_at)?;
+                Ok(())
+            }
+            Some(b'"') => {
+                out[type_at] = 0x02;
+                self.raw_string(out)?;
+                Ok(())
+            }
+            Some(b't') => {
+                self.lit("true")?;
+                out[type_at] = 0x08;
+                out.push(1);
+                Ok(())
+            }
+            Some(b'f') => {
+                self.lit("false")?;
+                out[type_at] = 0x08;
+                out.push(0);
+                Ok(())
+            }
+            Some(b'n') => {
+                self.lit("null")?;
+                out[type_at] = 0x0A;
+                Ok(())
+            }
+            Some(b'-' | b'0'..=b'9') => {
+                let n = self.number()?;
+                match infer_number(n) {
+                    Bson::Int32(i) => {
+                        out[type_at] = 0x10;
+                        out.extend_from_slice(&i.to_le_bytes());
+                    }
+                    Bson::Int64(i) => {
+                        out[type_at] = 0x12;
+                        out.extend_from_slice(&i.to_le_bytes());
+                    }
+                    Bson::Double(f) => {
+                        out[type_at] = 0x01;
+                        out.extend_from_slice(&f.to_le_bytes());
+                    }
+                    _ => out[type_at] = 0x0A,
+                }
+                Ok(())
+            }
+            _ => Err(self.err("unexpected character").into()),
+        }
+    }
 }
 
 /// Checks a raw incoming document: no duplicate field names at any

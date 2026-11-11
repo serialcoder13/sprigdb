@@ -336,7 +336,8 @@ impl PassSession {
         let definer_user = crate::tenant::rls::view_definer(&cat, object, user);
         let definer_account = sprig_auth::authz::backend::account(tenant, definer_user);
         let definer = format!("`{}`@`%`", definer_account.replace('`', "``"));
-        let views = crate::tenant::rls::views_on(&svc, &cat, object);
+        let enforcement = crate::tenant::rls::enforcement(&svc, &cat, obj.db_id);
+        let views = enforcement == "views";
         let policies: Vec<_> = state.policies_of(object).cloned().collect();
         let tp: Vec<TriggerPolicy<'_>> = policies
             .iter()
@@ -372,7 +373,8 @@ impl PassSession {
         crate::tenant::rls::hidden_set(tenant.0, object.0, hidden);
         let mut plan: Vec<(String, Vec<String>)> = Vec::new();
         for (schema, _) in &list {
-            if !sec.enabled {
+            // `off` (RL30): the gateway's rewrite alone, nothing in MariaDB.
+            if !sec.enabled || enforcement == "off" {
                 let mut d = drops(schema, object.0);
                 d.push(sprig_sql::rls::views::view_drop(
                     schema, &obj.name, object.0,
@@ -508,6 +510,9 @@ impl PassSession {
         .unwrap_or_default();
         // The shard list is in the key: a split or move needn't change the
         // catalog version, and the mover copies triggers but not views.
+        // So is `rls.backend_enforcement` (RL30): a global value changes
+        // without a catalog version, and every change applies at once.
+        let enforcement = crate::tenant::rls::enforcement(ts.services(), &cat, obj.db_id);
         let shards_hash = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -515,6 +520,7 @@ impl PassSession {
                 .map(|(s, c)| (s, c.to_string()))
                 .collect::<Vec<_>>()
                 .hash(&mut h);
+            enforcement.hash(&mut h);
             h.finish()
         };
         let key = (
@@ -531,7 +537,8 @@ impl PassSession {
             return Ok(());
         }
         let names = sprig_sql::rls::triggers::names(object.0);
-        let views = crate::tenant::rls::views_on(ts.services(), &cat, object) && sec.enabled;
+        let views = enforcement == "views" && sec.enabled;
+        let triggers = enforcement != "off" && sec.enabled;
         let view = sprig_sql::rls::views::view_name(&obj.name, object.0);
         let hview = sprig_sql::rls::views::hidden_view_name(&obj.name, object.0);
         let mut hidden: Vec<String> = Vec::new();
@@ -572,7 +579,8 @@ impl PassSession {
                 ))
                 .await?;
             let cell = |i: usize| -> Option<String> { rows.first().and_then(|r| r.get(i).cloned().flatten()) };
-            let triggers_ok = cell(0).and_then(|v| v.parse::<u64>().ok()) == Some(3) || !sec.enabled;
+            let count = cell(0).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+            let triggers_ok = if triggers { count == 3 } else { count == 0 || !sec.enabled };
             let (visible, all, invisible) = (cell(1), cell(2), cell(3));
             for c in invisible.iter().flat_map(|v| v.split('\n')) {
                 let l = c.to_lowercase();
@@ -580,13 +588,54 @@ impl PassSession {
                     hidden.push(l);
                 }
             }
-            let views_ok = !views
-                || visible.is_some()
+            let views_ok = if views {
+                visible.is_some()
                     && cell(4) == visible
-                    && if invisible.is_some() { cell(5) == all } else { cell(5).is_none() };
+                    && if invisible.is_some() { cell(5) == all } else { cell(5).is_none() }
+            } else {
+                // Views off (RL30): views left from before must go.
+                cell(4).is_none() && cell(5).is_none()
+            };
             if !triggers_ok || !views_ok {
                 complete = false;
                 break;
+            }
+        }
+        // Stale policy views (RL29): a regroup, split or move left the table
+        // in other schemas of these clusters; views of it elsewhere read
+        // nothing valid and hold grants, so they go.
+        let mut clusters: Vec<&str> = Vec::new();
+        for (schema, c) in &list {
+            if clusters.iter().any(|x| *x == c.as_str()) {
+                continue;
+            }
+            clusters.push(c.as_str());
+            let s = shards.session(schema).await?;
+            let q = |x: &str| sprig_sql::rls::sql_string(x, false);
+            let stale = s
+                .rows(&format!(
+                    "SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.VIEWS \
+                     WHERE TABLE_SCHEMA LIKE {} AND TABLE_NAME IN ({}, {})",
+                    q(&format!("t{}\\_d{}\\_%", ts.tenant.0, obj.db_id.0)),
+                    q(&view),
+                    q(&hview),
+                ))
+                .await?;
+            for r in stale {
+                let (Some(sch), Some(name)) = (r.first().cloned().flatten(), r.get(1).cloned().flatten())
+                else {
+                    continue;
+                };
+                if list.iter().any(|(x, _)| *x == sch) {
+                    continue;
+                }
+                tracing::info!(object = object.0, schema = %sch, view = %name, "stale row-level security policy view dropped");
+                s.exec(&format!(
+                    "DROP VIEW IF EXISTS {}.{}",
+                    sprig_sql::rls::quote(&sch),
+                    sprig_sql::rls::quote(&name)
+                ))
+                .await?;
             }
         }
         drop(shards);

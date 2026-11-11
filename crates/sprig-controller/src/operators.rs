@@ -1073,11 +1073,7 @@ impl Operators {
     /// # Errors
     /// As [`Self::login`].
     #[allow(clippy::too_many_lines)] // one check after another
-    pub async fn login_from(
-        &self,
-        req: LoginRequest,
-        addr: Option<&str>,
-    ) -> Result<LoginResponse> {
+    pub async fn login_from(&self, req: LoginRequest, addr: Option<&str>) -> Result<LoginResponse> {
         let now = self.now_ms();
         let client = req.client.clone().unwrap_or_default();
         let found = self.get(&req.name).await?;
@@ -1287,11 +1283,7 @@ impl Operators {
     ///
     /// # Errors
     /// As [`Self::enrol`].
-    pub async fn enrol_from(
-        &self,
-        req: EnrolRequest,
-        addr: Option<&str>,
-    ) -> Result<LoginResponse> {
+    pub async fn enrol_from(&self, req: EnrolRequest, addr: Option<&str>) -> Result<LoginResponse> {
         let now = self.now_ms();
         let Some((mut rec, rev)) = self.get(&req.name).await? else {
             return Err(login_failed());

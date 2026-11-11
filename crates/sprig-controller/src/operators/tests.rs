@@ -877,7 +877,11 @@ fn a_forwarded_address_counts_only_with_a_service_identity() {
     for wrong in ["nope", "boot-secret", "dc-secret", ""] {
         let mut h2 = h.clone();
         h2.insert(RELAY_AUTH_HEADER, wrong.parse().unwrap());
-        assert_eq!(g.client_addr(&h2, Some(peer)).addr.as_deref(), Some("10.0.0.5"), "{wrong}");
+        assert_eq!(
+            g.client_addr(&h2, Some(peer)).addr.as_deref(),
+            Some("10.0.0.5"),
+            "{wrong}"
+        );
     }
     // The gateway's service secret: the forwarded address, via the gateway.
     h.insert(RELAY_AUTH_HEADER, "gw-secret".parse().unwrap());
@@ -891,17 +895,31 @@ fn a_forwarded_address_counts_only_with_a_service_identity() {
     );
     // An IPv6 address is fine; something that isn't an address is not.
     h.insert(CLIENT_ADDR_HEADER, "2001:db8::1".parse().unwrap());
-    assert_eq!(g.client_addr(&h, Some(peer)).addr.as_deref(), Some("2001:db8::1"));
+    assert_eq!(
+        g.client_addr(&h, Some(peer)).addr.as_deref(),
+        Some("2001:db8::1")
+    );
     h.insert(CLIENT_ADDR_HEADER, "evil, 1.2.3.4".parse().unwrap());
-    assert_eq!(g.client_addr(&h, Some(peer)).addr.as_deref(), Some("10.0.0.5"));
+    assert_eq!(
+        g.client_addr(&h, Some(peer)).addr.as_deref(),
+        Some("10.0.0.5")
+    );
     assert_eq!(g.client_addr(&h, Some(peer)).via, None);
     // No peer known and nothing vouched: no address.
-    assert_eq!(g.client_addr(&axum::http::HeaderMap::new(), None), ClientAddr::default());
+    assert_eq!(
+        g.client_addr(&axum::http::HeaderMap::new(), None),
+        ClientAddr::default()
+    );
 }
 
 async fn echo_client(headers: HeaderMapT) -> axum::response::Response {
     use super::guard::{CLIENT_ADDR_HEADER, CLIENT_HEADER, RELAY_AUTH_HEADER};
-    let h = |n: &str| headers.get(n).and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let h = |n: &str| {
+        headers
+            .get(n)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
     crate::admin::http::respond(Ok(json!({
         "client": h(CLIENT_HEADER),
         "forwarded": h(CLIENT_ADDR_HEADER),
@@ -934,7 +952,10 @@ async fn the_layer_hands_routes_the_client_address() {
             s.read_to_string(&mut out).await.unwrap();
             let status: u16 = out[9..12].parse().unwrap();
             let body = out.split_once("\r\n\r\n").unwrap().1;
-            (status, serde_json::from_str::<Value>(body).unwrap_or(Value::Null))
+            (
+                status,
+                serde_json::from_str::<Value>(body).unwrap_or(Value::Null),
+            )
         }
     };
     // A client's own copies of the headers are dropped; the peer counts.
@@ -949,7 +970,8 @@ async fn the_layer_hands_routes_the_client_address() {
     assert_eq!(v["relay"], Value::Null);
     // A gateway vouching with its service secret: the person's address,
     // and the secret goes no further.
-    let relayed = format!("{CLIENT_ADDR_HEADER}: 203.0.113.7\r\n{RELAY_AUTH_HEADER}: gw-secret\r\n");
+    let relayed =
+        format!("{CLIENT_ADDR_HEADER}: 203.0.113.7\r\n{RELAY_AUTH_HEADER}: gw-secret\r\n");
     let (s, v) = call("POST", "/admin/v1/traffic/reports", relayed.clone()).await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(v["client"], "203.0.113.7");

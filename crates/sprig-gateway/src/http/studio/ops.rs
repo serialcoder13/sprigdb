@@ -155,6 +155,50 @@ pub fn forward_body(method: &Method, body: &[u8], login: &str) -> Result<Bytes, 
 /// The header that carries a named operator's session token.
 pub const OPERATOR_HEADER: &str = "x-sprig-operator";
 
+/// Whether `path` (under `/admin/v1/`) is one of the `Operators` service's
+/// routes: sign-in, enrolment, logout, whoami, operators and their tokens.
+#[must_use]
+pub fn operators_route(path: &str) -> bool {
+    let p = path.split('?').next().unwrap_or(path);
+    p == "/admin/v1/operators"
+        || p.starts_with("/admin/v1/operators/")
+        || p.starts_with("/admin/v1/operators:")
+        || p == "/admin/v1/operator-tokens"
+        || p.starts_with("/admin/v1/operator-tokens/")
+}
+
+/// `studio.operator_mtls = required` on the `Operators` routes the
+/// gateway relays as they are (REST and gRPC, ST47; hardening round 2):
+/// 39927 for such a call on a connection without a verified client
+/// certificate. Other admin routes are unaffected.
+///
+/// # Errors
+/// 39927 as above.
+pub fn operators_cert_check(mtls: &str, client_cert: bool, path: &str) -> Result<(), SprigError> {
+    if mtls == "required" && !client_cert && operators_route(path) {
+        return Err(SprigError::new(
+            SprigCode::StudioOperatorCertRequired,
+            "operator calls need a client certificate (studio.operator_mtls)",
+        ));
+    }
+    Ok(())
+}
+
+/// [`operators_cert_check`] with this gateway's setting and `info`'s
+/// connection.
+///
+/// # Errors
+/// 39927 as there.
+pub fn operators_cert(core: &Arc<Core>, info: &ConnInfo, path: &str) -> Result<(), SprigError> {
+    use sprig_studio::settings as k;
+    let mtls = core.studio.tenant_get(&k::OPERATOR_MTLS, None, None);
+    operators_cert_check(
+        mtls.as_ref(),
+        info.tls.as_ref().is_some_and(|t| t.client_cert),
+        path,
+    )
+}
+
 fn mode_and_cert(core: &Arc<Core>, info: &ConnInfo) -> Result<(), SprigError> {
     use sprig_studio::settings as k;
     let st = &core.studio;
@@ -220,7 +264,13 @@ async fn session_call(
         client_ip = %info.peer.ip(), "operator sign-in call from Studio");
     let r = core
         .admin
-        .forward(&Method::POST, &path, auth.as_deref(), body)
+        .forward_from(
+            &Method::POST,
+            &path,
+            auth.as_deref(),
+            body,
+            Some(info.peer.ip()),
+        )
         .await?;
     Ok(operator_reply(r.status, r.body))
 }
@@ -252,11 +302,12 @@ async fn named(
         // Entering operator mode: who the controller takes the token for.
         let r = core
             .admin
-            .forward(
+            .forward_from(
                 &Method::GET,
                 "/admin/v1/operators:whoami",
                 Some(&auth),
                 Bytes::new(),
+                Some(info.peer.ip()),
             )
             .await?;
         return Ok(operator_reply(r.status, r.body));
@@ -275,7 +326,7 @@ async fn named(
     metrics::counter!("sprig_studio_requests_total", "area" => "operator").increment(1);
     let r = core
         .admin
-        .forward(&method, &path, Some(&auth), body)
+        .forward_from(&method, &path, Some(&auth), body, Some(info.peer.ip()))
         .await?;
     Ok(operator_reply(r.status, r.body))
 }
@@ -350,7 +401,13 @@ pub(super) async fn route(
     metrics::counter!("sprig_studio_requests_total", "area" => "operator").increment(1);
     let r = core
         .admin
-        .forward(&method, &path, Some(&format!("Bearer {token}")), body)
+        .forward_from(
+            &method,
+            &path,
+            Some(&format!("Bearer {token}")),
+            body,
+            Some(info.peer.ip()),
+        )
         .await?;
     Ok(passthrough(r.status, r.body))
 }
@@ -387,5 +444,38 @@ mod tests {
         let v: Value = serde_json::from_slice(&b).unwrap();
         assert_eq!(v["actor"], "studio:p.ops");
         assert_eq!(v["reason"], "hot shard");
+    }
+
+    #[test]
+    fn operator_mtls_covers_the_operators_routes() {
+        for p in [
+            "/admin/v1/operators",
+            "/admin/v1/operators?x=1",
+            "/admin/v1/operators/alice",
+            "/admin/v1/operators/alice:disable",
+            "/admin/v1/operators:login",
+            "/admin/v1/operators:enrol",
+            "/admin/v1/operators:whoami",
+            "/admin/v1/operator-tokens",
+            "/admin/v1/operator-tokens/k1:revoke",
+        ] {
+            assert!(operators_route(p), "{p}");
+            let e = operators_cert_check("required", false, p).unwrap_err();
+            assert_eq!(
+                e.kind,
+                sprig_common::ErrorKind::Sprig(SprigCode::StudioOperatorCertRequired)
+            );
+            operators_cert_check("required", true, p).unwrap();
+            operators_cert_check("off", false, p).unwrap();
+        }
+        for p in [
+            "/admin/v1/clusters",
+            "/admin/v1/operatorsx",
+            "/admin/v1/settings/studio.operator_mtls",
+            "/admin/v1/dcs",
+        ] {
+            assert!(!operators_route(p), "{p}");
+            operators_cert_check("required", false, p).unwrap();
+        }
     }
 }

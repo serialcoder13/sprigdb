@@ -45,6 +45,9 @@ toml.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
+# The HTTPS Admin API test's certificates (already in the tree).
+rcgen.workspace = true
+axum.workspace = true
 # Rows for the automatic-indexing golden tests, turned into views by the
 # controller's `autoindex_admin::view`.
 sprig-advisor.workspace = true

@@ -1,0 +1,30 @@
+# The first VM of a several-VM data center (RUNBOOK.md, "High
+# availability"): compose.yaml plus the ports the other VMs need, published
+# on this VM's private address (SPRIG_PRIVATE_IP). Set in .env:
+#
+#   COMPOSE_FILE=compose.yaml:compose.ha.yaml
+#
+# etcd's client and peer ports and the gateway's peer service use mutual
+# TLS, and MariaDB requires TLS. The controller's internal port (permits)
+# is still plain HTTP (RUNBOOK.md, "Not done yet"): keep the private
+# network closed to everything but these VMs.
+
+services:
+  etcd:
+    ports:
+      - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_ETCD_CLIENT_PORT:-2379}:${SPRIG_ETCD_CLIENT_PORT:-2379}"
+      - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_ETCD_PEER_PORT:-2380}:${SPRIG_ETCD_PEER_PORT:-2380}"
+
+  # The other VMs' gateways and controllers reach the backend here; the
+  # cluster is registered at SPRIG_PRIVATE_HOST:SPRIG_BACKEND_PORT.
+  mariadb-1:
+    ports:
+      - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_BACKEND_PORT:-3306}:3306"
+
+  controller:
+    ports:
+      - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_INTERNAL_PORT:-7481}:${SPRIG_INTERNAL_PORT:-7481}"
+
+  gateway:
+    ports:
+      - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_PEER_PORT:-7403}:${SPRIG_PEER_PORT:-7403}"
