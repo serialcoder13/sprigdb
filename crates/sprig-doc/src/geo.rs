@@ -829,9 +829,69 @@ pub fn is_2dsphere(i: &crate::meta::IndexDef) -> bool {
     i.extra.contains_key("2dsphereIndexVersion")
 }
 
+/// The side table of a `2dsphere` path's lines and polygons (R5 round 6,
+/// R33's other half): one row per document whose value at the path isn't
+/// a point, with a latitude and longitude box holding it on the sphere.
+#[must_use]
+pub fn side_table(table: &str, path: &str) -> String {
+    let mut k = table.as_bytes().to_vec();
+    k.push(0);
+    k.extend_from_slice(path.as_bytes());
+    format!("__sprig_doc_gx_{:016x}", crate::meta::fnv64(&k))
+}
+
+/// `CREATE TABLE` of a side table (`db.side`, quoted).
+#[must_use]
+pub fn side_table_sql(st: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {st} (_id VARBINARY(3000) NOT NULL, lat_lo DOUBLE NOT NULL, \
+         lat_hi DOUBLE NOT NULL, lng_lo DOUBLE NOT NULL, lng_hi DOUBLE NOT NULL, \
+         _v BIGINT UNSIGNED NOT NULL, PRIMARY KEY (_id), KEY by_lat (lat_lo, lat_hi)) ENGINE=InnoDB"
+    )
+}
+
+/// A box `(lat_lo, lat_hi, lng_lo, lng_hi)` holding every location in a
+/// stored value on the sphere (its vertices' bounding cap, which holds
+/// the great-circle edges and polygon interiors between them); the whole
+/// earth when the cap is a hemisphere or more; `None` when the value holds
+/// no location.
+#[must_use]
+pub fn side_bounds(v: &Bson) -> Option<(f64, f64, f64, f64)> {
+    let geoms = stored_all(v);
+    let pts: Vec<LatLng> = geoms.iter().flat_map(points_of).collect();
+    if pts.is_empty() {
+        return None;
+    }
+    let world = (-90.0, 90.0, -180.0, 180.0);
+    let v3s: Vec<Point> = pts.iter().map(|p| v3(*p)).collect();
+    let mut cap = Cap::bounding(&v3s);
+    if cap.radius >= std::f64::consts::FRAC_PI_2 {
+        return Some(world);
+    }
+    cap.radius = cap.radius * (1.0 + 1e-9) + 1e-9;
+    let Some(((lo, hi), lngs)) = GeoOp::Within(Within::CenterSphere(
+        s2::lat_lng(cap.center),
+        cap.radius,
+    ))
+    .boxes() else {
+        return Some(world);
+    };
+    if lngs.len() != 1 {
+        return Some((lo, hi, -180.0, 180.0));
+    }
+    Some((lo, hi, lngs[0].0, lngs[0].1))
+}
+
+/// A path's side table and the `_v` past which documents aren't in it
+/// yet, as the engine passes them to [`prefilter`] in the collection's
+/// options (a copy used for one translation only).
+pub const SIDE_OPTION: &str = "__sprig_geo_side";
+
 /// The SQL prefilter of a geo condition on `path`: with a `2dsphere`
-/// index, points outside the region's box are skipped (non-point values
-/// have `NULL` columns and stay candidates); without one, every row.
+/// index, points outside the region's box are skipped; lines and polygons
+/// are skipped by their side table's boxes when the engine synced it
+/// (documents written since stay candidates), else they stay candidates;
+/// without an index, every row.
 #[must_use]
 pub fn prefilter(path: &str, op: &GeoOp, m: &CollMeta) -> String {
     if index_on(m, path).is_none() {
@@ -840,7 +900,46 @@ pub fn prefilter(path: &str, op: &GeoOp, m: &CollMeta) -> String {
     let Some(((lo, hi), lngs)) = op.boxes() else {
         return "TRUE".into();
     };
+    let side = m
+        .options
+        .get_document(SIDE_OPTION)
+        .ok()
+        .and_then(|d| d.get_document(path).ok())
+        .and_then(|d| Some((d.get_str("t").ok()?.to_owned(), d.get_i64("v").ok()?)));
     let (lat, lng) = columns(path);
+    if let Some((st, min_v)) = side {
+        let points = lngs
+            .iter()
+            .map(|(w, e)| {
+                format!(
+                    "{} BETWEEN {} AND {}",
+                    ident(&lng),
+                    f64_lit(*w - 1e-9),
+                    f64_lit(*e + 1e-9)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let shapes = lngs
+            .iter()
+            .map(|(w, e)| {
+                format!(
+                    "(lng_lo <= {} AND lng_hi >= {})",
+                    f64_lit(*e + 1e-9),
+                    f64_lit(*w - 1e-9)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        return format!(
+            "(({lat} IS NOT NULL AND {lat} BETWEEN {lo} AND {hi} AND ({points})) OR ({lat} IS NULL AND \
+             (_v > {min_v} OR LENGTH(_id) > 3000 OR _id IN (SELECT _id FROM {st} WHERE lat_hi >= {lo} \
+             AND lat_lo <= {hi} AND ({shapes})))))",
+            lat = ident(&lat),
+            lo = f64_lit(lo - 1e-9),
+            hi = f64_lit(hi + 1e-9),
+        );
+    }
     let lngs = lngs
         .iter()
         .map(|(w, e)| {
@@ -922,5 +1021,65 @@ mod tests {
         let (_, lngs) = op.boxes().unwrap();
         assert_eq!(lngs.len(), 2);
         assert!(op.eval(&[&bson::bson!([-179.8, 0.0])]));
+    }
+
+    #[test]
+    fn side_bounds_hold_lines_and_polygons() {
+        let line = bson::bson!({"type": "LineString", "coordinates": [[10.0, 20.0], [12.0, 21.0]]});
+        let (lo, hi, w, e) = side_bounds(&line).unwrap();
+        assert!(lo <= 20.0 && hi >= 21.0 && w <= 10.0 && e >= 12.0, "{lo} {hi} {w} {e}");
+        // A great-circle edge bulges toward the pole: the box holds it.
+        let arc = bson::bson!({"type": "LineString", "coordinates": [[-60.0, 60.0], [60.0, 60.0]]});
+        let (_, hi, _, _) = side_bounds(&arc).unwrap();
+        assert!(hi >= 70.0, "{hi}");
+        let poly = square((100.0, -5.0), 2.0);
+        let (lo, hi, w, e) = side_bounds(&poly).unwrap();
+        assert!(lo <= -7.0 && hi >= -3.0 && w <= 98.0 && e >= 102.0);
+        assert_eq!(side_bounds(&Bson::String("x".into())), None);
+        // Across the antimeridian: every longitude.
+        let wrap = bson::bson!({"type": "LineString", "coordinates": [[179.0, 0.0], [-179.0, 0.0]]});
+        let (_, _, w, e) = side_bounds(&wrap).unwrap();
+        assert!((w, e) == (-180.0, 180.0), "{w} {e}");
+    }
+
+    #[test]
+    fn prefilter_uses_the_side_table_once_synced() {
+        let mut m = CollMeta {
+            name: "c".into(),
+            table: "c".into(),
+            uuid: [0; 16],
+            array_paths: std::collections::BTreeSet::new(),
+            arrays_full: false,
+            pending_paths: std::collections::BTreeSet::new(),
+            indexes: vec![crate::meta::IndexDef {
+                id: 1,
+                name: "loc_2dsphere".into(),
+                key: vec![("loc".into(), 1)],
+                unique: false,
+                sparse: false,
+                expire_after: None,
+                origin: "user".into(),
+                extra: doc! {"2dsphereIndexVersion": 3},
+            }],
+            options: Document::new(),
+            next_index: 2,
+        };
+        let op = parse(
+            "$geoIntersects",
+            &Bson::Document(doc! {"$geometry": square((10.0, 20.0), 1.0)}),
+            &doc! {},
+        )
+        .unwrap();
+        // Not synced: every non-point value is a candidate.
+        let before = prefilter("loc", &op, &m);
+        assert!(before.contains("IS NULL OR"), "{before}");
+        assert!(!before.contains("__sprig_doc_gx_"), "{before}");
+        m.options.insert(
+            SIDE_OPTION,
+            doc! {"loc": {"t": "`d`.`__sprig_doc_gx_00`", "v": 77_i64}},
+        );
+        let after = prefilter("loc", &op, &m);
+        assert!(after.contains("FROM `d`.`__sprig_doc_gx_00` WHERE lat_hi >="), "{after}");
+        assert!(after.contains("_v > 77"), "{after}");
     }
 }

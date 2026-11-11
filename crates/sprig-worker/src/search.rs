@@ -833,6 +833,7 @@ impl SearchCopyJob {
         let job_id = cx.job_id.to_string();
         let mut running: Option<Running> = None;
         let mut last_snapshot = Instant::now();
+        let mut last_check = Instant::now();
         let stop = |running: &mut Option<Running>| {
             if let Some(r) = running.take() {
                 r.copy.stop();
@@ -872,6 +873,20 @@ impl SearchCopyJob {
                             let _ = placement::drop_index(&role.deps.dc, tenant, index).await;
                             self.remove_files(tenant, index);
                             return Ok(json!({"dropped": true}));
+                        }
+                        // Every 30 s: the index or its object may be gone
+                        // without a feed event this copy reads (DROP
+                        // DATABASE, a drop on another gateway).
+                        if last_check.elapsed() >= Duration::from_secs(30) {
+                            last_check = Instant::now();
+                            let host = WorkerHost(Arc::clone(role));
+                            if host.object_gone(TenantId(tenant), &r.def).await {
+                                stop(&mut running);
+                                let _ = placement::drop_index(&role.deps.dc, tenant, index).await;
+                                self.remove_files(tenant, index);
+                                tracing::info!(tenant, index, "search index or its object is gone; copy removed");
+                                return Ok(json!({"dropped": true}));
+                            }
                         }
                         let cr = CopyRecord {
                             tenant,

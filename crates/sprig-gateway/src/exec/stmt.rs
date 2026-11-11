@@ -129,6 +129,7 @@ impl Stmt {
             logical: None,
             recheck: None,
             client: None,
+            deferred_params: false,
             sql,
         }
     }

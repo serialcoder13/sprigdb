@@ -29,7 +29,7 @@
 //! the shard, others as text, their rows encoded in the binary protocol.
 
 mod backend;
-mod binary;
+pub(crate) mod binary;
 mod fk_ddl;
 pub(super) mod graph;
 mod ids;

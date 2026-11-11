@@ -153,10 +153,7 @@ fn threads_come_from_the_tenants_processlist() {
     let sql = ok(
         "SELECT t.thread_id, performance_schema.threads.name FROM `performance_schema`.`threads` t",
     );
-    assert!(
-        !sql.contains("performance_schema.threads.name"),
-        "{sql}"
-    );
+    assert!(!sql.contains("performance_schema.threads.name"), "{sql}");
     assert!(sql.contains(", `threads`.name FROM (SELECT"), "{sql}");
     assert!(sql.ends_with("information_schema.PROCESSLIST) t"), "{sql}");
 }

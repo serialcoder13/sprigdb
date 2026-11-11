@@ -54,6 +54,7 @@ mod export;
 mod failover;
 mod gateway;
 mod graph;
+mod search;
 mod index;
 // Chapter 52: approvals and recommendations.
 mod logic;
@@ -90,7 +91,6 @@ use crate::cluster::RegisterFlags;
 /// guide, 5.10).
 const GROUPS: &[(&str, &str, &[&str])] = &[
     ("feed", "Change feeds", &["list", "show", "lag"]),
-    ("search", "Search indexes", &["list", "show", "rebuild"]),
     (
         "import",
         "Copy data and index definitions from a live source",
@@ -454,6 +454,7 @@ fn cli() -> Command {
         .subcommand(txn::group())
         .subcommand(sink::group())
         .subcommand(graph::group())
+        .subcommand(search::group())
         .subcommand(operator::login_cmd())
         .subcommand(operator::logout_cmd())
         .subcommand(operator::whoami_cmd())
@@ -569,6 +570,9 @@ fn main() -> ExitCode {
                 .await
                 .map(|()| ExitCode::SUCCESS),
             "graph" => graph::run(&client, sub, output(&matches))
+                .await
+                .map(|()| ExitCode::SUCCESS),
+            "search" => search::run(&client, sub, output(&matches))
                 .await
                 .map(|()| ExitCode::SUCCESS),
             "txn" => txn::run(&client, sub, output(&matches))

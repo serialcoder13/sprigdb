@@ -315,7 +315,12 @@ impl IndexSchema {
                     }
                 }
                 Record::Doc { doc, .. } => {
-                    let parts: Vec<&str> = f.source_ref.split('.').collect();
+                    // A key-value field on the whole value has no path.
+                    let parts: Vec<&str> = if f.source_ref.is_empty() {
+                        Vec::new()
+                    } else {
+                        f.source_ref.split('.').collect()
+                    };
                     path_values(doc, &parts, &mut vals);
                 }
             }

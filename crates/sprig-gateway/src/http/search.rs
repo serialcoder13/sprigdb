@@ -21,7 +21,7 @@
 //! key, so writes that move hits around neither repeat nor skip the hit
 //! the cursor names).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -290,6 +290,51 @@ async fn reread(
                 );
             }
         }
+    } else if def.model == Model::Kv {
+        // A namespace's live string keys.
+        for chunk in hits.chunks(500) {
+            let list: Vec<String> = chunk
+                .iter()
+                .map(|h| sprig_doc::sql::bin_lit(&h.key.0))
+                .collect();
+            let rows = sql
+                .query(&format!(
+                    "SELECT k, v FROM {table} WHERE k IN ({}) AND type = 'string' \
+                     AND (expires_at IS NULL OR expires_at > NOW(3))",
+                    list.join(", ")
+                ))
+                .await
+                .map_err(|e| sql_err(&e))?;
+            for r in rows {
+                let k = r.first().cloned().flatten().unwrap_or_default();
+                let v = r.get(1).cloned().flatten().unwrap_or_default();
+                let value = sprig_search::copy::kv_value(&v);
+                let key = match std::str::from_utf8(&k) {
+                    Ok(t) => json!({"k": t}),
+                    Err(_) => json!({"k_base64": base64::engine::general_purpose::STANDARD.encode(&k)}),
+                };
+                let mut t = HashMap::new();
+                for f in texts {
+                    let mut x = &value;
+                    if !f.source_ref.is_empty() {
+                        for part in f.source_ref.split('.') {
+                            x = x.get(part).unwrap_or(&Value::Null);
+                        }
+                    }
+                    if let Some(s) = x.as_str() {
+                        t.insert(f.name.clone(), s.to_owned());
+                    }
+                }
+                out.insert(
+                    Key(k),
+                    Seen {
+                        key,
+                        row: with_row.then_some(value),
+                        texts: t,
+                    },
+                );
+            }
+        }
     } else {
         for chunk in hits.chunks(500) {
             let list: Vec<String> = chunk
@@ -458,7 +503,7 @@ async fn run(
         .max(1);
     let mut first = true;
     let mut facet_out = serde_json::Map::new();
-    let mut applied = String::new();
+    let mut applied;
     let (page, next) = loop {
         let mut ops = vec![Op::Top {
             k,
@@ -503,7 +548,8 @@ async fn run(
         }
         let exhausted = hits.len() < k;
         if page.len() == limit || exhausted || k >= knobs.max_window {
-            let more = page.len() == limit && !(exhausted && last == Some(hits.len() - 1));
+            let more =
+                page.len() == limit && !(exhausted && last.is_some_and(|l| l + 1 == hits.len()));
             let next = if more {
                 last.and_then(|p| {
                     hits.get(p).map(|h| {

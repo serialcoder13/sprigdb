@@ -443,10 +443,11 @@ impl CostModel for Model {
             });
         }
         // A field column's index changes with `v` (R6 round 6).
-        let write = t
-            .writes
-            .touching(super::kv::maintained_columns(&c.def).iter().map(String::as_str))
-            * p.maintenance_cost_ms;
+        let write = t.writes.touching(
+            super::kv::maintained_columns(&c.def)
+                .iter()
+                .map(String::as_str),
+        ) * p.maintenance_cost_ms;
         let bytes = if c.def.kind == super::model::IndexKind::FieldColumn {
             t.field_bytes(&c.def.parts)
         } else {

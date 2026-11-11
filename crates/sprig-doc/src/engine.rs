@@ -561,6 +561,18 @@ impl Engine {
         .map_err(|e| mongo_error(&e))?;
         // Chapter 34 (R33): the vector indexes' side tables.
         self.drop_vector_sides(sql, ns, &m.table, None).await;
+        // `2dsphere` side tables (R5 round 6).
+        for i in m.indexes.iter().filter(|i| crate::geo::is_2dsphere(i)) {
+            if let Some((p, _)) = i.key.first() {
+                let _ = sql
+                    .exec(&format!(
+                        "DROP TABLE IF EXISTS {}.{}",
+                        crate::sql::ident(&ns.db),
+                        crate::sql::ident(&crate::geo::side_table(&m.table, p))
+                    ))
+                    .await;
+            }
+        }
         self.catalog.unregister(sql, ns).await?;
         Ok(true)
     }
@@ -817,7 +829,8 @@ impl Engine {
         if let Some((path, near)) = models::near_of(&pred) {
             return Box::pin(self.find_near(sql, ns, &spec, &pred, &path, &near, &m)).await;
         }
-        let sqlp = translate(&pred, &m);
+        let gm = self.geo_sides(sql, ns, &m, &pred).await?;
+        let sqlp = translate(&pred, gm.as_ref().unwrap_or(&m));
         let remaining = (spec.limit > 0).then_some(spec.limit);
         let keyset = sort.is_empty() || (sort.len() == 1 && sort[0].0 == "_id");
         if keyset {
@@ -1120,7 +1133,8 @@ impl Engine {
         let Some(m) = self.meta(sql, ns).await? else {
             return Ok(0);
         };
-        let sqlp = translate(&pred, &m);
+        let gm = self.geo_sides(sql, ns, &m, &pred).await?;
+        let sqlp = translate(&pred, gm.as_ref().unwrap_or(&m));
         let total = if sqlp.exact {
             let q = format!(
                 "SELECT COUNT(*) FROM {}.{} WHERE {}",
@@ -1181,7 +1195,8 @@ impl Engine {
         let Some(m) = self.meta(sql, ns).await? else {
             return Ok(Vec::new());
         };
-        let sqlp = translate(&pred, &m);
+        let gm = self.geo_sides(sql, ns, &m, &pred).await?;
+        let sqlp = translate(&pred, gm.as_ref().unwrap_or(&m));
         let docs = self
             .scan(sql, ns, &m.table, &pred, &sqlp, self.cfg.max_sort_bytes)
             .await?;
@@ -1238,7 +1253,8 @@ impl Engine {
             None if upsert => self.create(sql, ns, Document::new(), false).await?,
             None => return Ok(UpdateOutcome::default()),
         };
-        let sqlp = translate(&pred, &m);
+        let gm = self.geo_sides(sql, ns, &m, &pred).await?;
+        let sqlp = translate(&pred, gm.as_ref().unwrap_or(&m));
         let now = now_date();
         let cx = ApplyCx {
             query: &pred,
@@ -1466,7 +1482,8 @@ impl Engine {
         let Some(m) = self.meta(sql, ns).await? else {
             return Ok((0, None));
         };
-        let sqlp = translate(&pred, &m);
+        let gm = self.geo_sides(sql, ns, &m, &pred).await?;
+        let sqlp = translate(&pred, gm.as_ref().unwrap_or(&m));
         if !limit_one && sqlp.exact && !matches!(pred, Pred::Expr(_)) {
             let stmt = format!(
                 "DELETE FROM {}.{} WHERE {}",
@@ -1930,7 +1947,8 @@ impl Engine {
             models::check_near(&pred, false)?;
             match self.meta(sql, ns).await? {
                 Some(m) => {
-                    let sqlp = translate(&pred, &m);
+                    let gm = self.geo_sides(sql, ns, &m, &pred).await?;
+        let sqlp = translate(&pred, gm.as_ref().unwrap_or(&m));
                     self.scan(
                         sql,
                         ns,

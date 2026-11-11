@@ -355,7 +355,7 @@ async fn teardown(conns: &mut [Conn], db: &str, p: &str, t: &[String]) {
 /// Skips (`true`) when a worker process could copy the tree (module
 /// docs, decision T1).
 async fn worker_copies_the_tree(test: &str) -> bool {
-    match copyw::tree_copier(&tenants()[0]).await {
+    match Box::pin(copyw::tree_copier(&tenants()[0])).await {
         Ok(None) => false,
         Ok(Some(why)) => {
             assert!(
@@ -381,7 +381,7 @@ async fn merged_views_match_the_model() {
     let Some(eps) = endpoints("merged_views_match_the_model") else {
         return;
     };
-    if worker_copies_the_tree("merged_views_match_the_model").await {
+    if Box::pin(worker_copies_the_tree("merged_views_match_the_model")).await {
         return;
     }
     model_run(&eps, None).await;
@@ -651,7 +651,11 @@ async fn materialized_views_converge_to_the_model() {
     let Some(eps) = endpoints("materialized_views_converge_to_the_model") else {
         return;
     };
-    if worker_copies_the_tree("materialized_views_converge_to_the_model").await {
+    if Box::pin(worker_copies_the_tree(
+        "materialized_views_converge_to_the_model",
+    ))
+    .await
+    {
         return;
     }
     let mut w = copyw::Worker::new(&tenants()[0]).await;

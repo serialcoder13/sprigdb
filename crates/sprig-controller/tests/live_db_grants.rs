@@ -27,7 +27,12 @@
 //!
 //! It deletes the tenant at the end.
 
-#![allow(clippy::too_many_lines, clippy::doc_markdown, missing_docs)]
+#![allow(
+    clippy::too_many_lines,
+    clippy::doc_markdown,
+    clippy::many_single_char_names,
+    missing_docs
+)]
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -359,7 +364,10 @@ async fn database_grants_follow_regroups_splits_merges_and_moves() {
     steps.push(format!("regroup: shards {sh:?}"));
     {
         let t = tally.lock().expect("lock");
-        eprintln!("  db.* user so far: {} rounds ok, errors {:?} {:?}", t.ok, t.errors, t.first);
+        eprintln!(
+            "  db.* user so far: {} rounds ok, errors {:?} {:?}",
+            t.ok, t.errors, t.first
+        );
     }
     tokio::time::sleep(Duration::from_secs(5)).await;
     let g = gid.to_string();
@@ -374,7 +382,10 @@ async fn database_grants_follow_regroups_splits_merges_and_moves() {
     steps.push(format!("split {last}: shards {sh:?}"));
     {
         let t = tally.lock().expect("lock");
-        eprintln!("  db.* user so far: {} rounds ok, errors {:?} {:?}", t.ok, t.errors, t.first);
+        eprintln!(
+            "  db.* user so far: {} rounds ok, errors {:?} {:?}",
+            t.ok, t.errors, t.first
+        );
     }
     tokio::time::sleep(Duration::from_secs(5)).await;
     // The two children merged again.
@@ -404,7 +415,10 @@ async fn database_grants_follow_regroups_splits_merges_and_moves() {
     steps.push(format!("merge {kids:?}: shards {sh:?}"));
     {
         let t = tally.lock().expect("lock");
-        eprintln!("  db.* user so far: {} rounds ok, errors {:?} {:?}", t.ok, t.errors, t.first);
+        eprintln!(
+            "  db.* user so far: {} rounds ok, errors {:?} {:?}",
+            t.ok, t.errors, t.first
+        );
     }
     tokio::time::sleep(Duration::from_secs(5)).await;
     // A move of the merged shard to the other cluster.
@@ -434,7 +448,10 @@ async fn database_grants_follow_regroups_splits_merges_and_moves() {
     steps.push(format!("move {merged} to {to}: shards {sh:?}"));
     {
         let t = tally.lock().expect("lock");
-        eprintln!("  db.* user so far: {} rounds ok, errors {:?} {:?}", t.ok, t.errors, t.first);
+        eprintln!(
+            "  db.* user so far: {} rounds ok, errors {:?} {:?}",
+            t.ok, t.errors, t.first
+        );
     }
     tokio::time::sleep(Duration::from_secs(8)).await;
     stop.store(true, Ordering::SeqCst);
@@ -480,15 +497,10 @@ async fn database_grants_follow_regroups_splits_merges_and_moves() {
     ] {
         match c.query_first::<u64, _>(q).await {
             Ok(got) if got == total => eprintln!("{what}: {got:?}"),
-            other => failed.push(format!(
-                "reader {what}: {other:?} (COUNT(*) {total:?})"
-            )),
+            other => failed.push(format!("reader {what}: {other:?} (COUNT(*) {total:?})")),
         }
     }
-    match c
-        .query_drop("CREATE TEMPORARY TABLE mine (a INT)")
-        .await
-    {
+    match c.query_drop("CREATE TEMPORARY TABLE mine (a INT)").await {
         Err(x) if ["1044", "1142"].contains(&code(&x).as_str()) => {
             eprintln!("reader's own temporary table refused: {x}");
         }

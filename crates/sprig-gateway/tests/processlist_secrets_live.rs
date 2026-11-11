@@ -16,7 +16,12 @@
 //! cargo test -p sprig-gateway --test processlist_secrets_live -- --nocapture --test-threads 1
 //! ```
 
-#![allow(clippy::unwrap_used, clippy::expect_used, missing_docs)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::many_single_char_names,
+    missing_docs
+)]
 
 use std::time::{Duration, Instant};
 
@@ -29,8 +34,8 @@ const ADDR: &str = "SPRIG_TEST_PROCESSLIST_SECRETS";
 async fn conn(addr: &str) -> Conn {
     let (host, port) = addr.split_once(':').unwrap();
     let user = std::env::var("SPRIG_TEST_PROCESSLIST_USER").unwrap_or_else(|_| "acme.app".into());
-    let pw = std::env::var("SPRIG_TEST_PROCESSLIST_PASSWORD")
-        .unwrap_or_else(|_| "sprig-dev-app".into());
+    let pw =
+        std::env::var("SPRIG_TEST_PROCESSLIST_PASSWORD").unwrap_or_else(|_| "sprig-dev-app".into());
     let opts = OptsBuilder::default()
         .ip_or_hostname(host)
         .tcp_port(port.parse().unwrap())
@@ -100,7 +105,9 @@ async fn secrets_never_show_in_the_process_list() {
     let mut failed = Vec::new();
     let mut a = conn(&addr).await;
     let mut b = conn(&addr).await;
-    a.query_drop("CREATE DATABASE IF NOT EXISTS bf6_pl").await.unwrap();
+    a.query_drop("CREATE DATABASE IF NOT EXISTS bf6_pl")
+        .await
+        .unwrap();
     a.query_drop("USE bf6_pl").await.unwrap();
     for (what, sql) in &cases {
         let run = tokio::spawn({
@@ -141,7 +148,9 @@ async fn secrets_never_show_in_the_process_list() {
             failed.push(format!("{what}: the statement never showed in the list"));
         }
     }
-    a.query_drop("DROP CONNECTION IF EXISTS bf6_pl.bf6_pl_c").await.ok();
+    a.query_drop("DROP CONNECTION IF EXISTS bf6_pl.bf6_pl_c")
+        .await
+        .ok();
     a.query_drop("DROP USER IF EXISTS 'bf6_pl'@'%'").await.ok();
     a.query_drop("DROP DATABASE IF EXISTS bf6_pl").await.ok();
     assert!(failed.is_empty(), "{failed:#?}");

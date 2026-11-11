@@ -1373,9 +1373,28 @@ pub async fn narrow_backend(
             })?;
         physical.extend(rows);
     }
+    // Policy views' definers (`user@host`): they keep the table.
+    let mut definers = HashSet::new();
+    for d in &dbs {
+        let like = format!("t{}\\_d{}\\_%", cat.tenant, d.0);
+        let rows: Vec<(String, String)> = conn
+            .exec(
+                "SELECT TABLE_NAME, DEFINER FROM information_schema.VIEWS \
+                 WHERE TABLE_SCHEMA LIKE ? AND TABLE_NAME LIKE '\\_\\_sprig\\_rls\\_%'",
+                (like.as_str(),),
+            )
+            .await
+            .map_err(|e| {
+                SprigError::new(SprigCode::BackendUnavailable, format!("{cluster}: {e}"))
+            })?;
+        for (view, definer) in rows {
+            let user = definer.split('@').next().unwrap_or_default().to_owned();
+            definers.insert((user, view.to_lowercase()));
+        }
+    }
     drop(conn);
     let bound = sprig_auth::authz::rls::backend_bound(cat, authz, auth);
-    sprig_auth::authz::rls::narrow(want, cat, &bound, &physical);
+    sprig_auth::authz::rls::narrow(want, cat, &bound, &physical, &definers);
     Ok(())
 }
 

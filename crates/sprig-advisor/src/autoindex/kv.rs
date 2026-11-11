@@ -166,7 +166,10 @@ pub const NOTE: &str = "variant:kv_elements";
 /// column of a key table (its benefit is estimated from rows returned).
 #[must_use]
 pub fn is_kv(c: &Candidate) -> bool {
-    c.evidence.notes.iter().any(|n| n == NOTE || n == FIELD_NOTE)
+    c.evidence
+        .notes
+        .iter()
+        .any(|n| n == NOTE || n == FIELD_NOTE)
 }
 
 /// The element-table candidates of `f` on table `alias` (module docs).
@@ -357,7 +360,9 @@ pub fn field_column(path: &str) -> String {
 pub fn safe_path(path: &str) -> bool {
     path.starts_with('$')
         && path.len() <= 200
-        && !path.chars().any(|c| c == '\'' || c == '\\' || c.is_control())
+        && !path
+            .chars()
+            .any(|c| c == '\'' || c == '\\' || c.is_control())
 }
 
 /// The `ADD COLUMN` clause of field column `column` over `path`:
@@ -407,8 +412,13 @@ pub fn add_fields_clause(def: &super::model::IndexDef) -> Option<String> {
 #[must_use]
 pub fn add_fields_sql(schema: &str, table: &str, def: &super::model::IndexDef) -> Option<String> {
     use sprig_common::names::quote;
-    add_fields_clause(def)
-        .map(|c| format!("ALTER TABLE {}.{} {c}, ALGORITHM=INSTANT", quote(schema), quote(table)))
+    add_fields_clause(def).map(|c| {
+        format!(
+            "ALTER TABLE {}.{} {c}, ALGORITHM=INSTANT",
+            quote(schema),
+            quote(table)
+        )
+    })
 }
 
 /// `ALTER TABLE <schema>.<table> DROP COLUMN IF EXISTS <c>, ...,
@@ -422,7 +432,11 @@ pub fn drop_fields_sql(schema: &str, table: &str, columns: &[String]) -> Option<
             .map(|c| format!("DROP COLUMN IF EXISTS {}", quote(c)))
             .collect::<Vec<_>>()
             .join(", ");
-        format!("ALTER TABLE {}.{} {drops}, ALGORITHM=INSTANT", quote(schema), quote(table))
+        format!(
+            "ALTER TABLE {}.{} {drops}, ALGORITHM=INSTANT",
+            quote(schema),
+            quote(table)
+        )
     })
 }
 
@@ -487,7 +501,9 @@ pub fn field_candidates(
         .map(|p| (p, PartSource::Eq))
         .collect();
     if paths.len() < MAX_FIELDS
-        && let Some(r) = range.into_iter().find(|r| !paths.iter().any(|(p, _)| p == r))
+        && let Some(r) = range
+            .into_iter()
+            .find(|r| !paths.iter().any(|(p, _)| p == r))
     {
         paths.push((r, PartSource::Range));
     }
@@ -526,7 +542,7 @@ pub fn field_candidates(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unwrap_used, clippy::many_single_char_names)]
 
     use std::sync::Arc;
 
@@ -662,7 +678,10 @@ mod tests {
         assert!(col.starts_with("_sprig_p_email_") && col.len() == "_sprig_p_email_".len() + 8);
         assert_eq!(c[0].def.kind, IndexKind::FieldColumn);
         assert_eq!(c[0].def.ddl_columns(), format!("`{col}`(64)"));
-        assert_eq!(fields_of(&c[0].def), vec![(col.clone(), "$.email".to_owned())]);
+        assert_eq!(
+            fields_of(&c[0].def),
+            vec![(col.clone(), "$.email".to_owned())]
+        );
         assert!(is_kv(&c[0]));
         assert_eq!(
             add_fields_sql("t1_redis", "db0", &c[0].def).unwrap(),
@@ -673,7 +692,9 @@ mod tests {
         );
         assert_eq!(
             drop_fields_sql("t1_redis", "db0", std::slice::from_ref(&col)).unwrap(),
-            format!("ALTER TABLE `t1_redis`.`db0` DROP COLUMN IF EXISTS `{col}`, ALGORITHM=INSTANT")
+            format!(
+                "ALTER TABLE `t1_redis`.`db0` DROP COLUMN IF EXISTS `{col}`, ALGORITHM=INSTANT"
+            )
         );
         assert_eq!(maintained_columns(&c[0].def), vec![col, "v".to_owned()]);
         // Writes of `v` maintain the index.
@@ -684,8 +705,9 @@ mod tests {
         let m = maintained_columns(&c[0].def);
         assert!((w.touching(m.iter().map(String::as_str)) - 100.0).abs() < 1e-9);
         // The generator proposes it instead of skipping the shape (K2).
-        let g = super::super::candidates::Generator::default()
-            .generate_all(&f, &|o| (o == KEYS).then(|| Box::leak(Box::new(key_stats())) as &TableStats));
+        let g = super::super::candidates::Generator::default().generate_all(&f, &|o| {
+            (o == KEYS).then(|| Box::leak(Box::new(key_stats())) as &TableStats)
+        });
         assert_eq!(g.candidates.len(), 1, "{g:?}");
         assert!(g.skipped.is_empty(), "{:?}", g.skipped);
     }
@@ -699,21 +721,33 @@ mod tests {
         let cols: Vec<String> = c[0].def.columns().map(str::to_owned).collect();
         assert_eq!(
             cols,
-            [field_column("$.city"), field_column("$.email"), field_column("$.age")]
+            [
+                field_column("$.city"),
+                field_column("$.email"),
+                field_column("$.age")
+            ]
         );
-        assert_eq!(c[0].evidence.parts, [PartSource::Eq, PartSource::Eq, PartSource::Range]);
+        assert_eq!(
+            c[0].evidence.parts,
+            [PartSource::Eq, PartSource::Eq, PartSource::Range]
+        );
         // LIKE, `->`, a key lookup, a non-key table: nothing.
         let like = EMAIL_EQ.replace(r#"{"op":"eq"}"#, r#"{"op":"like"}"#);
         let arrow = EMAIL_EQ.replace("JSON_VALUE", "->");
         let old = r#"{"t":"db0","col":"v","op":"json_path","path":"$.email","args":[0]}"#;
         for p in [like.as_str(), arrow.as_str(), old] {
             let f = input(by_field(p));
-            assert!(field_candidates(&f, "db0", KEYS, &key_stats()).is_empty(), "{p}");
+            assert!(
+                field_candidates(&f, "db0", KEYS, &key_stats()).is_empty(),
+                "{p}"
+            );
             assert!(value_field(&f, "db0", &key_stats()));
         }
         let by_key = format!(r#"{EMAIL_EQ},{{"t":"db0","col":"k","op":"eq","args":[1]}}"#);
         assert!(field_candidates(&input(by_field(&by_key)), "db0", KEYS, &key_stats()).is_empty());
-        assert!(field_candidates(&input(by_field(EMAIL_EQ)), "db0", KEYS, &stats("db0")).is_empty());
+        assert!(
+            field_candidates(&input(by_field(EMAIL_EQ)), "db0", KEYS, &stats("db0")).is_empty()
+        );
         // Unsafe paths never reach DDL.
         assert!(safe_path("$.\"a b\"[0]"));
         assert!(!safe_path("$.a' OR 1"));
@@ -727,6 +761,7 @@ mod tests {
     /// an element-table candidate, count them.
     #[test]
     fn a_batch_s_writes_reach_the_element_table_write_load() {
+        use super::super::cost::CostModel as _;
         use sprig_workload::shape::{ExtractCtx, ResolvedTable, TableResolver, extract};
         struct R;
         impl TableResolver for R {
@@ -757,22 +792,25 @@ mod tests {
             lower_case_table_names: false,
         };
         // The whole batch: no writes for the cost model.
-        let whole = sprig_workload::fingerprint::normalize(batch.as_bytes(), &lex, Some("redis"), false);
+        let whole =
+            sprig_workload::fingerprint::normalize(batch.as_bytes(), &lex, Some("redis"), false);
         assert!(extract(batch.as_bytes(), &whole, &ctx, &R).writes.is_none());
         // Its writes, each as a fingerprint run 3,600 times in a 1-hour window.
-        let fps: Vec<FpInput> = sprig_workload::fingerprint::compound::writes(batch.as_bytes(), &lex)
-            .into_iter()
-            .map(|w| {
-                let text = &batch.as_bytes()[w.range];
-                let norm = sprig_workload::fingerprint::normalize(text, &lex, Some("redis"), false);
-                FpInput {
-                    runs: 3_600,
-                    mean_ms: 0.0,
-                    affected_per_run: 1.0,
-                    ..input(extract(text, &norm, &ctx, &R))
-                }
-            })
-            .collect();
+        let fps: Vec<FpInput> =
+            sprig_workload::fingerprint::compound::writes(batch.as_bytes(), &lex)
+                .into_iter()
+                .map(|w| {
+                    let text = &batch.as_bytes()[w.range];
+                    let norm =
+                        sprig_workload::fingerprint::normalize(text, &lex, Some("redis"), false);
+                    FpInput {
+                        runs: 3_600,
+                        mean_ms: 0.0,
+                        affected_per_run: 1.0,
+                        ..input(extract(text, &norm, &ctx, &R))
+                    }
+                })
+                .collect();
         assert_eq!(fps.len(), 2);
         let params = super::super::cost::CostParams {
             window_hours: 1.0,
@@ -782,9 +820,17 @@ mod tests {
         st.n_rows = Some(20_000);
         let t = super::super::cost::TableContext::new(ELEMS, &st, &fps, params);
         // An upsert counts half an insert and half an update of its columns.
-        assert!((t.writes.inserts_h - 1_800.0).abs() < 1e-6, "{:?}", t.writes);
-        let c = candidates(&input(translate(&shape(BY_VALUE), &target).unwrap()), "h", ELEMS, &st);
-        use super::super::cost::CostModel as _;
+        assert!(
+            (t.writes.inserts_h - 1_800.0).abs() < 1e-6,
+            "{:?}",
+            t.writes
+        );
+        let c = candidates(
+            &input(translate(&shape(BY_VALUE), &target).unwrap()),
+            "h",
+            ELEMS,
+            &st,
+        );
         let e = super::super::cost::Model.estimate(&c[0], &t);
         // 1,800 inserts + 1,800 updates touching `e` and `v`, at 0.05 ms.
         assert!((e.write_ms_h - 180.0).abs() < 1e-6, "{e:?}");

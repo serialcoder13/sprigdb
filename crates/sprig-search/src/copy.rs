@@ -17,7 +17,8 @@
 //!   loop over the feed: events of the object upsert or delete by key
 //!     (each key's newest commit clamp wins), TRUNCATE empties, DROP of the
 //!     object stops; every search.commit_interval_ms (sooner when a query
-//!     waits): commit with the positions, then mark them applied
+//!     waits, or after a quarter of it when the feed has gone quiet for
+//!     50 ms): commit with the positions, then mark them applied
 //!
 //! wait(targets):  until every cluster's applied position reached its target,
 //!   or 39826 after the timeout
@@ -379,6 +380,14 @@ pub fn record_from_text(def: &IndexDef, columns: &[String], row: Vec<Option<Vec<
                 })
                 .collect(),
         }
+    } else if def.model == Model::Kv {
+        let mut it = row.into_iter();
+        let key = Key(it.next().flatten().unwrap_or_default());
+        let doc = it
+            .next()
+            .flatten()
+            .map_or(serde_json::Value::Null, |b| kv_value(&b));
+        Record::Doc { key, doc }
     } else {
         let mut it = row.into_iter();
         let key = Key(it.next().flatten().unwrap_or_default());
@@ -391,6 +400,25 @@ pub fn record_from_text(def: &IndexDef, columns: &[String], row: Vec<Option<Vec<
     }
 }
 
+/// A key-value string's value as a document: its JSON when it is JSON,
+/// else the text.
+#[must_use]
+pub fn kv_value(b: &[u8]) -> serde_json::Value {
+    serde_json::from_slice(b)
+        .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(b).into_owned()))
+}
+
+/// Whether a binlog `type` value is `string` (an ENUM's index 1, or its
+/// text).
+fn kv_string(v: &BinValue) -> bool {
+    match v {
+        BinValue::Enum(n) => *n == 1,
+        BinValue::String(b) | BinValue::Bytes(b) => b.as_slice() == b"string",
+        BinValue::Int(1) | BinValue::UInt(1) => true,
+        _ => false,
+    }
+}
+
 /// The columns a seed reads, and the `SELECT` of the page after `after`.
 ///
 /// # Errors
@@ -400,7 +428,8 @@ pub fn seed_page_sql(def: &IndexDef, after: Option<&Key>, limit: usize) -> Resul
     let table = format!("{}.{}", q(&def.db), q(&def.table));
     let cols: Vec<String> = match def.model {
         Model::Table => crate::schema::columns_read(def),
-        _ => vec!["_id".to_owned(), "doc".to_owned()],
+        Model::Kv => vec!["k".to_owned(), "v".to_owned()],
+        Model::Collection => vec!["_id".to_owned(), "doc".to_owned()],
     };
     let nk = def.key_columns.len().max(1);
     let select = cols.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ");
@@ -419,7 +448,14 @@ pub fn seed_page_sql(def: &IndexDef, after: Option<&Key>, limit: usize) -> Resul
             };
             format!(" WHERE {lhs} > {}", k.sql(Model::Table)?)
         }
+        (Some(k), Model::Kv) => format!(" WHERE `k` > {}", k.sql(def.model)?),
         (Some(k), _) => format!(" WHERE `_id` > {}", k.sql(def.model)?),
+    };
+    // A namespace's string keys only.
+    let cond = match (def.model, cond.is_empty()) {
+        (Model::Kv, true) => " WHERE `type` = 'string'".to_owned(),
+        (Model::Kv, false) => format!("{cond} AND `type` = 'string'"),
+        _ => cond,
     };
     let stmt = format!("SELECT {select} FROM {table}{cond} ORDER BY {order} LIMIT {limit}");
     Ok((cols, stmt))
@@ -885,7 +921,11 @@ impl Copy {
                     .collect();
                 Key::of_parts(&parts)
             }
-            _ => Key(img
+            Model::Kv => Key(img
+                .get("k")
+                .and_then(|v| v.as_bytes().map(<[u8]>::to_vec))
+                .unwrap_or_default()),
+            Model::Collection => Key(img
                 .get("_id")
                 .and_then(|v| v.as_bytes().map(<[u8]>::to_vec))
                 .unwrap_or_default()),
@@ -902,7 +942,17 @@ impl Copy {
                     .map(|(n, v)| (n.clone(), val_from_bin(v)))
                     .collect(),
             },
-            _ => Record::Doc {
+            // A key-value namespace (R5 round 6): string keys' values; a
+            // key of another type (or no value) indexes nothing.
+            Model::Kv => Record::Doc {
+                key,
+                doc: match (after.get("type"), after.get("v").and_then(|v| v.as_bytes())) {
+                    (Some(t), Some(b)) if kv_string(t) => kv_value(b),
+                    (None, Some(b)) => kv_value(b),
+                    _ => serde_json::Value::Null,
+                },
+            },
+            Model::Collection => Record::Doc {
                 key,
                 doc: after
                     .get("doc")
@@ -1000,6 +1050,8 @@ impl Copy {
         let mut pending = 0u64;
         let mut since = Instant::now();
         let mut checked = Instant::now();
+        // When the feed last brought something: a quiet feed commits early.
+        let mut last_item = Instant::now();
         let mut tick = tokio::time::interval(Duration::from_millis(50));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -1019,6 +1071,10 @@ impl Copy {
                 },
             };
             let boundary = !matches!(item, Some((_, FeedItem::Event(_))));
+            let quiet = item.is_none() && last_item.elapsed() >= Duration::from_millis(50);
+            if item.is_some() {
+                last_item = Instant::now();
+            }
             match item {
                 Some((c, FeedItem::Event(e))) => {
                     let mine = match (self.ours(&e), e.op) {
@@ -1106,7 +1162,13 @@ impl Copy {
                 continue;
             }
             let waiting = self.waiters.load(Ordering::SeqCst) > 0;
-            if pending >= MAX_PENDING || (boundary && (since.elapsed() >= interval || waiting)) {
+            // A feed gone quiet (no item for a tick) commits after a
+            // quarter of the interval, so a lone write is searchable
+            // sooner; a busy feed still commits once an interval.
+            let early = quiet && since.elapsed() >= interval / 4;
+            if pending >= MAX_PENDING
+                || (boundary && (since.elapsed() >= interval || waiting || early))
+            {
                 self.commit(&pos).await?;
                 pending = 0;
                 since = Instant::now();

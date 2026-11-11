@@ -133,13 +133,18 @@ fn json_paths_keep_their_function_and_condition() {
     );
     // JSON_VALUE in =, IN, a range or IS NULL can use a field column; the
     // others can't, and a shape of only those stays all unsargable.
-    let field: Vec<bool> = s.predicates.iter().map(|p| p.op.is_field_sargable()).collect();
+    let field: Vec<bool> = s
+        .predicates
+        .iter()
+        .map(|p| p.op.is_field_sargable())
+        .collect();
     assert_eq!(field, [true, true, true, false, false]);
     assert!(!s.all_unsargable());
-    assert!(shape_of("SELECT id FROM orders WHERE JSON_VALUE(email, '$.e') LIKE 'a%'").all_unsargable());
+    assert!(
+        shape_of("SELECT id FROM orders WHERE JSON_VALUE(email, '$.e') LIKE 'a%'").all_unsargable()
+    );
     // Shapes recorded before still read.
-    let old: PredOp =
-        serde_json::from_str(r#"{"op":"json_path","path":"$.a"}"#).unwrap();
+    let old: PredOp = serde_json::from_str(r#"{"op":"json_path","path":"$.a"}"#).unwrap();
     assert_eq!(
         old,
         PredOp::JsonPath {

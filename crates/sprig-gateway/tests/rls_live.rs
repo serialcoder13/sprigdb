@@ -610,7 +610,7 @@ async fn direct_probe(ck: &mut Checks, db: &str) {
     let mut root = conn(&addr, "root", &root_pw, None).await;
     let uid: u64 = root
         .query_first(format!(
-            "SELECT user_id FROM t{tid}_sprig.users WHERE name = 'rls_alice'"
+            "SELECT MAX(user_id) FROM t{tid}_sprig.users WHERE name = 'rls_alice'"
         ))
         .await
         .unwrap()
@@ -832,11 +832,19 @@ async fn row_level_security_suite() {
             ("rls_alice", BTreeSet::new()),
         ] {
             let mut c = conn(&addrs[0], &tenant_user(user), PW, Some(&db)).await;
-            let got = ids(
-                &mut c,
-                "SELECT id FROM docs WHERE MATCH (secret) AGAINST ('sevensecret')",
-            )
-            .await;
+            // The copy is filled in the background (39824 until then).
+            let mut got = Err(String::new());
+            for _ in 0..60 {
+                got = ids(
+                    &mut c,
+                    "SELECT id FROM docs WHERE MATCH (secret) AGAINST ('sevensecret')",
+                )
+                .await;
+                if !got.as_ref().is_err_and(|e| e.contains("39824")) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
             ck.ok(&format!("search {user}"), got == Ok(want.clone()), || {
                 format!("{got:?}")
             });

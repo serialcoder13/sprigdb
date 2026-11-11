@@ -530,6 +530,7 @@ impl PassSession {
         let s = self.stmts.get_mut(stmt)?;
         if let Some(text) = s.deferred.clone() {
             // Chapter 39 (R5 round 6): the bound values as literals.
+            let search_text = s.deferred_params;
             let text = if s.deferred_params {
                 let values: Vec<String> = s
                     .params_for_backend(params, persona)?
@@ -545,8 +546,20 @@ impl PassSession {
                 text
             };
             // A statement the gateway answers itself, planned again now.
-            let step = self
-                .tenant_text(
+            let step = if search_text {
+                // Its rows come as text from MariaDB: binary for the client.
+                let mut bin = search::ToBinary::new(out);
+                self.tenant_text(
+                    cx,
+                    &text,
+                    &QueryAttrs::default(),
+                    false,
+                    RowFormat::Text,
+                    &mut bin,
+                )
+                .await?
+            } else {
+                self.tenant_text(
                     cx,
                     &text,
                     &QueryAttrs::default(),
@@ -554,7 +567,8 @@ impl PassSession {
                     RowFormat::Binary,
                     out,
                 )
-                .await?;
+                .await?
+            };
             return Ok(ExecSummary {
                 status: step.status,
                 prepared: None,

@@ -1171,10 +1171,7 @@ mod tests {
         assert_eq!(
             dbs,
             vec![
-                (
-                    "t42\\_d%".to_owned(),
-                    ActionSet::EMPTY.union(ctt),
-                ),
+                ("t42\\_d%".to_owned(), ActionSet::EMPTY.union(ctt),),
                 (
                     "t42\\_d1\\_%".to_owned(),
                     ActionSet::of(&[Action::Select, Action::Insert]).union(ctt),

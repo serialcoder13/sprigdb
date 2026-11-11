@@ -386,7 +386,7 @@ pub(crate) async fn add_fields(
     Ok(missing)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn cleanup(
     ep: &NodeEndpoint,
     plan: &ValidationPlan,
@@ -431,14 +431,18 @@ async fn cleanup(
         r.drop_ms = Some(ms_since(started));
         if let Err(e) = res {
             r.node_check.bad(format!("drop of {name} failed: {e}"));
-        } else if let Some(sql) = crate::autoindex::kv::drop_fields_sql(&t.schema, &t.table, added_fields) {
+        } else if let Some(sql) =
+            crate::autoindex::kv::drop_fields_sql(&t.schema, &t.table, added_fields)
+        {
             // The field columns this validation added: the primary lacks
             // them, so they must not stay on the replica.
             match drop_with_retries(&mut ddl, &sql).await {
                 Ok(()) => r
                     .node_check
                     .ok(format!("field columns dropped: {}", added_fields.join(","))),
-                Err(e) => r.node_check.bad(format!("drop of field columns failed: {e}")),
+                Err(e) => r
+                    .node_check
+                    .bad(format!("drop of field columns failed: {e}")),
             }
         }
         if let Some(s) = stats {

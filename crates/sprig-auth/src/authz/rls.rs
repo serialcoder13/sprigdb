@@ -891,8 +891,10 @@ pub fn backend_bound(
 /// Narrows the wanted backend grants `want` for row-level security's
 /// policy views (`rls.backend_enforcement = views`; decision RL18).
 /// `physical` lists the relations (schema, name) of the tenant's
-/// databases with protected tables on the cluster being reconciled, and
-/// `bound` is [`backend_bound`].
+/// databases with protected tables on the cluster being reconciled,
+/// `bound` is [`backend_bound`], and `definers` the (account, lower-case
+/// view name) pairs of policy views' definers, which keep reading their
+/// table itself (a view reads it with its definer's rights; RL19).
 ///
 /// ```text
 /// for each account a, database D, schema s of D holding table T's view:
@@ -908,6 +910,7 @@ pub fn narrow(
     cat: &TenantCatalog,
     bound: &HashMap<String, Vec<ObjectId>>,
     physical: &[(String, String)],
+    definers: &std::collections::HashSet<(String, String)>,
 ) {
     use super::backend::{BackendTarget, db_pattern, db_row_for};
     use super::privilege::ActionSet;
@@ -958,8 +961,14 @@ pub fn narrow(
             let Some(in_db) = schemas.get(db) else {
                 continue;
             };
-            let binds: Vec<&(ObjectId, String)> =
-                tables.iter().filter(|(o, _)| mine.contains(o)).collect();
+            let binds: Vec<&(ObjectId, String)> = tables
+                .iter()
+                .filter(|(o, _)| mine.contains(o))
+                .filter(|(o, _)| {
+                    let v = policy_view(names.get(o).map_or("", String::as_str), *o).to_lowercase();
+                    !definers.contains(&(acct.clone(), v))
+                })
+                .collect();
             // The database row as it was (the same pattern rows cover
             // every schema of the database).
             let first = in_db.keys().next().cloned().unwrap_or_default();
@@ -1320,7 +1329,7 @@ mod tests {
             (s.clone(), CTX_FUNCTION.to_owned()),
             ("t42_d1_g7_s1".to_owned(), "other".to_owned()),
         ];
-        narrow(&mut want, &cat, &bound, &physical);
+        narrow(&mut want, &cat, &bound, &physical, &std::collections::HashSet::new());
         let sel = ActionSet::of(&[Action::Select]);
         let refs = ActionSet::of(&[Action::References]);
         let t = |s: &str, n: &str| BackendTarget::Table(s.into(), n.into());
@@ -1354,7 +1363,14 @@ mod tests {
             .or_default()
             .insert(tenant_row.clone(), all);
         let before = want2.clone();
-        narrow(&mut want2, &cat, &bound, &physical[..2]);
+        narrow(&mut want2, &cat, &bound, &physical[..2], &std::collections::HashSet::new());
+        // A view's definer keeps reading the table itself.
+        let mut want3 = BackendState::new();
+        want3.entry("t42_u1".into()).or_default().insert(tenant_row.clone(), all);
+        let before3 = want3.clone();
+        let defs = [("t42_u1".to_owned(), "__sprig_rls_docs".to_owned())].into_iter().collect();
+        narrow(&mut want3, &cat, &bound, &physical[..3], &defs);
+        assert_eq!(want3, before3);
         assert_eq!(want2, before);
     }
 

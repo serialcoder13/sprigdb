@@ -60,8 +60,11 @@ enum Tok {
 
 /// `text` with its secret literals replaced by [`SECRET`].
 #[must_use]
+#[allow(clippy::too_many_lines)] // one scanner loop, one arm per token kind
 pub fn info(text: &str) -> Cow<'_, str> {
-    if !(has_word(text, "IDENTIFIED") || has_word(text, "PASSWORD") || has_word(text, "CREDENTIALS"))
+    if !(has_word(text, "IDENTIFIED")
+        || has_word(text, "PASSWORD")
+        || has_word(text, "CREDENTIALS"))
     {
         return Cow::Borrowed(text);
     }
@@ -75,6 +78,11 @@ pub fn info(text: &str) -> Cow<'_, str> {
     // Parenthesis depth inside `CREDENTIALS (...)`, 0 outside.
     let mut cred = 0usize;
     let mut cred_next = false;
+    // Words since the statement began, and whether it is `SET PASSWORD`
+    // (whose literal after `=` is the password: `SET PASSWORD FOR u = 'x'`).
+    let mut words = 0usize;
+    let mut first_set = false;
+    let mut set_password = false;
     let mut i = 0;
     let push = |prev: &mut [Tok; 2], t: Tok| {
         prev[1] = std::mem::replace(&mut prev[0], t);
@@ -108,6 +116,7 @@ pub fn info(text: &str) -> Cow<'_, str> {
                 || word(&prev[0], "BY")
                 || ends_password(&prev[0])
                 || (matches!(prev[0], Tok::Punct(b'=' | b'(')) && ends_password(&prev[1]))
+                || (set_password && matches!(prev[0], Tok::Punct(b'=')))
                 || (identified
                     && (word(&prev[0], "AS")
                         || word(&prev[0], "USING")
@@ -146,6 +155,12 @@ pub fn info(text: &str) -> Cow<'_, str> {
                 identified = true;
             }
             cred_next = w == "CREDENTIALS";
+            match words {
+                0 => first_set = w == "SET",
+                1 => set_password = first_set && w == "PASSWORD",
+                _ => {}
+            }
+            words += 1;
             push(&mut prev, Tok::Word(w));
             continue;
         }
@@ -157,6 +172,9 @@ pub fn info(text: &str) -> Cow<'_, str> {
             b';' => {
                 identified = false;
                 cred = 0;
+                words = 0;
+                first_set = false;
+                set_password = false;
             }
             _ => {}
         }
@@ -248,7 +266,10 @@ mod tests {
             // A column named password compared with a literal is hidden
             // (as a PASSWORD = 'x' form): nothing else changes.
             if sql.contains("password = 'x'") {
-                assert_eq!(got, "SELECT 'IDENTIFIED BY' FROM t WHERE password = <secret>");
+                assert_eq!(
+                    got,
+                    "SELECT 'IDENTIFIED BY' FROM t WHERE password = <secret>"
+                );
             } else {
                 assert_eq!(got, sql);
             }

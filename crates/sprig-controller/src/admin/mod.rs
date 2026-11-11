@@ -54,6 +54,8 @@ pub mod placement_admin;
 // Chapter 25 (r2close): an operator's errant_extract and node_rebuild.
 pub mod recovery;
 pub mod sharding_admin;
+// Chapter 39 (R5 round 6): sprigctl search.
+mod search_admin;
 pub mod txn_admin;
 pub mod types;
 

@@ -1021,10 +1021,21 @@ mod tests {
     fn database_patterns_match_only_their_databases_schemas() {
         let p = db_pattern(TenantId(42), sprig_common::ids::DbId(1));
         assert_eq!(p, "t42\\_d1\\_%");
-        for yes in ["t42_d1_g1_s1", "t42_d1_g7_s3", "t42_d1_g90001_s12", "t42_d1_ref"] {
+        for yes in [
+            "t42_d1_g1_s1",
+            "t42_d1_g7_s3",
+            "t42_d1_g90001_s12",
+            "t42_d1_ref",
+        ] {
             assert!(db_matches(&p, yes), "{yes}");
         }
-        for no in ["t42_d10_g1_s1", "t42_d2_g1_s1", "t420_d1_g1_s1", "t42_sprig", "t42xd1_g1_s1"] {
+        for no in [
+            "t42_d10_g1_s1",
+            "t42_d2_g1_s1",
+            "t420_d1_g1_s1",
+            "t42_sprig",
+            "t42xd1_g1_s1",
+        ] {
             assert!(!db_matches(&p, no), "{no}");
         }
         assert!(db_matches("t42\\_d%", "t42_d10_g1_s1"));
@@ -1073,7 +1084,10 @@ mod tests {
             ActionSet::of(&[Action::Select]),
         );
         scratch_grants(&mut g, "t1\\_d%");
-        assert_eq!(g.get(&BackendTarget::Db("t1\\_d%".into())).copied(), Some(ctt));
+        assert_eq!(
+            g.get(&BackendTarget::Db("t1\\_d%".into())).copied(),
+            Some(ctt)
+        );
         // A database row keeps its own actions and gets CTT too, so the
         // more specific row still covers temporary tables.
         let mut g = BTreeMap::new();

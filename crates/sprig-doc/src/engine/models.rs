@@ -322,6 +322,22 @@ fn filter_paths(p: &Pred, out: &mut Vec<String>) {
     }
 }
 
+/// The paths of `pred`'s geo conditions.
+fn geo_paths(pred: &Pred, out: &mut Vec<String>) {
+    match pred {
+        Pred::And(v) | Pred::Or(v) | Pred::Nor(v) => {
+            for p in v {
+                geo_paths(p, out);
+            }
+        }
+        Pred::Field {
+            path,
+            op: FieldOp::Geo(_),
+        } if !out.contains(path) => out.push(path.clone()),
+        _ => {}
+    }
+}
+
 impl Engine {
     /// `find` with `$near` or `$nearSphere`: candidates through the
     /// `2dsphere` index's box, sorted by distance (then by `sort`, which
@@ -1281,6 +1297,206 @@ impl Engine {
         sql.exec(&geo::drop_columns_sql(&ns.db, &m.table, p))
             .await
             .map_err(|e| mongo_error(&e))?;
+        // Its lines' and polygons' side table (R5 round 6).
+        let _ = sql
+            .exec(&format!(
+                "DROP TABLE IF EXISTS {}.{}",
+                ident(&ns.db),
+                ident(&geo::side_table(&m.table, p))
+            ))
+            .await;
         Ok(())
+    }
+}
+
+impl Engine {
+    /// `m` with the side tables of `pred`'s geo paths synced (R5 round 6:
+    /// lines and polygons skipped by their boxes), for one translation;
+    /// `None` when no `2dsphere` path is queried.
+    ///
+    /// # Errors
+    /// The backend's.
+    pub(crate) async fn geo_sides(
+        &self,
+        sql: &mut dyn SqlRunner,
+        ns: &Ns,
+        m: &CollMeta,
+        pred: &Pred,
+    ) -> Result<Option<CollMeta>, MongoError> {
+        let mut paths = Vec::new();
+        geo_paths(pred, &mut paths);
+        paths.retain(|p| geo::index_on(m, p).is_some());
+        if paths.is_empty() {
+            return Ok(None);
+        }
+        let mut sides = Document::new();
+        for p in &paths {
+            let min_v = self.geo_sync(sql, ns, m, p).await?;
+            let st = format!(
+                "{}.{}",
+                ident(&ns.db),
+                ident(&geo::side_table(&m.table, p))
+            );
+            sides.insert(
+                p.clone(),
+                doc! {"t": st, "v": i64::try_from(min_v).unwrap_or(i64::MAX)},
+            );
+        }
+        let mut m = m.clone();
+        m.options.insert(geo::SIDE_OPTION, sides);
+        Ok(Some(m))
+    }
+
+    /// Brings `path`'s side table up to date (at most once a
+    /// `vector_sync_ms` per process): every document written since the
+    /// last sync, less a margin, whose value at the path isn't a point gets
+    /// its box; a value with no location loses its row. Returns the `_v`
+    /// past which documents may not be in the table yet.
+    async fn geo_sync(
+        &self,
+        sql: &mut dyn SqlRunner,
+        ns: &Ns,
+        m: &CollMeta,
+        path: &str,
+    ) -> Result<u64, MongoError> {
+        let side = geo::side_table(&m.table, path);
+        let st = format!("{}.{}", ident(&ns.db), ident(&side));
+        let coll = format!("{}.{}", ident(&ns.db), ident(&m.table));
+        let key = format!("{}.{side}", ns.db);
+        if let Some((at, v)) = SYNCED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            && at.elapsed() < std::time::Duration::from_millis(self.cfg.vector_sync_ms)
+        {
+            return Ok(*v);
+        }
+        let first = |rows: super::Rows| -> u64 {
+            text(rows.first().and_then(|r| r.first()).and_then(Option::as_ref))
+                .parse::<u64>()
+                .unwrap_or(0)
+        };
+        let now_v = first(
+            sql.query(&format!("SELECT COALESCE(MAX(_v), 0) FROM {coll}"))
+                .await
+                .map_err(|e| mongo_error(&e))?,
+        );
+        let marker = match sql.query(&format!("SELECT _v FROM {st} WHERE _id = ''")).await {
+            Ok(r) => first(r),
+            Err(e) if e.is(1146) => {
+                sql.exec(&format!(
+                    "ALTER TABLE {coll} ADD INDEX IF NOT EXISTS _sprig_dix_v (_v)"
+                ))
+                .await
+                .map_err(|e| mongo_error(&e))?;
+                sql.exec(&geo::side_table_sql(&st))
+                    .await
+                    .map_err(|e| mongo_error(&e))?;
+                0
+            }
+            Err(e) => return Err(mongo_error(&e)),
+        };
+        let lower = if marker == 0 {
+            0
+        } else {
+            marker.saturating_sub(SIDE_MARGIN)
+        };
+        let parts: Vec<&str> = path.split('.').collect();
+        let jp = str_lit(&json_path(&parts, &[]));
+        let (lat, _) = geo::columns(path);
+        let mut after: Option<Vec<u8>> = None;
+        loop {
+            let cond = after
+                .as_ref()
+                .map(|k| format!(" AND _id > {}", crate::sql::bin_lit(k)))
+                .unwrap_or_default();
+            let rows = sql
+                .query(&format!(
+                    "SELECT _id, JSON_EXTRACT(doc, {jp}), _v FROM {coll} WHERE _v > {lower} AND {} IS NULL \
+                     AND JSON_EXTRACT(doc, {jp}) IS NOT NULL AND LENGTH(_id) <= 3000{cond} ORDER BY _id LIMIT 2000",
+                    ident(&lat)
+                ))
+                .await
+                .map_err(|e| mongo_error(&e))?;
+            let got = rows.len();
+            let mut ups = Vec::new();
+            let mut dels = Vec::new();
+            for r in &rows {
+                let id = r.first().cloned().flatten().unwrap_or_default();
+                let v = r
+                    .get(1)
+                    .cloned()
+                    .flatten()
+                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                    .and_then(|j| Bson::try_from(j).ok());
+                let dv = text(r.get(2).and_then(Option::as_ref));
+                match v.as_ref().and_then(geo::side_bounds) {
+                    Some((a, b, c, d)) => ups.push(format!(
+                        "({}, {}, {}, {}, {}, {})",
+                        crate::sql::bin_lit(&id),
+                        f64_lit(a),
+                        f64_lit(b),
+                        f64_lit(c),
+                        f64_lit(d),
+                        dv.parse::<u64>().unwrap_or(0)
+                    )),
+                    None => dels.push(crate::sql::bin_lit(&id)),
+                }
+                after = Some(id);
+            }
+            if !ups.is_empty() {
+                sql.exec(&format!(
+                    "INSERT INTO {st} (_id, lat_lo, lat_hi, lng_lo, lng_hi, _v) VALUES {} \
+                     ON DUPLICATE KEY UPDATE lat_lo = VALUES(lat_lo), lat_hi = VALUES(lat_hi), \
+                     lng_lo = VALUES(lng_lo), lng_hi = VALUES(lng_hi), _v = VALUES(_v)",
+                    ups.join(", ")
+                ))
+                .await
+                .map_err(|e| mongo_error(&e))?;
+            }
+            if !dels.is_empty() {
+                sql.exec(&format!(
+                    "DELETE FROM {st} WHERE _id IN ({})",
+                    dels.join(", ")
+                ))
+                .await
+                .map_err(|e| mongo_error(&e))?;
+            }
+            if got < 2000 {
+                break;
+            }
+        }
+        sql.exec(&format!(
+            "INSERT INTO {st} (_id, lat_lo, lat_hi, lng_lo, lng_hi, _v) VALUES ('', 0, 0, 0, 0, {now_v}) \
+             ON DUPLICATE KEY UPDATE _v = GREATEST(_v, VALUES(_v))"
+        ))
+        .await
+        .map_err(|e| mongo_error(&e))?;
+        let due = {
+            let mut g = PURGED
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let due = g
+                .get(&key)
+                .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(60));
+            if due {
+                g.insert(key.clone(), std::time::Instant::now());
+            }
+            due
+        };
+        if due {
+            sql.exec(&format!(
+                "DELETE FROM {st} WHERE _id <> '' AND _id NOT IN (SELECT _id FROM {coll} WHERE {} IS NULL)",
+                ident(&lat)
+            ))
+            .await
+            .map_err(|e| mongo_error(&e))?;
+        }
+        let min_v = now_v.saturating_sub(SIDE_MARGIN);
+        SYNCED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, (std::time::Instant::now(), min_v));
+        Ok(min_v)
     }
 }

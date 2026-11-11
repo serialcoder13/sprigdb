@@ -259,7 +259,7 @@ fn is_string_type(t: &str) -> bool {
 
 /// The type MySQL gives the expression `[a, b]`, as MariaDB DDL; `None`
 /// when it isn't known (see the module docs).
-#[allow(clippy::many_single_char_names)]
+#[allow(clippy::many_single_char_names, clippy::too_many_lines)] // one rule per expression shape
 fn infer(s: &Sig<'_>, a: usize, b: usize, cols: &BTreeMap<String, String>) -> Option<String> {
     let col_type = |j: usize| -> Option<&String> {
         // `c` or `t.c`.
@@ -623,9 +623,15 @@ mod tests {
             rewrite_with(sql.as_bytes(), &o, &known).map(|v| String::from_utf8(v).unwrap())
         };
         let out = r("CREATE INDEX i ON t ((`title` COLLATE `utf8mb4_esperanto_ci`) DESC)").unwrap();
-        assert!(out.contains("varchar(100) COLLATE `utf8mb4_esperanto_ci` GENERATED ALWAYS"), "{out}");
+        assert!(
+            out.contains("varchar(100) COLLATE `utf8mb4_esperanto_ci` GENERATED ALWAYS"),
+            "{out}"
+        );
         let out = r("CREATE INDEX i ON t (((`height` / (`weight` + 5))))").unwrap();
-        assert!(out.contains("` DOUBLE GENERATED ALWAYS AS ((`height` / (`weight` + 5)))"), "{out}");
+        assert!(
+            out.contains("` DOUBLE GENERATED ALWAYS AS ((`height` / (`weight` + 5)))"),
+            "{out}"
+        );
         let out = r("CREATE INDEX i ON t ((`weight` + 0.0))").unwrap();
         assert!(out.contains("` DOUBLE GENERATED"), "{out}");
         let out = r("CREATE INDEX i ON t ((`weight` * 2))").unwrap();

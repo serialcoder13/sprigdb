@@ -125,6 +125,8 @@ fn routes(app: Arc<App>) -> Router {
             "/admin/v1/tenants/{name}/shards",
             get(list_shards).post(submit_shard_job),
         )
+        .route("/admin/v1/tenants/{name}/search", get(list_search))
+        .route("/admin/v1/tenants/{name}/search/{index}", get(show_search))
         .route("/admin/v1/tenants/{name}/graphs", get(list_graphs))
         .route("/admin/v1/tenants/{name}/graphs/{graph}", get(show_graph))
         .route(
@@ -1108,6 +1110,30 @@ async fn explain_decision(
             .parse()
             .map_err(|_| invalid(format!("decision id {id:?} is not a number")))?;
         app.svc.explain_decision(&name, id).await
+    };
+    respond(r.await)
+}
+
+async fn list_search(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath(name): UrlPath<String>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.list_search(&name).await
+    };
+    respond(r.await)
+}
+
+async fn show_search(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath((name, index)): UrlPath<(String, String)>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        app.svc.show_search(&name, &index).await
     };
     respond(r.await)
 }

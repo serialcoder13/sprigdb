@@ -190,8 +190,7 @@ impl<'a> IntMetaSink<'a> {
         self.cur = None;
         // MySQL's twelve EXPLAIN columns (chapter 28, R4 round 3).
         // Binary rows too (a prepared EXPLAIN, R4 round 4).
-        if sprig_sql::compat::explain::is_explain_extended(columns.iter().map(|c| &c.name[..]))
-        {
+        if sprig_sql::compat::explain::is_explain_extended(columns.iter().map(|c| &c.name[..])) {
             let after = explain_columns(columns);
             self.cur = Some(Rows {
                 format,
@@ -278,7 +277,9 @@ fn explain_binary(mut vals: Vec<sprig_proto_mysql::Value>) -> Vec<sprig_proto_my
     use sprig_proto_mysql::Value;
     if let Some(v) = vals.get_mut(8)
         && let Value::Bytes(b) = v
-        && let Some(n) = std::str::from_utf8(b).ok().and_then(|t| t.parse::<i64>().ok())
+        && let Some(n) = std::str::from_utf8(b)
+            .ok()
+            .and_then(|t| t.parse::<i64>().ok())
     {
         *v = Value::Int(n);
     }

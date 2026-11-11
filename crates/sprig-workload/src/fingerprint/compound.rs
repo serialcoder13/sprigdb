@@ -40,6 +40,7 @@ pub struct InnerWrite {
 /// The write statements of compound statement `sql` (module docs); empty
 /// for any other text.
 #[must_use]
+#[allow(clippy::too_many_lines)] // one walk, two passes
 pub fn writes(sql: &[u8], opts: &LexOptions) -> Vec<InnerWrite> {
     let Ok(all) = lex::lex(sql, opts) else {
         return Vec::new();
@@ -113,7 +114,10 @@ pub fn writes(sql: &[u8], opts: &LexOptions) -> Vec<InnerWrite> {
                         *e = true;
                     }
                 }
-                if pass == 1 && at_start && matches!(w, Some("INSERT" | "REPLACE" | "UPDATE" | "DELETE")) {
+                if pass == 1
+                    && at_start
+                    && matches!(w, Some("INSERT" | "REPLACE" | "UPDATE" | "DELETE"))
+                {
                     // To the next `;` outside parentheses.
                     let start = toks[i].start as usize;
                     let mut d = 0usize;
@@ -187,7 +191,9 @@ mod tests {
     fn a_guarded_batch_holds_its_writes() {
         let w = texts(HSET);
         assert_eq!(w.len(), 5, "{w:#?}");
-        assert!(w[0].starts_with("DELETE FROM `redis`.`__sprig_ke_db0`") && w[0].ends_with("X'61'"));
+        assert!(
+            w[0].starts_with("DELETE FROM `redis`.`__sprig_ke_db0`") && w[0].ends_with("X'61'")
+        );
         assert!(w[2].starts_with("INSERT INTO `redis`.`db0`") && w[2].ends_with("X'61')"));
         assert!(w[3].starts_with("UPDATE `redis`.`db0` SET"));
         assert!(w[4].starts_with("INSERT INTO `redis`.`__sprig_ke_db0`"));
@@ -198,7 +204,14 @@ mod tests {
         // Nested blocks multiply; ELSEIF adds a branch.
         let nested = "BEGIN NOT ATOMIC IF @a THEN IF @b = 1 THEN DELETE FROM t; ELSEIF @b = 2 \
             THEN DELETE FROM u; END IF; ELSE UPDATE t SET x = IF(@c, 1, 2); END IF; END";
-        assert_eq!(texts(nested), ["DELETE FROM t", "DELETE FROM u", "UPDATE t SET x = IF(@c, 1, 2)"]);
+        assert_eq!(
+            texts(nested),
+            [
+                "DELETE FROM t",
+                "DELETE FROM u",
+                "UPDATE t SET x = IF(@c, 1, 2)"
+            ]
+        );
         assert_eq!(weights(nested), [0.5 / 3.0, 0.5 / 3.0, 0.5]);
     }
 

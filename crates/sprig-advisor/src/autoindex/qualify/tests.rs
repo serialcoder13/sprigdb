@@ -461,6 +461,39 @@ fn unsargable_not_indexable_and_no_objects() {
     assert_eq!(miss_of(&q, 4), &Miss::NotIndexable);
 }
 
+/// R6 round 6 (decision K3): `JSON_VALUE` in an equality qualifies (a
+/// field column can serve it); in `LIKE` it stays unsargable.
+#[test]
+fn a_json_value_equality_qualifies_and_a_like_does_not() {
+    let json = |cmp: serde_json::Value| {
+        shape(&serde_json::json!({
+            "v": 1, "type": "select",
+            "tables": [{"alias": "d", "object_id": A.0, "table": "db0"}],
+            "predicates": [{"t": "d", "col": "v", "op": "json_path", "path": "$.email",
+                            "func": "JSON_VALUE", "cmp": cmp, "args": [0]}],
+            "joins": [], "order_by": [], "group_by": [], "select": {"d": ["k"]},
+            "limit": false, "writes": null, "or_groups": 0}))
+    };
+    let q = Run::new().go(vec![
+        SourcedWindow::client(win(
+            1,
+            json(serde_json::json!({"op": "eq"})),
+            80 * 24,
+            700.0,
+            900.0,
+        )),
+        SourcedWindow::client(win(
+            2,
+            json(serde_json::json!({"op": "like"})),
+            80 * 24,
+            700.0,
+            900.0,
+        )),
+    ]);
+    qualified(&q, 1);
+    assert_eq!(miss_of(&q, 2).code(), "json_path");
+}
+
 #[test]
 fn ranking_leaves_out_transactions_and_logic_invocations() {
     let mut w = BTreeMap::new();

@@ -661,10 +661,28 @@ impl PassSession {
                 }
             }
         } else if def.model == Model::Kv {
-            return Err(SprigError::new(
-                SprigCode::SearchUnsupported,
-                "search indexes on key-value namespaces are not built yet",
-            ));
+            // A key-value namespace (chapter 33; R5 round 6): its keys
+            // table, `k` the key and `v` a string key's value.
+            let q = format!(
+                "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {} \
+                 AND TABLE_NAME = {} AND COLUMN_NAME IN ('k', 'type', 'v', 'expires_at')",
+                lit(&db),
+                lit(&def.object)
+            );
+            let n = self.sub_rows(cx, wire, &q).await?;
+            let found = n
+                .first()
+                .and_then(|r| r.first().cloned().flatten())
+                .is_some_and(|b| b == b"4");
+            if !found {
+                return Err(SprigError::new(
+                    SprigCode::SearchFieldType,
+                    format!("'{}' isn't a key-value namespace: VALUE fields need one", def.object),
+                ));
+            }
+            def.table.clone_from(&def.object);
+            def.key_columns = vec!["k".to_owned()];
+            def.key_types = vec!["varbinary".to_owned()];
         } else {
             def.model = Model::Table;
             def.table.clone_from(&def.object);
@@ -1430,5 +1448,77 @@ pub(super) fn param_literal(p: &sprig_proto_mysql::command::BoundParam) -> Strin
             t.second,
             t.micro
         ),
+    }
+}
+
+/// Text rows as binary rows (a prepared statement whose `MATCH` runs on a
+/// search index executes as text; its client reads the binary protocol).
+pub(super) struct ToBinary<'a> {
+    pub(super) inner: &'a mut dyn ResultSink,
+    columns: Vec<ColumnDef>,
+}
+
+impl<'a> ToBinary<'a> {
+    pub(super) fn new(inner: &'a mut dyn ResultSink) -> Self {
+        Self {
+            inner,
+            columns: Vec::new(),
+        }
+    }
+
+    async fn text(&mut self, v: &[Option<&[u8]>]) -> Result<()> {
+        let values: Vec<sprig_proto_mysql::Value> = self
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(i, c)| super::router::binary::text_value(c, v.get(i).copied().flatten()))
+            .collect();
+        self.inner.row(RowValues::Binary(&values)).await
+    }
+}
+
+#[async_trait]
+impl ResultSink for ToBinary<'_> {
+    fn wire(&self) -> Wire {
+        self.inner.wire()
+    }
+    async fn begin_rows(&mut self, columns: &[ColumnDef], _format: RowFormat) -> Result<()> {
+        self.columns = columns.to_vec();
+        self.inner.begin_rows(columns, RowFormat::Binary).await
+    }
+    async fn row(&mut self, values: RowValues<'_>) -> Result<()> {
+        match values {
+            RowValues::Text(v) => self.text(v).await,
+            b @ RowValues::Binary(_) => self.inner.row(b).await,
+        }
+    }
+    async fn raw_row(&mut self, payload: Bytes) -> Result<()> {
+        let r = sprig_proto_mysql::resultset::decode_text_row(&payload, self.columns.len().max(1))?;
+        let v: Vec<Option<&[u8]>> = r.iter().map(|c| c.as_deref()).collect();
+        self.text(&v).await
+    }
+    async fn end_rows(&mut self, end: EndOfRows) -> Result<()> {
+        self.inner.end_rows(end).await
+    }
+    async fn ok(&mut self, ok: OkPacket) -> Result<()> {
+        self.inner.ok(ok).await
+    }
+    async fn error(&mut self, err: &SprigError) -> Result<()> {
+        self.inner.error(err).await
+    }
+    async fn column_list(&mut self, c: &[ColumnDef], e: EndOfRows) -> Result<()> {
+        self.inner.column_list(c, e).await
+    }
+    async fn local_infile_request(&mut self, f: &[u8]) -> Result<()> {
+        self.inner.local_infile_request(f).await
+    }
+    async fn local_infile_read(&mut self) -> Result<Bytes> {
+        self.inner.local_infile_read().await
+    }
+    async fn flush(&mut self) -> Result<()> {
+        self.inner.flush().await
+    }
+    fn finished(&self) -> bool {
+        self.inner.finished()
     }
 }

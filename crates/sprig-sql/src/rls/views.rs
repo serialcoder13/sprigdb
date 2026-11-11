@@ -274,15 +274,17 @@ fn upper(t: &Toks<'_>, i: usize) -> String {
         .unwrap_or_default()
 }
 
-/// Names a statement's `WITH` clauses define.
-fn cte_names(t: &Toks<'_>) -> HashSet<String> {
-    let mut out = HashSet::new();
+/// The `WITH` clauses' names: (lower-case name, first and last token of
+/// its own body, recursive).
+fn cte_names(t: &Toks<'_>) -> Vec<(String, usize, usize, bool)> {
+    let mut out = Vec::new();
     let n = t.toks.len();
     let mut i = 0;
     while i < n {
         if t.word(i, "WITH") && !t.word(i + 1, "ROLLUP") && !t.word(i + 1, "CHECK") {
             let mut k = i + 1;
-            if t.word(k, "RECURSIVE") {
+            let recursive = t.word(k, "RECURSIVE");
+            if recursive {
                 k += 1;
             }
             loop {
@@ -300,12 +302,12 @@ fn cte_names(t: &Toks<'_>) -> HashSet<String> {
                 if !t.word(m, "AS") {
                     break;
                 }
-                out.insert(name);
                 m += 1;
                 if !t.punct(m, "(") {
                     break;
                 }
                 let Some(c) = t.matching(m) else { break };
+                out.push((name, m, c, recursive));
                 if t.punct(c + 1, ",") {
                     k = c + 2;
                 } else {
@@ -316,6 +318,14 @@ fn cte_names(t: &Toks<'_>) -> HashSet<String> {
         i += 1;
     }
     out
+}
+
+/// Whether an unqualified `name` at token `at` names a CTE: some CTE has
+/// that name, and `at` isn't inside the body of a non-recursive one of
+/// that name (which still reads the table).
+fn is_cte(ctes: &[(String, usize, usize, bool)], name: &str, at: usize) -> bool {
+    let mine: Vec<_> = ctes.iter().filter(|c| c.0 == name).collect();
+    !mine.is_empty() && !mine.iter().any(|c| !c.3 && c.1 <= at && at <= c.2)
 }
 
 /// Whether the statement from token `from` (to its `;`) has `ON DUPLICATE
@@ -495,7 +505,8 @@ pub fn swap(
             };
             let table = val(&t, last);
             let lower = table.to_lowercase();
-            let shadowed = schema.is_none() && (ctes.contains(&lower) || exclude.contains(&lower));
+            let shadowed =
+                schema.is_none() && (is_cte(&ctes, &lower, i) || exclude.contains(&lower));
             // `x(` is a function, except an INSERT target's column list.
             let func = pos == Pos::Read && t.punct(last + 1, "(");
             if !shadowed
@@ -700,6 +711,11 @@ mod tests {
         assert_eq!(
             sw("WITH docs AS (SELECT 1) SELECT * FROM docs"),
             "WITH docs AS (SELECT 1) SELECT * FROM docs"
+        );
+        // A non-recursive CTE's own body still reads the table.
+        assert_eq!(
+            sw("WITH docs AS (SELECT * FROM docs) SELECT id FROM docs"),
+            "WITH docs AS (SELECT * FROM `__sprig_rls_docs` AS `docs`) SELECT id FROM docs"
         );
         assert_eq!(
             sw("SELECT 1 FROM JSON_TABLE('[]', '$' COLUMNS (a INT PATH '$')) j"),

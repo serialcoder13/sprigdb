@@ -15,7 +15,8 @@
 //! - a filter clause (`range` on a filter field), facets, highlights and
 //!   rows;
 //! - errors: an unknown index (39820), a bad query (39822), a sort (39823);
-//! - gRPC (h2c on the same port) answers the first page as REST does.
+//! - gRPC (h2c on the same port) answers the first page as REST does;
+//! - a search index on a key-value namespace's JSON values.
 //!
 //! The database is dropped at the end.
 
@@ -253,5 +254,64 @@ async fn search_query_over_rest_and_grpc() {
     assert_eq!(gids, got[..4].to_vec());
     assert!(!r.after.is_empty());
     println!("Search.Query over gRPC: first page equal to REST's");
+
+    // A key-value namespace (R5 round 6): JSON values by path.
+    for (k, note) in [
+        ("s1", "remember the red shoe"),
+        ("s2", "buy milk"),
+        ("s3", "the shoe store closes at six"),
+    ] {
+        let (st, v) = post(
+            http,
+            "/v1/databases/r5six_api/namespaces/notes:put",
+            &json!({"key": k, "text": json!({"note": note, "n": 1}).to_string()}),
+        )
+        .await;
+        assert_eq!(st, 200, "{v}");
+    }
+    let (st, v) = post(
+        http,
+        "/v1/databases/r5six_api/namespaces/notes:put",
+        &json!({"key": "plain", "text": "a shoe without JSON"}),
+    )
+    .await;
+    assert_eq!(st, 200, "{v}");
+    c.query_drop("CREATE SEARCH INDEX note_text ON notes (VALUE '$.note' TEXT)")
+        .await
+        .unwrap();
+    let (st, v) = post(
+        http,
+        "/v1/databases/r5six_api/search/note_text:query",
+        &json!({"query_string": "shoe", "include_row": true, "highlight": ["note"], "consistency": "latest"}),
+    )
+    .await;
+    assert_eq!(st, 200, "{v}");
+    let mut keys: Vec<String> = v["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| {
+            let k: Value = serde_json::from_str(h["key"].as_str().unwrap()).unwrap();
+            k["k"].as_str().unwrap().to_owned()
+        })
+        .collect();
+    keys.sort();
+    assert_eq!(keys, vec!["s1", "s3"], "{v}");
+    // A later write is found too.
+    let (st, _) = post(
+        http,
+        "/v1/databases/r5six_api/namespaces/notes:put",
+        &json!({"key": "s2", "text": json!({"note": "new shoe laces"}).to_string()}),
+    )
+    .await;
+    assert_eq!(st, 200);
+    let (_, v) = post(
+        http,
+        "/v1/databases/r5six_api/search/note_text:query",
+        &json!({"query_string": "laces", "consistency": "latest"}),
+    )
+    .await;
+    assert_eq!(v["hits"].as_array().map(Vec::len), Some(1), "{v}");
+    println!("Search.Query on a key-value namespace: JSON values by path, writes followed");
     c.query_drop("DROP DATABASE r5six_api").await.unwrap();
 }

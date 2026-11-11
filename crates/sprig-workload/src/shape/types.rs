@@ -404,7 +404,10 @@ impl PredOp {
                 ..
             } => {
                 f == "JSON_VALUE"
-                    && matches!(**c, Self::Eq | Self::In { .. } | Self::Range { .. } | Self::IsNull)
+                    && matches!(
+                        **c,
+                        Self::Eq | Self::In { .. } | Self::Range { .. } | Self::IsNull
+                    )
             }
             _ => false,
         }
