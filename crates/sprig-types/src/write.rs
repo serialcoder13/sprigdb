@@ -21,7 +21,7 @@ use sqlparser::ast::{
 
 use crate::Ctx;
 use crate::exec::{Done, Rows, Runner, Txn, unsupported};
-use crate::model::{DbTypes, TypeDef, TypeId};
+use crate::model::{DbTypes, DiscValue, Storage, TypeDef, TypeId};
 use crate::rewrite::{Pass, RefPlan, TYPE_COLUMN, TYPE_PATH_COLUMN, Walker, build_plan, quote_str};
 
 /// What a write plan wants the caller to do.
@@ -100,6 +100,281 @@ pub(crate) fn key_in(alias: Option<&str>, key: &[String], keys: &[Vec<String>]) 
     }
 }
 
+/// A literal a statement wrote, as a discriminator value; `None` for any
+/// other expression.
+pub(crate) fn literal_value(e: &Expr, nbe: bool) -> Option<DiscValue> {
+    match e {
+        Expr::Value(v) => match &v.value {
+            Value::SingleQuotedString(s) => {
+                let b = sprig_sql::lex::string_value(format!("'{s}'").as_bytes(), nbe)?;
+                Some(DiscValue::Str(String::from_utf8_lossy(&b).into_owned()))
+            }
+            Value::DoubleQuotedString(s) => {
+                let b = sprig_sql::lex::string_value(format!("\"{s}\"").as_bytes(), nbe)?;
+                Some(DiscValue::Str(String::from_utf8_lossy(&b).into_owned()))
+            }
+            Value::Number(n, _) => Some(DiscValue::Num(n.clone())),
+            _ => None,
+        },
+        Expr::UnaryOp {
+            op: sqlparser::ast::UnaryOperator::Minus,
+            expr,
+        } => match literal_value(expr, nbe)? {
+            DiscValue::Num(n) => Some(DiscValue::Num(format!("-{n}"))),
+            DiscValue::Str(_) => None,
+        },
+        Expr::Nested(e) => literal_value(e, nbe),
+        _ => None,
+    }
+}
+
+fn disc_mismatch(table: &str, col: &str, want: &DiscValue, got: &str) -> SprigError {
+    SprigError::new(
+        SprigCode::TypeDiscriminatorMismatch,
+        format!(
+            "A row of '{table}' has {col} = {want}, not {got}: insert it into the type its value \
+             names, or leave {col} out"
+        ),
+    )
+}
+
+/// An `INSERT` into the root of a joined hierarchy with a discriminator:
+/// the client's statement (or one per row, for generated keys), then each
+/// row's extension rows as its discriminator says ([`sync_extensions`]).
+async fn root_insert(
+    ins: &Insert,
+    root: &TypeDef,
+    db: &DbTypes,
+    db_sql: Option<&str>,
+    ctx: &Ctx<'_>,
+    r: &mut dyn Runner,
+) -> Result<WriteOutcome> {
+    if ins.on.is_some() || ins.replace_into || ins.ignore {
+        return Err(unsupported(
+            "INSERT IGNORE, REPLACE and ON DUPLICATE KEY UPDATE into the root of a joined \
+             hierarchy with a discriminator are not supported yet",
+        ));
+    }
+    let columns: Vec<String> = if ins.assignments.is_empty() {
+        ins.columns
+            .iter()
+            .filter_map(|c| name_parts(c).last().cloned())
+            .collect()
+    } else {
+        ins.assignments
+            .iter()
+            .filter_map(|a| match &a.target {
+                AssignmentTarget::ColumnName(c) => name_parts(c).last().cloned(),
+                AssignmentTarget::Tuple(_) => None,
+            })
+            .collect()
+    };
+    if let Some(c) = columns.iter().find(|c| is_type_column(c)) {
+        return Err(read_only(c));
+    }
+    let rows: Vec<Vec<Expr>> = if ins.assignments.is_empty() {
+        let Some(SetExpr::Values(v)) = ins.source.as_ref().map(|s| &*s.body) else {
+            return Err(unsupported(
+                "INSERT ... SELECT into the root of a joined hierarchy with a discriminator is \
+                 not supported yet",
+            ));
+        };
+        v.rows.iter().map(|r| r.content.clone()).collect()
+    } else {
+        vec![ins.assignments.iter().map(|a| a.value.clone()).collect()]
+    };
+    // A column-less insert names the root table's columns in order.
+    let columns = if columns.is_empty() {
+        let shown = r
+            .query(&format!(
+                "SELECT * FROM {} WHERE 1 = 0",
+                table_sql(db_sql, &root.name)
+            ))
+            .await?;
+        shown
+            .columns
+            .iter()
+            .map(|c| String::from_utf8_lossy(&c.name).into_owned())
+            .collect()
+    } else {
+        columns
+    };
+    let key_defs = db.key_defs(root.id);
+    let key: Vec<String> = key_defs.iter().map(|k| k.name.clone()).collect();
+    let key_idx: Vec<Option<usize>> = key
+        .iter()
+        .map(|k| columns.iter().position(|c| c.eq_ignore_ascii_case(k)))
+        .collect();
+    let lit = |e: &Expr| match e {
+        Expr::Value(v) => !matches!(v.value, Value::Null | Value::Placeholder(_)),
+        Expr::UnaryOp { expr, .. } => matches!(**expr, Expr::Value(_)),
+        _ => false,
+    };
+    let literal_keys = key_idx.iter().all(Option::is_some)
+        && rows.iter().all(|row| {
+            key_idx
+                .iter()
+                .flatten()
+                .all(|&i| row.get(i).is_some_and(lit))
+        });
+    let auto = key_defs.len() == 1 && key_defs[0].auto_increment() && !literal_keys;
+    if !literal_keys && !auto {
+        return Err(unsupported(
+            "the key of a row inserted into the root of a joined hierarchy with a discriminator \
+             must be a literal or generated",
+        ));
+    }
+    let n = rows.len() as u64;
+    let tx = Txn::begin(r).await?;
+    let result: Result<(Vec<Vec<String>>, u64)> = async {
+        if literal_keys {
+            let d = r.exec(&ins.to_string()).await?;
+            let keys = rows
+                .iter()
+                .map(|row| {
+                    key_idx
+                        .iter()
+                        .flatten()
+                        .map(|&i| row[i].to_string())
+                        .collect()
+                })
+                .collect();
+            return Ok((keys, d.last_insert_id));
+        }
+        let mut keys = Vec::new();
+        let mut first = 0;
+        for i in 0..rows.len() {
+            let mut one = ins.clone();
+            if one.assignments.is_empty()
+                && let Some(src) = one.source.as_mut()
+                && let SetExpr::Values(v) = &mut *src.body
+            {
+                let keep = v.rows[i].clone();
+                v.rows = vec![keep];
+            }
+            let d = r.exec(&one.to_string()).await?;
+            if first == 0 {
+                first = d.last_insert_id;
+            }
+            keys.push(vec![d.last_insert_id.to_string()]);
+        }
+        Ok((keys, first))
+    }
+    .await;
+    let result = match result {
+        Ok((keys, id)) => sync_extensions(db, root, db_sql, &keys, ctx, r)
+            .await
+            .map(|()| id),
+        Err(e) => Err(e),
+    };
+    let first_id = tx.end(r, result).await?;
+    metrics::counter!("sprig_types_statements_total", "kind" => "insert", "plan" => "steps")
+        .increment(1);
+    Ok(WriteOutcome::Done(Done {
+        affected_rows: n,
+        last_insert_id: first_id,
+        info: if n > 1 {
+            format!("Records: {n}  Duplicates: 0  Warnings: 0")
+        } else {
+            String::new()
+        },
+        warnings: 0,
+    }))
+}
+
+/// Joined storage with a discriminator: makes the extension rows of the
+/// rows keyed `keys` match their discriminator. A row whose type changed
+/// loses its rows in the tables of types it no longer is (deepest first),
+/// and gets rows at their columns' defaults in the tables of types it now
+/// is (shallowest first). One read joins every extension table.
+pub(crate) async fn sync_extensions(
+    db: &DbTypes,
+    root: &TypeDef,
+    db_sql: Option<&str>,
+    keys: &[Vec<String>],
+    ctx: &Ctx<'_>,
+    r: &mut dyn Runner,
+) -> Result<()> {
+    let mut exts = db.descendants(root.id);
+    if exts.is_empty() || keys.is_empty() {
+        return Ok(());
+    }
+    exts.sort_by(|a, b| a.depth.cmp(&b.depth).then(a.id.cmp(&b.id)));
+    let key = &root.key_fields;
+    let nk = key.len();
+    let nbe = ctx.lex.no_backslash_escapes;
+    let batch = ctx.limits.write_batch_rows.max(1);
+    for chunk in keys.chunks(batch) {
+        let mut sel: Vec<String> = key.iter().map(|k| format!("r.{}", quote(k))).collect();
+        sel.push(format!("r.{}", quote(TYPE_PATH_COLUMN)));
+        let mut from = format!("{} AS r", table_sql(db_sql, &root.name));
+        for (i, e) in exts.iter().enumerate() {
+            let on: Vec<String> = key
+                .iter()
+                .map(|k| format!("e{i}.{q} = r.{q}", q = quote(k)))
+                .collect();
+            sel.push(format!("e{i}.{} IS NOT NULL", quote(&key[0])));
+            from.push_str(&format!(
+                " LEFT JOIN {} AS e{i} ON {}",
+                table_sql(db_sql, &e.name),
+                on.join(" AND ")
+            ));
+        }
+        let found = r
+            .query(&format!(
+                "SELECT {} FROM {from} WHERE {}",
+                sel.join(", "),
+                key_in(Some("r"), key, chunk)
+            ))
+            .await?;
+        // Per extension table: keys to remove, keys to add.
+        let mut remove: Vec<Vec<Vec<String>>> = vec![Vec::new(); exts.len()];
+        let mut add: Vec<Vec<Vec<String>>> = vec![Vec::new(); exts.len()];
+        for row in &found.rows {
+            let k: Vec<String> = (0..nk)
+                .map(|i| literal(&found, i, row[i].as_ref(), nbe))
+                .collect();
+            let path = row.get(nk).cloned().flatten().unwrap_or_default();
+            for (i, e) in exts.iter().enumerate() {
+                let has = row.get(nk + 1 + i).and_then(|v| v.as_deref()) == Some(b"1".as_slice());
+                let should = path.starts_with(e.path.as_bytes());
+                if has && !should {
+                    remove[i].push(k.clone());
+                } else if should && !has {
+                    add[i].push(k.clone());
+                }
+            }
+        }
+        for (i, e) in exts.iter().enumerate().rev() {
+            if !remove[i].is_empty() {
+                r.exec(&format!(
+                    "DELETE FROM {} WHERE {}",
+                    table_sql(db_sql, &e.name),
+                    key_in(None, key, &remove[i])
+                ))
+                .await?;
+            }
+        }
+        let cols: Vec<String> = key.iter().map(|k| quote(k)).collect();
+        for (i, e) in exts.iter().enumerate() {
+            if !add[i].is_empty() {
+                let vals: Vec<String> = add[i]
+                    .iter()
+                    .map(|k| format!("({})", k.join(", ")))
+                    .collect();
+                r.exec(&format!(
+                    "INSERT INTO {} ({}) VALUES {}",
+                    table_sql(db_sql, &e.name),
+                    cols.join(", "),
+                    vals.join(", ")
+                ))
+                .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Plans and runs an `INSERT` into a subtype.
 ///
 /// # Errors
@@ -135,6 +410,11 @@ pub async fn insert(ins: &Insert, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<W
         ));
     }
     if t.is_root() {
+        // Joined storage with a discriminator: a root insert may write rows
+        // of any subtype, which need their extension rows.
+        if t.storage == Storage::Joined && t.discriminator.is_some() && db.has_subtypes(t.id) {
+            return root_insert(ins, &t, &db, db_name.as_deref(), ctx, r).await;
+        }
         return Ok(WriteOutcome::NotTyped);
     }
     if ins.on.is_some() || ins.replace_into || ins.ignore {
@@ -173,7 +453,7 @@ pub async fn insert(ins: &Insert, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<W
     if columns.is_empty() {
         columns = fields.iter().map(|f| f.name.clone()).collect();
     }
-    let mut owner_of = Vec::with_capacity(columns.len());
+    let mut owner_of: Vec<(TypeId, bool)> = Vec::with_capacity(columns.len());
     for c in &columns {
         let Some(f) = fields.iter().find(|f| f.name.eq_ignore_ascii_case(c)) else {
             return Err(SprigError::standard(
@@ -192,6 +472,65 @@ pub async fn insert(ins: &Insert, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<W
                 format!("Column count doesn't match value count at row {}", i + 1),
             ));
         }
+    }
+    let nbe = ctx.lex.no_backslash_escapes;
+    let disc = db.discriminator(t.id);
+    if let Some(dc) = &disc {
+        let tv = t.disc_value.clone().ok_or_else(|| {
+            SprigError::internal(format!("type '{}' has no discriminator value", t.name))
+        })?;
+        if let Some(i) = columns.iter().position(|c| c.eq_ignore_ascii_case(dc)) {
+            for row in &rows {
+                match literal_value(&row[i], nbe) {
+                    Some(v) if tv.same(&v) => {}
+                    Some(v) => {
+                        return Err(disc_mismatch(&t.name, dc, &tv, &v.to_string()));
+                    }
+                    None => {
+                        return Err(disc_mismatch(&t.name, dc, &tv, &row[i].to_string()));
+                    }
+                }
+            }
+        } else {
+            columns.push(dc.clone());
+            owner_of.push((t.root, false));
+            let e = crate::rewrite::expr(&tv.sql(nbe))?;
+            for row in &mut rows {
+                row.push(e.clone());
+            }
+        }
+    }
+    let db_sql = db_name.as_deref();
+    if t.storage == Storage::SingleTable {
+        // One row of the root's table: MariaDB counts, generates the key and
+        // answers LAST_INSERT_ID() itself.
+        let root = db
+            .root_of(t.id)
+            .ok_or_else(|| SprigError::internal("a type without a root"))?;
+        let mut cols: Vec<String> = columns.iter().map(|c| quote(c)).collect();
+        if disc.is_none() {
+            cols.push(quote(TYPE_COLUMN));
+            cols.push(quote(TYPE_PATH_COLUMN));
+        }
+        let vals: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                let mut v: Vec<String> = row.iter().map(ToString::to_string).collect();
+                if disc.is_none() {
+                    v.push(quote_str(&t.name, false));
+                    v.push(quote_str(&t.path, false));
+                }
+                format!("({})", v.join(", "))
+            })
+            .collect();
+        metrics::counter!("sprig_types_statements_total", "kind" => "insert", "plan" => "single")
+            .increment(1);
+        return Ok(WriteOutcome::Forward(format!(
+            "INSERT INTO {} ({}) VALUES {}",
+            table_sql(db_sql, &root.name),
+            cols.join(", "),
+            vals.join(", ")
+        )));
     }
     let key_defs = db.key_defs(t.id);
     let key: Vec<String> = key_defs.iter().map(|k| k.name.clone()).collect();
@@ -233,7 +572,6 @@ pub async fn insert(ins: &Insert, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<W
         }
     }
     let chain = db.chain(t.id);
-    let db_sql = db_name.as_deref();
     // Per chain table: the column indexes it owns (keys excluded).
     let own: Vec<Vec<usize>> = chain
         .iter()
@@ -255,7 +593,7 @@ pub async fn insert(ins: &Insert, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<W
             key.iter().map(|k| quote(k)).collect()
         };
         cols.extend(own[xi].iter().map(|&i| quote(&columns[i])));
-        if xi == 0 {
+        if xi == 0 && disc.is_none() {
             cols.push(quote(TYPE_COLUMN));
             cols.push(quote(TYPE_PATH_COLUMN));
         }
@@ -275,7 +613,7 @@ pub async fn insert(ins: &Insert, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<W
             key_vals.to_vec()
         };
         v.extend(own[xi].iter().map(|&i| row[i].to_string()));
-        if xi == 0 {
+        if xi == 0 && disc.is_none() {
             v.push(type_vals.clone());
         }
         v
@@ -429,7 +767,19 @@ pub async fn update(upd: &Update, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<W
         assigned.push((c, a.value.clone()));
     }
     let only = tref.only && tref.has_subtypes();
-    if tref.t.is_root() && !only {
+    // Joined storage with a discriminator: assigning it can change rows'
+    // types, so their extension rows follow (sync_extensions).
+    let root = tref
+        .db
+        .root_of(tref.t.id)
+        .ok_or_else(|| SprigError::internal("a type without a root"))?;
+    let moves = root.storage == Storage::Joined
+        && tref.db.has_subtypes(root.id)
+        && root
+            .discriminator
+            .as_deref()
+            .is_some_and(|d| assigned.iter().any(|(c, _)| c.eq_ignore_ascii_case(d)));
+    if tref.t.is_root() && !only && !moves {
         return Ok(WriteOutcome::NotTyped);
     }
     let mut values: Vec<Expr> = assigned.iter().map(|(_, e)| e.clone()).collect();
@@ -488,7 +838,7 @@ pub async fn update(upd: &Update, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<W
     let key_names: Vec<String> = keys.iter().map(|k| k.name.clone()).collect();
     let join = plan.join_sql(tr.db_name.as_deref(), &key_names);
     let wh = where_sql(selection.as_ref(), plan.filter.as_deref());
-    if plan.tables.len() == 1 {
+    if plan.tables.len() == 1 && !moves {
         metrics::counter!("sprig_types_statements_total", "kind" => "update", "plan" => "single")
             .increment(1);
         return Ok(WriteOutcome::Forward(format!(
@@ -497,8 +847,12 @@ pub async fn update(upd: &Update, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<W
             order_limit(&order_by, upd.limit.as_ref())
         )));
     }
-    // Several tables: step A finds the rows and MySQL's counts.
+    // Several tables (or rows changing type): step A finds the rows and
+    // MySQL's counts.
     for (i, v) in values.iter().enumerate() {
+        if plan.tables.len() == 1 {
+            break;
+        }
         let names = read_names(v);
         if names.contains("\u{0}nondeterministic") {
             return Err(unsupported(
@@ -565,6 +919,9 @@ pub async fn update(upd: &Update, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<W
             ))
             .await?;
         }
+        if moves {
+            sync_extensions(&tr.db, &root, tr.db_name.as_deref(), &keys, ctx, r).await?;
+        }
         Ok((matched, changed))
     }
     .await;
@@ -582,6 +939,9 @@ pub async fn update(upd: &Update, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<W
 /// The extension tables a delete of rows of `t` (and its subtypes) must
 /// clean, deepest first.
 fn extension_tables(db: &DbTypes, t: &TypeDef) -> Vec<Arc<TypeDef>> {
+    if t.storage == Storage::SingleTable {
+        return Vec::new();
+    }
     let mut v: Vec<Arc<TypeDef>> = db.chain(t.id).into_iter().skip(1).collect();
     v.extend(db.descendants(t.id));
     v.sort_by(|a, b| b.depth.cmp(&a.depth).then(a.id.cmp(&b.id)));
@@ -613,6 +973,10 @@ pub async fn delete(del: &Delete, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<W
     }
     let tref = w.refs[idx].clone();
     if tref.t.is_root() && !tref.has_subtypes() {
+        return Ok(WriteOutcome::NotTyped);
+    }
+    // A single-table root holds every row: a polymorphic delete is plain.
+    if tref.t.is_root() && tref.t.storage == Storage::SingleTable && !tref.only {
         return Ok(WriteOutcome::NotTyped);
     }
     let mut selection = del.selection.clone();

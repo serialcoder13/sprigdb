@@ -749,6 +749,20 @@ impl SqlVhost {
         })
     }
 
+    /// Whether the session's user may consume the queue `t` names (the
+    /// right `mq_get` checks: read, which for a queue is `SELECT` and
+    /// `DELETE` on it or its database). R9 (r9tests): an acknowledgement
+    /// by a user granted only the queue is settled by its owner.
+    #[must_use]
+    pub fn may_consume(&self, t: &TokenData) -> bool {
+        let (Some(q), Some(e)) = (self.v.queue_by_id(t.id.queue), self.v.engine.upgrade()) else {
+            return false;
+        };
+        e.deps
+            .catalog
+            .allowed(&self.cx.principal, &self.v.r, Perm::Read, "queue", &q.name)
+    }
+
     /// `mq_release` (R9, r9tests): every message of `queue` held under
     /// lease tag `tag` goes back to the queue now, its delivery count
     /// raised as when its lease ends. Checked as a read of the queue (the

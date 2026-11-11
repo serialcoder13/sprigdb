@@ -688,6 +688,9 @@ async fn delete_keys(
         .map(|(_, h)| h.clone())
         .collect();
     crate::links::before_delete(ctx, r, res, hexes, &hidden).await?;
+    // Overrides of these rows in child tenants become orphans later (the
+    // copy worker): their references are handed over until then.
+    crate::links::hand_over(ctx, r, res, chain, keys).await?;
     // The change in s.
     let hide: Vec<String> = keys
         .iter()
@@ -1181,6 +1184,30 @@ pub async fn reset(
     let cond = filter.map(|f| format!(" AND ({f})")).unwrap_or_default();
     layer_op("reset");
     let Some(cols) = columns else {
+        // An orphan's record exists nowhere above: resetting it takes the
+        // key out of this space's view, so it is checked like a delete
+        // (1451 while referenced), and its references are handed over to
+        // the overrides below that become orphans in turn.
+        let check = crate::links::deletes_need_check(ctx, o)
+            || (!o.links.is_empty() && crate::links::reaches_child_tenants(ctx, o));
+        if check {
+            let rows = r
+                .query(&format!(
+                    "SELECT {} FROM {} WHERE `_sprig_space` = {} AND `_sprig_state` = \
+                     'orphan'{cond}",
+                    key_list(o, None),
+                    res.layer,
+                    s.0
+                ))
+                .await?;
+            if !rows.rows.is_empty() {
+                let keys = key_tuples(&rows, o.key.len(), ctx.lex.no_backslash_escapes);
+                let hexes = crate::links::row_hexes(&rows, o.key.len());
+                crate::links::before_delete(ctx, r, &res, &hexes, &BTreeSet::new()).await?;
+                let chain = ctx.chain(o, s, &res.prefix)?;
+                crate::links::hand_over(ctx, r, &res, &chain, &keys).await?;
+            }
+        }
         return r
             .exec(&format!(
                 "DELETE FROM {} WHERE `_sprig_space` = {} AND `_sprig_state` IN ('ovr', 'hide', \

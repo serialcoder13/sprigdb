@@ -232,6 +232,132 @@ pub fn shares(ctx: &Ctx<'_>) -> Rows {
     out
 }
 
+/// `db.table` of each object of `o`'s foreign-key group, sorted.
+fn group_names(ctx: &Ctx<'_>, o: sprig_common::ids::ObjectId) -> String {
+    let mut names: Vec<String> = ctx
+        .state
+        .group_of(o)
+        .into_iter()
+        .filter_map(|id| ctx.state.object(id))
+        .map(|x| format!("{}.{}", ctx.db_name(x.db).unwrap_or_default(), x.table))
+        .collect();
+    names.sort();
+    names.join(", ")
+}
+
+/// The `CREATE SHARE` text of a stored share.
+#[must_use]
+pub fn create_share_text(ctx: &Ctx<'_>, s: &crate::model::Share) -> String {
+    let obj = ctx.state.object(s.object_id).map_or_else(
+        || s.object_id.to_string(),
+        |o| format!("{}.{}", q(&ctx.db_name(o.db).unwrap_or_default()), q(&o.table)),
+    );
+    let to = match s.to {
+        ShareTarget::Space(c) => format!("TO SPACE {}", q(&ctx.space_name(c))),
+        ShareTarget::Tenant(t) => format!("TO SPACE /* tenant {t} */"),
+        ShareTarget::AllChildren => "TO ALL CHILDREN".to_owned(),
+    };
+    let mut out = format!("CREATE SHARE {} ON {obj} {to}", q(&s.name));
+    if let Some(f) = &s.filter {
+        out.push_str(&format!(" WHERE {f}"));
+    }
+    if let Some(cs) = &s.columns {
+        out.push_str(&format!(
+            " COLUMNS ({})",
+            cs.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    if s.reshare {
+        out.push_str(" WITH RESHARE");
+    }
+    out
+}
+
+/// `SHOW CREATE SHARE n`: the share as created, from which space, its
+/// merge mode, and the foreign-key group it carries (decision IG3).
+///
+/// # Errors
+/// 39887 when this tenant made no share of that name.
+pub fn create_share(ctx: &Ctx<'_>, name: &str) -> sprig_common::Result<Rows> {
+    let Some(s) = ctx
+        .state
+        .shares()
+        .find(|s| s.via.is_none() && s.name.eq_ignore_ascii_case(name))
+    else {
+        return Err(sprig_common::SprigError::new(
+            sprig_common::SprigCode::ShareNotFound,
+            format!("share '{name}' doesn't exist"),
+        ));
+    };
+    Ok(text_rows(
+        &["Share", "Create Share", "From", "Mode", "Group"],
+        vec![row(vec![
+            Some(s.name.clone()),
+            Some(create_share_text(ctx, s)),
+            Some(ctx.space_name(s.from)),
+            Some(s.mode.as_str().into()),
+            Some(group_names(ctx, s.object_id)),
+        ])],
+    ))
+}
+
+/// `SHOW INHERITABLE TABLES`: per inheritable table, where it comes from
+/// (the tenant at the top of its tree, and how many tenant levels up that
+/// is: 0 = declared here), the columns this tenant added to it, its
+/// foreign-key group and the shares this tenant makes of it.
+///
+/// # Errors
+/// 39892 (a key differing from the parent's).
+pub fn inheritable(ctx: &Ctx<'_>) -> sprig_common::Result<Rows> {
+    let mut objs: Vec<_> = ctx.state.objects().cloned().collect();
+    objs.sort_by_key(|o| (ctx.db_name(o.db).unwrap_or_default(), o.table.clone()));
+    let mut rows = Vec::new();
+    for o in objs {
+        let (root, _) = crate::ids::tree_root(ctx, &o)?;
+        let (origin, levels) = if root == ctx.cat.tenant {
+            (ctx.tenant_name.to_owned(), 0)
+        } else {
+            let names = &ctx.cat.ancestry;
+            let i = names.iter().position(|a| a.id == root).unwrap_or(0);
+            (
+                names
+                    .get(i)
+                    .map_or_else(|| root.to_string(), |a| a.name.clone()),
+                names.len() - i,
+            )
+        };
+        let own: Vec<String> = match ctx.up_edge(&o)? {
+            Some(up) => o
+                .columns
+                .iter()
+                .filter(|c| up.parent_obj.column(c).is_none())
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        };
+        let mut shared: Vec<String> = ctx
+            .state
+            .shares_of(o.object_id)
+            .map(|s| s.name.clone())
+            .collect();
+        shared.sort();
+        shared.dedup();
+        rows.push(row(vec![
+            Some(format!("{}.{}", ctx.db_name(o.db).unwrap_or_default(), o.table)),
+            Some(o.key.join(", ")),
+            Some(origin),
+            Some(levels.to_string()),
+            Some(own.join(", ")),
+            Some(group_names(ctx, o.object_id)),
+            Some(shared.join(", ")),
+        ]));
+    }
+    Ok(text_rows(
+        &["Table", "Key", "Origin", "Levels_up", "Own_columns", "Group", "Shares"],
+        rows,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

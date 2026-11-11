@@ -61,6 +61,9 @@ export function Shell() {
           <NavLink to={`${base}/messaging`}>
             <FormattedMessage id="nav.messaging" />
           </NavLink>
+          <NavLink to={`${base}/inheritance`}>
+            <FormattedMessage id="nav.inheritance" />
+          </NavLink>
           <NavLink to={`${base}/indexing`}>
             <FormattedMessage id="nav.indexing" />
           </NavLink>

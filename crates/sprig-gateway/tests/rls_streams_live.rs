@@ -162,8 +162,7 @@ async fn hook_receiver(port: u16) -> Received {
                     let body = String::from_utf8_lossy(&buf[end + 4..end + 4 + len]).into_owned();
                     buf.drain(..end + 4 + len);
                     g.lock().unwrap().push(body);
-                    if s
-                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}")
+                    if s.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}")
                         .await
                         .is_err()
                     {
@@ -192,7 +191,8 @@ async fn hook_has(got: &Received, needle: &str, secs: u64) -> bool {
 /// `GET path` on the HTTP listener as `user` (Basic): status and body.
 async fn get(addr: &str, user: &str, pw: &str, path: &str) -> (u16, String) {
     let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let auth = base64::engine::general_purpose::STANDARD.encode(format!("{}.{user}:{pw}", tenant()));
+    let auth =
+        base64::engine::general_purpose::STANDARD.encode(format!("{}.{user}:{pw}", tenant()));
     let req = format!(
         "GET {path} HTTP/1.1\r\nhost: {addr}\r\nauthorization: Basic {auth}\r\nconnection: close\r\n\r\n"
     );
@@ -228,7 +228,7 @@ fn trigger_js(name: &str, leak: &str) -> String {
 
 fn after_commit(name: &str, leak: &str) -> String {
     format!(
-        r#"CREATE TRIGGER {DB}.{name} AFTER COMMIT ON {DB}.docs FOR INSERT LANGUAGE kirun AS '{{"namespace":"App","name":"Ac","parameters":{{"body":{{"parameterName":"body","schema":{{"type":["STRING"]}}}}}},"steps":{{"ins":{{"statementName":"ins","namespace":"Sprig.Db","name":"Exec","parameterMap":{{"sql":{{"s":{{"key":"s","type":"VALUE","value":"INSERT INTO {DB}.{leak} (v) VALUES (?)"}}}},"args":{{"a":{{"key":"a","type":"EXPRESSION","order":1,"expression":"Arguments.body"}}}}}}}}}}}}'"#
+        r#"CREATE TRIGGER {DB}.{name} AFTER COMMIT ON {DB}.docs FOR INSERT LANGUAGE kirun AS '{{"namespace":"App","name":"Ac","parameters":{{"body":{{"parameterName":"body","schema":{{"type":["STRING"]}}}}}},"steps":{{"ins":{{"statementName":"ins","namespace":"Sprig.Db","name":"Exec","parameterMap":{{"sql":{{"s":{{"key":"s","type":"VALUE","value":"INSERT INTO {leak} (v) VALUES (?)"}}}},"args":{{"a":{{"key":"a","type":"EXPRESSION","order":1,"expression":"Arguments.body"}}}}}}}}}}}}'"#
     )
 }
 
@@ -244,7 +244,9 @@ async fn row_level_security_on_streamed_rows() {
         std::env::var("SPRIG_TEST_RLS_HTTP"),
         std::env::var("SPRIG_TEST_RLS_HOOK_PORT"),
     ) else {
-        eprintln!("skipped: set SPRIG_TEST_RLS_SQL, SPRIG_TEST_RLS_HTTP and SPRIG_TEST_RLS_HOOK_PORT");
+        eprintln!(
+            "skipped: set SPRIG_TEST_RLS_SQL, SPRIG_TEST_RLS_HTTP and SPRIG_TEST_RLS_HOOK_PORT"
+        );
         return;
     };
     let port: u16 = port.parse().unwrap();
@@ -262,6 +264,11 @@ async fn row_level_security_on_streamed_rows() {
     ] {
         let _ = run(&mut admin, &s).await;
     }
+    // DROP DATABASE leaves a database's triggers and sinks behind: drop
+    // them by name first.
+    for t in ["t_mgr", "a_mgr", "t_alice", "a_alice"] {
+        let _ = run(&mut admin, &format!("DROP TRIGGER {DB}.{t}")).await;
+    }
     let _ = run(&mut admin, &format!("DROP DATABASE IF EXISTS {DB}")).await;
     for u in ["rlss_alice", "rlss_mgr"] {
         let _ = run(&mut admin, &format!("DROP USER IF EXISTS '{u}'@'%'")).await;
@@ -269,7 +276,9 @@ async fn row_level_security_on_streamed_rows() {
     must(&mut admin, &format!("CREATE DATABASE {DB}")).await;
     must(
         &mut admin,
-        &format!("CREATE TABLE {DB}.docs (id INT PRIMARY KEY, owner VARCHAR(64), body VARCHAR(64))"),
+        &format!(
+            "CREATE TABLE {DB}.docs (id INT PRIMARY KEY, owner VARCHAR(64), body VARCHAR(64))"
+        ),
     )
     .await;
     for t in ["leak_alice", "leak_t", "leak_a", "leak_v"] {
@@ -284,15 +293,27 @@ async fn row_level_security_on_streamed_rows() {
         &format!("ALTER TABLE {DB}.docs SPRIG SET (stream.change_topic = on)"),
     )
     .await;
-    must(&mut admin, &format!("ALTER TABLE {DB}.docs ENABLE ROW LEVEL SECURITY")).await;
+    must(
+        &mut admin,
+        &format!("ALTER TABLE {DB}.docs ENABLE ROW LEVEL SECURITY"),
+    )
+    .await;
     must(
         &mut admin,
         &format!("CREATE POLICY own ON {DB}.docs FOR ALL TO PUBLIC USING (owner = CURRENT_USER())"),
     )
     .await;
     for u in ["rlss_alice", "rlss_mgr"] {
-        must(&mut admin, &format!("CREATE USER '{u}'@'%' IDENTIFIED BY '{PW}'")).await;
-        must(&mut admin, &format!("GRANT SPRIG_SINK_ADMIN ON *.* TO '{u}'@'%'")).await;
+        must(
+            &mut admin,
+            &format!("CREATE USER '{u}'@'%' IDENTIFIED BY '{PW}'"),
+        )
+        .await;
+        must(
+            &mut admin,
+            &format!("GRANT SPRIG_SINK_ADMIN ON *.* TO '{u}'@'%'"),
+        )
+        .await;
     }
     // alice: reads and writes, code and triggers, no ALTER: the policies
     // bind her. mgr: ALL, so a manager the policies bind only when forced.
@@ -304,7 +325,11 @@ async fn row_level_security_on_streamed_rows() {
         ),
     )
     .await;
-    must(&mut admin, &format!("GRANT ALL ON {DB}.* TO 'rlss_mgr'@'%'")).await;
+    must(
+        &mut admin,
+        &format!("GRANT ALL ON {DB}.* TO 'rlss_mgr'@'%'"),
+    )
+    .await;
     must(&mut admin, "GRANT SPRIG_SINK_ADMIN ON *.* TO 'app'@'%'").await;
     must(
         &mut admin,
@@ -332,16 +357,28 @@ async fn row_level_security_on_streamed_rows() {
     let mut alice = sql(&sql_addr, "rlss_alice", PW).await;
     let mut mgr = sql(&sql_addr, "rlss_mgr", PW).await;
     let rows = texts(&mut alice, "SELECT body FROM docs").await;
-    ck.ok("alice's own rows", rows == vec!["alice-row".to_owned()], || {
-        format!("{rows:?}")
-    });
+    ck.ok(
+        "alice's own rows",
+        rows == vec!["alice-row".to_owned()],
+        || format!("{rows:?}"),
+    );
 
     // 1. SQL reads of the change topic: refused to alice, read by mgr.
     let e = run(&mut alice, "SELECT * FROM `docs.changes`").await;
-    ck.ok("SQL change topic refused to a bound user", matches!(e, Err((39366, _))), || {
-        format!("{e:?}")
-    });
-    let v = texts(&mut mgr, "SELECT CAST(value AS CHAR) FROM `docs.changes`").await;
+    ck.ok(
+        "SQL change topic refused to a bound user",
+        matches!(e, Err((39366, _))),
+        || format!("{e:?}"),
+    );
+    // The topic's sequencer copies changes into it within seconds.
+    let mut v = Vec::new();
+    for _ in 0..40 {
+        v = texts(&mut mgr, "SELECT CAST(value AS CHAR) FROM `docs.changes`").await;
+        if v.iter().any(|x| x.contains("bob-secret-0")) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
     ck.ok(
         "SQL change topic read by a manager",
         v.iter().any(|x| x.contains("bob-secret-0")),
@@ -356,10 +393,13 @@ async fn row_level_security_on_streamed_rows() {
         &format!("CREATE VIEW {DB}.vch AS SELECT * FROM {DB}.`docs.changes`"),
     )
     .await;
-    ck.ok("view over a change topic refused", matches!(e, Err((39366, _))), || {
-        format!("{e:?}")
-    });
+    ck.ok(
+        "view over a change topic refused",
+        matches!(e, Err((39366, _))),
+        || format!("{e:?}"),
+    );
     if e.is_ok() {
+        tokio::time::sleep(Duration::from_secs(3)).await;
         let v = texts(&mut alice, "SELECT CAST(value AS CHAR) FROM vch").await;
         ck.ok(
             "LEAK: alice reads bob's changes through the view",
@@ -370,23 +410,31 @@ async fn row_level_security_on_streamed_rows() {
 
     // 3. Setting a path up as alice (RL36, RL37): every one refused.
     let e = run(&mut alice, &trigger_js("t_alice", "leak_alice")).await;
-    ck.ok("stream trigger on the change topic refused", refused(&e), || {
-        format!("{e:?}")
-    });
+    ck.ok(
+        "stream trigger on the change topic refused",
+        refused(&e),
+        || format!("{e:?}"),
+    );
     let e = run(
         &mut alice,
         &format!("CREATE SINK {DB}.s_alice FROM STREAM {DB}.`docs.changes` TO WEBHOOK CONNECTION hook WITH (batch_max_wait_ms = 100)"),
     )
     .await;
-    ck.ok("sink FROM STREAM t.changes refused", refused(&e), || format!("{e:?}"));
+    ck.ok("sink FROM STREAM t.changes refused", refused(&e), || {
+        format!("{e:?}")
+    });
     let e = run(
         &mut alice,
         &format!("CREATE SINK {DB}.s_alice2 FROM CHANGES OF {DB}.docs TO WEBHOOK CONNECTION hook WITH (batch_max_wait_ms = 100)"),
     )
     .await;
-    ck.ok("sink FROM CHANGES OF refused", refused(&e), || format!("{e:?}"));
+    ck.ok("sink FROM CHANGES OF refused", refused(&e), || {
+        format!("{e:?}")
+    });
     let e = run(&mut alice, &after_commit("a_alice", "leak_alice")).await;
-    ck.ok("after-commit trigger refused", refused(&e), || format!("{e:?}"));
+    ck.ok("after-commit trigger refused", refused(&e), || {
+        format!("{e:?}")
+    });
     let e = run(
         &mut alice,
         &format!("CREATE TRIGGER {DB}.n_alice AFTER INSERT ON {DB}.docs FOR EACH ROW INSERT INTO {DB}.leak_alice (v) VALUES (NEW.body)"),
@@ -404,7 +452,11 @@ async fn row_level_security_on_streamed_rows() {
     let leaked_t = arrives(&mut admin, "leak_alice", "bob-secret-alice", 10).await;
     ck.ok("LEAK: alice's code got bob's row", !leaked_t, String::new);
     let leaked_h = hook_has(&got, "bob-secret-alice", 2).await;
-    ck.ok("LEAK: alice's sink exported bob's row", !leaked_h, String::new);
+    ck.ok(
+        "LEAK: alice's sink exported bob's row",
+        !leaked_h,
+        String::new,
+    );
 
     // 4. The same paths set up by mgr (a manager: not bound) deliver ...
     must(&mut mgr, &trigger_js("t_mgr", "leak_t")).await;
@@ -436,7 +488,11 @@ async fn row_level_security_on_streamed_rows() {
         String::new,
     );
     // ... and stop once FORCE makes the policies bind mgr.
-    must(&mut admin, &format!("ALTER TABLE {DB}.docs FORCE ROW LEVEL SECURITY")).await;
+    must(
+        &mut admin,
+        &format!("ALTER TABLE {DB}.docs FORCE ROW LEVEL SECURITY"),
+    )
+    .await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     must(
         &mut admin,
@@ -444,9 +500,17 @@ async fn row_level_security_on_streamed_rows() {
     )
     .await;
     let t = arrives(&mut admin, "leak_t", "bob-while-forced", 12).await;
-    ck.ok("LEAK: forced: stream trigger still delivers", !t, String::new);
+    ck.ok(
+        "LEAK: forced: stream trigger still delivers",
+        !t,
+        String::new,
+    );
     let a = arrives(&mut admin, "leak_a", "bob-while-forced", 2).await;
-    ck.ok("LEAK: forced: after-commit trigger still delivers", !a, String::new);
+    ck.ok(
+        "LEAK: forced: after-commit trigger still delivers",
+        !a,
+        String::new,
+    );
     let h = hook_has(&got, "bob-while-forced", 2).await;
     ck.ok("LEAK: forced: sink still exports", !h, String::new);
     let st = texts(
@@ -457,7 +521,11 @@ async fn row_level_security_on_streamed_rows() {
     eprintln!("s_mgr while forced: {st:?}");
     // NO FORCE frees mgr: the triggers go on with the rows they held back
     // (nothing was dropped or dead-lettered), the sink after RESUME.
-    must(&mut admin, &format!("ALTER TABLE {DB}.docs NO FORCE ROW LEVEL SECURITY")).await;
+    must(
+        &mut admin,
+        &format!("ALTER TABLE {DB}.docs NO FORCE ROW LEVEL SECURITY"),
+    )
+    .await;
     ck.ok(
         "unforced: stream trigger catches up",
         arrives(&mut admin, "leak_t", "bob-while-forced", 60).await,
@@ -501,12 +569,18 @@ async fn row_level_security_on_streamed_rows() {
     let alice_view = get(&http_addr, "rlss_alice", PW, &path).await;
     ck.ok(
         "LEAK: dead letter shows bob's row to alice",
-        alice_view.0 == 200 && !alice_view.1.contains("bob-poison") && alice_view.1.contains("dead_letters"),
+        alice_view.0 == 200
+            && !alice_view.1.contains("bob-poison")
+            && alice_view.1.contains("dead_letters"),
         || format!("{alice_view:?}"),
     );
 
     // Cleanup.
     for s in [
+        format!("DROP TRIGGER {DB}.t_mgr"),
+        format!("DROP TRIGGER {DB}.a_mgr"),
+        format!("DROP TRIGGER {DB}.t_alice"),
+        format!("DROP TRIGGER {DB}.a_alice"),
         format!("DROP SINK IF EXISTS {DB}.s_mgr"),
         format!("DROP SINK IF EXISTS {DB}.s_alice"),
         format!("DROP SINK IF EXISTS {DB}.s_alice2"),

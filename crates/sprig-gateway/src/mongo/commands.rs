@@ -1219,7 +1219,8 @@ async fn exec(
                 // with a resumable error, so the driver resumes after the
                 // last token it returned, under the new policies.
                 let _ = sql.query("SELECT 1").await;
-                let now = crate::tenant::rls::DocViews::fingerprint(sql.row_policy_docs().as_deref());
+                let now =
+                    crate::tenant::rls::DocViews::fingerprint(sql.row_policy_docs().as_deref());
                 if now != opened_with {
                     c.shared.cursors.remove(id);
                     return Err(MongoError::new(

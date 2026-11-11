@@ -580,6 +580,9 @@ sprig_codes! {
     SubtreeTooLarge = 39715, "ER_SPRIG_SUBTREE_TOO_LARGE", "SprigSubtreeTooLarge", SQLSTATE_GENERAL, false;
     /// `ADD HIERARCHY` found orphans or cycles (chapter 32).
     HierarchyBackfillFailed = 39716, "ER_SPRIG_HIERARCHY_BACKFILL_FAILED", "SprigHierarchyBackfillFailed", SQLSTATE_GENERAL, false;
+    /// A discriminator value that contradicts the table written to, or a
+    /// subtype's value another subtype already declares (chapter 32).
+    TypeDiscriminatorMismatch = 39717, "ER_SPRIG_TYPE_DISCRIMINATOR_MISMATCH", "SprigTypeDiscriminatorMismatch", SQLSTATE_GENERAL, false;
     /// Unknown key-value namespace (chapter 33).
     KvNamespaceNotFound = 39720, "ER_SPRIG_KV_NAMESPACE_NOT_FOUND", "SprigKvNamespaceNotFound", SQLSTATE_GENERAL, false;
     /// A key's version isn't the one the write expected (chapter 33).
@@ -1071,6 +1074,7 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::TypeFieldConflict
         | SprigCode::TypeAbstract
         | SprigCode::TypeColumnReadOnly
+        | SprigCode::TypeDiscriminatorMismatch
         | SprigCode::TypeKeyUpdate
         | SprigCode::TypePathTooLong
         | SprigCode::TypeUnsupported

@@ -36,7 +36,7 @@ use sqlparser::dialect::MySqlDialect;
 use sqlparser::parser::{Parser, ParserOptions};
 
 use crate::grammar::ONLY_PREFIX;
-use crate::model::{DbTypes, HierarchyDef, KeyClass, TypeDef, TypeId, upper};
+use crate::model::{DbTypes, HierarchyDef, KeyClass, Storage, TypeDef, TypeId, upper};
 
 /// The root columns every typed row has and users may name.
 pub const TYPE_COLUMN: &str = "_type";
@@ -279,6 +279,10 @@ pub fn build_plan(r: &TypedRef, owners: &BTreeSet<TypeId>, extra: &[TypeId]) -> 
     // ONLY needs the root's `_type`; reading only root columns of a
     // subtype needs the root's path range; otherwise the subtype's own
     // table holds exactly its rows.
+    // Single-table storage: the root's table holds every row and column.
+    if root.storage == Storage::SingleTable {
+        need.clear();
+    }
     let root_only = need.iter().all(|o| *o == root.id);
     if only || root_only || r.t.is_root() {
         need.insert(root.id);
@@ -1011,12 +1015,22 @@ impl<'l> Walker<'l> {
         }
     }
 
-    /// `alias.f` for every field of reference `r`, inherited first.
+    /// `alias.f` for every field of reference `r`, inherited first. A
+    /// single-table root (read with `ONLY`) keeps `alias.*`: its table is
+    /// what clients and dump tools know, every column of the hierarchy.
     fn expansion(&self, r: usize) -> Vec<SelectItem> {
         let rr = &self.refs[r];
         let Some(plan) = &rr.plan else {
             return Vec::new();
         };
+        if rr.t.is_root() && rr.t.storage == Storage::SingleTable {
+            return vec![SelectItem::QualifiedWildcard(
+                SelectItemQualifiedWildcardKind::ObjectName(ObjectName::from(vec![qident(
+                    plan.key_alias(),
+                )])),
+                sqlparser::ast::WildcardAdditionalOptions::default(),
+            )];
+        }
         rr.db
             .all_fields(rr.t.id)
             .into_iter()

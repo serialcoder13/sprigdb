@@ -484,3 +484,469 @@ async fn metadata_shows_logical_tables() {
     };
     assert_eq!(ct.inherits[0].name, "asset");
 }
+
+// Discriminator columns (inheritance plan step 8, Kiran's answer Q2 of 12
+// November 2026): `vehicle` typed by its own `vtype` column.
+
+mod discriminator {
+    use super::*;
+    use crate::model::Storage;
+    use crate::model::fleet::fleet;
+
+    async fn run_on(storage: Storage, sql: &str, fake: &mut Fake) -> Result<Handled> {
+        let db = fleet(storage);
+        let st = TypesState::new(db.iter().map(|t| (**t).clone()).collect(), Vec::new());
+        let l = One(Arc::new(db));
+        handle(sql, Some(&st), &ctx(&l), fake).await
+    }
+
+    fn forwarded(h: Handled) -> String {
+        match h {
+            Handled::Forward { sql, .. } => sql,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn single_table_reads_use_the_root_table() {
+        let mut f = Fake::default();
+        let s = Storage::SingleTable;
+        assert_eq!(
+            forwarded(run_on(s, "SELECT * FROM truck", &mut f).await.unwrap()),
+            "SELECT `truck`.`id`, `truck`.`name`, `truck`.`vtype`, `truck`.`payload_kg` FROM \
+             `vehicle` AS `truck` WHERE (`truck`.`_type_path` >= '/vehicle/truck/' AND \
+             `truck`.`_type_path` < '/vehicle/truck0')"
+        );
+        assert_eq!(
+            forwarded(
+                run_on(s, "SELECT cap FROM smalltruck WHERE id = 3", &mut f)
+                    .await
+                    .unwrap()
+            ),
+            "SELECT `smalltruck`.cap FROM `vehicle` AS `smalltruck` WHERE (`smalltruck`.id = 3) \
+             AND (`smalltruck`.`_type_path` >= '/vehicle/truck/smalltruck/' AND \
+             `smalltruck`.`_type_path` < '/vehicle/truck/smalltruck0')"
+        );
+        // ONLY on the root keeps its table's every column (what clients
+        // and dump tools know), filtered on the type.
+        assert_eq!(
+            forwarded(
+                run_on(s, "SELECT * FROM ONLY vehicle", &mut f)
+                    .await
+                    .unwrap()
+            ),
+            "SELECT `vehicle`.* FROM `vehicle` AS `vehicle` WHERE `vehicle`.`_type` = 'vehicle'"
+        );
+        // A polymorphic read of the root is the plain table.
+        assert!(matches!(
+            run_on(s, "SELECT * FROM vehicle", &mut f).await.unwrap(),
+            Handled::NotTyped
+        ));
+        assert!(f.log.is_empty());
+    }
+
+    #[tokio::test]
+    async fn inserts_set_or_check_the_value() {
+        let mut f = Fake::default();
+        let s = Storage::SingleTable;
+        assert_eq!(
+            forwarded(
+                run_on(
+                    s,
+                    "INSERT INTO truck (id, name, payload_kg) VALUES (5, 't', 10.5)",
+                    &mut f
+                )
+                .await
+                .unwrap()
+            ),
+            "INSERT INTO `vehicle` (`id`, `name`, `payload_kg`, `vtype`) VALUES (5, 't', 10.5, \
+             'TRUCK')"
+        );
+        assert_eq!(
+            forwarded(
+                run_on(s, "INSERT INTO truck VALUES (6, 'u', 'TRUCK', 3)", &mut f)
+                    .await
+                    .unwrap()
+            ),
+            "INSERT INTO `vehicle` (`id`, `name`, `vtype`, `payload_kg`) VALUES (6, 'u', 'TRUCK', 3)"
+        );
+        for bad in [
+            "INSERT INTO truck (id, vtype) VALUES (7, 'CAR')",
+            "INSERT INTO truck (id, vtype) VALUES (7, 'SMALLTRUCK')",
+            "INSERT INTO truck (id, vtype) VALUES (7, CONCAT('TR', 'UCK'))",
+        ] {
+            let e = run_on(s, bad, &mut f).await.unwrap_err();
+            assert_eq!(e.protocol().mysql_errno, 39717, "{bad}: {e}");
+        }
+        // Any value goes into the root, declared or not.
+        assert!(matches!(
+            run_on(
+                s,
+                "INSERT INTO vehicle (id, vtype) VALUES (8, 'MINITRUCK')",
+                &mut f
+            )
+            .await
+            .unwrap(),
+            Handled::NotTyped
+        ));
+        // Joined storage writes the value instead of _type and _type_path.
+        let mut f = Fake::default();
+        run_on(
+            Storage::Joined,
+            "INSERT INTO smalltruck (id, name, payload_kg, cap) VALUES (9, 's', 1, 2)",
+            &mut f,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            f.log,
+            [
+                "BEGIN",
+                "INSERT INTO `vehicle` (`id`, `name`, `vtype`) VALUES (9, 's', 'SMALLTRUCK')",
+                "INSERT INTO `truck` (`id`, `payload_kg`) VALUES (9, 1)",
+                "INSERT INTO `smalltruck` (`id`, `cap`) VALUES (9, 2)",
+                "COMMIT",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn joined_root_inserts_and_updates_move_extension_rows() {
+        let j = Storage::Joined;
+        let mut f = Fake::default();
+        // Columns: id, _type_path, then one "has a row" flag per extension
+        // table, shallowest first: truck, car, smalltruck.
+        let sync_cols = [
+            ("id", column_type::LONGLONG),
+            ("p", 253),
+            ("e0", column_type::LONGLONG),
+            ("e1", column_type::LONGLONG),
+            ("e2", column_type::LONGLONG),
+        ];
+        f.answers.push_back(rows(
+            &sync_cols,
+            &[
+                &[
+                    Some("9"),
+                    Some("/vehicle/truck/"),
+                    Some("0"),
+                    Some("0"),
+                    Some("0"),
+                ],
+                &[
+                    Some("10"),
+                    Some("/vehicle/"),
+                    Some("0"),
+                    Some("0"),
+                    Some("0"),
+                ],
+            ],
+        ));
+        let h = run_on(
+            j,
+            "INSERT INTO vehicle (id, name, vtype) VALUES (9, 'x', 'TRUCK'), (10, 'y', 'MINITRUCK')",
+            &mut f,
+        )
+        .await
+        .unwrap();
+        let Handled::Ok(d) = h else { panic!("{h:?}") };
+        assert_eq!(d.affected_rows, 2);
+        assert_eq!(f.log[0], "BEGIN");
+        assert_eq!(
+            f.log[1],
+            "INSERT INTO vehicle (id, name, vtype) VALUES (9, 'x', 'TRUCK'), (10, 'y', 'MINITRUCK')"
+        );
+        assert!(f.log[2].starts_with(
+            "SELECT r.`id`, r.`_type_path`, e0.`id` IS NOT NULL, e1.`id` IS NOT NULL, e2.`id` IS \
+             NOT NULL FROM `vehicle` AS r LEFT JOIN `truck` AS e0"
+        ), "{}", f.log[2]);
+        assert_eq!(
+            f.log[3..],
+            ["INSERT INTO `truck` (`id`) VALUES (9)", "COMMIT"]
+        );
+
+        // A truck becomes a car: its truck row goes, a car row comes.
+        let mut f = Fake::default();
+        f.answers.push_back(rows(
+            &[("id", column_type::LONGLONG), ("u", column_type::LONGLONG)],
+            &[&[Some("9"), Some("0")]],
+        ));
+        f.answers.push_back(rows(
+            &sync_cols,
+            &[&[
+                Some("9"),
+                Some("/vehicle/car/"),
+                Some("1"),
+                Some("0"),
+                Some("0"),
+            ]],
+        ));
+        let h = run_on(j, "UPDATE truck SET vtype = 'CAR' WHERE id = 9", &mut f)
+            .await
+            .unwrap();
+        let Handled::Ok(d) = h else { panic!("{h:?}") };
+        assert_eq!(d.affected_rows, 1);
+        assert_eq!(
+            f.log[1],
+            "SELECT `truck`.`id`, (('CAR') <=> `truck`.`vtype`) FROM `vehicle` AS `truck` WHERE \
+             (`truck`.id = 9) AND (`truck`.`_type_path` >= '/vehicle/truck/' AND \
+             `truck`.`_type_path` < '/vehicle/truck0') FOR UPDATE"
+        );
+        assert_eq!(
+            f.log[2],
+            "UPDATE `vehicle` AS `truck` SET `truck`.`vtype` = 'CAR' WHERE `truck`.`id` IN (9)"
+        );
+        assert_eq!(
+            f.log[4..],
+            [
+                "DELETE FROM `truck` WHERE `id` IN (9)",
+                "INSERT INTO `car` (`id`) VALUES (9)",
+                "COMMIT"
+            ]
+        );
+        // In single-table storage the same update is one statement.
+        let mut f = Fake::default();
+        assert_eq!(
+            forwarded(
+                run_on(
+                    Storage::SingleTable,
+                    "UPDATE truck SET vtype = 'CAR' WHERE id = 9",
+                    &mut f
+                )
+                .await
+                .unwrap()
+            ),
+            "UPDATE `vehicle` AS `truck` SET `truck`.`vtype` = 'CAR' WHERE (`truck`.id = 9) AND \
+             (`truck`.`_type_path` >= '/vehicle/truck/' AND `truck`.`_type_path` < \
+             '/vehicle/truck0')"
+        );
+        // Single-table deletes touch only the root's table.
+        let mut f = Fake::default();
+        f.answers.push_back(rows(
+            &[("id", column_type::LONGLONG), ("p", 253)],
+            &[&[Some("9"), Some("/vehicle/truck/")]],
+        ));
+        run_on(
+            Storage::SingleTable,
+            "DELETE FROM truck WHERE id = 9",
+            &mut f,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            f.log[2..],
+            ["DELETE FROM `vehicle` WHERE `id` IN (9)", "COMMIT"]
+        );
+    }
+
+    #[test]
+    fn show_create_gives_the_where_and_the_roots_options() {
+        let db = fleet(Storage::SingleTable);
+        let l = One(Arc::new(fleet(Storage::SingleTable)));
+        let c = ctx(&l);
+        let root_text = "CREATE TABLE `vehicle` (\n  `id` bigint(20) NOT NULL,\n  `name` varchar(50) \
+                         DEFAULT NULL,\n  `vtype` varchar(31) NOT NULL,\n  `payload_kg` decimal(10,2) \
+                         DEFAULT NULL,\n  `cap` int(11) DEFAULT NULL,\n  `seats` int(11) DEFAULT NULL,\n  \
+                         `_type` varchar(64) GENERATED ALWAYS AS (case `vtype` when 'TRUCK' then 'truck' \
+                         else 'vehicle' end) VIRTUAL INVISIBLE,\n  PRIMARY KEY (`id`),\n  KEY \
+                         `_sprig_type_path` (`_type_path`,`id`)\n) ENGINE=InnoDB";
+        let stub = "CREATE TABLE `truck` (\n  `id` bigint(20) NOT NULL,\n  PRIMARY KEY (`id`)\n) \
+                    ENGINE=InnoDB";
+        let truck = db.get("truck", false).unwrap();
+        let shown = show::logical_create_from(
+            stub,
+            Some(root_text),
+            truck,
+            Some("vehicle"),
+            Some("vtype"),
+            &c,
+        );
+        assert_eq!(
+            shown,
+            "CREATE TABLE `truck` (\n  `payload_kg` decimal(10,2) DEFAULT NULL\n) INHERITS \
+             (`vehicle`) WHERE `vtype` = 'TRUCK' ENGINE=InnoDB"
+        );
+        let Ok(grammar::Stmt::CreateTable(ct)) =
+            grammar::classify(shown.as_bytes(), &LexOptions::mariadb())
+        else {
+            panic!()
+        };
+        assert_eq!(
+            ct.disc_where,
+            Some(("vtype".into(), crate::model::DiscValue::Str("TRUCK".into())))
+        );
+        let vehicle = db.get("vehicle", false).unwrap();
+        let shown = show::logical_create_from(root_text, None, vehicle, None, None, &c);
+        assert!(
+            shown.ends_with(
+                ") ENGINE=InnoDB WITH (SPRIG_STORAGE = 'single_table', SPRIG_DISCRIMINATOR = \
+                 'vtype')"
+            ),
+            "{shown}"
+        );
+        assert!(
+            !shown.contains("_type") && shown.contains("`seats`"),
+            "{shown}"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::items_after_statements)] // the runner sits by its use
+    async fn a_later_subtype_adopts_rows_and_columns() {
+        // vehicle (single-table, vtype) gets `minitruck (cap2 INT)` under
+        // truck: the stub table, the column, then the type columns again
+        // with the new value mapped.
+        let mut f = Fake {
+            ids: vec![("vehicle".into(), 21), ("truck".into(), 22)],
+            ..Fake::default()
+        };
+        f.answers.push_back(rows(
+            &[("Table", 253), ("Create Table", 253)],
+            &[&[
+                Some("vehicle"),
+                Some(
+                    "CREATE TABLE `vehicle` (\n  `id` bigint(20) NOT NULL,\n  `vtype` varchar(31) \
+                     NOT NULL,\n  `wheels` int(11) DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) \
+                     ENGINE=InnoDB",
+                ),
+            ]],
+        ));
+        f.answers
+            .push_back(rows(&[("c", 253)], &[&[Some("utf8mb4")]]));
+        struct Mini<'a>(&'a mut Fake);
+        #[async_trait::async_trait]
+        impl Runner for Mini<'_> {
+            async fn query(&mut self, sql: &str) -> Result<Rows> {
+                self.0.query(sql).await
+            }
+            async fn exec(&mut self, sql: &str) -> Result<Done> {
+                if sql.starts_with("CREATE TABLE minitruck") {
+                    self.0.ids.push(("minitruck".into(), 25));
+                }
+                self.0.exec(sql).await
+            }
+            fn in_transaction(&self) -> bool {
+                false
+            }
+            fn found_rows(&self) -> bool {
+                false
+            }
+            async fn object_id(
+                &mut self,
+                db: Option<&str>,
+                t: &str,
+            ) -> Result<Option<(DbId, sprig_common::ids::ObjectId)>> {
+                self.0.object_id(db, t).await
+            }
+            async fn commit_types(&mut self, c: &TypesChange) -> Result<()> {
+                self.0.commit_types(c).await
+            }
+        }
+        let db = fleet(Storage::SingleTable);
+        // The root owns `wheels` (a Hibernate SINGLE_TABLE column).
+        let mut types: Vec<TypeDef> = db.iter().map(|t| (**t).clone()).collect();
+        for t in &mut types {
+            if t.name == "vehicle" {
+                t.own_fields.push(crate::model::fixtures::field(
+                    "wheels", "vehicle", "int(11)",
+                ));
+            }
+        }
+        let st = TypesState::new(types.clone(), Vec::new());
+        let l = One(Arc::new(crate::model::DbTypes::new(types, Vec::new())));
+        let c = ctx(&l);
+        let sql =
+            "CREATE TABLE minitruck (wheels INT, cap2 INT) INHERITS (truck) WHERE vtype = 'MINI'";
+        let mut m = Mini(&mut f);
+        handle(sql, Some(&st), &c, &mut m).await.unwrap();
+        assert_eq!(f.log[0], "SHOW CREATE TABLE `vehicle`");
+        assert_eq!(
+            f.log[1],
+            "CREATE TABLE minitruck (`id` bigint(20) NOT NULL, PRIMARY KEY (`id`))"
+        );
+        assert_eq!(f.log[2], "ALTER TABLE `vehicle` ADD COLUMN cap2 INT");
+        assert!(
+            f.log[3].starts_with("SELECT CHARSET(x.`vtype`)"),
+            "{}",
+            f.log[3]
+        );
+        assert_eq!(
+            f.log[4],
+            "ALTER TABLE `vehicle` DROP INDEX IF EXISTS `_sprig_type_path`"
+        );
+        assert!(
+            f.log[5].contains(
+                "AS (CASE (`vtype` COLLATE utf8mb4_bin) WHEN 'TRUCK' THEN 'truck' WHEN \
+                 'SMALLTRUCK' THEN 'smalltruck' WHEN 'CAR' THEN 'car' WHEN 'MINI' THEN \
+                 'minitruck' ELSE 'vehicle' END) VIRTUAL INVISIBLE"
+            ) || f.log[5].contains("WHEN 'MINI' THEN 'minitruck'"),
+            "{}",
+            f.log[5]
+        );
+        assert!(f.log[5].contains("WHEN 'MINI' THEN '/vehicle/truck/minitruck/'"));
+        assert_eq!(
+            f.log[6],
+            "ALTER TABLE `vehicle` ADD INDEX IF NOT EXISTS `_sprig_type_path` (`_type_path`, `id`)"
+        );
+        let change = &f.committed[0];
+        let mini = change
+            .upsert_types
+            .iter()
+            .find(|t| t.name == "minitruck")
+            .unwrap();
+        assert_eq!(
+            mini.disc_value,
+            Some(crate::model::DiscValue::Str("MINI".into()))
+        );
+        let own: Vec<_> = mini
+            .own_fields
+            .iter()
+            .map(|f| (f.name.clone(), f.physical_table.clone()))
+            .collect();
+        assert_eq!(
+            own,
+            [
+                ("wheels".to_owned(), "vehicle".to_owned()),
+                ("cap2".to_owned(), "vehicle".to_owned())
+            ]
+        );
+        // The root no longer owns the adopted column.
+        let root_fields = change
+            .fields
+            .iter()
+            .find(|(i, _)| i.0 == 21)
+            .map(|(_, f)| f.iter().map(|f| f.name.clone()).collect::<Vec<_>>())
+            .unwrap();
+        assert!(
+            !root_fields.contains(&"wheels".to_owned()),
+            "{root_fields:?}"
+        );
+        // A value another subtype has, or no value at all, is refused.
+        for (bad, code) in [
+            (
+                "CREATE TABLE m2 (x INT) INHERITS (truck) WHERE vtype = 'CAR'",
+                39717,
+            ),
+            ("CREATE TABLE m3 (x INT) INHERITS (truck)", 39710),
+            (
+                "CREATE TABLE m4 (x INT) INHERITS (truck) WHERE kind = 'X'",
+                39710,
+            ),
+            (
+                "CREATE TABLE m5 (x INT NOT NULL) INHERITS (truck) WHERE vtype = 'M5'",
+                39710,
+            ),
+        ] {
+            let mut f = Fake::default();
+            f.answers.push_back(rows(
+                &[("Table", 253), ("Create Table", 253)],
+                &[&[
+                    Some("vehicle"),
+                    Some("CREATE TABLE `vehicle` (\n  `id` bigint(20) NOT NULL,\n  PRIMARY KEY (`id`)\n)"),
+                ]],
+            ));
+            let e = run_on(Storage::SingleTable, bad, &mut f).await.unwrap_err();
+            assert_eq!(e.protocol().mysql_errno, code, "{bad}: {e}");
+        }
+    }
+}

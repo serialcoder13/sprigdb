@@ -1053,3 +1053,265 @@ async fn hierarchies_match_a_reference_tree() {
         exec(&mut c, &format!("DROP DATABASE {db}")).await;
     }
 }
+
+/// Kiran's discriminator model (inheritance plan section 7, Q2): a row's
+/// type is the subtype that declares its `vtype`, else the root.
+struct Fleet {
+    /// id to vtype.
+    rows: BTreeMap<i64, String>,
+    /// Declared values: value, type, parent type.
+    declared: Vec<(&'static str, &'static str, &'static str)>,
+}
+
+impl Fleet {
+    fn type_of(&self, v: &str) -> &'static str {
+        self.declared
+            .iter()
+            .find(|d| d.0 == v)
+            .map_or("vehicle", |d| d.1)
+    }
+    fn parent(&self, t: &str) -> Option<&'static str> {
+        self.declared.iter().find(|d| d.1 == t).map(|d| d.2)
+    }
+    fn is_a(&self, t: &str, of: &str) -> bool {
+        let mut cur = Some(t);
+        while let Some(c) = cur {
+            if c == of {
+                return true;
+            }
+            cur = self.parent(c);
+        }
+        false
+    }
+    fn types(&self) -> Vec<&'static str> {
+        let mut v = vec!["vehicle"];
+        v.extend(self.declared.iter().map(|d| d.1));
+        v
+    }
+    fn ids(&self, of: &str, only: bool) -> Vec<i64> {
+        self.rows
+            .iter()
+            .filter(|(_, v)| {
+                let t = self.type_of(v);
+                if only { t == of } else { self.is_a(t, of) }
+            })
+            .map(|(k, _)| *k)
+            .collect()
+    }
+}
+
+/// Every type's polymorphic and `ONLY` reads equal the model; in joined
+/// storage also through each subtype's own column (so its extension table
+/// holds exactly its rows).
+async fn check_fleet(c: &mut Conn, m: &Fleet, joined: bool, step: &str) {
+    for t in m.types() {
+        let got = ids(c, &format!("SELECT id FROM {t} ORDER BY id")).await;
+        assert_eq!(got, m.ids(t, false), "{step}: FROM {t}");
+        let got = ids(c, &format!("SELECT id FROM ONLY {t} ORDER BY id")).await;
+        assert_eq!(got, m.ids(t, true), "{step}: FROM ONLY {t}");
+        let own = match t {
+            "truck" => Some("payload_kg"),
+            "smalltruck" => Some("cap"),
+            "car" => Some("seats"),
+            _ => None,
+        };
+        if let (true, Some(col)) = (joined, own) {
+            let got = ids(
+                c,
+                &format!("SELECT id FROM {t} WHERE {col} IS NULL OR {col} IS NOT NULL ORDER BY id"),
+            )
+            .await;
+            assert_eq!(got, m.ids(t, false), "{step}: {t} through {col}");
+        }
+    }
+    let typed = rows(c, "SELECT id, _type FROM vehicle ORDER BY id").await;
+    for r in typed {
+        let id: i64 = r[0].parse().unwrap();
+        assert_eq!(r[1], m.type_of(&m.rows[&id]), "{step}: _type of {id}");
+    }
+}
+
+#[tokio::test]
+async fn discriminator_columns() {
+    let Some(eps) = endpoints("discriminator_columns") else {
+        return;
+    };
+    for (pi, ep) in eps.iter().enumerate() {
+        for storage in ["single_table", "joined"] {
+            let joined = storage == "joined";
+            let db = format!("r6_disc_{}_{}", &storage[..1], persona(pi));
+            let mut c = conn(ep, None).await;
+            fresh_db(&mut c, &db).await;
+            // An existing single-table schema, as Hibernate's SINGLE_TABLE
+            // with @DiscriminatorColumn(name = "vtype") makes it.
+            if joined {
+                exec(&mut c, "CREATE TABLE vehicle (id BIGINT PRIMARY KEY, vtype VARCHAR(31) NOT NULL DEFAULT 'VEHICLE', name VARCHAR(50))").await;
+                exec(&mut c, "INSERT INTO vehicle VALUES (1,'VEHICLE','v1'),(2,'TRUCK','t2'),(3,'SMALLTRUCK','s3'),(4,'CAR','c4'),(5,'truck','lower5'),(6,'MINI','m6')").await;
+            } else {
+                exec(&mut c, "CREATE TABLE vehicle (id BIGINT PRIMARY KEY, vtype VARCHAR(31) NOT NULL DEFAULT 'VEHICLE', name VARCHAR(50), payload_kg DECIMAL(10,2), cap INT, seats INT)").await;
+                exec(&mut c, "INSERT INTO vehicle VALUES (1,'VEHICLE','v1',NULL,NULL,NULL),(2,'TRUCK','t2',1000,NULL,NULL),(3,'SMALLTRUCK','s3',100,5,NULL),(4,'CAR','c4',NULL,NULL,4),(5,'truck','lower5',NULL,NULL,NULL),(6,'MINI','m6',NULL,NULL,NULL)").await;
+            }
+            let mut m = Fleet {
+                rows: [
+                    (1, "VEHICLE"),
+                    (2, "TRUCK"),
+                    (3, "SMALLTRUCK"),
+                    (4, "CAR"),
+                    (5, "truck"),
+                    (6, "MINI"),
+                ]
+                .into_iter()
+                .map(|(k, v)| (k, v.to_owned()))
+                .collect(),
+                declared: Vec::new(),
+            };
+            let t0 = Instant::now();
+            let with = if joined {
+                String::new()
+            } else {
+                " WITH (SPRIG_STORAGE = 'single_table')".to_owned()
+            };
+            exec(&mut c, &format!("CREATE TABLE truck (payload_kg DECIMAL(10,2)) INHERITS (vehicle) WHERE vtype = 'TRUCK'{with}")).await;
+            exec(&mut c, "CREATE TABLE car (seats INT) INHERITS (vehicle) WHERE vtype = 'CAR'").await;
+            let declare_ms = t0.elapsed().as_millis();
+            m.declared.push(("TRUCK", "truck", "vehicle"));
+            m.declared.push(("CAR", "car", "vehicle"));
+            check_fleet(&mut c, &m, joined, "declared truck and car").await;
+            // Existing data is typed in place.
+            if !joined {
+                let p = rows(&mut c, "SELECT payload_kg FROM truck WHERE id = 2").await;
+                assert_eq!(p, [["1000.00".to_owned()]]);
+            }
+            // Inserts into a subtype set the value, and refuse another.
+            exec(&mut c, "INSERT INTO truck (id, name, payload_kg) VALUES (7, 't7', 70)").await;
+            m.rows.insert(7, "TRUCK".into());
+            let v = rows(&mut c, "SELECT vtype FROM vehicle WHERE id = 7").await;
+            assert_eq!(v, [["TRUCK".to_owned()]]);
+            fails(&mut c, "INSERT INTO truck (id, vtype) VALUES (8, 'CAR')", 39717).await;
+            fails(&mut c, "INSERT INTO truck (id, vtype) VALUES (8, 'SMALLTRUCK')", 39717).await;
+            exec(&mut c, "INSERT INTO car (id, vtype, seats) VALUES (8, 'CAR', 2)").await;
+            m.rows.insert(8, "CAR".into());
+            // Any value goes into the root, undeclared ones included.
+            exec(&mut c, "INSERT INTO vehicle (id, vtype, name) VALUES (9, 'SMALLTRUCK', 's9'), (10, 'TRUCK', 't10')").await;
+            m.rows.insert(9, "SMALLTRUCK".into());
+            m.rows.insert(10, "TRUCK".into());
+            check_fleet(&mut c, &m, joined, "inserts").await;
+            // Declaring smalltruck adopts its existing rows at once.
+            let t1 = Instant::now();
+            exec(&mut c, "CREATE TABLE smalltruck (cap INT) INHERITS (truck) WHERE vtype = 'SMALLTRUCK'").await;
+            let adopt_ms = t1.elapsed().as_millis();
+            m.declared.push(("SMALLTRUCK", "smalltruck", "truck"));
+            check_fleet(&mut c, &m, joined, "declared smalltruck").await;
+            let cap = rows(&mut c, "SELECT cap FROM smalltruck WHERE id = 3").await;
+            assert_eq!(cap, [[if joined { "NULL" } else { "5" }.to_owned()]]);
+            // Updating vtype moves rows between types.
+            exec(&mut c, "UPDATE vehicle SET vtype = 'CAR' WHERE id = 2").await;
+            m.rows.insert(2, "CAR".into());
+            exec(&mut c, "UPDATE truck SET vtype = 'MINI' WHERE id = 7").await;
+            m.rows.insert(7, "MINI".into());
+            exec(&mut c, "UPDATE vehicle SET vtype = 'SMALLTRUCK' WHERE id IN (1, 5)").await;
+            m.rows.insert(1, "SMALLTRUCK".into());
+            m.rows.insert(5, "SMALLTRUCK".into());
+            check_fleet(&mut c, &m, joined, "moves").await;
+            let seats = rows(&mut c, "SELECT seats FROM car WHERE id = 2").await;
+            assert_eq!(seats, [["NULL".to_owned()]], "a new subtype's columns start at their defaults");
+            // Random writes, checked against the model after each.
+            let mut g = Lcg(99 + pi as u64 + u64::from(joined));
+            let values = ["TRUCK", "SMALLTRUCK", "CAR", "VEHICLE", "MINI", "truck"];
+            let mut next = 100i64;
+            let t2 = Instant::now();
+            for step in 0..60 {
+                let v = values[g.below(values.len() as u64) as usize];
+                match g.below(4) {
+                    0 => {
+                        let t = ["vehicle", "truck", "smalltruck", "car"][g.below(4) as usize];
+                        let tv = match t {
+                            "truck" => "TRUCK",
+                            "smalltruck" => "SMALLTRUCK",
+                            "car" => "CAR",
+                            _ => v,
+                        };
+                        let col = if t == "vehicle" { ", vtype" } else { "" };
+                        let val = if t == "vehicle" { format!(", '{tv}'") } else { String::new() };
+                        exec(&mut c, &format!("INSERT INTO {t} (id, name{col}) VALUES ({next}, 'r{next}'{val})")).await;
+                        m.rows.insert(next, tv.to_owned());
+                        next += 1;
+                    }
+                    1 | 2 => {
+                        let Some((&id, _)) = m.rows.iter().nth(g.below(m.rows.len() as u64) as usize) else { continue };
+                        let t = m.type_of(&m.rows[&id]);
+                        exec(&mut c, &format!("UPDATE {t} SET vtype = '{v}' WHERE id = {id}")).await;
+                        m.rows.insert(id, v.to_owned());
+                    }
+                    _ => {
+                        let Some((&id, _)) = m.rows.iter().nth(g.below(m.rows.len() as u64) as usize) else { continue };
+                        let t = m.type_of(&m.rows[&id]);
+                        exec(&mut c, &format!("DELETE FROM {t} WHERE id = {id}")).await;
+                        m.rows.remove(&id);
+                    }
+                }
+                check_fleet(&mut c, &m, joined, &format!("random step {step}")).await;
+            }
+            let random_ms = t2.elapsed().as_millis();
+            // Schema tools: the WHERE form, the root's options.
+            let ct = rows(&mut c, "SHOW CREATE TABLE smalltruck").await;
+            assert!(
+                ct[0][1].contains("INHERITS (`truck`) WHERE `vtype` = 'SMALLTRUCK'"),
+                "{}",
+                ct[0][1]
+            );
+            let ct = rows(&mut c, "SHOW CREATE TABLE vehicle").await;
+            assert!(!ct[0][1].contains("_type"), "{}", ct[0][1]);
+            if !joined {
+                assert!(
+                    ct[0][1].contains("WITH (SPRIG_STORAGE = 'single_table')"),
+                    "{}",
+                    ct[0][1]
+                );
+            }
+            let cols: Vec<String> = rows(&mut c, "SHOW COLUMNS FROM smalltruck")
+                .await
+                .into_iter()
+                .map(|r| r[0].clone())
+                .collect();
+            assert_eq!(cols, ["id", "vtype", "name", "payload_kg", "cap"]);
+            let cols: Vec<String> = rows(
+                &mut c,
+                &format!(
+                    "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '{db}' \
+                     AND TABLE_NAME = 'smalltruck' ORDER BY ORDINAL_POSITION"
+                ),
+            )
+            .await
+            .into_iter()
+            .map(|r| r[0].clone())
+            .collect();
+            assert_eq!(cols, ["id", "vtype", "name", "payload_kg", "cap"]);
+            // Refusals.
+            fails(&mut c, "ALTER TABLE vehicle DROP COLUMN vtype", 39710).await;
+            fails(&mut c, "UPDATE vehicle SET _type = 'car'", 39705).await;
+            fails(&mut c, "CREATE TABLE van (x INT) INHERITS (vehicle) WHERE vtype = 'CAR'", 39717).await;
+            fails(&mut c, "CREATE TABLE van (x INT) INHERITS (vehicle)", 39710).await;
+            // A subtype added later by ALTER (single-table: into the root).
+            exec(&mut c, "ALTER TABLE car ADD COLUMN doors INT").await;
+            exec(&mut c, "UPDATE car SET doors = 4").await;
+            let d = rows(&mut c, "SELECT COUNT(*) FROM car WHERE doors = 4").await;
+            assert_eq!(d[0][0], m.ids("car", false).len().to_string());
+            // Dropping smalltruck deletes its rows; its value is then the root's.
+            exec(&mut c, "DROP TABLE smalltruck").await;
+            m.declared.retain(|d| d.1 != "smalltruck");
+            m.rows.retain(|_, v| v != "SMALLTRUCK");
+            exec(&mut c, &format!("INSERT INTO vehicle (id, vtype) VALUES ({next}, 'SMALLTRUCK')")).await;
+            m.rows.insert(next, "SMALLTRUCK".into());
+            check_fleet(&mut c, &m, joined, "dropped smalltruck").await;
+            eprintln!(
+                "discriminator[{} {storage}]: truck and car declared over 6 rows in {declare_ms} ms; \
+                 smalltruck adopted its rows in {adopt_ms} ms; 60 random writes with full checks \
+                 in {random_ms} ms; {} rows at the end",
+                persona(pi),
+                m.rows.len()
+            );
+            exec(&mut c, &format!("DROP DATABASE {db}")).await;
+        }
+    }
+}

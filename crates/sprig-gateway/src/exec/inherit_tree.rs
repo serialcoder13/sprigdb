@@ -111,6 +111,13 @@ pub(crate) async fn refs(svc: &TenantServices, root: TenantId, sql: &str) -> Res
             &sprig_inherit::links::DDL_REFS.replace("{refs}", &table),
         )
         .await?;
+        // Tables made before handovers lack the index by referencing row.
+        ctl_query(
+            svc,
+            root,
+            &sprig_inherit::links::DDL_REFS_BY_FROM.replace("{refs}", &table),
+        )
+        .await?;
         refs_ready()
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -476,11 +483,44 @@ async fn sync_one(
     lctn: bool,
 ) -> Result<Option<u64>> {
     let wants = sprig_inherit::adopt::wanted(parent, child, lctn);
-    if wants.iter().all(sprig_inherit::adopt::Want::done) {
+    let widen = widenings(svc, parent, child, &wants, lctn).await?;
+    if wants.iter().all(sprig_inherit::adopt::Want::done) && widen.is_empty() {
         return Ok(None);
     }
     let t = child.tenant;
     let mut ver = child.version;
+    // Types the parent widened (inheritance round 2): MODIFY COLUMN.
+    for (i, clauses, _) in &widen {
+        let w = &wants[*i];
+        let cschema = sprig_inherit::plan::physical_schema(child, &w.db, lctn)?;
+        let sql = format!(
+            "ALTER TABLE {}.{} {}",
+            q(&cschema),
+            q(&w.table),
+            clauses.join(", ")
+        );
+        let logical = format!("ALTER TABLE {}.{} {}", q(&w.db), q(&w.table), clauses.join(", "));
+        let v = ddl(
+            svc,
+            t,
+            DdlStatement::AlterObject {
+                kind: ObjectKind::Table,
+                name: ObjectName {
+                    db: Some(w.db.clone()),
+                    name: w.table.clone(),
+                },
+                if_exists: false,
+                rename_to: None,
+            },
+            &sql,
+            &logical,
+            lctn,
+        )
+        .await?;
+        ver = ver.max(v.unwrap_or(0));
+        metrics::counter!("sprig_inherit_widened_columns_total").increment(clauses.len() as u64);
+        tracing::info!(tenant = %t, table = %w.table, clauses = ?clauses, "inherited column types widened");
+    }
     // Physical changes first.
     for w in wants.iter().filter(|w| !w.done()) {
         let pschema = sprig_inherit::plan::physical_schema(parent, &w.db, lctn)?;
@@ -565,7 +605,14 @@ async fn sync_one(
         root_name: None,
         ..InheritChange::default()
     };
-    for w in wants.iter().filter(|w| !w.done()) {
+    // A widened table's object is written again, unchanged: its version
+    // moves, so materialized copies of it are seeded again with the new
+    // types.
+    for (_, w) in wants
+        .iter()
+        .enumerate()
+        .filter(|(i, w)| !w.done() || widen.iter().any(|(j, _, _)| j == i))
+    {
         let Some(d) = fresh.database(&database_key(&w.db, lctn)) else {
             continue;
         };
@@ -615,6 +662,7 @@ async fn sync_one(
         change.upsert_objects.push(o);
     }
     if change.upsert_objects.is_empty() {
+        remember_widened(t, &widen);
         return Ok((ver > child.version).then_some(ver));
     }
     if sprig_inherit::plan::state_of(child).is_none_or(|s| !s.migrated) {
@@ -624,7 +672,81 @@ async fn sync_one(
         change.root_name = Some(name);
     }
     let v = commit(svc, t, &change).await?;
+    remember_widened(t, &widen);
     Ok(Some(v.max(ver)))
+}
+
+/// What this gateway last compared for widened types: (child tenant,
+/// parent object) → the parent object's schema version.
+fn compared() -> &'static Mutex<HashMap<(u64, u64), u64>> {
+    static C: OnceLock<Mutex<HashMap<(u64, u64), u64>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn remember_widened(t: TenantId, widen: &[(usize, Vec<String>, (u64, u64))]) {
+    let mut m = compared().lock().unwrap_or_else(PoisonError::into_inner);
+    for (_, _, (obj, v)) in widen {
+        m.insert((t.0, *obj), *v);
+    }
+}
+
+/// The `MODIFY COLUMN` clauses giving `child`'s inherited tables the
+/// types their parent widened since (decision IG5's gap): per want, its
+/// clauses and (parent object, schema version) to remember once applied.
+/// Only tables whose parent definition changed since this gateway last
+/// compared them are read (two `SHOW CREATE TABLE`s).
+async fn widenings(
+    svc: &TenantServices,
+    parent: &TenantCatalog,
+    child: &TenantCatalog,
+    wants: &[sprig_inherit::adopt::Want],
+    lctn: bool,
+) -> Result<Vec<(usize, Vec<String>, (u64, u64))>> {
+    let mut out = Vec::new();
+    for (i, w) in wants.iter().enumerate() {
+        let Some(co) = &w.child else { continue };
+        if w.plain {
+            continue;
+        }
+        let Some(pd) = parent.database(&database_key(&w.db, lctn)) else {
+            continue;
+        };
+        let key = sprig_catalog::ddl::object_key(ObjectKind::Table, &w.table, lctn);
+        let Some(prow) = parent.object(pd.db_id, sprig_catalog::store::Namespace::Relation, &key)
+        else {
+            continue;
+        };
+        let memo = (child.tenant.0, prow.object_id.0);
+        let seen = compared()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&memo)
+            .copied();
+        if seen == Some(prow.schema_version) {
+            continue;
+        }
+        let pschema = sprig_inherit::plan::physical_schema(parent, &w.db, lctn)?;
+        let cschema = sprig_inherit::plan::physical_schema(child, &w.db, lctn)?;
+        let ptext = show_create(svc, parent.tenant, &pschema, &w.table).await?;
+        let ctext = show_create(svc, child.tenant, &cschema, &w.table).await?;
+        let cols: Vec<String> = w
+            .parent
+            .columns
+            .iter()
+            .filter(|c| co.column(c).is_some())
+            .cloned()
+            .collect();
+        let clauses = sprig_inherit::adopt::widened(&ptext, &ctext, &cols);
+        if clauses.is_empty() {
+            compared()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(memo, prow.schema_version);
+        } else {
+            out.push((i, clauses, (prow.object_id.0, prow.schema_version)));
+        }
+    }
+    Ok(out)
 }
 
 /// Brings the session tenant (`cat`) and each tenant above it up to its

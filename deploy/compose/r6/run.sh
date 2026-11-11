@@ -10,11 +10,14 @@
 #
 # 1. Flyway 13 (migrate, info, validate) runs ./flyway/sql: a type
 #    hierarchy (asset > vehicle > truck, car) created with INHERITS, rows
-#    written through the subtypes, and a record hierarchy.
+#    written through the subtypes, a record hierarchy, and a single-table
+#    hierarchy typed by its discriminator (fleet > fleet_truck, fleet_car
+#    WHERE vtype = ...).
 # 2. Hibernate ddl-auto=validate over asset, vehicle and truck, then a JPA
-#    write and delete through a subtype and polymorphic counts
-#    (./hibernate; MySQL Connector/J on mysql, MariaDB Connector/J on
-#    mariadb).
+#    write and delete through a subtype and polymorphic counts; then
+#    Hibernate's SINGLE_TABLE inheritance with @DiscriminatorColumn over
+#    fleet, checked against SprigDB's typed reads (./hibernate; MySQL
+#    Connector/J on mysql, MariaDB Connector/J on mariadb).
 # 3. A dump round trip: mysqldump (the host's client) on mysql, mariadb-dump
 #    (the connector matrix's CLI image) on mariadb, with
 #    --single-transaction --skip-add-locks; the dump must hold INHERITS and
@@ -70,9 +73,9 @@ for persona in mysql mariadb; do
       -outputType=json -connectRetries=0 "$op" 2>"$OUT/flyway.$p.$op.log") || true
     printf '%s\n' "$out" >"$OUT/flyway.$p.$op.json"
     case $op in
-      migrate) ok=$(jq -r 'if .success == true and .migrationsExecuted == 3 then "pass" else "fail" end' <<<"$out" 2>/dev/null || echo fail)
+      migrate) ok=$(jq -r 'if .success == true and .migrationsExecuted == 4 then "pass" else "fail" end' <<<"$out" 2>/dev/null || echo fail)
         detail=$(jq -r '"\(.migrationsExecuted) migrations, target \(.targetSchemaVersion)"' <<<"$out" 2>/dev/null || head -c 200 <<<"$out") ;;
-      info) ok=$(jq -r 'if ([.migrations[] | select(.version != "" and .state == "Success")] | length) == 3 then "pass" else "fail" end' <<<"$out" 2>/dev/null || echo fail)
+      info) ok=$(jq -r 'if ([.migrations[] | select(.version != "" and .state == "Success")] | length) == 4 then "pass" else "fail" end' <<<"$out" 2>/dev/null || echo fail)
         detail=$(jq -r '[.migrations[] | "\(.version) \(.state)"] | join(", ")' <<<"$out" 2>/dev/null || head -c 200 <<<"$out") ;;
       validate) ok=$(jq -r 'if .validationSuccessful == true then "pass" else "fail" end' <<<"$out" 2>/dev/null || echo fail)
         detail=$(jq -r '"validationSuccessful=\(.validationSuccessful)"' <<<"$out" 2>/dev/null || head -c 200 <<<"$out") ;;
@@ -105,6 +108,11 @@ for persona in mysql mariadb; do
   else
     check "$persona dump INHERITS" fail "$(head -c 300 "$OUT/dump.$p.log")"
   fi
+  if grep -q 'INHERITS (`fleet`) WHERE `vtype` = '"'"'TRUCK'"'" "$dump" && grep -q "SPRIG_DISCRIMINATOR = 'vtype'" "$dump"; then
+    check "$persona dump discriminator" pass "fleet_truck INHERITS (fleet) WHERE vtype = 'TRUCK'"
+  else
+    check "$persona dump discriminator" fail "$(grep -m1 -A8 'CREATE TABLE `fleet_truck`' "$dump" | tr '\n' ' ' | head -c 300)"
+  fi
   if grep -Eq '`_type`|`_type_path`|_sprig_' "$dump"; then check "$persona dump hidden names" fail "$(grep -Eo '.{20}(`_type`|_sprig_).{20}' "$dump" | head -2 | tr '\n' ' ')"; else check "$persona dump hidden names" pass "no _type or _sprig_ in the dump"; fi
   l=$(leaks "$dump"); [[ -z $l ]] && check "$persona dump physical names" pass "none" || check "$persona dump physical names" fail "$l"
   sql "$port" "" "CREATE DATABASE $copy" >/dev/null
@@ -113,11 +121,13 @@ for persona in mysql mariadb; do
   same=pass detail=""
   for q in "SELECT id, name, site_id, _type FROM asset ORDER BY id" "SELECT * FROM vehicle ORDER BY id" \
            "SELECT * FROM truck ORDER BY id" "SELECT * FROM car ORDER BY id" "SELECT id FROM ONLY vehicle ORDER BY id" \
-           "SHOW COLUMNS FROM truck" "SELECT * FROM org ORDER BY id"; do
+           "SHOW COLUMNS FROM truck" "SELECT * FROM org ORDER BY id" "SELECT * FROM fleet ORDER BY id" \
+           "SELECT id, _type FROM fleet ORDER BY id" "SELECT * FROM fleet_truck ORDER BY id" \
+           "SELECT * FROM fleet_car ORDER BY id" "SELECT id FROM ONLY fleet ORDER BY id"; do
     a=$(sql "$port" "$db" "$q"); b=$(sql "$port" "$copy" "$q")
     if [[ $a != "$b" || -z $a ]]; then same=fail detail="$q differs: [$a] vs [$b]"; break; fi
   done
-  check "$persona dump round trip" $same "${detail:-7 typed reads equal in the copy}"
+  check "$persona dump round trip" $same "${detail:-12 typed reads equal in the copy}"
   ct=$(sql "$port" "$copy" "SHOW CREATE TABLE truck" | tr '\n' ' ')
   [[ $ct == *'INHERITS (`vehicle`)'* ]] && check "$persona copy is typed" pass "truck INHERITS vehicle in the copy" || check "$persona copy is typed" fail "$ct"
 

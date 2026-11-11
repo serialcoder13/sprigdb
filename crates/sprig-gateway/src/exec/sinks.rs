@@ -106,6 +106,51 @@ pub(crate) fn setting_of(
     })
 }
 
+/// The environment `TEST CONNECTION` and `TEST SINK` run in on a gateway
+/// (R9, r9tests): a sink task's, over the tenant services (catalog and
+/// `sprig_ctl` pools, the DC and global tiers, the sink key file, the
+/// tenant's residency and live settings).
+struct GwSinkEnv {
+    svc: Arc<crate::tenant::TenantServices>,
+}
+
+#[async_trait]
+impl sprig_sinks::job::SinkEnv for GwSinkEnv {
+    async fn catalog(&self, tenant: TenantId) -> Result<(mysql_async::Pool, String)> {
+        let ep = self.svc.locator.writer(tenant).await?;
+        Ok((ep.pool, ep.store.schema().to_owned()))
+    }
+
+    async fn shard_pool(&self, tenant: TenantId) -> Result<mysql_async::Pool> {
+        let cluster = self.svc.locator.cluster(tenant).await?;
+        self.svc.locator.ctl_pool(&cluster).await
+    }
+
+    fn dc(&self) -> Arc<dyn sprig_meta::MetaStore> {
+        self.svc.locator.dc_store()
+    }
+
+    fn global(&self) -> Option<Arc<dyn sprig_meta::MetaStore>> {
+        Some(Arc::clone(&self.svc.global))
+    }
+
+    fn keyring(&self) -> Option<Arc<dyn SinkKeyring>> {
+        keyring()
+    }
+
+    async fn residency_of(&self, tenant: TenantId) -> Result<Box<dyn Residency>> {
+        sprig_sinks::residency::residency_of(self.svc.global.as_ref(), tenant).await
+    }
+
+    fn worker_id(&self) -> String {
+        "gateway".to_owned()
+    }
+
+    fn settings(&self) -> Option<(sprig_settings::Snapshot, sprig_common::ids::DcId)> {
+        Some((self.svc.settings.live().snapshot(), self.svc.dc.clone()))
+    }
+}
+
 struct GwHost<'s> {
     sess: &'s mut PassSession,
     cat: Arc<TenantCatalog>,
@@ -338,6 +383,58 @@ impl Host for GwHost<'_> {
 
     fn keyring(&self) -> Option<Arc<dyn SinkKeyring>> {
         keyring()
+    }
+
+    fn sink_env(&self) -> Option<Arc<dyn sprig_sinks::job::SinkEnv>> {
+        let svc = Arc::clone(self.ts()?.services());
+        Some(Arc::new(GwSinkEnv { svc }))
+    }
+
+    async fn sample_queue(
+        &mut self,
+        db: &str,
+        queue: &str,
+        n: usize,
+    ) -> Result<Vec<sprig_sinks::model::SinkRecord>> {
+        use sprig_queues::sql as mq;
+        let ts = self.ts().ok_or_else(|| SprigError::internal("no tenant"))?;
+        let engine = ts.services().mq.get().cloned().ok_or_else(|| {
+            SprigError::new(
+                SprigCode::SinkOptionInvalid,
+                "the queue engine isn't running on this gateway",
+            )
+        })?;
+        let p = &ts.principal;
+        let principal = Arc::new(sprig_proto_amqp::auth::Principal {
+            tenant_id: ts.tenant.0,
+            tenant: p.tenant_name.clone().unwrap_or_default(),
+            user: p.user.clone(),
+            user_id: p.user_id.map(|u| u64::from(u.0)),
+            handle: Some(Arc::new(p.clone())),
+        });
+        // Browsing takes nothing, so the session key is never a holder.
+        let v = engine
+            .sql_vhost(principal, db, 0)
+            .await
+            .map_err(|e| super::queues::sql_error(&e))?;
+        let ds = v
+            .browse(queue, n)
+            .await
+            .map_err(|e| super::queues::sql_error(&e))?;
+        Ok(ds
+            .iter()
+            .map(|d| {
+                sprig_sinks::source::browsed_record(
+                    d.id.queue,
+                    d.id.seq,
+                    Some(mq::body_bytes(d).to_vec()),
+                    &mq::properties_json(d),
+                    d.message.routing_key.clone(),
+                    Some(d.message.exchange.clone()),
+                    d.delivery_count,
+                )
+            })
+            .collect())
     }
 
     fn user_by_name(&self, name: &str) -> Option<u32> {

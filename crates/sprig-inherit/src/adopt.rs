@@ -200,9 +200,98 @@ pub fn column_def(show_create: &str, col: &str) -> Option<String> {
         .map(|l| l.trim().trim_end_matches(',').to_owned())
 }
 
+/// The type and nullability of a `SHOW CREATE TABLE` column line
+/// (`` `name` varchar(40) DEFAULT NULL ``): `("varchar(40)", true)`.
+fn def_type(def: &str) -> Option<(String, bool)> {
+    let t = def.trim_start().strip_prefix('`')?;
+    let rest = t[t.find('`')? + 1..].trim_start();
+    let mut depth = 0i32;
+    let mut quoted = false;
+    let mut end = rest.len();
+    for (i, ch) in rest.char_indices() {
+        match ch {
+            '\'' => quoted = !quoted,
+            '(' if !quoted => depth += 1,
+            ')' if !quoted => depth -= 1,
+            ' ' if !quoted && depth == 0 => {
+                end = i;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let mut ty = rest[..end].to_owned();
+    let tail = &rest[end..];
+    for w in ["unsigned", "zerofill"] {
+        if tail.split_whitespace().any(|x| x.eq_ignore_ascii_case(w)) {
+            ty.push(' ');
+            ty.push_str(w);
+        }
+    }
+    let upper = tail.to_ascii_uppercase();
+    Some((ty, !upper.contains("NOT NULL")))
+}
+
+/// `MODIFY COLUMN` clauses that give the child's table the parent's wider
+/// types for `columns` (both tables have them): a type the parent widened
+/// (`VARCHAR(20)` → `VARCHAR(40)`, `INT` → `BIGINT`, ...) or a column it
+/// made nullable, from the two `SHOW CREATE TABLE` texts. A column the
+/// child widened further itself, or whose types aren't comparable, is left
+/// alone.
+#[must_use]
+pub fn widened(parent_show: &str, child_show: &str, columns: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for c in columns {
+        let (Some(pd), Some(cd)) = (column_def(parent_show, c), column_def(child_show, c)) else {
+            continue;
+        };
+        let (Some((pt, pn)), Some((ct, cn))) = (def_type(&pd), def_type(&cd)) else {
+            continue;
+        };
+        let wider = !pt.eq_ignore_ascii_case(&ct) && crate::guard::widens(&ct, &pt);
+        let same = pt.eq_ignore_ascii_case(&ct);
+        let nulls = pn && !cn;
+        if (wider || (same && nulls)) && (pn || !cn) {
+            out.push(format!("MODIFY COLUMN {pd}"));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn widened_types_reach_the_child() {
+        let parent = "CREATE TABLE `t1` (\n  `id` bigint(20) NOT NULL,\n  `name` varchar(40) \
+                      DEFAULT NULL,\n  `qty` int(10) unsigned NOT NULL DEFAULT 0,\n  `code` \
+                      char(4) DEFAULT NULL,\n  `mine` varchar(10) DEFAULT NULL,\n  `e` \
+                      enum('a','b','c') DEFAULT NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB";
+        let child = "CREATE TABLE `t1` (\n  `id` int(11) NOT NULL,\n  `name` varchar(20) DEFAULT \
+                     NULL,\n  `qty` int(10) unsigned NOT NULL DEFAULT 0,\n  `code` char(4) NOT \
+                     NULL,\n  `mine` varchar(80) DEFAULT NULL,\n  `e` enum('a','b') DEFAULT \
+                     NULL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB";
+        let cols: Vec<String> = ["id", "name", "qty", "code", "mine", "e"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        assert_eq!(
+            widened(parent, child, &cols),
+            vec![
+                "MODIFY COLUMN `id` bigint(20) NOT NULL".to_owned(),
+                "MODIFY COLUMN `name` varchar(40) DEFAULT NULL".to_owned(),
+                "MODIFY COLUMN `code` char(4) DEFAULT NULL".to_owned(),
+                "MODIFY COLUMN `e` enum('a','b','c') DEFAULT NULL".to_owned(),
+            ]
+        );
+        // Nothing to do when they agree, or the child is wider.
+        assert!(widened(child, child, &cols).is_empty());
+        assert_eq!(
+            def_type("`p` decimal(10,2) unsigned NOT NULL"),
+            Some(("decimal(10,2) unsigned".to_owned(), false))
+        );
+    }
 
     const SHOW: &str = "CREATE TABLE `t1` (\n  `id` int(11) NOT NULL AUTO_INCREMENT,\n  `t2_id` \
                         int(11) DEFAULT NULL,\n  `name` varchar(20) DEFAULT NULL,\n  \

@@ -23,6 +23,7 @@ import { RedisPage } from '../kv/RedisPage';
 import { LogicPage } from '../logic/LogicPage';
 import { MessagingPage } from '../msg/MessagingPage';
 import { PoliciesPage } from '../access/PoliciesPage';
+import { InheritancePage } from '../inherit/InheritancePage';
 import { isApiError } from '../api/errors';
 
 export const queryClient = new QueryClient({
@@ -90,6 +91,7 @@ export const routes = [
       { path: 'logic', element: <LogicPage /> },
       { path: 'messaging', element: <MessagingPage /> },
       { path: 'policies', element: <PoliciesPage /> },
+      { path: 'inheritance', element: <InheritancePage /> },
       { path: 'logic/:db/:kind/:name', element: <LogicPage /> },
       { path: 'logic/:db/new/:kind', element: <LogicPage creating /> },
       { path: 'access/:area', element: <AccessPage /> },

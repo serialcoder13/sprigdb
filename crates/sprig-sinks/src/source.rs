@@ -49,6 +49,34 @@ fn migrated() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     M.get_or_init(Default::default)
 }
 
+/// A stream log record as a sink record (also `TEST SINK`'s samples).
+pub(crate) fn stream_record(
+    stream: u64,
+    p: u32,
+    rec: sprig_streams::model::Record,
+) -> SinkRecord {
+    SinkRecord {
+        idem_key: stream_key(stream, p, rec.offset.0, rec.leader_epoch.0),
+        pos: Position::Stream {
+            stream,
+            partition: p,
+            offset: rec.offset.0,
+            epoch: rec.leader_epoch.0,
+        },
+        key: rec.key,
+        value: rec.value,
+        headers: rec
+            .headers
+            .into_iter()
+            .map(|(k, v)| (k, v.unwrap_or_default()))
+            .collect(),
+        op: None,
+        before: None,
+        after: None,
+        ts_ms: rec.ts_ms,
+    }
+}
+
 /// A stream source for one task.
 pub struct StreamSource {
     shard: Pool,
@@ -281,26 +309,7 @@ impl SourceReader for StreamSource {
             };
             for rec in batch.records {
                 self.at.insert(p, rec.offset.0 + 1);
-                out.push(SinkRecord {
-                    idem_key: stream_key(self.stream.0, p, rec.offset.0, rec.leader_epoch.0),
-                    pos: Position::Stream {
-                        stream: self.stream.0,
-                        partition: p,
-                        offset: rec.offset.0,
-                        epoch: rec.leader_epoch.0,
-                    },
-                    key: rec.key,
-                    value: rec.value,
-                    headers: rec
-                        .headers
-                        .into_iter()
-                        .map(|(k, v)| (k, v.unwrap_or_default()))
-                        .collect(),
-                    op: None,
-                    before: None,
-                    after: None,
-                    ts_ms: rec.ts_ms,
-                });
+                out.push(stream_record(self.stream.0, p, rec));
             }
         }
         self.turn = self.turn.wrapping_add(1);
@@ -968,14 +977,62 @@ fn queue_record(
         QueueAt::Own { id, .. } => *id,
         QueueAt::Member { .. } => qid,
     };
-    let body = col("body").and_then(|i| R::bytes(row, i));
     let props: serde_json::Value = col("properties")
         .and_then(|i| R::text(row, i))
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
-    let rk = col("routing_key")
-        .and_then(|i| R::text(row, i))
-        .unwrap_or_default();
+    Some(message_record(
+        queue,
+        msg,
+        token,
+        col("body").and_then(|i| R::bytes(row, i)),
+        &props,
+        col("routing_key")
+            .and_then(|i| R::text(row, i))
+            .unwrap_or_default(),
+        col("exchange").and_then(|i| R::text(row, i)),
+        col("delivery_count").and_then(|i| R::text(row, i)),
+    ))
+}
+
+/// A message browsed with `mq_browse` (`TEST SINK`'s samples, R9
+/// r9tests): the record a queue sink would make of it, without a delivery
+/// token; its position names the message's sequence number.
+#[must_use]
+pub fn browsed_record(
+    queue: u64,
+    seq: u64,
+    body: Option<Vec<u8>>,
+    properties: &str,
+    routing_key: String,
+    exchange: Option<String>,
+    delivery_count: u32,
+) -> SinkRecord {
+    let props: serde_json::Value = serde_json::from_str(properties).unwrap_or_default();
+    message_record(
+        queue,
+        format!("seq:{seq}"),
+        String::new(),
+        body,
+        &props,
+        routing_key,
+        exchange,
+        Some(delivery_count.to_string()),
+    )
+}
+
+/// A queue message's record (see [`queue_record`]).
+#[allow(clippy::too_many_arguments)]
+fn message_record(
+    queue: u64,
+    msg: String,
+    token: String,
+    body: Option<Vec<u8>>,
+    props: &serde_json::Value,
+    rk: String,
+    exchange: Option<String>,
+    delivery_count: Option<String>,
+) -> SinkRecord {
     let mut headers: Vec<(String, Vec<u8>)> = Vec::new();
     if let Some(h) = props.get("headers").and_then(serde_json::Value::as_object) {
         for (k, v) in h {
@@ -996,11 +1053,8 @@ fn queue_record(
         }
     };
     amqp("routing_key", Some(rk.clone()));
-    amqp("exchange", col("exchange").and_then(|i| R::text(row, i)));
-    amqp(
-        "delivery_count",
-        col("delivery_count").and_then(|i| R::text(row, i)),
-    );
+    amqp("exchange", exchange);
+    amqp("delivery_count", delivery_count);
     for k in ["message_id", "content_type", "correlation_id", "type"] {
         amqp(
             k,
@@ -1024,7 +1078,7 @@ fn queue_record(
             },
             |s| s.saturating_mul(1000),
         );
-    Some(SinkRecord {
+    SinkRecord {
         key: (!rk.is_empty()).then(|| rk.into_bytes()),
         value: body,
         headers,
@@ -1038,7 +1092,7 @@ fn queue_record(
             msg_id: msg,
             delivery: token,
         },
-    })
+    }
 }
 
 #[async_trait]

@@ -490,6 +490,18 @@ pub enum Stmt {
     ShowCreateSink(QName),
     /// `SHOW SINK STATUS`.
     ShowSinkStatus(QName),
+    /// `TEST [PLATFORM] CONNECTION c` (R9, r9tests): open and check the
+    /// destination, write nothing.
+    TestConnection(ConnName, Option<String>),
+    /// `TEST SINK s [WITH SAMPLE n]` (R9, r9tests): the sink's last `n`
+    /// source records (10 by default, at most 1,000) as they would be
+    /// delivered, delivering nothing.
+    TestSink {
+        /// The sink.
+        name: QName,
+        /// Records sampled.
+        sample: u32,
+    },
 }
 
 /// A cheap check before tokenizing: could `sql` be a sink statement?
@@ -949,6 +961,42 @@ pub fn parse(sql: &str) -> Result<Option<Stmt>> {
             Stmt::ShowSinkStatus(p.qname()?)
         } else {
             return Ok(None);
+        }
+    } else if p.peek_kw("TEST")
+        && (p.peek_kw_at(1, "CONNECTION")
+            || p.peek_kw_at(1, "SINK")
+            || (p.peek_kw_at(1, "PLATFORM") && p.peek_kw_at(2, "CONNECTION")))
+    {
+        p.need_kw("TEST")?;
+        if p.kw("SINK") {
+            let name = p.qname()?;
+            let sample = if p.kws(&["WITH", "SAMPLE"]) {
+                match p.peek() {
+                    Some(t) if t.kind == Tk::Num => {
+                        p.i += 1;
+                        t.text
+                            .parse::<u32>()
+                            .ok()
+                            .filter(|n| (1..=1000).contains(n))
+                            .ok_or_else(|| p.unexpected("a sample of 1 to 1000 records"))?
+                    }
+                    _ => return Err(p.unexpected("a sample of 1 to 1000 records")),
+                }
+            } else {
+                10
+            };
+            Stmt::TestSink { name, sample }
+        } else {
+            let platform = p.kw("PLATFORM");
+            p.need_kw("CONNECTION")?;
+            let q = p.qname()?;
+            Stmt::TestConnection(
+                ConnName {
+                    name: q.name,
+                    platform,
+                },
+                q.db,
+            )
         }
     } else if p.peek_kw("GRANT") || p.peek_kw("REVOKE") {
         let grant = p.kw("GRANT");
@@ -1568,5 +1616,50 @@ mod tests {
             Some(1_794_218_400_500)
         );
         assert_eq!(parse_time("nope"), None);
+    }
+
+    #[test]
+    fn test_statements_parse() {
+        // R9 (r9tests): TEST CONNECTION and TEST SINK.
+        assert_eq!(
+            parse("TEST CONNECTION shop.k").unwrap(),
+            Some(Stmt::TestConnection(
+                ConnName {
+                    name: "k".into(),
+                    platform: false
+                },
+                Some("shop".into())
+            ))
+        );
+        assert_eq!(
+            parse("test platform connection pk;").unwrap(),
+            Some(Stmt::TestConnection(
+                ConnName {
+                    name: "pk".into(),
+                    platform: true
+                },
+                None
+            ))
+        );
+        assert_eq!(
+            parse("TEST SINK s").unwrap(),
+            Some(Stmt::TestSink {
+                name: QName {
+                    db: None,
+                    name: "s".into()
+                },
+                sample: 10
+            })
+        );
+        assert!(matches!(
+            parse("TEST SINK shop.s WITH SAMPLE 25").unwrap(),
+            Some(Stmt::TestSink { sample: 25, .. })
+        ));
+        assert!(parse("TEST SINK s WITH SAMPLE 0").is_err());
+        assert!(parse("TEST SINK s WITH SAMPLE 1001").is_err());
+        assert!(parse("TEST SINK s WITH SAMPLE x").is_err());
+        assert!(parse("TEST CONNECTION").is_err());
+        // Not ours: a table or a word that merely starts like it.
+        assert_eq!(parse("TEST_SINK_TABLE").unwrap(), None);
     }
 }

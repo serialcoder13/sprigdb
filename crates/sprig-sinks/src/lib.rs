@@ -33,6 +33,7 @@ pub mod meta;
 pub mod model;
 pub mod peer;
 pub mod policy;
+pub mod probe;
 pub mod residency;
 pub mod runtime;
 pub mod secrets;

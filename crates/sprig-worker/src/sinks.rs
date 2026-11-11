@@ -97,7 +97,12 @@ impl RlsCatalogs {
     }
 
     /// Whether policies on any of `objects` bind user `owner`.
-    pub(crate) async fn binds(&self, tenant: TenantId, owner: u32, objects: &[u64]) -> Result<bool> {
+    pub(crate) async fn binds(
+        &self,
+        tenant: TenantId,
+        owner: u32,
+        objects: &[u64],
+    ) -> Result<bool> {
         use sprig_auth::authz::{AuthzState, CompiledPrivileges};
         let cat = self.catalog(tenant).await?;
         let Some(state) = sprig_auth::authz::rls::RlsState::of(&cat) else {
@@ -119,6 +124,55 @@ impl RlsCatalogs {
         Ok(objects
             .iter()
             .any(|o| r.tables.contains_key(&sprig_common::ids::ObjectId(*o))))
+    }
+
+    /// The `@sprig_rls` context of user `user` (chapter 29's JSON, as the
+    /// gateway builds it for a session; RL42): what MariaDB's policy views
+    /// and write triggers apply while worker-run code of that definer runs.
+    /// `None` when the tenant has no row-level security. Claims are absent
+    /// (no token) and the subtree sets empty, so policies naming them show
+    /// nothing to such code.
+    pub(crate) async fn context(&self, tenant: TenantId, user: u32) -> Result<Option<String>> {
+        use sprig_auth::authz::{AuthzState, CompiledPrivileges};
+        let cat = self.catalog(tenant).await?;
+        if sprig_auth::authz::rls::RlsState::of(&cat).is_none() {
+            return Ok(None);
+        }
+        let authz = AuthzState::of(&cat).ok_or_else(|| {
+            SprigError::new(
+                SprigCode::RlsUnsupported,
+                "no grants to compile the definer's policies",
+            )
+        })?;
+        let u = sprig_common::ids::UserId(user);
+        let row = sprig_auth::TenantAuth::of(&cat)
+            .and_then(|a| a.user(u))
+            .map(|x| x.row.clone())
+            .ok_or_else(|| {
+                SprigError::new(
+                    SprigCode::RlsUnsupported,
+                    format!("the definer (user {user}) is gone"),
+                )
+            })?;
+        let c = CompiledPrivileges::compile(authz, u, &authz.granted_roles(u));
+        let r = sprig_auth::authz::rls::compile(&cat, &c, u);
+        let v = json!({
+            "b": u8::from(r.bypass),
+            "x": r.exempt.iter().map(|o| o.0).collect::<Vec<_>>(),
+            "p": r.policy_ids,
+            "s": {
+                "user": format!("{}@{}", row.name, row.host),
+                "uid": user,
+                "tid": tenant.0,
+                "htid": tenant.0,
+                "space": (row.home_space_id != 0).then_some(row.home_space_id),
+                "claims": Value::Null,
+                "attrs": row.attributes.clone().unwrap_or(Value::Null),
+                "sub": Vec::<u64>::new(),
+                "man": Vec::<u64>::new(),
+            }
+        });
+        Ok(Some(v.to_string()))
     }
 }
 

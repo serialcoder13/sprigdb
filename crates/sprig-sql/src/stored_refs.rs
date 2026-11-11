@@ -113,7 +113,7 @@ impl Walk<'_> {
 #[must_use]
 pub fn references(text: &str, lex: &LexOptions) -> CodeRefs {
     let mut out = CodeRefs::default();
-    collect(text, lex, &mut out, 0);
+    collect(text, *lex, &mut out, 0);
     out.tables.sort();
     out.tables.dedup();
     out.calls.sort();
@@ -121,13 +121,13 @@ pub fn references(text: &str, lex: &LexOptions) -> CodeRefs {
     out
 }
 
-fn collect(text: &str, lex_opts: &LexOptions, out: &mut CodeRefs, depth: u8) {
+fn collect(text: &str, lex_opts: LexOptions, out: &mut CodeRefs, depth: u8) {
     let rec = Recorder(RefCell::new(Vec::new()));
-    if crate::rls::views::swap(text, lex_opts, &rec, &HashSet::new()).is_err() {
+    if crate::rls::views::swap(text, &lex_opts, &rec, &HashSet::new()).is_err() {
         out.opaque = true;
     }
     out.tables.extend(rec.0.into_inner());
-    let Ok(all) = lex::lex(text.as_bytes(), lex_opts) else {
+    let Ok(all) = lex::lex(text.as_bytes(), &lex_opts) else {
         out.opaque = true;
         return;
     };
@@ -196,7 +196,7 @@ fn collect(text: &str, lex_opts: &LexOptions, out: &mut CodeRefs, depth: u8) {
 /// The operand of `PREPARE ... FROM` or `EXECUTE IMMEDIATE` at token `k`:
 /// one string literal ending the statement is read as SQL; anything else
 /// is opaque.
-fn dynamic_operand(w: &Walk<'_>, k: usize, lex_opts: &LexOptions, out: &mut CodeRefs, depth: u8) {
+fn dynamic_operand(w: &Walk<'_>, k: usize, lex_opts: LexOptions, out: &mut CodeRefs, depth: u8) {
     let literal = w
         .toks
         .get(k)

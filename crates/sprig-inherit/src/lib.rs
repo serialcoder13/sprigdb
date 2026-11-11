@@ -236,6 +236,13 @@ pub async fn handle(sql: &str, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Hand
         Stmt::UseSpace(name) => return ddl::use_space(ctx, name.as_deref()).map(Handled::Space),
         Stmt::ShowSpaces => return Ok(Handled::Rows(show::spaces(ctx))),
         Stmt::ShowShares => return Ok(Handled::Rows(show::shares(ctx))),
+        Stmt::ShowCreateShare(name) => return show::create_share(ctx, &name).map(Handled::Rows),
+        Stmt::ShowInheritable => return show::inheritable(ctx).map(Handled::Rows),
+        Stmt::CheckRefs { table, filter } => {
+            return Box::pin(links::check_refs(ctx, r, &table, filter.as_deref()))
+                .await
+                .map(Handled::Rows);
+        }
         Stmt::CreateSpace { name, parent } => {
             return ddl::create_space(ctx, r, &name, parent.as_deref())
                 .await

@@ -58,6 +58,7 @@ mod failover;
 mod gateway;
 mod graph;
 mod index;
+mod inherit;
 mod search;
 // Chapter 52: approvals and recommendations.
 mod logic;
@@ -478,6 +479,7 @@ fn cli() -> Command {
         .subcommand(check::group())
         .subcommand(logic::group())
         .subcommand(space::group())
+        .subcommand(inherit::group())
         .subcommand(txn::group())
         .subcommand(sink::group())
         .subcommand(graph::group())
@@ -588,6 +590,9 @@ fn main() -> ExitCode {
                 .await
                 .map(|()| ExitCode::SUCCESS),
             "logic" => logic::run(sub, output(&matches))
+                .await
+                .map(|()| ExitCode::SUCCESS),
+            "inherit" => inherit::run(sub, output(&matches))
                 .await
                 .map(|()| ExitCode::SUCCESS),
             "space" => space::run(sub, output(&matches))

@@ -741,9 +741,9 @@ fn select(sql: &str, cx: &Ctx<'_>, host: &mut dyn Host) -> Result<Handled> {
         // topic would read the log with its definer's rights, so its
         // readers would get the table's rows without the table's policies
         // (and without SELECT on it): refused for every user.
-        let defines = ids.first().is_some_and(|w| {
-            w.eq_ignore_ascii_case("CREATE") || w.eq_ignore_ascii_case("ALTER")
-        });
+        let defines = ids
+            .first()
+            .is_some_and(|w| w.eq_ignore_ascii_case("CREATE") || w.eq_ignore_ascii_case("ALTER"));
         if defines && let Some(s) = found.values().find(|s| s.kind == StreamKind::Changes) {
             return Err(SprigError::new(
                 SprigCode::RlsUnsupported,

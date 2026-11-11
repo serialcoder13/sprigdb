@@ -596,8 +596,21 @@ pub const DDL_REFS: &str = "CREATE TABLE IF NOT EXISTS {refs} (
   from_key          VARBINARY(512)  NOT NULL,
   link              VARCHAR(64)     NOT NULL,
   at                DATETIME(6)     NOT NULL,
-  PRIMARY KEY (ref_obj, ref_key, kind, tenant, space, from_obj, from_key, link)
+  PRIMARY KEY (ref_obj, ref_key, kind, tenant, space, from_obj, from_key, link),
+  KEY by_from (from_obj, from_key)
 ) ENGINE=InnoDB";
+
+/// Adds [`DDL_REFS`]'s `by_from` index to a table made before it existed.
+pub const DDL_REFS_BY_FROM: &str = "ALTER TABLE {refs} ADD INDEX IF NOT EXISTS by_from (from_obj, \
+                                    from_key)";
+
+/// The prefix of a **handover** claim's link name. A level that deletes or
+/// hides rows of a referencing table that reaches child tenants hands their
+/// references over: descendants' overrides of those rows become orphans
+/// (the copy worker, asynchronously) and then hold the values themselves.
+/// Until the worker has claimed them, the handover stands in for their
+/// claims, so a delete of a referenced key can't slip between the two.
+pub const HANDOVER: char = '~';
 
 /// A key's canonical form in `inherit_refs`: its columns' text, joined by
 /// `0x1f`, as a SQL hex literal.
@@ -817,7 +830,8 @@ pub fn hex_parts(hex: &str) -> Vec<String> {
 }
 
 /// A key's parts as values comparable with its columns.
-fn hex_values(hex: &str) -> Vec<String> {
+#[must_use]
+pub fn hex_values(hex: &str) -> Vec<String> {
     hex_parts(hex)
         .into_iter()
         .map(|p| {
@@ -850,7 +864,8 @@ fn key_tuple(hex: &str) -> String {
 }
 
 /// The canonical form of `cols`, in SQL.
-fn canon(cols: &[String], alias: Option<&str>) -> String {
+#[must_use]
+pub fn canon(cols: &[String], alias: Option<&str>) -> String {
     let parts: Vec<String> = cols
         .iter()
         .map(|c| match alias {
@@ -865,7 +880,9 @@ fn canon(cols: &[String], alias: Option<&str>) -> String {
     }
 }
 
-fn bits(o: &InheritableObject, cols: &[String]) -> u64 {
+/// The override bits of `cols`.
+#[must_use]
+pub fn bits(o: &InheritableObject, cols: &[String]) -> u64 {
     cols.iter().fold(0, |b, c| b | o.bit(c))
 }
 
@@ -894,6 +911,202 @@ pub fn deletes_need_check(ctx: &Ctx<'_>, o: &InheritableObject) -> bool {
             matches!(s.to, ShareTarget::Tenant(_))
                 || (s.to == ShareTarget::AllChildren && s.from == ROOT_SPACE)
         })
+}
+
+/// Whether a delete in the session's space can orphan overrides in child
+/// tenants: `o` goes to child tenants from this space.
+#[must_use]
+pub fn reaches_child_tenants(ctx: &Ctx<'_>, o: &InheritableObject) -> bool {
+    ctx.state.shares_of(o.object_id).any(|s| {
+        s.from == ctx.space
+            && (matches!(s.to, ShareTarget::Tenant(_))
+                || (s.to == ShareTarget::AllChildren && s.from == ROOT_SPACE))
+    })
+}
+
+/// Before rows `keys` of `res` leave the session space's view (a delete,
+/// a hide or an orphan reset): handover claims for the values they show
+/// for each foreign key, when the table goes to child tenants (see
+/// [`HANDOVER`]). The copy worker replaces them with the orphans' own
+/// claims; a delete that finds one checks the descendants itself
+/// ([`before_delete`]).
+///
+/// # Errors
+/// The backend's and the catalog's.
+pub async fn hand_over(
+    ctx: &Ctx<'_>,
+    r: &mut dyn Runner,
+    res: &Resolved,
+    chain: &crate::view::Chain,
+    keys: &[String],
+) -> Result<()> {
+    let o = &res.obj;
+    if o.links.is_empty() || keys.is_empty() || !reaches_child_tenants(ctx, o) {
+        return Ok(());
+    }
+    let here = here(ctx);
+    for l in &o.links {
+        let Some(rr) = ctx.resolve(&Name {
+            db: Some(res.db_name.clone()),
+            name: l.ref_table.clone(),
+        })?
+        else {
+            continue;
+        };
+        let view = ViewSql {
+            o,
+            layer: res.layer.clone(),
+            keys: Some(keys.to_vec()),
+            origin: false,
+        }
+        .view(chain);
+        let rows = r
+            .query(&format!(
+                "SELECT HEX({}), HEX({}) FROM ({view}) AS `__sprig_v` WHERE {}",
+                canon(&o.key, Some("`__sprig_v`")),
+                canon(&l.columns, Some("`__sprig_v`")),
+                l.columns
+                    .iter()
+                    .map(|c| format!("`__sprig_v`.{} IS NOT NULL", q(c)))
+                    .collect::<Vec<_>>()
+                    .join(" AND ")
+            ))
+            .await?;
+        let found: Vec<Ref> = rows
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let from = text(row.first())?;
+                let to = text(row.get(1))?;
+                Some(Ref {
+                    from_hex: hex_lit(&from),
+                    ref_hex: hex_lit(&to),
+                    ref_sql: String::new(),
+                })
+            })
+            .collect();
+        if found.is_empty() {
+            continue;
+        }
+        let root = crate::ids::tree_root(ctx, &rr.obj)?;
+        let name = format!("{HANDOVER}{}", l.name);
+        for chunk in found.chunks(500) {
+            r.refs(
+                root.0,
+                &claims_sql(root.1, here.at, o.object_id, &name, chunk),
+            )
+            .await?;
+        }
+        metrics::counter!("sprig_inherit_handovers_total").increment(found.len() as u64);
+    }
+    Ok(())
+}
+
+/// Whether handover claim `c` (see [`HANDOVER`]) still stands for a
+/// delete at the session's level, related to it by `kin`: the handed-over
+/// row is gone (or going) at its level, and a tenant below that level
+/// (and at or below the session's, when the handover was made above it)
+/// still has an override of that row that the copy worker hasn't made an
+/// orphan with its own claim, or an orphan of it holding the key. The
+/// blocking tenant's level and the link, or `None` (the handover is then
+/// removed when nothing below needs it).
+async fn handover_live(
+    ctx: &Ctx<'_>,
+    r: &mut dyn Runner,
+    root: (TenantId, ObjectId),
+    c: &Entry,
+    kin: Kin,
+) -> Result<Option<(At, String, String, Link)>> {
+    let cat = if c.at.tenant == ctx.cat.tenant {
+        None
+    } else {
+        Some(catalog_of(ctx, r, c.at.tenant).await?)
+    };
+    let cc: &TenantCatalog = cat.as_deref().unwrap_or(ctx.cat);
+    let Some(st) = state_of(cc) else {
+        return Ok(None);
+    };
+    let Some(f) = st.object(c.from_obj).cloned() else {
+        r.refs(root.0, &forget_sql(root.1, "ref", c)).await?;
+        return Ok(None);
+    };
+    let name = c.link.trim_start_matches(HANDOVER);
+    let Some(l) = f.links.iter().find(|l| l.name == name).cloned() else {
+        r.refs(root.0, &forget_sql(root.1, "ref", c)).await?;
+        return Ok(None);
+    };
+    let Some(db) = cc.databases.get(f.db).map(|d| d.name.clone()) else {
+        return Ok(None);
+    };
+    // The handed-over row at its own level: still there (the delete
+    // rolled back), or locked (the delete is in flight).
+    let phys = physical_schema(cc, &db, ctx.lctn)?;
+    let at_home = format!(
+        "SELECT CAST(`_sprig_state` AS CHAR) FROM {}.{} WHERE {} AND `_sprig_space` = {} LOCK IN \
+         SHARE MODE NOWAIT",
+        q(&phys),
+        q(&f.table),
+        key_pred(&f.key, &c.from_hex),
+        c.at.space.0
+    );
+    match r.ctl_query(c.at.tenant, &at_home).await {
+        Ok(rows) => {
+            let state = rows.first().and_then(|row| text(row.first()));
+            if matches!(state.as_deref(), Some("own" | "orphan" | "ovr")) {
+                r.refs(root.0, &forget_sql(root.1, "ref", c)).await?;
+                return Ok(None);
+            }
+        }
+        Err(e) if locked(&e) => return Ok(Some((c.at, db, f.table.clone(), l))),
+        Err(e) => return Err(e),
+    }
+    // The tenants below that may hold an override of the row.
+    let (top, skip) = if kin == Kin::Above {
+        (ctx.cat.tenant, None)
+    } else {
+        (c.at.tenant, Some(c.at.tenant))
+    };
+    let tables = r.tree_tables(top, &db, &f.table).await?;
+    let b = bits(&f, &l.columns);
+    for tt in tables.iter().filter(|t| Some(t.tenant) != skip) {
+        let sql = format!(
+            "SELECT 1 FROM {}.{} WHERE {} AND `_sprig_space` = {} AND ((`_sprig_state` = 'ovr' \
+             AND `_sprig_ovr` & {b} <> {b}) OR (`_sprig_state` IN ('ovr', 'orphan') AND {} = {})) \
+             LIMIT 1 LOCK IN SHARE MODE NOWAIT",
+            q(&tt.schema),
+            q(&f.table),
+            key_pred(&f.key, &c.from_hex),
+            ROOT_SPACE.0,
+            canon(&l.columns, None),
+            c.ref_hex
+        );
+        let held = match r.ctl_query(tt.tenant, &sql).await {
+            Ok(rows) => !rows.is_empty(),
+            Err(e) if locked(&e) => true,
+            // A plain table of that name (no layer columns) shadows the
+            // inherited one there: nothing to orphan.
+            Err(e) if matches!(errno(&e), Some(1054 | 1146)) => false,
+            Err(e) => return Err(e),
+        };
+        if held {
+            let at = At {
+                tenant: tt.tenant,
+                space: ROOT_SPACE,
+            };
+            return Ok(Some((at, db, f.table.clone(), l)));
+        }
+    }
+    r.refs(root.0, &forget_sql(root.1, "ref", c)).await?;
+    Ok(None)
+}
+
+/// A backend error's number.
+fn errno(e: &SprigError) -> Option<u16> {
+    match e.kind {
+        sprig_common::ErrorKind::Backend { errno, .. }
+        | sprig_common::ErrorKind::Standard { errno, .. } => Some(errno),
+        sprig_common::ErrorKind::Sprig(_) => None,
+    }
 }
 
 /// A tenant's snapshot on the session's line (itself or an ancestor), or
@@ -1388,7 +1601,17 @@ pub async fn before_delete(
         let claims = parse_entries(&r.refs(root.0, &entries_sql(root.1, "ref", chunk)).await?);
         for c in claims {
             let anc = ancestors_of(ctx, r, c.at.tenant).await;
-            match here.kin(c.at, &anc) {
+            let kin = here.kin(c.at, &anc);
+            if c.link.starts_with(HANDOVER) {
+                if kin != Kin::Unrelated
+                    && let Some(b) = handover_live(ctx, r, root, &c, kin).await?
+                {
+                    blocking = Some(b);
+                    break;
+                }
+                continue;
+            }
+            match kin {
                 Kin::AtOrBelow => match claim_live(ctx, r, &c).await? {
                     Some((db, table, l)) => {
                         blocking = Some((c.at, db, table, l));
@@ -1444,6 +1667,144 @@ pub async fn before_delete(
     };
     metrics::counter!("sprig_inherit_deletes_refused_total").increment(1);
     Err(parent_row_fails(&db, &table, &l, &where_))
+}
+
+/// How a level shows to the caller: (tenant, space). A level in this
+/// tenant is named by its space; an ancestor by its name; a descendant
+/// tenant by its name for tenant administrators, otherwise as "a
+/// descendant tenant".
+async fn level_label(ctx: &Ctx<'_>, r: &mut dyn Runner, at: At) -> (String, String) {
+    if at.tenant == ctx.cat.tenant {
+        return (ctx.tenant_name.to_owned(), ctx.space_name(at.space));
+    }
+    if let Some(a) = ctx.cat.ancestry.iter().find(|a| a.id == at.tenant) {
+        return (a.name.clone(), String::new());
+    }
+    if ctx.privileges.space_admin()
+        && let Ok(c) = r.tenant_catalog(at.tenant).await
+    {
+        return (
+            tenant_name(&c).unwrap_or_else(|| at.tenant.to_string()),
+            String::new(),
+        );
+    }
+    ("a descendant tenant".to_owned(), String::new())
+}
+
+/// The text of a canonical key (`X'..'` parts joined by `, `).
+fn key_text(hex: &str) -> String {
+    let h = hex.trim_start_matches("X'").trim_end_matches('\'');
+    let bytes: Vec<u8> = (0..h.len() / 2)
+        .filter_map(|i| u8::from_str_radix(&h[i * 2..i * 2 + 2], 16).ok())
+        .collect();
+    bytes
+        .split(|b| *b == 0x1f)
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `SPRIG CHECK REFERENCES t [WHERE e]`: for the rows of `t` in the
+/// session space's view (at most 1,000), what would refuse their delete
+/// (1451) now: each row elsewhere that references one of them, by level,
+/// and handovers still waiting for the copy worker. Tenant administrators
+/// see descendant tenants' names and the referencing rows' keys; others
+/// see "a descendant tenant" and no key for rows outside this tenant and
+/// its ancestors.
+///
+/// # Errors
+/// 39885 for a table that isn't inheritable; the backend's.
+pub async fn check_refs(
+    ctx: &Ctx<'_>,
+    r: &mut dyn Runner,
+    table: &Name,
+    filter: Option<&str>,
+) -> Result<sprig_types::Rows> {
+    let Some(res) = ctx.resolve(table)? else {
+        return Err(SprigError::new(
+            SprigCode::NotInheritable,
+            format!("{} is not inheritable", table.name),
+        ));
+    };
+    let names = [
+        "Key", "Tenant", "Space", "Table", "Row", "Link", "Kind",
+    ];
+    let mut out = Vec::new();
+    if deletes_need_check(ctx, &res.obj) {
+        let chain = ctx.chain(&res.obj, ctx.space, &res.prefix)?;
+        let view = ViewSql {
+            o: &res.obj,
+            layer: res.layer.clone(),
+            keys: None,
+            origin: false,
+        }
+        .view(&chain);
+        let rows = r
+            .query(&format!(
+                "SELECT HEX({}) FROM ({view}) AS `__sprig_v`{} LIMIT 1000",
+                canon(&res.obj.key, Some("`__sprig_v`")),
+                filter.map(|f| format!(" WHERE {f}")).unwrap_or_default()
+            ))
+            .await?;
+        let hexes: Vec<String> = rows
+            .rows
+            .iter()
+            .filter_map(|row| text(row.first()))
+            .map(|h| hex_lit(&h))
+            .collect();
+        let here = here(ctx);
+        let root = crate::ids::tree_root(ctx, &res.obj)?;
+        let admin = ctx.privileges.space_admin();
+        for chunk in hexes.chunks(500) {
+            let claims =
+                parse_entries(&r.refs(root.0, &entries_sql(root.1, "ref", chunk)).await?);
+            for c in claims {
+                let anc = ancestors_of(ctx, r, c.at.tenant).await;
+                let kin = here.kin(c.at, &anc);
+                let found = if c.link.starts_with(HANDOVER) {
+                    if kin == Kin::Unrelated {
+                        None
+                    } else {
+                        handover_live(ctx, r, root, &c, kin)
+                            .await?
+                            .map(|(at, db, t, l)| (at, db, t, l, "orphaning in progress"))
+                    }
+                } else {
+                    match kin {
+                        Kin::AtOrBelow => claim_live(ctx, r, &c)
+                            .await?
+                            .map(|(db, t, l)| (c.at, db, t, l, "reference")),
+                        Kin::Above => claim_seen(ctx, r, &res.db_name, &c)
+                            .await?
+                            .map(|(t, l)| (c.at, res.db_name.clone(), t, l, "reference")),
+                        Kin::Unrelated => None,
+                    }
+                };
+                let Some((at, db, t, l, kind)) = found else {
+                    continue;
+                };
+                let (tenant, space) = level_label(ctx, r, at).await;
+                let on_line =
+                    at.tenant == ctx.cat.tenant || ctx.ancestors.iter().any(|a| a.tenant == at.tenant);
+                let row_key = (admin || on_line).then(|| key_text(&c.from_hex));
+                out.push(
+                    [
+                        Some(key_text(&c.ref_hex)),
+                        Some(tenant),
+                        Some(space),
+                        Some(format!("{db}.{t}")),
+                        row_key,
+                        Some(l.name.clone()),
+                        Some(kind.to_owned()),
+                    ]
+                    .into_iter()
+                    .map(|v| v.map(String::into_bytes))
+                    .collect(),
+                );
+            }
+        }
+    }
+    Ok(crate::show::text_rows(&names, out))
 }
 
 /// A tenant's name as its catalog's ancestry can't tell: its root space's

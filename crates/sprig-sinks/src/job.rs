@@ -731,7 +731,7 @@ pub async fn open_conn(
 ///
 /// # Errors
 /// 39219 for a function that is gone or can't be a transform.
-async fn load_transform(
+pub(crate) async fn load_transform(
     pool: &Pool,
     schema: &str,
     def: &SinkDef,
@@ -1802,7 +1802,7 @@ async fn instance_stream(
 /// The log shard schema of stream `stream` (its first log shard).
 /// A stream's log schema, and its table's object id when it is a change
 /// topic.
-async fn stream_log_schema(
+pub(crate) async fn stream_log_schema(
     pool: &Pool,
     catalog: &str,
     tenant: TenantId,

@@ -16,6 +16,9 @@
 //! | `SPRIG RESET t [(c, ...)] [WHERE e]` | [`Stmt::Reset`] |
 //! | `SHOW SPACES`, `SHOW SHARES` | [`Stmt::ShowSpaces`], [`Stmt::ShowShares`] |
 //! | `SPRIG CHECK IDS t` | [`Stmt::CheckIds`] (ids held by more than one tenant of the tree) |
+//! | `SPRIG CHECK REFERENCES t [WHERE e]` | [`Stmt::CheckRefs`] (what refuses a delete of those rows) |
+//! | `SHOW CREATE SHARE n` | [`Stmt::ShowCreateShare`] (with the share's foreign-key group) |
+//! | `SHOW INHERITABLE TABLES` | [`Stmt::ShowInheritable`] (each table's origin level and group) |
 //! | `CREATE TABLE t (... REFERENCES ...)` | [`Stmt::CreateTable`] (foreign keys onto inheritable tables) |
 
 use sprig_common::{SprigCode, SprigError};
@@ -164,6 +167,18 @@ pub enum Stmt {
     /// `SPRIG CHECK IDS t`: the ids of `t` that more than one tenant of
     /// its tree holds as its own ([`crate::ids`]).
     CheckIds(Name),
+    /// `SPRIG CHECK REFERENCES t [WHERE e]`: the rows and tenants whose
+    /// references refuse a delete of `t`'s rows ([`crate::links`]).
+    CheckRefs {
+        /// The referenced table.
+        table: Name,
+        /// Which rows (every row of the session's view when absent).
+        filter: Option<String>,
+    },
+    /// `SHOW CREATE SHARE n`.
+    ShowCreateShare(String),
+    /// `SHOW INHERITABLE TABLES`.
+    ShowInheritable,
     /// Anything else.
     Other,
 }
@@ -386,6 +401,28 @@ pub fn classify(sql: &[u8], lex_opts: &LexOptions) -> Result<Stmt, SprigError> {
         if t.is(1, "SHARES") {
             return Ok(Stmt::ShowShares);
         }
+    }
+    if first("SPRIG") && t.is(1, "CHECK") && t.is(2, "REFERENCES") {
+        let (table, i) = t
+            .name(3)
+            .ok_or_else(|| syntax("SPRIG CHECK REFERENCES table [WHERE condition]"))?;
+        let filter = if t.is(i, "WHERE") && i + 1 < t.len() {
+            Some(t.text(i + 1, t.len() - 1))
+        } else if i == t.len() {
+            None
+        } else {
+            return Err(syntax("SPRIG CHECK REFERENCES table [WHERE condition]"));
+        };
+        return Ok(Stmt::CheckRefs { table, filter });
+    }
+    if first("SHOW") && t.is(1, "CREATE") && t.is(2, "SHARE") {
+        return match t.ident_or_string(3) {
+            Some(n) if t.len() == 4 => Ok(Stmt::ShowCreateShare(n)),
+            _ => Err(syntax("SHOW CREATE SHARE name")),
+        };
+    }
+    if first("SHOW") && t.len() == 3 && t.is(1, "INHERITABLE") && t.is(2, "TABLES") {
+        return Ok(Stmt::ShowInheritable);
     }
     if first("SHOW") && t.is(1, "CREATE") && t.is(2, "TABLE") {
         if let Some((n, next)) = t.name(3)
@@ -764,7 +801,7 @@ pub fn is_extension(sql: &[u8], lex_opts: &LexOptions) -> bool {
         }
         return false;
     }
-    if t.is(0, "SPRIG") && t.is(1, "CHECK") && t.is(2, "IDS") {
+    if t.is(0, "SPRIG") && t.is(1, "CHECK") && (t.is(2, "IDS") || t.is(2, "REFERENCES")) {
         return true;
     }
     if t.is(0, "SPRIG") && t.is(1, "RESET") && !t.is(2, "BOUNDS") && !t.punct(2, b'(') {
@@ -922,6 +959,22 @@ mod tests {
                 change: ShareChange::Take(None)
             }
         );
+        assert_eq!(
+            c("SPRIG CHECK REFERENCES shop.t2 WHERE id IN (1, 2)"),
+            Stmt::CheckRefs {
+                table: Name {
+                    db: Some("shop".into()),
+                    name: "t2".into()
+                },
+                filter: Some("id IN (1, 2)".into())
+            }
+        );
+        assert_eq!(c("SHOW CREATE SHARE s1"), Stmt::ShowCreateShare("s1".into()));
+        assert_eq!(c("show inheritable tables"), Stmt::ShowInheritable);
+        assert!(is_extension(
+            b"SPRIG CHECK REFERENCES t2",
+            &LexOptions::mariadb()
+        ));
         assert_eq!(
             c("SPRIG RESET products (colour) WHERE id = 2"),
             Stmt::Reset {

@@ -139,6 +139,17 @@ pub trait RunGuard: Send + Sync {
     /// # Errors
     /// Why not, retryable: the lane retries with backoff.
     async fn check(&self) -> Result<()>;
+
+    /// The definer's `@sprig_rls` context (RL42), set on the shard
+    /// connection while the code runs, so MariaDB's policy views and write
+    /// triggers apply the definer's policies instead of treating the run as
+    /// internal; `None` for none.
+    ///
+    /// # Errors
+    /// Why it can't be built (retryable).
+    async fn context(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// An error's number.
@@ -218,12 +229,17 @@ impl Apply for MariaApply {
         // The version first: reading it takes a catalog connection, which
         // must never be awaited while this attempt holds a shard's.
         let (version, params) = self.versions.active().await?;
-        if let Some(g) = &self.guard {
-            g.check().await.map_err(|mut e| {
-                e.retryable = true;
-                e
-            })?;
-        }
+        let retry = |mut e: SprigError| {
+            e.retryable = true;
+            e
+        };
+        let ctx = match &self.guard {
+            Some(g) => {
+                g.check().await.map_err(retry)?;
+                g.context().await.map_err(retry)?
+            }
+            None => None,
+        };
         let pool = self.pools.pool(self.tenant).await?;
         let mut c = pool.get_conn().await.map_err(|e| {
             SprigError::new(
@@ -232,7 +248,30 @@ impl Apply for MariaApply {
             )
             .with_source(e)
         })?;
-        match self.attempt(&mut c, ev, version, &params).await {
+        if let Some(x) = &ctx {
+            c.exec_drop("SET @sprig_rls = ?", (x.as_str(),))
+                .await
+                .map_err(conn_err)?;
+        }
+        let r = self.attempt(&mut c, ev, version, &params).await;
+        // The pooled sprig_ctl connection must not keep the definer's
+        // context: other internal work on it would be checked as the
+        // definer. A connection that can't be reset is closed.
+        if ctx.is_some() {
+            if r.is_err() {
+                let _ = c.query_drop("ROLLBACK").await;
+            }
+            if c.query_drop("SET @sprig_rls = NULL").await.is_err() {
+                let _ = c.disconnect().await;
+                return r.map_err(|mut e| {
+                    if transient(&e) {
+                        e.retryable = true;
+                    }
+                    e
+                });
+            }
+        }
+        match r {
             Ok(a) => Ok(a),
             Err(mut e) => {
                 let _ = c.query_drop("ROLLBACK").await;

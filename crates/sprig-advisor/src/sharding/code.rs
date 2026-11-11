@@ -367,10 +367,7 @@ pub fn apply_rules(input: &mut Input, rules: &CodeRules) {
     for (o, _) in &held {
         for u in units.iter().filter(|u| u.contains(o)) {
             for m in u.iter().filter(|m| *m != o && !rules.held.contains_key(m)) {
-                extra.push((
-                    *m,
-                    vec![format!("its key-value unit's table {o} stays")],
-                ));
+                extra.push((*m, vec![format!("its key-value unit's table {o} stays")]));
             }
         }
     }
@@ -482,7 +479,12 @@ mod tests {
     #[test]
     fn code_holds_what_it_names() {
         let c = vec![
-            code(CodeKind::Procedure, "pcount", None, "SELECT COUNT(*) FROM la"),
+            code(
+                CodeKind::Procedure,
+                "pcount",
+                None,
+                "SELECT COUNT(*) FROM la",
+            ),
             code(
                 CodeKind::View,
                 "vla",
@@ -591,7 +593,12 @@ mod tests {
             ..Input::default()
         };
         let c = vec![
-            code(CodeKind::Procedure, "pcount", None, "SELECT COUNT(*) FROM la"),
+            code(
+                CodeKind::Procedure,
+                "pcount",
+                None,
+                "SELECT COUNT(*) FROM la",
+            ),
             code(
                 CodeKind::Trigger,
                 "tr_ord",
@@ -631,7 +638,10 @@ mod tests {
             found.evidence
         );
         assert!(
-            !found.evidence.iter().any(|e| e.contains("pinned UNSHARDED")),
+            !found
+                .evidence
+                .iter()
+                .any(|e| e.contains("pinned UNSHARDED")),
             "{:?}",
             found.evidence
         );

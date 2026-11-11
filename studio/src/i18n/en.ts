@@ -61,6 +61,7 @@ export const en = {
   'nav.redis': 'Redis',
   'nav.logic': 'Logic',
   'nav.messaging': 'Messaging',
+  'nav.inheritance': 'Inheritance',
   'nav.policies': 'Roles and policies',
   'nav.security': 'Security',
   'nav.operator': 'Operator mode',

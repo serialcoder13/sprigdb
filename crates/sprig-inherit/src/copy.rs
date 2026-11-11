@@ -625,6 +625,8 @@ pub struct Maintainer {
     family: Family,
     copies: CopyStates,
     views: BTreeSet<(u64, String, String)>,
+    /// Root tenants whose `inherit_refs` this maintainer made sure of.
+    refs_ready: BTreeSet<u64>,
     /// What it did so far.
     pub counts: Counts,
 }
@@ -666,6 +668,7 @@ impl Maintainer {
             family: Family::default(),
             copies: CopyStates::default(),
             views: BTreeSet::new(),
+            refs_ready: BTreeSet::new(),
             counts: Counts::default(),
         }
     }
@@ -985,17 +988,20 @@ impl Maintainer {
             .into_iter()
             .filter(|(n, _, _)| e.columns.iter().any(|(x, _)| x.eq_ignore_ascii_case(n)))
             .collect();
-        let have: Vec<String> = c
+        let have: Vec<(String, String)> = c
             .exec(
-                "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND \
-                 TABLE_NAME = ? AND COLUMN_NAME NOT LIKE '\\_sprig\\_%' ORDER BY ORDINAL_POSITION",
+                "SELECT COLUMN_NAME, COLUMN_TYPE FROM information_schema.COLUMNS WHERE \
+                 TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME NOT LIKE '\\_sprig\\_%' \
+                 ORDER BY ORDINAL_POSITION",
                 (e.child_schema.as_str(), copy_table(e.key.object)),
             )
             .await
             .map_err(exec_err)?;
-        let want: Vec<String> = cols.iter().map(|(n, _, _)| n.clone()).collect();
+        let want: Vec<(String, String)> =
+            cols.iter().map(|(n, t, _)| (n.clone(), t.clone())).collect();
         if !have.is_empty() && have != want {
-            // The child's columns changed: start the object's copies over.
+            // The child's columns changed (names, or types its parent
+            // widened): start the object's copies over.
             c.query_drop(format!(
                 "DROP TABLE IF EXISTS {}.{}",
                 q(&e.child_schema),
@@ -1199,6 +1205,9 @@ impl Maintainer {
             if lost.is_empty() {
                 continue;
             }
+            if !xo.links.is_empty() {
+                self.fill_references(tenant, x, &d, &lineage, &lost).await?;
+            }
             let mut c = self.env.conn(x).await?;
             c.query_drop(format!(
                 "UPDATE {}.{} SET `_sprig_state` = 'orphan', `_sprig_ovr` = {ALL_BITS} WHERE \
@@ -1210,9 +1219,327 @@ impl Maintainer {
             ))
             .await
             .map_err(exec_err)?;
-            self.counts.orphans += c.affected_rows();
+            let n = c.affected_rows();
+            drop(c);
+            self.counts.orphans += n;
             metrics::counter!("sprig_inherit_orphans_total", "policy" => "keep", "path" => "async")
-                .increment(c.affected_rows());
+                .increment(n);
+            if n > 0 && !xo.links.is_empty() {
+                self.claim_orphans(x, &d, &xschema, &xo, &lost).await?;
+            }
+        }
+        self.drop_handovers(tenant, db, table, keys).await?;
+        Ok(())
+    }
+
+    /// Runs `sql` on `inherit_refs` in tenant `root`'s catalog (`{refs}`
+    /// stands for the table, created when missing), as the gateway does.
+    async fn refs(&mut self, root: TenantId, sql: &str) -> Result<Vec<Row>> {
+        let table = format!(
+            "{}.`inherit_refs`",
+            q(&sprig_common::names::SchemaName::catalog(root).to_string())
+        );
+        let mut c = self.env.conn(root).await?;
+        if self.refs_ready.insert(root.0) {
+            let made = async {
+                c.query_drop(crate::links::DDL_REFS.replace("{refs}", &table))
+                    .await?;
+                c.query_drop(crate::links::DDL_REFS_BY_FROM.replace("{refs}", &table))
+                    .await
+            }
+            .await;
+            if let Err(e) = made {
+                self.refs_ready.remove(&root.0);
+                return Err(exec_err(e));
+            }
+        }
+        c.query(sql.replace("{refs}", &table))
+            .await
+            .map_err(exec_err)
+    }
+
+    /// The tree root (tenant, object) of the table that link `l` of `o`
+    /// (in tenant `t`, database `db`) references: where its claims live.
+    fn ref_root(
+        &self,
+        t: TenantId,
+        db: &str,
+        l: &crate::model::Link,
+    ) -> Option<(TenantId, ObjectId)> {
+        let ctx = self.family.ctx(t, &self.copies)?;
+        let d = ctx.cat.databases.iter().find(|d| d.name.eq_ignore_ascii_case(db))?;
+        let rr = ctx.state.object_named_ci(d.db_id, &l.ref_table)?;
+        crate::ids::tree_root(&ctx, rr).ok()
+    }
+
+    /// Before `x`'s overrides of `lost` become orphans: each foreign key
+    /// they inherit (its override bits unset) takes the value `x`'s view
+    /// showed when the record left it, not the value stored when the
+    /// override was written (the parent may have changed it since). That is
+    /// the nearest tenant between `deleter` and `x` whose row was orphaned
+    /// first in this pass, else the handover claim `deleter` made when it
+    /// deleted or hid the record ([`crate::links::HANDOVER`]).
+    async fn fill_references(
+        &mut self,
+        deleter: TenantId,
+        x: TenantId,
+        db: &str,
+        lineage: &[(TenantId, Arc<InheritableObject>, String)],
+        lost: &[KeyLit],
+    ) -> Result<()> {
+        let Some((_, xo, xschema)) = lineage.last().cloned() else {
+            return Ok(());
+        };
+        let from = lineage
+            .iter()
+            .position(|(y, _, _)| *y == deleter)
+            .map_or(0, |i| i + 1);
+        let between: Vec<(TenantId, Arc<InheritableObject>, String)> =
+            lineage[from.min(lineage.len() - 1)..lineage.len() - 1].to_vec();
+        let deleter_obj = lineage
+            .iter()
+            .find(|(y, _, _)| *y == deleter)
+            .map(|(_, o, _)| Arc::clone(o));
+        let key_hex = crate::links::canon(&xo.key, None);
+        for l in &xo.links {
+            let b = crate::links::bits(&xo, &l.columns);
+            let mut c = self.env.conn(x).await?;
+            let rows: Vec<Row> = c
+                .query(format!(
+                    "SELECT HEX({key_hex}) FROM {}.{} WHERE `_sprig_space` = {} AND \
+                     `_sprig_state` = 'ovr' AND `_sprig_ovr` & {b} <> {b} AND {}",
+                    q(&xschema),
+                    q(&xo.table),
+                    ROOT_SPACE.0,
+                    key_pred(&xo.key, lost, "")
+                ))
+                .await
+                .map_err(exec_err)?;
+            drop(c);
+            let mut need: BTreeSet<String> = rows
+                .into_iter()
+                .filter_map(|r| r.get::<Option<String>, _>(0).flatten())
+                .collect();
+            if need.is_empty() {
+                continue;
+            }
+            let mut values: BTreeMap<String, String> = BTreeMap::new();
+            let in_list = |need: &BTreeSet<String>| {
+                need.iter()
+                    .map(|h| format!("X'{h}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            for (y, yo, yschema) in between.iter().rev() {
+                if need.is_empty() {
+                    break;
+                }
+                let mut c = self.env.conn(*y).await?;
+                let rows: Vec<Row> = c
+                    .query(format!(
+                        "SELECT HEX({}), HEX({}) FROM {}.{} WHERE `_sprig_space` = {} AND \
+                         `_sprig_state` IN ('own', 'orphan') AND {} IN ({})",
+                        crate::links::canon(&yo.key, None),
+                        crate::links::canon(&l.columns, None),
+                        q(yschema),
+                        q(&yo.table),
+                        ROOT_SPACE.0,
+                        crate::links::canon(&yo.key, None),
+                        in_list(&need)
+                    ))
+                    .await
+                    .map_err(exec_err)?;
+                for r in rows {
+                    let (Some(k), v) = (
+                        r.get::<Option<String>, _>(0).flatten(),
+                        r.get::<Option<String>, _>(1).flatten(),
+                    ) else {
+                        continue;
+                    };
+                    need.remove(&k);
+                    if let Some(v) = v {
+                        values.insert(k, v);
+                    }
+                }
+            }
+            if !need.is_empty()
+                && let (Some(fo), Some(root)) = (&deleter_obj, self.ref_root(x, db, l))
+            {
+                let rows = self
+                    .refs(
+                        root.0,
+                        &format!(
+                            "SELECT HEX(from_key), HEX(ref_key) FROM {{refs}} WHERE ref_obj = {} \
+                             AND kind = 'ref' AND tenant = {} AND from_obj = {} AND link = {} \
+                             AND from_key IN ({})",
+                            root.1.0,
+                            deleter.0,
+                            fo.object_id.0,
+                            crate::view::lit(&format!("{}{}", crate::links::HANDOVER, l.name)),
+                            in_list(&need)
+                        ),
+                    )
+                    .await?;
+                for r in rows {
+                    if let (Some(k), Some(v)) = (
+                        r.get::<Option<String>, _>(0).flatten(),
+                        r.get::<Option<String>, _>(1).flatten(),
+                    ) {
+                        values.insert(k, v);
+                    }
+                }
+            }
+            if values.is_empty() {
+                continue;
+            }
+            let mut c = self.env.conn(x).await?;
+            for (k, v) in &values {
+                let sets: Vec<String> = l
+                    .columns
+                    .iter()
+                    .zip(crate::links::hex_values(&format!("X'{v}'")))
+                    .map(|(col, val)| format!("{} = {val}", q(col)))
+                    .collect();
+                c.query_drop(format!(
+                    "UPDATE {}.{} SET {} WHERE `_sprig_space` = {} AND `_sprig_state` = 'ovr' \
+                     AND {key_hex} = X'{k}'",
+                    q(&xschema),
+                    q(&xo.table),
+                    sets.join(", "),
+                    ROOT_SPACE.0
+                ))
+                .await
+                .map_err(exec_err)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Claims for the references `x`'s new orphans `lost` now hold as
+    /// their own (decision IG7's index), so a delete of a referenced key
+    /// anywhere above sees them.
+    async fn claim_orphans(
+        &mut self,
+        x: TenantId,
+        db: &str,
+        xschema: &str,
+        xo: &InheritableObject,
+        lost: &[KeyLit],
+    ) -> Result<()> {
+        for l in &xo.links {
+            let Some(root) = self.ref_root(x, db, l) else {
+                continue;
+            };
+            let mut c = self.env.conn(x).await?;
+            let rows: Vec<Row> = c
+                .query(format!(
+                    "SELECT HEX({}), HEX({}) FROM {}.{} WHERE `_sprig_space` = {} AND \
+                     `_sprig_state` = 'orphan' AND {} AND {}",
+                    crate::links::canon(&xo.key, None),
+                    crate::links::canon(&l.columns, None),
+                    q(xschema),
+                    q(&xo.table),
+                    ROOT_SPACE.0,
+                    key_pred(&xo.key, lost, ""),
+                    l.columns
+                        .iter()
+                        .map(|c| format!("{} IS NOT NULL", q(c)))
+                        .collect::<Vec<_>>()
+                        .join(" AND ")
+                ))
+                .await
+                .map_err(exec_err)?;
+            drop(c);
+            let found: Vec<crate::links::Ref> = rows
+                .into_iter()
+                .filter_map(|r| {
+                    let k = r.get::<Option<String>, _>(0).flatten()?;
+                    let v = r.get::<Option<String>, _>(1).flatten()?;
+                    Some(crate::links::Ref {
+                        from_hex: format!("X'{k}'"),
+                        ref_hex: format!("X'{v}'"),
+                        ref_sql: String::new(),
+                    })
+                })
+                .collect();
+            let at = crate::links::At {
+                tenant: x,
+                space: ROOT_SPACE,
+            };
+            for chunk in found.chunks(500) {
+                self.refs(
+                    root.0,
+                    &crate::links::claims_sql(root.1, at, xo.object_id, &l.name, chunk),
+                )
+                .await?;
+            }
+            metrics::counter!("sprig_inherit_orphan_claims_total").increment(found.len() as u64);
+        }
+        Ok(())
+    }
+
+    /// After the orphan pass of a change of `keys` in `deleter`: its
+    /// handover claims for them are no longer needed (the orphans below
+    /// hold their own claims now).
+    async fn drop_handovers(
+        &mut self,
+        deleter: TenantId,
+        db: &str,
+        table: &str,
+        keys: &[KeyLit],
+    ) -> Result<()> {
+        let Some(cat) = self.family.cats.get(&deleter).cloned() else {
+            return Ok(());
+        };
+        let Some(st) = state_of(&cat) else {
+            return Ok(());
+        };
+        let Some(o) = cat
+            .databases
+            .iter()
+            .find(|d| d.name.eq_ignore_ascii_case(db))
+            .and_then(|d| st.object_named_ci(d.db_id, table))
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let to_children = st.shares_of(o.object_id).any(|s| {
+            matches!(s.to, crate::model::ShareTarget::Tenant(_))
+                || s.to == crate::model::ShareTarget::AllChildren
+        });
+        if o.links.is_empty() || !to_children {
+            return Ok(());
+        }
+        let hexes: Vec<String> = keys
+            .iter()
+            .map(|k| {
+                let parts: Vec<String> = k.0.iter().map(|v| format!("CAST({v} AS BINARY)")).collect();
+                if parts.len() == 1 {
+                    parts.into_iter().next().unwrap_or_default()
+                } else {
+                    format!("CONCAT_WS(X'1F', {})", parts.join(", "))
+                }
+            })
+            .collect();
+        for l in &o.links {
+            let Some(root) = self.ref_root(deleter, db, l) else {
+                continue;
+            };
+            for chunk in hexes.chunks(500) {
+                self.refs(
+                    root.0,
+                    &format!(
+                        "DELETE FROM {{refs}} WHERE ref_obj = {} AND kind = 'ref' AND tenant = {} \
+                         AND from_obj = {} AND link = {} AND from_key IN ({})",
+                        root.1.0,
+                        deleter.0,
+                        o.object_id.0,
+                        crate::view::lit(&format!("{}{}", crate::links::HANDOVER, l.name)),
+                        chunk.join(", ")
+                    ),
+                )
+                .await?;
+            }
         }
         Ok(())
     }

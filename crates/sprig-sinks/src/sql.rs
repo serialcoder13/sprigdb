@@ -176,6 +176,31 @@ pub trait Host: Send {
         None
     }
 
+    /// What `TEST CONNECTION` and `TEST SINK` open connections and read
+    /// sources through, as a sink task would (R9, r9tests). `None`: this
+    /// host can't run them.
+    fn sink_env(&self) -> Option<Arc<dyn crate::job::SinkEnv>> {
+        None
+    }
+
+    /// Up to `n` messages of queue `queue` in database `db`, browsed (not
+    /// taken, not locked) with the session's rights, as sink records
+    /// (`TEST SINK`, R9 r9tests).
+    ///
+    /// # Errors
+    /// The queue engine's; by default, that this host has none.
+    async fn sample_queue(
+        &mut self,
+        _db: &str,
+        _queue: &str,
+        _n: usize,
+    ) -> Result<Vec<crate::model::SinkRecord>> {
+        Err(err(
+            SprigCode::SinkOptionInvalid,
+            "this gateway can't read queues for TEST SINK",
+        ))
+    }
+
     /// Whether the user may `DELETE` (consume) `db.name` (a queue).
     fn can_delete(&self, db: &str, name: &str) -> bool {
         self.can_select(db, name)
@@ -808,6 +833,8 @@ pub async fn handle_stmt(st: Stmt, h: &mut dyn Host) -> Result<Handled> {
                 rows: vec![vec![Some(s.name.clone()), Some(render_sink(s))]],
             })
         }
+        Stmt::TestConnection(c, db) => test_connection(h, &c, db.as_deref()).await,
+        Stmt::TestSink { name, sample } => test_sink(h, &name, sample).await,
         Stmt::ShowSinkStatus(name) => {
             let (db, _) = db_of(h, name.db.as_deref())?;
             let st = h.state();
@@ -860,6 +887,104 @@ pub async fn handle_stmt(st: Stmt, h: &mut dyn Host) -> Result<Handled> {
 }
 
 /// Target options known to be numbers.
+fn no_env() -> sprig_common::SprigError {
+    err(
+        SprigCode::SinkOptionInvalid,
+        "this gateway can't run TEST CONNECTION or TEST SINK (it has no sink environment)",
+    )
+}
+
+/// `TEST [PLATFORM] CONNECTION` (R9, r9tests; [`crate::probe`]): the
+/// rights to name the connection in a sink, then each step's result.
+async fn test_connection(h: &mut dyn Host, c: &ConnName, db: Option<&str>) -> Result<Handled> {
+    let (db_id, db_name) = db_of(h, db)?;
+    let (r, _) = resolve_conn(h, db_id, c).await?;
+    let env = h.sink_env().ok_or_else(no_env)?;
+    let steps = crate::probe::test_connection(env.as_ref(), h.tenant(), &r, db_id, &db_name).await?;
+    metrics::counter!("sprig_sink_connection_tests_total",
+        "result" => if steps.iter().all(|s| s.ok) { "ok" } else { "failed" })
+    .increment(1);
+    Ok(Handled::Rows {
+        columns: ["Step", "Result", "Detail", "Elapsed ms"]
+            .map(String::from)
+            .to_vec(),
+        rows: steps
+            .into_iter()
+            .map(|s| {
+                vec![
+                    Some(s.step),
+                    Some(if s.ok { "ok" } else { "failed" }.to_owned()),
+                    Some(s.detail),
+                    Some(s.elapsed_ms.to_string()),
+                ]
+            })
+            .collect(),
+    })
+}
+
+/// `TEST SINK` (R9, r9tests; [`crate::probe`]): `SPRIG_SINK_ADMIN` or the
+/// sink's ownership; a stream source also needs `SELECT` on it (the sample
+/// is read for the caller), a queue is browsed with the caller's rights.
+async fn test_sink(h: &mut dyn Host, name: &grammar::QName, sample: u32) -> Result<Handled> {
+    let (db, db_name) = db_of(h, name.db.as_deref())?;
+    let def = h
+        .state()
+        .sink(db, &name.name)
+        .ok_or_else(|| err(SprigCode::SinkNotFound, format!("no sink {}", name.name)))?
+        .clone();
+    let me = h.user_id().unwrap_or(u32::MAX);
+    if !(h.sink_admin() || def.owner_user_id == me) {
+        need_admin(h)?;
+    }
+    let env = h.sink_env().ok_or_else(no_env)?;
+    let n = sample as usize;
+    let records = match &def.source {
+        SourceSpec::Stream {
+            id,
+            name: s,
+            partitions,
+        } => {
+            if !h.can_select(&db_name, s) {
+                return Err(err(
+                    SprigCode::SinkPrivilege,
+                    format!("TEST SINK reads stream {s} for you: you need SELECT on it"),
+                ));
+            }
+            crate::probe::sample_stream(env.as_ref(), h.tenant(), *id, *partitions, n).await?
+        }
+        SourceSpec::Queue { name: q, .. } => h.sample_queue(&db_name, q, n).await?,
+        other => {
+            return Err(err(
+                SprigCode::SinkOptionInvalid,
+                format!(
+                    "TEST SINK samples stream and queue sources; this sink reads {}",
+                    other.kind()
+                ),
+            ));
+        }
+    };
+    let rows = crate::probe::dry_run(env.as_ref(), h.tenant(), &def, records).await?;
+    metrics::counter!("sprig_sink_dry_runs_total").increment(1);
+    Ok(Handled::Rows {
+        columns: ["Position", "Outcome", "Key", "Value", "Headers", "Detail"]
+            .map(String::from)
+            .to_vec(),
+        rows: rows
+            .into_iter()
+            .map(|r| {
+                vec![
+                    Some(r.position),
+                    Some(r.outcome.to_owned()),
+                    r.key,
+                    r.value,
+                    Some(r.headers),
+                    r.detail,
+                ]
+            })
+            .collect(),
+    })
+}
+
 fn check_option(k: &str, v: &str) -> Result<()> {
     if crate::settings::u64_key(k).is_some() && v.trim().parse::<u64>().is_err() {
         return Err(bad_option(format!("{k} must be a whole number, not '{v}'")));

@@ -637,3 +637,329 @@ async fn migration_reports_collisions() {
         exec(x, &format!("DROP DATABASE {db}")).await;
     }
 }
+
+/// Waits until `sql`'s rows satisfy `ok` (the copy worker orphans
+/// overrides across tenants asynchronously).
+async fn until_rows(
+    c: &mut Conn,
+    sql: &str,
+    ok: impl Fn(&[Vec<Option<String>>]) -> bool,
+) -> Vec<Vec<Option<String>>> {
+    let t0 = Instant::now();
+    loop {
+        let got = match c.query::<Row, _>(sql).await {
+            Ok(r) => r
+                .into_iter()
+                .map(|r| r.unwrap().iter().map(text).collect())
+                .collect(),
+            Err(mysql_async::Error::Server(s)) if s.code == 39889 => Vec::new(),
+            Err(e) => panic!("{sql}: {e}"),
+        };
+        if ok(&got) {
+            return got;
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(60),
+            "{sql}: still {got:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// `sql` once a refusal (`code`) that only lasts while the copy worker
+/// catches up has cleared.
+async fn passes_after(c: &mut Conn, sql: &str, code: u16) -> u64 {
+    let t0 = Instant::now();
+    loop {
+        match try_exec(c, sql).await {
+            Ok(n) => return n,
+            Err(e) if e == code && t0.elapsed() < Duration::from_secs(60) => {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            Err(e) => panic!("{sql}: {e}"),
+        }
+    }
+}
+
+/// Inheritance round 2 (decision IG7's gaps): an override in a child
+/// tenant that the copy worker makes an orphan holds its references as
+/// its own, so it gets a claim, and the values its view showed when the
+/// parent's record went (not the ones stored when it was written); until
+/// the worker has done that, the parent's delete hands the references
+/// over. `SPRIG RESET` of an orphan is checked like a delete. Needs the
+/// deployment's worker process (it orphans across tenants).
+#[tokio::test]
+async fn orphans_keep_their_references() {
+    let Some(eps) = endpoints("orphans_keep_their_references") else {
+        return;
+    };
+    let t = tenants();
+    let mode = mode();
+    let mat = mode == "materialized";
+    for (pi, ep) in eps.iter().enumerate() {
+        let p = if pi == 0 { "my" } else { "ma" };
+        let db = format!("ig_or_{p}_{}", if mat { "mat" } else { "rt" });
+        let s1 = format!("igo{p}{}", u8::from(mat));
+        let sb = format!("igob{p}{}", u8::from(mat));
+        let mut c = Vec::new();
+        for name in &t {
+            c.push(conn(ep, name).await);
+        }
+        let shares = [(1, sb.as_str()), (0, s1.as_str())];
+        cleanup(&mut c, &t, &db, &shares).await;
+        for (i, x) in c.iter_mut().enumerate() {
+            exec(x, &format!("USE SPACE `{}`", t[i])).await;
+            if mat {
+                exec(x, "SPRIG SET inherit.merge = 'materialized'").await;
+            } else {
+                let _ = try_exec(x, "SPRIG RESET inherit.merge").await;
+            }
+        }
+        exec(&mut c[0], &format!("CREATE DATABASE {db}")).await;
+        exec(&mut c[0], &format!("USE {db}")).await;
+        exec(
+            &mut c[0],
+            "CREATE TABLE t2 (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(40) NULL)",
+        )
+        .await;
+        exec(
+            &mut c[0],
+            "CREATE TABLE t1 (id INT AUTO_INCREMENT PRIMARY KEY, t2_id INT NULL, note \
+             VARCHAR(40) NULL, CONSTRAINT fk_t2 FOREIGN KEY (t2_id) REFERENCES t2 (id))",
+        )
+        .await;
+        exec(&mut c[0], "ALTER TABLE t1 SPRIG INHERITABLE KEY (id)").await;
+        exec(
+            &mut c[0],
+            &format!("CREATE SHARE {s1} ON t1 TO ALL CHILDREN WITH RESHARE"),
+        )
+        .await;
+        exec(&mut c[1], &format!("USE {db}")).await;
+        exec(
+            &mut c[1],
+            &format!("CREATE SHARE {sb} ON t1 TO ALL CHILDREN WITH RESHARE"),
+        )
+        .await;
+        exec(&mut c[2], &format!("USE {db}")).await;
+        let mut ins = Vec::new();
+        for v in ["k1", "k2", "k3"] {
+            exec(&mut c[0], &format!("INSERT INTO t2 (name) VALUES ('{v}')")).await;
+            let k: u64 = c[0]
+                .query_first("SELECT LAST_INSERT_ID()")
+                .await
+                .unwrap()
+                .unwrap();
+            ins.push(k);
+        }
+        let (k1, k2, k3) = (ins[0], ins[1], ins[2]);
+        exec(
+            &mut c[0],
+            &format!("INSERT INTO t1 (t2_id, note) VALUES ({k1}, 'a')"),
+        )
+        .await;
+        let r: u64 = c[0]
+            .query_first("SELECT LAST_INSERT_ID()")
+            .await
+            .unwrap()
+            .unwrap();
+
+        // A. b and c override a's row R without touching its foreign key;
+        //    a then points R at k2 and deletes it.
+        for i in [1, 2] {
+            until_rows(&mut c[i], &format!("SELECT id FROM t1 WHERE id = {r}"), |g| {
+                g.len() == 1
+            })
+            .await;
+            exec(
+                &mut c[i],
+                &format!("UPDATE t1 SET note = 'lvl{i}' WHERE id = {r}"),
+            )
+            .await;
+        }
+        exec(&mut c[0], &format!("UPDATE t1 SET t2_id = {k2} WHERE id = {r}")).await;
+        exec(&mut c[0], &format!("DELETE FROM t1 WHERE id = {r}")).await;
+        // Right away (before the worker has made the orphans): refused,
+        // the overrides below will hold k2.
+        let m = fails(&mut c[0], &format!("DELETE FROM t2 WHERE id = {k2}"), 1451).await;
+        eprintln!("{p}/{mode}: a's delete during the handover refused: {m}");
+        // The orphans hold k2, what their views showed, not the k1 stored
+        // with the overrides.
+        for i in [1, 2] {
+            let got = until_rows(
+                &mut c[i],
+                &format!("SELECT t2_id, note FROM t1 WHERE id = {r}"),
+                |g| g.len() == 1,
+            )
+            .await;
+            assert_eq!(
+                got[0],
+                vec![Some(k2.to_string()), Some(format!("lvl{i}"))],
+                "{p}: level {i}'s orphan"
+            );
+        }
+        // Their claims refuse a's delete of k2 now; k1 is free.
+        let m = fails(&mut c[0], &format!("DELETE FROM t2 WHERE id = {k2}"), 1451).await;
+        eprintln!("{p}/{mode}: a's delete after orphaning refused: {m}");
+        assert_eq!(
+            exec(&mut c[0], &format!("DELETE FROM t2 WHERE id = {k1}")).await,
+            1
+        );
+        // b drops its orphan: c's still references k2.
+        exec(&mut c[1], &format!("DELETE FROM t1 WHERE id = {r}")).await;
+        fails(&mut c[0], &format!("DELETE FROM t2 WHERE id = {k2}"), 1451).await;
+        exec(&mut c[2], &format!("DELETE FROM t1 WHERE id = {r}")).await;
+        assert_eq!(
+            passes_after(&mut c[0], &format!("DELETE FROM t2 WHERE id = {k2}"), 1451).await,
+            1
+        );
+
+        // B. SPRIG RESET of an orphan someone references is refused.
+        until_rows(&mut c[1], &format!("SELECT id FROM t2 WHERE id = {k3}"), |g| {
+            g.len() == 1
+        })
+        .await;
+        exec(
+            &mut c[1],
+            &format!("UPDATE t2 SET name = 'b3' WHERE id = {k3}"),
+        )
+        .await;
+        assert_eq!(
+            exec(&mut c[0], &format!("DELETE FROM t2 WHERE id = {k3}")).await,
+            1
+        );
+        until_rows(
+            &mut c[1],
+            &format!("SELECT name FROM t2 WHERE id = {k3}"),
+            |g| g.len() == 1 && g[0][0].as_deref() == Some("b3"),
+        )
+        .await;
+        exec(
+            &mut c[1],
+            &format!("INSERT INTO t1 (t2_id, note) VALUES ({k3}, 'b->orphan')"),
+        )
+        .await;
+        let b_ref: u64 = c[1]
+            .query_first("SELECT LAST_INSERT_ID()")
+            .await
+            .unwrap()
+            .unwrap();
+        let m = fails(&mut c[1], "SPRIG RESET t2", 1451).await;
+        eprintln!("{p}/{mode}: b's reset of a referenced orphan refused: {m}");
+        assert_eq!(
+            rows(&mut c[1], &format!("SELECT name FROM t2 WHERE id = {k3}")).await,
+            vec![vec![Some("b3".to_owned())]]
+        );
+        exec(&mut c[1], &format!("DELETE FROM t1 WHERE id = {b_ref}")).await;
+        passes_after(&mut c[1], "SPRIG RESET t2", 1451).await;
+        assert!(
+            rows(&mut c[1], &format!("SELECT name FROM t2 WHERE id = {k3}"))
+                .await
+                .is_empty()
+        );
+        eprintln!("{p}/{mode}: orphans keep their references");
+        cleanup(&mut c, &t, &db, &shares).await;
+    }
+}
+
+/// Inheritance round 2 (decision IG5's gap): a type the parent widens
+/// while shared (`VARCHAR(10)` → `VARCHAR(60)`) reaches its children and
+/// grandchildren at their next statement, so their overrides and own rows
+/// can hold the longer values (before: 1406 in the child).
+#[tokio::test]
+async fn widened_types_reach_children() {
+    let Some(eps) = endpoints("widened_types_reach_children") else {
+        return;
+    };
+    let t = tenants();
+    let mode = mode();
+    let mat = mode == "materialized";
+    for (pi, ep) in eps.iter().enumerate() {
+        let p = if pi == 0 { "my" } else { "ma" };
+        let db = format!("ig_wd_{p}_{}", if mat { "mat" } else { "rt" });
+        let s1 = format!("igw{p}{}", u8::from(mat));
+        let sb = format!("igwb{p}{}", u8::from(mat));
+        let mut c = Vec::new();
+        for name in &t {
+            c.push(conn(ep, name).await);
+        }
+        let shares = [(1, sb.as_str()), (0, s1.as_str())];
+        cleanup(&mut c, &t, &db, &shares).await;
+        for (i, x) in c.iter_mut().enumerate() {
+            exec(x, &format!("USE SPACE `{}`", t[i])).await;
+            if mat {
+                exec(x, "SPRIG SET inherit.merge = 'materialized'").await;
+            } else {
+                let _ = try_exec(x, "SPRIG RESET inherit.merge").await;
+            }
+        }
+        exec(&mut c[0], &format!("CREATE DATABASE {db}")).await;
+        exec(&mut c[0], &format!("USE {db}")).await;
+        exec(
+            &mut c[0],
+            "CREATE TABLE t2 (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(10) NULL, qty \
+             SMALLINT NULL)",
+        )
+        .await;
+        exec(&mut c[0], "ALTER TABLE t2 SPRIG INHERITABLE KEY (id)").await;
+        exec(
+            &mut c[0],
+            &format!("CREATE SHARE {s1} ON t2 TO ALL CHILDREN WITH RESHARE"),
+        )
+        .await;
+        exec(&mut c[0], "INSERT INTO t2 (name, qty) VALUES ('short', 1)").await;
+        let k: u64 = c[0]
+            .query_first("SELECT LAST_INSERT_ID()")
+            .await
+            .unwrap()
+            .unwrap();
+        exec(&mut c[1], &format!("USE {db}")).await;
+        exec(
+            &mut c[1],
+            &format!("CREATE SHARE {sb} ON t2 TO ALL CHILDREN WITH RESHARE"),
+        )
+        .await;
+        exec(&mut c[2], &format!("USE {db}")).await;
+        until_rows(&mut c[2], "SELECT id FROM t2", |g| g.len() == 1).await;
+        // The parent widens two types while shared (additive).
+        exec(&mut c[0], "ALTER TABLE t2 MODIFY name VARCHAR(60) NULL").await;
+        exec(&mut c[0], "ALTER TABLE t2 MODIFY qty INT NULL").await;
+        let long_b = "b".repeat(50);
+        let long_c = "c".repeat(50);
+        // b's override of a's row and c's own row hold the wider values.
+        until_rows(&mut c[1], &format!("SELECT id FROM t2 WHERE id = {k}"), |g| {
+            g.len() == 1
+        })
+        .await;
+        exec(
+            &mut c[1],
+            &format!("UPDATE t2 SET name = '{long_b}', qty = 100000 WHERE id = {k}"),
+        )
+        .await;
+        settled(
+            &mut c[2],
+            &format!("INSERT INTO t2 (name, qty) VALUES ('{long_c}', 200000)"),
+        )
+        .await
+        .unwrap();
+        let got = until_rows(
+            &mut c[2],
+            &format!("SELECT name, qty FROM t2 WHERE id = {k}"),
+            |g| g.len() == 1 && g[0][0].as_deref() == Some(long_b.as_str()),
+        )
+        .await;
+        assert_eq!(got[0][1].as_deref(), Some("100000"));
+        until_rows(
+            &mut c[2],
+            &format!("SELECT id FROM t2 WHERE name = '{long_c}'"),
+            |g| g.len() == 1,
+        )
+        .await;
+        // a's own row is unchanged.
+        assert_eq!(
+            rows(&mut c[0], &format!("SELECT name FROM t2 WHERE id = {k}")).await,
+            vec![vec![Some("short".to_owned())]]
+        );
+        eprintln!("{p}/{mode}: widened types reach b and c");
+        cleanup(&mut c, &t, &db, &shares).await;
+    }
+}

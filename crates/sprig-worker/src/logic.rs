@@ -273,6 +273,11 @@ impl RunGuard for DefinerGuard {
         }
         Ok(())
     }
+
+    async fn context(&self) -> Result<Option<String>> {
+        let definer = self.definer().await?;
+        self.rls.context(self.tenant, definer).await
+    }
 }
 
 /// `logic_trigger` (see the module docs).
@@ -360,7 +365,10 @@ impl LogicTrigger {
             budget: env.settings.trigger_budget_for(tenant),
             // RL37: the code gets every changed row; it runs while the
             // table's policies don't bind its definer.
-            guard: match (b.object_id, crate::sinks::RlsCatalogs::new(Arc::clone(&env.locator))) {
+            guard: match (
+                b.object_id,
+                crate::sinks::RlsCatalogs::new(Arc::clone(&env.locator)),
+            ) {
                 (Some(object), Some(rls)) => Some(Arc::new(DefinerGuard {
                     rls,
                     locator: Arc::clone(&locator),
@@ -532,6 +540,26 @@ impl JobHandler for LogicSchedule {
             .map_err(|e| e.to_string())?;
         let mut shard = pool.get_conn().await.map_err(|e| e.to_string())?;
         let store = LogicStore::new(ep.store.schema());
+        // Chapter 29 (RL42): the run applies its definer's policies in
+        // MariaDB (policy views and write triggers), not an internal
+        // session's (every row).
+        let rls = crate::sinks::RlsCatalogs::new(Arc::clone(&env.locator))
+            .ok_or("the worker can't load row-level security catalogs")?;
+        let guard = DefinerGuard {
+            rls,
+            locator: Arc::clone(&env.locator) as Arc<dyn CatalogLocator>,
+            tenant,
+            module_id,
+            object: 0,
+            cached: Mutex::new(None),
+        };
+        let ctx = guard.context().await.map_err(|e| e.to_string())?;
+        if let Some(x) = &ctx {
+            shard
+                .exec_drop("SET @sprig_rls = ?", (x.as_str(),))
+                .await
+                .map_err(|e| e.to_string())?;
+        }
         let end = sprig_logic::schedule::run(
             &mut catalog,
             &store,
@@ -541,8 +569,12 @@ impl JobHandler for LogicSchedule {
             run,
             env.settings.job_budget(),
         )
-        .await
-        .map_err(|e| e.to_string())?;
+        .await;
+        // The pooled sprig_ctl connection mustn't keep the context.
+        if ctx.is_some() && shard.query_drop("SET @sprig_rls = NULL").await.is_err() {
+            let _ = shard.disconnect().await;
+        }
+        let end = end.map_err(|e| e.to_string())?;
         tracing::info!(%tenant, module = module_id, job = %cx.job_id, %run, outcome = %end.outcome, "schedule run ended");
         if end.queued {
             // A queued run: make the index due now.

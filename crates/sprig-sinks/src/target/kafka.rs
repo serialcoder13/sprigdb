@@ -383,6 +383,81 @@ async fn with_timeout<T>(
 }
 
 /// The version of `api` to use: our highest within the broker's range.
+/// `TEST CONNECTION` on a Kafka connection (R9, r9tests): its options,
+/// then each bootstrap broker in turn until one answers (TCP, TLS,
+/// `ApiVersions`, SASL), then a metadata call naming the brokers. Nothing
+/// is produced. Steps as `(step, Ok(detail) | Err(reason))`.
+pub async fn probe(conn: &Conn) -> Vec<(&'static str, std::result::Result<String, String>)> {
+    let mut out = Vec::new();
+    let cfg = match ConnCfg::new(conn) {
+        Ok(c) => {
+            out.push((
+                "options",
+                Ok(format!(
+                    "{} bootstrap broker(s), security {:?}",
+                    c.bootstrap.len(),
+                    c.security
+                )
+                .to_ascii_lowercase()),
+            ));
+            c
+        }
+        Err(e) => {
+            out.push(("options", Err(e.to_string())));
+            return out;
+        }
+    };
+    let mut reached = None;
+    let mut last = String::new();
+    for (h, p) in &cfg.bootstrap {
+        match cfg.connect(h, *p).await {
+            Ok(x) => {
+                reached = Some((format!("{h}:{p}"), x));
+                break;
+            }
+            Err(e) => last = format!("{h}:{p}: {e}"),
+        }
+    }
+    let Some((at, (mut c, versions))) = reached else {
+        out.push(("connect", Err(last)));
+        return out;
+    };
+    out.push((
+        "connect",
+        Ok(format!(
+            "{at}{}",
+            if cfg.security.sasl() {
+                format!(", SASL {} accepted", cfg.mechanism)
+            } else {
+                String::new()
+            }
+        )),
+    ));
+    let r: Result<MetadataResponse> = match pick(&versions, 3, 12, 4) {
+        Ok(v) => {
+            with_timeout(
+                cfg.timeout,
+                c.call(
+                    v,
+                    &MetadataRequest {
+                        topics: Some(Vec::new()),
+                        allow_auto_topic_creation: false,
+                        ..MetadataRequest::default()
+                    },
+                ),
+            )
+            .await
+        }
+        Err(e) => Err(e),
+    };
+    out.push((
+        "metadata",
+        r.map(|m| format!("{} broker(s)", m.brokers.len()))
+            .map_err(|e| e.to_string()),
+    ));
+    out
+}
+
 fn pick(versions: &HashMap<i16, (i16, i16)>, api: i16, ours: i16, min: i16) -> Result<i16> {
     let (lo, hi) = versions
         .get(&api)

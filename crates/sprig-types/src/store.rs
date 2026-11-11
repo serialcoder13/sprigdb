@@ -26,7 +26,8 @@ use sprig_common::names::quote;
 use sprig_common::{Result, SprigCode, SprigError};
 
 use crate::model::{
-    FieldDef, HierState, HierarchyDef, KeyClass, OnDelete, Storage, TypeDef, TypeState, TypesState,
+    DiscValue, FieldDef, HierState, HierarchyDef, KeyClass, OnDelete, Storage, TypeDef, TypeState,
+    TypesState,
 };
 
 /// The module name.
@@ -105,18 +106,32 @@ pub const DDL_HIERARCHIES: &str = "CREATE TABLE IF NOT EXISTS hierarchies (
   PRIMARY KEY (object_id)
 ) ENGINE=InnoDB";
 
+/// Format 2: `types.discriminator`, a root's discriminator column
+/// (`{"column": "vtype"}`) or a subtype's value (`{"value": "TRUCK"}`,
+/// `{"number": "5"}`).
+pub const DDL_DISCRIMINATOR: &str =
+    "ALTER TABLE types ADD COLUMN IF NOT EXISTS discriminator JSON NULL AFTER storage";
+
 /// The module's migrations.
-pub static TYPES_MIGRATIONS: &[Migration] = &[Migration {
-    format: 1,
-    phase: Phase::Expand,
-    name: "types, type_fields, type_bindings and hierarchies",
-    statements: &[
-        DDL_TYPES,
-        DDL_TYPE_FIELDS,
-        DDL_TYPE_BINDINGS,
-        DDL_HIERARCHIES,
-    ],
-}];
+pub static TYPES_MIGRATIONS: &[Migration] = &[
+    Migration {
+        format: 1,
+        phase: Phase::Expand,
+        name: "types, type_fields, type_bindings and hierarchies",
+        statements: &[
+            DDL_TYPES,
+            DDL_TYPE_FIELDS,
+            DDL_TYPE_BINDINGS,
+            DDL_HIERARCHIES,
+        ],
+    },
+    Migration {
+        format: 2,
+        phase: Phase::Expand,
+        name: "types.discriminator",
+        statements: &[DDL_DISCRIMINATOR],
+    },
+];
 
 /// The `types` module, for [`Migrator::new`].
 pub const TYPES_MODULE: Module = Module {
@@ -163,6 +178,32 @@ fn bad(what: &str) -> SprigError {
     SprigError::internal(format!("types catalog: {what}"))
 }
 
+/// A `types.discriminator` value: a root's column, or a subtype's value.
+fn discriminator_json(t: &TypeDef) -> Option<String> {
+    if let Some(c) = &t.discriminator {
+        return Some(serde_json::json!({ "column": c }).to_string());
+    }
+    t.disc_value.as_ref().map(|v| v.to_json().to_string())
+}
+
+/// Reads [`discriminator_json`]'s text back.
+fn parse_discriminator(j: Option<String>) -> Result<(Option<String>, Option<DiscValue>)> {
+    let Some(j) = j else {
+        return Ok((None, None));
+    };
+    let v: serde_json::Value = serde_json::from_str(&j).map_err(|_| bad("discriminator"))?;
+    if let Some(c) = v.get("column").and_then(serde_json::Value::as_str) {
+        return Ok((Some(c.to_owned()), None));
+    }
+    if let Some(s) = v.get("value").and_then(serde_json::Value::as_str) {
+        return Ok((None, Some(DiscValue::Str(s.to_owned()))));
+    }
+    if let Some(n) = v.get("number").and_then(serde_json::Value::as_str) {
+        return Ok((None, Some(DiscValue::Num(n.to_owned()))));
+    }
+    Ok((None, None))
+}
+
 /// The JSON of a hierarchy's `key_fields`: `[{"name":..,"class":..,"type":..}]`.
 fn key_fields_json(h: &HierarchyDef) -> String {
     serde_json::json!([{ "name": h.key, "class": h.key_class.as_str(), "type": h.key_type }])
@@ -204,16 +245,41 @@ impl TypesStore {
         Ok(n.unwrap_or(0) > 0)
     }
 
-    /// Every entity type and hierarchy whose table is live.
+    /// Whether the module is at its newest format (format 2's
+    /// `types.discriminator` exists).
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn current<Q: Queryable + Send>(&self, q: &mut Q) -> Result<bool> {
+        let n: Option<u64> = q
+            .exec_first(
+                "SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? \
+                 AND TABLE_NAME = 'types' AND COLUMN_NAME = 'discriminator'",
+                (self.schema.as_str(),),
+            )
+            .await
+            .map_err(map_err)?;
+        Ok(n.unwrap_or(0) > 0)
+    }
+
+    /// Every entity type and hierarchy whose table is live. The state is
+    /// `migrated` only at the newest format, so the next type DDL migrates
+    /// a format-1 catalog first.
     ///
     /// # Errors
     /// 39070, a backend error, or `Internal` for a malformed row.
     pub async fn load<Q: Queryable + Send>(&self, q: &mut Q) -> Result<TypesState> {
+        let current = self.current(q).await?;
+        let disc = if current {
+            "CAST(t.discriminator AS CHAR)"
+        } else {
+            "NULL"
+        };
         let rows: Vec<Row> = q
             .query(format!(
                 "SELECT t.type_id, t.db_id, t.parent_id, t.root_id, t.depth, t.type_path, \
-                 t.is_abstract, t.storage, CAST(t.key_fields AS CHAR), t.state, t.version, o.name \
-                 FROM {} t JOIN {} o ON o.object_id = t.type_id \
+                 t.is_abstract, t.storage, CAST(t.key_fields AS CHAR), t.state, t.version, o.name, \
+                 {disc} FROM {} t JOIN {} o ON o.object_id = t.type_id \
                  WHERE t.kind = 'entity' AND o.state <> 'dropped' ORDER BY t.type_id",
                 self.t("types"),
                 self.t("objects")
@@ -229,6 +295,7 @@ impl TypesStore {
             };
             let storage: String = col(r, 7)?;
             let state: String = col(r, 9)?;
+            let (discriminator, disc_value) = parse_discriminator(col(r, 12)?)?;
             types.push(TypeDef {
                 id: ObjectId(col(r, 0)?),
                 db: DbId(col(r, 1)?),
@@ -243,6 +310,8 @@ impl TypesStore {
                 state: TypeState::parse(&state).ok_or_else(|| bad("state"))?,
                 version: col(r, 10)?,
                 name: col(r, 11)?,
+                discriminator,
+                disc_value,
             });
         }
         let fields: Vec<Row> = q
@@ -308,7 +377,9 @@ impl TypesStore {
                 state: HierState::parse(&state).ok_or_else(|| bad("hierarchy state"))?,
             });
         }
-        Ok(TypesState::new(types, hierarchies))
+        let mut state = TypesState::new(types, hierarchies);
+        state.migrated = current;
+        Ok(state)
     }
 
     /// Applies `change` in `q` (the versioned change's transaction).
@@ -348,12 +419,13 @@ impl TypesStore {
                 format!(
                     "INSERT INTO {} (type_id, db_id, parent_id, root_id, depth, type_path, kind, \
                      is_abstract, storage, key_fields, physical_table, state, version, created_at, \
-                     updated_at) VALUES (?, ?, ?, ?, ?, ?, 'entity', ?, ?, ?, ?, ?, 1, \
-                     UTC_TIMESTAMP(3), UTC_TIMESTAMP(3)) \
+                     updated_at, discriminator) VALUES (?, ?, ?, ?, ?, ?, 'entity', ?, ?, ?, ?, ?, \
+                     1, UTC_TIMESTAMP(3), UTC_TIMESTAMP(3), ?) \
                      ON DUPLICATE KEY UPDATE parent_id = VALUES(parent_id), \
                      root_id = VALUES(root_id), depth = VALUES(depth), \
                      type_path = VALUES(type_path), is_abstract = VALUES(is_abstract), \
                      storage = VALUES(storage), key_fields = VALUES(key_fields), \
+                     discriminator = VALUES(discriminator), \
                      physical_table = VALUES(physical_table), state = VALUES(state), \
                      version = version + 1, updated_at = VALUES(updated_at)",
                     self.t("types")
@@ -370,6 +442,7 @@ impl TypesStore {
                     key_fields,
                     t.name.as_str(),
                     t.state.as_str(),
+                    discriminator_json(t),
                 ),
             )
             .await
@@ -541,9 +614,36 @@ mod tests {
     #[test]
     fn module_is_well_formed() {
         Migrator::new(&[TYPES_MODULE]).unwrap();
-        assert_eq!(TYPES_MODULE.newest(), 1);
+        assert_eq!(TYPES_MODULE.newest(), 2);
         for ddl in TYPES_MIGRATIONS[0].statements {
             assert!(ddl.starts_with("CREATE TABLE IF NOT EXISTS "));
+        }
+        assert!(TYPES_MIGRATIONS[1].statements[0].contains("ADD COLUMN IF NOT EXISTS"));
+    }
+
+    #[test]
+    fn discriminators_round_trip_as_json() {
+        let mut t = (**crate::model::fixtures::assets()
+            .get("asset", false)
+            .unwrap())
+        .clone();
+        assert_eq!(discriminator_json(&t), None);
+        t.discriminator = Some("vtype".into());
+        let j = discriminator_json(&t);
+        assert_eq!(
+            parse_discriminator(j).unwrap(),
+            (Some("vtype".into()), None)
+        );
+        t.discriminator = None;
+        for v in [
+            DiscValue::Str("TRUCK 'x'".into()),
+            DiscValue::Num("-5".into()),
+        ] {
+            t.disc_value = Some(v.clone());
+            assert_eq!(
+                parse_discriminator(discriminator_json(&t)).unwrap(),
+                (None, Some(v))
+            );
         }
     }
 

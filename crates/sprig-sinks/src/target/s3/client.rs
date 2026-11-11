@@ -752,6 +752,16 @@ impl S3Client {
 
     /// `CreateBucket` (tests and setup; an existing bucket of ours is fine).
     ///
+    /// `HeadBucket` (`TEST CONNECTION`, R9 r9tests): the answer's status,
+    /// nothing written.
+    ///
+    /// # Errors
+    /// A connection, TLS or destination-rule failure.
+    pub async fn head_bucket(&self) -> Result<u16> {
+        let r = self.request("HEAD", None, &[], &[], Bytes::new()).await?;
+        Ok(r.status)
+    }
+
     /// # Errors
     /// As [`S3Client::put_object`].
     pub async fn create_bucket(&self) -> Result<()> {

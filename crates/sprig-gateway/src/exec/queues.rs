@@ -38,7 +38,7 @@ use super::tenant::Step;
 use crate::pipeline::{EndOfRows, ExecCtx, ResultSink, RowFormat, RowValues, Wire};
 
 /// A chapter 50 error as a SQL one: the number, the name, the text.
-fn sql_error(e: &MqError) -> SprigError {
+pub(super) fn sql_error(e: &MqError) -> SprigError {
     let state = if e.code == MqCode::OwnerMoved {
         *b"40001"
     } else {
@@ -610,6 +610,22 @@ impl PassSession {
                 let in_txn = self.mq_in_transaction();
                 let deleted = match self.mq_run(cx, &mq::ack_sql(&db, &t), true).await {
                     Ok(c) => c.affected.unwrap_or(0),
+                    // R9 (r9tests): a user granted only the queue (not
+                    // DELETE on its database's tables), such as an
+                    // inherited queue sink's sprig_inherited, may consume
+                    // it (the engine checked the queue's rights at the
+                    // get). Outside a transaction the owner deletes the
+                    // message itself, as for an AMQP acknowledgement.
+                    Err(e)
+                        if !in_txn
+                            && matches!(e.protocol().mysql_errno, 1142 | 1143 | 1044)
+                            && v.may_consume(&t) =>
+                    {
+                        v.release(&t, false);
+                        v.ack(&t);
+                        metrics::counter!("sprig_queue_acked_by_owner_total").increment(1);
+                        return Ok(Reply::Ok(1));
+                    }
                     Err(e) => {
                         v.release(&t, false);
                         return Err(e);

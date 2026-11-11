@@ -380,6 +380,19 @@ impl Endpoint {
         headers: &[(String, String)],
         body: Bytes,
     ) -> Result<(StatusCode, hyper::HeaderMap, Bytes)> {
+        self.send_method(hyper::Method::POST, path, headers, body)
+            .await
+    }
+
+    /// [`Self::send`] with another method (`OPTIONS` for `TEST
+    /// CONNECTION`, R9 r9tests).
+    async fn send_method(
+        &self,
+        method: hyper::Method,
+        path: &str,
+        headers: &[(String, String)],
+        body: Bytes,
+    ) -> Result<(StatusCode, hyper::HeaderMap, Bytes)> {
         let mut sender = self.sender().await?;
         let scheme = if self.tls { "https" } else { "http" };
         let uri: Uri = match &sender {
@@ -388,7 +401,9 @@ impl Endpoint {
         }
         .parse()
         .map_err(|e| bad_option(format!("webhook path '{path}': {e}")))?;
-        let mut req = Request::post(uri)
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
             .body(Full::new(body))
             .map_err(|e| bad_option(format!("webhook request: {e}")))?;
         let h = req.headers_mut();
@@ -987,6 +1002,45 @@ impl WebhookTarget {
                     reason: format!("{}: HTTP 413", self.ep.authority),
                 },
             });
+        }
+    }
+}
+
+impl WebhookTarget {
+    /// `TEST CONNECTION` (R9, r9tests): an `OPTIONS` request to the
+    /// connection's URL with its authentication, nothing posted. The
+    /// answer's status; 401 and 403 after an OAuth2 refresh mean the
+    /// credentials were refused.
+    ///
+    /// # Errors
+    /// A connection, TLS or destination-rule failure (39213, 39214, 39220),
+    /// or no answer within `sink.http_timeout_ms`.
+    pub async fn probe(&self) -> Result<u16> {
+        let mut refreshed = false;
+        loop {
+            let mut h = vec![("sprig-sink".to_owned(), self.sink_name.clone())];
+            h.extend(self.auth_headers(refreshed).await?);
+            let (status, _, _) = tokio::time::timeout(
+                self.timeout,
+                self.ep
+                    .send_method(hyper::Method::OPTIONS, &self.path, &h, Bytes::new()),
+            )
+            .await
+            .map_err(|_| {
+                delivery_failed(format!(
+                    "{}: no answer within sink.http_timeout_ms = {} ms",
+                    self.ep.authority,
+                    self.timeout.as_millis()
+                ))
+            })??;
+            if status == StatusCode::UNAUTHORIZED
+                && matches!(self.auth, Auth::OAuth2 { .. })
+                && !refreshed
+            {
+                refreshed = true;
+                continue;
+            }
+            return Ok(status.as_u16());
         }
     }
 }

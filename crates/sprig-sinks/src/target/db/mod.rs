@@ -233,6 +233,62 @@ impl std::fmt::Debug for DbTarget {
     }
 }
 
+/// `TEST CONNECTION` on a MySQL, MariaDB or PostgreSQL connection (R9,
+/// r9tests): open the checked address, log in, run `SELECT 1`; with
+/// `table`, also read that table's columns. Nothing is written.
+pub async fn probe(
+    ctx: &TargetCtx,
+    table: Option<&str>,
+) -> Vec<(&'static str, std::result::Result<String, String>)> {
+    let mut out = Vec::new();
+    let conn = match ctx.conn() {
+        Ok(c) => c,
+        Err(e) => {
+            out.push(("options", Err(e.to_string())));
+            return out;
+        }
+    };
+    let backend: Arc<dyn Backend> = match conn.kind {
+        ConnKind::Mysql => match mysql::MyBackend::connect(conn, ctx).await {
+            Ok(b) => Arc::new(b),
+            Err(e) => {
+                out.push(("options", Err(e.to_string())));
+                return out;
+            }
+        },
+        ConnKind::Postgresql => match pg::PgBackend::connect(conn, ctx).await {
+            Ok(b) => Arc::new(b),
+            Err(e) => {
+                out.push(("options", Err(e.to_string())));
+                return out;
+            }
+        },
+        other => {
+            out.push(("options", Err(format!("not a database connection: {other}"))));
+            return out;
+        }
+    };
+    out.push(("options", Ok(format!("{} connection", conn.kind))));
+    match backend.exec("SELECT 1").await {
+        Ok(()) => out.push(("query", Ok("logged in; SELECT 1 answered".into()))),
+        Err(e) => {
+            out.push(("query", Err(e.message().to_owned())));
+            return out;
+        }
+    }
+    if let Some(t) = table {
+        out.push((
+            "table",
+            match backend.table(t).await {
+                Ok(Some(info)) => Ok(format!("{t}: {} column(s)", info.cols.len())),
+                Ok(None) => Err(format!("{t} doesn't exist")),
+                Err(e) => Err(e.message().to_owned()),
+            },
+        ));
+    }
+    out
+}
+
 /// Builds the database target of `ctx` (`MYSQL` or `POSTGRESQL`
 /// connection).
 ///

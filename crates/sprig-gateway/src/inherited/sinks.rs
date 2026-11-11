@@ -819,15 +819,17 @@ async fn ensure_one(
         return Ok(had_error);
     }
     // The member's sprig_inherited: the definition's GRANTS, and reading
-    // the stream's instance. A queue is consumed as for queue triggers:
-    // reading its messages and deleting their rows in the vhost's shard
-    // (chapter 50: an acknowledgement needs DELETE on the database).
+    // the stream's instance. A queue (R9, r9tests: least privilege) is
+    // granted alone: SELECT and DELETE on the queue, the right `mq_get`
+    // checks; its acknowledgements outside a transaction are then settled
+    // by the queue's owner, and the vhost opens for a right on one of its
+    // queues. Nothing on the database's tables.
     let first = phys.as_ref().and_then(|p| p.get("sink")).is_none();
     let extra = if spec.source_kind() == DefKind::Queue {
         vec![GrantItem {
             privileges: vec!["SELECT".into(), "DELETE".into()],
             db: spec.db.clone(),
-            name: "*".to_owned(),
+            name: spec.source.clone(),
         }]
     } else {
         vec![GrantItem {

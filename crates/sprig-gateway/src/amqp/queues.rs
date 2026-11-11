@@ -230,6 +230,21 @@ impl MqCatalog for GatewayMq {
             .any(|a| self.allows(&*g, &cat, &row.name, a, None))
                 || g.unrestricted()
                 || Self::has_rule(p, &cat, &r)
+                // R9 (r9tests): a right on one of its queues only (an
+                // inherited queue sink's sprig_inherited).
+                || Self::state(&cat)
+                    .topology(row.db_id.0, cat.version)
+                    .queues
+                    .keys()
+                    .any(|q| {
+                        g.allows(
+                            Action::Select,
+                            Target::Named {
+                                db_key: &database_key(&row.name, lctn),
+                                name_key: &object_key(ObjectKind::Table, q, lctn),
+                            },
+                        )
+                    })
                 || cat.objects.iter().any(|o| {
                     o.db_id == row.db_id
                         && g.allows(

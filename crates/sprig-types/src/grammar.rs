@@ -5,7 +5,7 @@
 //!
 //! | Form | Read as |
 //! |---|---|
-//! | `CREATE TABLE t (...) INHERITS (p) [WITH (SPRIG_ABSTRACT = 1, SPRIG_STORAGE = 'joined')]` | [`Stmt::CreateTable`] with the extension clauses cut out of the text |
+//! | `CREATE TABLE t (...) INHERITS (p) [WHERE c = 'v'] [WITH (SPRIG_ABSTRACT = 1, SPRIG_STORAGE = 'joined', SPRIG_DISCRIMINATOR = 'c')]` | [`Stmt::CreateTable`] with the extension clauses cut out of the text |
 //! | `CREATE TYPE ...` | [`Stmt::CreateType`] (refused in this release) |
 //! | `ALTER TABLE t ADD HIERARCHY (parent) [ON DELETE RESTRICT \| CASCADE] [MAX DEPTH n]` | [`Stmt::AddHierarchy`] |
 //! | `ALTER TABLE t DROP HIERARCHY` | [`Stmt::DropHierarchy`] |
@@ -20,6 +20,8 @@ use std::ops::Range;
 
 use sprig_common::{SprigCode, SprigError};
 use sprig_sql::lex::{LexOptions, Token, TokenKind, ident_value, lex, string_value};
+
+use crate::model::DiscValue;
 
 /// The name prefix [`mark_only`] gives a table read with `ONLY`.
 pub const ONLY_PREFIX: &str = "__sprig_only__";
@@ -89,6 +91,12 @@ pub struct CreateTable {
     pub is_abstract: bool,
     /// `WITH (SPRIG_STORAGE = '...')`, lower-cased.
     pub storage: Option<String>,
+    /// `WITH (SPRIG_DISCRIMINATOR = 'c')`: the hierarchy's discriminator
+    /// column.
+    pub discriminator: Option<String>,
+    /// `INHERITS (p) WHERE c = v`: the discriminator column and this
+    /// subtype's value.
+    pub disc_where: Option<(String, DiscValue)>,
     /// `CREATE TEMPORARY TABLE`.
     pub temporary: bool,
     /// `IF NOT EXISTS`.
@@ -103,7 +111,11 @@ impl CreateTable {
     /// Whether the statement uses any extension.
     #[must_use]
     pub fn is_typed(&self) -> bool {
-        !self.inherits.is_empty() || self.is_abstract || self.storage.is_some()
+        !self.inherits.is_empty()
+            || self.is_abstract
+            || self.storage.is_some()
+            || self.discriminator.is_some()
+            || self.disc_where.is_some()
     }
 }
 
@@ -125,8 +137,14 @@ pub struct AddHierarchy {
 pub struct AlterTable {
     /// The table.
     pub table: Name,
+    /// The table name's byte range in the statement.
+    pub name_span: Range<usize>,
     /// Columns added (`ADD [COLUMN] c ...`, `ADD [COLUMN] (c ..., ...)`).
     pub added: Vec<String>,
+    /// Every clause adds columns (nothing else).
+    pub only_add_columns: bool,
+    /// Identifiers in clauses that drop, modify, change, rename or alter.
+    pub changed_columns: Vec<String>,
     /// The statement renames the table.
     pub renames: bool,
     /// A clause adds, drops, changes or renames something (else: options
@@ -438,6 +456,8 @@ fn create(t: &Toks<'_>, sql: &[u8]) -> Result<Stmt, SprigError> {
         inherits: Vec::new(),
         is_abstract: false,
         storage: None,
+        discriminator: None,
+        disc_where: None,
         temporary,
         if_not_exists,
         like_or_select: false,
@@ -477,6 +497,37 @@ fn create(t: &Toks<'_>, sql: &[u8]) -> Result<Stmt, SprigError> {
             j = close + 1;
             continue;
         }
+        // `INHERITS (p) WHERE c = v`: the discriminator. `WHERE` can't
+        // follow a column list in MySQL's CREATE TABLE, except inside the
+        // SELECT of `CREATE TABLE ... SELECT`, which is left alone.
+        if t.is(j, "WHERE") && !ct.like_or_select {
+            let col = t
+                .ident(j + 1)
+                .ok_or_else(|| unsupported("a WHERE clause other than WHERE column = value"))?;
+            if !t.punct(j + 2, b'=') {
+                return Err(unsupported(
+                    "a WHERE clause other than WHERE column = value",
+                ));
+            }
+            let (value, last) = if let Some(v) = t.string(j + 3) {
+                (DiscValue::Str(v), j + 3)
+            } else if t.kind(j + 3) == Some(TokenKind::Number) {
+                (DiscValue::Num(t.text(j + 3, j + 3)), j + 3)
+            } else if t.punct(j + 3, b'-') && t.kind(j + 4) == Some(TokenKind::Number) {
+                (DiscValue::Num(format!("-{}", t.text(j + 4, j + 4))), j + 4)
+            } else {
+                return Err(unsupported(
+                    "a discriminator value other than a string or a number",
+                ));
+            };
+            if ct.disc_where.is_some() {
+                return Err(unsupported("two WHERE clauses"));
+            }
+            ct.disc_where = Some((col, value));
+            cut.push(t.start(j)..t.end(last));
+            j = last + 1;
+            continue;
+        }
         if t.is(j, "WITH") && t.punct(j + 1, b'(') {
             let close = t
                 .close_of(j + 1)
@@ -501,6 +552,7 @@ fn create(t: &Toks<'_>, sql: &[u8]) -> Result<Stmt, SprigError> {
                         ct.is_abstract = matches!(value.to_lowercase().as_str(), "1" | "true");
                     }
                     "SPRIG_STORAGE" => ct.storage = Some(value.to_lowercase()),
+                    "SPRIG_DISCRIMINATOR" => ct.discriminator = Some(value),
                     other => return Err(unsupported(&format!("the table option {other}"))),
                 }
                 k = v + 1;
@@ -550,9 +602,11 @@ fn alter(t: &Toks<'_>) -> Result<Stmt, SprigError> {
     if t.is(i, "IF") && t.is(i + 1, "EXISTS") {
         i += 2;
     }
+    let name_at = i;
     let Some((table, mut i)) = t.name(i) else {
         return Ok(Stmt::Other);
     };
+    let name_span = t.start(name_at)..t.end(i - 1);
     if t.is(i, "ADD") && t.is(i + 1, "HIERARCHY") {
         i += 2;
         if !t.punct(i, b'(') {
@@ -606,10 +660,14 @@ fn alter(t: &Toks<'_>) -> Result<Stmt, SprigError> {
     }
     let mut at = AlterTable {
         table,
+        name_span,
         added: Vec::new(),
         renames: false,
         changes: false,
+        only_add_columns: true,
+        changed_columns: Vec::new(),
     };
+    let mut clause_word: Option<String> = None;
     let mut depth = 0usize;
     let mut k = i;
     let mut clause_start = true;
@@ -639,6 +697,12 @@ fn alter(t: &Toks<'_>) -> Result<Stmt, SprigError> {
                     .any(|w| t.is(k, w))
             {
                 at.changes = true;
+            }
+            if clause_start {
+                clause_word = Some(String::from_utf8_lossy(t.bytes(k)).to_uppercase());
+                if !t.is(k, "ADD") {
+                    at.only_add_columns = false;
+                }
             }
             if clause_start && t.is(k, "ADD") {
                 let mut c = k + 1;
@@ -692,9 +756,20 @@ fn alter(t: &Toks<'_>) -> Result<Stmt, SprigError> {
                     && let Some(n) = t.ident(c)
                 {
                     at.added.push(n);
+                } else {
+                    at.only_add_columns = false;
                 }
             }
             clause_start = false;
+        }
+        // Columns named by a clause that drops, changes or renames.
+        if !clause_start
+            && clause_word
+                .as_deref()
+                .is_some_and(|w| ["DROP", "MODIFY", "CHANGE", "RENAME", "ALTER"].contains(&w))
+            && let Some(n) = t.ident(k)
+        {
+            at.changed_columns.push(n);
         }
         k += 1;
     }
@@ -904,6 +979,53 @@ mod tests {
             panic!()
         };
         assert!(!ct.is_typed());
+
+        // The discriminator forms (chapter 32, discriminator columns).
+        let Stmt::CreateTable(ct) = c(
+            "CREATE TABLE truck (payload_kg DECIMAL(10,2)) INHERITS (vehicle) WHERE vtype = 'TRUCK' \
+             WITH (SPRIG_STORAGE = 'single_table')",
+        ) else {
+            panic!()
+        };
+        assert_eq!(
+            ct.disc_where,
+            Some(("vtype".into(), DiscValue::Str("TRUCK".into())))
+        );
+        assert_eq!(ct.storage.as_deref(), Some("single_table"));
+        assert_eq!(
+            ct.plain.trim_end(),
+            "CREATE TABLE truck (payload_kg DECIMAL(10,2))"
+        );
+        let Stmt::CreateTable(ct) =
+            c("CREATE TABLE k (x INT) INHERITS (p) WHERE `kind` = -3 ENGINE=InnoDB")
+        else {
+            panic!()
+        };
+        assert_eq!(
+            ct.disc_where,
+            Some(("kind".into(), DiscValue::Num("-3".into())))
+        );
+        assert!(ct.plain.contains("ENGINE=InnoDB") && !ct.plain.contains("WHERE"));
+        let Stmt::CreateTable(ct) = c(
+            "CREATE TABLE vehicle (id INT PRIMARY KEY, vtype VARCHAR(20)) WITH (SPRIG_DISCRIMINATOR = 'vtype')",
+        ) else {
+            panic!()
+        };
+        assert_eq!(ct.discriminator.as_deref(), Some("vtype"));
+        assert!(ct.is_typed());
+        for bad in [
+            "CREATE TABLE k (x INT) INHERITS (p) WHERE kind > 3",
+            "CREATE TABLE k (x INT) INHERITS (p) WHERE kind = other",
+            "CREATE TABLE k (x INT) INHERITS (p) WHERE kind = 'a' WHERE kind = 'b'",
+        ] {
+            let e = classify(bad.as_bytes(), &LexOptions::mariadb()).unwrap_err();
+            assert_eq!(e.code(), Some(SprigCode::TypeUnsupported), "{bad}");
+        }
+        // CREATE TABLE ... SELECT keeps its WHERE.
+        let Stmt::CreateTable(ct) = c("CREATE TABLE c2 SELECT * FROM a WHERE x = 1") else {
+            panic!()
+        };
+        assert!(ct.disc_where.is_none() && ct.like_or_select);
 
         let e = classify(
             b"CREATE TABLE x (a INT) INHERITS (p, q)",

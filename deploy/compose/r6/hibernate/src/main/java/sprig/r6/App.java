@@ -1,6 +1,8 @@
 // R6 Hibernate check (chapter 32): ddl-auto=validate over typed tables
 // (asset, vehicle, truck, created by ../../flyway), then a JPA write
-// through a subtype and polymorphic reads. One JSON line per check.
+// through a subtype and polymorphic reads; then Hibernate's SINGLE_TABLE
+// inheritance with @DiscriminatorColumn over fleet, which SprigDB types by
+// that column (fleet_truck, fleet_car). One JSON line per check.
 //
 // Environment: SPRIG_CONNECTOR (hibernate = MySQL Connector/J,
 // hibernate-mariadb = MariaDB Connector/J), SPRIG_HOST, SPRIG_PORT,
@@ -91,6 +93,42 @@ public class App {
             em.close();
         } catch (Exception e) {
             emit("jpa", false, String.valueOf(rootOf(e).getMessage()));
+        }
+        // Hibernate SINGLE_TABLE + @DiscriminatorColumn over a table SprigDB
+        // types by the same column: Hibernate writes and reads its table,
+        // SQL reads the subtypes, and both agree.
+        try {
+            EntityManager em = emf.createEntityManager();
+            em.getTransaction().begin();
+            em.persist(new FleetTruck(900L, "jpa-fleet-truck", new BigDecimal("42.50")));
+            em.getTransaction().commit();
+            em.clear();
+            long hqlTrucks = em.createQuery("select count(t) from FleetTruck t", Long.class).getSingleResult();
+            long sqlTrucks = ((Number) em.createNativeQuery("select count(*) from fleet_truck").getSingleResult()).longValue();
+            String vtype = String.valueOf(em.createNativeQuery("select vtype from fleet where id = 900").getSingleResult());
+            emit("single_table_write", hqlTrucks == 2 && sqlTrucks == 2 && vtype.equals("TRUCK"),
+                    "persisted FleetTruck 900 (vtype " + vtype + "); trucks via HQL " + hqlTrucks + ", via fleet_truck " + sqlTrucks + " (want 2)");
+            long all = ((Number) em.createNativeQuery("select count(*) from fleet").getSingleResult()).longValue();
+            long only = ((Number) em.createNativeQuery("select count(*) from only fleet").getSingleResult()).longValue();
+            long cars = ((Number) em.createNativeQuery("select count(*) from fleet_car").getSingleResult()).longValue();
+            emit("single_table_typed_reads", all == 5 && only == 2 && cars == 1,
+                    "fleet " + all + " (want 5), only fleet " + only + " (want 2: VEHICLE and the undeclared SMALLTRUCK), fleet_car " + cars + " (want 1)");
+            em.getTransaction().begin();
+            em.createNativeQuery("update fleet set vtype = 'CAR' where id = 900").executeUpdate();
+            em.getTransaction().commit();
+            em.clear();
+            FleetCar moved = em.find(FleetCar.class, 900L);
+            long carsAfter = ((Number) em.createNativeQuery("select count(*) from fleet_car").getSingleResult()).longValue();
+            emit("single_table_move", moved != null && carsAfter == 2,
+                    "vtype TRUCK -> CAR: Hibernate finds FleetCar 900 " + (moved != null) + ", fleet_car " + carsAfter + " (want 2)");
+            em.getTransaction().begin();
+            em.remove(em.find(FleetCar.class, 900L));
+            em.getTransaction().commit();
+            long left = ((Number) em.createNativeQuery("select count(*) from fleet").getSingleResult()).longValue();
+            emit("single_table_delete", left == 4, "fleet after deleting FleetCar 900: " + left);
+            em.close();
+        } catch (Exception e) {
+            emit("single_table", false, String.valueOf(rootOf(e).getMessage()));
         }
         ctx.close();
         System.exit(failures == 0 ? 0 : 1);

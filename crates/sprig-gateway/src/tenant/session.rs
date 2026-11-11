@@ -168,7 +168,12 @@ impl TenantSession {
             .ensure(&self.svc, &cat, &self.principal.backend.cluster)
             .await
         {
-            tracing::warn!(tenant = %self.tenant, error = %e, "backend grants not reconciled");
+            // A tenant being deleted (bugfix-32): every statement says so.
+            if e.code() == Some(sprig_common::SprigCode::TenantNotReady) {
+                tracing::debug!(tenant = %self.tenant, error = %e, "backend grants not reconciled");
+            } else {
+                tracing::warn!(tenant = %self.tenant, error = %e, "backend grants not reconciled");
+            }
         }
         Ok(cat)
     }

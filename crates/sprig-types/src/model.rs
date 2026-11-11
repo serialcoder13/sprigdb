@@ -145,7 +145,9 @@ impl DiscValue {
     #[must_use]
     pub fn same(&self, other: &DiscValue) -> bool {
         match (self, other) {
-            (DiscValue::Str(a), DiscValue::Str(b)) => a.trim_end_matches(' ') == b.trim_end_matches(' '),
+            (DiscValue::Str(a), DiscValue::Str(b)) => {
+                a.trim_end_matches(' ') == b.trim_end_matches(' ')
+            }
             (DiscValue::Num(a), DiscValue::Num(b)) => {
                 a == b
                     || matches!((a.parse::<f64>(), b.parse::<f64>()), (Ok(x), Ok(y)) if (x - y).abs() == 0.0)
@@ -744,6 +746,93 @@ pub(crate) mod fixtures {
 }
 
 #[cfg(test)]
+pub(crate) mod fleet {
+    //! Kiran's example: `vehicle` typed by its `vtype` column.
+    use super::fixtures::field;
+    use super::*;
+
+    /// `vehicle (id, name, vtype)` with discriminator `vtype` > `truck
+    /// (payload_kg)` 'TRUCK' > `smalltruck (cap)` 'SMALLTRUCK', and
+    /// `vehicle` > `car (seats)` 'CAR'. Ids 21..24 in database 1.
+    pub(crate) fn fleet(storage: Storage) -> DbTypes {
+        let single = storage == Storage::SingleTable;
+        let table = |own: &str| {
+            if single {
+                "vehicle".to_owned()
+            } else {
+                own.to_owned()
+            }
+        };
+        let mut id = field("id", "vehicle", "bigint(20)");
+        id.nullable = false;
+        let t =
+            |oid: u64, name: &str, parent: Option<u64>, depth: u8, path: &str, v, own| TypeDef {
+                id: ObjectId(oid),
+                db: DbId(1),
+                name: name.into(),
+                parent: parent.map(ObjectId),
+                root: ObjectId(21),
+                depth,
+                path: path.into(),
+                is_abstract: false,
+                storage,
+                key_fields: vec!["id".into()],
+                own_fields: own,
+                discriminator: (oid == 21).then(|| "vtype".to_owned()),
+                disc_value: v,
+                state: TypeState::Active,
+                version: 1,
+            };
+        let s = |v: &str| Some(DiscValue::Str(v.into()));
+        DbTypes::new(
+            vec![
+                t(
+                    21,
+                    "vehicle",
+                    None,
+                    0,
+                    "/vehicle/",
+                    None,
+                    vec![
+                        id,
+                        field("name", "vehicle", "varchar(50)"),
+                        field("vtype", "vehicle", "varchar(31)"),
+                    ],
+                ),
+                t(
+                    22,
+                    "truck",
+                    Some(21),
+                    1,
+                    "/vehicle/truck/",
+                    s("TRUCK"),
+                    vec![field("payload_kg", &table("truck"), "decimal(10,2)")],
+                ),
+                t(
+                    23,
+                    "smalltruck",
+                    Some(22),
+                    2,
+                    "/vehicle/truck/smalltruck/",
+                    s("SMALLTRUCK"),
+                    vec![field("cap", &table("smalltruck"), "int(11)")],
+                ),
+                t(
+                    24,
+                    "car",
+                    Some(21),
+                    1,
+                    "/vehicle/car/",
+                    s("CAR"),
+                    vec![field("seats", &table("car"), "int(11)")],
+                ),
+            ],
+            Vec::new(),
+        )
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::fixtures::assets;
     use super::*;
@@ -780,6 +869,25 @@ mod tests {
         assert!(db.get("Truck", false).is_none());
         assert!(db.get("Truck", true).is_some());
         assert!(db.hierarchy("org_unit", false).is_some());
+    }
+
+    #[test]
+    fn values_name_types_and_undeclared_values_are_the_roots() {
+        let db = super::fleet::fleet(Storage::SingleTable);
+        let of = |v: DiscValue| db.type_of_value(ObjectId(21), &v).unwrap().name.clone();
+        assert_eq!(of(DiscValue::Str("TRUCK".into())), "truck");
+        assert_eq!(of(DiscValue::Str("SMALLTRUCK ".into())), "smalltruck");
+        assert_eq!(of(DiscValue::Str("MINITRUCK".into())), "vehicle");
+        assert_eq!(of(DiscValue::Str("truck".into())), "vehicle");
+        assert_eq!(db.discriminator(ObjectId(23)).as_deref(), Some("vtype"));
+        let owners: Vec<_> = db
+            .all_fields(ObjectId(23))
+            .iter()
+            .map(|f| f.owner_table.clone())
+            .collect();
+        assert!(owners.iter().all(|o| o == "vehicle"), "{owners:?}");
+        assert!(DiscValue::Num("5".into()).same(&DiscValue::Num("5.0".into())));
+        assert!(!DiscValue::Num("5".into()).same(&DiscValue::Num("6".into())));
     }
 
     #[test]

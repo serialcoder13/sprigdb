@@ -21,8 +21,8 @@ use crate::Ctx;
 use crate::ddl::{FK_PREFIX, TYPE_PATH_INDEX};
 use crate::exec::{Rows, Runner};
 use crate::grammar::{Name, ShowColumns};
-use crate::model::{DbTypes, TypeDef};
-use crate::rewrite::{TYPE_COLUMN, TYPE_PATH_COLUMN};
+use crate::model::{DbTypes, Storage, TypeDef};
+use crate::rewrite::{TYPE_COLUMN, TYPE_PATH_COLUMN, quote_str};
 use crate::tabledef::{Element, TableDef};
 
 fn table_sql(db: Option<&str>, t: &str) -> String {
@@ -39,36 +39,93 @@ fn is_type_column(c: &str) -> bool {
 /// The logical `CREATE TABLE` of type `t` from its table's physical one.
 #[must_use]
 pub fn logical_create(physical: &str, t: &TypeDef, parent: Option<&str>, ctx: &Ctx<'_>) -> String {
+    logical_create_from(physical, None, t, parent, None, ctx)
+}
+
+/// [`logical_create`], with the columns of a single-table subtype taken
+/// from its root's physical text (`root`), and the root's discriminator
+/// column (`disc`) for a subtype's `WHERE`.
+#[must_use]
+pub fn logical_create_from(
+    physical: &str,
+    root: Option<&str>,
+    t: &TypeDef,
+    parent: Option<&str>,
+    disc: Option<&str>,
+    ctx: &Ctx<'_>,
+) -> String {
     let Some(def) = TableDef::parse(physical, &ctx.lex) else {
         return physical.to_owned();
     };
-    let keep: Vec<&str> = def
+    let keep_element = |e: &Element| match e {
+        Element::Column(c) => !is_type_column(&c.name) && (t.is_root() || !t.is_key(&c.name)),
+        Element::PrimaryKey(_) => t.is_root(),
+        Element::Other { name, columns, .. } => {
+            let n = name.as_deref().unwrap_or("");
+            !n.eq_ignore_ascii_case(TYPE_PATH_INDEX)
+                && !n.starts_with(FK_PREFIX)
+                && !columns.iter().any(|c| is_type_column(c))
+        }
+    };
+    let mut keep: Vec<&str> = def
         .elements
         .iter()
-        .filter(|(e, _)| match e {
-            Element::Column(c) => !is_type_column(&c.name) && (t.is_root() || !t.is_key(&c.name)),
-            Element::PrimaryKey(_) => t.is_root(),
-            Element::Other { name, columns, .. } => {
-                let n = name.as_deref().unwrap_or("");
-                !n.eq_ignore_ascii_case(TYPE_PATH_INDEX)
-                    && !n.starts_with(FK_PREFIX)
-                    && !columns.iter().any(|c| is_type_column(c))
-            }
-        })
+        .filter(|(e, _)| keep_element(e))
         .map(|(_, r)| &physical[r.clone()])
         .collect();
+    // A single-table subtype's own columns live in its root's table.
+    if let Some(rt) = root
+        && let Some(rdef) = TableDef::parse(rt, &ctx.lex)
+    {
+        keep = t
+            .own_fields
+            .iter()
+            .filter_map(|f| {
+                rdef.elements.iter().find_map(|(e, r)| match e {
+                    Element::Column(c) if c.name.eq_ignore_ascii_case(&f.name) => {
+                        Some(&rt[r.clone()])
+                    }
+                    _ => None,
+                })
+            })
+            .collect();
+    }
     let mut out = String::with_capacity(physical.len());
     out.push_str(&physical[..=def.open]);
-    out.push_str("\n  ");
-    out.push_str(&keep.join(",\n  "));
-    out.push('\n');
+    if !keep.is_empty() {
+        out.push_str("\n  ");
+        out.push_str(&keep.join(",\n  "));
+        out.push('\n');
+    }
     out.push(')');
     if let Some(p) = parent {
         out.push_str(&format!(" INHERITS ({})", quote(p)));
+        if let (Some(d), Some(v)) = (disc, &t.disc_value) {
+            out.push_str(&format!(
+                " WHERE {} = {}",
+                quote(d),
+                v.sql(ctx.lex.no_backslash_escapes)
+            ));
+        }
     }
     out.push_str(&physical[def.close + 1..]);
+    let mut opts = Vec::new();
     if t.is_abstract {
-        out.push_str(" WITH (SPRIG_ABSTRACT = 1)");
+        opts.push("SPRIG_ABSTRACT = 1".to_owned());
+    }
+    if t.is_root() {
+        if t.storage == Storage::SingleTable {
+            opts.push("SPRIG_STORAGE = 'single_table'".to_owned());
+        }
+        if let Some(d) = &t.discriminator {
+            opts.push(format!(
+                "SPRIG_DISCRIMINATOR = {}",
+                quote_str(d, ctx.lex.no_backslash_escapes)
+            ));
+        }
+    }
+    if !opts.is_empty() {
+        out.push_str(&format!(" WITH ({})", opts.join(", ")));
     }
     out
 }
@@ -94,10 +151,35 @@ pub async fn create(
         .parent
         .and_then(|p| types.by_id(p))
         .map(|p| p.name.clone());
+    let root = types.root_of(t.id);
+    let root_text = match &root {
+        Some(rt) if rt.storage == Storage::SingleTable && !t.is_root() => {
+            let rows = r
+                .query(&format!(
+                    "SHOW CREATE TABLE {}",
+                    table_sql(name.db.as_deref(), &rt.name)
+                ))
+                .await?;
+            rows.rows
+                .first()
+                .and_then(|row| row.get(1).cloned().flatten())
+                .map(|v| String::from_utf8_lossy(&v).into_owned())
+        }
+        _ => None,
+    };
+    let disc = root.and_then(|r| r.discriminator.clone());
     for row in &mut rows.rows {
         if let Some(Some(v)) = row.get_mut(1) {
             let text = String::from_utf8_lossy(v).into_owned();
-            *v = logical_create(&text, t, parent.as_deref(), ctx).into_bytes();
+            *v = logical_create_from(
+                &text,
+                root_text.as_deref(),
+                t,
+                parent.as_deref(),
+                disc.as_deref(),
+                ctx,
+            )
+            .into_bytes();
         }
     }
     Ok(rows)
@@ -121,6 +203,36 @@ pub async fn columns(
     let full = if sc.full { "FULL " } else { "" };
     let db = sc.table.db.as_deref();
     let mut out = Rows::default();
+    if t.storage == Storage::SingleTable && !t.is_root() {
+        // Every column is the root table's: the type's own, inherited first.
+        let root = types
+            .root_of(t.id)
+            .ok_or_else(|| sprig_common::SprigError::internal("a type without a root"))?;
+        let rows = r
+            .query(&format!(
+                "SHOW {full}COLUMNS FROM {}{filter}",
+                table_sql(db, &root.name)
+            ))
+            .await?;
+        out.columns = rows.columns;
+        let name_of = |row: &Vec<Option<Vec<u8>>>| {
+            row.first()
+                .cloned()
+                .flatten()
+                .map(|v| String::from_utf8_lossy(&v).into_owned())
+                .unwrap_or_default()
+        };
+        for f in types.all_fields(t.id) {
+            if let Some(row) = rows
+                .rows
+                .iter()
+                .find(|row| name_of(row).eq_ignore_ascii_case(&f.name))
+            {
+                out.rows.push(row.clone());
+            }
+        }
+        return Ok(out);
+    }
     for x in types.chain(t.id) {
         let rows = r
             .query(&format!(
