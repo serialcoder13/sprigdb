@@ -738,7 +738,7 @@ impl PassSession {
         // text the client prepared; cursors are left out (their rows come
         // with later fetches).
         let pending = match &logical {
-            Some(l) if !cursor => self.wl_start(l),
+            Some(l) if !cursor => self.wl_start_stmt(stmt, l),
             _ => None,
         };
         self.wl_probe(pending.as_ref());
@@ -1190,6 +1190,18 @@ impl SessionExec for PassSession {
             p.row_policies()
                 .is_some_and(|r| r.tables.contains_key(&sprig_common::ids::ObjectId(object))),
         )
+    }
+
+    fn row_policy_docs(&self) -> Option<std::sync::Arc<crate::tenant::rls::DocViews>> {
+        // RL34: the change stream's view of the tenant's documents.
+        let ts = self.tenant.as_deref()?;
+        let cat = ts.catalog()?;
+        let p = crate::tenant::authz::privileges(ts, cat);
+        Some(std::sync::Arc::new(crate::tenant::rls::doc_views(
+            ts,
+            cat,
+            p.row_policies().as_deref(),
+        )))
     }
 
     fn attach_capture(&mut self, capture: crate::workload::SessionCapture) {

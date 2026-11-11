@@ -478,6 +478,43 @@ async fn a_deleting_tenants_stuck_job_and_databases_go() {
     assert!(r.deleted_databases.is_empty() && r.errors.is_empty());
 }
 
+/// bugfix-27: an object left `creating` with no job behind it (an
+/// inherited instance whose creation a crash or the deletion cut short)
+/// held its database for ever, and the tenant stayed `deleting`. For a
+/// deleted tenant only a live job holds a database.
+#[tokio::test]
+async fn an_orphan_creating_object_doesnt_hold_a_deleted_tenants_database() {
+    let env = billing().await;
+    let mut orphan = env.live("orders").expect("orders");
+    orphan.state = ObjectState::Creating;
+    let mut c = env
+        .v
+        .change(env.tenant, VersionKind::Catalog)
+        .await
+        .unwrap();
+    c.tx().put_object(orphan);
+    c.commit().await.unwrap();
+    // An active tenant's pass leaves the database alone (it is held).
+    let r = env.reconciler(now_cfg()).pass(env.tenant).await.unwrap();
+    assert!(r.deleted_databases.is_empty());
+    env.dir
+        .update(env.tenant, |e| {
+            e.state = TenantState::Deleting;
+            Ok(true)
+        })
+        .await
+        .unwrap();
+    let r = env.reconciler(now_cfg()).pass(env.tenant).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert_eq!(r.deleted_databases, ["billing".to_owned()], "{r:?}");
+    assert!(
+        env.snapshot()
+            .databases
+            .iter()
+            .all(|d| d.state == DbState::Dropped)
+    );
+}
+
 /// Group maps from a fixed answer.
 struct FixedGroups(std::result::Result<BTreeSet<GroupId>, ()>);
 

@@ -139,6 +139,10 @@ pub struct DcLease {
     opts: DcLeaseOpts,
     state: Mutex<Inner>,
     ticks: AtomicU64,
+    /// A round has finished without an error since this keeper started
+    /// (hardening round 2): until then the controller's permit answer would
+    /// be a refusal it hasn't checked.
+    settled: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for DcLease {
@@ -169,6 +173,7 @@ impl DcLease {
             opts,
             state: Mutex::new(Inner::default()),
             ticks: AtomicU64::new(0),
+            settled: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -192,6 +197,17 @@ impl DcLease {
     #[must_use]
     pub fn ticks(&self) -> u64 {
         self.ticks.load(Ordering::SeqCst)
+    }
+
+    /// Whether a round has finished without an error since this keeper
+    /// started. Until then [`Self::permit`] would refuse only because this
+    /// controller hasn't read the lease yet, so the permit service answers
+    /// "unavailable" instead and holders ask another controller (a
+    /// restarted controller used to fence its DC's gateways for a moment;
+    /// hardening round 2).
+    #[must_use]
+    pub fn settled(&self) -> bool {
+        self.settled.load(Ordering::SeqCst)
     }
 
     /// Before this instant the DC lease certainly exists: the local
@@ -254,6 +270,9 @@ impl DcLease {
     pub async fn tick(&self, may_take: bool) -> Result<()> {
         self.ticks.fetch_add(1, Ordering::SeqCst);
         let r = self.round(may_take).await;
+        if r.is_ok() {
+            self.settled.store(true, Ordering::SeqCst);
+        }
         // A deadline that passed ends the lease locally whatever etcd says.
         let now = self.clock.now();
         let mut s = self.lock();

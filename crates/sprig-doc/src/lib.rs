@@ -31,6 +31,7 @@ pub mod heavy;
 pub mod json;
 pub mod keyenc;
 pub mod meta;
+pub mod policy;
 pub mod sessions;
 pub mod sql;
 /// `$text`, `$search` and `$searchMeta` (chapter 39, R5 round 5).

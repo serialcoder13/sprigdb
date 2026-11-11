@@ -356,12 +356,20 @@ fn struct_value(tag: u8, f: &[PackValue]) -> Result<Value> {
                     .ok_or_else(bad)?,
             ))
         }
-        0x45 => Value::Duration(temporal::Dur {
-            months: int_field(f, 0)?,
-            days: int_field(f, 1)?,
-            secs: int_field(f, 2)?,
-            nanos: int_field(f, 3)?,
-        }),
+        0x45 => Value::Duration(
+            temporal::Dur::from_fields(
+                int_field(f, 0)?,
+                int_field(f, 1)?,
+                int_field(f, 2)?,
+                int_field(f, 3)?,
+            )
+            .ok_or_else(|| {
+                SprigError::new(
+                    SprigCode::GraphPropertyType,
+                    "duration seconds out of range",
+                )
+            })?,
+        ),
         0x58 | 0x59 => Value::Point(temporal::Point {
             srid: u32_of(int_field(f, 0)?)?,
             x: float_field(f, 1)?,

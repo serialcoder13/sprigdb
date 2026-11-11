@@ -190,7 +190,15 @@ async fn deleted_tenants_finish_and_close_their_connections() {
     ctl(&e, &["tenant", "create", &decl, "--cluster", "dc-a-c1"]).expect("declarer");
     ctl(
         &e,
-        &["tenant", "create", &mem, "--under", &decl, "--cluster", "dc-a-c1"],
+        &[
+            "tenant",
+            "create",
+            &mem,
+            "--under",
+            &decl,
+            "--cluster",
+            "dc-a-c1",
+        ],
     )
     .expect("member");
     ctl(&e, &["tenant", "create", &plain, "--cluster", "dc-a-c1"]).expect("plain");

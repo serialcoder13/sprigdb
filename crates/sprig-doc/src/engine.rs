@@ -1026,7 +1026,10 @@ impl Engine {
             return Ok(Some(None));
         };
         let doc = r.get(1).and_then(Option::as_deref).unwrap_or_default();
-        let types = r.get(2).and_then(Option::as_ref).map(|b| String::from_utf8_lossy(b));
+        let types = r
+            .get(2)
+            .and_then(Option::as_ref)
+            .map(|b| String::from_utf8_lossy(b));
         let raw = json::to_raw(
             std::str::from_utf8(doc)
                 .map_or_else(
@@ -1574,7 +1577,20 @@ impl Engine {
         // The read that found the document, when it kept `_v`: it already
         // matched the filter.
         let mut seen = first_v.map(|v| (first, v));
-        for _ in 0..=self.cfg.update_retry_max {
+        for attempt in 0..=self.cfg.update_retry_max {
+            // Another writer changed the document between this one's read
+            // and its write: the first retry is at once, later ones after
+            // a short, jittered pause (R5 round 8: under YCSB A's hot keys,
+            // immediate retries ran out of attempts and failed with 112).
+            if attempt >= 2 {
+                let base = 1u64 << (attempt - 2).min(5);
+                let jitter = u64::from(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_or(0, |d| d.subsec_nanos()),
+                ) % (base + 1);
+                tokio::time::sleep(std::time::Duration::from_millis(base + jitter)).await;
+            }
             let (old, v) = if let Some(x) = seen.take() {
                 x
             } else {
@@ -1605,7 +1621,12 @@ impl Engine {
                 return Ok((false, Some(new), Some(old)));
             }
             let s = json::to_stored(&new, &self.opts())?;
-            if bson::to_vec(&new).map_or(0, |b| b.len()) > 16 * 1024 * 1024 {
+            // A document's BSON is at most 13 times its stored JSON (a
+            // decimal `0` in an array: 2 bytes of JSON, 25 of BSON), so
+            // only a large one is serialized to be measured (R5 round 8).
+            if s.doc.len().saturating_mul(13) > 16 * 1024 * 1024
+                && bson::to_vec(&new).map_or(0, |b| b.len()) > 16 * 1024 * 1024
+            {
                 return Err(MongoError::new(
                     code::BSON_OBJECT_TOO_LARGE,
                     "Resulting document after update is larger than 16777216",

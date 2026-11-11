@@ -101,6 +101,23 @@ async fn the_leader_takes_the_lease_and_raises_the_epoch() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_keeper_is_settled_only_after_a_round_succeeds() {
+    let (_mem, store, clock) = store_with("active").await;
+    let l = lease(&store, &clock, "ctl-1");
+    assert!(!l.settled(), "a new keeper hasn't read the lease");
+    assert!(l.permit().fenced, "its permit would be a refusal");
+    l.tick(true).await.expect("tick");
+    assert!(l.settled());
+    assert!(!l.permit().fenced);
+    // A follower that adopts the lease is settled too.
+    let f = lease(&store, &clock, "ctl-2");
+    assert!(!f.settled());
+    f.tick(false).await.expect("tick");
+    assert!(f.settled());
+    assert!(!f.permit().fenced);
+}
+
+#[tokio::test(start_paused = true)]
 async fn followers_adopt_and_renew_the_same_lease() {
     let (_mem, store, clock) = store_with("active").await;
     let (a, b) = (lease(&store, &clock, "c1"), lease(&store, &clock, "c2"));

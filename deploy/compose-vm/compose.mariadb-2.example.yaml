@@ -13,5 +13,9 @@ services:
       - --max-connections=${MARIADB_MAX_CONNECTIONS:-1000}
     volumes:
       - mariadb-2-data:/var/lib/mysql
+    # Several VMs (RUNBOOK.md, "High availability"): the other VMs' gateways
+    # reach it here; register it as SPRIG_PRIVATE_HOST:SPRIG_BACKEND_PORT_2.
+    ports:
+      - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_BACKEND_PORT_2:-3316}:3306"
 volumes:
   mariadb-2-data: {}

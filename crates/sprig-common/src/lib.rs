@@ -22,6 +22,7 @@ pub mod https;
 pub mod ids;
 pub mod names;
 pub mod net;
+pub mod secret_file;
 pub mod telemetry;
 pub mod time;
 

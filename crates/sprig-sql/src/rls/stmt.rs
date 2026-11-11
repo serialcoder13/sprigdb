@@ -173,6 +173,11 @@ pub enum PolicyStmt {
         using: Option<String>,
         /// `WITH CHECK (...)`.
         check: Option<String>,
+        /// `SPRIG MONGO USING '<filter>'`: the `USING` as a MongoDB
+        /// filter (extended JSON), kept for change streams (RL33).
+        mongo_using: Option<String>,
+        /// `SPRIG MONGO ... CHECK '<filter>'`.
+        mongo_check: Option<String>,
     },
     /// `ALTER POLICY ... RENAME TO`.
     Rename {
@@ -539,6 +544,21 @@ fn create(p: &mut P<'_>) -> R<PolicyStmt> {
     if p.eat_words(&["WITH", "CHECK"]) {
         check = Some(p.paren_text()?);
     }
+    // RL33: the MongoDB forms of a collection's policy (`sprigCreatePolicy`
+    // writes them; the SQL above is what the gateway and MariaDB apply).
+    let mut mongo_using = None;
+    let mut mongo_check = None;
+    if p.eat_words(&["SPRIG", "MONGO"]) {
+        if p.eat_word("USING") {
+            mongo_using = Some(p.name(true)?);
+        }
+        if p.eat_word("CHECK") {
+            mongo_check = Some(p.name(true)?);
+        }
+        if mongo_using.is_none() && mongo_check.is_none() {
+            return Err(p.err());
+        }
+    }
     p.end()?;
     let commands = commands.unwrap_or(Commands::ALL);
     // PostgreSQL's rules: INSERT has no USING, SELECT and DELETE no WITH
@@ -564,6 +584,8 @@ fn create(p: &mut P<'_>) -> R<PolicyStmt> {
         to,
         using,
         check,
+        mongo_using,
+        mongo_check,
     })
 }
 
@@ -754,8 +776,21 @@ mod tests {
                 ],
                 using: Some("owner_id = SPRIG_CLAIM('sub')".into()),
                 check: None,
+                mongo_using: None,
+                mongo_check: None,
             }
         );
+        match ok("CREATE POLICY m ON c USING (TRUE) SPRIG MONGO USING '{\"o\": \"$$USER\"}'") {
+            PolicyStmt::Create {
+                mongo_using,
+                mongo_check,
+                ..
+            } => {
+                assert_eq!(mongo_using.as_deref(), Some("{\"o\": \"$$USER\"}"));
+                assert!(mongo_check.is_none());
+            }
+            o => panic!("{o:?}"),
+        }
         match ok("create policy p on t for insert with check ((a > 1) and b in (select x from u))")
         {
             PolicyStmt::Create {

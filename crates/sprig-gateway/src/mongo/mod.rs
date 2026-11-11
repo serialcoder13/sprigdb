@@ -27,10 +27,12 @@ pub mod changes;
 pub mod commands;
 pub mod conn;
 pub mod cursors;
+pub mod explain;
 pub mod failpoint;
 pub mod logic;
 pub mod publish;
 pub mod retry;
+pub mod rls;
 pub mod search;
 pub mod snapshot;
 pub mod sql;
@@ -236,29 +238,57 @@ pub struct Shared {
     pub(crate) process_id: bson::oid::ObjectId,
     pub(crate) conn_ids: std::sync::atomic::AtomicI32,
     pub(crate) started: std::time::Instant,
+    /// The two settings every command reads, with the settings snapshot
+    /// they were resolved in (R5 round 8: resolving them per command was
+    /// about 1% of a point read's gateway CPU).
+    pub(crate) per_command: std::sync::Mutex<Option<(sprig_settings::watch::Snapshot, PerCommand)>>,
+}
+
+/// [`Shared::per_command`]'s values.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PerCommand {
+    test_commands: bool,
+    large_request_bytes: u64,
 }
 
 impl Shared {
+    fn per_command(&self) -> PerCommand {
+        let Some((l, dc)) = &self.d.live else {
+            return PerCommand {
+                test_commands: false,
+                large_request_bytes: crate::offload::LARGE_STATEMENT_BYTES.default,
+            };
+        };
+        let snap = l.snapshot();
+        let mut memo = self
+            .per_command
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((s, v)) = memo.as_ref()
+            && Arc::ptr_eq(s, &snap)
+        {
+            return *v;
+        }
+        let ctx = SettingCtx::process(dc);
+        let v = PerCommand {
+            test_commands: snap.get(&failpoint::TEST_COMMANDS, &ctx),
+            large_request_bytes: snap.get(&crate::offload::LARGE_STATEMENT_BYTES, &ctx),
+        };
+        *memo = Some((snap, v));
+        v
+    }
+
     /// `mongo.test_commands`: the `failCommand` fail point is accepted.
     #[must_use]
     pub fn test_commands(&self) -> bool {
-        self.d
-            .live
-            .as_ref()
-            .is_some_and(|(l, dc)| l.get(&failpoint::TEST_COMMANDS, &SettingCtx::process(dc)))
+        self.per_command().test_commands
     }
 
     /// `gateway.large_statement_bytes`: requests this big run on a
     /// blocking thread ([`crate::offload`]).
     #[must_use]
     pub fn large_request_bytes(&self) -> u64 {
-        match &self.d.live {
-            Some((l, dc)) => l.get(
-                &crate::offload::LARGE_STATEMENT_BYTES,
-                &SettingCtx::process(dc),
-            ),
-            None => crate::offload::LARGE_STATEMENT_BYTES.default,
-        }
+        self.per_command().large_request_bytes
     }
 
     /// The settings now.
@@ -352,6 +382,7 @@ impl MongoFrontend {
             process_id: bson::oid::ObjectId::new(),
             conn_ids: std::sync::atomic::AtomicI32::new(1),
             started: std::time::Instant::now(),
+            per_command: std::sync::Mutex::new(None),
             d,
         });
         let s = Arc::clone(&shared);

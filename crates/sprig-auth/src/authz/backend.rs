@@ -355,8 +355,9 @@ pub fn object_names(want: &BackendState) -> BTreeSet<String> {
     want.values()
         .flat_map(BTreeMap::keys)
         .filter_map(|t| match t {
-            BackendTarget::Table(_, n) | BackendTarget::Column(_, n, _) => Some(n.clone()),
-            BackendTarget::Routine(_, n, _) => Some(n.clone()),
+            BackendTarget::Table(_, n)
+            | BackendTarget::Column(_, n, _)
+            | BackendTarget::Routine(_, n, _) => Some(n.clone()),
             BackendTarget::Db(_) => None,
         })
         .filter(|n| n != DOC_SESSIONS_TABLE && n != "__sprig_redo")

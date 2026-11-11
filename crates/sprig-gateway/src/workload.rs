@@ -101,7 +101,7 @@ struct Inner {
     settings: CaptureSettings,
     /// Weights of writes inside compound statements not yet counted as a
     /// run, by tenant and fingerprint (decision A4).
-    inner_weights: std::sync::Mutex<std::collections::HashMap<(TenantId, u64), f64>>,
+    compound_weights: std::sync::Mutex<std::collections::HashMap<(TenantId, u64), f64>>,
 }
 
 /// Inner-write weights kept at most (the map is emptied above it).
@@ -155,7 +155,7 @@ impl GatewayWorkload {
             gateway_id,
             clock,
             settings,
-            inner_weights: std::sync::Mutex::new(std::collections::HashMap::new()),
+            compound_weights: std::sync::Mutex::new(std::collections::HashMap::new()),
         }))
     }
 
@@ -420,7 +420,7 @@ impl SessionCapture {
             let mut m = self
                 .wl
                 .0
-                .inner_weights
+                .compound_weights
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if m.len() > MAX_INNER_WEIGHTS {

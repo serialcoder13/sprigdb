@@ -119,6 +119,9 @@ pub struct AdminService {
     residency: Option<Arc<crate::residency::Residency>>,
     /// Chapter 18's in-doubt transaction calls, built on first use.
     txn: std::sync::OnceLock<Arc<txn_admin::TxnAdmin>>,
+    /// Tenant catalog changes for `sprigctl search rebuild` (chapter 39;
+    /// R5 round 8).
+    search_catalog: Option<sprig_catalog::Versioner<sprig_catalog::MariaBackend>>,
 }
 
 impl std::fmt::Debug for AdminService {
@@ -154,7 +157,19 @@ impl AdminService {
             residency: None,
             sharding: None,
             txn: std::sync::OnceLock::new(),
+            search_catalog: None,
         }
+    }
+
+    /// The same service with tenant catalog changes for `sprigctl search
+    /// rebuild`.
+    #[must_use]
+    pub fn with_search_catalog(
+        mut self,
+        v: sprig_catalog::Versioner<sprig_catalog::MariaBackend>,
+    ) -> Self {
+        self.search_catalog = Some(v);
+        self
     }
 
     /// The same service with the automatic-indexing calls.

@@ -106,5 +106,6 @@ pub fn budgets(get: &dyn Fn(&'static Setting<u64>) -> u64) -> Budgets {
         batch_nodes: n(&BATCH_NODES),
         local_burst_hops: u32::try_from(get(&LOCAL_BURST_HOPS)).unwrap_or(4),
         max_detach_edges: n(&MAX_DETACH_EDGES),
+        tx_metadata: None,
     }
 }

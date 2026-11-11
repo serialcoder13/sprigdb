@@ -269,6 +269,36 @@ pub fn parse(sql: &[u8], opts: &LexOptions) -> Option<R<AccountStmt>> {
     Some(stmt(&mut p))
 }
 
+/// `SET PASSWORD FOR acct = 'pw'` (after `SET PASSWORD FOR`): `ALTER USER
+/// acct IDENTIFIED BY 'pw'` under MySQL's own privilege rule for it
+/// (bugfix-26).
+fn set_password_for(p: &mut P<'_>) -> R<AccountStmt> {
+    let user = p.user_spec()?;
+    if !p.eat_punct("=") {
+        return Err(p.err());
+    }
+    if p.word("PASSWORD") || p.word("OLD_PASSWORD") {
+        return Err(unsupported("SET PASSWORD ... = PASSWORD('...')"));
+    }
+    let password = p.string()?;
+    p.end()?;
+    Ok(AccountStmt::AlterUser {
+        if_exists: false,
+        users: vec![UserItem {
+            user,
+            identified: Some(Identified {
+                password: Zeroizing::new(password),
+                plugin: None,
+                retain_current: false,
+            }),
+        }],
+        options: UserOptions {
+            set_password: true,
+            ..UserOptions::default()
+        },
+    })
+}
+
 fn stmt(p: &mut P<'_>) -> R<AccountStmt> {
     if p.eat_words(&["FLUSH", "PRIVILEGES"]) {
         p.end()?;
@@ -301,32 +331,7 @@ fn stmt(p: &mut P<'_>) -> R<AccountStmt> {
         });
     }
     if p.eat_words(&["SET", "PASSWORD", "FOR"]) {
-        // `SET PASSWORD FOR acct = 'pw'`: `ALTER USER acct IDENTIFIED BY
-        // 'pw'` under MySQL's own privilege rule for it (bugfix-26).
-        let user = p.user_spec()?;
-        if !p.eat_punct("=") {
-            return Err(p.err());
-        }
-        if p.word("PASSWORD") || p.word("OLD_PASSWORD") {
-            return Err(unsupported("SET PASSWORD ... = PASSWORD('...')"));
-        }
-        let password = p.string()?;
-        p.end()?;
-        return Ok(AccountStmt::AlterUser {
-            if_exists: false,
-            users: vec![UserItem {
-                user,
-                identified: Some(Identified {
-                    password: Zeroizing::new(password),
-                    plugin: None,
-                    retain_current: false,
-                }),
-            }],
-            options: UserOptions {
-                set_password: true,
-                ..UserOptions::default()
-            },
-        });
+        return set_password_for(p);
     }
     if p.eat_words(&["ALTER", "USER"]) {
         let if_exists = p.eat_words(&["IF", "EXISTS"]);
@@ -964,8 +969,11 @@ mod tests {
         // Not this parser's: the session's own password, `SET PASSWORD = ...`.
         assert!(parse(b"SET PASSWORD = 'x'", &LexOptions::mysql84()).is_none());
         assert!(
-            parse(b"SET PASSWORD FOR bob = PASSWORD('x')", &LexOptions::mysql84())
-                .is_some_and(|r| r.is_err())
+            parse(
+                b"SET PASSWORD FOR bob = PASSWORD('x')",
+                &LexOptions::mysql84()
+            )
+            .is_some_and(|r| r.is_err())
         );
     }
 

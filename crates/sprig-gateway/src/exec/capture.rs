@@ -38,7 +38,60 @@ fn db_id_of(ts: &TenantSession, cat: Option<&TenantCatalog>, db: Option<&str>) -
     cat.database(&key).map_or(DbId(0), |r| r.db_id)
 }
 
+/// What a prepared statement's fingerprint was made under (R5 round 8):
+/// the tenant catalog's version (table ids, and `lower_case_table_names`,
+/// a tenant setting the catalog carries), the current database, the
+/// lexer's options and the capture setting that changes the text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FpKey {
+    version: u64,
+    db: Option<String>,
+    lex: sprig_sql::lex::LexOptions,
+    max_text: usize,
+}
+
 impl PassSession {
+    /// [`PassSession::wl_start`] for prepared statement `stmt`: its
+    /// fingerprint is made once and kept with the statement while what it
+    /// was made under stays the same (a logic function's statements, which
+    /// carry their caller, are fingerprinted each time).
+    pub(super) fn wl_start_stmt(
+        &mut self,
+        stmt: crate::pipeline::StmtRef,
+        logical: &[u8],
+    ) -> Option<Pending> {
+        if crate::workload::task_caller().is_some() {
+            return self.wl_start(logical);
+        }
+        let key = {
+            let wl = self.wl.as_ref()?;
+            let ts = self.tenant.as_deref()?;
+            FpKey {
+                version: ts.catalog().map_or(0, |c| c.version),
+                db: self.current_logical(),
+                lex: self.lex_opts().0,
+                max_text: wl.workload().max_text_bytes(),
+            }
+        };
+        let cached = self
+            .stmts
+            .get_mut(stmt)
+            .ok()
+            .and_then(|s| s.fp.as_ref())
+            .filter(|(k, _)| *k == key)
+            .map(|(_, fp)| fp.clone());
+        if let Some(fp) = cached {
+            let wl = self.wl.as_ref()?;
+            let tenant = self.tenant.as_deref()?.tenant;
+            return Some(wl.start(tenant, fp, self.wl_multi));
+        }
+        let p = self.wl_start(logical)?;
+        if let Ok(s) = self.stmts.get_mut(stmt) {
+            s.fp = Some((key, p.fingerprint().clone()));
+        }
+        Some(p)
+    }
+
     /// Fingerprints `logical` (a tenant statement's text, logical names)
     /// and asks the recorder for a plan. `None` without capture or tenant.
     pub(super) fn wl_start(&self, logical: &[u8]) -> Option<Pending> {

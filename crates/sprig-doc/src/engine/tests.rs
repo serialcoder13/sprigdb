@@ -116,6 +116,25 @@ async fn live_engine_on_mariadb() {
     )
     .await;
     assert_eq!(got, vec![docs[0].clone()]);
+    // R5 round 8: a point read's BSON written from the stored JSON is the
+    // document's own; a miss is `Some(None)`; other filters aren't points.
+    for d in &docs {
+        let raw = e
+            .find_point_raw(&mut s, &ns, &doc! {"_id": d.get("_id").unwrap().clone()})
+            .await
+            .unwrap();
+        assert_eq!(raw, Some(Some(bson::to_vec(d).unwrap())), "{d}");
+    }
+    let miss = e
+        .find_point_raw(&mut s, &ns, &doc! {"_id": 99})
+        .await
+        .unwrap();
+    assert_eq!(miss, Some(None));
+    let not_point = e
+        .find_point_raw(&mut s, &ns, &doc! {"status": "paid"})
+        .await
+        .unwrap();
+    assert_eq!(not_point, None);
     // duplicate key
     let (n, errs) = e
         .insert(&mut s, &ns, vec![doc! {"_id": 2}], true)

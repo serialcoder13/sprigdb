@@ -39,6 +39,15 @@ class Recorder(unittest.TextTestResult):
         super().addSkip(test, reason)
         self._row(test, "skip", reason)
 
+    def addSubTest(self, test, subtest, err):
+        # A failing subTest fails its test (unittest then never calls
+        # addSuccess for it); the first failing subtest's reason is kept.
+        super().addSubTest(test, subtest, err)
+        if err is not None and self.rows.get(test.id(), ("",))[0] != "fail":
+            self._row(test, "fail", self._exc_info_to_string(err, test))
+            status, line = self.rows[test.id()]
+            self.rows[test.id()] = (status, f"{subtest._subDescription()} {line}"[:240])
+
     def addExpectedFailure(self, test, err):
         super().addExpectedFailure(test, err)
         self._row(test, "pass")
@@ -49,7 +58,8 @@ class Recorder(unittest.TextTestResult):
 
 
 def main():
-    tk, out = os.path.abspath(sys.argv[1]), sys.argv[2]
+    # Both absolute before the chdir below (a relative <out.tsv> was lost).
+    tk, out = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
     sys.path.insert(0, tk)
     os.chdir(tk)
     suite = unittest.TestLoader().discover("tests.neo4j", top_level_dir=tk)
@@ -58,8 +68,9 @@ def main():
     with open(out, "w", encoding="utf-8") as f:
         for tid, (status, msg) in sorted(result.rows.items()):
             f.write(f"{tid}\t{status}\t{msg}\n")
-    print(f"testkit: {len(result.rows)} tests, {len(result.failures) + len(result.errors)} failed, "
-          f"{len(result.skipped)} skipped")
+    counts = {k: sum(1 for st, _ in result.rows.values() if st == k) for k in ("pass", "fail", "skip")}
+    print(f"testkit: {len(result.rows)} tests: {counts['pass']} pass, {counts['fail']} fail, "
+          f"{counts['skip']} skip")
 
 
 if __name__ == "__main__":

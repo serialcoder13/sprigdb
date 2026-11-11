@@ -111,7 +111,9 @@ async fn set_password_for_another_account_follows_mysql() {
                     .query_drop("SET PASSWORD FOR bf7sp_nobody = 'Bf7-x-pw1'")
                     .await;
                 if code(&r) != 1133 {
-                    failed.push(format!("{persona} {u} unknown account: {r:?} (wanted 1133)"));
+                    failed.push(format!(
+                        "{persona} {u} unknown account: {r:?} (wanted 1133)"
+                    ));
                 }
             }
             // Its own password, by name, needs nothing.

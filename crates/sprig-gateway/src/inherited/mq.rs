@@ -477,6 +477,8 @@ pub async fn ensure_vhost(
         .await?;
         if d.kind == DefKind::Queue {
             super::triggers::ensure_for_queue(svc, chain, d, (row.db_id.0, &row.name), *id).await?;
+            // R9 (r9fanin): its FOR EACH TENANT sinks, as for streams.
+            super::sinks::ensure_for_queue(svc, chain, d, t).await;
         }
     }
     applied_map()

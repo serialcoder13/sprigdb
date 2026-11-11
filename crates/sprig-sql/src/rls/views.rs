@@ -740,6 +740,46 @@ pub struct ViewSwap {
     /// Policy view → the table's all-columns view and its invisible
     /// columns (lower case), for tables with invisible columns (RL28).
     pub hidden: std::collections::BTreeMap<String, (String, Vec<String>)>,
+    /// Temporary tables by (lower-case schema, lower-case name) that shadow
+    /// a protected table on this connection: a gathered read's copies,
+    /// filled through the views already (RL28).
+    pub shadowed: std::collections::BTreeSet<(String, String)>,
+}
+
+impl ViewSwap {
+    /// Notes the temporary table `CREATE TEMPORARY TABLE` statement `sql`
+    /// makes (`` `schema`.`name` `` or `name` in `default_schema`), so the
+    /// connection's later statements read it, not the policy view. `false`
+    /// when `sql` isn't such a statement.
+    pub fn note_temporary(&mut self, sql: &str, default_schema: Option<&str>) -> bool {
+        let Ok(all) = lex::lex(sql.as_bytes(), &LexOptions::mariadb()) else {
+            return false;
+        };
+        let t = Toks::new(sql.as_bytes(), &all);
+        let Some(at) = (0..t.toks.len())
+            .find(|i| t.word(*i, "CREATE") && t.word(i + 1, "TEMPORARY") && t.word(i + 2, "TABLE"))
+        else {
+            return false;
+        };
+        let mut k = at + 3;
+        if t.word(k, "IF") && t.word(k + 1, "NOT") && t.word(k + 2, "EXISTS") {
+            k += 3;
+        }
+        if !ident(&t, k) {
+            return false;
+        }
+        let (schema, name) = if t.punct(k + 1, ".") && ident(&t, k + 2) {
+            (Some(val(&t, k)), val(&t, k + 2))
+        } else {
+            (default_schema.map(str::to_owned), val(&t, k))
+        };
+        let Some(schema) = schema else {
+            return false;
+        };
+        self.shadowed
+            .insert((schema.to_lowercase(), name.to_lowercase()));
+        true
+    }
 }
 
 struct SwapLookup<'a> {
@@ -750,6 +790,13 @@ struct SwapLookup<'a> {
 impl Lookup for SwapLookup<'_> {
     fn view(&self, schema: Option<&str>, table: &str) -> Option<String> {
         let s = schema.or(self.default_schema)?;
+        if self
+            .swap
+            .shadowed
+            .contains(&(s.to_lowercase(), table.to_lowercase()))
+        {
+            return None;
+        }
         let db = self.swap.db_of(s)?;
         self.swap
             .tables
@@ -968,6 +1015,31 @@ mod tests {
         assert_eq!(a(&v, "SELECT * FROM notes", Some("t1_d2_g1_s1")), None);
         v.temporary.insert("docs".into());
         assert_eq!(a(&v, "SELECT * FROM docs", Some("t1_d2_g1_s1")), None);
+        // A gathered read's copy shadows the table in its own schema only.
+        let mut w = ViewSwap {
+            tenant: 1,
+            ..ViewSwap::default()
+        };
+        w.tables
+            .entry(2)
+            .or_default()
+            .insert("docs".into(), view_name("docs", 7));
+        assert!(w.note_temporary(
+            "SET STATEMENT sql_mode='' FOR CREATE TEMPORARY TABLE `t1_d2_g1_s1`.`docs` (id INT)",
+            None
+        ));
+        assert_eq!(a(&w, "SELECT * FROM docs", Some("t1_d2_g1_s1")), None);
+        assert_eq!(a(&w, "SELECT * FROM t1_d2_g1_s1.docs", Some("x")), None);
+        assert_eq!(
+            a(
+                &w,
+                "INSERT INTO docs SELECT * FROM `t1_d2_g4_s2`.`docs`",
+                Some("t1_d2_g1_s1")
+            )
+            .as_deref(),
+            Some("INSERT INTO docs SELECT * FROM `t1_d2_g4_s2`.`__sprig_rls_docs` AS `docs`")
+        );
+        assert!(!w.note_temporary("SELECT 1", None));
         let long = "x".repeat(60);
         assert_eq!(
             view_name(&long, 9),

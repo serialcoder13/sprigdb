@@ -323,6 +323,10 @@ pub struct StreamSpec {
     /// `dropIndexes`, `modify`) and the fields MongoDB 6.0 added
     /// (`collectionUUID`, `operationDescription`).
     pub expanded: bool,
+    /// Chapter 29 (RL34): the documents the stream's session may see, by
+    /// its row-level security policies when the stream opened. `None`: no
+    /// row event shows.
+    pub visibility: Option<Arc<crate::tenant::rls::DocViews>>,
 }
 
 /// Whether a `$changeStream` stage asks for `showExpandedEvents`.
@@ -647,7 +651,32 @@ async fn render_inner(
             },
         );
     }
-    match e.op {
+    // Chapter 29 (RL34): events of documents the session may not see
+    // are dropped; an update that hides a document arrives as a delete,
+    // one that shows it as an insert (`rls.stream_visibility_events`).
+    let mut op = e.op;
+    if matches!(e.op, Op::Insert | Op::Update | Op::Delete) {
+        let see = |img: Option<&sprig_feed::Image>| {
+            image_doc(img).is_some_and(|d| {
+                spec.visibility
+                    .as_ref()
+                    .is_some_and(|v| v.visible(&e.db_name, &e.table, &d))
+            })
+        };
+        let (b, a) = (see(e.before.as_ref()), see(e.after.as_ref()));
+        match e.op {
+            Op::Insert if !a => return None,
+            Op::Delete if !b => return None,
+            Op::Update => match (b, a) {
+                (false, false) => return None,
+                (true, false) => op = Op::Delete,
+                (false, true) => op = Op::Insert,
+                (true, true) => {}
+            },
+            _ => {}
+        }
+    }
+    match op {
         Op::Insert => {
             let after = image_doc(e.after.as_ref())?;
             d.insert("operationType", "insert");

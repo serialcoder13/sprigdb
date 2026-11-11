@@ -211,7 +211,10 @@ impl AuthzServices {
             return Ok(());
         }
         let placement = crate::exec::router::placement_digest(svc, cat);
-        let digest = placement.as_ref().map_or(0, |p| p.0);
+        // Chapter 29 (RL30): a changed `rls.backend_enforcement` (a global
+        // value changes no catalog version) narrows or widens grants now.
+        let digest =
+            placement.as_ref().map_or(0, |p| p.0) ^ super::rls::enforcement_digest(svc, cat);
         let versions = (cat.version, cat.auth_version, digest);
         let every = Duration::from_secs(svc.settings.get(
             &sprig_auth::authz::settings::RECONCILE_INTERVAL_SECONDS,

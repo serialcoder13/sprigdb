@@ -247,13 +247,13 @@ fn show(t: &Arc<std::sync::Mutex<Tally>>, what: &str) {
     );
 }
 
+/// One node's view of a table: its port, the schemas holding the table,
+/// and the grant rows ((account, schema) → privileges) on it.
+type NodeRows = (u16, BTreeSet<String>, BTreeMap<(String, String), String>);
+
 /// On every node: the schemas of `tenant` holding table `table`, and the
 /// grant rows (schema → privileges) of `tenant`'s accounts on it.
-async fn grant_rows(
-    e: &Env,
-    tenant: u64,
-    table: &str,
-) -> Vec<(u16, BTreeSet<String>, BTreeMap<(String, String), String>)> {
+async fn grant_rows(e: &Env, tenant: u64, table: &str) -> Vec<NodeRows> {
     let mut out = Vec::new();
     for &port in &e.nodes {
         let p = root_pool(port);
@@ -331,7 +331,10 @@ async fn table_grants_follow_regroups_splits_merges_and_moves() {
                 "INSERT IGNORE INTO gr.cust (id, v) VALUES (1, 'a'), (2, 'b'), (3, 'c')",
                 "INSERT IGNORE INTO gr.ord (id, cust_id, v) VALUES (10, 1, 'x'), (20, 2, 'y')",
                 "DROP PROCEDURE IF EXISTS gr.pcount",
-                "CREATE PROCEDURE gr.pcount() SELECT COUNT(*) FROM la",
+                // The routine names no table: a body naming a table the
+                // advisor regroups fails with 1146 for every user once the
+                // table leaves the default schema (bugfix-28).
+                "CREATE PROCEDURE gr.pcount() SELECT 41 + 1",
                 "CREATE USER IF NOT EXISTS 'tbl'@'%' IDENTIFIED BY 'sprig-table-grants-pw'",
                 "GRANT SELECT, INSERT, UPDATE ON gr.cust TO 'tbl'@'%'",
                 "GRANT SELECT, INSERT ON gr.ord TO 'tbl'@'%'",
@@ -540,9 +543,7 @@ async fn table_grants_follow_regroups_splits_merges_and_moves() {
 
     // MariaDB's rows for `cust` match the schemas holding it, on every
     // cluster: one row per holding schema, none elsewhere.
-    let check_rows = |rows: &[(u16, BTreeSet<String>, BTreeMap<(String, String), String>)],
-                      want_insert: bool,
-                      failed: &mut Vec<String>| {
+    let check_rows = |rows: &[NodeRows], want_insert: bool, failed: &mut Vec<String>| {
         let mut holders_total = 0;
         for (port, holders, grants) in rows {
             holders_total += holders.len();
@@ -550,14 +551,20 @@ async fn table_grants_follow_regroups_splits_merges_and_moves() {
             eprintln!("node {port}: cust in {holders:?}; rows {grants:?}");
             for ((u, db), privs) in grants {
                 if !holders.contains(db) {
-                    failed.push(format!("node {port}: {u} keeps a row on {db}, which has no cust"));
+                    failed.push(format!(
+                        "node {port}: {u} keeps a row on {db}, which has no cust"
+                    ));
                 }
                 if privs.contains("Insert") != want_insert {
-                    failed.push(format!("node {port}: {u} on {db}: {privs} (INSERT wanted: {want_insert})"));
+                    failed.push(format!(
+                        "node {port}: {u} on {db}: {privs} (INSERT wanted: {want_insert})"
+                    ));
                 }
             }
             if users.len() != 1 {
-                failed.push(format!("node {port}: accounts with cust rows: {users:?} (one wanted)"));
+                failed.push(format!(
+                    "node {port}: accounts with cust rows: {users:?} (one wanted)"
+                ));
             }
             for h in holders {
                 if !grants.keys().any(|(_, d)| d == h) {
@@ -638,7 +645,10 @@ async fn table_grants_follow_regroups_splits_merges_and_moves() {
         let p = pool(&e, "tbl", PW, Some("gr"));
         if let Ok(mut c) = p.get_conn().await {
             let _ = c.query_drop("SELECT COUNT(*) FROM cust").await;
-            match c.query_drop("INSERT INTO cust (id, v) VALUES (7, 'r')").await {
+            match c
+                .query_drop("INSERT INTO cust (id, v) VALUES (7, 'r')")
+                .await
+            {
                 Err(x) if code(&x) == "1142" => {}
                 other => failed.push(format!("tbl INSERT after REVOKE: {other:?}")),
             }

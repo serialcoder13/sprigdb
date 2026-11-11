@@ -452,6 +452,8 @@ pub fn check_queue_calls(statements: &[String]) -> Result<()> {
             "call sprig.mq_get(",
             "call sprig.mq_ack(",
             "call sprig.mq_nack(",
+            // `ordering = queue` waits out earlier leases (r9fanin).
+            "call sprig.mq_info(",
         ]
         .iter()
         .any(|p| low.starts_with(p))
@@ -460,7 +462,7 @@ pub fn check_queue_calls(statements: &[String]) -> Result<()> {
         if !ok {
             return Err(SprigError::new(
                 SprigCode::SinkScriptReadOnly,
-                "a sink's queue session runs sprig.mq_get, mq_ack and mq_nack only",
+                "a sink's queue session runs sprig.mq_get, mq_ack, mq_nack and mq_info only",
             ));
         }
     }

@@ -238,12 +238,17 @@ impl StudioState {
     /// operator_token_file`); without it, operator calls answer 503.
     #[must_use]
     pub fn with_operator_token_file(mut self, path: Option<&std::path::Path>) -> Self {
-        self.operator_token = path.and_then(|p| match std::fs::read_to_string(p) {
-            Ok(t) if !t.trim().is_empty() => Some(t.trim().to_owned()),
-            Ok(_) => None,
-            Err(e) => {
-                tracing::warn!(error = %e, path = %p.display(), "operator token not loaded");
-                None
+        self.operator_token = path.and_then(|p| {
+            match sprig_common::secret_file::check(p, "[gateway] operator_token_file")
+                .map_err(|e| std::io::Error::other(e.message))
+                .and_then(|()| std::fs::read_to_string(p))
+            {
+                Ok(t) if !t.trim().is_empty() => Some(t.trim().to_owned()),
+                Ok(_) => None,
+                Err(e) => {
+                    tracing::warn!(error = %e, path = %p.display(), "operator token not loaded");
+                    None
+                }
             }
         });
         self

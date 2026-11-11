@@ -1192,24 +1192,24 @@ pub(super) async fn next_object_id(svc: &TenantServices, t: TenantId) -> Result<
 }
 
 /// Every member holding an instance of stream definition `def` re-applies
-/// its derived state (settings, triggers) now, in the background; the
-/// number of instances.
+/// its derived state (settings, triggers, sinks) now, in the background;
+/// for a queue definition, its sinks (r9fanin). The number of instances.
 pub(super) async fn rollout(svc: &Arc<TenantServices>, def: DefKey) -> Result<usize> {
     let entries = inherited::instances_of(svc, def).await?;
     let n = entries.len();
     let svc = Arc::clone(svc);
     tokio::spawn(async move {
         for e in entries {
-            streams::forget_applied(e.tenant, def);
-            let r = async {
-                let cat = inherited::catalog(&svc, e.tenant).await?;
-                let chain = inherited::chain(&svc, &cat).await?;
-                let d = chain
-                    .def(def)
-                    .ok_or_else(|| SprigError::internal("the definition is gone"))?;
-                streams::ensure(&svc, &chain, &d, Cause::Declare).await
-            }
-            .await;
+            // A stream's derived state, or (R9, r9fanin) a queue's sinks.
+            let r = crate::inherited::sinks::reapply_source(&svc, e.tenant, def)
+                .await
+                .and_then(|reached| {
+                    if reached {
+                        Ok(())
+                    } else {
+                        Err(SprigError::internal("the definition is gone"))
+                    }
+                });
             if let Err(err) = r {
                 tracing::warn!(tenant = %e.tenant, def = %def, error = %err, "inherited instance not updated; its next use retries");
             }

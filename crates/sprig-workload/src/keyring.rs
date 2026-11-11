@@ -169,6 +169,7 @@ impl MasterKeyring {
     /// # Errors
     /// 39998 if it can't be read or is malformed.
     pub fn from_file(path: &Path) -> Result<Self> {
+        sprig_common::secret_file::check(path, "the workload master key file")?;
         let text = Zeroizing::new(std::fs::read_to_string(path).map_err(|e| {
             bad(format!(
                 "workload sample keys: can't read {}: {e}",

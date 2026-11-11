@@ -250,6 +250,13 @@ impl std::fmt::Debug for SqlSession {
 }
 
 impl SqlSession {
+    /// Chapter 29 (RL34): the tables whose policies bind this session, as
+    /// MongoDB filters; `None` when it can't tell.
+    #[must_use]
+    pub fn row_policy_docs(&self) -> Option<std::sync::Arc<crate::tenant::rls::DocViews>> {
+        self.exec.row_policy_docs()
+    }
+
     /// The gateway session's id (chapter 29: internal exemptions).
     #[must_use]
     pub fn session_id(&self) -> sprig_common::ids::ConnId {

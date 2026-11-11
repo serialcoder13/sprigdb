@@ -1,18 +1,21 @@
 # SprigDB on VMs with Docker Compose: runbook
 
-This bundle runs one SprigDB data center on one VM: etcd, one MariaDB 11.8 node, the controller, the worker and one gateway. Every client port is TLS, etcd uses mutual TLS, and passwords, tokens and keys are read from files. Chapter 27 ("Compose on VMs") describes the design; this file is the procedure.
+This bundle runs one SprigDB data center on one VM (etcd, one MariaDB 11.8 node, the controller, the worker and one gateway), or on three VMs for high availability (an etcd member, a controller and a gateway on each; MariaDB and the worker on the first). Every client port is TLS, the controller's Admin API is HTTPS, etcd uses mutual TLS, backups are encrypted, and passwords, tokens and keys are read from files that are checked at start. Chapter 27 ("Compose on VMs") describes the design; this file is the procedure.
 
-It was tested on the laptop (Docker Desktop, arm64) on 11 November 2026: install, first operator, tenant, a smoke test on all nine client protocols, backup and restore, upgrade and rollback between two builds, and certificate rotation. "Tested" notes below give the numbers. It has **not** run on a real VM yet.
+It was tested on the laptop (Docker Desktop, arm64) on 11 November 2026: install, first operator, tenant, a smoke test on all nine client protocols, backup and restore, upgrade and rollback between two builds, and certificate rotation (hardening round 1); then three "VMs" as three Compose projects on separate networks, reaching each other only through published ports, with three etcd members, two controllers and two gateways, an upgrade and rollback with a client writing throughout, losing an etcd member, encrypted backups copied off the VM and restored, and the secrets checks in a Linux container (round 2). "Tested" notes below give the numbers. It has **not** run on a real VM yet.
 
-Contents: [Files](#files) · [Install](#install) · [First operator](#first-operator) · [Tenants](#tenants) · [Ports](#ports) · [Adding a cluster](#adding-a-cluster) · [Backups](#backups) · [Restore](#restore) · [Upgrade and rollback](#upgrade-and-rollback) · [Rotating certificates](#rotating-certificates) · [Monitoring](#monitoring) · [Logs](#logs) · [Common failures](#common-failures) · [Galera: a node that can't rejoin](#galera-a-node-that-cant-rejoin) · [Not done yet](#not-done-yet)
+Contents: [Files](#files) · [Install](#install) · [High availability](#high-availability-three-vms) · [First operator](#first-operator) · [Tenants](#tenants) · [Ports](#ports) · [Adding a cluster](#adding-a-cluster) · [Backups](#backups) · [Restore](#restore) · [Upgrade and rollback](#upgrade-and-rollback) · [etcd members](#etcd-members) · [Rotating certificates](#rotating-certificates) · [Monitoring](#monitoring) · [Logs](#logs) · [Common failures](#common-failures) · [Galera: a node that can't rejoin](#galera-a-node-that-cant-rejoin) · [Not done yet](#not-done-yet)
 
 ## Files
 
 | File | What it is |
 |---|---|
-| `compose.yaml` | the services, limits, healthchecks, volumes and ports |
+| `compose.yaml` | the services, limits, healthchecks, volumes and ports (one VM, or the first of three with the next file) |
+| `compose.ha.yaml` | the first VM of three: publishes etcd, MariaDB, the controller's internal port and the gateway's peer port on the private network |
+| `compose.gateway-vm.yaml` | the second and third VMs: an etcd member, a controller and a gateway (a worker under the profile `worker`), no MariaDB |
+| `compose.mariadb-2.example.yaml` | a second MariaDB container as its own cluster ([Adding a cluster](#adding-a-cluster)) |
 | `.env.example` | every value you set per VM; copy to `.env` |
-| `sprig-vm.sh` | init, up, configure, tenant, backup, restore, upgrade, rollback, rotate-certs |
+| `sprig-vm.sh` | init, check-secrets, up-etcd, up, configure, status, tenant, backup, verify-backup, restore, etcd-rejoin, upgrade, rollback, rotate-certs, stop, down |
 | `config/controller.toml`, `config/gateway.toml` | the process files (the worker reads the controller's) |
 | `config/mariadb/10-sprig.cnf` | chapter 27's server settings, TLS required |
 | `config/mariadb/initdb/` | creates `sprig_ctl` and `sprig_repl` on first start |
@@ -32,16 +35,63 @@ On the VM (Ubuntu 24.04 or Debian 12 with Docker Engine 27+ and the compose plug
 3. **Settings:** `cp .env.example .env`, then set at least `SPRIGDB_IMAGE`, `SPRIG_PUBLIC_HOST` (the name clients use; it goes into the certificate and into Kafka's advertised address), `SPRIG_TLS_SANS` for any other names, the memory limits for the VM's size and `SPRIG_DC`.
 4. **Secrets:** `./sprig-vm.sh init`. It makes `secrets/`:
    - `ca/ca-key.pem`: the deployment's CA key. **Move it off the VM** after init and bring it back only to rotate certificates.
-   - `tls/`: the CA certificate and the gateway, etcd, MariaDB and client certificates.
+   - `tls/`: the CA certificate and the gateway, etcd, MariaDB, controller (the HTTPS Admin API) and process certificates. The process certificate (`client.pem`) is every SprigDB process's identity: etcd's client certificate and both ends of the gateways' peer service.
    - `mariadb/`: the root, `sprig_ctl` and `sprig_repl` passwords.
    - `sprig/`: the admin (bootstrap) token, the gateways' token, the workload master key, cluster credentials and the gateway's backend-account secret.
-   `secrets/` itself is mode 0700; the files in it are 0644, because each container reads them as its own user (sprigdb 10001, mysql 999, etcd root). **Back up `secrets/` now**, somewhere other than the data backups: without it, a restored backup can't be opened (the workload key and the backend secret are in it).
-5. **Start:** `./sprig-vm.sh up`. It starts the containers, waits for every healthcheck, registers the MariaDB node as cluster `<SPRIG_DC>-main` and writes the listener settings (TLS required on every listener; plain HTTP and plain AMQP off). The listeners come up within a few seconds.
+   - `backup/`: the backups' key pair. `backup-pub.pem` stays (each backup is encrypted to it); **move `backup-key.pem` off the VM** with the CA key: it is needed only to restore.
+   `secrets/` itself is mode 0700; the files in it are 0644, because each container reads them as its own user (sprigdb 10001, mysql 999, etcd root); the two offline keys are 0600. **Back up `secrets/` now**, somewhere other than the data backups: without it, a restored backup can't be opened (the workload key and the backend secret are in it).
+5. **Start:** `./sprig-vm.sh up`. It checks `secrets/` first ([Secrets checks](#secrets-checks)), then starts the containers, waits for every healthcheck, registers the MariaDB node as cluster `<SPRIG_DC>-main` and writes the listener settings (TLS required on every listener; plain HTTP and plain AMQP off). The listeners come up within a few seconds.
 6. **Check:** `./sprig-vm.sh status`, then create a tenant ([Tenants](#tenants)) and run the smoke test from a machine that reaches the ports: `SMOKE_PASSWORD=... smoke/smoke.sh acme.app <public host>`. It logs in over TLS (verifying the certificate against `secrets/tls/ca.pem`) on MySQL, MariaDB, MongoDB, REST, gRPC, Redis, Bolt, Kafka and AMQP, does one operation on each, and checks that a plaintext MySQL login is refused.
 
 **Tested (laptop, project `sprigvm`, ports 3xxxx):** `up` took 19 s from nothing to every healthcheck green, including the cluster registration (TLS verified against the deployment CA). The smoke test passed on all nine protocols plus the plaintext refusal; each check took 4–107 ms after login (Redis 107 ms, the rest under 40 ms).
 
-To use your own certificates instead of the generated ones, put them at the same paths in `secrets/tls/` (`gateway.pem` with the full chain and `gateway-key.pem` for clients; the CA that signed `etcd.pem`, `mariadb.pem` and `client.pem` as `ca.pem`).
+To use your own certificates instead of the generated ones, put them at the same paths in `secrets/tls/` (`gateway.pem` with the full chain and `gateway-key.pem` for clients; the CA that signed `etcd.pem`, `mariadb.pem`, `controller.pem` and `client.pem` as `ca.pem`).
+
+**A bundle installed before round 2** lacks the controller's certificate and the backups' key pair, and its `client.pem` can't serve the peer service. `up` makes what is missing; for the two certificates it needs `secrets/ca` back on the VM for that one run.
+
+### Secrets checks
+
+`up`, `up-etcd` and `./sprig-vm.sh check-secrets` refuse to go on, listing each problem with the command that fixes it, unless:
+
+- `secrets/` is owned by the user running the script and closed to everyone else (0700);
+- everything inside is owned by that user (or root), is not a symbolic link, and isn't writable by group or others;
+- the files the containers read are readable by others (0644: each container reads them as its own uid, and `secrets/` being 0700 keeps other users of the VM out);
+- the two offline keys, `secrets/ca/*` and `secrets/backup/backup-key.pem`, are 0600 when they are present (the script also reminds you to move them off).
+
+The SprigDB processes check again when they start: a token, key or backends file that isn't a regular file or is writable by everyone stops the process with 39998 naming the file (chapter 47, "Secret files are checked at start").
+
+**Tested (Linux, `debian:bookworm-slim`, as uid 1000):** 14 of 14 cases gave the expected answer: the layout `init` makes passes, and so do a file owned by root and a 0600 backup key; `secrets/` at 0755 or owned by root, a group-writable token, a world-writable key, a file owned by another uid, the CA key at 0644, the backup key at 0640, a certificate at 0600 (the containers couldn't read it), a symbolic link, a group-writable `tls/` and a missing `secrets/` are refused. Docker Desktop on the Mac maps ownership differently, which is why this ran in a Linux container.
+
+## High availability (three VMs)
+
+One VM is a single point of failure, and its upgrades refuse writes while its gateway restarts (and, with one controller, while the controller restarts). Three VMs on one private network remove both:
+
+| VM | Compose files | Runs |
+|---|---|---|
+| 1 | `compose.yaml:compose.ha.yaml` | etcd member `etcd-vm1`, MariaDB, controller `ctl-1` (bootstraps the deployment), worker, gateway `gw-1` |
+| 2 | `compose.gateway-vm.yaml` | etcd member `etcd-vm2`, controller `ctl-2`, gateway `gw-2` |
+| 3 | `compose.gateway-vm.yaml` | etcd member `etcd-vm3`, controller `ctl-3`, gateway `gw-3` (or only the etcd member: `up-etcd`) |
+
+- **etcd** has three members, one per VM, with mutual TLS between members and to every client. It keeps working with any two.
+- **Every controller serves permits.** A gateway renews its write permit from any controller of its DC, so restarting one controller no longer fences writes; the DC-leader loops (balancer, mover dispatch, reconcilers) move to another controller within the leader lease.
+- **Gateways behind a load balancer.** Put the VMs' client ports behind a TCP load balancer with a health check on each gateway's port (or give clients several hosts). A gateway that stops drains: it stops accepting, and the balancer sends new connections to the others.
+- **MariaDB stays on VM 1** (or on managed or separate database servers): the other VMs reach it on the private network, and the cluster is registered at VM 1's private address. MariaDB itself isn't made highly available by this layout: use a primary/replica or Galera cluster, or a managed server, for that ([Adding a cluster](#adding-a-cluster)).
+
+**Settings** (`.env.example`, "Several VMs"). The same on every VM: `SPRIG_DC`, `SPRIG_DEPLOYMENT_ID`, the client ports, `SPRIG_ETCD_INITIAL_CLUSTER`, `SPRIG_ETCD_SEEDS` and `SPRIG_INTERNAL_SANS` (every VM's private address). Per VM: `COMPOSE_FILE`, `SPRIG_VM_ID` (1, 2, 3), `SPRIG_CONTROLLER_BOOTSTRAP` (`true` on VM 1 only), `SPRIG_ETCD_NAME`, `SPRIG_PRIVATE_HOST` and `SPRIG_PRIVATE_IP` (this VM's private address) and `SPRIG_ADMIN_BIND_IP` (the private address too, so the other VMs' gateways can relay admin calls to whichever controller leads). Each internal port binds inside its container on the number it is published on, so the advertised address is the one the others reach.
+
+**Install:**
+
+1. On VM 1: `./sprig-vm.sh init` with `SPRIG_INTERNAL_SANS` set, so the etcd, MariaDB, controller and process certificates name every VM.
+2. Copy `secrets/` to VM 2 and VM 3 **without** `secrets/ca/` and `secrets/backup/backup-key.pem` (for example `rsync -a --exclude ca/ --exclude backup/backup-key.pem secrets/ vm2:/opt/sprigdb/secrets/`, then `chmod 700 secrets` there).
+3. On every VM: `./sprig-vm.sh up-etcd`. Each member waits for a majority, so start all three within a few minutes of each other.
+4. On VM 1: `./sprig-vm.sh up` (it registers MariaDB at `SPRIG_PRIVATE_HOST:SPRIG_BACKEND_PORT`), then on VM 2 and VM 3: `./sprig-vm.sh up` (they don't configure anything; the DC's settings are VM 1's).
+5. `./sprig-vm.sh status` on any VM lists the three etcd members, and `./sprig-vm.sh ctl dc show <dc>` names the DC leader.
+
+Open between the VMs only: etcd's client and peer ports, MariaDB's port, the controllers' Admin and internal ports, and the gateways' peer port. The client ports face the load balancer.
+
+**If etcd refuses its peers** with `rejected connection on peer endpoint ... does not match any of DNSNames`, a member's connections arrive from an address its certificate doesn't name (NAT between the VMs, or Docker's userland proxy). Add that address to `SPRIG_INTERNAL_SANS` and re-issue the certificates, or set `SPRIG_ETCD_PEER_SKIP_SAN=true`: members still need a certificate from the deployment CA, but etcd stops matching it against the source address. The laptop test needed it (every "VM" was behind Docker Desktop's NAT).
+
+@@HA-TESTED@@
 
 ## First operator
 
@@ -113,29 +163,41 @@ Tenants placed on the new cluster afterwards, or moved there with `sprigctl shar
 
 ## Backups
 
-`./sprig-vm.sh backup` writes `backups/<UTC timestamp>/`:
+`./sprig-vm.sh backup` runs on the VM with MariaDB (VM 1) and writes `backups/<UTC timestamp>/`:
 
-- `mariadb-1/`: a `mariadb-backup` copy of the whole server, already prepared (consistent and ready to copy back);
-- `etcd.db`: an etcd snapshot (shard maps, settings, operators, cluster records);
-- `image.env`: the image that was running.
+- `<service>.xbstream.zst.enc` for **every MariaDB container on the VM** (`mariadb-1`, `mariadb-2`, ...): `mariadb-backup --stream=xbstream`, compressed with zstd and encrypted, as one stream;
+- `etcd.db.zst.enc`: a snapshot of the whole etcd cluster (shard maps, settings, operators, cluster records), compressed and encrypted;
+- `data-key.enc`: this backup's data key, encrypted to `secrets/backup/backup-pub.pem`;
+- `MANIFEST`, `image.env` (the image that was running), `SHA256SUMS` (every file), and the tools' logs.
 
-It covers `mariadb-1` only. A second MariaDB container ("Adding a cluster") needs the same `mariadb-backup` step for it, which the script doesn't do yet.
+**Encryption.** Each backup gets a fresh 256-bit data key, made on the host. The data files are encrypted with it (AES-256-CTR, `openssl enc` with PBKDF2 and a salt), and the data key is encrypted with the backups' RSA-4096 public key (RSA-OAEP with SHA-256) into `data-key.enc`. The streams go straight from `mariadb-backup` through zstd and `openssl` inside the MariaDB container, which gets the key on stdin and keeps it in memory, so no unencrypted copy reaches the disk. The one exception is etcd's snapshot (etcdctl only writes files): it is encrypted the moment it is written and then shredded. The VM holds only the public key: someone who copies `backups/` or the off-VM copies, or the VM itself, can't read them. Restoring needs `backup-key.pem`, which you keep off the VM with the CA key. The tools are OpenSSL 3 and zstd, both already in the MariaDB image (Apache-2.0 and BSD licences); nothing is downloaded.
 
-Run it from cron or a systemd timer (for example hourly), and copy `backups/` off the VM (object storage, another host). Keep `secrets/` backed up separately. Backups are not encrypted by this script; encrypt them when they leave the VM.
+**Off the VM.** Set `SPRIG_BACKUP_COPY_TO` in `.env` to a directory (a separate disk, an NFS or SMB share, a mounted bucket) or to `host:path` (rsync over SSH). After each backup the encrypted files and `SHA256SUMS` are copied there; a directory copy is written as `<ts>.part`, checked against `SHA256SUMS` and only then renamed to `<ts>`. Old copies there are pruned by that storage's own retention. In `backups/` on the VM, the newest `SPRIG_BACKUP_KEEP` (7) backups are kept.
 
-**Consistency.** The MariaDB copy and the etcd snapshot are taken a few seconds apart. Take backups when no move, split or merge is running (`./sprig-vm.sh ctl mover list`), or pause the balancer first (`ctl settings set balancer.mode off --scope dc:dc1`). A job that ran between the two copies can leave a shard map that points at a schema state from before or after it.
+`./sprig-vm.sh verify-backup <ts> [dir]` checks a backup's files against `SHA256SUMS` without the key; elsewhere (the backup host, from cron), `sha256sum -c SHA256SUMS` in the backup's directory does the same.
 
-**Tested (laptop):** backup of a tenant with 3 tables (2,000 rows) plus the operator directory: 2 s, 59 MB. After that, 500 rows were deleted, a column updated, a table dropped, a table and a second tenant created. `restore` brought back exactly the backed-up state: `CHECKSUM TABLE` equal on all three tables, the dropped table back, the new table and the new tenant gone, logins and operator tokens working. A full restore took 29 s from `restore` to every healthcheck green.
+Run `backup` from cron or a systemd timer (for example hourly). Keep `secrets/` backed up separately: a restored backup needs the same workload key and backend secret.
+
+**Consistency.** The MariaDB copies and the etcd snapshot are taken a few seconds apart. Take backups when no move, split or merge is running (`./sprig-vm.sh ctl mover list`), or pause the balancer first (`ctl settings set balancer.mode off --scope dc:dc1`). A job that ran between the copies can leave a shard map that points at a schema state from before or after it.
+
+@@BACKUP-TESTED@@
 
 ## Restore
 
 ```sh
-./sprig-vm.sh restore <timestamp>     # a directory name under backups/
+./sprig-vm.sh restore <ts>              # from backups/<ts>
+./sprig-vm.sh restore <ts> /mnt/backups # from the off-VM copy: fetched into backups/<ts> first
 ```
 
-It stops the gateway, worker, controller, MariaDB and etcd (the MariaDB healthcheck uses root's password file, because the image's own healthcheck account lives in the datadir the restore replaces); empties MariaDB's datadir and copies the backup back; restores etcd from the snapshot into a fresh data directory; starts everything and waits for the healthchecks. Everything written after the backup is gone. Clients reconnect.
+Put `backup-key.pem` back first (`secrets/backup/backup-key.pem`, mode 0600, or `SPRIG_BACKUP_KEY=<path>`). `restore` checks `SHA256SUMS`, opens the data key on the host (only the 64-character data key is decrypted there; it reaches the containers on stdin), stops this VM's SprigDB, MariaDB and etcd, then, for every MariaDB container: empties its datadir, decrypts and unpacks the stream into it and prepares it (`mariadb-backup --prepare`). etcd is restored from the snapshot as a one-member cluster (this VM's member). Then it starts everything and waits for the healthchecks. Everything written after the backup is gone; clients reconnect. Move the private key off the VM again afterwards.
 
-To restore onto a new VM: copy the bundle, the same `secrets/` and the backup directory, `docker load` the image named in `image.env`, `./sprig-vm.sh up` once (it creates the volumes), then `./sprig-vm.sh restore <timestamp>`.
+**With three VMs**, the other two must not run while VM 1 restores:
+
+1. On VM 2 and VM 3: `./sprig-vm.sh stop`.
+2. On VM 1: `./sprig-vm.sh restore <ts>`. etcd comes back with one member (VM 1's), which is a majority of one.
+3. On VM 2, then VM 3: `./sprig-vm.sh etcd-rejoin` (it adds the member back and starts it empty; it copies the data from VM 1's member), then `./sprig-vm.sh up`.
+
+To restore onto a new VM: copy the bundle, the same `secrets/` and the backup directory, `docker load` the image named in `image.env`, `./sprig-vm.sh up` once (it creates the volumes), then `./sprig-vm.sh restore <ts>`.
 
 ## Upgrade and rollback
 

@@ -113,6 +113,9 @@ pub struct QueryResult {
     pub t_first: i64,
     /// More records, produced as the client pulls them.
     pub stream: Option<Box<dyn RecordStream>>,
+    /// More entries of the final `SUCCESS` (`plan`, `profile`,
+    /// `notifications`).
+    pub summary: Vec<(&'static str, PackValue)>,
 }
 
 impl std::fmt::Debug for QueryResult {
@@ -417,6 +420,7 @@ impl Conn {
             if let Some(db) = r.db {
                 meta.push(("db", PackValue::String(db)));
             }
+            meta.extend(r.summary);
             if !stats.is_empty() {
                 meta.push((
                     "stats",

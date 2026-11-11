@@ -254,6 +254,7 @@ pub fn parse(src: &str) -> Result<Query> {
         toks,
         pos: 0,
     };
+    p.query_options()?;
     let q = p.query()?;
     p.accept_sym(";");
     if !matches!(p.peek(), Tok::Eof) {
@@ -415,6 +416,35 @@ impl Parser {
     // ---------------------------------------------------------------
     // Statements and clauses
     // ---------------------------------------------------------------
+
+    /// Neo4j's query options in front of a statement: `CYPHER [5]
+    /// [option=value ...]` (`runtime=interpreted`, `planner=cost`, ...).
+    /// They choose Neo4j's planner and runtime, which SprigDB doesn't have,
+    /// so they are accepted and ignored; a language version other than 5
+    /// is refused.
+    fn query_options(&mut self) -> Result<()> {
+        while self.is_kw("CYPHER") {
+            self.bump();
+            if let Tok::Int(v) = self.peek().clone() {
+                if v != 5 {
+                    return Err(SprigError::new(
+                        SprigCode::GraphUnsupported,
+                        format!("CYPHER {v} is not supported: SprigDB speaks Cypher 5"),
+                    ));
+                }
+                self.bump();
+            }
+            while matches!(self.peek(), Tok::Ident(_)) && self.is_sym_at(1, "=") {
+                self.bump();
+                self.bump();
+                match self.bump() {
+                    Tok::Ident(_) | Tok::Int(_) | Tok::Str(_) => {}
+                    _ => return Err(self.err("a query option's value")),
+                }
+            }
+        }
+        Ok(())
+    }
 
     fn query(&mut self) -> Result<Query> {
         let explain = if self.accept_kw("EXPLAIN") {
@@ -1875,6 +1905,35 @@ mod tests {
         let e = parse("CALL { RETURN 1 } IN TRANSACTIONS").expect_err("batches");
         assert_eq!(e.code(), Some(SprigCode::GraphUnsupported));
         let e = parse("WITH 1 + 1 RETURN 1").expect_err("alias");
+        assert_eq!(e.code(), Some(SprigCode::GraphSyntax));
+    }
+
+    #[test]
+    fn query_options_are_accepted_and_ignored() {
+        // The drivers' testkit sends `CYPHER runtime=interpreted ...`.
+        for (with, without) in [
+            (
+                "CYPHER runtime=interpreted WITH $x AS x RETURN x.year",
+                "WITH $x AS x RETURN x.year",
+            ),
+            (
+                "CYPHER 5 planner=cost runtime=slotted RETURN 1 AS n",
+                "RETURN 1 AS n",
+            ),
+            (
+                "cypher replan=force CYPHER 5 EXPLAIN MATCH (n) RETURN n",
+                "EXPLAIN MATCH (n) RETURN n",
+            ),
+        ] {
+            assert_eq!(
+                format!("{:?}", ok(with)),
+                format!("{:?}", ok(without)),
+                "{with}"
+            );
+        }
+        let e = parse("CYPHER 25 RETURN 1").expect_err("version");
+        assert_eq!(e.code(), Some(SprigCode::GraphUnsupported));
+        let e = parse("CYPHER runtime= RETURN 1").expect_err("value");
         assert_eq!(e.code(), Some(SprigCode::GraphSyntax));
     }
 

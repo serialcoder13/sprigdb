@@ -322,7 +322,10 @@ fn close_dropped_users(svc: &Arc<TenantServices>) {
             for r in &change.revoked {
                 if r.reason == RevokeReason::Dropped {
                     svc.locator
-                        .retire_account(&sprig_auth::authz::backend::account(change.tenant, r.user_id));
+                        .retire_account(&sprig_auth::authz::backend::account(
+                            change.tenant,
+                            r.user_id,
+                        ));
                 }
             }
         }

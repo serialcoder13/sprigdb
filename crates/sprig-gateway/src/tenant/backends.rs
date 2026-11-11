@@ -252,6 +252,7 @@ impl TenantBackends {
     /// # Errors
     /// 39998 if the file can't be read or parsed.
     pub fn open(path: &Path, locator: Arc<GatewayLocator>) -> Result<Self> {
+        sprig_common::secret_file::check(path, "[gateway] backends_file")?;
         let text = std::fs::read_to_string(path)
             .map_err(|e| invalid(format!("backends file {}: {e}", path.display())))?;
         let base = path.parent().unwrap_or_else(|| Path::new("."));

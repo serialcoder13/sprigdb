@@ -126,7 +126,10 @@ fn routes(app: Arc<App>) -> Router {
             get(list_shards).post(submit_shard_job),
         )
         .route("/admin/v1/tenants/{name}/search", get(list_search))
-        .route("/admin/v1/tenants/{name}/search/{index}", get(show_search))
+        .route(
+            "/admin/v1/tenants/{name}/search/{index}",
+            get(show_search).post(post_search),
+        )
         .route("/admin/v1/tenants/{name}/graphs", get(list_graphs))
         .route("/admin/v1/tenants/{name}/graphs/{graph}", get(show_graph))
         .route(
@@ -164,6 +167,7 @@ fn routes(app: Arc<App>) -> Router {
 /// # Errors
 /// 39998 if the file can't be read or is empty.
 pub fn load_token(path: &Path) -> Result<String> {
+    sprig_common::secret_file::check(path, "[controller] token file")?;
     let t = std::fs::read_to_string(path).map_err(|e| {
         SprigError::new(
             SprigCode::ConfigInvalid,
@@ -1191,6 +1195,25 @@ async fn show_search(
     let r = async {
         authorize(&app, &headers)?;
         app.svc.show_search(&name, &index).await
+    };
+    respond(r.await)
+}
+
+/// `POST /admin/v1/tenants/{name}/search/{db.index}:rebuild` (`sprigctl
+/// search rebuild`, R5 round 8).
+async fn post_search(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    UrlPath((name, index)): UrlPath<(String, String)>,
+) -> Response {
+    let r = async {
+        authorize(&app, &headers)?;
+        match index.rsplit_once(':') {
+            Some((ix, "rebuild")) => app.svc.rebuild_search(&name, ix).await,
+            _ => Err(invalid(format!(
+                "POST /admin/v1/tenants/{name}/search/{index}: expected {{db.index}}:rebuild"
+            ))),
+        }
     };
     respond(r.await)
 }

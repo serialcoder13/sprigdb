@@ -238,18 +238,20 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         MariaBackend::new(Arc::new(locator.clone())).with_clock(Arc::clone(&clock)),
         Arc::new(DirectoryAllocator::new(Arc::clone(&stores.global))),
     );
-    let reconciler = Arc::new(CatalogReconciler::new(
-        DdlEngine::new(versioner.clone(), Arc::clone(&clock)),
-        Directory::new(Arc::clone(&stores.global)),
-        Arc::new(PoolExecutors::new(locator.clone())),
-        Arc::new(LogDecisions),
-        dc.clone(),
-        Some(settings.live.clone()),
-        Arc::clone(&clock),
-    )
-    .with_group_maps(Arc::new(sprig_shard::ShardMapStore::new(Arc::clone(
-        &stores.dc,
-    )))));
+    let reconciler = Arc::new(
+        CatalogReconciler::new(
+            DdlEngine::new(versioner.clone(), Arc::clone(&clock)),
+            Directory::new(Arc::clone(&stores.global)),
+            Arc::new(PoolExecutors::new(locator.clone())),
+            Arc::new(LogDecisions),
+            dc.clone(),
+            Some(settings.live.clone()),
+            Arc::clone(&clock),
+        )
+        .with_group_maps(Arc::new(sprig_shard::ShardMapStore::new(Arc::clone(
+            &stores.dc,
+        )))),
+    );
     let settings_admin = Arc::new(SettingsService::new(
         settings.live.clone(),
         versioner.clone(),
@@ -715,7 +717,8 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
             .with_moves(moves)
             .with_sharding(sharding.sharding())
             .with_failover(Arc::clone(&failover))
-            .with_residency(residency),
+            .with_residency(residency)
+            .with_search_catalog(versioner.clone()),
     );
     // Chapter 52: the `Recommendations` service beside the Admin API.
     let dc_token = cfg

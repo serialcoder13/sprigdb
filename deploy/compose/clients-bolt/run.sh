@@ -12,8 +12,10 @@
 #
 # Pinned: testkit commit 75f4aa8 and the Python driver commit 9c876c1 (both
 # from r8four's download, decisions/r8-interim.md G46; testkit's branch 6.x);
-# the Go driver tag v6.0.0 and the Java driver tag 6.0.0. Needs on the
-# runner: git, python3 with venv, and Go (go) or a JDK with Maven (java).
+# the Go driver tag v6.4.0 (go.mod: Go 1.24; run on a laptop by r8testkit,
+# 11 November 2026, decisions/r8-interim.md G66) and the Java driver tag
+# 6.0.0 (not run yet, G68). Needs on the runner: git, python3 with venv,
+# and Go (go) or a JDK with Maven (java).
 #
 #   SPRIG_BOLT_REF   reference host:port (127.0.0.1:7687), neo4j / SPRIG_BOLT_REF_PASSWORD
 #   SPRIG_BOLT_SUT   SprigDB host:port (127.0.0.1:27687, deploy/compose/ci/listeners.sh),
@@ -28,7 +30,7 @@ DRIVER=${1:-}
 TESTKIT_SHA=75f4aa8b227a34e76a62d0ceee0fa3bea50cf38d
 case $DRIVER in
 python) REPO=https://github.com/neo4j/neo4j-python-driver.git REF=9c876c1fe5d915cb8704de65cb60e78194c950da ;;
-go) REPO=https://github.com/neo4j/neo4j-go-driver.git REF=v6.0.0 ;;
+go) REPO=https://github.com/neo4j/neo4j-go-driver.git REF=v6.4.0 ;;
 java) REPO=https://github.com/neo4j/neo4j-java-driver.git REF=6.0.0 ;;
 *) sed -n '2,/^set -euo/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; exit 2 ;;
 esac
@@ -66,7 +68,7 @@ for side in ref sut; do
     else
         hp=${SPRIG_BOLT_SUT:-127.0.0.1:27687} user=${SPRIG_BOLT_USER:-acme.app} pass=${SPRIG_BOLT_PASSWORD:-sprig-dev-app}
     fi
-    TEST_NEO4J_HOST=${hp%:*} TEST_NEO4J_PORT=${hp#*:} TEST_NEO4J_USER=$user TEST_NEO4J_PASS=$pass \
+    TEST_DRIVER_NAME=$DRIVER TEST_NEO4J_HOST=${hp%:*} TEST_NEO4J_PORT=${hp#*:} TEST_NEO4J_USER=$user TEST_NEO4J_PASS=$pass \
         TEST_NEO4J_SCHEME=bolt TEST_NEO4J_VERSION=5.26 TEST_NEO4J_EDITION=community \
         TEST_NEO4J_CLUSTER=False TEST_NEO4J_DEFAULT_DB=neo4j \
         python "$HERE/testkit_run.py" "$W/testkit" "$OUT/$side/tests.tsv" 2>"$OUT/$side/unittest.log" || true

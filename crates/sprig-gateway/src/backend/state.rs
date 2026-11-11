@@ -554,6 +554,7 @@ pub struct Unreplayable(pub String);
 ///
 /// # Errors
 /// [`Unreplayable`] if a variable's value can't be written as a literal.
+#[allow(clippy::too_many_lines)] // one step per kind of session state, in replay order
 pub fn sync_prefix(
     applied: &AppliedState,
     base: &Baseline,

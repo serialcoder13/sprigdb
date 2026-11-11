@@ -86,7 +86,26 @@ pub trait SinkEnv: Send + Sync {
     fn peer(&self) -> Option<Arc<dyn crate::peer::SinkPeer>> {
         None
     }
+    /// Chapter 29 (decision RL31): whether row-level security policies on
+    /// any of tables `objects` now bind user `owner` (the sink would export
+    /// rows its owner can't see). By default `false`: workers without the
+    /// tenant catalog rely on the gateway's pause (RL25).
+    ///
+    /// # Errors
+    /// The catalog's.
+    async fn row_policies_bind(
+        &self,
+        _tenant: TenantId,
+        _owner: u32,
+        _objects: &[u64],
+    ) -> Result<bool> {
+        Ok(false)
+    }
 }
+
+/// The start of the pause reason row-level security gives a sink (RL25,
+/// RL31): a running task stops at once, not after its buffered records.
+pub const RLS_PAUSE: &str = "ER_SPRIG_RLS_UNSUPPORTED";
 
 /// Who a sink's statements run as on a gateway: its owner, in its
 /// tenant (by name) and database.
@@ -393,6 +412,9 @@ struct CatalogControl {
     epoch: TaskEpoch,
     definition_ver: u64,
     delivered: AtomicU64,
+    /// Chapter 29 (RL31): a change sink's owner and tables, checked before
+    /// each batch (every poll).
+    rls: Option<(Arc<dyn SinkEnv>, TenantId, u32, Vec<u64>)>,
 }
 
 impl CatalogControl {
@@ -403,20 +425,73 @@ impl CatalogControl {
     }
 }
 
+/// The directive that stops a task, from its sink's catalog state: gone,
+/// redefined, failed, dropping, or paused by row-level security (RL25,
+/// RL31: a running task stops at once, its buffered records undelivered).
+fn stop_directive(
+    state: Option<&(SinkState, Option<String>, u64)>,
+    definition_ver: u64,
+) -> Option<Directive> {
+    match state {
+        None => Some(Directive::Stop),
+        Some((_, _, v)) if *v != definition_ver => Some(Directive::Stop),
+        Some((SinkState::Failed | SinkState::Dropping, _, _)) => Some(Directive::Stop),
+        Some((SinkState::Paused, r, _))
+            if r.as_deref().is_some_and(|r| r.starts_with(RLS_PAUSE)) =>
+        {
+            Some(Directive::Stop)
+        }
+        _ => None,
+    }
+}
+
+impl CatalogControl {
+    /// RL31: whether policies now bind the sink's owner on its tables; if
+    /// so the sink is paused (state `paused`, reason 39366), as the
+    /// gateway's policy statements do.
+    async fn rls_bound(&self, c: &mut mysql_async::Conn) -> Result<bool> {
+        let Some((env, tenant, owner, objects)) = &self.rls else {
+            return Ok(false);
+        };
+        if !env.row_policies_bind(*tenant, *owner, objects).await? {
+            return Ok(false);
+        }
+        self.store
+            .set_state(
+                c,
+                self.sink,
+                SinkState::Paused,
+                Some(&format!(
+                    "{RLS_PAUSE}: row-level security on a source table binds the sink's owner; \
+                     the sink would export rows the owner can't see"
+                )),
+            )
+            .await?;
+        tracing::warn!(tenant = %tenant, sink = self.sink.0, "sink paused by its worker: its owner is bound by row-level security");
+        Ok(true)
+    }
+}
+
 #[async_trait]
 impl Control for CatalogControl {
     async fn poll(&self) -> Result<Directive> {
         let mut c = self.conn().await?;
-        Ok(match self.store.state_of(&mut c, self.sink).await? {
-            None => Directive::Stop,
-            Some((_, _, v)) if v != self.definition_ver => Directive::Stop,
-            Some((SinkState::Failed | SinkState::Dropping, _, _)) => Directive::Stop,
+        let state = self.store.state_of(&mut c, self.sink).await?;
+        if let Some(d) = stop_directive(state.as_ref(), self.definition_ver) {
+            return Ok(d);
+        }
+        // RL31: row-level security now binds the owner (checked each poll,
+        // so before each batch is cut).
+        if self.rls_bound(&mut c).await? {
+            return Ok(Directive::Stop);
+        }
+        Ok(match state {
             Some((SinkState::Paused, r, _))
                 if r.as_deref().is_some_and(|r| r.starts_with("user")) =>
             {
                 Directive::Pause
             }
-            Some(_) => Directive::Run,
+            _ => Directive::Run,
         })
     }
 
@@ -866,6 +941,7 @@ pub async fn run_sink_task(
         epoch,
         definition_ver: def.definition_ver,
         delivered: AtomicU64::new(0),
+        rls: None,
     });
     let dead = Arc::new(CatalogDead {
         pool: cat_pool.clone(),
@@ -1024,6 +1100,22 @@ impl crate::source::FanInOpener for EnvFanIn {
         )
         .await
         .map(|s| Box::new(s) as Box<dyn crate::runtime::SourceReader>)
+    }
+}
+
+/// A queue sink's `ordering` option: `queue` (strict queue order, chapter
+/// 51) or `key` (the default: one routing key's messages in order, lanes
+/// in parallel).
+///
+/// # Errors
+/// 39218 for another value.
+pub fn queue_ordering(opts: &Opts) -> Result<bool> {
+    match opts.get("ordering").map(str::to_ascii_lowercase).as_deref() {
+        None | Some("key" | "") => Ok(false),
+        Some("queue") => Ok(true),
+        Some(o) => Err(crate::model::bad_option(format!(
+            "ordering = '{o}' isn't known for a queue sink: use 'queue' or 'key'"
+        ))),
     }
 }
 
@@ -1311,6 +1403,16 @@ async fn run_fan_in_task(
         epoch,
         definition_ver: def.definition_ver,
         delivered: AtomicU64::new(0),
+        // RL31: a change sink's owner is checked before each batch.
+        rls: match &def.source {
+            SourceSpec::Changes { objects } => Some((
+                Arc::clone(&env),
+                tenant,
+                def.owner_user_id,
+                objects.iter().map(|o| o.0).collect(),
+            )),
+            _ => None,
+        },
     });
     let dead = Arc::new(CatalogDead {
         pool: cat_pool.clone(),
@@ -1541,6 +1643,13 @@ async fn run_queue_task(
         opts.u64("queue_lease_ms", 300_000)?.max(1000),
         sink.0,
     );
+    // `ordering = queue` (r9fanin): queue order, one lane, and earlier
+    // tasks' leases waited out before reading on.
+    let queue_order = queue_ordering(&opts)?;
+    if queue_order {
+        settings.lanes = 1;
+    }
+    let source = source.with_queue_order(queue_order);
     let prepare = SinkPrepare {
         condition: def
             .filter_sql
@@ -1558,6 +1667,7 @@ async fn run_queue_task(
         epoch,
         definition_ver: def.definition_ver,
         delivered: AtomicU64::new(0),
+        rls: None,
     });
     let dead = Arc::new(CatalogDead {
         pool: cat_pool.clone(),
@@ -1663,6 +1773,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_sink_paused_by_row_level_security_stops_its_task() {
+        let st = |s: SinkState, r: Option<&str>| (s, r.map(str::to_owned), 3u64);
+        // Before RL31 a running task kept delivering (`Run`).
+        assert_eq!(
+            stop_directive(
+                Some(&st(
+                    SinkState::Paused,
+                    Some(
+                        "ER_SPRIG_RLS_UNSUPPORTED: row-level security on 'docs' binds the sink's owner"
+                    )
+                )),
+                3
+            ),
+            Some(Directive::Stop)
+        );
+        assert_eq!(
+            stop_directive(Some(&st(SinkState::Paused, Some("user"))), 3),
+            None
+        );
+        assert_eq!(stop_directive(Some(&st(SinkState::Running, None)), 3), None);
+        assert_eq!(
+            stop_directive(Some(&st(SinkState::Running, None)), 4),
+            Some(Directive::Stop)
+        );
+        assert_eq!(stop_directive(None, 3), Some(Directive::Stop));
+    }
+
+    #[test]
     fn tasks_split_partitions() {
         assert_eq!(task_partitions(12, 4, 0), vec![0, 1, 2, 3]);
         assert_eq!(task_partitions(10, 4, 2), vec![8, 9]);
@@ -1694,6 +1832,12 @@ mod tests {
             instance_start(StartAt::Earliest, 1_794_000_000_300, sink),
             StartAt::Earliest
         );
+        // `ordering` of queue sinks (r9fanin).
+        let o = |v: &str| Opts([("ordering".to_owned(), v.to_owned())].into_iter().collect());
+        assert!(queue_ordering(&o("queue")).unwrap());
+        assert!(!queue_ordering(&o("key")).unwrap());
+        assert!(!queue_ordering(&Opts::default()).unwrap());
+        assert!(queue_ordering(&o("partition")).is_err());
         // Change topics keep whole seconds.
         assert_eq!(fan_in_created_ms(Some(1_794_000_000_900), true), 1_794_000_000_000);
     }

@@ -6731,6 +6731,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sprig-api",
+ "sprig-auth",
  "sprig-binlog",
  "sprig-catalog",
  "sprig-cluster",

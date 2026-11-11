@@ -40,6 +40,86 @@ pub struct SinksEnv {
     settings: crate::settings::WorkerSettings,
     /// The DC's gateways (queue sources, the script `db` handle; R9).
     peer: Option<Arc<dyn sprig_sinks::peer::SinkPeer>>,
+    /// Chapter 29 (RL31): tenant catalogs for sink owners' checks.
+    rls: Option<Arc<RlsCatalogs>>,
+}
+
+/// Tenant catalogs with chapter 14's and 29's modules (users, grants,
+/// row-level security), cached two seconds per tenant: what a change
+/// sink's owner may see, checked before each batch (decision RL31).
+struct RlsCatalogs {
+    source: sprig_catalog::cache::MariaSource,
+    cache: std::sync::Mutex<
+        std::collections::HashMap<
+            TenantId,
+            (std::time::Instant, Arc<sprig_catalog::TenantCatalog>),
+        >,
+    >,
+}
+
+impl RlsCatalogs {
+    fn new(locator: Arc<ShardMapLocator>) -> Option<Self> {
+        let ext: Vec<Arc<dyn sprig_catalog::CatalogExtension>> = vec![
+            Arc::new(sprig_auth::AuthExtension),
+            Arc::new(sprig_auth::authz::AuthzExtension),
+            Arc::new(sprig_auth::authz::rls::RlsExtension),
+        ];
+        sprig_catalog::cache::MariaSource::new(locator as Arc<dyn CatalogLocator>, ext)
+            .ok()
+            .map(|source| Self {
+                source,
+                cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+            })
+    }
+
+    async fn catalog(&self, tenant: TenantId) -> Result<Arc<sprig_catalog::TenantCatalog>> {
+        use sprig_catalog::cache::CatalogSource;
+        if let Some((at, c)) = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&tenant)
+            && at.elapsed() < std::time::Duration::from_secs(2)
+        {
+            return Ok(Arc::clone(c));
+        }
+        let loaded = self
+            .source
+            .load(tenant, None, sprig_catalog::cache::Node::Writer)
+            .await?;
+        let reg = sprig_settings::Registry::global()?;
+        let c = Arc::new(sprig_catalog::TenantCatalog::build(reg, tenant, loaded));
+        self.cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(tenant, (std::time::Instant::now(), Arc::clone(&c)));
+        Ok(c)
+    }
+
+    /// Whether policies on any of `objects` bind user `owner`.
+    async fn binds(&self, tenant: TenantId, owner: u32, objects: &[u64]) -> Result<bool> {
+        use sprig_auth::authz::{AuthzState, CompiledPrivileges};
+        let cat = self.catalog(tenant).await?;
+        let Some(state) = sprig_auth::authz::rls::RlsState::of(&cat) else {
+            return Ok(false);
+        };
+        if !objects.iter().any(|o| {
+            state
+                .security(sprig_common::ids::ObjectId(*o))
+                .is_some_and(|s| s.enabled)
+        }) {
+            return Ok(false);
+        }
+        let Some(authz) = AuthzState::of(&cat) else {
+            return Ok(false);
+        };
+        let u = sprig_common::ids::UserId(owner);
+        let c = CompiledPrivileges::compile(authz, u, &authz.granted_roles(u));
+        let r = sprig_auth::authz::rls::compile(&cat, &c, u);
+        Ok(objects
+            .iter()
+            .any(|o| r.tables.contains_key(&sprig_common::ids::ObjectId(*o))))
+    }
 }
 
 impl std::fmt::Debug for SinksEnv {
@@ -84,6 +164,7 @@ impl SinksEnv {
             worker: worker.to_owned(),
             settings: env.settings.clone(),
             peer: None,
+            rls: RlsCatalogs::new(Arc::clone(&env.locator)).map(Arc::new),
         }
     }
 
@@ -143,6 +224,18 @@ impl SinkEnv for SinksEnv {
 
     fn worker_id(&self) -> String {
         self.worker.clone()
+    }
+
+    async fn row_policies_bind(
+        &self,
+        tenant: TenantId,
+        owner: u32,
+        objects: &[u64],
+    ) -> Result<bool> {
+        match &self.rls {
+            Some(r) => r.binds(tenant, owner, objects).await,
+            None => Ok(false),
+        }
     }
 
     fn settings(&self) -> Option<(sprig_settings::Snapshot, sprig_common::ids::DcId)> {

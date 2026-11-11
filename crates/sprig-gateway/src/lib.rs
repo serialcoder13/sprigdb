@@ -131,9 +131,14 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     let dc = ctx.config.node.dc.clone();
     let sctx = SettingCtx::process(&dc);
     let gateway_id = ctx.config.node.id();
-    // Components stop on this token: SIGTERM, or the end of a drain asked
-    // for through the Admin API.
-    let stop = ctx.shutdown.child_token();
+    // Components stop on this token, at the end of the drain, whether
+    // SIGTERM or the Admin API started it. It is not a child of
+    // `ctx.shutdown`: on SIGTERM the permit loop, the backends and the
+    // registration must keep running while the gateway drains, or writes
+    // that still arrive during the drain get 39501 (hardening round 2: a
+    // stopping gateway refused writes for 5-6 s before it closed its
+    // listeners).
+    let stop = sprig_common::CancellationToken::new();
     let rctx = RoleContext {
         config: ctx.config.clone(),
         health: ctx.health.clone(),

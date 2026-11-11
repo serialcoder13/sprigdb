@@ -150,6 +150,7 @@ impl Executor for Observed {
         Box::new(ObservedSession {
             inner: self.inner.open(login),
             tenant: login.principal.tenant.map(|t| t.0),
+            sli: Sli::default(),
         })
     }
 }
@@ -157,6 +158,59 @@ impl Executor for Observed {
 struct ObservedSession {
     inner: Box<dyn SessionExec>,
     tenant: Option<u64>,
+    sli: Sli,
+}
+
+/// A session's SLI metric handles, registered on first use (R5 round 8:
+/// registering them with their labels on every statement cost about 2% of
+/// a MongoDB point read's gateway CPU). A session's protocol and tenant
+/// don't change; `result` and whether the tenant has its own series do.
+#[derive(Default)]
+struct Sli {
+    /// `sprig_gateway_statements_total` by (result, tenant series).
+    statements: Vec<(&'static str, bool, metrics::Counter)>,
+    /// `sprig_gateway_query_duration_seconds` without and with the tenant
+    /// series.
+    duration: [Option<metrics::Histogram>; 2],
+    overhead: Option<metrics::Histogram>,
+}
+
+impl Sli {
+    fn record(
+        &mut self,
+        protocol: &'static str,
+        tenant: Option<u64>,
+        busy: bool,
+        result: &'static str,
+        total: Duration,
+        overhead: Duration,
+    ) {
+        let label = || match tenant {
+            Some(t) if busy => t.to_string(),
+            _ => String::new(),
+        };
+        let i = match self
+            .statements
+            .iter()
+            .position(|(r, b, _)| *r == result && *b == busy)
+        {
+            Some(i) => i,
+            None => {
+                let c = metrics::counter!("sprig_gateway_statements_total", "protocol" => protocol, "result" => result, "tenant" => label());
+                self.statements.push((result, busy, c));
+                self.statements.len() - 1
+            }
+        };
+        self.statements[i].2.increment(1);
+        self.duration[usize::from(busy)]
+            .get_or_insert_with(|| metrics::histogram!("sprig_gateway_query_duration_seconds", "protocol" => protocol, "tenant" => label()))
+            .record(total.as_secs_f64());
+        self.overhead
+            .get_or_insert_with(
+                || metrics::histogram!("sprig_gateway_overhead_seconds", "protocol" => protocol),
+            )
+            .record(overhead.as_secs_f64());
+    }
 }
 
 fn traceparent(req: &Request) -> Option<String> {
@@ -216,16 +270,17 @@ impl SessionExec for ObservedSession {
             span.record("error", true);
         }
         let backend = Duration::from_nanos(waited.load(Ordering::Relaxed));
-        let tenant = match self.tenant {
-            Some(t) if TenantRates::get().busy(t, Instant::now()) => t.to_string(),
-            _ => String::new(),
-        };
-        metrics::counter!("sprig_gateway_statements_total", "protocol" => protocol, "result" => result, "tenant" => tenant.clone())
-            .increment(1);
-        metrics::histogram!("sprig_gateway_query_duration_seconds", "protocol" => protocol, "tenant" => tenant)
-            .record(total.as_secs_f64());
-        metrics::histogram!("sprig_gateway_overhead_seconds", "protocol" => protocol)
-            .record(total.saturating_sub(backend).as_secs_f64());
+        let busy = self
+            .tenant
+            .is_some_and(|t| TenantRates::get().busy(t, Instant::now()));
+        self.sli.record(
+            protocol,
+            self.tenant,
+            busy,
+            result,
+            total,
+            total.saturating_sub(backend),
+        );
         r
     }
 
@@ -259,6 +314,10 @@ impl SessionExec for ObservedSession {
 
     fn row_policy_binds(&self, object: u64) -> Option<bool> {
         self.inner.row_policy_binds(object)
+    }
+
+    fn row_policy_docs(&self) -> Option<std::sync::Arc<crate::tenant::rls::DocViews>> {
+        self.inner.row_policy_docs()
     }
 }
 

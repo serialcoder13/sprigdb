@@ -123,6 +123,16 @@ fn bad(why: &str) -> Response {
 }
 
 async fn renew(State(s): State<Arc<Internal>>, body: Bytes) -> Response {
+    // A controller that hasn't read the DC lease yet (it just started)
+    // would answer a refusal it hasn't checked, and a refusal ends a
+    // holder's permit at once: answer 503 so the holder asks another
+    // controller instead (hardening round 2).
+    if !s.lease.settled() {
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .body(Body::from("this controller hasn't read the DC lease yet"))
+            .unwrap_or_default();
+    }
     match serde_json::from_slice::<PermitRequest>(&body) {
         Ok(r) => json(&s.renew(&r)),
         Err(e) => bad(&e.to_string()),

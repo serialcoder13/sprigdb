@@ -94,6 +94,22 @@ impl BoltSession for Sess {
                 "bad",
             ));
         }
+        if query == "PLAN" {
+            // Summary entries reach the final SUCCESS (R8 testkit run).
+            return Ok(QueryResult {
+                fields: vec!["x".into()],
+                records: VecDeque::from([vec![PackValue::Int(7)]]),
+                qtype: "r",
+                summary: vec![
+                    (
+                        "plan",
+                        PackValue::map([("operatorType", PackValue::str("ProduceResults"))]),
+                    ),
+                    ("notifications", PackValue::List(vec![])),
+                ],
+                ..QueryResult::default()
+            });
+        }
         if let Some(rest) = query.strip_prefix('S') {
             let (n, fail_at) = match rest.split_once('!') {
                 Some((a, b)) => (a.parse().unwrap_or(0), b.parse().ok()),
@@ -395,4 +411,22 @@ async fn streamed_results_pull_discard_and_buffer() {
         assert_eq!(recs, want, "qid {qid}");
     }
     c.commit().await.expect("commit");
+}
+
+#[tokio::test]
+async fn summary_entries_end_the_result() {
+    let (mut c, _h) = start(None).await;
+    c.login("u", "pw").await.expect("login");
+    let r = c.query("PLAN", vec![], vec![]).await.expect("run");
+    assert_eq!(r.records.len(), 1);
+    let plan = r.summary.get("plan").expect("plan in the summary");
+    assert_eq!(
+        plan.get("operatorType").and_then(PackValue::as_str),
+        Some("ProduceResults")
+    );
+    assert_eq!(
+        r.summary.get("notifications"),
+        Some(&PackValue::List(vec![]))
+    );
+    assert_eq!(r.summary.get("type").and_then(PackValue::as_str), Some("r"));
 }

@@ -22,6 +22,8 @@ serde_json.workspace = true
 # Chapter 41 (R9): runs of triggers on streams and queues go to gateways
 # over the peer service.
 sprig-api.workspace = true
+# Chapter 29 (RL31): sink owners' row-level security, checked by the worker.
+sprig-auth.workspace = true
 sprig-binlog.workspace = true
 sprig-catalog.workspace = true
 sprig-cluster.workspace = true

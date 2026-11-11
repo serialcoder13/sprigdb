@@ -50,6 +50,7 @@ check_secrets() {
     read -r uid mode type <<<"$(st secrets)"
     [[ $uid == "$me" ]] || { echo "  secrets/ is owned by uid $uid, not by you ($me): chown -R $me secrets"; bad=1; }
     (( (8#$mode & 8#077) == 0 )) || { echo "  secrets/ is mode $mode: chmod 700 secrets"; bad=1; }
+    [[ -r secrets && -x secrets ]] || { echo "  you can't read secrets/"; return 1; }
     while IFS= read -r -d '' f; do
         if [[ -L $f ]]; then echo "  $f is a symbolic link: replace it with the file"; bad=1; continue; fi
         read -r uid mode type <<<"$(st "$f")"
@@ -98,20 +99,29 @@ dc_compose() {
     if [[ -n ${COMPOSE_FILE:-} ]]; then docker compose --project-directory "$here" "$@"
     else docker compose --project-directory "$here" -f "$here/compose.yaml" "$@"; fi
 }
-services() { dc_compose config --services 2>/dev/null; }
-has_service() { services | grep -qx "$1"; }
+# This VM's services (read once; grep -q on a pipe would trip pipefail).
+svc_list=
+services() { [[ -n $svc_list ]] || svc_list=$(dc_compose config --services 2>/dev/null); echo "$svc_list"; }
+has_service() { local l; l=$(services); grep -qx "$1" <<<"$l"; }
 # The MariaDB containers of this VM: mariadb-1, mariadb-2, ...
-mariadb_services() { services | grep -E '^mariadb-[0-9]+$' | sort -t- -k2 -n || true; }
+mariadb_services() { local l; l=$(services); grep -E '^mariadb-[0-9]+$' <<<"$l" | sort -t- -k2 -n || true; }
 
 # sprigctl in the controller container, over HTTPS (the Admin API's
 # certificate is checked against the deployment CA). Before named operators
 # take over it uses the bootstrap token; after, the service token RUNBOOK.md's
 # "First operator" issues to this script (secrets/sprig/ops-token).
+# SPRIGCTL_BIN runs a sprigctl on the host instead, against the published
+# Admin port (a newer sprigctl than the image's, say).
 ctl() {
-    local tok=/run/sprig/sprig/admin-token
-    [[ -s secrets/sprig/ops-token ]] && tok=/run/sprig/sprig/ops-token
-    dc_compose exec -T controller sprigctl --endpoint "https://127.0.0.1:$admin_port" \
-        --ca-file /run/sprig/tls/ca.pem --token-file "$tok" "$@"
+    local tok=sprig/admin-token
+    [[ -s secrets/sprig/ops-token ]] && tok=sprig/ops-token
+    if [[ -n ${SPRIGCTL_BIN:-} ]]; then
+        "$SPRIGCTL_BIN" --endpoint "https://127.0.0.1:$admin_port" --ca-file secrets/tls/ca.pem \
+            --token-file "secrets/$tok" "$@"
+    else
+        dc_compose exec -T controller sprigctl --endpoint "https://127.0.0.1:$admin_port" \
+            --ca-file /run/sprig/tls/ca.pem --token-file "/run/sprig/$tok" "$@"
+    fi
 }
 
 # etcd: every member's client URL, from SPRIG_ETCD_SEEDS (a TOML list).
@@ -369,48 +379,48 @@ etcd_rejoin() {
 
 # --- backups -----------------------------------------------------------------------------
 
-# Each backup gets a fresh 256-bit data key. The data key is encrypted with
-# secrets/backup/backup-pub.pem (RSA-OAEP, SHA-256); each file is streamed
-# straight from mariadb-backup / etcd through zstd and AES-256-CTR, so no
-# unencrypted copy is written. SHA256SUMS covers every file.
+# Each backup gets a fresh 256-bit data key, made on the host and sealed
+# with secrets/backup/backup-pub.pem (RSA-OAEP, SHA-256) into data-key.enc.
+# Each file is streamed straight from mariadb-backup / etcd through zstd and
+# AES-256-CTR inside the MariaDB container (the key reaches it on stdin, and
+# stays in its memory), so no unencrypted copy is written to the disk, except
+# etcd's snapshot for the second it takes to encrypt it. SHA256SUMS covers
+# every file.
 backup() {
-    local ts=${1:-$(date -u +%Y%m%dT%H%M%SZ)} d s uidgid enc_svc
+    local ts=${1:-$(date -u +%Y%m%dT%H%M%SZ)} d s uidgid enc_svc k
     d=backups/$ts
     uidgid="$(id -u):$(id -g)"
     enc_svc=$(mariadb_services | head -1)
     [[ -n $enc_svc ]] || die "no MariaDB on this VM: backups run on the VM with MariaDB (it snapshots the whole etcd cluster too)"
     [[ -s secrets/backup/backup-pub.pem ]] || die "no secrets/backup/backup-pub.pem (./sprig-vm.sh up makes one)"
     mkdir -p "$d"
-    # The data key, made and sealed in the container; it never touches the disk unsealed.
-    dc_compose exec -T "$enc_svc" bash -c "set -euo pipefail; umask 077
-        openssl rand -hex 32 >/dev/shm/sprig-backup-key
-        openssl pkeyutl -encrypt -pubin -inkey /run/sprig/backup/backup-pub.pem \
-            -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 \
-            -in /dev/shm/sprig-backup-key -out /backups/$ts/data-key.enc"
+    k=$(openssl rand -hex 32)
+    printf '%s' "$k" | openssl pkeyutl -encrypt -pubin -inkey secrets/backup/backup-pub.pem \
+        -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -out "$d/data-key.enc"
     for s in $(mariadb_services); do
         say "MariaDB $s: mariadb-backup, compressed and encrypted, into $d/$s.xbstream.zst.enc"
-        # The key is copied into this container's memory (/dev/shm) for the stream.
-        dc_compose exec -T "$enc_svc" cat /dev/shm/sprig-backup-key |
-            dc_compose exec -T "$s" bash -c "set -euo pipefail; umask 077
-                cat >/dev/shm/sprig-backup-key
-                p=\$(cat /run/sprig/mariadb/root-password)
-                mariadb-backup --backup --stream=xbstream --user=root --password=\"\$p\" --target-dir=/tmp 2>/backups/$ts/$s.log |
-                    zstd -q -T2 |
-                    openssl enc -aes-256-ctr -pbkdf2 -salt -pass file:/dev/shm/sprig-backup-key -out /backups/$ts/$s.xbstream.zst.enc
-                rm -f /dev/shm/sprig-backup-key
-                grep -q 'completed OK' /backups/$ts/$s.log"
+        printf '%s' "$k" | dc_compose exec -T "$s" bash -c "set -euo pipefail; umask 077
+            cat >/dev/shm/sprig-backup-key
+            trap 'rm -f /dev/shm/sprig-backup-key' EXIT
+            p=\$(cat /run/sprig/mariadb/root-password)
+            mariadb-backup --backup --stream=xbstream --user=root --password=\"\$p\" --target-dir=/tmp 2>/backups/$ts/$s.log |
+                zstd -q -T2 |
+                openssl enc -aes-256-ctr -pbkdf2 -salt -pass file:/dev/shm/sprig-backup-key -out /backups/$ts/$s.xbstream.zst.enc
+            grep -q 'completed OK' /backups/$ts/$s.log"
     done
     if has_service etcd; then
         say "etcd: snapshot of the cluster, encrypted, into $d/etcd.db.zst.enc"
         dc_compose exec -T etcd etcdctl --endpoints="https://127.0.0.1:${SPRIG_ETCD_CLIENT_PORT:-2379}" --cacert=/tls/ca.pem \
             --cert=/tls/client.pem --key=/tls/client-key.pem snapshot save "/backups/$ts/.etcd.db.part" >"$d/etcd-snapshot.log" 2>&1
         # etcdctl can only write a file: encrypt it at once and remove it.
-        dc_compose exec -T "$enc_svc" bash -c "set -euo pipefail; umask 077
+        printf '%s' "$k" | dc_compose exec -T "$enc_svc" bash -c "set -euo pipefail; umask 077
+            cat >/dev/shm/sprig-backup-key
+            trap 'rm -f /dev/shm/sprig-backup-key' EXIT
             zstd -q </backups/$ts/.etcd.db.part |
                 openssl enc -aes-256-ctr -pbkdf2 -salt -pass file:/dev/shm/sprig-backup-key -out /backups/$ts/etcd.db.zst.enc
             shred -u /backups/$ts/.etcd.db.part 2>/dev/null || rm -f /backups/$ts/.etcd.db.part"
     fi
-    dc_compose exec -T "$enc_svc" rm -f /dev/shm/sprig-backup-key
+    k=
     dc_compose images --format json >"$d/images.json" 2>/dev/null || true
     grep -E '^SPRIGDB_IMAGE=' .env >"$d/image.env" || echo "SPRIGDB_IMAGE=${SPRIGDB_IMAGE:-sprigdb:dev}" >"$d/image.env"
     {
@@ -418,9 +428,10 @@ backup() {
         echo "created $ts"
         echo "dc $dc"
         echo "mariadb $(mariadb_services | tr '\n' ' ')"
-        echo "encryption aes-256-ctr+pbkdf2 (openssl enc), data key rsa-oaep-sha256 (data-key.enc)"
+        echo "encryption aes-256-ctr, pbkdf2 (openssl enc); data key rsa-oaep-sha256 (data-key.enc)"
     } >"$d/MANIFEST"
-    dc_compose exec -T "$enc_svc" bash -c "cd /backups/$ts && sha256sum MANIFEST data-key.enc *.enc image.env >SHA256SUMS && chown -R $uidgid . && chmod 600 *.enc && chmod 644 MANIFEST SHA256SUMS"
+    dc_compose exec -T "$enc_svc" bash -c "cd /backups/$ts && chown -R $uidgid . && chmod 600 *.enc *.log"
+    (cd "$d" && sums_make)
     du -sh "$d" | awk -v ts="$ts" '{print "sprig-vm: backup " ts " done (" $1 ", encrypted)"}'
     copy_off "$ts"
     prune
@@ -432,7 +443,7 @@ backup() {
 copy_off() {
     local ts=$1 to=${SPRIG_BACKUP_COPY_TO:-}
     [[ -n $to ]] || { say "SPRIG_BACKUP_COPY_TO isn't set: the backup stays on this VM only"; return 0; }
-    local files=(MANIFEST SHA256SUMS data-key.enc image.env)
+    local files=(MANIFEST SHA256SUMS image.env)
     local f
     for f in backups/"$ts"/*.enc; do files+=("$(basename "$f")"); done
     if [[ $to == /* ]]; then
@@ -448,6 +459,11 @@ copy_off() {
     say "copied to $to/$ts"
 }
 
+sums_make() {
+    if command -v sha256sum >/dev/null; then sha256sum MANIFEST image.env ./*.enc >SHA256SUMS
+    else shasum -a 256 MANIFEST image.env ./*.enc >SHA256SUMS; fi
+}
+
 sums_check() {
     if command -v sha256sum >/dev/null; then sha256sum -c --quiet SHA256SUMS
     else shasum -a 256 -c --quiet SHA256SUMS; fi
@@ -457,11 +473,12 @@ sums_check() {
 # this script made (they have a MANIFEST) are removed. The off-VM copies are
 # pruned by the storage's own retention.
 prune() {
-    local keep=${SPRIG_BACKUP_KEEP:-7} old
-    old=$(cd backups && for x in */MANIFEST; do [[ -f $x ]] && dirname "$x"; done | sort | head -n -"$keep" 2>/dev/null || true)
-    # BSD head has no negative counts: fall back to awk.
-    [[ -n $old ]] || old=$(cd backups && for x in */MANIFEST; do [[ -f $x ]] && dirname "$x"; done | sort | awk -v k="$keep" '{a[NR]=$0} END {for (i = 1; i <= NR - k; i++) print a[i]}')
-    for x in $old; do say "removing old backup backups/$x"; rm -rf "backups/${x:?}"; done
+    local keep=${SPRIG_BACKUP_KEEP:-7} x
+    for x in $(cd backups && for m in */MANIFEST; do [[ -f $m ]] && dirname "$m"; done | sort |
+        awk -v k="$keep" '{a[NR] = $0} END {for (i = 1; i <= NR - k; i++) print a[i]}'); do
+        say "removing old backup backups/$x"
+        rm -rf "backups/${x:?}"
+    done
 }
 
 verify_backup() {

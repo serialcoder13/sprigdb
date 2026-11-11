@@ -119,6 +119,11 @@ pub struct PolicyRow {
     pub using_expr: Option<String>,
     /// `WITH CHECK`.
     pub check_expr: Option<String>,
+    /// `USING` as a MongoDB filter (extended JSON), for collections'
+    /// policies made by `sprigCreatePolicy` (decision RL33).
+    pub using_mongo: Option<String>,
+    /// `WITH CHECK` as a MongoDB filter.
+    pub check_mongo: Option<String>,
     /// Who created it.
     pub created_by: UserId,
     /// The auth version of its last change.
@@ -503,6 +508,10 @@ pub struct NewPolicy<'a> {
     pub using_expr: Option<&'a str>,
     /// `WITH CHECK`.
     pub check_expr: Option<&'a str>,
+    /// `USING` as a MongoDB filter (RL33).
+    pub using_mongo: Option<&'a str>,
+    /// `WITH CHECK` as a MongoDB filter.
+    pub check_mongo: Option<&'a str>,
     /// Who creates it.
     pub by: UserId,
 }
@@ -560,7 +569,8 @@ impl RlsStore {
         let rows: Vec<Row> = q
             .query(format!(
                 "SELECT policy_id, object_id, name, mode, commands, CAST(grantees AS CHAR), \
-                 using_expr, check_expr, created_by, changed_version FROM {} \
+                 using_expr, check_expr, created_by, changed_version, \
+                 CAST(using_mongo AS CHAR), CAST(check_mongo AS CHAR) FROM {} \
                  ORDER BY object_id, name",
                 self.policies
             ))
@@ -588,6 +598,14 @@ impl RlsStore {
                     .flatten(),
                 created_by: UserId(get(r, 8)?),
                 changed_version: get(r, 9)?,
+                using_mongo: r
+                    .get_opt::<Option<String>, usize>(10)
+                    .and_then(Result::ok)
+                    .flatten(),
+                check_mongo: r
+                    .get_opt::<Option<String>, usize>(11)
+                    .and_then(Result::ok)
+                    .flatten(),
             });
         }
         let rows: Vec<Row> = q
@@ -684,7 +702,8 @@ impl RlsStore {
             .exec_drop(
                 format!(
                     "INSERT INTO {} (object_id, name, mode, commands, grantees, using_expr, \
-                     check_expr, created_by, changed_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     check_expr, created_by, changed_version, using_mongo, check_mongo) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     self.policies
                 ),
                 (
@@ -701,6 +720,8 @@ impl RlsStore {
                     p.check_expr,
                     p.by.0,
                     version,
+                    p.using_mongo,
+                    p.check_mongo,
                 ),
             )
             .await;
@@ -731,12 +752,16 @@ impl RlsStore {
             q,
             format!(
                 "UPDATE {} SET grantees = COALESCE(?, grantees), \
+                 using_mongo = IF(? IS NULL, using_mongo, NULL), \
+                 check_mongo = IF(? IS NULL, check_mongo, NULL), \
                  using_expr = COALESCE(?, using_expr), check_expr = COALESCE(?, check_expr), \
                  changed_version = ? WHERE object_id = ? AND name = ?",
                 self.policies
             ),
             (
                 grantees.map(grantees_json),
+                using_expr,
+                check_expr,
                 using_expr,
                 check_expr,
                 version,
@@ -1062,7 +1087,8 @@ pub fn narrow(
                     // RL28: the all-columns view of a table with invisible
                     // columns gets the same rights.
                     let hview = policy_view_hidden(&spelled_name, *object);
-                    let hkey = has(&hview).then(|| BackendTarget::Table(schema.clone(), hview.clone()));
+                    let hkey =
+                        has(&hview).then(|| BackendTarget::Table(schema.clone(), hview.clone()));
                     if binds.iter().any(|(o, _)| o == object) {
                         let refs = ActionSet::of(&[Action::References]);
                         let e = grants.entry(tkey.clone()).or_default();
@@ -1088,7 +1114,8 @@ pub fn narrow(
                                 let e = grants.entry(vc).or_default();
                                 *e = e.union(select);
                                 if hkey.is_some() {
-                                    let hc = BackendTarget::Column(s.clone(), hview.clone(), c.clone());
+                                    let hc =
+                                        BackendTarget::Column(s.clone(), hview.clone(), c.clone());
                                     let e = grants.entry(hc).or_default();
                                     *e = e.union(select);
                                 }
@@ -1199,6 +1226,8 @@ mod tests {
             grantees: g,
             using_expr: u.map(str::to_owned),
             check_expr: c.map(str::to_owned),
+            using_mongo: None,
+            check_mongo: None,
             created_by: UserId(1),
             changed_version: 1,
         }
@@ -1361,7 +1390,13 @@ mod tests {
             ("t42_d1_g7_s1".to_owned(), "other".to_owned()),
             (s.clone(), "__sprig_rlsh_Docs".to_owned()),
         ];
-        narrow(&mut want, &cat, &bound, &physical, &std::collections::HashSet::new());
+        narrow(
+            &mut want,
+            &cat,
+            &bound,
+            &physical,
+            &std::collections::HashSet::new(),
+        );
         let sel = ActionSet::of(&[Action::Select]);
         let refs = ActionSet::of(&[Action::References]);
         let t = |s: &str, n: &str| BackendTarget::Table(s.into(), n.into());
@@ -1398,12 +1433,23 @@ mod tests {
             .or_default()
             .insert(tenant_row.clone(), all);
         let before = want2.clone();
-        narrow(&mut want2, &cat, &bound, &physical[..2], &std::collections::HashSet::new());
+        narrow(
+            &mut want2,
+            &cat,
+            &bound,
+            &physical[..2],
+            &std::collections::HashSet::new(),
+        );
         // A view's definer keeps reading the table itself.
         let mut want3 = BackendState::new();
-        want3.entry("t42_u1".into()).or_default().insert(tenant_row.clone(), all);
+        want3
+            .entry("t42_u1".into())
+            .or_default()
+            .insert(tenant_row.clone(), all);
         let before3 = want3.clone();
-        let defs = [("t42_u1".to_owned(), "__sprig_rls_docs".to_owned())].into_iter().collect();
+        let defs = [("t42_u1".to_owned(), "__sprig_rls_docs".to_owned())]
+            .into_iter()
+            .collect();
         narrow(&mut want3, &cat, &bound, &physical[..3], &defs);
         assert_eq!(want3, before3);
         assert_eq!(want2, before);

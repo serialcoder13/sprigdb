@@ -24,8 +24,12 @@
 //! sprigctl settings set sink.destination_allowlist '["127.0.0.1:<SPRIG_TEST_INHERIT_HOOK_PORT>"]' --scope tenant:$SYSTEM ...
 //! ```
 //!
+//! `SPRIG_TEST_INHERIT_CONTROLLER_PIDFILE` and `..._START` let
+//! `fan_in_sink_end_to_end` stop the controller for a moment (a sink made
+//! while its task can't start yet).
+//!
 //! With `SPRIG_TEST_INHERIT_LATE=x`, each test creates its own late member
-//! (`x`, `xa`, `xs`, `xq`, `xb1`, `xb2`, `xfi`), so use a new `x` per run.
+//! (`x`, `xa`, `xs`, `xq`, `xk`, `xb1`, `xb2`, `xfi`), so use a new `x` per run.
 //!
 //! Every tenant has the user `app` (password `sprig-dev-app`). Kiran's
 //! case: the system tenant declares `security.user_events FOR EACH TENANT`
@@ -167,6 +171,31 @@ fn start_worker(e: &Env) {
         .status()
         .unwrap();
     assert!(st.success());
+}
+
+/// Stops the controller (`SPRIG_TEST_INHERIT_CONTROLLER_PIDFILE`), if the
+/// test may (`SPRIG_TEST_INHERIT_CONTROLLER_START` restarts it): the
+/// command to start it again.
+fn stop_controller() -> Option<String> {
+    let pidfile = var("SPRIG_TEST_INHERIT_CONTROLLER_PIDFILE")?;
+    let start = var("SPRIG_TEST_INHERIT_CONTROLLER_START")?;
+    let pid = std::fs::read_to_string(pidfile).unwrap();
+    let pid = pid.trim();
+    let st = std::process::Command::new("kill")
+        .arg(pid)
+        .status()
+        .unwrap();
+    assert!(st.success(), "kill {pid}");
+    let end = Instant::now() + Duration::from_secs(40);
+    while Instant::now() < end
+        && std::process::Command::new("kill")
+            .args(["-0", pid])
+            .status()
+            .is_ok_and(|s| s.success())
+    {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Some(start)
 }
 
 const SYNC_USERS: &str = r"
@@ -2884,11 +2913,22 @@ async fn fan_in_sink_end_to_end() {
     let _ = sql(&mut sys, "DROP SINK r9fsink.dl").await;
     ok(&mut sys, "CREATE STREAM r9fsink.ev PARTITIONS 1").await;
     ok(&mut sys, "CREATE STREAM r9fsink.dead PARTITIONS 1").await;
-    // The sink's task starts only after the three records (its worker is
-    // down meanwhile): START AT LATEST counts from the sink's creation, so
-    // they still come (r9fanin: it counted from the task's first start,
-    // seconds later under load, and this step got nothing).
-    let killed = kill_worker(&e);
+    // The sink's task starts only after the three records are in the
+    // stream: the controller, which submits sink tasks, is down meanwhile
+    // (the worker's sequencer keeps running). START AT LATEST counts from
+    // the sink's creation, so they still come (r9fanin: it counted from the
+    // task's first start, seconds later under load, and this step got
+    // nothing).
+    ok(
+        &mut sys,
+        "INSERT INTO r9fsink.ev (`key`, `value`) VALUES ('k', 'before-the-sink')",
+    )
+    .await;
+    assert_eq!(
+        wait_count(&mut sys, "SELECT COUNT(*) FROM r9fsink.ev", 1, 60).await,
+        1
+    );
+    let ctl = stop_controller();
     ok(
         &mut sys,
         "CREATE SINK r9fsink.dl FROM STREAM ev TO WEBHOOK CONNECTION hook \
@@ -2903,9 +2943,17 @@ async fn fan_in_sink_end_to_end() {
         )
         .await;
     }
-    if killed {
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        start_worker(&e);
+    if let Some(start) = ctl {
+        assert_eq!(
+            wait_count(&mut sys, "SELECT COUNT(*) FROM r9fsink.ev", 4, 60).await,
+            4
+        );
+        let st = std::process::Command::new("sh")
+            .args(["-c", &start])
+            .status()
+            .unwrap();
+        assert!(st.success(), "starting the controller");
+        println!("the controller was down while the sink was made");
     }
     let n = wait_count(&mut sys, "SELECT COUNT(*) FROM r9fsink.dead", 1, 120).await;
     let dl = ok(
@@ -2930,6 +2978,8 @@ async fn fan_in_sink_end_to_end() {
         vals.contains(&"ok1".to_owned()) && vals.contains(&"ok2".to_owned()),
         "{vals:?}"
     );
+    // The record from before the sink never comes (START AT LATEST).
+    assert!(!vals.contains(&"before-the-sink".to_owned()), "{vals:?}");
     ok(&mut sys, "DROP SINK r9fsink.dl").await;
     ok(&mut sys, "DROP CONNECTION r9fsink.hook").await;
     let _ = sql(&mut sys, "DROP STREAM security.fs_events IMMEDIATE CASCADE").await;
@@ -3089,4 +3139,130 @@ async fn queue_trigger_dead_letter_replay() {
     );
     let _ = sql(&mut sys, "DROP TRIGGER r9fqdl.on_job").await;
     ok(&mut sys, "DROP DATABASE r9fqdl").await;
+}
+
+/// Publishes `q-<m>-<i>` into member `m`'s own instance of `r9fqs.jobs`.
+async fn publish_q(c: &mut Conn, m: &str, from: u64, to: u64) {
+    for i in from..to {
+        ok(
+            c,
+            &format!("CALL sprig.mq_publish('', 'jobs', 'q-{m}-{i}', '{{}}', 0, 'r9fqs')"),
+        )
+        .await;
+    }
+}
+
+/// The numbers `i` of member `m`'s `q-<m>-<i>` records, in arrival order.
+fn arrived(r: &[(String, String, String)], m: &str) -> Vec<u64> {
+    let p = format!("q-{m}-");
+    r.iter()
+        .filter_map(|(_, v, _)| v.strip_prefix(&p).and_then(|n| n.parse().ok()))
+        .collect()
+}
+
+/// Queue sources for inherited sinks (R9, r9fanin; chapter 51,
+/// "Inherited sinks and connections"): `CREATE SINK ... FOR EACH TENANT
+/// FROM QUEUE q` gives each member its own sink over its own instance of
+/// the `FOR EACH TENANT` queue, deployed when that instance is made (as
+/// for streams), here with `ordering = 'queue'`: every member's messages
+/// arrive once each, in queue order; a member created later gets its sink
+/// with its first message. Needs `sink.destination_allowlist` with the
+/// hook port for the members (global scope on a private deployment).
+#[tokio::test]
+async fn inherited_queue_sink_end_to_end() {
+    let Some(e) = env("inherited_queue_sink_end_to_end") else {
+        return;
+    };
+    let Some(port) = var("SPRIG_TEST_INHERIT_HOOK_PORT").and_then(|p| p.parse::<u16>().ok()) else {
+        eprintln!("no SPRIG_TEST_INHERIT_HOOK_PORT: skipped");
+        return;
+    };
+    let got = hook_receiver(port).await;
+    let mut sys = conn(&e.addr, &e.system).await;
+    let _ = sql(&mut sys, "DROP SINK r9fqs.out").await;
+    let _ = sql(&mut sys, "DROP CONNECTION r9fqs.hook").await;
+    let _ = sql(&mut sys, "DROP QUEUE r9fqs.jobs IMMEDIATE CASCADE").await;
+    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS r9fqs").await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    got.lock().unwrap().clear();
+    ok(&mut sys, "CREATE DATABASE r9fqs").await;
+    ok(&mut sys, "GRANT SPRIG_SINK_ADMIN ON *.* TO app").await;
+    ok(&mut sys, "CREATE QUEUE r9fqs.jobs FOR EACH TENANT").await;
+    ok(
+        &mut sys,
+        &format!(
+            "CREATE CONNECTION r9fqs.hook FOR EACH TENANT TYPE WEBHOOK WITH \
+             (url = 'http://127.0.0.1:{port}', format = 'ndjson', signature = 'none')"
+        ),
+    )
+    .await;
+    let t = Instant::now();
+    ok(
+        &mut sys,
+        "CREATE SINK r9fqs.out FOR EACH TENANT FROM QUEUE jobs TO WEBHOOK CONNECTION hook \
+         WITH (batch_max_wait_ms = 100, batch_max_records = 7, ordering = 'queue')",
+    )
+    .await;
+    println!("inherited queue sink defined: {:?}", t.elapsed());
+    let shown = ok(&mut sys, "SHOW INHERITED DEFINITIONS").await;
+    assert!(
+        shown
+            .iter()
+            .any(|r| r[0].as_deref() == Some("sink") && r[2].as_deref() == Some("out")),
+        "{shown:?}"
+    );
+    // Each member's first publish makes its queue instance, and with it
+    // its sink.
+    let n = 40u64;
+    let mut cs = Vec::new();
+    for m in &e.members {
+        let mut c = conn(&e.addr, m).await;
+        let _ = sql(&mut c, "DROP DATABASE IF EXISTS r9fqs").await;
+        publish_q(&mut c, m, 0, n).await;
+        cs.push((m.clone(), c));
+    }
+    let ms = e.members.clone();
+    wait_received(
+        &got,
+        |r| ms.iter().all(|m| arrived(r, m).len() >= n as usize),
+        120,
+    )
+    .await;
+    let r = received(&got);
+    println!("{} records from {} members in {:?}", r.len(), ms.len(), t.elapsed());
+    for m in &ms {
+        let a = arrived(&r, m);
+        assert_eq!(a, (0..n).collect::<Vec<_>>(), "{m}: once each, in queue order");
+    }
+    // The member sees its own sink instance, owned by sprig_inherited.
+    let (m0, c0) = &mut cs[0];
+    let inst = ok(c0, "SHOW INHERITED INSTANCES").await;
+    println!("{m0} instances: {inst:?}");
+    assert!(
+        inst.iter()
+            .any(|r| r[0].as_deref() == Some("sink") && r[2].as_deref() == Some("out")
+                && r[5].as_deref() == Some("active")),
+        "{inst:?}"
+    );
+    // Nothing left in the members' queues.
+    for (m, c) in &mut cs {
+        let info = ok(c, "CALL sprig.mq_info('jobs', 'r9fqs')").await;
+        println!("{m} jobs after: {info:?}");
+        assert_eq!(info[0][0].as_deref(), Some("0"), "{m}: {info:?}");
+    }
+    // A member created now: its sink comes with its first message.
+    if let Some(late) = e.late.as_ref().map(|l| format!("{l}k")) {
+        create_tenant(&e, &late);
+        got.lock().unwrap().clear();
+        let mut lc = conn(&e.addr, &late).await;
+        let t = Instant::now();
+        publish_q(&mut lc, &late, 0, 10).await;
+        wait_received(&got, |r| arrived(r, &late).len() >= 10, 60).await;
+        println!("late member {late}: 10 delivered {:?} after its first publish", t.elapsed());
+        assert_eq!(arrived(&received(&got), &late), (0..10).collect::<Vec<_>>());
+    }
+    ok(&mut sys, "DROP SINK r9fqs.out").await;
+    ok(&mut sys, "DROP CONNECTION r9fqs.hook").await;
+    let _ = sql(&mut sys, "DROP QUEUE r9fqs.jobs IMMEDIATE CASCADE").await;
+    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS r9fqs").await;
 }

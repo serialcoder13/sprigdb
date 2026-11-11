@@ -104,9 +104,9 @@ impl Reply {
     pub(crate) fn into_document(self) -> Document {
         match self {
             Self::Doc(d) => d,
-            Self::Raw(r) => r.to_document().unwrap_or_else(|e| {
-                MongoError::new(code::INTERNAL_ERROR, e.to_string()).to_doc()
-            }),
+            Self::Raw(r) => r
+                .to_document()
+                .unwrap_or_else(|e| MongoError::new(code::INTERNAL_ERROR, e.to_string()).to_doc()),
         }
     }
 
@@ -675,7 +675,12 @@ impl Conn {
         let mut body = match m.body.to_document() {
             Ok(d) => d,
             Err(e) => {
-                return (String::new(), Reply::Doc(MongoError::new(code::BAD_VALUE, format!("invalid BSON: {e}")).to_doc()));
+                return (
+                    String::new(),
+                    Reply::Doc(
+                        MongoError::new(code::BAD_VALUE, format!("invalid BSON: {e}")).to_doc(),
+                    ),
+                );
             }
         };
         let name = body.keys().next().cloned().unwrap_or_default();
@@ -711,11 +716,16 @@ impl Conn {
             }
         }
         if self.principal.is_none() && !PRE_AUTH.contains(&name.as_str()) {
-            return (name.clone(), Reply::Doc(MongoError::new(
-                    code::UNAUTHORIZED,
-                    format!("Command {name} requires authentication"),
-                )
-                .to_doc()));
+            return (
+                name.clone(),
+                Reply::Doc(
+                    MongoError::new(
+                        code::UNAUTHORIZED,
+                        format!("Command {name} requires authentication"),
+                    )
+                    .to_doc(),
+                ),
+            );
         }
         // Driver test suites' fail point (D18), when the operator allows it.
         let tenant = self
@@ -859,10 +869,7 @@ impl Conn {
             self.close_now = true;
             return (name, Reply::Doc(Document::new()));
         }
-        let result = if r.is_ok() { "ok" } else { "error" };
-        metrics::counter!("sprig_mongo_commands_total", "command" => name.clone(), "result" => result).increment(1);
-        metrics::histogram!("sprig_mongo_command_duration_seconds", "command" => name.clone())
-            .record(started.elapsed().as_secs_f64());
+        command_metrics(&name, r.is_ok(), started.elapsed());
         // R5 round 8: a reply the handler built as BSON bytes gets the
         // same fields as a document reply (below), appended.
         let wce = injected
@@ -937,6 +944,52 @@ impl Conn {
         };
         (name, Reply::Doc(doc))
     }
+}
+
+/// A command's two metric handles (`sprig_mongo_commands_total` by
+/// result, `sprig_mongo_command_duration_seconds`).
+#[derive(Clone)]
+struct CommandMetrics {
+    ok: metrics::Counter,
+    error: metrics::Counter,
+    duration: metrics::Histogram,
+}
+
+/// Commands whose handles a runtime thread keeps; past this many names,
+/// each call registers as the macros do.
+const COMMAND_METRICS_MAX: usize = 256;
+
+thread_local! {
+    /// The handles by command name, per runtime thread (R5 round 8:
+    /// registering them with their labels on every command cost about 2%
+    /// of a point read's gateway CPU).
+    static COMMAND_METRICS: std::cell::RefCell<std::collections::HashMap<String, CommandMetrics>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn command_metrics(name: &str, ok: bool, took: Duration) {
+    let register = || CommandMetrics {
+        ok: metrics::counter!("sprig_mongo_commands_total", "command" => name.to_owned(), "result" => "ok"),
+        error: metrics::counter!("sprig_mongo_commands_total", "command" => name.to_owned(), "result" => "error"),
+        duration: metrics::histogram!("sprig_mongo_command_duration_seconds", "command" => name.to_owned()),
+    };
+    let m = COMMAND_METRICS.with(|c| {
+        let mut c = c.borrow_mut();
+        if let Some(m) = c.get(name) {
+            return m.clone();
+        }
+        let m = register();
+        if c.len() < COMMAND_METRICS_MAX {
+            c.insert(name.to_owned(), m.clone());
+        }
+        m
+    });
+    if ok {
+        m.ok.increment(1)
+    } else {
+        m.error.increment(1)
+    }
+    m.duration.record(took.as_secs_f64());
 }
 
 static CLUSTER_TIME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

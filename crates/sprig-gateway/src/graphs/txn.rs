@@ -238,6 +238,10 @@ pub(crate) struct GraphBackend {
     /// `txn.non_xa_policy = sprig_2pc` holds branches on clusters without
     /// XA).
     config: Mutex<Option<TxnConfig>>,
+    /// `innodb_lock_wait_timeout` of branches opened from now on, in
+    /// seconds: the Bolt transaction's `tx_timeout`, rounded up (none: the
+    /// server's default, which the pool's connection reset restores).
+    lock_wait: Mutex<Option<u64>>,
     pub(crate) positions: Positions,
 }
 
@@ -254,6 +258,7 @@ impl GraphBackend {
             caps: Mutex::new(HashMap::new()),
             isolation: Mutex::new("READ COMMITTED"),
             config: Mutex::new(None),
+            lock_wait: Mutex::new(None),
             positions: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -264,6 +269,21 @@ impl GraphBackend {
             .isolation
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = level;
+    }
+
+    /// The lock wait of branches opened from now on: `tx_timeout` rounded
+    /// up to whole seconds (MariaDB's unit), at least 1.
+    pub(crate) fn set_lock_wait(&self, timeout: Option<std::time::Duration>) {
+        *self
+            .lock_wait
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = timeout.map(|t| {
+            t.as_millis()
+                .div_ceil(1000)
+                .max(1)
+                .try_into()
+                .unwrap_or(u64::MAX)
+        });
     }
 
     /// Learns `cluster`'s capability profile (chapter 09's `derived.xa`).
@@ -349,6 +369,15 @@ impl TxnBackend for GraphBackend {
         c.query_drop(format!("SET SESSION TRANSACTION ISOLATION LEVEL {level}"))
             .await
             .map_err(|e| db_error(&e))?;
+        let lock_wait = *self
+            .lock_wait
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(secs) = lock_wait {
+            c.query_drop(format!("SET SESSION innodb_lock_wait_timeout = {secs}"))
+                .await
+                .map_err(|e| db_error(&e))?;
+        }
         let thread = u64::from(c.id());
         Ok(GraphBranch {
             conn: Some(c),

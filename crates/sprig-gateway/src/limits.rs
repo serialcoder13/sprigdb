@@ -745,6 +745,10 @@ impl SessionExec for LimitedSession {
     fn row_policy_binds(&self, object: u64) -> Option<bool> {
         self.inner.row_policy_binds(object)
     }
+
+    fn row_policy_docs(&self) -> Option<std::sync::Arc<crate::tenant::rls::DocViews>> {
+        self.inner.row_policy_docs()
+    }
 }
 
 #[cfg(test)]

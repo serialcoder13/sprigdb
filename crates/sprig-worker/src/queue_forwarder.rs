@@ -7,7 +7,8 @@
 //!
 //! ```text
 //! serve(cluster):
-//!   every 5 s: the tenants with an active queue_forwarder subscription
+//!   every 5 s, and at once when a forwarder subscription is written (a
+//!   watch; r9fanin): the tenants with an active queue_forwarder subscription
 //!     whose map points at this cluster (a running tenant's placement is
 //!     read again each minute) → start a tenant task for each new one,
 //!     stop the tasks of tenants gone or moved away
@@ -300,6 +301,11 @@ impl ClusterForwarder {
     async fn serve(&mut self, cx: &JobCtx) -> std::result::Result<Value, String> {
         let mut last_refresh: Option<Instant> = None;
         tracing::info!(cluster = %self.cluster, "queue forwarder for the cluster starts");
+        // A new subscription is picked up at once, not at the next 5 s
+        // refresh: its first publishes then go from the feed, in commit
+        // order, before the 2 s fallback takes them (decision 88; r9fanin).
+        let (wake_tx, mut wake_rx) = mpsc::channel::<()>(1);
+        let watcher = watch_subscriptions(Arc::clone(&self.env.dc), wake_tx, cx.cancel.clone());
         loop {
             if last_refresh.is_none_or(|t| t.elapsed() >= REFRESH) {
                 self.refresh(&cx.cancel).await;
@@ -312,8 +318,10 @@ impl ClusterForwarder {
             tokio::select! {
                 () = cx.cancel.cancelled() => break,
                 () = tokio::time::sleep(Duration::from_secs(2)) => {}
+                Some(()) = wake_rx.recv() => last_refresh = None,
             }
         }
+        watcher.abort();
         // Stop every tenant task and let it acknowledge its position.
         let tasks: Vec<Running> = self.running.drain().map(|(_, r)| r).collect();
         for r in &tasks {
@@ -324,6 +332,58 @@ impl ClusterForwarder {
         }
         Err("cancelled".to_owned())
     }
+}
+
+/// Whether `key` is a forwarder subscription (`.../feed/subs/<tenant>/queue_forwarder`).
+#[must_use]
+pub fn is_forwarder_sub(key: &str) -> bool {
+    key.rsplit('/').next() == Some(SUB_NAME) && key.contains("/feed/subs/")
+}
+
+/// Wakes the cluster job when a forwarder subscription is written (a new
+/// tenant), so it starts the tenant's task at once; re-watches after an
+/// error. The 5 s refresh stays as the fallback.
+fn watch_subscriptions(
+    dc: Arc<dyn MetaStore>,
+    wake: mpsc::Sender<()>,
+    cancel: sprig_common::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    use tokio_stream::StreamExt as _;
+    tokio::spawn(async move {
+        let Ok(prefix) = dc.tier().key("feed/subs/") else {
+            return;
+        };
+        loop {
+            match dc.watch(&prefix, 0).await {
+                Ok(mut w) => loop {
+                    let ev = tokio::select! {
+                        () = cancel.cancelled() => return,
+                        e = w.next() => e,
+                    };
+                    match ev {
+                        Some(Ok(sprig_meta::WatchEvent::Put(kv)))
+                            if is_forwarder_sub(kv.key.as_str()) =>
+                        {
+                            let _ = wake.try_send(());
+                        }
+                        Some(Ok(_)) => {}
+                        Some(Err(e)) => {
+                            tracing::debug!(error = %e, "queue forwarder: subscription watch broke");
+                            break;
+                        }
+                        None => break,
+                    }
+                },
+                Err(e) => {
+                    tracing::debug!(error = %e, "queue forwarder: subscriptions not watched");
+                }
+            }
+            tokio::select! {
+                () = cancel.cancelled() => return,
+                () = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+        }
+    })
 }
 
 /// One outbox row the feed showed committed.
@@ -841,5 +901,48 @@ mod tests {
             ..SqlResult::default()
         };
         assert_eq!(counts(Some(&res)), (5, 2, 0));
+    }
+
+    /// r9fanin (decision 88): a new forwarder subscription wakes the
+    /// cluster job at once (before, it waited for the next 5 s refresh and
+    /// the 2 s fallback took the tenant's first publishes); other
+    /// subscriptions don't.
+    #[tokio::test]
+    async fn a_new_forwarder_subscription_wakes_the_job() {
+        use sprig_feed::subs::{Subscription, Subscriptions};
+        let dc: Arc<dyn MetaStore> = Arc::new(sprig_meta::MemStore::new(sprig_meta::Tier::Dc(
+            sprig_common::ids::DcId::new("dc-a").unwrap(),
+        )));
+        let (tx, mut rx) = mpsc::channel(1);
+        let cancel = sprig_common::CancellationToken::new();
+        let w = watch_subscriptions(Arc::clone(&dc), tx, cancel.clone());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let subs = Subscriptions::new(Arc::clone(&dc));
+        let sub = |name: &str| Subscription {
+            tenant: TenantId(7),
+            name: name.into(),
+            kind: name.into(),
+            ordering: "merged".into(),
+            owner_ref: None,
+            state: "active".into(),
+            created_at_ms: 1,
+        };
+        subs.register(&sub("search")).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), rx.recv())
+                .await
+                .is_err()
+        );
+        subs.register(&sub(SUB_NAME)).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap(),
+            Some(())
+        );
+        assert!(is_forwarder_sub("/sprig/dc/dc-a/feed/subs/7/queue_forwarder"));
+        assert!(!is_forwarder_sub("/sprig/dc/dc-a/feed/checkpoints/7/queue_forwarder"));
+        cancel.cancel();
+        let _ = w.await;
     }
 }

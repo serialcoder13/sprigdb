@@ -636,8 +636,8 @@ pub struct CatalogDocs {
     migrated: Mutex<HashSet<u64>>,
     /// The newest catalog version this gateway committed, per tenant.
     seen: Mutex<HashMap<u64, u64>>,
-    /// (tenant, database) checked for an old `__sprig_doc_meta`.
-    legacy: Mutex<HashSet<(u64, String)>>,
+    /// Databases checked for an old `__sprig_doc_meta`, by tenant.
+    legacy: Mutex<HashMap<u64, HashSet<String>>>,
     /// The publication wait (D13); `None` without a DC tier.
     publisher: Option<Arc<super::publish::Publisher>>,
 }
@@ -660,7 +660,7 @@ impl CatalogDocs {
             svc,
             migrated: Mutex::new(HashSet::new()),
             seen: Mutex::new(HashMap::new()),
-            legacy: Mutex::new(HashSet::new()),
+            legacy: Mutex::new(HashMap::new()),
             publisher: None,
         }
     }
@@ -720,8 +720,7 @@ impl CatalogDocs {
         cat: &TenantCatalog,
         db_id: sprig_common::ids::DbId,
     ) -> Result<bool> {
-        let key = (tenant.0, db.to_owned());
-        if lock(&self.legacy).contains(&key) {
+        if self.legacy_checked(tenant, db) {
             return Ok(false);
         }
         // Only a database the round-1 engine wrote has the table (an
@@ -736,7 +735,7 @@ impl CatalogDocs {
             )
             .is_none()
         {
-            lock(&self.legacy).insert(key);
+            self.legacy_done(tenant, db);
             return Ok(false);
         }
         let rows = match TableCatalog::rows(sql, db).await {
@@ -771,8 +770,22 @@ impl CatalogDocs {
             }
             tracing::info!(%tenant, db, collections = rows.len(), "collection metadata moved to the catalog");
         }
-        lock(&self.legacy).insert(key);
+        self.legacy_done(tenant, db);
         Ok(imported)
+    }
+
+    /// `db` of `tenant` was checked for old metadata in this process.
+    fn legacy_checked(&self, tenant: TenantId, db: &str) -> bool {
+        lock(&self.legacy)
+            .get(&tenant.0)
+            .is_some_and(|s| s.contains(db))
+    }
+
+    fn legacy_done(&self, tenant: TenantId, db: &str) {
+        lock(&self.legacy)
+            .entry(tenant.0)
+            .or_default()
+            .insert(db.to_owned());
     }
 
     /// Registers `m` as `ns` in one change; the existing live collection
@@ -1017,6 +1030,11 @@ impl DocCatalog for CatalogDocs {
         db: &str,
     ) -> std::result::Result<(), MongoError> {
         if let Some(tenant) = tenant_of(sql) {
+            // Once a database was checked, the one-time work is done: no
+            // catalog snapshot per command (R5 round 8).
+            if self.legacy_checked(tenant, db) {
+                return Ok(());
+            }
             self.state(sql, tenant, db).await.map_err(|e| mongo(&e))?;
         }
         Ok(())

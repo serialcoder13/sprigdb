@@ -174,6 +174,7 @@ impl AdminApi {
     /// 39998 if the file can't be read or is empty.
     pub fn with_internal_token_file(mut self, path: Option<&std::path::Path>) -> Result<Self> {
         if let Some(p) = path {
+            sprig_common::secret_file::check(p, "[gateway] controller_token_file")?;
             let t = std::fs::read_to_string(p).map_err(|e| {
                 SprigError::new(
                     SprigCode::ConfigInvalid,

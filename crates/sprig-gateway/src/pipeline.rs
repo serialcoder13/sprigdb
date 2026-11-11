@@ -343,6 +343,14 @@ pub trait SessionExec: Send {
     fn row_policy_binds(&self, _object: u64) -> Option<bool> {
         None
     }
+
+    /// The tables whose policies bind this session, with those policies as
+    /// MongoDB filters with its values bound (chapter 29, decision RL34):
+    /// what a change stream shows. `None` when the executor can't tell:
+    /// callers show nothing then.
+    fn row_policy_docs(&self) -> Option<std::sync::Arc<crate::tenant::rls::DocViews>> {
+        None
+    }
 }
 
 /// The client side of a response, as an executor sees it.
@@ -601,6 +609,10 @@ impl SessionExec for HookedSession {
 
     fn row_policy_binds(&self, object: u64) -> Option<bool> {
         self.inner.row_policy_binds(object)
+    }
+
+    fn row_policy_docs(&self) -> Option<std::sync::Arc<crate::tenant::rls::DocViews>> {
+        self.inner.row_policy_docs()
     }
 }
 

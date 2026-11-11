@@ -578,7 +578,18 @@ impl sprig_router::Scratch for GwScratch {
     }
 
     async fn run(&mut self, sql: &str, budget: &mut Budget) -> Result<ShardOutcome> {
-        run_on(&mut self.stream.bs, sql, budget).await
+        let r = run_on(&mut self.stream.bs, sql, budget).await?;
+        // Chapter 29 (RL28): a copy shadows its protected table on this
+        // connection; the copy was filled through the policy views, so the
+        // statement over it reads the copy, not a view.
+        let schema = self.stream.bs.vars().schema.clone();
+        if let Some(sw) = self.stream.bs.vars().rls_views.clone() {
+            let mut sw = (*sw).clone();
+            if sw.note_temporary(sql, schema.as_deref()) {
+                self.stream.bs.vars_mut().rls_views = Some(std::sync::Arc::new(sw));
+            }
+        }
+        Ok(r)
     }
 
     async fn start(&mut self, sql: &str) -> Result<Option<Vec<ColumnDef>>> {

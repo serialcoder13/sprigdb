@@ -560,6 +560,12 @@ pub fn id_key(id: &Bson) -> Result<Vec<u8>, MongoError> {
 
 /// Parses a type map.
 fn parse_types(t: &str) -> Result<HashMap<String, String>, MongoError> {
+    // The engine writes a flat object of strings: read that directly (R5
+    // round 8; serde_json's tree was a few percent of a point read), and
+    // anything else as before.
+    if let Some(m) = parse_flat_types(t) {
+        return Ok(m);
+    }
     let v: serde_json::Value =
         serde_json::from_str(t).map_err(|e| invalid(format!("_types is not JSON: {e}")))?;
     let serde_json::Value::Object(m) = v else {
@@ -568,6 +574,42 @@ fn parse_types(t: &str) -> Result<HashMap<String, String>, MongoError> {
     Ok(m.into_iter()
         .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_owned())))
         .collect())
+}
+
+/// A type map that is a flat JSON object of strings; `None` for anything
+/// else.
+fn parse_flat_types(t: &str) -> Option<HashMap<String, String>> {
+    let empty = HashMap::new();
+    let mut p = Parser {
+        s: t.as_bytes(),
+        at: 0,
+        types: &empty,
+    };
+    p.expect(b'{').ok()?;
+    let mut m = HashMap::new();
+    if p.peek() == Some(b'}') {
+        p.at += 1;
+    } else {
+        loop {
+            let k = p.string().ok()?;
+            p.expect(b':').ok()?;
+            if p.peek() != Some(b'"') {
+                return None;
+            }
+            let v = p.string().ok()?;
+            m.insert(k, v);
+            match p.peek() {
+                Some(b',') => p.at += 1,
+                Some(b'}') => {
+                    p.at += 1;
+                    break;
+                }
+                _ => return None,
+            }
+        }
+    }
+    p.ws();
+    (p.at == p.s.len()).then_some(m)
 }
 
 struct Parser<'a> {
@@ -619,7 +661,8 @@ impl Parser<'_> {
         if let Some(end) = rest.iter().position(|&c| c == b'"' || c == b'\\')
             && rest[end] == b'"'
         {
-            let t = std::str::from_utf8(&rest[..end]).map_err(|_| self.err("string is not UTF-8"))?;
+            let t =
+                std::str::from_utf8(&rest[..end]).map_err(|_| self.err("string is not UTF-8"))?;
             self.at += end + 1;
             return Ok(t.to_owned());
         }
@@ -1044,6 +1087,109 @@ impl Parser<'_> {
         Ok(())
     }
 
+    /// The string at the cursor when it has no escapes (the type map's
+    /// encodings never need them), the cursor past it.
+    fn plain_str(&mut self) -> Option<&str> {
+        if self.peek() != Some(b'"') {
+            return None;
+        }
+        let s: &[u8] = self.s;
+        let rest = &s[self.at + 1..];
+        let end = rest.iter().position(|&c| c == b'"' || c == b'\\')?;
+        if rest[end] != b'"' {
+            return None;
+        }
+        let t = std::str::from_utf8(&rest[..end]).ok()?;
+        self.at += end + 2;
+        Some(t)
+    }
+
+    /// A scalar of type map entry `e` written directly, as [`convert`]
+    /// would make it: `binData:<n>`, `uuid`, `objectId`, `date`, `long` and
+    /// `double`. `false` when it isn't one of these or doesn't fit (the
+    /// caller then restores the cursor and `out`).
+    fn raw_typed(&mut self, out: &mut Vec<u8>, type_at: usize, e: &str) -> bool {
+        match self.peek() {
+            Some(b'"') => {
+                let Some(t) = self.plain_str() else {
+                    return false;
+                };
+                if let Some(st) = e.strip_prefix("binData:") {
+                    let Ok(st) = st.parse::<u8>() else {
+                        return false;
+                    };
+                    out[type_at] = 0x05;
+                    let len_at = out.len();
+                    out.extend_from_slice(&[0; 4]);
+                    out.push(u8::from(BinarySubtype::from(st)));
+                    let start = out.len();
+                    if B64.decode_vec(t, out).is_err() {
+                        return false;
+                    }
+                    let Ok(n) = i32::try_from(out.len() - start) else {
+                        return false;
+                    };
+                    out[len_at..len_at + 4].copy_from_slice(&n.to_le_bytes());
+                    return true;
+                }
+                match e {
+                    "uuid" => {
+                        let Some(b) = hex_bytes(&t.replace('-', "")).filter(|b| b.len() == 16)
+                        else {
+                            return false;
+                        };
+                        out[type_at] = 0x05;
+                        out.extend_from_slice(&16i32.to_le_bytes());
+                        out.push(4);
+                        out.extend_from_slice(&b);
+                        true
+                    }
+                    "objectId" => {
+                        let Ok(o) = ObjectId::parse_str(t) else {
+                            return false;
+                        };
+                        out[type_at] = 0x07;
+                        out.extend_from_slice(&o.bytes());
+                        true
+                    }
+                    "date" => {
+                        let Some(ms) = ms_from_iso(t) else {
+                            return false;
+                        };
+                        out[type_at] = 0x09;
+                        out.extend_from_slice(&ms.to_le_bytes());
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            Some(b'-' | b'0'..=b'9') => {
+                let Ok(n) = self.number() else {
+                    return false;
+                };
+                match e {
+                    "long" => n.parse::<i64>().is_ok_and(|i| {
+                        out[type_at] = 0x12;
+                        out.extend_from_slice(&i.to_le_bytes());
+                        true
+                    }),
+                    "double" => n.parse::<f64>().is_ok_and(|f| {
+                        out[type_at] = 0x01;
+                        out.extend_from_slice(&f.to_le_bytes());
+                        true
+                    }),
+                    "date" => n.parse::<i64>().is_ok_and(|ms| {
+                        out[type_at] = 0x09;
+                        out.extend_from_slice(&ms.to_le_bytes());
+                        true
+                    }),
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
     /// The JSON object at the cursor appended as a BSON document.
     fn raw_document(
         &mut self,
@@ -1127,9 +1273,17 @@ impl Parser<'_> {
         } else {
             self.types.get(path.as_str()).map(String::as_str)
         };
-        if entry.is_some() {
-            // A typed value: the document parse's conversion. Its element
-            // replaces the one begun at `type_at`.
+        if let Some(e) = entry {
+            // The common typed scalars are written directly; the others, and
+            // any value its entry doesn't fit, take the document parse's
+            // conversion, whose element replaces the one begun at
+            // `type_at`.
+            let (at0, len0) = (self.at, out.len());
+            if self.raw_typed(out, type_at, e) {
+                return Ok(());
+            }
+            self.at = at0;
+            out.truncate(len0);
             let v = self.value(path, depth)?;
             out.truncate(type_at);
             raw_bson_element(out, key, v)?;
@@ -1244,10 +1398,25 @@ pub fn check_raw(d: &bson::RawDocument) -> Result<(), MongoError> {
 }
 
 fn check_raw_doc(d: &bson::RawDocument, depth: usize) -> Result<(), MongoError> {
-    let mut seen = std::collections::HashSet::new();
+    // Names compared one by one while there are few, through a hash set
+    // past `RAW_DUP_LINEAR` (R5 round 8: a set per document level was most
+    // of this check's cost).
+    let mut few: Vec<&str> = Vec::new();
+    let mut seen: Option<std::collections::HashSet<&str>> = None;
     for e in d {
         let (k, v) = e.map_err(|e| invalid(format!("invalid BSON: {e}")))?;
-        if !seen.insert(k) {
+        let dup = match seen.as_mut() {
+            Some(s) => !s.insert(k),
+            None => {
+                let dup = few.contains(&k);
+                few.push(k);
+                if few.len() > RAW_DUP_LINEAR {
+                    seen = Some(few.drain(..).collect());
+                }
+                dup
+            }
+        };
+        if dup {
             return Err(invalid(format!("duplicate field name '{k}'")));
         }
         check_raw_val(v, depth)?;

@@ -5,8 +5,16 @@
 # (deploy/compose/ci/outcomes.py; the target is always "sprig"). A test that
 # fails on Neo4j too is never counted against SprigDB.
 #
-# Known from chapter 43's as-built notes (Bolt 5.0 to 5.4, basic logins only,
-# bookmarks unsigned and not waited on); the rest comes from the first CI run
-# (defined, not yet run).
-sprig fail *.test_authentication.*bearer* :: bearer logins are refused with 39915 (chapter 43)
-sprig fail *.test_authentication.*impersonat* :: impersonation is refused with 39916 (chapter 43)
+# First run (r8testkit, 11 November 2026, testkit 75f4aa8, Python driver
+# 9c876c1, Neo4j 5.26.0 community reference, SprigDB on a private laptop
+# deployment): 127 tests, reference 114 pass / 13 skip. SprigDB before the
+# round's fixes 90 / 20 fail / 13 skip (the 4 missing ones failed in
+# subtests); after them (decisions/r8-interim.md G66) 109 pass / 5 fail / 13 skip, the same through neo4j:// (routing);
+# through bolt+ssc:// (TLS) 108 / 5 / 14.
+# Every remaining difference is listed below (G67).
+sprig fail tests.neo4j.datatypes.test_datatypes.TestDataTypes.test_should_echo_back :: one subtest echoes a byte array: SprigDB has no byte-array value yet and refuses bytes parameters with 39909 (G67)
+sprig fail tests.neo4j.datatypes.test_temporal_types.TestDataTypes.test_should_echo_all_timezone_ids :: the test lists the server's time zones with CALL { } IN TRANSACTIONS ... ON ERROR CONTINUE, which answers 39901 (chapter 43: not built; decisions/r8-interim.md G67)
+sprig fail tests.neo4j.datatypes.test_temporal_types.TestDataTypes.test_date_time_cypher_created_tz_id :: as above: CALL { } IN TRANSACTIONS answers 39901 (G67)
+sprig fail tests.neo4j.test_session_run.TestSessionRun.test_recover_from_fail_on_streaming :: UNWIND [1, 0, 2] AS x RETURN 10 / x is computed whole (only MATCH ... RETURN reads stream, chapter 43), so / by zero fails the RUN instead of the second PULL; the driver still gets the error and the session recovers (G67)
+sprig fail tests.neo4j.test_summary.TestSummary.test_protocol_version_information :: SprigDB speaks Bolt 5.0-5.4 (bolt.max_version, chapter 43 open question 4) while its agent string says Neo4j/5.26.0, whose drivers expect 5.8 (G67)
+sprig flaky tests.neo4j.test_tx_run.TestTxRun.test_tx_timeout :: passes alone; in one full run on a laptop at load 45 (debug build) the 250 ms tx_timeout ran out in the MATCH before the lock wait began, answering TransactionTimedOutClientConfiguration instead of LockClientStopped (G66)

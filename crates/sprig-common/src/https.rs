@@ -79,6 +79,7 @@ pub fn certs(path: &Path, what: &str) -> Result<Vec<CertificateDer<'static>>> {
 }
 
 fn key(path: &Path, what: &str) -> Result<PrivateKeyDer<'static>> {
+    crate::secret_file::check(path, what)?;
     let pem = read(path, what)?;
     PrivateKeyDer::from_pem_slice(&pem)
         .map_err(|e| config_err(format!("{what} {}: {e}", path.display())))

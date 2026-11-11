@@ -27,7 +27,7 @@ use sprig_catalog::TenantCatalog;
 use sprig_common::{Result, SprigCode, SprigError};
 use sprig_inherit::msg::grammar as ig;
 use sprig_inherit::msg::{
-    AppliesTo, Cause, Chain, DefKey, DefKind, DefState, Definition, MsgState, Override, What,
+    AppliesTo, Chain, DefKey, DefKind, DefState, Definition, MsgState, Override, What,
 };
 use sprig_sinks::grammar::{self as sg, InheritTarget, InheritedOp, OptVal, SourceAst, TargetAst};
 use sprig_sinks::sql::Handled;
@@ -35,7 +35,7 @@ use sprig_sinks::sql::Handled;
 use super::PassSession;
 use super::inherit_msg::{check_quota, next_object_id, rollout, scope_of};
 use crate::inherited::sinks::{ConnSpec, OptSpec, SinkSpec, seal_credentials, source_of};
-use crate::inherited::{self, MsgWrite, streams, target_err};
+use crate::inherited::{self, MsgWrite, target_err};
 use crate::tenant::TenantServices;
 
 fn err(code: SprigCode, m: impl Into<String>) -> SprigError {
@@ -381,39 +381,61 @@ impl PassSession {
             ));
         }
         let db = self.db_or_current(cs.name.db.as_deref())?;
-        let SourceAst::Stream(q) = &cs.source else {
-            return Err(err(
-                SprigCode::SinkOptionInvalid,
-                "a FOR EACH TENANT sink reads a FOR EACH TENANT stream (FROM STREAM s); queue \
-                 sources and FAN IN are separate forms",
-            ));
+        // A FOR EACH TENANT stream, or (R9, r9fanin) queue: each member's
+        // sink reads its own instance.
+        let (q, src_kind) = match &cs.source {
+            SourceAst::Stream(q) => (q, DefKind::Stream),
+            SourceAst::Queue(q) => (q, DefKind::Queue),
+            _ => {
+                return Err(err(
+                    SprigCode::SinkOptionInvalid,
+                    "a FOR EACH TENANT sink reads a FOR EACH TENANT stream (FROM STREAM s) or \
+                     queue (FROM QUEUE q); FAN IN is a separate form",
+                ));
+            }
         };
         let src_db = q.db.clone().unwrap_or_else(|| db.clone());
         if src_db != db {
             return Err(err(
                 SprigCode::SinkOptionInvalid,
                 format!(
-                    "a FOR EACH TENANT sink lives in its stream's database ({src_db}), with its \
+                    "a FOR EACH TENANT sink lives in its source's database ({src_db}), with its \
                      connections"
                 ),
             ));
         }
         let stream = own
-            .def(&db, DefKind::Stream, &q.name)
+            .def(&db, src_kind, &q.name)
             .cloned()
-            .or_else(|| chain.resolve(&db, DefKind::Stream, &q.name))
+            .or_else(|| chain.resolve(&db, src_kind, &q.name))
             .ok_or_else(|| {
-                err(
-                    SprigCode::StreamNotFound,
-                    format!(
-                        "ER_SPRIG_STREAM_NOT_FOUND: a FOR EACH TENANT sink reads a FOR EACH TENANT \
-                         stream; {db}.{} isn't one here",
-                        q.name
-                    ),
-                )
+                if src_kind == DefKind::Queue {
+                    err(
+                        SprigCode::SinkOptionInvalid,
+                        format!(
+                            "a FOR EACH TENANT sink FROM QUEUE reads a FOR EACH TENANT queue; \
+                             {db}.{} isn't one here",
+                            q.name
+                        ),
+                    )
+                } else {
+                    err(
+                        SprigCode::StreamNotFound,
+                        format!(
+                            "ER_SPRIG_STREAM_NOT_FOUND: a FOR EACH TENANT sink reads a FOR EACH \
+                             TENANT stream; {db}.{} isn't one here",
+                            q.name
+                        ),
+                    )
+                }
             })?;
         if !super::inherit_msg::allows(ts, cat, Action::Select, &db, &q.name) {
             return Err(super::inherit_msg::denied(ts, "SELECT", &q.name));
+        }
+        if src_kind == DefKind::Queue
+            && !super::inherit_msg::allows(ts, cat, Action::Delete, &db, &q.name)
+        {
+            return Err(super::inherit_msg::denied(ts, "DELETE", &q.name));
         }
         for g in &f.grants {
             inherited::triggers::actions_of(g)?;
@@ -449,6 +471,11 @@ impl PassSession {
             text,
             db: db.clone(),
             source: q.name.clone(),
+            source_kind: if src_kind == DefKind::Queue {
+                "queue".into()
+            } else {
+                String::new()
+            },
             connections: conns,
             options: std::collections::BTreeMap::new(),
         };
@@ -748,11 +775,7 @@ impl PassSession {
                 if !hit {
                     continue;
                 }
-                streams::forget_applied(e.tenant, sk);
-                let tcat = inherited::catalog(svc, e.tenant).await?;
-                let tchain = inherited::chain(svc, &tcat).await?;
-                if let Some(d) = tchain.def(sk) {
-                    streams::ensure(svc, &tchain, &d, Cause::Declare).await?;
+                if crate::inherited::sinks::reapply_source(svc, e.tenant, sk).await? {
                     reached += 1;
                 }
             }
@@ -764,8 +787,9 @@ impl PassSession {
     }
 }
 
-/// The stream definitions whose instances `def` (a sink definition, or a
-/// connection definition through the sinks that name it) affects.
+/// The stream (or queue) definitions whose instances `def` (a sink
+/// definition, or a connection definition through the sinks that name it)
+/// affects.
 fn streams_of(chain: &Chain, def: &Definition) -> Vec<DefKey> {
     let sinks: Vec<Arc<Definition>> = match def.kind {
         DefKind::Sink => vec![Arc::new(def.clone())],

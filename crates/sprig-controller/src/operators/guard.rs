@@ -374,10 +374,9 @@ fn public(method: &Method, path: &str) -> bool {
         )
 }
 
-/// The layer: see the module notes.
-pub async fn layer(State(g): State<Arc<Guard>>, req: Request, next: Next) -> Response {
-    let (mut parts, body) = req.into_parts();
-    parts.headers.remove(AUTHN_HEADER);
+/// The client's address (module notes): replaces the relay headers with
+/// [`CLIENT_HEADER`].
+fn establish_client(g: &Guard, parts: &mut axum::http::request::Parts) -> ClientAddr {
     let peer = parts
         .extensions
         .get::<ConnectInfo<SocketAddr>>()
@@ -391,6 +390,15 @@ pub async fn layer(State(g): State<Arc<Guard>>, req: Request, next: Next) -> Res
     {
         parts.headers.insert(CLIENT_HEADER, v);
     }
+    client
+}
+
+/// The layer: see the module notes.
+#[allow(clippy::too_many_lines)] // one step after another
+pub async fn layer(State(g): State<Arc<Guard>>, req: Request, next: Next) -> Response {
+    let (mut parts, body) = req.into_parts();
+    parts.headers.remove(AUTHN_HEADER);
+    let client = establish_client(&g, &mut parts);
     let method = parts.method.clone();
     let path = parts.uri.path().to_owned();
     if !path.starts_with("/admin/v1/") || public(&method, &path) {

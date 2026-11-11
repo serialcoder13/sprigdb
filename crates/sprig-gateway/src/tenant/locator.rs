@@ -643,7 +643,9 @@ impl GatewayLocator {
     /// was deleted (decision bugfix-29).
     pub fn retire_tenant(&self, tenant: TenantId) {
         let prefix = format!("t{tenant}_");
-        self.backends.pools().retire_where(|a| a.starts_with(&prefix));
+        self.backends
+            .pools()
+            .retire_where(|a| a.starts_with(&prefix));
     }
 
     /// Closes every pool (shutdown).

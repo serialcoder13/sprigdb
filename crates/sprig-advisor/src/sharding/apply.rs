@@ -313,19 +313,22 @@ async fn triggers(c: &mut Conn, schema: &str, table: &str) -> Result<Vec<(String
 /// (chapter 29: `__sprig_rls_<table>`, or `__sprig_rlsh_<table>` with
 /// every column; long names keep a head and `~<object id>`).
 fn policy_view_of(view: &str, table: &str) -> bool {
-    [("__sprig_rls_", 52usize, 40usize), ("__sprig_rlsh_", 51, 39)]
-        .iter()
-        .any(|(prefix, whole, head)| {
-            let Some(rest) = view.strip_prefix(prefix) else {
-                return false;
-            };
-            if table.chars().count() <= *whole {
-                rest == table
-            } else {
-                let h: String = table.chars().take(*head).collect();
-                rest.strip_prefix(&h).is_some_and(|r| r.starts_with('~'))
-            }
-        })
+    [
+        ("__sprig_rls_", 52usize, 40usize),
+        ("__sprig_rlsh_", 51, 39),
+    ]
+    .iter()
+    .any(|(prefix, whole, head)| {
+        let Some(rest) = view.strip_prefix(prefix) else {
+            return false;
+        };
+        if table.chars().count() <= *whole {
+            rest == table
+        } else {
+            let h: String = table.chars().take(*head).collect();
+            rest.strip_prefix(&h).is_some_and(|r| r.starts_with('~'))
+        }
+    })
 }
 
 /// The policy views of `schema.table` (chapter 29, decision RL29): (name,
@@ -353,7 +356,9 @@ async fn policy_views(
             .await
             .map_err(|e| db_err("SHOW CREATE VIEW", &e))?;
         if let Some(body) = r.and_then(|r| r.get::<String, _>(1)) {
-            let account = definer.rsplit_once('@').map_or(definer.clone(), |(u, _)| u.to_owned());
+            let account = definer
+                .rsplit_once('@')
+                .map_or(definer.clone(), |(u, _)| u.to_owned());
             out.push((n, account, body));
         }
     }
@@ -368,43 +373,77 @@ fn policy_views_are_recognised() {
     assert!(!policy_view_of("__sprig_rls_docs2", "docs"));
     assert!(!policy_view_of("__sprig_rls_ctx", "docs"));
     let long = "x".repeat(60);
-    assert!(policy_view_of(&format!("__sprig_rls_{}~9", "x".repeat(40)), &long));
-    assert!(policy_view_of(&format!("__sprig_rlsh_{}~9", "x".repeat(39)), &long));
-    assert!(policy_view_of(&format!("__sprig_rlsh_{}", "y".repeat(51)), &"y".repeat(51)));
+    assert!(policy_view_of(
+        &format!("__sprig_rls_{}~9", "x".repeat(40)),
+        &long
+    ));
+    assert!(policy_view_of(
+        &format!("__sprig_rlsh_{}~9", "x".repeat(39)),
+        &long
+    ));
+    assert!(policy_view_of(
+        &format!("__sprig_rlsh_{}", "y".repeat(51)),
+        &"y".repeat(51)
+    ));
 }
 
 /// Re-creates moved tables' policy views in their new schemas, with the
-/// context function they read and their definer's right to run it (RL29);
-/// the caller drops the old ones, which the rename left invalid, once their
-/// grants are carried.
-async fn move_policy_views(c: &mut Conn, views: &[(String, String, String, String, String)]) -> Result<()> {
+/// context function they read and their definer's right to run it (RL29).
+/// `moves` maps each moved (schema, table) to its new schema: the views'
+/// texts name their table, the function and their policies' subquery
+/// tables qualified. Best effort: a view that can't be made is left to the
+/// gateways, which re-create missing views at the next statement; the
+/// regroup itself never fails for one. Returns the views made (the caller
+/// carries their grants and drops the old ones).
+async fn move_policy_views(
+    c: &mut Conn,
+    views: &[(String, String, String, String, String)],
+    moves: &[(String, String, String)],
+) -> Vec<(String, String, String)> {
+    let mut made = Vec::new();
     for (from, to, name, account, body) in views {
-        c.query_drop(format!("USE {}", quote(to)))
-            .await
-            .map_err(|e| db_err("use", &e))?;
+        let mut text = body.replacen("CREATE ", "CREATE OR REPLACE ", 1);
+        for (f, t, table) in moves {
+            text = text.replace(
+                &format!("{}.{}", quote(f), quote(table)),
+                &format!("{}.{}", quote(t), quote(table)),
+            );
+        }
+        // The view's own name and the function, as `SHOW CREATE VIEW`
+        // qualifies them from another default schema.
+        for n in [name.as_str(), "__sprig_rls_ctx"] {
+            text = text.replace(
+                &format!("{}.{}", quote(from), quote(n)),
+                &format!("{}.{}", quote(to), quote(n)),
+            );
+        }
         let who = format!("'{}'@'%'", account.replace('\'', ""));
-        c.query_drop(format!(
-            "CREATE FUNCTION IF NOT EXISTS {}.`__sprig_rls_ctx`() RETURNS LONGTEXT CHARSET utf8mb4 \
-             COLLATE utf8mb4_bin NOT DETERMINISTIC NO SQL SQL SECURITY DEFINER RETURN @sprig_rls",
-            quote(to)
-        ))
-        .await
-        .map_err(|e| db_err("create the policy context function", &e))?;
-        c.query_drop(format!(
-            "GRANT EXECUTE ON FUNCTION {}.`__sprig_rls_ctx` TO {who}",
-            quote(to)
-        ))
-        .await
-        .map_err(|e| db_err("grant the policy context function", &e))?;
-        let text = body
-            .replace(&format!("{}.", quote(from)), &format!("{}.", quote(to)))
-            .replacen("CREATE ", "CREATE OR REPLACE ", 1);
-        c.query_drop(text)
-            .await
-            .map_err(|e| db_err("re-create a policy view", &e))?;
-        let _ = name;
+        let stmts = [
+            format!("USE {}", quote(to)),
+            format!(
+                "CREATE FUNCTION IF NOT EXISTS {}.`__sprig_rls_ctx`() RETURNS LONGTEXT CHARSET utf8mb4 \
+                 COLLATE utf8mb4_bin NOT DETERMINISTIC NO SQL SQL SECURITY DEFINER RETURN @sprig_rls",
+                quote(to)
+            ),
+            format!(
+                "GRANT EXECUTE ON FUNCTION {}.`__sprig_rls_ctx` TO {who}",
+                quote(to)
+            ),
+            text,
+        ];
+        let mut ok = true;
+        for q in &stmts {
+            if let Err(e) = c.query_drop(q.as_str()).await {
+                tracing::warn!(schema = %to, view = %name, error = %e, "a policy view didn't follow the regroup; the gateways re-create it");
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            made.push((from.clone(), to.clone(), name.clone()));
+        }
     }
-    Ok(())
+    made
 }
 
 /// A `tables_priv` or `columns_priv` privilege as `GRANT` names it
@@ -620,15 +659,21 @@ async fn regroup(
         // name, and the rename leaves them behind; the tenant's accounts
         // get theirs on the new schema before writes resume (the gateways'
         // reconcile then drops the old rows).
-        move_policy_views(c, &pviews).await?;
+        let made = move_policy_views(c, &pviews, &moves).await;
         for (from, to, t) in &moves {
             carry_grants(c, ctx.tenant, from, to, t).await;
         }
-        for (from, to, n, _, _) in &pviews {
+        for (from, to, n) in &made {
             carry_grants(c, ctx.tenant, from, to, n).await;
-            c.query_drop(format!("DROP VIEW IF EXISTS {}.{}", quote(from), quote(n)))
+        }
+        // Every old policy view of a moved table reads nothing valid now.
+        for (from, _, n, _, _) in &pviews {
+            if let Err(e) = c
+                .query_drop(format!("DROP VIEW IF EXISTS {}.{}", quote(from), quote(n)))
                 .await
-                .map_err(|e| db_err("drop a moved policy view", &e))?;
+            {
+                tracing::warn!(schema = %from, view = %n, error = %e, "a moved table's old policy view wasn't dropped; the gateways drop it");
+            }
         }
         // Gateways route the moved tables from the next catalog version:
         // publish it while writes are still held.

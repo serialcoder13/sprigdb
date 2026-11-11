@@ -904,3 +904,76 @@ async fn shortest_paths_to_many_ends_match_pairwise_searches() {
         );
     }
 }
+
+/// `CALL tx.getMetaData()` returns the Bolt transaction's `tx_metadata`
+/// (the drivers' testkit, R8), an empty map without one.
+#[tokio::test]
+async fn tx_get_metadata_returns_the_transaction_metadata() {
+    let mut s = MemStore::new(1);
+    let o = q(&mut s, "CALL tx.getMetaData").await;
+    assert_eq!(o.columns, ["metadata"]);
+    assert_eq!(o.rows, vec![vec![Value::Map(BTreeMap::new())]]);
+    let meta: BTreeMap<String, Value> = [
+        ("foo".to_owned(), Value::Float(1.5)),
+        ("bar".to_owned(), Value::String("baz".into())),
+    ]
+    .into();
+    let b = Budgets {
+        tx_metadata: Some(meta.clone()),
+        ..Budgets::default()
+    };
+    for text in [
+        "CALL tx.getMetaData",
+        "CALL tx.getMetaData() YIELD metadata RETURN metadata",
+    ] {
+        let o = crate::execute(&mut s, text, &Params::new(), &b)
+            .await
+            .unwrap_or_else(|e| panic!("{text}: {e}"));
+        assert_eq!(o.rows, vec![vec![Value::Map(meta.clone())]], "{text}");
+    }
+}
+
+/// Neo4j's `CartesianProduct` notification: disconnected patterns of one
+/// `MATCH`, never connected ones (the drivers' testkit, R8).
+#[test]
+fn cartesian_product_notifications() {
+    let notes = |text: &str| {
+        let q = crate::parser::parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        crate::exec::notifications(&q)
+    };
+    let n = notes("EXPLAIN MATCH (n), (m) RETURN n, m");
+    assert_eq!(n.len(), 1);
+    assert_eq!(
+        n[0].code,
+        "Neo.ClientNotification.Statement.CartesianProduct"
+    );
+    assert!(
+        n[0].description.ends_with("(identifier is: (m))"),
+        "{}",
+        n[0].description
+    );
+    assert_eq!(notes("MATCH (a)-[:R]->(b), (c) RETURN *").len(), 1);
+    for connected in [
+        "CREATE (n) RETURN n",
+        "MATCH (n) RETURN n",
+        "MATCH (a)-[:R]->(b), (b)-[:S]->(c) RETURN a, c",
+        "MATCH (a) WITH a MATCH (a)-->(b), (a)-->(c) RETURN b, c",
+        "UNWIND [1, 2] AS x MATCH (n {k: x}) RETURN n",
+    ] {
+        assert!(notes(connected).is_empty(), "{connected}");
+    }
+}
+
+/// `EXPLAIN` and `PROFILE` say which they are, for the Bolt summary's
+/// `plan` and `profile`.
+#[tokio::test]
+async fn explain_and_profile_plans() {
+    let mut s = social(1).await;
+    let e = q(&mut s, "EXPLAIN MATCH (n:Person) RETURN n").await;
+    assert!(e.plan.is_some() && !e.profiled && e.rows.is_empty());
+    let p = q(&mut s, "PROFILE MATCH (n:Person) RETURN n.name").await;
+    assert!(p.plan.is_some() && p.profiled);
+    assert_eq!(p.rows.len(), 5);
+    let plain = q(&mut s, "MATCH (n:Person) RETURN n.name").await;
+    assert!(plain.plan.is_none() && !plain.profiled && plain.notifications.is_empty());
+}

@@ -578,9 +578,15 @@ impl PassSession {
                     s = q(schema),
                 ))
                 .await?;
-            let cell = |i: usize| -> Option<String> { rows.first().and_then(|r| r.get(i).cloned().flatten()) };
+            let cell = |i: usize| -> Option<String> {
+                rows.first().and_then(|r| r.get(i).cloned().flatten())
+            };
             let count = cell(0).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-            let triggers_ok = if triggers { count == 3 } else { count == 0 || !sec.enabled };
+            let triggers_ok = if triggers {
+                count == 3
+            } else {
+                count == 0 || !sec.enabled
+            };
             let (visible, all, invisible) = (cell(1), cell(2), cell(3));
             for c in invisible.iter().flat_map(|v| v.split('\n')) {
                 let l = c.to_lowercase();
@@ -591,7 +597,11 @@ impl PassSession {
             let views_ok = if views {
                 visible.is_some()
                     && cell(4) == visible
-                    && if invisible.is_some() { cell(5) == all } else { cell(5).is_none() }
+                    && if invisible.is_some() {
+                        cell(5) == all
+                    } else {
+                        cell(5).is_none()
+                    }
             } else {
                 // Views off (RL30): views left from before must go.
                 cell(4).is_none() && cell(5).is_none()
@@ -622,7 +632,8 @@ impl PassSession {
                 ))
                 .await?;
             for r in stale {
-                let (Some(sch), Some(name)) = (r.first().cloned().flatten(), r.get(1).cloned().flatten())
+                let (Some(sch), Some(name)) =
+                    (r.first().cloned().flatten(), r.get(1).cloned().flatten())
                 else {
                     continue;
                 };
@@ -949,16 +960,14 @@ impl PassSession {
         // Reads through policy views: each view must be on every shard
         // and match the table's columns (checked once per catalog
         // version).
-        if !needs_checks && let Some(sw) = &swap {
+        // RL30: every bound table is checked (once per version and
+        // `rls.backend_enforcement` value), so views appear or go as the
+        // setting changes, whether the session reads them or not.
+        let _ = &swap;
+        if !needs_checks {
             let viewed: Vec<ObjectId> = covered
                 .iter()
-                .filter(|o| {
-                    cat.objects.get(**o).is_some_and(|x| {
-                        sw.tables
-                            .get(&x.db_id.0)
-                            .is_some_and(|m| m.contains_key(&x.name.to_lowercase()))
-                    })
-                })
+                .filter(|o| rls.tables.get(o).is_some_and(|x| x.checks_deployed))
                 .copied()
                 .collect();
             for o in viewed {

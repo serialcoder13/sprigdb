@@ -808,6 +808,21 @@ async fn open_change_stream(
             return Err(sprig_doc::engine::mongo_error(&e));
         }
     }
+    // Chapter 29 (RL34): a collection whose binding policies have no
+    // MongoDB form (written in SQL) can't be evaluated per event.
+    let visibility = sql.row_policy_docs();
+    if let (Some(v), Some((_, t))) = (&visibility, &coll_spec)
+        && matches!(
+            v.tables.get(&(db.to_lowercase(), t.to_lowercase())),
+            Some(crate::tenant::rls::DocPolicies::Hidden)
+        )
+    {
+        return Err(MongoError::new(
+            39366,
+            "ER_SPRIG_RLS_UNSUPPORTED: a change stream over a collection whose row-level security \
+             policies have no MongoDB form (create them with sprigCreatePolicy) isn't supported",
+        ));
+    }
     let spec = StreamSpec {
         tenant: sprig_common::ids::TenantId(who.tenant),
         db: (db != "admin").then(|| db.to_owned()),
@@ -821,6 +836,7 @@ async fn open_change_stream(
         before,
         pipeline: rest.to_vec(),
         expanded: super::changes::expanded_of(stage),
+        visibility,
     };
     let stream = feed.open(spec, resume.as_ref()).await?;
     let token = stream.token.clone();
@@ -1409,6 +1425,8 @@ async fn exec(
         ),
         // Chapter 41 (R7): a logic-layer function exposed to `mongo`.
         "sprigCall" => super::logic::sprig_call(sql, body, db).await,
+        // Chapter 29 (R5, RL33): row-level security on collections.
+        n if super::rls::handles(n) => super::rls::command(&engine, sql, n, body, db).await,
         // Chapter 34 (R6 round 3): Atlas's vector search index commands.
         n if super::search::handles(n) => super::search::command(&engine, sql, n, body, db).await,
         other => Err(MongoError::new(
@@ -1426,11 +1444,15 @@ async fn explain(
     db: &str,
     verbosity: &str,
 ) -> Result<Document, MongoError> {
-    match engine.explain_search(sql, db, cmd, verbosity).await? {
+    if let Some(d) = engine.explain_search(sql, db, cmd, verbosity).await? {
+        return Ok(d);
+    }
+    // R5 round 8: the other reads and the writes.
+    match super::explain::explain(engine, sql, cmd, db, verbosity).await? {
         Some(d) => Ok(d),
         None => Err(MongoError::new(
             code::SPRIG_DOC_FEATURE_UNSUPPORTED,
-            "explain is supported for $text, $search and $searchMeta in this release",
+            "explain is supported for find, aggregate, count, distinct, update and delete in this release",
         )),
     }
 }

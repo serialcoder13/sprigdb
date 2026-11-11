@@ -211,6 +211,7 @@ const DETERMINISTIC: &[&str] = &[
     "JSON_EXTRACT",
     "JSON_VALUE",
     "JSON_UNQUOTE",
+    "JSON_QUOTE",
     "JSON_CONTAINS",
     "JSON_CONTAINS_PATH",
     "JSON_LENGTH",

@@ -414,10 +414,25 @@ pub async fn statement(
                 to,
                 using,
                 check,
+                mongo_using,
+                mongo_check,
                 ..
             } => {
                 if name.len() > 64 {
                     return Err(invalid("a policy name is at most 64 characters"));
+                }
+                // RL33: a MongoDB form must be exactly what its SQL says.
+                for (m, sql) in [(mongo_using, using), (mongo_check, check)] {
+                    if let Some(m) = m {
+                        let same = mongo_filter(m)
+                            .and_then(|d| sprig_doc::policy::to_sql(&d).ok())
+                            .is_some_and(|t| sql.as_deref() == Some(t.as_str()));
+                        if !same {
+                            return Err(invalid(
+                                "the MongoDB form of a policy must be the filter its SQL was made from",
+                            ));
+                        }
+                    }
                 }
                 let grantees = resolve_grantees(ts, cat, to)?;
                 let mut new_reads = Vec::new();
@@ -450,6 +465,8 @@ pub async fn statement(
                             grantees: &grantees,
                             using_expr: using.as_deref(),
                             check_expr: check.as_deref(),
+                            using_mongo: mongo_using.as_deref(),
+                            check_mongo: mongo_check.as_deref(),
                             by,
                         },
                         version,
@@ -768,6 +785,36 @@ impl SessionValues {
         }
     }
 
+    /// A session value as a MongoDB policy filter names it (`USER`,
+    /// `USER_ID`, `CLAIM.<k>`, ...; `sprig_doc::policy`), `None` when it
+    /// has none.
+    #[must_use]
+    pub fn mongo_value(&self, key: &str) -> Option<bson::Bson> {
+        let json = |v: &serde_json::Value| -> Option<bson::Bson> {
+            match v {
+                serde_json::Value::Null => None,
+                v => bson::Bson::try_from(v.clone()).ok(),
+            }
+        };
+        let id = |n: u64| i64::try_from(n).ok().map(bson::Bson::Int64);
+        match key {
+            "USER" => Some(bson::Bson::String(self.current_user.clone())),
+            "USER_ID" => id(self.user_id),
+            "TENANT_ID" => id(self.tenant),
+            "HOME_TENANT_ID" => id(self.home),
+            "SESSION_SPACE" => self.space.and_then(id),
+            k => {
+                if let Some(c) = k.strip_prefix("CLAIM.") {
+                    json(self.claims.as_deref()?.get(c)?)
+                } else if let Some(a) = k.strip_prefix("ATTR.") {
+                    json(self.attrs.as_ref()?.get(a)?)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
     /// The `@sprig_rls` context for MariaDB's triggers.
     #[must_use]
     pub fn context(&self, rls: &SessionRls) -> String {
@@ -815,7 +862,40 @@ pub struct Resolve<'a> {
     tainted: &'a HashSet<String>,
     /// key → protected table.
     pub keys: RefCell<Vec<ObjectId>>,
+    /// Keys that are a key-value namespace's element or sorted-set table
+    /// (`__sprig_ke_<ns>`, `__sprig_kz_<ns>`), filtered by the namespace's
+    /// key policies (decision RL35).
+    elements: RefCell<HashSet<usize>>,
     cache: RefCell<HashMap<(usize, Vec<Cmd>, String), String>>,
+}
+
+/// The prefixes of a key-value namespace's element and sorted-set tables
+/// (chapter 33).
+const KV_ELEMENT_PREFIXES: [&str; 2] = ["__sprig_ke_", "__sprig_kz_"];
+
+/// `rendered` (a policy predicate rendered with qualifier `` `__sprig_kq` ``)
+/// with `qual` in its place, when it reads no column but the key `k`: an
+/// element row then shows exactly when its key's row would (RL35).
+/// `None` when it reads another column.
+fn key_only(rendered: &str, qual: &str) -> Option<String> {
+    const Q: &str = "`__sprig_kq`.";
+    let mut rest = rendered;
+    while let Some(at) = rest.find(Q) {
+        let after = &rest[at + Q.len()..];
+        let col = if let Some(r) = after.strip_prefix('`') {
+            r.split('`').next().unwrap_or_default().to_owned()
+        } else {
+            after
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
+                .collect()
+        };
+        if !col.eq_ignore_ascii_case("k") {
+            return None;
+        }
+        rest = after;
+    }
+    Some(rendered.replace("`__sprig_kq`", qual))
 }
 
 impl<'a> Resolve<'a> {
@@ -836,6 +916,13 @@ impl<'a> Resolve<'a> {
             .keys()
             .filter_map(|o| cat.objects.get(*o))
             .map(|o| o.name.to_lowercase())
+            .flat_map(|n| {
+                let e: Vec<String> = KV_ELEMENT_PREFIXES
+                    .iter()
+                    .map(|p| format!("{p}{n}"))
+                    .collect();
+                std::iter::once(n).chain(e)
+            })
             .collect();
         Self {
             cat,
@@ -848,6 +935,7 @@ impl<'a> Resolve<'a> {
             names,
             tainted,
             keys: RefCell::new(Vec::new()),
+            elements: RefCell::new(HashSet::new()),
             cache: RefCell::new(HashMap::new()),
         }
     }
@@ -949,13 +1037,26 @@ impl Resolver for Resolve<'_> {
             .cat
             .database(&key)
             .filter(|r| r.state == DbState::Active)?;
-        let okey = object_key(ObjectKind::Table, table, self.lctn);
+        // RL35: a key-value namespace's element tables follow its key
+        // table's policies.
+        let lower = table.to_ascii_lowercase();
+        let element = KV_ELEMENT_PREFIXES
+            .iter()
+            .find_map(|p| lower.strip_prefix(p).map(|_| &table[p.len()..]));
+        let okey = object_key(ObjectKind::Table, element.unwrap_or(table), self.lctn);
         let obj = self
             .cat
             .object(row.db_id, Namespace::Relation, &okey)
             .filter(|o| o.state == ObjectState::Active)?;
         if !self.rls.tables.contains_key(&obj.object_id) {
             return None;
+        }
+        if element.is_some() {
+            let mut keys = self.keys.borrow_mut();
+            keys.push(obj.object_id);
+            let i = keys.len() - 1;
+            self.elements.borrow_mut().insert(i);
+            return Some(i);
         }
         let mut keys = self.keys.borrow_mut();
         if let Some(i) = keys.iter().position(|o| *o == obj.object_id) {
@@ -986,6 +1087,12 @@ impl Resolver for Resolve<'_> {
                 Cmd::Update => cmd::UPDATE,
                 Cmd::Delete => cmd::DELETE,
             };
+            if self.elements.borrow().contains(&key) {
+                // RL35: key policies only; another column hides elements.
+                let r = self.render_one(&t, bit, "`__sprig_kq`", &name)?;
+                parts.push(key_only(&r, qual).unwrap_or_else(|| "FALSE".to_owned()));
+                continue;
+            }
             parts.push(self.render_one(&t, bit, qual, &name)?);
         }
         let s = if parts.len() == 1 {
@@ -1220,6 +1327,127 @@ pub async fn pause_bound_sinks(
 // ---------------------------------------------------------------------
 // Policy views (RLS round 2, decisions RL18 to RL21).
 
+/// The policies on a collection's table that bind a session, as MongoDB
+/// filters with the session's values bound (decision RL34): what a change
+/// stream shows of each event's documents.
+#[derive(Debug, Clone)]
+pub enum DocPolicies {
+    /// No policy binds the session there.
+    Unbound,
+    /// Bound, and an applying policy has no MongoDB form (it was written in
+    /// SQL) or a session value it needs is missing: no document shows.
+    Hidden,
+    /// A document shows when one of `permissive` and all of `restrictive`
+    /// match it (none permissive: none shows).
+    Filters {
+        /// OR-ed.
+        permissive: Vec<sprig_doc::filter::Pred>,
+        /// AND-ed.
+        restrictive: Vec<sprig_doc::filter::Pred>,
+    },
+}
+
+impl DocPolicies {
+    /// Whether document `d` shows.
+    #[must_use]
+    pub fn visible(&self, d: &bson::Document) -> bool {
+        match self {
+            Self::Unbound => true,
+            Self::Hidden => false,
+            Self::Filters {
+                permissive,
+                restrictive,
+            } => {
+                permissive.iter().any(|p| p.matches(d)) && restrictive.iter().all(|p| p.matches(d))
+            }
+        }
+    }
+}
+
+/// [`DocPolicies`] of table `object` for session `ts`.
+#[must_use]
+pub fn doc_policies(
+    ts: &TenantSession,
+    cat: &TenantCatalog,
+    rls: &SessionRls,
+    object: ObjectId,
+) -> DocPolicies {
+    let Some(t) = rls.tables.get(&object) else {
+        return DocPolicies::Unbound;
+    };
+    let values = SessionValues::of(ts, cat);
+    let lookup = |k: &str| values.mongo_value(k);
+    let comb = t.combination(cmd::SELECT, Clause::Using);
+    let compile =
+        |terms: &[sprig_auth::authz::rls::Term<'_>]| -> Option<Vec<sprig_doc::filter::Pred>> {
+            terms
+                .iter()
+                .map(|term| {
+                    let f = mongo_filter(term.policy.using_mongo.as_deref()?)?;
+                    let bound = sprig_doc::policy::bind(&f, &lookup)?;
+                    sprig_doc::filter::parse(&bound).ok()
+                })
+                .collect()
+        };
+    match (compile(&comb.permissive), compile(&comb.restrictive)) {
+        (Some(permissive), Some(restrictive)) => DocPolicies::Filters {
+            permissive,
+            restrictive,
+        },
+        _ => DocPolicies::Hidden,
+    }
+}
+
+/// Every table whose policies bind a session, by lower-case (database,
+/// table), as [`DocPolicies`]; tables not here don't bind it (RL34).
+#[derive(Debug, Clone, Default)]
+pub struct DocViews {
+    /// (database, table) → the policies.
+    pub tables: HashMap<(String, String), DocPolicies>,
+}
+
+impl DocViews {
+    /// Whether document `d` of `db`.`table` shows.
+    #[must_use]
+    pub fn visible(&self, db: &str, table: &str, d: &bson::Document) -> bool {
+        self.tables
+            .get(&(db.to_lowercase(), table.to_lowercase()))
+            .is_none_or(|p| p.visible(d))
+    }
+}
+
+/// [`DocViews`] for a session with compiled policies `rls` (none: empty).
+#[must_use]
+pub fn doc_views(ts: &TenantSession, cat: &TenantCatalog, rls: Option<&SessionRls>) -> DocViews {
+    let mut out = DocViews::default();
+    let Some(rls) = rls else {
+        return out;
+    };
+    for o in rls.tables.keys() {
+        let Some(obj) = cat.objects.get(*o) else {
+            continue;
+        };
+        let Some(db) = cat.databases.get(obj.db_id) else {
+            continue;
+        };
+        out.tables.insert(
+            (db.name.to_lowercase(), obj.name.to_lowercase()),
+            doc_policies(ts, cat, rls, *o),
+        );
+    }
+    out
+}
+
+/// A policy's MongoDB form (relaxed extended JSON) as a filter document.
+#[must_use]
+pub fn mongo_filter(text: &str) -> Option<bson::Document> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    match bson::Bson::try_from(v).ok()? {
+        bson::Bson::Document(d) => Some(d),
+        _ => None,
+    }
+}
+
 /// Protected tables' invisible columns (lower case), by (tenant, object),
 /// as the last check of their shards found them: their policy views come
 /// in two (decision RL28), and a statement naming one of these reads the
@@ -1264,6 +1492,31 @@ pub fn enforcement(svc: &super::TenantServices, cat: &TenantCatalog, db: DbId) -
             Some(&cat.settings),
         )
         .into_owned()
+}
+
+/// A hash of `rls.backend_enforcement` at every database with a protected
+/// table (0 without row-level security): the backend reconcile's key, so
+/// a change narrows or widens grants at once (RL30).
+#[must_use]
+pub fn enforcement_digest(svc: &super::TenantServices, cat: &TenantCatalog) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let Some(state) = RlsState::of(cat).filter(|s| s.any_enabled()) else {
+        return 0;
+    };
+    let mut dbs: Vec<DbId> = state
+        .rows()
+        .security
+        .iter()
+        .filter(|s| s.enabled)
+        .map(|s| s.db_id)
+        .collect();
+    dbs.sort_unstable();
+    dbs.dedup();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for d in dbs {
+        (d.0, enforcement(svc, cat, d)).hash(&mut h);
+    }
+    h.finish()
 }
 
 /// Whether table `object`'s reads go through its policy view.

@@ -746,6 +746,11 @@ pub struct QueueSource {
     lease_ms: u64,
     seed: u64,
     idle_ms: u64,
+    /// `ordering = queue` (r9fanin): before reading on, wait until no
+    /// message of the queue is held by an earlier task's lease.
+    queue_order: bool,
+    /// Earlier leases are out of the way (or `queue_order` is off).
+    leases_clear: bool,
 }
 
 impl std::fmt::Debug for QueueSource {
@@ -776,6 +781,71 @@ impl QueueSource {
             lease_ms,
             seed,
             idle_ms: 0,
+            queue_order: false,
+            leases_clear: true,
+        }
+    }
+
+    /// `ordering = queue` (chapter 51, "What \"in order\" means per
+    /// source"; r9fanin): the task reads on only once no message is held
+    /// by an earlier task's lease, so a message a dead task held never
+    /// comes after later ones. The sink's own queue only: a fan-in queue
+    /// source reads members' instances, whose order is per member.
+    #[must_use]
+    pub fn with_queue_order(mut self, on: bool) -> Self {
+        let own = matches!(self.at, QueueAt::Own { .. });
+        self.queue_order = on && own;
+        self.leases_clear = !self.queue_order;
+        self
+    }
+
+    /// Waits until the queue has no unacknowledged message (an earlier
+    /// task's leases ended or were settled), at most the lease plus 5 s;
+    /// without `mq_info` (an older gateway) for the whole lease.
+    async fn wait_out_leases(&mut self) -> Result<()> {
+        use crate::peer::{SqlOp, quote};
+        let QueueAt::Own { db, .. } = &self.at else {
+            self.leases_clear = true;
+            return Ok(());
+        };
+        let start = tokio::time::Instant::now();
+        let end = start + Duration::from_millis(self.lease_ms) + Duration::from_secs(5);
+        let op = SqlOp::Queue {
+            statements: vec![format!(
+                "CALL sprig.mq_info({}, {})",
+                quote(&self.queue),
+                quote(db)
+            )],
+        };
+        loop {
+            let r = self.run(op.clone()).await?;
+            let res = r.results.into_iter().next().unwrap_or_default();
+            let unacked = if res.error.is_some() {
+                None
+            } else {
+                res.col("unacked")
+                    .and_then(|i| res.rows.first().and_then(|row| crate::peer::SqlResult::text(row, i)))
+                    .and_then(|t| t.trim().parse::<u64>().ok())
+            };
+            let now = tokio::time::Instant::now();
+            if unacked == Some(0) || now >= end {
+                if now >= end {
+                    tracing::warn!(queue = %self.queue, "queue sink (ordering = queue): earlier leases didn't end in time; reading on");
+                }
+                metrics::histogram!("sprig_sink_queue_order_wait_seconds")
+                    .record(now.duration_since(start).as_secs_f64());
+                self.leases_clear = true;
+                return Ok(());
+            }
+            if unacked.is_some() {
+                tracing::debug!(queue = %self.queue, unacked, "queue sink (ordering = queue): waiting for earlier leases");
+            }
+            let step = if unacked.is_some() {
+                Duration::from_millis(500)
+            } else {
+                end - now
+            };
+            tokio::time::sleep(step.min(end - now)).await;
         }
     }
 
@@ -921,6 +991,9 @@ impl SourceReader for QueueSource {
         wait: Duration,
     ) -> Result<Vec<SinkRecord>> {
         use crate::peer::{SqlOp, quote};
+        if !self.leases_clear {
+            self.wait_out_leases().await?;
+        }
         let n = u32::try_from(max_records.clamp(1, 1000)).unwrap_or(1000);
         let op = match &self.at {
             QueueAt::Own { db, .. } => SqlOp::Queue {
@@ -941,9 +1014,18 @@ impl SourceReader for QueueSource {
                 lease_ms: self.lease_ms,
             },
         };
-        let r = self.run(op).await?;
+        let r = match self.run(op).await {
+            Ok(r) => r,
+            Err(e) => {
+                // A get whose answer was lost may have leased messages:
+                // under `ordering = queue` they are waited out again.
+                self.leases_clear = !self.queue_order;
+                return Err(e);
+            }
+        };
         let res = r.results.into_iter().next().unwrap_or_default();
         if let Some(e) = &res.error {
+            self.leases_clear = !self.queue_order;
             return Err(e.error());
         }
         let out: Vec<SinkRecord> = res
@@ -1190,5 +1272,114 @@ mod fan_in_tests {
         let got = s.next_batch(100, 1 << 20, Duration::ZERO).await.unwrap();
         assert_eq!(got.len(), 2);
         assert!(got.iter().all(|r| record_member(r).is_none()));
+    }
+}
+
+#[cfg(test)]
+mod queue_order_tests {
+    use super::*;
+    use crate::peer::{SinkPeer, SqlOp, SqlReply, SqlRequest, SqlResult};
+    use std::sync::{Arc, Mutex};
+
+    /// A gateway whose queue holds `unacked` leased messages for the first
+    /// `held` `mq_info` calls; it records every statement.
+    struct Peer {
+        calls: Mutex<Vec<String>>,
+        held: Mutex<u32>,
+    }
+
+    #[async_trait]
+    impl SinkPeer for Peer {
+        async fn sql(&self, _seed: u64, req: &SqlRequest) -> Result<SqlReply> {
+            let SqlOp::Queue { statements } = &req.op else {
+                panic!("{:?}", req.op);
+            };
+            let s = statements[0].clone();
+            self.calls.lock().unwrap().push(s.clone());
+            let cell = |t: &str| SqlResult::cell(Some(t.as_bytes()));
+            let res = if s.starts_with("CALL sprig.mq_info(") {
+                let mut h = self.held.lock().unwrap();
+                let unacked = if *h > 0 { 2 } else { 0 };
+                *h = h.saturating_sub(1);
+                SqlResult {
+                    columns: vec!["ready".into(), "unacked".into(), "consumers".into()],
+                    rows: vec![vec![cell("5"), cell(&unacked.to_string()), cell("0")]],
+                    ..SqlResult::default()
+                }
+            } else {
+                SqlResult {
+                    columns: vec!["delivery_token".into()],
+                    ..SqlResult::default()
+                }
+            };
+            Ok(SqlReply {
+                results: vec![res],
+                ..SqlReply::default()
+            })
+        }
+    }
+
+    fn source(peer: &Arc<Peer>, order: bool) -> QueueSource {
+        QueueSource::new(
+            Arc::clone(peer) as Arc<dyn SinkPeer>,
+            crate::peer::RunAs {
+                tenant: 1,
+                tenant_name: "t".into(),
+                user_id: 1,
+                database: "d".into(),
+            },
+            QueueAt::Own {
+                id: 9,
+                db: "d".into(),
+            },
+            "jobs".into(),
+            60_000,
+            1,
+        )
+        .with_queue_order(order)
+    }
+
+    /// r9fanin: with `ordering = queue` a task reads nothing while an
+    /// earlier task's leases hold messages; without it, it reads at once.
+    #[tokio::test(start_paused = true)]
+    async fn ordering_queue_waits_out_earlier_leases() {
+        let peer = Arc::new(Peer {
+            calls: Mutex::new(Vec::new()),
+            held: Mutex::new(3),
+        });
+        let mut s = source(&peer, true);
+        s.next_batch(10, 1 << 20, Duration::ZERO).await.unwrap();
+        let calls = peer.calls.lock().unwrap().clone();
+        let infos = calls.iter().filter(|c| c.contains("mq_info")).count();
+        assert_eq!(infos, 4, "{calls:?}");
+        // The first get comes after the last mq_info found no lease.
+        assert!(calls.last().unwrap().contains("mq_get"), "{calls:?}");
+        // Later batches don't ask again.
+        s.next_batch(10, 1 << 20, Duration::ZERO).await.unwrap();
+        assert_eq!(
+            peer.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c.contains("mq_info"))
+                .count(),
+            4
+        );
+
+        let peer = Arc::new(Peer {
+            calls: Mutex::new(Vec::new()),
+            held: Mutex::new(3),
+        });
+        let mut s = source(&peer, false);
+        s.next_batch(10, 1 << 20, Duration::ZERO).await.unwrap();
+        let calls = peer.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert!(calls[0].contains("mq_get"));
+    }
+
+    #[test]
+    fn mq_info_is_allowed_in_a_sinks_queue_session() {
+        crate::peer::check_queue_calls(&["CALL sprig.mq_info('q', 'd')".to_owned()]).unwrap();
+        assert!(crate::peer::check_queue_calls(&["SELECT 1".to_owned()]).is_err());
     }
 }

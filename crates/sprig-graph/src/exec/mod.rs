@@ -56,6 +56,9 @@ pub struct Budgets {
     pub local_burst_hops: u32,
     /// `graph.max_detach_edges`.
     pub max_detach_edges: usize,
+    /// Not a budget: the Bolt transaction's `tx_metadata`, which
+    /// `CALL tx.getMetaData()` returns (an empty map when there is none).
+    pub tx_metadata: Option<BTreeMap<String, Value>>,
 }
 
 impl Default for Budgets {
@@ -69,6 +72,7 @@ impl Default for Budgets {
             batch_nodes: 1000,
             local_burst_hops: 4,
             max_detach_edges: 100_000,
+            tx_metadata: None,
         }
     }
 }
@@ -89,6 +93,129 @@ pub struct Output {
     pub qtype: &'static str,
     /// `EXPLAIN` / `PROFILE`: the steps, with their tier.
     pub plan: Option<Vec<String>>,
+    /// `plan` is `PROFILE`'s (the statement ran).
+    pub profiled: bool,
+    /// Neo4j's notifications for the statement (see [`notifications`]).
+    pub notifications: Vec<Notification>,
+}
+
+/// A Neo4j notification (Bolt `notifications` in the summary).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notification {
+    /// `Neo.ClientNotification...`.
+    pub code: &'static str,
+    /// The title.
+    pub title: &'static str,
+    /// The description.
+    pub description: String,
+    /// `INFORMATION` or `WARNING`.
+    pub severity: &'static str,
+    /// `PERFORMANCE`, ...
+    pub category: &'static str,
+}
+
+/// The notifications SprigDB gives for a statement. Only Neo4j's
+/// `CartesianProduct` for now: one `MATCH` with patterns that share no
+/// variable, directly or through variables bound by earlier clauses (the
+/// drivers' testkit checks it on `EXPLAIN MATCH (n), (m) RETURN n, m`).
+#[must_use]
+pub fn notifications(q: &Query) -> Vec<Notification> {
+    let mut out = Vec::new();
+    for part in &q.parts {
+        cartesian_products(&part.clauses, &mut out);
+    }
+    out
+}
+
+fn uf_root(p: &mut [usize], mut i: usize) -> usize {
+    while p[i] != i {
+        p[i] = p[p[i]];
+        i = p[i];
+    }
+    i
+}
+
+fn cartesian_products(clauses: &[Clause], out: &mut Vec<Notification>) {
+    let mut bound: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for c in clauses {
+        match c {
+            Clause::Match { patterns, .. } => {
+                // Union-find over the patterns; index `patterns.len()`
+                // stands for the rows bound before this clause.
+                let n = patterns.len();
+                let mut parent: Vec<usize> = (0..=n).collect();
+                let vars: Vec<Vec<String>> = patterns.iter().map(pattern_vars).collect();
+                for i in 0..n {
+                    if vars[i].iter().any(|v| bound.contains(v)) {
+                        let (a, b) = (uf_root(&mut parent, i), uf_root(&mut parent, n));
+                        parent[a] = b;
+                    }
+                    for j in 0..i {
+                        if vars[i].iter().any(|v| vars[j].contains(v)) {
+                            let (a, b) = (uf_root(&mut parent, i), uf_root(&mut parent, j));
+                            parent[a] = b;
+                        }
+                    }
+                }
+                let touches_bound =
+                    (0..n).any(|i| uf_root(&mut parent, i) == uf_root(&mut parent, n));
+                let mut roots: Vec<usize> = Vec::new();
+                for i in 0..n {
+                    let r = uf_root(&mut parent, i);
+                    if !roots.contains(&r) {
+                        roots.push(r);
+                    }
+                }
+                let parts = roots.len() + usize::from(!bound.is_empty() && !touches_bound);
+                if parts > 1 && n > 1 {
+                    // The identifiers of every part but the first.
+                    let first = uf_root(&mut parent, 0);
+                    let mut ids: Vec<String> = Vec::new();
+                    for (i, vs) in vars.iter().enumerate() {
+                        if uf_root(&mut parent, i) != first {
+                            for v in vs {
+                                if !ids.contains(v) {
+                                    ids.push(v.clone());
+                                }
+                            }
+                        }
+                    }
+                    out.push(Notification {
+                        code: "Neo.ClientNotification.Statement.CartesianProduct",
+                        title: "This query builds a cartesian product between disconnected patterns.",
+                        description: format!(
+                            "If a part of a query contains multiple disconnected patterns, this will build a cartesian product between all those parts. This may produce a large amount of data and slow down query processing. While occasionally intended, it may often be possible to reformulate the query that avoids the use of this cross product, perhaps by adding a relationship between the different parts or by using OPTIONAL MATCH (identifier is: ({}))",
+                            ids.join(", ")
+                        ),
+                        severity: "INFORMATION",
+                        category: "PERFORMANCE",
+                    });
+                }
+                bound.extend(vars.into_iter().flatten());
+            }
+            Clause::Unwind { alias, .. } => {
+                bound.insert(alias.clone());
+            }
+            Clause::With(p) => {
+                if !p.star {
+                    bound.clear();
+                }
+                bound.extend(p.items.iter().map(|(_, a)| a.clone()));
+            }
+            Clause::Create(ps) => {
+                for p in ps {
+                    bound.extend(pattern_vars(p));
+                }
+            }
+            Clause::Merge { pattern, .. } => bound.extend(pattern_vars(pattern)),
+            Clause::Call {
+                yields: Some(y), ..
+            } => bound.extend(y.iter().map(|(_, a)| a.clone())),
+            // Names this check doesn't follow: stop rather than guess.
+            Clause::Call { .. } | Clause::Subquery { .. } => return,
+            _ => {}
+        }
+    }
 }
 
 /// A 39903 budget error, counted by reason.
@@ -128,6 +255,7 @@ pub async fn run(
         return Ok(Output {
             qtype: if has_writes(q) { "rw" } else { "r" },
             plan: Some(plan),
+            notifications: notifications(q),
             ..Output::default()
         });
     }
@@ -159,6 +287,8 @@ pub async fn run(
         deleted_nodes: ex.deleted,
         qtype,
         plan,
+        profiled: q.explain == Explain::Profile,
+        notifications: notifications(q),
     })
 }
 
@@ -858,6 +988,12 @@ impl Exec<'_> {
                     .into_iter()
                     .map(|l| vec![Value::String(l)])
                     .collect(),
+            ),
+            "tx.getmetadata" => (
+                vec!["metadata"],
+                vec![vec![Value::Map(
+                    self.b.tx_metadata.clone().unwrap_or_default(),
+                )]],
             ),
             "dbms.components" => (
                 vec!["name", "versions", "edition"],

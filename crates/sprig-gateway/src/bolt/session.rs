@@ -72,6 +72,8 @@ struct Tx {
     back: Option<oneshot::Receiver<TxConns>>,
     db: Option<String>,
     timeout: Option<Duration>,
+    /// `BEGIN`'s `tx_metadata`, for `CALL tx.getMetaData()`.
+    metadata: Option<BTreeMap<String, sprig_graph::value::Value>>,
     deleted: Vec<(Arc<GraphShards>, Vec<u64>)>,
     /// Graphs written, with the shards (and their epochs) written.
     touched: Vec<(GraphRef, Vec<Touched>)>,
@@ -108,6 +110,9 @@ struct Prepared {
     cat: Arc<TenantCatalog>,
     budgets: sprig_graph::Budgets,
     read_mode: bool,
+    /// The auto-commit statement's `tx_timeout` (an explicit
+    /// transaction's is in its `Tx`).
+    timeout: Option<Duration>,
     /// Per-label and per-type grants, when the graph-wide ones don't give
     /// `SELECT` (decision G42) or a write action (round 5, G50).
     visible: Option<Access>,
@@ -232,6 +237,104 @@ fn timeout_of(extra: &PackValue) -> Option<Duration> {
         .and_then(PackValue::as_int)
         .filter(|t| *t > 0)
         .map(|t| Duration::from_millis(u64::try_from(t).unwrap_or(0)))
+}
+
+/// `tx_metadata` of `BEGIN` or an auto-commit `RUN`: a map, else none
+/// (values that aren't Cypher values leave it out; it is still audited).
+fn metadata_of(extra: &PackValue) -> Option<BTreeMap<String, sprig_graph::value::Value>> {
+    match extra.get("tx_metadata").map(from_pack) {
+        Some(Ok(sprig_graph::value::Value::Map(m))) => Some(m),
+        _ => None,
+    }
+}
+
+/// A lock wait that ended because the transaction's `tx_timeout` passed
+/// (the branch's `innodb_lock_wait_timeout` is set from it): Neo4j's
+/// `LockClientStopped`, a client error, as Neo4j answers it, rather than
+/// the transient 1205 drivers would retry.
+fn timed_out_failure(e: &SprigError, timeout: Option<Duration>) -> BoltFailure {
+    match (&e.kind, timeout) {
+        (
+            sprig_common::ErrorKind::Backend { errno: 1205, .. }
+            | sprig_common::ErrorKind::Standard { errno: 1205, .. },
+            Some(t),
+        ) => BoltFailure::new(
+            "Neo.ClientError.Transaction.LockClientStopped",
+            format!(
+                "The transaction has been terminated: it waited for a lock past its timeout of {} ms (tx_timeout)",
+                t.as_millis()
+            ),
+        ),
+        // The time budget that fired was the tx_timeout (it caps
+        // graph.max_time_ms): Neo4j's transaction timeout.
+        (sprig_common::ErrorKind::Sprig(SprigCode::GraphBudgetExceeded), Some(t))
+            if e.message
+                .ends_with(&format!("(time): graph.max_time_ms = {}", t.as_millis())) =>
+        {
+            BoltFailure::new(
+                "Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration",
+                format!(
+                    "The transaction has been terminated: it ran past its timeout of {} ms (tx_timeout)",
+                    t.as_millis()
+                ),
+            )
+        }
+        _ => failure(e),
+    }
+}
+
+/// `EXPLAIN`'s or `PROFILE`'s steps as Neo4j's plan map: a chain of
+/// operators (`operatorType`, `args` with the step's text in `Details`,
+/// `identifiers`, `children`) under `ProduceResults`, the last step on top.
+/// A profile adds `rows` (the result's, on `ProduceResults`) and `dbHits`
+/// (0: SprigDB doesn't count store reads per operator).
+fn plan_pack(steps: &[String], columns: &[String], rows: Option<usize>) -> PackValue {
+    let op = |kind: &str, details: &str, idents: &[String], child: Option<PackValue>, n: usize| {
+        let mut m = vec![
+            ("operatorType", PackValue::str(kind)),
+            (
+                "args",
+                PackValue::map(vec![
+                    ("Details", PackValue::str(details)),
+                    ("planner", PackValue::str("SPRIG")),
+                    ("runtime", PackValue::str("SPRIG")),
+                ]),
+            ),
+            (
+                "identifiers",
+                PackValue::List(idents.iter().cloned().map(PackValue::String).collect()),
+            ),
+            ("children", PackValue::List(child.into_iter().collect())),
+        ];
+        if rows.is_some() {
+            m.push(("rows", PackValue::Int(i64::try_from(n).unwrap_or(i64::MAX))));
+            m.push(("dbHits", PackValue::Int(0)));
+        }
+        PackValue::map(m)
+    };
+    let mut child = None;
+    for s in steps {
+        let kind = s.split([':', ' ']).next().unwrap_or("Step");
+        child = Some(op(kind, s, &[], child, 0));
+    }
+    op(
+        "ProduceResults",
+        &columns.join(", "),
+        columns,
+        child,
+        rows.unwrap_or(0),
+    )
+}
+
+/// A notification as Bolt's summary map.
+fn notification_pack(n: &sprig_graph::exec::Notification) -> PackValue {
+    PackValue::map(vec![
+        ("code", PackValue::str(n.code)),
+        ("title", PackValue::str(n.title)),
+        ("description", PackValue::String(n.description.clone())),
+        ("severity", PackValue::str(n.severity)),
+        ("category", PackValue::str(n.category)),
+    ])
 }
 
 fn read_mode(extra: &PackValue) -> bool {
@@ -819,6 +922,10 @@ impl GwSession {
         if let Some(t) = timeout {
             budgets.max_time = budgets.max_time.min(t);
         }
+        budgets.tx_metadata = match &self.tx {
+            Some(t) => t.metadata.clone(),
+            None => metadata_of(extra),
+        };
         Ok(Prep::Run(Box::new(Prepared {
             q,
             p,
@@ -826,6 +933,7 @@ impl GwSession {
             cat,
             budgets,
             read_mode: read_mode(extra),
+            timeout,
             visible,
         })))
     }
@@ -839,6 +947,7 @@ impl GwSession {
             cat,
             budgets,
             read_mode,
+            timeout,
             visible,
         } = pr;
         let writes = has_writes(&q);
@@ -912,7 +1021,9 @@ impl GwSession {
                 self.after_commit().await?;
                 return Ok(StartOrResult::Result(self.result(out, &g.name, &cat)?));
             }
-            // A write: one coordinated transaction.
+            // A write: one coordinated transaction, whose lock waits end
+            // with its tx_timeout.
+            self.backend.set_lock_wait(timeout);
             let mut coord = self.backend.coordinator(self.tenant());
             let mut touched: Vec<Touched> = Vec::new();
             let r = {
@@ -1102,12 +1213,27 @@ impl GwSession {
             }
             records.push_back(rec);
         }
+        let mut summary = Vec::new();
+        if let Some(steps) = &out.plan {
+            let key = if out.profiled { "profile" } else { "plan" };
+            summary.push((
+                key,
+                plan_pack(steps, &out.columns, out.profiled.then_some(records.len())),
+            ));
+        }
+        if !out.notifications.is_empty() {
+            summary.push((
+                "notifications",
+                PackValue::List(out.notifications.iter().map(notification_pack).collect()),
+            ));
+        }
         Ok(QueryResult {
             fields: out.columns,
             records,
             qtype: out.qtype,
             stats: out.stats.into_iter().collect(),
             db: Some(graph.to_owned()),
+            summary,
             ..QueryResult::default()
         })
     }
@@ -1172,6 +1298,10 @@ impl GwSession {
     ) -> std::result::Result<QueryResult, BoltFailure> {
         let started = Instant::now();
         let mut attempt = 0;
+        let timeout = self
+            .tx
+            .as_ref()
+            .map_or_else(|| timeout_of(extra), |t| t.timeout);
         let (start, graph) = loop {
             let pr = match self.prepare(query, params, extra).await {
                 Ok(Prep::Done(r)) => return Ok(r),
@@ -1199,7 +1329,7 @@ impl GwSession {
                     metrics::counter!("sprig_graph_stale_map_retries_total").increment(1);
                     tokio::time::sleep(Duration::from_millis(100 << attempt.min(4))).await;
                 }
-                Err(e) => return Err(failure(&e)),
+                Err(e) => return Err(timed_out_failure(&e, timeout)),
             }
         };
         let t_first = i64::try_from(started.elapsed().as_millis()).unwrap_or(0);
@@ -1291,6 +1421,7 @@ impl BoltSession for GwSession {
             let cat = self.graphs.catalog(tenant, Freshness::Latest).await?;
             self.backend.set_isolation(self.isolation(&cat));
             self.backend.set_config(self.txn_config(&cat));
+            self.backend.set_lock_wait(timeout_of(extra));
             let conns = if read_mode(extra) {
                 TxConns::Read(ReadConns::default())
             } else {
@@ -1306,6 +1437,7 @@ impl BoltSession for GwSession {
                     .and_then(PackValue::as_str)
                     .map(str::to_owned),
                 timeout: timeout_of(extra),
+                metadata: metadata_of(extra),
                 deleted: Vec::new(),
                 touched: Vec::new(),
                 ran: 0,
@@ -1420,5 +1552,78 @@ impl BoltSession for GwSession {
                 PackValue::List(vec![server("ROUTE"), server("READ"), server("WRITE")]),
             ),
         ]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tx_timeouts_answer_neo4j_codes() {
+        // The drivers' testkit (R8): a lock wait cut by tx_timeout is
+        // LockClientStopped; the time budget set by tx_timeout is
+        // TransactionTimedOutClientConfiguration; without a tx_timeout
+        // both keep their usual codes.
+        let t = Some(Duration::from_millis(250));
+        let lock = SprigError::backend(1205, *b"HY000", "Lock wait timeout exceeded");
+        assert_eq!(
+            timed_out_failure(&lock, t).code,
+            "Neo.ClientError.Transaction.LockClientStopped"
+        );
+        assert_eq!(
+            timed_out_failure(&lock, None).code,
+            "Neo.TransientError.Transaction.DeadlockDetected"
+        );
+        let budget = sprig_graph::exec::budget_error("time", "graph.max_time_ms = 250");
+        assert_eq!(
+            timed_out_failure(&budget, t).code,
+            "Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration"
+        );
+        // graph.max_time_ms itself was the lower bound: a budget error.
+        let budget = sprig_graph::exec::budget_error("time", "graph.max_time_ms = 100");
+        assert_eq!(
+            timed_out_failure(&budget, t).code,
+            "Neo.ClientError.Statement.SprigGraphBudgetExceeded"
+        );
+    }
+
+    #[test]
+    fn tx_metadata_is_a_map_or_nothing() {
+        let extra = PackValue::map([(
+            "tx_metadata",
+            PackValue::map([
+                ("foo", PackValue::Float(1.5)),
+                ("bar", PackValue::str("baz")),
+            ]),
+        )]);
+        let m = metadata_of(&extra).expect("a map");
+        assert_eq!(m.len(), 2);
+        assert_eq!(m["bar"], sprig_graph::value::Value::String("baz".into()));
+        assert!(metadata_of(&PackValue::map([("tx_metadata", PackValue::Int(1))])).is_none());
+        assert!(metadata_of(&PackValue::Map(vec![])).is_none());
+    }
+
+    #[test]
+    fn plans_are_neo4j_operator_trees() {
+        let steps = vec!["NodeScan n: label".to_owned(), "Filter: n.x > 1".to_owned()];
+        let cols = vec!["n".to_owned()];
+        let plan = plan_pack(&steps, &cols, None);
+        assert_eq!(
+            plan.get("operatorType").and_then(PackValue::as_str),
+            Some("ProduceResults")
+        );
+        assert!(plan.get("rows").is_none());
+        let Some(PackValue::List(kids)) = plan.get("children") else {
+            panic!("children");
+        };
+        // The last step sits right under ProduceResults.
+        assert_eq!(
+            kids[0].get("operatorType").and_then(PackValue::as_str),
+            Some("Filter")
+        );
+        let profile = plan_pack(&steps, &cols, Some(3));
+        assert_eq!(profile.get("rows"), Some(&PackValue::Int(3)));
+        assert_eq!(profile.get("dbHits"), Some(&PackValue::Int(0)));
     }
 }

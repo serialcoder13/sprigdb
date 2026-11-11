@@ -93,6 +93,11 @@ services:
       - --cert-file=/tls/etcd.pem
       - --key-file=/tls/etcd-key.pem
       - --peer-client-cert-auth
+      # etcd also checks that a peer's certificate names the address the
+      # connection comes from. Behind NAT (Docker Desktop, the laptop test)
+      # it doesn't: true skips that one check; the certificate must still be
+      # signed by the deployment CA.
+      - --peer-skip-client-san-verification=${SPRIG_ETCD_PEER_SKIP_SAN:-false}
       - --peer-trusted-ca-file=/tls/ca.pem
       - --peer-cert-file=/tls/etcd.pem
       - --peer-key-file=/tls/etcd-key.pem

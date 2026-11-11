@@ -1342,6 +1342,7 @@ async fn create_users(
     Ok(version)
 }
 
+#[allow(clippy::too_many_lines)] // each clause in turn, as MySQL applies them
 async fn alter_users(
     cx: &AccountCtx<'_>,
     state: &AuthzState,

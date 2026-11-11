@@ -273,6 +273,7 @@ async fn forward_if_remote(
 }
 
 /// Runs a data call here; `(status, reply)`.
+#[allow(clippy::too_many_lines)] // one arm per data call
 async fn run_local(
     core: &Arc<Core>,
     caller: &Caller,

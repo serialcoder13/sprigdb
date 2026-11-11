@@ -65,6 +65,20 @@ pub struct Dur {
 }
 
 impl Dur {
+    /// A duration from Bolt's fields, with the nanoseconds brought into
+    /// 0..999,999,999 as Neo4j does (drivers may send them with the
+    /// seconds' sign: the Python driver sends -1 s -854,775,808 ns for
+    /// -9,223,372,037 s 145,224,192 ns); `None` when the seconds overflow.
+    #[must_use]
+    pub fn from_fields(months: i64, days: i64, secs: i64, nanos: i64) -> Option<Dur> {
+        Some(Dur {
+            months,
+            days,
+            secs: secs.checked_add(nanos.div_euclid(NANOS))?,
+            nanos: nanos.rem_euclid(NANOS),
+        })
+    }
+
     fn norm(months: i64, days: i64, secs: i64, nanos: i64) -> Dur {
         let secs = secs + nanos.div_euclid(NANOS);
         Dur {
@@ -347,6 +361,13 @@ fn fixed_offset(name: &str) -> Option<i32> {
     off.filter(|_| name.starts_with(['+', '-']))
 }
 
+/// Whether a zone name is only an offset (`Z`, `+01:00`), which a value
+/// keeps as its offset alone. `UTC` is a named zone, as in Neo4j (Java's
+/// `ZoneId.of("UTC")` is a region): `datetime('...[UTC]')` keeps `[UTC]`.
+fn offset_only(name: &str) -> bool {
+    name.eq_ignore_ascii_case("Z") || name.starts_with(['+', '-'])
+}
+
 fn zoned(local: NaiveDateTime, offset: Option<i32>, zone: Option<String>) -> Result<Zoned> {
     match (offset, zone) {
         (Some(o), z) => Ok(Zoned {
@@ -359,11 +380,7 @@ fn zoned(local: NaiveDateTime, offset: Option<i32>, zone: Option<String>) -> Res
             Ok(Zoned {
                 local,
                 offset: off,
-                zone: if fixed_offset(&z).is_some() {
-                    None
-                } else {
-                    Some(z)
-                },
+                zone: if offset_only(&z) { None } else { Some(z) },
             })
         }
         (None, None) => Ok(Zoned {
@@ -582,7 +599,7 @@ fn now_in(tz: Option<&str>) -> Result<Zoned> {
             Ok(Zoned {
                 local: now + ChronoDur::seconds(i64::from(off)),
                 offset: off,
-                zone: fixed_offset(z).is_none().then(|| z.to_owned()),
+                zone: (!offset_only(z)).then(|| z.to_owned()),
             })
         }
     }
@@ -1432,6 +1449,38 @@ mod tests {
             ("hours".to_owned(), Value::Int(25)),
         ]);
         assert_eq!(text(&duration_from_map(&m).unwrap()).unwrap(), "P1DT25H");
+    }
+
+    #[test]
+    fn bolt_durations_are_normalized() {
+        let d = Dur::from_fields(0, 0, -9_223_372_036, -854_775_808).expect("fits");
+        assert_eq!((d.secs, d.nanos), (-9_223_372_037, 145_224_192));
+        let d = Dur::from_fields(3, 4, 999, 123_456_789).expect("fits");
+        assert_eq!(
+            (d.months, d.days, d.secs, d.nanos),
+            (3, 4, 999, 123_456_789)
+        );
+        assert!(Dur::from_fields(0, 0, i64::MIN, -1).is_none());
+    }
+
+    #[test]
+    fn utc_is_a_named_zone() {
+        // Neo4j keeps `[UTC]` (the Go driver's testkit run, R8); `Z` and
+        // offsets stay offsets.
+        let Value::DateTime(z) = p("datetime", "1976-06-13T12:34:56[UTC]") else {
+            panic!("datetime");
+        };
+        assert_eq!((z.offset, z.zone.as_deref()), (0, Some("UTC")));
+        assert_eq!(
+            text(&Value::DateTime(z)).unwrap(),
+            "1976-06-13T12:34:56Z[UTC]"
+        );
+        for s in ["1976-06-13T12:34:56Z", "1976-06-13T12:34:56+01:00"] {
+            let Value::DateTime(z) = p("datetime", s) else {
+                panic!("datetime");
+            };
+            assert_eq!(z.zone, None, "{s}");
+        }
     }
 
     #[test]
