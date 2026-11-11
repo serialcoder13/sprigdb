@@ -340,6 +340,33 @@ async fn change_topics() {
         .unwrap_err();
     assert_eq!(e.code(), Some(SprigCode::RlsUnsupported));
     m.filtered = false;
+    // RL38: a view or routine over a change topic would read it with its
+    // definer's rights, bypassing the table's policies for its readers:
+    // refused even when nothing binds the creator now.
+    for s in [
+        "CREATE VIEW v AS SELECT * FROM `orders.changes`",
+        "CREATE OR REPLACE VIEW v AS SELECT * FROM `orders.changes`",
+        "ALTER VIEW v AS SELECT * FROM `orders.changes`",
+    ] {
+        let e = handle(s, &cx(&state), &mut m).await.unwrap_err();
+        assert_eq!(e.code(), Some(SprigCode::RlsUnsupported), "{s}");
+    }
+    // A routine's body isn't rewritten at all: MariaDB finds no such
+    // table (1146) when it runs.
+    assert!(matches!(
+        handle(
+            "CREATE PROCEDURE p() SELECT * FROM `orders.changes`",
+            &cx(&state),
+            &mut m
+        )
+        .await,
+        Ok(Handled::NotStream)
+    ));
+    assert!(
+        handle("SELECT * FROM `orders.changes`", &cx(&state), &mut m)
+            .await
+            .is_ok()
+    );
     let e = handle(
         "INSERT INTO `orders.changes` (key, value) VALUES (1, 2)",
         &cx(&state),

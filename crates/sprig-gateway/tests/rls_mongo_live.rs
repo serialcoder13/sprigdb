@@ -98,6 +98,34 @@ async fn client(addr: &str, user: &str, pw: &str) -> mongodb::Client {
     mongodb::Client::with_uri_str(&uri).await.unwrap()
 }
 
+/// Up to `n` events of `stream` within `secs` seconds, as `op:_id`.
+async fn collect_events<T>(stream: &mut mongodb::change_stream::ChangeStream<T>, n: usize, secs: u64) -> Vec<String>
+where
+    T: serde::de::DeserializeOwned + Unpin + Send + Sync,
+{
+    let mut seen = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    while seen.len() < n && tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(2), stream.next_if_any()).await {
+            Ok(Ok(Some(ev))) => {
+                let key = ev
+                    .document_key
+                    .as_ref()
+                    .and_then(|k| k.get("_id").cloned())
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
+                seen.push(format!("{:?}:{key}", ev.operation_type));
+            }
+            Ok(Ok(None)) | Err(_) => {}
+            Ok(Err(e)) => {
+                seen.push(format!("error {e}"));
+                break;
+            }
+        }
+    }
+    seen
+}
+
 async fn sql(addr: &str, user: &str, pw: &str) -> mysql_async::Conn {
     let (host, port) = addr.split_once(':').unwrap();
     let opts = mysql_async::OptsBuilder::default()
@@ -445,6 +473,73 @@ async fn row_level_security_on_collections() {
         e.as_ref().is_err_and(|e| code_of(e) == 39366),
         || format!("{:?}", e.as_ref().err()),
     );
+    // RL41: a policy change reaches a stream that is already open. The
+    // restrictive `small` (n < 15) hides 203 when the stream opens; once it
+    // is dropped, the gateway ends the stream with a resumable error, the
+    // driver resumes, and 203 arrives.
+    let mut stream = alice
+        .database(DB)
+        .collection::<Document>("notes")
+        .watch()
+        .await
+        .unwrap();
+    // The stream's first getMore, under the policies it opened with.
+    let _ = tokio::time::timeout(Duration::from_secs(2), stream.next_if_any()).await;
+    let r = adb
+        .run_command(doc! {"sprigDropPolicy": "notes", "name": "small"})
+        .await;
+    ck.ok("drop small", r.is_ok(), || format!("{r:?}"));
+    notes
+        .insert_one(doc! {"_id": 203, "owner": "rlsm_alice@%", "n": 70})
+        .await
+        .unwrap();
+    let seen = collect_events(&mut stream, 1, 20).await;
+    ck.ok(
+        "policy change reaches an open stream",
+        seen == vec!["Insert:203".to_owned()],
+        || format!("{seen:?}"),
+    );
+    // RL40: a database stream leaves out the events of collections the
+    // watcher may not read (carol holds SELECT on notes only).
+    let _ = admin_sql
+        .query_drop("DROP USER IF EXISTS 'rlsm_carol'@'%'")
+        .await;
+    admin_sql
+        .query_drop(format!("CREATE USER 'rlsm_carol'@'%' IDENTIFIED BY '{PW}'"))
+        .await
+        .unwrap();
+    admin_sql
+        .query_drop(format!("GRANT SELECT ON {DB}.notes TO 'rlsm_carol'@'%'"))
+        .await
+        .unwrap();
+    adb.collection::<Document>("other")
+        .insert_one(doc! {"_id": 1, "secret": "s1"})
+        .await
+        .unwrap();
+    let carol = client(&mongo_addr, "rlsm_carol", PW).await;
+    let mut dbs = carol.database(DB).watch().await.unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(2), dbs.next_if_any()).await;
+    adb.collection::<Document>("other")
+        .insert_one(doc! {"_id": 2, "secret": "s2"})
+        .await
+        .unwrap();
+    notes
+        .insert_one(doc! {"_id": 300, "owner": "rlsm_carol@%", "n": 1})
+        .await
+        .unwrap();
+    adb.collection::<Document>("other")
+        .insert_one(doc! {"_id": 3, "secret": "s3"})
+        .await
+        .unwrap();
+    let seen = collect_events(&mut dbs, 3, 8).await;
+    ck.ok(
+        "database stream: unreadable collection left out",
+        seen == vec!["Insert:300".to_owned()],
+        || format!("{seen:?}"),
+    );
+    let _ = admin_sql
+        .query_drop("DROP USER IF EXISTS 'rlsm_carol'@'%'")
+        .await;
     // Disabling security opens the collection again.
     adb.run_command(doc! {"sprigRowSecurity": "notes", "enable": false})
         .await
@@ -455,7 +550,7 @@ async fn row_level_security_on_collections() {
         .count_documents(doc! {})
         .await
         .unwrap();
-    ck.ok("disabled", n == 22, || format!("{n}"));
+    ck.ok("disabled", n == 24, || format!("{n}"));
     // Cleanup.
     let _ = admin_sql
         .query_drop(format!("DROP DATABASE IF EXISTS {DB}"))

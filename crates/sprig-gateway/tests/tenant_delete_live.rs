@@ -15,8 +15,11 @@
 //!   while the catalog listed databases, and only the catalog reconciler's
 //!   next pass (every 5 minutes) dropped them; an instance database held
 //!   by an unfinished creation was never dropped.
-//! - No `t<id>_` schema of them is left on the node, and the node has no
-//!   connection of their accounts within 15 s of the deletion (before, the
+//! - No `t<id>_` schema or backend account of them is left on the node,
+//!   though sessions of the plain tenant keep running statements (and
+//!   logging in again) through its deletion and 20 s after (bugfix-32),
+//!   and the node has no connection of their accounts within 15 s of the
+//!   deletion (before, the
 //!   gateway kept an idle connection per user until
 //!   `backend.idle_timeout_seconds`, 300 s).
 //!
@@ -147,6 +150,20 @@ fn root_opts(port: u16) -> OptsBuilder {
         .tcp_port(port)
         .user(Some("root"))
         .pass(Some(pw))
+}
+
+/// The node's backend accounts of tenant `id` (`mysql.global_priv`).
+async fn accounts_on_node(e: &Env, id: u64) -> Vec<String> {
+    let mut c = Conn::new(root_opts(e.node)).await.expect("root login");
+    let v: Vec<String> = c
+        .exec(
+            "SELECT CONCAT(User, '@', Host) FROM mysql.global_priv WHERE User LIKE ?",
+            (format!("t{id}\\_%"),),
+        )
+        .await
+        .expect("global_priv");
+    c.disconnect().await.ok();
+    v
 }
 
 /// The node's connections and schemas of tenant `id`.
@@ -304,6 +321,47 @@ async fn deleted_tenants_finish_and_close_their_connections() {
     for c in [d, d2, m, m2, p, p2] {
         c.disconnect().await.ok();
     }
+    // bugfix-32: sessions that keep running statements while their tenant
+    // is deleted, and new logins, must not bring its backend accounts back
+    // (r9fanin found `t<id>_u1` left after a deletion).
+    let busy_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut busy = Vec::new();
+    for (user, fresh) in [("app", false), ("two", false), ("app", true)] {
+        let mut c = login(&e, &plain, user, Some("dd")).await;
+        let stop = busy_stop.clone();
+        let (port, tenant) = (e.mysql, plain.clone());
+        busy.push(tokio::spawn(async move {
+            let mut n = 0u64;
+            let mut errs = 0u64;
+            while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                if c.query_drop("SELECT COUNT(*) FROM orders").await.is_ok() {
+                    n += 1;
+                } else {
+                    errs += 1;
+                }
+                if fresh {
+                    let o = OptsBuilder::default()
+                        .ip_or_hostname("127.0.0.1")
+                        .tcp_port(port)
+                        .user(Some(format!("{tenant}.{user}")))
+                        .pass(Some(PW))
+                        .db_name(Some("dd"))
+                        .ssl_opts(
+                            SslOpts::default()
+                                .with_danger_accept_invalid_certs(true)
+                                .with_danger_skip_domain_validation(true),
+                        );
+                    if let Ok(x) = Conn::new(o).await {
+                        c.disconnect().await.ok();
+                        c = x;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            c.disconnect().await.ok();
+            (n, errs)
+        }));
+    }
     for (t, id) in &ids {
         let (conns, schemas) = left_on_node(&e, *id).await;
         eprintln!("{t} before deletion: {conns} connections, schemas {schemas:?}");
@@ -375,6 +433,14 @@ async fn deleted_tenants_finish_and_close_their_connections() {
     }
     eprintln!("all deletions: {:?}", t0.elapsed());
 
+    // The busy sessions run on for a while after the tenants went.
+    tokio::time::sleep(Duration::from_secs(20)).await;
+    busy_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    for b in busy {
+        if let Ok((n, errs)) = b.await {
+            eprintln!("busy session: {n} statements ok, {errs} failed");
+        }
+    }
     // Nothing of them on the node; their connections closed.
     tokio::time::sleep(Duration::from_secs(15)).await;
     for (t, id) in &ids {
@@ -385,6 +451,11 @@ async fn deleted_tenants_finish_and_close_their_connections() {
         }
         if !schemas.is_empty() {
             failed.push(format!("{t}: schemas left {schemas:?}"));
+        }
+        let accounts = accounts_on_node(&e, *id).await;
+        eprintln!("{t} after deletion: accounts {accounts:?}");
+        if !accounts.is_empty() {
+            failed.push(format!("{t}: backend accounts left {accounts:?}"));
         }
     }
     assert!(failed.is_empty(), "{failed:#?}");

@@ -51,10 +51,10 @@ fn raw_matches_document_path() {
         assert_eq!(to_raw(c, None).unwrap(), want, "{c}");
     }
     let typed = r#"{"_id": "6721c5a4e1b2c3d4e5f60718", "n": [1, {"d": "2026-11-07T10:15:00.000Z"}], "n2": 3}"#;
-    let types = r#"{"_id": "objectId", "n.1.d": "date", "n2": "long"}"#;
+    let type_map = r#"{"_id": "objectId", "n.1.d": "date", "n2": "long"}"#;
     assert_eq!(
-        to_raw(typed, Some(types)).unwrap(),
-        bson::to_vec(&to_bson(typed, Some(types)).unwrap()).unwrap()
+        to_raw(typed, Some(type_map)).unwrap(),
+        bson::to_vec(&to_bson(typed, Some(type_map)).unwrap()).unwrap()
     );
     assert!(to_raw(r#"{"_id": 1"#, None).is_err());
     assert!(to_raw(r#"{"_id": 1} x"#, None).is_err());

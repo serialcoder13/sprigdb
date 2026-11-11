@@ -737,6 +737,24 @@ fn select(sql: &str, cx: &Ctx<'_>, host: &mut dyn Host) -> Result<Handled> {
                 found.insert((d, s.name.clone()), s);
             }
         }
+        // Chapter 29 (RL38): a view, routine, trigger or event over a change
+        // topic would read the log with its definer's rights, so its
+        // readers would get the table's rows without the table's policies
+        // (and without SELECT on it): refused for every user.
+        let defines = ids.first().is_some_and(|w| {
+            w.eq_ignore_ascii_case("CREATE") || w.eq_ignore_ascii_case("ALTER")
+        });
+        if defines && let Some(s) = found.values().find(|s| s.kind == StreamKind::Changes) {
+            return Err(SprigError::new(
+                SprigCode::RlsUnsupported,
+                format!(
+                    "ER_SPRIG_RLS_UNSUPPORTED: views and stored code can't read change topic \
+                     '{}': its readers would get the table's rows without its row-level \
+                     security; read the topic directly",
+                    s.name
+                ),
+            ));
+        }
         // Privileges, and the row-level hook for change topics.
         for ((db, _), s) in &found {
             match (s.kind, s.source_object) {

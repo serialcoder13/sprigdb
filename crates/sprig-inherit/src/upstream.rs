@@ -124,6 +124,31 @@ pub async fn ensure(ctx: &Ctx<'_>, run: &mut dyn Runner, r: &Resolved) -> Result
     let mut lineage: Vec<&TenantCatalog> = ctx.ancestors.iter().map(AsRef::as_ref).collect();
     lineage.push(ctx.cat);
     let table = r.obj.table.clone();
+    // Reads stop at a serving copy of the edge from the parent tenant: no
+    // share view is read then, and across clusters none could be made
+    // (the parent's schema is on another server).
+    if let Some(up) = tenant_edge(
+        lineage[lineage.len() - 2],
+        ctx.cat,
+        &r.db_name,
+        &table,
+        ctx.lctn,
+    )? && up.share.mode == crate::model::MergeMode::Materialized
+        && ctx
+            .copies
+            .ready(
+                crate::copy::CopyKey {
+                    tenant: ctx.cat.tenant,
+                    object: r.obj.object_id,
+                    share: crate::copy::UPSTREAM,
+                },
+                r.obj.version,
+                up.share.version,
+            )
+            .is_some()
+    {
+        return Ok(());
+    }
     // The contiguous edges ending at this tenant.
     let mut edges = Vec::new();
     let mut j = lineage.len() - 1;

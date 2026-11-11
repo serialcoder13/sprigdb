@@ -92,7 +92,10 @@ pub(crate) struct Stmt {
     /// Tenant sessions (R5 round 8): the fingerprint workload capture made
     /// of `logical`, with what it was made under; the next execute under
     /// the same reuses it instead of normalizing the text again.
-    pub fp: Option<(super::capture::FpKey, sprig_workload::fingerprint::Fingerprint)>,
+    pub fp: Option<(
+        super::capture::FpKey,
+        sprig_workload::fingerprint::Fingerprint,
+    )>,
 }
 
 impl Stmt {

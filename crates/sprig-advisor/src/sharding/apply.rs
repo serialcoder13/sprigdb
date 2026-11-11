@@ -997,6 +997,31 @@ pub async fn apply_first_design(
     maps: &TenantMaps,
     shard_maps: &ShardMapStore,
 ) -> Result<Applied> {
+    // Decision bugfix-31: stored code created since the run (or since a
+    // stored design was decided) may name tables the design moves. Checked
+    // before the run's first group exists; a resumed run goes on.
+    let cat = catalog(ctx.tenant);
+    let started: Option<u64> = c
+        .exec_first(
+            format!("SELECT COUNT(*) FROM `{cat}`.table_groups WHERE advisor_run_id = ?"),
+            (run,),
+        )
+        .await
+        .unwrap_or(Some(0));
+    if started.unwrap_or(0) == 0 {
+        let code = super::code::read(c, ctx.tenant).await?;
+        let why = super::code::conflicts(design, &super::code::rules(&code, located), located);
+        if !why.is_empty() {
+            return Err(SprigError::new(
+                SprigCode::SplitNotAllowed,
+                format!(
+                    "advisor run {run} would move tables stored code reads where they are: {}; \
+                     a new run keeps them in place",
+                    why.join(", ")
+                ),
+            ));
+        }
+    }
     let groups = create_groups(c, ctx, run, design, input, located).await?;
     let hold_ms = regroup(c, ctx, run, &groups, located, maps, shard_maps).await?;
     let mut backfilled = 0;

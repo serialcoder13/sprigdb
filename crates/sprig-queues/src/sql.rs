@@ -50,7 +50,9 @@ use crate::vhost::ConnVhost;
 pub enum MqCall {
     /// `sprig.mq_publish(exchange, routing_key, body, properties [, mandatory [, vhost]])`.
     Publish,
-    /// `sprig.mq_get(queue [, max [, lease_ms [, vhost]]])`.
+    /// `sprig.mq_get(queue [, max [, lease_ms [, vhost [, lease_tag]]]])`.
+    /// With a lease tag (R9, r9tests), the messages are held under the
+    /// tag rather than the session, so `mq_release` can give them back.
     Get,
     /// `sprig.mq_ack(token)`.
     Ack,
@@ -66,6 +68,12 @@ pub enum MqCall {
     /// moves up to `max` messages (a dead-letter queue's, say) to an
     /// exchange, with their own routing key when `routing_key` is NULL.
     Republish,
+    /// `sprig.mq_release(queue, lease_tag [, vhost])` (R9, r9tests): every
+    /// message of `queue` held under `lease_tag` (by `mq_get`'s fifth
+    /// argument) goes back to the queue at once, as when an AMQP
+    /// connection closes. A queue sink's new task gives back a dead
+    /// task's messages this way instead of waiting out their lease.
+    Release,
 }
 
 /// A parsed `CALL sprig.mq_*(...)`: the call and its argument texts.
@@ -97,6 +105,7 @@ pub fn parse_call(sql: &str) -> Option<Call> {
         "mq_browse" => MqCall::Browse,
         "mq_purge" => MqCall::Purge,
         "mq_republish" => MqCall::Republish,
+        "mq_release" => MqCall::Release,
         _ => return None,
     };
     let inner = rest.trim().strip_prefix('(')?.strip_suffix(')')?;
@@ -307,6 +316,25 @@ impl std::fmt::Debug for SqlVhost {
 /// SQL sessions' connection keys: this bit and the session id, apart from
 /// AMQP connections' process counter.
 pub const SQL_CONN_BIT: u64 = 1 << 62;
+
+/// Lease tags' connection keys (R9, r9tests): this bit and a hash of the
+/// tag. Unlike a session's or an AMQP connection's key, a tag's key means
+/// the same on every gateway, so the owner matches it whatever link the
+/// get came over ([`crate::owner`]'s `conn_lost`).
+pub const LEASE_TAG_BIT: u64 = 1 << 61;
+
+/// The connection key messages taken with lease tag `tag` are held
+/// under: [`LEASE_TAG_BIT`] and the tag's 64-bit FNV-1a hash (stable
+/// across builds and gateways), cut to the bits below it.
+#[must_use]
+pub fn lease_tag_conn(tag: &str) -> ConnKey {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in tag.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    ConnKey(LEASE_TAG_BIT | (h & (LEASE_TAG_BIT - 1)))
+}
 
 fn unroutable(exchange: &str, key: &str) -> MqError {
     MqError::new(
@@ -595,6 +623,26 @@ impl SqlVhost {
         max: u32,
         lease_ms: u64,
     ) -> Result<Vec<Delivery>, MqError> {
+        self.get_tagged(queue, max, lease_ms, None).await
+    }
+
+    /// [`Self::get`] with an optional lease tag (R9, r9tests): the
+    /// messages are held under the tag's key ([`lease_tag_conn`]), not the
+    /// session's, so [`Self::release_tag`] can return them later from any
+    /// session on any gateway.
+    ///
+    /// # Errors
+    /// 39250, 39253, 39252.
+    pub async fn get_tagged(
+        &self,
+        queue: &str,
+        max: u32,
+        lease_ms: u64,
+        tag: Option<&str>,
+    ) -> Result<Vec<Delivery>, MqError> {
+        let conn = tag
+            .filter(|t| !t.is_empty())
+            .map_or(self.cx.conn, lease_tag_conn);
         // Through the vhost first, for the checks; then the owner with the
         // lease.
         let q = self.v.queue(queue).ok_or_else(|| {
@@ -620,10 +668,7 @@ impl SqlVhost {
         for _ in 0..max.max(1) {
             let (tx, rx) = oneshot::channel();
             if !h.send(Cmd::Get {
-                holder: Holder {
-                    origin: 0,
-                    conn: self.cx.conn,
-                },
+                holder: Holder { origin: 0, conn },
                 no_ack: false,
                 lease_ms: Some(lease_ms.max(1)),
                 reply: tx,
@@ -702,6 +747,29 @@ impl SqlVhost {
             consumers: u64::from(consumers),
             unacked: stored.saturating_sub(u64::from(ready)),
         })
+    }
+
+    /// `mq_release` (R9, r9tests): every message of `queue` held under
+    /// lease tag `tag` goes back to the queue now, its delivery count
+    /// raised as when its lease ends. Checked as a read of the queue (the
+    /// right `mq_get` needs). The owner applies it after the commands
+    /// before it; the caller sees the result through `mq_info`.
+    ///
+    /// # Errors
+    /// 39250, 39252, 39261 (owner stopped).
+    pub async fn release_tag(&self, queue: &str, tag: &str) -> Result<(), MqError> {
+        let (_, q) = self.checked_queue(queue, Perm::Read).await?;
+        if tag.is_empty() {
+            return Ok(());
+        }
+        if !self.v.slot(&q).send(Cmd::ConnLost(Holder {
+            origin: 0,
+            conn: lease_tag_conn(tag),
+        })) {
+            return Err(MqError::new(MqCode::OwnerMoved, "owner stopped"));
+        }
+        metrics::counter!("sprig_queue_lease_tag_releases_total").increment(1);
+        Ok(())
     }
 
     /// `mq_purge` (R9, ST50): removes the ready messages; delivered ones

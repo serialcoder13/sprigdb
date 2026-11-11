@@ -191,7 +191,7 @@ Run `backup` from cron or a systemd timer (for example hourly). Keep `secrets/` 
 - without the private key it refused before stopping anything ("restoring needs the backups' private key");
 - with it: fetched and checked the copy, restored both MariaDBs and etcd in 28 s; VM 2 and VM 3 then ran `etcd-rejoin` (18 s for both), and VM 2 `up`.
 - Afterwards every table of both tenants had the same `CHECKSUM TABLE` and row count as before the backup (68 tables, including the tenants' catalogs), the dropped table was back and the new one gone, the third tenant was gone from etcd and MariaDB, and both tenants logged in and read through both gateways.
-- Two problems found and fixed: the first `etcd-rejoin` on VM 2 stopped silently when its `etcdctl` call reached a member that was down (it now retries each call), and VM 1's controller restarted for about three minutes after the restore, because at start it refused to run when its first etcd read reached a member that wasn't back yet (the processes now retry the other members at start; [High availability](#high-availability-three-vms)).
+- Two problems found and fixed: the first `etcd-rejoin` on VM 2 stopped silently when its `etcdctl` call reached a member that was down (it now retries each call), and VM 1's controller restarted for about three minutes after the restore, because at start it refused to run when its first etcd read reached a member that wasn't back yet. The processes now try the other members at start: with one of three members stopped, a restarted controller was healthy in 6–8 s (`harden2-c`), where the build before the fix didn't start within 300 s.
 
 ## Restore
 
@@ -229,10 +229,11 @@ To restore onto a new VM: copy the bundle, the same `secrets/` and the backup di
 
 | Run | Images | Writes acknowledged | Refused with 39501 | Connections refused or dropped (then sent to the other gateway) | Acknowledged rows lost |
 |---|---|---|---|---|---|
-| upgrade only | `harden2-a` → `harden2-b` (two builds, 19:20 and 20:48 trees) | 387 of 412 | 25 (13 on VM 1, 12 on VM 2, about 5 s each: the old build's gateway drain) | 4 | 0 |
-| upgrade and rollback | `harden2-b` → `harden2-b2` → `harden2-b` | **690 of 690** | **0** | 7, at most 0.6 s on one gateway per step | **0** |
+| upgrade and rollback | `harden2-b` → `harden2-c` → `harden2-b` (two builds, 20:48 and 21:28 trees) | **729 of 729** | **0** | 6, at most 0.5 s on one gateway per step | **0** |
+| upgrade and rollback | `harden2-b` → `harden2-b2` → `harden2-b` | 690 of 690 | 0 | 7, at most 0.6 s | 0 |
+| upgrade only | `harden2-a` → `harden2-b` (19:20 and 20:48 trees) | 387 of 412 | 25 (13 on VM 1, 12 on VM 2, about 5 s each: the old build's gateway drain) | 4 | 0 |
 
-Each step took 23–33 s (VM 1 includes the 2–5 s backup). `harden2-b2` is `harden2-b`'s binaries under another tag: the containers are recreated and the processes restart exactly as in an upgrade, but no code changed in that run. The first run's 39501s come from stopping `harden2-a` gateways, which still had the drain problem fixed in `harden2-b`; the first `harden2-a` rehearsal (before the fix) also showed 2 refused writes on VM 2's gateway while VM 1's controller restarted, from the restarted controller answering "fenced" before it had read the lease (also fixed in `harden2-b`).
+Each step took 22–33 s (VM 1 includes the 2–5 s backup). `harden2-b2` is `harden2-b`'s binaries under another tag: the containers are recreated and the processes restart exactly as in an upgrade, but no code changed in that run. The first run's 39501s come from stopping `harden2-a` gateways, which still had the drain problem fixed in `harden2-b`; the first `harden2-a` rehearsal (before the fix) also showed 2 refused writes on VM 2's gateway while VM 1's controller restarted, from the restarted controller answering "fenced" before it had read the lease (also fixed in `harden2-b`).
 
 **Tested (laptop, one VM, hardening round 1):** build A → build B → back to A, the same client against one gateway: 33 s each way; 30 and 15 failed inserts (39501 while the only controller restarted and while the gateway drained, then 2003/2013 while it was replaced); 0 of 299 acknowledged rows lost.
 

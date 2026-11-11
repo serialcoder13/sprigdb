@@ -652,19 +652,24 @@ impl ShardingLoop {
             Cause::MinShards
         };
         let s = ts.advisor;
-        let found = if s.mode == AdvisorMode::Off {
-            let (d, evidence) = design::structural(&asm.input, &s);
-            let score = design::score(&asm.input, &d, &s);
-            design::SearchResult {
-                best: d,
-                score,
-                path: Vec::new(),
-                alternatives: Vec::new(),
-                evidence,
+        // Decision bugfix-31: a trigger's table and the tables its body
+        // names land in one group or stay; `settle` holds split couples
+        // and finds the design again.
+        let found = sprig_advisor::sharding::code::settle(&mut asm.input, |input| {
+            if s.mode == AdvisorMode::Off {
+                let (d, evidence) = design::structural(input, &s);
+                let score = design::score(input, &d, &s);
+                design::SearchResult {
+                    best: d,
+                    score,
+                    path: Vec::new(),
+                    alternatives: Vec::new(),
+                    evidence,
+                }
+            } else {
+                design::search(input, &s)
             }
-        } else {
-            design::search(&asm.input, &s)
-        };
+        });
         let runner = found.alternatives.first();
         let confidence = design::confidence(&asm.input, &found.best, runner.map(|(d, _)| d), &s);
         let observed = asm

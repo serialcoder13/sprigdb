@@ -222,6 +222,13 @@ pub struct Input {
     /// Objects the key-value rule placed (their implied pins aren't
     /// reported as client pins).
     pub kv_decided: Vec<Obj>,
+    /// Tables stored code keeps in their default schema (an implied
+    /// `UNSHARDED` pin each, with its own evidence line; decision
+    /// bugfix-31, [`super::code`]).
+    pub held: Vec<Obj>,
+    /// A trigger's table and a table its body names: both move into the
+    /// same group or neither moves ([`super::code::settle`]).
+    pub code_couples: Vec<(Obj, Obj, String)>,
 }
 
 impl Input {
@@ -585,7 +592,7 @@ pub fn structural(input: &Input, s: &AdvisorSettings) -> (Design, Vec<String>) {
     for t in &input.tables {
         match input.pin(t.object) {
             Some(PinKind::Unsharded) => {
-                if !input.kv_decided.contains(&t.object) {
+                if !input.kv_decided.contains(&t.object) && !input.held.contains(&t.object) {
                     evidence.push(format!("{}: pinned UNSHARDED", t.name));
                 }
                 out.insert(t.object);

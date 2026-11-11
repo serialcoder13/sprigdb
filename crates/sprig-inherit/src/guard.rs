@@ -237,7 +237,7 @@ pub async fn refuse_if_shared_now(
 ) -> Result<()> {
     refuse_if_shared(ctx, o, what)?;
     let t = ctx.cat.tenant;
-    let rows = match r
+    let Ok(rows) = r
         .ctl_query(
             t,
             &format!(
@@ -247,10 +247,9 @@ pub async fn refuse_if_shared_now(
             ),
         )
         .await
-    {
-        Ok(rows) => rows,
+    else {
         // A runner without provisioning access: the snapshot's answer.
-        Err(_) => return Ok(()),
+        return Ok(());
     };
     let names: Vec<String> = rows
         .into_iter()

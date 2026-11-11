@@ -1376,12 +1376,19 @@ impl Core {
             .filter(|c| c.spec.holder == h)
             .map(|c| c.spec.id)
             .collect();
+        // A lease tag's key (R9, r9tests) means the same over every link:
+        // its messages go back whichever gateway they were taken through.
+        let tag = h.conn.0 & crate::sql::LEASE_TAG_BIT != 0;
         let seqs: Vec<u64> = self
             .unacked
             .iter()
-            .filter(|(_, u)| u.holder == h)
+            .filter(|(_, u)| u.holder == h || (tag && u.holder.conn == h.conn))
             .map(|(s, _)| *s)
             .collect();
+        if tag {
+            metrics::counter!("sprig_queue_lease_tag_returned_total")
+                .increment(seqs.len() as u64);
+        }
         for s in seqs {
             self.requeue(s, true);
         }

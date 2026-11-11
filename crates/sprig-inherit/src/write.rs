@@ -1025,7 +1025,12 @@ pub async fn insert(sql: &str, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Hand
                 .await?;
             }
         }
-        let text = insert_text(&mut stmt_with_rows(&stmt, &columns, &rows), &columns, s, &res)?;
+        let text = insert_text(
+            &mut stmt_with_rows(&stmt, &columns, &rows),
+            &columns,
+            s,
+            &res,
+        )?;
         let first = r.exec(&text).await;
         let mut d = match first {
             Ok(d) => d,

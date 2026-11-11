@@ -42,3 +42,5 @@ pub mod rec_stmt;
 // Chapter 29: row-level security (policies and the rewrite, R4).
 pub mod rls;
 pub mod settings_stmt;
+// Chapter 16 (bugfix-31): what stored code's text names.
+pub mod stored_refs;

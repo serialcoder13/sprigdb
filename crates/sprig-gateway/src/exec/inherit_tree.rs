@@ -96,7 +96,10 @@ fn refs_ready() -> &'static Mutex<HashSet<u64>> {
 /// # Errors
 /// The catalog's.
 pub(crate) async fn refs(svc: &TenantServices, root: TenantId, sql: &str) -> Result<RawRows> {
-    let table = format!("{}.`inherit_refs`", q(&SchemaName::catalog(root).to_string()));
+    let table = format!(
+        "{}.`inherit_refs`",
+        q(&SchemaName::catalog(root).to_string())
+    );
     let ready = refs_ready()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -421,7 +424,12 @@ async fn ddl(
     Ok(out.version)
 }
 
-async fn show_create(svc: &TenantServices, t: TenantId, schema: &str, table: &str) -> Result<String> {
+async fn show_create(
+    svc: &TenantServices,
+    t: TenantId,
+    schema: &str,
+    table: &str,
+) -> Result<String> {
     let rows = ctl_query(
         svc,
         t,
@@ -458,7 +466,9 @@ async fn commit(svc: &TenantServices, t: TenantId, change: &InheritChange) -> Re
     c.commit().await
 }
 
-/// Brings `child` up to its parent: returns whether anything changed.
+/// Brings `child` up to its parent: the catalog version when anything
+/// changed.
+#[allow(clippy::too_many_lines, clippy::many_single_char_names)] // the steps in order
 async fn sync_one(
     svc: &Arc<TenantServices>,
     parent: &TenantCatalog,
@@ -480,10 +490,8 @@ async fn sync_one(
             let cschema = sprig_inherit::plan::physical_schema(&cat, &w.db, lctn)?;
             let target = format!("{}.{}", q(&cschema), q(&w.table));
             let sql = sprig_inherit::adopt::child_create(&text, &target);
-            let logical = sprig_inherit::adopt::child_create(
-                &text,
-                &format!("{}.{}", q(&w.db), q(&w.table)),
-            );
+            let logical =
+                sprig_inherit::adopt::child_create(&text, &format!("{}.{}", q(&w.db), q(&w.table)));
             let v = ddl(
                 svc,
                 t,
@@ -567,6 +575,7 @@ async fn sync_one(
             continue;
         };
         let p = &w.parent;
+        #[allow(clippy::single_match_else)] // two ways to the same object
         let o = match &w.child {
             Some(c) => {
                 let mut o = (**c).clone();
@@ -638,9 +647,10 @@ pub(crate) async fn adopt(
     }
     line.push(Arc::clone(cat));
     // Nothing shared to anyone on the line: nothing to do.
-    if line[..line.len() - 1].iter().all(|c| {
-        sprig_inherit::plan::state_of(c).is_none_or(|s| s.shares().next().is_none())
-    }) {
+    if line[..line.len() - 1]
+        .iter()
+        .all(|c| sprig_inherit::plan::state_of(c).is_none_or(|s| s.shares().next().is_none()))
+    {
         return Ok(None);
     }
     let mut changed = false;

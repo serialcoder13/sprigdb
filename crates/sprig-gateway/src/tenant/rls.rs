@@ -1432,6 +1432,26 @@ pub struct DocViews {
 }
 
 impl DocViews {
+    /// A digest of what the views show (tables, policies, bound values):
+    /// a change stream compares it at each `getMore` with the one it
+    /// opened with (RL41).
+    #[must_use]
+    pub fn fingerprint(views: Option<&Self>) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        if let Some(v) = views {
+            let mut keys: Vec<_> = v.tables.iter().collect();
+            keys.sort_by(|a, b| a.0.cmp(b.0));
+            for (k, p) in keys {
+                k.hash(&mut h);
+                format!("{p:?}").hash(&mut h);
+            }
+        } else {
+            u64::MAX.hash(&mut h);
+        }
+        h.finish()
+    }
+
     /// Whether document `d` of `db`.`table` shows.
     #[must_use]
     pub fn visible(&self, db: &str, table: &str, d: &bson::Document) -> bool {
@@ -1442,9 +1462,38 @@ impl DocViews {
 }
 
 /// [`DocViews`] for a session with compiled policies `rls` (none: empty).
+/// Tables the session may not `SELECT` are [`DocPolicies::Hidden`] too
+/// (RL40): a database or deployment change stream leaves their events out,
+/// as MongoDB asks `find` on every collection of what it watches.
 #[must_use]
 pub fn doc_views(ts: &TenantSession, cat: &TenantCatalog, rls: Option<&SessionRls>) -> DocViews {
     let mut out = DocViews::default();
+    let grants = super::authz::privileges(ts, cat);
+    if !grants.unrestricted() {
+        let lctn = ts.lower_case_table_names();
+        for obj in cat.objects.iter() {
+            if obj.namespace != Namespace::Relation || obj.state != ObjectState::Active {
+                continue;
+            }
+            let Some(db) = cat.databases.get(obj.db_id) else {
+                continue;
+            };
+            let db_key = database_key(&db.name, lctn);
+            if !grants.allows(
+                Action::Select,
+                Target::Object {
+                    db_key: &db_key,
+                    db: obj.db_id,
+                    object: obj.object_id,
+                },
+            ) {
+                out.tables.insert(
+                    (db.name.to_lowercase(), obj.name.to_lowercase()),
+                    DocPolicies::Hidden,
+                );
+            }
+        }
+    }
     let Some(rls) = rls else {
         return out;
     };
@@ -1455,10 +1504,10 @@ pub fn doc_views(ts: &TenantSession, cat: &TenantCatalog, rls: Option<&SessionRl
         let Some(db) = cat.databases.get(obj.db_id) else {
             continue;
         };
-        out.tables.insert(
-            (db.name.to_lowercase(), obj.name.to_lowercase()),
-            doc_policies(ts, cat, rls, *o),
-        );
+        // A table the session may not read stays hidden (RL40).
+        out.tables
+            .entry((db.name.to_lowercase(), obj.name.to_lowercase()))
+            .or_insert_with(|| doc_policies(ts, cat, rls, *o));
     }
     out
 }

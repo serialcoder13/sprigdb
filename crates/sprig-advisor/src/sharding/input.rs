@@ -584,17 +584,23 @@ pub async fn assemble(
         ))
         .await
         .map_err(|e| db_err("catalog version", &e))?;
+    let mut input = Input {
+        tables,
+        fks,
+        stmts,
+        units,
+        split_bytes,
+        pins,
+        kv,
+        ..Input::default()
+    };
+    // Decision bugfix-31: tables stored code names stay where the code
+    // reads them.
+    let code = super::code::read(c, tenant).await?;
+    let rules = super::code::rules(&code, &located);
+    super::code::apply_rules(&mut input, &rules);
     Ok(Assembled {
-        input: Input {
-            tables,
-            fks,
-            stmts,
-            units,
-            split_bytes,
-            pins,
-            kv,
-            ..Input::default()
-        },
+        input,
         located,
         first_seen,
         schema_version: version

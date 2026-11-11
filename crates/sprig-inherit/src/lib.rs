@@ -130,7 +130,9 @@ pub trait Runner: sprig_types::Runner {
     /// The backend's (a `NOWAIT` lock conflict is 1205 or 3572).
     async fn ctl_query(&mut self, t: TenantId, sql: &str) -> Result<RawRows> {
         let _ = (t, sql);
-        Err(SprigError::internal("no provisioning access in this runner"))
+        Err(SprigError::internal(
+            "no provisioning access in this runner",
+        ))
     }
 
     /// Runs `sql` on `inherit_refs` in tenant `root`'s catalog (`{refs}`

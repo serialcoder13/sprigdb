@@ -33,6 +33,9 @@
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
     clippy::uninlined_format_args,
+    clippy::many_single_char_names,
+    clippy::needless_range_loop,
+    clippy::similar_names,
     missing_docs
 )]
 
@@ -140,15 +143,39 @@ async fn tables(c: &mut Conn) -> BTreeSet<String> {
 async fn eventually(c: &mut Conn, sql: &str, want: usize) {
     let t0 = Instant::now();
     loop {
-        let n = rows(c, sql).await.len();
+        // Across clusters a copy that isn't serving yet can't be read
+        // through (39889): wait for it too.
+        let n = match c.query::<Row, _>(sql).await {
+            Ok(r) => r.len(),
+            Err(mysql_async::Error::Server(s)) if s.code == 39889 => usize::MAX,
+            Err(e) => panic!("{sql}: {e}"),
+        };
         if n == want {
             return;
         }
+        let wait: u64 = std::env::var("SPRIG_TEST_IG_WAIT_S")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
         assert!(
-            t0.elapsed() < Duration::from_secs(20),
+            t0.elapsed() < Duration::from_secs(wait),
             "{sql}: {n} rows, want {want}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// `sql`'s outcome once a copy that isn't serving yet (39889 across
+/// clusters, after a schema change) serves.
+async fn settled(c: &mut Conn, sql: &str) -> Result<u64, u16> {
+    let t0 = Instant::now();
+    loop {
+        match try_exec(c, sql).await {
+            Err(39889) if t0.elapsed() < Duration::from_secs(180) => {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            other => return other,
+        }
     }
 }
 
@@ -246,7 +273,8 @@ async fn kirans_example() {
                     for i in 0..per {
                         let label = format!("L{lvl}-{k}-{i}");
                         exec(&mut x, &format!("INSERT INTO t2 (name) VALUES ('{label}')")).await;
-                        let id: Option<u64> = x.query_first("SELECT LAST_INSERT_ID()").await.unwrap();
+                        let id: Option<u64> =
+                            x.query_first("SELECT LAST_INSERT_ID()").await.unwrap();
                         got.push((id.unwrap(), label, lvl));
                     }
                     got
@@ -269,13 +297,21 @@ async fn kirans_example() {
             let view: BTreeMap<u64, String> = rows(&mut c[lvl], "SELECT id, name FROM t2")
                 .await
                 .into_iter()
-                .map(|r| (r[0].clone().unwrap().parse().unwrap(), r[1].clone().unwrap()))
+                .map(|r| {
+                    (
+                        r[0].clone().unwrap().parse().unwrap(),
+                        r[1].clone().unwrap(),
+                    )
+                })
                 .collect();
             for (id, label, by) in &all {
                 if *by <= lvl {
                     assert_eq!(view.get(id), Some(label), "{p}: level {lvl} id {id}");
                 } else {
-                    assert!(!view.contains_key(id), "{p}: level {lvl} sees a lower level's {id}");
+                    assert!(
+                        !view.contains_key(id),
+                        "{p}: level {lvl} sees a lower level's {id}"
+                    );
                 }
             }
         }
@@ -290,12 +326,21 @@ async fn kirans_example() {
         let c_row = all.iter().find(|x| x.2 == 2).unwrap().0;
 
         // 3. Foreign keys against each level's merged view.
+        if mat {
+            // Across clusters t1's copy must serve before c can use it.
+            eventually(&mut c[2], "SELECT id FROM t1", 0).await;
+            eventually(&mut c[1], "SELECT id FROM t1", 0).await;
+        }
         exec(
             &mut c[2],
             &format!("INSERT INTO t1 (t2_id, note) VALUES ({a_row}, 'c->a')"),
         )
         .await;
-        let c_ref: u64 = c[2].query_first("SELECT LAST_INSERT_ID()").await.unwrap().unwrap();
+        let c_ref: u64 = c[2]
+            .query_first("SELECT LAST_INSERT_ID()")
+            .await
+            .unwrap()
+            .unwrap();
         exec(
             &mut c[2],
             &format!("INSERT INTO t1 (t2_id, note) VALUES ({b_row}, 'c->b')"),
@@ -306,7 +351,11 @@ async fn kirans_example() {
             &format!("INSERT INTO t1 (t2_id, note) VALUES ({a_row}, 'b->a')"),
         )
         .await;
-        let b_ref: u64 = c[1].query_first("SELECT LAST_INSERT_ID()").await.unwrap().unwrap();
+        let b_ref: u64 = c[1]
+            .query_first("SELECT LAST_INSERT_ID()")
+            .await
+            .unwrap()
+            .unwrap();
         fails(
             &mut c[1],
             &format!("INSERT INTO t1 (t2_id, note) VALUES ({c_row}, 'b->c')"),
@@ -322,7 +371,12 @@ async fn kirans_example() {
         .await;
         // An update in c of the row b wrote: c's override references c's own row.
         if mat {
-            eventually(&mut c[2], &format!("SELECT id FROM t1 WHERE id = {b_ref}"), 1).await;
+            eventually(
+                &mut c[2],
+                &format!("SELECT id FROM t1 WHERE id = {b_ref}"),
+                1,
+            )
+            .await;
         }
         exec(
             &mut c[2],
@@ -332,7 +386,11 @@ async fn kirans_example() {
         // Parent and child row in one transaction.
         exec(&mut c[2], "BEGIN").await;
         exec(&mut c[2], "INSERT INTO t2 (name) VALUES ('c-tx')").await;
-        let tx_row: u64 = c[2].query_first("SELECT LAST_INSERT_ID()").await.unwrap().unwrap();
+        let tx_row: u64 = c[2]
+            .query_first("SELECT LAST_INSERT_ID()")
+            .await
+            .unwrap()
+            .unwrap();
         exec(
             &mut c[2],
             &format!("INSERT INTO t1 (t2_id, note) VALUES ({tx_row}, 'same tx')"),
@@ -349,16 +407,37 @@ async fn kirans_example() {
         .await;
         eprintln!("{p}/{mode}: a's delete refused: {m}");
         // b hides a's row while c references it: refused too.
-        fails(&mut c[1], &format!("DELETE FROM t2 WHERE id = {a_row}"), 1451).await;
+        fails(
+            &mut c[1],
+            &format!("DELETE FROM t2 WHERE id = {a_row}"),
+            1451,
+        )
+        .await;
         exec(&mut c[1], &format!("DELETE FROM t1 WHERE id = {b_ref}")).await;
-        fails(&mut c[0], &format!("DELETE FROM t2 WHERE id = {a_row}"), 1451).await;
+        fails(
+            &mut c[0],
+            &format!("DELETE FROM t2 WHERE id = {a_row}"),
+            1451,
+        )
+        .await;
         exec(&mut c[2], &format!("DELETE FROM t1 WHERE id = {c_ref}")).await;
         // c's override of b's row now points at c's own row.
-        assert_eq!(exec(&mut c[0], &format!("DELETE FROM t2 WHERE id = {a_row}")).await, 1);
+        assert_eq!(
+            exec(&mut c[0], &format!("DELETE FROM t2 WHERE id = {a_row}")).await,
+            1
+        );
         // An unreferenced row goes at once.
-        assert_eq!(exec(&mut c[0], &format!("DELETE FROM t2 WHERE id = {a_row2}")).await, 1);
+        assert_eq!(
+            exec(&mut c[0], &format!("DELETE FROM t2 WHERE id = {a_row2}")).await,
+            1
+        );
         // c's own referenced row can't go either.
-        fails(&mut c[2], &format!("DELETE FROM t2 WHERE id = {tx_row}"), 1451).await;
+        fails(
+            &mut c[2],
+            &format!("DELETE FROM t2 WHERE id = {tx_row}"),
+            1451,
+        )
+        .await;
 
         // 5. t3 at a and t4 at b join the group and reach c; a column added
         //    at b reaches c, not a.
@@ -374,11 +453,17 @@ async fn kirans_example() {
              fk4 FOREIGN KEY (t1_id) REFERENCES t1 (id))",
         )
         .await;
-        exec(&mut c[1], "ALTER TABLE t1 ADD COLUMN b_extra VARCHAR(10) NULL").await;
+        exec(
+            &mut c[1],
+            "ALTER TABLE t1 ADD COLUMN b_extra VARCHAR(10) NULL",
+        )
+        .await;
         let tc = tables(&mut c[2]).await;
         assert!(tc.contains("t3") && tc.contains("t4"), "c: {tc:?}");
         assert!(!tables(&mut c[0]).await.contains("t4"));
-        rows(&mut c[2], "SELECT id, b_extra FROM t1").await;
+        settled(&mut c[2], "SELECT id, b_extra FROM t1")
+            .await
+            .unwrap();
         fails(&mut c[0], "SELECT b_extra FROM t1", 1054).await;
         exec(
             &mut c[1],
@@ -388,6 +473,7 @@ async fn kirans_example() {
         if mat {
             eventually(&mut c[2], "SELECT id FROM t1 WHERE b_extra = 'bx'", 1).await;
         }
+        settled(&mut c[2], "SELECT b_extra FROM t1").await.unwrap();
         assert!(
             rows(&mut c[2], "SELECT b_extra FROM t1")
                 .await
@@ -395,7 +481,10 @@ async fn kirans_example() {
                 .any(|r| r[0].as_deref() == Some("bx"))
         );
         // t4's foreign key holds at c: c's rows of t4 must reference c's view of t1.
-        fails(&mut c[2], "INSERT INTO t4 (t1_id) VALUES (999999999)", 1452).await;
+        assert_eq!(
+            settled(&mut c[2], "INSERT INTO t4 (t1_id) VALUES (999999999)").await,
+            Err(1452)
+        );
 
         // 6. Refusals.
         // Q3: a column a descendant already has.
@@ -452,12 +541,20 @@ async fn spaces_inside_one_tenant() {
     .await;
     exec(&mut a, "CREATE SHARE igsp ON t1 TO SPACE igx").await;
     exec(&mut a, "INSERT INTO t2 (name) VALUES ('root')").await;
-    let r: u64 = a.query_first("SELECT LAST_INSERT_ID()").await.unwrap().unwrap();
+    let r: u64 = a
+        .query_first("SELECT LAST_INSERT_ID()")
+        .await
+        .unwrap()
+        .unwrap();
     exec(&mut a, "USE SPACE igx").await;
     // t2 reaches igx through t1's share.
     assert_eq!(rows(&mut a, "SELECT name FROM t2").await.len(), 1);
     exec(&mut a, &format!("INSERT INTO t1 (t2_id) VALUES ({r})")).await;
-    let child: u64 = a.query_first("SELECT LAST_INSERT_ID()").await.unwrap().unwrap();
+    let child: u64 = a
+        .query_first("SELECT LAST_INSERT_ID()")
+        .await
+        .unwrap()
+        .unwrap();
     fails(&mut a, "INSERT INTO t1 (t2_id) VALUES (424242)", 1452).await;
     exec(&mut a, &format!("USE SPACE `{}`", t[0])).await;
     let m = fails(&mut a, &format!("DELETE FROM t2 WHERE id = {r}"), 1451).await;
@@ -465,7 +562,10 @@ async fn spaces_inside_one_tenant() {
     exec(&mut a, "USE SPACE igx").await;
     exec(&mut a, &format!("DELETE FROM t1 WHERE id = {child}")).await;
     exec(&mut a, &format!("USE SPACE `{}`", t[0])).await;
-    assert_eq!(exec(&mut a, &format!("DELETE FROM t2 WHERE id = {r}")).await, 1);
+    assert_eq!(
+        exec(&mut a, &format!("DELETE FROM t2 WHERE id = {r}")).await,
+        1
+    );
     exec(&mut a, "DROP SHARE igsp").await;
     exec(&mut a, "DROP SPACE igx CASCADE").await;
     exec(&mut a, &format!("DROP DATABASE {db}")).await;
@@ -513,9 +613,17 @@ async fn migration_reports_collisions() {
     assert!(rep[0][1].as_deref().unwrap().contains(&t[1]), "{rep:?}");
     // New ids come from one sequence above every existing one.
     exec(&mut b, "INSERT INTO t9 (v) VALUES ('b-new')").await;
-    let nb: u64 = b.query_first("SELECT LAST_INSERT_ID()").await.unwrap().unwrap();
+    let nb: u64 = b
+        .query_first("SELECT LAST_INSERT_ID()")
+        .await
+        .unwrap()
+        .unwrap();
     exec(&mut a, "INSERT INTO t9 (v) VALUES ('a-new')").await;
-    let na: u64 = a.query_first("SELECT LAST_INSERT_ID()").await.unwrap().unwrap();
+    let na: u64 = a
+        .query_first("SELECT LAST_INSERT_ID()")
+        .await
+        .unwrap()
+        .unwrap();
     assert!(nb > 3 && na > 3 && na != nb, "{nb} {na}");
     // Existing rows unchanged: b still sees its own 1 and 2.
     let v: Vec<Option<String>> = rows(&mut b, "SELECT v FROM t9 WHERE id IN (1, 2) ORDER BY id")

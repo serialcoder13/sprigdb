@@ -1405,16 +1405,15 @@ fn check_raw_doc(d: &bson::RawDocument, depth: usize) -> Result<(), MongoError> 
     let mut seen: Option<std::collections::HashSet<&str>> = None;
     for e in d {
         let (k, v) = e.map_err(|e| invalid(format!("invalid BSON: {e}")))?;
-        let dup = match seen.as_mut() {
-            Some(s) => !s.insert(k),
-            None => {
-                let dup = few.contains(&k);
-                few.push(k);
-                if few.len() > RAW_DUP_LINEAR {
-                    seen = Some(few.drain(..).collect());
-                }
-                dup
+        let dup = if let Some(s) = seen.as_mut() {
+            !s.insert(k)
+        } else {
+            let dup = few.contains(&k);
+            few.push(k);
+            if few.len() > RAW_DUP_LINEAR {
+                seen = Some(few.drain(..).collect());
             }
+            dup
         };
         if dup {
             return Err(invalid(format!("duplicate field name '{k}'")));

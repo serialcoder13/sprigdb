@@ -416,13 +416,84 @@ async fn dead_letters(
     {
         return Err(invalid(format!("'{s}' isn't a dead letter's state")));
     }
-    let rows = st
+    let mut rows = st
         .dead_letters(&mut conn, Some(b.binding_id), state, MAX_ROWS)
         .await?;
+    // Chapter 29 (RL39): a trigger's dead letters hold table rows (an
+    // after-commit trigger's images, a change topic's records): hidden
+    // from a caller the table's policies bind.
+    let hidden = match table_source(core, caller, &mut conn, &b).await? {
+        Some(object) => !unbound(core, caller, object).await,
+        None => false,
+    };
+    if hidden {
+        for r in &mut rows {
+            r.event = Value::Null;
+        }
+    }
     Ok(json_response(
         200,
-        &json!({"dead_letters": rows, "binding": b.binding_id}),
+        &json!({"dead_letters": rows, "binding": b.binding_id, "events_hidden": hidden}),
     ))
+}
+
+/// The table whose rows binding `b`'s events carry: an after-commit
+/// trigger's table, or a stream trigger's change topic's table.
+async fn table_source(
+    core: &Arc<Core>,
+    caller: &Caller,
+    conn: &mut mysql_async::Conn,
+    b: &sprig_logic::catalog::BindingRow,
+) -> Result<Option<u64>, SprigError> {
+    if b.object_id.is_some() {
+        return Ok(b.object_id);
+    }
+    let (Some(svc), Some(tid)) = (&core.studio.tenants, caller.principal.tenant) else {
+        return Ok(None);
+    };
+    let ep = sprig_catalog::CatalogLocator::writer(&*svc.locator, tid).await?;
+    let Some(src) = sprig_logic::messages::source(conn, ep.store.schema(), b.binding_id).await?
+    else {
+        return Ok(None);
+    };
+    if src.kind != sprig_logic::declare::SourceKind::Stream || src.fanin_declarer != 0 {
+        return Ok(None);
+    }
+    let Some(cat) = svc.cache.cached(tid) else {
+        // Can't tell: treat it as table rows.
+        return Ok(Some(0));
+    };
+    Ok(cat
+        .ext
+        .get::<sprig_streams::StreamsState>(sprig_streams::MODULE)
+        .and_then(|st| {
+            st.all()
+                .find(|s| s.id.0 == src.object_id)
+                .filter(|s| s.kind == sprig_streams::model::StreamKind::Changes)
+                .map(|s| s.source_object.map_or(0, |o| o.0))
+        }))
+}
+
+/// Whether policies on table `object` don't bind the caller (a session of
+/// its own, as search's facets ask; RL39). `false` when it can't tell.
+async fn unbound(core: &Arc<Core>, caller: &Caller, object: u64) -> bool {
+    use sprig_doc::engine::SqlRunner as _;
+    let Ok(mut sql) = crate::mongo::sql::SqlSession::open(
+        &core.engine.sessions,
+        &core.engine.executor,
+        &caller.principal,
+        caller.listener,
+        caller.generation,
+        caller.peer,
+        caller.tls.clone(),
+        1 << 20,
+    ) else {
+        return false;
+    };
+    // The session's catalog is installed by its first statement.
+    let ok = sql.query("SELECT 1").await.is_ok() && sql.row_policy_binds(object) == Some(false);
+    sql.close().await;
+    ok
 }
 
 async fn settle(

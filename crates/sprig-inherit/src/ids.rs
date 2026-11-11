@@ -263,7 +263,10 @@ pub async fn check(ctx: &Ctx<'_>, r: &mut dyn Runner, table: &Name) -> Result<Ha
         ]);
     }
     metrics::counter!("sprig_inherit_id_collisions_found_total").increment(out.len() as u64);
-    Ok(Handled::Rows(crate::show::text_rows(&["Id", "Tenants"], out)))
+    Ok(Handled::Rows(crate::show::text_rows(
+        &["Id", "Tenants"],
+        out,
+    )))
 }
 
 /// One tenant's copy of a table in a tree ([`Runner::tree_tables`]).

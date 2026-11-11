@@ -407,6 +407,9 @@ pub struct ChangeStream {
     pub token: String,
     pipeline: Vec<Document>,
     done: bool,
+    /// Chapter 29 (RL41): the digest of the row-level security views the
+    /// stream opened with ([`crate::tenant::rls::DocViews::fingerprint`]).
+    pub policies: u64,
 }
 
 impl Drop for ChangeStream {
@@ -838,6 +841,7 @@ impl ChangeFeed {
         let (tx, rx) = mpsc::channel(QUEUE);
         let stop = CancellationToken::new();
         let pipeline = spec.pipeline.clone();
+        let policies = crate::tenant::rls::DocViews::fingerprint(spec.visibility.as_deref());
         tokio::spawn(run(tail, spec, tx, stop.clone()));
         metrics::gauge!("sprig_mongo_cursors_open", "kind" => "change_stream").increment(1.0);
         Ok(ChangeStream {
@@ -846,6 +850,7 @@ impl ChangeFeed {
             token,
             pipeline,
             done: false,
+            policies,
         })
     }
 }

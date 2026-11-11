@@ -446,7 +446,10 @@ pub fn clash(what: &str, named: Option<&str>) -> SprigError {
         format!(
             "{what} already exists in {}: the change would come down to it through the share; \
              rename one of them first",
-            named.map_or_else(|| "a descendant tenant".to_owned(), |n| format!("tenant '{n}'"))
+            named.map_or_else(
+                || "a descendant tenant".to_owned(),
+                |n| format!("tenant '{n}'")
+            )
         ),
     )
 }
@@ -647,7 +650,13 @@ pub struct Entry {
 
 /// The upsert of `refs`' claims.
 #[must_use]
-pub fn claims_sql(ref_obj: ObjectId, here: At, from_obj: ObjectId, link: &str, refs: &[Ref]) -> String {
+pub fn claims_sql(
+    ref_obj: ObjectId,
+    here: At,
+    from_obj: ObjectId,
+    link: &str,
+    refs: &[Ref],
+) -> String {
     let rows: Vec<String> = refs
         .iter()
         .map(|r| {
@@ -889,11 +898,7 @@ pub fn deletes_need_check(ctx: &Ctx<'_>, o: &InheritableObject) -> bool {
 
 /// A tenant's snapshot on the session's line (itself or an ancestor), or
 /// from the runner.
-async fn catalog_of(
-    ctx: &Ctx<'_>,
-    r: &mut dyn Runner,
-    t: TenantId,
-) -> Result<Arc<TenantCatalog>> {
+async fn catalog_of(ctx: &Ctx<'_>, r: &mut dyn Runner, t: TenantId) -> Result<Arc<TenantCatalog>> {
     if let Some(a) = ctx.ancestors.iter().find(|a| a.tenant == t) {
         return Ok(Arc::clone(a));
     }
@@ -936,7 +941,11 @@ async fn own_refs(
             "SELECT {}, {} FROM {} WHERE `_sprig_space` = {} AND (`_sprig_state` IN ('own', \
              'orphan') OR (`_sprig_state` = 'ovr' AND `_sprig_ovr` & {} <> 0)){kp}",
             o.key.iter().map(|k| q(k)).collect::<Vec<_>>().join(", "),
-            l.columns.iter().map(|c| q(c)).collect::<Vec<_>>().join(", "),
+            l.columns
+                .iter()
+                .map(|c| q(c))
+                .collect::<Vec<_>>()
+                .join(", "),
             res.layer,
             s.0,
             bits(o, &l.columns),
@@ -949,7 +958,10 @@ async fn own_refs(
         if vals.iter().any(Option::is_none) {
             continue;
         }
-        let from: Vec<Vec<u8>> = row[..n].iter().map(|v| v.clone().unwrap_or_default()).collect();
+        let from: Vec<Vec<u8>> = row[..n]
+            .iter()
+            .map(|v| v.clone().unwrap_or_default())
+            .collect();
         let to: Vec<Vec<u8>> = vals.into_iter().map(Option::unwrap_or_default).collect();
         let lits: Vec<String> = (n..n + l.columns.len())
             .map(|i| crate::write::literal_of(&rows, row, i, nbe))
@@ -1252,7 +1264,11 @@ pub fn row_hexes(rows: &sprig_types::Rows, n: usize) -> Vec<String> {
 }
 
 /// What a claim of a level at or below the session's says now.
-async fn claim_live(ctx: &Ctx<'_>, r: &mut dyn Runner, c: &Entry) -> Result<Option<(String, String, Link)>> {
+async fn claim_live(
+    ctx: &Ctx<'_>,
+    r: &mut dyn Runner,
+    c: &Entry,
+) -> Result<Option<(String, String, Link)>> {
     let cat = if c.at.tenant == ctx.cat.tenant {
         None
     } else {
@@ -1433,8 +1449,11 @@ pub async fn before_delete(
 /// A tenant's name as its catalog's ancestry can't tell: its root space's
 /// row, when it has one.
 fn tenant_name(c: &TenantCatalog) -> Option<String> {
-    state_of(c)
-        .and_then(|s| s.spaces().find(|x| x.id == ROOT_SPACE).map(|x| x.name.clone()))
+    state_of(c).and_then(|s| {
+        s.spaces()
+            .find(|x| x.id == ROOT_SPACE)
+            .map(|x| x.name.clone())
+    })
 }
 
 // --------------------------------------------------------------- DDL
@@ -1621,7 +1640,11 @@ pub async fn convert_native(
         let n = objs[ci].links.len() + 1;
         let name = default_name(&objs[ci].table, &objs[ci].links, n);
         let l = link_of(f, &objs[ci].columns.clone(), &target, &name)?;
-        if !objs[ci].links.iter().any(|x| x.name.eq_ignore_ascii_case(&l.name)) {
+        if !objs[ci]
+            .links
+            .iter()
+            .any(|x| x.name.eq_ignore_ascii_case(&l.name))
+        {
             objs[ci].links.push(l);
         }
     }
@@ -2015,7 +2038,12 @@ async fn check_existing(
                     .map(|c| format!("v.{} IS NOT NULL", q(c)))
                     .collect::<Vec<_>>()
                     .join(" AND "),
-                target.key.iter().map(|k| q(k)).collect::<Vec<_>>().join(", "),
+                target
+                    .key
+                    .iter()
+                    .map(|k| q(k))
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 ViewSql {
                     o: target,
                     layer: tres.layer.clone(),

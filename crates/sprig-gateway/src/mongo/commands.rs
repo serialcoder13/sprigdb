@@ -1210,8 +1210,25 @@ async fn exec(
                 let r = st.next_batch(n, wait).await;
                 let token = st.token.clone();
                 let done = st.done();
+                let opened_with = st.policies;
                 let ns = cursor.ns.clone();
                 drop(g);
+                // Chapter 29 (RL41): when the watcher's policies, roles or
+                // grants changed since the stream opened, this batch was
+                // filtered by the old ones: it is dropped and the stream ends
+                // with a resumable error, so the driver resumes after the
+                // last token it returned, under the new policies.
+                let _ = sql.query("SELECT 1").await;
+                let now = crate::tenant::rls::DocViews::fingerprint(sql.row_policy_docs().as_deref());
+                if now != opened_with {
+                    c.shared.cursors.remove(id);
+                    return Err(MongoError::new(
+                        234,
+                        "row-level security for this change stream changed; resume it to apply \
+                         the new policies",
+                    )
+                    .label("ResumableChangeStreamError"));
+                }
                 let batch = match r {
                     Ok(b) => b,
                     Err(e) => {

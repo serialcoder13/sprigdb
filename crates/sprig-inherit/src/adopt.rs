@@ -191,9 +191,11 @@ pub fn child_create(show_create: &str, target: &str) -> String {
 pub fn column_def(show_create: &str, col: &str) -> Option<String> {
     show_create
         .lines()
-        .find(|l| line_name(l).is_some_and(|n| n.eq_ignore_ascii_case(col)) && {
-            let t = l.trim_start();
-            !t.starts_with("KEY") && !t.starts_with("UNIQUE")
+        .find(|l| {
+            line_name(l).is_some_and(|n| n.eq_ignore_ascii_case(col)) && {
+                let t = l.trim_start();
+                !t.starts_with("KEY") && !t.starts_with("UNIQUE")
+            }
         })
         .map(|l| l.trim().trim_end_matches(',').to_owned())
 }

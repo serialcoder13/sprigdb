@@ -331,12 +331,11 @@ impl InheritStore {
             let columns: String = col(r, 5)?;
             let uniques: String = col(r, 6)?;
             let ext: Option<String> = col(r, 9)?;
-            let ext: ObjectExt = match ext {
-                Some(e) => json(&e, "inherit_ext")?,
-                None => {
-                    missing.push(ObjectId(col(r, 0)?));
-                    ObjectExt::default()
-                }
+            let ext: ObjectExt = if let Some(e) = ext {
+                json(&e, "inherit_ext")?
+            } else {
+                missing.push(ObjectId(col(r, 0)?));
+                ObjectExt::default()
             };
             objects.push(InheritableObject {
                 object_id: ObjectId(col(r, 0)?),
