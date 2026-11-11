@@ -462,7 +462,11 @@ impl MigrationDecider {
                 "improvement_pct": improvement,
                 "scores": ev.scores,
             }),
-            score: if ev.decision == "relief" { 100.0 } else { improvement },
+            score: if ev.decision == "relief" {
+                100.0
+            } else {
+                improvement
+            },
             summary: if ev.decision == "relief" {
                 format!("move {name} from {} to {best}: capacity relief", ev.home)
             } else {

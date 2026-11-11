@@ -214,3 +214,179 @@ impl Applier for IndexApprovals {
         })
     }
 }
+
+/// Chapter 52's gate before automatic indexing removes an index of one
+/// object (decision AP14): an automatic index's retirement or drop, and a
+/// user or migrated index's removal.
+///
+/// - An automatic index is held when `auto_index.mode = approve` for the
+///   object (kind `index.drop`); `recommend` keeps retiring automatically,
+///   as chapter 13 does.
+/// - A user or migrated index is held when
+///   `auto_index.retire_user_indexes = approve`, or when it is `on` and
+///   `auto_index.mode = approve`: one switch holds every index change.
+///
+/// The observer proposes the removal again at its next judgement, so an
+/// approved one goes ahead only while the evidence still asks for it.
+pub struct IndexRemovalGate {
+    a: Arc<ControllerApprovals>,
+    tenant: TenantId,
+    object: ObjectId,
+    db: Option<(sprig_common::ids::DbId, String)>,
+    table: String,
+}
+
+impl std::fmt::Debug for IndexRemovalGate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IndexRemovalGate")
+            .field("tenant", &self.tenant)
+            .field("object", &self.object)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The gate for `object` of `tenant`, when the controller has approvals.
+#[must_use]
+pub fn removal_gate(
+    tenant: TenantId,
+    object: ObjectId,
+    o: &crate::autoindex_loop::ObjectEnv,
+) -> Option<IndexRemovalGate> {
+    let a = super::installed()?;
+    Some(IndexRemovalGate {
+        a: Arc::clone(a),
+        tenant,
+        object,
+        db: o.db.clone(),
+        table: o
+            .shards
+            .first()
+            .map(|t| t.table.clone())
+            .unwrap_or_default(),
+    })
+}
+
+impl IndexRemovalGate {
+    /// The policy of `index.drop` for this removal.
+    async fn policy(&self, user: bool) -> Policy {
+        let db = self.db.as_ref().map(|d| d.0);
+        let p = self
+            .a
+            .policy(
+                Kind::IndexDrop,
+                Some(self.tenant),
+                db,
+                Some(self.object),
+                None,
+            )
+            .await;
+        if !user {
+            return p;
+        }
+        let Some(r) = self
+            .a
+            .resolve(
+                "auto_index.retire_user_indexes",
+                Some(self.tenant),
+                db,
+                Some(self.object),
+                None,
+            )
+            .await
+        else {
+            return p;
+        };
+        match &r.value {
+            sprig_settings::Value::Str(t) if t == "approve" => {
+                self.a
+                    .policy_with(
+                        Kind::IndexDrop,
+                        "approve",
+                        r.source,
+                        Some(self.tenant),
+                        db,
+                        Some(self.object),
+                    )
+                    .await
+            }
+            _ => p,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl sprig_advisor::autoindex::observe::RemovalGate for IndexRemovalGate {
+    async fn removal(
+        &self,
+        r: &sprig_advisor::autoindex::observe::Removal<'_>,
+    ) -> sprig_advisor::autoindex::observe::RemovalVerdict {
+        use sprig_advisor::autoindex::observe::RemovalVerdict as V;
+        let policy = self.policy(r.user).await;
+        if policy.mode != Mode::Approve {
+            return V::Go(None);
+        }
+        let mut subject = self.a.subject(self.tenant).await;
+        subject.db = self.db.as_ref().map(|d| d.0);
+        subject.db_name = self.db.as_ref().map(|d| d.1.clone());
+        subject.object = Some(self.object);
+        subject.object_name = Some(self.table.clone());
+        let db_name = self.db.as_ref().map_or("?", |d| d.1.as_str());
+        let what = if r.user {
+            "user index"
+        } else {
+            "automatic index"
+        };
+        let text = if r.user {
+            format!(
+                "ALTER TABLE {db_name}.{} ALTER INDEX {} IGNORED, then DROP INDEX after \
+                 auto_index.usage_sample_reads reads with no query slower",
+                self.table, r.index
+            )
+        } else {
+            format!(
+                "ALTER TABLE {db_name}.{} DROP INDEX {}",
+                self.table, r.index
+            )
+        };
+        let p = Proposal {
+            kind: Kind::IndexDrop,
+            subject,
+            target: format!("t{}/o{}/{}", self.tenant, self.object.0, r.index),
+            action: Action {
+                text,
+                machine: serde_json::json!({
+                    "index": r.index,
+                    "user": r.user,
+                    "reason": r.reason,
+                    "columns": r.columns,
+                }),
+            },
+            evidence: r.evidence.clone(),
+            score: 1.0,
+            summary: format!(
+                "remove {what} {} on {db_name}.{} ({}): {}",
+                r.index,
+                self.table,
+                r.columns.join(", "),
+                r.reason
+            ),
+            emergency: false,
+        };
+        match self.a.gate(&p, &policy).await {
+            Verdict::Proceed(t) => V::Go(
+                t.id.is_some()
+                    .then(|| serde_json::to_string(&t).unwrap_or_default()),
+            ),
+            Verdict::Wait(id) => V::Hold(format!("held for approval as {id}")),
+            Verdict::Advice(id) => V::Hold(format!("recommended as {id}")),
+            Verdict::Suppressed(id) => V::Hold(format!("ignored ({id})")),
+            Verdict::Off => V::Go(None),
+        }
+    }
+
+    async fn removed(&self, ticket: &str, ok: bool, detail: &str) {
+        if let Ok(t) = serde_json::from_str::<sprig_approvals::Ticket>(ticket) {
+            self.a.finished(&t, ok, detail).await;
+        }
+    }
+}

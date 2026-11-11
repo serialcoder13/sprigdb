@@ -39,6 +39,7 @@ use sprig_graph::bookmark::{self, Bookmark};
 use sprig_graph::catalog::backend_error;
 use sprig_graph::eval::Params;
 use sprig_graph::maria::{GraphShards, MariaStore, ShardConns, check_deleted};
+use sprig_graph::mirror::MirrorGate;
 use sprig_graph::store::GraphStore;
 use sprig_proto_bolt::PackValue;
 use sprig_proto_bolt::server::{BoltFailure, BoltSession, QueryResult};
@@ -50,6 +51,7 @@ use super::{
     DEFAULT_GRAPH, ISOLATION, LOGICAL_DATABASE, MAX_BUFFERED_RESULT_MB, failure, from_pack, refuse,
     to_pack,
 };
+use crate::graphs::mirror::CatalogGate;
 use crate::graphs::txn::{CoordConns, GraphBackend, ReadConns, Touched, check_epochs};
 use crate::graphs::{GatewayGraphs, GraphRef};
 use crate::reads::GtidSet;
@@ -386,6 +388,33 @@ impl GwSession {
         Ok(())
     }
 
+    /// The mirror gate of a read statement on `g` (round 5): `None` unless
+    /// the applier keeps `g`'s mirrors.
+    fn gate(&self, g: &GraphRef, cat: &TenantCatalog) -> Option<Arc<dyn MirrorGate>> {
+        if !g.shards.mirror_async {
+            return None;
+        }
+        let ctx = cat.setting_ctx(&self.dc).with_db(g.db_id);
+        let wait = self.graphs.svc.settings.get(
+            &sprig_graph::settings::MIRROR_MAX_WAIT_MS,
+            &ctx,
+            Some(&cat.settings),
+        );
+        let targets = self
+            .causal()
+            .gtids
+            .iter()
+            .map(|(c, s)| (c.clone(), s.to_string()))
+            .collect();
+        Some(Arc::new(CatalogGate {
+            graphs: Arc::clone(&self.graphs),
+            tenant: g.tenant,
+            graph: g.graph_id,
+            targets,
+            wait: Duration::from_millis(wait),
+        }))
+    }
+
     /// Waits while the mover holds a range of `g`'s map (a cutover), then
     /// answers `g` with the map after it.
     async fn after_holds(&self, g: GraphRef) -> Result<GraphRef> {
@@ -612,9 +641,16 @@ impl GwSession {
                 .await?;
             graph = Some(g);
         }
-        let Some(g) = graph else {
+        let Some(mut g) = graph else {
             return Err(SprigError::internal("graph missing"));
         };
+        // Round 5: the graph's mirror mode follows `graph.mirror`.
+        if self.graphs.follow_mirror_setting(&g, &cat).await {
+            cat = self.graphs.catalog(tenant, Freshness::Latest).await?;
+            if let Some(now) = self.graphs.resolve(&cat, &g.db, &g.name).await? {
+                g = now;
+            }
+        }
         let mut visible = None;
         for a in actions(&q) {
             if !self
@@ -748,6 +784,7 @@ impl GwSession {
                     rc.end().await;
                     return Err(e);
                 }
+                let gate = self.gate(&g, &cat);
                 if streams {
                     let (tx, rx) = mpsc::channel(CHANNEL_ROWS);
                     let layout = Arc::clone(&g.shards);
@@ -756,7 +793,8 @@ impl GwSession {
                         let r = {
                             let mut store =
                                 MariaStore::new(&mut rc, layout, labels, types, dict, ids)
-                                    .with_schema(indexes, None);
+                                    .with_schema(indexes, None)
+                                    .with_gate(gate);
                             let mut sink = ChanSink { tx: tx.clone() };
                             stream_on(&mut store, visible, &q, &p, &budgets, &mut sink).await
                         };
@@ -769,7 +807,8 @@ impl GwSession {
                 let r = {
                     let mut store =
                         MariaStore::new(&mut rc, Arc::clone(&g.shards), labels, types, dict, ids)
-                            .with_schema(g.def.indexes.clone(), Some(self.graphs.schema_ops(&g)));
+                            .with_schema(g.def.indexes.clone(), Some(self.graphs.schema_ops(&g)))
+                            .with_gate(gate);
                     run_on(&mut store, visible.clone(), &q, &p, &budgets).await
                 };
                 rc.end().await;
@@ -849,6 +888,12 @@ impl GwSession {
             return Err(e);
         }
         let backend = Arc::clone(&self.backend);
+        // Read-only transactions may read asynchronous mirrors.
+        let gate = if matches!(conns, TxConns::Read(_)) {
+            self.gate(&g, &cat)
+        } else {
+            None
+        };
         if streams {
             let (back_tx, back_rx) = oneshot::channel();
             if let Some(t) = self.tx.as_mut() {
@@ -876,7 +921,8 @@ impl GwSession {
                         }
                     };
                     let mut store = MariaStore::new(sc, layout, labels, types, dict, ids)
-                        .with_schema(indexes, None);
+                        .with_schema(indexes, None)
+                        .with_gate(gate);
                     stream_on(&mut store, visible, &q, &p, &budgets, &mut sink).await
                 };
                 let _ = back_tx.send(conns);
@@ -903,7 +949,8 @@ impl GwSession {
                 }
             };
             let mut store = MariaStore::new(sc, Arc::clone(&g.shards), labels, types, dict, ids)
-                .with_schema(g.def.indexes.clone(), Some(ops));
+                .with_schema(g.def.indexes.clone(), Some(ops))
+                .with_gate(gate);
             run_on(&mut store, visible.clone(), &q, &p, &budgets).await
         };
         let Some(t) = self.tx.as_mut() else {

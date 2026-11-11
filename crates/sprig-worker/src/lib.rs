@@ -9,6 +9,8 @@
 //! etcd scopes when it uses them ([`settings`]). Index builds (chapter 13)
 //! don't run here yet.
 
+// Chapter 43 (R8): the asynchronous graph mirror applier.
+pub mod graph_mirror;
 pub mod inherit;
 // Chapter 33 (R6): the key-value expiry and old-generation sweeper.
 pub mod kv_sweep;
@@ -193,6 +195,13 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         Arc::clone(&env.pools),
         Arc::clone(&env.clusters),
     )?);
+    // Chapter 43's mirror applier (R8 round 5): one job per tenant.
+    let graph_mirror_env = graph_mirror::GraphMirrorEnv {
+        dc: dc_logic.clone(),
+        pools: Arc::clone(&env.pools),
+        locator: Arc::clone(&env.locator),
+        clusters: Arc::clone(&env.clusters) as Arc<dyn sprig_feed::Clusters>,
+    };
     // Chapter 45's stream sequencers, on the logic jobs' pools and feeds.
     let streams_env = streams::StreamsEnv::from_logic(&env);
     // Chapter 51's sink tasks, on the same pools, with the global tier
@@ -230,6 +239,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         .with_handler(Arc::new(logic::LogicTrigger(env.clone())))
         .with_handler(Arc::new(logic::LogicSchedule(env)))
         .with_handler(Arc::new(inherit::InheritCopy(inherit_env)))
+        .with_handler(Arc::new(graph_mirror::GraphMirror(graph_mirror_env)))
         .with_handler(Arc::new(streams::StreamSequencer(streams_env)))
         .with_handler(Arc::new(sinks::SinkTask(sinks_env)))
         .with_handler(Arc::new(msg_triggers::StreamTrigger(msg_env.clone())))

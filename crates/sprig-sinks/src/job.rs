@@ -484,8 +484,13 @@ impl Control for CatalogControl {
     }
 }
 
-/// Opens one connection: options, credentials, destination rules.
-async fn open_conn(
+/// Opens one connection: options, credentials, destination rules (also
+/// chapter 52's approval webhooks through a tenant's connection).
+///
+/// # Errors
+/// 39210 for a connection that is gone; 39216 for credentials that don't
+/// open; 39232 for a platform connection not granted to the tenant.
+pub async fn open_conn(
     env: &dyn SinkEnv,
     tenant: TenantId,
     catalog: &mut mysql_async::Conn,

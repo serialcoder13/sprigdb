@@ -16,6 +16,7 @@ use sprig_common::SprigError;
 use tonic::body::Body;
 
 use super::{hdr, invalid, parse_json, passthrough, read_body, rows_of, run_sql};
+use crate::http::sql::Caller as SqlCaller;
 use crate::http::{ConnInfo, Core};
 
 /// The caller's `ALTER` and `INDEX` grants and administrator right, from
@@ -89,7 +90,6 @@ fn enc(s: &str) -> String {
 ///
 /// # Errors
 /// 39792 for an unknown route; the controller's errors.
-#[allow(clippy::too_many_lines)] // one arm per route
 pub async fn handle(
     core: &Arc<Core>,
     info: &ConnInfo,
@@ -102,10 +102,34 @@ pub async fn handle(
     let query = req.uri().query().unwrap_or("").to_owned();
     let body = read_body(req).await?;
     let caller = core.caller(info, auth, None, host).await?;
+    let rest = path.trim_start_matches("/v1/recommendations");
+    let r = proxy(core, &caller, &method, rest, &query, &body).await?;
+    Ok(passthrough(r.status, r.body))
+}
+
+/// One call of a tenant user to the controller's `Recommendations`
+/// service, with the user as a caller claim: `rest` is the part after
+/// `/v1/recommendations` (`""`, `/{id}`, `/{id}:{action}`, `:bulk`,
+/// `:policy`, `:subscriptions`). The REST face above and gRPC's
+/// `sprig.admin.v1.Recommendations` (for tenant logins) both call it.
+///
+/// # Errors
+/// 39792 for an unknown route or a login without a tenant; the
+/// controller's errors.
+#[allow(clippy::too_many_lines)] // one arm per route
+pub async fn proxy(
+    core: &Arc<Core>,
+    caller: &SqlCaller,
+    method: &Method,
+    rest: &str,
+    query: &str,
+    body: &[u8],
+) -> Result<crate::http::admin::Reply, SprigError> {
+    let query = query.to_owned();
     let Some(tenant) = caller.principal.tenant_name.clone() else {
         return Err(invalid("the approvals inbox needs a tenant login"));
     };
-    let grants = run_sql(core, &caller, "-", "SHOW GRANTS".to_owned()).await?;
+    let grants = run_sql(core, caller, "-", "SHOW GRANTS".to_owned()).await?;
     let lines: Vec<String> = rows_of(&grants)
         .into_iter()
         .filter_map(|r| r.into_iter().next().flatten())
@@ -131,7 +155,6 @@ pub async fn handle(
             && s.chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'))
     };
-    let rest = path.trim_start_matches("/v1/recommendations");
     let base = "/admin/v1/recommendations";
     let (m, target, fwd): (Method, String, Bytes) = match (method.as_str(), rest) {
         ("GET", "" | "/") => {
@@ -170,7 +193,7 @@ pub async fn handle(
             Bytes::new(),
         ),
         ("POST", ":subscriptions") => {
-            let b = parse_json(&body)?;
+            let b = parse_json(body)?;
             let fwd = json!({
                 "tenant": tenant,
                 "user": caller.principal.user,
@@ -186,7 +209,7 @@ pub async fn handle(
             )
         }
         ("POST", ":bulk") => {
-            let mut b = parse_json(&body)?;
+            let mut b = parse_json(body)?;
             if let Value::Object(o) = &mut b {
                 o.insert(
                     "caller".into(),
@@ -209,7 +232,7 @@ pub async fn handle(
             let mut b = if body.iter().all(u8::is_ascii_whitespace) {
                 json!({})
             } else {
-                parse_json(&body)?
+                parse_json(body)?
             };
             if let Value::Object(o) = &mut b {
                 o.insert(
@@ -224,10 +247,13 @@ pub async fn handle(
                 Bytes::from(b.to_string()),
             )
         }
-        _ => return Err(invalid(format!("no route {method} {path}"))),
+        _ => {
+            return Err(invalid(format!(
+                "no route {method} /v1/recommendations{rest}"
+            )));
+        }
     };
-    let r = core.admin.forward_internal(&m, &target, fwd).await?;
-    Ok(passthrough(r.status, r.body))
+    core.admin.forward_internal(&m, &target, fwd).await
 }
 
 #[cfg(test)]

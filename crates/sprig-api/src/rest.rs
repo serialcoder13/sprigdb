@@ -551,6 +551,62 @@ pub static ROUTES: &[Route] = &[
         "/admin/v1/gateways/{name}:drain",
         "NameRequest"
     ),
+    r!(
+        "sprig.admin.v1.Recommendations",
+        "ListRecommendations",
+        "GET",
+        "/admin/v1/recommendations",
+        "ListRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Recommendations",
+        "GetRecommendation",
+        "GET",
+        "/admin/v1/recommendations/{name}",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Recommendations",
+        "ActOnRecommendation",
+        "POST",
+        "/admin/v1/recommendations/{name}:act",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Recommendations",
+        "BulkAct",
+        "POST",
+        "/admin/v1/recommendations:bulk",
+        "BodyRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Recommendations",
+        "GetApprovalPolicy",
+        "GET",
+        "/admin/v1/recommendations:policy",
+        "ListRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Recommendations",
+        "SetApprovalPolicy",
+        "POST",
+        "/admin/v1/recommendations:policy",
+        "BodyRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Recommendations",
+        "ListSubscriptions",
+        "GET",
+        "/admin/v1/recommendations:subscriptions",
+        "ListRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Recommendations",
+        "SetSubscription",
+        "POST",
+        "/admin/v1/recommendations:subscriptions",
+        "BodyRequest"
+    ),
 ];
 
 /// The route for `Service.Rpc` (package-less, as [`Route::short_name`]).

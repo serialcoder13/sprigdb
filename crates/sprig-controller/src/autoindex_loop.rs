@@ -53,6 +53,7 @@ use std::time::{Duration, SystemTime};
 
 use mysql_async::Conn;
 use sprig_advisor::autoindex::model::AutoIndexId;
+use sprig_advisor::autoindex::observe::RemovalGate;
 use sprig_advisor::autoindex::observe::user::UserStep;
 use sprig_advisor::autoindex::observe::{
     self, ObserveCx, ObserveSettings, ObserveStep, WorkloadSource, drift,
@@ -187,6 +188,8 @@ pub struct ObjectEnv {
     /// Validation settings, resolved at the object (the replay keys, the
     /// thresholds, lock waits and the estimate margin).
     pub validation: ValidationSettings,
+    /// The object's database: id and name (chapter 52's items name it).
+    pub db: Option<(sprig_common::ids::DbId, String)>,
 }
 
 /// Where the loop finds catalogs, objects and clusters.
@@ -531,6 +534,7 @@ async fn pass(
         let Some(r) = store.index_by_name(&mut q, *object, name).await? else {
             continue;
         };
+        let removals = crate::approvals::index::removal_gate(tenant, *object, o);
         let cx = ObserveCx {
             tenant,
             view: &o.view,
@@ -541,6 +545,7 @@ async fn pass(
             workload: &*hooks.workload,
             decisions: &*hooks.decisions,
             now,
+            removals: removals.as_ref().map(|g| g as &dyn RemovalGate),
         };
         match observe::retire_now(&store, &mut q, &cx, &r, *reason).await {
             Ok(st) => rep.retired.push((r.index_id, st)),
@@ -555,6 +560,7 @@ async fn pass(
         if o.mode == Mode::Off {
             continue;
         }
+        let removals = crate::approvals::index::removal_gate(tenant, r.object, o);
         let cx = ObserveCx {
             tenant,
             view: &o.view,
@@ -565,6 +571,7 @@ async fn pass(
             workload: &*hooks.workload,
             decisions: &*hooks.decisions,
             now,
+            removals: removals.as_ref().map(|g| g as &dyn RemovalGate),
         };
         match observe::step(&store, &mut q, &cx, r).await {
             Ok(s) => {
@@ -613,6 +620,7 @@ async fn pass(
                 workload: &*hooks.workload,
                 decisions: &*hooks.decisions,
                 now,
+                removals: None,
             };
             match drift::reconcile_object(&store, &mut q, &cx, *object).await {
                 Ok(d) => rep.drift.push((*object, d)),
@@ -663,6 +671,7 @@ async fn user_pass(
             // an index left IGNORED is made visible again.
             rules.retire_user_indexes = Mode::Off;
         }
+        let removals = crate::approvals::index::removal_gate(tenant, *object, o);
         let cx = ObserveCx {
             tenant,
             view: &o.view,
@@ -673,6 +682,7 @@ async fn user_pass(
             workload: &*hooks.workload,
             decisions: &*hooks.decisions,
             now,
+            removals: removals.as_ref().map(|g| g as &dyn RemovalGate),
         };
         match observe::user::object_pass(store, q, &cx, *object).await {
             Ok(steps) => {

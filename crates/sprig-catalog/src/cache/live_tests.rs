@@ -192,7 +192,7 @@ fn run_live_sequence(ops: Vec<OpSpec>) {
                         }
                         OpSpec::Gap => {
                             let c = cat.change(T, VersionKind::Catalog).await.unwrap();
-                            c.rollback().await.unwrap();
+                            c.abandon().await.unwrap();
                         }
                         OpSpec::Purge(back) => {
                             let mut conn = pool.get_conn().await.unwrap();

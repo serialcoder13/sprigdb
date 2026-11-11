@@ -924,6 +924,7 @@ mod tests {
     const D: &str = "DEFINER=`t1_u7`@`%`";
 
     #[test]
+    #[allow(clippy::too_many_lines)] // one case per kind of stored code
     fn stored_code_runs_in_the_session_mode_with_logical_names() {
         assert_eq!(
             in_mode("CREATE PROCEDURE p() SELECT 1", Some("PIPES_AS_CONCAT")),

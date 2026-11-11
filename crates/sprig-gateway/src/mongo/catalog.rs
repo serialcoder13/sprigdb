@@ -34,7 +34,7 @@ use sprig_catalog::cache::{ExtState, SnapshotTx};
 use sprig_catalog::ddl::{LOWER_CASE_TABLE_NAMES, database_key, object_key};
 use sprig_catalog::migrate::{MigrateOpts, Migration, Migrator, Module, Phase};
 use sprig_catalog::store::{Namespace, ObjectKind};
-use sprig_catalog::version::VersionKind;
+use sprig_catalog::version::{ChangeOpts, VersionKind};
 use sprig_catalog::{CatalogExtension, CatalogLocator, Freshness, TenantCatalog};
 use sprig_common::ids::TenantId;
 use sprig_common::names::quote;
@@ -786,10 +786,13 @@ impl CatalogDocs {
         self.prepare(tenant).await?;
         let cat = self.snapshot(tenant).await?;
         let lctn = self.lctn(&cat);
+        // Decision PF1: the version row is locked first and a version is
+        // allocated only when something is written, so finding the
+        // collection already registered leaves no gap.
         let mut ch = self
             .svc
             .catalog
-            .change(tenant, VersionKind::Catalog)
+            .lock(tenant, VersionKind::Catalog)
             .await?;
         let r: Result<Option<CollMeta>> = async {
             let (store, tx) = ch.tx().parts();
@@ -827,16 +830,16 @@ impl CatalogDocs {
         .await;
         match r {
             Ok(Some(x)) => {
-                let _ = ch.rollback().await;
+                let _ = ch.release().await;
                 Ok(Some(x))
             }
             Ok(None) => {
-                let v = ch.commit().await?;
+                let v = ch.allocate(ChangeOpts::default()).await?.commit().await?;
                 self.saw(tenant, v);
                 Ok(None)
             }
             Err(e) => {
-                let _ = ch.rollback().await;
+                let _ = ch.release().await;
                 Err(e)
             }
         }
@@ -858,10 +861,11 @@ impl CatalogDocs {
         self.prepare(tenant).await?;
         let cat = self.snapshot(tenant).await?;
         let lctn = self.lctn(&cat);
+        // Decision PF1: allocate only when `f` changed something.
         let mut ch = self
             .svc
             .catalog
-            .change(tenant, VersionKind::Catalog)
+            .lock(tenant, VersionKind::Catalog)
             .await?;
         let r: Result<bool> = async {
             let (store, tx) = ch.tx().parts();
@@ -880,16 +884,16 @@ impl CatalogDocs {
         .await;
         match r {
             Ok(true) => {
-                let v = ch.commit().await?;
+                let v = ch.allocate(ChangeOpts::default()).await?.commit().await?;
                 self.saw(tenant, v);
                 Ok(Some(v))
             }
             Ok(false) => {
-                let _ = ch.rollback().await;
+                let _ = ch.release().await;
                 Ok(None)
             }
             Err(e) => {
-                let _ = ch.rollback().await;
+                let _ = ch.release().await;
                 Err(e)
             }
         }
@@ -899,10 +903,14 @@ impl CatalogDocs {
     /// database, or a table dropped by SQL), in one change.
     async fn purge_orphans(&self, tenant: TenantId) -> Result<()> {
         self.prepare(tenant).await?;
+        // Decision PF1: after nearly every `dropDatabase` there is nothing
+        // to purge; the version row is locked, and a version allocated only
+        // when rows go (before, each call left a gap that held every
+        // `Freshness::Latest` load of the tenant for `catalog.version_wait_ms`).
         let mut ch = self
             .svc
             .catalog
-            .change(tenant, VersionKind::Catalog)
+            .lock(tenant, VersionKind::Catalog)
             .await?;
         let r: Result<u64> = async {
             let (store, tx) = ch.tx().parts();
@@ -925,16 +933,16 @@ impl CatalogDocs {
         .await;
         match r {
             Ok(0) => {
-                let _ = ch.rollback().await;
+                let _ = ch.release().await;
                 Ok(())
             }
             Ok(_) => {
-                let v = ch.commit().await?;
+                let v = ch.allocate(ChangeOpts::default()).await?.commit().await?;
                 self.saw(tenant, v);
                 Ok(())
             }
             Err(e) => {
-                let _ = ch.rollback().await;
+                let _ = ch.release().await;
                 Err(e)
             }
         }

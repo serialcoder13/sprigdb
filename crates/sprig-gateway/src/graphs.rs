@@ -52,6 +52,7 @@ use sprig_shard::{KeyClass, KeySpec, ShardMap, ShardMapCache, ShardMapStore, sha
 
 use crate::tenant::TenantServices;
 
+pub(crate) mod mirror;
 pub(crate) mod txn;
 
 /// Ids handed out per block of the counter table.
@@ -118,6 +119,8 @@ pub struct GatewayGraphs {
     dtx_ready: Mutex<HashSet<(String, String)>>,
     /// Chapter 18's coordinator pieces for Bolt transactions.
     pub(crate) coord: txn::CoordServices,
+    /// Round 5: asynchronous mirrors' mode changes and subscriptions.
+    pub(crate) mirrors: mirror::MirrorState,
 }
 
 type Names = (BTreeMap<u32, String>, BTreeMap<u32, String>);
@@ -158,6 +161,7 @@ impl GatewayGraphs {
             maps: Mutex::new(HashMap::new()),
             dtx_ready: Mutex::new(HashSet::new()),
             coord: txn::CoordServices::new(),
+            mirrors: mirror::MirrorState::default(),
         }
     }
 
@@ -303,7 +307,11 @@ impl GatewayGraphs {
                 version: map.version,
                 shards,
                 seq: Tables::of(default_schema, def.graph_id).seq,
-                mirrors: def.mirrors,
+                // Every grouped graph has mirror rows (decision G29); who
+                // keeps them follows `graph.mirror` (round 5).
+                mirrors: true,
+                mirror_async: def.mirror_async,
+                mirror_building: !def.mirrors,
             }),
             held,
         ))

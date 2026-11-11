@@ -286,6 +286,33 @@ async fn settle_closes_a_gap_and_is_a_no_op_otherwise() {
     c.rollback().await.unwrap();
 }
 
+/// Decision PF1: a change rolled back on purpose (nothing to write) leaves
+/// no gap, so `Freshness::Latest` loaders don't wait for it; an abandoned
+/// one (a crash) still does, until the next change or `settle`.
+#[tokio::test(start_paused = true)]
+async fn rollback_settles_its_version_and_abandon_leaves_a_gap() {
+    let (g, v) = setup().await;
+    commit_one(&v, VersionKind::Catalog).await.unwrap();
+    let c = v.change(T, VersionKind::Catalog).await.unwrap();
+    assert_eq!(c.version(), 2);
+    c.rollback().await.unwrap();
+    assert_eq!(directory(&*g, T).await["catalog_version"], 2);
+    let cat = v.backend().read(T).unwrap();
+    assert_eq!(cat.catalog, 2, "the rolled-back version is committed empty");
+    assert!(cat.commits.last().unwrap().rows.is_empty());
+    let c = v.change(T, VersionKind::Catalog).await.unwrap();
+    assert_eq!((c.previous(), c.version()), (2, 3));
+    c.abandon().await.unwrap();
+    assert_eq!(v.backend().read(T).unwrap().catalog, 2, "a gap");
+    assert_eq!(directory(&*g, T).await["catalog_version"], 3);
+    assert_eq!(commit_one(&v, VersionKind::Catalog).await.unwrap(), 4);
+    // Auth versions settle the same way, on their own row.
+    let a = v.change(T, VersionKind::Auth).await.unwrap();
+    a.rollback().await.unwrap();
+    assert_eq!(v.backend().read(T).unwrap().auth, 1);
+    assert_eq!(directory(&*g, T).await["auth_version"], 1);
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_directory_behind_the_catalog_never_reissues_versions() {
     let (g, v) = setup().await;

@@ -1,6 +1,6 @@
 //! The `graph.*` settings (chapter 43, "Configuration") this build reads.
-//! Keys for features not built yet (mirrors, partitioning, the plugin,
-//! algorithms) are not registered.
+//! Keys for features not built yet (partitioning, the plugin, algorithms)
+//! are not registered.
 
 use std::borrow::Cow;
 
@@ -76,6 +76,21 @@ key!(
     TRAVERSAL_TIER: Cow<'static, str> = "graph.traversal_tier", Cow::Borrowed("auto"), Scopes::ALL,
     HardBounds::one_of(&["auto", "cte", "gateway", "plugin"]),
     "Traversal tier: auto, cte, gateway or plugin"
+);
+
+key!(
+    /// `graph.mirror` (round 5): `async` mirrors are kept by the worker's
+    /// applier once it serves the graph; until then, and under `sync` or
+    /// `off` (not built: kept as `sync`), writers keep them in their own
+    /// transaction.
+    MIRROR: Cow<'static, str> = "graph.mirror", Cow::Borrowed("async"), Scopes::DATA,
+    HardBounds::one_of(&["off", "async", "sync"]),
+    "Mirrors of incoming relationships: off, async or sync"
+);
+key!(
+    /// `graph.mirror_max_wait_ms` (round 5).
+    MIRROR_MAX_WAIT_MS: u64 = "graph.mirror_max_wait_ms", 1000, Scopes::DATA, HardBounds::range(0, 60_000),
+    "Wait for the mirror applier to reach the session's causal target before scattering"
 );
 
 /// The budgets from settings, read through `get`.

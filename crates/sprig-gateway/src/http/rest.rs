@@ -516,8 +516,7 @@ pub async fn forwarded(core: &Arc<Core>, req: ForwardRequest) -> ForwardReply {
         let auth = (!req.authorization.is_empty()).then(|| req.authorization.clone());
         let caller = core.caller(&info, auth, None, None).await?;
         // Studio's cursors (chapter 44) aren't in the route table.
-        if let Some(r) =
-            super::studio::cursors::forwarded(core, &caller, &req.method, &body).await
+        if let Some(r) = super::studio::cursors::forwarded(core, &caller, &req.method, &body).await
         {
             return r;
         }

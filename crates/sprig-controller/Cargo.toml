@@ -63,6 +63,12 @@ uuid.workspace = true
 [dev-dependencies]
 # tests/live_node_rebuild.rs's test PKI (decision RC2), already in the tree.
 rcgen.workspace = true
+# Chapter 52's approval webhook tests: an HTTPS receiver in process.
+rustls.workspace = true
+tokio-rustls.workspace = true
+# Chapter 52's multi-DC test calls the gateways' gRPC Recommendations.
+sprig-api.workspace = true
+tonic = { workspace = true, features = ["channel"] }
 # tests/live_split.rs builds a cluster access by hand (chapter 20).
 sprig-binlog.workspace = true
 tracing-subscriber.workspace = true

@@ -421,3 +421,199 @@ async fn a_new_leader_waits_three_ttls_before_acting_on_a_missing_lease() {
     let out = g.tick().await.expect("tick");
     assert_eq!(ended(&out[0]).state, FailoverState::Done);
 }
+
+/// Chapter 52: approvals over `w`'s tiers with `failover.mode = approve`
+/// set at the global scope.
+async fn approvals_over(w: &World) -> Arc<crate::approvals::ControllerApprovals> {
+    let ams = TierView::over(&w.store, Tier::Dc(dc("ams1")));
+    let live = sprig_settings::LiveSettings::start(
+        sprig_settings::Registry::global().expect("registry"),
+        sprig_settings::SettingsStores::new(Arc::clone(&w.store), ams).expect("stores"),
+    )
+    .expect("live");
+    live.ready().await;
+    put(
+        &w.store,
+        Tier::Global.key("settings/failover.mode").expect("k"),
+        br#"{"v":1,"value":"approve","set_by":"test"}"#.to_vec(),
+        None,
+    )
+    .await;
+    let hub = sprig_approvals::Approvals::new(
+        Arc::new(sprig_approvals::MemStores::new()),
+        Arc::clone(&w.clock),
+    );
+    let a = Arc::new(crate::approvals::ControllerApprovals::new(
+        Arc::new(hub),
+        dc("ams1"),
+        crate::tree::Directory::new(Arc::clone(&w.store)),
+        Some(live),
+    ));
+    for _ in 0..200 {
+        let p = a
+            .policy(sprig_approvals::Kind::FailoverDc, None, None, None, None)
+            .await;
+        if p.mode == sprig_approvals::Mode::Approve {
+            return a;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("failover.mode = approve never reached the settings");
+}
+
+fn global_items(a: &crate::approvals::ControllerApprovals) -> Arc<dyn sprig_approvals::RecStore> {
+    a.hub().stores().global().expect("global store")
+}
+
+#[allow(clippy::many_single_char_names)]
+#[tokio::test(start_paused = true)]
+async fn an_approval_releases_a_held_promotion_only_while_the_checks_allow_it() {
+    use sprig_approvals::{Act, Caller, Filter, State};
+    let w = world().await;
+    let a = approvals_over(&w).await;
+    let obs = scripted(
+        &[("ams1", VerdictKind::Down), ("wit1", VerdictKind::Down)],
+        800,
+    );
+    let g =
+        driver(&w, Arc::clone(&obs), FailoverSettings::default()).with_approvals(Arc::clone(&a));
+    assert!(g.tick().await.expect("tick").is_empty());
+    w.store
+        .revoke_lease(w.leases["fra1"])
+        .await
+        .expect("revoke");
+    // 1. The DC fails, but the promotion waits: tenant 42 stays planned
+    //    and fenced in fra1, with the item in its reason.
+    let out = g.tick().await.expect("tick");
+    let f = ended(&out[0]).clone();
+    assert_eq!(f.state, FailoverState::Promoting, "{f:?}");
+    let t42 = f.tenants.iter().find(|t| t.tenant_id == 42).expect("42");
+    assert_eq!(t42.outcome, "planned");
+    assert!(
+        t42.reason
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("held for approval as g."),
+        "{t42:?}"
+    );
+    assert_eq!(home(&w, 42).await.0, "fra1");
+    let items = global_items(&a)
+        .list(&Filter::default())
+        .await
+        .expect("list");
+    assert_eq!(
+        items.len(),
+        1,
+        "one item: tenants 77 and 99 were skipped by the checks"
+    );
+    let item = items[0].clone();
+    assert_eq!(item.kind, sprig_approvals::Kind::FailoverDc);
+    assert_eq!(item.level, sprig_approvals::Level::Platform);
+    assert_eq!(item.state, State::Open);
+    // Passes while held ask the gate at most every HOLD_RECHECK and write
+    // nothing.
+    for _ in 0..5 {
+        g.tick().await.expect("tick");
+    }
+    assert_eq!(home(&w, 42).await.0, "fra1");
+    // 2. A tenant administrator may not approve a platform item.
+    let admin = Caller {
+        name: "studio:t42.ana".into(),
+        tenant: Some(TenantId(42)),
+        tenant_admin: true,
+        ..Caller::default()
+    };
+    let approve = Act::Approve {
+        reason: "go".into(),
+        window: None,
+    };
+    let e = a
+        .hub()
+        .act(
+            &item.id,
+            &approve,
+            &admin,
+            &[],
+            sprig_approvals::ActKnobs::default(),
+        )
+        .await
+        .expect_err("denied");
+    assert_eq!(e.code(), Some(sprig_common::SprigCode::ApprovalDenied));
+    // 3. The platform approves; the next check (after HOLD_RECHECK)
+    //    observes again, finds the DC still down and the standby within
+    //    its RPO, and promotes.
+    a.hub()
+        .act(
+            &item.id,
+            &approve,
+            &Caller::platform("op:test"),
+            &[],
+            sprig_approvals::ActKnobs::default(),
+        )
+        .await
+        .expect("approve");
+    let asked_before = obs.asked.lock().expect("lock").len();
+    tokio::time::sleep(HOLD_RECHECK + Duration::from_secs(1)).await;
+    let out = g.tick().await.expect("tick");
+    let f = ended(&out[0]);
+    assert_eq!(f.state, FailoverState::Done, "{f:?}");
+    assert!(
+        obs.asked.lock().expect("lock").len() > asked_before,
+        "observed again before promoting"
+    );
+    assert_eq!(home(&w, 42).await, ("ams1".into(), 4, "active".into()));
+    let done = a.hub().get(&item.id).await.expect("get");
+    assert_eq!(done.state, State::Applied, "{done:?}");
+}
+
+#[allow(clippy::many_single_char_names)]
+#[tokio::test(start_paused = true)]
+async fn an_approved_promotion_is_refused_when_the_standby_fell_behind() {
+    use sprig_approvals::{Act, Caller, Filter, State};
+    let w = world().await;
+    let a = approvals_over(&w).await;
+    let obs = scripted(
+        &[("ams1", VerdictKind::Down), ("wit1", VerdictKind::Down)],
+        800,
+    );
+    let g =
+        driver(&w, Arc::clone(&obs), FailoverSettings::default()).with_approvals(Arc::clone(&a));
+    g.tick().await.expect("tick");
+    w.store
+        .revoke_lease(w.leases["fra1"])
+        .await
+        .expect("revoke");
+    g.tick().await.expect("tick");
+    let item = global_items(&a)
+        .list(&Filter::default())
+        .await
+        .expect("list")[0]
+        .clone();
+    a.hub()
+        .act(
+            &item.id,
+            &Act::Approve {
+                reason: String::new(),
+                window: None,
+            },
+            &Caller::platform("op:test"),
+            &[],
+            sprig_approvals::ActKnobs::default(),
+        )
+        .await
+        .expect("approve");
+    // Meanwhile the standby's lag grew past the 5 s RPO: the approval
+    // can't force the promotion.
+    let obs2 = scripted(
+        &[("ams1", VerdictKind::Down), ("wit1", VerdictKind::Down)],
+        9000,
+    );
+    let g2 = driver(&w, obs2, FailoverSettings::default()).with_approvals(Arc::clone(&a));
+    let out = g2.tick().await.expect("tick");
+    let f = ended(&out[0]);
+    let t42 = f.tenants.iter().find(|t| t.tenant_id == 42).expect("42");
+    assert_eq!(t42.outcome, "skipped", "{t42:?}");
+    assert_eq!(home(&w, 42).await.0, "fra1", "still fenced in fra1");
+    let r = a.hub().get(&item.id).await.expect("get");
+    assert_eq!(r.state, State::Failed, "{r:?}");
+}

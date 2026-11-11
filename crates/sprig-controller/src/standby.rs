@@ -181,12 +181,22 @@ impl StandbyLoop {
 
     /// Chapter 52's gate: whether to create (`dc` `None`) or drop the
     /// standby in `dc` now. Without an approvals hub: always.
-    async fn standby_gate(&self, tenant: TenantId, dc: Option<&DcId>, want: usize, have: usize) -> bool {
+    async fn standby_gate(
+        &self,
+        tenant: TenantId,
+        dc: Option<&DcId>,
+        want: usize,
+        have: usize,
+    ) -> bool {
         use sprig_approvals::{Action, Kind, Proposal, Verdict};
         let Some(a) = &self.approvals else {
             return true;
         };
-        let kind = if dc.is_some() { Kind::StandbyDrop } else { Kind::StandbyCreate };
+        let kind = if dc.is_some() {
+            Kind::StandbyDrop
+        } else {
+            Kind::StandbyCreate
+        };
         let policy = a.policy(kind, Some(tenant), None, None, None).await;
         let p = Proposal {
             kind,
@@ -202,7 +212,9 @@ impl StandbyLoop {
             evidence: serde_json::json!({ "want": want, "have": have }),
             score: 1.0,
             summary: match dc {
-                Some(d) => format!("drop the standby in {d}: {have} standbys, failover.standby_dcs = {want}"),
+                Some(d) => format!(
+                    "drop the standby in {d}: {have} standbys, failover.standby_dcs = {want}"
+                ),
                 None => format!("create a standby: {have} standbys, failover.standby_dcs = {want}"),
             },
             emergency: false,

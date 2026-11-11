@@ -268,20 +268,23 @@ impl ShardingLoop {
         }
     }
 
-    /// Chapter 52's gate for a split, merge or move proposal: `None` to
-    /// go ahead, `Some(why)` to hold. Only under `approve` and `recommend`
-    /// with an approvals hub.
+    /// Chapter 52's gate for a split, merge or move proposal: `Ok` to go
+    /// ahead (with the ticket to report the submission with, when an item
+    /// tracks it), `Err(why)` to hold. Only under `approve` and
+    /// `recommend` with an approvals hub.
     async fn approval_gate(
         &self,
         tenant: TenantId,
         p: &shards::Proposal,
         subject: &str,
         mode: ShardingMode,
-    ) -> Option<String> {
+    ) -> std::result::Result<Option<sprig_approvals::Ticket>, String> {
         use sprig_approvals::{Action, Kind, Proposal, Verdict};
-        let a = self.approvals.get()?;
+        let Some(a) = self.approvals.get() else {
+            return Ok(None);
+        };
         if !matches!(mode, ShardingMode::Approve | ShardingMode::Recommend) {
-            return None;
+            return Ok(None);
         }
         let kind = match p.job.kind() {
             "split" => Kind::ShardSplit,
@@ -309,11 +312,18 @@ impl ShardingLoop {
             emergency: false,
         };
         match a.gate(&gp, &policy).await {
-            Verdict::Proceed(_) => None,
-            Verdict::Wait(id) => Some(format!("held for approval as {id}")),
-            Verdict::Advice(id) => Some(format!("recommended as {id}")),
-            Verdict::Suppressed(id) => Some(format!("ignored ({id})")),
-            Verdict::Off => Some("approvals unavailable".into()),
+            Verdict::Proceed(t) => Ok(t.id.is_some().then_some(t)),
+            Verdict::Wait(id) => Err(format!("held for approval as {id}")),
+            Verdict::Advice(id) => Err(format!("recommended as {id}")),
+            Verdict::Suppressed(id) => Err(format!("ignored ({id})")),
+            Verdict::Off => Err("approvals unavailable".into()),
+        }
+    }
+
+    /// Reports a shard job an approval let through.
+    async fn approval_done(&self, ticket: Option<&sprig_approvals::Ticket>, ok: bool, detail: &str) {
+        if let (Some(t), Some(a)) = (ticket, self.approvals.get()) {
+            a.finished(t, ok, detail).await;
         }
     }
 
@@ -704,7 +714,9 @@ impl ShardingLoop {
             // runs again every `advisor_retry`, so an approved design is
             // applied from a fresh run that still finds it.
             use sprig_approvals::{Action, Kind, Proposal, Verdict as Gate};
-            let policy = a.policy(Kind::AdvisorDesign, Some(tenant), None, None, None).await;
+            let policy = a
+                .policy(Kind::AdvisorDesign, Some(tenant), None, None, None)
+                .await;
             let design = found.best.to_json(&asm.input);
             let p = Proposal {
                 kind: Kind::AdvisorDesign,
@@ -737,7 +749,13 @@ impl ShardingLoop {
                 let r = self
                     .apply_run(tenant, ts, home, c, run, d, &found.best, &asm, report)
                     .await;
-                a.finished(&t, r.is_ok(), &r.as_ref().map_or_else(|e| e.message.clone(), |()| format!("run {run} applied"))).await;
+                a.finished(
+                    &t,
+                    r.is_ok(),
+                    &r.as_ref()
+                        .map_or_else(|e| e.message.clone(), |()| format!("run {run} applied")),
+                )
+                .await;
                 return r;
             }
         }
@@ -1150,6 +1168,41 @@ impl ShardingLoop {
             } else {
                 Admission::Wait("ddl")
             };
+            // Chapter 52: under `recommend` an approval in the inbox runs the
+            // job. The gate is asked once the job would be admitted as under
+            // `on` (so an approval isn't spent while a slot or lock is
+            // busy); approved, it goes through the same submission.
+            let mut ticket: Option<sprig_approvals::Ticket> = None;
+            let mut gated = false;
+            let adm = if matches!(adm, Admission::Recommend) && ddl_jobs.is_empty() {
+                let mut on = ts.sharding;
+                on.mode = ShardingMode::On;
+                let would = shards::admit(
+                    &p,
+                    running,
+                    &on,
+                    &cluster,
+                    &lock(&self.backoff),
+                    now_ms(),
+                );
+                if matches!(would, Admission::Submit) {
+                    gated = true;
+                    match self
+                        .approval_gate(tenant, &p, &subject, ts.sharding.mode)
+                        .await
+                    {
+                        Ok(t) => {
+                            ticket = t;
+                            Admission::Submit
+                        }
+                        Err(_) => adm,
+                    }
+                } else {
+                    adm
+                }
+            } else {
+                adm
+            };
             match adm {
                 Admission::Wait(why) => {
                     metrics::counter!("sprig_balancer_jobs_waiting_total", "blocked_by" => why)
@@ -1175,12 +1228,13 @@ impl ShardingLoop {
                     }
                 }
                 Admission::Recommend => {
-                    // Chapter 52: advice in the approvals inbox too; an
-                    // approval there doesn't run it (the mode is still
-                    // `recommend`), the operator does.
-                    let _ = self
-                        .approval_gate(tenant, &p, &subject, ts.sharding.mode)
-                        .await;
+                    // Chapter 52: advice in the approvals inbox too (an
+                    // approval runs it once it would be admitted, above).
+                    if !gated {
+                        let _ = self
+                            .approval_gate(tenant, &p, &subject, ts.sharding.mode)
+                            .await;
+                    }
                     let key = (subject.clone(), "recommend");
                     if lock(&self.state)
                         .entry(tenant)
@@ -1202,19 +1256,25 @@ impl ShardingLoop {
                     }
                 }
                 Admission::Submit => {
-                    if ts.sharding.mode == ShardingMode::Approve
-                        && let Some(why) = self
+                    if ts.sharding.mode == ShardingMode::Approve {
+                        match self
                             .approval_gate(tenant, &p, &subject, ts.sharding.mode)
                             .await
-                    {
-                        report.waiting.push((subject.clone(), "approval"));
-                        tracing::debug!(tenant = %tenant, subject = %subject, why, "shard job held");
-                        continue;
+                        {
+                            Ok(t) => ticket = t,
+                            Err(why) => {
+                                report.waiting.push((subject.clone(), "approval"));
+                                tracing::debug!(tenant = %tenant, subject = %subject, why, "shard job held");
+                                continue;
+                            }
+                        }
                     }
                     let Ok(id) = self
                         .submit(tenant, &map, &dbs, &p, ts, running, report)
                         .await?
                     else {
+                        self.approval_done(ticket.as_ref(), false, "the job couldn't be submitted")
+                            .await;
                         continue;
                     };
                     // The other side of chapter 21's exclusion and of a move
@@ -1234,6 +1294,11 @@ impl ShardingLoop {
                         report.waiting.push((subject.clone(), why));
                         metrics::counter!("sprig_balancer_jobs_waiting_total", "blocked_by" => why)
                             .increment(1);
+                        self.approval_done(ticket.as_ref(), false, &format!("job {} withdrawn: {why}", id.0))
+                            .await;
+                    } else {
+                        self.approval_done(ticket.as_ref(), true, &format!("job {} submitted", id.0))
+                            .await;
                     }
                 }
             }

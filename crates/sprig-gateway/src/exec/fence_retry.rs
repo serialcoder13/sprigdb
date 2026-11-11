@@ -15,8 +15,9 @@
 //! the request's first answer is ERR 1146 or 1049 (nothing sent before it):
 //!   held back from the client
 //!   fence := the database it names is one the tenant has, and the
-//!            token moved or a range is held (waiting up to 1 s for the
-//!            watch to show it)
+//!            token moved or a range is held: in the watched copy, else in
+//!            etcd itself (one listing, R34), else (etcd didn't answer)
+//!            after waiting up to 1 s for the watch to show it
 //!   not a fence                         -> the ERR goes out as it was
 //!   fence, inside a transaction         -> 1213 (the transaction was on the
 //!                                          fenced copy; it is rolled back)
@@ -29,6 +30,18 @@
 //! privileges there (RL13); a write a lagging gateway still sent there gets
 //! 1142, handled the same way (the database check is skipped and the wait
 //! for the watch is 300 ms).
+//!
+//! **What a genuine error costs (R34, bugfix5).** A table that really
+//! doesn't exist used to cost up to [`SETTLE`]: the gateway waited for its
+//! watch in case it lagged behind a hold. Now it lists the tenant's maps in
+//! etcd once (a linearizable read, about a millisecond): a mover writes its
+//! hold `mover.txn_grace_ms` before it renames, so a listing made after the
+//! 1146 arrived shows the hold, or the cutover after it, whatever the
+//! watch's lag. Unchanged maps there mean a real missing table (or a real
+//! missing privilege for 1142), answered at once. Only when etcd doesn't
+//! answer within the wait does the old wait for the watch decide. When etcd
+//! does show a fence the watch hasn't, the gateway still waits (up to the
+//! same bound) for the watch to catch up, so the retry waits out the hold.
 //!
 //! Running an autocommit statement again is safe here: 1146 and 1049 are
 //! raised when the statement opens its tables, before it changes
@@ -58,7 +71,8 @@ pub(super) const MAX_ATTEMPTS: u32 = 3;
 /// How long one request may spend meeting fences, all attempts together.
 pub(super) const MAX_TOTAL: Duration = Duration::from_secs(10);
 /// How long the gateway waits for its watch to show the move that a 1146
-/// suggests before it treats the error as the table's own.
+/// suggests, when etcd itself can't be asked (R34), before it treats the
+/// error as the table's own; also the bound on etcd's answer.
 const SETTLE: Duration = Duration::from_secs(1);
 /// The same for a 1142 (the old home fenced by a failover, RL13): the
 /// maps were quarantined before the fence, so the watch rarely lags.
@@ -105,7 +119,9 @@ fn known_db(e: &SprigError, map: &MemoryNameMap) -> bool {
 
 /// Whether the request that failed with `e` met a mover's fence: the
 /// database is the tenant's and its maps moved (or are held) since
-/// `before`, waiting up to [`SETTLE`] for the watch to show it.
+/// `before`, as the watched copy shows it, else as etcd itself does (R34),
+/// else (etcd didn't answer) waiting up to [`SETTLE`] for the watch to
+/// show it.
 pub(super) async fn met_fence(
     locator: &GatewayLocator,
     tenant: TenantId,
@@ -114,7 +130,7 @@ pub(super) async fn met_fence(
     e: &SprigError,
 ) -> bool {
     // 1142 names an account and a table, not a database; a privilege a
-    // tenant really lacks is answered after a short look at its maps.
+    // tenant really lacks is answered after a look at its maps.
     let revoked = e.protocol().mysql_errno == 1142;
     if !revoked && !known_db(e, map) {
         return false;
@@ -123,16 +139,34 @@ pub(super) async fn met_fence(
         return true; // it ran under a hold (a transaction running on)
     }
     let settle = if revoked { REVOKED_SETTLE } else { SETTLE };
+    // Follows the tenant to another DC when its map there was left.
+    let _ = locator.placement_followed(tenant).await;
+    let now = locator.maps_token(tenant);
+    if now.2 || now != *before {
+        return true;
+    }
+    // R34: etcd itself, whatever the watch's lag (module docs). Asked only
+    // once the watched copy has loaded: `before` is from that copy.
+    let mut confirmed = false;
+    if locator.maps_loaded(tenant) {
+        match tokio::time::timeout(settle, locator.maps_token_fresh(tenant)).await {
+            Ok(Ok(fresh)) if !fresh.2 && fresh == *before => return false,
+            Ok(Ok(_)) => confirmed = true,
+            Ok(Err(e)) => tracing::debug!(%tenant, error = %e, "can't read the tenant's maps; waiting for the watch"),
+            Err(_) => tracing::debug!(%tenant, "etcd didn't list the tenant's maps in time; waiting for the watch"),
+        }
+    }
+    // A fence etcd showed: wait (bounded) until the watch shows it too, so
+    // the retry waits out the hold. Else the old wait for the watch.
     let t0 = Instant::now();
     loop {
-        // Follows the tenant to another DC when its map there was left.
         let _ = locator.placement_followed(tenant).await;
         let now = locator.maps_token(tenant);
         if now.2 || now != *before {
             return true;
         }
         if t0.elapsed() >= settle {
-            return false;
+            return confirmed;
         }
         let mut changes = locator.placement_changes_for(tenant);
         let _ = tokio::time::timeout(Duration::from_millis(100), changes.changed()).await;
@@ -383,5 +417,149 @@ mod tests {
         assert!(known_db(&phys, &map));
         let other = SprigError::backend(1146, *b"42S02", "Table 'nope.orders' doesn't exist");
         assert!(!known_db(&other, &map));
+    }
+
+    mod fresh {
+        //! R34 (bugfix5): a genuine 1146 is answered at once; a fence the
+        //! watch hasn't shown is still met.
+        #![allow(clippy::unwrap_used)]
+
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use futures::StreamExt as _;
+        use sprig_catalog::placement::{RangeState, ShardMap};
+        use sprig_cluster::registry::ClusterRegistry;
+        use sprig_common::ids::ClusterId;
+        use sprig_meta::{
+            Consistency, Key, KeyValue, LeaseId, ListOpts, ListPage, MemStore, MetaStore, Op,
+            Record, Revision, Tier, TierView, Txn, TxnResult, WatchStream,
+        };
+
+        use super::*;
+        use crate::backend::Backends;
+        use crate::backend::cluster::StaticClusters;
+        use crate::backend::settings::{BackendSettings, FixedSettings};
+
+        /// A store whose watches never deliver anything: a gateway whose
+        /// watch lags behind every write.
+        struct NoWatch(Arc<dyn MetaStore>);
+
+        #[async_trait::async_trait]
+        impl MetaStore for NoWatch {
+            fn tier(&self) -> &Tier {
+                self.0.tier()
+            }
+            async fn get(&self, key: &Key, c: Consistency) -> Result<Option<KeyValue>> {
+                self.0.get(key, c).await
+            }
+            async fn list(&self, prefix: &Key, opts: ListOpts) -> Result<ListPage> {
+                self.0.list(prefix, opts).await
+            }
+            async fn txn(&self, txn: Txn) -> Result<TxnResult> {
+                self.0.txn(txn).await
+            }
+            async fn watch(&self, _prefix: &Key, _from: Revision) -> Result<WatchStream> {
+                Ok(futures::stream::pending().boxed())
+            }
+            async fn grant_lease(&self, ttl: Duration) -> Result<LeaseId> {
+                self.0.grant_lease(ttl).await
+            }
+            async fn keep_alive(&self, lease: LeaseId) -> Result<Option<Duration>> {
+                self.0.keep_alive(lease).await
+            }
+            async fn revoke_lease(&self, lease: LeaseId) -> Result<()> {
+                self.0.revoke_lease(lease).await
+            }
+        }
+
+        const T: TenantId = TenantId(7);
+
+        fn dc() -> DcId {
+            DcId::new("dc-a").unwrap()
+        }
+
+        async fn put_map(store: &Arc<dyn MetaStore>, held: bool) {
+            let mut m = ShardMap::catalog(T, ClusterId::new("dc-a-c1").unwrap(), 1);
+            if held {
+                m.ranges[0].state = RangeState::Held;
+            }
+            store
+                .txn(Txn {
+                    when: Vec::new(),
+                    then: vec![Op::Put {
+                        key: ShardMap::catalog_key(store.tier(), T).unwrap(),
+                        value: Record::new(m).encode().unwrap(),
+                        lease: None,
+                    }],
+                    otherwise: Vec::new(),
+                })
+                .await
+                .unwrap();
+        }
+
+        /// A locator over `seen` (what its watch shows) whose tenant's
+        /// map is in `store`, loaded.
+        async fn locator(store: &Arc<dyn MetaStore>, seen: Arc<dyn MetaStore>) -> GatewayLocator {
+            put_map(store, false).await;
+            let global = TierView::over(store, Tier::Global);
+            let backends = Backends::new(
+                dc(),
+                StaticClusters::new(),
+                FixedSettings::new(BackendSettings::default()),
+            );
+            let registry = ClusterRegistry::new(global, Arc::clone(&seen)).unwrap();
+            let l = GatewayLocator::new(seen, registry, backends);
+            for _ in 0..200 {
+                if l.maps_loaded(T) && l.maps_token(T).1 > 0 {
+                    return l;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("the maps never loaded");
+        }
+
+        fn missing() -> SprigError {
+            SprigError::backend(1146, *b"42S02", "Table 'shop.nope' doesn't exist")
+        }
+
+        #[tokio::test]
+        async fn a_missing_table_is_answered_at_once() {
+            let store: Arc<dyn MetaStore> = Arc::new(MemStore::new(Tier::Dc(dc())));
+            let l = locator(&store, Arc::clone(&store)).await;
+            let map = MemoryNameMap::new(T).with_db(1, "shop", 0, 0);
+            let before = l.maps_token(T);
+            let t0 = Instant::now();
+            assert!(!met_fence(&l, T, &map, &before, &missing()).await);
+            let took = t0.elapsed();
+            // Before R34's fix: SETTLE (1 s).
+            assert!(took < Duration::from_millis(200), "took {took:?}");
+            // A privilege really missing: before, REVOKED_SETTLE (300 ms).
+            let denied = SprigError::backend(1142, *b"42000", "INSERT command denied");
+            let t0 = Instant::now();
+            assert!(!met_fence(&l, T, &map, &before, &denied).await);
+            let took = t0.elapsed();
+            assert!(took < Duration::from_millis(100), "took {took:?}");
+        }
+
+        #[tokio::test]
+        async fn a_hold_the_watch_hasnt_shown_is_still_a_fence() {
+            let store: Arc<dyn MetaStore> = Arc::new(MemStore::new(Tier::Dc(dc())));
+            let seen: Arc<dyn MetaStore> = Arc::new(NoWatch(Arc::clone(&store)));
+            let l = locator(&store, seen).await;
+            let map = MemoryNameMap::new(T).with_db(1, "shop", 0, 0);
+            let before = l.maps_token(T);
+            // The mover holds the map, then renames: the watch shows neither.
+            put_map(&store, true).await;
+            assert_eq!(l.maps_token(T), before, "the watch must lag here");
+            // Before R34's fix: not a fence after 1 s (the 1146 reached
+            // the client).
+            assert!(met_fence(&l, T, &map, &before, &missing()).await);
+            // The hold released (the cutover committed): still a fence for
+            // a statement routed before it.
+            put_map(&store, false).await;
+            assert!(met_fence(&l, T, &map, &before, &missing()).await);
+            assert_ne!(l.maps_token_fresh(T).await.unwrap(), before);
+        }
     }
 }

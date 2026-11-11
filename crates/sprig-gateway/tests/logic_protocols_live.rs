@@ -268,6 +268,7 @@ async fn mongo_and_redis_call_logic_functions() {
     // ---- Redis --------------------------------------------------------------------
     let rc = redis::Client::open(redis_url.as_str()).unwrap();
     let mut r = rc.get_multiplexed_async_connection().await.unwrap();
+    #[allow(clippy::items_after_statements)] // next to its only use
     async fn cmd(
         r: &mut redis::aio::MultiplexedConnection,
         args: &[&str],

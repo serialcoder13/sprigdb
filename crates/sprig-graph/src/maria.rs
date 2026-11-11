@@ -19,9 +19,14 @@
 //!   column, `CYCLE o, id RESTRICT`, `max_recursive_iterations` and the
 //!   shard's range: nodes outside it are boundary nodes, returned but not
 //!   expanded (incoming searches recurse over the mirrors).
-//! - **Mirrors** (`graph.mirror = sync`): every edge of a grouped graph has a
-//!   mirror row written in the same transaction, whatever the shard count,
-//!   so splits carry them with no rebuild.
+//! - **Mirrors.** Every edge of a grouped graph has a mirror row on its
+//!   destination's shard, whatever the shard count, so splits carry them
+//!   with no rebuild. Under `sync` (and until the worker's applier serves
+//!   the graph) writers keep it in their own transaction; under `async`
+//!   (round 5, [`crate::mirror`]) the applier keeps it from the feed, and
+//!   a statement reads through mirrors only when its [`MirrorGate`] says
+//!   the applier has reached the session's causal target; otherwise
+//!   incoming hops scatter the `rev` key, and write statements always do.
 //! - Property equalities push down as `JSON_VALUE(props, '$."k"') IN (...)`,
 //!   a superset the gateway rechecks.
 //! - Ids come from [`CounterIds`]: blocks from the counter table on their
@@ -40,6 +45,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 
 use crate::ast::{Dir, Entity, Schema};
 use crate::catalog::{Tables, backend_error};
+use crate::mirror::MirrorGate;
 use crate::store::{
     EdgeKey, EdgeRow, GraphStore, IdKind, IndexDef, NodeRow, Reach, Scan, SchemaCounts, StoreStats,
     rk_of,
@@ -170,6 +176,14 @@ pub struct GraphShards {
     pub seq: String,
     /// Mirror rows are kept for every edge.
     pub mirrors: bool,
+    /// The mirrors are the applier's (`graph.mirror = async`, round 5):
+    /// writers don't write them, and readers use them only after the
+    /// statement's [`MirrorGate`] says they are fresh.
+    pub mirror_async: bool,
+    /// The mirrors are being completed (`mirror_state = building`, after
+    /// `async` went back to `sync`): writers keep them, readers don't use
+    /// them yet.
+    pub mirror_building: bool,
 }
 
 impl GraphShards {
@@ -192,6 +206,8 @@ impl GraphShards {
                 tables,
             }],
             mirrors: false,
+            mirror_async: false,
+            mirror_building: false,
         }
     }
 
@@ -256,6 +272,10 @@ pub struct MariaStore<'c> {
     now_us: u64,
     indexes: Vec<IndexDef>,
     schema: Option<Arc<dyn SchemaOps>>,
+    /// Whether asynchronous mirrors may be read (a read statement's).
+    gate: Option<Arc<dyn MirrorGate>>,
+    /// The gate's answer, asked once per statement.
+    mirror_ok: Option<bool>,
 }
 
 impl std::fmt::Debug for MariaStore<'_> {
@@ -384,7 +404,106 @@ impl<'c> MariaStore<'c> {
             now_us,
             indexes: Vec::new(),
             schema: None,
+            gate: None,
+            mirror_ok: None,
         }
+    }
+
+    /// Asynchronous mirrors may be read when `gate` says they are fresh
+    /// (read statements; without a gate incoming hops scatter).
+    #[must_use]
+    pub fn with_gate(mut self, gate: Option<Arc<dyn MirrorGate>>) -> Self {
+        self.gate = gate;
+        self
+    }
+
+    /// Whether incoming hops read the mirrors: a grouped graph with more
+    /// than one shard whose mirrors are kept synchronously, or are the
+    /// applier's and fresh for this statement.
+    async fn read_mirrors(&mut self) -> bool {
+        if !self.many() || !self.layout.mirrors || self.layout.mirror_building {
+            return false;
+        }
+        if !self.layout.mirror_async {
+            return true;
+        }
+        if let Some(ok) = self.mirror_ok {
+            return ok;
+        }
+        let ok = match &self.gate {
+            Some(g) => g.fresh(&self.layout).await,
+            None => false,
+        };
+        if !ok {
+            let reason = if self.gate.is_some() { "lag" } else { "write" };
+            metrics::counter!("sprig_graph_mirror_fallbacks_total", "reason" => reason)
+                .increment(1);
+        }
+        self.mirror_ok = Some(ok);
+        ok
+    }
+
+    /// Whether writers keep the mirrors in their own transaction.
+    fn write_mirrors(&self) -> bool {
+        self.layout.mirrors && !self.layout.mirror_async
+    }
+
+    /// [`GraphStore::reach`] without the mirrors: level by level through
+    /// [`GraphStore::expand`] (an incoming scatter of the `rev` key per
+    /// level), each node once per origin at its smallest depth, nodes
+    /// outside `shard` returned but not expanded, as the CTE does.
+    async fn reach_levels(
+        &mut self,
+        shard: usize,
+        seeds: &[(u64, u64)],
+        types: &[u32],
+        dir: Dir,
+        hops: u32,
+    ) -> Result<Vec<Reach>> {
+        let lo = self.layout.shards[shard].lo;
+        let hi = self.layout.hi(shard);
+        let inside = |rk: u64| rk >= lo && hi.is_none_or(|h| rk < h);
+        let mut best: HashMap<(u64, u64), Reach> = HashMap::new();
+        let mut frontier: Vec<(u64, u64)> = seeds.to_vec();
+        for d in 1..=hops {
+            if frontier.is_empty() {
+                break;
+            }
+            let mut from: Vec<u64> = frontier.iter().map(|(_, n)| *n).collect();
+            from.sort_unstable();
+            from.dedup();
+            let mut by_near: HashMap<u64, Vec<(u64, u64)>> = HashMap::new();
+            for (e, _) in self.expand(&from, types, dir).await? {
+                let (near, far, rk) = if dir == Dir::In {
+                    (e.dst, e.src, e.src_rk)
+                } else {
+                    (e.src, e.dst, e.dst_rk)
+                };
+                by_near.entry(near).or_default().push((far, rk));
+            }
+            let mut next = Vec::new();
+            for (origin, node) in frontier.drain(..) {
+                for &(far, rk) in by_near.get(&node).map_or(&[][..], Vec::as_slice) {
+                    if best.contains_key(&(origin, far)) {
+                        continue;
+                    }
+                    best.insert(
+                        (origin, far),
+                        Reach {
+                            origin,
+                            node: far,
+                            rk,
+                            depth: d,
+                        },
+                    );
+                    if inside(rk) {
+                        next.push((origin, far));
+                    }
+                }
+            }
+            frontier = next;
+        }
+        Ok(best.into_values().collect())
     }
 
     /// The graph's indexes (used by scans and `SHOW`), and how schema
@@ -875,7 +994,7 @@ impl GraphStore for MariaStore<'_> {
         if dir == Dir::Both {
             return Err(SprigError::internal("expand takes one direction"));
         }
-        if dir == Dir::In && self.many() && self.layout.mirrors {
+        if dir == Dir::In && self.read_mirrors().await {
             // The mirrors on the destinations' shards, then the edges (with
             // their sources) on the sources' shards.
             let by_src = self.mirrors_into(from, types).await?;
@@ -930,20 +1049,17 @@ impl GraphStore for MariaStore<'_> {
                 "reach on a shard the graph doesn't have",
             ));
         }
-        self.stats.cte_queries += 1;
         // Incoming over several shards recurses over the mirrors, whose
-        // rows are local to their destination as edges are to their source.
+        // rows are local to their destination as edges are to their source;
+        // lagging (or no) mirrors: level by level over a scatter of `rev`.
+        if dir == Dir::In && self.many() && !self.read_mirrors().await {
+            return self.reach_levels(shard, seeds, types, dir, hops).await;
+        }
+        self.stats.cte_queries += 1;
         let t = self.t(shard);
         let (table, near, far, far_rk) = match dir {
             Dir::Out => (t.edges.clone(), "src", "dst", "dst_rk"),
-            Dir::In if self.many() => {
-                if !self.layout.mirrors {
-                    return Err(SprigError::internal(
-                        "an incoming search over several shards needs mirrors",
-                    ));
-                }
-                (t.mirrors.clone(), "dst", "src", "src_rk")
-            }
+            Dir::In if self.many() => (t.mirrors.clone(), "dst", "src", "src_rk"),
             Dir::In => (t.edges.clone(), "dst", "src", "_sprig_rk"),
             Dir::Both => return Err(SprigError::internal("reach takes one direction")),
         };
@@ -1037,7 +1153,7 @@ impl GraphStore for MariaStore<'_> {
             }
         }
         // Incoming: mirrors, the `rev` key of one shard, or a scatter.
-        if self.many() && self.layout.mirrors {
+        if self.read_mirrors().await {
             let by_src = self.mirrors_into(nodes, &[]).await?;
             for (e, _) in self.edges_with_src(by_src).await? {
                 if seen.insert(e.id) {
@@ -1195,7 +1311,7 @@ impl GraphStore for MariaStore<'_> {
                 return Err(self.duplicate(e, "Relationship", first));
             }
         }
-        if !self.layout.mirrors {
+        if !self.write_mirrors() {
             return Ok(());
         }
         // Mirrors on the destinations' shards, in the same transaction.
@@ -1403,7 +1519,7 @@ impl GraphStore for MariaStore<'_> {
             );
             n += self.run_at(i, sql, Params::Empty).await?;
         }
-        if self.layout.mirrors {
+        if self.write_mirrors() {
             let mut by: BTreeMap<usize, (Vec<u64>, Vec<u64>)> = BTreeMap::new();
             for e in edges {
                 let x = by.entry(self.layout.index_of(e.dst_rk)).or_default();
@@ -1523,12 +1639,14 @@ pub async fn check_deleted(
     deleted: &[u64],
 ) -> Result<()> {
     let many = layout.shards.len() > 1;
+    // Asynchronous mirrors may lag: the commit check scatters instead.
+    let mirrors = layout.mirrors && !layout.mirror_async && !layout.mirror_building;
     for batch in deleted.chunks(1000) {
         let mut hit: Option<u64> = None;
         for (i, part) in layout.by_shard(batch) {
             let at = &layout.shards[i];
             let l = ids_list(&part);
-            let incoming = if many && layout.mirrors {
+            let incoming = if many && mirrors {
                 format!(
                     " UNION SELECT dst FROM {} WHERE dst IN ({l})",
                     at.tables.mirrors
@@ -1554,7 +1672,7 @@ pub async fn check_deleted(
                 break;
             }
         }
-        if hit.is_none() && many && !layout.mirrors {
+        if hit.is_none() && many && !mirrors {
             let l = ids_list(batch);
             for at in &layout.shards {
                 let conn = conns.conn(at, false).await?;

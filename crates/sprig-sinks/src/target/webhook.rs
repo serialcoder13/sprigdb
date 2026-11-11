@@ -873,6 +873,124 @@ impl WebhookTarget {
     }
 }
 
+/// Chapter 52's approval events through a webhook connection: one JSON
+/// body per event, outside any sink. The connection keeps every rule a
+/// sink's has (the destination checks, TLS and its CA, the authentication)
+/// and signs the body with its `signing_secret`.
+impl WebhookTarget {
+    /// A target for single events on `conn`, named `name` in the
+    /// `Sprig-Sink` header; `opts` are resolved `sink.*` options
+    /// (`http_timeout_ms`, `http_connect_timeout_ms`, `http2`, `signature`).
+    ///
+    /// # Errors
+    /// As [`build`].
+    pub fn for_events(conn: Conn, opts: super::Opts, name: &str) -> Result<Self> {
+        let sink = crate::model::SinkDef {
+            id: crate::model::SinkId(0),
+            db_id: 0,
+            name: name.to_owned(),
+            source: crate::model::SourceSpec::Stream {
+                id: 0,
+                name: "sprig_recommendations".into(),
+                partitions: 1,
+            },
+            filter_sql: None,
+            projection: None,
+            transform: None,
+            target: TargetSpec::Webhook { path: None },
+            connections: Vec::new(),
+            guarantee: crate::model::Guarantee::AtLeastOnce,
+            dead_letter: None,
+            start_at: crate::model::StartAt::Latest,
+            owner_user_id: 0,
+            state: crate::model::SinkState::Running,
+            state_reason: None,
+            definition_ver: 0,
+            options: std::collections::BTreeMap::new(),
+        };
+        let ctx = TargetCtx {
+            task: crate::runtime::TaskInfo {
+                tenant: 0,
+                sink: 0,
+                task_no: 0,
+                epoch: crate::model::TaskEpoch(0),
+            },
+            sink: std::sync::Arc::new(sink),
+            conn: Some(conn),
+            extra: Vec::new(),
+            opts,
+            db_name: String::new(),
+        };
+        Self::new(&ctx)
+    }
+
+    /// POSTs one JSON `body` with `Sprig-Event: event` and the
+    /// idempotency key `idem`, signed and authenticated as the connection
+    /// says; chapter 51's classes of the answer (an OAuth2 token is
+    /// refreshed once on 401).
+    ///
+    /// # Errors
+    /// A connection, TLS or destination-rule failure (39213, 39214, 39220).
+    pub async fn post_event(&self, body: Bytes, idem: &str, event: &str) -> Result<Outcome> {
+        let mut headers = vec![
+            ("content-type".to_owned(), "application/json".to_owned()),
+            ("sprig-event".to_owned(), event.to_owned()),
+            ("sprig-idempotency-key".to_owned(), idem.to_owned()),
+            ("sprig-sink".to_owned(), self.sink_name.clone()),
+            ("traceparent".to_owned(), traceparent()),
+        ];
+        match self.signature {
+            Signature::None => {}
+            Signature::Sprig => {
+                let s = self.ep.conn.secret("signing_secret")?;
+                headers.push((
+                    "sprig-signature".into(),
+                    sprig_signature(s.as_bytes(), unix_now(), &body),
+                ));
+            }
+            Signature::Standard => {
+                let s = self.ep.conn.secret("signing_secret")?;
+                let ts = unix_now();
+                headers.push(("webhook-id".into(), idem.to_owned()));
+                headers.push(("webhook-timestamp".into(), ts.to_string()));
+                headers.push((
+                    "webhook-signature".into(),
+                    standard_signature(&s, idem, ts, &body),
+                ));
+            }
+        }
+        let mut refreshed = false;
+        loop {
+            let mut h = headers.clone();
+            h.extend(self.auth_headers(refreshed).await?);
+            let (status, rh, rbody) =
+                tokio::time::timeout(self.timeout, self.ep.send(&self.path, &h, body.clone()))
+                    .await
+                    .map_err(|_| {
+                        delivery_failed(format!(
+                            "{}: no answer within sink.http_timeout_ms = {} ms",
+                            self.ep.authority,
+                            self.timeout.as_millis()
+                        ))
+                    })??;
+            if status == StatusCode::UNAUTHORIZED
+                && matches!(self.auth, Auth::OAuth2 { .. })
+                && !refreshed
+            {
+                refreshed = true;
+                continue;
+            }
+            return Ok(match self.classify(status, &rh, &rbody, 1) {
+                BatchOutcome::All(o) => o,
+                BatchOutcome::Each(mut v) => v.pop().unwrap_or(Outcome::Ok),
+                BatchOutcome::TooLarge => Outcome::Fail {
+                    reason: format!("{}: HTTP 413", self.ep.authority),
+                },
+            });
+        }
+    }
+}
+
 fn ep_url(a: &Auth) -> String {
     match a {
         Auth::OAuth2 { token_url, .. } => token_url.clone(),

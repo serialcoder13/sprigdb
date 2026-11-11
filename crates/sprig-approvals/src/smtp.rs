@@ -173,8 +173,8 @@ fn split_host_port(s: &str, default: u16) -> Option<(String, u16)> {
     }
     match s.rsplit_once(':') {
         Some((h, p)) if !h.contains(':') => Some((h.to_owned(), p.parse().ok()?)),
-        Some(_) => Some((s.to_owned(), default)), // a bare IPv6 address
-        None => Some((s.to_owned(), default)),
+        // No port, or a bare IPv6 address.
+        _ => Some((s.to_owned(), default)),
     }
 }
 

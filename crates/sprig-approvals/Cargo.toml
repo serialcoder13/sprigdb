@@ -17,6 +17,14 @@ serde.workspace = true
 serde_json.workspace = true
 # Fingerprints: the first 128 bits of SHA-256.
 sha2.workspace = true
+# SMTP over TLS (STARTTLS and implicit TLS): the workspace's rustls with
+# ring, PEM files for the CA and the client certificate, and the Mozilla
+# roots (the same `webpki-roots` 1.x sprig-sinks uses; CDLA-Permissive-2.0
+# data under an MPL-2.0 crate, already in the tree).
+rustls.workspace = true
+rustls-pemfile.workspace = true
+tokio-rustls.workspace = true
+webpki-roots = "1"
 # The `approvals` migration module and the catalog locator.
 sprig-catalog.workspace = true
 sprig-common.workspace = true
@@ -27,6 +35,8 @@ tokio = { workspace = true, features = ["io-util"] }
 tracing.workspace = true
 
 [dev-dependencies]
+# Certificates for the SMTP TLS tests' in-process servers.
+rcgen.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]

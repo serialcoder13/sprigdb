@@ -104,6 +104,9 @@ fn show_text(v: &Value) -> String {
         names("labels"),
         names("types"),
     );
+    if let Some(m) = v["mirror"].as_str() {
+        out.push_str(&format!("Mirrors: {m}\n"));
+    }
     let idx: Vec<[String; 6]> = v["indexes"]
         .as_array()
         .map(|a| {

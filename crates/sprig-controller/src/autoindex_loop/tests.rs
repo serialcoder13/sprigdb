@@ -292,6 +292,7 @@ async fn one_tenant_from_candidate_to_drop() {
                 rollout,
                 observe: ObserveSettings::default(),
                 validation: sprig_advisor::autoindex::validate::ValidationSettings::default(),
+                db: None,
             },
         };
         let hooks = AutoIndexHooks {

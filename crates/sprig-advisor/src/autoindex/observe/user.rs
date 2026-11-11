@@ -416,7 +416,7 @@ async fn bring_back<Q: Queryable + Send>(
 ///
 /// # Errors
 /// Catalog errors; statement failures are [`UserStep::Failed`].
-#[allow(clippy::too_many_lines)] // the state machine, in one place
+#[allow(clippy::too_many_lines, clippy::many_single_char_names)] // the state machine, in one place
 pub async fn object_pass<Q: Queryable + Send>(
     store: &AutoIndexStore,
     q: &mut Q,
@@ -504,13 +504,38 @@ pub async fn object_pass<Q: Queryable + Send>(
                     };
                 let mut step = UserStep::Checked;
                 let mut observed_after = None;
+                // Chapter 52: `on` and `approve` ask the gate first; it holds
+                // the removal under approve (the row shows as recommended).
+                let gate = match &judged {
+                    Some(j) if j.verdict == UsageVerdict::Remove => {
+                        if matches!(mode, Mode::On | Mode::Approve)
+                            && (mode == Mode::On || cx.removals.is_some())
+                        {
+                            let proposal = super::Removal {
+                                object,
+                                index: &ix.name,
+                                user: true,
+                                reason: "unused",
+                                columns: ix.parts.iter().map(|p| p.column.clone()).collect(),
+                                evidence: serde_json::json!({"usage": us.last, "origin": origin.as_str()}),
+                            };
+                            Some(super::gate_removal(cx, &proposal).await)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                let mut ticket: Option<String> = None;
                 if let Some(j) = &judged {
-                    match j.verdict {
-                        UsageVerdict::NotYet => {}
-                        UsageVerdict::Remove if mode == Mode::On => {
+                    match (j.verdict, &gate) {
+                        (UsageVerdict::NotYet, _) => {}
+                        (UsageVerdict::Remove, Some(super::RemovalVerdict::Go(t))) => {
+                            ticket.clone_from(t);
                             if let Err(e) =
                                 on_all_shards(cx, |t| ignore_user_sql(t, &ix.name, true)).await
                             {
+                                super::removal_done(cx, ticket.as_deref(), false, &e).await;
                                 out.push((ix.name.clone(), UserStep::Failed(e)));
                                 continue;
                             }
@@ -525,13 +550,20 @@ pub async fn object_pass<Q: Queryable + Send>(
                             observed_after = Some(with_part(Some(&o), "retire", &rs));
                             step = UserStep::Retiring;
                         }
-                        UsageVerdict::Remove => {
+                        (UsageVerdict::Remove, Some(super::RemovalVerdict::Hold(_))) => {
+                            // Held for approval: recommended, and judged
+                            // again on the same sample when due, so the item
+                            // stays fresh while the evidence holds.
+                            us.verdict = Some("remove".into());
+                            step = UserStep::Recommended;
+                        }
+                        (UsageVerdict::Remove, _) => {
                             // recommend: recorded, judged again on the next sample.
                             us.verdict = Some("remove".into());
                             j.next_sample(&mut us, now_ms);
                             step = UserStep::Recommended;
                         }
-                        v @ (UsageVerdict::Keep | UsageVerdict::Unknown) => {
+                        (v @ (UsageVerdict::Keep | UsageVerdict::Unknown), _) => {
                             us.verdict = Some(
                                 if v == UsageVerdict::Keep {
                                     "keep"
@@ -571,6 +603,9 @@ pub async fn object_pass<Q: Queryable + Send>(
                             log(cx, r, "index.retire", "applied", "unused", format!(
                                 "{} ({}) ignored: rarely used and costing more than it saves; dropped after {} more reads unless a query it served gets slower",
                                 ix.name, origin.as_str(), cx.rules.usage_sample_reads), evidence).await;
+                            super::removal_done(cx, ticket.as_deref(), true, &format!(
+                                "{} ignored; dropped after {} more reads unless a query it served gets slower",
+                                ix.name, cx.rules.usage_sample_reads)).await;
                         }
                     }
                     (UserStep::Recommended, S::Serving) => {
@@ -587,8 +622,11 @@ pub async fn object_pass<Q: Queryable + Send>(
                             .await?
                         {
                             log(cx, r, "index.retire", "recommended", "unused", format!(
-                                "{} ({}) is rarely used and costs more than it saves: recommended for removal (auto_index.retire_user_indexes = recommend)",
-                                ix.name, origin.as_str()), evidence).await;
+                                "{} ({}) is rarely used and costs more than it saves: recommended for removal ({})",
+                                ix.name, origin.as_str(), match &gate {
+                                    Some(super::RemovalVerdict::Hold(why)) => why.clone(),
+                                    _ => "auto_index.retire_user_indexes = recommend".to_owned(),
+                                }), evidence).await;
                         }
                     }
                     (UserStep::Checked, S::Recommended)

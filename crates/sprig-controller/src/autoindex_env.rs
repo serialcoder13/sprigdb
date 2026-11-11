@@ -361,6 +361,7 @@ impl AutoIndexEnv for ControllerEnv {
                     rollout,
                     observe,
                     validation,
+                    db: Some((o.db_id, db.name.clone())),
                 },
             );
         }

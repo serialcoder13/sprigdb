@@ -11,12 +11,7 @@ use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
-use http_body_util::Full;
-use hyper::Request;
 use hyper::body::Bytes;
-use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::rt::TokioExecutor;
 use mysql_async::prelude::Queryable;
 use sprig_approvals::catalog::{SqlRecs, Subscription};
 use sprig_approvals::events::{Outbound, rfc3339};
@@ -25,7 +20,7 @@ use sprig_approvals::metrics::notified;
 use sprig_approvals::model::{NotifyLevel, Recommendation, State};
 use sprig_approvals::policy::kind_listed;
 use sprig_approvals::settings as keys;
-use sprig_approvals::smtp::{Mail, SmtpConfig};
+use sprig_approvals::smtp::{Mail, SmtpConfig, TlsFiles};
 use sprig_approvals::store::Filter;
 use sprig_catalog::CatalogLocator;
 use sprig_common::ids::TenantId;
@@ -45,6 +40,8 @@ pub struct Secrets {
     pub smtp_password: Option<String>,
     /// `approvals_webhook_secret_file`.
     pub webhook_secret: Option<String>,
+    /// `smtp_ca_file`, `smtp_client_cert_file`, `smtp_client_key_file`.
+    pub smtp_tls: TlsFiles,
 }
 
 /// The notification hook.
@@ -52,7 +49,7 @@ pub struct Notifier {
     ctl: OnceLock<Arc<ControllerApprovals>>,
     locator: Arc<dyn CatalogLocator>,
     secrets: Secrets,
-    http: Client<HttpConnector, Full<Bytes>>,
+    webhooks: OnceLock<Arc<super::webhook::Webhooks>>,
     /// Day (since the epoch) of each tenant's last digest run.
     digested: Mutex<BTreeMap<Option<TenantId>, i64>>,
 }
@@ -74,15 +71,19 @@ impl Notifier {
     /// A notifier reading catalogs through `locator`.
     #[must_use]
     pub fn new(locator: Arc<dyn CatalogLocator>, secrets: Secrets) -> Self {
-        let mut c = HttpConnector::new();
-        c.set_connect_timeout(Some(Duration::from_secs(5)));
         Self {
             ctl: OnceLock::new(),
             locator,
             secrets,
-            http: Client::builder(TokioExecutor::new()).build(c),
+            webhooks: OnceLock::new(),
             digested: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Webhooks through chapter 51's webhook target (the platform URL and
+    /// tenants' connections).
+    pub fn set_webhooks(&self, w: Arc<super::webhook::Webhooks>) {
+        let _ = self.webhooks.set(w);
     }
 
     /// Completes the cycle hub → hook → controller approvals.
@@ -111,6 +112,7 @@ impl Notifier {
                 &from
             },
             auth,
+            self.secrets.smtp_tls.clone(),
         )
     }
 
@@ -192,75 +194,66 @@ impl Notifier {
         }
     }
 
-    async fn webhook(&self, ev: &Event, body: Bytes) {
+    /// The webhook destinations of `ev`: the platform URL, the subject
+    /// tenant's connection, and the connection of an ancestor the item
+    /// has escalated to.
+    async fn webhook_dests(&self, ev: &Event) -> Vec<super::webhook::Dest> {
+        use super::webhook::Dest;
+        let mut out = Vec::new();
         let url = self
             .setting(keys::WEBHOOK_URL.key, ev.rec.subject.tenant)
             .await;
-        if url.is_empty() {
+        if !url.is_empty() {
+            out.push(Dest::Platform(url));
+        }
+        let mut tenants: Vec<TenantId> = ev.rec.subject.tenant.into_iter().collect();
+        if let NotifyLevel::Ancestor(a) = ev.rec.notify_level
+            && !tenants.contains(&a)
+        {
+            tenants.push(a);
+        }
+        for t in tenants {
+            let c = self.tenant_setting(keys::WEBHOOK_CONNECTION.key, t).await;
+            if !c.is_empty() {
+                out.push(Dest::Tenant(t, c));
+            }
+        }
+        out
+    }
+
+    /// A tenant-only key at `t` (its own value; never a wider scope's).
+    async fn tenant_setting(&self, key: &str, t: TenantId) -> String {
+        match self.ctl.get() {
+            Some(c) => match c.resolve(key, Some(t), None, None, None).await {
+                Some(r) if matches!(r.source, sprig_settings::ScopeKind::Tenant) => text(Some(r)),
+                _ => String::new(),
+            },
+            None => String::new(),
+        }
+    }
+
+    async fn webhook(&self, ev: &Event, body: Bytes) {
+        let dests = self.webhook_dests(ev).await;
+        if dests.is_empty() {
             return;
         }
-        if !url.starts_with("http://") {
+        let Some(w) = self.webhooks.get().cloned() else {
             notified("webhook", "skipped");
-            tracing::warn!(
-                url,
-                "approvals: only http:// webhooks are built (decision AP8)"
-            );
+            tracing::warn!("approvals: webhooks aren't wired in this controller");
             return;
-        }
-        let secret = self.secrets.webhook_secret.clone();
-        let http = self.http.clone();
+        };
         let event = ev.kind.name().to_owned();
         let key = format!("{}:{}:{}", ev.rec.id, event, ev.at_us);
-        tokio::spawn(async move {
-            let rng = sprig_sinks::runtime::Rng::from_os();
-            for n in 1..=WEBHOOK_ATTEMPTS {
-                let t = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs());
-                let mut req = Request::post(&url)
-                    .header("content-type", "application/json")
-                    .header("sprig-event", &event)
-                    .header("sprig-idempotency-key", &key);
-                if let Some(s) = &secret {
-                    req = req.header(
-                        "sprig-signature",
-                        sprig_sinks::target::webhook::sprig_signature(s.as_bytes(), t, &body),
-                    );
-                }
-                let Ok(req) = req.body(Full::new(body.clone())) else {
+        for d in dests {
+            let (w, body, event, key) = (Arc::clone(&w), body.clone(), event.clone(), key.clone());
+            tokio::spawn(async move {
+                if w.deliver(&d, body, &key, &event).await {
+                    notified("webhook", "sent");
+                } else {
                     notified("webhook", "failed");
-                    return;
-                };
-                let r: std::result::Result<
-                    std::result::Result<hyper::Response<hyper::body::Incoming>, _>,
-                    _,
-                > = tokio::time::timeout(Duration::from_secs(30), http.request(req)).await;
-                let retry = match r {
-                    Ok(Ok(resp)) if resp.status().is_success() => {
-                        notified("webhook", "sent");
-                        return;
-                    }
-                    Ok(Ok(resp)) => {
-                        let s = resp.status().as_u16();
-                        matches!(s, 408 | 429 | 401 | 403) || s >= 500
-                    }
-                    _ => true,
-                };
-                if !retry || n == WEBHOOK_ATTEMPTS {
-                    break;
                 }
-                tokio::time::sleep(sprig_sinks::runtime::backoff(
-                    n,
-                    None,
-                    Duration::from_millis(500),
-                    Duration::from_secs(60),
-                    &rng,
-                ))
-                .await;
-            }
-            notified("webhook", "failed");
-            tracing::warn!(url, event, "approvals: webhook not delivered");
-        });
+            });
+        }
     }
 
     /// Who gets an immediate email for `rec` now: the notify level's

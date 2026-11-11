@@ -1,5 +1,5 @@
 // Operator mode's data (chapter 44 step 17): the Admin API's replies
-// through /v1/ops/ (decision ST34).
+// through /v1/ops/ (decision ST35).
 
 export interface OpsCluster {
   cluster_id: string;

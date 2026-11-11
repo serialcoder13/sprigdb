@@ -1908,3 +1908,293 @@ async fn round_four_uniqueness_grants_and_sprigctl() {
     let _ = c.goodbye().await;
     s.disconnect().await.expect("bye");
 }
+
+/// The graph's mirror mode and per-shard relationship and mirror counts,
+/// from `sprigctl graph show`.
+fn mirror_view(ctl: &str, tenant: &str, graph: &str) -> (String, u64, u64, usize) {
+    let v = sprigctl(ctl, &["graph", "show", tenant, graph]);
+    let shards = v["shards"].as_array().cloned().unwrap_or_default();
+    let sum = |k: &str| shards.iter().filter_map(|s| s[k].as_u64()).sum::<u64>();
+    (
+        v["mirror"].as_str().unwrap_or_default().to_owned(),
+        sum("relationships"),
+        sum("mirrors"),
+        shards.len(),
+    )
+}
+
+/// Round 5 (decision G47): `graph.mirror = async` (the default). A new
+/// grouped graph goes `starting` then `async` once the worker's applier
+/// serves it; writers then keep no mirrors, and the applier does. While a
+/// writer runs a chain of `MERGE`s, a second session given each write's
+/// bookmark finds the new relationship through an incoming hop (the
+/// mirror read waits for the applier, or scatters), through a split and
+/// two moves across the three dev clusters; the corpus answers stay the
+/// same after each step; at the end every relationship has exactly one
+/// mirror and the commit check still sees incoming relationships.
+///
+/// Needs the end-to-end variables plus `SPRIG_TEST_SPRIGCTL`,
+/// `SPRIGCTL_ENDPOINT` and (for the wait counts) `SPRIG_TEST_GW_METRICS`.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // mode, load, write and check, split, moves, convergence
+async fn round_five_async_mirrors() {
+    let (Some(addr), Some(user), Some(pw), Some(sql), Some(ctl)) = (
+        env("SPRIG_TEST_BOLT_ADDR"),
+        env("SPRIG_TEST_BOLT_USER"),
+        env("SPRIG_TEST_BOLT_PASSWORD"),
+        env("SPRIG_TEST_SQL_ADDR"),
+        env("SPRIG_TEST_SPRIGCTL"),
+    ) else {
+        eprintln!("skipped: SPRIG_TEST_BOLT_* / SPRIG_TEST_SQL_ADDR / SPRIG_TEST_SPRIGCTL not set");
+        return;
+    };
+    let tenant = env("SPRIG_TEST_TENANT").unwrap_or_else(|| "acme".into());
+    let metrics = env("SPRIG_TEST_GW_METRICS");
+    let gname = "r8five_am.g";
+    {
+        let mut c = sql_conn(&sql, &user, &pw).await;
+        c.query_drop("CREATE DATABASE IF NOT EXISTS r8five_am")
+            .await
+            .expect("db");
+        c.query_drop("DROP GRAPH IF EXISTS r8five_am.g")
+            .await
+            .expect("drop");
+        c.disconnect().await.expect("bye");
+    }
+    sprigctl(
+        &ctl,
+        &[
+            "settings", "set", "--scope", "database", "--tenant", &tenant, "--db", "r8five_am",
+            "sharding.min_shards", "2", "--reason", "r8five async mirrors",
+        ],
+    );
+    {
+        let mut c = sql_conn(&sql, &user, &pw).await;
+        c.query_drop("CREATE GRAPH r8five_am.g").await.expect("create");
+        c.disconnect().await.expect("bye");
+    }
+    let db = vec![("db", PackValue::str(gname))];
+    let mut c = connect(&addr, &user, &pw).await.expect("login");
+    let ring = "UNWIND range(0, 299) AS i CREATE (:R {i: i})";
+    let link = "MATCH (a:R), (b:R) WHERE b.i = (a.i + 1) % 300 OR b.i = (a.i * 7) % 300 CREATE (a)-[:NEXT {w: a.i}]->(b)";
+    c.query(ring, vec![], db.clone()).await.expect("ring");
+    c.query(link, vec![], db.clone()).await.expect("link");
+    // Statements move the mode: starting, then async once the applier
+    // serves the graph.
+    let t0 = Instant::now();
+    let mut modes = Vec::new();
+    loop {
+        c.query("MATCH (n:R {i: 0}) RETURN n.i", vec![], db.clone())
+            .await
+            .expect("poke");
+        let (m, _, _, _) = mirror_view(&ctl, &tenant, gname);
+        if modes.last() != Some(&m) {
+            modes.push(m.clone());
+        }
+        if m == "async/ready" {
+            break;
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(120),
+            "the graph never became async: {modes:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let to_async = t0.elapsed();
+    let waits_before = match &metrics {
+        Some(u) => metric(u, "sprig_graph_mirror_waits_total").await,
+        None => 0.0,
+    };
+    let corpus = [
+        "MATCH (n:R) RETURN count(n)",
+        "MATCH ()-[r:NEXT]->() RETURN count(r), sum(r.w)",
+        "MATCH (a:R {i: 5})-[:NEXT*1..4]->(x) RETURN count(DISTINCT x)",
+        "MATCH (a:R {i: 5})<-[:NEXT*1..3]-(x) RETURN count(DISTINCT x)",
+        "MATCH (a:R {i: 0})<-[:NEXT]-(x) RETURN x.i ORDER BY x.i",
+        "MATCH (a:R {i: 1}), (b:R {i: 151}) MATCH p = shortestPath((a)-[:NEXT*]->(b)) RETURN length(p)",
+        "MATCH (x:R)<-[:NEXT]-(y:R) WHERE x.i < 20 WITH x, y ORDER BY y.i RETURN x.i, collect(y.i) ORDER BY x.i",
+    ];
+    let mut before = Vec::new();
+    for q in corpus {
+        before.push(rows_text(&c.query(q, vec![], db.clone()).await.expect(q), true));
+    }
+    // A writer making a chain, and a checker that reads each new link
+    // backwards with the writer's bookmark.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(i64, String)>();
+    let writer = {
+        let stop = std::sync::Arc::clone(&stop);
+        let (addr, user, pw) = (addr.clone(), user.clone(), pw.clone());
+        let db = db.clone();
+        tokio::spawn(async move {
+            let mut w = connect(&addr, &user, &pw).await.expect("writer login");
+            let (mut ok, mut retried, mut k) = (0i64, 0u64, 0i64);
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let q = "MERGE (a:W {k: $k}) WITH a OPTIONAL MATCH (p:W {k: $k - 1}) FOREACH (_ IN CASE WHEN p IS NULL THEN [] ELSE [1] END | CREATE (p)-[:THEN]->(a))";
+                let r = loop {
+                    match w.query(q, vec![("k", PackValue::Int(k))], db.clone()).await {
+                        Ok(r) => break r,
+                        Err(e) if e.code.starts_with("Neo.TransientError") => {
+                            retried += 1;
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                        Err(e) => panic!("writer {k}: {e}"),
+                    }
+                };
+                let bm = r
+                    .summary
+                    .get("bookmark")
+                    .and_then(PackValue::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let _ = tx.send((k, bm));
+                ok += 1;
+                k += 1;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            (ok, retried)
+        })
+    };
+    let checker = {
+        let (addr, user, pw) = (addr.clone(), user.clone(), pw.clone());
+        let db = db.clone();
+        tokio::spawn(async move {
+            let mut r = connect(&addr, &user, &pw).await.expect("checker login");
+            let (mut checked, mut wrong) = (0u64, Vec::new());
+            while let Some((k, bm)) = rx.recv().await {
+                if k == 0 {
+                    continue;
+                }
+                let mut extra = db.clone();
+                if !bm.is_empty() {
+                    extra.push(("bookmarks", PackValue::List(vec![PackValue::str(bm)])));
+                }
+                let q = "MATCH (a:W {k: $k})<-[:THEN]-(p:W) RETURN p.k";
+                let got = loop {
+                    match r.query(q, vec![("k", PackValue::Int(k))], extra.clone()).await {
+                        Ok(x) => break x,
+                        Err(e) if e.code.starts_with("Neo.TransientError") => {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                        Err(e) => panic!("checker {k}: {e}"),
+                    }
+                };
+                let ks: Vec<i64> = got.records.iter().filter_map(|x| x[0].as_int()).collect();
+                if ks != vec![k - 1] {
+                    wrong.push((k, ks));
+                }
+                checked += 1;
+            }
+            (checked, wrong)
+        })
+    };
+    async fn same(c: &mut Client, db: &[(&str, PackValue)], corpus: &[&str], before: &[Vec<String>], label: &str) {
+        for (q, want) in corpus.iter().zip(before) {
+            let got = c.query(q, vec![], db.to_vec()).await.expect(q);
+            assert_eq!(&rows_text(&got, true), want, "{label}: {q}");
+        }
+    }
+    let eid = c
+        .query("MATCH (n:R {i: 0}) RETURN elementId(n)", vec![], db.clone())
+        .await
+        .expect("element id");
+    let graph_id = eid.records[0][0]
+        .as_str()
+        .and_then(|s| s.split(':').nth(1))
+        .expect("graph id")
+        .to_owned();
+    let group_name = format!("graph_{graph_id}");
+    let (gid, shards) = graph_shards(&ctl, &tenant, &group_name);
+    let gid = gid.to_string();
+    assert_eq!(shards.len(), 2, "{shards:?}");
+    let mut steps = Vec::new();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    same(&mut c, &db, &corpus, &before, "under writes").await;
+    let s = shards[1].0.to_string();
+    let j = sprigctl(&ctl, &["shard", "split", &tenant, &gid, &s]);
+    let id = j["id"].as_str().expect("job id").to_owned();
+    steps.push(("split 2 -> 3", wait_job(&ctl, &id).await));
+    same(&mut c, &db, &corpus, &before, "after the split").await;
+    let (_, shards) = graph_shards(&ctl, &tenant, &group_name);
+    assert_eq!(shards.len(), 3, "{shards:?}");
+    for ((s, _), to) in shards.iter().skip(1).zip(["dc-a-c2", "dc-a-c3"]) {
+        let s = s.to_string();
+        let j = sprigctl(&ctl, &["shard", "move", &tenant, &gid, &s, "--to", to]);
+        let id = j["id"].as_str().expect("job id").to_owned();
+        let label = if to == "dc-a-c2" { "move to c2" } else { "move to c3" };
+        steps.push((label, wait_job(&ctl, &id).await));
+        same(&mut c, &db, &corpus, &before, label).await;
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (ok, retried) = writer.await.expect("writer");
+    let (checked, wrong) = checker.await.expect("checker");
+    // Every write landed once.
+    let w = c
+        .query(
+            "MATCH (a:W) WITH count(a) AS n, count(DISTINCT a.k) AS d MATCH ()-[t:THEN]->() RETURN n, d, count(t)",
+            vec![],
+            db.clone(),
+        )
+        .await
+        .expect("writes");
+    let row: Vec<i64> = w.records[0].iter().filter_map(PackValue::as_int).collect();
+    // The applier catches up: one mirror per relationship.
+    let t1 = Instant::now();
+    let (mode, rels, mirrors, nshards) = loop {
+        let v = mirror_view(&ctl, &tenant, gname);
+        if v.1 == v.2 || t1.elapsed() > Duration::from_secs(60) {
+            break v;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    let waits = match &metrics {
+        Some(u) => metric(u, "sprig_graph_mirror_waits_total").await - waits_before,
+        None => -1.0,
+    };
+    let (_, shards) = graph_shards(&ctl, &tenant, &group_name);
+    eprintln!(
+        "async mirrors: modes {modes:?}, async after {to_async:?}; steps {steps:?}; shards {shards:?}; \
+         writer {ok} statements ({retried} retried), graph {row:?}; checker {checked} incoming hops with \
+         bookmarks, {} wrong; mirror waits {waits}; mode {mode}, {rels} relationships, {mirrors} mirrors \
+         over {nshards} shards ({:?} to converge)",
+        wrong.len(),
+        t1.elapsed()
+    );
+    assert_eq!(row, vec![ok, ok, ok - 1], "every write landed once");
+    assert!(wrong.is_empty(), "incoming hops missed writes: {wrong:?}");
+    assert_eq!(mode, "async/ready");
+    assert_eq!(rels, mirrors, "one mirror per relationship");
+    let clusters: std::collections::BTreeSet<&str> = shards.iter().map(|(_, c)| c.as_str()).collect();
+    assert_eq!(clusters.len(), 3, "{shards:?}");
+    // The commit check and DETACH DELETE see incoming edges (scatter).
+    let e = c
+        .query("MATCH (n:R {i: 0}) DELETE n", vec![], db.clone())
+        .await
+        .expect_err("dangling");
+    assert_eq!(e.code, "Neo.ClientError.Schema.ConstraintValidationFailed");
+    let count = |rows: &Rows| rows.records[0][0].as_int().unwrap_or(-1);
+    let all = count(&c.query("MATCH ()-[r:NEXT]->() RETURN count(r)", vec![], db.clone()).await.expect("count"));
+    let touching = count(
+        &c.query("MATCH (n:R {i: 0})-[r]-() RETURN count(DISTINCT r)", vec![], db.clone())
+            .await
+            .expect("touching"),
+    );
+    c.query("MATCH (n:R {i: 0}) DETACH DELETE n", vec![], db.clone())
+        .await
+        .expect("detach");
+    let o = c
+        .query("MATCH ()-[r:NEXT]->() RETURN count(r)", vec![], db.clone())
+        .await
+        .expect("after detach");
+    assert_eq!(count(&o), all - touching);
+    let t2 = Instant::now();
+    loop {
+        let v = mirror_view(&ctl, &tenant, gname);
+        if v.1 == v.2 {
+            break;
+        }
+        assert!(t2.elapsed() < Duration::from_secs(60), "mirrors after DETACH DELETE: {v:?}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}

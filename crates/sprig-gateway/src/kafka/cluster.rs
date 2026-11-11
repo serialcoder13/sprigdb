@@ -58,6 +58,10 @@ pub struct GatewayCluster {
     live: LiveSettings,
     dc: DcId,
     held: tokio::sync::Mutex<Held>,
+    /// Serializes granting the coordinator lease; `held` is never kept
+    /// across an etcd call (r9more: a slow etcd answer held every group's
+    /// heartbeat, join and timer behind one group's lease request).
+    granting: tokio::sync::Mutex<()>,
     brokers: Mutex<Option<(Instant, Vec<BrokerNode>)>>,
 }
 
@@ -104,6 +108,7 @@ impl GatewayCluster {
             live,
             dc,
             held: tokio::sync::Mutex::new(Held::default()),
+            granting: tokio::sync::Mutex::new(()),
             brokers: Mutex::new(None),
         }
     }
@@ -224,39 +229,75 @@ impl Cluster for GatewayCluster {
 impl Leases for GatewayCluster {
     async fn acquire(&self, k: &GroupKey) -> Result<LeaseState, StoreError> {
         let key = self.key(k)?;
-        let mut h = self.held.lock().await;
-        if h.keys.contains(k) {
-            return Ok(LeaseState::Held { epoch: h.epoch });
-        }
-        let lease = if let Some(l) = h.lease {
-            l
+        let current = {
+            let h = self.held.lock().await;
+            if h.keys.contains(k) {
+                return Ok(LeaseState::Held { epoch: h.epoch });
+            }
+            h.lease.map(|l| (l, h.epoch))
+        };
+        let (lease, epoch) = if let Some(c) = current {
+            c
         } else {
-            let l = self.store.grant_lease(LEASE_TTL).await.map_err(store_err)?;
-            h.lease = Some(l);
-            h.epoch += 1;
-            l
+            let _one = self.granting.lock().await;
+            let again = {
+                let h = self.held.lock().await;
+                h.lease.map(|l| (l, h.epoch))
+            };
+            if let Some(c) = again {
+                c
+            } else {
+                let l = self.store.grant_lease(LEASE_TTL).await.map_err(store_err)?;
+                let mut h = self.held.lock().await;
+                h.lease = Some(l);
+                h.epoch += 1;
+                (l, h.epoch)
+            }
+        };
+        let put = Op::Put {
+            key: key.clone(),
+            value: self.value(),
+            lease: Some(lease),
         };
         let r = self
             .store
             .txn(Txn {
                 when: vec![Cmp::Missing(key.clone())],
-                then: vec![Op::Put {
-                    key: key.clone(),
-                    value: self.value(),
-                    lease: Some(lease),
-                }],
-                otherwise: vec![Op::Get(key)],
+                then: vec![put.clone()],
+                otherwise: vec![Op::Get(key.clone())],
             })
             .await
             .map_err(store_err)?;
-        if r.succeeded {
-            h.keys.insert(k.clone());
-            return Ok(LeaseState::Held { epoch: h.epoch });
+        let mut won = r.succeeded;
+        let mut node = -1;
+        if !won && let Some(OpResult::Get(Some(kv))) = r.results.first() {
+            node = Self::node_of(&kv.value).unwrap_or(-1);
+            // Our own broker id under another lease: an earlier incarnation
+            // of this gateway (a restart) or a lease this gateway lost. Its
+            // key would otherwise answer NOT_COORDINATOR to every member,
+            // pointed back here, until its lease ran out (up to 10 s).
+            if node == self.node_id() && kv.lease != Some(lease) {
+                let r = self
+                    .store
+                    .txn(Txn {
+                        when: vec![Cmp::ModRev(key.clone(), kv.mod_revision)],
+                        then: vec![put],
+                        otherwise: Vec::new(),
+                    })
+                    .await
+                    .map_err(store_err)?;
+                won = r.succeeded;
+            }
         }
-        let node = match r.results.first() {
-            Some(OpResult::Get(Some(kv))) => Self::node_of(&kv.value).unwrap_or(-1),
-            _ => -1,
-        };
+        if won {
+            let mut h = self.held.lock().await;
+            if h.epoch != epoch || h.lease != Some(lease) {
+                // The lease was lost while the key was written.
+                return Err(StoreError("coordinator lease lost".into()));
+            }
+            h.keys.insert(k.clone());
+            return Ok(LeaseState::Held { epoch });
+        }
         Ok(LeaseState::Elsewhere(node))
     }
 
@@ -277,17 +318,19 @@ impl Leases for GatewayCluster {
 
     async fn release(&self, k: &GroupKey) {
         let Ok(key) = self.key(k) else { return };
-        let mut h = self.held.lock().await;
-        if h.keys.remove(k) {
-            let _ = self
-                .store
-                .txn(Txn {
-                    when: Vec::new(),
-                    then: vec![Op::Delete(key)],
-                    otherwise: Vec::new(),
-                })
-                .await;
+        if !self.held.lock().await.keys.remove(k) {
+            return;
         }
+        // Until the key is gone, an acquire of it is refused (the key
+        // exists) and the member retries: never two coordinators.
+        let _ = self
+            .store
+            .txn(Txn {
+                when: Vec::new(),
+                then: vec![Op::Delete(key)],
+                otherwise: Vec::new(),
+            })
+            .await;
     }
 }
 

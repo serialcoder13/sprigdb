@@ -214,7 +214,7 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub controller_token_file: Option<PathBuf>,
     /// A file holding the Admin API token Studio's operator mode uses
-    /// (chapter 44 step 17; decision ST34): calls from sessions whose login
+    /// (chapter 44 step 17; decision ST35): calls from sessions whose login
     /// is in `studio.operator_logins` go to the controller with it. Unset:
     /// operator mode answers 503.
     #[serde(default)]
@@ -312,6 +312,18 @@ pub struct ControllerConfig {
     /// Chapter 52: the secret that signs `approvals.webhook_url` events.
     #[serde(default)]
     pub approvals_webhook_secret_file: Option<PathBuf>,
+    /// Chapter 52: the CA (PEM) the SMTP server's certificate is checked
+    /// against instead of the Mozilla roots (`smtps://` and
+    /// `smtp+starttls://`).
+    #[serde(default)]
+    pub smtp_ca_file: Option<PathBuf>,
+    /// Chapter 52: a client certificate chain (PEM) offered to the SMTP
+    /// server, with `smtp_client_key_file`.
+    #[serde(default)]
+    pub smtp_client_cert_file: Option<PathBuf>,
+    /// Chapter 52: the private key (PEM) of `smtp_client_cert_file`.
+    #[serde(default)]
+    pub smtp_client_key_file: Option<PathBuf>,
 }
 
 impl Default for ControllerConfig {
@@ -330,6 +342,9 @@ impl Default for ControllerConfig {
             dc_operator_token_file: None,
             smtp_password_file: None,
             approvals_webhook_secret_file: None,
+            smtp_ca_file: None,
+            smtp_client_cert_file: None,
+            smtp_client_key_file: None,
         }
     }
 }

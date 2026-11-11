@@ -97,6 +97,11 @@ pub struct GraphView {
     pub indexes: Vec<GraphIndexRow>,
     /// Shards with their row counts (native graphs).
     pub shards: Vec<GraphShardRow>,
+    /// Who keeps the mirrors and their state, `<mirror_mode>/<mirror_state>`
+    /// (`sync/ready`, `starting/ready`, `async/ready`, `sync/building`;
+    /// R8 round 5); absent before the catalog's graph migration 3.
+    #[serde(default)]
+    pub mirror: Option<String>,
 }
 
 /// `sprigctl graph partition`.
@@ -282,6 +287,13 @@ impl ShardingLoop {
             ))
             .await
             .unwrap_or_default();
+        let mirror: Option<String> = c
+            .query_first(format!(
+                "SELECT CONCAT(mirror_mode, '/', mirror_state) FROM {q}.graphs WHERE graph_id = {id}"
+            ))
+            .await
+            .ok()
+            .flatten();
         drop(c);
         let indexes = idx
             .into_iter()
@@ -325,6 +337,7 @@ impl ShardingLoop {
             types,
             indexes,
             shards,
+            mirror,
         })
     }
 

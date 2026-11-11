@@ -31,6 +31,8 @@ sprig-controller = { path = "../sprig-controller" }
 sprig-feed.workspace = true
 # Chapter 42's copy worker (inherit_copy jobs).
 sprig-inherit = { path = "../sprig-inherit" }
+# Chapter 43 (R8 round 5): the graph mirror applier.
+sprig-graph = { path = "../sprig-graph" }
 sprig-logic = { path = "../sprig-logic" }
 # Chapter 45: stream sequencers (R9).
 sprig-streams = { path = "../sprig-streams" }

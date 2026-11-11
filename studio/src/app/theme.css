@@ -151,3 +151,5 @@ nav.tabs a[aria-current='page'] { font-weight: 600; box-shadow: inset 0 -2px 0 v
 .table { inline-size: 100%; }
 pre.code { max-block-size: 360px; overflow: auto; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius); }
 .banner.impersonation { border-radius: 0; margin: 0; display: flex; gap: 12px; align-items: center; }
+/* Stacked links stay 24 px tall targets (WCAG 2.5.8). */
+.linklist a { display: inline-block; min-block-size: 24px; line-height: 24px; }

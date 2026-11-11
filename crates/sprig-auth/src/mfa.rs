@@ -30,12 +30,12 @@ use mysql_async::prelude::Queryable as _;
 use mysql_async::{Row, Value};
 use ring::aead;
 use sha2::{Digest as _, Sha256};
-use subtle::ConstantTimeEq as _;
 use sprig_catalog::migrate::MigrateOpts;
 use sprig_catalog::{ChangeOpts, MariaCatalog, Migrator, VersionKind};
 use sprig_common::ids::{TenantId, UserId};
 use sprig_common::{Result, SprigCode, SprigError};
 use sprig_proto_mysql::Persona;
+use subtle::ConstantTimeEq as _;
 
 use crate::cache::TenantAuth;
 use crate::mysql::{CatalogLogins, Principal, locked, temp_locked};
@@ -100,10 +100,9 @@ pub fn check(seed: &[u8], code: &str, now: SystemTime, last: Option<u64>) -> Opt
     }
     let want: u32 = code.parse().ok()?;
     let s = step_of(now);
-    [s.saturating_sub(1), s, s + 1].into_iter().find(|&st| {
-        last.is_none_or(|l| st > l)
-            && bool::from(code_at(seed, st).ct_eq(&want))
-    })
+    [s.saturating_sub(1), s, s + 1]
+        .into_iter()
+        .find(|&st| last.is_none_or(|l| st > l) && bool::from(code_at(seed, st).ct_eq(&want)))
 }
 
 /// RFC 4648 base32 without padding (authenticator apps' secret form).
@@ -209,12 +208,7 @@ fn no_key() -> SprigError {
 ///
 /// # Errors
 /// 39301 without a key; `Internal`.
-pub fn seal(
-    keys: &dyn FactorKeys,
-    tenant: TenantId,
-    user: UserId,
-    seed: &[u8],
-) -> Result<Vec<u8>> {
+pub fn seal(keys: &dyn FactorKeys, tenant: TenantId, user: UserId, seed: &[u8]) -> Result<Vec<u8>> {
     let (version, key) = keys.current(tenant).ok_or_else(no_key)?;
     let k = aead::LessSafeKey::new(
         aead::UnboundKey::new(&aead::AES_256_GCM, &key)
@@ -425,7 +419,7 @@ impl FactorStore {
         keys: &dyn FactorKeys,
         tenant: TenantId,
         user: UserId,
-        code: &str,
+        submitted: &str,
         now: SystemTime,
     ) -> Result<Option<Vec<String>>> {
         let Some((id, sealed, _)) = self.totp(tenant, user, true).await? else {
@@ -435,7 +429,7 @@ impl FactorStore {
             ));
         };
         let seed = open(keys, tenant, user, &sealed)?;
-        let Some(step) = check(&seed, code, now, None) else {
+        let Some(step) = check(&seed, submitted, now, None) else {
             return Ok(None);
         };
         let codes = recovery_codes()?;
@@ -447,11 +441,11 @@ impl FactorStore {
         let r = async {
             let (core, q) = ch.tx().parts();
             let store = AuthStore::of(core);
-            let t = tbl(&store, "user_factors");
+            let factors = tbl(&store, "user_factors");
             exec_count(
                 q,
                 format!(
-                    "DELETE FROM {t} WHERE user_id = ? AND (kind = 'recovery' \
+                    "DELETE FROM {factors} WHERE user_id = ? AND (kind = 'recovery' \
                      OR (kind = 'totp' AND factor_id <> ?))"
                 ),
                 vec![Value::from(user.0), Value::from(id)],
@@ -460,7 +454,7 @@ impl FactorStore {
             exec_count(
                 q,
                 format!(
-                    "UPDATE {t} SET state = 'active', last_step = ?, changed_version = ? \
+                    "UPDATE {factors} SET state = 'active', last_step = ?, changed_version = ? \
                      WHERE factor_id = ?"
                 ),
                 vec![Value::from(step), Value::from(version), Value::from(id)],
@@ -470,7 +464,7 @@ impl FactorStore {
                 exec_count(
                     q,
                     format!(
-                        "INSERT INTO {t} (user_id, kind, state, code_sha256, created_at, \
+                        "INSERT INTO {factors} (user_id, kind, state, code_sha256, created_at, \
                          changed_version) VALUES (?, 'recovery', 'active', ?, {AT}, ?)"
                     ),
                     vec![
@@ -581,7 +575,10 @@ impl FactorStore {
             let store = AuthStore::of(core);
             let n = exec_count(
                 q,
-                format!("DELETE FROM {} WHERE user_id = ?", tbl(&store, "user_factors")),
+                format!(
+                    "DELETE FROM {} WHERE user_id = ?",
+                    tbl(&store, "user_factors")
+                ),
                 vec![Value::from(user.0)],
             )
             .await?;
@@ -667,7 +664,10 @@ pub async fn account_principal(
     }
     .ok_or_else(|| denied("no such account"))?;
     let (name, host) = (u.row.name.as_str(), u.row.host.as_str());
-    if let Some(lock) = auth.temp_lock(u.row.user_id).filter(|l| l.locked_until > now) {
+    if let Some(lock) = auth
+        .temp_lock(u.row.user_id)
+        .filter(|l| l.locked_until > now)
+    {
         let p = temp_locked(Persona::MySql84, name, host, &lock, now);
         return Err(SprigError::standard(p.code, p.sqlstate, p.message));
     }
@@ -755,7 +755,10 @@ mod tests {
     #[test]
     fn base32_and_uri() {
         assert_eq!(base32(b"foobar"), "MZXW6YTBOI");
-        assert_eq!(base32(b"12345678901234567890"), "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
+        assert_eq!(
+            base32(b"12345678901234567890"),
+            "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+        );
         let u = otpauth_uri("SprigDB acme", "acme.app", b"12345678901234567890");
         assert!(u.starts_with("otpauth://totp/SprigDB%20acme:acme.app?secret=GEZDGNBV"));
         assert!(u.contains("&digits=6&period=30"));
@@ -765,9 +768,16 @@ mod tests {
     fn recovery_codes_normalize() {
         let codes = recovery_codes().unwrap();
         assert_eq!(codes.len(), RECOVERY_CODES);
-        assert!(codes.iter().all(|c| c.len() == 11 && c.as_bytes()[5] == b'-'));
+        assert!(
+            codes
+                .iter()
+                .all(|c| c.len() == 11 && c.as_bytes()[5] == b'-')
+        );
         let c = &codes[0];
-        assert_eq!(recovery_hash(c), recovery_hash(&c.to_uppercase().replace('-', " ")));
+        assert_eq!(
+            recovery_hash(c),
+            recovery_hash(&c.to_uppercase().replace('-', " "))
+        );
         assert_ne!(recovery_hash(&codes[0]), recovery_hash(&codes[1]));
     }
 

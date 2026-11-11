@@ -722,6 +722,7 @@ fn ocx<'a>(
         workload: w,
         decisions: &LogDecisions,
         now,
+        removals: None,
     }
 }
 
@@ -1423,6 +1424,104 @@ async fn lock_queue_kills_a_waiting_build_single() {
         assert_eq!(after.state, IndexState::RollingOut);
         assert_eq!(after.shards.get("0"), Some(&ShardBuild::Pending));
         assert_eq!(Progress::of(after.observed.as_ref()).lock_timeouts, 1);
+        let _ = q.disconnect().await;
+    })
+    .await;
+}
+
+/// Chapter 52: a removal gate that holds until told to go, and records
+/// what was reported.
+struct HoldingGate {
+    go: AtomicBool,
+    asked: AtomicU64,
+    done: std::sync::Mutex<Vec<(String, bool)>>,
+}
+
+#[async_trait::async_trait]
+impl crate::autoindex::observe::RemovalGate for HoldingGate {
+    async fn removal(
+        &self,
+        r: &crate::autoindex::observe::Removal<'_>,
+    ) -> crate::autoindex::observe::RemovalVerdict {
+        use crate::autoindex::observe::RemovalVerdict as V;
+        assert!(!r.user && r.reason == "unused", "{r:?}");
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        if self.go.load(Ordering::SeqCst) {
+            V::Go(Some("ticket-1".into()))
+        } else {
+            V::Hold("held for approval as t1.7".into())
+        }
+    }
+    async fn removed(&self, ticket: &str, ok: bool, _detail: &str) {
+        self.done.lock().unwrap().push((ticket.to_owned(), ok));
+    }
+}
+
+/// Chapter 52 (decision AP14): under `approve` an unused automatic index
+/// isn't ignored or dropped until the gate lets it go; the next judgement
+/// proposes it again, and the approved removal goes ahead and is reported.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unused_index_waits_for_its_approval() {
+    with_env(Topo::Single, "held removal", |env| async move {
+        let (rs, os, rl) = (settings(), ObserveSettings::default(), rules());
+        let shards = vec![env.table.clone()];
+        let def = def();
+        let mut q = catalog(&env).await;
+        let id = active_index(&env, &mut q, &def).await;
+        let fake = Fake {
+            latency: Some(
+                [
+                    (Fingerprint(1), FpLatency::read(200, 1.0, 0.8)),
+                    (
+                        Fingerprint(2),
+                        FpLatency {
+                            write: true,
+                            affected_per_run: 1.0,
+                            ..FpLatency::read(20, 0.5, 0.4)
+                        },
+                    ),
+                ]
+                .into(),
+            ),
+            samples: Some(vec![UsageSample {
+                fingerprint: Fingerprint(1),
+                schema: env.schema.clone(),
+                sql: "SELECT id FROM orders WHERE status = 3".into(),
+            }]),
+        };
+        let gate = HoldingGate {
+            go: AtomicBool::new(false),
+            asked: AtomicU64::new(0),
+            done: std::sync::Mutex::new(Vec::new()),
+        };
+        // 1. Held: still active and visible.
+        let now = SystemTime::now() + Duration::from_secs(60);
+        let r = env.store.index(&mut q, id).await.unwrap().unwrap();
+        let mut c = ocx(&env, &rl, &os, &rs, &shards, &fake, now);
+        c.removals = Some(&gate);
+        let st = step(&env.store, &mut q, &c, &r).await.unwrap();
+        assert_eq!(st, ObserveStep::Held("held for approval as t1.7".into()));
+        let r = env.store.index(&mut q, id).await.unwrap().unwrap();
+        assert_eq!(r.state, IndexState::Active);
+        let mut n = Node::connect(env.view.nodes.writer().unwrap(), Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert!(!n.indexes(&env.table).await.unwrap()[&def.name()].ignored);
+        // 2. Approved: the next judgement (the same evidence, more reads)
+        //    proposes it again and it is ignored, then reported.
+        gate.go.store(true, Ordering::SeqCst);
+        let later = now + Duration::from_secs(3600);
+        let mut c = ocx(&env, &rl, &os, &rs, &shards, &fake, later);
+        c.removals = Some(&gate);
+        let st = step(&env.store, &mut q, &c, &r).await.unwrap();
+        assert_eq!(st, ObserveStep::Retiring(DropReason::Unused));
+        assert!(n.indexes(&env.table).await.unwrap()[&def.name()].ignored);
+        assert_eq!(gate.asked.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *gate.done.lock().unwrap(),
+            vec![("ticket-1".to_owned(), true)]
+        );
+        n.close().await;
         let _ = q.disconnect().await;
     })
     .await;

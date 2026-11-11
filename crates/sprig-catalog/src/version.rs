@@ -49,6 +49,8 @@
 //!   catalog. It is the only cause. The next change commits above it, and
 //!   [`Versioner::settle`] closes it at once by committing the catalog's
 //!   version row up to the directory's value (an empty change).
+//!   [`Change::rollback`] settles right after rolling back, so a caller
+//!   that allocates and then finds nothing to write leaves no gap.
 //!
 //! Failure cases (chapter 08, "Failure handling"):
 //!
@@ -57,7 +59,7 @@
 //! | Before allocation (crash, lock timeout) | Nothing: the transaction rolls back |
 //! | Global tier unreachable | Retried until the deadline, then 39070; rolled back, no gap |
 //! | Leadership lost before the CAS | 39504, rolled back, no gap |
-//! | Crash or error after allocation | Rolled back; gap |
+//! | Crash or error after allocation | Rolled back; gap (an explicit rollback settles it) |
 //! | Leadership lost after allocation | Checked before `COMMIT`: 39504, rolled back; gap |
 //! | Commit reply lost | Committed or not; either way consistent (a gap at worst) |
 
@@ -563,33 +565,43 @@ impl<B: VersionBackend> Versioner<B> {
     /// the directory (the next change repairs that by allocating above
     /// both).
     pub async fn settle(&self, tenant: TenantId, kind: VersionKind) -> Result<u64> {
-        let (tx, committed) = self.backend.begin_locked(tenant, kind).await?;
-        let dir = match self.allocator.current(tenant, kind).await {
-            Ok(d) => d,
-            Err(e) => {
-                let _ = self.backend.rollback(tx).await;
-                return Err(e);
-            }
-        };
-        if dir == committed {
-            self.backend.rollback(tx).await?;
-            return Ok(committed);
-        }
-        if dir < committed {
-            let _ = self.backend.rollback(tx).await;
-            return Err(SprigError::internal(format!(
-                "tenant {tenant}: catalog {} version {committed} is ahead of the directory's {dir}",
-                kind.label()
-            )));
-        }
-        if let Err(e) = self.allocator.check_fence() {
-            let _ = self.backend.rollback(tx).await;
+        settle_in(&*self.backend, &*self.allocator, tenant, kind).await
+    }
+}
+
+/// [`Versioner::settle`] on its parts, for [`Change::rollback`] too.
+async fn settle_in<B: VersionBackend>(
+    backend: &B,
+    allocator: &dyn VersionAllocator,
+    tenant: TenantId,
+    kind: VersionKind,
+) -> Result<u64> {
+    let (tx, committed) = backend.begin_locked(tenant, kind).await?;
+    let dir = match allocator.current(tenant, kind).await {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = backend.rollback(tx).await;
             return Err(e);
         }
-        tracing::info!(%tenant, kind = kind.label(), from = committed, to = dir, "closing a version gap");
-        self.backend.commit(tx, kind, dir).await?;
-        Ok(dir)
+    };
+    if dir == committed {
+        backend.rollback(tx).await?;
+        return Ok(committed);
     }
+    if dir < committed {
+        let _ = backend.rollback(tx).await;
+        return Err(SprigError::internal(format!(
+            "tenant {tenant}: catalog {} version {committed} is ahead of the directory's {dir}",
+            kind.label()
+        )));
+    }
+    if let Err(e) = allocator.check_fence() {
+        let _ = backend.rollback(tx).await;
+        return Err(e);
+    }
+    tracing::debug!(%tenant, kind = kind.label(), from = committed, to = dir, "closing a version gap");
+    backend.commit(tx, kind, dir).await?;
+    Ok(dir)
 }
 
 /// A transaction holding a version row, with no version allocated yet
@@ -801,11 +813,42 @@ impl<B: VersionBackend> Change<B> {
         Ok(version)
     }
 
-    /// Rolls back: the allocated version becomes a gap.
+    /// Rolls back, then closes the gap the allocated version would leave:
+    /// the version row is settled up to the directory's value in a short
+    /// empty change ([`Versioner::settle`]), unless a later change already
+    /// committed above it. Without that, every loader asking for the
+    /// directory's version (`Freshness::Latest`) waited
+    /// `catalog.version_wait_ms` for a version that never commits: callers
+    /// that allocate, find nothing to write and roll back (the document
+    /// catalog after each `dropDatabase`, for one) cost every later session
+    /// up to 2 s (decision PF1). A failed settle leaves the gap, as before.
+    ///
+    /// # Errors
+    /// The backend's error from the rollback.
+    pub async fn rollback(self) -> Result<()> {
+        let Change {
+            tx,
+            backend,
+            allocator,
+            tenant,
+            kind,
+            ..
+        } = self;
+        backend.rollback(tx).await?;
+        if let Err(e) = settle_in(&*backend, &*allocator, tenant, kind).await {
+            tracing::debug!(%tenant, kind = kind.label(), error = %e,
+                "a rolled-back change's version stays a gap");
+        }
+        Ok(())
+    }
+
+    /// Rolls back and leaves the allocated version as a gap (what a crash
+    /// leaves); for tests of gap handling.
     ///
     /// # Errors
     /// The backend's error.
-    pub async fn rollback(self) -> Result<()> {
+    #[doc(hidden)]
+    pub async fn abandon(self) -> Result<()> {
         self.backend.rollback(self.tx).await
     }
 }

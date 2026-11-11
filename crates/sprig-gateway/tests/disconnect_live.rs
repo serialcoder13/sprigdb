@@ -23,7 +23,12 @@
 //! Login `acme.app` / `sprig-dev-app` unless `SPRIG_TEST_HTTP_USER` and
 //! `SPRIG_TEST_HTTP_PASSWORD` say otherwise.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, missing_docs)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::many_single_char_names,
+    missing_docs
+)]
 
 use std::time::{Duration, Instant};
 
@@ -141,9 +146,11 @@ async fn wait_started<T: std::fmt::Debug>(
 ) {
     let end = Instant::now() + Duration::from_secs(10);
     while backend_running(e, marker).await == 0 {
-        if call.is_finished() {
-            panic!("{marker}: the call ended first: {:?}", call.await);
-        }
+        assert!(
+            !call.is_finished(),
+            "{marker}: the call ended first: {:?}",
+            call.await
+        );
         assert!(
             Instant::now() < end,
             "{marker}: the statement never started"
@@ -295,7 +302,7 @@ async fn http2_client_gone() {
     check("h2_conn_closed", gone_after(&e, &mut wire, &m, left).await);
 }
 
-/// gRPC: the caller drops a `Sql.Query` stream (RST_STREAM, channel kept)
+/// gRPC: the caller drops a `Sql.Query` stream (`RST_STREAM`, channel kept)
 /// and a unary `Sql.Execute` call.
 #[tokio::test]
 async fn grpc_client_gone() {

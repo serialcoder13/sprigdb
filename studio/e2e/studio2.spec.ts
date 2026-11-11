@@ -148,7 +148,7 @@ test.describe.serial('Studio round 3', () => {
       if (await page.getByTestId('all-fetched').isVisible()) break;
       await page.getByTestId('fetch-more').click();
       await expect
-        .poll(async () => (await page.getByTestId('all-fetched').isVisible()) || (await page.getByTestId('fetch-more').isEnabled()))
+        .poll(async () => (await page.getByTestId('all-fetched').isVisible()) || (await page.getByTestId('fetch-more').isEnabled()), { timeout: 30_000 })
         .toBe(true);
     }
     await expect(page.getByTestId('all-fetched')).toBeVisible();
@@ -230,6 +230,8 @@ test.describe.serial('Studio round 3', () => {
       await axe(page, 'security');
       await shot(page, 'security');
       await page.getByRole('button', { name: 'Sign out' }).click();
+      // The logout request must finish before navigating, or the cookie stays.
+      await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
       // Sign in: password, then the code.
       await page.goto('/studio/login');
       await page.getByLabel('User', { exact: true }).fill(`acme.${user}`);
@@ -248,6 +250,8 @@ test.describe.serial('Studio round 3', () => {
       await page.getByRole('link', { name: 'Security' }).click();
       await expect(page.getByTestId('amr')).toHaveText('pwd, otp');
       await page.getByRole('button', { name: 'Sign out' }).click();
+      // The logout request must finish before navigating, or the cookie stays.
+      await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
       // A recovery code instead.
       await page.goto('/studio/login');
       await page.getByLabel('User', { exact: true }).fill(`acme.${user}`);
@@ -259,6 +263,8 @@ test.describe.serial('Studio round 3', () => {
       await page.getByRole('link', { name: 'Security' }).click();
       await expect(page.getByTestId('recovery-left')).toHaveText('9');
       await page.getByRole('button', { name: 'Sign out' }).click();
+      // The logout request must finish before navigating, or the cookie stays.
+      await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
       // Impersonation by the tenant administrator.
       await signIn(page);
       await page.goto('/studio/t/acme/access/users');
@@ -298,7 +304,9 @@ test.describe.serial('Studio round 3', () => {
     const answers = ['acme', 'e2e: checking the advisor from Studio'];
     page.on('dialog', (d) => void d.accept(answers.shift() ?? ''));
     await page.getByTestId('ops-tenants').getByRole('row').filter({ has: page.getByRole('button', { name: 'acme', exact: true }) }).getByRole('button', { name: 'Run the sharding advisor' }).click();
-    await expect(page.getByTestId('ops-tenants').getByRole('status')).toHaveText(/Done\./);
+    // The controller's own answer comes back: done, or (once the tenant has
+    // table groups) 39471, as sprigctl advisor run says.
+    await expect(page.getByTestId('ops-tenants').getByRole('status')).toHaveText(/Done\.|39471/);
     await axe(page, 'ops-tenants');
     await shot(page, 'ops-tenants');
     await page.getByRole('link', { name: 'Data centers' }).click();

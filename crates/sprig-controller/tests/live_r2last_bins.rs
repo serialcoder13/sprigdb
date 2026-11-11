@@ -1837,3 +1837,652 @@ async fn bins_r2last_readonly_standbys_tenant_scopes_and_traffic_following() {
         let _ = std::fs::remove_dir_all(&work);
     }
 }
+
+// ============================================================================
+// Chapter 52 (approvals2): a DC move held at tenant level, escalated
+// tenant -> ancestor -> platform, approved over gRPC, then applied
+// ============================================================================
+
+/// Rule 8f for the approvals test: above every tenant id on the dev
+/// clusters (921,306,000,001 on 10 Nov 2026, 23:00 IST): port 24025 x 10^8.
+/// Only this test's own containers hold these schemas.
+const AP2_BASE: u64 = 2_402_500_000_000;
+
+/// `method path` on a controller's Admin API (no token: the platform
+/// operator); the status and the JSON body.
+async fn admin_rest(dc: &str, method: &str, path: &str, body: &Value) -> (u16, Value) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let addr = format!("127.0.0.1:{}", ports(dc).admin);
+    let mut s = tokio::net::TcpStream::connect(&addr).await.expect("admin");
+    let b = if method == "GET" {
+        String::new()
+    } else {
+        body.to_string()
+    };
+    let req = format!(
+        "{method} {path} HTTP/1.1\r\nhost: {addr}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{b}",
+        b.len()
+    );
+    s.write_all(req.as_bytes()).await.expect("write");
+    let mut out = Vec::new();
+    s.read_to_end(&mut out).await.expect("read");
+    let text = String::from_utf8_lossy(&out).to_string();
+    let status = text
+        .split(' ')
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    let body = text.split_once("\r\n\r\n").map_or("", |x| x.1);
+    // Chunked bodies: the JSON is the part between the first '{' and the
+    // last '}'.
+    let json = match (body.find('{'), body.rfind('}')) {
+        (Some(a), Some(z)) => serde_json::from_str(&body[a..=z]).unwrap_or(Value::Null),
+        _ => Value::Null,
+    };
+    (status, json)
+}
+
+fn b64(s: &str) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for c in s.as_bytes().chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            out.push(if i <= c.len() {
+                T[((n >> (18 - 6 * i)) & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+    }
+    out
+}
+
+/// The kid's open `dc.move` item, as fra1's controller lists it.
+async fn dc_move_item(tenant: &str) -> Option<Value> {
+    let (_, v) = admin_rest(
+        "fra1",
+        "GET",
+        &format!("/admin/v1/recommendations?tenant={tenant}&kind=dc.move&all=true"),
+        &Value::Null,
+    )
+    .await;
+    v["items"].as_array()?.first().cloned()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn bins_approvals_dc_move_escalates_tenant_ancestor_platform() {
+    use sprig_api::proto::admin::recommendations_client::RecommendationsClient;
+    use sprig_api::proto::admin::{ListRequest, NameRequest};
+    if !skip::flag(skip::DOCKER) {
+        skip::report_missing(
+            skip::DOCKER,
+            "bins_approvals_dc_move_escalates_tenant_ancestor_platform",
+        );
+        return;
+    }
+    let _one = ONE_AT_A_TIME.lock().await;
+    let Some((sprigdb, sprigctl)) = bins() else {
+        eprintln!("build sprigdb and sprigctl first (cargo build -p sprigdb -p sprigctl)");
+        return;
+    };
+    let work = std::env::temp_dir().join(format!("approvals2-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).expect("work dir");
+    let t_all = Instant::now();
+
+    // ---- etcd and one MariaDB primary per DC (own containers) ----
+    let ep = free_port();
+    let etcd_pub = format!("127.0.0.1:{ep}:2379");
+    let etcd = OwnContainer::run(
+        "r2last-ap2-etcd",
+        &[
+            "--memory",
+            "256m",
+            "-p",
+            &etcd_pub,
+            "quay.io/coreos/etcd:v3.6.5",
+            "etcd",
+            "--listen-client-urls=http://0.0.0.0:2379",
+            "--advertise-client-urls=http://r2last-ap2-etcd.invalid:2379",
+        ],
+    )
+    .expect("etcd");
+    let seed = format!("http://127.0.0.1:{ep}");
+    let mut cfg = EtcdConfig::new(vec![seed.clone()]);
+    cfg.request_timeout = Duration::from_secs(2);
+    let store: Arc<dyn MetaStore> = loop {
+        match EtcdStore::connect(Tier::Global, &cfg).await {
+            Ok(s) => break Arc::new(s),
+            Err(_) => tokio::time::sleep(Duration::from_millis(300)).await,
+        }
+    };
+    let net = Net(format!("sprig-sim-ap2-{}", std::process::id()));
+    docker(&["network", "create", &net.0]).expect("network");
+    let (fra1_db, fra1_port) = mariadb(&net.0, "ap2fra1db", 101, 1, None);
+    let (ams1_db, ams1_port) = mariadb(&net.0, "ap2ams1db", 201, 2, None);
+    let (sin1_db, sin1_port) = mariadb(&net.0, "ap2sin1db", 301, 3, None);
+    let root_url = |p: u16| format!("mysql://root:{ROOT_PW}@127.0.0.1:{p}");
+    let db_port: BTreeMap<&str, u16> = [
+        ("fra1", fra1_port),
+        ("ams1", ams1_port),
+        ("sin1", sin1_port),
+    ]
+    .into_iter()
+    .collect();
+    for p in db_port.values() {
+        wait_for(&root_url(*p), "SELECT 1", "1", Duration::from_secs(180)).await;
+    }
+    for d in DCS {
+        delay_proxy(
+            ports(d).internal_proxy,
+            ports(d).internal,
+            Duration::from_millis(delay_ms(d) / 2),
+        )
+        .await;
+    }
+    let certs = sprig_testkit::compose::compose_dir().join("gateway-certs");
+    for (k, v) in [
+        ("migration.evaluate_seconds", json!(5)),
+        ("migration.window_minutes", json!(2)),
+        ("migration.min_signal_requests", json!(300)),
+        ("migration.sustain_minutes", json!(0.5)),
+        ("migration.cooldown_hours", json!(0.025)),
+        ("recovery.stability_minutes", json!(0)),
+        ("control.latency_probe_seconds", json!(2)),
+        ("routing.traffic_report_seconds", json!(5)),
+        ("mover.ready_sustain_seconds", json!(3)),
+        ("mover.source_retain_hours", json!(0)),
+        ("approvals.tick_seconds", json!(5)),
+    ] {
+        put(
+            &*store,
+            &format!("/sprig/g/settings/{k}"),
+            json!({"v": 1, "value": v, "set_by": "op:approvals2", "reason": "chapter 52 live test"}),
+        )
+        .await;
+    }
+    for d in DCS {
+        for (k, v) in [
+            (
+                "tls.bundles.default.cert_path",
+                json!(certs.join("server.pem").display().to_string()),
+            ),
+            (
+                "tls.bundles.default.key_path",
+                json!(certs.join("server-key.pem").display().to_string()),
+            ),
+            ("listener.mysql.tls", json!("optional")),
+            ("listener.mariadb.tls", json!("optional")),
+            ("listener.http.tls", json!("off")),
+            ("listener.https.tls", json!("required")),
+            ("failover.standby_dcs", json!(0)),
+        ] {
+            put(
+                &*store,
+                &format!("/sprig/dc/{d}/settings/{k}"),
+                json!({"v": 1, "value": v, "set_by": "op:approvals2", "reason": "chapter 52 live test"}),
+            )
+            .await;
+        }
+    }
+    let creds = work.join("creds.toml");
+    std::fs::write(
+        &creds,
+        format!(
+            "[sprig_ctl]\nuser = \"root\"\npassword = \"{ROOT_PW}\"\ntls = \"skip_verify\"\n\
+             [sprig_repl]\nuser = \"root\"\npassword = \"{ROOT_PW}\"\ntls = \"skip_verify\"\n"
+        ),
+    )
+    .expect("creds");
+    let backends = work.join("backends.toml");
+    std::fs::write(
+        &backends,
+        "[per_user]\nsecret = \"file:backends.toml#backend_secret\"\ntls = \"skip_verify\"\n\
+         [backend_secret]\npassword = \"ap2-per-user-secret\"\n",
+    )
+    .expect("backends");
+    std::fs::write(
+        work.join("extract.keys"),
+        "# approvals2 test key\n1 7f1c0d2e3a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5\n",
+    )
+    .expect("keys");
+
+    // ---- controllers, DCs, clusters, agents, gateways, workers ----
+    let mut procs = Procs {
+        bin: sprigdb.clone(),
+        work: work.clone(),
+        kids: Vec::new(),
+    };
+    procs.start(
+        "ctl-fra1",
+        "controller",
+        &controller_toml("fra1", &seed, &work),
+    );
+    assert!(
+        ready(ports("fra1").ctl_tel, Duration::from_secs(120)).await,
+        "ctl-fra1 ready"
+    );
+    put(
+        &*store,
+        "/sprig/g/ids/tenant",
+        json!({"v": 1, "next": AP2_BASE}),
+    )
+    .await;
+    let mut fra1 = get(&*store, "/sprig/g/dcs/fra1").await.expect("dcs/fra1");
+    fra1["global_voter"] = json!(true);
+    fra1["tags"] = json!({"jurisdiction": "EU"});
+    put(&*store, "/sprig/g/dcs/fra1", fra1).await;
+    for (d, j) in [("ams1", "EU"), ("sin1", "SG")] {
+        ctl_retry(
+            &sprigctl,
+            "fra1",
+            &[
+                "dc",
+                "register",
+                d,
+                "--global-voter",
+                "--tags",
+                &format!("jurisdiction={j}"),
+            ],
+            Duration::from_secs(30),
+        )
+        .await;
+    }
+    for d in ["ams1", "sin1"] {
+        procs.start(
+            &format!("ctl-{d}"),
+            "controller",
+            &controller_toml(d, &seed, &work),
+        );
+    }
+    for d in ["ams1", "sin1"] {
+        assert!(
+            ready(ports(d).ctl_tel, Duration::from_secs(120)).await,
+            "ctl-{d} ready"
+        );
+    }
+    let t0 = Instant::now();
+    loop {
+        let mut all = true;
+        for d in DCS {
+            let v = get(&*store, &format!("/sprig/g/dcs/{d}"))
+                .await
+                .unwrap_or_default();
+            all &= v["state"] == "active";
+        }
+        if all {
+            break;
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(180),
+            "DCs never activated"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let cred = format!("file:{}", creds.display());
+    let mut cluster = BTreeMap::new();
+    for d in DCS {
+        let v = ctl_retry(
+            &sprigctl,
+            d,
+            &[
+                "cluster",
+                "register",
+                &format!("{d}-db"),
+                "--topology",
+                "single",
+                "--node",
+                &format!("127.0.0.1:{}", db_port[d]),
+                "--credentials",
+                &cred,
+                "--storage-gb",
+                "1",
+            ],
+            Duration::from_secs(30),
+        )
+        .await;
+        let c = v["cluster"]["cluster_id"]
+            .as_str()
+            .expect("cluster id")
+            .to_owned();
+        let t0 = Instant::now();
+        loop {
+            let v = ctl(&sprigctl, d, &["cluster", "list"]).unwrap_or_default();
+            let st = v["clusters"]
+                .as_array()
+                .and_then(|a| a.iter().find(|x| x["cluster_id"] == c.as_str()))
+                .map(|x| x["admin_state"].as_str().unwrap_or_default().to_owned());
+            if st.as_deref() == Some("active") {
+                break;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(120), "{c} never active");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        procs.start(&format!("agent-{d}"), "agent", &agent_toml(d, &seed, &c));
+        assert!(
+            ready(ports(d).agent_tel, Duration::from_secs(60)).await,
+            "agent-{d}"
+        );
+        cluster.insert(d, c);
+    }
+    for p in db_port.values() {
+        wait_for(
+            &root_url(*p),
+            "SELECT @@read_only",
+            "0",
+            Duration::from_secs(60),
+        )
+        .await;
+    }
+    for d in DCS {
+        procs.start(
+            &format!("gw-{d}"),
+            "gateway",
+            &gateway_toml(d, &seed, &backends),
+        );
+        procs.start(
+            &format!("worker-{d}"),
+            "worker",
+            &worker_toml(d, &seed, &work),
+        );
+    }
+    for d in DCS {
+        assert!(
+            ready(ports(d).gw_tel, Duration::from_secs(180)).await,
+            "gw-{d}"
+        );
+        assert!(
+            ready(ports(d).worker_tel, Duration::from_secs(180)).await,
+            "worker-{d}"
+        );
+    }
+    eprintln!("all processes ready ({:?})", t_all.elapsed());
+
+    // ---- tenants: ap2-kid under ap2-parent, both homed in fra1 ----
+    let parent = ctl_retry(
+        &sprigctl,
+        "fra1",
+        &[
+            "tenant",
+            "create",
+            "ap2-parent",
+            "--cluster",
+            &cluster["fra1"],
+        ],
+        Duration::from_secs(60),
+    )
+    .await["tenant"]["tenant_id"]
+        .as_u64()
+        .expect("parent id");
+    let kid = ctl_retry(
+        &sprigctl,
+        "fra1",
+        &[
+            "tenant",
+            "create",
+            "ap2-kid",
+            "--under",
+            "ap2-parent",
+            "--cluster",
+            &cluster["fra1"],
+        ],
+        Duration::from_secs(60),
+    )
+    .await["tenant"]["tenant_id"]
+        .as_u64()
+        .expect("kid id");
+    for id in [parent, kid] {
+        assert!(
+            (AP2_BASE..AP2_BASE + 100_000).contains(&id),
+            "rule 8f: {id} outside this test's range"
+        );
+    }
+    user_and_schema(&sprigctl, "fra1", "ap2-kid").await;
+    // DC moves of the kid wait for an approval at tenant level, and climb
+    // a level every minute nobody acts.
+    tenant_setting(&sprigctl, "fra1", "ap2-kid", "migration.mode", "approve").await;
+    tenant_setting(
+        &sprigctl,
+        "fra1",
+        "ap2-kid",
+        "approvals.escalate_after",
+        "dc.move=1m",
+    )
+    .await;
+    eprintln!("tenants parent {parent}, kid {kid} ({:?})", t_all.elapsed());
+
+    // ---- the kid's traffic comes from ams1 ----
+    let stop = Arc::new(AtomicBool::new(false));
+    let next = Arc::new(AtomicU64::new(1));
+    let tally = Arc::new(Mutex::new(Tally::default()));
+    let mut clients = workload(
+        "fra1",
+        "ap2-kid",
+        1,
+        0,
+        Duration::from_millis(50),
+        &stop,
+        &next,
+        &tally,
+    );
+    clients.extend(workload(
+        "ams1",
+        "ap2-kid",
+        0,
+        2,
+        Duration::from_millis(20),
+        &stop,
+        &next,
+        &tally,
+    ));
+    let traffic_at = Instant::now();
+
+    // 1. Held at tenant level: an open dc.move item, the tenant stays.
+    let item = loop {
+        if let Some(i) = dc_move_item("ap2-kid").await
+            && i["state"] == "open"
+        {
+            break i;
+        }
+        assert!(
+            traffic_at.elapsed() < Duration::from_secs(420),
+            "no dc.move item: {}",
+            traffic(&sprigctl, "fra1", "ap2-kid")
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    };
+    let id = item["id"].as_str().expect("id").to_owned();
+    eprintln!(
+        "1. {id} raised {:?} after the traffic started: level {}, notifies {}: {}",
+        traffic_at.elapsed(),
+        item["level"],
+        item["notify_level"],
+        item["summary"]
+    );
+    assert_eq!(item["level"], "tenant", "{item}");
+    assert_eq!(item["notify_level"], "tenant", "{item}");
+    assert_eq!(item["action"]["machine"]["to"], "ams1", "{item}");
+    let raised = Instant::now();
+
+    // 2. Escalated to the ancestor, then the platform; never moved meanwhile.
+    let mut seen = vec!["tenant".to_owned()];
+    loop {
+        let i = dc_move_item("ap2-kid").await.expect("item");
+        let nl = i["notify_level"].as_str().unwrap_or_default().to_owned();
+        if seen.last() != Some(&nl) {
+            eprintln!("2. {id} notifies {nl} after {:?}", raised.elapsed());
+            seen.push(nl.clone());
+        }
+        let e = entry(&*store, kid).await;
+        assert_eq!(e["home_dc"], "fra1", "held: the kid must not move: {e}");
+        assert_eq!(i["state"], "open", "{i}");
+        if nl == "platform" {
+            break;
+        }
+        assert!(
+            raised.elapsed() < Duration::from_secs(300),
+            "no escalation to the platform: {seen:?}"
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    assert_eq!(
+        seen,
+        vec![
+            "tenant".to_owned(),
+            format!("ancestor:{parent}"),
+            "platform".to_owned()
+        ]
+    );
+    let auto = traffic(&sprigctl, "fra1", "ap2-kid");
+    eprintln!(
+        "2. while held the decider says {} ({})",
+        auto["auto"]["action"], auto["auto"]["why"]
+    );
+    assert_eq!(auto["auto"]["action"], "awaiting_approval", "{auto}");
+
+    // 3. Who may act: a kid user without rights is refused (39974); the
+    //    parent's administrator may act on the descendant's item.
+    let (s, v) = admin_rest(
+        "fra1",
+        "POST",
+        &format!("/admin/v1/recommendations/{id}:approve"),
+        &json!({"reason": "x", "caller": {"name": "studio:ap2-kid.nobody", "tenant": kid}}),
+    )
+    .await;
+    eprintln!("3. a kid user without rights: {s} {}", v["code"]);
+    assert_eq!(s, 403, "{v}");
+    let claim = json!({"name": "studio:ap2-parent.admin", "tenant": parent, "tenant_admin": true})
+        .to_string();
+    let enc: String = claim
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect();
+    let (_, v) = admin_rest(
+        "fra1",
+        "GET",
+        &format!("/admin/v1/recommendations/{id}?caller={enc}"),
+        &Value::Null,
+    )
+    .await;
+    assert_eq!(v["may_act"], true, "the parent's administrator: {v}");
+
+    // 4. gRPC through fra1's gateway: the kid's login lists its item with
+    //    the same claims as REST; the platform approves.
+    let ch =
+        tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{}", ports("fra1").http))
+            .expect("endpoint")
+            .connect()
+            .await
+            .expect("grpc");
+    let mut rc = RecommendationsClient::new(ch);
+    let mut req = tonic::Request::new(ListRequest {
+        query: "kind=dc.move".into(),
+    });
+    req.metadata_mut().insert(
+        "authorization",
+        format!("Basic {}", b64(&format!("ap2-kid.app:{APP_PW}")))
+            .parse()
+            .expect("header"),
+    );
+    let listed: Value = serde_json::from_str(
+        &rc.list_recommendations(req)
+            .await
+            .expect("list")
+            .into_inner()
+            .json,
+    )
+    .expect("json");
+    let mine = listed["items"]
+        .as_array()
+        .and_then(|a| a.iter().find(|i| i["id"] == id.as_str()))
+        .cloned()
+        .expect("the kid's login sees its item over gRPC");
+    eprintln!(
+        "4. gRPC ListRecommendations as ap2-kid.app: {} item(s), {id} may_act {}",
+        listed["items"].as_array().map_or(0, Vec::len),
+        mine["may_act"]
+    );
+    let approve_at = Instant::now();
+    let got = rc
+        .act_on_recommendation(NameRequest {
+            name: id.clone(),
+            query: String::new(),
+            body_json:
+                json!({"action": "approve", "reason": "platform: move it", "actor": "approvals2"})
+                    .to_string(),
+        })
+        .await
+        .expect("approve over gRPC")
+        .into_inner();
+    let got: Value = serde_json::from_str(&got.json).expect("json");
+    eprintln!(
+        "4. gRPC ActOnRecommendation approve (operator): {}",
+        got["state"]
+    );
+    assert_eq!(got["state"], "approved", "{got}");
+
+    // 5. The decider's next cycle still qualifies the move: it runs, and
+    //    the item is applied once the kid's home is ams1.
+    let (mig, commit, _) = follow(
+        &*store,
+        &sprigctl,
+        "ap2-kid",
+        kid,
+        "ams1",
+        Duration::from_secs(420),
+    )
+    .await;
+    eprintln!(
+        "5. moved fra1 -> ams1: started {:?} and committed {:?} after the approval",
+        mig.map(|m| m - approve_at),
+        commit - approve_at
+    );
+    let t0 = Instant::now();
+    let done = loop {
+        let (_, v) = admin_rest(
+            "ams1",
+            "GET",
+            &format!("/admin/v1/recommendations/{id}"),
+            &Value::Null,
+        )
+        .await;
+        if v["state"] == "applied" {
+            break v;
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(120),
+            "the item never became applied: {v}"
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    };
+    eprintln!(
+        "5. {id}: {} by {} ({})",
+        done["state"], done["decided_by"], done["result"]
+    );
+    let lm = entry(&*store, kid).await["last_move"].clone();
+    assert_eq!(lm["migration"]["cause"], "traffic", "{lm}");
+
+    stop.store(true, Ordering::SeqCst);
+    for c in clients {
+        let _ = c.await;
+    }
+    let (acked, lost) =
+        check_appends(&root_url(ams1_port), kid, &tally.lock().expect("lock")).await;
+    eprintln!("5. {acked} acknowledged appends, {} lost", lost.len());
+    assert!(lost.is_empty(), "lost {lost:?}");
+    eprintln!("done in {:?}", t_all.elapsed());
+    drop(procs);
+    drop([fra1_db, ams1_db, sin1_db]);
+    drop(net);
+    drop(etcd);
+    let _ = std::fs::remove_dir_all(&work);
+}

@@ -394,6 +394,64 @@ pub struct ObserveCx<'a> {
     pub decisions: &'a dyn DecisionLog,
     /// Now.
     pub now: SystemTime,
+    /// Chapter 52's gate for removing an index; `None`: never held.
+    pub removals: Option<&'a dyn RemovalGate>,
+}
+
+/// Chapter 52's gate before an index is removed: an automatic index's
+/// retirement or drop, or a user or migrated index's removal (decision
+/// O1). Under `approve` it holds the removal until someone approves it;
+/// the observer proposes it again on its next judgement, so an approved
+/// removal goes ahead only if the evidence still asks for it.
+#[async_trait::async_trait]
+pub trait RemovalGate: Send + Sync {
+    /// Whether to remove now.
+    async fn removal(&self, r: &Removal<'_>) -> RemovalVerdict;
+    /// The removal a [`RemovalVerdict::Go`] ticket let through started
+    /// (`ok`), or failed.
+    async fn removed(&self, ticket: &str, ok: bool, detail: &str);
+}
+
+/// One proposed removal.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Removal<'a> {
+    /// The table.
+    pub object: ObjectId,
+    /// The index.
+    pub index: &'a str,
+    /// A user or migrated index (else an automatic one).
+    pub user: bool,
+    /// Why: `unused`, `no_gain`, `regression`, `write_cost`, `budget`,
+    /// `superseded`.
+    pub reason: &'a str,
+    /// Its columns, in order.
+    pub columns: Vec<String>,
+    /// The measurements behind it.
+    pub evidence: serde_json::Value,
+}
+
+/// What the gate said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemovalVerdict {
+    /// Remove now; report with the ticket, when there is one.
+    Go(Option<String>),
+    /// Held (the reason names the item).
+    Hold(String),
+}
+
+/// Asks `cx`'s gate.
+pub(crate) async fn gate_removal(cx: &ObserveCx<'_>, r: &Removal<'_>) -> RemovalVerdict {
+    match cx.removals {
+        Some(g) => g.removal(r).await,
+        None => RemovalVerdict::Go(None),
+    }
+}
+
+/// Reports a removal a ticket let through.
+pub(crate) async fn removal_done(cx: &ObserveCx<'_>, ticket: Option<&str>, ok: bool, detail: &str) {
+    if let (Some(g), Some(t)) = (cx.removals, ticket) {
+        g.removed(t, ok, detail).await;
+    }
 }
 
 /// What one observation step did.
@@ -413,6 +471,9 @@ pub enum ObserveStep {
     Dropped(Option<DropReason>),
     /// A statement failed; try again later.
     Failed(String),
+    /// The removal waits for an approval (chapter 52); the reason names
+    /// the item.
+    Held(String),
 }
 
 /// `observed.<key>` as `T`.
@@ -1010,6 +1071,8 @@ fn change(from: IndexState, to: IndexState, at: SystemTime, r: Option<DropReason
 /// user's index serves whatever it did. `before` holds the fingerprints it
 /// served as they ran (else its targets' latency over the last
 /// `watch_every` is read): what "regressed while ignored" compares with.
+/// Chapter 52's gate is asked first.
+#[allow(clippy::too_many_lines)] // the gate, the toggle and the drop
 async fn retire<Q: Queryable + Send>(
     store: &AutoIndexStore,
     q: &mut Q,
@@ -1020,6 +1083,22 @@ async fn retire<Q: Queryable + Send>(
     before: Option<BTreeMap<String, usage::Before>>,
 ) -> Result<ObserveStep> {
     let name = def.name();
+    let proposal = Removal {
+        object: row.object,
+        index: &name,
+        user: false,
+        reason: reason.as_str(),
+        columns: def.parts.iter().map(|p| p.column.clone()).collect(),
+        evidence: serde_json::json!({
+            "reason": reason.as_str(),
+            "usage": row.observed.as_ref().and_then(|o| o.get("usage")),
+            "watch": row.observed.as_ref().and_then(|o| o.get("watch")),
+        }),
+    };
+    let ticket = match gate_removal(cx, &proposal).await {
+        RemovalVerdict::Go(t) => t,
+        RemovalVerdict::Hold(why) => return Ok(ObserveStep::Held(why)),
+    };
     if cx.view.instant_ignored_toggle && reason != DropReason::Superseded {
         let before = if let Some(b) = before {
             b
@@ -1037,6 +1116,7 @@ async fn retire<Q: Queryable + Send>(
         };
         for t in cx.shards {
             if let Err(e) = run_on_writer(cx, t, &ignore_sql(t, &name, true)?).await {
+                removal_done(cx, ticket.as_deref(), false, &e).await;
                 return Ok(ObserveStep::Failed(e));
             }
         }
@@ -1078,6 +1158,16 @@ async fn retire<Q: Queryable + Send>(
             )
             .await;
         }
+        removal_done(
+            cx,
+            ticket.as_deref(),
+            ok,
+            &format!(
+                "{} ignored; dropped after {} more reads unless a query it served gets slower",
+                row.name, cx.rules.usage_sample_reads
+            ),
+        )
+        .await;
         return Ok(ObserveStep::Retiring(reason));
     }
     let ok = store
@@ -1087,6 +1177,7 @@ async fn retire<Q: Queryable + Send>(
             &change(row.state, IndexState::Dropping, cx.now, Some(reason)),
         )
         .await?;
+    removal_done(cx, ticket.as_deref(), ok, &format!("{} dropping", row.name)).await;
     if !ok {
         return Ok(ObserveStep::Idle);
     }

@@ -32,6 +32,13 @@ pub fn install(admin: Arc<AdminApi>) {
     let _ = ADMIN.set(admin);
 }
 
+/// The Admin API forwarder, once HTTP started (chapter 52's gate for the
+/// gateway's own decisions uses it too).
+#[must_use]
+pub fn admin() -> Option<Arc<AdminApi>> {
+    ADMIN.get().cloned()
+}
+
 /// A statement's answer.
 #[derive(Debug)]
 pub enum RecAnswer {

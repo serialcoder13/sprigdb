@@ -63,6 +63,16 @@ struct Live {
 
 impl Live {
     async fn run_with(&self, text: &str, b: &Budgets) -> Result<Output> {
+        self.run_gated(text, b, None).await
+    }
+
+    /// [`Self::run_with`] with a mirror gate (round 5's read statements).
+    async fn run_gated(
+        &self,
+        text: &str,
+        b: &Budgets,
+        gate: Option<Arc<dyn sprig_graph::mirror::MirrorGate>>,
+    ) -> Result<Output> {
         let mut conn = self
             .pool
             .get_conn()
@@ -87,7 +97,8 @@ impl Live {
                     self.dict.clone(),
                     self.ids.clone(),
                 )
-                .with_schema(self.indexes.lock().expect("lock").clone(), None);
+                .with_schema(self.indexes.lock().expect("lock").clone(), None)
+                .with_gate(gate);
                 execute(&mut store, text, &Params::new(), b).await
             };
             match r {
@@ -788,4 +799,249 @@ async fn four_shards_uniqueness_across_shards() {
         panic!("live still shared");
     };
     live.cleanup().await;
+}
+
+/// A gate with a fixed answer.
+struct Gate(bool);
+
+#[async_trait]
+impl sprig_graph::mirror::MirrorGate for Gate {
+    async fn fresh(&self, _layout: &GraphShards) -> bool {
+        self.0
+    }
+}
+
+/// The applier's connections: the test's one server.
+struct Conns(mysql_async::Pool);
+
+#[async_trait]
+impl sprig_graph::mirror::ApplyConns for Conns {
+    async fn connect(&mut self, _cluster: &str) -> Result<mysql_async::Conn> {
+        self.0
+            .get_conn()
+            .await
+            .map_err(sprig_graph::catalog::backend_error)
+    }
+}
+
+/// Every edge and every mirror of the graph: `(id, src, dst, type)`.
+async fn edges_and_mirrors(live: &Live) -> (Vec<(u64, u64, u64, u32)>, Vec<(u64, u64, u64, u32)>) {
+    let mut c = live.pool.get_conn().await.expect("conn");
+    let (mut e, mut m) = (Vec::new(), Vec::new());
+    for (i, sh) in live.layout.shards.iter().enumerate() {
+        let rows: Vec<(u64, u64, u64, u32)> = c
+            .query(format!("SELECT id, src, dst, type FROM {}", sh.tables.edges))
+            .await
+            .expect("edges");
+        e.extend(rows);
+        let rows: Vec<(u64, u64, u64, u32, u64)> = c
+            .query(format!(
+                "SELECT id, src, dst, type, _sprig_rk FROM {}",
+                sh.tables.mirrors
+            ))
+            .await
+            .expect("mirrors");
+        for r in rows {
+            assert_eq!(live.layout.index_of(r.4), i, "mirror {} off its shard", r.0);
+            m.push((r.0, r.1, r.2, r.3));
+        }
+    }
+    e.sort_unstable();
+    m.sort_unstable();
+    (e, m)
+}
+
+/// The edges as the binlog would show their inserts.
+async fn insert_events(live: &Live) -> Vec<sprig_graph::mirror::EdgeChange> {
+    let mut c = live.pool.get_conn().await.expect("conn");
+    let mut out = Vec::new();
+    for sh in &live.layout.shards {
+        let rows: Vec<(u64, u64, u64, u32, u64, u64)> = c
+            .query(format!(
+                "SELECT id, src, dst, type, _sprig_rk, dst_rk FROM {}",
+                sh.tables.edges
+            ))
+            .await
+            .expect("edges");
+        out.extend(rows.into_iter().map(|(id, src, dst, rtype, src_rk, dst_rk)| {
+            sprig_graph::mirror::EdgeChange {
+                id,
+                src,
+                dst,
+                rtype,
+                src_rk,
+                dst_rk,
+                live: true,
+            }
+        }));
+    }
+    out
+}
+
+/// Round 5 (`graph.mirror = async`): writers on four shard schemas keep no
+/// mirrors; reads without a fresh gate scatter and still equal memory; the
+/// applier's batches (also replayed, and with deletes seen before their
+/// inserts, as two clusters' streams can be) leave exactly one mirror per
+/// edge; reads through the applied mirrors equal memory; and writers
+/// racing the applier never leave a mirror without its edge.
+#[tokio::test]
+async fn async_mirrors_converge() {
+    use sprig_graph::mirror::{EdgeChange, apply_batch};
+    let Some(mut live) = setup("r8five_live4a", 4).await else {
+        eprintln!("skipped: SPRIG_TEST_MARIADB_SINGLE is not set");
+        return;
+    };
+    {
+        let mut l = (*live.layout).clone();
+        l.mirror_async = true;
+        live.layout = Arc::new(l);
+    }
+    let b = Budgets::default();
+    let mut mem = MemStore::new(4);
+    let ring = "UNWIND range(0, 59) AS i CREATE (:R {i: i})";
+    let link = "MATCH (a:R), (b:R) WHERE b.i = (a.i + 1) % 60 OR b.i = (a.i * 7) % 60 CREATE (a)-[:NEXT {w: a.i}]->(b)";
+    for q in [CORPUS_SETUP, ring, link] {
+        live.run(q).await;
+        execute(&mut mem, q, &Params::new(), &b).await.expect(q);
+    }
+    let (edges, mirrors) = edges_and_mirrors(&live).await;
+    assert!(!edges.is_empty());
+    assert!(mirrors.is_empty(), "writers keep no asynchronous mirrors");
+    let extra = [
+        "MATCH (a:R {i: 0})<-[:NEXT]-(x) RETURN x.i ORDER BY x.i",
+        "MATCH (a:R {i: 5})<-[:NEXT*1..3]-(x) RETURN count(DISTINCT x) AS c",
+        "MATCH (a:R {i: 5})<-[r:NEXT*2]-(x) RETURN x.i, [e IN r | e.w] AS ws ORDER BY x.i, ws",
+        "MATCH (a:R {i: 3})-[:NEXT]-(x) RETURN x.i ORDER BY x.i",
+        "MATCH (x:R)<-[:NEXT]-(y:R) WHERE x.i < 4 RETURN x.i, count(y) ORDER BY x.i",
+        "MATCH (a {name: 'Alice'})<-[:KNOWS*1..2]-(x) RETURN DISTINCT x.name AS n ORDER BY n",
+    ];
+    let qs: Vec<&str> = CORPUS.iter().chain(extra.iter()).copied().collect();
+    // Lagging mirrors: incoming hops scatter.
+    compare_gated(&live, &mut mem, &qs, false, "scatter").await;
+    // The applier: every insert, twice (a replay after a restart).
+    let mut pool = Conns(live.pool.clone());
+    let ins = insert_events(&live).await;
+    let a = apply_batch(&mut pool, &live.layout, &ins, 1).await.expect("apply");
+    assert_eq!(a.upserts, ins.len() as u64);
+    apply_batch(&mut pool, &live.layout, &ins, 2).await.expect("replay");
+    let (edges, mirrors) = edges_and_mirrors(&live).await;
+    assert_eq!(edges, mirrors, "one mirror per edge");
+    compare_gated(&live, &mut mem, &qs, true, "through mirrors").await;
+    // Deletes: a node with incoming edges from other shards, and one edge.
+    let gone_before: std::collections::BTreeSet<u64> = edges.iter().map(|e| e.0).collect();
+    for q in [
+        "MATCH (n:R {i: 0}) DETACH DELETE n",
+        "MATCH (a:R)-[r:NEXT]->(b:R) WHERE a.i = 7 DELETE r",
+    ] {
+        live.run(q).await;
+        execute(&mut mem, q, &Params::new(), &b).await.expect(q);
+    }
+    let (edges, _) = edges_and_mirrors(&live).await;
+    let now: std::collections::BTreeSet<u64> = edges.iter().map(|e| e.0).collect();
+    let deleted: Vec<EdgeChange> = ins
+        .iter()
+        .filter(|e| gone_before.contains(&e.id) && !now.contains(&e.id))
+        .map(|e| EdgeChange { live: false, ..*e })
+        .collect();
+    assert!(deleted.len() >= 3, "{} deleted", deleted.len());
+    // The deletes' stream first, then a late replay of the inserts (as a
+    // lagging cluster's stream would deliver them): no stale mirror.
+    apply_batch(&mut pool, &live.layout, &deleted, 3).await.expect("deletes");
+    apply_batch(&mut pool, &live.layout, &ins, 4).await.expect("late inserts");
+    let (edges, mirrors) = edges_and_mirrors(&live).await;
+    assert_eq!(edges, mirrors, "late inserts of deleted edges leave no mirror");
+    compare_gated(&live, &mut mem, &qs, true, "after deletes").await;
+    // Writers racing the applier: 6 writers (one after another) create
+    // and delete edges while the applier replays what it saw, deletes
+    // first.
+    let writers = async {
+        for t in 0..6i64 {
+            for k in 0..15i64 {
+                live.run(&format!(
+                    "MATCH (a:R {{i: {}}}), (b:R {{i: {}}}) CREATE (a)-[:RACE {{t: {t}, k: {k}}}]->(b)",
+                    1 + (t * 7 + k) % 59,
+                    1 + (t * 13 + k * 5) % 59
+                ))
+                .await;
+                if k % 2 == 0 {
+                    live.run(&format!(
+                        "MATCH ()-[r:RACE {{t: {t}, k: {k}}}]->() DELETE r"
+                    ))
+                    .await;
+                }
+            }
+        }
+    };
+    let applier = {
+        let pool = live.pool.clone();
+        let layout = Arc::clone(&live.layout);
+        let live = &live;
+        async move {
+            let mut conns = Conns(pool);
+            let mut seen: Vec<EdgeChange> = Vec::new();
+            for round in 0..20u64 {
+                let now = insert_events(live).await;
+                let ids: std::collections::BTreeSet<u64> = now.iter().map(|e| e.id).collect();
+                // Edges seen before and gone now: their deletes go first.
+                let mut batch: Vec<EdgeChange> = seen
+                    .iter()
+                    .filter(|e| !ids.contains(&e.id))
+                    .map(|e| EdgeChange { live: false, ..*e })
+                    .collect();
+                batch.extend(seen.iter().copied());
+                batch.extend(now.iter().copied());
+                apply_batch(&mut conns, &layout, &batch, 10 + round)
+                    .await
+                    .expect("racing apply");
+                for e in now {
+                    if !seen.iter().any(|x| x.id == e.id) {
+                        seen.push(e);
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            }
+            seen
+        }
+    };
+    let (seen, ()) = tokio::join!(applier, writers);
+    // The final stream: what the applier hadn't seen yet, then every
+    // delete.
+    let now = insert_events(&live).await;
+    let ids: std::collections::BTreeSet<u64> = now.iter().map(|e| e.id).collect();
+    let mut last: Vec<EdgeChange> = now.clone();
+    last.extend(
+        seen.iter()
+            .filter(|e| !ids.contains(&e.id))
+            .map(|e| EdgeChange { live: false, ..*e }),
+    );
+    apply_batch(&mut Conns(live.pool.clone()), &live.layout, &last, 99)
+        .await
+        .expect("final apply");
+    let (edges, mirrors) = edges_and_mirrors(&live).await;
+    assert_eq!(edges, mirrors, "mirrors equal edges after the race");
+    eprintln!(
+        "async mirrors: {} edges, {} mirrors, {} edges seen by the racing applier",
+        edges.len(),
+        mirrors.len(),
+        seen.len()
+    );
+    live.cleanup().await;
+}
+
+/// `qs` on `live` with a gate answering `gate`, against memory.
+async fn compare_gated(live: &Live, mem: &mut MemStore, qs: &[&str], gate: bool, label: &str) {
+    for q in qs {
+        let a = show(
+            &live
+                .run_gated(q, &Budgets::default(), Some(Arc::new(Gate(gate))))
+                .await
+                .unwrap_or_else(|e| panic!("{label}: {q}: {e}")),
+        );
+        let want = show(
+            &execute(mem, q, &Params::new(), &Budgets::default())
+                .await
+                .expect(q),
+        );
+        assert_eq!(a, want, "{label}: {q}");
+    }
 }

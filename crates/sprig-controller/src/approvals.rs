@@ -45,6 +45,7 @@ pub mod http;
 pub mod index;
 pub mod notify;
 pub mod service;
+pub mod webhook;
 
 /// Proposes held decisions of a component that parks them (automatic
 /// indexing's `recommended` rows): the approvals loop calls it per tenant
@@ -450,6 +451,86 @@ pub async fn failover_gate(dc: &DcId, cluster: &ClusterId, writer: &str) -> Opti
     }
 }
 
+/// What chapter 52's gate says about one tenant's promotion in a DC
+/// failover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DcFailoverGate {
+    /// Promote now; report the result with [`dc_failover_done`] when the
+    /// ticket names an item.
+    Go(Option<Ticket>),
+    /// Held (the reason names the item); ask again on a later pass.
+    Hold(String),
+}
+
+/// Chapter 52's gate for promoting `tenant` from the lost DC `x` to `to`
+/// in DC failover `failover_id` (the global leader, chapter 25 step 7).
+/// Held only when `failover.mode = approve` comes from the global scope;
+/// the item lives in the global tier. An approval lets the failover code
+/// go ahead only after it has checked again that the DC's lease is still
+/// gone, the sites still agree, and the standby's lag is still within the
+/// tenant's RPO: it can stop a failover, never force one.
+pub async fn dc_failover_gate(
+    a: Option<&ControllerApprovals>,
+    x: &DcId,
+    tenant: TenantId,
+    to: &DcId,
+    failover_id: &str,
+    lag_ms: Option<u32>,
+) -> DcFailoverGate {
+    use sprig_approvals::{Action, Mode};
+    let Some(a) = a else {
+        return DcFailoverGate::Go(None);
+    };
+    let policy = a.policy(Kind::FailoverDc, None, None, None, None).await;
+    if policy.mode != Mode::Approve {
+        return DcFailoverGate::Go(None);
+    }
+    let mut subject = a.subject(tenant).await;
+    subject.dc = Some(x.clone());
+    let name = subject
+        .tenant_name
+        .clone()
+        .unwrap_or_else(|| tenant.to_string());
+    let p = Proposal {
+        kind: Kind::FailoverDc,
+        subject,
+        target: format!("t{tenant}/dc/{x}"),
+        action: Action {
+            text: format!("promote tenant {name}'s standby in {to} (DC {x} lost)"),
+            machine: serde_json::json!({ "from": x.as_str(), "to": to.as_str() }),
+        },
+        evidence: serde_json::json!({
+            "failover": failover_id,
+            "lost_dc": x.as_str(),
+            "standby_dc": to.as_str(),
+            "standby_lag_ms": lag_ms,
+        }),
+        score: 1.0,
+        summary: format!("DC {x} is lost: fail tenant {name} over to its standby in {to}"),
+        emergency: false,
+    };
+    match a.gate(&p, &policy).await {
+        Verdict::Proceed(t) => DcFailoverGate::Go(Some(t)),
+        Verdict::Wait(id) => DcFailoverGate::Hold(format!("held for approval as {id}")),
+        Verdict::Suppressed(id) => DcFailoverGate::Hold(format!("ignored ({id}); fenced in {x}")),
+        _ => DcFailoverGate::Hold("held: approvals unavailable".into()),
+    }
+}
+
+/// Reports the promotion a [`DcFailoverGate::Go`] ticket let through.
+pub async fn dc_failover_done(
+    a: Option<&ControllerApprovals>,
+    ticket: Option<&Ticket>,
+    ok: bool,
+    detail: &str,
+) {
+    if let (Some(t), Some(a)) = (ticket, a)
+        && t.id.is_some()
+    {
+        a.finished(t, ok, detail).await;
+    }
+}
+
 /// Ancestors (root first) from a directory path `/1/42/77/`, without
 /// `tenant` itself.
 #[must_use]
@@ -708,6 +789,89 @@ impl Reconciler for ApprovalsLoop {
 
     fn workers(&self) -> usize {
         4
+    }
+}
+
+/// Timers, expiry and retention of the global tier's items (DC failover
+/// holds), on the global leader.
+pub struct GlobalApprovalsLoop {
+    a: Arc<ControllerApprovals>,
+}
+
+impl fmt::Debug for GlobalApprovalsLoop {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GlobalApprovalsLoop")
+            .finish_non_exhaustive()
+    }
+}
+
+impl GlobalApprovalsLoop {
+    /// The loop over `a`.
+    #[must_use]
+    pub fn new(a: Arc<ControllerApprovals>) -> Self {
+        Self { a }
+    }
+}
+
+#[async_trait::async_trait]
+impl Reconciler for GlobalApprovalsLoop {
+    type Key = &'static str;
+
+    fn name(&self) -> &'static str {
+        "approvals_global"
+    }
+
+    fn tier(&self) -> LoopTier {
+        LoopTier::GlobalLeader
+    }
+
+    fn keys_for(&self, _ev: &MetaEvent) -> Vec<&'static str> {
+        vec!["global"]
+    }
+
+    async fn all_keys(&self, _cx: &LoopCx) -> Result<Vec<&'static str>> {
+        Ok(vec!["global"])
+    }
+
+    async fn reconcile(&self, cx: &LoopCx, _key: &&'static str) -> Result<Outcome> {
+        cx.leader()?;
+        let num = |r: Option<Resolved>, d: u32| {
+            r.and_then(|r| r.value.as_f64()).map_or(d, |v| {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let v = v.max(0.0) as u32;
+                v
+            })
+        };
+        let tick = num(
+            self.a
+                .resolve(keys::TICK_SECONDS.key, None, None, None, None)
+                .await,
+            keys::TICK_SECONDS.default,
+        );
+        let tick = Duration::from_secs(u64::from(tick.max(1)));
+        let Some(store) = self.a.hub.stores().global() else {
+            return Ok(Outcome::RequeueAfter(tick));
+        };
+        let hours = num(
+            self.a
+                .resolve(keys::APPLYING_TIMEOUT_HOURS.key, None, None, None, None)
+                .await,
+            keys::APPLYING_TIMEOUT_HOURS.default,
+        );
+        self.a
+            .pass(&*store, Duration::from_secs(u64::from(hours) * 3600))
+            .await?;
+        let days = num(
+            self.a
+                .resolve(keys::RETENTION_DAYS.key, None, None, None, None)
+                .await,
+            keys::RETENTION_DAYS.default,
+        );
+        let before = self.a.hub.now() - i64::from(days) * 86_400 * 1_000_000;
+        if let Err(e) = store.purge(before).await {
+            tracing::debug!(error = %e, "approvals: global purge");
+        }
+        Ok(Outcome::RequeueAfter(tick))
     }
 }
 

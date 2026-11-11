@@ -155,7 +155,7 @@ pub struct StudioState {
     factors: Option<sprig_auth::mfa::FactorStore>,
     /// The keys sealing TOTP seeds.
     factor_keys: Option<Arc<dyn sprig_auth::mfa::FactorKeys>>,
-    /// The Admin API token operator mode forwards with (decision ST34).
+    /// The Admin API token operator mode forwards with (decision ST35).
     operator_token: Option<String>,
 }
 
@@ -248,15 +248,19 @@ impl StudioState {
     /// answer 39301.
     #[must_use]
     pub fn with_factor_keys(mut self, path: Option<&std::path::Path>) -> Self {
-        self.factor_keys = path.and_then(|p| {
-            match sprig_workload::keyring::MasterKeyring::from_file(p) {
-                Ok(k) => Some(Arc::new(mfa::KeyringFactorKeys(k)) as Arc<dyn sprig_auth::mfa::FactorKeys>),
-                Err(e) => {
-                    tracing::warn!(error = %e, "second-factor keys not loaded");
-                    None
-                }
-            }
-        });
+        self.factor_keys =
+            path.and_then(
+                |p| match sprig_workload::keyring::MasterKeyring::from_file(p) {
+                    Ok(k) => {
+                        Some(Arc::new(mfa::KeyringFactorKeys(k))
+                            as Arc<dyn sprig_auth::mfa::FactorKeys>)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "second-factor keys not loaded");
+                        None
+                    }
+                },
+            );
         self
     }
 

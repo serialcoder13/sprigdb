@@ -298,3 +298,58 @@ service Gateways {
     };
   }
 }
+
+// Approvals and recommendations (chapter 52). Ids carry their store:
+// "t42.17", "dc.mum1.3", "g.5". Operators call with the admin token (or a
+// DC operator's); tenant users call with their own login, and the gateway
+// passes their tenant, SPRIG_TENANT_ADMIN and ALTER/INDEX grants to the
+// controller as a caller claim, as the REST face /v1/recommendations does.
+service Recommendations {
+  // Query: tenant, level, kind, state, db, table, min_age_hours, all, limit.
+  rpc ListRecommendations(ListRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      get: "/admin/v1/recommendations"
+    };
+  }
+  rpc GetRecommendation(NameRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      get: "/admin/v1/recommendations/{name}"
+    };
+  }
+  // body_json: {"action": "approve" | "ignore" | "snooze" | "reopen" |
+  // "comment", ...} as chapter 52's action bodies.
+  rpc ActOnRecommendation(NameRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      post: "/admin/v1/recommendations/{name}:act"
+      body: "*"
+    };
+  }
+  rpc BulkAct(BodyRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      post: "/admin/v1/recommendations:bulk"
+      body: "*"
+    };
+  }
+  rpc GetApprovalPolicy(ListRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      get: "/admin/v1/recommendations:policy"
+    };
+  }
+  rpc SetApprovalPolicy(BodyRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      post: "/admin/v1/recommendations:policy"
+      body: "*"
+    };
+  }
+  rpc ListSubscriptions(ListRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      get: "/admin/v1/recommendations:subscriptions"
+    };
+  }
+  rpc SetSubscription(BodyRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      post: "/admin/v1/recommendations:subscriptions"
+      body: "*"
+    };
+  }
+}

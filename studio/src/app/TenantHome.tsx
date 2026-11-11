@@ -21,7 +21,7 @@ export function TenantHome() {
       <div className="row" style={{ alignItems: 'stretch' }}>
         <section className="card" style={{ flex: 1, minInlineSize: 260 }} aria-labelledby="dbs-h">
           <h2 id="dbs-h">Databases</h2>
-          <ul>
+          <ul className="linklist">
             {(dbs.data ?? []).map((d) => (
               <li key={d}>
                 <Link to={`/t/${encodeURIComponent(me.principal.tenant ?? '')}/db/${encodeURIComponent(d)}`}>{d}</Link>

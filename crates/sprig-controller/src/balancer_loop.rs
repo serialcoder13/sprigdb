@@ -175,13 +175,18 @@ impl BalancerLoop {
             if mode_of(m.tenant) != BalancerMode::Approve {
                 continue;
             }
-            let policy = a.policy(Kind::BalancerMove, Some(m.tenant), None, None, None).await;
+            let policy = a
+                .policy(Kind::BalancerMove, Some(m.tenant), None, None, None)
+                .await;
             let p = Proposal {
                 kind: Kind::BalancerMove,
                 subject: a.subject(m.tenant).await,
                 target: format!("t{}/cluster", m.tenant),
                 action: Action {
-                    text: format!("move tenant {} from cluster {} to {}", m.tenant, m.from, m.to),
+                    text: format!(
+                        "move tenant {} from cluster {} to {}",
+                        m.tenant, m.from, m.to
+                    ),
                     machine: serde_json::json!({ "to": m.to.to_string() }),
                 },
                 evidence: serde_json::json!({

@@ -435,6 +435,10 @@ impl Migrator {
         schema: &str,
         opts: &MigrateOpts,
     ) -> Result<MigrateReport> {
+        // The run changes the connection's default database and holds a
+        // named lock: the connection is reset when it goes back to its pool,
+        // even a catalog pool that keeps its connections as they are.
+        conn.reset_connection(true);
         let lock = lock_name(schema)?;
         let got: Option<Option<i64>> = timed(
             opts.lock_timeout + opts.statement_timeout,

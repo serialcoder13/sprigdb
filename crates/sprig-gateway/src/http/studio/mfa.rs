@@ -17,7 +17,7 @@
 //! once: TOTP steps are stored with a compare-and-set, recovery codes are
 //! deleted when used.
 //!
-//! **Impersonation** (decision ST33) needs a session (no Basic or API
+//! **Impersonation** (decision ST34) needs a session (no Basic or API
 //! key), `SPRIG_TENANT_ADMIN` over the user's tenant (the caller's own or a
 //! descendant), a user who doesn't administer the caller's tenant,
 //! `auth.impersonation` on for that tenant, a reason, at most
@@ -160,7 +160,12 @@ fn challenge_seconds(core: &Arc<Core>, tenant: Option<TenantId>) -> u64 {
         .tenant_get(&sprig_auth::settings::MFA_CHALLENGE_SECONDS, tenant, None)
 }
 
-fn sign(core: &Arc<Core>, kind: &str, caller: &Caller, client: &str) -> Result<(String, u64), SprigError> {
+fn sign(
+    core: &Arc<Core>,
+    kind: &str,
+    caller: &Caller,
+    client: &str,
+) -> Result<(String, u64), SprigError> {
     let (t, u) = ids(caller)?;
     let ttl = challenge_seconds(core, Some(t));
     let ticket = core.studio.tokens.sign_ticket(&json!({
@@ -190,7 +195,10 @@ async fn open_ticket(
         return Err(denied("the challenge expired; sign in again"));
     }
     let tid: u64 = v["tid"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let uid = v["uid"].as_u64().and_then(|u| u32::try_from(u).ok()).unwrap_or(0);
+    let uid = v["uid"]
+        .as_u64()
+        .and_then(|u| u32::try_from(u).ok())
+        .unwrap_or(0);
     Ok((
         v["ten"].as_str().unwrap_or("").to_owned(),
         TenantId(tid),
@@ -223,13 +231,17 @@ pub(super) async fn after_password(
         let (ticket, ttl) = sign(core, "enrol", caller, client)?;
         tracing::info!(target: "sprig_audit", event = "auth.login_failed", reason = "mfa_enrolment_required",
             user = %caller.principal.user, "a second factor must be enrolled first");
-        return Ok(Some(json_response(200, &json!({ "enrol": ticket, "expires_in": ttl }))));
+        return Ok(Some(json_response(
+            200,
+            &json!({ "enrol": ticket, "expires_in": ttl }),
+        )));
     }
     Ok(None)
 }
 
 /// Issues the session after a second factor, as login does (cookie or
 /// body).
+#[allow(clippy::too_many_arguments)] // one session's parts, from two call sites
 async fn sign_in(
     core: &Arc<Core>,
     info: &ConnInfo,
@@ -308,7 +320,12 @@ impl Hdrs {
 
     /// The cookie rules of a login (`refresh_transport` `cookie`); whether
     /// the refresh token goes in the cookie.
-    fn cookie_rules(&self, cfg: &StudioConfig, info: &ConnInfo, body: &Value) -> Result<bool, SprigError> {
+    fn cookie_rules(
+        &self,
+        cfg: &StudioConfig,
+        info: &ConnInfo,
+        body: &Value,
+    ) -> Result<bool, SprigError> {
         let cookie = text(body, "refresh_transport") != "body";
         if cookie {
             same_origin(
@@ -339,41 +356,54 @@ pub(super) async fn complete(
     info: &ConnInfo,
     req: Request<Incoming>,
 ) -> Result<Response<Body>, SprigError> {
-    let h = Hdrs::of(&req);
-    let b = parse_json(&read_body(req).await?)?;
-    let cookie = h.cookie_rules(cfg, info, &b)?;
-    let (tenant, t, u, client) = open_ticket(core, &text(&b, "challenge"), "mfa").await?;
+    let hdrs = Hdrs::of(&req);
+    let body = parse_json(&read_body(req).await?)?;
+    let cookie = hdrs.cookie_rules(cfg, info, &body)?;
+    let (tenant, tid, uid, client) = open_ticket(core, &text(&body, "challenge"), "mfa").await?;
     let (store, keys) = parts(core)?;
-    let code = text(&b, "code");
-    match store.verify(keys, t, u, &code, SystemTime::now()).await? {
-        Some(method) => {
-            metrics::counter!("sprig_auth_mfa_total", "method" => method, "outcome" => "ok")
-                .increment(1);
-            let left = if method == "rec" {
-                json!({ "recovery_left": store.recovery_left(t, u).await? })
-            } else {
-                json!({})
-            };
-            sign_in(core, info, &tenant, u, &client, vec!["pwd".into(), method.into()], cookie, left)
-                .await
-        }
-        None => {
-            metrics::counter!("sprig_auth_mfa_total", "method" => "any", "outcome" => "failed")
-                .increment(1);
-            tracing::info!(target: "sprig_audit", event = "auth.login_failed", reason = "mfa_failed",
-                tenant = %tenant, user_id = u.0, client_ip = %info.peer.ip(), "second factor refused");
-            Err(denied("the code is not valid, or was already used"))
-        }
-    }
+    let factor_code = text(&body, "code");
+    let Some(method) = store
+        .verify(keys, tid, uid, &factor_code, SystemTime::now())
+        .await?
+    else {
+        metrics::counter!("sprig_auth_mfa_total", "method" => "any", "outcome" => "failed")
+            .increment(1);
+        tracing::info!(target: "sprig_audit", event = "auth.login_failed", reason = "mfa_failed",
+            tenant = %tenant, user_id = uid.0, client_ip = %info.peer.ip(), "second factor refused");
+        return Err(denied("the code is not valid, or was already used"));
+    };
+    metrics::counter!("sprig_auth_mfa_total", "method" => method, "outcome" => "ok").increment(1);
+    let left = if method == "rec" {
+        json!({ "recovery_left": store.recovery_left(tid, uid).await? })
+    } else {
+        json!({})
+    };
+    sign_in(
+        core,
+        info,
+        &tenant,
+        uid,
+        &client,
+        vec!["pwd".into(), method.into()],
+        cookie,
+        left,
+    )
+    .await
 }
 
 /// Who a factors call is for: a session's user, or an enrol ticket's.
 enum Subject {
-    Session(Caller),
-    Ticket { tenant: String, t: TenantId, u: UserId, client: String },
+    Session(Box<Caller>),
+    Ticket {
+        tenant: String,
+        t: TenantId,
+        u: UserId,
+        client: String,
+    },
 }
 
 /// `/v1/auth/factors...`.
+#[allow(clippy::too_many_lines)] // the four verbs and their two subjects
 pub(super) async fn factors(
     core: &Arc<Core>,
     cfg: &StudioConfig,
@@ -384,13 +414,15 @@ pub(super) async fn factors(
     let (store, keys) = parts(core)?;
     if verb.is_empty() {
         let (caller, _) = session_caller(core, info, &req).await?;
-        let (t, u) = ids(&caller)?;
-        let list = store.list(t, u).await?;
+        let (tid, uid) = ids(&caller)?;
+        let list = store.list(tid, uid).await?;
         let shown: Vec<Value> = list
             .iter()
             .filter(|f| f.kind != "recovery")
-            .map(|f| json!({"id": f.id.to_string(), "kind": f.kind, "state": f.state,
-                "created_ms": f.created_ms.to_string()}))
+            .map(|f| {
+                json!({"id": f.id.to_string(), "kind": f.kind, "state": f.state,
+                "created_ms": f.created_ms.to_string()})
+            })
             .collect();
         let left = list.iter().filter(|f| f.kind == "recovery").count();
         return Ok(json_response(
@@ -398,17 +430,17 @@ pub(super) async fn factors(
             &json!({ "factors": shown, "recovery_left": left, "required": required(core, &caller).await }),
         ));
     }
-    let h = Hdrs::of(&req);
-    let b = parse_json(&read_body(req).await?)?;
-    let sub = subject(core, info, &b, h.auth.as_deref()).await?;
+    let hdrs = Hdrs::of(&req);
+    let body = parse_json(&read_body(req).await?)?;
+    let sub = subject(core, info, &body, hdrs.auth.as_deref()).await?;
     let now = SystemTime::now();
-    let (tenant_name, t, u, label) = match &sub {
+    let (tenant_name, tid, uid, label) = match &sub {
         Subject::Session(c) => {
-            let (t, u) = ids(c)?;
+            let (tid, uid) = ids(c)?;
             (
                 c.principal.tenant_name.clone().unwrap_or_default(),
-                t,
-                u,
+                tid,
+                uid,
                 format!(
                     "{}.{}",
                     c.principal.tenant_name.clone().unwrap_or_default(),
@@ -416,12 +448,18 @@ pub(super) async fn factors(
                 ),
             )
         }
-        Subject::Ticket { tenant, t, u, .. } => (tenant.clone(), *t, *u, format!("{tenant}#{}", u.0)),
+        Subject::Ticket {
+            tenant,
+            t: tid,
+            u: uid,
+            ..
+        } => (tenant.clone(), *tid, *uid, format!("{tenant}#{}", uid.0)),
     };
     match verb {
         "enrol" => {
-            let seed = store.enrol(keys, t, u, now).await?;
-            let uri = sprig_auth::mfa::otpauth_uri(&format!("SprigDB {tenant_name}"), &label, &seed);
+            let seed = store.enrol(keys, tid, uid, now).await?;
+            let uri =
+                sprig_auth::mfa::otpauth_uri(&format!("SprigDB {tenant_name}"), &label, &seed);
             Ok(json_response(
                 200,
                 &json!({ "secret": sprig_auth::mfa::base32(&seed), "otpauth_uri": uri,
@@ -429,19 +467,33 @@ pub(super) async fn factors(
             ))
         }
         "confirm" => {
-            let Some(codes) = store.confirm(keys, t, u, &text(&b, "code"), now).await? else {
-                return Err(denied("the code is not valid; check the device's clock and try again"));
+            let Some(codes) = store
+                .confirm(keys, tid, uid, &text(&body, "code"), now)
+                .await?
+            else {
+                return Err(denied(
+                    "the code is not valid; check the device's clock and try again",
+                ));
             };
             tracing::info!(target: "sprig_audit", event = "auth.factor_enrolled", kind = "totp",
-                tenant = %tenant_name, user_id = u.0, "TOTP factor enrolled");
+                tenant = %tenant_name, user_id = uid.0, "TOTP factor enrolled");
             let extra = json!({ "recovery_codes": codes });
             match sub {
                 Subject::Ticket { tenant, client, .. } => {
                     // The enrolment ticket's login: signing in with the
                     // code just shown.
-                    let cookie = h.cookie_rules(cfg, info, &b)?;
-                    sign_in(core, info, &tenant, u, &client, vec!["pwd".into(), "otp".into()], cookie, extra)
-                        .await
+                    let cookie = hdrs.cookie_rules(cfg, info, &body)?;
+                    sign_in(
+                        core,
+                        info,
+                        &tenant,
+                        uid,
+                        &client,
+                        vec!["pwd".into(), "otp".into()],
+                        cookie,
+                        extra,
+                    )
+                    .await
                 }
                 Subject::Session(_) => Ok(json_response(200, &extra)),
             }
@@ -450,13 +502,19 @@ pub(super) async fn factors(
             let Subject::Session(caller) = sub else {
                 return Err(denied("sign in to remove factors"));
             };
-            let target_user = text(&b, "user");
+            let target_user = text(&body, "user");
             let (rt, ru) = if target_user.is_empty() || target_user == caller.principal.user {
                 // One's own: prove it with a current code or a recovery code.
-                if store.verify(keys, t, u, &text(&b, "code"), now).await?.is_none() {
-                    return Err(denied("removing your factor needs a current code or a recovery code"));
+                if store
+                    .verify(keys, tid, uid, &text(&body, "code"), now)
+                    .await?
+                    .is_none()
+                {
+                    return Err(denied(
+                        "removing your factor needs a current code or a recovery code",
+                    ));
                 }
-                (t, u)
+                (tid, uid)
             } else {
                 // An administrator's reset.
                 let p = privileges(core, &caller).await;
@@ -471,7 +529,7 @@ pub(super) async fn factors(
                 let LoginSource::Catalog(cl) = login.source() else {
                     return Err(unavailable());
                 };
-                let host = text(&b, "host");
+                let host = text(&body, "host");
                 let p = sprig_auth::mfa::account_principal(
                     cl,
                     &tenant_name,
@@ -481,7 +539,7 @@ pub(super) async fn factors(
                     now,
                 )
                 .await?;
-                (t, p.user_id.ok_or_else(|| denied("no such account"))?)
+                (tid, p.user_id.ok_or_else(|| denied("no such account"))?)
             };
             let n = store.reset(rt, ru, now).await?;
             tracing::info!(target: "sprig_audit", event = "auth.factor_reset", tenant = %tenant_name,
@@ -501,7 +559,12 @@ async fn subject(
     let ticket = text(body, "enrol");
     if !ticket.is_empty() {
         let (tenant, t, u, client) = open_ticket(core, &ticket, "enrol").await?;
-        return Ok(Subject::Ticket { tenant, t, u, client });
+        return Ok(Subject::Ticket {
+            tenant,
+            t,
+            u,
+            client,
+        });
     }
     not_impersonating(authorization, "change second factors")?;
     let Some(token) = bearer(authorization).filter(|t| t.starts_with(ACCESS_PREFIX)) else {
@@ -511,7 +574,7 @@ async fn subject(
         .studio
         .verify(token, info.peer.ip(), info.tls.is_some())
         .await?;
-    Ok(Subject::Session(Caller {
+    Ok(Subject::Session(Box::new(Caller {
         principal: v.principal,
         peer: info.peer,
         tls: info.tls.clone(),
@@ -519,10 +582,11 @@ async fn subject(
         generation: info.generation,
         authorization: authorization.map(str::to_owned),
         client_dc: None,
-    }))
+    })))
 }
 
 /// `POST /v1/auth/impersonate`.
+#[allow(clippy::too_many_lines)] // chapter 14's checks, one after another
 pub(super) async fn impersonate(
     core: &Arc<Core>,
     info: &ConnInfo,
@@ -534,7 +598,9 @@ pub(super) async fn impersonate(
     let b = parse_json(&read_body(req).await?)?;
     let me = caller.principal.clone();
     let home = me.tenant_name.clone().unwrap_or_default();
-    let target_tenant = Some(text(&b, "tenant")).filter(|t| !t.is_empty()).unwrap_or_else(|| home.clone());
+    let target_tenant = Some(text(&b, "tenant"))
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| home.clone());
     let user = text(&b, "user");
     let host = text(&b, "host");
     let reason = text(&b, "reason");
@@ -547,7 +613,9 @@ pub(super) async fn impersonate(
     // An administrator over the tenant: the caller's own or a descendant.
     let privs = privileges(core, &caller).await;
     if !privs.tenant_admin {
-        return Err(imp_denied("impersonation needs SPRIG_TENANT_ADMIN over the user's tenant"));
+        return Err(imp_denied(
+            "impersonation needs SPRIG_TENANT_ADMIN over the user's tenant",
+        ));
     }
     let tree = tenant_tree(core, &me, true).await;
     let node = tree
@@ -556,7 +624,11 @@ pub(super) async fn impersonate(
         .flatten()
         .find(|n| n["name"].as_str() == Some(target_tenant.as_str()))
         .cloned()
-        .ok_or_else(|| imp_denied(format!("tenant {target_tenant} is not yours or below yours")))?;
+        .ok_or_else(|| {
+            imp_denied(format!(
+                "tenant {target_tenant} is not yours or below yours"
+            ))
+        })?;
     let target_tid = node["id"]
         .as_str()
         .and_then(|s| s.parse().ok())
@@ -566,11 +638,15 @@ pub(super) async fn impersonate(
         .studio
         .tenant_get(&sprig_auth::settings::IMPERSONATION, target_tid, None);
     if on.as_ref() != "on" {
-        return Err(imp_denied(format!("auth.impersonation is off for tenant {target_tenant}")));
+        return Err(imp_denied(format!(
+            "auth.impersonation is off for tenant {target_tenant}"
+        )));
     }
-    let max = core
-        .studio
-        .tenant_get(&sprig_auth::settings::IMPERSONATION_MAX_MINUTES, target_tid, None);
+    let max = core.studio.tenant_get(
+        &sprig_auth::settings::IMPERSONATION_MAX_MINUTES,
+        target_tid,
+        None,
+    );
     let minutes = b["minutes"].as_u64().unwrap_or(max.min(15));
     if minutes == 0 || minutes > max {
         return Err(imp_denied(format!(
@@ -637,7 +713,14 @@ pub(super) async fn impersonate(
     let issued = core
         .studio
         .tokens
-        .issue(target, "studio", limits, now, s.claims.amr.clone(), Some((act, imp)))
+        .issue(
+            target,
+            "studio",
+            limits,
+            now,
+            s.claims.amr.clone(),
+            Some((act, imp)),
+        )
         .await?;
     metrics::counter!("sprig_auth_impersonations_total").increment(1);
     tracing::info!(target: "sprig_audit", event = "auth.impersonation_started", sid = %issued.sid,

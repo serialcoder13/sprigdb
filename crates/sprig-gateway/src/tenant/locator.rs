@@ -53,6 +53,9 @@ pub struct GatewayLocator {
     registry: ClusterRegistry,
     backends: Arc<Backends>,
     pools: Mutex<HashMap<ClusterId, (String, Pool)>>,
+    /// `sprig_ctl` pools for catalog reads and changes only, which keep
+    /// their connections' prepared statements (decision PF3).
+    catalog_pools: Mutex<HashMap<ClusterId, (String, Pool)>>,
     clusters: Mutex<HashMap<TenantId, ClusterId>>,
     ctl_users: Mutex<HashMap<ClusterId, String>>,
     /// Every tenant map in this DC tier (`shardmaps/`), fed by a watch,
@@ -98,6 +101,7 @@ impl GatewayLocator {
             registry,
             backends,
             pools: Mutex::new(HashMap::new()),
+            catalog_pools: Mutex::new(HashMap::new()),
             clusters: Mutex::new(HashMap::new()),
             ctl_users: Mutex::new(HashMap::new()),
             maps: OnceLock::new(),
@@ -213,6 +217,55 @@ impl GatewayLocator {
             (sum, held)
         });
         (dc, sum, held)
+    }
+
+    /// R34 (bugfix5): [`Self::maps_token`] read from etcd itself rather than
+    /// from the watched copy: one linearizable listing of `tenant`'s maps in
+    /// the DC they are followed in. A mover writes its hold before it
+    /// fences, so a listing made after a statement met the fence shows the
+    /// hold (or the cutover after it), however far the watch lags.
+    ///
+    /// # Errors
+    /// The store's.
+    pub async fn maps_token_fresh(&self, tenant: TenantId) -> Result<(DcId, u64, bool)> {
+        let dc = self.home_of(tenant);
+        let prefix = Tier::Dc(dc.clone()).key(&format!("shardmaps/{tenant}/"))?;
+        let (mut sum, mut held) = (0u64, false);
+        let mut after = None;
+        loop {
+            let page = self
+                .dc
+                .list(
+                    &prefix,
+                    sprig_meta::ListOpts {
+                        after: after.take(),
+                        ..sprig_meta::ListOpts::default()
+                    },
+                )
+                .await?;
+            for kv in &page.kvs {
+                sum = sum.wrapping_add(kv.mod_revision);
+                held |= self
+                    .decode_map(kv.key.as_str(), kv.mod_revision, &kv.value)
+                    .is_some_and(|m| {
+                        m.ranges
+                            .iter()
+                            .any(|r| r.state == sprig_catalog::placement::RangeState::Held)
+                    });
+            }
+            match page.kvs.last() {
+                Some(kv) if page.more => after = Some(kv.key.clone()),
+                _ => break,
+            }
+        }
+        Ok((dc, sum, held))
+    }
+
+    /// Whether the watched copy of the maps of the DC `tenant` is followed
+    /// in has loaded (before that, [`Self::maps_token`] sees no map).
+    #[must_use]
+    pub fn maps_loaded(&self, tenant: TenantId) -> bool {
+        self.maps_of(&self.home_of(tenant)).is_ready()
     }
 
     /// The DC whose map this gateway follows for `tenant`: its home as last
@@ -472,6 +525,31 @@ impl GatewayLocator {
     /// 39104 for an unknown cluster; 39100 without a writer; 39998 for a
     /// credential reference that doesn't resolve.
     pub async fn ctl_pool(&self, cluster: &ClusterId) -> Result<Pool> {
+        self.pool_of(cluster, false).await
+    }
+
+    /// The pool of `sprig_ctl` connections to `cluster`'s writer that the
+    /// tenant catalogs there use ([`CatalogLocator::writer`]). Its
+    /// connections are not reset when they go back to the pool, so their
+    /// server-side prepared statements stay cached: with the reset (the
+    /// driver's default) every catalog statement was prepared again, about
+    /// 80 of a DDL statement's 160 round trips (decision PF3). Catalog work
+    /// leaves no session state behind: its statements name their schema,
+    /// lock waits are `SET STATEMENT`, transactions roll back when dropped,
+    /// and a migration run resets its own connection.
+    ///
+    /// # Errors
+    /// As [`Self::ctl_pool`].
+    pub async fn catalog_pool(&self, cluster: &ClusterId) -> Result<Pool> {
+        self.pool_of(cluster, true).await
+    }
+
+    async fn pool_of(&self, cluster: &ClusterId, catalog: bool) -> Result<Pool> {
+        let pools = if catalog {
+            &self.catalog_pools
+        } else {
+            &self.pools
+        };
         let stored = self.registry.get(cluster).await?.ok_or_else(|| {
             SprigError::new(
                 SprigCode::ClusterNotFound,
@@ -494,8 +572,7 @@ impl GatewayLocator {
             )
         })?;
         let fingerprint = format!("{}|{}|{}", writer.node, writer.addr, rec.secrets.ctl);
-        if let Some((f, p)) = self
-            .pools
+        if let Some((f, p)) = pools
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(cluster)
@@ -511,8 +588,14 @@ impl GatewayLocator {
                 .insert(cluster.clone(), u.to_owned());
         }
         let constraints = PoolConstraints::new(0, POOL_MAX).unwrap_or_default();
+        let mut opts = OptsBuilder::from_opts(ep.opts);
+        if catalog {
+            // Catalog statements name the tenant's schema, so a few
+            // tenants' worth are kept per connection.
+            opts = opts.stmt_cache_size(128);
+        }
         let pool = Pool::new(
-            OptsBuilder::from_opts(ep.opts)
+            opts
                 // Idle connections are kept (up to POOL_MAX) for a minute.
                 // With mysql_async's default TTL of 0, every connection
                 // returned to a pool with a minimum of 0 is closed, so each
@@ -522,11 +605,11 @@ impl GatewayLocator {
                 .pool_opts(
                     PoolOpts::new()
                         .with_constraints(constraints)
-                        .with_inactive_connection_ttl(IDLE_TTL),
+                        .with_inactive_connection_ttl(IDLE_TTL)
+                        .with_reset_connection(!catalog),
                 ),
         );
-        let old = self
-            .pools
+        let old = pools
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(cluster.clone(), (fingerprint, pool.clone()));
@@ -557,13 +640,20 @@ impl GatewayLocator {
 
     /// Closes every pool (shutdown).
     pub async fn close(&self) {
-        let pools: Vec<Pool> = self
+        let mut pools: Vec<Pool> = self
             .pools
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .drain()
             .map(|(_, (_, p))| p)
             .collect();
+        pools.extend(
+            self.catalog_pools
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .drain()
+                .map(|(_, (_, p))| p),
+        );
         for p in pools {
             let _ = p.disconnect().await;
         }
@@ -585,7 +675,7 @@ impl CatalogLocator for GatewayLocator {
     async fn writer(&self, tenant: TenantId) -> Result<CatalogEndpoint> {
         let cluster = self.cluster(tenant).await?;
         Ok(CatalogEndpoint {
-            pool: self.ctl_pool(&cluster).await?,
+            pool: self.catalog_pool(&cluster).await?,
             store: Store::new(SchemaName::catalog(tenant).to_string()),
         })
     }

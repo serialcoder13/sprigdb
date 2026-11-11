@@ -22,6 +22,8 @@
 //! - [`temporal`]: temporal and spatial values.
 //! - [`access`]: per-label and per-type read grants.
 //! - [`semantic`]: compile-time semantic checks (the TCK's errors).
+//! - [`mirror`]: asynchronous mirrors: the applier's steps and the
+//!   freshness check.
 
 // An interpreter: evaluator and executor functions are one match or one
 // step-by-step walk each, with the short names of the algorithms.
@@ -37,6 +39,7 @@ pub mod gql;
 pub mod mapped;
 pub mod maria;
 pub mod mem;
+pub mod mirror;
 pub mod neo4j;
 pub mod parser;
 pub mod pgq;

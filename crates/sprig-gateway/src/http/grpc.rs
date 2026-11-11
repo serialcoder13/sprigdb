@@ -578,8 +578,87 @@ impl AdminReq for TenantObjectRequest {
     }
 }
 
-async fn admin_call<R: AdminReq>(core: &Core, rpc: &str, req: Request<R>) -> GrpcResult<JsonReply> {
+/// `sprig.admin.v1.Recommendations` for a tenant login (chapter 52): the
+/// same caller claim as the REST face `/v1/recommendations`. `None` when
+/// the credential isn't a tenant login (operators' tokens go through the
+/// Admin API as they are).
+async fn recommendations_as_tenant<R: AdminReq>(
+    core: &Arc<Core>,
+    rpc: &str,
+    req: &Request<R>,
+) -> std::result::Result<Option<JsonReply>, Status> {
+    let Ok(c) = caller(core, req).await else {
+        return Ok(None);
+    };
+    if c.principal.tenant_name.is_none() {
+        return Ok(None);
+    }
+    let (vars, query, body) = req.get_ref().parts();
+    let name = vars.get("name").cloned().unwrap_or_default();
+    let body_v: serde_json::Value = if body.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(body)
+            .map_err(|e| Status::invalid_argument(format!("body_json: {e}")))?
+    };
+    let (method, rest) = match rpc.rsplit('.').next().unwrap_or(rpc) {
+        "ListRecommendations" => (Method::GET, String::new()),
+        "GetRecommendation" => (Method::GET, format!("/{name}")),
+        "ActOnRecommendation" => {
+            let action = body_v
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .filter(|a| !a.is_empty() && a.chars().all(|c| c.is_ascii_lowercase()))
+                .ok_or_else(|| {
+                    Status::invalid_argument(
+                        "body_json needs \"action\": approve, ignore, snooze, reopen or comment",
+                    )
+                })?;
+            (Method::POST, format!("/{name}:{action}"))
+        }
+        "BulkAct" => (Method::POST, ":bulk".to_owned()),
+        "GetApprovalPolicy" => (Method::GET, ":policy".to_owned()),
+        "ListSubscriptions" => (Method::GET, ":subscriptions".to_owned()),
+        "SetSubscription" => (Method::POST, ":subscriptions".to_owned()),
+        _ => {
+            return Err(Status::permission_denied(
+                "tenants set approval policy with ALTER ... SPRIG SET (39974)",
+            ));
+        }
+    };
+    let reply = super::studio::recommendations::proxy(
+        core,
+        &c,
+        &method,
+        &rest,
+        query.trim_start_matches('?'),
+        body.as_bytes(),
+    )
+    .await
+    .map_err(|e| st(&e))?;
+    if reply.status >= 400 {
+        let e = serde_json::from_slice::<ErrorBody>(&reply.body).map_or_else(
+            |_| SprigError::internal(format!("the controller answered {}", reply.status)),
+            |b| from_rest(&b),
+        );
+        return Err(st(&e));
+    }
+    Ok(Some(JsonReply {
+        json: String::from_utf8_lossy(&reply.body).into_owned(),
+    }))
+}
+
+async fn admin_call<R: AdminReq>(
+    core: &Arc<Core>,
+    rpc: &str,
+    req: Request<R>,
+) -> GrpcResult<JsonReply> {
     metrics::counter!("sprig_api_requests_total", "service" => "sprig.admin.v1", "method" => rpc.to_owned(), "protocol" => "grpc").increment(1);
+    if rpc.starts_with("Recommendations.")
+        && let Some(r) = recommendations_as_tenant(core, rpc, &req).await?
+    {
+        return Ok(Response::new(r));
+    }
     let auth = meta(&req, "authorization");
     let r = req.into_inner();
     let route = by_name(rpc).ok_or_else(|| Status::unimplemented(rpc.to_owned()))?;
@@ -702,6 +781,16 @@ admin_service!(GatewaysSvc, gateways_server::Gateways, GatewaysServer, "Gateways
     get_gateway: NameRequest => "GetGateway",
     drain_gateway: NameRequest => "DrainGateway",
 });
+admin_service!(RecommendationsSvc, recommendations_server::Recommendations, RecommendationsServer, "Recommendations", {
+    list_recommendations: ListRequest => "ListRecommendations",
+    get_recommendation: NameRequest => "GetRecommendation",
+    act_on_recommendation: NameRequest => "ActOnRecommendation",
+    bulk_act: BodyRequest => "BulkAct",
+    get_approval_policy: ListRequest => "GetApprovalPolicy",
+    set_approval_policy: BodyRequest => "SetApprovalPolicy",
+    list_subscriptions: ListRequest => "ListSubscriptions",
+    set_subscription: BodyRequest => "SetSubscription",
+});
 
 #[derive(Clone)]
 struct HealthSvc(Arc<Core>);
@@ -787,5 +876,10 @@ pub fn routes(core: &Arc<Core>) -> tonic::service::Routes {
         .add_service(ExplainServer::new(ExplainSvc(c())))
         .add_service(JobsServer::new(JobsSvc(c())))
         .add_service(GatewaysServer::new(GatewaysSvc(c())))
+        .add_service(
+            sprig_api::proto::admin::recommendations_server::RecommendationsServer::new(
+                RecommendationsSvc(c()),
+            ),
+        )
         .prepare()
 }

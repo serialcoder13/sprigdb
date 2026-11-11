@@ -215,9 +215,9 @@ async fn run(role: Role, config: ProcessConfig, source: Option<(PathBuf, String)
     };
     let outcome = match role {
         Role::Gateway => Box::pin(sprig_gateway::run(ctx)).await,
-        Role::Controller => sprig_controller::run(ctx).await,
-        Role::Worker => sprig_worker::run(ctx).await,
-        Role::Agent => sprig_agent::run(ctx).await,
+        Role::Controller => Box::pin(sprig_controller::run(ctx)).await,
+        Role::Worker => Box::pin(sprig_worker::run(ctx)).await,
+        Role::Agent => Box::pin(sprig_agent::run(ctx)).await,
         Role::Operator => sprig_operator::run(ctx).await,
     };
 

@@ -203,7 +203,7 @@ fn opts_map(opts: &[(String, OptVal)]) -> Result<Map<String, Value>> {
         match v {
             OptVal::Required => {
                 return Err(bad_option(format!(
-                    "{k} = REQUIRED needs FOR EACH TENANT, which isn't built yet"
+                    "{k} = REQUIRED is for FOR EACH TENANT connections, whose members each set it"
                 )));
             }
             OptVal::Text(s) | OptVal::Bare(s) => {
@@ -336,11 +336,21 @@ fn secrets_of(kind: ConnKind, c: &[(String, String)]) -> Result<Vec<(String, Zer
 ///
 /// # Errors
 /// The statement's error, as the client sees it.
-#[allow(clippy::too_many_lines)]
 pub async fn handle(sql: &str, h: &mut dyn Host) -> Result<Handled> {
     let Some(st) = grammar::parse(sql)? else {
         return Ok(Handled::NotSink);
     };
+    handle_stmt(st, h).await
+}
+
+/// Handles one parsed statement (also how an inherited connection or sink
+/// is deployed in a member, R9: built from its definition, so credentials
+/// never become statement text).
+///
+/// # Errors
+/// The statement's error, as the client sees it.
+#[allow(clippy::too_many_lines)]
+pub async fn handle_stmt(st: Stmt, h: &mut dyn Host) -> Result<Handled> {
     let ok = Ok(Handled::Ok { affected: 0 });
     match st {
         Stmt::CreateConnection(c) => {
@@ -356,6 +366,11 @@ pub async fn handle(sql: &str, h: &mut dyn Host) -> Result<Handled> {
                 ));
             }
             let options = opts_map(&c.options)?;
+            if let Some(k) = c.required_credentials.first() {
+                return Err(bad_option(format!(
+                    "{k} = REQUIRED is for FOR EACH TENANT connections, whose members each set it"
+                )));
+            }
             let (hosts, tags) = check_hosts(h, db, c.kind, &options)?;
             let secrets = secrets_of(c.kind, &c.credentials)?;
             if !secrets.is_empty() && h.keyring().is_none() {

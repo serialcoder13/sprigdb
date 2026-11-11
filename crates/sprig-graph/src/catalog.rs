@@ -122,7 +122,19 @@ pub static GRAPH_MIGRATIONS: &[Migration] = &[
         name: "graph_keys, graph_indexes",
         statements: &[DDL_KEYS, DDL_INDEXES],
     },
+    Migration {
+        format: 3,
+        phase: Phase::Expand,
+        name: "graph_mirror_pos, graphs.mirror_mode",
+        statements: &[crate::mirror::DDL_POS, DDL_MIRROR_MODE],
+    },
 ];
+
+/// Who keeps a grouped graph's mirrors (round 5): `sync`, the writers;
+/// `starting`, still the writers while the worker's applier starts on the
+/// graph; `async`, the applier (`graph.mirror = async`).
+const DDL_MIRROR_MODE: &str = "ALTER TABLE graphs ADD COLUMN IF NOT EXISTS \
+  mirror_mode ENUM('sync','starting','async') NOT NULL DEFAULT 'sync' AFTER mirror_state";
 
 fn map_err(e: mysql_async::Error) -> SprigError {
     match &e {
@@ -164,6 +176,10 @@ pub struct GraphDef {
     pub group_id: Option<u32>,
     /// Mirror rows are kept for every edge (`ready`).
     pub mirrors: bool,
+    /// The worker's applier keeps them (`mirror_mode = async`, round 5).
+    pub mirror_async: bool,
+    /// `mirror_mode`: `sync`, `starting` or `async` (round 5).
+    pub mirror_mode: String,
     /// A mapped graph's definition ([`crate::mapped::MappedDef`] as JSON).
     pub definition: Option<String>,
     /// Label ids to names.
@@ -260,13 +276,26 @@ impl GraphCatalog {
             String,
             Option<String>,
         );
-        let rows: Vec<GraphRow> = q
+        // `mirror_mode` arrived with migration 3; a catalog without it
+        // keeps every mirror synchronous.
+        let rows: Vec<GraphRow> = match q
             .query(format!(
-                "SELECT graph_id, db_id, kind, state, group_id, mirror_state, definition FROM {}",
+                "SELECT graph_id, db_id, kind, state, group_id, \
+                 CONCAT(mirror_state, ':', mirror_mode), definition FROM {}",
                 self.t("graphs")
             ))
             .await
-            .map_err(map_err)?;
+        {
+            Ok(r) => r,
+            Err(mysql_async::Error::Server(e)) if e.code == 1054 => q
+                .query(format!(
+                    "SELECT graph_id, db_id, kind, state, group_id, mirror_state, definition FROM {}",
+                    self.t("graphs")
+                ))
+                .await
+                .map_err(map_err)?,
+            Err(e) => return Err(map_err(e)),
+        };
         let mut graphs: HashMap<u64, GraphDef> = rows
             .into_iter()
             .map(|(g, d, k, s, group, m, definition)| {
@@ -278,7 +307,9 @@ impl GraphCatalog {
                         kind: k,
                         state: s,
                         group_id: group,
-                        mirrors: m == "ready",
+                        mirrors: m == "ready" || m.starts_with("ready:"),
+                        mirror_async: m.ends_with(":async"),
+                        mirror_mode: m.split_once(':').map_or("sync", |x| x.1).to_owned(),
                         definition,
                         labels: BTreeMap::new(),
                         types: BTreeMap::new(),
@@ -590,7 +621,37 @@ impl GraphCatalog {
             .await
             .map_err(map_err)?;
         }
+        // The applier's positions (migration 3; absent before it).
+        match crate::mirror::clear_pos(q, &self.schema, graph).await {
+            Err(e) if matches!(e.kind, sprig_common::ErrorKind::Backend { errno: 1146, .. }) => {}
+            r => r?,
+        }
         Ok(())
+    }
+
+    /// Sets who keeps a graph's mirrors and their state (round 5):
+    /// `mode` `sync`, `starting` or `async`, `state` `building` or
+    /// `ready`.
+    ///
+    /// # Errors
+    /// A backend error.
+    pub async fn set_mirror<Q: Queryable + Send>(
+        &self,
+        q: &mut Q,
+        graph: u64,
+        mode: &str,
+        state: &str,
+    ) -> Result<()> {
+        q.exec_drop(
+            format!(
+                "UPDATE {} SET mirror_mode = ?, mirror_state = ?, updated_at = UTC_TIMESTAMP(6) \
+                 WHERE graph_id = ?",
+                self.t("graphs")
+            ),
+            (mode, state, graph),
+        )
+        .await
+        .map_err(map_err)
     }
 
     /// The id of a native label (`label = true`) or relationship type.

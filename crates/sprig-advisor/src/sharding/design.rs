@@ -1363,9 +1363,7 @@ pub fn decide(cause: Cause, e: &Evidence, s: &AdvisorSettings) -> Verdict {
         (
             AdvisorMode::Recommend | AdvisorMode::Approve,
             Verdict::Apply | Verdict::ApplyLowConfidence,
-        ) => {
-            Verdict::Recommend
-        }
+        ) => Verdict::Recommend,
         _ => v,
     }
 }

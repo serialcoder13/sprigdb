@@ -92,7 +92,7 @@ keys! {
     /// `approvals.smtp_url`.
     SMTP_URL: Text = "approvals.smtp_url", Cow::Borrowed(""), Scopes::PROCESS,
         HardBounds::NONE, true, 52,
-        "smtp://host:port, smtp+starttls://host:port or smtps://host:port; empty disables email";
+        "smtp://host[:25], smtp+starttls://host[:587] or smtps://host[:465]; empty disables email";
     /// `approvals.smtp_from`.
     SMTP_FROM: Text = "approvals.smtp_from", Cow::Borrowed("sprigdb@localhost"), Scopes::PROCESS,
         HardBounds::NONE, true, 52,
@@ -112,7 +112,11 @@ keys! {
     /// `approvals.webhook_url`.
     WEBHOOK_URL: Text = "approvals.webhook_url", Cow::Borrowed(""), Scopes::PROCESS,
         HardBounds::NONE, true, 52,
-        "A platform webhook URL for every event; signed with [controller] approvals_webhook_secret_file";
+        "An http:// or https:// URL for every event; signed with [controller] approvals_webhook_secret_file";
+    /// `approvals.webhook_connection`.
+    WEBHOOK_CONNECTION: Text = "approvals.webhook_connection", Cow::Borrowed(""), TENANT_ONLY,
+        HardBounds::NONE, false, 52,
+        "<database>.<connection> or platform:<name>: a webhook connection (chapter 51) that gets the tenant's events";
     /// `approvals.stream_database`.
     STREAM_DATABASE: Text = "approvals.stream_database", Cow::Borrowed(""), TENANT_ONLY,
         HardBounds::NONE, false, 52,

@@ -287,6 +287,9 @@ pub struct CreateConnection {
     pub options: Vec<(String, OptVal)>,
     /// `CREDENTIALS (...)`, in order.
     pub credentials: Vec<(String, String)>,
+    /// `CREDENTIALS (name = REQUIRED, ...)`: credentials each member of a
+    /// `FOR EACH TENANT` connection sets (R9, r9more).
+    pub required_credentials: Vec<String>,
 }
 
 /// What `ALTER CONNECTION` does.
@@ -722,6 +725,121 @@ pub fn parse_time(s: &str) -> Option<i64> {
     Some(((days * 24 + h) * 60 + mi) * 60_000 + ms)
 }
 
+/// Who an `ALTER INHERITED CONNECTION | SINK` is for.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum InheritTarget {
+    /// The session's own tenant.
+    #[default]
+    Own,
+    /// `FOR TENANT t`.
+    Tenant(String),
+    /// `FOR SUBTREE [t]`.
+    Subtree(Option<String>),
+}
+
+/// What an `ALTER INHERITED CONNECTION | SINK` does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InheritedOp {
+    /// `SET (...) [CREDENTIALS (...)]`, or `SET CREDENTIALS (...)`.
+    Set {
+        /// Options (connections) or `sink.*` settings (sinks).
+        options: Vec<(String, OptVal)>,
+        /// Credentials (connections only).
+        credentials: Vec<(String, String)>,
+    },
+    /// `RESET [(k, ...)]`: every override, or those keys.
+    Reset(Vec<String>),
+    /// `DISABLE` (sinks).
+    Disable,
+    /// `ENABLE` (sinks).
+    Enable,
+}
+
+/// `ALTER INHERITED CONNECTION | SINK [db.]name [FOR TENANT t | FOR
+/// SUBTREE [t]] ...` (chapter 51, "Inherited sinks and connections").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InheritedAlter {
+    /// A sink (else a connection).
+    pub sink: bool,
+    /// The name.
+    pub name: QName,
+    /// Who for.
+    pub target: InheritTarget,
+    /// What.
+    pub op: InheritedOp,
+}
+
+/// Parses `ALTER INHERITED CONNECTION | SINK ...`; `Ok(None)` for any
+/// other statement. These are parsed here, with the other sink
+/// statements, so their credentials are sealed and never logged.
+///
+/// # Errors
+/// 1064 for a malformed statement; 39216 for an unquoted credential.
+pub fn parse_inherited(sql: &str) -> Result<Option<InheritedAlter>> {
+    if !maybe_sink(sql.as_bytes()) {
+        return Ok(None);
+    }
+    let t = tokens(sql)?;
+    let mut p = P { t: &t, i: 0, sql };
+    if !p.kws(&["ALTER", "INHERITED"]) {
+        return Ok(None);
+    }
+    let sink = if p.kw("SINK") {
+        true
+    } else if p.kw("CONNECTION") {
+        false
+    } else {
+        return Ok(None);
+    };
+    let name = p.qname()?;
+    let mut target = InheritTarget::Own;
+    if p.kws(&["FOR", "TENANT"]) {
+        target = InheritTarget::Tenant(p.ident()?);
+    } else if p.kws(&["FOR", "SUBTREE"]) {
+        let named = !["SET", "RESET", "DISABLE", "ENABLE"]
+            .iter()
+            .any(|w| p.peek_kw(w))
+            && p.peek().is_some();
+        target = InheritTarget::Subtree(if named { Some(p.ident()?) } else { None });
+    }
+    let op = if p.kws(&["SET", "CREDENTIALS"]) {
+        InheritedOp::Set {
+            options: Vec::new(),
+            credentials: p.credentials()?,
+        }
+    } else if p.kw("SET") {
+        let options = p.options()?;
+        let credentials = if p.kw("CREDENTIALS") {
+            p.credentials()?
+        } else {
+            Vec::new()
+        };
+        InheritedOp::Set {
+            options,
+            credentials,
+        }
+    } else if p.kw("RESET") {
+        if p.peek().is_some_and(|t| t.kind == Tk::Punct && t.text == "(") {
+            InheritedOp::Reset(p.name_list()?)
+        } else {
+            InheritedOp::Reset(Vec::new())
+        }
+    } else if p.kw("DISABLE") {
+        InheritedOp::Disable
+    } else if p.kw("ENABLE") {
+        InheritedOp::Enable
+    } else {
+        return Err(p.unexpected("expected SET, RESET, DISABLE or ENABLE"));
+    };
+    p.end()?;
+    Ok(Some(InheritedAlter {
+        sink,
+        name,
+        target,
+        op,
+    }))
+}
+
 /// Parses one statement; `Ok(None)` when it isn't a sink statement.
 ///
 /// # Errors
@@ -895,17 +1013,29 @@ fn create_connection(p: &mut P<'_>) -> Result<Stmt> {
     } else {
         Vec::new()
     };
-    let credentials = if p.kw("CREDENTIALS") {
-        p.credentials()?
-    } else {
-        Vec::new()
-    };
+    let mut credentials = Vec::new();
+    let mut required_credentials = Vec::new();
+    if p.kw("CREDENTIALS") {
+        for (k, v) in p.options()? {
+            match v {
+                OptVal::Text(s) => credentials.push((k, s)),
+                OptVal::Required => required_credentials.push(k),
+                OptVal::Bare(_) => {
+                    return Err(err(
+                        SprigCode::SinkCredentialsInvalid,
+                        format!("credential {k} must be a quoted string"),
+                    ));
+                }
+            }
+        }
+    }
     Ok(Stmt::CreateConnection(CreateConnection {
         name,
         if_not_exists,
         kind,
         options,
         credentials,
+        required_credentials,
     }))
 }
 

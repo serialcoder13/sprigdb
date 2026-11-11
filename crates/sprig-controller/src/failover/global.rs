@@ -80,7 +80,15 @@ pub struct GlobalFailover {
     /// Two tiers: positions the target DCs' `tenant_promote` loops
     /// reported, by (failover, tenant), until the record takes them.
     reported: Mutex<HashMap<(String, u64), BTreeMap<String, String>>>,
+    /// Chapter 52: promotions held for approval, by (failover, tenant),
+    /// with when the gate was last asked.
+    held: Mutex<HashMap<(String, u64), Instant>>,
+    /// Chapter 52's approvals; the process's installed ones when unset.
+    approvals: std::sync::OnceLock<Arc<crate::approvals::ControllerApprovals>>,
 }
+
+/// How often a held promotion asks chapter 52's gate again.
+pub const HOLD_RECHECK: Duration = Duration::from_secs(10);
 
 impl std::fmt::Debug for GlobalFailover {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -129,7 +137,24 @@ impl GlobalFailover {
             seen: Mutex::new(HashMap::new()),
             started,
             reported: Mutex::new(HashMap::new()),
+            held: Mutex::new(HashMap::new()),
+            approvals: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Holds promotions through `a` (chapter 52) instead of the process's
+    /// installed approvals.
+    #[must_use]
+    pub fn with_approvals(self, a: Arc<crate::approvals::ControllerApprovals>) -> Self {
+        let _ = self.approvals.set(a);
+        self
+    }
+
+    fn approvals_hub(&self) -> Option<&crate::approvals::ControllerApprovals> {
+        self.approvals
+            .get()
+            .or_else(|| crate::approvals::installed())
+            .map(Arc::as_ref)
     }
 
     /// `Global.PromotionDone` (two tiers): the target DC finished steps
@@ -464,6 +489,7 @@ impl GlobalFailover {
             tracing::warn!(dc = %x, failover = %f.failover_id, "DC failed; promoting its tenants");
         }
         if f.state == FailoverState::Promoting {
+            let before = f.clone();
             // Two tiers: committed promotions the target DC finished.
             for t in f.tenants.iter_mut().filter(|t| t.outcome == "committed") {
                 let Some(to) = t.to.clone() else { continue };
@@ -493,6 +519,10 @@ impl GlobalFailover {
                 .filter(|(_, t)| t.outcome == "planned")
                 .map(|(i, _)| i)
                 .collect();
+            // Chapter 52: under a global `failover.mode = approve` each
+            // promotion waits for an approval, and an approved one goes
+            // ahead only if the checks still allow it now.
+            let (todo, tickets) = self.approvals(&mut f, &x, &s, todo).await?;
             let par = s.max_parallel_promotions.max(1) as usize;
             let mut jobs: Vec<BoxFut<'_, (usize, Result<Promoted>)>> = Vec::new();
             for &i in &todo {
@@ -512,12 +542,44 @@ impl GlobalFailover {
                 .collect()
                 .await;
             for (i, r) in results {
+                let ticket = tickets.get(&i);
+                match &r {
+                    Ok(Promoted::Done { .. }) => {
+                        crate::approvals::dc_failover_done(
+                            self.approvals_hub(),
+                            ticket,
+                            true,
+                            "promoted",
+                        )
+                        .await;
+                    }
+                    Ok(Promoted::Committed { .. }) => {
+                        crate::approvals::dc_failover_done(
+                            self.approvals_hub(),
+                            ticket,
+                            true,
+                            "committed; the target DC finishes the promotion",
+                        )
+                        .await;
+                    }
+                    Ok(Promoted::Skipped(why)) => {
+                        crate::approvals::dc_failover_done(
+                            self.approvals_hub(),
+                            ticket,
+                            false,
+                            why,
+                        )
+                        .await;
+                    }
+                    Err(_) => {}
+                }
                 let t = &mut f.tenants[i];
                 match r {
                     Ok(Promoted::Done { epoch, applied }) => {
                         t.outcome = "promoted".into();
                         t.epoch = Some(epoch);
                         t.applied = applied;
+                        t.reason = None;
                     }
                     Ok(Promoted::Skipped(why)) => {
                         t.outcome = "skipped".into();
@@ -528,6 +590,7 @@ impl GlobalFailover {
                         // finishes it (r2next).
                         t.outcome = "committed".into();
                         t.epoch = Some(epoch);
+                        t.reason = None;
                     }
                     Err(e) if e.code() == Some(sprig_common::SprigCode::NotLeader) => {
                         return Err(e);
@@ -546,9 +609,119 @@ impl GlobalFailover {
                 metrics::counter!("sprig_controller_dc_failovers_total", "result" => "done")
                     .increment(1);
             }
-            self.write_record(&f).await?;
+            // A pass that changed nothing (promotions held for approval)
+            // writes nothing.
+            if f != before {
+                self.write_record(&f).await?;
+            }
         }
         Ok(Outcome::Ended(f))
+    }
+
+    /// Chapter 52's gate over the planned promotions `todo`: those to run
+    /// now, with the ticket of each one an approval released. A held
+    /// tenant stays `planned` with the item in its reason, and asks again
+    /// every [`HOLD_RECHECK`]. An approved one runs only if the lost DC's
+    /// lease is still gone, the sites still agree it is down, and a fresh
+    /// plan still promotes the tenant (its standby's lag within its RPO,
+    /// its writers safe); otherwise the item fails, or the tenant is
+    /// skipped when the DC came back.
+    #[allow(clippy::many_single_char_names)] // f, x, s as in resume
+    async fn approvals(
+        &self,
+        f: &mut FailoverRecord,
+        x: &DcId,
+        s: &FailoverSettings,
+        todo: Vec<usize>,
+    ) -> Result<(Vec<usize>, HashMap<usize, sprig_approvals::machine::Ticket>)> {
+        use crate::approvals::{DcFailoverGate, dc_failover_done, dc_failover_gate};
+        let mut go = Vec::new();
+        let mut tickets = HashMap::new();
+        let mut approved = Vec::new();
+        for i in todo {
+            let t = &f.tenants[i];
+            let key = (f.failover_id.clone(), t.tenant_id);
+            let now = self.clock.now();
+            if lock(&self.held)
+                .get(&key)
+                .is_some_and(|at| now.saturating_duration_since(*at) < HOLD_RECHECK)
+            {
+                continue;
+            }
+            let to = t.to.clone().unwrap_or_else(|| x.clone());
+            let gate = dc_failover_gate(
+                self.approvals_hub(),
+                x,
+                TenantId(t.tenant_id),
+                &to,
+                &f.failover_id,
+                t.lag_ms,
+            )
+            .await;
+            match gate {
+                DcFailoverGate::Go(None) => go.push(i),
+                DcFailoverGate::Go(Some(ticket)) => {
+                    lock(&self.held).remove(&key);
+                    approved.push((i, ticket));
+                }
+                DcFailoverGate::Hold(why) => {
+                    if f.tenants[i].reason.as_deref() != Some(why.as_str()) {
+                        tracing::warn!(tenant = t.tenant_id, dc = %x, why, "promotion held (chapter 52)");
+                    }
+                    lock(&self.held).insert(key, now);
+                    f.tenants[i].reason = Some(why);
+                }
+            }
+        }
+        if approved.is_empty() {
+            return Ok((go, tickets));
+        }
+        if self.has_lease(x).await? {
+            let why = format!("DC {x} took its lease back while the promotion was held");
+            for (i, ticket) in approved {
+                f.tenants[i].outcome = "skipped".into();
+                f.tenants[i].reason = Some(why.clone());
+                dc_failover_done(self.approvals_hub(), Some(&ticket), false, &why).await;
+            }
+            return Ok((go, tickets));
+        }
+        let sites = self.sites(x).await?;
+        let verdicts = self.observe_all(&sites, x, &f.failover_id, s).await;
+        if let Tally::Retry(why) = decision::tally(&verdicts, s.min_sites) {
+            let why = format!("the failover checks no longer allow it: {why}");
+            for (i, ticket) in approved {
+                f.tenants[i].reason = Some(why.clone());
+                dc_failover_done(self.approvals_hub(), Some(&ticket), false, &why).await;
+            }
+            return Ok((go, tickets));
+        }
+        let lags = decision::lags(&verdicts);
+        let unsafe_w = decision::unsafe_writers(&verdicts);
+        let fresh = self.plan(x, s, &lags, &unsafe_w).await?;
+        for (i, ticket) in approved {
+            let id = f.tenants[i].tenant_id;
+            match fresh.iter().find(|o| o.tenant_id == id) {
+                Some(o) if o.outcome == "planned" => {
+                    let t = &mut f.tenants[i];
+                    t.to.clone_from(&o.to);
+                    t.lag_ms = o.lag_ms;
+                    t.epoch = o.epoch;
+                    t.reason = None;
+                    tracing::warn!(tenant = id, dc = %x, to = ?t.to, "approved promotion: the checks still allow it");
+                    go.push(i);
+                    tickets.insert(i, ticket);
+                }
+                other => {
+                    let why = other
+                        .and_then(|o| o.reason.clone())
+                        .unwrap_or_else(|| format!("the tenant is no longer homed in {x}"));
+                    f.tenants[i].outcome = "skipped".into();
+                    f.tenants[i].reason = Some(why.clone());
+                    dc_failover_done(self.approvals_hub(), Some(&ticket), false, &why).await;
+                }
+            }
+        }
+        Ok((go, tickets))
     }
 
     async fn close(&self, mut f: FailoverRecord, why: &str) -> Result<Outcome> {

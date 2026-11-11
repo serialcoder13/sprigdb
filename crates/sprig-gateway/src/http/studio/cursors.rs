@@ -163,7 +163,10 @@ impl Cursor {
             .idle_deadline
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = now + self.idle;
-        *self.last_used.lock().unwrap_or_else(PoisonError::into_inner) = now;
+        *self
+            .last_used
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = now;
     }
 
     fn overdue(&self, now: Instant) -> bool {
@@ -174,7 +177,10 @@ impl Cursor {
     }
 
     fn last_used(&self) -> Instant {
-        *self.last_used.lock().unwrap_or_else(PoisonError::into_inner)
+        *self
+            .last_used
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     fn owned_by(&self, tenant: Option<TenantId>, user: &str) -> bool {
@@ -265,7 +271,10 @@ impl CursorRegistry {
     /// Open cursors.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.open.lock().unwrap_or_else(PoisonError::into_inner).len()
+        self.open
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 
     /// No open cursors.
@@ -483,15 +492,15 @@ impl CursorRegistry {
     ) -> Result<Arc<Cursor>, SprigError> {
         match self.get(h) {
             Some(c) if c.owned_by(tenant, user) => Ok(c),
-            Some(_) => Err(unknown()),
             None if self.was_expired(h.session) => Err(expired()),
-            None => Err(unknown()),
+            // Another principal's cursor looks unknown.
+            Some(_) | None => Err(unknown()),
         }
     }
 
     /// Closes cursors idle past their deadline that no call is using;
     /// the number closed.
-    pub async fn reap_once(&self, now: Instant) -> usize {
+    pub fn reap_once(&self, now: Instant) -> usize {
         let overdue: Vec<Arc<Cursor>> = self
             .open
             .lock()
@@ -533,7 +542,7 @@ async fn reap(reg: Weak<CursorRegistry>) {
     loop {
         tick.tick().await;
         let Some(r) = reg.upgrade() else { return };
-        r.reap_once(Instant::now()).await;
+        r.reap_once(Instant::now());
     }
 }
 
@@ -640,7 +649,11 @@ pub async fn open(
     };
     // No caps and no statement timeout: the stream waits for Fetch, and
     // the idle timeout ends it.
-    tokio::spawn(async move { engine.run_capped(&c2, call, None, Caps::default(), tx).await });
+    tokio::spawn(async move {
+        engine
+            .run_capped(&c2, call, None, Caps::default(), tx)
+            .await;
+    });
     let columns = match header(&mut rx, wait).await? {
         Ok(c) => c,
         Err(end) => {
@@ -718,14 +731,17 @@ pub async fn forwarded(
         _ => return Some(Err(invalid(format!("can't forward {method}")))),
     };
     let name = body.get("cursor").and_then(Value::as_str).unwrap_or("");
-    Some(async {
-        let h = parse_name(name)?;
-        // A forwarded call is never forwarded again.
-        if h.gateway_id != core.engine.gateway_id {
-            return Err(unknown());
+    Some(
+        async {
+            let h = parse_name(name)?;
+            // A forwarded call is never forwarded again.
+            if h.gateway_id != core.engine.gateway_id {
+                return Err(unknown());
+            }
+            local(core, caller, verb, &h, body).await.map(|v| (200, v))
         }
-        local(core, caller, verb, &h, body).await.map(|v| (200, v))
-    }.await)
+        .await,
+    )
 }
 
 /// Routes `POST /v1/databases/{db}/cursors` and
@@ -881,7 +897,15 @@ mod tests {
     ) -> (String, Page, tokio::sync::oneshot::Receiver<u64>) {
         let (rx, done) = producer(n);
         let (name, p) = reg
-            .register(("dc-a", "gw-1", Some(TenantId(7)), user), rx, skip, 25, idle, 4, WAIT)
+            .register(
+                ("dc-a", "gw-1", Some(TenantId(7)), user),
+                rx,
+                skip,
+                25,
+                idle,
+                4,
+                WAIT,
+            )
             .await
             .unwrap();
         (name, p, done)
@@ -898,14 +922,23 @@ mod tests {
         assert!(name.starts_with(PREFIX));
         assert_eq!((p.rows.len(), p.position, p.done), (25, 25, false));
         let h = parse_name(&name).unwrap();
-        let p2 = reg.fetch(&h, Some(TenantId(7)), "alice", 25, WAIT).await.unwrap();
+        let p2 = reg
+            .fetch(&h, Some(TenantId(7)), "alice", 25, WAIT)
+            .await
+            .unwrap();
         assert_eq!(first(&p2.rows), "25");
-        let p3 = reg.fetch(&h, Some(TenantId(7)), "alice", 25, WAIT).await.unwrap();
+        let p3 = reg
+            .fetch(&h, Some(TenantId(7)), "alice", 25, WAIT)
+            .await
+            .unwrap();
         assert_eq!((p3.rows.len(), p3.position, p3.done), (10, 60, true));
         assert_eq!(done.await.unwrap(), 60);
         // Done closes it.
         assert!(reg.is_empty());
-        let e = reg.fetch(&h, Some(TenantId(7)), "alice", 25, WAIT).await.unwrap_err();
+        let e = reg
+            .fetch(&h, Some(TenantId(7)), "alice", 25, WAIT)
+            .await
+            .unwrap_err();
         assert_eq!(e.code(), Some(SprigCode::StudioCursorUnknown));
     }
 
@@ -927,7 +960,10 @@ mod tests {
         let h = parse_name(&name).unwrap();
         assert!(reg.close(&h, Some(TenantId(7)), "alice").await.unwrap());
         let sent = done.await.unwrap();
-        assert!(sent < 25 + 10 * (CHANNEL_DEPTH as u64 + 2), "produced {sent}");
+        assert!(
+            sent < 25 + 10 * (CHANNEL_DEPTH as u64 + 2),
+            "produced {sent}"
+        );
     }
 
     #[tokio::test]
@@ -935,17 +971,17 @@ mod tests {
         let reg = Arc::new(CursorRegistry::default());
         let (name, _, done) = opened(&reg, "alice", 1_000_000, 0, Duration::from_millis(50)).await;
         let h = parse_name(&name).unwrap();
-        assert_eq!(reg.reap_once(Instant::now()).await, 0);
-        assert_eq!(
-            reg.reap_once(Instant::now() + Duration::from_millis(60)).await,
-            1
-        );
+        assert_eq!(reg.reap_once(Instant::now()), 0);
+        assert_eq!(reg.reap_once(Instant::now() + Duration::from_millis(60)), 1);
         // The producer saw its channel close: the executor would kill the
         // backend statement and close its connection here.
         let sent = tokio::time::timeout(WAIT, done).await.unwrap().unwrap();
         assert!(sent < 1_000_000);
         assert!(reg.is_empty());
-        let e = reg.fetch(&h, Some(TenantId(7)), "alice", 25, WAIT).await.unwrap_err();
+        let e = reg
+            .fetch(&h, Some(TenantId(7)), "alice", 25, WAIT)
+            .await
+            .unwrap_err();
         assert_eq!(e.code(), Some(SprigCode::StudioCursorExpired));
         // Closing an expired cursor is not an error.
         assert!(!reg.close(&h, Some(TenantId(7)), "alice").await.unwrap());
@@ -975,11 +1011,16 @@ mod tests {
         }
         // Use the first, so the second is the least recently used.
         let h0 = parse_name(&names[0]).unwrap();
-        reg.fetch(&h0, Some(TenantId(7)), "alice", 1, WAIT).await.unwrap();
+        reg.fetch(&h0, Some(TenantId(7)), "alice", 1, WAIT)
+            .await
+            .unwrap();
         let _fifth = opened(&reg, "alice", 1000, 0, WAIT).await;
         assert_eq!(reg.len(), 4);
         let h1 = parse_name(&names[1]).unwrap();
-        let e = reg.fetch(&h1, Some(TenantId(7)), "alice", 1, WAIT).await.unwrap_err();
+        let e = reg
+            .fetch(&h1, Some(TenantId(7)), "alice", 1, WAIT)
+            .await
+            .unwrap_err();
         assert_eq!(e.code(), Some(SprigCode::StudioCursorExpired));
         // Another user's cursors don't count.
         let _bob = opened(&reg, "bob", 1000, 0, WAIT).await;

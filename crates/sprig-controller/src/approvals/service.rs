@@ -528,6 +528,184 @@ impl RecommendationsService {
     }
 }
 
+/// `POST /admin/v1/recommendations:gate`: a gateway asks chapter 52's
+/// gate for a decision it makes itself (`vector.ann`: an automatic ANN
+/// graph, chapter 34), or reports the action it was let through.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)] // one request, read once
+pub enum GateRequest {
+    /// Record or refresh the proposal; may it act now?
+    Check {
+        /// The kind (`vector.ann`).
+        kind: String,
+        /// The tenant's id.
+        tenant: u64,
+        /// The database's name.
+        db: String,
+        /// What changes (unique per index).
+        target: String,
+        /// What would be done, for people.
+        action: String,
+        /// Its machine form.
+        #[serde(default)]
+        machine: serde_json::Value,
+        /// The numbers behind it.
+        #[serde(default)]
+        evidence: serde_json::Value,
+        /// One line for people.
+        summary: String,
+        /// Grows with the evidence.
+        #[serde(default)]
+        score: f64,
+    },
+    /// The action a `Check` let through finished.
+    Finished {
+        /// The ticket `Check` returned.
+        ticket: sprig_approvals::Ticket,
+        /// Whether it worked.
+        ok: bool,
+        /// What happened.
+        #[serde(default)]
+        detail: String,
+    },
+}
+
+/// The answer to a [`GateRequest::Check`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GateReply {
+    /// Act now.
+    pub go: bool,
+    /// Report the result with this ticket (when an item tracks it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<sprig_approvals::Ticket>,
+    /// Why not, naming the item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+impl RecommendationsService {
+    /// [`GateRequest`].
+    ///
+    /// # Errors
+    /// 39792 for a kind gateways don't decide, or an unknown database;
+    /// catalog errors.
+    pub async fn gate(&self, req: GateRequest) -> Result<GateReply> {
+        use sprig_approvals::{Action, Mode, Proposal, Verdict};
+        let (kind, tenant, db, target, action, machine, evidence, summary, score) = match req {
+            GateRequest::Finished { ticket, ok, detail } => {
+                self.ctl.finished(&ticket, ok, &detail).await;
+                return Ok(GateReply {
+                    go: ok,
+                    ticket: None,
+                    why: None,
+                });
+            }
+            GateRequest::Check {
+                kind,
+                tenant,
+                db,
+                target,
+                action,
+                machine,
+                evidence,
+                summary,
+                score,
+            } => (
+                kind, tenant, db, target, action, machine, evidence, summary, score,
+            ),
+        };
+        let kind = Kind::parse(&kind)
+            .filter(|k| *k == Kind::VectorAnn)
+            .ok_or_else(|| invalid(format!("{kind}: gateways ask the gate for vector.ann only")))?;
+        let t = TenantId(tenant);
+        let db_id = self.db_id(t, &db).await?;
+        let policy = self
+            .ctl
+            .policy(kind, Some(t), Some(db_id), None, None)
+            .await;
+        if policy.mode == Mode::On {
+            return Ok(GateReply {
+                go: true,
+                ticket: None,
+                why: None,
+            });
+        }
+        if policy.mode == Mode::Off {
+            return Ok(GateReply {
+                go: false,
+                ticket: None,
+                why: Some("off".into()),
+            });
+        }
+        let mut subject = self.ctl.subject(t).await;
+        subject.db = Some(db_id);
+        subject.db_name = Some(db);
+        let p = Proposal {
+            kind,
+            subject,
+            target: sprig_approvals::model::clip(&format!("t{tenant}/{target}"), 255),
+            action: Action {
+                text: action,
+                machine,
+            },
+            evidence,
+            score,
+            summary,
+            emergency: false,
+        };
+        Ok(match self.ctl.gate(&p, &policy).await {
+            Verdict::Proceed(t) => GateReply {
+                go: true,
+                ticket: t.id.is_some().then_some(t),
+                why: None,
+            },
+            Verdict::Wait(id) => GateReply {
+                go: false,
+                ticket: None,
+                why: Some(format!("held for approval as {id}")),
+            },
+            Verdict::Advice(id) => GateReply {
+                go: false,
+                ticket: None,
+                why: Some(format!("recommended as {id}")),
+            },
+            Verdict::Suppressed(id) => GateReply {
+                go: false,
+                ticket: None,
+                why: Some(format!("ignored ({id})")),
+            },
+            Verdict::Off => GateReply {
+                go: false,
+                ticket: None,
+                why: Some("off".into()),
+            },
+        })
+    }
+
+    /// The id of database `name` of `t`, from its catalog.
+    async fn db_id(&self, t: TenantId, name: &str) -> Result<sprig_common::ids::DbId> {
+        use mysql_async::prelude::Queryable;
+        let ep = self.ctl.locator().writer(t).await?;
+        let schema = ep.store.schema().to_owned();
+        let mut c = ep.pool.get_conn().await.map_err(|e| {
+            SprigError::new(SprigCode::CatalogUnavailable, "catalog unavailable").with_source(e)
+        })?;
+        let id: Option<u32> = c
+            .exec_first(
+                format!(
+                    "SELECT db_id FROM {}.`databases` WHERE name_key = ? AND state = 'active'",
+                    sprig_common::names::quote(&schema)
+                ),
+                (name.to_lowercase(),),
+            )
+            .await
+            .map_err(|e| SprigError::internal("databases").with_source(e))?;
+        id.map(sprig_common::ids::DbId)
+            .ok_or_else(|| invalid(format!("no database {name}")))
+    }
+}
+
 /// 39974 for callers without a right to the operation.
 #[must_use]
 pub fn denied(what: &str) -> SprigError {

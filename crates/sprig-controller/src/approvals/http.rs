@@ -138,6 +138,7 @@ pub fn router(app: Arc<RecApp>) -> Router {
             "/admin/v1/recommendations:subscriptions",
             get(subscriptions).post(set_subscription),
         )
+        .route("/admin/v1/recommendations:gate", post(gate))
         .route("/admin/v1/recommendations/{id}", get(get_one).post(act))
         .with_state(app)
 }
@@ -185,7 +186,7 @@ async fn act(
     let r = async {
         let Some((id, action)) = id.rsplit_once(':') else {
             return Err(invalid(
-                "POST /admin/v1/recommendations/{id}:approve, :ignore, :snooze, :reopen or :comment",
+                "POST /admin/v1/recommendations/{id}:approve, :ignore, :snooze, :reopen, :comment or :act",
             ));
         };
         let mut v: serde_json::Value = if body.iter().all(u8::is_ascii_whitespace) {
@@ -193,7 +194,11 @@ async fn act(
         } else {
             serde_json::from_slice(&body).map_err(|e| invalid(format!("request body: {e}")))?
         };
-        if let serde_json::Value::Object(m) = &mut v {
+        // `{id}:act` (gRPC's `ActOnRecommendation`) names the action in
+        // the body; `{id}:approve` and the others in the path.
+        if let serde_json::Value::Object(m) = &mut v
+            && action != "act"
+        {
             m.insert(
                 "action".into(),
                 serde_json::Value::String(action.to_owned()),
@@ -203,6 +208,21 @@ async fn act(
             serde_json::from_value(v).map_err(|e| invalid(format!("request body: {e}")))?;
         let c = app.caller(&headers, req.caller.clone(), req.actor.as_deref())?;
         app.svc.act(&c, id, &req.act).await
+    };
+    respond(r.await)
+}
+
+/// A gateway's own decisions (`vector.ann`): the gateway credential, or
+/// the admin token.
+async fn gate(State(app): State<Arc<RecApp>>, headers: HeaderMap, body: Bytes) -> Response {
+    let r = async {
+        match app.who(&headers)? {
+            Who::Gateway | Who::Platform => {}
+            Who::DcOperator => return Err(denied("the gate is for gateways")),
+        }
+        let req: super::service::GateRequest =
+            serde_json::from_slice(&body).map_err(|e| invalid(format!("request body: {e}")))?;
+        app.svc.gate(req).await
     };
     respond(r.await)
 }

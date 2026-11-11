@@ -90,6 +90,8 @@ pub mod sharding_runtime;
 // Chapter 25 (R2, r2final): job standbys kept current by the mover.
 pub mod standby;
 pub mod streams_loop;
+// Chapter 43 (R8 round 5): the graph mirror applier jobs.
+pub mod graph_mirror_loop;
 // Chapter 33 (R6): the key-value sweeper job.
 pub mod kv_sweep_loop;
 // Chapter 51 (R9): sink tasks.
@@ -445,7 +447,9 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         p.map(|p| {
             std::fs::read_to_string(p)
                 .map(|s| s.trim().to_owned())
-                .map_err(|e| SprigError::new(SprigCode::ConfigInvalid, format!("{}: {e}", p.display())))
+                .map_err(|e| {
+                    SprigError::new(SprigCode::ConfigInvalid, format!("{}: {e}", p.display()))
+                })
         })
         .transpose()
     };
@@ -454,21 +458,37 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         approvals::notify::Secrets {
             smtp_password: read_secret(cfg.controller.smtp_password_file.as_deref())?,
             webhook_secret: read_secret(cfg.controller.approvals_webhook_secret_file.as_deref())?,
+            smtp_tls: sprig_approvals::smtp::TlsFiles {
+                ca_pem: read_secret(cfg.controller.smtp_ca_file.as_deref())?,
+                client_cert_pem: read_secret(cfg.controller.smtp_client_cert_file.as_deref())?,
+                client_key_pem: read_secret(cfg.controller.smtp_client_key_file.as_deref())?,
+            },
         },
     ));
+    // Webhooks through chapter 51's webhook target: the platform URL and
+    // tenants' own connections (their credentials open with the master
+    // key file, as in sink workers).
+    notifier.set_webhooks(Arc::new(approvals::webhook::Webhooks::new(
+        Arc::new(locator.clone()),
+        Arc::clone(&stores.dc),
+        Arc::clone(&stores.global),
+        cfg.controller.workload_key_file.as_deref(),
+        Some(settings.live.clone()),
+        dc.clone(),
+        read_secret(cfg.controller.approvals_webhook_secret_file.as_deref())?,
+    )));
     let approvals = {
         let stores_ = sprig_approvals::LocatorStores::new(Arc::new(locator.clone()))
             .with_dc(dc.clone(), Arc::clone(&stores.dc))
             .with_global(Arc::clone(&stores.global));
-        let hub = sprig_approvals::Approvals::new(Arc::new(stores_), Arc::clone(&clock)).with_hook(
-            Arc::new(approvals::DecisionHook::new(
-                Arc::new(sprig_balancer::decisions::CatalogDecisionLog::new(Arc::new(
-                    locator.clone(),
-                ))),
+        let hub = sprig_approvals::Approvals::new(Arc::new(stores_), Arc::clone(&clock))
+            .with_hook(Arc::new(approvals::DecisionHook::new(
+                Arc::new(sprig_balancer::decisions::CatalogDecisionLog::new(
+                    Arc::new(locator.clone()),
+                )),
                 dc.clone(),
-            )),
-        )
-        .with_hook(Arc::clone(&notifier) as Arc<dyn sprig_approvals::Hook>);
+            )))
+            .with_hook(Arc::clone(&notifier) as Arc<dyn sprig_approvals::Hook>);
         let a = Arc::new(
             approvals::ControllerApprovals::new(
                 Arc::new(hub),
@@ -552,6 +572,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .with_loop(Loop::new(logic_loop::LogicLoop::new(logic_locator)))
         .with_loop(Loop::new(inherit_loop::InheritLoop))
         .with_loop(Loop::new(streams_loop::StreamsLoop))
+        .with_loop(Loop::new(graph_mirror_loop::GraphMirrorLoop))
         .with_loop(Loop::new(kv_sweep_loop::KvSweepLoop::new(Some((
             settings.live.clone(),
             dc.clone(),
@@ -561,6 +582,8 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .with_loop(Loop::new(
             approvals::ApprovalsLoop::new(Arc::clone(&approvals)).with_notifier(Arc::clone(&notifier)),
         ))
+        // Chapter 52: the same for DC failover items in the global tier.
+        .with_loop(Loop::new(approvals::GlobalApprovalsLoop::new(Arc::clone(&approvals))))
         .global_candidate(cfg.controller.global_candidate);
     // Chapter 25 (r2final): job standbys, in single-etcd mode (the loop
     // writes the standby DC's tier through the one etcd).

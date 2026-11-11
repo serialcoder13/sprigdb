@@ -315,3 +315,16 @@ pub async fn admit(tenant: u64, limits: Analytics) -> Result<Admitted> {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
+
+/// Chapter 52: `vector.auto_ann` (`on`, `approve`, `recommend` or `off`)
+/// for `caller` on `database`, at the same scopes as the other `vector.*`
+/// keys.
+#[must_use]
+pub fn vector_auto_ann(engine: &SqlEngine, caller: &Caller, database: &str) -> String {
+    if !matches!(engine.api, ApiSettingsSource::Live { .. }) {
+        return "on".into();
+    }
+    For::new(engine, caller, database)
+        .get(&sprig_approvals::settings::VECTOR_AUTO_ANN)
+        .into_owned()
+}

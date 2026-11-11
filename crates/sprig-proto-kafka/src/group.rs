@@ -380,6 +380,8 @@ struct Group {
     not_before: Option<Instant>,
     seq: u64,
     dirty: bool,
+    /// The number of the last snapshot handed to the group's writer.
+    saved_seq: u64,
 }
 
 impl Group {
@@ -404,6 +406,7 @@ impl Group {
             not_before: None,
             seq: 0,
             dirty: false,
+            saved_seq: 0,
         }
     }
 
@@ -622,6 +625,10 @@ impl Group {
 /// The coordinator of every group this gateway holds the lease of.
 pub struct Coordinator {
     groups: std::sync::Mutex<HashMap<GroupKey, Arc<Mutex<Group>>>>,
+    /// Each group's writer of its durable row (r9more): rows are written
+    /// off the group's lock and off the timer loop, one group's writes in
+    /// order, so a slow catalog write never holds up a rebalance.
+    writers: std::sync::Mutex<HashMap<GroupKey, Arc<Writer>>>,
     store: Arc<dyn GroupStore>,
     leases: Arc<dyn Leases>,
     cfg: std::sync::RwLock<GroupConfig>,
@@ -635,12 +642,27 @@ impl std::fmt::Debug for Coordinator {
 
 type Held = Result<Arc<Mutex<Group>>, i16>;
 
+/// One group's row writer: the number of the last snapshot written (or
+/// skipped as stale), and how many snapshots are on their way.
+#[derive(Default)]
+struct Writer {
+    last: Mutex<u64>,
+    pending: std::sync::atomic::AtomicU64,
+}
+
+impl Writer {
+    fn busy(&self) -> bool {
+        self.pending.load(std::sync::atomic::Ordering::Acquire) > 0
+    }
+}
+
 impl Coordinator {
     /// A coordinator over `store` and `leases`.
     #[must_use]
     pub fn new(store: Arc<dyn GroupStore>, leases: Arc<dyn Leases>, cfg: GroupConfig) -> Self {
         Self {
             groups: std::sync::Mutex::new(HashMap::new()),
+            writers: std::sync::Mutex::new(HashMap::new()),
             store,
             leases,
             cfg: std::sync::RwLock::new(cfg),
@@ -704,7 +726,12 @@ impl Coordinator {
             .map(|(k, g)| (k.clone(), Arc::clone(g)))
             .collect();
         for (key, g) in groups {
-            let mut gg = g.lock().await;
+            // A group busy elsewhere (a describe or delete reading the
+            // catalog) is checked at the next tick, so it can't hold up the
+            // others' timers.
+            let Ok(mut gg) = g.try_lock() else {
+                continue;
+            };
             if !self.leases.confirm(&key, gg.epoch).await {
                 // The lease moved: members find the new coordinator.
                 gg.fail_waiters(err::NOT_COORDINATOR);
@@ -713,14 +740,17 @@ impl Coordinator {
                 continue;
             }
             gg.tick(now, &cfg);
-            self.persist(&mut gg).await;
+            self.persist(&mut gg);
             let idle =
                 gg.state == GroupState::Empty && gg.members.is_empty() && gg.pending.is_empty();
             drop(gg);
-            if idle {
-                // Nothing in memory worth keeping: give the lease back.
+            if idle && !self.writer(&key).busy() {
+                // Nothing in memory worth keeping: give the lease back,
+                // without holding up the other groups' timers on etcd.
                 self.forget(&key, &g);
-                self.leases.release(&key).await;
+                self.drop_writer(&key);
+                let leases = Arc::clone(&self.leases);
+                tokio::spawn(async move { leases.release(&key).await });
             }
         }
     }
@@ -733,17 +763,60 @@ impl Coordinator {
         }
     }
 
-    async fn persist(&self, g: &mut Group) {
+    fn drop_writer(&self, key: &GroupKey) {
+        let mut w = self
+            .writers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if w.get(key).is_some_and(|x| !x.busy()) {
+            w.remove(key);
+        }
+    }
+
+    fn writer(&self, key: &GroupKey) -> Arc<Writer> {
+        let mut w = self
+            .writers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(w.entry(key.clone()).or_default())
+    }
+
+    /// Hands the group's row to its writer when it changed. The write runs
+    /// in its own task: the caller never waits on the catalog (a slow write
+    /// once held the timer loop, and every group's rebalance with it, for
+    /// up to the backend's lock wait). Writes of one group apply in order;
+    /// a snapshot older than one already written is skipped.
+    fn persist(&self, g: &mut Group) {
         if !g.dirty {
             return;
         }
         g.dirty = false;
-        if let Err(e) = self
-            .store
-            .save_group(g.key.tenant, &g.as_stored(), g.state)
-            .await
-        {
-            tracing::warn!(group = %g.key.group, error = %e, "kafka group: saving the generation failed");
+        g.saved_seq += 1;
+        let seq = g.saved_seq;
+        let (tenant, row, state) = (g.key.tenant, g.as_stored(), g.state);
+        let w = self.writer(&g.key);
+        w.pending.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let store = Arc::clone(&self.store);
+        tokio::spawn(async move {
+            {
+                let mut last = w.last.lock().await;
+                if *last < seq {
+                    if let Err(e) = store.save_group(tenant, &row, state).await {
+                        tracing::warn!(group = %row.group, error = %e, "kafka group: saving the generation failed");
+                    }
+                    *last = seq;
+                }
+            }
+            w.pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        });
+    }
+
+    /// Waits until every row write handed out for `key` is done (tests,
+    /// and before a group's row is deleted).
+    pub async fn flush(&self, key: &GroupKey) {
+        let w = self.writer(key);
+        while w.busy() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
 
@@ -776,6 +849,8 @@ impl Coordinator {
             // The lease was lost and taken again: what we had is stale.
             gg.fail_waiters(err::NOT_COORDINATOR);
         }
+        // A row write of an earlier incarnation lands before the row is read.
+        self.flush(key).await;
         let stored = self
             .store
             .load_group(key.tenant, &key.group)
@@ -808,7 +883,7 @@ impl Coordinator {
             let now = Instant::now();
             let rx = Self::join_locked(&mut g, a, session, now, &cfg);
             g.try_complete_join(now);
-            self.persist(&mut g).await;
+            self.persist(&mut g);
             rx
         };
         match rx {
@@ -1034,7 +1109,7 @@ impl Coordinator {
                     }
                 }
             }
-            self.persist(&mut g).await;
+            self.persist(&mut g);
             rx
         };
         rx.await
@@ -1123,7 +1198,7 @@ impl Coordinator {
                 _ => {}
             }
             g.try_complete_join(now);
-            self.persist(&mut g).await;
+            self.persist(&mut g);
         }
         let top = if members.len() == 1 {
             out[0]
@@ -1153,7 +1228,7 @@ impl Coordinator {
                 if g.protocol_type.is_none() {
                     // A group that only commits offsets: keep its row.
                     g.dirty = true;
-                    self.persist(&mut g).await;
+                    self.persist(&mut g);
                 }
                 return err::NONE;
             }
@@ -1256,6 +1331,8 @@ impl Coordinator {
         if !g.members.is_empty() {
             return err::NON_EMPTY_GROUP;
         }
+        // Every write handed out lands before the row is deleted.
+        self.flush(key).await;
         match self.store.load_group(key.tenant, &key.group).await {
             Ok(None) if g.generation == 0 && g.protocol_type.is_none() => {
                 return err::GROUP_ID_NOT_FOUND;
@@ -1275,7 +1352,172 @@ impl Coordinator {
         g.fail_waiters(err::COORDINATOR_NOT_AVAILABLE);
         drop(g);
         self.map().remove(key);
+        self.drop_writer(key);
         self.leases.release(key).await;
         err::NONE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mem::{MemGroupStore, MemLeases};
+
+    /// A store whose row writes of one group hang until released.
+    struct SlowStore {
+        inner: MemGroupStore,
+        slow_group: String,
+        gate: tokio::sync::Semaphore,
+    }
+
+    #[async_trait]
+    impl GroupStore for SlowStore {
+        async fn commit(&self, t: u64, g: &str, o: &[CommittedOffset]) -> Result<(), StoreError> {
+            self.inner.commit(t, g, o).await
+        }
+        async fn fetch(
+            &self,
+            t: u64,
+            g: &str,
+            only: Option<&[(u64, i32)]>,
+        ) -> Result<Vec<CommittedOffset>, StoreError> {
+            self.inner.fetch(t, g, only).await
+        }
+        async fn save_group(
+            &self,
+            t: u64,
+            g: &StoredGroup,
+            s: GroupState,
+        ) -> Result<(), StoreError> {
+            if g.group == self.slow_group {
+                let _p = self.gate.acquire().await;
+            }
+            self.inner.save_group(t, g, s).await
+        }
+        async fn load_group(&self, t: u64, g: &str) -> Result<Option<StoredGroup>, StoreError> {
+            self.inner.load_group(t, g).await
+        }
+        async fn list_groups(&self, t: u64) -> Result<Vec<StoredGroup>, StoreError> {
+            self.inner.list_groups(t).await
+        }
+        async fn delete_group(&self, t: u64, g: &str) -> Result<(), StoreError> {
+            self.inner.delete_group(t, g).await
+        }
+    }
+
+    fn join_args() -> JoinArgs {
+        JoinArgs {
+            client_id: "c".into(),
+            session_timeout_ms: 10_000,
+            rebalance_timeout_ms: 300_000,
+            protocol_type: "consumer".into(),
+            protocols: vec![("range".into(), vec![1])],
+            ..JoinArgs::default()
+        }
+    }
+
+    /// r9more: a group's row write that hangs (a catalog row lock, a slow
+    /// backend) held the shared timer loop, so a new group's first join
+    /// waited for it (36.6 s measured with kafka-python against a held
+    /// row lock). Now the other group's join completes after its own
+    /// initial delay, and the slow write still lands, in order.
+    #[tokio::test]
+    async fn a_slow_row_write_holds_up_no_other_group() {
+        let store = Arc::new(SlowStore {
+            inner: MemGroupStore::default(),
+            slow_group: "slow".into(),
+            gate: tokio::sync::Semaphore::new(0),
+        });
+        let cfg = GroupConfig {
+            initial_rebalance_delay: Duration::from_millis(200),
+            tick: Duration::from_millis(20),
+            ..GroupConfig::default()
+        };
+        let c = Arc::new(Coordinator::new(
+            Arc::clone(&store) as Arc<dyn GroupStore>,
+            Arc::new(MemLeases::single(1)),
+            cfg,
+        ));
+        let stop = sprig_common::CancellationToken::new();
+        tokio::spawn(Arc::clone(&c).run(stop.clone()));
+        let key = |g: &str| GroupKey {
+            tenant: 7,
+            group: g.into(),
+        };
+        // The slow group's join completes on a tick, whose row write hangs.
+        let slow = c.join(&key("slow"), join_args()).await;
+        assert_eq!(slow.error, err::NONE);
+        let t = Instant::now();
+        let fast = c.join(&key("fast"), join_args()).await;
+        assert_eq!(fast.error, err::NONE);
+        assert_eq!(fast.generation, 1);
+        let took = t.elapsed();
+        assert!(
+            took < Duration::from_secs(2),
+            "the other group waited {took:?}"
+        );
+        let s = c
+            .sync(
+                &key("fast"),
+                SyncArgs {
+                    member_id: fast.member_id.clone(),
+                    generation: 1,
+                    assignments: vec![(fast.member_id.clone(), vec![9])],
+                    ..SyncArgs::default()
+                },
+            )
+            .await;
+        assert_eq!((s.error, s.assignment), (err::NONE, vec![9]));
+        c.flush(&key("fast")).await;
+        assert_eq!(
+            store
+                .load_group(7, "fast")
+                .await
+                .unwrap()
+                .unwrap()
+                .generation,
+            1
+        );
+        // The slow write lands once released.
+        assert!(store.load_group(7, "slow").await.unwrap().is_none());
+        store.gate.add_permits(100);
+        c.flush(&key("slow")).await;
+        assert_eq!(
+            store
+                .load_group(7, "slow")
+                .await
+                .unwrap()
+                .unwrap()
+                .generation,
+            1
+        );
+        stop.cancel();
+    }
+
+    /// Writes of one group apply in order: the last snapshot wins.
+    #[tokio::test]
+    async fn row_writes_of_a_group_land_in_order() {
+        let store = Arc::new(MemGroupStore::default());
+        let c = Coordinator::new(
+            Arc::clone(&store) as Arc<dyn GroupStore>,
+            Arc::new(MemLeases::single(1)),
+            GroupConfig::default(),
+        );
+        let key = GroupKey {
+            tenant: 1,
+            group: "g".into(),
+        };
+        let g = c.held(&key).await.unwrap();
+        for _ in 0..50 {
+            let mut g = g.lock().await;
+            g.generation += 1;
+            g.dirty = true;
+            c.persist(&mut g);
+        }
+        c.flush(&key).await;
+        assert_eq!(
+            store.load_group(1, "g").await.unwrap().unwrap().generation,
+            50
+        );
     }
 }

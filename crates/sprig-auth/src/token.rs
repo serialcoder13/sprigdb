@@ -303,13 +303,21 @@ impl Tokens {
             limits.access_ttl,
         );
         claims.act = act;
-        let kind = if impersonator.is_some() { "impersonation" } else { "login" };
+        let kind = if impersonator.is_some() {
+            "impersonation"
+        } else {
+            "login"
+        };
         let expires_at = if impersonator.is_some() {
             now + limits.access_ttl
         } else {
             now + limits.max_age
         };
-        let refresh_token = if impersonator.is_some() { String::new() } else { refresh_token };
+        let refresh_token = if impersonator.is_some() {
+            String::new()
+        } else {
+            refresh_token
+        };
         self.store
             .create(&NewSession {
                 sid: sid_bytes,

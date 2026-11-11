@@ -140,6 +140,109 @@ fn building() -> &'static Mutex<HashSet<String>> {
     B.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// What chapter 52's gate said about an automatic graph.
+enum AnnGate {
+    /// Build it; report with the ticket when an item tracks it.
+    Go(Option<Value>),
+    /// Not now.
+    Skip,
+}
+
+/// When a held graph asks the gate again.
+fn next_ask() -> &'static Mutex<std::collections::HashMap<String, std::time::Instant>> {
+    static N: OnceLock<Mutex<std::collections::HashMap<String, std::time::Instant>>> =
+        OnceLock::new();
+    N.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Chapter 52 for `vector.auto_ann`: `on` builds as before; `off` never;
+/// `approve` and `recommend` ask the controller's gate once the index is
+/// due (`vector.ann_min_rows`), at most once a minute per index while it
+/// waits. Unreachable approvals hold the graph.
+async fn ann_gate(
+    sql: &mut SqlSession,
+    def: &IndexDef,
+    settings: &sprig_vector::plan::Settings,
+    mode: &str,
+    tenant: Option<sprig_common::ids::TenantId>,
+    key: &str,
+) -> AnnGate {
+    match mode {
+        "on" | "" => return AnnGate::Go(None),
+        "off" => return AnnGate::Skip,
+        _ => {}
+    }
+    if next_ask()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(key)
+        .is_some_and(|at| std::time::Instant::now() < *at)
+    {
+        return AnnGate::Skip;
+    }
+    let Ok(rows) = index::rows(sql, def).await else {
+        return AnnGate::Skip;
+    };
+    if rows < settings.ann_min_rows {
+        return AnnGate::Skip;
+    }
+    next_ask()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(
+            key.to_owned(),
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+        );
+    let (Some(t), Some(admin)) = (tenant, crate::tenant::rec_sql::admin()) else {
+        return AnnGate::Skip;
+    };
+    let body = json!({
+        "op": "check",
+        "kind": "vector.ann",
+        "tenant": t.0,
+        "db": def.database,
+        "target": format!("{}/vector/{}", def.database, def.name),
+        "action": format!(
+            "build the HNSW graph of vector index {}.{} (M {}), kept if recall reaches vector.min_recall {}",
+            def.database, def.name, def.m, settings.min_recall
+        ),
+        "machine": {"database": def.database, "index": def.name, "m": def.m},
+        "evidence": {"rows": rows, "dimensions": def.dimensions, "ann_min_rows": settings.ann_min_rows},
+        "summary": format!(
+            "vector index {}.{} holds {rows} rows: build its ANN graph",
+            def.database, def.name
+        ),
+        "score": f64::from(u32::try_from(rows).unwrap_or(u32::MAX)),
+    });
+    let reply = admin
+        .forward_internal(
+            &hyper::Method::POST,
+            "/admin/v1/recommendations:gate",
+            bytes::Bytes::from(body.to_string()),
+        )
+        .await;
+    match reply {
+        Ok(r) if r.status < 300 => {
+            let v: Value = serde_json::from_slice(&r.body).unwrap_or_default();
+            if v.get("go").and_then(Value::as_bool) == Some(true) {
+                AnnGate::Go(v.get("ticket").cloned().filter(|t| !t.is_null()))
+            } else {
+                let why = v.get("why").and_then(Value::as_str).unwrap_or("");
+                tracing::info!(index = %def.name, why, "automatic vector graph held (chapter 52)");
+                AnnGate::Skip
+            }
+        }
+        Ok(r) => {
+            tracing::warn!(index = %def.name, status = r.status, "automatic vector graph: the approvals gate refused the check");
+            AnnGate::Skip
+        }
+        Err(e) => {
+            tracing::warn!(index = %def.name, error = %e, "automatic vector graph: approvals unreachable; held");
+            AnnGate::Skip
+        }
+    }
+}
+
 /// Starts the automatic graph of an `auto` index in the background, once.
 fn maybe_auto(engine: &Arc<SqlEngine>, caller: &Caller, def: &IndexDef) {
     if def.ann_mode != AnnMode::Auto || def.ann_state == index::AnnState::Ready {
@@ -167,14 +270,51 @@ fn maybe_auto(engine: &Arc<SqlEngine>, caller: &Caller, def: &IndexDef) {
     };
     let mut def = def.clone();
     let settings = super::model_settings::vector_for(engine, caller, &def.database);
+    // Chapter 52: `vector.auto_ann` holds the graph for an approval.
+    let mode = super::model_settings::vector_auto_ann(engine, caller, &def.database);
+    let tenant = caller.principal.tenant;
     tokio::spawn(async move {
-        match auto_ann(&mut sql, &mut def, &settings, 20, 10).await {
+        let ticket = match ann_gate(&mut sql, &def, &settings, &mode, tenant, &key).await {
+            AnnGate::Go(t) => t,
+            AnnGate::Skip => {
+                building()
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&key);
+                return;
+            }
+        };
+        let r = auto_ann(&mut sql, &mut def, &settings, 20, 10).await;
+        match &r {
             Ok(Some(r)) => {
                 tracing::info!(index = %def.name, recall = r, kept = def.ann_state == index::AnnState::Ready, "automatic vector graph validated");
             }
             Ok(None) => {}
             Err(e) => {
                 tracing::warn!(index = %def.name, error = %e, "automatic vector graph failed");
+            }
+        }
+        if let Some(t) = ticket {
+            let (ok, detail) = match &r {
+                Ok(Some(recall)) if def.ann_state == index::AnnState::Ready => {
+                    (true, format!("graph built, recall {recall:.3}"))
+                }
+                Ok(Some(recall)) => (
+                    false,
+                    format!("graph dropped: recall {recall:.3} below vector.min_recall"),
+                ),
+                Ok(None) => (false, "nothing was due".to_owned()),
+                Err(e) => (false, e.message.clone()),
+            };
+            let body = json!({"op": "finished", "ticket": t, "ok": ok, "detail": detail});
+            if let Some(admin) = crate::tenant::rec_sql::admin() {
+                let _ = admin
+                    .forward_internal(
+                        &hyper::Method::POST,
+                        "/admin/v1/recommendations:gate",
+                        bytes::Bytes::from(body.to_string()),
+                    )
+                    .await;
             }
         }
         building()

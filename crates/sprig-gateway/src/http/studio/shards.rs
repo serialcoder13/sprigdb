@@ -47,14 +47,7 @@ fn denied() -> SprigError {
 async fn catalog(
     core: &Arc<Core>,
     caller: &Caller,
-) -> Result<
-    (
-        mysql_async::Conn,
-        String,
-        Arc<sprig_catalog::TenantCatalog>,
-    ),
-    SprigError,
-> {
+) -> Result<(mysql_async::Conn, String, Arc<sprig_catalog::TenantCatalog>), SprigError> {
     let (Some(svc), Some(tid)) = (&core.studio.tenants, caller.principal.tenant) else {
         return Err(invalid("the shards view needs a tenant login"));
     };
@@ -82,7 +75,7 @@ fn missing_table(e: &mysql_async::Error) -> bool {
     matches!(e, mysql_async::Error::Server(s) if s.code == 1146)
 }
 
-fn db_err(what: &str, e: mysql_async::Error) -> SprigError {
+fn db_err(what: &str, e: &mysql_async::Error) -> SprigError {
     SprigError::new(SprigCode::CatalogUnavailable, format!("{what}: {e}"))
 }
 
@@ -151,6 +144,63 @@ fn maps_by_group(v: &Value) -> BTreeMap<u32, Value> {
         .collect()
 }
 
+/// The maps by group from the controller (the router's maps live in
+/// etcd), or why they couldn't be read.
+async fn maps(core: &Arc<Core>, tenant: &str) -> (BTreeMap<u32, Value>, Value) {
+    match core
+        .admin
+        .forward_internal(
+            &Method::GET,
+            &format!("/admin/v1/tenants/{tenant}/shards"),
+            Bytes::new(),
+        )
+        .await
+    {
+        Ok(r) if r.status == 200 => {
+            let v: Value = serde_json::from_slice(&r.body).unwrap_or(Value::Null);
+            (maps_by_group(&v), Value::Null)
+        }
+        Ok(r) => (
+            BTreeMap::new(),
+            json!(format!(
+                "the controller answered {}: {}",
+                r.status,
+                String::from_utf8_lossy(&r.body)
+                    .chars()
+                    .take(300)
+                    .collect::<String>()
+            )),
+        ),
+        Err(e) => (BTreeMap::new(), json!(e.to_string())),
+    }
+}
+
+/// A `table_groups` row as read.
+type GroupRow = (
+    u32,
+    String,
+    String,
+    Option<String>,
+    String,
+    Option<u32>,
+    String,
+    Option<u64>,
+    Option<String>,
+);
+
+/// A `group_members` row as read.
+type MemberRow = (
+    u64,
+    u32,
+    u32,
+    String,
+    Option<String>,
+    Option<u64>,
+    Option<String>,
+    String,
+    u8,
+);
+
 /// `GET /v1/shards`.
 async fn groups(core: &Arc<Core>, caller: &Caller, tenant: &str) -> Result<Value, SprigError> {
     let seen = workload::visible(core, caller).await?;
@@ -160,21 +210,10 @@ async fn groups(core: &Arc<Core>, caller: &Caller, tenant: &str) -> Result<Value
          advisor_run_id, DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') \
          FROM `{schema}`.table_groups ORDER BY group_id"
     );
-    type GroupRow = (
-        u32,
-        String,
-        String,
-        Option<String>,
-        String,
-        Option<u32>,
-        String,
-        Option<u64>,
-        Option<String>,
-    );
     let rows: Vec<GroupRow> = match conn.query(gsql).await {
         Ok(r) => r,
         Err(e) if missing_table(&e) => Vec::new(),
-        Err(e) => return Err(db_err("table groups", e)),
+        Err(e) => return Err(db_err("table groups", &e)),
     };
     let groups: Vec<(u32, Value)> = rows
         .into_iter()
@@ -194,21 +233,10 @@ async fn groups(core: &Arc<Core>, caller: &Caller, tenant: &str) -> Result<Value
          parent_object_id, parent_fk, rk_state, pinned FROM `{schema}`.group_members \
          ORDER BY group_id, db_id, object_id"
     );
-    type MemberRow = (
-        u64,
-        u32,
-        u32,
-        String,
-        Option<String>,
-        Option<u64>,
-        Option<String>,
-        String,
-        u8,
-    );
     let rows: Vec<MemberRow> = match conn.query(msql).await {
         Ok(r) => r,
         Err(e) if missing_table(&e) => Vec::new(),
-        Err(e) => return Err(db_err("group members", e)),
+        Err(e) => return Err(db_err("group members", &e)),
     };
     drop(conn);
     let name_of = |o: u64| {
@@ -235,30 +263,7 @@ async fn groups(core: &Arc<Core>, caller: &Caller, tenant: &str) -> Result<Value
             })
         })
         .collect();
-    // The maps, from the controller (the router's maps live in etcd).
-    let (maps, maps_error) = match core
-        .admin
-        .forward_internal(
-            &Method::GET,
-            &format!("/admin/v1/tenants/{tenant}/shards"),
-            Bytes::new(),
-        )
-        .await
-    {
-        Ok(r) if r.status == 200 => {
-            let v: Value = serde_json::from_slice(&r.body).unwrap_or(Value::Null);
-            (maps_by_group(&v), Value::Null)
-        }
-        Ok(r) => (
-            BTreeMap::new(),
-            json!(format!(
-                "the controller answered {}: {}",
-                r.status,
-                String::from_utf8_lossy(&r.body).chars().take(300).collect::<String>()
-            )),
-        ),
-        Err(e) => (BTreeMap::new(), json!(e.to_string())),
-    };
+    let (maps, maps_error) = maps(core, tenant).await;
     let out = assemble(groups, members, seen.as_deref(), &maps);
     Ok(json!({ "groups": out, "maps_error": maps_error, "all_databases": seen.is_none() }))
 }
@@ -278,7 +283,7 @@ async fn runs(core: &Arc<Core>, caller: &Caller) -> Result<Value, SprigError> {
     let rows: Vec<mysql_async::Row> = match conn.query(sql).await {
         Ok(r) => r,
         Err(e) if missing_table(&e) => Vec::new(),
-        Err(e) => return Err(db_err("advisor runs", e)),
+        Err(e) => return Err(db_err("advisor runs", &e)),
     };
     let s = |r: &mysql_async::Row, i: usize| -> Value {
         r.get_opt::<Option<String>, _>(i)
@@ -319,7 +324,9 @@ pub(super) async fn route(
     let Some(tenant) = caller.principal.tenant_name.clone() else {
         return Err(invalid("the shards view needs a tenant login"));
     };
-    let rest = path.trim_start_matches("/v1/shards").trim_start_matches('/');
+    let rest = path
+        .trim_start_matches("/v1/shards")
+        .trim_start_matches('/');
     match rest.split('/').collect::<Vec<_>>().as_slice() {
         [""] => Ok(json_response(200, &groups(core, caller, &tenant).await?)),
         ["advisor"] => Ok(json_response(200, &runs(core, caller).await?)),
@@ -367,7 +374,10 @@ mod tests {
             member(2, "ops", "logs"),
         ];
         let mut maps = BTreeMap::new();
-        maps.insert(1, json!({"version": 4, "shards": [{"shard": 1}, {"shard": 2}]}));
+        maps.insert(
+            1,
+            json!({"version": 4, "shards": [{"shard": 1}, {"shard": 2}]}),
+        );
         // An administrator sees every group, the empty one included.
         let all = assemble(groups.clone(), members.clone(), None, &maps);
         assert_eq!(all.len(), 3);

@@ -38,6 +38,7 @@
 //! 1142, a duplicate key 1062); the rest are 39795 with the language's own
 //! code in the message.
 
+use std::fmt::Write as _;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 
@@ -335,6 +336,7 @@ impl SqlEngine {
     // Cypher and GQL.
     // ------------------------------------------------------------------
 
+    #[allow(clippy::too_many_lines)] // one result's whole life, in order
     async fn run_graph(
         &self,
         caller: &Caller,
@@ -600,7 +602,9 @@ async fn mongo_command(
             out.end(affected, String::new()).await
         }
         .await;
-        return Ok(r.unwrap_or(()));
+        // A gone client (`Err`) has nothing more to hear.
+        drop(r);
+        return Ok(());
     };
     let ns = cursor.get_str("ns").unwrap_or_default().to_owned();
     let coll = ns
@@ -679,7 +683,7 @@ fn ext_json(b: Bson) -> String {
 /// A reply's error, or its first write error, as a [`SprigError`].
 fn check_reply(reply: &Document) -> Result<()> {
     let ok = match reply.get("ok") {
-        Some(Bson::Double(f)) => *f == 1.0,
+        Some(Bson::Double(f)) => (*f - 1.0).abs() < f64::EPSILON,
         Some(Bson::Int32(i)) => *i == 1,
         Some(Bson::Int64(i)) => *i == 1,
         Some(Bson::Boolean(b)) => *b,
@@ -808,7 +812,10 @@ fn to_json(v: &PackValue) -> Json {
         PackValue::Int(i) => json!(i),
         PackValue::Float(f) => json!(f),
         PackValue::Bytes(b) => {
-            let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+            let hex = b.iter().fold(String::new(), |mut acc, x| {
+                let _ = write!(acc, "{x:02x}");
+                acc
+            });
             json!({ "$bytes": hex })
         }
         PackValue::String(s) => Json::String(s.clone()),

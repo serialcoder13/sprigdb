@@ -46,8 +46,8 @@ fn times_round_trip_as_micros() {
 #[test]
 fn the_module_registers_with_the_migrator() {
     let m = Migrator::new(&[AUTH_MODULE]).unwrap();
-    assert_eq!(m.supports().get(MODULE), Some(&4));
-    assert_eq!(AUTH_MODULE.newest(), 4);
+    assert_eq!(m.supports().get(MODULE), Some(&5));
+    assert_eq!(AUTH_MODULE.newest(), 5);
 }
 
 #[test]

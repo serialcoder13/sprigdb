@@ -3,7 +3,7 @@
 //! when their login holds platform operator rights (decided 7 November
 //! 2026).
 //!
-//! **Who is an operator** (decision ST34): logins listed in
+//! **Who is an operator** (decision ST35): logins listed in
 //! `studio.operator_logins` (global scope, so only someone with the Admin
 //! API's token can list one). `WhoAmI` reports them with the platform role
 //! `operator`.
@@ -158,7 +158,11 @@ pub(super) async fn route(
         .trim_start_matches('/')
         .to_owned();
     let query = req.uri().query().map(str::to_owned);
-    if rest.split('/').any(|s| s == ".." || s == "." || s.is_empty()) && !rest.is_empty() {
+    if rest
+        .split('/')
+        .any(|s| s == ".." || s == "." || s.is_empty())
+        && !rest.is_empty()
+    {
         return Err(SprigError::new(
             SprigCode::AdminRequestInvalid,
             "bad operator path",
@@ -214,11 +218,20 @@ mod tests {
 
     #[test]
     fn writes_need_a_reason_and_carry_the_actor() {
-        assert!(forward_body(&Method::GET, b"anything", "a.b").unwrap().is_empty());
+        assert!(
+            forward_body(&Method::GET, b"anything", "a.b")
+                .unwrap()
+                .is_empty()
+        );
         let e = forward_body(&Method::POST, br#"{"kind":"split"}"#, "a.b").unwrap_err();
         assert!(e.to_string().contains("reason"));
         assert!(forward_body(&Method::POST, b"[1]", "a.b").is_err());
-        let b = forward_body(&Method::POST, br#"{"reason":"hot shard","actor":"forged"}"#, "p.ops").unwrap();
+        let b = forward_body(
+            &Method::POST,
+            br#"{"reason":"hot shard","actor":"forged"}"#,
+            "p.ops",
+        )
+        .unwrap();
         let v: Value = serde_json::from_slice(&b).unwrap();
         assert_eq!(v["actor"], "studio:p.ops");
         assert_eq!(v["reason"], "hot shard");
