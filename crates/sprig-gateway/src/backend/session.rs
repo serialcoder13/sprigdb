@@ -332,6 +332,55 @@ fn internal(e: &ClientError) -> SprigError {
     SprigError::new(SprigCode::BackendProtocol, e.to_string())
 }
 
+/// ST31 (bugfix5): a session dropped with a statement under way stops that
+/// statement. The router's per-shard streams (scatter, gather, analytic
+/// reads) are sessions of their own, dropped with the request when its
+/// REST or gRPC client goes away; their connections close with them, but
+/// MariaDB would run a statement such as `SELECT SLEEP(30)` to its end.
+/// The connection is never reused (a dropped lease closes it), so the
+/// `KILL QUERY` can't reach another statement.
+impl Drop for BackendSession {
+    fn drop(&mut self) {
+        if !self.in_flight() {
+            return;
+        }
+        let Some((node, id)) = self.thread_id() else {
+            return;
+        };
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let backends = Arc::clone(&self.backends);
+        let target = self.target.clone();
+        // The connection stays open until the kill is in: MariaDB's `KILL`
+        // of a thread whose client has just closed its socket can wait up
+        // to 2 s for that thread (seen live), one of a live client's doesn't.
+        let conn = self.cur.take();
+        drop(rt.spawn(async move {
+            let t0 = std::time::Instant::now();
+            let r =
+                tokio::time::timeout(Duration::from_secs(3), backends.kill_query(&node, &target, id))
+                    .await;
+            drop(conn);
+            let ms = t0.elapsed().as_millis();
+            match r {
+                Ok(Ok(())) if ms < 500 => {
+                    tracing::debug!(node = %node, thread = id, ms, "statement of a dropped backend session killed");
+                }
+                Ok(Ok(())) => {
+                    tracing::info!(node = %node, thread = id, ms, "statement of a dropped backend session killed, slowly");
+                }
+                Ok(Err(e)) => {
+                    tracing::info!(node = %node, thread = id, ms, error = %e, "KILL QUERY for a dropped backend session failed");
+                }
+                Err(_) => {
+                    tracing::info!(node = %node, thread = id, "KILL QUERY for a dropped backend session timed out");
+                }
+            }
+        }));
+    }
+}
+
 impl BackendSession {
     pub(super) fn new(backends: Arc<Backends>, target: BackendTarget, opts: SessionOpts) -> Self {
         let settings = backends.settings(&target.cluster);
@@ -446,6 +495,13 @@ impl BackendSession {
             .map(|c| &c.lease)
             .or(self.held.as_ref().map(|(l, _)| l))
             .map(|l| l.conn_ref().client.caps())
+    }
+
+    /// Whether a statement is under way: sent, or its response not read to
+    /// its end.
+    #[must_use]
+    pub fn in_flight(&self) -> bool {
+        self.cur.as_ref().is_some_and(|c| !c.done && !c.failed) || self.inflight.is_some()
     }
 
     /// `KILL QUERY` on the backend thread of the statement in flight (or

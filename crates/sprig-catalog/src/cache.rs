@@ -729,7 +729,23 @@ impl Inner {
         let mut node = if writer { Node::Writer } else { Node::Replica };
         let deadline = Instant::now() + cfg.version_wait;
         let mut pause = Duration::from_millis(5);
+        let mut poll = Duration::from_millis(2);
         loop {
+            // Decision PF4: the directory moves before the catalog commits,
+            // so a load the watch starts usually finds the version not yet
+            // committed. Until the deadline, the committed versions are
+            // polled with one small query, and the full load (every
+            // module's tables) runs once the target is there. Before, each
+            // catalog change cost every gateway two or more full loads.
+            if Instant::now() < deadline
+                && let Ok(Some((catalog, auth))) = self.source.committed(tenant, node).await
+                && !target.within(Want { catalog, auth })
+            {
+                tokio::time::sleep(poll.min(deadline.saturating_duration_since(Instant::now())))
+                    .await;
+                poll = (poll * 2).min(Duration::from_millis(50));
+                continue;
+            }
             let started = Instant::now();
             let r = tokio::time::timeout(
                 cfg.load_timeout,

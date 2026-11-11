@@ -524,6 +524,12 @@ pub struct DdlOutcome {
     pub notes: Vec<DdlNote>,
     /// The job, when one ran.
     pub job: Option<JobId>,
+    /// The committed catalog version the statement read, when it changed
+    /// nothing (an `IF [NOT] EXISTS` that found its answer). The session
+    /// reads at least this version next, as it does `version`, so a
+    /// statement that found another session's new database or table sees
+    /// it in its next statement too (decision PF6).
+    pub seen: Option<u64>,
 }
 
 // ---- intents ----
@@ -1090,6 +1096,7 @@ where
             affected_rows: plan.affected,
             notes: plan.notes,
             job: Some(job),
+            seen: None,
         })
     }
 
@@ -1159,8 +1166,15 @@ where
                     tokio::time::sleep(self.opts.poll).await;
                 }
                 Ok(other) => {
+                    let seen = locked.previous();
                     locked.release().await?;
-                    return Ok(other);
+                    return Ok(match other {
+                        Planned::Done(mut o) => {
+                            o.seen = Some(seen);
+                            Planned::Done(o)
+                        }
+                        other => other,
+                    });
                 }
                 Err(e) => {
                     let _ = locked.release().await;

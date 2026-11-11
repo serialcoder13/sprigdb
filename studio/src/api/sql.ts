@@ -16,10 +16,24 @@ function dbPath(db: string | null | undefined): string {
 export function execute(
   db: string | null | undefined,
   sql: string,
-  opts: { transaction?: string; signal?: AbortSignal; multi?: boolean } = {},
+  opts: {
+    transaction?: string;
+    signal?: AbortSignal;
+    multi?: boolean;
+    language?: QueryLanguage;
+    maxRows?: number;
+    timeoutMs?: number;
+  } = {},
 ): Promise<ExecuteResponse> {
   return json<ExecuteResponse>(`/v1/databases/${dbPath(db)}/sql:execute`, {
-    body: { sql, transaction: opts.transaction, multi_statements: opts.multi ?? false },
+    body: {
+      sql,
+      transaction: opts.transaction,
+      multi_statements: opts.multi ?? false,
+      ...(opts.language && opts.language !== 'sql' ? { language: opts.language } : {}),
+      ...(opts.maxRows ? { max_rows: opts.maxRows } : {}),
+      ...(opts.timeoutMs ? { timeout_ms: opts.timeoutMs } : {}),
+    },
     signal: opts.signal,
   });
 }
@@ -71,7 +85,12 @@ export interface QueryCaps {
   maxRows?: number;
   maxBytes?: number;
   timeoutMs?: number;
+  /** `language` on Sql.Query (chapter 37, "Languages"): `sql` when absent. */
+  language?: QueryLanguage;
 }
+
+/** The languages Sql.Query runs (chapter 37, bugfix4). */
+export type QueryLanguage = 'sql' | 'cypher' | 'gql' | 'mongo';
 
 export function query(db: string | null | undefined, sql: string, h: StreamHandlers, caps: QueryCaps = {}): Running {
   const worker = new Worker(new URL('./query.worker.ts', import.meta.url), { type: 'module' });
@@ -105,6 +124,7 @@ export function query(db: string | null | undefined, sql: string, h: StreamHandl
         ...(caps.maxRows ? { max_rows: caps.maxRows } : {}),
         ...(caps.maxBytes ? { max_bytes: caps.maxBytes } : {}),
         ...(caps.timeoutMs ? { timeout_ms: caps.timeoutMs } : {}),
+        ...(caps.language && caps.language !== 'sql' ? { language: caps.language } : {}),
       }),
     };
     worker.onmessage = (ev: MessageEvent<FromWorker>) => {

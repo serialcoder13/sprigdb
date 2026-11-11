@@ -295,6 +295,8 @@ async fn after_use(
     }
     adopt_settings(svc, chain, def, si).await?;
     super::triggers::ensure_for_stream(svc, chain, def, si).await?;
+    // R9 (r9more): inherited sinks (and their connections) on the instance.
+    super::sinks::ensure_for_stream(svc, chain, def, si).await;
     // R9 (r9next): fan-in triggers above read the instance.
     super::fanin_triggers::on_instance(svc, chain, def, si).await;
     super::put_index(
@@ -324,7 +326,12 @@ fn signature(chain: &Chain, def: &Definition) -> String {
         for o in &st.overrides {
             let _ = write!(s, "|o{}:{}:{}", o.def, o.set_at_ms, o.value);
         }
-        for d in st.defs.values().filter(|d| d.kind == DefKind::Trigger) {
+        for d in st.defs.values().filter(|d| {
+            matches!(
+                d.kind,
+                DefKind::Trigger | DefKind::Sink | DefKind::Connection
+            )
+        }) {
             let _ = write!(s, "|t{}:{}:{}", d.key(), d.def_version, d.state.as_str());
         }
     }

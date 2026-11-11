@@ -56,14 +56,14 @@ use sprig_inherit::msg::{
 use sprig_sinks::grammar::{self as sg, OptVal};
 use sprig_sinks::meta::{PlatformConnection, SinkIndex};
 use sprig_sinks::model::{SinkId, SinkState, StartAt, TaskRow};
-use sprig_sinks::policy::{Residency, Unpinned};
+use sprig_sinks::policy::Residency;
 use sprig_sinks::secrets::SinkKeyring;
-use sprig_sinks::sql::{Change, Handled, Host};
+use sprig_sinks::sql::{Change, Host};
 use sprig_sinks::store::SinksState;
 use zeroize::Zeroizing;
 
+use super::catalog;
 use super::streams::StreamInstance;
-use super::{catalog, state_of};
 use crate::tenant::TenantServices;
 
 /// An option of a connection definition, as written.
@@ -320,7 +320,7 @@ pub async fn ensure_for_stream(
                 svc,
                 si.tenant,
                 &s,
-                json!({"error": e.to_string(), "code": e.code.number()}),
+                json!({"error": e.to_string(), "code": e.code().map(sprig_common::SprigCode::number)}),
                 InstanceState::Creating,
             )
             .await;
@@ -358,8 +358,8 @@ async fn record(
             )
             .await?;
     }
-    use mysql_async::prelude::Queryable;
-    conn.exec_drop(
+    mysql_async::prelude::Queryable::exec_drop(
+        &mut conn,
         format!(
             "UPDATE {}.inherited_instances SET state = ?, def_version = ?, definition = ?, \
              physical = ?, last_used_at = UTC_TIMESTAMP(3) WHERE def_tenant_id = ? AND \
@@ -622,6 +622,13 @@ async fn ensure_one(
             // the definition), else where the definition says.
             if si.created || si.stream.created_at_ms >= s.created_at_ms {
                 cs.start_at = StartAt::Earliest;
+            } else if cs.start_at == StartAt::Latest {
+                // "Latest" is the deploy, not the task's first run: a task
+                // that can't start yet (a destination down, a credential
+                // still missing) misses nothing published meanwhile.
+                cs.start_at = StartAt::Timestamp {
+                    ms: i64::try_from(sprig_inherit::msg::store::now_ms()).unwrap_or(i64::MAX),
+                };
             }
             cs.options = opts
                 .iter()
@@ -648,7 +655,11 @@ async fn ensure_one(
     };
     let conn_ids: Vec<Value> = conns
         .iter()
-        .filter_map(|c| host.state().connection(db_id, &c.def.name).map(|d| json!(d.id.0)))
+        .filter_map(|c| {
+            host.state()
+                .connection(db_id, &c.def.name)
+                .map(|d| json!(d.id.0))
+        })
         .collect();
     tracing::info!(tenant = %t, def = %s.key(), sink = sink_id, disabled, "inherited sink deployed");
     record(
@@ -690,14 +701,13 @@ pub async fn drop_instance(
     drop(conn);
     let spec: SinkSpec = serde_json::from_value(s.definition.clone()).unwrap_or_default();
     let cat = catalog(svc, t).await?;
-    let run_as = sprig_auth::cache::TenantAuth::of(&cat)
-        .and_then(|a| a.accounts(super::RUN_AS_USER).first().map(|u| u.row.user_id));
+    let run_as = sprig_auth::cache::TenantAuth::of(&cat).and_then(|a| {
+        a.accounts(super::RUN_AS_USER)
+            .first()
+            .map(|u| u.row.user_id)
+    });
     if let Some(run_as) = run_as
-        && row
-            .physical
-            .as_ref()
-            .and_then(|p| p.get("sink"))
-            .is_some()
+        && row.physical.as_ref().and_then(|p| p.get("sink")).is_some()
     {
         let mut host = DeployHost::new(svc, t, run_as, &spec.db).await?;
         if let Some(db_id) = host.db_id(&spec.db) {
@@ -799,16 +809,21 @@ struct DeployHost {
     user: UserId,
     db: String,
     migrated: bool,
+    residency: sprig_sinks::residency::Shared,
 }
 
 impl DeployHost {
     async fn new(svc: &Arc<TenantServices>, t: TenantId, user: UserId, db: &str) -> Result<Self> {
+        let cat = catalog(svc, t).await?;
+        // The member's residency (its and its ancestors' policies).
+        let residency = crate::exec::sinks::residency_of(svc, &cat).await?;
         Ok(Self {
             svc: Arc::clone(svc),
-            cat: catalog(svc, t).await?,
+            cat,
             user,
             db: db.to_owned(),
             migrated: false,
+            residency,
         })
     }
 
@@ -901,7 +916,7 @@ impl Host for DeployHost {
     }
 
     fn residency(&self) -> Box<dyn Residency> {
-        Box::new(Unpinned)
+        Box::new(self.residency.clone())
     }
 
     fn keyring(&self) -> Option<Arc<dyn SinkKeyring>> {
@@ -931,12 +946,23 @@ impl Host for DeployHost {
             sprig_sinks::store::migrate(&mut conn, &schema).await?;
             self.migrated = true;
         }
-        let mut c = self.svc.catalog.change(tenant, VersionKind::Catalog).await?;
+        let mut c = self
+            .svc
+            .catalog
+            .change(tenant, VersionKind::Catalog)
+            .await?;
         let keys = crate::exec::sinks::keyring();
         let applied = {
             let (store, tx) = c.tx().parts();
-            sprig_sinks::sql::apply(tx, store.schema(), &change, keys.as_deref(), tenant, self.user.0)
-                .await
+            sprig_sinks::sql::apply(
+                tx,
+                store.schema(),
+                &change,
+                keys.as_deref(),
+                tenant,
+                self.user.0,
+            )
+            .await
         };
         if let Err(e) = applied {
             let _ = c.rollback().await;
@@ -993,6 +1019,13 @@ impl Host for DeployHost {
         )
         .await?;
         Ok(Some((p, granted)))
+    }
+
+    async fn function_source(&mut self, db: u32, name: &str) -> Result<Option<(String, String)>> {
+        let (mut c, schema) = self.conn().await?;
+        Ok(sprig_sinks::transform::source_of(&mut c, &schema, db, name)
+            .await?
+            .map(|(runtime, _, source, _)| (runtime, source)))
     }
 
     async fn platform_granted(&mut self) -> Result<Vec<PlatformConnection>> {

@@ -786,14 +786,10 @@ impl CatalogDocs {
         self.prepare(tenant).await?;
         let cat = self.snapshot(tenant).await?;
         let lctn = self.lctn(&cat);
-        // Decision PF1: the version row is locked first and a version is
+        // Decision PF2: the version row is locked first and a version is
         // allocated only when something is written, so finding the
         // collection already registered leaves no gap.
-        let mut ch = self
-            .svc
-            .catalog
-            .lock(tenant, VersionKind::Catalog)
-            .await?;
+        let mut ch = self.svc.catalog.lock(tenant, VersionKind::Catalog).await?;
         let r: Result<Option<CollMeta>> = async {
             let (store, tx) = ch.tx().parts();
             let d = DocTables::new(store.schema());
@@ -861,12 +857,8 @@ impl CatalogDocs {
         self.prepare(tenant).await?;
         let cat = self.snapshot(tenant).await?;
         let lctn = self.lctn(&cat);
-        // Decision PF1: allocate only when `f` changed something.
-        let mut ch = self
-            .svc
-            .catalog
-            .lock(tenant, VersionKind::Catalog)
-            .await?;
+        // Decision PF2: allocate only when `f` changed something.
+        let mut ch = self.svc.catalog.lock(tenant, VersionKind::Catalog).await?;
         let r: Result<bool> = async {
             let (store, tx) = ch.tx().parts();
             let d = DocTables::new(store.schema());
@@ -903,15 +895,11 @@ impl CatalogDocs {
     /// database, or a table dropped by SQL), in one change.
     async fn purge_orphans(&self, tenant: TenantId) -> Result<()> {
         self.prepare(tenant).await?;
-        // Decision PF1: after nearly every `dropDatabase` there is nothing
+        // Decision PF2: after nearly every `dropDatabase` there is nothing
         // to purge; the version row is locked, and a version allocated only
         // when rows go (before, each call left a gap that held every
         // `Freshness::Latest` load of the tenant for `catalog.version_wait_ms`).
-        let mut ch = self
-            .svc
-            .catalog
-            .lock(tenant, VersionKind::Catalog)
-            .await?;
+        let mut ch = self.svc.catalog.lock(tenant, VersionKind::Catalog).await?;
         let r: Result<u64> = async {
             let (store, tx) = ch.tx().parts();
             let s = store.schema().to_owned();

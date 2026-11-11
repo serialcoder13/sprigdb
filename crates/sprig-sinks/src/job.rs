@@ -602,6 +602,29 @@ pub async fn open_conn(
     }
 }
 
+/// The sink's `TRANSFORM` function, compiled at task start (its active
+/// version then; a later deploy reaches the next task start).
+///
+/// # Errors
+/// 39219 for a function that is gone or can't be a transform.
+async fn load_transform(
+    pool: &Pool,
+    schema: &str,
+    def: &SinkDef,
+    opts: &Opts,
+) -> Result<Option<Arc<crate::transform::Transform>>> {
+    let Some(f) = &def.transform else {
+        return Ok(None);
+    };
+    let mut c = pool.get_conn().await.map_err(|e| {
+        SprigError::new(SprigCode::CatalogUnavailable, "catalog unavailable").with_source(e)
+    })?;
+    let budget = Duration::from_millis(opts.u64("transform_budget_ms", 50)?);
+    crate::transform::Transform::load(&mut c, schema, def.db_id, f, budget)
+        .await
+        .map(Some)
+}
+
 /// Builds the target of a sink.
 ///
 /// # Errors
@@ -641,6 +664,8 @@ pub async fn run_sink_task(
         return Ok(TaskEnd::Stopped);
     }
     let def = Arc::new(def);
+    // `sink.tenant_bytes_per_sec` is one budget across workers (R9).
+    crate::runtime::ensure_quota_sharing(env.dc(), env.worker_id());
     let opts = resolve_opts(&mut c, &cat_schema, &def).await?;
     let opts = match env.settings() {
         Some((etcd, dc)) => over_global(opts, &etcd, &dc),
@@ -744,6 +769,7 @@ pub async fn run_sink_task(
             .map(crate::filter::parse)
             .transpose()?,
         projection: def.projection.clone(),
+        transform: load_transform(&cat_pool, &cat_schema, &def, &opts).await?,
     };
     let control = Arc::new(CatalogControl {
         pool: cat_pool.clone(),
@@ -1123,6 +1149,7 @@ async fn run_fan_in_task(
             .map(crate::filter::parse)
             .transpose()?,
         projection: def.projection.clone(),
+        transform: load_transform(&cat_pool, &cat_schema, &def, &opts).await?,
     };
     let control = Arc::new(CatalogControl {
         pool: cat_pool.clone(),

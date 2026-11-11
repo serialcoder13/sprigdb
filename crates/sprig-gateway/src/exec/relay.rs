@@ -78,6 +78,9 @@ pub(crate) struct Relay<'a> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ConnStatus {
     vars: Vec<(&'static str, String)>,
+    /// 3306's `SHOW VARIABLES`: `collation_*` values in MySQL's names
+    /// (chapter 28, R4 round 3; gaps row 60).
+    mysql_collations: bool,
 }
 
 impl ConnStatus {
@@ -95,6 +98,7 @@ impl ConnStatus {
             Framing::Zstd { level } => ("ON", "zstd".to_owned(), level.to_string()),
         };
         Self {
+            mysql_collations: false,
             vars: vec![
                 ("Ssl_cipher", cipher),
                 ("Ssl_version", version),
@@ -113,28 +117,66 @@ impl ConnStatus {
         let Some(Value::Bytes(name)) = vals.first() else {
             return None;
         };
-        let (_, v) = self
+        let v = match self
             .vars
             .iter()
-            .find(|(n, _)| n.as_bytes().eq_ignore_ascii_case(name))?;
-        *vals.get_mut(1)? = Value::Bytes(Bytes::from(v.clone()));
+            .find(|(n, _)| n.as_bytes().eq_ignore_ascii_case(name))
+        {
+            Some((_, v)) => v.clone(),
+            None => {
+                let Some(Value::Bytes(value)) = vals.get(1) else {
+                    return None;
+                };
+                self.mysql_collation(name, value)?
+            }
+        };
+        *vals.get_mut(1)? = Value::Bytes(Bytes::from(v));
         encode_binary_row(&vals, &cols).ok()
     }
 
     /// Rows to rewrite by variable name (`SHOW VARIABLES`: the persona's
     /// version strings).
     pub(crate) fn from_rows(vars: Vec<(&'static str, String)>) -> Self {
-        Self { vars }
+        Self {
+            vars,
+            mysql_collations: false,
+        }
+    }
+
+    /// More rows to rewrite (the session's own counters, gaps row 46).
+    pub(crate) fn with_rows(mut self, rows: Vec<(&'static str, String)>) -> Self {
+        self.vars.extend(rows);
+        self
+    }
+
+    /// `collation_*` rows in MySQL's names too (3306's `SHOW VARIABLES`).
+    pub(crate) fn with_mysql_collations(mut self) -> Self {
+        self.mysql_collations = true;
+        self
+    }
+
+    /// A `collation_*` value in MySQL's name, when it differs.
+    fn mysql_collation(&self, name: &[u8], value: &[u8]) -> Option<String> {
+        if !self.mysql_collations || !name.to_ascii_lowercase().starts_with(b"collation_") {
+            return None;
+        }
+        let value = std::str::from_utf8(value).ok()?;
+        let mapped = sprig_sql::compat::collation::mysql_name(value);
+        (mapped != value).then(|| mapped.to_owned())
     }
 
     /// The row for a status variable, rewritten if it is one of these.
     fn rewrite(&self, row: &[u8]) -> Option<Bytes> {
         let vals = decode_text_row(row, 2).ok()?;
         let name = vals.first().copied().flatten()?;
-        let (_, v) = self
+        let v = match self
             .vars
             .iter()
-            .find(|(n, _)| n.as_bytes().eq_ignore_ascii_case(name))?;
+            .find(|(n, _)| n.as_bytes().eq_ignore_ascii_case(name))
+        {
+            Some((_, v)) => v.clone(),
+            None => self.mysql_collation(name, vals.get(1).copied().flatten()?)?,
+        };
         Some(encode_text_row([Some(name), Some(v.as_bytes())]))
     }
 }
@@ -675,12 +717,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mysql_persona_shows_mysql_collation_names() {
+        let cs = ConnStatus::from_rows(vec![("version", "8.4.8-SprigDB".into())]).with_mysql_collations();
+        let row = encode_text_row([Some(&b"collation_connection"[..]), Some(&b"utf8mb4_uca1400_ai_ci"[..])]);
+        assert_eq!(
+            cs.rewrite(&row).unwrap(),
+            encode_text_row([Some(&b"collation_connection"[..]), Some(&b"utf8mb4_0900_ai_ci"[..])])
+        );
+        // A MySQL name already, another variable, or 3307: unchanged.
+        let same = encode_text_row([Some(&b"collation_server"[..]), Some(&b"utf8mb3_general_ci"[..])]);
+        assert!(cs.rewrite(&same).is_none());
+        let other = encode_text_row([Some(&b"character_set_server"[..]), Some(&b"utf8mb4"[..])]);
+        assert!(cs.rewrite(&other).is_none());
+        let plain = ConnStatus::from_rows(Vec::new());
+        assert!(plain.rewrite(&row).is_none());
+    }
+
+    #[test]
     fn connection_status_rows_describe_the_client() {
         let cs = ConnStatus {
             vars: vec![
                 ("Ssl_cipher", "TLS_AES_256_GCM_SHA384".into()),
                 ("Compression", "OFF".into()),
             ],
+            mysql_collations: false,
         };
         let row = encode_text_row([Some(&b"Ssl_cipher"[..]), Some(&b"ECDHE"[..])]);
         let out = cs.rewrite(&row).unwrap();

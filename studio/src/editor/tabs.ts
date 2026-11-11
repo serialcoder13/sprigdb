@@ -10,6 +10,10 @@ export interface Tab {
   title: string;
   sql: string;
   db: string | null;
+  /** The tab's language (chapter 44 steps 19 and 27); SQL when absent. */
+  language?: 'sql' | 'cypher' | 'gql' | 'mongo';
+  /** For Cypher and GQL: the graph, sent as Bolt's `db.graph`. */
+  graph?: string;
 }
 
 interface TabsState {

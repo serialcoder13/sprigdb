@@ -1,0 +1,236 @@
+# Heavy client suites of the non-SQL protocols, too big for a laptop
+# (decisions/r4-interim.md, "Kiran's answer on heavy suites": "CI is the
+# place"; chapter 46, "Compatibility suites"). Nightly and on demand. Each job
+# starts a SprigDB stack (.github/actions/sprig-stack: Compose, a release
+# gateway in catalog mode, tenant acme, login acme.app / sprig-dev-app) with
+# the protocol's listener (deploy/compose/ci/listeners.sh), starts a pinned
+# reference server, runs the suite on the reference and then through
+# SprigDB, and compares the two (deploy/compose/ci/outcomes.py): a job fails
+# only on a difference its expected file doesn't list, or on a listed one
+# that has gone away. Every download happens on the runner, every version is
+# pinned (images by tag, packages by version, repositories by tag or commit).
+#
+#   amqp      RabbitMQ 4.1.0 reference: pika scenarios (r9final's 21), the
+#             amqp091-go integration tests, Java and .NET client scenarios,
+#             PerfTest (deploy/compose/clients-amqp)
+#   kafka     Apache Kafka 3.9.0 reference: kafka-python, the Java client
+#             through the image's own tools, franz-go, Confluent.Kafka
+#             (deploy/compose/clients-kafka)
+#   mongoose  MongoDB 8.0.34 reference: Mongoose 8.24.8's whole suite in 8
+#             shards (deploy/compose/clients-mongo)
+#   neo4j     Neo4j 5.26.0 reference: the drivers' testkit through the Python,
+#             Go and Java drivers (deploy/compose/clients-bolt)
+#
+# workflow_dispatch's `jobs` input picks some of them (comma-separated) or
+# `all`. Results are uploaded as artifacts (target/ci-results).
+name: heavy-protocols
+
+on:
+  schedule:
+    - cron: "47 3 * * *"
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: "Jobs to run: all, or a comma-separated list of amqp, kafka, mongoose, neo4j"
+        required: false
+        default: all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: heavy-protocols-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  amqp:
+    name: R9 AMQP ${{ matrix.check }} (RabbitMQ 4.1.0 and SprigDB)
+    if: >-
+      github.event_name == 'schedule' || inputs.jobs == 'all' || contains(inputs.jobs, 'amqp')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [diff, go, java, dotnet, perftest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/sprig-stack
+        with:
+          listeners: amqp
+      - name: Vhost / is database mq on SprigDB
+        run: deploy/compose/ci/sql.sh "CREATE DATABASE IF NOT EXISTS mq"
+      - name: Start the RabbitMQ 4.1.0 reference
+        run: |
+          docker run -d --name ci-ref-rabbitmq --memory 2g -p 127.0.0.1:5672:5672 \
+            -e RABBITMQ_DEFAULT_USER=app -e RABBITMQ_DEFAULT_PASS=sprig-dev-app rabbitmq:4.1.0
+          timeout 180 bash -c 'until docker exec ci-ref-rabbitmq rabbitmq-diagnostics -q check_port_connectivity >/dev/null 2>&1; do sleep 3; done'
+      - name: Run ${{ matrix.check }} on both and compare
+        run: deploy/compose/clients-amqp/run.sh ${{ matrix.check }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: heavy-amqp-${{ matrix.check }}
+          path: |
+            target/ci-results
+            !target/ci-results/**/cache
+            deploy/compose/.gateway-dev/*.log
+          if-no-files-found: ignore
+      - name: Stop
+        if: always()
+        run: |
+          docker rm -f ci-ref-rabbitmq || true
+          deploy/compose/ci/stack-down.sh
+
+  kafka:
+    name: R9 Kafka ${{ matrix.check }} (Apache Kafka 3.9.0 and SprigDB)
+    if: >-
+      github.event_name == 'schedule' || inputs.jobs == 'all' || contains(inputs.jobs, 'kafka')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [python, jvm, go, dotnet]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/sprig-stack
+        with:
+          listeners: kafka
+      - name: Topics are streams of database kt on SprigDB
+        run: deploy/compose/ci/sql.sh "CREATE DATABASE IF NOT EXISTS kt"
+      - name: Start the Apache Kafka 3.9.0 reference (KRaft, one node)
+        run: |
+          docker run -d --name ci-ref-kafka --memory 2g -p 127.0.0.1:9092:9092 apache/kafka:3.9.0
+          timeout 180 bash -c 'until docker exec ci-ref-kafka /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1; do sleep 3; done'
+      - name: Run ${{ matrix.check }} on both and compare
+        run: deploy/compose/clients-kafka/run.sh ${{ matrix.check }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: heavy-kafka-${{ matrix.check }}
+          path: |
+            target/ci-results
+            deploy/compose/.gateway-dev/*.log
+          if-no-files-found: ignore
+      - name: Stop
+        if: always()
+        run: |
+          docker rm -f ci-ref-kafka || true
+          deploy/compose/ci/stack-down.sh
+
+  mongoose:
+    # Each Mongoose test creates its own collections and indexes, so through
+    # SprigDB the suite is DDL-bound (decisions/r5-interim.md, round 4: about
+    # 2.4 s per DDL on a laptop): 8 shards of the test files, each well
+    # inside GitHub's 6-hour job limit.
+    name: R5 Mongoose 8.24.8 shard ${{ matrix.shard }}/8 (MongoDB 8.0.34 and SprigDB)
+    if: >-
+      github.event_name == 'schedule' || inputs.jobs == 'all' || contains(inputs.jobs, 'mongoose')
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    env:
+      SPRIG_CLIENTS_CACHE: ${{ github.workspace }}/target/clients-mongo
+      SPRIG_MONGOOSE_SHARD: ${{ matrix.shard }}/8
+      R: ${{ github.workspace }}/target/ci-results/mongoose-${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.11.0"
+      - uses: ./.github/actions/sprig-stack
+        with:
+          listeners: mongo
+      - name: Start the MongoDB 8.0.34 reference (one-node replica set, for transactions)
+        run: |
+          docker run -d --name ci-ref-mongo --memory 2g -p 127.0.0.1:27017:27017 mongo:8.0.34 --replSet rs0 --bind_ip_all
+          timeout 120 bash -c 'until docker exec ci-ref-mongo mongosh --quiet --eval "db.runCommand({ping: 1}).ok" >/dev/null 2>&1; do sleep 2; done'
+          docker exec ci-ref-mongo mongosh --quiet --eval 'rs.initiate({_id: "rs0", members: [{_id: 0, host: "127.0.0.1:27017"}]})'
+          timeout 120 bash -c 'until docker exec ci-ref-mongo mongosh --quiet --eval "db.hello().isWritablePrimary" | grep -q true; do sleep 2; done'
+      - name: Mongoose on MongoDB
+        run: |
+          mkdir -p "$R/ref" "$R/sut"
+          SPRIG_MONGOOSE_LABEL=ref SPRIG_MONGOOSE_XUNIT="$R/ref/mongoose.xml" \
+            deploy/compose/clients-mongo/run.sh mongoose 'mongodb://127.0.0.1:27017/mongoose_test?directConnection=true' || true
+      - name: Mongoose through SprigDB
+        run: |
+          SPRIG_MONGOOSE_LABEL=sut SPRIG_MONGOOSE_XUNIT="$R/sut/mongoose.xml" \
+            deploy/compose/clients-mongo/run.sh mongoose \
+            'mongodb://acme.app:sprig-dev-app@127.0.0.1:28017/mongoose_test?authSource=admin&directConnection=true' || true
+      - name: Compare
+        run: |
+          python3 -I deploy/compose/ci/outcomes.py tests junit "$R/ref" "$R/sut" \
+            deploy/compose/clients-mongo/expected/mongoose.txt sprig "$R"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: heavy-mongoose-${{ matrix.shard }}
+          path: |
+            target/ci-results
+            target/clients-mongo/results
+            deploy/compose/.gateway-dev/*.log
+          if-no-files-found: ignore
+      - name: Stop
+        if: always()
+        run: |
+          docker rm -f ci-ref-mongo || true
+          deploy/compose/ci/stack-down.sh
+
+  neo4j:
+    name: R8 Neo4j testkit, ${{ matrix.driver }} driver (Neo4j 5.26.0 and SprigDB)
+    if: >-
+      github.event_name == 'schedule' || inputs.jobs == 'all' || contains(inputs.jobs, 'neo4j')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        driver: [python, go, java]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.8"
+      - uses: actions/setup-go@v5
+        if: matrix.driver == 'go'
+        with:
+          go-version: "1.23.4"
+          cache: false
+      - uses: actions/setup-java@v4
+        if: matrix.driver == 'java'
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: ./.github/actions/sprig-stack
+        with:
+          listeners: bolt
+      - name: The default graph's database on SprigDB
+        run: deploy/compose/ci/sql.sh "CREATE DATABASE IF NOT EXISTS graph"
+      - name: Start the Neo4j 5.26.0 reference
+        run: |
+          docker run -d --name ci-ref-neo4j --memory 2g -p 127.0.0.1:7687:7687 \
+            -e NEO4J_AUTH=neo4j/sprig-dev-pass neo4j:5.26.0-community
+          timeout 180 bash -c 'until docker exec ci-ref-neo4j cypher-shell -u neo4j -p sprig-dev-pass "RETURN 1" >/dev/null 2>&1; do sleep 3; done'
+      - name: Testkit on both and compare
+        run: deploy/compose/clients-bolt/run.sh ${{ matrix.driver }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: heavy-neo4j-${{ matrix.driver }}
+          path: |
+            target/ci-results
+            !target/ci-results/**/work
+            deploy/compose/.gateway-dev/*.log
+          if-no-files-found: ignore
+      - name: Stop
+        if: always()
+        run: |
+          docker rm -f ci-ref-neo4j || true
+          deploy/compose/ci/stack-down.sh

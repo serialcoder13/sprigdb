@@ -119,6 +119,14 @@ pub trait Host: Send {
     fn fan_in(&self) -> bool {
         false
     }
+    /// The live logic function `name` of `db`: its runtime and source text
+    /// (`TRANSFORM`, R9). `None`: no such function.
+    ///
+    /// # Errors
+    /// The catalog's.
+    async fn function_source(&mut self, _db: u32, _name: &str) -> Result<Option<(String, String)>> {
+        Ok(None)
+    }
     /// The change topic (`t.changes`) of table object `table` in `db`: its
     /// stream id and partitions, when the table's change topic is on.
     fn change_stream(&self, _db: u32, _table: u64) -> Option<(u64, u32)> {
@@ -1007,11 +1015,18 @@ async fn create_sink(h: &mut dyn Host, c: grammar::CreateSink) -> Result<Handled
             SourceSpec::Changes { objects }
         }
     };
-    if c.transform.is_some() {
-        return Err(err(
-            SprigCode::SinkTransformInvalid,
-            "TRANSFORM isn't built yet (chapter 51, build step 8)",
-        ));
+    // TRANSFORM f: a live JavaScript, KIRun or Lua function of the sink's
+    // database whose text uses no data or outside calls (R9, r9more).
+    if let Some(f) = &c.transform {
+        match h.function_source(db, f).await? {
+            None => {
+                return Err(err(
+                    SprigCode::SinkTransformInvalid,
+                    format!("TRANSFORM {f}: no function {f} in database {dbname}"),
+                ));
+            }
+            Some((runtime, source)) => crate::transform::check(f, &runtime, &source)?,
+        }
     }
     // DEAD LETTER TO STREAM d: a stream of this tenant (its events go
     // there as well as to sink_dead_letters, which sprigctl replays from).
@@ -1156,7 +1171,7 @@ async fn create_sink(h: &mut dyn Host, c: grammar::CreateSink) -> Result<Handled
         source,
         filter_sql: c.filter,
         projection: c.projection,
-        transform: None,
+        transform: c.transform.clone(),
         target,
         connections: connections.into_iter().map(|(r, _)| r).collect(),
         guarantee: c.guarantee,
@@ -1249,6 +1264,9 @@ pub fn render_sink(d: &SinkDef) -> String {
             s.push_str(&format!(" EXCEPT COLUMNS ({})", columns.join(", ")));
         }
         None => {}
+    }
+    if let Some(f) = &d.transform {
+        s.push_str(&format!(" TRANSFORM `{f}`"));
     }
     let conn = |r: Option<&ConnRef>| match r {
         Some(ConnRef::Platform { name }) => format!("PLATFORM CONNECTION `{name}`"),

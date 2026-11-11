@@ -26,10 +26,12 @@
 //!
 //! - **Freshness** ([`CatalogGate`]). A read statement on an `async` graph
 //!   passes a gate holding the session's causal target to the store; the
-//!   store asks it once, at its first incoming hop. The gate polls the
-//!   positions until they reach the target, up to
+//!   store asks it once, at its first incoming hop. The gate reads the
+//!   binlog position of each of the graph's clusters now, and polls the
+//!   positions until they reach both that and the session's target, up to
 //!   `graph.mirror_max_wait_ms`; a missing or stale row (the applier isn't
-//!   serving the graph) answers `false` at once.
+//!   serving the graph) answers `false` at once. So mirrors never hide an
+//!   edge committed before the statement.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -97,9 +99,39 @@ impl CatalogGate {
         let mut c = ep.pool.get_conn().await.map_err(backend_error)?;
         let schema = ep.store.schema().to_owned();
         let none = BTreeMap::new();
+        // Not serving the graph at all: scatter without asking further.
+        let rows = mirror::read_pos(&mut c, &schema, self.graph).await?;
+        if !mirror::fresh(&rows, layout, &none) {
+            return Ok(false);
+        }
+        // The target: every transaction committed on the shards' clusters
+        // before the statement (their binlog positions now), and the
+        // session's causal target, so the mirrors never hide a committed
+        // edge (decision G47).
+        let mut targets = self.targets.clone();
+        let mut asked: HashSet<&str> = HashSet::new();
+        for s in &layout.shards {
+            if !asked.insert(s.cluster.as_str()) {
+                continue;
+            }
+            let cluster = ClusterId::new(&s.cluster)
+                .map_err(|e| SprigError::internal(format!("cluster id {}: {e}", s.cluster)))?;
+            let pool = self.graphs.pool(&cluster).await?;
+            let mut pc = pool.get_conn().await.map_err(backend_error)?;
+            let now: Option<String> = pc
+                .query_first("SELECT @@gtid_binlog_pos")
+                .await
+                .map_err(backend_error)?;
+            // Both positions: `reached` keeps each domain's highest.
+            let t = targets.entry(s.cluster.clone()).or_default();
+            if !t.is_empty() {
+                t.push(',');
+            }
+            t.push_str(&now.unwrap_or_default());
+        }
         loop {
             let rows = mirror::read_pos(&mut c, &schema, self.graph).await?;
-            if mirror::fresh(&rows, layout, &self.targets) {
+            if mirror::fresh(&rows, layout, &targets) {
                 return Ok(true);
             }
             // Not serving the graph (or behind a map change): no wait.
@@ -196,7 +228,12 @@ impl GatewayGraphs {
         let r = {
             let (store, tx) = ch.tx().parts();
             GraphCatalog::new(store.schema())
-                .set_mirror(tx, g.graph_id, mode, if ready { "ready" } else { "building" })
+                .set_mirror(
+                    tx,
+                    g.graph_id,
+                    mode,
+                    if ready { "ready" } else { "building" },
+                )
                 .await
         };
         if let Err(e) = r {
@@ -287,7 +324,9 @@ impl GatewayGraphs {
                     graph = g.graph_id,
                     "graph mirrors still building: the applier didn't catch up"
                 ),
-                Err(e) => tracing::warn!(graph = g.graph_id, error = %e, "graph mirror drain failed"),
+                Err(e) => {
+                    tracing::warn!(graph = g.graph_id, error = %e, "graph mirror drain failed")
+                }
             }
             me.mirrors
                 .draining
@@ -334,7 +373,11 @@ impl GatewayGraphs {
                 .shards
                 .shards
                 .iter()
-                .filter_map(|s| targets.get(&s.cluster).map(|p| (s.cluster.clone(), p.clone())))
+                .filter_map(|s| {
+                    targets
+                        .get(&s.cluster)
+                        .map(|p| (s.cluster.clone(), p.clone()))
+                })
                 .collect();
             if mirror::fresh(&rows, &now.shards, &t) {
                 self.set_mirror(&now, "sync", true).await?;

@@ -39,9 +39,13 @@ serde_json.workspace = true
 sprig-catalog.workspace = true
 sprig-common.workspace = true
 sprig-logic-js.workspace = true
+# TRANSFORM: deployed logic functions' versions and call results (R9, r9more).
+sprig-logic = { path = "../sprig-logic" }
 sprig-meta.workspace = true
 sprig-proto-kafka = { path = "../sprig-proto-kafka" }
 sprig-settings.workspace = true
+# Residency policies (chapter 26), shared (R9, r9more).
+sprig-residency.workspace = true
 sprig-streams = { path = "../sprig-streams" }
 sprig-workload.workspace = true
 # The PostgreSQL database target (chapter 51 open question 10): sqlx's

@@ -321,6 +321,14 @@ pub mod persona {
     /// `innodb_snapshot_isolation` for the MySQL persona (decision D9); the
     /// MariaDB persona keeps the server's default.
     pub const MYSQL84_SNAPSHOT_ISOLATION: &str = "OFF";
+    /// `character_set_collations` for the MySQL persona (chapter 28, R4
+    /// round 3; gaps row 58): MySQL 8.4's default collation of each
+    /// character set MariaDB maps to a UCA 14.0 one. `utf8mb4` keeps the
+    /// backend's `utf8mb4_uca1400_ai_ci`, which 3306 shows as
+    /// `utf8mb4_0900_ai_ci`; the others are MySQL's `*_general_ci`.
+    pub const MYSQL84_CHARSET_COLLATIONS: &str = "utf8mb3=utf8mb3_general_ci,\
+        ucs2=ucs2_general_ci,utf8mb4=utf8mb4_uca1400_ai_ci,utf16=utf16_general_ci,\
+        utf32=utf32_general_ci";
 }
 
 /// The variables `SET NAMES` sets (and the login collation). MariaDB's
@@ -363,15 +371,24 @@ impl SessionVars {
                 "innodb_snapshot_isolation".to_owned(),
                 persona::MYSQL84_SNAPSHOT_ISOLATION.to_owned(),
             );
+            // Gaps row 58: `CHARACTER SET utf8mb3` without a collation is
+            // `utf8mb3_general_ci` (id 33), as on MySQL.
+            vars.insert(
+                "character_set_collations".to_owned(),
+                persona::MYSQL84_CHARSET_COLLATIONS.to_owned(),
+            );
         }
+        let login_map = vars
+            .get("character_set_collations")
+            .cloned()
+            .unwrap_or_else(|| charset::DEFAULT_CHARSET_COLLATIONS.to_owned());
         let mut s = Self {
             schema,
             vars,
             client_sql_mode,
             ..Self::default()
         };
-        if let Some((cs, coll)) = charset::login(collation_id, charset::DEFAULT_CHARSET_COLLATIONS)
-        {
+        if let Some((cs, coll)) = charset::login(collation_id, &login_map) {
             s.set_names(&cs, &coll);
             if charset::by_id(collation_id).is_some_and(|(_, primary)| primary) {
                 s.login_charset = Some(cs);
@@ -402,12 +419,15 @@ impl SessionVars {
         let Some(cs) = self.login_charset.take() else {
             return;
         };
-        let Some(map) = base.get("character_set_collations") else {
+        // The session's own map (the MySQL persona's), else the server's.
+        let own = self.vars.get("character_set_collations").cloned();
+        let Some(map) = own.as_deref().or_else(|| base.get("character_set_collations")) else {
             return;
         };
         let coll = charset::mapped(map, &cs).or_else(|| charset::compiled_default(&cs));
         if let Some(coll) = coll {
-            self.set_names(&cs, coll);
+            let coll = coll.to_owned();
+            self.set_names(&cs, &coll);
         }
     }
 }

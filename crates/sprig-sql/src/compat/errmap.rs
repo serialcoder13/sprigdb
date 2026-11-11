@@ -10,6 +10,7 @@
 //! | 1969 `max_statement_time` exceeded | always | 3024 (`HY000`) |
 //! | 4025 `CONSTRAINT ... failed` | a column-level check (`t.c`): the JSON check of a `JSON` column | 3140 (`22032`) |
 //! | 4025 | a table check | 3819 (`HY000`) |
+//! | 4025 | a `_sprig_nn_<c>` check: a generated column's `NOT NULL` (R4 round 3) | 1048 (`23000`) |
 //! | 1451 without the row detail | `DROP TABLE` of a referenced table | 3730 (`HY000`) |
 //! | 1205 lock wait timeout | the statement had `NOWAIT` (the relay knows) | 3572 |
 //! | any message naming "MariaDB" | `... your MariaDB server version ...` | "MySQL" |
@@ -119,7 +120,14 @@ pub fn to_mysql(e: &WireError) -> Option<WireError> {
         )),
         4025 if e.message.starts_with("CONSTRAINT ") => {
             let name = first_backquoted(&e.message)?;
-            if name.contains('.') {
+            if let Some(col) = super::ddl::nn_column(&name) {
+                // A generated column's NOT NULL (chapter 28, R4 round 3).
+                Some(WireError::new(
+                    1048,
+                    *b"23000",
+                    format!("Column '{col}' cannot be null"),
+                ))
+            } else if name.contains('.') {
                 Some(WireError::new(
                     3140,
                     *b"22032",
@@ -417,6 +425,10 @@ mod tests {
                 "Invalid JSON text: \"Invalid value.\" at position 0 in value for column 'j.k'."
                     .to_owned()
             ))
+        );
+        assert_eq!(
+            map(4025, b"23000", "CONSTRAINT `_sprig_nn_b` failed for `shop`.`g`"),
+            Some((1048, *b"23000", "Column 'b' cannot be null".to_owned()))
         );
         assert_eq!(
             map(4025, b"23000", "CONSTRAINT `c_chk_1` failed for `shop`.`c`"),

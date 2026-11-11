@@ -313,3 +313,40 @@ fn creates_and_eo_tables() {
             .contains("'1/2'")
     );
 }
+
+/// R9 (r9more): a fan-in sink's rows carry their member in
+/// `_sprig_tenant`, which leads the key of a table the sink creates.
+#[test]
+fn fan_in_rows_carry_their_member() {
+    let member = 252_530_600_004u64;
+    let packed = crate::source::fanin_stream_id(member, 3).unwrap();
+    let mut r = SinkRecord {
+        key: Some(br#"{"id": 7}"#.to_vec()),
+        value: Some(br#"{"id": 7, "name": "a"}"#.to_vec()),
+        headers: Vec::new(),
+        op: None,
+        before: None,
+        after: None,
+        ts_ms: 1000,
+        idem_key: format!("{member}/s/3/0/5/1"),
+        pos: Position::Stream {
+            stream: packed,
+            partition: 0,
+            offset: 5,
+            epoch: 1,
+        },
+    };
+    let o = opts(Mode::Upsert, DeleteMode::Delete);
+    let ops = plan::plan(std::slice::from_ref(&r), &o, Dialect::Mysql).unwrap();
+    assert_eq!(ops[0].cols[0], ("_sprig_tenant".to_owned(), json!(member)));
+    assert_eq!(ops[0].key_cols[0], "_sprig_tenant");
+    // The sink's own tenant's records don't get the column.
+    r.pos = Position::Stream {
+        stream: 3,
+        partition: 0,
+        offset: 5,
+        epoch: 1,
+    };
+    let ops = plan::plan(&[r], &o, Dialect::Mysql).unwrap();
+    assert!(ops[0].cols.iter().all(|(c, _)| c != "_sprig_tenant"));
+}

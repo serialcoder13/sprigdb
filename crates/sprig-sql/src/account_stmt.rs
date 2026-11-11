@@ -529,6 +529,22 @@ fn priv_list(p: &mut P<'_>) -> R<Vec<PrivItem>> {
         if words.is_empty() {
             return Err(p.err());
         }
+        // Neo4j's property list (`SET PROPERTY {*}`, chapter 43 round 5):
+        // kept in the name, so a list other than `*` is refused later.
+        if p.eat_punct("{") {
+            let mut inner = Vec::new();
+            while let Some(t) = p.peek() {
+                if p.punct("}") {
+                    break;
+                }
+                inner.push(p.text(t));
+                p.at += 1;
+            }
+            if !p.eat_punct("}") {
+                return Err(p.err());
+            }
+            words.push(format!("{{{}}}", inner.join("")));
+        }
         let mut columns = Vec::new();
         if p.eat_punct("(") {
             loop {
@@ -809,6 +825,13 @@ mod tests {
                 on: GrantOn::GraphElement { db: None, rels: true, ref name, .. },
                 ..
             } if name == "KNOWS"
+        ));
+        // Per-label write grants (round 5).
+        assert!(matches!(
+            parse_ok("GRANT CREATE, DELETE, SET PROPERTY {*} ON GRAPH g NODES L TO w"),
+            AccountStmt::Grant { ref privileges, .. }
+                if privileges.iter().map(|p| p.name.as_str()).collect::<Vec<_>>()
+                    == ["CREATE", "DELETE", "SET PROPERTY {*}"]
         ));
         // A table called `graph` is still a table.
         assert!(matches!(

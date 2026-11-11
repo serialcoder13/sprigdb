@@ -202,7 +202,12 @@ pub fn render(segs: &[Seg], r: &SinkRecord, cx: &RenderCtx) -> String {
                     let h = twox_hash::XxHash3_64::oneshot(k) % cx.key_buckets.max(1);
                     out.push_str(&h.to_string());
                 }
-                Var::Tenant => out.push_str(&cx.tenant.to_string()),
+                // A fan-in sink's record: its member (R9, r9more).
+                Var::Tenant => out.push_str(
+                    &crate::source::record_member(r)
+                        .unwrap_or(cx.tenant)
+                        .to_string(),
+                ),
             },
         }
     }

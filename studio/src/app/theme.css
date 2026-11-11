@@ -153,3 +153,31 @@ pre.code { max-block-size: 360px; overflow: auto; padding: 8px; border: 1px soli
 .banner.impersonation { border-radius: 0; margin: 0; display: flex; gap: 12px; align-items: center; }
 /* Stacked links stay 24 px tall targets (WCAG 2.5.8). */
 .linklist a { display: inline-block; min-block-size: 24px; line-height: 24px; }
+/* Graph view (chapter 44 step 27). */
+.graph-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: var(--space); }
+.graph-host { block-size: 460px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); }
+.graph-side { max-block-size: 460px; overflow: auto; }
+.graph-side h3 { font-size: 13px; margin: 0; word-break: break-all; }
+/* JSON tree (chapter 44 step 20). */
+.doc-list { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--space); }
+.doc-card { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space); background: var(--bg-raised); }
+.tree, .tree ul { list-style: none; margin: 0; padding-inline-start: 18px; }
+.tree { padding-inline-start: 0; font-size: 13px; }
+.tree-toggle { border: none; background: none; inline-size: 24px; block-size: 24px; padding: 0; cursor: pointer; }
+.tree-key { font-weight: 600; }
+.type-badge { font-size: 10px; padding: 0 4px; border-radius: 3px; background: var(--bg-sunken); color: var(--fg-muted); border: 1px solid var(--border); }
+.tree-string { color: var(--accent); }
+button.link { border: none; background: none; color: var(--accent); text-decoration: underline; cursor: pointer; min-block-size: 24px; }
+.conflict-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space); }
+.conflict-grid pre { max-block-size: 240px; overflow: auto; font-size: 12px; }
+/* Redis console (chapter 44 step 22). */
+.kv-layout { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: calc(var(--space) * 2); align-items: start; }
+.kv-log { max-block-size: 360px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space); background: var(--bg-sunken); font-size: 12px; }
+.kv-log pre { margin: 0 0 6px; white-space: pre-wrap; }
+.kv-cmd { color: var(--fg-muted); }
+dialog.modal { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); color: var(--fg); max-inline-size: 640px; }
+/* Logic editors (chapter 44 step 26). */
+.logic-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: calc(var(--space) * 2); align-items: start; }
+.logic-stmt { white-space: pre-wrap; max-block-size: 320px; overflow: auto; font-size: 12px; }
+.kirun-host { block-size: 520px; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.table-scroll { max-inline-size: 100%; overflow-x: auto; }

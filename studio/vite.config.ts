@@ -20,6 +20,11 @@ function apiProxy(): Record<string, ProxyOptions> {
 export default defineConfig({
   base: '/studio/',
   plugins: [react()],
+  // @fincity/kirun-ui imports the whole of Monaco ("monaco-editor", every
+  // language and the TypeScript worker); it uses only the editor core's API
+  // (create, themes, markers, a Monarch tokenizer), so it gets the core
+  // Studio already loads.
+  resolve: { alias: [{ find: /^monaco-editor$/, replacement: 'monaco-editor/editor' }] },
   build: {
     outDir: 'dist',
     assetsDir: 'assets',

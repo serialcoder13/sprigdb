@@ -5,14 +5,23 @@ import type { ResultBuffer } from './buffer';
 import { exportAll, type ExportFormat } from './exports';
 import { errorText } from '../api/errors';
 import { Pager, track } from './cursor';
+import type { QueryLanguage } from '../api/sql';
+import { hasGraph } from '../graph/elements';
 
 const Chart = lazy(() => import('./Chart').then((m) => ({ default: m.Chart })));
+const GraphResult = lazy(() => import('../graph/GraphResult'));
+const DocTree = lazy(() => import('../docs/DocTree'));
 
 export interface ResultItem {
   buffer: ResultBuffer | null;
   affected?: string;
   info?: string;
   warnings?: number;
+  /** The statement's language (chapter 37): graphs get a graph view,
+   * documents a JSON tree. */
+  language?: QueryLanguage;
+  /** The collection a MongoDB result came from (for editing documents). */
+  collection?: string;
 }
 
 /** One result: rows (grid or chart) with the cap notice and export, or
@@ -31,7 +40,11 @@ export function ResultView({
   version: number;
 }) {
   const intl = useIntl();
-  const [mode, setMode] = useState<'grid' | 'chart'>('grid');
+  const lang = item.language ?? 'sql';
+  const b0 = item.buffer;
+  const graphable = !!b0 && (lang === 'cypher' || lang === 'gql') && hasGraph(b0.rowCount, b0.columns.length, (r, c) => b0.cell(r, c));
+  const tree = !!b0 && lang === 'mongo';
+  const [mode, setMode] = useState<'grid' | 'chart' | 'graph' | 'tree'>(() => (graphable ? 'graph' : tree ? 'tree' : 'grid'));
   const [exportError, setExportError] = useState<string | null>(null);
   const b = item.buffer;
   const pager = useRef<{ p: Pager; untrack: () => void } | null>(null);
@@ -93,20 +106,36 @@ export function ResultView({
           <button role="tab" aria-selected={mode === 'grid'} onClick={() => setMode('grid')}>
             <FormattedMessage id="results.grid" />
           </button>
-          <button role="tab" aria-selected={mode === 'chart'} onClick={() => setMode('chart')}>
-            <FormattedMessage id="results.chart" />
-          </button>
+          {graphable && (
+            <button role="tab" aria-selected={mode === 'graph'} onClick={() => setMode('graph')} data-testid="tab-graph">
+              <FormattedMessage id="results.graph" />
+            </button>
+          )}
+          {tree && (
+            <button role="tab" aria-selected={mode === 'tree'} onClick={() => setMode('tree')} data-testid="tab-tree">
+              <FormattedMessage id="results.tree" />
+            </button>
+          )}
+          {lang === 'sql' && (
+            <button role="tab" aria-selected={mode === 'chart'} onClick={() => setMode('chart')}>
+              <FormattedMessage id="results.chart" />
+            </button>
+          )}
         </div>
         <span style={{ flex: 1 }} />
-        <button onClick={() => void doExport('csv')}>{intl.formatMessage({ id: 'results.export' })} CSV</button>
-        <button onClick={() => void doExport('ndjson')}>{intl.formatMessage({ id: 'results.export' })} NDJSON</button>
+        {lang === 'sql' && (
+          <>
+            <button onClick={() => void doExport('csv')}>{intl.formatMessage({ id: 'results.export' })} CSV</button>
+            <button onClick={() => void doExport('ndjson')}>{intl.formatMessage({ id: 'results.export' })} NDJSON</button>
+          </>
+        )}
       </div>
       {b.truncated && b.offset === 0 && !paging.done && (
         <p className="banner" role="status" data-testid="truncated">
           <FormattedMessage id="results.truncated" values={{ count: b.rowCount }} />
         </p>
       )}
-      {b.truncated && (
+      {b.truncated && lang === 'sql' && (
         <div className="row">
           {!paging.done && (
             <button onClick={() => void fetchMore()} disabled={paging.busy} data-testid="fetch-more">
@@ -135,7 +164,15 @@ export function ResultView({
       )}
       {paging.error && <p className="error">{paging.error}</p>}
       {exportError && <p className="error">{exportError}</p>}
-      {mode === 'grid' ? (
+      {mode === 'graph' ? (
+        <Suspense fallback={<p className="muted">Loading graph view…</p>}>
+          <GraphResult buffer={b} rows={b.rowCount} db={db} label={`Result ${index + 1}`} language={lang === 'gql' ? 'gql' : 'cypher'} />
+        </Suspense>
+      ) : mode === 'tree' ? (
+        <Suspense fallback={<p className="muted">Loading tree…</p>}>
+          <DocTree buffer={b} rows={b.rowCount} label={`Result ${index + 1}`} db={db} collection={item.collection} />
+        </Suspense>
+      ) : mode === 'grid' ? (
         <Grid
           label={`Result ${index + 1}`}
           columns={b.columns.map((c) => c.name)}

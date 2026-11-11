@@ -1,0 +1,11 @@
+# Hibernate ORM (versions.txt; 6.6.33, the version the connector matrix's
+# Spring Boot pins) through run.sh: every outcome other than pass that a run
+# against MySQL 8.4 doesn't already explain. Format:
+# <target-glob> <fail|skip|flaky|exclude> <test-glob> :: <reason>
+# (summarize.py). Test ids are Gradle's Class.method.
+#
+# Status (11 November 2026, r4three): defined, not yet run. It runs only in
+# CI (.github/workflows/heavy-sql.yml): each shard first against a MySQL
+# 8.4.11 reference, then through the gateway's 3306 with
+# SPRIG_CLIENTS_BASELINE=baseline-mysql, so a test that fails on MySQL too
+# isn't counted. Lines go here as the first runs are triaged.

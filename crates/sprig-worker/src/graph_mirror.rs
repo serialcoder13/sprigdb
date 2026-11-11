@@ -11,7 +11,7 @@
 //!     every 2 s: the graphs served (grouped native graphs whose
 //!       mirror_mode is starting or async, or whose mirrors are building)
 //!       and their shard maps; clusters added to the DC get a reader
-//!     take what the readers have (at most 512 groups or 50 ms)
+//!     take what the readers have (at most 512 groups or 20 ms)
 //!     per group, in each cluster's commit order: skip the mover's copies
 //!       and replays (they carry its position row); hold an XA branch's
 //!       rows from its PREPARE to its COMMIT; edge-table rows of a served
@@ -19,7 +19,7 @@
 //!     apply each graph's changes (apply_batch); a batch whose shards
 //!       changed epoch meanwhile runs again with the new map
 //!     each cluster's position moves past what was applied
-//!     every 200 ms (and at least every second): a position row per shard
+//!     every 50 ms (and at least every second): a position row per shard
 //!       of each served graph, its cluster's position
 //!     every 2 s: the positions as the job's progress (its checkpoint)
 //! ```
@@ -174,10 +174,9 @@ impl Applier {
         // The checkpoint: positions per cluster.
         if let Some(m) = cx.progress.get("pos").and_then(Value::as_object) {
             for (c, p) in m {
-                if let (Ok(c), Some(Ok(p))) = (
-                    ClusterId::new(c),
-                    p.as_str().map(str::parse::<GtidPos>),
-                ) {
+                if let (Ok(c), Some(Ok(p))) =
+                    (ClusterId::new(c), p.as_str().map(str::parse::<GtidPos>))
+                {
                     self.pos.insert(c, p);
                 }
             }
@@ -200,7 +199,7 @@ impl Applier {
             }
             // Take what the readers have.
             let mut items: Vec<Item> = Vec::new();
-            let deadline = tokio::time::sleep(Duration::from_millis(50));
+            let deadline = tokio::time::sleep(Duration::from_millis(20));
             tokio::pin!(deadline);
             loop {
                 tokio::select! {
@@ -233,7 +232,7 @@ impl Applier {
                     }
                 }
             }
-            if (dirty && last_pos_write.elapsed() >= Duration::from_millis(200))
+            if (dirty && last_pos_write.elapsed() >= Duration::from_millis(50))
                 || last_pos_write.elapsed() >= Duration::from_secs(1)
             {
                 match self.write_positions().await {
@@ -256,7 +255,9 @@ impl Applier {
                     })
                     .collect();
                 match cx
-                    .progress(json!({ "pos": pos, "applied": self.applied, "graphs": self.graphs.len() }))
+                    .progress(
+                        json!({ "pos": pos, "applied": self.applied, "graphs": self.graphs.len() }),
+                    )
                     .await
                 {
                     Ok(true) => {}
@@ -361,13 +362,12 @@ impl Applier {
                 continue;
             }
             // A reader starts again before the oldest branch it held.
-            let from = match self.safe_pos(&c) {
-                Some(p) => p,
-                None => {
-                    let p = self.env.clusters.position(&c).await?;
-                    self.pos.insert(c.clone(), p.clone());
-                    p
-                }
+            let from = if let Some(p) = self.safe_pos(&c) {
+                p
+            } else {
+                let p = self.env.clusters.position(&c).await?;
+                self.pos.insert(c.clone(), p.clone());
+                p
             };
             self.held.retain(|h| h.0 != c);
             self.pos.insert(c.clone(), from.clone());
@@ -423,8 +423,12 @@ impl Applier {
                     let rows = match &t.xa {
                         Some(XaMark::Prepare(x)) => {
                             if !t.apply {
-                                self.held
-                                    .push((cluster.clone(), x.clone(), t.before.clone(), t.rows));
+                                self.held.push((
+                                    cluster.clone(),
+                                    x.clone(),
+                                    t.before.clone(),
+                                    t.rows,
+                                ));
                             }
                             Vec::new()
                         }
@@ -526,7 +530,8 @@ impl Applier {
             if !stale {
                 if let Ok(a) = &r {
                     self.applied += a.upserts + a.deletes;
-                    metrics::counter!("sprig_graph_mirror_applied_total").increment(a.upserts + a.deletes);
+                    metrics::counter!("sprig_graph_mirror_applied_total")
+                        .increment(a.upserts + a.deletes);
                 }
                 return Ok(());
             }

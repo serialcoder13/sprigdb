@@ -275,12 +275,11 @@ pub fn coalesce(changes: &[EdgeChange]) -> Vec<EdgeChange> {
     let mut at: HashMap<u64, usize> = HashMap::new();
     let mut out: Vec<EdgeChange> = Vec::new();
     for c in changes {
-        match at.get(&c.id) {
-            Some(&i) => out[i] = *c,
-            None => {
-                at.insert(c.id, out.len());
-                out.push(*c);
-            }
+        if let Some(&i) = at.get(&c.id) {
+            out[i] = *c;
+        } else {
+            at.insert(c.id, out.len());
+            out.push(*c);
         }
     }
     out
@@ -375,7 +374,9 @@ async fn begin(
     c.query_drop("SET SESSION innodb_lock_wait_timeout = 5")
         .await
         .map_err(backend_error)?;
-    c.query_drop("START TRANSACTION").await.map_err(backend_error)?;
+    c.query_drop("START TRANSACTION")
+        .await
+        .map_err(backend_error)?;
     open.insert(k, c);
     Ok(())
 }
@@ -499,102 +500,6 @@ pub fn still_current(touched: &[(u32, u64, String)], now: &GraphShards) -> bool 
     })
 }
 
-/// Rebuilds the mirrors of shard `shard_of_edges`'s edges (the edges whose
-/// source lives there) and removes mirrors of that shard's sources whose
-/// edge is gone: the applier's repair after a feed gap. Returns
-/// `(upserts, deletes)`.
-///
-/// # Errors
-/// A backend error.
-pub async fn rebuild_shard(
-    conns: &mut dyn ApplyConns,
-    layout: &GraphShards,
-    shard_of_edges: usize,
-    now_us: u64,
-) -> Result<(u64, u64)> {
-    let s = &layout.shards[shard_of_edges];
-    let mut c = conns.connect(&s.cluster).await?;
-    let mut after = 0u64;
-    let (mut up, mut del) = (0u64, 0u64);
-    loop {
-        let rows: Vec<(u64, u64, u64, u32, u64, u64)> = c
-            .query(format!(
-                "SELECT id, src, dst, type, _sprig_rk, dst_rk FROM {} WHERE id > {after} \
-                 ORDER BY id LIMIT 1000",
-                s.tables.edges
-            ))
-            .await
-            .map_err(backend_error)?;
-        let Some(last) = rows.last() else {
-            break;
-        };
-        after = last.0;
-        let changes: Vec<EdgeChange> = rows
-            .iter()
-            .map(|&(id, src, dst, rtype, src_rk, dst_rk)| EdgeChange {
-                id,
-                src,
-                dst,
-                rtype,
-                src_rk,
-                dst_rk,
-                live: true,
-            })
-            .collect();
-        let a = apply_batch(conns, layout, &changes, now_us).await?;
-        up += a.upserts;
-    }
-    // Mirrors whose source is on this shard but whose edge is gone.
-    let lo = s.lo;
-    let hi = layout.hi(shard_of_edges);
-    for m in &layout.shards {
-        let mut mc = conns.connect(&m.cluster).await?;
-        let mut range = format!("src_rk >= {lo}");
-        if let Some(h) = hi {
-            let _ = write!(range, " AND src_rk < {h}");
-        }
-        let rows: Vec<(u64, u64, u64, u32, u64)> = mc
-            .query(format!(
-                "SELECT id, src, dst, type, src_rk FROM {} WHERE {range}",
-                m.tables.mirrors
-            ))
-            .await
-            .map_err(backend_error)?;
-        let mut missing: Vec<EdgeChange> = Vec::new();
-        for batch in rows.chunks(1000) {
-            let eids: Vec<u64> = batch.iter().map(|r| r.0).collect();
-            let found: Vec<u64> = c
-                .query(format!(
-                    "SELECT id FROM {} WHERE id IN ({})",
-                    s.tables.edges,
-                    ids(&eids)
-                ))
-                .await
-                .map_err(backend_error)?;
-            let found: HashSet<u64> = found.into_iter().collect();
-            for &(id, src, dst, rtype, src_rk) in batch {
-                if !found.contains(&id) {
-                    missing.push(EdgeChange {
-                        id,
-                        src,
-                        dst,
-                        rtype,
-                        src_rk,
-                        dst_rk: crate::store::rk_of(dst),
-                        live: true,
-                    });
-                }
-            }
-        }
-        // Re-checked under the lock: gone edges lose their mirror.
-        if !missing.is_empty() {
-            let a = apply_batch(conns, layout, &missing, now_us).await?;
-            del += a.deletes;
-        }
-    }
-    Ok((up, del))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -645,7 +550,10 @@ mod tests {
             pos: pos.into(),
             age_ms,
         };
-        let ok = vec![row(1, "c1", 4, "0-1-50", 100), row(2, "c2", 7, "0-2-9", 100)];
+        let ok = vec![
+            row(1, "c1", 4, "0-1-50", 100),
+            row(2, "c2", 7, "0-2-9", 100),
+        ];
         let mut t = BTreeMap::new();
         assert!(fresh(&ok, &l, &t));
         t.insert("c1".to_owned(), "0-1-50".to_owned());
@@ -654,11 +562,20 @@ mod tests {
         assert!(!fresh(&ok, &l, &t), "c2 not reached");
         t.remove("c2");
         assert!(!fresh(&ok[..1], &l, &t), "shard 2 has no row");
-        let moved = vec![row(1, "c1", 4, "0-1-50", 100), row(2, "c1", 7, "0-1-50", 100)];
+        let moved = vec![
+            row(1, "c1", 4, "0-1-50", 100),
+            row(2, "c1", 7, "0-1-50", 100),
+        ];
         assert!(!fresh(&moved, &l, &t), "row of the old cluster");
-        let split = vec![row(1, "c1", 3, "0-1-50", 100), row(2, "c2", 7, "0-2-9", 100)];
+        let split = vec![
+            row(1, "c1", 3, "0-1-50", 100),
+            row(2, "c2", 7, "0-2-9", 100),
+        ];
         assert!(!fresh(&split, &l, &t), "row of the old epoch");
-        let stale = vec![row(1, "c1", 4, "0-1-50", LIVE_MS + 1), row(2, "c2", 7, "0-2-9", 1)];
+        let stale = vec![
+            row(1, "c1", 4, "0-1-50", LIVE_MS + 1),
+            row(2, "c2", 7, "0-2-9", 1),
+        ];
         assert!(!fresh(&stale, &l, &t), "applier stopped");
     }
 

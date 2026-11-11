@@ -34,7 +34,7 @@ pub(crate) mod watch;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -88,8 +88,8 @@ impl fmt::Debug for MySqlConfig {
 /// State shared by a front end's connections.
 pub(crate) struct Shared {
     pub(crate) cfg: MySqlConfig,
-    pub(crate) started: Instant,
-    /// `COM_STATISTICS`' `Questions`.
+    /// `COM_STATISTICS`' `Questions` (its `Uptime` is
+    /// [`crate::exec::status::uptime_secs`], as in `SHOW STATUS`).
     pub(crate) questions: AtomicU64,
 }
 
@@ -110,10 +110,10 @@ impl MySqlFrontend {
     /// A front end for `cfg.persona`.
     #[must_use]
     pub fn new(cfg: MySqlConfig) -> Self {
+        crate::exec::status::mark_started();
         Self {
             shared: Arc::new(Shared {
                 cfg,
-                started: Instant::now(),
                 questions: AtomicU64::new(0),
             }),
         }

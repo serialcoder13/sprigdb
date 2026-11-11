@@ -19,6 +19,7 @@
 //! the rules stay text rewrites on the lexer.
 
 pub mod collation;
+pub mod ddl;
 pub mod errmap;
 pub mod funcs;
 pub mod geo;
@@ -26,6 +27,7 @@ pub mod groupby;
 pub mod intmeta;
 pub mod jsontext;
 pub mod keywords;
+pub mod lateral;
 pub mod locks;
 pub mod meta;
 pub mod rollup;
@@ -444,7 +446,7 @@ pub fn mysql_text_rewrites(sql: &[u8], opts: &LexOptions, backend_version: u32) 
     }
     let mut out: Option<Vec<u8>> =
         lex::versioned::expand_text_for_mariadb(sql, opts, backend_version);
-    let steps: [TextStep; 6] = [
+    let steps: [TextStep; 9] = [
         rewrite_json_casts,
         name_checks,
         rewrite_srid_attribute,
@@ -455,6 +457,12 @@ pub fn mysql_text_rewrites(sql: &[u8], opts: &LexOptions, backend_version: u32) 
         // R4 (r4close): `TABLE t`, `VALUES ROW(...)` and the row alias of
         // `ON DUPLICATE KEY UPDATE`.
         rowsyntax::rewrite,
+        // R4 round 3: `NOT NULL` on generated columns (gaps row 49) and
+        // MySQL's default collations in database DDL (gaps row 58).
+        ddl::generated_not_null,
+        ddl::database_collation,
+        // R4 round 3: LATERAL derived tables (step 9).
+        lateral::rewrite,
     ];
     for step in steps {
         if let Some(v) = step(out.as_deref().unwrap_or(sql), opts) {

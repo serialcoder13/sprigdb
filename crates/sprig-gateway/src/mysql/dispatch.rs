@@ -875,7 +875,8 @@ impl CommandLoop {
 
     /// `COM_STATISTICS`: a status string (not an OK packet).
     async fn statistics(&mut self) -> Result<Flow> {
-        let uptime = self.shared.started.elapsed().as_secs();
+        // The same uptime `SHOW STATUS` answers (gaps row 61).
+        let uptime = crate::exec::status::uptime_secs();
         let questions = self.shared.questions.load(Ordering::Relaxed);
         #[allow(clippy::cast_precision_loss)] // a rate for display
         let qps = if uptime == 0 {

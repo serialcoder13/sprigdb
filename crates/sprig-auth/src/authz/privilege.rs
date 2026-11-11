@@ -430,7 +430,13 @@ pub const fn grantable_at(level: Level, object: ObjectType) -> ActionSet {
         (Level::Object, ObjectType::Table) => TABLE_ACTIONS,
         (Level::Object, _) => ROUTINE_ACTIONS,
         (Level::Column, _) => COLUMN_ACTIONS,
-        (Level::GraphElement, _) => ActionSet::of(&[Action::Select]),
+        // Read, and per-label writes since R8 round 5.
+        (Level::GraphElement, _) => ActionSet::of(&[
+            Action::Select,
+            Action::Insert,
+            Action::Update,
+            Action::Delete,
+        ]),
     }
 }
 

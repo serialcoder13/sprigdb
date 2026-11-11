@@ -1,0 +1,13 @@
+# Known differences between MongoDB 8.0.34 and SprigDB in Mongoose 8.24.8's
+# own suite (deploy/compose/clients-mongo/run.sh mongoose, CI's
+# heavy-protocols workflow). Test ids are mocha xunit's "<suite title>.<test
+# title>"; globs match them. Format:
+#   <target-glob> <fail|skip|flaky|exclude> <test-glob> :: <reason>
+# (deploy/compose/ci/outcomes.py; the target is always "sprig"). A test that
+# fails on MongoDB too is never counted against SprigDB.
+#
+# From the partial runs on the laptop (decisions/r5-interim.md D34, D36; 152
+# of about 4,000 tests). The full suite is defined in CI, not yet run.
+sprig fail *capped* :: capped collections aren't supported (39662, chapter 31)
+sprig fail *$where* :: $where isn't supported (chapter 30)
+sprig fail *elemMatch*DBRef* :: $elemMatch on a DBRef's $id (r5-interim, round 4 summary); not investigated

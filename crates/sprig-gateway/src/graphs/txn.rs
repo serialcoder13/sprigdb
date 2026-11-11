@@ -85,6 +85,16 @@ pub(crate) struct GraphBranch {
     /// The statement layer wrote through it.
     pub(crate) wrote: bool,
     positions: Positions,
+    /// Sprig 2PC: a held branch's record of its writes (R8 round 5).
+    redo: Option<Redo>,
+}
+
+/// What a held branch wrote, for its redo rows (chapter 18, "Sprig 2PC").
+#[derive(Debug, Default)]
+struct Redo {
+    timestamp_us: u64,
+    stmts: Vec<sprig_txn::RedoStmt>,
+    unsafe_why: Option<String>,
 }
 
 impl std::fmt::Debug for GraphBranch {
@@ -106,6 +116,29 @@ impl GraphBranch {
         self.conn
             .as_mut()
             .ok_or_else(|| SprigError::new(SprigCode::BackendLost, "lost the backend connection"))
+    }
+
+    /// A held branch records a write the store ran (its values in the
+    /// text), with the connection's affected-row count.
+    pub(crate) fn record(&mut self, sql: &str) {
+        let (Some(r), Some(c)) = (self.redo.as_mut(), self.conn.as_ref()) else {
+            return;
+        };
+        if r.unsafe_why.is_none()
+            && let Some(why) = sprig_txn::redo::unsafe_reason(sql)
+        {
+            r.unsafe_why = Some(why.to_owned());
+        }
+        let update = sql.trim_start().to_ascii_uppercase().starts_with("UPDATE");
+        r.stmts.push(sprig_txn::RedoStmt {
+            sql: sql.to_owned(),
+            // UPDATE counts depend on CLIENT_FOUND_ROWS: not checked.
+            affected: if update { u64::MAX } else { c.affected_rows() },
+            insert_id: 0,
+            vars: Vec::new(),
+            charset: None,
+            timestamp_us: Some(r.timestamp_us),
+        });
     }
 }
 
@@ -175,6 +208,24 @@ impl BranchConn for GraphBranch {
         }
         Ok(())
     }
+
+    fn start_redo(&mut self, timestamp_us: u64) -> bool {
+        self.redo = Some(Redo {
+            timestamp_us,
+            ..Redo::default()
+        });
+        true
+    }
+
+    fn take_redo(&mut self) -> std::result::Result<Vec<sprig_txn::RedoStmt>, String> {
+        let Some(r) = self.redo.take() else {
+            return Ok(Vec::new());
+        };
+        match r.unsafe_why {
+            Some(why) => Err(why),
+            None => Ok(r.stmts),
+        }
+    }
 }
 
 /// One Bolt session's branch factory.
@@ -183,6 +234,10 @@ pub(crate) struct GraphBackend {
     caps: Mutex<HashMap<ClusterId, ClusterCaps>>,
     /// `READ COMMITTED` or `REPEATABLE READ`.
     isolation: Mutex<&'static str>,
+    /// Chapter 18's `txn.*` settings for the next coordinator (round 5:
+    /// `txn.non_xa_policy = sprig_2pc` holds branches on clusters without
+    /// XA).
+    config: Mutex<Option<TxnConfig>>,
     pub(crate) positions: Positions,
 }
 
@@ -198,6 +253,7 @@ impl GraphBackend {
             graphs,
             caps: Mutex::new(HashMap::new()),
             isolation: Mutex::new("READ COMMITTED"),
+            config: Mutex::new(None),
             positions: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -233,18 +289,26 @@ impl GraphBackend {
             .insert(cluster.clone(), ClusterCaps { xa });
     }
 
+    /// The `txn.*` settings of coordinators made from now on.
+    pub(crate) fn set_config(&self, mut cfg: TxnConfig) {
+        cfg.coordinator_id
+            .clone_from(&self.graphs.coord.coordinator_id);
+        *self.config.lock().unwrap_or_else(PoisonError::into_inner) = Some(cfg);
+    }
+
     /// A coordinator for one transaction of `tenant`.
     pub(crate) fn coordinator(self: &Arc<Self>, tenant: TenantId) -> TxnCoordinator<Self> {
         let s = &self.graphs.coord;
-        TxnCoordinator::new(
-            Arc::clone(self),
-            Arc::clone(&s.dtids),
-            tenant,
-            TxnConfig {
+        let cfg = self
+            .config
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(|| TxnConfig {
                 coordinator_id: s.coordinator_id.clone(),
                 ..TxnConfig::default()
-            },
-        )
+            });
+        TxnCoordinator::new(Arc::clone(self), Arc::clone(&s.dtids), tenant, cfg)
     }
 
     /// Commit positions gathered since the last call.
@@ -293,6 +357,7 @@ impl TxnBackend for GraphBackend {
             open: false,
             wrote: false,
             positions: Arc::clone(&self.positions),
+            redo: None,
         })
     }
 
@@ -348,6 +413,19 @@ impl ShardConns for CoordConns<'_> {
             bc.wrote = true;
         }
         bc.raw()
+    }
+
+    fn records(&self) -> bool {
+        true
+    }
+
+    fn wrote(&mut self, at: &ShardLoc, sql: &str) {
+        let Ok(cluster) = cluster_id(&at.cluster) else {
+            return;
+        };
+        for (_, b) in self.coord.conns_mut(&[cluster]) {
+            b.record(sql);
+        }
     }
 }
 

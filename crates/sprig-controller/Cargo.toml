@@ -47,6 +47,8 @@ sprig-mover.workspace = true
 # The tenant map a move starts from (chapter 15).
 sprig-shard.workspace = true
 sprig-provision.workspace = true
+# Residency policies (chapter 26), shared (R9, r9more).
+sprig-residency.workspace = true
 sprig-settings.workspace = true
 # Chapter 07's rewriter and the persona's lexer: validation replays sampled
 # statements in the shards' physical names (chapter 13).

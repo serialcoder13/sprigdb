@@ -6,6 +6,12 @@
 import { useEffect, useRef } from 'react';
 import * as monaco from 'monaco-editor/editor';
 import 'monaco-editor/languages/definitions/mysql/register';
+// Round 4: Cypher (graphs), JavaScript (MongoDB commands, logic), Redis and
+// Lua, all Monarch tokenizers without workers of their own.
+import 'monaco-editor/languages/definitions/cypher/register';
+import 'monaco-editor/languages/definitions/javascript/register';
+import 'monaco-editor/languages/definitions/redis/register';
+import 'monaco-editor/languages/definitions/lua/register';
 import EditorWorker from 'monaco-editor/editor/editor.worker?worker';
 import { isDark } from '../app/theme';
 
@@ -23,13 +29,16 @@ export interface CompletionSource {
   columns(): { name: string; detail: string }[];
 }
 
-let completionRegistered = false;
+/** The editor languages Studio uses. */
+export type EditorLanguage = 'mysql' | 'cypher' | 'javascript' | 'redis' | 'lua';
+
+const completionRegistered = new Set<EditorLanguage>();
 let source: CompletionSource | null = null;
 
-function registerCompletion(): void {
-  if (completionRegistered) return;
-  completionRegistered = true;
-  monaco.languages.registerCompletionItemProvider('mysql', {
+function registerCompletion(lang: EditorLanguage): void {
+  if (completionRegistered.has(lang)) return;
+  completionRegistered.add(lang);
+  monaco.languages.registerCompletionItemProvider(lang, {
     triggerCharacters: ['.', ' '],
     provideCompletionItems(model, position) {
       const word = model.getWordUntilPosition(position);
@@ -90,7 +99,9 @@ export default function Monaco({
   completion,
   label,
   handle,
+  language = 'mysql',
 }: {
+  language?: EditorLanguage;
   value: string;
   onChange: (v: string) => void;
   onRun: () => void;
@@ -108,12 +119,12 @@ export default function Monaco({
     source = completion;
   });
   useEffect(() => {
-    registerCompletion();
+    registerCompletion(language);
     defineThemes();
     if (!host.current) return;
     const e = monaco.editor.create(host.current, {
       value,
-      language: 'mysql',
+      language,
       theme: themeName(),
       minimap: { enabled: false },
       automaticLayout: true,
@@ -178,5 +189,12 @@ export default function Monaco({
     const e = ed.current;
     if (e && e.getValue() !== value) e.setValue(value);
   }, [value]);
+  useEffect(() => {
+    const m = ed.current?.getModel();
+    if (m && m.getLanguageId() !== language) {
+      registerCompletion(language);
+      monaco.editor.setModelLanguage(m, language);
+    }
+  }, [language]);
   return <div ref={host} className="editor-host" data-testid="sql-editor" />;
 }

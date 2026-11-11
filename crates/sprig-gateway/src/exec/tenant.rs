@@ -1599,7 +1599,9 @@ impl PassSession {
         match result {
             Ok(outcome) => {
                 if let Some(ts) = self.tenant.as_deref_mut() {
-                    ts.changed(outcome.version);
+                    // An `IF [NOT] EXISTS` no-op names the version it read
+                    // (decision PF6), so the next statement sees what it saw.
+                    ts.changed(outcome.version.or(outcome.seen));
                     if !outcome.notes.is_empty() {
                         ts.warnings = Some(
                             outcome

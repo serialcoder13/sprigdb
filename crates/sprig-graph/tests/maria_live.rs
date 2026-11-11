@@ -830,7 +830,10 @@ async fn edges_and_mirrors(live: &Live) -> (Vec<(u64, u64, u64, u32)>, Vec<(u64,
     let (mut e, mut m) = (Vec::new(), Vec::new());
     for (i, sh) in live.layout.shards.iter().enumerate() {
         let rows: Vec<(u64, u64, u64, u32)> = c
-            .query(format!("SELECT id, src, dst, type FROM {}", sh.tables.edges))
+            .query(format!(
+                "SELECT id, src, dst, type FROM {}",
+                sh.tables.edges
+            ))
             .await
             .expect("edges");
         e.extend(rows);
@@ -863,17 +866,20 @@ async fn insert_events(live: &Live) -> Vec<sprig_graph::mirror::EdgeChange> {
             ))
             .await
             .expect("edges");
-        out.extend(rows.into_iter().map(|(id, src, dst, rtype, src_rk, dst_rk)| {
-            sprig_graph::mirror::EdgeChange {
-                id,
-                src,
-                dst,
-                rtype,
-                src_rk,
-                dst_rk,
-                live: true,
-            }
-        }));
+        out.extend(
+            rows.into_iter()
+                .map(
+                    |(id, src, dst, rtype, src_rk, dst_rk)| sprig_graph::mirror::EdgeChange {
+                        id,
+                        src,
+                        dst,
+                        rtype,
+                        src_rk,
+                        dst_rk,
+                        live: true,
+                    },
+                ),
+        );
     }
     out
 }
@@ -921,9 +927,13 @@ async fn async_mirrors_converge() {
     // The applier: every insert, twice (a replay after a restart).
     let mut pool = Conns(live.pool.clone());
     let ins = insert_events(&live).await;
-    let a = apply_batch(&mut pool, &live.layout, &ins, 1).await.expect("apply");
+    let a = apply_batch(&mut pool, &live.layout, &ins, 1)
+        .await
+        .expect("apply");
     assert_eq!(a.upserts, ins.len() as u64);
-    apply_batch(&mut pool, &live.layout, &ins, 2).await.expect("replay");
+    apply_batch(&mut pool, &live.layout, &ins, 2)
+        .await
+        .expect("replay");
     let (edges, mirrors) = edges_and_mirrors(&live).await;
     assert_eq!(edges, mirrors, "one mirror per edge");
     compare_gated(&live, &mut mem, &qs, true, "through mirrors").await;
@@ -946,10 +956,17 @@ async fn async_mirrors_converge() {
     assert!(deleted.len() >= 3, "{} deleted", deleted.len());
     // The deletes' stream first, then a late replay of the inserts (as a
     // lagging cluster's stream would deliver them): no stale mirror.
-    apply_batch(&mut pool, &live.layout, &deleted, 3).await.expect("deletes");
-    apply_batch(&mut pool, &live.layout, &ins, 4).await.expect("late inserts");
+    apply_batch(&mut pool, &live.layout, &deleted, 3)
+        .await
+        .expect("deletes");
+    apply_batch(&mut pool, &live.layout, &ins, 4)
+        .await
+        .expect("late inserts");
     let (edges, mirrors) = edges_and_mirrors(&live).await;
-    assert_eq!(edges, mirrors, "late inserts of deleted edges leave no mirror");
+    assert_eq!(
+        edges, mirrors,
+        "late inserts of deleted edges leave no mirror"
+    );
     compare_gated(&live, &mut mem, &qs, true, "after deletes").await;
     // Writers racing the applier: 6 writers (one after another) create
     // and delete edges while the applier replays what it saw, deletes

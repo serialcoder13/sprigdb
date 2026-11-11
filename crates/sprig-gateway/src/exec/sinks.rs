@@ -28,7 +28,7 @@ use sprig_proto_mysql::StatusFlags;
 use sprig_proto_mysql::packets::OkPacket;
 use sprig_sinks::meta::{PlatformConnection, SinkIndex};
 use sprig_sinks::model::{SinkId, TaskRow};
-use sprig_sinks::policy::{Residency, Unpinned};
+use sprig_sinks::policy::Residency;
 use sprig_sinks::secrets::SinkKeyring;
 use sprig_sinks::sql::{Change, Handled, Host};
 use sprig_sinks::store::SinksState;
@@ -54,17 +54,65 @@ pub fn install_keyring(path: Option<&std::path::Path>) {
     let _ = KEYRING.set(k);
 }
 
-fn keyring() -> Option<Arc<dyn SinkKeyring>> {
+/// The sink credential keyring, if this gateway loaded one.
+pub(crate) fn keyring() -> Option<Arc<dyn SinkKeyring>> {
     KEYRING
         .get()
         .and_then(Clone::clone)
         .map(|k| k as Arc<dyn SinkKeyring>)
 }
 
+/// The residency of `cat`'s tenant for sink destinations (its and its
+/// ancestors' policies; unpinned without any).
+///
+/// # Errors
+/// The global tier's; 39506 for a policy that doesn't parse.
+pub(crate) async fn residency_of(
+    svc: &crate::tenant::TenantServices,
+    cat: &TenantCatalog,
+) -> Result<sprig_sinks::residency::Shared> {
+    let r = sprig_sinks::residency::residency_of(svc.global.as_ref(), cat.tenant).await?;
+    Ok(sprig_sinks::residency::Shared(Arc::from(r)))
+}
+
+/// A resolved `sink.*` setting of tenant `cat` at database `db`, as text
+/// (also for inherited sinks deployed in a member, R9).
+pub(crate) fn setting_of(
+    svc: &crate::tenant::TenantServices,
+    cat: &TenantCatalog,
+    key: &str,
+    db: u32,
+) -> Option<String> {
+    use sprig_sinks::settings as s;
+    let ctx = cat.setting_ctx(&svc.dc).with_db(DbId(db));
+    let text = |k: &'static sprig_settings::Setting<std::borrow::Cow<'static, str>>| {
+        svc.settings.get(k, &ctx, Some(&cat.settings)).into_owned()
+    };
+    Some(match key {
+        "destination_allowlist" => text(&s::DESTINATION_ALLOWLIST),
+        "allowed_kinds" => text(&s::ALLOWED_KINDS),
+        "platform_identity" => text(&s::PLATFORM_IDENTITY),
+        "enabled" => {
+            if svc.settings.get(&s::ENABLED, &ctx, Some(&cat.settings)) {
+                "on".into()
+            } else {
+                "off".into()
+            }
+        }
+        other => {
+            let k = s::u64_key(other)?;
+            svc.settings.get(k, &ctx, Some(&cat.settings)).to_string()
+        }
+    })
+}
+
 struct GwHost<'s> {
     sess: &'s mut PassSession,
     cat: Arc<TenantCatalog>,
     migrated: bool,
+    /// The tenant's residency, from its and its ancestors' directory
+    /// entries (R9, r9more: checked at `CREATE` and `ALTER CONNECTION`).
+    residency: sprig_sinks::residency::Shared,
 }
 
 impl GwHost<'_> {
@@ -211,7 +259,7 @@ impl Host for GwHost<'_> {
     }
 
     fn residency(&self) -> Box<dyn Residency> {
-        Box::new(Unpinned)
+        Box::new(self.residency.clone())
     }
 
     fn keyring(&self) -> Option<Arc<dyn SinkKeyring>> {
@@ -324,6 +372,13 @@ impl Host for GwHost<'_> {
             sprig_sinks::meta::platform_granted(&global, name, self.cat.tenant.0, &ancestors)
                 .await?;
         Ok(Some((p, granted)))
+    }
+
+    async fn function_source(&mut self, db: u32, name: &str) -> Result<Option<(String, String)>> {
+        let (mut c, schema) = self.catalog_conn().await?;
+        Ok(sprig_sinks::transform::source_of(&mut c, &schema, db, name)
+            .await?
+            .map(|(runtime, _, source, _)| (runtime, source)))
     }
 
     async fn platform_granted(&mut self) -> Result<Vec<PlatformConnection>> {
@@ -465,8 +520,11 @@ impl PassSession {
         let Ok(sql) = std::str::from_utf8(text) else {
             return Ok(None);
         };
-        // Cheap: only statements that parse as sink statements go on.
-        if let Ok(None) = sprig_sinks::grammar::parse(sql) {
+        // Cheap: only statements that parse as sink statements go on
+        // (R9: and ALTER INHERITED CONNECTION | SINK).
+        if let Ok(None) = sprig_sinks::grammar::parse(sql)
+            && let Ok(None) = sprig_sinks::grammar::parse_inherited(sql)
+        {
             return Ok(None);
         }
         let cat = match ts.catalog() {
@@ -480,15 +538,28 @@ impl PassSession {
             .ext
             .get::<SinksState>(sprig_sinks::store::MODULE)
             .is_some_and(|s| s.migrated);
+        let Some(svc) = self.tenant.as_deref().map(|t| Arc::clone(t.services())) else {
+            return Ok(None);
+        };
         let logged = sprig_sinks::grammar::redact(sql).map_or_else(|| sql.to_owned(), |(r, _)| r);
         tracing::debug!(statement = %logged.chars().take(300).collect::<String>(), "sink statement");
-        let handled = {
-            let mut host = GwHost {
-                sess: self,
-                cat,
-                migrated,
-            };
-            sprig_sinks::sql::handle(sql, &mut host).await
+        // R9 (r9more): FOR EACH TENANT connections and sinks, and the
+        // overrides of inherited ones.
+        let handled = match self.inherit_sinks(sql, &cat).await {
+            Ok(Some(h)) => Ok(h),
+            Err(e) => Err(e),
+            Ok(None) => match residency_of(&svc, &cat).await {
+                Ok(residency) => {
+                    let mut host = GwHost {
+                        sess: self,
+                        cat,
+                        migrated,
+                        residency,
+                    };
+                    sprig_sinks::sql::handle(sql, &mut host).await
+                }
+                Err(e) => Err(e),
+            },
         };
         let s = self.status();
         let status = if more {

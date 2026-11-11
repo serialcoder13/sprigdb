@@ -1,0 +1,17 @@
+[package]
+name = "sprig-residency"
+description = "SprigDB: residency policies over DC tags (chapter 26), shared by the controller, workers and gateways"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+sprig-common.workspace = true
+sprig-meta.workspace = true
+
+[lints]
+workspace = true

@@ -46,6 +46,8 @@ mod tenant;
 pub(crate) mod inherit;
 // Chapter 42 (R9): inherited messaging objects (`FOR EACH TENANT`).
 mod inherit_msg;
+// R9 (r9more): FOR EACH TENANT connections and sinks.
+mod inherit_sinks;
 pub(crate) mod types;
 // Chapter 45: event streams (R9).
 mod streams;
@@ -63,6 +65,8 @@ mod offsets;
 mod groupby;
 // Chapter 36 (R6 round 3): nearest neighbours with a growing radius on 3306.
 mod geo_knn;
+// Per-session status counters (gaps rows 46 and 61).
+pub(crate) mod status;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -151,6 +155,7 @@ impl Executor for PassThrough {
             wl_multi: false,
             router: router::RouterState::default(),
             packet_limit: None,
+            status: status::SessionStatus::default(),
         })
     }
 }
@@ -179,6 +184,8 @@ pub struct PassSession {
     /// The session's packet limit (chapter 05, "Packet limit"), answered
     /// for `max_allowed_packet` in mixed selects and `SHOW VARIABLES`.
     packet_limit: Option<u64>,
+    /// The session's own status counters, for `SHOW STATUS` (gaps row 46).
+    status: status::SessionStatus,
 }
 
 impl std::fmt::Debug for PassSession {
@@ -1037,6 +1044,8 @@ impl SessionExec for PassSession {
     }
 
     async fn abandoned(&mut self, _cx: &mut ExecCtx<'_>, why: Abandon) {
+        // ST31 (bugfix5): the router's statements on other connections too.
+        self.router.abandon_in_flight(DRAIN_TIMEOUT).await;
         let Some(bs) = self.bs.as_mut() else {
             return;
         };
@@ -1132,7 +1141,7 @@ impl PassSession {
         proto: &sprig_proto_mysql::state::ProtoState,
     ) -> Option<relay::ConnStatus> {
         if split::is_session_status(piece) {
-            Some(relay::ConnStatus::of(proto))
+            Some(relay::ConnStatus::of(proto).with_rows(self.status_rows()))
         } else if split::is_show_variables(piece) {
             // The client's own values of gateway-owned variables (`SET
             // wait_timeout = ...`), which `@@` reads already answer.
@@ -1155,7 +1164,13 @@ impl PassSession {
                     }
                 }
             }
-            Some(relay::ConnStatus::from_rows(rows))
+            let st = relay::ConnStatus::from_rows(rows);
+            // 3306: `collation_*` in MySQL's names (gaps row 60).
+            Some(if self.persona == Persona::MySql84 {
+                st.with_mysql_collations()
+            } else {
+                st
+            })
         } else {
             None
         }
@@ -1217,6 +1232,7 @@ impl PassSession {
         req: Request,
         out: &mut dyn ResultSink,
     ) -> Result<ExecSummary> {
+        self.count_request(&req);
         match req {
             Request::Query { sql, attrs } => {
                 if self.tenant.is_some() {

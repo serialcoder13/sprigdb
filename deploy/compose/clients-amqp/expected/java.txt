@@ -1,0 +1,8 @@
+# Known differences between a RabbitMQ 4.x reference and SprigDB for the
+# RabbitMQ Java client 5.22.0 scenarios (java/Scenarios.java); test ids are scenario names.
+# Format: <target-glob> <fail|skip|flaky|exclude> <test-glob> :: <reason>
+# (deploy/compose/ci/outcomes.py; the target is always "sprig"). A listed
+# fail that matches the reference again is reported as stale.
+#
+# Empty until the first CI run: every difference that run finds is either
+# fixed or listed here with its reason.

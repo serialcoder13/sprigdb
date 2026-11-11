@@ -463,6 +463,29 @@ impl GatewayGraphs {
         })
     }
 
+    /// The labels and types `g`'s grants on single elements of graph
+    /// `graph` let it write with `a` (`INSERT` = `CREATE`, `DELETE`,
+    /// `UPDATE` = `SET PROPERTY`; round 5): `None` when they name none.
+    #[must_use]
+    pub fn writable(
+        g: &dyn SessionGrants,
+        graph: u64,
+        a: Action,
+    ) -> Option<(HashSet<String>, HashSet<String>)> {
+        let (mut labels, mut types) = (HashSet::new(), HashSet::new());
+        for (rels, name, set) in g.graph_elements(ObjectId(graph)) {
+            if !set.has(a) {
+                continue;
+            }
+            if rels {
+                types.insert(name);
+            } else {
+                labels.insert(name);
+            }
+        }
+        (!labels.is_empty() || !types.is_empty()).then_some((labels, types))
+    }
+
     /// What `g`'s grants on single labels and relationship types of graph
     /// `graph` let it read (decision G42); `None` when they give nothing.
     #[must_use]

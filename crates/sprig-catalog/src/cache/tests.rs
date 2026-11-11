@@ -138,6 +138,14 @@ impl CatalogSource for ViaVersioner {
     ) -> sprig_common::Result<Loaded> {
         self.0.backend().load(tenant, prev, node).await
     }
+
+    async fn committed(
+        &self,
+        tenant: TenantId,
+        node: Node,
+    ) -> sprig_common::Result<Option<(u64, u64)>> {
+        self.0.backend().committed(tenant, node).await
+    }
 }
 
 struct Env {
@@ -781,6 +789,40 @@ async fn a_lagging_replica_hands_over_to_the_writer() {
     );
     let (replica, writer) = env.mem().loads();
     assert!(replica >= 2 && writer >= 1, "{replica} {writer}");
+}
+
+/// Decision PF4: the directory moves before the catalog commits, so a
+/// reader asking for the new version polls the committed version with a
+/// small read and loads in full once, when it is there.
+#[tokio::test]
+async fn a_version_not_yet_committed_is_polled_and_loaded_once() {
+    let env = Env::new().await;
+    let cache = env.cache(fast(), None);
+    cache.get(T, Freshness::Latest).await.unwrap();
+    let (r0, w0) = env.mem().loads();
+    // Allocated (the directory moves), committed 40 ms later.
+    let mut c = env.v.change(T, VersionKind::Catalog).await.unwrap();
+    let v = c.version();
+    c.tx().put_database(db(1, "a", v, DbState::Active));
+    env.seen(T, v).await;
+    let commit = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        c.commit().await.unwrap()
+    });
+    let got = cache
+        .get(T, Freshness::Cached { min_version: v })
+        .await
+        .unwrap();
+    assert_eq!(got.version, v);
+    assert_eq!(commit.await.unwrap(), v);
+    let (r1, w1) = env.mem().loads();
+    assert!(
+        (r1 - r0) + (w1 - w0) <= 2,
+        "full loads while waiting: replica {} writer {}",
+        r1 - r0,
+        w1 - w0
+    );
+    assert!(env.mem().version_reads() >= 2, "the wait polled");
 }
 
 #[tokio::test]

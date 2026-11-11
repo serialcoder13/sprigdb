@@ -88,10 +88,32 @@ pub fn json_join(phys: &str, lit: Lit<'_>) -> String {
         " LEFT JOIN (SELECT `TABLE_NAME` AS `_sprig_jt`, `CONSTRAINT_NAME` AS {JSON_COL} \
          FROM information_schema.CHECK_CONSTRAINTS WHERE `CONSTRAINT_SCHEMA` = {phys} \
          AND `LEVEL` = {} AND `CHECK_CLAUSE` = {} LIMIT 4294967295) AS `_sprig_j` \
-         ON `_sprig_jt` = `TABLE_NAME` AND {JSON_COL} = `COLUMN_NAME`",
+         ON `_sprig_jt` = `TABLE_NAME` AND {JSON_COL} = `COLUMN_NAME` \
+         LEFT JOIN (SELECT `TABLE_NAME` AS `_sprig_nt`, `CONSTRAINT_NAME` AS {NN_COL} \
+         FROM information_schema.CHECK_CONSTRAINTS WHERE `CONSTRAINT_SCHEMA` = {phys} \
+         AND `LEVEL` = {} AND `CONSTRAINT_NAME` LIKE {} LIMIT 4294967295) AS `_sprig_n` \
+         ON `_sprig_nt` = `TABLE_NAME` AND {NN_COL} = CONCAT({}, `COLUMN_NAME`)",
         lit("Column"),
-        json_clause("`CONSTRAINT_NAME`", lit)
+        json_clause("`CONSTRAINT_NAME`", lit),
+        lit("Table"),
+        lit(&nn_like()),
+        lit(super::ddl::NN_PREFIX),
     )
+}
+
+/// A `LIKE` pattern for [`super::ddl::NN_PREFIX`] names.
+fn nn_like() -> String {
+    format!("{}%", super::ddl::NN_PREFIX.replace('_', "\\_"))
+}
+
+/// The alias of the generated-`NOT NULL` side table in `COLUMNS` (see
+/// [`json_join`] and [`super::ddl`]).
+const NN_COL: &str = "`_sprig_nc`";
+
+/// `IS_NULLABLE`: `NO` for a generated column whose `NOT NULL` is a
+/// [`super::ddl::NN_PREFIX`] check.
+fn is_nullable(lit: Lit<'_>) -> String {
+    format!("IF({NN_COL} IS NULL, `IS_NULLABLE`, {})", lit("NO"))
 }
 
 /// `COLUMN_TYPE` without integer display widths, as MySQL 8.4 shows it
@@ -165,7 +187,7 @@ pub fn mysql_view(table: &str, lit: Lit<'_>) -> Option<Vec<(&'static str, Src)>>
             ("COLUMN_NAME", Col("COLUMN_NAME")),
             ("ORDINAL_POSITION", Col("ORDINAL_POSITION")),
             ("COLUMN_DEFAULT", Sql(column_default(lit))),
-            ("IS_NULLABLE", Col("IS_NULLABLE")),
+            ("IS_NULLABLE", Sql(is_nullable(lit))),
             (
                 "DATA_TYPE",
                 Sql(format!("IF({json}, {}, `DATA_TYPE`)", lit("json"))),
@@ -380,17 +402,21 @@ pub fn mysql_column_names(table: &str) -> Option<Vec<&'static str>> {
 pub fn mysql_branch_filter(table: &str, phys: &str, lit: Lit<'_>) -> Option<String> {
     match table {
         "CHECK_CONSTRAINTS" => Some(format!(
-            " AND NOT (`LEVEL` = {} AND `CHECK_CLAUSE` = {})",
+            " AND NOT (`LEVEL` = {} AND `CHECK_CLAUSE` = {}) AND `CONSTRAINT_NAME` NOT LIKE {}",
             lit("Column"),
-            json_clause("`CONSTRAINT_NAME`", lit)
+            json_clause("`CONSTRAINT_NAME`", lit),
+            lit(&nn_like())
         )),
         "TABLE_CONSTRAINTS" => Some(format!(
             " AND NOT (`CONSTRAINT_TYPE` = {} AND (`TABLE_NAME`, `CONSTRAINT_NAME`) IN \
              (SELECT `TABLE_NAME`, `CONSTRAINT_NAME` FROM information_schema.CHECK_CONSTRAINTS \
-             WHERE `CONSTRAINT_SCHEMA` = {phys} AND `LEVEL` = {} AND `CHECK_CLAUSE` = {}))",
+             WHERE `CONSTRAINT_SCHEMA` = {phys} AND `LEVEL` = {} AND `CHECK_CLAUSE` = {})) \
+             AND NOT (`CONSTRAINT_TYPE` = {} AND `CONSTRAINT_NAME` LIKE {})",
             lit("CHECK"),
             lit("Column"),
-            json_clause("`CONSTRAINT_NAME`", lit)
+            json_clause("`CONSTRAINT_NAME`", lit),
+            lit("CHECK"),
+            lit(&nn_like())
         )),
         _ => None,
     }
@@ -505,9 +531,10 @@ pub fn show_columns_sql(
     );
     let mut inner = format!(
         "SELECT `COLUMN_NAME` AS `Field`, {ty} AS `Type`, {coll} AS `Collation`, \
-         `IS_NULLABLE` AS `Null`, `COLUMN_KEY` AS `Key`, {} AS `Default`, {} AS `Extra`, \
+         {} AS `Null`, `COLUMN_KEY` AS `Key`, {} AS `Default`, {} AS `Extra`, \
          `PRIVILEGES` AS `Privileges`, `COLUMN_COMMENT` AS `Comment`, \
          `ORDINAL_POSITION` AS `_sprig_pos` FROM information_schema.COLUMNS",
+        is_nullable(lit),
         column_default(lit),
         extra(lit)
     );
@@ -1041,12 +1068,29 @@ pub fn mysql_create_table(text: &str) -> String {
     if !text.starts_with("CREATE TABLE") && !text.starts_with("CREATE TEMPORARY TABLE") {
         return text.to_owned();
     }
-    let lines: Vec<String> = text
+    // Generated columns' NOT NULL checks (R4 round 3, [`super::ddl`]): the
+    // check line goes, the column says NOT NULL again.
+    let mut not_null: Vec<String> = Vec::new();
+    let kept: Vec<&str> = text
         .split('\n')
-        .map(|line| {
+        .filter(|line| match nn_check_line(line) {
+            Some(c) => {
+                not_null.push(c);
+                false
+            }
+            None => true,
+        })
+        .collect();
+    let mut lines: Vec<String> = kept
+        .iter()
+        .map(|&line| {
             let t = line.trim_start();
             if line.starts_with("  `") {
-                mysql_column_line(line)
+                let l = mysql_column_line(line);
+                match column_line_name(line) {
+                    Some((name, _)) if not_null.contains(&name) => generated_not_null(&l),
+                    _ => l,
+                }
             } else if line.starts_with("  ")
                 && (t.starts_with("KEY ")
                     || t.starts_with("UNIQUE KEY ")
@@ -1066,7 +1110,37 @@ pub fn mysql_create_table(text: &str) -> String {
             }
         })
         .collect();
+    if !not_null.is_empty() {
+        // The element before the closing line loses a comma a removed
+        // check line left behind.
+        if let Some(close) = lines.iter().rposition(|l| l.starts_with(')'))
+            && close > 0
+            && let Some(prev) = lines.get_mut(close - 1)
+            && prev.ends_with(',')
+        {
+            prev.pop();
+        }
+    }
     mysql_collations(&lines.join("\n"))
+}
+
+/// The column of a `  CONSTRAINT `_sprig_nn_<c>` CHECK (...)` line.
+fn nn_check_line(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("  CONSTRAINT ")?;
+    let (name, _) = column_line_name(&format!("  {rest}"))?;
+    super::ddl::nn_column(&name).map(str::to_owned)
+}
+
+/// A generated column's line with MySQL's `NOT NULL` after `VIRTUAL` or
+/// `STORED`.
+fn generated_not_null(line: &str) -> String {
+    for kw in [" VIRTUAL", " STORED"] {
+        if let Some(i) = line.rfind(kw) {
+            let at = i + kw.len();
+            return format!("{} NOT NULL{}", &line[..at], &line[at..]);
+        }
+    }
+    line.to_owned()
 }
 
 #[cfg(test)]

@@ -5661,6 +5661,7 @@ dependencies = [
  "sprig-mover",
  "sprig-proto-mysql",
  "sprig-provision",
+ "sprig-residency",
  "sprig-settings",
  "sprig-shard",
  "sprig-sinks",
@@ -5838,6 +5839,7 @@ dependencies = [
  "sprig-proto-bolt",
  "sprig-settings",
  "sprig-shard",
+ "sprig-txn",
  "tokio",
  "tracing",
 ]
@@ -6215,6 +6217,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sprig-residency"
+version = "0.0.1"
+dependencies = [
+ "serde_json",
+ "sprig-common",
+ "sprig-meta",
+]
+
+[[package]]
 name = "sprig-router"
 version = "0.0.1"
 dependencies = [
@@ -6334,9 +6345,11 @@ dependencies = [
  "serde_json",
  "sprig-catalog",
  "sprig-common",
+ "sprig-logic",
  "sprig-logic-js",
  "sprig-meta",
  "sprig-proto-kafka",
+ "sprig-residency",
  "sprig-settings",
  "sprig-streams",
  "sprig-workload",

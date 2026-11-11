@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Only fetches RabbitMQ PerfTest (Apache-2.0 / MPL-2.0, used under
+     Apache-2.0) and its dependencies: mvn dependency:copy-dependencies
+     -DoutputDirectory=libs, then java -cp 'libs/*' com.rabbitmq.perf.PerfTest.
+     Test tooling only. -->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>dev.sprigdb.ci</groupId>
+  <artifactId>amqp-perftest</artifactId>
+  <version>1</version>
+  <packaging>pom</packaging>
+  <dependencies>
+    <dependency>
+      <groupId>com.rabbitmq</groupId>
+      <artifactId>perf-test</artifactId>
+      <version>2.21.0</version>
+    </dependency>
+  </dependencies>
+</project>

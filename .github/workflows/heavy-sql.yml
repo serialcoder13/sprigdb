@@ -1,0 +1,193 @@
+# R4's heavy SQL suites (chapter 46, release gate R4: "Tier 1 and 2 SQL
+# suites; differential against MySQL 8.4; mysql-test-run subsets"), which
+# are too big for a laptop and run on CI runners (Kiran, 11 November 2026:
+# "CI is the place"; decisions/r4-interim.md):
+#
+#   clients          the tier 1 drivers' own suites (deploy/compose/clients):
+#                    MySQL Connector/J in its five chunks plus DateTimeTest,
+#                    PHP mysqli and PDO_MySQL, SQLAlchemy in full (test/orm
+#                    included), go-sql-driver, mysql2, PyMySQL, mysqlclient,
+#                    MariaDB Connector/J
+#   hibernate-orm    Hibernate ORM 6.6.33's own hibernate-core suite
+#                    (-Pdb=mysql_ci), in shards by package
+#   mysql-test-run   MySQL 8.4.11's own mysql-test-run.pl, the curated list
+#                    in deploy/compose/clients/mysql-test-run/tests.txt
+#
+# Each job starts a SprigDB stack (.github/actions/sprig-stack: Compose's
+# MariaDB 11.8 node and a release gateway, tenant acme) and a reference
+# server (deploy/compose/ci/refs.sh: MySQL 8.4.11 or MariaDB 11.8.9, 3 GB),
+# runs the suite on the reference, then through the gateway's port for the
+# same persona (deploy/compose/ci/sql-suite.sh). It fails only on an outcome
+# that neither the expected file (deploy/compose/clients/expected/) nor the
+# reference run explains. Every download (images, repositories, Maven,
+# Gradle, pip and npm packages, MySQL's test package) happens on the runner;
+# each is pinned in deploy/compose/clients/versions.txt, run.sh or the
+# files it names.
+#
+# Nightly, and on demand with a choice of jobs. The protocol suites (AMQP,
+# Kafka, MongoDB, Bolt) are in heavy-protocols.yml.
+name: heavy-sql
+
+on:
+  schedule:
+    - cron: "37 1 * * *"
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: "Which jobs: all, or a comma-separated list of clients, hibernate-orm, mysql-test-run"
+        required: false
+        default: all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: heavy-sql-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  clients:
+    name: SQL client suite ${{ matrix.label }}
+    if: >-
+      github.event_name == 'schedule' ||
+      inputs.jobs == 'all' || contains(inputs.jobs, 'clients')
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # MySQL Connector/J 9.7.0, the chunks r4close used on the laptop
+          # (decisions/r4-interim.md X6), here without the 30-minute hold.
+          - { label: mysql-connector-j 1 unit and simple, suite: mysql-connector-j, persona: mysql, minutes: 120,
+              filter: "com/mysql/cj/**/*Test,testsuite/simple/*Test,!testsuite/simple/BlobTest,!testsuite/simple/DateTimeTest" }
+          - { label: mysql-connector-j 2 statements, suite: mysql-connector-j, persona: mysql, minutes: 120,
+              filter: "testsuite/regression/StatementRegressionTest" }
+          - { label: mysql-connector-j 3 connections, suite: mysql-connector-j, persona: mysql, minutes: 120,
+              filter: "testsuite/regression/ConnectionRegressionTest" }
+          - { label: mysql-connector-j 4 result sets and metadata, suite: mysql-connector-j, persona: mysql, minutes: 120,
+              filter: "testsuite/regression/ResultSetRegressionTest,testsuite/regression/MetaDataRegressionTest" }
+          - { label: mysql-connector-j 5 other regressions, suite: mysql-connector-j, persona: mysql, minutes: 120,
+              filter: "testsuite/regression/*Test,!testsuite/regression/StatementRegressionTest,!testsuite/regression/ConnectionRegressionTest,!testsuite/regression/ResultSetRegressionTest,!testsuite/regression/MetaDataRegressionTest,!testsuite/regression/BlobRegressionTest,!testsuite/regression/StressRegressionTest,!testsuite/regression/MicroPerformanceRegressionTest" }
+          - { label: mysql-connector-j 6 DateTimeTest, suite: mysql-connector-j, persona: mysql, minutes: 240,
+              filter: "testsuite/simple/DateTimeTest" }
+          - { label: php-mysqli mysql, suite: php-mysqli, persona: mysql, minutes: 90 }
+          - { label: php-mysqli mariadb, suite: php-mysqli, persona: mariadb, minutes: 90 }
+          - { label: php-pdo-mysql mysql, suite: php-pdo-mysql, persona: mysql, minutes: 60 }
+          - { label: php-pdo-mysql mariadb, suite: php-pdo-mysql, persona: mariadb, minutes: 60 }
+          # SQLAlchemy 2.0.36 in full: test/orm is the part the laptop's
+          # 30-minute hold couldn't finish (decisions/r4-interim.md Y8).
+          - { label: sqlalchemy dialect, suite: sqlalchemy, persona: mysql, minutes: 120, paths: test/dialect }
+          - { label: sqlalchemy sql engine base, suite: sqlalchemy, persona: mysql, minutes: 120, paths: "test/sql test/engine test/base" }
+          - { label: sqlalchemy orm, suite: sqlalchemy, persona: mysql, minutes: 330, paths: test/orm }
+          - { label: sqlalchemy ext, suite: sqlalchemy, persona: mysql, minutes: 120, paths: test/ext }
+          - { label: go-sql-driver mysql, suite: go-sql-driver, persona: mysql, minutes: 60 }
+          - { label: go-sql-driver mariadb, suite: go-sql-driver, persona: mariadb, minutes: 60 }
+          - { label: mysql2 mysql, suite: mysql2, persona: mysql, minutes: 60 }
+          - { label: mysql2 mariadb, suite: mysql2, persona: mariadb, minutes: 60 }
+          - { label: pymysql mysql, suite: pymysql, persona: mysql, minutes: 60 }
+          - { label: pymysql mariadb, suite: pymysql, persona: mariadb, minutes: 60 }
+          - { label: mysqlclient mysql, suite: mysqlclient, persona: mysql, minutes: 60 }
+          - { label: mysqlclient mariadb, suite: mysqlclient, persona: mariadb, minutes: 60 }
+          - { label: mariadb-connector-j mariadb, suite: mariadb-connector-j, persona: mariadb, minutes: 120 }
+    env:
+      SPRIG_CLIENTS_FILTER: ${{ matrix.filter }}
+      SPRIG_CLIENTS_PATHS: ${{ matrix.paths }}
+      SPRIG_CLIENTS_MEMORY: 4g
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/sprig-stack
+      - name: Start the reference server
+        run: deploy/compose/ci/refs.sh up ${{ matrix.persona }}
+      - name: Run the suite (reference, then gateway)
+        run: deploy/compose/ci/sql-suite.sh ${{ matrix.suite }} ${{ matrix.persona }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: heavy-sql-${{ matrix.suite }}-${{ strategy.job-index }}
+          path: |
+            target/ci-results
+            deploy/compose/.gateway-dev/*.log
+          if-no-files-found: ignore
+      - name: Stop
+        if: always()
+        run: deploy/compose/ci/stack-down.sh
+
+  hibernate-orm:
+    name: Hibernate ORM suite ${{ matrix.shard }}
+    if: >-
+      github.event_name == 'schedule' ||
+      inputs.jobs == 'all' || contains(inputs.jobs, 'hibernate-orm')
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      matrix:
+        # Gradle --tests patterns over hibernate-core's test packages
+        # (org.hibernate.orm.test.* since 6.0), about even by size.
+        include:
+          - { shard: a-c, tests: "org.hibernate.orm.test.a* org.hibernate.orm.test.b* org.hibernate.orm.test.c*" }
+          - { shard: d-h, tests: "org.hibernate.orm.test.d* org.hibernate.orm.test.e* org.hibernate.orm.test.f* org.hibernate.orm.test.g* org.hibernate.orm.test.h*" }
+          - { shard: i-l, tests: "org.hibernate.orm.test.i* org.hibernate.orm.test.j* org.hibernate.orm.test.k* org.hibernate.orm.test.l*" }
+          - { shard: m-p, tests: "org.hibernate.orm.test.m* org.hibernate.orm.test.n* org.hibernate.orm.test.o* org.hibernate.orm.test.p*" }
+          - { shard: q-s, tests: "org.hibernate.orm.test.q* org.hibernate.orm.test.r* org.hibernate.orm.test.s*" }
+          - { shard: t-z, tests: "org.hibernate.orm.test.t* org.hibernate.orm.test.u* org.hibernate.orm.test.v* org.hibernate.orm.test.w* org.hibernate.orm.test.x* org.hibernate.orm.test.y* org.hibernate.orm.test.z*" }
+          - { shard: other, tests: "org.hibernate.test* org.hibernate.engine* org.hibernate.internal* org.hibernate.dialect* org.hibernate.boot*" }
+    env:
+      SPRIG_CLIENTS_FILTER: ${{ matrix.tests }}
+      SPRIG_CLIENTS_MEMORY: 7g
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/sprig-stack
+      - name: Start the reference server
+        run: deploy/compose/ci/refs.sh up mysql
+      - name: Run the suite (MySQL 8.4, then the gateway's 3306)
+        run: deploy/compose/ci/sql-suite.sh hibernate-orm mysql
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: heavy-sql-hibernate-orm-${{ matrix.shard }}
+          path: |
+            target/ci-results
+            deploy/compose/.gateway-dev/*.log
+          if-no-files-found: ignore
+      - name: Stop
+        if: always()
+        run: deploy/compose/ci/stack-down.sh
+
+  mysql-test-run:
+    name: mysql-test-run subsets (${{ matrix.persona }})
+    if: >-
+      github.event_name == 'schedule' ||
+      inputs.jobs == 'all' || contains(inputs.jobs, 'mysql-test-run')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # MySQL's tests through 3306 against MySQL 8.4; through 3307 against
+        # MariaDB 11.8, where they show what a MariaDB server itself fails.
+        persona: [mysql, mariadb]
+    env:
+      SPRIG_CLIENTS_MEMORY: 2g
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/sprig-stack
+      - name: Start the reference server
+        run: deploy/compose/ci/refs.sh up ${{ matrix.persona }}
+      - name: Run the tests (reference, then gateway)
+        run: deploy/compose/ci/sql-suite.sh mysql-test-run ${{ matrix.persona }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: heavy-sql-mysql-test-run-${{ matrix.persona }}
+          path: |
+            target/ci-results
+            deploy/compose/.gateway-dev/*.log
+          if-no-files-found: ignore
+      - name: Stop
+        if: always()
+        run: deploy/compose/ci/stack-down.sh

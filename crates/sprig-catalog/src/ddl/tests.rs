@@ -408,6 +408,9 @@ async fn existence_errors_and_notes_read_like_mariadb() {
         .unwrap();
     assert_eq!(o.notes[0].code, 1007);
     assert_eq!(o.version, None);
+    // Decision PF6: the no-op names the committed version it read, so the
+    // session's next statement reads at least that snapshot.
+    assert_eq!(o.seen, Some(before));
     let e = env
         .run(
             DdlStatement::DropDatabase {

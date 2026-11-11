@@ -14,6 +14,7 @@ publish = false
 # Workspace crates.
 sprig-common = { path = "crates/sprig-common" }
 sprig-settings = { path = "crates/sprig-settings" }
+sprig-residency = { path = "crates/sprig-residency" }
 sprig-meta = { path = "crates/sprig-meta" }
 sprig-gateway = { path = "crates/sprig-gateway" }
 sprig-controller = { path = "crates/sprig-controller" }

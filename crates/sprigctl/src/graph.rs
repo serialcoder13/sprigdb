@@ -105,7 +105,9 @@ fn show_text(v: &Value) -> String {
         names("types"),
     );
     if let Some(m) = v["mirror"].as_str() {
-        out.push_str(&format!("Mirrors: {m}\n"));
+        out.push_str("Mirrors: ");
+        out.push_str(m);
+        out.push('\n');
     }
     let idx: Vec<[String; 6]> = v["indexes"]
         .as_array()

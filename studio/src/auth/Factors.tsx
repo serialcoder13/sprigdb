@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { FormattedMessage, useIntl } from 'react-intl';
 import { completeMfa, confirmEnrolment, startEnrolment, type Enrolment } from './session';
 import { errorText } from '../api/errors';
+import { QrCode } from './QrCode';
 
 const page = { maxInlineSize: 480, marginInline: 'auto', paddingBlockStart: 64 } as const;
 
@@ -91,6 +92,7 @@ export function RecoveryCodes({ codes, onDone }: Readonly<{ codes: string[]; onD
  * an enrol ticket (at login, when auth.mfa_required covers the user) the
  * confirmation also signs in. */
 export function EnrolForm({ ticket, onDone }: Readonly<{ ticket?: string; onDone: () => void }>) {
+  const intl = useIntl();
   const [e, setE] = useState<Enrolment | null>(null);
   const [code, setCode] = useState('');
   const [codes, setCodes] = useState<{ codes: string[]; finish: () => Promise<void> } | null>(null);
@@ -130,6 +132,7 @@ export function EnrolForm({ ticket, onDone }: Readonly<{ ticket?: string; onDone
           <p>
             <FormattedMessage id="mfa.enrolHint" />
           </p>
+          <QrCode text={e.otpauth_uri} label={intl.formatMessage({ id: 'mfa.qrLabel' })} />
           <dl className="kv">
             <dt>Secret</dt>
             <dd className="mono" data-testid="totp-secret">

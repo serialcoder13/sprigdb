@@ -380,6 +380,18 @@ pub fn fanin_stream_id(member: u64, stream: u64) -> Option<u64> {
     (member < (1 << 38) && stream < (1 << 24)).then_some((1 << 62) | (member << 24) | stream)
 }
 
+/// The member a fan-in record came from (its position's packed stream
+/// id); `None` for a record of the sink's own tenant.
+#[must_use]
+pub fn record_member(r: &crate::model::SinkRecord) -> Option<u64> {
+    match &r.pos {
+        crate::model::Position::Stream { stream, .. } if stream & (1 << 62) != 0 => {
+            Some((stream >> 24) & ((1 << 38) - 1))
+        }
+        _ => None,
+    }
+}
+
 /// One member's instance, as a fan-in task reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FanInMember {
@@ -789,5 +801,7 @@ mod fan_in_tests {
         assert!(fanin_stream_id(1 << 38, 1).is_none());
         assert!(fanin_stream_id(1, 1 << 24).is_none());
         assert_eq!(fanin_stream_id(3, 5), Some((1 << 62) | (3 << 24) | 5));
+        let packed = fanin_stream_id(252_530_600_004, 7).unwrap();
+        assert_eq!((packed >> 24) & ((1 << 38) - 1), 252_530_600_004);
     }
 }

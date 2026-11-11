@@ -9,3 +9,5 @@ mysql-connector-j      https://github.com/mysql/mysql-connector-j.git          9
 php-mysqli             image:sprigdb-conn-php:dev                              8.4.14
 php-pdo-mysql          image:sprigdb-conn-php:dev                              8.4.14
 sqlalchemy             https://github.com/sqlalchemy/sqlalchemy.git            rel_2_0_36
+hibernate-orm          https://github.com/hibernate/hibernate-orm.git          6.6.33
+mysql-test-run         image:sprigdb-mtr:8.4.11                                8.4.11

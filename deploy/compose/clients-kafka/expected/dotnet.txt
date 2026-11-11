@@ -1,0 +1,7 @@
+# Known differences between Apache Kafka 3.9.0 and SprigDB for the dotnet check
+# of deploy/compose/clients-kafka/run.sh; test ids are observation keys.
+# Format: <target-glob> <fail|skip|flaky|exclude> <test-glob> :: <reason>
+# (deploy/compose/ci/outcomes.py; the target is always "sprig"). Keys ending
+# in _seconds, _s or _rate are timings and never compared.
+#
+# Empty until the first CI run (defined, not yet run).

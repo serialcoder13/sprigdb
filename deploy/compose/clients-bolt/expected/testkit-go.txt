@@ -1,0 +1,12 @@
+# Known differences between Neo4j 5.26 and SprigDB in the Neo4j drivers'
+# testkit integration tests (tests.neo4j) through the go driver's backend
+# (deploy/compose/clients-bolt/run.sh go). Test ids are unittest ids.
+# Format: <target-glob> <fail|skip|flaky|exclude> <test-glob> :: <reason>
+# (deploy/compose/ci/outcomes.py; the target is always "sprig"). A test that
+# fails on Neo4j too is never counted against SprigDB.
+#
+# Known from chapter 43's as-built notes (Bolt 5.0 to 5.4, basic logins only,
+# bookmarks unsigned and not waited on); the rest comes from the first CI run
+# (defined, not yet run).
+sprig fail *.test_authentication.*bearer* :: bearer logins are refused with 39915 (chapter 43)
+sprig fail *.test_authentication.*impersonat* :: impersonation is refused with 39916 (chapter 43)

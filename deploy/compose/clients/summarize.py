@@ -4,8 +4,15 @@ expected/<suite>.txt.
     summarize.py <suite> <target> <format> <results-dir> <expected-file>
 
 <format> is gojson (go test -json), junit (JUnit XML files anywhere under
-<results-dir>/raw: pytest, Maven Surefire) or poku (the mysql2 runner's
-output, one result per test file).
+<results-dir>/raw: pytest, Maven Surefire, Gradle), poku (the mysql2
+runner's output, one result per test file) or mtr (mysql-test-run.pl's
+log, raw/mtr.log, one result per test case).
+
+With SPRIG_CLIENTS_BASELINE=<tests.tsv> (CI's heavy-suite jobs, which run
+each suite on a reference server first, in the same job), a test the
+expected file doesn't name and that didn't pass on the reference isn't
+counted against the target: it is reported as "fails on the reference
+too". The expected file still wins where it names a test.
 
 Writes <results-dir>/tests.tsv (test, status, first line of the failure) and
 <results-dir>/summary.txt, prints the counts and every difference from the
@@ -140,6 +147,53 @@ def parse_poku(raw):
     return result
 
 
+MTR_LINE = re.compile(
+    r"^\[\s*\d+%\]\s+(\S+)(?:\s+'([^']*)')?\s+\[\s*(pass|fail|skipped|disabled)\s*\]\s*(.*)$"
+)
+
+
+def parse_mtr(raw):
+    """mysql-test-run.pl prints `[ 12%] main.group_by  [ pass ]  1234` per
+    test case (with a combination in quotes when the suite has several).
+    A failure's reason is the first `mysqltest: ...` or diff line after it."""
+    result = {}
+    path = os.path.join(raw, "mtr.log")
+    with open(path, encoding="utf-8", errors="replace") as f:
+        lines = [ANSI.sub("", l.rstrip("\n")) for l in f]
+    for i, line in enumerate(lines):
+        m = MTR_LINE.match(line.strip())
+        if not m:
+            continue
+        name, combo, mark, tail = m.groups()
+        tid = f"{name}:{combo}" if combo else name
+        status = {"pass": "pass", "fail": "fail"}.get(mark, "skip")
+        msg = ""
+        if status == "fail":
+            for nxt in lines[i + 1 : i + 60]:
+                s = nxt.strip()
+                if s.startswith("mysqltest:") or s.startswith(("+", "-")) and not s.startswith(("+++", "---")):
+                    msg = s[:240]
+                    break
+        elif status == "skip":
+            msg = tail.strip()[:240]
+        # A retried test reports again: the last report wins.
+        result[tid] = (status, msg)
+    return result
+
+
+def load_baseline(path):
+    """tests.tsv of the same suite on the reference: test -> status."""
+    base = {}
+    if not path:
+        return base
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) >= 2:
+                base[parts[0]] = parts[1]
+    return base
+
+
 def load_expected(path, target):
     rules = []
     if not os.path.exists(path):
@@ -176,9 +230,11 @@ def main():
         return
     suite, target, fmt, results, expected = sys.argv[1:6]
     raw = os.path.join(results, "raw")
-    parser = {"gojson": parse_gojson, "junit": parse_junit, "poku": parse_poku}[fmt]
+    parser = {"gojson": parse_gojson, "junit": parse_junit, "poku": parse_poku, "mtr": parse_mtr}[fmt]
     tests = parser(raw)
     rules = load_expected(expected, target)
+    baseline = load_baseline(os.environ.get("SPRIG_CLIENTS_BASELINE", ""))
+    on_reference = 0
 
     counts = {"pass": 0, "fail": 0, "skip": 0}
     bad, info = [], []
@@ -193,6 +249,13 @@ def main():
             continue
         if want == "exclude":
             want = "skip"
+        if not n and status != "pass" and name in baseline and baseline[name] != "pass":
+            # Not ours: the reference fails or skips it too (or ran it
+            # with another outcome), in the same job.
+            on_reference += 1
+            if status == "fail":
+                info.append(f"fails on the reference too ({baseline[name]})  {name}: {msg}")
+            continue
         if status == "fail" and want != "fail":
             bad.append(f"UNEXPECTED FAIL  {name}: {msg}")
         elif want == "fail" and status != "fail":
@@ -212,6 +275,8 @@ def main():
         f"{counts['fail']} fail, {counts['skip']} skip; "
         f"{len(bad)} unexpected"
     )
+    if baseline:
+        head += f"; {on_reference} not passing on the reference either"
     with open(os.path.join(results, "summary.txt"), "w", encoding="utf-8") as f:
         f.write(head + "\n")
         for line in bad + info:

@@ -95,6 +95,14 @@ impl MyConn {
         Ok(())
     }
 
+    /// A write the caller ran on [`Self::raw`] succeeded: a held branch
+    /// records it (with the connection's affected rows), as [`Self::exec`]
+    /// does. `sql` must carry its values in the text (R8 round 5: the
+    /// graph store's statements).
+    pub fn note_write(&mut self, sql: &str) {
+        self.record(sql);
+    }
+
     /// A held branch records a write that succeeded.
     fn record(&mut self, sql: &str) {
         let (Some(rec), Some(c)) = (self.redo.as_mut(), self.conn.as_ref()) else {

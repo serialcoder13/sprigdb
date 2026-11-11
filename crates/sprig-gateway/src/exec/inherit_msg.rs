@@ -80,7 +80,7 @@ fn not_built(what: &str) -> SprigError {
     )
 }
 
-fn denied(ts: &TenantSession, cmd: &str, name: &str) -> SprigError {
+pub(super) fn denied(ts: &TenantSession, cmd: &str, name: &str) -> SprigError {
     SprigError::standard(
         1142,
         *b"42000",
@@ -93,7 +93,13 @@ fn denied(ts: &TenantSession, cmd: &str, name: &str) -> SprigError {
 
 /// Whether the session may do `a` on `db.name`: by name, or on the
 /// database.
-fn allows(ts: &TenantSession, cat: &TenantCatalog, a: Action, db: &str, name: &str) -> bool {
+pub(super) fn allows(
+    ts: &TenantSession,
+    cat: &TenantCatalog,
+    a: Action,
+    db: &str,
+    name: &str,
+) -> bool {
     let grants = crate::tenant::authz::privileges(ts, cat);
     if grants.unrestricted() {
         return true;
@@ -110,7 +116,7 @@ fn allows(ts: &TenantSession, cat: &TenantCatalog, a: Action, db: &str, name: &s
     ) || grants.allows(a, Target::Database { db_key: &db_key })
 }
 
-fn tenant_admin(ts: &TenantSession, cat: &TenantCatalog) -> bool {
+pub(super) fn tenant_admin(ts: &TenantSession, cat: &TenantCatalog) -> bool {
     let grants = crate::tenant::authz::privileges(ts, cat);
     grants.unrestricted() || grants.allows(Action::TenantAdmin, Target::Tenant)
 }
@@ -630,7 +636,7 @@ impl PassSession {
     }
 
     /// A catalog change of this session's own tenant: read it at once.
-    async fn after_own_change(&mut self, v: u64) -> Result<()> {
+    pub(super) async fn after_own_change(&mut self, v: u64) -> Result<()> {
         if let Some(ts) = self.tenant.as_deref_mut() {
             ts.changed(Some(v));
             ts.refresh().await?;
@@ -1129,7 +1135,11 @@ fn phys_name(p: Option<&Value>) -> Option<(&str, &str)> {
 }
 
 /// The scope of a `FOR EACH TENANT` clause in `declarer`.
-async fn scope_of(svc: &TenantServices, declarer: TenantId, f: &grammar::ForEach) -> Result<Scope> {
+pub(super) async fn scope_of(
+    svc: &TenantServices,
+    declarer: TenantId,
+    f: &grammar::ForEach,
+) -> Result<Scope> {
     let under = match &f.under {
         None => None,
         Some(n) => {
@@ -1153,7 +1163,7 @@ async fn scope_of(svc: &TenantServices, declarer: TenantId, f: &grammar::ForEach
     })
 }
 
-fn check_quota(svc: &TenantServices, cat: &TenantCatalog, own: &MsgState) -> Result<()> {
+pub(super) fn check_quota(svc: &TenantServices, cat: &TenantCatalog, own: &MsgState) -> Result<()> {
     let max = svc.settings.get(
         &sprig_inherit::msg::settings::MAX_DEFINITIONS_PER_TENANT,
         &cat.setting_ctx(&svc.dc),
@@ -1172,7 +1182,7 @@ fn check_quota(svc: &TenantServices, cat: &TenantCatalog, own: &MsgState) -> Res
     Ok(())
 }
 
-async fn next_object_id(svc: &TenantServices, t: TenantId) -> Result<u64> {
+pub(super) async fn next_object_id(svc: &TenantServices, t: TenantId) -> Result<u64> {
     use sprig_catalog::CatalogLocator;
     let ep = svc.locator.writer(t).await?;
     let mut conn = ep.pool.get_conn().await.map_err(|e| {
@@ -1184,7 +1194,7 @@ async fn next_object_id(svc: &TenantServices, t: TenantId) -> Result<u64> {
 /// Every member holding an instance of stream definition `def` re-applies
 /// its derived state (settings, triggers) now, in the background; the
 /// number of instances.
-async fn rollout(svc: &Arc<TenantServices>, def: DefKey) -> Result<usize> {
+pub(super) async fn rollout(svc: &Arc<TenantServices>, def: DefKey) -> Result<usize> {
     let entries = inherited::instances_of(svc, def).await?;
     let n = entries.len();
     let svc = Arc::clone(svc);
@@ -2063,34 +2073,48 @@ impl PassSession {
                     DefKind::Queue,
                     DefKind::Binding,
                     DefKind::Trigger,
+                    DefKind::Connection,
+                    DefKind::Sink,
                 ] {
                     for d in chain.reaching(kind) {
                         let i = live.get(&d.key());
-                        let state = if matches!(kind, DefKind::Trigger | DefKind::Binding)
-                            && chain.disabled(d.key())
-                        {
-                            "disabled".to_owned()
-                        } else {
-                            i.map_or_else(
-                                || {
-                                    if kind == DefKind::Binding {
-                                        "inherited".to_owned()
-                                    } else {
-                                        "none".to_owned()
-                                    }
-                                },
-                                |i| {
-                                    if i.physical
-                                        .as_ref()
-                                        .is_some_and(|p| p.get("blocked").is_some())
-                                    {
-                                        "blocked".to_owned()
-                                    } else {
-                                        i.state.as_str().to_owned()
-                                    }
-                                },
-                            )
-                        };
+                        let state =
+                            if matches!(kind, DefKind::Trigger | DefKind::Binding | DefKind::Sink)
+                                && chain.disabled(d.key())
+                            {
+                                "disabled".to_owned()
+                            } else {
+                                i.map_or_else(
+                                    || {
+                                        if matches!(kind, DefKind::Binding | DefKind::Connection) {
+                                            "inherited".to_owned()
+                                        } else {
+                                            "none".to_owned()
+                                        }
+                                    },
+                                    |i| {
+                                        if i.physical
+                                            .as_ref()
+                                            .is_some_and(|p| p.get("blocked").is_some())
+                                        {
+                                            "blocked".to_owned()
+                                        } else if let Some(p) = i.physical.as_ref().filter(|p| {
+                                            p.get("waiting_config").is_some()
+                                                || p.get("error").is_some()
+                                        }) {
+                                            // R9 (r9more): an inherited sink waiting for its
+                                            // member's configuration (39241), or not deployable.
+                                            if p.get("waiting_config").is_some() {
+                                                "waiting_config".to_owned()
+                                            } else {
+                                                "error".to_owned()
+                                            }
+                                        } else {
+                                            i.state.as_str().to_owned()
+                                        }
+                                    },
+                                )
+                            };
                         let from = if d.declarer == me {
                             "self".to_owned()
                         } else {

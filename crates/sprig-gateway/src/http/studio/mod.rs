@@ -38,6 +38,10 @@ pub mod catalog;
 pub mod cursors;
 pub mod exports;
 pub mod grants;
+// Round 4: the logic editors (chapter 44 step 26).
+pub mod logic;
+// Round 4: the stream, queue and sink views (chapter 44 steps 28–31).
+pub mod messaging;
 pub mod mfa;
 pub mod ops;
 // Chapter 52: the approvals inbox.
@@ -837,6 +841,8 @@ pub async fn handle(
             }
         }
         (_, p) if p == "/v1/ops" || p.starts_with("/v1/ops/") => ops::route(core, info, req).await,
+        (_, p) if logic::is_logic_path(p) => logic::route(core, info, req).await,
+        (_, p) if messaging::is_messaging_path(p) => messaging::route(core, info, req).await,
         ("GET", p) if p == "/v1/shards" || p.starts_with("/v1/shards/") => {
             match core
                 .caller(info, hdr(&req, "authorization"), None, hdr(&req, "host"))

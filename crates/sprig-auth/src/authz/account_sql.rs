@@ -636,7 +636,11 @@ impl AccountCtx<'_> {
         if level == Level::GraphElement {
             // Neo4j's graph privileges: READ (and MATCH, TRAVERSE) read
             // the label or type; SELECT and ALL are accepted as their SQL
-            // names. Writes stay graph-wide (decision G42).
+            // names (decision G42). Round 5: CREATE, DELETE and SET
+            // PROPERTY (all properties, `{*}`) write elements of the label
+            // or type; MERGE is MATCH, CREATE and SET PROPERTY; WRITE all
+            // three writes; INSERT and UPDATE are accepted as their SQL
+            // names.
             for it in items {
                 if !it.columns.is_empty() {
                     return Err(illegal_grant());
@@ -644,6 +648,23 @@ impl AccountCtx<'_> {
                 match it.name.as_str() {
                     "READ" | "MATCH" | "TRAVERSE" | "SELECT" | "ALL" | "ALL PRIVILEGES" => {
                         set = set.with(Action::Select);
+                    }
+                    "CREATE" | "INSERT" => set = set.with(Action::Insert),
+                    "DELETE" => set = set.with(Action::Delete),
+                    "SET PROPERTY" | "SET PROPERTY {*}" | "UPDATE" => {
+                        set = set.with(Action::Update);
+                    }
+                    "MERGE" | "MERGE {*}" => {
+                        set = set
+                            .with(Action::Select)
+                            .with(Action::Insert)
+                            .with(Action::Update);
+                    }
+                    "WRITE" => {
+                        set = set
+                            .with(Action::Insert)
+                            .with(Action::Update)
+                            .with(Action::Delete);
                     }
                     "USAGE" => {}
                     _ => return Err(illegal_grant()),

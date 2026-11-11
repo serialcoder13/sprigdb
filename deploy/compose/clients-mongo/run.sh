@@ -31,9 +31,23 @@ mongoose)
     fi
     files=("$@")
     [[ ${#files[@]} -gt 0 ]] || files=(test/*.test.js)
+    # CI (.github/workflows/heavy-protocols.yml): SPRIG_MONGOOSE_SHARD=i/n
+    # runs every n-th test file from the i-th (0-based) of the sorted list;
+    # SPRIG_MONGOOSE_XUNIT=<file> writes mocha's xunit report there instead
+    # of the dot reporter; SPRIG_MONGOOSE_LABEL names the results file.
+    if [[ -n ${SPRIG_MONGOOSE_SHARD:-} ]]; then
+        shard=${SPRIG_MONGOOSE_SHARD%/*} of=${SPRIG_MONGOOSE_SHARD#*/}
+        mapfile -t all < <(cd "$src" && printf '%s\n' test/*.test.js | sort)
+        files=()
+        for i in "${!all[@]}"; do
+            ((i % of == shard)) && files+=("${all[$i]}")
+        done
+    fi
+    reporter=(--reporter dot)
+    [[ -n ${SPRIG_MONGOOSE_XUNIT:-} ]] && reporter=(--reporter xunit --reporter-option "output=$SPRIG_MONGOOSE_XUNIT")
     (cd "$src" && MONGOOSE_TEST_URI=$uri MONGOOSE_REPLSET_URI=$uri \
-        npx mocha --exit --timeout 30000 --reporter dot "${files[@]}") 2>&1 |
-        tee "$cache/results/mongoose.txt"
+        npx mocha --exit --timeout 30000 "${reporter[@]}" "${files[@]}") 2>&1 |
+        tee "$cache/results/${SPRIG_MONGOOSE_LABEL:-mongoose}.txt"
     ;;
 *) echo "usage: run.sh spring-data|mongoose <uri> [files]" >&2; exit 2 ;;
 esac

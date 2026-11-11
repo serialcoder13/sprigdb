@@ -819,7 +819,9 @@ pub fn parse_inherited(sql: &str) -> Result<Option<InheritedAlter>> {
             credentials,
         }
     } else if p.kw("RESET") {
-        if p.peek().is_some_and(|t| t.kind == Tk::Punct && t.text == "(") {
+        if p.peek()
+            .is_some_and(|t| t.kind == Tk::Punct && t.text == "(")
+        {
             InheritedOp::Reset(p.name_list()?)
         } else {
             InheritedOp::Reset(Vec::new())
@@ -1425,6 +1427,74 @@ mod tests {
         assert!(
             parse("CREATE SINK x FOR EACH TENANT FROM STREAM s TO WEBHOOK CONNECTION c").is_err()
         );
+    }
+
+    #[test]
+    fn inherited_connections_and_overrides() {
+        // A definition's credentials may be REQUIRED (the clause is cut
+        // out by the gateway before this grammar sees the statement).
+        let Some(Stmt::CreateConnection(c)) = parse(
+            "CREATE CONNECTION hooks TYPE WEBHOOK WITH (url = REQUIRED, auth = 'bearer') \
+             CREDENTIALS (token = REQUIRED, signing_secret = REQUIRED)",
+        )
+        .unwrap() else {
+            panic!("not a connection");
+        };
+        assert_eq!(c.required_credentials, vec!["token", "signing_secret"]);
+        assert!(c.credentials.is_empty());
+        assert_eq!(c.options[0], ("url".into(), OptVal::Required));
+        let a = parse_inherited(
+            "ALTER INHERITED CONNECTION sec.hooks FOR TENANT acme SET (url = 'https://a.example') \
+             CREDENTIALS (token = 't1')",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!a.sink);
+        assert_eq!(a.name.db.as_deref(), Some("sec"));
+        assert_eq!(a.target, InheritTarget::Tenant("acme".into()));
+        assert_eq!(
+            a.op,
+            InheritedOp::Set {
+                options: vec![("url".into(), OptVal::Text("https://a.example".into()))],
+                credentials: vec![("token".into(), "t1".into())],
+            }
+        );
+        let a = parse_inherited("ALTER INHERITED CONNECTION hooks SET CREDENTIALS (token = 'x')")
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.target, InheritTarget::Own);
+        assert!(matches!(a.op, InheritedOp::Set { ref options, .. } if options.is_empty()));
+        let a = parse_inherited("ALTER INHERITED SINK k FOR SUBTREE DISABLE")
+            .unwrap()
+            .unwrap();
+        assert!(a.sink);
+        assert_eq!(
+            (a.target, a.op),
+            (InheritTarget::Subtree(None), InheritedOp::Disable)
+        );
+        let a = parse_inherited("ALTER INHERITED SINK k FOR SUBTREE b RESET (batch_max_records)")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (a.target, a.op),
+            (
+                InheritTarget::Subtree(Some("b".into())),
+                InheritedOp::Reset(vec!["batch_max_records".into()])
+            )
+        );
+        assert!(
+            parse_inherited("ALTER INHERITED STREAM s SPRIG SET (x = 1)")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            parse_inherited("ALTER INHERITED CONNECTION c SET CREDENTIALS (token = x)").is_err()
+        );
+        // The redaction covers ALTER INHERITED too.
+        let (r, v) =
+            redact("ALTER INHERITED CONNECTION c SET CREDENTIALS (token = 'zz9')").unwrap();
+        assert!(!r.contains("zz9"), "{r}");
+        assert_eq!(v.len(), 1);
     }
 
     #[test]

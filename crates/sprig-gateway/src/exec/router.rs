@@ -222,6 +222,30 @@ impl RouterState {
         self.coord.as_ref().is_some_and(|c| c.in_txn())
     }
 
+    /// ST31 (bugfix5): the session's statement was abandoned (`KILL QUERY`,
+    /// or its REST, gRPC or MySQL client went away): every statement still
+    /// under way on the router's other connections (the session's
+    /// connection to another cluster, the coordinator's branches) is
+    /// stopped with `KILL QUERY` and drained, as the session's own
+    /// connection's is. Per-shard streams stop when they are dropped
+    /// (`BackendSession`'s `Drop`).
+    pub(crate) async fn abandon_in_flight(&mut self, drain: Duration) {
+        let clusters: Vec<ClusterId> = self
+            .coord
+            .as_ref()
+            .map(|c| c.branches().iter().map(|b| b.cluster().clone()).collect())
+            .unwrap_or_default();
+        let mut conns: Vec<&mut BackendSession> = self.others.values_mut().collect();
+        if let Some(c) = self.coord.as_mut() {
+            conns.extend(c.conns_mut(&clusters).into_iter().map(|(_, b)| b));
+        }
+        for bs in conns {
+            if bs.in_flight() {
+                bs.abandon(drain).await;
+            }
+        }
+    }
+
     /// Ends the session's router state: an open transaction rolls back.
     pub(crate) async fn close(&mut self) {
         if let Some(c) = self.coord.as_mut() {
@@ -664,24 +688,9 @@ impl PassSession {
     /// The shard reference of the session's default schema (unsharded
     /// statements inside a coordinator transaction).
     fn home_ref(&self) -> ShardRef {
-        let schema = self
-            .bs
-            .as_ref()
-            .and_then(|b| b.vars().schema.clone())
-            .unwrap_or_default();
-        let (db, group, shard) = match schema.parse::<SchemaName>() {
-            Ok(SchemaName::Shard {
-                db, group, shard, ..
-            }) => (db, group, shard),
-            _ => (DbId(0), GroupId(0), ShardId(0)),
-        };
-        ShardRef {
-            db,
-            group,
-            shard,
-            hash_point: 0,
-            schema,
-        }
+        let schema = self.bs.as_ref().and_then(|b| b.vars().schema.clone());
+        let map = self.tenant.as_deref().map(|ts| ts.map());
+        home_ref_of(schema, map.as_deref().map(|m| m as &dyn NameMap))
     }
 
     fn main_cluster(&self) -> ClusterId {
@@ -2388,6 +2397,39 @@ fn as_db(e: &SprigError) -> Option<DbError> {
     db_error(e)
 }
 
+/// The anchor of a branch opened for an unsharded statement: the shard of
+/// `schema` (the session's default schema). A session without one (an
+/// internal session, a client that names every table) anchors on its
+/// tenant's first database's first schema, which is on the session's own
+/// cluster and has `__sprig_dtx` (R34, bugfix5). Before, the anchor's
+/// schema was empty, and a transaction whose first statement was
+/// unsharded and that then wrote on two clusters failed its `COMMIT` with
+/// 1102 (`Incorrect database name ''`): the decision row went to that
+/// first branch's anchor.
+fn home_ref_of(schema: Option<String>, map: Option<&dyn NameMap>) -> ShardRef {
+    let schema = schema
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            let dbs = map?.list();
+            let first = dbs.iter().min_by_key(|d| d.id.0)?;
+            first.shards.first().map(ToString::to_string)
+        })
+        .unwrap_or_default();
+    let (db, group, shard) = match schema.parse::<SchemaName>() {
+        Ok(SchemaName::Shard {
+            db, group, shard, ..
+        }) => (db, group, shard),
+        _ => (DbId(0), GroupId(0), ShardId(0)),
+    };
+    ShardRef {
+        db,
+        group,
+        shard,
+        hash_point: 0,
+        schema,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2458,5 +2500,25 @@ mod tests {
         ));
         assert!(!column_gone(&SprigError::backend(1146, *b"42S02", "x")));
         assert!(words_of("SELECT `Email` FROM users").contains("users"));
+    }
+
+    #[test]
+    fn a_session_without_a_schema_anchors_on_its_first_database() {
+        use sprig_common::ids::TenantId;
+        use sprig_sql::names::MemoryNameMap;
+        let map = MemoryNameMap::new(TenantId(7))
+            .with_db(2, "b", 0, 0)
+            .with_db(1, "a", 0, 0);
+        // R34: before, the anchor's schema was '' (COMMIT then failed 1102).
+        let r = home_ref_of(None, Some(&map));
+        let first = map.database("a").unwrap().shards[0].to_string();
+        assert_eq!(r.schema, first);
+        assert_eq!(r.db, DbId(1));
+        // The session's own schema wins.
+        let b = map.database("b").unwrap().shards[0].to_string();
+        let r = home_ref_of(Some(b.clone()), Some(&map));
+        assert_eq!((r.schema, r.db), (b, DbId(2)));
+        // No database at all: nothing to anchor on, as before.
+        assert_eq!(home_ref_of(None, None).schema, "");
     }
 }

@@ -51,6 +51,15 @@ export function Shell() {
           <NavLink to={`${base}/q/${firstTab}`}>
             <FormattedMessage id="nav.query" />
           </NavLink>
+          <NavLink to={`${base}/redis`}>
+            <FormattedMessage id="nav.redis" />
+          </NavLink>
+          <NavLink to={`${base}/logic`}>
+            <FormattedMessage id="nav.logic" />
+          </NavLink>
+          <NavLink to={`${base}/messaging`}>
+            <FormattedMessage id="nav.messaging" />
+          </NavLink>
           <NavLink to={`${base}/indexing`}>
             <FormattedMessage id="nav.indexing" />
           </NavLink>

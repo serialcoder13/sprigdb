@@ -1964,13 +1964,25 @@ async fn round_five_async_mirrors() {
     sprigctl(
         &ctl,
         &[
-            "settings", "set", "--scope", "database", "--tenant", &tenant, "--db", "r8five_am",
-            "sharding.min_shards", "2", "--reason", "r8five async mirrors",
+            "settings",
+            "set",
+            "--scope",
+            "database",
+            "--tenant",
+            &tenant,
+            "--db",
+            "r8five_am",
+            "sharding.min_shards",
+            "2",
+            "--reason",
+            "r8five async mirrors",
         ],
     );
     {
         let mut c = sql_conn(&sql, &user, &pw).await;
-        c.query_drop("CREATE GRAPH r8five_am.g").await.expect("create");
+        c.query_drop("CREATE GRAPH r8five_am.g")
+            .await
+            .expect("create");
         c.disconnect().await.expect("bye");
     }
     let db = vec![("db", PackValue::str(gname))];
@@ -2016,7 +2028,10 @@ async fn round_five_async_mirrors() {
     ];
     let mut before = Vec::new();
     for q in corpus {
-        before.push(rows_text(&c.query(q, vec![], db.clone()).await.expect(q), true));
+        before.push(rows_text(
+            &c.query(q, vec![], db.clone()).await.expect(q),
+            true,
+        ));
     }
     // A writer making a chain, and a checker that reads each new link
     // backwards with the writer's bookmark.
@@ -2055,7 +2070,7 @@ async fn round_five_async_mirrors() {
             (ok, retried)
         })
     };
-    let checker = {
+    let check_task = {
         let (addr, user, pw) = (addr.clone(), user.clone(), pw.clone());
         let db = db.clone();
         tokio::spawn(async move {
@@ -2071,7 +2086,10 @@ async fn round_five_async_mirrors() {
                 }
                 let q = "MATCH (a:W {k: $k})<-[:THEN]-(p:W) RETURN p.k";
                 let got = loop {
-                    match r.query(q, vec![("k", PackValue::Int(k))], extra.clone()).await {
+                    match r
+                        .query(q, vec![("k", PackValue::Int(k))], extra.clone())
+                        .await
+                    {
                         Ok(x) => break x,
                         Err(e) if e.code.starts_with("Neo.TransientError") => {
                             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2088,7 +2106,13 @@ async fn round_five_async_mirrors() {
             (checked, wrong)
         })
     };
-    async fn same(c: &mut Client, db: &[(&str, PackValue)], corpus: &[&str], before: &[Vec<String>], label: &str) {
+    async fn same(
+        c: &mut Client,
+        db: &[(&str, PackValue)],
+        corpus: &[&str],
+        before: &[Vec<String>],
+        label: &str,
+    ) {
         for (q, want) in corpus.iter().zip(before) {
             let got = c.query(q, vec![], db.to_vec()).await.expect(q);
             assert_eq!(&rows_text(&got, true), want, "{label}: {q}");
@@ -2121,14 +2145,18 @@ async fn round_five_async_mirrors() {
         let s = s.to_string();
         let j = sprigctl(&ctl, &["shard", "move", &tenant, &gid, &s, "--to", to]);
         let id = j["id"].as_str().expect("job id").to_owned();
-        let label = if to == "dc-a-c2" { "move to c2" } else { "move to c3" };
+        let label = if to == "dc-a-c2" {
+            "move to c2"
+        } else {
+            "move to c3"
+        };
         steps.push((label, wait_job(&ctl, &id).await));
         same(&mut c, &db, &corpus, &before, label).await;
     }
     tokio::time::sleep(Duration::from_secs(3)).await;
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let (ok, retried) = writer.await.expect("writer");
-    let (checked, wrong) = checker.await.expect("checker");
+    let (checked, wrong) = check_task.await.expect("checker");
     // Every write landed once.
     let w = c
         .query(
@@ -2165,7 +2193,8 @@ async fn round_five_async_mirrors() {
     assert!(wrong.is_empty(), "incoming hops missed writes: {wrong:?}");
     assert_eq!(mode, "async/ready");
     assert_eq!(rels, mirrors, "one mirror per relationship");
-    let clusters: std::collections::BTreeSet<&str> = shards.iter().map(|(_, c)| c.as_str()).collect();
+    let clusters: std::collections::BTreeSet<&str> =
+        shards.iter().map(|(_, c)| c.as_str()).collect();
     assert_eq!(clusters.len(), 3, "{shards:?}");
     // The commit check and DETACH DELETE see incoming edges (scatter).
     let e = c
@@ -2174,11 +2203,19 @@ async fn round_five_async_mirrors() {
         .expect_err("dangling");
     assert_eq!(e.code, "Neo.ClientError.Schema.ConstraintValidationFailed");
     let count = |rows: &Rows| rows.records[0][0].as_int().unwrap_or(-1);
-    let all = count(&c.query("MATCH ()-[r:NEXT]->() RETURN count(r)", vec![], db.clone()).await.expect("count"));
-    let touching = count(
-        &c.query("MATCH (n:R {i: 0})-[r]-() RETURN count(DISTINCT r)", vec![], db.clone())
+    let all = count(
+        &c.query("MATCH ()-[r:NEXT]->() RETURN count(r)", vec![], db.clone())
             .await
-            .expect("touching"),
+            .expect("count"),
+    );
+    let touching = count(
+        &c.query(
+            "MATCH (n:R {i: 0})-[r]-() RETURN count(DISTINCT r)",
+            vec![],
+            db.clone(),
+        )
+        .await
+        .expect("touching"),
     );
     c.query("MATCH (n:R {i: 0}) DETACH DELETE n", vec![], db.clone())
         .await
@@ -2194,7 +2231,332 @@ async fn round_five_async_mirrors() {
         if v.1 == v.2 {
             break;
         }
-        assert!(t2.elapsed() < Duration::from_secs(60), "mirrors after DETACH DELETE: {v:?}");
+        assert!(
+            t2.elapsed() < Duration::from_secs(60),
+            "mirrors after DETACH DELETE: {v:?}"
+        );
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+}
+
+/// Round 5 (decision G50): per-label and per-type write grants, through a
+/// gateway, on a graph over several shards. A writer holding `READ` on
+/// the graph's labels plus `CREATE`, `DELETE` and `SET PROPERTY` on label
+/// `Doc` and `CREATE` on type `REF` (no graph-wide write) may write
+/// exactly those; every other write is refused with `Forbidden` and its
+/// transaction rolls back; `SHOW GRANTS` shows Neo4j's forms; after
+/// `REVOKE` the writes are refused again.
+///
+/// Needs the end-to-end variables.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // grant, write, refuse, revoke
+async fn round_five_label_write_grants() {
+    let (Some(addr), Some(user), Some(pw), Some(sql)) = (
+        env("SPRIG_TEST_BOLT_ADDR"),
+        env("SPRIG_TEST_BOLT_USER"),
+        env("SPRIG_TEST_BOLT_PASSWORD"),
+        env("SPRIG_TEST_SQL_ADDR"),
+    ) else {
+        eprintln!("skipped: SPRIG_TEST_BOLT_* / SPRIG_TEST_SQL_ADDR not set");
+        return;
+    };
+    let tenant = user.split('.').next().unwrap_or("acme").to_owned();
+    let mut s = sql_conn(&sql, &user, &pw).await;
+    s.query_drop("CREATE DATABASE IF NOT EXISTS r8five_w")
+        .await
+        .expect("db");
+    s.query_drop("DROP GRAPH IF EXISTS r8five_w.g")
+        .await
+        .expect("drop");
+    s.query_drop("CREATE GRAPH r8five_w.g")
+        .await
+        .expect("create");
+    let db = vec![("db", PackValue::str("r8five_w.g"))];
+    let mut c = connect(&addr, &user, &pw).await.expect("login");
+    c.query(
+        "CREATE (a:Doc {n: 'a'}), (b:Doc:Secret {n: 'b'}), (s:Secret {n: 's'}), (a)-[:REF]->(b), (a)-[:OWN]->(s)",
+        vec![],
+        db.clone(),
+    )
+    .await
+    .expect("setup");
+    let _ = s.query_drop("DROP USER IF EXISTS r8five_writer").await;
+    s.query_drop("CREATE USER r8five_writer IDENTIFIED BY 'r8five-writer-pw'")
+        .await
+        .expect("user");
+    for g in [
+        "GRANT SELECT ON r8five_w.* TO r8five_writer",
+        "GRANT CREATE, DELETE, SET PROPERTY {*} ON GRAPH r8five_w.g NODES Doc TO r8five_writer",
+        "GRANT CREATE ON GRAPH r8five_w.g RELATIONSHIPS REF TO r8five_writer",
+    ] {
+        s.query_drop(g).await.unwrap_or_else(|e| panic!("{g}: {e}"));
+    }
+    let grants: Vec<String> = s
+        .query("SHOW GRANTS FOR r8five_writer")
+        .await
+        .expect("show");
+    assert!(
+        grants.iter().any(|g| g.contains(
+            "GRANT CREATE, DELETE, SET PROPERTY {*} ON GRAPH `r8five_w`.`g` NODES `Doc`"
+        )),
+        "{grants:?}"
+    );
+    assert!(
+        grants
+            .iter()
+            .any(|g| g.contains("GRANT CREATE ON GRAPH `r8five_w`.`g` RELATIONSHIPS `REF`")),
+        "{grants:?}"
+    );
+    let writer = format!("{tenant}.r8five_writer");
+    let mut w = connect(&addr, &writer, "r8five-writer-pw")
+        .await
+        .expect("writer login");
+    let allowed = [
+        "CREATE (:Doc {n: 'd'})",
+        "MATCH (a:Doc {n: 'a'}), (d:Doc {n: 'd'}) CREATE (a)-[:REF]->(d)",
+        "MATCH (a:Doc {n: 'a'}) SET a.x = 1",
+        "MATCH (b:Doc {n: 'b'}) SET b.x = 2",
+        "MATCH (d:Doc {n: 'd'}) SET d:Doc",
+        "CREATE (:Doc {n: 'del'})",
+        "MATCH (x:Doc {n: 'del'}) DELETE x",
+    ];
+    for q in allowed {
+        w.query(q, vec![], db.clone())
+            .await
+            .unwrap_or_else(|e| panic!("{q}: {e}"));
+    }
+    let refused = [
+        "CREATE (:Secret {n: 'e'})",
+        "CREATE (:Doc:Secret {n: 'e'})",
+        "CREATE ({n: 'e'})",
+        "MATCH (a:Doc {n: 'a'}), (s:Secret {n: 's'}) CREATE (a)-[:OWN]->(s)",
+        "MATCH (s:Secret {n: 's'}) SET s.x = 1",
+        "MATCH (a:Doc {n: 'a'}) SET a:Secret",
+        "MATCH (b:Doc {n: 'b'}) REMOVE b:Secret",
+        "MATCH ()-[r:REF]->() SET r.w = 1",
+        "MATCH ()-[r:OWN]->() DELETE r",
+        "MATCH (d:Doc {n: 'd'}) DETACH DELETE d",
+        "MATCH (b:Doc {n: 'b'}) DETACH DELETE b",
+    ];
+    let mut codes = Vec::new();
+    for q in refused {
+        let e = w.query(q, vec![], db.clone()).await.expect_err(q);
+        codes.push(e.code.clone());
+        assert!(
+            e.code.contains("Forbidden") || e.message.contains("not allowed"),
+            "{q}: {e:?}"
+        );
+    }
+    // The refused statements left nothing behind (each rolled back).
+    let state = c
+        .query(
+            "MATCH (n) WITH count(n) AS n MATCH ()-[r]->() RETURN n, count(r)",
+            vec![],
+            db.clone(),
+        )
+        .await
+        .expect("state");
+    assert_eq!(rows_text(&state, true), ["4 | 3"], "after refusals");
+    // An explicit transaction: allowed writes, then a refused one, rolls
+    // back as a whole.
+    w.begin(db.clone()).await.expect("begin");
+    w.query("CREATE (:Doc {n: 'tx'})", vec![], vec![])
+        .await
+        .expect("tx write");
+    let e = w
+        .query("CREATE (:Secret {n: 'tx'})", vec![], vec![])
+        .await
+        .expect_err("tx refused");
+    assert!(e.message.contains("not allowed"), "{e:?}");
+    let _ = w.reset().await;
+    let n = c
+        .query("MATCH (n {n: 'tx'}) RETURN count(n)", vec![], db.clone())
+        .await
+        .expect("tx count");
+    assert_eq!(int0(&n), 0, "the transaction rolled back");
+    let _ = w.goodbye().await;
+    s.query_drop(
+        "REVOKE CREATE, DELETE, SET PROPERTY {*} ON GRAPH r8five_w.g NODES Doc FROM r8five_writer",
+    )
+    .await
+    .expect("revoke");
+    s.query_drop("REVOKE CREATE ON GRAPH r8five_w.g RELATIONSHIPS REF FROM r8five_writer")
+        .await
+        .expect("revoke types");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let mut w = connect(&addr, &writer, "r8five-writer-pw")
+        .await
+        .expect("writer login");
+    let e = w
+        .query("CREATE (:Doc {n: 'z'})", vec![], db.clone())
+        .await
+        .expect_err("revoked");
+    assert!(e.message.contains("denied"), "{e:?}");
+    let r = w
+        .query("MATCH (n:Doc) RETURN count(n)", vec![], db.clone())
+        .await
+        .expect("still reads");
+    assert_eq!(int0(&r), 3);
+    let _ = w.goodbye().await;
+    eprintln!(
+        "label write grants: {} allowed writes ran, {} refused ({:?}), a refused write rolled its transaction back, revoked",
+        allowed.len(),
+        refused.len(),
+        codes.iter().collect::<std::collections::BTreeSet<_>>()
+    );
+    s.query_drop("DROP USER r8five_writer")
+        .await
+        .expect("drop user");
+    s.query_drop("DROP GRAPH r8five_w.g")
+        .await
+        .expect("drop graph");
+    let _ = c.goodbye().await;
+    s.disconnect().await.expect("bye");
+}
+
+/// Round 5 (decision G47): the applier's worker killed (`kill -9`) while
+/// a writer runs and restarted later. While it is down, readers given the
+/// writer's bookmarks find every new relationship (they scatter once the
+/// positions go stale); after the restart the job resumes at its
+/// checkpoint and every relationship gets its mirror.
+///
+/// Needs the end-to-end variables, `SPRIG_TEST_SPRIGCTL`, and
+/// `SPRIG_TEST_WORKER_CTL`: a command taking `kill` or `start` for this
+/// deployment's worker.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn round_five_applier_kill() {
+    let (Some(addr), Some(user), Some(pw), Some(sql), Some(ctl), Some(wk)) = (
+        env("SPRIG_TEST_BOLT_ADDR"),
+        env("SPRIG_TEST_BOLT_USER"),
+        env("SPRIG_TEST_BOLT_PASSWORD"),
+        env("SPRIG_TEST_SQL_ADDR"),
+        env("SPRIG_TEST_SPRIGCTL"),
+        env("SPRIG_TEST_WORKER_CTL"),
+    ) else {
+        eprintln!(
+            "skipped: SPRIG_TEST_BOLT_* / SPRIG_TEST_SPRIGCTL / SPRIG_TEST_WORKER_CTL not set"
+        );
+        return;
+    };
+    let tenant = env("SPRIG_TEST_TENANT").unwrap_or_else(|| "acme".into());
+    let gname = "r8five_ak.g";
+    {
+        let mut c = sql_conn(&sql, &user, &pw).await;
+        c.query_drop("CREATE DATABASE IF NOT EXISTS r8five_ak")
+            .await
+            .expect("db");
+        c.query_drop("DROP GRAPH IF EXISTS r8five_ak.g")
+            .await
+            .expect("drop");
+        c.disconnect().await.expect("bye");
+    }
+    sprigctl(
+        &ctl,
+        &[
+            "settings",
+            "set",
+            "--scope",
+            "database",
+            "--tenant",
+            &tenant,
+            "--db",
+            "r8five_ak",
+            "sharding.min_shards",
+            "4",
+            "--reason",
+            "r8five applier kill",
+        ],
+    );
+    {
+        let mut c = sql_conn(&sql, &user, &pw).await;
+        c.query_drop("CREATE GRAPH r8five_ak.g")
+            .await
+            .expect("create");
+        c.disconnect().await.expect("bye");
+    }
+    let db = vec![("db", PackValue::str(gname))];
+    let mut c = connect(&addr, &user, &pw).await.expect("login");
+    let t0 = Instant::now();
+    loop {
+        c.query("MATCH (n) RETURN count(n)", vec![], db.clone())
+            .await
+            .expect("poke");
+        if mirror_view(&ctl, &tenant, gname).0 == "async/ready" {
+            break;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(120), "never async");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let run = |arg: &str| {
+        let st = std::process::Command::new(&wk)
+            .arg(arg)
+            .status()
+            .expect("worker ctl");
+        assert!(st.success(), "worker {arg}");
+    };
+    let mut w = connect(&addr, &user, &pw).await.expect("writer");
+    let mut r = connect(&addr, &user, &pw).await.expect("reader");
+    let (mut wrong, mut checked) = (Vec::new(), 0u64);
+    let started = Instant::now();
+    let (mut killed, mut restarted) = (None, None);
+    let mut k = 0i64;
+    while started.elapsed() < Duration::from_secs(45) {
+        if killed.is_none() && started.elapsed() > Duration::from_secs(5) {
+            run("kill");
+            killed = Some(k);
+        }
+        if restarted.is_none() && started.elapsed() > Duration::from_secs(25) {
+            run("start");
+            restarted = Some(k);
+        }
+        let q = "MERGE (a:W {k: $k}) WITH a OPTIONAL MATCH (p:W {k: $k - 1}) FOREACH (_ IN CASE WHEN p IS NULL THEN [] ELSE [1] END | CREATE (p)-[:THEN]->(a))";
+        let res = w
+            .query(q, vec![("k", PackValue::Int(k))], db.clone())
+            .await
+            .unwrap_or_else(|e| panic!("writer {k}: {e}"));
+        let bm = res
+            .summary
+            .get("bookmark")
+            .and_then(PackValue::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if k > 0 {
+            let mut extra = db.clone();
+            extra.push(("bookmarks", PackValue::List(vec![PackValue::str(bm)])));
+            let got = r
+                .query(
+                    "MATCH (a:W {k: $k})<-[:THEN]-(p:W) RETURN p.k",
+                    vec![("k", PackValue::Int(k))],
+                    extra,
+                )
+                .await
+                .expect("reader");
+            let ks: Vec<i64> = got.records.iter().filter_map(|x| x[0].as_int()).collect();
+            if ks != vec![k - 1] {
+                wrong.push((k, ks));
+            }
+            checked += 1;
+        }
+        k += 1;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let t1 = Instant::now();
+    let (mode, rels, mirrors, shards) = loop {
+        let v = mirror_view(&ctl, &tenant, gname);
+        if (v.1 == v.2 && v.1 > 0) || t1.elapsed() > Duration::from_secs(120) {
+            break v;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    eprintln!(
+        "applier kill: {k} writes, worker killed at write {killed:?}, restarted at {restarted:?}; \
+         {checked} checked reads, {} wrong; {mode}: {rels} relationships, {mirrors} mirrors over \
+         {shards} shards, converged {:?} after the writer stopped",
+        wrong.len(),
+        t1.elapsed()
+    );
+    assert!(wrong.is_empty(), "{wrong:?}");
+    assert_eq!(rels, mirrors);
+    assert_eq!(rels, u64::try_from(k - 1).unwrap_or(0));
 }

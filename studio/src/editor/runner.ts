@@ -5,7 +5,7 @@
 // studio.* settings and stops the statement itself (decision ST8): a
 // result it cut ends with `truncated`, a statement past its time with 3024.
 
-import { query } from '../api/sql';
+import { query, type QueryLanguage } from '../api/sql';
 import { ResultBuffer } from '../results/buffer';
 import type { ResultItem } from '../results/ResultView';
 
@@ -13,6 +13,9 @@ export interface Caps {
   maxRows: number;
   maxBytes: number;
   timeoutMs: number;
+  language?: QueryLanguage;
+  /** A MongoDB statement's collection, kept with its results. */
+  collection?: string;
 }
 
 export interface RunHandle {
@@ -37,7 +40,7 @@ export function runStatement(db: string | null, sql: string, caps: Caps, onUpdat
   const running = query(db, sql, {
     header(_i, columns) {
       current = new ResultBuffer(columns, caps.maxRows, caps.maxBytes);
-      items.push({ buffer: current });
+      items.push({ buffer: current, language: caps.language ?? 'sql', collection: caps.collection });
       redraw();
     },
     rows(rows) {
@@ -54,12 +57,12 @@ export function runStatement(db: string | null, sql: string, caps: Caps, onUpdat
         last.warnings = e.warnings;
         last.info = e.info;
       } else {
-        items.push({ buffer: null, affected: e.affected_rows, info: e.info, warnings: e.warnings });
+        items.push({ buffer: null, affected: e.affected_rows, info: e.info, warnings: e.warnings, language: caps.language ?? 'sql' });
       }
       current = null;
       redraw();
     },
-  }, { maxRows: caps.maxRows, maxBytes: caps.maxBytes, timeoutMs: caps.timeoutMs });
+  }, { maxRows: caps.maxRows, maxBytes: caps.maxBytes, timeoutMs: caps.timeoutMs, language: caps.language });
   // The gateway stops the statement at the same time; the browser's timer
   // is the backstop for a gateway that doesn't answer.
   const timer = setTimeout(() => {

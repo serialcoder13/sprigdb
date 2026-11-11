@@ -14,8 +14,19 @@
 //!   hidden nodes. The store reports one shard, so the executor never
 //!   treats a node as a boundary node.
 //! - `db.labels()` and `db.relationshipTypes()` list only readable names.
-//! - Writes pass through: they need the graph-wide privileges, which a
-//!   reader filtered here doesn't hold for the statement to get this far.
+//! - **Writes** (round 5, decision G50): a writer without a graph-wide
+//!   `INSERT`, `DELETE` or `UPDATE` may hold it for single labels and
+//!   types ([`Writable`]; `GRANT CREATE|DELETE|SET PROPERTY ON GRAPH g
+//!   NODES L`). Every write is then checked here before it runs: a new
+//!   node needs `CREATE` on each of its labels, a new relationship on its
+//!   type; a deleted node `DELETE` on each of its labels, a deleted
+//!   relationship on its type; a changed property `SET PROPERTY` on one of
+//!   the node's labels (or the relationship's type); an added label
+//!   `CREATE` on it and a removed label `DELETE` on it. A refused write
+//!   fails the statement with 1142 (`Neo.ClientError.Security.Forbidden`),
+//!   and its transaction rolls back. Nodes without labels need the
+//!   graph-wide privilege. A writer with the graph-wide `SELECT` reads
+//!   unfiltered ([`FilteredStore::guarded`] with no [`Visible`]).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -36,10 +47,36 @@ pub struct Visible {
     pub types: HashSet<String>,
 }
 
-/// A store showing only what [`Visible`] allows.
+/// What a writer may write, by label or type name, for the actions it
+/// doesn't hold graph-wide (round 5).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Writable {
+    /// `CREATE` everywhere (the graph-wide `INSERT`).
+    pub create_all: bool,
+    /// `DELETE` everywhere.
+    pub delete_all: bool,
+    /// `SET PROPERTY` everywhere (the graph-wide `UPDATE`).
+    pub set_all: bool,
+    /// Labels with `CREATE`.
+    pub create_labels: HashSet<String>,
+    /// Labels with `DELETE`.
+    pub delete_labels: HashSet<String>,
+    /// Labels with `SET PROPERTY`.
+    pub set_labels: HashSet<String>,
+    /// Types with `CREATE`.
+    pub create_types: HashSet<String>,
+    /// Types with `DELETE`.
+    pub delete_types: HashSet<String>,
+    /// Types with `SET PROPERTY`.
+    pub set_types: HashSet<String>,
+}
+
+/// A store showing only what [`Visible`] allows (all when `None`), and
+/// writing only what [`Writable`] allows (everything when `None`).
 pub struct FilteredStore<'s> {
     inner: &'s mut dyn GraphStore,
-    vis: Visible,
+    vis: Option<Visible>,
+    writes: Option<Writable>,
     /// Ids of the readable types that exist.
     type_ids: Vec<u32>,
 }
@@ -58,40 +95,114 @@ impl<'s> FilteredStore<'s> {
     /// # Errors
     /// The inner store's, looking up type ids.
     pub async fn new(inner: &'s mut dyn GraphStore, vis: Visible) -> Result<Self> {
+        Self::guarded(inner, Some(vis), None).await
+    }
+
+    /// `inner`, reads filtered by `vis` (unfiltered when `None`) and writes
+    /// checked against `writes` (unchecked when `None`).
+    ///
+    /// # Errors
+    /// The inner store's, looking up type ids.
+    pub async fn guarded(
+        inner: &'s mut dyn GraphStore,
+        vis: Option<Visible>,
+        writes: Option<Writable>,
+    ) -> Result<Self> {
         let mut type_ids = Vec::new();
-        for t in &vis.types {
-            if let Some(id) = inner.type_id(t, false).await? {
-                type_ids.push(id);
+        if let Some(v) = &vis {
+            for t in &v.types {
+                if let Some(id) = inner.type_id(t, false).await? {
+                    type_ids.push(id);
+                }
             }
         }
         type_ids.sort_unstable();
         Ok(Self {
             inner,
             vis,
+            writes,
             type_ids,
         })
     }
 
     fn node_ok(&self, n: &NodeRow) -> bool {
+        let Some(v) = &self.vis else {
+            return true;
+        };
         n.labels.iter().any(|l| {
             self.inner
                 .label_name(*l)
-                .is_some_and(|name| self.vis.labels.contains(&name))
+                .is_some_and(|name| v.labels.contains(&name))
         })
     }
 
     fn type_ok(&self, t: u32) -> bool {
+        let Some(v) = &self.vis else {
+            return true;
+        };
         self.inner
             .type_name(t)
-            .is_some_and(|name| self.vis.types.contains(&name))
+            .is_some_and(|name| v.types.contains(&name))
     }
 
     /// The readable types among `types` (empty: any readable one).
     fn types_of(&self, types: &[u32]) -> Vec<u32> {
+        if self.vis.is_none() {
+            return types.to_vec();
+        }
         if types.is_empty() {
             self.type_ids.clone()
         } else {
             types.iter().copied().filter(|t| self.type_ok(*t)).collect()
+        }
+    }
+
+    fn label_names(&self, ids: &[u32]) -> Vec<String> {
+        ids.iter()
+            .map(|l| self.inner.label_name(*l).unwrap_or_else(|| format!("#{l}")))
+            .collect()
+    }
+
+    fn type_name_of(&self, t: u32) -> String {
+        self.inner.type_name(t).unwrap_or_else(|| format!("#{t}"))
+    }
+
+    /// Checks a node write: `all` held graph-wide, else every (`every`)
+    /// or one of the node's labels in `set`.
+    fn check_labels(
+        what: &str,
+        all: bool,
+        set: &HashSet<String>,
+        labels: &[String],
+        every: bool,
+    ) -> Result<()> {
+        if all {
+            return Ok(());
+        }
+        let ok = if labels.is_empty() {
+            false
+        } else if every {
+            labels.iter().all(|l| set.contains(l))
+        } else {
+            labels.iter().any(|l| set.contains(l))
+        };
+        if ok {
+            return Ok(());
+        }
+        let on = if labels.is_empty() {
+            "a node without labels".to_owned()
+        } else {
+            format!("nodes with label(s) {}", labels.join(", "))
+        };
+        Err(denied(what, &on))
+    }
+
+    fn check_type(&self, what: &str, all: bool, set: &HashSet<String>, t: u32) -> Result<()> {
+        let name = self.type_name_of(t);
+        if all || set.contains(&name) {
+            Ok(())
+        } else {
+            Err(denied(what, &format!("relationships of type {name}")))
         }
     }
 
@@ -126,6 +237,17 @@ impl<'s> FilteredStore<'s> {
     }
 }
 
+/// A per-label write refused (1142, Neo4j's `Forbidden`).
+fn denied(what: &str, on: &str) -> sprig_common::SprigError {
+    sprig_common::SprigError::standard(
+        1142,
+        *b"42000",
+        format!(
+            "{what} on {on} is not allowed for this user (GRANT {what} ON GRAPH ... NODES|RELATIONSHIPS ...)"
+        ),
+    )
+}
+
 #[async_trait]
 impl GraphStore for FilteredStore<'_> {
     fn graph_id(&self) -> u64 {
@@ -133,10 +255,16 @@ impl GraphStore for FilteredStore<'_> {
     }
 
     fn shards(&self) -> usize {
+        if self.vis.is_none() {
+            return self.inner.shards();
+        }
         1
     }
 
-    fn shard_of(&self, _rk: u64) -> usize {
+    fn shard_of(&self, rk: u64) -> usize {
+        if self.vis.is_none() {
+            return self.inner.shard_of(rk);
+        }
         0
     }
 
@@ -178,6 +306,9 @@ impl GraphStore for FilteredStore<'_> {
         types: &[u32],
         dir: Dir,
     ) -> Result<Vec<(EdgeRow, Option<NodeRow>)>> {
+        if self.vis.is_none() {
+            return self.inner.expand(from, types, dir).await;
+        }
         let types = self.types_of(types);
         if types.is_empty() || from.is_empty() {
             return Ok(Vec::new());
@@ -213,12 +344,15 @@ impl GraphStore for FilteredStore<'_> {
 
     async fn reach(
         &mut self,
-        _shard: usize,
+        shard: usize,
         seeds: &[(u64, u64)],
         types: &[u32],
         dir: Dir,
         hops: u32,
     ) -> Result<Vec<Reach>> {
+        if self.vis.is_none() {
+            return self.inner.reach(shard, seeds, types, dir, hops).await;
+        }
         // Level by level over filtered hops, each node once per origin at
         // its smallest depth (the CTE's `CYCLE o, id RESTRICT`).
         let mut best: HashMap<(u64, u64), Reach> = HashMap::new();
@@ -263,6 +397,9 @@ impl GraphStore for FilteredStore<'_> {
 
     async fn edges(&mut self, ids: &[u64]) -> Result<Vec<EdgeRow>> {
         let rows = self.inner.edges(ids).await?;
+        if self.vis.is_none() {
+            return Ok(rows);
+        }
         self.visible_edges(rows).await
     }
 
@@ -279,26 +416,81 @@ impl GraphStore for FilteredStore<'_> {
     }
 
     async fn insert_nodes(&mut self, rows: &[NodeRow]) -> Result<()> {
+        if let Some(w) = &self.writes {
+            for r in rows {
+                let names = self.label_names(&r.labels);
+                Self::check_labels("CREATE", w.create_all, &w.create_labels, &names, true)?;
+            }
+        }
         self.inner.insert_nodes(rows).await
     }
 
     async fn insert_edges(&mut self, rows: &[EdgeRow]) -> Result<()> {
+        if let Some(w) = &self.writes {
+            for r in rows {
+                self.check_type("CREATE", w.create_all, &w.create_types, r.rtype)?;
+            }
+        }
         self.inner.insert_edges(rows).await
     }
 
     async fn update_node(&mut self, row: &NodeRow, old_labels: &[u32]) -> Result<()> {
+        if self.writes.is_some() {
+            let old = self.inner.nodes(&[row.id]).await?.into_iter().next();
+            let w = self.writes.as_ref().unwrap_or_else(|| unreachable!());
+            let added: Vec<u32> = row
+                .labels
+                .iter()
+                .copied()
+                .filter(|l| !old_labels.contains(l))
+                .collect();
+            let removed: Vec<u32> = old_labels
+                .iter()
+                .copied()
+                .filter(|l| !row.labels.contains(l))
+                .collect();
+            if !added.is_empty() {
+                let n = self.label_names(&added);
+                Self::check_labels("CREATE", w.create_all, &w.create_labels, &n, true)?;
+            }
+            if !removed.is_empty() {
+                let n = self.label_names(&removed);
+                Self::check_labels("DELETE", w.delete_all, &w.delete_labels, &n, true)?;
+            }
+            let props_changed = old.as_ref().is_none_or(|o| o.props != row.props);
+            if props_changed {
+                let n = self.label_names(old_labels);
+                Self::check_labels("SET PROPERTY", w.set_all, &w.set_labels, &n, false)?;
+            }
+        }
         self.inner.update_node(row, old_labels).await
     }
 
     async fn update_edge(&mut self, row: &EdgeRow) -> Result<()> {
+        if let Some(w) = &self.writes {
+            self.check_type("SET PROPERTY", w.set_all, &w.set_types, row.rtype)?;
+        }
         self.inner.update_edge(row).await
     }
 
     async fn delete_edges(&mut self, edges: &[EdgeKey]) -> Result<u64> {
+        if let Some(w) = &self.writes {
+            for e in edges {
+                self.check_type("DELETE", w.delete_all, &w.delete_types, e.rtype)?;
+            }
+        }
         self.inner.delete_edges(edges).await
     }
 
     async fn delete_nodes(&mut self, ids: &[u64]) -> Result<u64> {
+        if self.writes.is_some() && !ids.is_empty() {
+            let rows = self.inner.nodes(ids).await?;
+            let w = self.writes.as_ref().unwrap_or_else(|| unreachable!());
+            for r in &rows {
+                let names = self.label_names(&r.labels);
+                Self::check_labels("DELETE", w.delete_all, &w.delete_labels, &names, true)?;
+            }
+        }
         self.inner.delete_nodes(ids).await
     }
 
@@ -322,7 +514,7 @@ impl GraphStore for FilteredStore<'_> {
         self.inner
             .all_labels()
             .into_iter()
-            .filter(|l| self.vis.labels.contains(l))
+            .filter(|l| self.vis.as_ref().is_none_or(|v| v.labels.contains(l)))
             .collect()
     }
 
@@ -330,7 +522,7 @@ impl GraphStore for FilteredStore<'_> {
         self.inner
             .all_types()
             .into_iter()
-            .filter(|t| self.vis.types.contains(t))
+            .filter(|t| self.vis.as_ref().is_none_or(|v| v.types.contains(t)))
             .collect()
     }
 
@@ -359,6 +551,72 @@ mod tests {
             .iter()
             .map(|r| r.iter().map(Value::display).collect::<Vec<_>>().join("|"))
             .collect()
+    }
+
+    async fn guarded_run(
+        mem: &mut MemStore,
+        w: &Writable,
+        q: &str,
+    ) -> sprig_common::Result<crate::Output> {
+        let mut f = FilteredStore::guarded(mem, None, Some(w.clone()))
+            .await
+            .expect("guard");
+        execute(&mut f, q, &Params::new(), &Budgets::default()).await
+    }
+
+    #[tokio::test]
+    async fn per_label_writes_are_checked() {
+        for shards in [1, 4] {
+            let mut mem = MemStore::new(shards);
+            rows(
+                &mut mem,
+                "CREATE (a:Doc {n: 'a'}), (b:Doc:Secret {n: 'b'}), (c:Secret {n: 'c'}),
+                 (a)-[:REF]->(b), (a)-[:OWN]->(c)",
+            )
+            .await;
+            let w = Writable {
+                create_labels: ["Doc".to_owned()].into(),
+                delete_labels: ["Doc".to_owned()].into(),
+                set_labels: ["Doc".to_owned()].into(),
+                create_types: ["REF".to_owned()].into(),
+                delete_types: ["REF".to_owned()].into(),
+                ..Writable::default()
+            };
+            for q in [
+                "CREATE (:Doc {n: 'd'})",
+                "MATCH (a {n: 'a'}), (d {n: 'd'}) CREATE (a)-[:REF]->(d)",
+                "MATCH (a {n: 'a'}) SET a.x = 1",
+                "MATCH (b {n: 'b'}) SET b.x = 1",
+                "MATCH (a {n: 'a'})-[r:REF]->(d {n: 'd'}) DELETE r",
+                "MATCH (d {n: 'd'}) DETACH DELETE d",
+            ] {
+                guarded_run(&mut mem, &w, q)
+                    .await
+                    .unwrap_or_else(|e| panic!("{shards}: {q}: {e}"));
+            }
+            for q in [
+                "CREATE (:Secret {n: 'e'})",
+                "CREATE (:Doc:Secret {n: 'e'})",
+                "CREATE ()",
+                "MATCH (a {n: 'a'}), (c {n: 'c'}) CREATE (a)-[:OWN]->(c)",
+                "MATCH (c {n: 'c'}) SET c.x = 1",
+                "MATCH (a {n: 'a'}) SET a:Secret",
+                "MATCH (b {n: 'b'}) REMOVE b:Secret",
+                "MATCH ()-[r:REF]->() SET r.w = 1",
+                "MATCH ()-[r:OWN]->() DELETE r",
+                // Last: in memory a refused statement isn't rolled back.
+                "MATCH (b {n: 'b'}) DETACH DELETE b",
+            ] {
+                let e = guarded_run(&mut mem, &w, q).await.expect_err(q);
+                assert_eq!(e.protocol().mysql_errno, 1142, "{q}: {e}");
+            }
+            // Reads stay whole.
+            assert_eq!(
+                rows(&mut mem, "MATCH (n) RETURN count(n)").await,
+                ["3"],
+                "{shards}"
+            );
+        }
     }
 
     #[tokio::test]

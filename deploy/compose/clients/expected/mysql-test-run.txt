@@ -1,0 +1,16 @@
+# mysql-test-run (versions.txt; MySQL 8.4.11's own test files, the list in
+# mysql-test-run/tests.txt) through run.sh: every outcome other than pass
+# that the run against the MySQL 8.4 reference doesn't already explain.
+# Format: <target-glob> <fail|skip|flaky|exclude> <test-glob> :: <reason>
+# (summarize.py). Test ids are mtr's <suite>.<test>[:<combination>].
+#
+# Status (11 November 2026, r4three): defined, not yet run; CI only
+# (.github/workflows/heavy-sql.yml). A test file is one result: a single
+# differing line (an error message, a column type in --enable_metadata
+# output, an EXPLAIN plan) fails the whole file, so expect most files to
+# need a line here with the gaps row that explains them.
+
+# Plans are MariaDB's optimizer's (chapter 28 non-goal: "matching MySQL's
+# optimizer plans").
+gateway-* fail main.explain_json_all :: plans are MariaDB's optimizer's; only EXPLAIN's shape is emulated (chapter 28, non-goals)
+gateway-* fail main.explain_tree :: plans are MariaDB's optimizer's; only EXPLAIN's shape is emulated (chapter 28, non-goals)

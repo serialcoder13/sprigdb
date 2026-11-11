@@ -1,0 +1,43 @@
+# A SprigDB development stack on a CI runner, for the heavy-suite workflows
+# (.github/workflows/heavy-sql.yml, heavy-protocols.yml): Compose's etcd and
+# one MariaDB 11.8 node, then a release controller, worker and gateway from
+# deploy/compose/gateway-dev.sh (catalog mode: tenants acme and globex, login
+# acme.app / sprig-dev-app; MySQL persona 127.0.0.1:13306, MariaDB persona
+# 127.0.0.1:13307), and optionally the protocol listeners of
+# deploy/compose/ci/listeners.sh. The calling job checks the repository out
+# first and stops the stack with deploy/compose/ci/stack-down.sh.
+name: SprigDB stack
+description: Compose (one node) plus a release gateway in catalog mode
+inputs:
+  listeners:
+    description: Protocol listeners to turn on (mongo, kafka, amqp, bolt, redis), space-separated
+    required: false
+    default: ""
+  topology:
+    description: Compose profile of the backend (single, replication or galera)
+    required: false
+    default: single
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: rustup toolchain install
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: heavy-release
+    - name: Start Compose
+      shell: bash
+      working-directory: deploy/compose
+      run: docker compose --profile "${{ inputs.topology }}" up -d --wait --wait-timeout 300
+    - name: Build the release binaries
+      shell: bash
+      run: cargo build --release --locked -p sprigdb -p sprigctl
+    - name: Start the gateway (catalog mode)
+      shell: bash
+      env:
+        SPRIG_GATEWAY_PROFILE: release
+      run: deploy/compose/gateway-dev.sh up
+    - name: Turn on protocol listeners
+      if: inputs.listeners != ''
+      shell: bash
+      run: deploy/compose/ci/listeners.sh ${{ inputs.listeners }}

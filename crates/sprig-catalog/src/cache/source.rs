@@ -58,6 +58,17 @@ pub trait CatalogSource: Send + Sync + 'static {
         prev: Option<&TenantCatalog>,
         node: Node,
     ) -> Result<Loaded>;
+
+    /// The committed catalog and auth versions on `node`, read without a
+    /// snapshot: one small query, so a loader waiting for a version polls
+    /// this instead of loading in full again and again. `None` when the
+    /// source can't tell cheaply (the loader then just loads).
+    ///
+    /// # Errors
+    /// As [`load`](Self::load); the loader falls back to a full load.
+    async fn committed(&self, _tenant: TenantId, _node: Node) -> Result<Option<(u64, u64)>> {
+        Ok(None)
+    }
 }
 
 /// Loads from the catalogs' MariaDB clusters through a [`CatalogLocator`].
@@ -161,6 +172,19 @@ impl CatalogSource for MariaSource {
             }
             tx.commit().await.map_err(map_err)?;
             Ok(Loaded { snapshot, ext })
+        })
+        .await
+    }
+
+    async fn committed(&self, tenant: TenantId, node: Node) -> Result<Option<(u64, u64)>> {
+        let ep = match node {
+            Node::Replica => self.locator.reader(tenant).await?,
+            Node::Writer => self.locator.writer(tenant).await?,
+        };
+        timed(self.timeout, "catalog versions", async {
+            let mut conn = ep.pool.get_conn().await.map_err(map_err)?;
+            let v = ep.store.versions(&mut conn).await?;
+            Ok(Some((v.catalog, v.auth)))
         })
         .await
     }

@@ -6,9 +6,14 @@
 #   run.sh <suite> <host> <port> <persona>
 #
 # <suite>    go-sql-driver, mysql2, pymysql, mysqlclient, mariadb-connector-j,
-#            mysql-connector-j, php-mysqli, php-pdo-mysql or sqlalchemy (versions.txt
-#            pins each to a release tag; the PHP suites come from the
-#            source tarball inside the connector matrix's PHP image)
+#            mysql-connector-j, php-mysqli, php-pdo-mysql, sqlalchemy,
+#            hibernate-orm or mysql-test-run (versions.txt pins each to a
+#            release tag; the PHP suites come from the source tarball inside
+#            the connector matrix's PHP image, mysql-test-run from MySQL's
+#            test package in an image built from mysql-test-run/Dockerfile).
+#            hibernate-orm and mysql-test-run need more memory than a
+#            laptop's 768 MB rule allows: they run in CI
+#            (.github/workflows/heavy-sql.yml)
 # <persona>  mysql or mariadb: which server the endpoint stands for
 #
 # The suite is cloned once (depth 1, at its tag) into .src/ and runs in an
@@ -40,6 +45,13 @@
 #                             (default test; through a gateway the whole
 #                             suite takes longer than one heavy-job hold)
 #   SPRIG_CLIENTS_PREFIX      container name prefix (default sprig-clients)
+#   SPRIG_CLIENTS_MEMORY      the suite container's memory limit (default
+#                             768m, agent brief rule 4; CI uses more)
+#   SPRIG_CLIENTS_BASELINE    the target label of a reference run of the
+#                             same suite (baseline-mysql): a test that didn't
+#                             pass there isn't counted here (summarize.py)
+#   SPRIG_CLIENTS_TESTS       mysql-test-run: the test list (default
+#                             mysql-test-run/tests.txt)
 #
 # Expected files can `exclude` tests per target. They keep statements of
 # 16 MiB and more away from gateways: the development clusters keep MariaDB's
@@ -68,7 +80,7 @@ PASS=${SPRIG_CLIENTS_PASSWORD:-sprig-dev-root}
 SRC_ROOT=${SPRIG_CLIENTS_SRC:-$HERE/.src}
 RESULTS=${SPRIG_CLIENTS_RESULTS:-$HERE/results}/$SUITE/$TARGET_LABEL
 FILTER=${SPRIG_CLIENTS_FILTER:-}
-MEM=768m
+MEM=${SPRIG_CLIENTS_MEMORY:-768m}
 # Images, pinned to exact tags (override with SPRIG_CLIENTS_PY_IMAGE,
 # SPRIG_CLIENTS_MAVEN_IMAGE).
 PY_IMAGE=${SPRIG_CLIENTS_PY_IMAGE:-python:3.12.12-slim-bookworm}
@@ -88,8 +100,12 @@ if [[ $REPO == image:* ]]; then
   # The suite ships inside an image (the PHP extensions' tests are in the
   # official image's /usr/src/php.tar.xz): nothing to clone.
   mkdir -p "$SRC"
+  # Built from the suite's own directory when it has a Dockerfile
+  # (mysql-test-run), else the connector matrix's PHP image.
+  ctx=$HERE/../connectors/php
+  [[ -f $HERE/$SUITE/Dockerfile ]] && ctx=$HERE/$SUITE
   docker image inspect "${REPO#image:}" >/dev/null 2>&1 ||
-    docker build -q -t "${REPO#image:}" "$HERE/../connectors/php" >/dev/null
+    docker build -q --build-arg "VERSION=$TAG" -t "${REPO#image:}" "$ctx" >/dev/null
 elif [[ ! -d $SRC ]]; then
   mkdir -p "$SRC_ROOT"
   git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$TAG" "$REPO" "$SRC"
@@ -293,6 +309,46 @@ case $SUITE in
             php -d memory_limit=512M run-tests.php -q -j1 --no-color -d memory_limit=512M ${FILTER:-$DIRS} > /out/run-tests.log 2>&1; true' ||
       true
     ;;
+  hibernate-orm)
+    # Hibernate ORM's own suite, hibernate-core's tests, as upstream's CI
+    # runs them on MySQL (`-Pdb=mysql_ci`; ci/build.sh, docker_db.sh
+    # mysql_8_0): a database hibernate_orm_test with the case-sensitive
+    # default collation upstream's server uses. configure.pl points the
+    # mysql_ci profile's URL, user and password at the target. Gradle and
+    # the build run in the Maven image's JDK 21; SPRIG_CLIENTS_FILTER is a
+    # list of Gradle --tests patterns (the CI matrix shards by package).
+    if [[ $setup == 1 ]]; then
+      sql -e "DROP DATABASE IF EXISTS hibernate_orm_test;
+              CREATE DATABASE hibernate_orm_test CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs"
+    fi
+    FORMAT=junit
+    mkdir -p "$SRC_ROOT/.cache/gradle"
+    suite_run -v "$SRC_ROOT/.cache/gradle:/root/.gradle" -v "$HERE:/clients:ro" -- "$MAVEN_IMAGE" \
+      sh -c 'mkdir /work && cd /src && tar --exclude=.git -cf - . | tar -C /work -xf - && cd /work &&
+             perl /clients/hibernate-orm/configure.pl "$TARGET_HOST:$TARGET_PORT" "$TARGET_USER" "$TARGET_PASS" > /out/configure.log 2>&1 &&
+             T=""; for p in $FILTER; do T="$T --tests $p"; done;
+             ./gradlew --no-daemon --continue -Pdb=mysql_ci -Dorg.gradle.jvmargs="-Xmx2g" \
+               :hibernate-core:test $T > /out/gradle.log 2>&1;
+             mkdir -p /out/junit && find . -path "*/test-results/*" -name "TEST-*.xml" -exec cp {} /out/junit/ \; ; true' ||
+      true
+    ;;
+  mysql-test-run)
+    # MySQL's own mysql-test-run.pl, from the mysql-community-test package
+    # of the pinned 8.4 release (mysql-test-run/Dockerfile), run against the
+    # target as an external server (--extern): the curated test list in
+    # mysql-test-run/tests.txt, a database test, no restarts (tests that
+    # need one skip themselves). Each test compares its output with the
+    # .result MySQL recorded, so a run against the MySQL 8.4 reference
+    # first (SPRIG_CLIENTS_BASELINE) separates the tests extern mode can't
+    # run from SprigDB's differences.
+    if [[ $setup == 1 ]]; then
+      sql -e "DROP DATABASE IF EXISTS test; CREATE DATABASE test; DROP DATABASE IF EXISTS mtr; CREATE DATABASE mtr"
+    fi
+    FORMAT=mtr
+    suite_run --entrypoint bash -v "$HERE:/clients:ro" \
+      -e TESTS_FILE="${SPRIG_CLIENTS_TESTS:-/clients/mysql-test-run/tests.txt}" -- "${REPO#image:}" \
+      /clients/mysql-test-run/run-mtr.sh
+    ;;
   *)
     echo "suite $SUITE: not wired yet" >&2
     exit 2
@@ -300,6 +356,14 @@ case $SUITE in
 esac
 echo "$SUITE $TARGET_LABEL ($HOST:$PORT): $(($(date +%s) - start)) s" >"$RESULTS/raw/elapsed.txt"
 
+# A reference run of the same suite (SPRIG_CLIENTS_BASELINE): its tests.tsv.
+BASE=()
+if [[ -n ${SPRIG_CLIENTS_BASELINE:-} ]]; then
+  base_tsv=${SPRIG_CLIENTS_RESULTS:-$HERE/results}/$SUITE/$SPRIG_CLIENTS_BASELINE/tests.tsv
+  [[ -s $base_tsv ]] || { echo "$SUITE: no reference results at $base_tsv" >&2; exit 1; }
+  BASE=(-v "$base_tsv:/baseline.tsv:ro" -e SPRIG_CLIENTS_BASELINE=/baseline.tsv)
+fi
 docker run --rm --name "$PREFIX-summary-$$" --memory 256m -v "$HERE:/clients:ro" -v "$RESULTS:/results" \
+  ${BASE[@]+"${BASE[@]}"} -e SPRIG_CLIENTS_VERBOSE="${SPRIG_CLIENTS_VERBOSE:-}" \
   "$PY_IMAGE" python3 -I /clients/summarize.py "$SUITE" "$TARGET_LABEL" "$FORMAT" /results \
   "/clients/expected/$SUITE.txt"

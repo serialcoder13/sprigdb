@@ -408,9 +408,26 @@ pub struct SinkPrepare {
     pub condition: Option<Condition>,
     /// `COLUMNS` / `EXCEPT COLUMNS`.
     pub projection: Option<Projection>,
+    /// `TRANSFORM f` (R9, r9more).
+    pub transform: Option<std::sync::Arc<crate::transform::Transform>>,
 }
 
+#[async_trait::async_trait]
 impl Prepare for SinkPrepare {
+    async fn transform(
+        &self,
+        recs: Vec<SinkRecord>,
+    ) -> std::result::Result<Vec<SinkRecord>, String> {
+        let Some(t) = &self.transform else {
+            return Ok(recs);
+        };
+        let mut out = Vec::with_capacity(recs.len());
+        for r in recs {
+            out.extend(t.apply(r).await?);
+        }
+        Ok(out)
+    }
+
     fn prepare(&self, mut rec: SinkRecord) -> std::result::Result<Vec<SinkRecord>, String> {
         if let Some(c) = &self.condition
             && !c.matches(&rec)
@@ -488,6 +505,7 @@ mod tests {
             projection: Some(Projection::Except {
                 columns: vec!["card_token".into()],
             }),
+            transform: None,
         };
         let out = p.prepare(r).unwrap();
         assert!(out[0].after.as_ref().unwrap().get("card_token").is_none());

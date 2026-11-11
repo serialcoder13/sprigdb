@@ -1,0 +1,63 @@
+# mysql-test-run subsets for R4 (chapter 46 step 10; chapter 48's R4 gate:
+# "mysql-test-run subsets"). One <suite>.<test> per line, chosen for what
+# the translator emulates (chapter 28). Names the package doesn't have are
+# left out of the run and listed in missing.txt (run-mtr.sh): this list was
+# written without a copy of the 8.4 tree, so the first CI run settles it.
+
+# Grouping, ONLY_FULL_GROUP_BY with functional dependencies, rollup (steps 8, 9)
+main.group_by
+main.group_by_fd_no_prot
+main.group_by_fd_ps_prot
+main.olap
+main.func_group
+
+# Derived tables, LATERAL, CTEs, window functions (steps 7, 9)
+main.derived
+main.derived_correlated
+main.with_recursive
+main.with_non_recursive
+main.window_functions
+main.subquery_all
+main.union
+
+# Expressions and functions (step 7)
+main.func_str
+main.func_math
+main.func_time
+main.func_if
+main.func_regexp
+main.func_uuid
+main.user_var
+json.json_functions_innodb
+json.json_table
+
+# DDL, functional and invisible indexes, SHOW CREATE TABLE (step 10)
+main.functional_index
+main.invisible_indexes
+main.create
+main.alter_table
+main.check_constraints
+main.show_check
+main.information_schema
+
+# INSERT ... ON DUPLICATE KEY UPDATE row alias, VALUES ROW, TABLE (step 7)
+main.insert_update
+main.table_value_constructor
+
+# EXPLAIN shapes (step 11)
+main.explain_json_all
+main.explain_tree
+
+# Locking clauses and user-level locks (steps 7, 14)
+main.locking_clause
+main.lock_multi
+main.get_lock
+
+# sql_mode and variables (step 2)
+main.sql_mode
+main.variables
+
+# Stored programs (step 12)
+main.sp
+main.trigger
+main.view

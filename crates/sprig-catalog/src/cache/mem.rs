@@ -295,6 +295,7 @@ pub struct MemSource {
     delay_ms: AtomicU64,
     replica_loads: AtomicU64,
     writer_loads: AtomicU64,
+    version_reads: AtomicU64,
 }
 
 impl MemSource {
@@ -375,6 +376,12 @@ impl MemSource {
             u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
             Ordering::SeqCst,
         );
+    }
+
+    /// Cheap version reads served ([`CatalogSource::committed`]).
+    #[must_use]
+    pub fn version_reads(&self) -> u64 {
+        self.version_reads.load(Ordering::SeqCst)
     }
 
     /// Loads served, per node: (replica, writer).
@@ -479,5 +486,22 @@ impl CatalogSource for MemSource {
             None => lock(&t.tables).snapshot(since),
         };
         Ok(Loaded::core(snap))
+    }
+
+    async fn committed(&self, tenant: TenantId, node: Node) -> Result<Option<(u64, u64)>> {
+        if self.failing.load(Ordering::SeqCst) {
+            return Err(SprigError::new(
+                SprigCode::CatalogUnavailable,
+                "catalog unavailable (test)",
+            ));
+        }
+        self.version_reads.fetch_add(1, Ordering::SeqCst);
+        let t = self.tenant(tenant)?;
+        let frozen = match node {
+            Node::Replica => lock(&t.replica).as_ref().map(|r| r.versions),
+            Node::Writer => None,
+        };
+        let v = frozen.unwrap_or_else(|| lock(&t.tables).versions);
+        Ok(Some((v.catalog, v.auth)))
     }
 }

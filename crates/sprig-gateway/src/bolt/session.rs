@@ -33,7 +33,7 @@ use sprig_catalog::{Freshness, TenantCatalog};
 use sprig_common::ids::{ClusterId, DcId, TenantId};
 use sprig_common::ids::{DbId, GroupId};
 use sprig_common::{Result, SprigCode, SprigError};
-use sprig_graph::access::{FilteredStore, Visible};
+use sprig_graph::access::{FilteredStore, Visible, Writable};
 use sprig_graph::ast::{Clause, Query};
 use sprig_graph::bookmark::{self, Bookmark};
 use sprig_graph::catalog::backend_error;
@@ -108,16 +108,25 @@ struct Prepared {
     cat: Arc<TenantCatalog>,
     budgets: sprig_graph::Budgets,
     read_mode: bool,
-    /// Per-label and per-type read grants, when the graph-wide ones don't
-    /// give `SELECT` (decision G42).
-    visible: Option<Visible>,
+    /// Per-label and per-type grants, when the graph-wide ones don't give
+    /// `SELECT` (decision G42) or a write action (round 5, G50).
+    visible: Option<Access>,
+}
+
+/// What per-label and per-type grants allow a statement: reads filtered
+/// by `vis` (all when `None`), writes checked against `writes` (all when
+/// `None`).
+#[derive(Debug, Clone, Default)]
+struct Access {
+    vis: Option<Visible>,
+    writes: Option<Writable>,
 }
 
 /// Runs `q` on `store`, filtered by `vis` when given.
 #[allow(clippy::many_single_char_names)] // the executor's names
 async fn run_on(
     store: &mut dyn GraphStore,
-    vis: Option<Visible>,
+    vis: Option<Access>,
     q: &Query,
     p: &Params,
     b: &sprig_graph::Budgets,
@@ -125,7 +134,7 @@ async fn run_on(
     match vis {
         None => sprig_graph::exec::run(store, q, p, b).await,
         Some(v) => {
-            let mut f = FilteredStore::new(store, v).await?;
+            let mut f = FilteredStore::guarded(store, v.vis, v.writes).await?;
             sprig_graph::exec::run(&mut f, q, p, b).await
         }
     }
@@ -135,7 +144,7 @@ async fn run_on(
 #[allow(clippy::many_single_char_names)] // the executor's names
 async fn stream_on(
     store: &mut dyn GraphStore,
-    vis: Option<Visible>,
+    vis: Option<Access>,
     q: &Query,
     p: &Params,
     b: &sprig_graph::Budgets,
@@ -144,7 +153,7 @@ async fn stream_on(
     match vis {
         None => sprig_graph::run_stream(store, q, p, b, sink).await,
         Some(v) => {
-            let mut f = FilteredStore::new(store, v).await?;
+            let mut f = FilteredStore::guarded(store, v.vis, v.writes).await?;
             sprig_graph::run_stream(&mut f, q, p, b, sink).await
         }
     }
@@ -386,6 +395,20 @@ impl GwSession {
             rc.conns.insert(c, conn);
         }
         Ok(())
+    }
+
+    /// Chapter 18's `txn.*` settings for the tenant (round 5:
+    /// `txn.non_xa_policy = sprig_2pc` holds graph writes' branches on
+    /// clusters without XA, as SQL sessions do).
+    fn txn_config(&self, cat: &TenantCatalog) -> sprig_txn::TxnConfig {
+        let ctx = cat.setting_ctx(&self.dc);
+        let s = &self.graphs.svc.settings;
+        sprig_txn::TxnConfig::resolve_with(
+            &ctx,
+            |k, cx| s.get(k, cx, Some(&cat.settings)),
+            |k, cx| s.get(k, cx, Some(&cat.settings)).into_owned(),
+            "",
+        )
     }
 
     /// The mirror gate of a read statement on `g` (round 5): `None` unless
@@ -651,7 +674,7 @@ impl GwSession {
                 g = now;
             }
         }
-        let mut visible = None;
+        let mut visible: Option<Access> = None;
         for a in actions(&q) {
             if !self
                 .graphs
@@ -664,7 +687,79 @@ impl GwSession {
                         .as_deref()
                         .and_then(|gr| GatewayGraphs::visible(gr, g.graph_id))
                 {
-                    visible = Some(v);
+                    visible.get_or_insert_with(Access::default).vis = Some(v);
+                    continue;
+                }
+                // Writes may rest on them too (round 5): each write is
+                // then checked against the labels and types it touches.
+                if matches!(a, Action::Insert | Action::Update | Action::Delete)
+                    && g.def.kind != "mapped"
+                    && let Some(gr) = grants.as_deref()
+                    && let Some(w) = GatewayGraphs::writable(gr, g.graph_id, a)
+                {
+                    // The other write actions as held graph-wide (a label
+                    // change is a CREATE or DELETE on that label, whatever
+                    // clause makes it).
+                    let wide = |x: Action| {
+                        self.graphs.allows(
+                            grants.as_deref(),
+                            &cat,
+                            &g.db,
+                            g.db_id,
+                            Some(g.graph_id),
+                            x,
+                        )
+                    };
+                    let (ci, cd, cu) = (
+                        wide(Action::Insert),
+                        wide(Action::Delete),
+                        wide(Action::Update),
+                    );
+                    let acc = visible.get_or_insert_with(Access::default);
+                    let have = acc.writes.get_or_insert_with(|| {
+                        let mut wr = Writable {
+                            create_all: ci,
+                            delete_all: cd,
+                            set_all: cu,
+                            ..Writable::default()
+                        };
+                        for x in [Action::Insert, Action::Delete, Action::Update] {
+                            if let Some((l, t)) = GatewayGraphs::writable(gr, g.graph_id, x) {
+                                match x {
+                                    Action::Insert => {
+                                        wr.create_labels = l;
+                                        wr.create_types = t;
+                                    }
+                                    Action::Delete => {
+                                        wr.delete_labels = l;
+                                        wr.delete_types = t;
+                                    }
+                                    _ => {
+                                        wr.set_labels = l;
+                                        wr.set_types = t;
+                                    }
+                                }
+                            }
+                        }
+                        wr
+                    });
+                    match a {
+                        Action::Insert => {
+                            have.create_all = false;
+                            have.create_labels = w.0;
+                            have.create_types = w.1;
+                        }
+                        Action::Delete => {
+                            have.delete_all = false;
+                            have.delete_labels = w.0;
+                            have.delete_types = w.1;
+                        }
+                        _ => {
+                            have.set_all = false;
+                            have.set_labels = w.0;
+                            have.set_types = w.1;
+                        }
+                    }
                     continue;
                 }
                 return Err(SprigError::standard(
@@ -777,6 +872,7 @@ impl GwSession {
         let ids = self.graphs.counters(&g).await?;
         let streams = sprig_graph::streamable(&q).is_some();
         self.backend.set_isolation(self.isolation(&cat));
+        self.backend.set_config(self.txn_config(&cat));
         if self.tx.is_none() {
             if !writes {
                 let mut rc = ReadConns::default();
@@ -1046,6 +1142,13 @@ fn stale(e: &SprigError) -> bool {
     }
 }
 
+/// [`stale`] for a failure a streamed statement reported.
+fn stale_failure(f: &BoltFailure) -> bool {
+    f.message.contains("(1146)")
+        || f.message.contains("(1049)")
+        || f.code == "Neo.TransientError.General.DatabaseUnavailable"
+}
+
 /// A mapped graph's definition.
 fn mapped_def(g: &GraphRef) -> Result<sprig_graph::mapped::MappedDef> {
     serde_json::from_str(g.def.definition.as_deref().unwrap_or("{}"))
@@ -1069,7 +1172,7 @@ impl GwSession {
     ) -> std::result::Result<QueryResult, BoltFailure> {
         let started = Instant::now();
         let mut attempt = 0;
-        let (rx, graph) = loop {
+        let (start, graph) = loop {
             let pr = match self.prepare(query, params, extra).await {
                 Ok(Prep::Done(r)) => return Ok(r),
                 Ok(Prep::Run(p)) => *p,
@@ -1077,7 +1180,17 @@ impl GwSession {
             };
             match self.execute(pr).await {
                 Ok(StartOrResult::Result(r)) => return Ok(r),
-                Ok(StartOrResult::Stream(rx, g)) => break (rx, g),
+                Ok(StartOrResult::Stream(rx, g)) => match super::stream::start(rx).await {
+                    Ok(s) => break (s, g),
+                    // A streamed read that failed before its first row
+                    // (nothing reached the client): as below (round 5).
+                    Err(f) if self.tx.is_none() && attempt < 5 && stale_failure(&f) => {
+                        attempt += 1;
+                        metrics::counter!("sprig_graph_stale_map_retries_total").increment(1);
+                        tokio::time::sleep(Duration::from_millis(100 << attempt.min(4))).await;
+                    }
+                    Err(f) => return Err(f),
+                },
                 // An auto-commit statement that met a shard the mover just
                 // split, merged or moved (its schema or table is gone, or
                 // the map changed under it) runs again with the new map.
@@ -1089,7 +1202,6 @@ impl GwSession {
                 Err(e) => return Err(failure(&e)),
             }
         };
-        let start = super::stream::start(rx).await?;
         let t_first = i64::try_from(started.elapsed().as_millis()).unwrap_or(0);
         Ok(match start {
             Start::Rows(fields, first, stream) => QueryResult {
@@ -1178,6 +1290,7 @@ impl BoltSession for GwSession {
             self.take_bookmarks(extra).await?;
             let cat = self.graphs.catalog(tenant, Freshness::Latest).await?;
             self.backend.set_isolation(self.isolation(&cat));
+            self.backend.set_config(self.txn_config(&cat));
             let conns = if read_mode(extra) {
                 TxConns::Read(ReadConns::default())
             } else {

@@ -307,14 +307,41 @@ fn value_row(r: &SinkRecord) -> Option<Map<String, Value>> {
 /// # Errors
 /// Never for well-formed records; `DbErr::Row` for a change record without
 /// the image it needs.
-pub fn plan(records: &[SinkRecord], opts: &DbOpts, _d: Dialect) -> DbResult<Vec<Op>> {
+pub fn plan(records: &[SinkRecord], opts: &DbOpts, d: Dialect) -> DbResult<Vec<Op>> {
+    let mut out = plan_rows(records, opts, d)?;
+    for op in &mut out {
+        let Some(m) = records.get(op.rec).and_then(crate::source::record_member) else {
+            continue;
+        };
+        if !op.cols.iter().any(|(c, _)| c == TENANT_COL) {
+            op.cols.insert(0, (TENANT_COL.to_owned(), Value::from(m)));
+        }
+        if let Some(old) = op.old.as_mut()
+            && !old.iter().any(|(c, _)| c == TENANT_COL)
+        {
+            old.insert(0, (TENANT_COL.to_owned(), Value::from(m)));
+        }
+    }
+    Ok(out)
+}
+
+/// The column a fan-in sink's database rows name their member in.
+pub const TENANT_COL: &str = "_sprig_tenant";
+
+fn plan_rows(records: &[SinkRecord], opts: &DbOpts, _d: Dialect) -> DbResult<Vec<Op>> {
     let mut out = Vec::with_capacity(records.len());
     for (i, r) in records.iter().enumerate() {
         let table = render_table(&opts.table, r, opts);
         let ver = version_of(r);
-        let key_cols: Vec<String> = key_object(r)
+        let mut key_cols: Vec<String> = key_object(r)
             .map(|m| mapped(&m, opts).into_iter().map(|(c, _)| c).collect())
             .unwrap_or_default();
+        // A fan-in sink's record carries its member in `_sprig_tenant`,
+        // part of the key: equal keys of two members are two rows (R9).
+        let member = crate::source::record_member(r);
+        if member.is_some() && !key_cols.is_empty() {
+            key_cols.insert(0, TENANT_COL.to_owned());
+        }
         let base = |kind, cols, old, deleted, op| Op {
             rec: i,
             kind,
@@ -446,11 +473,20 @@ pub fn create_key(ops: &[&Op], opts: &DbOpts) -> Vec<String> {
         return vec!["_sprig_idem".into()];
     }
     if !opts.primary_key.is_empty() {
-        return opts
+        let mut k: Vec<String> = opts
             .primary_key
             .iter()
             .map(|c| opts.column_map.get(c).cloned().unwrap_or_else(|| c.clone()))
             .collect();
+        // A fan-in sink's rows: equal keys of two members are two rows.
+        if !k.iter().any(|c| c == TENANT_COL)
+            && ops
+                .iter()
+                .any(|o| o.cols.iter().any(|(c, _)| c == TENANT_COL))
+        {
+            k.insert(0, TENANT_COL.to_owned());
+        }
+        return k;
     }
     ops.iter()
         .find(|o| !o.key_cols.is_empty())
@@ -468,6 +504,7 @@ pub fn type_for(d: Dialect, name: &str, sample: &Value, key: bool) -> &'static s
         "_sprig_op" => return "VARCHAR(1)",
         "_sprig_ts" => return "BIGINT",
         "_sprig_idem" => return "VARCHAR(200)",
+        TENANT_COL => return "BIGINT",
         _ => {}
     }
     match sample {

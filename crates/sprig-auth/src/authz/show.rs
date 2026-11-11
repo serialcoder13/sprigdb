@@ -331,13 +331,26 @@ fn render_one(
             with_option(set)
         ));
     }
-    // Graph elements (chapter 43): Neo4j's form, `READ`.
+    // Graph elements (chapter 43): Neo4j's forms, `READ`, and since round
+    // 5 `CREATE`, `DELETE`, `SET PROPERTY {*}`.
     for ((db, g, rels, name), set) in &elements {
-        if !set.has(Action::Select) {
+        let mut privs = Vec::new();
+        for (a, n) in [
+            (Action::Select, "READ"),
+            (Action::Insert, "CREATE"),
+            (Action::Delete, "DELETE"),
+            (Action::Update, "SET PROPERTY {*}"),
+        ] {
+            if set.has(a) {
+                privs.push(n);
+            }
+        }
+        if privs.is_empty() {
             continue;
         }
         out.push(format!(
-            "GRANT READ ON GRAPH {}.{} {} {} TO {to}",
+            "GRANT {} ON GRAPH {}.{} {} {} TO {to}",
+            privs.join(", "),
             q(db),
             q(g),
             if *rels { "RELATIONSHIPS" } else { "NODES" },

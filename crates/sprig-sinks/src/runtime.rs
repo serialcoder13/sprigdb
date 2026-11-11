@@ -259,12 +259,24 @@ pub trait Control: Send + Sync {
 
 /// The preparation step: `WHERE`, columns, `TRANSFORM`. `Ok(vec![])`
 /// drops the record; `Err(reason)` fails it permanently (dead letter).
+#[async_trait::async_trait]
 pub trait Prepare: Send + Sync {
     /// Prepares one record.
     ///
     /// # Errors
     /// The reason the record fails permanently.
     fn prepare(&self, rec: SinkRecord) -> std::result::Result<Vec<SinkRecord>, String>;
+
+    /// `TRANSFORM`, after [`Prepare::prepare`] kept the record (R9).
+    ///
+    /// # Errors
+    /// The reason the record fails permanently.
+    async fn transform(
+        &self,
+        recs: Vec<SinkRecord>,
+    ) -> std::result::Result<Vec<SinkRecord>, String> {
+        Ok(recs)
+    }
 }
 
 /// Passes every record unchanged.
@@ -530,30 +542,54 @@ impl Shared {
     }
 }
 
-/// A per-tenant delivery quota: a token bucket in bytes.
+/// A per-tenant delivery quota: a token bucket in bytes. `per_sec` is the
+/// tenant's budget across every worker (`sink.tenant_bytes_per_sec`); the
+/// bucket fills at this worker's share of it, which [`share_quotas`] sets
+/// from what each worker asked for in the last window (R9, r9more).
 #[derive(Debug)]
 pub struct Quota {
     per_sec: u64,
+    /// This worker's share, bytes a second.
+    local: AtomicU64,
+    /// Bytes asked for since the last report.
+    demand: AtomicU64,
     state: Mutex<(f64, Instant)>,
 }
 
 impl Quota {
-    /// `per_sec` bytes a second.
+    /// `per_sec` bytes a second; until shares are known, this worker may
+    /// use all of it.
     #[must_use]
     pub fn new(per_sec: u64) -> Self {
         #[allow(clippy::cast_precision_loss)]
         let full = per_sec as f64;
         Self {
             per_sec,
+            local: AtomicU64::new(per_sec),
+            demand: AtomicU64::new(0),
             state: Mutex::new((full, Instant::now())),
         }
     }
 
+    /// This worker's share now.
+    #[must_use]
+    pub fn local(&self) -> u64 {
+        self.local.load(Ordering::Relaxed)
+    }
+
+    /// Sets this worker's share (at least 1 byte a second).
+    pub fn set_local(&self, per_sec: u64) {
+        self.local.store(per_sec.max(1), Ordering::Relaxed);
+    }
+
     /// Waits until `bytes` may be sent.
     pub async fn take(&self, bytes: u64) {
+        self.demand.fetch_add(bytes, Ordering::Relaxed);
         #[allow(clippy::cast_precision_loss)]
-        let (rate, need) = (self.per_sec as f64, bytes as f64);
+        let need = bytes as f64;
         loop {
+            #[allow(clippy::cast_precision_loss)]
+            let rate = self.local() as f64;
             let wait = {
                 let mut s = self
                     .state
@@ -567,7 +603,7 @@ impl Quota {
                     s.0 -= need;
                     return;
                 }
-                Duration::from_secs_f64(((need - s.0) / rate).min(10.0))
+                Duration::from_secs_f64(((need - s.0) / rate).min(1.0))
             };
             tokio::time::sleep(wait).await;
         }
@@ -594,6 +630,136 @@ pub fn tenant_quota(tenant: u64, per_sec: u64) -> Option<Arc<Quota>> {
         *q = Arc::new(Quota::new(per_sec));
     }
     Some(Arc::clone(q))
+}
+
+/// How often workers report and re-split each tenant's budget.
+pub const QUOTA_WINDOW: Duration = Duration::from_secs(2);
+/// A report older than this is a worker that stopped.
+const QUOTA_STALE_MS: u64 = 3 * 2_000 + 1_000;
+
+/// One worker's share of `per_sec` from every worker's demand: each gets
+/// a tenth of an even split as a floor (so a worker that starts asking
+/// isn't starved for a window), the rest by demand; the shares add up to
+/// `per_sec`.
+#[must_use]
+pub fn split(per_sec: u64, mine: u64, all: &[u64]) -> u64 {
+    let n = all.len().max(1) as u64;
+    let floor = (per_sec / n / 10).max(1);
+    let total: u128 = all.iter().map(|d| u128::from(*d + floor)).sum();
+    if total == 0 {
+        return per_sec / n;
+    }
+    u64::try_from(u128::from(per_sec) * u128::from(mine + floor) / total).unwrap_or(per_sec)
+}
+
+fn now_ms() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(0)
+}
+
+/// Shares every tenant's `sink.tenant_bytes_per_sec` among the workers
+/// delivering for it (chapter 51, "Configuration"; R9, r9more): every
+/// [`QUOTA_WINDOW`] each worker writes what it asked for into
+/// `/sprig/dc/<dc>/sink-quota/<tenant>/<worker>`, reads the others'
+/// fresh reports, and fills its bucket at its [`split`] of the budget. A
+/// worker that stops reporting drops out after about three windows.
+/// Started once per process.
+pub fn ensure_quota_sharing(dc: Arc<dyn sprig_meta::MetaStore>, worker: String) {
+    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if STARTED.set(()).is_err() {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut idle: HashMap<u64, u32> = HashMap::new();
+        loop {
+            tokio::time::sleep(QUOTA_WINDOW).await;
+            let quotas: Vec<(u64, Arc<Quota>)> = QUOTAS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .map(|(t, q)| (*t, Arc::clone(q)))
+                .collect();
+            for (tenant, q) in quotas {
+                let asked = q.demand.swap(0, Ordering::Relaxed) / QUOTA_WINDOW.as_secs().max(1);
+                let quiet = idle.entry(tenant).or_default();
+                *quiet = if asked == 0 { *quiet + 1 } else { 0 };
+                if let Err(e) =
+                    share_once(dc.as_ref(), &worker, tenant, &q, asked, *quiet > 30).await
+                {
+                    tracing::debug!(tenant, error = %e, "sink quota: sharing failed; keeping the last share");
+                }
+            }
+        }
+    });
+}
+
+async fn share_once(
+    dc: &dyn sprig_meta::MetaStore,
+    worker: &str,
+    tenant: u64,
+    q: &Quota,
+    asked: u64,
+    forget: bool,
+) -> Result<()> {
+    use sprig_meta::{Op, Txn};
+    let prefix = dc.tier().key(&format!("sink-quota/{tenant}/"))?;
+    let mine = dc.tier().key(&format!("sink-quota/{tenant}/{worker}"))?;
+    if forget {
+        // Quiet for a minute: leave the split to the others.
+        dc.txn(Txn {
+            when: Vec::new(),
+            then: vec![Op::Delete(mine)],
+            otherwise: Vec::new(),
+        })
+        .await?;
+        return Ok(());
+    }
+    let now = now_ms();
+    dc.txn(Txn {
+        when: Vec::new(),
+        then: vec![Op::Put {
+            key: mine.clone(),
+            value: serde_json::to_vec(&serde_json::json!({"demand": asked, "at": now}))
+                .unwrap_or_default(),
+            lease: None,
+        }],
+        otherwise: Vec::new(),
+    })
+    .await?;
+    let page = dc
+        .list(
+            &prefix,
+            sprig_meta::ListOpts {
+                limit: 10_000,
+                ..sprig_meta::ListOpts::default()
+            },
+        )
+        .await?;
+    let mut all = Vec::new();
+    for kv in &page.kvs {
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&kv.value) else {
+            continue;
+        };
+        let at = v.get("at").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        if now.saturating_sub(at) > QUOTA_STALE_MS && kv.key != mine {
+            continue;
+        }
+        all.push(
+            v.get("demand")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0),
+        );
+    }
+    let share = split(q.per_sec, asked, &all);
+    q.set_local(share);
+    #[allow(clippy::cast_precision_loss)]
+    metrics::gauge!("sprig_sink_quota_share_bytes_per_sec").set(share as f64);
+    Ok(())
 }
 
 /// What one lane batch ended with.
@@ -1201,7 +1367,11 @@ pub async fn run_task(parts: TaskParts, cancel: Cancel) -> Result<TaskEnd> {
                     for rec in recs {
                         let pos = rec.pos.clone();
                         settler.read(&pos);
-                        match prepare.prepare(rec.clone()) {
+                        let prepared = match prepare.prepare(rec.clone()) {
+                            Ok(out) if !out.is_empty() => prepare.transform(out).await,
+                            other => other,
+                        };
+                        match prepared {
                             Ok(out) if out.is_empty() => settler.done(&pos),
                             Ok(out) => {
                                 // A record that fans out settles when its
@@ -1260,5 +1430,49 @@ pub async fn run_task(parts: TaskParts, cancel: Cancel) -> Result<TaskEnd> {
                 () = cancel.cancelled() => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod quota_tests {
+    #[test]
+    fn quota_split_follows_demand_and_adds_up() {
+        // One worker alone gets everything.
+        assert_eq!(super::split(1000, 50, &[50]), 1000);
+        // Two busy workers split evenly; a busy and an idle one about 10:1.
+        assert_eq!(super::split(1000, 500, &[500, 500]), 500);
+        let busy = super::split(1000, 900, &[900, 0]);
+        let idle = super::split(1000, 0, &[900, 0]);
+        assert!(busy > 9 * idle && busy + idle <= 1000, "{busy} {idle}");
+        // Never more than the budget in all.
+        let d = [10_u64, 2000, 0, 77];
+        let sum: u64 = d.iter().map(|m| super::split(1000, *m, &d)).sum();
+        assert!((990..=1000).contains(&sum), "{sum}");
+    }
+
+    /// Two workers' buckets with shares from one window deliver at most
+    /// the budget between them.
+    #[tokio::test(start_paused = true)]
+    async fn two_workers_share_one_budget() {
+        let a = super::Quota::new(10_000);
+        let b = super::Quota::new(10_000);
+        a.set_local(super::split(10_000, 8_000, &[8_000, 8_000]));
+        b.set_local(super::split(10_000, 8_000, &[8_000, 8_000]));
+        let start = tokio::time::Instant::now();
+        let fa = async {
+            for _ in 0..50 {
+                a.take(1_000).await;
+            }
+        };
+        let fb = async {
+            for _ in 0..50 {
+                b.take(1_000).await;
+            }
+        };
+        tokio::join!(fa, fb);
+        // 100,000 bytes at 10,000 a second in all (each starts with one
+        // second of its share): about 9 s, never under 8.
+        let took = start.elapsed().as_secs_f64();
+        assert!(took >= 8.0, "{took}");
     }
 }

@@ -25,6 +25,8 @@
 
 use sprig_proto_mysql::packets::Persona;
 
+use std::fmt::Write as _;
+
 use crate::lex::{self, LexOptions, TokenKind};
 
 /// MySQL 8.4's default `sql_mode`.
@@ -198,6 +200,50 @@ impl PersonaVars {
     }
 }
 
+/// The collation variables whose values 3306 shows in MySQL's names (gaps
+/// row 60): MariaDB's UCA 14.0 defaults become MySQL's `*_0900_*`.
+const MYSQL_NAMED_COLLATIONS: &[&str] =
+    &["collation_connection", "collation_database", "collation_server"];
+
+/// Whether the token at `sig[k]` is a whole select item without an alias:
+/// at nesting depth 0, after `SELECT` (or `DISTINCT`) or a comma, and
+/// followed by the end, a comma, `;`, or a clause keyword.
+fn whole_item(tokens: &[lex::Token], sig: &[usize], sql: &[u8], k: usize) -> bool {
+    let punct = |i: usize, c: u8| tokens[i].kind == TokenKind::Punct && sql[tokens[i].start as usize] == c;
+    let word = |i: usize, w: &[&[u8]]| {
+        tokens[i].kind == TokenKind::Word && w.iter().any(|x| tokens[i].bytes(sql).eq_ignore_ascii_case(x))
+    };
+    let mut depth = 0i32;
+    for &i in &sig[..k] {
+        if punct(i, b'(') {
+            depth += 1;
+        } else if punct(i, b')') {
+            depth -= 1;
+        }
+    }
+    if depth != 0 || k == 0 {
+        return false;
+    }
+    let prev = sig[k - 1];
+    if !(punct(prev, b',') || word(prev, &[b"SELECT", b"DISTINCT", b"ALL"])) {
+        return false;
+    }
+    match sig.get(k + 1) {
+        None => true,
+        Some(&n) => {
+            punct(n, b',')
+                || punct(n, b';')
+                || word(
+                    n,
+                    &[
+                        b"FROM", b"INTO", b"UNION", b"WHERE", b"LIMIT", b"ORDER", b"GROUP",
+                        b"HAVING", b"WINDOW", b"FOR", b"EXCEPT", b"INTERSECT",
+                    ],
+                )
+        }
+    }
+}
+
 /// A replaced read: the literal sent, and the column name the client's
 /// text gives it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -290,6 +336,29 @@ pub fn rewrite_reads(
                         lit,
                         String::from_utf8_lossy(t.bytes(sql)).into_owned(),
                     ));
+                } else if vars.persona == Persona::MySql84 && MYSQL_NAMED_COLLATIONS.contains(&name)
+                {
+                    // R4 round 3 (gaps row 60): the backend's collation
+                    // names read as MySQL's. A whole select item keeps
+                    // the name the client wrote.
+                    let written = String::from_utf8_lossy(t.bytes(sql)).into_owned();
+                    let mut expr = format!("CASE {written}");
+                    for (m, my) in super::collation::output_pairs() {
+                        // MySQL has its own PAD SPACE `utf8mb4_bin`.
+                        if my.starts_with("utf8mb4_0900_") && m != "utf8mb4_bin" {
+                            let _ = write!(
+                                expr,
+                                " WHEN {} THEN {}",
+                                sql_literal(&m, nbe),
+                                sql_literal(my, nbe)
+                            );
+                        }
+                    }
+                    let _ = write!(expr, " ELSE {written} END");
+                    if whole_item(&tokens, &sig, sql, k) {
+                        let _ = write!(expr, " AS `{}`", written.replace('`', "``"));
+                    }
+                    edits.push((t.range(), expr, written));
                 }
             }
             TokenKind::Word
@@ -358,6 +427,37 @@ mod tests {
     fn rw(sql: &str, vars: &PersonaVars) -> Option<(String, Vec<Replaced>)> {
         rewrite_reads(sql.as_bytes(), &LexOptions::mysql84(), vars)
             .map(|(s, r)| (String::from_utf8(s).unwrap(), r))
+    }
+
+    #[test]
+    fn collation_reads_use_mysql_names() {
+        let (sql, r) = rw(
+            "SELECT @@collation_connection, @@session.collation_database AS d, \
+             CONCAT(@@collation_server, 'x') FROM dual",
+            &my(),
+        )
+        .unwrap();
+        assert!(sql.starts_with("SELECT CASE @@collation_connection WHEN "), "{sql}");
+        assert!(
+            sql.contains(" WHEN 'utf8mb4_uca1400_ai_ci' THEN 'utf8mb4_0900_ai_ci' "),
+            "{sql}"
+        );
+        assert!(!sql.contains("'utf8mb4_bin'"), "{sql}");
+        assert!(sql.contains(" ELSE @@collation_connection END AS `@@collation_connection`, CASE @@session.collation_database"), "{sql}");
+        assert!(sql.contains(" ELSE @@session.collation_database END AS d, "), "{sql}");
+        assert!(sql.contains("CONCAT(CASE @@collation_server WHEN"), "{sql}");
+        assert!(!sql.contains("AS `@@collation_server`"), "{sql}");
+        assert_eq!(r[0].written, "@@collation_connection");
+        // `SET @old = @@collation_connection` reads the MySQL name too.
+        let (sql, _) = rw("SET @c = @@collation_connection", &my()).unwrap();
+        assert!(sql.starts_with("SET @c = CASE @@collation_connection WHEN"), "{sql}");
+        assert!(!sql.contains(" AS `"), "{sql}");
+        // 3307 shows MariaDB's names.
+        assert!(rw(
+            "SELECT @@collation_connection",
+            &PersonaVars::new(Persona::MariaDb, "11.8.3-MariaDB-SprigDB")
+        )
+        .is_none());
     }
 
     #[test]

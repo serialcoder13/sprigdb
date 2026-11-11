@@ -246,6 +246,58 @@ pub trait ShardConns: Send {
     /// # Errors
     /// The coordinator's (39440, 39444) or the backend's.
     async fn conn(&mut self, at: &ShardLoc, write: bool) -> Result<&mut Conn>;
+
+    /// Whether writes are reported through [`Self::wrote`] (a coordinator
+    /// whose branches may be held by Sprig 2PC records them for redo).
+    fn records(&self) -> bool {
+        false
+    }
+
+    /// A write that succeeded on `at`'s connection, with its values
+    /// written into the text ([`inline_params`]); the connection still
+    /// holds its affected-row count.
+    fn wrote(&mut self, _at: &ShardLoc, _sql: &str) {}
+}
+
+/// `sql` with each `?` placeholder outside quotes replaced by its value
+/// as an SQL literal: the text a held branch records for redo (chapter
+/// 18's Sprig 2PC).
+#[must_use]
+pub fn inline_params(sql: &str, params: &Params) -> String {
+    let vals: &[MyValue] = match params {
+        Params::Positional(v) => v,
+        _ => return sql.to_owned(),
+    };
+    let mut out = String::with_capacity(sql.len() + vals.len() * 8);
+    let mut it = vals.iter();
+    let mut quote: Option<char> = None;
+    let mut chars = sql.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                out.push(c);
+                if c == '\\' && q != '`' {
+                    if let Some(n) = chars.next() {
+                        out.push(n);
+                    }
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '\'' | '"' | '`' => {
+                    quote = Some(c);
+                    out.push(c);
+                }
+                '?' => match it.next() {
+                    Some(v) => out.push_str(&v.as_sql(false)),
+                    None => out.push('?'),
+                },
+                _ => out.push(c),
+            },
+        }
+    }
+    out
 }
 
 /// One connection for every shard (tests; every shard on one server).
@@ -753,9 +805,14 @@ impl<'c> MariaStore<'c> {
     async fn run_at(&mut self, i: usize, sql: String, params: Params) -> Result<u64> {
         self.stats.shard_queries += 1;
         let at = self.layout.shards[i].clone();
+        let text = self.conns.records().then(|| inline_params(&sql, &params));
         let conn = self.conns.conn(&at, true).await?;
         conn.exec_drop(sql, params).await.map_err(backend_error)?;
-        Ok(conn.affected_rows())
+        let n = conn.affected_rows();
+        if let Some(t) = text {
+            self.conns.wrote(&at, &t);
+        }
+        Ok(n)
     }
 
     async fn node_rows_at(
@@ -1701,4 +1758,29 @@ pub async fn check_deleted(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod inline_tests {
+    use super::*;
+
+    #[test]
+    fn values_go_in_outside_quotes() {
+        let p = Params::Positional(vec![
+            MyValue::from(7u64),
+            MyValue::from("it's {\"a\": \"?\"}"),
+            MyValue::NULL,
+        ]);
+        assert_eq!(
+            inline_params(
+                "INSERT INTO `s?`.t (a, b, c) VALUES (?, ?, ?) /* '?' */",
+                &p
+            ),
+            "INSERT INTO `s?`.t (a, b, c) VALUES (7, 'it\\'s {\\\"a\\\": \\\"?\\\"}', NULL) /* '?' */"
+        );
+        assert_eq!(
+            inline_params("DELETE FROM t", &Params::Empty),
+            "DELETE FROM t"
+        );
+    }
 }

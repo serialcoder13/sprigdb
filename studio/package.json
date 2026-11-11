@@ -21,10 +21,15 @@
     "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm licences && node scripts/gen-api.mjs --check"
   },
   "dependencies": {
+    "@fincity/kirun-js": "3.17.2",
+    "@fincity/kirun-ui": "1.4.0",
     "@tanstack/react-query": "5.105.0",
     "@tanstack/react-virtual": "3.14.23",
+    "acorn": "8.19.0",
+    "cytoscape": "3.34.4",
     "echarts": "6.1.0",
     "monaco-editor": "0.56.0",
+    "qrcode": "1.5.4",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "react-intl": "12.1.5",
