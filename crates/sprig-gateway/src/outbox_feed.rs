@@ -90,13 +90,11 @@ pub async fn subscribe(svc: &TenantServices, tenant: TenantId) {
             }
         }
     });
-    let ok = match tokio::time::timeout(SUBSCRIBE_WAIT, run).await {
-        Ok(ok) => *ok,
-        Err(_) => {
-            tracing::warn!(%tenant, "queue forwarder subscription still registering; the polling fallback forwards meanwhile");
-            return;
-        }
+    let Ok(ok) = tokio::time::timeout(SUBSCRIBE_WAIT, run).await else {
+        tracing::warn!(%tenant, "queue forwarder subscription still registering; the polling fallback forwards meanwhile");
+        return;
     };
+    let ok = *ok;
     if !ok {
         let mut m = subscribed().lock().unwrap_or_else(PoisonError::into_inner);
         if m.get(&tenant.0).is_some_and(|c| Arc::ptr_eq(c, &cell)) {

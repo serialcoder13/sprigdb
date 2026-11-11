@@ -486,7 +486,11 @@ mod tests {
             progress: true,
         };
         subs.register_at(&sub, &tok, 7).await.unwrap();
-        let cp = subs.checkpoint(t, "queue_forwarder").await.unwrap().unwrap();
+        let cp = subs
+            .checkpoint(t, "queue_forwarder")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(cp.resume_token().unwrap(), tok);
         assert_eq!(cp.acked_events, 0);
         let later = ResumeToken {
@@ -498,16 +502,22 @@ mod tests {
             e.kind,
             sprig_common::ErrorKind::Sprig(SprigCode::FeedSubscriptionExists)
         ));
-        let cp = subs.checkpoint(t, "queue_forwarder").await.unwrap().unwrap();
+        let cp = subs
+            .checkpoint(t, "queue_forwarder")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(cp.resume_token().unwrap(), tok);
         let other = ResumeToken {
             tenant: TenantId(8),
             ..tok.clone()
         };
-        let sub8 = Subscription {
-            tenant: TenantId(9),
+        // Another tenant's token is refused, even for a new subscription.
+        let fresh = Subscription {
+            name: "other".into(),
             ..sub.clone()
         };
-        assert!(subs.register_at(&sub8, &other, 9).await.is_err());
+        assert!(subs.register_at(&fresh, &other, 9).await.is_err());
+        assert!(subs.get(t, "other").await.is_err());
     }
 }

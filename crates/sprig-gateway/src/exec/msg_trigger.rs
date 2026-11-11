@@ -237,6 +237,15 @@ impl PassSession {
                 if !allows(sprig_auth::authz::Action::Select, &sdb, &def.name) {
                     return Err(denied(ts, "SELECT", &sdb, &def.name));
                 }
+                // Chapter 29 (RL36): a change topic carries its table's rows,
+                // so its table's SELECT and policies decide, not the name's.
+                crate::tenant::rls_streams::change_topic_readable(
+                    grants.as_ref(),
+                    &cat,
+                    &def,
+                    lctn,
+                    &ts.principal.user,
+                )?;
                 let r = cat
                     .database(&database_key(&sdb, lctn))
                     .cloned()
@@ -392,7 +401,12 @@ impl PassSession {
             );
             return Ok(Some(self.fail(out, &e).await?));
         };
-        let reply = if let Some(rp) = &req.replay {
+        let reply = if let Some(r) = self.change_topic_guard(&req).await {
+            // Chapter 29 (RL36): the definer may no longer read the change
+            // topic's table (a policy, role or grant change since deploy):
+            // the trigger waits, its records neither run nor dead-letter.
+            r
+        } else if let Some(rp) = &req.replay {
             // RC11: a dead letter's replay.
             self.run_replay(cx, &req, rp).await
         } else if req.record.is_some() {
@@ -435,6 +449,46 @@ impl PassSession {
             errored: false,
             status: Some(status),
         }))
+    }
+
+    /// Chapter 29 (RL36): a trigger on a change topic runs only while its
+    /// definer (this session) may read the topic's table unfiltered:
+    /// `SELECT` on the table and no policy binding the definer. Otherwise a
+    /// transient failure, so the runner retries with backoff and the record
+    /// is neither run nor dead-lettered. `None` to go on.
+    async fn change_topic_guard(&mut self, req: &RunRequest) -> Option<RunReply> {
+        if req.source.kind != SourceKind::Stream || req.instance_tenant != 0 {
+            return None;
+        }
+        let ts = self.tenant.as_deref_mut()?;
+        let cat = match ts.refresh().await {
+            Ok(c) => c,
+            Err(e) => {
+                let mut r = RunReply::failed(&e);
+                r.transient = true;
+                return Some(r);
+            }
+        };
+        let def = cat
+            .ext
+            .get::<StreamsState>(sprig_streams::MODULE)?
+            .all()
+            .find(|s| s.id.0 == req.source.object_id)
+            .cloned()?;
+        let grants = crate::tenant::authz::privileges(ts, &cat);
+        let lctn = ts.lower_case_table_names();
+        let e = crate::tenant::rls_streams::change_topic_readable(
+            grants.as_ref(),
+            &cat,
+            &def,
+            lctn,
+            &ts.principal.user,
+        )
+        .err()?;
+        tracing::warn!(binding = req.source.binding_id, stream = %def.name, error = %e, "trigger on a change topic waits: its definer may not read the table's rows");
+        let mut r = RunReply::failed(&e);
+        r.transient = true;
+        Some(r)
     }
 
     /// One statement through this session; its error returned.

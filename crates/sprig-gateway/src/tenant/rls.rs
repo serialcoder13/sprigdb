@@ -1270,18 +1270,43 @@ pub async fn pause_bound_sinks(
     let mut conn = ep.pool.get_conn().await.map_err(|e| {
         SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable").with_source(e)
     })?;
+    // RL36: sinks `FROM STREAM t.changes` export the table's rows too.
+    let topic = cat
+        .ext
+        .get::<sprig_streams::StreamsState>(sprig_streams::MODULE)
+        .and_then(|st| {
+            st.all()
+                .find(|s| {
+                    s.kind == sprig_streams::model::StreamKind::Changes
+                        && s.source_object == Some(object)
+                })
+                .map(|s| s.id.0)
+        });
     let rows: Vec<(u64, u32)> = match conn
-        .exec(
+        .exec::<(u64, u32, String), _, _>(
             format!(
-                "SELECT sink_id, owner_user_id FROM {}.sinks WHERE source_kind = 'changes' \
-                 AND JSON_CONTAINS(source_ids, ?) AND state IN ('creating', 'running', 'failing')",
+                "SELECT sink_id, owner_user_id, CAST(source_ids AS CHAR) FROM {}.sinks \
+                 WHERE source_kind IN ('changes', 'stream') \
+                 AND state IN ('creating', 'running', 'failing')",
                 sprig_sql::rls::quote(&schema)
             ),
-            (object.0.to_string(),),
+            (),
         )
         .await
     {
-        Ok(r) => r,
+        Ok(r) => r
+            .into_iter()
+            .filter(|(_, _, src)| {
+                match serde_json::from_str::<sprig_sinks::model::SourceSpec>(src) {
+                    Ok(sprig_sinks::model::SourceSpec::Changes { objects }) => {
+                        objects.iter().any(|(o, _)| *o == object.0)
+                    }
+                    Ok(sprig_sinks::model::SourceSpec::Stream { id, .. }) => Some(id) == topic,
+                    _ => false,
+                }
+            })
+            .map(|(s, o, _)| (s, o))
+            .collect(),
         // No sinks module yet.
         Err(mysql_async::Error::Server(e)) if e.code == 1146 => return Ok(0),
         Err(e) => {

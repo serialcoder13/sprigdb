@@ -932,7 +932,13 @@ impl PassSession {
                 *lex_opts,
                 &tainted,
             );
-            let Some(inj) = inject(src, lex_opts, &r)? else {
+            let inj = match inject(src, lex_opts, &r) {
+                Ok(i) => i,
+                // Say why stored code over a protected table is refused when
+                // pointing it at the policy views failed (RL20).
+                Err(e) => return Err(with_repoint_reason(e, ts.tenant.0, &tainted)),
+            };
+            let Some(inj) = inj else {
                 return Ok(same(text));
             };
             let keys = r.keys.borrow().clone();
@@ -1056,6 +1062,46 @@ async fn table_columns(
 /// Code already pointed at the policy views: (tenant, object, schema
 /// version, protected set).
 type Repointed = std::sync::Mutex<std::collections::HashSet<(u64, u64, u64, u64)>>;
+
+/// Why pointing stored code at the policy views last failed, by (tenant,
+/// lower-case name).
+fn repoint_errors() -> &'static std::sync::Mutex<HashMap<(u64, String), String>> {
+    static R: std::sync::OnceLock<std::sync::Mutex<HashMap<(u64, String), String>>> =
+        std::sync::OnceLock::new();
+    R.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// `e` (a refusal of stored code over a protected table) with the reason
+/// the code wasn't pointed at the policy views, when one is known.
+fn with_repoint_reason(
+    e: SprigError,
+    tenant: u64,
+    tainted: &std::collections::HashSet<String>,
+) -> SprigError {
+    if e.code() != Some(SprigCode::RlsUnsupported) || tainted.is_empty() {
+        return e;
+    }
+    let reasons: Vec<String> = {
+        let m = repoint_errors()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        tainted
+            .iter()
+            .filter_map(|n| m.get(&(tenant, n.clone())).map(|r| format!("{n}: {r}")))
+            .collect()
+    };
+    if reasons.is_empty() {
+        return e;
+    }
+    SprigError::new(
+        SprigCode::RlsUnsupported,
+        format!(
+            "{} (stored code wasn't pointed at the policy views: {})",
+            e.message,
+            reasons.join("; ")
+        ),
+    )
+}
 
 fn repointed() -> &'static Repointed {
     static R: std::sync::OnceLock<Repointed> = std::sync::OnceLock::new();
@@ -1184,6 +1230,10 @@ impl PassSession {
                 .await;
                 if let Err(e) = r {
                     tracing::warn!(object = c.object.0, %schema, error = %e, "stored code not pointed at the policy views: refused to bound sessions");
+                    repoint_errors()
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert((tenant, c.name.to_lowercase()), format!("{schema}: {e}"));
                     ok = false;
                     break;
                 }

@@ -30,8 +30,8 @@ use sprig_common::names::quote;
 use sprig_common::{Result, SprigCode, SprigError};
 
 use crate::model::{
-    InheritState, InheritableObject, MergeMode, ROOT_SPACE, Share, ShareTarget, Space, SpaceId,
-    Take, UniqueKey,
+    InheritState, InheritableObject, MergeMode, ObjectExt, ROOT_SPACE, Share, ShareTarget, Space,
+    SpaceId, Take, UniqueKey,
 };
 
 /// The module name.
@@ -111,13 +111,32 @@ pub const DDL_HOMES: &str = "CREATE TABLE IF NOT EXISTS space_homes (
   PRIMARY KEY (user_id)
 ) ENGINE=InnoDB";
 
+/// `inherit_ext` (format 2, Kiran's decisions of 11 November 2026): per
+/// object, the `AUTO_INCREMENT` column, the foreign keys the gateway keeps
+/// and whether SprigDB created the object from its parent tenant's, as
+/// JSON ([`crate::model::ObjectExt`]).
+pub const DDL_EXT: &str = "CREATE TABLE IF NOT EXISTS inherit_ext (
+  object_id         BIGINT UNSIGNED NOT NULL,
+  ext               JSON            NOT NULL,
+  changed_version   BIGINT UNSIGNED NOT NULL,
+  PRIMARY KEY (object_id)
+) ENGINE=InnoDB";
+
 /// The module's migrations.
-pub static INHERIT_MIGRATIONS: &[Migration] = &[Migration {
-    format: 1,
-    phase: Phase::Expand,
-    name: "spaces, inheritable_objects, shares and space_homes",
-    statements: &[DDL_SPACES, DDL_OBJECTS, DDL_SHARES, DDL_HOMES],
-}];
+pub static INHERIT_MIGRATIONS: &[Migration] = &[
+    Migration {
+        format: 1,
+        phase: Phase::Expand,
+        name: "spaces, inheritable_objects, shares and space_homes",
+        statements: &[DDL_SPACES, DDL_OBJECTS, DDL_SHARES, DDL_HOMES],
+    },
+    Migration {
+        format: 2,
+        phase: Phase::Expand,
+        name: "inherit_ext: AUTO_INCREMENT columns, foreign keys, adopted objects",
+        statements: &[DDL_EXT],
+    },
+];
 
 /// The `inherit` module, for [`Migrator::new`].
 pub const INHERIT_MODULE: Module = Module {
@@ -245,11 +264,28 @@ impl InheritStore {
         Ok(n.unwrap_or(0) > 0)
     }
 
+    /// Whether format 2's `inherit_ext` exists.
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn ext_ready<Q: Queryable + Send>(&self, q: &mut Q) -> Result<bool> {
+        let n: Option<u64> = q
+            .exec_first(
+                "SELECT COUNT(*) FROM information_schema.TABLES \
+                 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'inherit_ext'",
+                (self.schema.as_str(),),
+            )
+            .await
+            .map_err(map_err)?;
+        Ok(n.unwrap_or(0) > 0)
+    }
+
     /// The whole state.
     ///
     /// # Errors
     /// 39070, a backend error, or `Internal` for a malformed row.
     pub async fn load<Q: Queryable + Send>(&self, q: &mut Q) -> Result<InheritState> {
+        let ext_ready = self.ext_ready(q).await?;
         let rows: Vec<Row> = q
             .query(format!(
                 "SELECT space_id, name, parent_space_id, depth FROM {} \
@@ -267,11 +303,19 @@ impl InheritStore {
                 depth: col(r, 3)?,
             });
         }
+        let ext_sql = if ext_ready {
+            format!(
+                "(SELECT CAST(e.ext AS CHAR) FROM {} e WHERE e.object_id = i.object_id)",
+                self.t("inherit_ext")
+            )
+        } else {
+            "NULL".to_owned()
+        };
         let rows: Vec<Row> = q
             .query(format!(
                 "SELECT i.object_id, o.db_id, o.name, CAST(i.key_fields AS CHAR), \
                  CAST(i.field_slots AS CHAR), CAST(i.columns AS CHAR), \
-                 CAST(i.unique_keys AS CHAR), i.tag_field, i.version \
+                 CAST(i.unique_keys AS CHAR), i.tag_field, i.version, {ext_sql} \
                  FROM {} i JOIN {} o ON o.object_id = i.object_id \
                  WHERE o.state <> 'dropped' ORDER BY i.object_id",
                 self.t("inheritable_objects"),
@@ -280,11 +324,20 @@ impl InheritStore {
             .await
             .map_err(map_err)?;
         let mut objects = Vec::with_capacity(rows.len());
+        let mut missing = Vec::new();
         for r in &rows {
             let key: String = col(r, 3)?;
             let slots: String = col(r, 4)?;
             let columns: String = col(r, 5)?;
             let uniques: String = col(r, 6)?;
+            let ext: Option<String> = col(r, 9)?;
+            let ext: ObjectExt = match ext {
+                Some(e) => json(&e, "inherit_ext")?,
+                None => {
+                    missing.push(ObjectId(col(r, 0)?));
+                    ObjectExt::default()
+                }
+            };
             objects.push(InheritableObject {
                 object_id: ObjectId(col(r, 0)?),
                 db: DbId(col(r, 1)?),
@@ -295,6 +348,9 @@ impl InheritStore {
                 uniques: json::<Vec<UniqueKey>>(&uniques, "unique_keys")?,
                 tag_field: col(r, 7)?,
                 version: col(r, 8)?,
+                auto: ext.auto,
+                links: ext.links,
+                adopted: ext.adopted,
             });
         }
         let rows: Vec<Row> = q
@@ -343,6 +399,7 @@ impl InheritStore {
                 version: col(r, 11)?,
                 created_by: col(r, 12)?,
                 mode: MergeMode::parse(&col::<String>(r, 13)?).unwrap_or_default(),
+                via: None,
             });
         }
         let homes: Vec<(u32, u64)> = q
@@ -352,13 +409,16 @@ impl InheritStore {
             ))
             .await
             .map_err(map_err)?;
-        Ok(InheritState::new(
+        let mut st = InheritState::new(
             spaces,
             objects,
             shares,
             takes,
             homes.into_iter().map(|(u, s)| (u, SpaceId(s))).collect(),
-        ))
+        );
+        st.ext_ready = ext_ready;
+        st.set_ext_missing(missing);
+        Ok(st)
     }
 
     async fn next_id<Q: Queryable + Send>(&self, q: &mut Q, table: &str, id: &str) -> Result<u64> {
@@ -463,6 +523,12 @@ impl InheritStore {
             .await
             .map_err(map_err)?;
             q.exec_drop(
+                format!("DELETE FROM {} WHERE object_id = ?", self.t("inherit_ext")),
+                (id.0,),
+            )
+            .await
+            .map_err(map_err)?;
+            q.exec_drop(
                 format!("DELETE FROM {} WHERE object_id = ?", self.t("shares")),
                 (id.0,),
             )
@@ -491,6 +557,17 @@ impl InheritStore {
                     o.tag_field.as_deref(),
                     version,
                 ),
+            )
+            .await
+            .map_err(map_err)?;
+            q.exec_drop(
+                format!(
+                    "INSERT INTO {} (object_id, ext, changed_version) VALUES (?, ?, ?) \
+                     ON DUPLICATE KEY UPDATE ext = VALUES(ext), \
+                     changed_version = VALUES(changed_version)",
+                    self.t("inherit_ext")
+                ),
+                (o.object_id.0, enc(&o.ext()), version),
             )
             .await
             .map_err(map_err)?;
@@ -673,9 +750,11 @@ mod tests {
     #[test]
     fn module_is_well_formed() {
         Migrator::new(&[INHERIT_MODULE]).unwrap();
-        assert_eq!(INHERIT_MODULE.newest(), 1);
-        for ddl in INHERIT_MIGRATIONS[0].statements {
-            assert!(ddl.starts_with("CREATE TABLE IF NOT EXISTS "));
+        assert_eq!(INHERIT_MODULE.newest(), 2);
+        for m in INHERIT_MIGRATIONS {
+            for ddl in m.statements {
+                assert!(ddl.starts_with("CREATE TABLE IF NOT EXISTS "));
+            }
         }
     }
 }

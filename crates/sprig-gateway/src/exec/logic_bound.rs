@@ -296,6 +296,33 @@ impl PassSession {
                 {
                     return Err(denied("TRIGGER", &user_name, &t.name));
                 }
+                // Chapter 29 (RL37): an after-commit trigger's code gets every
+                // changed row's images, as its definer: it needs SELECT on
+                // the table (as MySQL asks of a trigger reading OLD and NEW),
+                // and policies on the table mustn't bind the definer.
+                // Validations run in the writer's own statement and see only
+                // its row, so TRIGGER stays enough for them.
+                if decl.kind == Kind::Trigger && !grants.unrestricted() {
+                    let on = AuthzTarget::Object {
+                        db_key: &db_key,
+                        db: row.db_id,
+                        object: o.object_id,
+                    };
+                    if !grants.allows(Action::Select, on) {
+                        return Err(denied("SELECT", &user_name, &t.name));
+                    }
+                    if grants.row_filter(on, Action::Select).is_some() {
+                        return Err(SprigError::new(
+                            SprigCode::RlsUnsupported,
+                            format!(
+                                "ER_SPRIG_RLS_UNSUPPORTED: row-level security on '{}' binds this \
+                                 user, and an after-commit trigger would get every changed row \
+                                 unfiltered",
+                                t.name
+                            ),
+                        ));
+                    }
+                }
                 Some((t.name.clone(), o.object_id.0))
             }
         } else {

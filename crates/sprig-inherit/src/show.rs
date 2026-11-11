@@ -35,6 +35,14 @@ fn columns(names: &[&str]) -> Vec<ColumnDef> {
         .collect()
 }
 
+/// A text result set.
+pub(crate) fn text_rows(names: &[&str], rows: Vec<Vec<Option<Vec<u8>>>>) -> Rows {
+    Rows {
+        columns: columns(names),
+        rows,
+    }
+}
+
 fn row(vals: Vec<Option<String>>) -> Vec<Option<Vec<u8>>> {
     vals.into_iter()
         .map(|v| v.map(String::into_bytes))

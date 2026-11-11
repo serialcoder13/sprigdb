@@ -1,7 +1,8 @@
-# SprigDB on one VM with Docker Compose (hardening round 1; chapter 27,
-# "Compose on VMs"). Production bundle: TLS on every client listener, mutual
-# TLS to etcd, secrets from files, healthchecks, memory limits, log rotation,
-# named volumes, `restart: unless-stopped`.
+# SprigDB on one VM with Docker Compose (hardening rounds 1 and 2; chapter
+# 27, "Compose on VMs"), or the first of three VMs with compose.ha.yaml.
+# Production bundle: TLS on every client listener, mutual TLS to etcd,
+# secrets from files, healthchecks, memory limits, log rotation, named
+# volumes, `restart: unless-stopped`.
 #
 # This is NOT the development stack (deploy/compose/compose.yaml). Start it
 # through sprig-vm.sh, which makes the secrets and certificates first and
@@ -21,10 +22,13 @@
 #   SPRIG_KAFKA_PORT    Kafka                       (default 9092)
 #   SPRIG_AMQPS_PORT    AMQP 0-9-1 / 1.0 over TLS   (default 5671)
 # On 127.0.0.1 only (reach them over SSH):
-#   SPRIG_ADMIN_PORT    controller Admin API, bearer token (default 7480)
+#   SPRIG_ADMIN_PORT    controller Admin API, HTTPS + bearer token (default 7480)
 #   SPRIG_METRICS_PORT  Prometheus, when the monitoring profile runs (9090)
 # Inside the network only: etcd 2379 (mTLS), MariaDB 3306 (TLS required),
-# telemetry/metrics 9180 on each SprigDB process, controller internal 7481.
+# telemetry/metrics 9180 on each SprigDB process, controller internal 7481,
+# gateway peer service 7403 (mTLS). With several VMs, compose.ha.yaml and
+# compose.gateway-vm.yaml publish etcd, MariaDB, 7481 and 7403 on the
+# private address (RUNBOOK.md, "High availability").
 #
 # The listeners bind inside the gateway container on the same port numbers
 # they are published on (sprig-vm.sh writes listener.<name>.bind), so the

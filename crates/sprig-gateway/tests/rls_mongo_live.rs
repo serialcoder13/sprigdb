@@ -23,7 +23,8 @@
     clippy::unwrap_used,
     clippy::expect_used,
     missing_docs,
-    clippy::too_many_lines
+    clippy::too_many_lines,
+    clippy::many_single_char_names
 )]
 
 use std::collections::BTreeSet;

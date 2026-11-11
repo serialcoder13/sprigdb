@@ -47,6 +47,16 @@ fn literal(rows: &Rows, row: &[Option<Vec<u8>>], i: usize, nbe: bool) -> String 
     }
 }
 
+/// [`literal`] for other modules.
+pub(crate) fn literal_of(rows: &Rows, row: &[Option<Vec<u8>>], i: usize, nbe: bool) -> String {
+    literal(rows, row, i, nbe)
+}
+
+/// [`key_in`] for other modules.
+pub(crate) fn key_in_sql(o: &InheritableObject, tuples: &[String]) -> String {
+    key_in(o, tuples)
+}
+
 /// The key tuples of the first `n` columns of each row, as SQL.
 fn key_tuples(rows: &Rows, n: usize, nbe: bool) -> Vec<String> {
     rows.rows
@@ -269,25 +279,51 @@ pub async fn update(sql: &str, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Hand
     upstream::ensure(ctx, r, &res).await?;
     let chain = ctx.chain(o, s, &res.prefix)?;
     let nbe = ctx.lex.no_backslash_escapes;
+    // Foreign keys whose columns this statement sets are checked after it.
+    let sets_links = o.links.iter().any(|l| {
+        l.columns
+            .iter()
+            .any(|c| assigned.iter().any(|(x, _)| x.eq_ignore_ascii_case(c)))
+    });
     if chain.is_base() {
         // Only s's own rows: the client's statement with s as a condition.
         let sets: Vec<String> = assigned
             .iter()
             .map(|(c, v)| format!("{a}.{} = {v}", q(c)))
             .collect();
-        let text = format!(
-            "UPDATE {} AS {a} SET {} WHERE {a}.`_sprig_space` = {} AND {a}.`_sprig_state` IN \
-             ('own', 'orphan'){}{order}{limit}",
-            res.layer,
-            sets.join(", "),
+        let cond = format!(
+            "{a}.`_sprig_space` = {} AND {a}.`_sprig_state` IN ('own', 'orphan'){}",
             s.0,
             selection
                 .as_deref()
                 .map(|w| format!(" AND ({w})"))
                 .unwrap_or_default()
         );
+        let text = format!(
+            "UPDATE {} AS {a} SET {} WHERE {cond}{order}{limit}",
+            res.layer,
+            sets.join(", "),
+        );
         layer_op("update");
-        return r.exec(&text).await.map(Handled::Ok).map_err(map_duplicate);
+        if !sets_links {
+            return r.exec(&text).await.map(Handled::Ok).map_err(map_duplicate);
+        }
+        let tx = Txn::begin(tr(r)).await?;
+        let result = async {
+            let rows = r
+                .query(&format!(
+                    "SELECT {} FROM {} AS {a} WHERE {cond}{order}{limit}",
+                    key_list(o, Some(&a)),
+                    res.layer
+                ))
+                .await?;
+            let keys = key_tuples(&rows, o.key.len(), nbe);
+            let d = r.exec(&text).await.map_err(map_duplicate)?;
+            crate::links::after_write(ctx, r, &res, &keys).await?;
+            Ok(d)
+        }
+        .await;
+        return tx.end(tr(r), result).await.map(Handled::Ok);
     }
     let same = if assigned.is_empty() {
         "TRUE".to_owned()
@@ -356,6 +392,9 @@ pub async fn update(sql: &str, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Hand
             );
             r.exec(&text).await.map_err(map_duplicate)?;
             layer_op("override");
+            if sets_links {
+                crate::links::after_write(ctx, r, &res, &keys).await?;
+            }
         }
         let affected = if r.found_rows() { matched } else { changed };
         Ok(Done {
@@ -482,7 +521,8 @@ async fn delete_where(
     upstream::ensure(ctx, r, res).await?;
     let chain = ctx.chain(o, s, &res.prefix)?;
     let below = feeds_below(ctx, o, s);
-    if let (true, false, Direct::Yes(cond)) = (chain.is_base(), below, direct) {
+    let checked = crate::links::deletes_need_check(ctx, o);
+    if let (true, false, false, Direct::Yes(cond)) = (chain.is_base(), below, checked, direct) {
         let text = format!(
             "DELETE FROM {} WHERE `_sprig_space` = {} AND `_sprig_state` IN ('own', 'orphan'){}{tail}",
             res.layer,
@@ -504,7 +544,8 @@ async fn delete_where(
         if keys.is_empty() {
             return Ok(done(0));
         }
-        delete_keys(ctx, r, res, &chain, &keys, below).await?;
+        let hexes = crate::links::row_hexes(&rows, o.key.len());
+        delete_keys(ctx, r, res, &chain, &keys, &hexes, below).await?;
         Ok(done(keys.len() as u64))
     }
     .await;
@@ -535,6 +576,7 @@ async fn delete_keys(
     res: &Resolved,
     chain: &Chain,
     keys: &[String],
+    hexes: &[String],
     below: bool,
 ) -> Result<()> {
     let o = &res.obj;
@@ -637,6 +679,15 @@ async fn delete_keys(
             before.insert(p, m);
         }
     }
+    // Refused (1451) while a row of s's view, or of a space or tenant
+    // below s, still references a key (Kiran's decision 4).
+    let hidden: BTreeSet<String> = keys
+        .iter()
+        .zip(hexes)
+        .filter(|(k, _)| inherited.contains(*k))
+        .map(|(_, h)| h.clone())
+        .collect();
+    crate::links::before_delete(ctx, r, res, hexes, &hidden).await?;
     // The change in s.
     let hide: Vec<String> = keys
         .iter()
@@ -736,6 +787,16 @@ async fn delete_keys(
                     ))
                     .await?;
                     metrics::counter!("sprig_inherit_orphans_total", "policy" => "keep", "path" => "sync").increment(1);
+                    if !o.links.is_empty() {
+                        crate::links::claim_rows(
+                            ctx,
+                            r,
+                            res,
+                            c.space,
+                            std::slice::from_ref(&c.key),
+                        )
+                        .await?;
+                    }
                 }
             }
         }
@@ -820,6 +881,24 @@ pub async fn insert(sql: &str, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Hand
     } else {
         vec![ins.assignments.iter().map(|a| a.value.clone()).collect()]
     };
+    // Generated ids come from the tree's one sequence (Kiran's decision 3).
+    let learnt;
+    let seq_obj: &InheritableObject = if ctx.state.ext_missing(o.object_id) {
+        // Made inheritable before its AUTO_INCREMENT column was recorded.
+        let cols = crate::guard::show_columns(r, &res.layer).await?;
+        let mut x = (**o).clone();
+        x.auto = crate::guard::auto_column(&cols);
+        r.commit(&crate::store::InheritChange {
+            upsert_objects: vec![x.clone()],
+            ..crate::store::InheritChange::default()
+        })
+        .await?;
+        learnt = x;
+        &learnt
+    } else {
+        o
+    };
+    let generated = crate::ids::fill(ctx, r, seq_obj, &mut columns, &mut rows).await?;
     upstream::ensure(ctx, r, &res).await?;
     let chain = ctx.chain(o, s, &res.prefix)?;
     if ins.replace_into && chain.has_upstream() {
@@ -850,10 +929,18 @@ pub async fn insert(sql: &str, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Hand
             format!("({})", parts.join(", "))
         })
     };
-    let keys: Vec<String> = rows.iter().filter_map(|row| tuple(row)).collect();
+    // Keys from the tree's sequence are new at every level: no visibility
+    // check and no stale layer rows to clear (and no gap locks taken).
+    let keys: Vec<String> = rows
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !generated.contains(i))
+        .filter_map(|(_, row)| tuple(row))
+        .collect();
     let upsert = matches!(&ins.on, Some(OnInsert::DuplicateKeyUpdate(_)));
     let mut ignored = 0u64;
-    let base = chain.is_base();
+    let linked = !o.links.is_empty();
+    let base = chain.is_base() && !linked;
     let tx = if base {
         None
     } else {
@@ -938,7 +1025,7 @@ pub async fn insert(sql: &str, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Hand
                 .await?;
             }
         }
-        let text = insert_text(&mut stmt_with_rows(&stmt, &rows), &columns, s, &res)?;
+        let text = insert_text(&mut stmt_with_rows(&stmt, &columns, &rows), &columns, s, &res)?;
         let first = r.exec(&text).await;
         let mut d = match first {
             Ok(d) => d,
@@ -965,6 +1052,10 @@ pub async fn insert(sql: &str, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Hand
             .warnings
             .saturating_add(u16::try_from(ignored).unwrap_or(u16::MAX));
         layer_op("add");
+        if linked {
+            let written: Vec<String> = rows.iter().filter_map(|row| tuple(row)).collect();
+            crate::links::after_write(ctx, r, &res, &written).await?;
+        }
         Ok(d)
     }
     .await;
@@ -978,14 +1069,25 @@ fn is_dup(e: &SprigError) -> bool {
     matches!(e.kind, sprig_common::ErrorKind::Backend { errno: 1062, .. })
 }
 
-/// `stmt` (an `INSERT`) with its rows replaced.
-fn stmt_with_rows(stmt: &Statement, rows: &[Vec<Expr>]) -> Statement {
+/// `stmt` (an `INSERT`) with its rows replaced (`columns`: the rows'
+/// columns, which may have gained the `AUTO_INCREMENT` column).
+fn stmt_with_rows(stmt: &Statement, columns: &[String], rows: &[Vec<Expr>]) -> Statement {
     let mut s = stmt.clone();
     if let Statement::Insert(ins) = &mut s {
         if !ins.assignments.is_empty() {
             if let Some(row) = rows.first() {
                 for (a, v) in ins.assignments.iter_mut().zip(row) {
                     a.value = v.clone();
+                }
+                for (c, v) in columns.iter().zip(row).skip(ins.assignments.len()) {
+                    ins.assignments.push(sqlparser::ast::Assignment {
+                        target: AssignmentTarget::ColumnName(sqlparser::ast::ObjectName(vec![
+                            sqlparser::ast::ObjectNamePart::Identifier(
+                                sqlparser::ast::Ident::with_quote('`', c.clone()),
+                            ),
+                        ])),
+                        value: v.clone(),
+                    });
                 }
             }
         } else if let Some(src) = &mut ins.source
@@ -1122,7 +1224,13 @@ pub async fn truncate(table: &Name, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result
     let Some(res) = ctx.resolve(table)? else {
         return Ok(Handled::NotInherit);
     };
-    crate::guard::refuse_if_shared(ctx, &res.obj, "TRUNCATE")?;
+    crate::guard::refuse_if_shared_now(ctx, r, &res.obj, "TRUNCATE").await?;
+    if crate::links::deletes_need_check(ctx, &res.obj) {
+        return Err(unsupported(
+            "TRUNCATE of an inheritable table other tables reference: use DELETE, which checks \
+             the references",
+        ));
+    }
     let chain = ctx.chain(&res.obj, ctx.space, &res.prefix)?;
     if chain.has_upstream() {
         return Err(unsupported(

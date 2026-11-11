@@ -124,6 +124,21 @@ pub struct MariaApply {
     pub versions: Arc<CatalogVersions>,
     /// `logic.trigger_budget_ms`.
     pub budget: Duration,
+    /// Chapter 29 (RL37): asked before each attempt; an error (retryable)
+    /// makes the event wait, neither run nor dead-lettered.
+    pub guard: Option<Arc<dyn RunGuard>>,
+}
+
+/// Whether a binding's code may run now (chapter 29, RL37: row-level
+/// security on the trigger's table mustn't bind its definer, whose code
+/// gets every changed row's images).
+#[async_trait]
+pub trait RunGuard: Send + Sync {
+    /// `Ok` to run.
+    ///
+    /// # Errors
+    /// Why not, retryable: the lane retries with backoff.
+    async fn check(&self) -> Result<()>;
 }
 
 /// An error's number.
@@ -203,6 +218,12 @@ impl Apply for MariaApply {
         // The version first: reading it takes a catalog connection, which
         // must never be awaited while this attempt holds a shard's.
         let (version, params) = self.versions.active().await?;
+        if let Some(g) = &self.guard {
+            g.check().await.map_err(|mut e| {
+                e.retryable = true;
+                e
+            })?;
+        }
         let pool = self.pools.pool(self.tenant).await?;
         let mut c = pool.get_conn().await.map_err(|e| {
             SprigError::new(

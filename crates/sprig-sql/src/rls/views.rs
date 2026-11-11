@@ -493,7 +493,7 @@ pub fn swap(
         return Ok(None);
     }
     let ctes = cte_names(&t);
-    let mut named: Option<HashSet<String>> = None;
+    let mut ident_cache: Option<HashSet<String>> = None;
     let mut widened = false;
     // RL28: the all-columns view when the statement names an invisible
     // column of the table.
@@ -501,8 +501,8 @@ pub fn swap(
         let Some((full, cols)) = lookup.hidden(&view) else {
             return view;
         };
-        let names = named.get_or_insert_with(|| idents(&t));
-        if cols.iter().any(|c| names.contains(c)) {
+        let seen = ident_cache.get_or_insert_with(|| idents(&t));
+        if cols.iter().any(|c| seen.contains(c)) {
             widened = true;
             full
         } else {

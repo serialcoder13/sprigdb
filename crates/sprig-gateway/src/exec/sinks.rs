@@ -216,6 +216,25 @@ impl Host for GwHost<'_> {
         let lctn = self.lctn();
         let db_key = database_key(db_name, lctn);
         let name_key = object_key(ObjectKind::Table, name, lctn);
+        // Chapter 29 (RL36): `FROM STREAM t.changes` exports table t's rows:
+        // SELECT on t and its policies decide, as for `CHANGES OF t`.
+        if let Some(row) = self.cat.database(&db_key)
+            && let Some(st) = self
+                .cat
+                .ext
+                .get::<sprig_streams::StreamsState>(sprig_streams::MODULE)
+            && let Some(def) = st.get(row.db_id, name, lctn)
+            && def.kind == sprig_streams::model::StreamKind::Changes
+        {
+            return crate::tenant::rls_streams::change_topic_readable(
+                g.as_ref(),
+                &self.cat,
+                def,
+                lctn,
+                &ts.principal.user,
+            )
+            .is_ok();
+        }
         // Chapter 29: a sink would export a table whose policies bind the
         // session unfiltered: refused.
         if let Some(row) = self.cat.database(&db_key)

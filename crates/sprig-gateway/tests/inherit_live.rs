@@ -104,7 +104,18 @@ async fn conn(addr: &str, tenant: &str) -> Conn {
         .ssl_opts(Some(
             SslOpts::default().with_danger_accept_invalid_certs(true),
         ));
-    Conn::new(opts).await.unwrap()
+    // A tenant created a moment ago can answer 39301 ("authentication
+    // unavailable; retry") until its login data reaches this gateway.
+    let end = Instant::now() + Duration::from_secs(20);
+    loop {
+        match Conn::new(opts.clone()).await {
+            Ok(c) => return c,
+            Err(mysql_async::Error::Server(e)) if e.code == 39301 && Instant::now() < end => {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            Err(e) => panic!("login as {tenant}.app: {e}"),
+        }
+    }
 }
 
 /// A statement's rows as text, or its error number and message.
@@ -571,12 +582,17 @@ async fn for_each_tenant_end_to_end() {
                 ),
             )
             .await;
-            let b = count(
+            // The Lua trigger runs on its own: wait for it too (r9fanin: it
+            // was counted once, the moment the JavaScript one was done, and
+            // was 2 behind under load).
+            let b = wait_count(
                 c,
                 &format!(
                     "SELECT COUNT(*) FROM app_b.members WHERE user_id >= {lo} AND user_id < {}",
                     lo + n
                 ),
+                n,
+                180,
             )
             .await;
             let b_twice = count(
@@ -3229,19 +3245,28 @@ async fn inherited_queue_sink_end_to_end() {
     )
     .await;
     let r = received(&got);
-    println!("{} records from {} members in {:?}", r.len(), ms.len(), t.elapsed());
+    println!(
+        "{} records from {} members in {:?}",
+        r.len(),
+        ms.len(),
+        t.elapsed()
+    );
     for m in &ms {
         let a = arrived(&r, m);
-        assert_eq!(a, (0..n).collect::<Vec<_>>(), "{m}: once each, in queue order");
+        assert_eq!(
+            a,
+            (0..n).collect::<Vec<_>>(),
+            "{m}: once each, in queue order"
+        );
     }
     // The member sees its own sink instance, owned by sprig_inherited.
     let (m0, c0) = &mut cs[0];
     let inst = ok(c0, "SHOW INHERITED INSTANCES").await;
     println!("{m0} instances: {inst:?}");
     assert!(
-        inst.iter()
-            .any(|r| r[0].as_deref() == Some("sink") && r[2].as_deref() == Some("out")
-                && r[5].as_deref() == Some("active")),
+        inst.iter().any(|r| r[0].as_deref() == Some("sink")
+            && r[2].as_deref() == Some("out")
+            && r[5].as_deref() == Some("active")),
         "{inst:?}"
     );
     // Nothing left in the members' queues.
@@ -3258,7 +3283,10 @@ async fn inherited_queue_sink_end_to_end() {
         let t = Instant::now();
         publish_q(&mut lc, &late, 0, 10).await;
         wait_received(&got, |r| arrived(r, &late).len() >= 10, 60).await;
-        println!("late member {late}: 10 delivered {:?} after its first publish", t.elapsed());
+        println!(
+            "late member {late}: 10 delivered {:?} after its first publish",
+            t.elapsed()
+        );
         assert_eq!(arrived(&received(&got), &late), (0..10).collect::<Vec<_>>());
     }
     ok(&mut sys, "DROP SINK r9fqs.out").await;

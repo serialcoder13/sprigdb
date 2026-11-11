@@ -30,7 +30,8 @@
     clippy::unwrap_used,
     clippy::expect_used,
     missing_docs,
-    clippy::too_many_lines
+    clippy::too_many_lines,
+    clippy::many_single_char_names
 )]
 
 use std::collections::BTreeSet;
@@ -711,7 +712,12 @@ async fn direct_probe(ck: &mut Checks, db: &str) {
             .as_ref()
             .ok()
             .and_then(|r| r.first())
-            .map(|r| r.columns_ref().iter().map(|c| c.name_str().into_owned()).collect())
+            .map(|r| {
+                r.columns_ref()
+                    .iter()
+                    .map(|c| c.name_str().into_owned())
+                    .collect()
+            })
             .unwrap_or_default();
         ck.ok(
             &format!("direct: view columns visible only in {s}"),
@@ -735,6 +741,64 @@ async fn direct_probe(ck: &mut Checks, db: &str) {
     ck.ok("direct: the view shows alice's rows", seen == want, || {
         format!("{seen:?} vs {want:?}")
     });
+}
+
+/// RL30: `rls.backend_enforcement` applies at the next statement:
+/// `triggers` drops the policy views (the rewrite still filters), and back
+/// to `views` they return.
+async fn enforcement_switch(ck: &mut Checks, admin: &mut Conn, a: &mut Conn, db: &str) {
+    let views = || async {
+        let (Ok(addr), Ok(tid)) = (
+            std::env::var("SPRIG_TEST_RLS_DIRECT"),
+            std::env::var("SPRIG_TEST_RLS_TENANT_ID"),
+        ) else {
+            return None;
+        };
+        let root_pw =
+            std::env::var("SPRIG_TEST_RLS_ROOT_PW").unwrap_or_else(|_| "sprig-dev-root".into());
+        let mut root = conn(&addr, "root", &root_pw, None).await;
+        let n: Option<i64> = root
+            .query_first(format!(
+                "SELECT COUNT(*) FROM information_schema.VIEWS WHERE TABLE_SCHEMA LIKE 't{tid}\\_d%' \
+                 AND TABLE_NAME IN ('__sprig_rls_docs', '__sprig_rlsh_docs')"
+            ))
+            .await
+            .unwrap();
+        n
+    };
+    let want = visible("rls_alice", false);
+    for (value, has_views) in [("'triggers'", false), ("DEFAULT", true)] {
+        let set = if value == "DEFAULT" {
+            format!("ALTER DATABASE {db} SPRIG RESET (rls.backend_enforcement)")
+        } else {
+            format!("ALTER DATABASE {db} SPRIG SET (rls.backend_enforcement = {value})")
+        };
+        let r = admin.query_drop(&set).await;
+        ck.ok(&format!("enforcement {value}: set"), r.is_ok(), || {
+            format!("{r:?}")
+        });
+        // The settings reach the gateway's catalog within moments.
+        let mut got = Err(String::new());
+        let mut n = None;
+        for _ in 0..20 {
+            got = ids(a, "SELECT id FROM docs").await;
+            n = views().await;
+            if got.as_ref() == Ok(&want) && n.is_none_or(|n| (n > 0) == has_views) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        ck.ok(
+            &format!("enforcement {value}: reads filtered"),
+            got == Ok(want.clone()),
+            || format!("{got:?}"),
+        );
+        ck.ok(
+            &format!("enforcement {value}: policy views present = {has_views}"),
+            n.is_none_or(|n| (n > 0) == has_views),
+            || format!("{n:?} views"),
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1038,6 +1102,7 @@ async fn row_level_security_suite() {
         );
     }
     direct_probe(&mut ck, &db).await;
+    enforcement_switch(&mut ck, &mut admin_db, &mut a, &db).await;
     // Disabling security opens the table again.
     admin_db
         .query_drop("ALTER TABLE docs DISABLE ROW LEVEL SECURITY")

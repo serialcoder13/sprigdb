@@ -272,17 +272,38 @@ impl EtcdStore {
             shared: Arc::default(),
             cfg: Arc::new(cfg.clone()),
         };
-        // The channel connects lazily; one read proves a seed answers.
+        // The channel connects lazily; one read proves a seed answers. The
+        // balanced channel may send a call to a seed that is down (one of
+        // three members stopped, or a member of another cluster right after
+        // a restore), and that call fails instead of trying the next seed:
+        // retry until one answers (up to `connect_timeout` per seed), so one dead
+        // seed doesn't stop a process from starting (hardening round 2).
         let root = store.tier.root();
-        store
-            .call(
-                "connect",
-                store.client.kv_client().get(
-                    root.as_str(),
-                    Some(GetOptions::new().with_count_only().with_serializable()),
-                ),
-            )
-            .await?;
+        let seeds = u32::try_from(cfg.endpoints.len()).unwrap_or(1).max(1);
+        let deadline = tokio::time::Instant::now() + cfg.connect_timeout * seeds;
+        let mut tries = 0u32;
+        loop {
+            tries += 1;
+            let r = store
+                .call(
+                    "connect",
+                    store.client.kv_client().get(
+                        root.as_str(),
+                        Some(GetOptions::new().with_count_only().with_serializable()),
+                    ),
+                )
+                .await;
+            match r {
+                Ok(_) => break,
+                Err(e)
+                    if tries < 3 * seeds && tokio::time::Instant::now() < deadline =>
+                {
+                    tracing::debug!(error = %e, tries, "an etcd seed didn't answer; trying again");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
         Ok(store)
     }
 

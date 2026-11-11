@@ -824,7 +824,11 @@ impl QueueSource {
                 None
             } else {
                 res.col("unacked")
-                    .and_then(|i| res.rows.first().and_then(|row| crate::peer::SqlResult::text(row, i)))
+                    .and_then(|i| {
+                        res.rows
+                            .first()
+                            .and_then(|row| crate::peer::SqlResult::text(row, i))
+                    })
                     .and_then(|t| t.trim().parse::<u64>().ok())
             };
             let now = tokio::time::Instant::now();

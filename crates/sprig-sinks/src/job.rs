@@ -911,7 +911,8 @@ pub async fn run_sink_task(
     let target = build_target_with(&ctx, db).await?;
     // The stream's log shard.
     let shard = env.shard_pool(tenant).await?;
-    let log_schema = stream_log_schema(&cat_pool, &cat_schema, tenant, stream).await?;
+    let (log_schema, change_source) =
+        stream_log_schema(&cat_pool, &cat_schema, tenant, stream).await?;
     let source = crate::source::StreamSource::open(
         shard,
         cat_pool.clone(),
@@ -941,7 +942,9 @@ pub async fn run_sink_task(
         epoch,
         definition_ver: def.definition_ver,
         delivered: AtomicU64::new(0),
-        rls: None,
+        // RL36: `FROM STREAM t.changes` exports table t's rows, so its
+        // owner is checked before each batch as for `CHANGES OF t` (RL31).
+        rls: change_source.map(|o| (Arc::clone(&env), tenant, def.owner_user_id, vec![o])),
     });
     let dead = Arc::new(CatalogDead {
         pool: cat_pool.clone(),
@@ -1731,12 +1734,14 @@ async fn instance_stream(
 }
 
 /// The log shard schema of stream `stream` (its first log shard).
+/// A stream's log schema, and its table's object id when it is a change
+/// topic.
 async fn stream_log_schema(
     pool: &Pool,
     catalog: &str,
     tenant: TenantId,
     stream: u64,
-) -> Result<String> {
+) -> Result<(String, Option<u64>)> {
     let mut c = pool.get_conn().await.map_err(|e| {
         SprigError::new(SprigCode::CatalogUnavailable, "catalog unavailable").with_source(e)
     })?;
@@ -1753,7 +1758,10 @@ async fn stream_log_schema(
         .log
         .first()
         .ok_or_else(|| err(SprigCode::SinkSourceLost, "the stream has no log shard"))?;
-    Ok(log.slot.schema(tenant, def.db).to_string())
+    let source = (def.kind == sprig_streams::model::StreamKind::Changes)
+        .then(|| def.source_object.map(|o| o.0))
+        .flatten();
+    Ok((log.slot.schema(tenant, def.db).to_string(), source))
 }
 
 /// Kinds of connection each target needs (for messages).
@@ -1833,12 +1841,21 @@ mod tests {
             StartAt::Earliest
         );
         // `ordering` of queue sinks (r9fanin).
-        let o = |v: &str| Opts([("ordering".to_owned(), v.to_owned())].into_iter().collect());
+        let o = |v: &str| {
+            Opts(
+                [("ordering".to_owned(), v.to_owned())]
+                    .into_iter()
+                    .collect(),
+            )
+        };
         assert!(queue_ordering(&o("queue")).unwrap());
         assert!(!queue_ordering(&o("key")).unwrap());
         assert!(!queue_ordering(&Opts::default()).unwrap());
         assert!(queue_ordering(&o("partition")).is_err());
         // Change topics keep whole seconds.
-        assert_eq!(fan_in_created_ms(Some(1_794_000_000_900), true), 1_794_000_000_000);
+        assert_eq!(
+            fan_in_created_ms(Some(1_794_000_000_900), true),
+            1_794_000_000_000
+        );
     }
 }

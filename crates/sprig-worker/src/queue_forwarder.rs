@@ -940,8 +940,12 @@ mod tests {
                 .unwrap(),
             Some(())
         );
-        assert!(is_forwarder_sub("/sprig/dc/dc-a/feed/subs/7/queue_forwarder"));
-        assert!(!is_forwarder_sub("/sprig/dc/dc-a/feed/checkpoints/7/queue_forwarder"));
+        assert!(is_forwarder_sub(
+            "/sprig/dc/dc-a/feed/subs/7/queue_forwarder"
+        ));
+        assert!(!is_forwarder_sub(
+            "/sprig/dc/dc-a/feed/checkpoints/7/queue_forwarder"
+        ));
         cancel.cancel();
         let _ = w.await;
     }

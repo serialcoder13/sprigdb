@@ -278,6 +278,7 @@ async fn explain_of_reads_and_writes() {
     .await;
     let st = r.get_document("executionStats").unwrap();
     assert_eq!(st.get_i64("nReturned").unwrap(), 20, "{r}");
+    assert_eq!(wp(&r).get_str("stage").unwrap(), "COLLSCAN", "{r}");
     for x in stmts(&r) {
         let t = x.as_document().unwrap().to_string();
         assert!(!has_physical(&t), "a physical name: {t}");

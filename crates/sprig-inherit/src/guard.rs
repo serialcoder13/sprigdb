@@ -197,27 +197,97 @@ pub fn refuse_if_shared(ctx: &Ctx<'_>, o: &InheritableObject, what: &str) -> Res
     ))
 }
 
-/// `DROP TABLE`: refused for a shared object.
+/// 39897 when this tenant receives `o` from its parent tenant: the
+/// parent's share decides that the table is here (a child may add to it,
+/// not remove or reshape what it inherits).
 ///
 /// # Errors
-/// 39895.
+/// 39897.
+pub fn refuse_if_received(ctx: &Ctx<'_>, o: &InheritableObject, what: &str) -> Result<()> {
+    if ctx.up_edge(o)?.is_none() {
+        return Ok(());
+    }
+    let parent = ctx
+        .cat
+        .ancestry
+        .last()
+        .map_or_else(String::new, |a| a.name.clone());
+    Err(SprigError::new(
+        SprigCode::InheritNotOverridable,
+        format!(
+            "{what} on {} is refused: this tenant inherits it from '{parent}' (a child may add \
+             columns and tables, not remove or change inherited ones)",
+            o.table
+        ),
+    ))
+}
+
+/// [`refuse_if_shared`], reading the catalog itself (as the provisioning
+/// account) rather than the snapshot: for statements no DDL prepare phase
+/// sees (`TRUNCATE` of an inheritable object runs as a `DELETE`), so a
+/// share made in between by another session is seen.
+///
+/// # Errors
+/// 39895; the catalog's.
+pub async fn refuse_if_shared_now(
+    ctx: &Ctx<'_>,
+    r: &mut dyn Runner,
+    o: &InheritableObject,
+    what: &str,
+) -> Result<()> {
+    refuse_if_shared(ctx, o, what)?;
+    let t = ctx.cat.tenant;
+    let rows = match r
+        .ctl_query(
+            t,
+            &format!(
+                "SELECT name FROM `t{t}_sprig`.shares WHERE object_id = {} AND role = 'granted' \
+                 AND state = 'active' ORDER BY share_id",
+                o.object_id.0
+            ),
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        // A runner without provisioning access: the snapshot's answer.
+        Err(_) => return Ok(()),
+    };
+    let names: Vec<String> = rows
+        .into_iter()
+        .filter_map(|row| row.into_iter().next().flatten())
+        .map(|v| String::from_utf8_lossy(&v).into_owned())
+        .collect();
+    if names.is_empty() {
+        return Ok(());
+    }
+    refusal(what, &o.table, &names)
+}
+
+/// `DROP TABLE`: refused for a shared object, and for one this tenant
+/// receives from its parent.
+///
+/// # Errors
+/// 39895; 39897.
 pub fn drop_tables(names: &[Name], ctx: &Ctx<'_>) -> Result<()> {
     for n in names {
         if let Some(r) = ctx.resolve(n)? {
             refuse_if_shared(ctx, &r.obj, "DROP TABLE")?;
+            refuse_if_received(ctx, &r.obj, "DROP TABLE")?;
         }
     }
     Ok(())
 }
 
-/// `RENAME TABLE`: refused for a shared object.
+/// `RENAME TABLE`: refused for a shared object, and for one this tenant
+/// receives from its parent.
 ///
 /// # Errors
-/// 39895.
+/// 39895; 39897.
 pub fn rename(names: &[Name], ctx: &Ctx<'_>) -> Result<()> {
     for n in names {
         if let Some(r) = ctx.resolve(n)? {
             refuse_if_shared(ctx, &r.obj, "RENAME TABLE")?;
+            refuse_if_received(ctx, &r.obj, "RENAME TABLE")?;
         }
     }
     Ok(())
@@ -236,6 +306,7 @@ pub fn drop_database(db: &str, ctx: &Ctx<'_>) -> Result<()> {
     };
     for o in ctx.state.objects().filter(|o| o.db == id) {
         refuse_if_shared(ctx, o, "DROP DATABASE")?;
+        refuse_if_received(ctx, o, "DROP DATABASE")?;
     }
     Ok(())
 }
@@ -246,6 +317,15 @@ pub(crate) struct OldColumn {
     pub(crate) name: String,
     pub(crate) ty: String,
     pub(crate) nullable: bool,
+    /// `Extra` (`auto_increment`, ...).
+    pub(crate) extra: String,
+}
+
+/// The `AUTO_INCREMENT` column among `cols`.
+pub(crate) fn auto_column(cols: &[OldColumn]) -> Option<String> {
+    cols.iter()
+        .find(|c| c.extra.to_ascii_lowercase().contains("auto_increment"))
+        .map(|c| c.name.clone())
 }
 
 pub(crate) async fn show_columns(r: &mut dyn Runner, layer: &str) -> Result<Vec<OldColumn>> {
@@ -263,6 +343,7 @@ pub(crate) async fn show_columns(r: &mut dyn Runner, layer: &str) -> Result<Vec<
             name: text(row, 0),
             ty: text(row, 1),
             nullable: text(row, 2).eq_ignore_ascii_case("YES"),
+            extra: text(row, 5),
         })
         .collect())
 }
@@ -574,6 +655,18 @@ pub async fn alter(sql: &str, n: &Name, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Re
                 .unwrap_or_else(|| SprigError::internal("shared but no shares")),
         );
     }
+    if let Some(why) = &why {
+        refuse_if_received(ctx, &res.obj, &format!("ALTER TABLE ({why})"))?;
+    }
+    // A column a descendant tenant already has would come down to it
+    // (question Q3; the default: refuse the parent's change).
+    if let Ok(Statement::AlterTable(at)) = parse_one(sql) {
+        for op in &at.operations {
+            if let AlterTableOperation::AddColumn { column_def, .. } = op {
+                crate::links::refuse_clash(ctx, r, &res, Some(&column_def.name.value)).await?;
+            }
+        }
+    }
     let d = match why {
         Some(why) => DESTRUCTIVE.scope(why, r.exec(sql)).await?,
         None => r.exec(sql).await?,
@@ -601,6 +694,13 @@ pub(crate) async fn follow_columns(
     if let Some(n) = o.with_slots_for(&cols) {
         o = n;
         changed = true;
+    }
+    if o.auto.is_none() {
+        let old = show_columns(r, &res.layer).await?;
+        if let Some(a) = auto_column(&old) {
+            o.auto = Some(a);
+            changed = true;
+        }
     }
     for u in &uniques {
         if !res.obj.uniques.iter().any(|x| x.name == u.name) {
@@ -667,11 +767,13 @@ mod tests {
                 name: "name".into(),
                 ty: "varchar(200)".into(),
                 nullable: false,
+                extra: String::new(),
             },
             OldColumn {
                 name: "price".into(),
                 ty: "decimal(10,2)".into(),
                 nullable: true,
+                extra: String::new(),
             },
         ];
         let d = |sql: &str| ops(sql).iter().find_map(|o| destructive(o, &old));

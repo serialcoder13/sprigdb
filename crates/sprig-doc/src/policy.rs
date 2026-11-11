@@ -163,27 +163,24 @@ impl Path {
     }
 
     /// An array at the path whose elements are plain JSON contains `v`.
-    fn array_has(&self, v: &Val) -> Option<String> {
+    fn array_has(&self, v: &Val) -> String {
         let probe = match v {
             Val::Str(s) => format!("JSON_QUOTE({s})"),
             Val::Num(n) => format!("CAST({n} AS CHAR)"),
             Val::Bool(b) => format!("'{b}'"),
         };
-        Some(format!(
+        format!(
             "({} = 'ARRAY' AND (_types IS NULL OR JSON_SEARCH(JSON_KEYS(_types), 'one', {}) IS NULL) \
              AND JSON_CONTAINS({}, {probe}))",
             self.jtype(),
             self.elements,
             self.extract
-        ))
+        )
     }
 
     fn eq(&self, v: &Val) -> String {
         let scalar = format!("({} AND {})", self.same_kind(v), self.compare("=", v));
-        match self.array_has(v) {
-            Some(a) => format!("({scalar} OR {a})"),
-            None => scalar,
-        }
+        format!("({scalar} OR {})", self.array_has(v))
     }
 
     /// Present, a plain scalar, and not `v` (narrower than `$ne`).

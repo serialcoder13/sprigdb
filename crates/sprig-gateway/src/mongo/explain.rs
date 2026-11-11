@@ -257,7 +257,9 @@ pub(super) async fn explain(
                     .and_then(Option::as_ref)
                     .map(|b| scrub(&String::from_utf8_lossy(b), tenant, db))
                     .unwrap_or_default();
-                match serde_json::from_str::<serde_json::Value>(&j) {
+                let parsed = serde_json::from_str::<serde_json::Value>(&j)
+                    .or_else(|_| serde_json::from_str::<serde_json::Value>(&repair_json(&j)));
+                match parsed {
                     Ok(v) => {
                         if main.is_none() && !write {
                             main = Some(v.clone());
@@ -609,6 +611,11 @@ fn leaf(plan: Option<&serde_json::Value>, m: &CollMeta, filter: &Document) -> Do
         Some("PRIMARY") if matches!(access, "const" | "system" | "eq_ref") => {
             doc! {"stage": "EXPRESS_IXSCAN", "keyPattern": {"_id": 1}, "indexName": "_id_"}
         }
+        // A full walk of the primary key (the `_id` order of the engine's
+        // reads) is MongoDB's collection scan.
+        Some("PRIMARY") if access == "index" => {
+            filtered(doc! {"stage": "COLLSCAN", "direction": "forward"})
+        }
         Some(k) => {
             let (name, pattern) = if k == "PRIMARY" {
                 ("_id_".to_owned(), doc! {"_id": 1})
@@ -676,6 +683,43 @@ fn scrub(text: &str, tenant: u64, db: &str) -> String {
         rest = &after[end..];
     }
     out.push_str(rest);
+    out
+}
+
+/// MariaDB's `EXPLAIN FORMAT=JSON` with the `"` inside string values
+/// escaped: MariaDB writes conditions such as `json_value(doc,'$."tag"')`
+/// into `attached_condition` without escaping them. Its output has one
+/// member per line, so each `"name": "..."` line is mended alone.
+fn repair_json(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 16);
+    for line in text.split_inclusive('\n') {
+        let (body, nl) = line.strip_suffix('\n').map_or((line, ""), |b| (b, "\n"));
+        let Some(start) = body.find(": \"") else {
+            out.push_str(line);
+            continue;
+        };
+        let value_start = start + 3;
+        let rest = &body[value_start..];
+        let (inner, tail) = if let Some(i) = rest.strip_suffix("\",") {
+            (i, "\",")
+        } else if let Some(i) = rest.strip_suffix('"') {
+            (i, "\"")
+        } else {
+            out.push_str(line);
+            continue;
+        };
+        out.push_str(&body[..value_start]);
+        let mut prev_backslash = false;
+        for c in inner.chars() {
+            if c == '"' && !prev_backslash {
+                out.push('\\');
+            }
+            prev_backslash = c == '\\' && !prev_backslash;
+            out.push(c);
+        }
+        out.push_str(tail);
+        out.push_str(nl);
+    }
     out
 }
 
@@ -751,6 +795,18 @@ mod tests {
         // Another tenant's prefix, or the prefix inside a name, stays.
         assert_eq!(scrub("t55_x.c", 5, "shop"), "t55_x.c");
         assert_eq!(scrub("at5_x.c", 5, "shop"), "at5_x.c");
+    }
+
+    #[test]
+    fn mariadb_json_with_bare_quotes_is_mended() {
+        let bad = "{\n  \"t\": {\n    \"attached_condition\": \"json_value(o.doc,'$.\"tag\"') = 'x'\",\n    \"rows\": 2\n  }\n}";
+        assert!(serde_json::from_str::<serde_json::Value>(bad).is_err());
+        let v: serde_json::Value = serde_json::from_str(&repair_json(bad)).unwrap();
+        assert_eq!(
+            v["t"]["attached_condition"],
+            "json_value(o.doc,'$.\"tag\"') = 'x'"
+        );
+        assert_eq!(v["t"]["rows"], 2);
     }
 
     #[test]

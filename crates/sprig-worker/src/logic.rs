@@ -33,7 +33,9 @@ use sprig_feed::names::{CatalogPools, CatalogResolver};
 use sprig_feed::subs::Subscriptions;
 use sprig_feed::{Clusters, MetaPlacement, StartAt, TailOptions, TenantTail, TxnSource};
 use sprig_logic::LogicStore;
-use sprig_logic::triggers::maria::{CatalogOutcomes, CatalogVersions, MariaApply, ShardPools};
+use sprig_logic::triggers::maria::{
+    CatalogOutcomes, CatalogVersions, MariaApply, RunGuard, ShardPools,
+};
 use sprig_logic::triggers::{self, Filter, RunOpts, Stats};
 use sprig_meta::MetaStore;
 use sprig_mover::mysql::ClusterAccess;
@@ -207,6 +209,72 @@ fn spec_u64(spec: &Value, k: &str) -> std::result::Result<u64, String> {
         .ok_or_else(|| format!("spec.{k} is missing"))
 }
 
+/// Chapter 29 (RL37): an after-commit trigger's code gets every changed
+/// row's images as its definer (the user who deployed the active version),
+/// so it runs only while the table's policies don't bind that user; else
+/// the event waits (retryable), and a policy, role or grant change that
+/// frees the definer lets it go on.
+struct DefinerGuard {
+    rls: crate::sinks::RlsCatalogs,
+    locator: Arc<dyn CatalogLocator>,
+    tenant: TenantId,
+    module_id: u64,
+    object: u64,
+    /// The definer, read at most every two seconds.
+    cached: Mutex<Option<(Instant, u32)>>,
+}
+
+impl DefinerGuard {
+    async fn definer(&self) -> Result<u32> {
+        if let Some((at, u)) = *self.cached.lock().unwrap_or_else(PoisonError::into_inner)
+            && at.elapsed() < Duration::from_secs(2)
+        {
+            return Ok(u);
+        }
+        let ep = self.locator.writer(self.tenant).await?;
+        let mut c = ep.pool.get_conn().await.map_err(|e| {
+            SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable").with_source(e)
+        })?;
+        let schema = sprig_common::names::quote(ep.store.schema());
+        let u: Option<u32> = c
+            .exec_first(
+                format!(
+                    "SELECT v.created_by FROM {schema}.logic_modules m JOIN {schema}.logic_versions v \
+                     ON v.module_id = m.module_id AND v.version = m.active_version \
+                     WHERE m.module_id = ?"
+                ),
+                (self.module_id,),
+            )
+            .await
+            .map_err(|e| {
+                SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable").with_source(e)
+            })?;
+        let u = u.ok_or_else(|| {
+            SprigError::new(
+                SprigCode::LogicNotFound,
+                format!("module {} has no active version", self.module_id),
+            )
+        })?;
+        *self.cached.lock().unwrap_or_else(PoisonError::into_inner) = Some((Instant::now(), u));
+        Ok(u)
+    }
+}
+
+#[async_trait]
+impl RunGuard for DefinerGuard {
+    async fn check(&self) -> Result<()> {
+        let definer = self.definer().await?;
+        if self.rls.binds(self.tenant, definer, &[self.object]).await? {
+            return Err(SprigError::new(
+                SprigCode::RlsUnsupported,
+                "ER_SPRIG_RLS_UNSUPPORTED: row-level security on the trigger's table binds its \
+                 definer, whose code would get every changed row unfiltered; the trigger waits",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// `logic_trigger` (see the module docs).
 #[derive(Debug, Clone)]
 pub struct LogicTrigger(pub LogicEnv);
@@ -290,6 +358,22 @@ impl LogicTrigger {
             }),
             versions,
             budget: env.settings.trigger_budget_for(tenant),
+            // RL37: the code gets every changed row; it runs while the
+            // table's policies don't bind its definer.
+            guard: match (b.object_id, crate::sinks::RlsCatalogs::new(Arc::clone(&env.locator))) {
+                (Some(object), Some(rls)) => Some(Arc::new(DefinerGuard {
+                    rls,
+                    locator: Arc::clone(&locator),
+                    tenant,
+                    module_id: module.module_id,
+                    object,
+                    cached: Mutex::new(None),
+                }) as Arc<dyn RunGuard>),
+                (Some(_), None) => {
+                    return Err("the worker can't load row-level security catalogs".to_owned());
+                }
+                (None, _) => None,
+            },
         });
         let out = Arc::new(CatalogOutcomes {
             locator: Arc::clone(&locator),

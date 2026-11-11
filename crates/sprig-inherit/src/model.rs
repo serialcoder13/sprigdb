@@ -139,9 +139,65 @@ pub struct InheritableObject {
     pub tag_field: Option<String>,
     /// Bumped on every change of the row.
     pub version: u64,
+    /// The `AUTO_INCREMENT` column, if any: its values come from the
+    /// tree's one sequence ([`crate::ids`]).
+    pub auto: Option<String>,
+    /// The foreign keys the gateway keeps for it ([`crate::links`]).
+    pub links: Vec<Link>,
+    /// Created by SprigDB in this tenant because its parent tenant shares
+    /// it (Kiran's decision 1, 11 November 2026), rather than declared here.
+    pub adopted: bool,
+}
+
+/// A foreign key of an inheritable object, kept by the gateway against
+/// each space's merged view (never MariaDB's: the referenced row may live
+/// in an ancestor's layer, in another schema).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Link {
+    /// The constraint name.
+    pub name: String,
+    /// The referencing columns.
+    pub columns: Vec<String>,
+    /// The referenced table, in the same database: an inheritable object
+    /// whose key is `ref_columns`.
+    pub ref_table: String,
+    /// The referenced columns (the referenced object's key, in order).
+    pub ref_columns: Vec<String>,
+}
+
+/// What `inherit_ext` holds per object (format 2 of the module).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ObjectExt {
+    /// [`InheritableObject::auto`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto: Option<String>,
+    /// [`InheritableObject::links`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Link>,
+    /// [`InheritableObject::adopted`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub adopted: bool,
 }
 
 impl InheritableObject {
+    /// The fields `inherit_ext` stores.
+    #[must_use]
+    pub fn ext(&self) -> ObjectExt {
+        ObjectExt {
+            auto: self.auto.clone(),
+            links: self.links.clone(),
+            adopted: self.adopted,
+        }
+    }
+
+    /// Whether this object references `table` (by name, any case).
+    #[must_use]
+    pub fn references(&self, table: &str) -> bool {
+        self.links
+            .iter()
+            .any(|l| l.ref_table.eq_ignore_ascii_case(table))
+    }
+
     /// Whether `col` is part of the key.
     #[must_use]
     pub fn is_key(&self, col: &str) -> bool {
@@ -239,6 +295,20 @@ pub struct Share {
     pub created_by: u32,
     /// How the edges of this share are computed (`shares.merge_mode`).
     pub mode: MergeMode,
+    /// Set on a share SprigDB derives for another table of the shared
+    /// table's foreign-key group (Kiran's decision 1): the id of the share
+    /// the user created. Derived shares are never stored.
+    pub via: Option<u64>,
+}
+
+/// The top bit marks a derived share's id ([`Share::via`]).
+pub const DERIVED_SHARE: u64 = 1 << 63;
+
+/// The id of the share derived from share `base` for object `o`: unique
+/// per pair, never a stored share's.
+#[must_use]
+pub fn derived_share_id(base: u64, o: ObjectId) -> u64 {
+    DERIVED_SHARE | ((base & 0x7fff_ffff) << 32) | (o.0 & 0xffff_ffff)
 }
 
 impl Share {
@@ -272,11 +342,16 @@ pub struct Take {
 pub struct InheritState {
     /// Whether the module's tables exist.
     pub migrated: bool,
+    /// Whether format 2's `inherit_ext` exists too.
+    pub ext_ready: bool,
     spaces: BTreeMap<SpaceId, Space>,
     objects: BTreeMap<ObjectId, Arc<InheritableObject>>,
     shares: Vec<Arc<Share>>,
     takes: Vec<Take>,
     homes: BTreeMap<u32, SpaceId>,
+    /// Objects made inheritable before `inherit_ext` (no row there yet):
+    /// their `AUTO_INCREMENT` column is learnt at their next insert.
+    ext_missing: std::collections::BTreeSet<ObjectId>,
 }
 
 impl InheritState {
@@ -295,8 +370,9 @@ impl InheritState {
         takes: Vec<Take>,
         homes: Vec<(u32, SpaceId)>,
     ) -> Self {
-        Self {
+        let mut st = Self {
             migrated: true,
+            ext_ready: true,
             spaces: spaces.into_iter().map(|s| (s.id, s)).collect(),
             objects: objects
                 .into_iter()
@@ -305,7 +381,110 @@ impl InheritState {
             shares: shares.into_iter().map(Arc::new).collect(),
             takes,
             homes: homes.into_iter().collect(),
+            ext_missing: std::collections::BTreeSet::new(),
+        };
+        st.derive_group_shares();
+        st
+    }
+
+    /// Whether object `o` has no `inherit_ext` row yet.
+    #[must_use]
+    pub fn ext_missing(&self, o: ObjectId) -> bool {
+        self.ext_missing.contains(&o)
+    }
+
+    /// Records the objects without an `inherit_ext` row (the loader).
+    pub fn set_ext_missing(&mut self, ids: impl IntoIterator<Item = ObjectId>) {
+        self.ext_missing = ids.into_iter().collect();
+    }
+
+    /// The objects linked to `o` by foreign keys, either way, through the
+    /// closure (`o` included): its foreign-key group (Kiran's decision 1).
+    #[must_use]
+    pub fn group_of(&self, o: ObjectId) -> Vec<ObjectId> {
+        let Some(start) = self.objects.get(&o) else {
+            return vec![o];
+        };
+        let mut out = vec![o];
+        let mut frontier = vec![Arc::clone(start)];
+        while let Some(x) = frontier.pop() {
+            for y in self.objects.values() {
+                if out.contains(&y.object_id) || y.db != x.db {
+                    continue;
+                }
+                if x.references(&y.table) || y.references(&x.table) {
+                    out.push(y.object_id);
+                    frontier.push(Arc::clone(y));
+                }
+            }
         }
+        out.sort();
+        out
+    }
+
+    /// Every object whose links reference `o` (the referencing side of
+    /// `o`'s foreign keys), with the links.
+    #[must_use]
+    pub fn referencing(&self, o: &InheritableObject) -> Vec<(Arc<InheritableObject>, Link)> {
+        let mut out = Vec::new();
+        for x in self.objects.values().filter(|x| x.db == o.db) {
+            for l in &x.links {
+                if l.ref_table.eq_ignore_ascii_case(&o.table) {
+                    out.push((Arc::clone(x), l.clone()));
+                }
+            }
+        }
+        out
+    }
+
+    /// An object by database and name in any case.
+    #[must_use]
+    pub fn object_named_ci(&self, db: DbId, table: &str) -> Option<&Arc<InheritableObject>> {
+        self.objects
+            .values()
+            .find(|o| o.db == db && o.table.eq_ignore_ascii_case(table))
+    }
+
+    /// Adds, for every stored share of an object, a derived share of each
+    /// other object of its foreign-key group that has no stored share of
+    /// its own from the same space to the same target: sharing one table
+    /// shares the group, unfiltered and with every column (Kiran's
+    /// decision 1).
+    fn derive_group_shares(&mut self) {
+        let stored: Vec<Arc<Share>> = self.shares.clone();
+        let mut add = Vec::new();
+        for s in &stored {
+            for m in self.group_of(s.object_id) {
+                if m == s.object_id {
+                    continue;
+                }
+                let own = stored
+                    .iter()
+                    .any(|x| x.object_id == m && x.from == s.from && x.to == s.to);
+                let dup = add
+                    .iter()
+                    .any(|x: &Share| x.object_id == m && x.from == s.from && x.to == s.to);
+                if own || dup {
+                    continue;
+                }
+                add.push(Share {
+                    id: derived_share_id(s.id, m),
+                    name: s.name.clone(),
+                    object_id: m,
+                    from: s.from,
+                    to: s.to,
+                    filter: None,
+                    columns: None,
+                    take: None,
+                    reshare: s.reshare,
+                    version: s.version,
+                    created_by: s.created_by,
+                    mode: s.mode,
+                    via: Some(s.id),
+                });
+            }
+        }
+        self.shares.extend(add.into_iter().map(Arc::new));
     }
 
     /// Whether the tenant uses inheritance at all (objects or shares).
@@ -448,7 +627,7 @@ impl InheritState {
     pub fn share_named(&self, name: &str) -> Option<&Arc<Share>> {
         self.shares
             .iter()
-            .find(|s| s.name.eq_ignore_ascii_case(name))
+            .find(|s| s.via.is_none() && s.name.eq_ignore_ascii_case(name))
     }
 
     /// The shares of object `o`.
@@ -536,6 +715,9 @@ pub(crate) mod fixtures {
             uniques: Vec::new(),
             tag_field: None,
             version: 1,
+            auto: None,
+            links: Vec::new(),
+            adopted: false,
         }
     }
 
@@ -559,6 +741,7 @@ pub(crate) mod fixtures {
             version: 1,
             created_by: 1,
             mode: MergeMode::ReadThrough,
+            via: None,
         };
         InheritState::new(
             vec![
@@ -609,5 +792,72 @@ mod tests {
             .unwrap();
         assert_eq!(wider.bit("sku"), 16);
         assert!(wider.with_slots_for(&wider.columns.clone()).is_none());
+    }
+
+    #[test]
+    fn a_share_carries_the_foreign_key_group() {
+        let obj = |id: u64, name: &str, links: &[&str]| InheritableObject {
+            object_id: ObjectId(id),
+            db: DbId(1),
+            table: name.into(),
+            key: vec!["id".into()],
+            columns: vec!["id".into(), "r".into()],
+            slots: [("r".to_owned(), 0u8)].into_iter().collect(),
+            uniques: Vec::new(),
+            tag_field: None,
+            version: 1,
+            auto: Some("id".into()),
+            links: links
+                .iter()
+                .map(|t| Link {
+                    name: format!("{name}_ibfk_1"),
+                    columns: vec!["r".into()],
+                    ref_table: (*t).into(),
+                    ref_columns: vec!["id".into()],
+                })
+                .collect(),
+            adopted: false,
+        };
+        let share = Share {
+            id: 5,
+            name: "s".into(),
+            object_id: ObjectId(1),
+            from: ROOT_SPACE,
+            to: ShareTarget::AllChildren,
+            filter: Some("r > 1".into()),
+            columns: None,
+            take: None,
+            reshare: true,
+            version: 1,
+            created_by: 1,
+            mode: MergeMode::ReadThrough,
+            via: None,
+        };
+        // t1 -> t2, t3 -> t1, t9 alone.
+        let st = InheritState::new(
+            Vec::new(),
+            vec![
+                obj(1, "t1", &["t2"]),
+                obj(2, "t2", &[]),
+                obj(3, "t3", &["T1"]),
+                obj(9, "t9", &[]),
+            ],
+            vec![share],
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(
+            st.group_of(ObjectId(2)),
+            vec![ObjectId(1), ObjectId(2), ObjectId(3)]
+        );
+        let t2 = st.tenant_edge(ObjectId(2), TenantId(77)).unwrap();
+        assert_eq!(t2.via, Some(5));
+        assert_eq!(t2.filter, None, "a group member comes whole (Q1)");
+        assert_eq!(t2.id, derived_share_id(5, ObjectId(2)));
+        assert!(st.tenant_edge(ObjectId(3), TenantId(77)).is_some());
+        assert!(st.tenant_edge(ObjectId(9), TenantId(77)).is_none());
+        // Derived shares can't be named.
+        assert_eq!(st.share_named("s").unwrap().object_id, ObjectId(1));
+        assert_eq!(st.referencing(&obj(1, "t1", &[])).len(), 1);
     }
 }

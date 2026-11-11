@@ -47,7 +47,7 @@ pub struct SinksEnv {
 /// Tenant catalogs with chapter 14's and 29's modules (users, grants,
 /// row-level security), cached two seconds per tenant: what a change
 /// sink's owner may see, checked before each batch (decision RL31).
-struct RlsCatalogs {
+pub(crate) struct RlsCatalogs {
     source: sprig_catalog::cache::MariaSource,
     cache: std::sync::Mutex<
         std::collections::HashMap<
@@ -58,7 +58,7 @@ struct RlsCatalogs {
 }
 
 impl RlsCatalogs {
-    fn new(locator: Arc<ShardMapLocator>) -> Option<Self> {
+    pub(crate) fn new(locator: Arc<ShardMapLocator>) -> Option<Self> {
         let ext: Vec<Arc<dyn sprig_catalog::CatalogExtension>> = vec![
             Arc::new(sprig_auth::AuthExtension),
             Arc::new(sprig_auth::authz::AuthzExtension),
@@ -97,7 +97,7 @@ impl RlsCatalogs {
     }
 
     /// Whether policies on any of `objects` bind user `owner`.
-    async fn binds(&self, tenant: TenantId, owner: u32, objects: &[u64]) -> Result<bool> {
+    pub(crate) async fn binds(&self, tenant: TenantId, owner: u32, objects: &[u64]) -> Result<bool> {
         use sprig_auth::authz::{AuthzState, CompiledPrivileges};
         let cat = self.catalog(tenant).await?;
         let Some(state) = sprig_auth::authz::rls::RlsState::of(&cat) else {
@@ -234,7 +234,13 @@ impl SinkEnv for SinksEnv {
     ) -> Result<bool> {
         match &self.rls {
             Some(r) => r.binds(tenant, owner, objects).await,
-            None => Ok(false),
+            // RL36: without the catalogs the owner can't be checked, so a
+            // change sink doesn't run (fail closed, not open).
+            None => Err(sprig_common::SprigError::new(
+                sprig_common::SprigCode::RlsUnsupported,
+                "ER_SPRIG_RLS_UNSUPPORTED: the worker can't load row-level security catalogs to \
+                 check the sink's owner",
+            )),
         }
     }
 

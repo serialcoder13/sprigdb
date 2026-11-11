@@ -624,27 +624,24 @@ pub mod retry {
         // The source: a stream definition (its instance must exist), or
         // a queue definition (R9, r9fanin; a member without its queue
         // instance yet fails the deploy and is tried again).
-        let si = match chain
+        let stream_def = chain
             .reaching(DefKind::Stream)
             .into_iter()
-            .find(|d| d.key() == e.stream)
-        {
-            Some(stream_def) => {
-                let Some(si) = super::super::streams::existing(&cat, &stream_def) else {
-                    return Ok(None);
-                };
-                Some(si)
+            .find(|d| d.key() == e.stream);
+        let si = if let Some(stream_def) = stream_def {
+            let Some(si) = super::super::streams::existing(&cat, &stream_def) else {
+                return Ok(None);
+            };
+            Some(si)
+        } else {
+            if !chain
+                .reaching(DefKind::Queue)
+                .iter()
+                .any(|d| d.key() == e.stream)
+            {
+                return Ok(None);
             }
-            None => {
-                if !chain
-                    .reaching(DefKind::Queue)
-                    .iter()
-                    .any(|d| d.key() == e.stream)
-                {
-                    return Ok(None);
-                }
-                None
-            }
+            None
         };
         match super::ensure_one(svc, &chain, &s, e.tenant, si.as_ref()).await {
             Ok(_) => Ok(Some(())),
@@ -822,18 +819,23 @@ async fn ensure_one(
         return Ok(had_error);
     }
     // The member's sprig_inherited: the definition's GRANTS, and reading
-    // the stream's instance (consuming the queue's: SELECT and DELETE).
+    // the stream's instance. A queue is consumed as for queue triggers:
+    // reading its messages and deleting their rows in the vhost's shard
+    // (chapter 50: an acknowledgement needs DELETE on the database).
     let first = phys.as_ref().and_then(|p| p.get("sink")).is_none();
-    let privileges = if spec.source_kind() == DefKind::Queue {
-        vec!["SELECT".into(), "DELETE".into()]
+    let extra = if spec.source_kind() == DefKind::Queue {
+        vec![GrantItem {
+            privileges: vec!["SELECT".into(), "DELETE".into()],
+            db: spec.db.clone(),
+            name: "*".to_owned(),
+        }]
     } else {
-        vec!["SELECT".into()]
+        vec![GrantItem {
+            privileges: vec!["SELECT".into()],
+            db: spec.db.clone(),
+            name: spec.source.clone(),
+        }]
     };
-    let extra = vec![GrantItem {
-        privileges,
-        db: spec.db.clone(),
-        name: spec.source.clone(),
-    }];
     let run_as = super::triggers::ensure_run_as(svc, t, s, first, &extra).await?;
     let mut host = DeployHost::new(svc, t, run_as, &spec.db).await?;
     let db_id = host

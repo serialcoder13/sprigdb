@@ -391,6 +391,7 @@ fn cluster_group() -> Command {
         )
 }
 
+#[allow(clippy::too_many_lines)] // the whole command tree, one subcommand after another
 fn cli() -> Command {
     let mut cmd = Command::new("sprigctl")
         .about("SprigDB operator CLI")

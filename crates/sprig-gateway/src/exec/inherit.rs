@@ -201,9 +201,10 @@ impl PassSession {
         let empty = InheritState::unmigrated();
         let state = state.unwrap_or(&empty);
         let svc = Arc::clone(ts.services());
-        // Ancestors' snapshots, for edges from the parent tenant.
+        // Ancestors' snapshots, for edges from the parent tenant (and the
+        // tree's root: id sequences and references).
         let mut ancestors = Vec::new();
-        if state.objects().next().is_some() {
+        if state.objects().next().is_some() || !cat.ancestry.is_empty() {
             for a in cat.ancestry.iter() {
                 match svc
                     .cache
@@ -266,7 +267,7 @@ impl PassSession {
             persona: self.persona,
             caps: cx.proto.caps,
         };
-        let migrated = state.migrated;
+        let migrated = state.migrated && state.ext_ready;
         let handled = {
             let mut runner = InhRunner {
                 gw: GwRunner {
@@ -329,6 +330,31 @@ impl PassSession {
                 }
                 r.map(Some)
             }
+        }
+    }
+}
+
+impl PassSession {
+    /// Kiran's decisions 1 and 2 (11 November 2026): before a statement of
+    /// a tenant whose parent shares it tables, the tenant (and each tenant
+    /// above it, top first) gets every table and column its parent shares
+    /// ([`super::inherit_tree::adopt`]). `cat` again, or the fresh
+    /// snapshot when anything changed.
+    pub(super) async fn inherit_adopt(&mut self, cat: Arc<TenantCatalog>) -> Result<Arc<TenantCatalog>> {
+        let Some(ts) = self.tenant.as_deref_mut() else {
+            return Ok(cat);
+        };
+        if ts.types.internal || ts.principal.must_change_password || cat.ancestry.is_empty() {
+            return Ok(cat);
+        }
+        let svc = Arc::clone(ts.services());
+        let lctn = ts.lower_case_table_names();
+        match super::inherit_tree::adopt(&svc, &cat, lctn).await? {
+            Some(fresh) => {
+                ts.changed(Some(fresh.version));
+                ts.refresh().await
+            }
+            None => Ok(cat),
         }
     }
 }
@@ -444,6 +470,71 @@ impl sprig_inherit::Runner for InhRunner<'_, '_, '_> {
     fn user_id(&self, name: &str) -> Option<u32> {
         let ts = self.gw.sess.tenant.as_deref()?;
         ts.auth()?.accounts(name).first().map(|u| u.row.user_id.0)
+    }
+
+    async fn ctl_query(&mut self, t: TenantId, sql: &str) -> Result<sprig_inherit::RawRows> {
+        let Some(ts) = self.gw.sess.tenant.as_deref() else {
+            return Err(SprigError::internal("no tenant"));
+        };
+        let svc = Arc::clone(ts.services());
+        super::inherit_tree::ctl_query(&svc, t, sql).await
+    }
+
+    async fn refs(&mut self, root: TenantId, sql: &str) -> Result<sprig_inherit::RawRows> {
+        let Some(ts) = self.gw.sess.tenant.as_deref() else {
+            return Err(SprigError::internal("no tenant"));
+        };
+        let svc = Arc::clone(ts.services());
+        super::inherit_tree::refs(&svc, root, sql).await
+    }
+
+    async fn tenant_catalog(&mut self, t: TenantId) -> Result<Arc<TenantCatalog>> {
+        let Some(ts) = self.gw.sess.tenant.as_deref() else {
+            return Err(SprigError::internal("no tenant"));
+        };
+        let svc = Arc::clone(ts.services());
+        svc.cache.get(t, Freshness::Latest).await
+    }
+
+    async fn tree_ids(
+        &mut self,
+        seq: &sprig_inherit::ids::TreeSeq,
+        n: u64,
+        explicit: Option<i128>,
+    ) -> Result<Option<(i128, i128)>> {
+        let var = |k: &str| {
+            self.gw
+                .sess
+                .bs
+                .as_ref()
+                .and_then(|b| b.vars().vars.get(k).and_then(|v| v.parse::<u64>().ok()))
+                .unwrap_or(1)
+                .clamp(1, 65_535)
+        };
+        let s = sprig_shard::ids::AutoIncSession {
+            increment: var("auto_increment_increment"),
+            offset: var("auto_increment_offset"),
+        };
+        let Some(ts) = self.gw.sess.tenant.as_deref() else {
+            return Err(SprigError::internal("no tenant"));
+        };
+        let svc = Arc::clone(ts.services());
+        let lctn = ts.lower_case_table_names();
+        super::inherit_tree::tree_ids(&svc, seq, n, explicit, &s, lctn).await
+    }
+
+    async fn tree_tables(
+        &mut self,
+        root: TenantId,
+        db: &str,
+        table: &str,
+    ) -> Result<Vec<sprig_inherit::ids::TreeTable>> {
+        let Some(ts) = self.gw.sess.tenant.as_deref() else {
+            return Err(SprigError::internal("no tenant"));
+        };
+        let svc = Arc::clone(ts.services());
+        let lctn = ts.lower_case_table_names();
+        super::inherit_tree::tree_tables(&svc, root, db, table, lctn).await
     }
 
     async fn subscribe(&mut self) -> Result<()> {

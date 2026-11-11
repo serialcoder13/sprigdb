@@ -46,6 +46,9 @@ mod rls;
 mod tenant;
 // Chapter 32: typed tables and record hierarchies.
 pub(crate) mod inherit;
+// Chapter 42 (Kiran's decisions of 11 Nov 2026): tree id sequences, the
+// reference index, children receiving their parent's tables.
+pub(crate) mod inherit_tree;
 // Chapter 42 (R9): inherited messaging objects (`FOR EACH TENANT`).
 mod inherit_msg;
 // R9 (r9more): FOR EACH TENANT connections and sinks.

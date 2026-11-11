@@ -39,7 +39,7 @@ fn denied(what: &str) -> SprigError {
     SprigError::new(SprigCode::SpaceAccessDenied, what.to_owned())
 }
 
-fn no_table(name: &Name, ctx: &Ctx<'_>) -> SprigError {
+pub(crate) fn no_table(name: &Name, ctx: &Ctx<'_>) -> SprigError {
     SprigError::standard(
         1146,
         *b"42S02",
@@ -54,7 +54,7 @@ fn no_table(name: &Name, ctx: &Ctx<'_>) -> SprigError {
     )
 }
 
-fn root_change(ctx: &Ctx<'_>) -> InheritChange {
+pub(crate) fn root_change(ctx: &Ctx<'_>) -> InheritChange {
     InheritChange {
         root_name: Some(ctx.tenant_name.to_owned()),
         ..InheritChange::default()
@@ -249,6 +249,11 @@ pub async fn space_home(
 
 /// `ALTER TABLE t SPRIG INHERITABLE KEY (k) [TAG FIELD f]`.
 ///
+/// The table's MariaDB foreign keys, to and from it, become foreign keys
+/// the gateway keeps, and the tables at their other ends become inheritable
+/// too (their primary key is their key): a table and the tables linked to
+/// it by foreign keys inherit together (Kiran's decision 1, [`crate::links`]).
+///
 /// # Errors
 /// 1146; 1142; 39891 when the key isn't the primary key, or for a typed
 /// table.
@@ -277,26 +282,61 @@ pub async fn inheritable(
             o.key.join(", ")
         )));
     }
+    if !ctx.privileges.alter(&db_name, db, object_id) {
+        return Err(alter_denied(&db_name, &table.name));
+    }
+    let objects = crate::links::convert_native(ctx, r, db, &db_name, table, key, tag).await?;
+    let mut c = root_change(ctx);
+    c.upsert_objects = objects;
+    r.commit(&c).await?;
+    Ok(Done::default())
+}
+
+/// Makes table `table` (database `db`) inheritable in MariaDB: the layer
+/// columns, the widened keys and `_sprig_layer`, in one `ALTER TABLE`.
+/// `key` `None`: the primary key. Returns the object, not yet committed.
+/// The object id comes from the runner, so a table created by the same
+/// statement is found.
+///
+/// # Errors
+/// 1146; 1072; 39891 when the key isn't the primary key, or for a typed
+/// table.
+pub(crate) async fn enable(
+    ctx: &Ctx<'_>,
+    r: &mut dyn Runner,
+    db: sprig_common::ids::DbId,
+    table: &Name,
+    key: Option<&[String]>,
+    tag: Option<&str>,
+) -> Result<InheritableObject> {
+    let Some((_, object_id)) = r.object_id(table.db.as_deref(), &table.name).await? else {
+        return Err(no_table(table, ctx));
+    };
     if ctx.typed.contains(&table.name.to_lowercase()) {
         return Err(unsupported(
             "a typed or hierarchical table can't be inheritable yet",
         ));
     }
-    if !ctx.privileges.alter(&db_name, db, object_id) {
-        return Err(alter_denied(&db_name, &table.name));
-    }
     let layer = match &table.db {
         Some(d) => format!("{}.{}", q(d), q(&table.name)),
         None => q(&table.name),
     };
-    let cols: Vec<String> = crate::guard::show_columns(r, &layer)
-        .await?
-        .into_iter()
-        .map(|c| c.name)
-        .collect();
+    let old = crate::guard::show_columns(r, &layer).await?;
+    let cols: Vec<String> = old.iter().map(|c| c.name.clone()).collect();
     let (pk, uniques) = crate::guard::show_uniques(r, &layer).await?;
+    let key: Vec<String> = match key {
+        Some(k) => k.to_vec(),
+        None if !pk.is_empty() => pk.clone(),
+        None => {
+            return Err(unsupported(format!(
+                "{} is linked to an inheritable table by a foreign key, so it inherits with it, \
+                 and needs a primary key",
+                table.name
+            )));
+        }
+    };
     let mut key_cols = Vec::with_capacity(key.len());
-    for k in key {
+    for k in &key {
         let c = cols
             .iter()
             .find(|c| c.eq_ignore_ascii_case(k))
@@ -371,12 +411,11 @@ pub async fn inheritable(
         uniques,
         tag_field: tag.map(str::to_owned),
         version: 1,
+        auto: crate::guard::auto_column(&old),
+        links: Vec::new(),
+        adopted: false,
     };
-    let o = empty.with_slots_for(&cols).unwrap_or(empty);
-    let mut c = root_change(ctx);
-    c.upsert_objects.push(o);
-    r.commit(&c).await?;
-    Ok(Done::default())
+    Ok(empty.with_slots_for(&cols).unwrap_or(empty))
 }
 
 /// `ALTER TABLE t DROP SPRIG INHERITABLE`: back to a plain table, when
@@ -444,7 +483,7 @@ pub async fn drop_inheritable(ctx: &Ctx<'_>, r: &mut dyn Runner, table: &Name) -
     Ok(Done::default())
 }
 
-fn alter_denied(db: &str, table: &str) -> SprigError {
+pub(crate) fn alter_denied(db: &str, table: &str) -> SprigError {
     SprigError::standard(
         1142,
         *b"42000",
@@ -737,6 +776,7 @@ pub async fn create_share(ctx: &Ctx<'_>, r: &mut dyn Runner, s: &NewShare<'_>) -
         version: 1,
         created_by: ctx.user.unwrap_or(0),
         mode,
+        via: None,
     });
     r.commit(&c).await?;
     // The copy worker keeps copies and orphans across tenants.

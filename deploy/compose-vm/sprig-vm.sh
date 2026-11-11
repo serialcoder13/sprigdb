@@ -136,6 +136,17 @@ etcdctl_all() {
     dc_compose run --rm --no-deps -T --entrypoint etcdctl etcd --endpoints="$(etcd_endpoints)" \
         --cacert=/tls/ca.pem --cert=/tls/client.pem --key=/tls/client-key.pem "$@"
 }
+# etcdctl_all with retries: with a member down (or one of another cluster,
+# right after a restore), a call can land on it and fail; the next one picks
+# another member. Prints the output of the call that worked.
+etcdctl_retry() {
+    local i out
+    for i in 1 2 3 4 5 6; do
+        if out=$(etcdctl_all "$@" 2>/dev/null); then echo "$out"; return 0; fi
+        sleep 2
+    done
+    etcdctl_all "$@"
+}
 # A shell with the sprigdb image, as root, for chores on volumes.
 chore() {
     local vol=$1
@@ -308,7 +319,12 @@ configure() {
     # No plaintext listeners: plain HTTP and plain AMQP are off.
     set_dc listener.http.enabled false
     set_dc listener.amqp.enabled false
-    set_dc kafka.advertised_host "$public_host"
+    # One VM: Kafka's Metadata names the public host. Several VMs: each
+    # gateway is named by its own registered address (SPRIG_PRIVATE_HOST);
+    # a DC-wide value would name VM 1 for every gateway.
+    if [[ -z ${SPRIG_PRIVATE_HOST:-} ]]; then
+        set_dc kafka.advertised_host "$public_host"
+    fi
     say "configured; listeners come up within a few seconds"
 }
 
@@ -361,19 +377,20 @@ etcd_rejoin() {
     local peer="https://$host:${SPRIG_ETCD_PEER_PORT:-2380}" id out ic
     say "stopping this VM's etcd member ($name)"
     dc_compose stop etcd >/dev/null 2>&1 || true
-    id=$(etcdctl_all member list | awk -F', ' -v n="$name" -v p="$peer" '$3 == n || $4 == p {print $1}')
+    out=$(etcdctl_retry member list) || die "can't list the etcd members (is a majority of them up?): $out"
+    id=$(awk -F', ' -v n="$name" -v p="$peer" '$3 == n || $4 == p {print $1}' <<<"$out")
     if [[ -n $id ]]; then
         say "removing member $id ($name) from the cluster"
-        etcdctl_all member remove "$id" >/dev/null
+        etcdctl_retry member remove "$id" >/dev/null || die "member remove $id failed"
     fi
-    out=$(etcdctl_all member add "$name" --peer-urls="$peer")
+    out=$(etcdctl_retry member add "$name" --peer-urls="$peer") || die "member add $name failed: $out"
     ic=$(sed -n 's/^ETCD_INITIAL_CLUSTER="\(.*\)"$/\1/p' <<<"$out")
     [[ -n $ic ]] || die "member add didn't say the initial cluster: $out"
     say "emptying $name's data directory"
     chore "${project}_etcd-data" 'rm -rf /d/data'
     SPRIG_ETCD_INITIAL_CLUSTER=$ic SPRIG_ETCD_CLUSTER_STATE=existing dc_compose up -d --no-deps --force-recreate etcd
     wait_healthy etcd 90 || die "etcd member $name didn't become healthy (docker compose logs etcd)"
-    etcdctl_all member list -w table
+    etcdctl_retry member list -w table
     say "member $name rejoined"
 }
 

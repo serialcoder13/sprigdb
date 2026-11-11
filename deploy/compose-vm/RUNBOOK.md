@@ -30,7 +30,7 @@ Contents: [Files](#files) · [Install](#install) · [High availability](#high-av
 
 On the VM (Ubuntu 24.04 or Debian 12 with Docker Engine 27+ and the compose plugin; `openssl` and `jq` installed):
 
-1. **Get the image** onto the VM. On a build machine: `deploy/compose-vm/build-image.sh sprigdb:<version>`, then `docker save sprigdb:<version> | gzip > sprigdb-<version>.tar.gz`, copy it over, `docker load < sprigdb-<version>.tar.gz`. (A registry works too: tag and push, then set `SPRIGDB_IMAGE` to the registry name.) The build runs in a container capped at 6 GB with 2 jobs and 16 codegen units (the workspace's one-unit release profile needs more than 6 GB for `sprig-gateway`; on a 12 GB builder, `SPRIG_BUILD_CGU=1` gives the exact profile). It took about 25 minutes on the laptop from a cold cache.
+1. **Get the image** onto the VM. On a build machine: `deploy/compose-vm/build-image.sh sprigdb:<version>`, then `docker save sprigdb:<version> | gzip > sprigdb-<version>.tar.gz`, copy it over, `docker load < sprigdb-<version>.tar.gz`. (A registry works too: tag and push, then set `SPRIGDB_IMAGE` to the registry name.) The build runs in a container capped at 6 GB with 2 jobs and 16 codegen units (the workspace's one-unit release profile needs more than 6 GB for `sprig-gateway`; on a 12 GB builder, `SPRIG_BUILD_CGU=1` gives the exact profile). It took about 25 minutes on the laptop from a cold cache in round 1, 45 minutes at a load of 40–68 in round 2, and 27 minutes with the cache volume warm.
 2. **Copy this directory** to the VM, for example `/opt/sprigdb`.
 3. **Settings:** `cp .env.example .env`, then set at least `SPRIGDB_IMAGE`, `SPRIG_PUBLIC_HOST` (the name clients use; it goes into the certificate and into Kafka's advertised address), `SPRIG_TLS_SANS` for any other names, the memory limits for the VM's size and `SPRIG_DC`.
 4. **Secrets:** `./sprig-vm.sh init`. It makes `secrets/`:
@@ -87,28 +87,31 @@ One VM is a single point of failure, and its upgrades refuse writes while its ga
 4. On VM 1: `./sprig-vm.sh up` (it registers MariaDB at `SPRIG_PRIVATE_HOST:SPRIG_BACKEND_PORT`), then on VM 2 and VM 3: `./sprig-vm.sh up` (they don't configure anything; the DC's settings are VM 1's).
 5. `./sprig-vm.sh status` on any VM lists the three etcd members, and `./sprig-vm.sh ctl dc show <dc>` names the DC leader.
 
+**Kafka clients** connect to each gateway directly (Kafka's Metadata lists every gateway as a broker, at its registered address, which is `SPRIG_PRIVATE_HOST` in this layout), so Kafka clients must reach the VMs' private addresses on the Kafka port; the load balancer only serves their first connection. (`configure` doesn't set the DC-wide `kafka.advertised_host` here: it would name VM 1 for every gateway.)
+
 Open between the VMs only: etcd's client and peer ports, MariaDB's port, the controllers' Admin and internal ports, and the gateways' peer port. The client ports face the load balancer.
 
 **If etcd refuses its peers** with `rejected connection on peer endpoint ... does not match any of DNSNames`, a member's connections arrive from an address its certificate doesn't name (NAT between the VMs, or Docker's userland proxy). Add that address to `SPRIG_INTERNAL_SANS` and re-issue the certificates, or set `SPRIG_ETCD_PEER_SKIP_SAN=true`: members still need a certificate from the deployment CA, but etcd stops matching it against the source address. The laptop test needed it (every "VM" was behind Docker Desktop's NAT).
 
-@@HA-TESTED@@
+**Tested (laptop, 11 November 2026):** three Compose projects on separate Docker networks, reaching each other only through published ports on `host.docker.internal` (`SPRIG_ETCD_PEER_SKIP_SAN=true`, see above); VM 3 ran only its etcd member. `up` on VM 1 took 14 s and on VM 2 12 s once the three members were up; the cluster registered at VM 1's private address with TLS verified. The nine-protocol smoke test passed on VM 1's gateway, and on VM 2's except for Kafka, which named the DC's Kafka port where the laptop had remapped VM 2's (a laptop-only effect). `KILL QUERY` sent to one gateway ended a statement on the other through the peer service within 3 s. Upgrades, etcd failures and backups: their sections below.
 
 ## First operator
 
 People who run SprigDB log in as **named operators** (chapter 14, "Operators"), with a password and TOTP. The bootstrap token in `secrets/sprig/admin-token` works only until the first operator logs in.
 
 ```sh
-docker compose exec controller sprigctl --endpoint http://127.0.0.1:7480 --token-file /run/sprig/sprig/admin-token \
-    operator create alice --role platform --display-name "Alice" --email alice@example.com
+docker compose exec controller sprigctl --endpoint https://127.0.0.1:7480 --ca-file /run/sprig/tls/ca.pem \
+    --token-file /run/sprig/sprig/admin-token operator create alice --role platform --display-name "Alice" --email alice@example.com
 #   asks for alice's password (12 characters or more) on the terminal
 ```
 
 (`sprig-vm.sh ctl` runs without a terminal, so it can't ask for a password. From a machine with `sprigctl` and the SSH tunnel below, `--password-file` works too.)
 
-Then alice logs in from the VM, through an SSH tunnel to the Admin API (`ssh -L 7480:127.0.0.1:7480 vm`), with `sprigctl` on her machine:
+Then alice logs in from the VM, through an SSH tunnel to the Admin API (`ssh -L 7480:127.0.0.1:7480 vm`), with `sprigctl` and a copy of `secrets/tls/ca.pem` on her machine. The Admin API is HTTPS with a certificate from the deployment CA, valid for `127.0.0.1`, `localhost` and `controller` (and the private addresses in `SPRIG_INTERNAL_SANS`):
 
 ```sh
-sprigctl --endpoint http://127.0.0.1:7480 login --name alice
+export SPRIGCTL_CA_FILE=~/sprigdb-ca.pem
+sprigctl --endpoint https://127.0.0.1:7480 login --name alice
 #   first login: shows an otpauth:// URI; add it to an authenticator app, type a code;
 #   prints ten recovery codes: keep them
 ```
@@ -116,11 +119,11 @@ sprigctl --endpoint http://127.0.0.1:7480 login --name alice
 From that login on, the bootstrap token is refused (39310). So that `sprig-vm.sh` keeps working, alice issues it a service token and saves it as `secrets/sprig/ops-token`:
 
 ```sh
-sprigctl --endpoint http://127.0.0.1:7480 token create --service sprig-vm --kind ci --scope '*:write' --never-expires --label "sprig-vm.sh on $(hostname)"
+sprigctl --endpoint https://127.0.0.1:7480 token create --service sprig-vm --kind ci --scope '*:write' --never-expires --label "sprig-vm.sh on $(hostname)"
 #   "The token is shown once": copy the sprigsvc_... value into secrets/sprig/ops-token (mode 0644 inside secrets/)
 ```
 
-**Tested (laptop):** `operator create alice` with the bootstrap token; login gave an enrolment ticket and an `otpauth://` URI; enrolment with a TOTP code returned ten recovery codes and a session. From then on, the bootstrap token got 39310 on `cluster list`. A `sprigsvc_` token issued from alice's session (`--kind ci --scope '*:write' --never-expires`) in `secrets/sprig/ops-token` made `./sprig-vm.sh ctl cluster list` work again.
+**Tested (laptop, round 1, plain HTTP then):** `operator create alice` with the bootstrap token; login gave an enrolment ticket and an `otpauth://` URI; enrolment with a TOTP code returned ten recovery codes and a session. From then on, the bootstrap token got 39310 on `cluster list`. A `sprigsvc_` token issued from alice's session (`--kind ci --scope '*:write' --never-expires`) in `secrets/sprig/ops-token` made `./sprig-vm.sh ctl cluster list` work again.
 
 Add more operators with `sprigctl operator create` (a `dc` operator: `--role dc --dcs dc1`). If every operator is locked out, set `admin_token_break_glass = true` under `[controller]` in `config/controller.toml`, `docker compose up -d controller`, fix the accounts with the bootstrap token, then remove the setting. Every call made that way is audited as `breakglass.admin_token`.
 
@@ -144,9 +147,13 @@ Clients log in over TLS. **A tenant that needs plaintext MySQL logins without TL
 | 7687 | Bolt | required | `SPRIG_BIND_IP` |
 | 9092 | Kafka | required | `SPRIG_BIND_IP` |
 | 5671 | AMQP 0-9-1 and 1.0 | required | `SPRIG_BIND_IP` |
-| 7480 | controller Admin API (bearer token, plain HTTP) | **no** | 127.0.0.1 only: use SSH |
+| 7480 | controller Admin API (bearer token) | **HTTPS** (deployment CA) | 127.0.0.1 only (use SSH); several VMs: the private address (`SPRIG_ADMIN_BIND_IP`) |
 | 9090 | Prometheus (profile `monitoring`) | no | 127.0.0.1 only |
-| 2379, 3306, 9180, 7481 | etcd (mTLS), MariaDB (TLS), telemetry, controller internal | etcd and MariaDB yes | inside the Compose network only |
+| 2379, 2380 | etcd client and peer | mutual TLS | one VM: inside the Compose network; several VMs: `SPRIG_PRIVATE_IP` |
+| 3306 (MariaDB) | the backend | required | one VM: inside the network; several VMs: `SPRIG_PRIVATE_IP:SPRIG_BACKEND_PORT` |
+| 7481 | controller internal (permits) | **no** (plain HTTP) | one VM: inside the network; several VMs: `SPRIG_PRIVATE_IP` |
+| 7403 | gateway peer service (KILL, drains, relays) | mutual TLS | one VM: inside the network; several VMs: `SPRIG_PRIVATE_IP` |
+| 9180 | telemetry and metrics | no | inside the Compose network only |
 
 Every port number is a variable in `.env`. The gateway listens inside its container on the same number it is published on, so Kafka advertises the address clients really use (`SPRIG_PUBLIC_HOST:SPRIG_KAFKA_PORT`). If a VM also runs RabbitMQ, MongoDB or Redis, move SprigDB's ports in `.env` (the laptop test used 3xxxx ports).
 
@@ -180,7 +187,11 @@ Run `backup` from cron or a systemd timer (for example hourly). Keep `secrets/` 
 
 **Consistency.** The MariaDB copies and the etcd snapshot are taken a few seconds apart. Take backups when no move, split or merge is running (`./sprig-vm.sh ctl mover list`), or pause the balancer first (`ctl settings set balancer.mode off --scope dc:dc1`). A job that ran between the copies can leave a shard map that points at a schema state from before or after it.
 
-@@BACKUP-TESTED@@
+**Tested (laptop, three "VMs", two MariaDB containers on VM 1 as two clusters):** a tenant on each cluster (783 rows; 3,000 rows), then `backup`: 4.5 s for both MariaDBs and etcd, 4.3 MB, copied to the stand-in off-VM directory and checked there. The data files start with OpenSSL's `Salted__` header and nothing in them is readable; decrypting with a wrong key fails at the zstd frame check. After the backup: 300 rows deleted and the rest updated on one tenant, a table dropped and another created on the other, and a third tenant created. Then the local copy was deleted and `restore <ts> <off-VM dir>` run on VM 1 with VM 2 stopped:
+- without the private key it refused before stopping anything ("restoring needs the backups' private key");
+- with it: fetched and checked the copy, restored both MariaDBs and etcd in 28 s; VM 2 and VM 3 then ran `etcd-rejoin` (18 s for both), and VM 2 `up`.
+- Afterwards every table of both tenants had the same `CHECKSUM TABLE` and row count as before the backup (68 tables, including the tenants' catalogs), the dropped table was back and the new one gone, the third tenant was gone from etcd and MariaDB, and both tenants logged in and read through both gateways.
+- Two problems found and fixed: the first `etcd-rejoin` on VM 2 stopped silently when its `etcdctl` call reached a member that was down (it now retries each call), and VM 1's controller restarted for about three minutes after the restore, because at start it refused to run when its first etcd read reached a member that wasn't back yet (the processes now retry the other members at start; [High availability](#high-availability-three-vms)).
 
 ## Restore
 
@@ -206,20 +217,42 @@ To restore onto a new VM: copy the bundle, the same `secrets/` and the backup di
 ./sprig-vm.sh rollback                         # back to the image before that upgrade
 ```
 
-`upgrade` records the running image in `.state/previous-image`, takes a backup (`backups/pre-upgrade-<ts>/`), changes `SPRIGDB_IMAGE` in `.env` and recreates the controller, then the worker, then the gateway, each after the previous one is healthy. The gateway drains on stop: open sessions get up to `gateway.drain_timeout_seconds` (30 s) to finish, and new connections are refused for the few seconds the container is replaced. With one gateway per VM that is a short outage on this VM's ports. Put two VMs' gateways behind a load balancer and upgrade one VM at a time to avoid it.
+`upgrade` records the running image in `.state/previous-image`, takes a backup on the VM with MariaDB (`backups/pre-upgrade-<ts>/`), changes `SPRIGDB_IMAGE` in `.env` and recreates this VM's controller, then its worker, then its gateway, each after the previous one is healthy. `rollback` swaps the image back in the same order. It is safe when the new build hasn't changed a stored format. If a release note says a version migrates the catalog or etcd records, rolling back means restoring the `pre-upgrade` backup instead: `./sprig-vm.sh restore pre-upgrade-<ts>` with the old image.
 
-`rollback` swaps the image back in the same order. It is safe when the new build hasn't changed a stored format. If a release note says a version migrates the catalog or etcd records, rolling back means restoring the `pre-upgrade` backup instead: `./sprig-vm.sh restore pre-upgrade-<ts>` with the old image.
+**The gateway drains on stop.** Its readiness turns off at once (load balancers stop sending it new connections), it keeps serving for `gateway.drain_lb_delay_seconds` (10 s), then closes its listeners and gives open sessions up to `gateway.drain_timeout_seconds` (30 s) to finish; `stop_grace_period` is 45 s. Its write permit stays valid throughout (before hardening round 2, a stopping gateway refused writes with 39501 for 5–6 s while it still accepted connections).
 
-**With one controller per DC, its restart fences writes for a few seconds.** The gateway holds writes to a valid DC lease, which the controller renews (chapter 25's self-fencing). While the only controller restarts, writes get **39501** ("data center ... is fenced") for about 3–5 s (reads weren't measured). Clients that retry ride through it. To avoid it, run a second controller (another VM), or accept it for a single-VM deployment.
+**Three VMs: upgrade one VM at a time** (VM 1, then VM 2, then VM 3; roll back in the same order). While a VM's controller restarts, the other controllers keep serving permits, and while its gateway restarts the load balancer sends clients to the others, so no write is refused. A restarted controller answers permit requests only once it has read the DC lease, so it can't fence anyone while it starts.
 
-**Tested (laptop):** build A (tree of 16:24 IST, 11 Nov) → build B (tree of 17:38) → back to A, with one client inserting a row every 0.2 s on a new TLS connection each time:
+**One VM:** the gateway's restart is a short outage of this VM's ports, and the controller's restart fences writes for a few seconds: the gateway holds writes to a valid DC lease, which only that controller renews (chapter 25's self-fencing), so writes get **39501** ("data center ... is fenced") for about 3–5 s. Clients that retry ride through it.
 
-| Step | Took | Client errors | Acknowledged rows lost |
+**Tested (laptop, three "VMs", hardening round 2).** One client inserting a row every 0.2 s, each on a new TLS connection, alternating between the two gateways, and trying the other gateway at once when a connection is refused or dropped (what a load balancer with health checks does); upgrade VM 1, then VM 2, then roll back VM 1, then VM 2:
+
+| Run | Images | Writes acknowledged | Refused with 39501 | Connections refused or dropped (then sent to the other gateway) | Acknowledged rows lost |
+|---|---|---|---|---|---|
+| upgrade only | `harden2-a` → `harden2-b` (two builds, 19:20 and 20:48 trees) | 387 of 412 | 25 (13 on VM 1, 12 on VM 2, about 5 s each: the old build's gateway drain) | 4 | 0 |
+| upgrade and rollback | `harden2-b` → `harden2-b2` → `harden2-b` | **690 of 690** | **0** | 7, at most 0.6 s on one gateway per step | **0** |
+
+Each step took 23–33 s (VM 1 includes the 2–5 s backup). `harden2-b2` is `harden2-b`'s binaries under another tag: the containers are recreated and the processes restart exactly as in an upgrade, but no code changed in that run. The first run's 39501s come from stopping `harden2-a` gateways, which still had the drain problem fixed in `harden2-b`; the first `harden2-a` rehearsal (before the fix) also showed 2 refused writes on VM 2's gateway while VM 1's controller restarted, from the restarted controller answering "fenced" before it had read the lease (also fixed in `harden2-b`).
+
+**Tested (laptop, one VM, hardening round 1):** build A → build B → back to A, the same client against one gateway: 33 s each way; 30 and 15 failed inserts (39501 while the only controller restarted and while the gateway drained, then 2003/2013 while it was replaced); 0 of 299 acknowledged rows lost.
+
+## etcd members
+
+With three members, etcd keeps working while any two run; SprigDB's processes list all three (`SPRIG_ETCD_SEEDS`) and use whichever answer.
+
+- **A member down for a while** (its VM rebooting, say): nothing to do; it catches up when it starts again. `./sprig-vm.sh status` shows each member's state.
+- **A member that lost its data, or a VM rebuilt from scratch:** on that VM, `./sprig-vm.sh etcd-rejoin`. It removes the member from the cluster, adds it again with the same name and address, empties its data directory and starts it; it copies the data from the others.
+- **Two members down:** etcd has no majority and refuses writes. SprigDB's data path keeps going for a while (writes need a DC permit, which the controllers keep renewing only while etcd answers: about `failover.dc_lease_seconds`), then writes get 39501. Bring a member back; if two are lost for good, restore etcd from a backup ([Restore](#restore)).
+
+**Tested (laptop, three "VMs"; a client writing every 0.2 s through both gateways, each insert on a new TLS connection):**
+
+| Step | Took | Writes | Failed |
 |---|---|---|---|
-| `upgrade sprigdb:harden1-b` (backup 2 s, then three roles) | 33 s | 30 failed inserts in 7 s: 26 × 39501 (controller restart), 4 × 2003/2013 (gateway restart) | 0 |
-| `rollback` | 33 s | 15 failed inserts: 8 × 39501 over 3 s, 7 × 2003/2013 over 5 s | 0 |
+| etcd-vm2 (a follower) stopped for 60 s, then started | healthy again 5.4 s after start | 300 | 0 |
+| etcd-vm1 (the leader, on the VM with MariaDB and the leading controller) stopped for 45 s, then started | a new leader at once | 228 | 0 |
+| `etcd-rejoin` on VM 3 (member removed, re-added, started empty) | 19.6 s | 56 | 0 |
 
-All 299 acknowledged inserts were in the table afterwards, and no row appeared that wasn't acknowledged. The nine-protocol smoke test passed after each step.
+783 acknowledged inserts in all, 783 in the table. Every member reported the same data size afterwards, VM 3's under a new member id. A client without a certificate gets no answer from any member (mutual TLS).
 
 ## Rotating certificates
 
@@ -227,7 +260,7 @@ All 299 acknowledged inserts were in the table afterwards, and no row appeared t
 ./sprig-vm.sh rotate-certs     # needs secrets/ca/ca-key.pem back on the VM
 ```
 
-It makes new gateway, etcd and MariaDB certificates from the same CA. **Tested (laptop):** the gateway served the new certificate 1 s after the script finished, a MySQL session in the middle of a 15 s statement finished normally, and etcd and MariaDB took new connections with their new certificates. Each file is replaced by rename, so a reader never sees half a file. The gateway re-reads its bundle within two polls (a few seconds; log event `gateway.cert_rotated`) without dropping connections. MariaDB gets `FLUSH SSL`, and etcd picks up new certificates on new connections. To use certificates from your own CA, write them to `secrets/tls/gateway.pem` and `gateway-key.pem` (key first, then the certificate, each by `mv`). The generated certificates last `SPRIG_CERT_DAYS` (397) days: put a reminder or a timer on it. `sprig_gateway_cert_expiry_seconds` (and the `SprigCertExpiringSoon` alert) warns 14 days ahead.
+It makes new gateway, etcd, MariaDB and controller certificates from the same CA (the process certificate, `client.pem`, is made by `init`). With several VMs, copy `secrets/tls/` to the other VMs afterwards. The controller reads its Admin API certificate when it starts: `docker compose up -d --force-recreate controller` on each VM, one at a time (with three VMs that refuses no write, see "Upgrade and rollback"). **Tested (laptop, round 1, one VM):** the gateway served the new certificate 1 s after the script finished, a MySQL session in the middle of a 15 s statement finished normally, and etcd and MariaDB took new connections with their new certificates. Each file is replaced by rename, so a reader never sees half a file. The gateway re-reads its bundle within two polls (a few seconds; log event `gateway.cert_rotated`) without dropping connections. MariaDB gets `FLUSH SSL`, and etcd picks up new certificates on new connections. To use certificates from your own CA, write them to `secrets/tls/gateway.pem` and `gateway-key.pem` (key first, then the certificate, each by `mv`). The generated certificates last `SPRIG_CERT_DAYS` (397) days: put a reminder or a timer on it. `sprig_gateway_cert_expiry_seconds` (and the `SprigCertExpiringSoon` alert) warns 14 days ahead.
 
 Rotating the CA itself: make a new CA, put both CA certificates into `ca.pem` (old and new), restart everything once (`docker compose up -d --force-recreate`), then issue new certificates from the new CA and remove the old CA from `ca.pem`.
 
@@ -257,7 +290,13 @@ Rotating the CA itself: make a new CA, put both CA certificates into `ca.pem` (o
 | MariaDB container restarts, exit 137 | out of memory | raise `MARIADB_MEM_LIMIT` or lower `MARIADB_BUFFER_POOL` and `MARIADB_MAX_CONNECTIONS` |
 | `cluster register` precheck fails on TLS | the server's certificate doesn't cover the name you registered | register the name in the certificate (`mariadb-1`), or re-issue |
 | Kafka clients connect and then time out | `SPRIG_PUBLIC_HOST` isn't the name clients reach | fix it in `.env`, `./sprig-vm.sh configure` |
-| Backups fail with "No space left" | `backups/` on the root disk | mount a data disk at `backups/`; prune old backups |
+| Backups fail with "No space left" | `backups/` on the root disk | mount a data disk at `backups/`; lower `SPRIG_BACKUP_KEEP` |
+| `up` stops with "secrets/ failed its checks" | an owner or mode in `secrets/` is wrong | run each `chmod`/`chown` it prints ([Secrets checks](#secrets-checks)) |
+| A process exits with 39998 naming a token or key file | the file is a symbolic link to nothing, not a regular file, or writable by everyone | `chmod 644` it (0600 for the offline keys) |
+| `sprig-vm.sh ctl` says `unexpected argument '--ca-file'` | the image's `sprigctl` predates HTTPS on the Admin API | `SPRIGCTL_BIN=<a newer sprigctl> ./sprig-vm.sh ...`, or upgrade the image |
+| etcd logs `rejected connection on peer endpoint ... does not match` | a member connects from an address its certificate doesn't name (NAT) | add the address to `SPRIG_INTERNAL_SANS` and re-issue, or `SPRIG_ETCD_PEER_SKIP_SAN=true` |
+| `up-etcd` member stays `starting` | fewer than two members run | start the other VMs' members (`up-etcd` on each) |
+| `restore` says it needs the private key | `backup-key.pem` is off the VM, as it should be | put it back at `secrets/backup/backup-key.pem` (0600) or set `SPRIG_BACKUP_KEY` for that run |
 
 ## Galera: a node that can't rejoin
 
@@ -272,8 +311,10 @@ A node that joins under heavy load can also fail because the donor loses contact
 
 ## Not done yet
 
-- **Run on a real VM** (Kiran decides when; nothing has touched the dev or stage VMs).
-- **One gateway per VM:** two gateways on one VM would need different ports. HA means a second VM running only the gateway (a `gateway-only` compose file pointing at the first VM's etcd), which isn't written yet.
-- **The Admin API is plain HTTP** (loopback only, bearer token): the controller has no TLS listener yet (chapter 37's 8443 relay through a gateway is TLS: `sprigctl --endpoint https://<gateway>:8443`).
-- **One etcd member:** etcd is a single point of failure for control (not for data). Three members across VMs are chapter 23's production layout.
-- **Backups aren't encrypted or shipped** by the script.
+- **Run on a real VM** (Kiran decides when; nothing has touched the dev or stage VMs). The three "VMs" of round 2 were three Compose projects on one laptop, on separate networks.
+- **The controller's internal port (permits, 7481) is plain HTTP** between VMs: keep the private network closed to everything else. Chapter 23's mutual-TLS port 7400 would replace it.
+- **MariaDB isn't highly available in this layout**: it stays on VM 1. Use a primary/replica or Galera cluster, or a managed server ([Adding a cluster](#adding-a-cluster)); the bundle doesn't build one.
+- **No load balancer in the bundle**: use the cloud's, or HAProxy or nginx `stream` with a TCP health check on each gateway port. Kafka clients also need the VMs' private addresses.
+- **Two gateways on one VM** would need different ports (the listener ports are DC-wide settings). Use one gateway per VM.
+- **Not tested with three VMs:** certificate rotation, Prometheus scraping the other VMs, and `up` migrating a round-1 bundle (it makes the controller certificate and the backups' key pair).
+- **Backups** are a few seconds apart between MariaDB and etcd (back up when no mover job runs), and there is no point-in-time restore yet (chapter 47's binlog archiving).

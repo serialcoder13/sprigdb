@@ -34,6 +34,8 @@ pub mod pins_sql;
 pub mod rec_sql;
 // Chapter 29: row-level security (R4).
 pub mod rls;
+// Chapter 29: row-level security for streamed rows (RLS round 4).
+pub mod rls_streams;
 pub mod session;
 pub mod settings_sql;
 pub mod stored_names;

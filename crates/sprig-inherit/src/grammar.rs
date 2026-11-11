@@ -15,6 +15,8 @@
 //! | `DROP SHARE [IF EXISTS] n` | [`Stmt::DropShare`] |
 //! | `SPRIG RESET t [(c, ...)] [WHERE e]` | [`Stmt::Reset`] |
 //! | `SHOW SPACES`, `SHOW SHARES` | [`Stmt::ShowSpaces`], [`Stmt::ShowShares`] |
+//! | `SPRIG CHECK IDS t` | [`Stmt::CheckIds`] (ids held by more than one tenant of the tree) |
+//! | `CREATE TABLE t (... REFERENCES ...)` | [`Stmt::CreateTable`] (foreign keys onto inheritable tables) |
 
 use sprig_common::{SprigCode, SprigError};
 use sprig_sql::lex::{LexOptions, Token, TokenKind, ident_value, lex, string_value};
@@ -155,6 +157,13 @@ pub enum Stmt {
     LoadData(Name),
     /// `CREATE VIEW`, routines, triggers, `CREATE TABLE ... LIKE | SELECT`.
     CreateOther,
+    /// `CREATE TABLE t (...)` with a foreign key (`REFERENCES`): the
+    /// table joins the group of an inheritable table it references
+    /// ([`crate::links`]).
+    CreateTable(Name),
+    /// `SPRIG CHECK IDS t`: the ids of `t` that more than one tenant of
+    /// its tree holds as its own ([`crate::ids`]).
+    CheckIds(Name),
     /// Anything else.
     Other,
 }
@@ -219,13 +228,13 @@ impl<'a> Toks<'a> {
         self.ident(i).or_else(|| self.string(i))
     }
 
-    fn start(&self, i: usize) -> usize {
+    pub(crate) fn start(&self, i: usize) -> usize {
         self.tokens
             .get(i)
             .map_or(self.src.len(), |t| t.start as usize)
     }
 
-    fn end(&self, i: usize) -> usize {
+    pub(crate) fn end(&self, i: usize) -> usize {
         self.tokens
             .get(i)
             .map_or(self.src.len(), |t| t.end as usize)
@@ -253,7 +262,7 @@ impl<'a> Toks<'a> {
         ))
     }
 
-    fn close_of(&self, open: usize) -> Option<usize> {
+    pub(crate) fn close_of(&self, open: usize) -> Option<usize> {
         let mut depth = 0usize;
         for i in open..self.len() {
             if self.punct(i, b'(') {
@@ -269,7 +278,7 @@ impl<'a> Toks<'a> {
     }
 
     /// The text from token `a` to token `b` (inclusive).
-    fn text(&self, a: usize, b: usize) -> String {
+    pub(crate) fn text(&self, a: usize, b: usize) -> String {
         if a > b || a >= self.len() {
             return String::new();
         }
@@ -278,7 +287,7 @@ impl<'a> Toks<'a> {
     }
 
     /// `(a, b, ...)` at `open`: the names and the index after `)`.
-    fn ident_list(&self, open: usize) -> Option<(Vec<String>, usize)> {
+    pub(crate) fn ident_list(&self, open: usize) -> Option<(Vec<String>, usize)> {
         if !self.punct(open, b'(') {
             return None;
         }
@@ -299,7 +308,7 @@ impl<'a> Toks<'a> {
 
     /// The first index at or after `from` at parenthesis depth 0 where
     /// `stop` holds, or the end.
-    fn until(&self, from: usize, stop: impl Fn(usize) -> bool) -> usize {
+    pub(crate) fn until(&self, from: usize, stop: impl Fn(usize) -> bool) -> usize {
         let mut depth = 0usize;
         for i in from..self.len() {
             if self.punct(i, b'(') {
@@ -363,6 +372,12 @@ pub fn classify(sql: &[u8], lex_opts: &LexOptions) -> Result<Stmt, SprigError> {
     }
     if first("SPRIG") && t.is(1, "RESET") {
         return reset(&t);
+    }
+    if first("SPRIG") && t.is(1, "CHECK") && t.is(2, "IDS") {
+        return match t.name(3) {
+            Some((n, next)) if next == t.len() => Ok(Stmt::CheckIds(n)),
+            _ => Err(syntax("SPRIG CHECK IDS table")),
+        };
     }
     if first("SHOW") && t.len() == 2 {
         if t.is(1, "SPACES") {
@@ -503,11 +518,19 @@ fn create(t: &Toks<'_>) -> Result<Stmt, SprigError> {
         i += 1;
     }
     if t.is(i, "TABLE") {
-        let refers = (i..t.len()).any(|j| {
-            t.is(j, "LIKE") || t.is(j, "SELECT") || t.is(j, "REFERENCES") || t.is(j, "AS")
-        });
-        if !refers {
+        let copies = (i..t.len()).any(|j| t.is(j, "LIKE") || t.is(j, "SELECT") || t.is(j, "AS"));
+        let refers = (i..t.len()).any(|j| t.is(j, "REFERENCES"));
+        if !copies && !refers {
             return Ok(Stmt::Other);
+        }
+        if !copies {
+            let mut j = i + 1;
+            if t.is(j, "IF") && t.is(j + 1, "NOT") && t.is(j + 2, "EXISTS") {
+                j += 3;
+            }
+            if let Some((n, _)) = t.name(j) {
+                return Ok(Stmt::CreateTable(n));
+            }
         }
     }
     Ok(Stmt::CreateOther)
@@ -740,6 +763,9 @@ pub fn is_extension(sql: &[u8], lex_opts: &LexOptions) -> bool {
                     && t.is(next + 2, "INHERITABLE"));
         }
         return false;
+    }
+    if t.is(0, "SPRIG") && t.is(1, "CHECK") && t.is(2, "IDS") {
+        return true;
     }
     if t.is(0, "SPRIG") && t.is(1, "RESET") && !t.is(2, "BOUNDS") && !t.punct(2, b'(') {
         let Some((n, _)) = t.name(2) else {

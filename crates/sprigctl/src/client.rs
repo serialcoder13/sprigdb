@@ -69,6 +69,7 @@ impl AdminClient {
     ///
     /// # Errors
     /// For an endpoint that isn't an `http://` URL.
+    #[cfg(test)]
     pub(crate) fn new(endpoint: &str, token: Option<String>) -> Result<Self, CallError> {
         Self::with_tls(endpoint, token, &TlsFiles::default())
     }

@@ -903,6 +903,15 @@ impl PassSession {
             Ok(c) => c,
             Err(e) => return self.fail(out, &e).await,
         };
+        // Chapter 42 (Kiran's decisions of 11 Nov 2026): a child tenant
+        // holds every table and column its parent shares to it.
+        let cat = match Box::pin(self.inherit_adopt(cat)).await {
+            Ok(c) => c,
+            Err(e) => return self.fail(out, &e).await,
+        };
+        let Some(ts) = self.tenant.as_deref_mut() else {
+            return Err(SprigError::internal("no tenant"));
+        };
         // SprigDB's own information_schema view (chapter 07, step 11).
         let inlined = settings_sql::inline_view(text, &lex, || {
             settings_sql::view_sql(ts, &cat, lex.no_backslash_escapes)

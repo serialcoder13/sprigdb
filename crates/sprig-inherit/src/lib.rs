@@ -19,6 +19,12 @@
 //! - [`copy`]: materialized copies and asynchronous orphaning across
 //!   tenants, kept by one worker per tenant tree from the change feed
 //!   (step 8 and step 9's other half; the job is `sprig-worker::inherit`);
+//! - [`links`]: foreign keys between inheritable tables, checked against
+//!   merged views, and refused deletes of referenced rows (Kiran's
+//!   decisions 1 and 4 of 11 November 2026);
+//! - [`ids`]: one id sequence per table for the whole tree (decision 3);
+//! - [`adopt`]: what a child tenant must create or change so it holds
+//!   every table its parent shares to it (decisions 1 and 2);
 //! - [`moves`]: the tenant-move check for shares (39361);
 //! - [`guard`]: "Schema changes while an object is shared" (39895);
 //! - [`show`]: what schema tools see;
@@ -43,10 +49,13 @@
     clippy::struct_excessive_bools
 )]
 
+pub mod adopt;
 pub mod copy;
 pub mod ddl;
 pub mod grammar;
 pub mod guard;
+pub mod ids;
+pub mod links;
 pub mod model;
 pub mod moves;
 pub mod msg;
@@ -61,8 +70,11 @@ pub mod upstream;
 pub mod view;
 pub mod write;
 
-use sprig_common::Result;
+use std::sync::Arc;
+
+use sprig_catalog::TenantCatalog;
 use sprig_common::ids::TenantId;
+use sprig_common::{Result, SprigError};
 use sprig_types::{Done, Rows};
 
 pub use model::{InheritState, InheritableObject, LayerState, ROOT_SPACE, Share, Space, SpaceId};
@@ -110,7 +122,71 @@ pub trait Runner: sprig_types::Runner {
     async fn subscribe(&mut self) -> Result<()> {
         Ok(())
     }
+
+    /// Runs `sql` (physical names) as the provisioning account on tenant
+    /// `t`'s cluster, outside the session's transaction; its rows as text.
+    ///
+    /// # Errors
+    /// The backend's (a `NOWAIT` lock conflict is 1205 or 3572).
+    async fn ctl_query(&mut self, t: TenantId, sql: &str) -> Result<RawRows> {
+        let _ = (t, sql);
+        Err(SprigError::internal("no provisioning access in this runner"))
+    }
+
+    /// Runs `sql` on `inherit_refs` in tenant `root`'s catalog (`{refs}`
+    /// stands for the table, created when missing), as the provisioning
+    /// account, autocommitted ([`links`]).
+    ///
+    /// # Errors
+    /// The catalog's.
+    async fn refs(&mut self, root: TenantId, sql: &str) -> Result<RawRows> {
+        let _ = (root, sql);
+        Err(SprigError::internal("no reference index in this runner"))
+    }
+
+    /// Tenant `t`'s snapshot.
+    ///
+    /// # Errors
+    /// The cache's.
+    async fn tenant_catalog(&mut self, t: TenantId) -> Result<Arc<TenantCatalog>> {
+        let _ = t;
+        Err(SprigError::internal("no catalog cache in this runner"))
+    }
+
+    /// `n` values of `seq` (the first and the step), after moving it past
+    /// `explicit`, the largest explicit value of the statement ([`ids`]).
+    /// `None`: the runner has no sequences (MariaDB's counter is used).
+    ///
+    /// # Errors
+    /// 39460, 39463, 1467.
+    async fn tree_ids(
+        &mut self,
+        seq: &ids::TreeSeq,
+        n: u64,
+        explicit: Option<i128>,
+    ) -> Result<Option<(i128, i128)>> {
+        let _ = (seq, n, explicit);
+        Ok(None)
+    }
+
+    /// Every tenant in `root`'s subtree (`root` included) holding table
+    /// `db.table`, with its physical schema.
+    ///
+    /// # Errors
+    /// The directory's.
+    async fn tree_tables(
+        &mut self,
+        root: TenantId,
+        db: &str,
+        table: &str,
+    ) -> Result<Vec<ids::TreeTable>> {
+        let _ = (root, db, table);
+        Ok(Vec::new())
+    }
 }
+
+/// Rows as text, as [`Runner::ctl_query`] returns them.
+pub type RawRows = Vec<Vec<Option<Vec<u8>>>>;
 
 /// What the gateway does with a statement.
 #[derive(Debug)]
@@ -218,6 +294,7 @@ pub async fn handle(sql: &str, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Hand
                 .await
                 .map(Handled::Ok);
         }
+        Stmt::CheckIds(table) => return Box::pin(ids::check(ctx, r, &table)).await,
         Stmt::Reset {
             table,
             columns,
@@ -251,7 +328,13 @@ pub async fn handle(sql: &str, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Hand
         Stmt::Insert | Stmt::Replace => Box::pin(write::insert(sql, ctx, r)).await,
         Stmt::Update => Box::pin(write::update(sql, ctx, r)).await,
         Stmt::Delete => Box::pin(write::delete(sql, ctx, r)).await,
-        Stmt::AlterTable(n) => Box::pin(guard::alter(sql, &n, ctx, r)).await,
+        Stmt::AlterTable(n) => {
+            if let Some(h) = Box::pin(links::alter(sql, &n, ctx, r)).await? {
+                return Ok(h);
+            }
+            Box::pin(guard::alter(sql, &n, ctx, r)).await
+        }
+        Stmt::CreateTable(n) => Box::pin(links::create_table(sql, &n, ctx, r)).await,
         Stmt::DropTable(names) => guard::drop_tables(&names, ctx).map(|()| Handled::NotInherit),
         Stmt::Rename(names) => guard::rename(&names, ctx).map(|()| Handled::NotInherit),
         Stmt::Truncate(n) => Box::pin(write::truncate(&n, ctx, r)).await,

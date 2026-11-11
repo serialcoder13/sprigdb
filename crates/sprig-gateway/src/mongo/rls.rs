@@ -17,6 +17,8 @@
 //! filters themselves are kept with the policy (`using_mongo`,
 //! `check_mongo`) for change streams.
 
+use std::fmt::Write as _;
+
 use bson::{Bson, Document, doc};
 use sprig_doc::engine::{Engine, SqlRunner};
 use sprig_doc::sql::{ident, str_lit};
@@ -67,6 +69,7 @@ fn commands_of(v: Option<&Bson>) -> Result<String, MongoError> {
     Ok(out.join(", "))
 }
 
+#[allow(clippy::many_single_char_names)] // u, h, s, g, v: parts of a grantee
 fn grantees_of(v: Option<&Bson>) -> Result<String, MongoError> {
     let Some(v) = v else {
         return Ok("PUBLIC".into());
@@ -100,6 +103,15 @@ fn filter_of<'a>(body: &'a Document, key: &str) -> Result<Option<&'a Document>, 
 /// The relaxed extended JSON of `d`, as a SQL string literal.
 fn json_lit(d: &Document) -> String {
     str_lit(&Bson::Document(d.clone()).into_relaxed_extjson().to_string())
+}
+
+/// A SQL error in MongoDB terms, keeping chapter 29's numbers (1304,
+/// 1305, 39363 to 39366) as the error code.
+fn sql_error(e: &sprig_doc::engine::SqlError) -> MongoError {
+    match e.errno {
+        Some(n @ (1304 | 1305 | 39363..=39366)) => MongoError::new(i32::from(n), e.message.clone()),
+        _ => sprig_doc::engine::mongo_error(e),
+    }
 }
 
 /// Runs one of this module's commands in `db`.
@@ -148,18 +160,18 @@ pub async fn command(
                 grantees_of(body.get("to"))?
             );
             if let Some(u) = using {
-                s.push_str(&format!(" USING ({})", sprig_doc::policy::to_sql(u)?));
+                let _ = write!(s, " USING ({})", sprig_doc::policy::to_sql(u)?);
             }
             if let Some(c) = check {
-                s.push_str(&format!(" WITH CHECK ({})", sprig_doc::policy::to_sql(c)?));
+                let _ = write!(s, " WITH CHECK ({})", sprig_doc::policy::to_sql(c)?);
             }
             if using.is_some() || check.is_some() {
                 s.push_str(" SPRIG MONGO");
                 if let Some(u) = using {
-                    s.push_str(&format!(" USING {}", json_lit(u)));
+                    let _ = write!(s, " USING {}", json_lit(u));
                 }
                 if let Some(c) = check {
-                    s.push_str(&format!(" CHECK {}", json_lit(c)));
+                    let _ = write!(s, " CHECK {}", json_lit(c));
                 }
             }
             s
@@ -193,16 +205,12 @@ pub async fn command(
                 return Err(bad("sprigRowSecurity needs enable or force"));
             }
             for s in &out {
-                sql.exec(s)
-                    .await
-                    .map_err(|e| sprig_doc::engine::mongo_error(&e))?;
+                sql.exec(s).await.map_err(|e| sql_error(&e))?;
             }
             return Ok(doc! {"ok": 1.0});
         }
     };
-    sql.exec(&stmt)
-        .await
-        .map_err(|e| sprig_doc::engine::mongo_error(&e))?;
+    sql.exec(&stmt).await.map_err(|e| sql_error(&e))?;
     Ok(doc! {"ok": 1.0})
 }
 
