@@ -1,0 +1,28 @@
+# Node agent (compose.db-ha.yaml; chapter 25, "DC leases, sub-leases and
+# self-fencing"). compose sets node.dc, node.id, meta.dc_seeds,
+# meta.deployment_id, agent.cluster and agent.node through SPRIGDB_*
+# variables.
+
+[node]
+dc = "dc1"
+
+[meta]
+dc_seeds = ["https://etcd:2379"]
+global_seeds = []
+deployment_id = "sprigdb"
+
+# Mutual TLS to etcd and to the controllers' internal port (permits).
+[tls]
+ca = "/run/sprig/tls/ca.pem"
+cert = "/run/sprig/tls/client.pem"
+key = "/run/sprig/tls/client-key.pem"
+
+[agent]
+# The node is reached at its address in the cluster record, with the
+# cluster's sprig_ctl credentials (secrets/sprig/cluster-credentials.toml),
+# which hold READ_ONLY ADMIN and CONNECTION ADMIN.
+
+[telemetry]
+bootstrap_log_level = "info"
+log_format = "json"
+bootstrap_addr = "0.0.0.0:9180"

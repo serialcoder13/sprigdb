@@ -264,6 +264,16 @@ pub fn rewrite(
 /// name when the call is a whole select item without an alias, as MySQL
 /// names it.
 fn named(sql: &[u8], t: &[Token], from: usize, to: usize, expr: String) -> String {
+    if !whole_select_item(sql, t, from, to) {
+        return expr;
+    }
+    let written = String::from_utf8_lossy(&sql[t[from].start as usize..t[to].end as usize]);
+    format!("{expr} AS `{}`", written.replace('`', "``"))
+}
+
+/// Whether `t[from..=to]` is a whole select item without an alias (R4
+/// round 5: also [`super::jsonops`]).
+pub(crate) fn whole_select_item(sql: &[u8], t: &[Token], from: usize, to: usize) -> bool {
     let word = |k: usize, ws: &[&[u8]]| {
         t.get(k).is_some_and(|x| {
             x.kind == TokenKind::Word && ws.iter().any(|w| x.bytes(sql).eq_ignore_ascii_case(w))
@@ -285,10 +295,10 @@ fn named(sql: &[u8], t: &[Token], from: usize, to: usize, expr: String) -> Strin
             ],
         );
     if !ends || from == 0 {
-        return expr;
+        return false;
     }
     // After SELECT or DISTINCT, or a comma of the select list.
-    let starts = if word(from - 1, &[b"SELECT", b"DISTINCT"]) {
+    if word(from - 1, &[b"SELECT", b"DISTINCT"]) {
         true
     } else if punct(from - 1, b',') {
         let mut depth = 0i32;
@@ -313,12 +323,7 @@ fn named(sql: &[u8], t: &[Token], from: usize, to: usize, expr: String) -> Strin
         found
     } else {
         false
-    };
-    if !starts {
-        return expr;
     }
-    let written = String::from_utf8_lossy(&sql[t[from].start as usize..t[to].end as usize]);
-    format!("{expr} AS `{}`", written.replace('`', "``"))
 }
 
 fn no_such_table(schema: Schema, obj: &str) -> WireError {

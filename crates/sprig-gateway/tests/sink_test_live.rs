@@ -251,6 +251,8 @@ async fn test_connection_reports_each_step() {
         let r = sql(&mut u, &format!("TEST CONNECTION {db}.k_ok")).await;
         assert_eq!(r.unwrap_err().0, 39212, "needs USAGE");
         ok(&mut c, &format!("GRANT USAGE ON CONNECTION {db}.k_ok TO st_nouse")).await;
+        // A new session sees the grant.
+        let mut u = conn(&addr, &format!("{tenant}.st_nouse"), "sprig-dev-nouse").await;
         let r = sql(&mut u, &format!("TEST CONNECTION {db}.k_ok")).await;
         assert!(r.is_ok(), "with USAGE: {r:?}");
     }
@@ -300,7 +302,16 @@ async fn test_sink_shows_records_and_delivers_nothing() {
         )
         .await;
     }
-    let rows = ok(&mut c, "TEST SINK s WITH SAMPLE 10").await;
+    // Published records get their offsets from the stream's sequencer a
+    // moment later: wait until all six are in the log.
+    let mut rows = Vec::new();
+    for _ in 0..40 {
+        rows = ok(&mut c, "TEST SINK s WITH SAMPLE 10").await;
+        if rows.len() >= 6 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
     println!("TEST SINK s:");
     for r in &rows {
         println!("  {r:?}");
@@ -343,7 +354,19 @@ async fn test_sink_shows_records_and_delivers_nothing() {
         )
         .await
         .unwrap();
-        ok(&mut c, "CREATE SINK sq FROM QUEUE jobs TO WEBHOOK CONNECTION hook").await;
+        // A queue declared over AMQP is seen by sessions opened after it
+        // (a session keeps its catalog snapshot's topology).
+        let mut made = Err((0, String::new()));
+        for _ in 0..20 {
+            c = conn(&addr, &format!("{tenant}.app"), "sprig-dev-app").await;
+            ok(&mut c, &format!("USE {db}")).await;
+            made = sql(&mut c, "CREATE SINK sq FROM QUEUE jobs TO WEBHOOK CONNECTION hook").await;
+            if made.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        made.unwrap();
         ok(&mut c, "ALTER SINK sq PAUSE").await;
         tokio::time::sleep(Duration::from_secs(2)).await;
         ch.confirm_select(ConfirmSelectOptions::default())
@@ -391,6 +414,6 @@ async fn test_sink_shows_records_and_delivers_nothing() {
     drop(u);
     ok(&mut c, "DROP USER st_plain").await;
     ok(&mut c, "DROP SINK s").await;
-    ok(&mut c, "DROP STREAM ev IMMEDIATE").await;
+    ok(&mut c, "DROP STREAM ev").await;
     ok(&mut c, &format!("DROP DATABASE {db}")).await;
 }

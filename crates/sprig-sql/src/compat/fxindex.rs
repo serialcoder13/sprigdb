@@ -427,6 +427,24 @@ fn apply(sql: &[u8], mut edits: Vec<(usize, usize, String)>) -> Vec<u8> {
     out
 }
 
+/// A cheap test on the bytes: a functional part opens with `(` right
+/// after the part list's `(` or a `,`, once whitespace is gone (R4 round
+/// 5: Django's mixed lists, `(author_id DESC, (LOWER(title)) ASC)`, have
+/// no `((`).
+fn maybe_functional(sql: &[u8]) -> bool {
+    let mut last = 0u8;
+    for &b in sql {
+        if b.is_ascii_whitespace() {
+            continue;
+        }
+        if b == b'(' && (last == b'(' || last == b',') {
+            return true;
+        }
+        last = b;
+    }
+    false
+}
+
 /// Functional key parts as hidden virtual columns (see the module docs).
 /// `None` when nothing changes or a part's type isn't known.
 #[must_use]
@@ -441,7 +459,7 @@ pub fn rewrite(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
 /// and calls [`rewrite_with`]).
 #[must_use]
 pub fn needs_types(sql: &[u8], opts: &LexOptions) -> Option<String> {
-    if !(sql.windows(2).any(|w| w == b"((") || sql.windows(3).any(|w| w == b"( (")) {
+    if !maybe_functional(sql) {
         return None;
     }
     if rewrite(sql, opts).is_some() {
@@ -477,9 +495,7 @@ pub fn rewrite_with(
     opts: &LexOptions,
     known: &BTreeMap<String, String>,
 ) -> Option<Vec<u8>> {
-    // A functional part always has `((` once whitespace is gone, or
-    // `( (`; cheap test on the parenthesis pair.
-    if !(sql.windows(2).any(|w| w == b"((") || sql.windows(3).any(|w| w == b"( (")) {
+    if !maybe_functional(sql) {
         return None;
     }
     let tokens = lex::lex(sql, opts).ok()?;
@@ -607,6 +623,32 @@ mod tests {
 
     fn rw(s: &str) -> Option<String> {
         rewrite(s.as_bytes(), &LexOptions::mysql84()).map(|v| String::from_utf8(v).unwrap())
+    }
+
+    #[test]
+    fn mixed_part_lists() {
+        // Django's Index(F("author").desc(), Lower("title").asc(), "pub_date")
+        // and UniqueConstraint(F("height").desc(), "uuid", Lower("name").asc()):
+        // no `((` anywhere (R4 round 5).
+        let o = LexOptions::mysql84();
+        let known: BTreeMap<String, String> = [("title".to_owned(), "varchar(100)".to_owned())]
+            .into_iter()
+            .collect();
+        let sql = "CREATE INDEX `func_f_lower_field_idx` ON `schema_book` (`author_id` DESC, (LOWER(`title`)) ASC, `pub_date`)";
+        assert_eq!(
+            needs_types(sql.as_bytes(), &o).as_deref(),
+            Some("`schema_book`")
+        );
+        let out = String::from_utf8(rewrite_with(sql.as_bytes(), &o, &known).unwrap()).unwrap();
+        let k = fx_column("LOWER(`title`)");
+        assert_eq!(
+            out,
+            format!(
+                "ALTER TABLE `schema_book` ADD COLUMN IF NOT EXISTS `{k}` varchar(100) GENERATED ALWAYS AS (LOWER(`title`)) VIRTUAL INVISIBLE, ADD INDEX `func_f_lower_field_idx` (`author_id` DESC, `{k}` ASC, `pub_date`)"
+            )
+        );
+        let alter = "ALTER TABLE `schema_author` ADD CONSTRAINT `u` UNIQUE (`height` DESC, `uuid`, (LOWER(`title`)) ASC)";
+        assert!(rewrite_with(alter.as_bytes(), &o, &known).is_some());
     }
 
     #[test]

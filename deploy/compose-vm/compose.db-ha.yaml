@@ -1,0 +1,78 @@
+# MariaDB high availability across three VMs (RUNBOOK.md, "MariaDB high
+# availability"; hardening round 3): one MariaDB node per VM, a primary and
+# two replicas with semi-synchronous replication that waits AFTER_SYNC, and
+# a SprigDB agent next to each node. The three nodes are one SprigDB cluster
+# (topology primary_replica); when the primary is lost, the DC leader
+# promotes the replica holding every acknowledged commit and repoints the
+# other (chapter 25, "Primary + replicas, driven by SprigDB").
+#
+# On every VM, with compose.yaml and compose.ha.yaml:
+#
+#   COMPOSE_FILE=compose.yaml:compose.ha.yaml:compose.db-ha.yaml
+#   SPRIG_DB_NODES=db1=10.0.0.11:3306,db2=10.0.0.12:3306,db3=10.0.0.13:3306
+#   SPRIG_DB_PRIMARY=db1              # the first primary; the others replicate from it
+#
+# Every node boots read_only and with semi-sync's primary side off. Its agent
+# clears read_only only on the node holding the cluster's writer lease while
+# its DC permit is valid, and switches the primary side on once a replica is
+# attached; a node that isn't the writer is fenced (read_only, tenant
+# sessions killed).
+
+services:
+  mariadb-1:
+    command:
+      # One server id per VM (101, 102, 103), one GTID domain for the cluster.
+      - --server-id=10${SPRIG_VM_ID:-1}
+      - --gtid-domain-id=1
+      # What a promoted node is known as to the others: its private address.
+      - --report-host=${SPRIG_PRIVATE_HOST:-mariadb-1}
+      - --report-port=${SPRIG_BACKEND_PORT:-3306}
+      # Chapter 25: a node boots fenced; its agent unfences the writer.
+      - --read-only=ON
+      - --rpl-semi-sync-slave-enabled=ON
+      - --rpl-semi-sync-master-enabled=OFF
+      - --innodb-buffer-pool-size=${MARIADB_BUFFER_POOL:-2G}
+      - --innodb-log-file-size=${MARIADB_REDO_SIZE:-1G}
+      - --max-connections=${MARIADB_MAX_CONNECTIONS:-1000}
+
+  # The node agent (chapter 25, "DC leases, sub-leases and self-fencing"):
+  # holds the writer lease for its node, fences it when it may not write,
+  # and reports whether mysqld answers, which the controllers' failover
+  # reads. It reaches its node at the address in the cluster record.
+  agent:
+    image: ${SPRIGDB_IMAGE:-sprigdb:dev}
+    init: true
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: ${SPRIG_LOG_MAX_SIZE:-50m}
+        max-file: "${SPRIG_LOG_MAX_FILES:-5}"
+    networks: [sprig]
+    mem_limit: ${AGENT_MEM_LIMIT:-256m}
+    user: "${SPRIG_UID:-10001}:${SPRIG_GID:-10001}"
+    command: [--config, /etc/sprigdb/agent.toml, agent]
+    environment:
+      SPRIGDB_NODE_DC: ${SPRIG_DC:-dc1}
+      SPRIGDB_NODE_ID: agt-${SPRIG_VM_ID:-1}
+      SPRIGDB_META_DEPLOYMENT_ID: ${SPRIG_DEPLOYMENT_ID:-sprigdb}
+      SPRIGDB_META_DC_SEEDS: '${SPRIG_ETCD_SEEDS:-["https://etcd:2379"]}'
+      SPRIGDB_TELEMETRY_LOG_FORMAT: json
+      SPRIGDB_TELEMETRY_BOOTSTRAP_LOG_LEVEL: ${SPRIG_LOG_LEVEL:-info}
+      # The cluster's id (sprig-vm.sh writes it into .env once registered;
+      # a fresh DC's first cluster is <dc>-c1) and this VM's node in it.
+      SPRIGDB_AGENT_CLUSTER: ${SPRIG_DB_CLUSTER_ID:-${SPRIG_DC:-dc1}-c1}
+      SPRIGDB_AGENT_NODE: db${SPRIG_VM_ID:-1}
+    volumes:
+      - ./config/agent.toml:/etc/sprigdb/agent.toml:ro
+      - ./secrets/tls:/run/sprig/tls:ro
+      - ./secrets/sprig:/run/sprig/sprig:ro
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9180 && printf 'GET /readyz HTTP/1.0\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q ' 200 '"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+    depends_on:
+      etcd: { condition: service_healthy }
+      mariadb-1: { condition: service_healthy }

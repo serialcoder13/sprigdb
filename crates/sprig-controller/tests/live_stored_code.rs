@@ -453,7 +453,7 @@ async fn stored_code_survives_regroups_splits_merges_and_moves() {
                 let r = async {
                     let mut c = pl.get_conn().await?;
                     round(&mut c, id).await?;
-                    if i % 5 == 0 {
+                    if i.is_multiple_of(5) {
                         c.disconnect().await?;
                     }
                     Ok::<_, mysql_async::Error>(())

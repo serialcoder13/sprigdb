@@ -887,6 +887,20 @@ pub async fn handle_stmt(st: Stmt, h: &mut dyn Host) -> Result<Handled> {
 }
 
 /// Target options known to be numbers.
+/// `EXACTLY ONCE` for a fan-in sink (R9, r9tests): into databases only,
+/// by the records' member-prefixed idempotency keys in the destination's
+/// `__sprig_sink_seen`; Kafka and S3 keep positions per partition, which
+/// fan-in tasks don't have (39217). Other targets are refused later.
+fn fan_in_guarantee(g: Guarantee, target: &TargetAst) -> Result<()> {
+    if g == Guarantee::ExactlyOnce && matches!(target, TargetAst::Kafka { .. } | TargetAst::S3 { .. }) {
+        return Err(err(
+            SprigCode::SinkExactlyOnceUnsupported,
+            "EXACTLY ONCE from a fan-in source is built for database targets only (Kafka and S3 keep positions per partition, which fan-in tasks don't have)",
+        ));
+    }
+    Ok(())
+}
+
 fn no_env() -> sprig_common::SprigError {
     err(
         SprigCode::SinkOptionInvalid,
@@ -1133,11 +1147,7 @@ async fn create_sink(h: &mut dyn Host, c: grammar::CreateSink) -> Result<Handled
                         ),
                     )
                 })?;
-            if c.guarantee == Guarantee::ExactlyOnce {
-                return Err(bad_option(
-                    "EXACTLY ONCE isn't built for fan-in sinks yet: they deliver at least once, each record with its tenant-prefixed idempotency key",
-                ));
-            }
+            fan_in_guarantee(c.guarantee, &c.target)?;
             SourceSpec::FanIn {
                 def_tenant: d.def_tenant,
                 def_object: d.def_object,
@@ -1205,11 +1215,7 @@ async fn create_sink(h: &mut dyn Host, c: grammar::CreateSink) -> Result<Handled
                         ),
                     )
                 })?;
-            if c.guarantee == Guarantee::ExactlyOnce {
-                return Err(bad_option(
-                    "EXACTLY ONCE isn't built for fan-in sinks yet: they deliver at least once, each record with its tenant-prefixed idempotency key",
-                ));
-            }
+            fan_in_guarantee(c.guarantee, &c.target)?;
             SourceSpec::FanInQueue {
                 def_tenant: d.def_tenant,
                 def_object: d.def_object,
@@ -1685,4 +1691,37 @@ async fn put_secrets<Q: Queryable + Send>(
             .await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod fan_in_guarantee_tests {
+    use super::*;
+
+    #[test]
+    fn exactly_once_fan_in_goes_to_databases_only() {
+        // R9 (r9tests).
+        let conn = ConnName {
+            name: "c".into(),
+            platform: false,
+        };
+        let db = TargetAst::Database {
+            conn: conn.clone(),
+            table: "t".into(),
+        };
+        let kafka = TargetAst::Kafka {
+            conn: conn.clone(),
+            topic: "t".into(),
+            key: None,
+        };
+        let s3 = TargetAst::S3 {
+            conn,
+            prefix: "p/".into(),
+        };
+        assert!(fan_in_guarantee(Guarantee::ExactlyOnce, &db).is_ok());
+        assert!(fan_in_guarantee(Guarantee::AtLeastOnce, &kafka).is_ok());
+        for t in [&kafka, &s3] {
+            let e = fan_in_guarantee(Guarantee::ExactlyOnce, t).unwrap_err();
+            assert_eq!(e.code(), Some(SprigCode::SinkExactlyOnceUnsupported));
+        }
+    }
 }

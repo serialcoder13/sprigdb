@@ -189,17 +189,16 @@ impl Sli {
             Some(t) if busy => t.to_string(),
             _ => String::new(),
         };
-        let i = match self
+        let i = if let Some(i) = self
             .statements
             .iter()
             .position(|(r, b, _)| *r == result && *b == busy)
         {
-            Some(i) => i,
-            None => {
-                let c = metrics::counter!("sprig_gateway_statements_total", "protocol" => protocol, "result" => result, "tenant" => label());
-                self.statements.push((result, busy, c));
-                self.statements.len() - 1
-            }
+            i
+        } else {
+            let c = metrics::counter!("sprig_gateway_statements_total", "protocol" => protocol, "result" => result, "tenant" => label());
+            self.statements.push((result, busy, c));
+            self.statements.len() - 1
         };
         self.statements[i].2.increment(1);
         self.duration[usize::from(busy)]

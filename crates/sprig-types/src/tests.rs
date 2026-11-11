@@ -545,6 +545,53 @@ mod discriminator {
         assert!(f.log.is_empty());
     }
 
+    /// Dumps of a single-table hierarchy carry every row through the root:
+    /// restored, the discriminator types each row again, in whatever order
+    /// the subtypes (and their adopted columns) come back.
+    #[tokio::test]
+    async fn single_table_dumps_go_through_the_root() {
+        let mut f = Fake::default();
+        let s = Storage::SingleTable;
+        assert!(matches!(
+            run_on(
+                s,
+                "SELECT /*!40001 SQL_NO_CACHE */ * FROM `vehicle`",
+                &mut f
+            )
+            .await
+            .unwrap(),
+            Handled::NotTyped
+        ));
+        let sql = forwarded(
+            run_on(s, "SELECT /*!40001 SQL_NO_CACHE */ * FROM `truck`", &mut f)
+                .await
+                .unwrap(),
+        );
+        assert!(
+            sql.ends_with("FROM `vehicle` AS `truck` WHERE 1 = 0"),
+            "{sql}"
+        );
+        // Joined storage keeps one row per type (ONLY).
+        let sql = forwarded(
+            run_on(
+                Storage::Joined,
+                "SELECT /*!40001 SQL_NO_CACHE */ * FROM `vehicle`",
+                &mut f,
+            )
+            .await
+            .unwrap(),
+        );
+        assert!(sql.contains("`_type` = 'vehicle'"), "{sql}");
+        // Single-table storage without a discriminator is refused.
+        let e = run(
+            "CREATE TABLE plain_root (id INT PRIMARY KEY) WITH (SPRIG_STORAGE = 'single_table')",
+            &mut Fake::default(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.protocol().mysql_errno, 39710, "{e}");
+    }
+
     #[tokio::test]
     async fn inserts_set_or_check_the_value() {
         let mut f = Fake::default();

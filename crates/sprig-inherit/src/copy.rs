@@ -997,8 +997,10 @@ impl Maintainer {
             )
             .await
             .map_err(exec_err)?;
-        let want: Vec<(String, String)> =
-            cols.iter().map(|(n, t, _)| (n.clone(), t.clone())).collect();
+        let want: Vec<(String, String)> = cols
+            .iter()
+            .map(|(n, t, _)| (n.clone(), t.clone()))
+            .collect();
         if !have.is_empty() && have != want {
             // The child's columns changed (names, or types its parent
             // widened): start the object's copies over.
@@ -1267,7 +1269,11 @@ impl Maintainer {
         l: &crate::model::Link,
     ) -> Option<(TenantId, ObjectId)> {
         let ctx = self.family.ctx(t, &self.copies)?;
-        let d = ctx.cat.databases.iter().find(|d| d.name.eq_ignore_ascii_case(db))?;
+        let d = ctx
+            .cat
+            .databases
+            .iter()
+            .find(|d| d.name.eq_ignore_ascii_case(db))?;
         let rr = ctx.state.object_named_ci(d.db_id, &l.ref_table)?;
         crate::ids::tree_root(&ctx, rr).ok()
     }
@@ -1510,10 +1516,35 @@ impl Maintainer {
         if o.links.is_empty() || !to_children {
             return Ok(());
         }
+        // Only for rows really gone (or hidden) at the deleter's root
+        // space: a pass for an earlier change of a row (an UPDATE) that
+        // runs after the gateway handed it over for its DELETE must leave
+        // the handover for the DELETE's own pass.
+        let schema = physical_schema(&cat, db, false)?;
+        let mut c = self.env.conn(deleter).await?;
+        let still: Vec<Row> = c
+            .query(format!(
+                "SELECT {} FROM {}.{} WHERE `_sprig_space` = {} AND `_sprig_state` IN ('own', \
+                 'orphan', 'ovr') AND {}",
+                o.key.iter().map(|k| q(k)).collect::<Vec<_>>().join(", "),
+                q(&schema),
+                q(&o.table),
+                ROOT_SPACE.0,
+                key_pred(&o.key, keys, "")
+            ))
+            .await
+            .map_err(exec_err)?;
+        drop(c);
+        let still: BTreeSet<KeyLit> = still
+            .into_iter()
+            .map(|r| KeyLit(r.unwrap().iter().map(key_value).collect()))
+            .collect();
         let hexes: Vec<String> = keys
             .iter()
+            .filter(|k| !still.contains(*k))
             .map(|k| {
-                let parts: Vec<String> = k.0.iter().map(|v| format!("CAST({v} AS BINARY)")).collect();
+                let parts: Vec<String> =
+                    k.0.iter().map(|v| format!("CAST({v} AS BINARY)")).collect();
                 if parts.len() == 1 {
                     parts.into_iter().next().unwrap_or_default()
                 } else {

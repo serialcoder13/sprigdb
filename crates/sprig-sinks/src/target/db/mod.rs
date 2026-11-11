@@ -319,7 +319,7 @@ impl DbTarget {
             backend,
             opts: DbOpts::from_ctx(ctx)?,
             exactly_once: ctx.sink.guarantee == Guarantee::ExactlyOnce,
-            queue_source: ctx.sink.source.kind() == SourceKind::Queue,
+            queue_source: seen_keyed(&ctx.sink.source),
             task: Mutex::new(Some(ctx.task.clone())),
             tables: Mutex::new(HashMap::new()),
             last_purge: Mutex::new(None),
@@ -589,6 +589,18 @@ impl DbTarget {
 /// `<tenant>/<sink>/<task>/<unit>`.
 fn unit_key(t: &TaskInfo, unit: u64) -> String {
     format!("{}/{unit}", t.sink_key())
+}
+
+/// Whether exactly once into this target goes by `__sprig_sink_seen`
+/// (each record's idempotency key, kept for `db.seen_retention_hours`)
+/// rather than by positions per partition: queues (no order to keep a
+/// position in), and fan-in sources (R9, r9tests), whose records carry
+/// the member in a stable idempotency key but whose positions are a
+/// task's own slots, which a destination row can't name across restarts.
+#[must_use]
+pub fn seen_keyed(source: &crate::model::SourceSpec) -> bool {
+    use crate::model::SourceSpec as S;
+    source.kind() == SourceKind::Queue || matches!(source, S::FanIn { .. } | S::FanInQueue { .. })
 }
 
 /// `<tenant>/<sink>`: queue consumers of one sink compete, so seen keys

@@ -351,3 +351,27 @@ fn fan_in_rows_carry_their_member() {
     let ops = plan::plan(&[r], &o, Dialect::Mysql).unwrap();
     assert!(ops[0].cols.iter().all(|(c, _)| c != "_sprig_tenant"));
 }
+
+#[test]
+fn fan_in_and_queues_are_seen_keyed() {
+    // R9 (r9tests): exactly-once fan-in into databases goes by seen keys.
+    use crate::model::SourceSpec as S;
+    let fan_in = S::FanIn {
+        def_tenant: 1,
+        def_object: 2,
+        db: "d".into(),
+        name: "s".into(),
+        partitions: 3,
+        under: None,
+    };
+    assert!(super::seen_keyed(&fan_in));
+    assert!(super::seen_keyed(&S::Queue {
+        id: 1,
+        name: "q".into()
+    }));
+    assert!(!super::seen_keyed(&S::Stream {
+        id: 1,
+        name: "s".into(),
+        partitions: 2
+    }));
+}

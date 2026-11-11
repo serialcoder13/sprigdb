@@ -1331,6 +1331,7 @@ mod tests {
                 catalog_formats: Vec::new(),
                 authorizers: Vec::new(),
                 load: registry::Load::default(),
+                kafka_host: None,
             };
             let slot = registry::SlotRecord {
                 gateway_id: id.clone(),

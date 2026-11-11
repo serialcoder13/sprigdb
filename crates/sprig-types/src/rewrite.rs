@@ -432,6 +432,10 @@ pub struct Walker<'l> {
     pub reads: HashMap<usize, Option<NodeRead>>,
     /// Read every typed reference with `ONLY`.
     pub only_all: bool,
+    /// A dump tool's read: a single-table hierarchy with a discriminator
+    /// dumps every row through its root (the column restores each row's
+    /// type) and none through its subtypes.
+    pub dump: bool,
     /// `NO_BACKSLASH_ESCAPES`.
     pub no_backslash_escapes: bool,
     pass: Pass,
@@ -452,6 +456,7 @@ impl<'l> Walker<'l> {
             calls: Vec::new(),
             reads: HashMap::new(),
             only_all: false,
+            dump: false,
             no_backslash_escapes: false,
             pass: Pass::Collect,
             next_ref: 0,
@@ -539,7 +544,22 @@ impl<'l> Walker<'l> {
 
     /// Decides each SELECT reference's tables from what it uses.
     pub fn plan_refs(&mut self) {
+        let dump = self.dump;
         for r in &mut self.refs {
+            // A dump of a single-table hierarchy typed by its discriminator:
+            // the root's table whole, the subtypes empty. Restored, the
+            // column types every row again, whatever order the subtypes
+            // come back in.
+            if dump && r.t.storage == Storage::SingleTable && r.db.discriminator(r.t.id).is_some() {
+                if r.t.is_root() {
+                    r.only = false;
+                    continue;
+                }
+                let mut p = build_plan(r, &BTreeSet::new(), &[]);
+                p.filter = Some("1 = 0".to_owned());
+                r.plan = Some(p);
+                continue;
+            }
             let only = r.only && r.has_subtypes();
             if r.t.is_root() && !only {
                 continue;

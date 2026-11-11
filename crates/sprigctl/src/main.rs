@@ -526,6 +526,7 @@ impl From<String> for Failed {
     }
 }
 
+#[allow(clippy::too_many_lines)] // one arm per command group
 fn main() -> ExitCode {
     let matches = cli().get_matches();
     let Some((group, sub)) = matches.subcommand() else {
@@ -534,7 +535,8 @@ fn main() -> ExitCode {
     let name = sub.subcommand_name().unwrap_or_default().to_owned();
     let implemented = match group {
         "dc" | "cluster" | "settings" | "index" | "job" | "gateway" | "check" | "advisor"
-        | "shard" | "space" | "txn" | "sink" | "graph" | "search" | "recommendations" => true,
+        | "shard" | "space" | "txn" | "sink" | "graph" | "search" | "recommendations"
+        | "inherit" => true,
         "login" | "logout" | "whoami" | "operator" | "token" => true,
         "explain" => matches!(name.as_str(), "query" | "decision" | "placement"),
         "tenant" => !TENANT_LATER.contains(&name.as_str()),

@@ -264,11 +264,23 @@ impl QueueBackend for GatewayQueues {
             // publishes into them are stamped (or targeted, from above).
             let db = self.database(vhost);
             if let Some(t) = &self.tenants {
-                crate::inherited::mq::before_open(t, TenantId(principal.tenant_id), &db).await;
+                Box::pin(crate::inherited::mq::before_open(
+                    t,
+                    TenantId(principal.tenant_id),
+                    &db,
+                ))
+                .await;
             }
             let v = e.open_vhost(principal, vhost, conn, events.clone()).await?;
             if let Some(t) = &self.tenants {
-                return crate::inherited::mq::wrap_vhost(t, principal, &db, v, Some(events)).await;
+                return Box::pin(crate::inherited::mq::wrap_vhost(
+                    t,
+                    principal,
+                    &db,
+                    v,
+                    Some(events),
+                ))
+                .await;
             }
             return Ok(v);
         }

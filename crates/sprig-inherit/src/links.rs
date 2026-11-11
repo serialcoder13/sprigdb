@@ -1300,7 +1300,13 @@ pub async fn after_write(
                 continue;
             }
             if marker_holds(ctx, r, &res.db_name, &rr.obj.table, &m).await? {
-                return Err(child_row_fails(&res.db_name, &o.table, l));
+                // A level below the deleter's that holds the key as its
+                // own row or orphan (an override the copy worker or the
+                // deleting statement made an orphan) still provides it.
+                if m.at == here.at || !provided_below(r, &rr, &here, &m).await? {
+                    return Err(child_row_fails(&res.db_name, &o.table, l));
+                }
+                continue;
             }
             r.refs(root.0, &forget_sql(root.1, "del", &m)).await?;
         }
@@ -1387,6 +1393,39 @@ pub async fn after_write(
         }
     }
     Ok(())
+}
+
+/// Whether a space of this tenant on the session's path, below deletion
+/// marker `m`'s level, holds `m`'s key as its own row or orphan.
+async fn provided_below(
+    r: &mut dyn Runner,
+    rr: &Resolved,
+    here: &Here,
+    m: &Entry,
+) -> Result<bool> {
+    let spaces: Vec<String> = if m.at.tenant == here.at.tenant {
+        here.path
+            .iter()
+            .skip_while(|s| **s != m.at.space)
+            .skip(1)
+            .map(|s| s.0.to_string())
+            .collect()
+    } else {
+        here.path.iter().map(|s| s.0.to_string()).collect()
+    };
+    if spaces.is_empty() {
+        return Ok(false);
+    }
+    let rows = r
+        .query(&format!(
+            "SELECT 1 FROM {} WHERE `_sprig_space` IN ({}) AND `_sprig_state` IN ('own', \
+             'orphan') AND {} LIMIT 1",
+            rr.layer,
+            spaces.join(", "),
+            key_pred(&rr.obj.key, &m.ref_hex)
+        ))
+        .await?;
+    Ok(!rows.rows.is_empty())
 }
 
 /// Registers claims for every row of `res` with its own references, in
@@ -1726,9 +1765,7 @@ pub async fn check_refs(
             format!("{} is not inheritable", table.name),
         ));
     };
-    let names = [
-        "Key", "Tenant", "Space", "Table", "Row", "Link", "Kind",
-    ];
+    let names = ["Key", "Tenant", "Space", "Table", "Row", "Link", "Kind"];
     let mut out = Vec::new();
     if deletes_need_check(ctx, &res.obj) {
         let chain = ctx.chain(&res.obj, ctx.space, &res.prefix)?;
@@ -1756,8 +1793,7 @@ pub async fn check_refs(
         let root = crate::ids::tree_root(ctx, &res.obj)?;
         let admin = ctx.privileges.space_admin();
         for chunk in hexes.chunks(500) {
-            let claims =
-                parse_entries(&r.refs(root.0, &entries_sql(root.1, "ref", chunk)).await?);
+            let claims = parse_entries(&r.refs(root.0, &entries_sql(root.1, "ref", chunk)).await?);
             for c in claims {
                 let anc = ancestors_of(ctx, r, c.at.tenant).await;
                 let kin = here.kin(c.at, &anc);
@@ -1784,8 +1820,8 @@ pub async fn check_refs(
                     continue;
                 };
                 let (tenant, space) = level_label(ctx, r, at).await;
-                let on_line =
-                    at.tenant == ctx.cat.tenant || ctx.ancestors.iter().any(|a| a.tenant == at.tenant);
+                let on_line = at.tenant == ctx.cat.tenant
+                    || ctx.ancestors.iter().any(|a| a.tenant == at.tenant);
                 let row_key = (admin || on_line).then(|| key_text(&c.from_hex));
                 out.push(
                     [

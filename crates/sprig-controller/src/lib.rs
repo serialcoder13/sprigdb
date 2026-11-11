@@ -649,10 +649,15 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         cfg.controller.internal_advertise.as_deref(),
     )
     .await?;
+    // Hardening round 3: mutual TLS on the internal port with the process
+    // identity, when `[controller] internal_tls` is on.
+    let internal_tls = internal_tls_config(cfg)?;
+    let internal_https = internal_tls.is_some();
     let internal_task = failover.serve_internal(
         internal,
         &internal_addr,
         axum::Router::new(),
+        internal_tls,
         ctx.shutdown.clone(),
     );
     let failover_tasks = failover.spawn(&rt.status(), &ctx.shutdown);
@@ -771,12 +776,13 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
             version: env!("CARGO_PKG_VERSION").to_owned(),
             internal_addr: Some(internal_addr.clone()),
             admin_tls: admin_https,
+            internal_tls: internal_https,
         },
         ctx.shutdown.clone(),
     ));
 
     ctx.health.set_ready();
-    tracing::info!(%role, %dc, admin = %admin_addr, admin_tls = admin_https, internal = %internal_addr, "ready");
+    tracing::info!(%role, %dc, admin = %admin_addr, admin_tls = admin_https, internal = %internal_addr, internal_tls = internal_https, "ready");
     rt.run(ctx.shutdown.clone()).await;
     ctx.health.set_draining();
     match admin.await {
@@ -795,6 +801,33 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
 
 /// Single-etcd mode: one etcd serves both tiers (no global seeds, or the
 /// same seeds as the DC's).
+/// The internal port's server configuration when `[controller]
+/// internal_tls` is on: `[tls] cert` and `key` (re-read when they change),
+/// and client certificates signed by `[tls] ca` required.
+///
+/// # Errors
+/// 39998 when `internal_tls` is on without `[tls]`, or a file doesn't load.
+fn internal_tls_config(
+    cfg: &sprig_common::ProcessConfig,
+) -> Result<Option<Arc<sprig_common::https::ServerConfig>>> {
+    if !cfg.controller.internal_tls {
+        return Ok(None);
+    }
+    let Some(t) = &cfg.tls else {
+        return Err(sprig_common::SprigError::new(
+            sprig_common::SprigCode::ConfigInvalid,
+            "[controller] internal_tls needs [tls] (ca, cert, key)",
+        ));
+    };
+    sprig_common::https::server_config_named(
+        &t.cert,
+        &t.key,
+        Some(&t.ca),
+        sprig_common::https::INTERNAL_NAMES,
+    )
+    .map(Some)
+}
+
 fn single_etcd(meta: &sprig_common::config::MetaConfig) -> bool {
     let norm = |v: &[String]| {
         let mut v: Vec<String> = v

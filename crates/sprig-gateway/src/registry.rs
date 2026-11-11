@@ -102,6 +102,11 @@ pub struct GatewayRecord {
     /// Its load.
     #[serde(default)]
     pub load: Load,
+    /// The host Kafka clients reach it at (`[gateway]
+    /// kafka_advertise_host`; hardening round 3), given for it in Kafka's
+    /// Metadata. Unset: `addr`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kafka_host: Option<String>,
 }
 
 impl Versioned for GatewayRecord {

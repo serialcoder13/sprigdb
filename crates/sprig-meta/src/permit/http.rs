@@ -23,10 +23,10 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::{Method, Request, header};
 use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use sprig_common::https::InternalConnector;
 use sprig_common::{CancellationToken, Result, SprigCode, SprigError};
 
 use super::{Permit, PermitHolder, PermitRequest, PermitSource};
@@ -35,10 +35,12 @@ use crate::{ListOpts, MetaStore};
 /// How often a keeper reads the DC's controller registrations again.
 pub const DISCOVERY_PERIOD: Duration = Duration::from_secs(5);
 
-/// JSON over HTTP/1.1, with pooled keep-alive connections.
+/// JSON over HTTP/1.1, with pooled keep-alive connections: plain to
+/// `http://` addresses, mutual TLS with this process's `[tls]` identity
+/// to `https://` ones (`[controller] internal_tls`; hardening round 3).
 #[derive(Debug, Clone)]
 pub struct JsonHttp {
-    http: Client<HttpConnector, Full<Bytes>>,
+    http: Client<InternalConnector, Full<Bytes>>,
     timeout: Duration,
 }
 
@@ -50,13 +52,10 @@ impl JsonHttp {
     /// A client whose calls time out after `timeout`.
     #[must_use]
     pub fn new(timeout: Duration) -> Self {
-        let mut c = HttpConnector::new();
-        c.set_connect_timeout(Some(timeout));
-        c.set_nodelay(true);
         Self {
             http: Client::builder(TokioExecutor::new())
                 .pool_idle_timeout(Duration::from_secs(30))
-                .build(c),
+                .build(InternalConnector::new(timeout)),
             timeout,
         }
     }
@@ -149,7 +148,9 @@ impl PermitSource for HttpPermitSource {
 }
 
 /// The internal addresses the DC's controllers registered
-/// (`controllers/<node>` with an `internal_addr`), sorted.
+/// (`controllers/<node>` with an `internal_addr`), sorted: `host:port`,
+/// or `https://host:port` for a controller that serves them over TLS
+/// (`"internal_tls": true`).
 ///
 /// # Errors
 /// The store's errors.
@@ -161,7 +162,13 @@ pub async fn internal_addrs(dc: &dyn MetaStore) -> Result<Vec<String>> {
         .iter()
         .filter_map(|kv| {
             let v: serde_json::Value = serde_json::from_slice(&kv.value).ok()?;
-            v.get("internal_addr")?.as_str().map(str::to_owned)
+            let a = v.get("internal_addr")?.as_str()?;
+            let tls = v.get("internal_tls").and_then(serde_json::Value::as_bool) == Some(true);
+            Some(if tls && !a.is_empty() && !a.contains("://") {
+                format!("https://{a}")
+            } else {
+                a.to_owned()
+            })
         })
         .filter(|a| !a.is_empty())
         .collect();
@@ -305,6 +312,47 @@ mod tests {
     use crate::{MemStore, Op, Tier, Txn};
     use sprig_common::ids::DcId;
     use sprig_common::time::SystemClock;
+
+    #[tokio::test]
+    async fn a_controller_serving_tls_is_called_with_https() {
+        let mem: Arc<dyn MetaStore> = Arc::new(MemStore::new(Tier::Dc(DcId::new("fra1").unwrap())));
+        for (node, v) in [
+            ("c1", &br#"{"v":1,"admin_addr":"x","internal_addr":"10.0.0.11:7481","internal_tls":true}"#[..]),
+            ("c2", &br#"{"v":1,"admin_addr":"x","internal_addr":"10.0.0.12:7481"}"#[..]),
+            ("c3", &br#"{"v":1,"admin_addr":"x","internal_addr":"10.0.0.13:7481","internal_tls":false}"#[..]),
+        ] {
+            let key = mem.tier().key(&format!("controllers/{node}")).unwrap();
+            mem.txn(Txn {
+                when: vec![],
+                then: vec![Op::Put {
+                    key,
+                    value: v.to_vec(),
+                    lease: None,
+                }],
+                otherwise: vec![],
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            internal_addrs(&*mem).await.unwrap(),
+            vec![
+                "10.0.0.12:7481".to_owned(),
+                "10.0.0.13:7481".to_owned(),
+                "https://10.0.0.11:7481".to_owned(),
+            ]
+        );
+        // A plain address gets http://; an https:// one keeps its scheme.
+        let h = JsonHttp::new(Duration::from_millis(100));
+        assert_eq!(
+            HttpPermitSource::with_client("10.0.0.12:7481", h.clone()).base,
+            "http://10.0.0.12:7481"
+        );
+        assert_eq!(
+            HttpPermitSource::with_client("https://10.0.0.11:7481", h).base,
+            "https://10.0.0.11:7481"
+        );
+    }
 
     #[tokio::test]
     async fn keeper_arms_on_a_registered_controller_and_fences_without_answers() {

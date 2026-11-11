@@ -210,11 +210,12 @@ async fn probe(conn: Conn, opts: &Opts, db_id: u32) -> Steps {
             crate::target::db::probe(&ctx, table.as_deref()).await
         }
         ConnKind::Webhook => {
-            match crate::target::webhook::WebhookTarget::for_events(
-                conn,
-                opts.clone(),
-                "test_connection",
-            ) {
+            // An OPTIONS request carries no body to sign: a connection
+            // without a signing secret (for `signature = none` sinks)
+            // tests as well.
+            let mut o = opts.clone();
+            o.0.insert("signature".into(), "none".into());
+            match crate::target::webhook::WebhookTarget::for_events(conn, o, "test_connection") {
                 Err(e) => vec![("options", Err(e.to_string()))],
                 Ok(w) => vec![
                     ("options", Ok("webhook".into())),

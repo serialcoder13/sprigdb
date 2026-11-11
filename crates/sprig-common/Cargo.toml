@@ -26,6 +26,8 @@ metrics-exporter-prometheus.workspace = true
 # The Admin API over TLS (`https`, hardening round 2): both already in the tree.
 rustls.workspace = true
 tokio-rustls.workspace = true
+# hyper's connector trait for the internal services' TLS connector (MIT).
+tower-service.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

@@ -1634,4 +1634,17 @@ mod tests {
         assert_eq!(call_target(b"call `p` ()", lex), Some((None, "p".into())));
         assert_eq!(call_target(b"SELECT 1", lex), None);
     }
+
+    #[test]
+    fn a_tenant_being_deleted_gets_no_account_made_again() {
+        let a = AuthzServices::default();
+        assert!(a.refuse_gone(TenantId(3)).is_ok());
+        a.deleting(TenantId(3));
+        let e = a.refuse_gone(TenantId(3)).unwrap_err();
+        assert_eq!(e.code(), Some(sprig_common::SprigCode::TenantNotReady));
+        // Only that tenant: 30 isn't 3.
+        assert!(a.refuse_gone(TenantId(30)).is_ok());
+        a.forget(TenantId(3));
+        assert!(a.refuse_gone(TenantId(3)).is_err());
+    }
 }

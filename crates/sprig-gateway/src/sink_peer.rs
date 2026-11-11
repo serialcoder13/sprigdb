@@ -34,7 +34,7 @@ pub async fn serve(
     engine: &Arc<SqlEngine>,
     req: SqlRequest,
 ) -> SqlReply {
-    match serve_inner(login, engine, req).await {
+    match Box::pin(serve_inner(login, engine, req)).await {
         Ok(r) => r,
         Err(e) => SqlReply {
             error: Some(PeerError::of(&e)),
@@ -55,7 +55,10 @@ async fn serve_inner(
             .tenants
             .clone()
             .ok_or_else(|| SprigError::internal("this gateway serves no tenant catalogs"))?;
-        return crate::outbox_feed::serve(&svc, req.tenant, schema, table, ids).await;
+        return Box::pin(crate::outbox_feed::serve(
+            &svc, req.tenant, schema, table, ids,
+        ))
+        .await;
     }
     let principal =
         crate::triggers::principal_of(login, req.tenant, &req.tenant_name, req.user_id).await?;

@@ -1202,7 +1202,13 @@ pub async fn run_task(parts: TaskParts, cancel: Cancel) -> Result<TaskEnd> {
     let mut settler = Settler::default();
     let mut inflight: u64 = 0;
     let mut last_settle = Instant::now();
-    let mut last_poll = Instant::now();
+    // The first iteration polls before it reads (chapter 29, RL36): the
+    // controller restarts the tasks of a sink paused by row-level security
+    // every few seconds, and such a task must stop before it delivers
+    // anything, not after its first second.
+    let mut last_poll = Instant::now()
+        .checked_sub(s.poll_every)
+        .unwrap_or_else(Instant::now);
     let mut directive = Directive::Run;
     let mut read_failures = 0u32;
     let mut end: Option<TaskEnd> = None;

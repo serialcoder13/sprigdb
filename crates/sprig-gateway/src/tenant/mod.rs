@@ -279,12 +279,13 @@ fn close_deleted_tenants(svc: &Arc<TenantServices>) {
                             // Decision bugfix-32: a tenant marked `deleting`
                             // gets no backend account made again here.
                             Ok(WatchEvent::Put(kv)) => {
-                                let deleting = sprig_meta::Record::<
-                                    crate::inherited::DirEntry,
-                                >::decode(&kv.value)
-                                .is_ok_and(|r| {
-                                    matches!(r.body.state.as_str(), "deleting" | "deleted")
-                                });
+                                let deleting =
+                                    sprig_meta::Record::<crate::inherited::DirEntry>::decode(
+                                        &kv.value,
+                                    )
+                                    .is_ok_and(|r| {
+                                        matches!(r.body.state.as_str(), "deleting" | "deleted")
+                                    });
                                 if deleting
                                     && let (Some(t), Some(svc)) = (id_of(&kv.key), weak.upgrade())
                                 {

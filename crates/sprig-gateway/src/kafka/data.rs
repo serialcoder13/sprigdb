@@ -554,10 +554,7 @@ impl StreamData for GatewayData {
         match self.resolve(p, name, access).await {
             // Chapter 42 (R9): an inherited stream's topic.
             Err(e) if e.code == err::UNKNOWN_TOPIC_OR_PARTITION => {
-                match self
-                    .inherited_topic(p, name, access == Access::Write)
-                    .await?
-                {
+                match Box::pin(self.inherited_topic(p, name, access == Access::Write)).await? {
                     inherit::Inh::Retry => self.resolve(p, name, access).await.map(|r| r.topic),
                     inherit::Inh::Def(t) => Ok(t),
                     inherit::Inh::Unknown => Err(e),
@@ -617,7 +614,7 @@ impl StreamData for GatewayData {
     ) -> Result<AppendTicket, TopicError> {
         // Chapter 42 (R9): a definition's topic, by `x-sprig-tenant`.
         if t.stream_id & inherit::DEF_FLAG != 0 {
-            return self.append_by_tenant(p, t, partition, records).await;
+            return Box::pin(self.append_by_tenant(p, t, partition, records)).await;
         }
         let mut records = records;
         let r = self.resolve_t(p, t).await?;

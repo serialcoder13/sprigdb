@@ -4,7 +4,9 @@
 //! - **Brokers** are the DC's ready gateways that run the `kafka` listener,
 //!   from their registry records (chapter 04), read at most once a second.
 //!   The broker id is the gateway's slot: unique among live gateways of a
-//!   DC, and a small integer as Kafka needs. The host is
+//!   DC, and a small integer as Kafka needs. The host is the gateway's
+//!   own `[gateway] kafka_advertise_host` from its record when set (one
+//!   public name per VM; hardening round 3), else, for this gateway,
 //!   `kafka.advertised_host` when set, else the gateway's advertised
 //!   address.
 //! - **Coordinator leases** are etcd keys
@@ -205,7 +207,12 @@ impl Cluster for GatewayCluster {
             .filter(|r| r.state == GatewayState::Ready)
             .filter_map(|r| {
                 let port = *r.listeners.get("kafka")?;
-                let host = if r.gateway_id == me.gateway_id && !advertised.is_empty() {
+                // Its own public name first (`[gateway]
+                // kafka_advertise_host`, one per VM), then the DC's
+                // `kafka.advertised_host` for this gateway, then its address.
+                let host = if let Some(h) = r.kafka_host.as_ref().filter(|h| !h.is_empty()) {
+                    h.clone()
+                } else if r.gateway_id == me.gateway_id && !advertised.is_empty() {
                     advertised.to_string()
                 } else {
                     r.addr.clone()

@@ -969,7 +969,10 @@ mod tests {
                 filter: Some("id IN (1, 2)".into())
             }
         );
-        assert_eq!(c("SHOW CREATE SHARE s1"), Stmt::ShowCreateShare("s1".into()));
+        assert_eq!(
+            c("SHOW CREATE SHARE s1"),
+            Stmt::ShowCreateShare("s1".into())
+        );
         assert_eq!(c("show inheritable tables"), Stmt::ShowInheritable);
         assert!(is_extension(
             b"SPRIG CHECK REFERENCES t2",

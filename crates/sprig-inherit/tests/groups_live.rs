@@ -766,9 +766,11 @@ async fn orphans_keep_their_references() {
         // A. b and c override a's row R without touching its foreign key;
         //    a then points R at k2 and deletes it.
         for i in [1, 2] {
-            until_rows(&mut c[i], &format!("SELECT id FROM t1 WHERE id = {r}"), |g| {
-                g.len() == 1
-            })
+            until_rows(
+                &mut c[i],
+                &format!("SELECT id FROM t1 WHERE id = {r}"),
+                |g| g.len() == 1,
+            )
             .await;
             exec(
                 &mut c[i],
@@ -776,7 +778,11 @@ async fn orphans_keep_their_references() {
             )
             .await;
         }
-        exec(&mut c[0], &format!("UPDATE t1 SET t2_id = {k2} WHERE id = {r}")).await;
+        exec(
+            &mut c[0],
+            &format!("UPDATE t1 SET t2_id = {k2} WHERE id = {r}"),
+        )
+        .await;
         exec(&mut c[0], &format!("DELETE FROM t1 WHERE id = {r}")).await;
         // Right away (before the worker has made the orphans): refused,
         // the overrides below will hold k2.
@@ -807,6 +813,28 @@ async fn orphans_keep_their_references() {
         // b drops its orphan: c's still references k2.
         exec(&mut c[1], &format!("DELETE FROM t1 WHERE id = {r}")).await;
         fails(&mut c[0], &format!("DELETE FROM t2 WHERE id = {k2}"), 1451).await;
+        // c's override, now without a record above, becomes c's orphan
+        // (the worker, again filling k2 from b's handover) before c can
+        // delete it: until then c's view doesn't show it.
+        let mine = format!("\"t2_id\": \"{} (orphaned)\"", t[2]);
+        until_rows(
+            &mut c[2],
+            &format!("SELECT SPRIG_ORIGIN(), t2_id FROM t1 WHERE id = {r}"),
+            |g| g.len() == 1 && g[0][0].as_deref().is_some_and(|o| o.contains(&mine)),
+        )
+        .await;
+        let blockers = rows(
+            &mut c[0],
+            &format!("SPRIG CHECK REFERENCES t2 WHERE id = {k2}"),
+        )
+        .await;
+        assert!(
+            blockers
+                .iter()
+                .any(|b| b[1].as_deref() == Some(t[2].as_str())
+                    && b[4].as_deref() == Some(r.to_string().as_str())),
+            "{blockers:?}"
+        );
         exec(&mut c[2], &format!("DELETE FROM t1 WHERE id = {r}")).await;
         assert_eq!(
             passes_after(&mut c[0], &format!("DELETE FROM t2 WHERE id = {k2}"), 1451).await,
@@ -814,9 +842,11 @@ async fn orphans_keep_their_references() {
         );
 
         // B. SPRIG RESET of an orphan someone references is refused.
-        until_rows(&mut c[1], &format!("SELECT id FROM t2 WHERE id = {k3}"), |g| {
-            g.len() == 1
-        })
+        until_rows(
+            &mut c[1],
+            &format!("SELECT id FROM t2 WHERE id = {k3}"),
+            |g| g.len() == 1,
+        )
         .await;
         exec(
             &mut c[1],
@@ -827,10 +857,17 @@ async fn orphans_keep_their_references() {
             exec(&mut c[0], &format!("DELETE FROM t2 WHERE id = {k3}")).await,
             1
         );
+        // b's override of k3 becomes b's orphan (with a materialized copy
+        // it shows before that, over the copy's record).
+        let b_orphan = format!("\"name\": \"{} (orphaned)\"", t[1]);
         until_rows(
             &mut c[1],
-            &format!("SELECT name FROM t2 WHERE id = {k3}"),
-            |g| g.len() == 1 && g[0][0].as_deref() == Some("b3"),
+            &format!("SELECT SPRIG_ORIGIN(), name FROM t2 WHERE id = {k3}"),
+            |g| {
+                g.len() == 1
+                    && g[0][1].as_deref() == Some("b3")
+                    && g[0][0].as_deref().is_some_and(|o| o.contains(&b_orphan))
+            },
         )
         .await;
         exec(
@@ -926,9 +963,11 @@ async fn widened_types_reach_children() {
         let long_b = "b".repeat(50);
         let long_c = "c".repeat(50);
         // b's override of a's row and c's own row hold the wider values.
-        until_rows(&mut c[1], &format!("SELECT id FROM t2 WHERE id = {k}"), |g| {
-            g.len() == 1
-        })
+        until_rows(
+            &mut c[1],
+            &format!("SELECT id FROM t2 WHERE id = {k}"),
+            |g| g.len() == 1,
+        )
         .await;
         exec(
             &mut c[1],

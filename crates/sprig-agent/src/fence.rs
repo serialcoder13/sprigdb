@@ -48,7 +48,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use sprig_cluster::failover::primary_replica::{fence_node, semisync_guard, semisync_resume};
+use sprig_cluster::failover::primary_replica::{
+    fence_node, semisync_guard, semisync_master_enabled, semisync_resume,
+};
 pub use sprig_cluster::failover::writer::{AgentRecord, MysqldState, WriterLease};
 use sprig_cluster::failover::writer::{MYSQLD_DOWN_AFTER, writer_lease_key};
 use sprig_cluster::record::{ClusterRecord, NodeSpec};
@@ -618,13 +620,17 @@ impl AgentFence {
                             conn = None;
                         }
                     }
-                } else if semisync_suspended
-                    && round.is_multiple_of(5)
+                } else if round.is_multiple_of(5)
                     && let Some(c) = conn.as_mut()
+                    && (semisync_suspended || matches!(semisync_master_enabled(c).await, Ok(false)))
                     && matches!(semisync_resume(c).await, Ok(true))
                 {
+                    // Also a writer whose mysqld restarted (it boots with
+                    // the primary side off, hardening round 3): with a
+                    // replica attached, acknowledged commits wait for it
+                    // again.
                     semisync_suspended = false;
-                    tracing::info!(cluster = %label, "a replica attached: semi-sync's primary side on again");
+                    tracing::info!(cluster = %label, "a replica attached: semi-sync's primary side on");
                 }
             } else if serving != Some(false) || read_only == Some(false) {
                 match fence_node(&self.target.endpoint).await {

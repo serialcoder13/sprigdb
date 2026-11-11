@@ -445,16 +445,20 @@ async fn table_source(
     conn: &mut mysql_async::Conn,
     b: &sprig_logic::catalog::BindingRow,
 ) -> Result<Option<u64>, SprigError> {
-    if b.object_id.is_some() {
-        return Ok(b.object_id);
-    }
     let (Some(svc), Some(tid)) = (&core.studio.tenants, caller.principal.tenant) else {
-        return Ok(None);
+        // Can't tell: treat it as table rows.
+        return Ok(Some(b.object_id.unwrap_or(0)));
     };
     let ep = sprig_catalog::CatalogLocator::writer(&*svc.locator, tid).await?;
-    let Some(src) = sprig_logic::messages::source(conn, ep.store.schema(), b.binding_id).await?
-    else {
-        return Ok(None);
+    // A stream or queue trigger's binding names its stream or queue; an
+    // after-commit trigger's names its table.
+    let src = match sprig_logic::messages::source(conn, ep.store.schema(), b.binding_id).await {
+        Ok(s) => s,
+        Err(e) if missing_tables(&e) => None,
+        Err(e) => return Err(e),
+    };
+    let Some(src) = src else {
+        return Ok(b.object_id);
     };
     if src.kind != sprig_logic::declare::SourceKind::Stream || src.fanin_declarer != 0 {
         return Ok(None);
@@ -478,6 +482,10 @@ async fn table_source(
 /// its own, as search's facets ask; RL39). `false` when it can't tell.
 async fn unbound(core: &Arc<Core>, caller: &Caller, object: u64) -> bool {
     use sprig_doc::engine::SqlRunner as _;
+    // 0: the table isn't known.
+    if object == 0 {
+        return false;
+    }
     let Ok(mut sql) = crate::mongo::sql::SqlSession::open(
         &core.engine.sessions,
         &core.engine.executor,

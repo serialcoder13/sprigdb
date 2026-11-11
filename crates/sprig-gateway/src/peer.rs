@@ -762,6 +762,7 @@ mod tests {
             catalog_formats: Vec::new(),
             authorizers: Vec::new(),
             load: registry::Load::default(),
+            kafka_host: None,
         };
         let put = |r: &GatewayRecord| {
             let fra1 = Arc::clone(&fra1);

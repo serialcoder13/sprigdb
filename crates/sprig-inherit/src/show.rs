@@ -250,7 +250,13 @@ fn group_names(ctx: &Ctx<'_>, o: sprig_common::ids::ObjectId) -> String {
 pub fn create_share_text(ctx: &Ctx<'_>, s: &crate::model::Share) -> String {
     let obj = ctx.state.object(s.object_id).map_or_else(
         || s.object_id.to_string(),
-        |o| format!("{}.{}", q(&ctx.db_name(o.db).unwrap_or_default()), q(&o.table)),
+        |o| {
+            format!(
+                "{}.{}",
+                q(&ctx.db_name(o.db).unwrap_or_default()),
+                q(&o.table)
+            )
+        },
     );
     let to = match s.to {
         ShareTarget::Space(c) => format!("TO SPACE {}", q(&ctx.space_name(c))),
@@ -343,7 +349,11 @@ pub fn inheritable(ctx: &Ctx<'_>) -> sprig_common::Result<Rows> {
         shared.sort();
         shared.dedup();
         rows.push(row(vec![
-            Some(format!("{}.{}", ctx.db_name(o.db).unwrap_or_default(), o.table)),
+            Some(format!(
+                "{}.{}",
+                ctx.db_name(o.db).unwrap_or_default(),
+                o.table
+            )),
             Some(o.key.join(", ")),
             Some(origin),
             Some(levels.to_string()),
@@ -353,7 +363,15 @@ pub fn inheritable(ctx: &Ctx<'_>) -> sprig_common::Result<Rows> {
         ]));
     }
     Ok(text_rows(
-        &["Table", "Key", "Origin", "Levels_up", "Own_columns", "Group", "Shares"],
+        &[
+            "Table",
+            "Key",
+            "Origin",
+            "Levels_up",
+            "Own_columns",
+            "Group",
+            "Shares",
+        ],
         rows,
     ))
 }

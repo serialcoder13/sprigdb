@@ -417,13 +417,14 @@ async fn change_master(
     let mut s = session(ep).await?;
     s.exec("STOP SLAVE").await?;
     s.exec("SET GLOBAL read_only = ON").await?;
+    let ssl = ssl_clause(s.scalar("SELECT @@GLOBAL.ssl_ca").await?.as_deref());
     s.exec(&format!(
         "CHANGE MASTER TO MASTER_HOST = {}, MASTER_PORT = {}, MASTER_USER = {}, \
-         MASTER_PASSWORD = {}, MASTER_USE_GTID = {use_gtid}",
+         MASTER_PASSWORD = {}, MASTER_USE_GTID = {use_gtid}{ssl}",
         literal(&to.host),
         to.port,
         literal(&to.user),
-        literal(&to.password)
+        literal(&to.password),
     ))
     .await?;
     s.exec("SET GLOBAL rpl_semi_sync_master_enabled = OFF")
@@ -433,6 +434,20 @@ async fn change_master(
     s.exec("START SLAVE").await?;
     s.close().await;
     Ok(())
+}
+
+/// The TLS part of `CHANGE MASTER` (hardening round 3): a node that serves
+/// TLS with a CA file (`ssl_ca`) checks the new primary's certificate
+/// against that CA, so a former primary rejoining a cluster whose nodes
+/// require TLS (`require_secure_transport`, `REQUIRE SSL` accounts)
+/// replicates over verified TLS. A node without `ssl_ca` keeps what it had
+/// (MariaDB 11.8 replicates over TLS by default, verifying against the
+/// system's roots).
+fn ssl_clause(ssl_ca: Option<&str>) -> String {
+    match ssl_ca.map(str::trim) {
+        Some(ca) if !ca.is_empty() => format!(", MASTER_SSL = 1, MASTER_SSL_CA = {}", literal(ca)),
+        _ => String::new(),
+    }
 }
 
 /// Accounts a fence never kills: SprigDB's own and MariaDB's.

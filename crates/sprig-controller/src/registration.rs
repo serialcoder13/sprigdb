@@ -33,6 +33,11 @@ pub struct ControllerRecord {
     /// 37, "Admin API over TLS"): gateways relay to it with `https://`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub admin_tls: bool,
+    /// The internal services serve mutual TLS (`[controller]
+    /// internal_tls`; hardening round 3): callers use `https://` and
+    /// present their `[tls]` certificate.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub internal_tls: bool,
 }
 
 impl Versioned for ControllerRecord {
@@ -128,6 +133,7 @@ mod tests {
             version: "t".into(),
             internal_addr: None,
             admin_tls: false,
+            internal_tls: false,
         };
         let task = tokio::spawn(keep(
             Arc::clone(&store),

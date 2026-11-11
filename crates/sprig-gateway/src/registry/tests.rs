@@ -18,6 +18,7 @@ fn record(id: &str) -> GatewayRecord {
         catalog_formats: vec![],
         authorizers: vec![],
         load: Load::default(),
+        kafka_host: None,
     }
 }
 

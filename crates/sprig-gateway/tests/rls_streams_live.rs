@@ -22,7 +22,8 @@
     clippy::unwrap_used,
     clippy::expect_used,
     missing_docs,
-    clippy::too_many_lines
+    clippy::too_many_lines,
+    clippy::many_single_char_names
 )]
 
 use std::sync::{Arc, Mutex};
@@ -266,11 +267,11 @@ async fn row_level_security_on_streamed_rows() {
     }
     // DROP DATABASE leaves a database's triggers and sinks behind: drop
     // them by name first.
-    for t in ["t_mgr", "a_mgr", "t_alice", "a_alice"] {
+    for t in ["t_mgr", "a_mgr", "t_alice", "a_alice", "a_ev"] {
         let _ = run(&mut admin, &format!("DROP TRIGGER {DB}.{t}")).await;
     }
     let _ = run(&mut admin, &format!("DROP DATABASE IF EXISTS {DB}")).await;
-    for u in ["rlss_alice", "rlss_mgr"] {
+    for u in ["rlss_alice", "rlss_mgr", "rlss_writer"] {
         let _ = run(&mut admin, &format!("DROP USER IF EXISTS '{u}'@'%'")).await;
     }
     must(&mut admin, &format!("CREATE DATABASE {DB}")).await;
@@ -330,6 +331,18 @@ async fn row_level_security_on_streamed_rows() {
         &format!("GRANT ALL ON {DB}.* TO 'rlss_mgr'@'%'"),
     )
     .await;
+    // The writer of other users' rows, whatever FORCE binds.
+    must(
+        &mut admin,
+        &format!("CREATE USER 'rlss_writer'@'%' IDENTIFIED BY '{PW}'"),
+    )
+    .await;
+    must(
+        &mut admin,
+        &format!("GRANT INSERT, SELECT ON {DB}.* TO 'rlss_writer'@'%'"),
+    )
+    .await;
+    must(&mut admin, "GRANT BYPASS RLS ON *.* TO 'rlss_writer'@'%'").await;
     must(&mut admin, "GRANT SPRIG_SINK_ADMIN ON *.* TO 'app'@'%'").await;
     must(
         &mut admin,
@@ -356,6 +369,7 @@ async fn row_level_security_on_streamed_rows() {
     .await;
     let mut alice = sql(&sql_addr, "rlss_alice", PW).await;
     let mut mgr = sql(&sql_addr, "rlss_mgr", PW).await;
+    let mut writer = sql(&sql_addr, "rlss_writer", PW).await;
     let rows = texts(&mut alice, "SELECT body FROM docs").await;
     ck.ok(
         "alice's own rows",
@@ -445,7 +459,7 @@ async fn row_level_security_on_streamed_rows() {
     });
     // Whatever got through would now see bob's next row.
     must(
-        &mut admin,
+        &mut writer,
         &format!("INSERT INTO {DB}.docs VALUES (3, 'rlss_bob@%', 'bob-secret-alice')"),
     )
     .await;
@@ -468,7 +482,7 @@ async fn row_level_security_on_streamed_rows() {
     .await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     must(
-        &mut admin,
+        &mut writer,
         &format!("INSERT INTO {DB}.docs VALUES (4, 'rlss_bob@%', 'bob-before-force')"),
     )
     .await;
@@ -495,7 +509,7 @@ async fn row_level_security_on_streamed_rows() {
     .await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     must(
-        &mut admin,
+        &mut writer,
         &format!("INSERT INTO {DB}.docs VALUES (5, 'rlss_bob@%', 'bob-while-forced')"),
     )
     .await;
@@ -543,11 +557,73 @@ async fn row_level_security_on_streamed_rows() {
         String::new,
     );
 
+    // 6. Worker-run code applies its definer's policies (RL42): mgr's
+    // after-commit trigger on `events` writes a row for bob into `docs2`,
+    // which is forced, so its policies bind mgr there; the write fails
+    // MariaDB's check instead of passing as internal work.
+    must(
+        &mut admin,
+        &format!("CREATE TABLE {DB}.events (id INT PRIMARY KEY, body VARCHAR(64))"),
+    )
+    .await;
+    must(
+        &mut admin,
+        &format!(
+            "CREATE TABLE {DB}.docs2 (id INT PRIMARY KEY, owner VARCHAR(64), note VARCHAR(64))"
+        ),
+    )
+    .await;
+    must(
+        &mut admin,
+        &format!("ALTER TABLE {DB}.docs2 ENABLE ROW LEVEL SECURITY"),
+    )
+    .await;
+    must(
+        &mut admin,
+        &format!("ALTER TABLE {DB}.docs2 FORCE ROW LEVEL SECURITY"),
+    )
+    .await;
+    must(
+        &mut admin,
+        &format!(
+            "CREATE POLICY own ON {DB}.docs2 FOR ALL TO PUBLIC USING (owner = CURRENT_USER())"
+        ),
+    )
+    .await;
+    must(
+        &mut admin,
+        &format!("GRANT INSERT, SELECT ON {DB}.events TO 'rlss_writer'@'%'"),
+    )
+    .await;
+    must(&mut mgr, &format!(
+        r#"CREATE TRIGGER {DB}.a_ev AFTER COMMIT ON {DB}.events FOR INSERT LANGUAGE kirun AS '{{"namespace":"App","name":"Ev","parameters":{{"id":{{"parameterName":"id","schema":{{"type":["INTEGER"]}}}},"body":{{"parameterName":"body","schema":{{"type":["STRING"]}}}}}},"steps":{{"ins":{{"statementName":"ins","namespace":"Sprig.Db","name":"Exec","parameterMap":{{"sql":{{"s":{{"key":"s","type":"VALUE","value":"INSERT INTO docs2 (id, owner, note) VALUES (?, ''rlss_bob@%'', ?)"}}}},"args":{{"a":{{"key":"a","type":"EXPRESSION","order":1,"expression":"Arguments.id"}},"b":{{"key":"b","type":"EXPRESSION","order":2,"expression":"Arguments.body"}}}}}}}}}}}}'"#
+    )).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    must(
+        &mut writer,
+        &format!("INSERT INTO {DB}.events VALUES (1, 'ev-for-bob')"),
+    )
+    .await;
+    let mut wrote = false;
+    for _ in 0..20 {
+        let v = texts(&mut writer, &format!("SELECT note FROM {DB}.docs2")).await;
+        if v.iter().any(|x| x == "ev-for-bob") {
+            wrote = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    ck.ok(
+        "LEAK: worker-run code writes past the definer's policies",
+        !wrote,
+        String::new,
+    );
+
     // 5. Dead letters (RL39): a record the stream trigger fails on for good
     // keeps the change record; alice (bound) gets it without the event,
     // the administrator (a manager) with it.
     must(
-        &mut admin,
+        &mut writer,
         &format!("INSERT INTO {DB}.docs VALUES (6, 'rlss_bob@%', 'bob-poison')"),
     )
     .await;
@@ -581,12 +657,14 @@ async fn row_level_security_on_streamed_rows() {
         format!("DROP TRIGGER {DB}.a_mgr"),
         format!("DROP TRIGGER {DB}.t_alice"),
         format!("DROP TRIGGER {DB}.a_alice"),
+        format!("DROP TRIGGER {DB}.a_ev"),
         format!("DROP SINK IF EXISTS {DB}.s_mgr"),
         format!("DROP SINK IF EXISTS {DB}.s_alice"),
         format!("DROP SINK IF EXISTS {DB}.s_alice2"),
         format!("DROP DATABASE IF EXISTS {DB}"),
         "DROP USER IF EXISTS 'rlss_alice'@'%'".to_owned(),
         "DROP USER IF EXISTS 'rlss_mgr'@'%'".to_owned(),
+        "DROP USER IF EXISTS 'rlss_writer'@'%'".to_owned(),
     ] {
         let _ = run(&mut admin, &s).await;
     }

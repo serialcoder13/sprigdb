@@ -136,11 +136,20 @@ pub(crate) async fn run(sub: &ArgMatches, out: Output) -> Result<(), Failed> {
     let rows = result.map_err(|e| Failed(e.to_string()))?;
     let header: Vec<String> = rows
         .first()
-        .map(|r| r.columns_ref().iter().map(|c| c.name_str().into_owned()).collect())
+        .map(|r| {
+            r.columns_ref()
+                .iter()
+                .map(|c| c.name_str().into_owned())
+                .collect()
+        })
         .unwrap_or_default();
     let body: Vec<Vec<String>> = rows
         .iter()
-        .map(|r| (0..r.len()).map(|i| r.as_ref(i).map_or_else(String::new, text)).collect())
+        .map(|r| {
+            (0..r.len())
+                .map(|i| r.as_ref(i).map_or_else(String::new, text))
+                .collect()
+        })
         .collect();
     match out {
         Output::Json => {

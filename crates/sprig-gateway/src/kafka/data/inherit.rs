@@ -129,9 +129,14 @@ impl GatewayData {
                 // first publish).
                 return Ok(Inh::Unknown);
             }
-            inherited::streams::ensure(&self.svc, &chain, &def, Cause::Publish)
-                .await
-                .map_err(|e| kafka_err(&e))?;
+            Box::pin(inherited::streams::ensure(
+                &self.svc,
+                &chain,
+                &def,
+                Cause::Publish,
+            ))
+            .await
+            .map_err(|e| kafka_err(&e))?;
             return Ok(Inh::Retry);
         }
         if !write {
@@ -259,9 +264,14 @@ impl GatewayData {
             if !tchain.is_proper_ancestor(me) {
                 return Err(no());
             }
-            let si = inherited::streams::ensure(&svc, &tchain, &tdef, Cause::Publish)
-                .await
-                .map_err(|e| kafka_err(&e))?;
+            let si = Box::pin(inherited::streams::ensure(
+                &svc,
+                &tchain,
+                &tdef,
+                Cause::Publish,
+            ))
+            .await
+            .map_err(|e| kafka_err(&e))?;
             let schema = si.outbox_schema().map_err(|e| kafka_err(&e))?;
             let mut pubs = Vec::with_capacity(recs.len());
             for r in &mut recs {

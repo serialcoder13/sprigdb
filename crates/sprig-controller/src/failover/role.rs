@@ -225,17 +225,22 @@ impl FailoverRole {
     /// `listener` until `stop`; remembers the advertised URL for
     /// `dc-observe/<dc>`.
     #[allow(clippy::needless_pass_by_value)] // the router is consumed by merge
+    ///
+    /// With `tls` (`[controller] internal_tls`; hardening round 3) it
+    /// serves mutual TLS and the URL is `https://`.
     pub fn serve_internal(
         self: &Arc<Self>,
         listener: tokio::net::TcpListener,
         advertised: &str,
         extra: axum::Router,
+        tls: Option<Arc<sprig_common::https::ServerConfig>>,
         stop: CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
+        let scheme = if tls.is_some() { "https" } else { "http" };
         *self
             .internal_url
             .write()
-            .unwrap_or_else(PoisonError::into_inner) = Some(format!("http://{advertised}"));
+            .unwrap_or_else(PoisonError::into_inner) = Some(format!("{scheme}://{advertised}"));
         let me = Arc::clone(self);
         let handle: super::two_tier::GlobalHandle =
             Arc::new(move || lock(&me.global).as_ref().map(|(_, g)| Arc::clone(g)));
@@ -244,10 +249,25 @@ impl FailoverRole {
             .merge(super::relay::router(Arc::clone(&self.stores.dc)))
             .merge(extra);
         tokio::spawn(async move {
-            let serve = axum::serve(listener, app).with_graceful_shutdown(async move {
-                stop.cancelled().await;
-            });
-            if let Err(e) = serve.await {
+            let r = match tls {
+                None => {
+                    axum::serve(listener, app)
+                        .with_graceful_shutdown(async move { stop.cancelled().await })
+                        .await
+                }
+                Some(cfg) => match sprig_common::https::TlsListener::new(listener, cfg) {
+                    Ok(l) => {
+                        axum::serve(l, app)
+                            .with_graceful_shutdown(async move { stop.cancelled().await })
+                            .await
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "internal services can't serve TLS");
+                        return;
+                    }
+                },
+            };
+            if let Err(e) = r {
                 tracing::warn!(error = %e, "internal services stopped");
             }
         })
@@ -414,7 +434,13 @@ impl FailoverRole {
             sprig_meta::permit::http::internal_addrs(&*self.stores.dc)
                 .await?
                 .into_iter()
-                .map(|a| format!("http://{a}"))
+                .map(|a| {
+                    if a.contains("://") {
+                        a
+                    } else {
+                        format!("http://{a}")
+                    }
+                })
                 .collect();
         if let Some(me) = self
             .internal_url

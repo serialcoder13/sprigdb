@@ -225,6 +225,14 @@ pub struct GatewayConfig {
     /// its client certificate when the controller asks for one.
     #[serde(default)]
     pub controller_ca_file: Option<PathBuf>,
+    /// The host Kafka clients reach this gateway at, given for it in
+    /// Kafka's Metadata (chapter 45, "Brokers and metadata") and published
+    /// in its registration record, so every gateway of a DC is named by its
+    /// own public name (one per VM). Unset: the DC's
+    /// `kafka.advertised_host` for this gateway, else
+    /// [`GatewayConfig::advertise_addr`].
+    #[serde(default)]
+    pub kafka_advertise_host: Option<String>,
 }
 
 /// `[gateway] login_mode`.
@@ -254,6 +262,7 @@ impl GatewayConfig {
 /// `[controller]`: runtime sizing plus the start-up switches of chapter 23.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)] // each bool is one key of the file
 pub struct ControllerConfig {
     /// Tokio worker threads; 0 means one per CPU.
     #[serde(default)]
@@ -361,6 +370,15 @@ pub struct ControllerConfig {
     /// Admin API then requires (mutual TLS). Unset: no client certificate.
     #[serde(default)]
     pub admin_tls_client_ca: Option<PathBuf>,
+    /// Hardening round 3: serve the internal services (`internal_addr`)
+    /// over mutual TLS with this process's `[tls]` identity: the
+    /// certificate `[tls] cert` and `key`, and every client must present a
+    /// certificate `[tls] ca` signed. Published in the registration, so
+    /// gateways, workers, agents and other controllers call it with
+    /// `https://` and their own `[tls]` identity. Needs `[tls]`. Unset:
+    /// plain HTTP, as before.
+    #[serde(default)]
+    pub internal_tls: bool,
 }
 
 impl Default for ControllerConfig {
@@ -388,6 +406,7 @@ impl Default for ControllerConfig {
             admin_tls_cert: None,
             admin_tls_key: None,
             admin_tls_client_ca: None,
+            internal_tls: false,
         }
     }
 }

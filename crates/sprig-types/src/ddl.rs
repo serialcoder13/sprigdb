@@ -487,6 +487,9 @@ pub async fn create(ct: &CreateTable, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Resu
         {
             return Err(unknown_column(d, &child));
         }
+        if storage_opt == Some(Storage::SingleTable) && ct.discriminator.is_none() {
+            return Err(single_needs_discriminator());
+        }
         r.exec(&ct.plain).await?;
         let pdef = show_create(db, &child, ctx, r).await?;
         let key = pdef.primary_key();
@@ -600,6 +603,9 @@ pub async fn create(ct: &CreateTable, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Resu
         ),
         (None, None) => None,
     };
+    if storage == Storage::SingleTable && disc_col.is_none() {
+        return Err(single_needs_discriminator());
+    }
     let disc_value: Option<DiscValue> = ct.disc_where.as_ref().map(|(_, v)| v.clone());
     if disc_col.is_some() && disc_value.is_none() && !ct.is_abstract {
         return Err(unsupported(format!(
@@ -925,6 +931,13 @@ pub async fn create(ct: &CreateTable, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Resu
     r.commit_types(&change).await?;
     tracing::info!(type_name = %child, parent = %parent_name.name, "type created");
     Ok(Done::default())
+}
+
+fn single_needs_discriminator() -> SprigError {
+    unsupported(
+        "single-table storage needs a discriminator column (WHERE column = value on the \
+         subtypes, or SPRIG_DISCRIMINATOR on the root): dumps restore each row's type from it",
+    )
 }
 
 fn unknown_column(c: &str, table: &str) -> SprigError {

@@ -28,6 +28,7 @@ pub mod fxindex;
 pub mod geo;
 pub mod groupby;
 pub mod intmeta;
+pub mod jsonops;
 pub mod jsontext;
 pub mod keywords;
 pub mod lateral;
@@ -451,7 +452,11 @@ pub fn mysql_text_rewrites(sql: &[u8], opts: &LexOptions, backend_version: u32) 
     }
     let mut out: Option<Vec<u8>> =
         lex::versioned::expand_text_for_mariadb(sql, opts, backend_version);
-    let steps: [TextStep; 12] = [
+    let steps: [TextStep; 14] = [
+        // R4 round 5: `->` and `->>`, and JSON string constants in
+        // comparisons (before the functional key parts read them).
+        jsonops::rewrite_arrows,
+        jsonops::rewrite_string_constants,
         rewrite_json_casts,
         name_checks,
         rewrite_srid_attribute,

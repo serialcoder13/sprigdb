@@ -197,6 +197,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             .map(|s| (*s).to_owned())
             .collect(),
         load: registry::Load::default(),
+        kafka_host: ctx.config.gateway.kafka_advertise_host.clone(),
     });
     let lease_live = live.clone();
     let lease_dc = dc.clone();

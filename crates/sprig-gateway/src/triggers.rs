@@ -84,7 +84,7 @@ impl LogicPeerService {
         &self,
         req: sprig_sinks::peer::SqlRequest,
     ) -> sprig_sinks::peer::SqlReply {
-        crate::sink_peer::serve(&self.0.login, &self.0.engine, req).await
+        Box::pin(crate::sink_peer::serve(&self.0.login, &self.0.engine, req)).await
     }
 }
 
@@ -213,7 +213,7 @@ impl LogicPeer for LogicPeerService {
         let req: sprig_sinks::peer::SqlRequest =
             serde_json::from_str(&request.get_ref().request_json)
                 .map_err(|e| tonic::Status::invalid_argument(format!("request_json: {e}")))?;
-        let reply = LogicPeerService::sink_sql(self, req).await;
+        let reply = Box::pin(LogicPeerService::sink_sql(self, req)).await;
         Ok(tonic::Response::new(SinkSqlReply {
             reply_json: serde_json::to_string(&reply).unwrap_or_default(),
         }))

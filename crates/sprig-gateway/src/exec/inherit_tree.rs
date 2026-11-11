@@ -499,7 +499,12 @@ async fn sync_one(
             q(&w.table),
             clauses.join(", ")
         );
-        let logical = format!("ALTER TABLE {}.{} {}", q(&w.db), q(&w.table), clauses.join(", "));
+        let logical = format!(
+            "ALTER TABLE {}.{} {}",
+            q(&w.db),
+            q(&w.table),
+            clauses.join(", ")
+        );
         let v = ddl(
             svc,
             t,

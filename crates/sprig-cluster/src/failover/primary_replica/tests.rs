@@ -148,3 +148,13 @@ fn binlog_event_infos_parse() {
     );
     assert_eq!(table_of("nothing"), None);
 }
+
+#[test]
+fn repointing_keeps_tls_verified_against_the_nodes_ca() {
+    assert_eq!(
+        ssl_clause(Some("/run/sprig/tls/ca.pem")),
+        ", MASTER_SSL = 1, MASTER_SSL_CA = '/run/sprig/tls/ca.pem'"
+    );
+    assert_eq!(ssl_clause(Some("")), "");
+    assert_eq!(ssl_clause(None), "");
+}

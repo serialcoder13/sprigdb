@@ -22,6 +22,7 @@
     clippy::cast_sign_loss,
     clippy::uninlined_format_args,
     clippy::single_match_else,
+    clippy::many_single_char_names,
     missing_docs
 )]
 
@@ -1172,7 +1173,11 @@ async fn discriminator_columns() {
                 " WITH (SPRIG_STORAGE = 'single_table')".to_owned()
             };
             exec(&mut c, &format!("CREATE TABLE truck (payload_kg DECIMAL(10,2)) INHERITS (vehicle) WHERE vtype = 'TRUCK'{with}")).await;
-            exec(&mut c, "CREATE TABLE car (seats INT) INHERITS (vehicle) WHERE vtype = 'CAR'").await;
+            exec(
+                &mut c,
+                "CREATE TABLE car (seats INT) INHERITS (vehicle) WHERE vtype = 'CAR'",
+            )
+            .await;
             let declare_ms = t0.elapsed().as_millis();
             m.declared.push(("TRUCK", "truck", "vehicle"));
             m.declared.push(("CAR", "car", "vehicle"));
@@ -1183,13 +1188,31 @@ async fn discriminator_columns() {
                 assert_eq!(p, [["1000.00".to_owned()]]);
             }
             // Inserts into a subtype set the value, and refuse another.
-            exec(&mut c, "INSERT INTO truck (id, name, payload_kg) VALUES (7, 't7', 70)").await;
+            exec(
+                &mut c,
+                "INSERT INTO truck (id, name, payload_kg) VALUES (7, 't7', 70)",
+            )
+            .await;
             m.rows.insert(7, "TRUCK".into());
             let v = rows(&mut c, "SELECT vtype FROM vehicle WHERE id = 7").await;
             assert_eq!(v, [["TRUCK".to_owned()]]);
-            fails(&mut c, "INSERT INTO truck (id, vtype) VALUES (8, 'CAR')", 39717).await;
-            fails(&mut c, "INSERT INTO truck (id, vtype) VALUES (8, 'SMALLTRUCK')", 39717).await;
-            exec(&mut c, "INSERT INTO car (id, vtype, seats) VALUES (8, 'CAR', 2)").await;
+            fails(
+                &mut c,
+                "INSERT INTO truck (id, vtype) VALUES (8, 'CAR')",
+                39717,
+            )
+            .await;
+            fails(
+                &mut c,
+                "INSERT INTO truck (id, vtype) VALUES (8, 'SMALLTRUCK')",
+                39717,
+            )
+            .await;
+            exec(
+                &mut c,
+                "INSERT INTO car (id, vtype, seats) VALUES (8, 'CAR', 2)",
+            )
+            .await;
             m.rows.insert(8, "CAR".into());
             // Any value goes into the root, undeclared ones included.
             exec(&mut c, "INSERT INTO vehicle (id, vtype, name) VALUES (9, 'SMALLTRUCK', 's9'), (10, 'TRUCK', 't10')").await;
@@ -1198,7 +1221,11 @@ async fn discriminator_columns() {
             check_fleet(&mut c, &m, joined, "inserts").await;
             // Declaring smalltruck adopts its existing rows at once.
             let t1 = Instant::now();
-            exec(&mut c, "CREATE TABLE smalltruck (cap INT) INHERITS (truck) WHERE vtype = 'SMALLTRUCK'").await;
+            exec(
+                &mut c,
+                "CREATE TABLE smalltruck (cap INT) INHERITS (truck) WHERE vtype = 'SMALLTRUCK'",
+            )
+            .await;
             let adopt_ms = t1.elapsed().as_millis();
             m.declared.push(("SMALLTRUCK", "smalltruck", "truck"));
             check_fleet(&mut c, &m, joined, "declared smalltruck").await;
@@ -1209,12 +1236,20 @@ async fn discriminator_columns() {
             m.rows.insert(2, "CAR".into());
             exec(&mut c, "UPDATE truck SET vtype = 'MINI' WHERE id = 7").await;
             m.rows.insert(7, "MINI".into());
-            exec(&mut c, "UPDATE vehicle SET vtype = 'SMALLTRUCK' WHERE id IN (1, 5)").await;
+            exec(
+                &mut c,
+                "UPDATE vehicle SET vtype = 'SMALLTRUCK' WHERE id IN (1, 5)",
+            )
+            .await;
             m.rows.insert(1, "SMALLTRUCK".into());
             m.rows.insert(5, "SMALLTRUCK".into());
             check_fleet(&mut c, &m, joined, "moves").await;
             let seats = rows(&mut c, "SELECT seats FROM car WHERE id = 2").await;
-            assert_eq!(seats, [["NULL".to_owned()]], "a new subtype's columns start at their defaults");
+            assert_eq!(
+                seats,
+                [["NULL".to_owned()]],
+                "a new subtype's columns start at their defaults"
+            );
             // Random writes, checked against the model after each.
             let mut g = Lcg(99 + pi as u64 + u64::from(joined));
             let values = ["TRUCK", "SMALLTRUCK", "CAR", "VEHICLE", "MINI", "truck"];
@@ -1222,8 +1257,8 @@ async fn discriminator_columns() {
             let t2 = Instant::now();
             for step in 0..60 {
                 let v = values[g.below(values.len() as u64) as usize];
-                match g.below(4) {
-                    0 => {
+                match g.below(5) {
+                    0 | 1 => {
                         let t = ["vehicle", "truck", "smalltruck", "car"][g.below(4) as usize];
                         let tv = match t {
                             "truck" => "TRUCK",
@@ -1232,19 +1267,41 @@ async fn discriminator_columns() {
                             _ => v,
                         };
                         let col = if t == "vehicle" { ", vtype" } else { "" };
-                        let val = if t == "vehicle" { format!(", '{tv}'") } else { String::new() };
-                        exec(&mut c, &format!("INSERT INTO {t} (id, name{col}) VALUES ({next}, 'r{next}'{val})")).await;
+                        let val = if t == "vehicle" {
+                            format!(", '{tv}'")
+                        } else {
+                            String::new()
+                        };
+                        exec(
+                            &mut c,
+                            &format!(
+                                "INSERT INTO {t} (id, name{col}) VALUES ({next}, 'r{next}'{val})"
+                            ),
+                        )
+                        .await;
                         m.rows.insert(next, tv.to_owned());
                         next += 1;
                     }
-                    1 | 2 => {
-                        let Some((&id, _)) = m.rows.iter().nth(g.below(m.rows.len() as u64) as usize) else { continue };
+                    2 | 3 => {
+                        let Some((&id, _)) =
+                            m.rows.iter().nth(g.below(m.rows.len() as u64) as usize)
+                        else {
+                            continue;
+                        };
                         let t = m.type_of(&m.rows[&id]);
-                        exec(&mut c, &format!("UPDATE {t} SET vtype = '{v}' WHERE id = {id}")).await;
+                        exec(
+                            &mut c,
+                            &format!("UPDATE {t} SET vtype = '{v}' WHERE id = {id}"),
+                        )
+                        .await;
                         m.rows.insert(id, v.to_owned());
                     }
                     _ => {
-                        let Some((&id, _)) = m.rows.iter().nth(g.below(m.rows.len() as u64) as usize) else { continue };
+                        let Some((&id, _)) =
+                            m.rows.iter().nth(g.below(m.rows.len() as u64) as usize)
+                        else {
+                            continue;
+                        };
                         let t = m.type_of(&m.rows[&id]);
                         exec(&mut c, &format!("DELETE FROM {t} WHERE id = {id}")).await;
                         m.rows.remove(&id);
@@ -1262,13 +1319,12 @@ async fn discriminator_columns() {
             );
             let ct = rows(&mut c, "SHOW CREATE TABLE vehicle").await;
             assert!(!ct[0][1].contains("_type"), "{}", ct[0][1]);
-            if !joined {
-                assert!(
-                    ct[0][1].contains("WITH (SPRIG_STORAGE = 'single_table')"),
-                    "{}",
-                    ct[0][1]
-                );
-            }
+            let opts = if joined {
+                "WITH (SPRIG_DISCRIMINATOR = 'vtype')"
+            } else {
+                "WITH (SPRIG_STORAGE = 'single_table', SPRIG_DISCRIMINATOR = 'vtype')"
+            };
+            assert!(ct[0][1].ends_with(opts), "{}", ct[0][1]);
             let cols: Vec<String> = rows(&mut c, "SHOW COLUMNS FROM smalltruck")
                 .await
                 .into_iter()
@@ -1290,7 +1346,12 @@ async fn discriminator_columns() {
             // Refusals.
             fails(&mut c, "ALTER TABLE vehicle DROP COLUMN vtype", 39710).await;
             fails(&mut c, "UPDATE vehicle SET _type = 'car'", 39705).await;
-            fails(&mut c, "CREATE TABLE van (x INT) INHERITS (vehicle) WHERE vtype = 'CAR'", 39717).await;
+            fails(
+                &mut c,
+                "CREATE TABLE van (x INT) INHERITS (vehicle) WHERE vtype = 'CAR'",
+                39717,
+            )
+            .await;
             fails(&mut c, "CREATE TABLE van (x INT) INHERITS (vehicle)", 39710).await;
             // A subtype added later by ALTER (single-table: into the root).
             exec(&mut c, "ALTER TABLE car ADD COLUMN doors INT").await;
@@ -1301,7 +1362,11 @@ async fn discriminator_columns() {
             exec(&mut c, "DROP TABLE smalltruck").await;
             m.declared.retain(|d| d.1 != "smalltruck");
             m.rows.retain(|_, v| v != "SMALLTRUCK");
-            exec(&mut c, &format!("INSERT INTO vehicle (id, vtype) VALUES ({next}, 'SMALLTRUCK')")).await;
+            exec(
+                &mut c,
+                &format!("INSERT INTO vehicle (id, vtype) VALUES ({next}, 'SMALLTRUCK')"),
+            )
+            .await;
             m.rows.insert(next, "SMALLTRUCK".into());
             check_fleet(&mut c, &m, joined, "dropped smalltruck").await;
             eprintln!(

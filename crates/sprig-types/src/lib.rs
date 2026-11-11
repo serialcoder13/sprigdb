@@ -9,7 +9,9 @@
 //!   (build step 1);
 //! - [`grammar`]: `INHERITS`, `WITH (SPRIG_...)`, `ONLY`, `ADD | DROP
 //!   HIERARCHY`, `@sprig_inheritance` (step 2);
-//! - [`ddl`]: type DDL with joined storage (step 3);
+//! - [`ddl`]: type DDL with joined and single-table storage (steps 3 and
+//!   6), and discriminator columns: `INHERITS (p) WHERE c = v`, under which
+//!   `_type` and `_type_path` are generated from a user column;
 //! - [`rewrite`], [`show`] and [`infoschema`]: polymorphic reads and the
 //!   metadata schema tools see (step 4), and the `SPRIG_*` hierarchy
 //!   predicates (step 10);
@@ -22,7 +24,7 @@
 //! that sends the plan's statements back through the session (logical
 //! names, chapter 29's checks, chapter 17's router).
 //!
-//! Not built: single-table storage, composites and arrays, documents and
+//! Not built: the `NOT NULL` check of single-table storage, composites and arrays, documents and
 //! the other models (they need R5), footprints for chapter 29, rename
 //! jobs, cross-shard moves, `$graphLookup`, typed upserts and
 //! `INSERT ... SELECT` into subtypes, prepared statements on typed tables.
@@ -232,7 +234,8 @@ async fn query(
         return Ok(Handled::NotTyped);
     };
     let mut w = Walker::new(ctx.lookup);
-    w.only_all = ctx.inheritance_only || grammar::is_dump_read(sql.as_bytes());
+    w.dump = grammar::is_dump_read(sql.as_bytes());
+    w.only_all = ctx.inheritance_only || w.dump;
     w.no_backslash_escapes = ctx.lex.no_backslash_escapes;
     w.query(Pass::Collect, q)?;
     w.plan_refs();

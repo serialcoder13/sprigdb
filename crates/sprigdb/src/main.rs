@@ -207,6 +207,14 @@ async fn run(role: Role, config: ProcessConfig, source: Option<(PathBuf, String)
     ));
     let shutdown = CancellationToken::new();
     tokio::spawn(cancel_on_signal(shutdown.clone()));
+    // Hardening round 3: the process identity for `https://` internal
+    // calls (permits, peer pings, observations, the relay) to controllers
+    // with `[controller] internal_tls`.
+    if let Some(t) = &config.tls
+        && let Err(e) = sprig_common::https::install_internal_client(&t.ca, &t.cert, &t.key)
+    {
+        tracing::warn!(error = %e, "[tls] doesn't load: calls to controllers serving internal TLS will fail");
+    }
 
     let ctx = RoleContext {
         config,
