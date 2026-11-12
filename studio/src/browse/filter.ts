@@ -1,4 +1,4 @@
-// The table view's filter bar (decision R2, sprigdb-plan/decisions/studio-tui-redesign.md):
+// The table view's filter bar (the Studio and TUI redesign):
 // conditions on columns, or a raw WHERE clause. The clause is the user's own
 // SQL, run with the user's own rights, like anything typed in a query tab.
 

@@ -1,4 +1,4 @@
-// Saved queries and history (decision R4, sprigdb-plan/decisions/studio-tui-redesign.md).
+// Saved queries and history (the Studio and TUI redesign).
 // Kept in the tenant's catalog per user (/v1/library), shared with `sprig`, so
 // they follow the user between browsers. When the gateway can't keep them (an
 // accounts-file login, or a gateway without the routes) they stay in the

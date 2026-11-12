@@ -1,5 +1,4 @@
-//! Saved queries per profile (decision R4 of
-//! `sprigdb-plan/decisions/studio-tui-redesign.md`).
+//! Saved queries per profile (the Studio and TUI redesign).
 //!
 //! The tenant's catalog keeps them per user (`/v1/library`), shared with
 //! Studio: the TUI loads them at start ([`Saved::adopt`]) and sends every

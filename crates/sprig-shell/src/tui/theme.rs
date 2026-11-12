@@ -1,4 +1,4 @@
-//! The TUI's colours (decision R6 of `sprigdb-plan/decisions/studio-tui-redesign.md`):
+//! The TUI's colours (the Studio and TUI redesign):
 //! the same calm palette as Studio. Neutral greys, the coral-gold accent
 //! (`#E0805A`) only for small marks (the active tab, the focused pane, the
 //! connected dot), indigo keywords, burnt-orange strings, coral numbers.

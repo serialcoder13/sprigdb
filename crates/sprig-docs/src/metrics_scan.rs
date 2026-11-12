@@ -76,7 +76,7 @@ impl Scanner {
                 ("histogram!(", MetricKind::Histogram),
             ]
             .into_iter()
-            .find(|(m, _)| text[i..].starts_with(m) && (i == 0 || !is_ident(b[i - 1])));
+            .find(|(m, _)| b[i..].starts_with(m.as_bytes()) && (i == 0 || !is_ident(b[i - 1])));
             let Some((mac, kind)) = kind else {
                 i += 1;
                 continue;
@@ -124,7 +124,10 @@ fn is_ident(c: u8) -> bool {
 }
 
 fn memchr(b: &[u8], from: usize, c: u8) -> usize {
-    b[from..].iter().position(|&x| x == c).map_or(b.len(), |p| from + p)
+    b[from..]
+        .iter()
+        .position(|&x| x == c)
+        .map_or(b.len(), |p| from + p)
 }
 
 /// The index just past the string literal starting at `start` (a `"`).
@@ -219,5 +222,15 @@ mod tests {
         assert_eq!(m[0].labels.iter().cloned().collect::<Vec<_>>(), ["x"]);
         assert!(m[1].kinds.contains(&MetricKind::Counter));
         assert!(m[0].crates.contains("sprig-x"));
+    }
+
+    #[test]
+    fn non_ascii_source_is_fine() {
+        let mut s = Scanner::default();
+        s.scan(
+            "sprig-y",
+            "/// p95 4.2 s → ~40 ms · é\nlet x = \"ä\"; counter!(\"sprig_ok_total\", \"kind\" => \"π\");",
+        );
+        assert_eq!(s.metrics()[0].name, "sprig_ok_total");
     }
 }

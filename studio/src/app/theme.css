@@ -1,6 +1,5 @@
-/* Design tokens (chapter 44, "Accessibility, themes and languages"; decision R5
-   of sprigdb-plan/decisions/studio-tui-redesign.md): neutral grey and charcoal
-   surfaces, the coral-gold accent only for small marks (active section and tab,
+/* Design tokens (chapter 44, "Accessibility, themes and languages"; the Studio
+   and TUI redesign): neutral grey and charcoal surfaces, the coral-gold accent only for small marks (active section and tab,
    focus, the primary button, the connected dot). Light, dark and high contrast;
    prefers-color-scheme unless the user chooses. Logical properties throughout. */
 :root {

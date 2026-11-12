@@ -1,5 +1,5 @@
 //! The SprigDB mascot as terminal art for the `sprig` TUI, in the coral-gold
-//! colourway Studio uses (decision R5 of `sprigdb-plan/decisions/studio-tui-redesign.md`).
+//! colourway Studio uses (the Studio and TUI redesign).
 //! Pure ASCII, coloured per character. The art comes from `brand/mascot/ascii/mascot.rs`;
 //! only the palette and the sprout rule differ.
 //!

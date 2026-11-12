@@ -1,199 +1,106 @@
-# SprigDB
+<p align="center">
+  <img src="brand/mascot/coralgold/png/01-waving-1024.png" width="220" alt="Sprig, the SprigDB axolotl, waving">
+</p>
 
-SprigDB is an open-source, multi-model, multi-data-center database built as a Rust layer over MariaDB. It speaks the MySQL, MariaDB, MongoDB, Redis, Neo4j Bolt and Kafka protocols, plus REST and gRPC, and runs without a DBA: placement, sharding, indexing and failover are automatic.
+<h1 align="center">SprigDB</h1>
 
-The design lives in [serialcoder13/sprigdb-plan](https://github.com/serialcoder13/sprigdb-plan): a high-level design book and a low-level design book with build steps for every component.
+<p align="center">
+  <b>One database for every data model. It runs itself.</b><br>
+  An open-source, multi-model, multi-data-centre database, built in Rust as a layer over MariaDB.
+</p>
 
-Licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE).
+<p align="center">
+  <a href="LICENSE"><img alt="Licence: Apache-2.0" src="https://img.shields.io/badge/licence-Apache--2.0-e0805a"></a>
+  <img alt="Rust" src="https://img.shields.io/badge/built%20with-Rust-a5502c">
+  <img alt="MariaDB 11.8 and 12.3" src="https://img.shields.io/badge/MariaDB-11.8%20%7C%2012.3-5d6573">
+</p>
 
-## Development
+---
 
-You need the Rust toolchain pinned in `rust-toolchain.toml` (rustup installs it on first use) and, for the local environment, Docker with Compose v2.
+Say hello to **Sprig** 👋, the axolotl on this page. Axolotls regrow what they lose, and SprigDB aims to do the same for your data: it moves, reshapes and heals itself so you don't have to.
 
-### Build and test
+Your applications connect as they already do, with a MySQL or MariaDB driver, `mongosh`, `redis-cli`, a Neo4j driver or a Kafka client. Behind that, SprigDB keeps everything in MariaDB and takes care of what normally needs a DBA:
+- deciding where data lives;
+- splitting it into shards;
+- creating indexes;
+- surviving a failed node or a whole data centre.
+
+## Why SprigDB
+
+- **Many models, one store.** Tables, documents, key-value, vectors, graphs, streams and queues, all in MariaDB, joinable in one query.
+- **Your drivers just work.** MySQL 8.4 and MariaDB personas, the MongoDB 8 wire protocol, Redis (RESP), Neo4j Bolt, Kafka and AMQP, plus REST and gRPC.
+- **Sharding without a DBA.** Tenants start on one shard. SprigDB learns the workload, chooses the keys, and splits, merges and moves shards online.
+- **Indexes from your queries.** Repeated slow queries get indexes that are designed, checked on a replica, rolled out and retired automatically.
+- **Many data centres.** Routing, moves, residency pins and safe failover across sites, on Galera, primary with replicas, a single node or managed MariaDB.
+- **Multi-tenant by design.** Tenant trees, inherited settings, row-level security, and isolation enforced by MariaDB's own grants.
+- **Logic next to the data.** Functions and triggers in KIRun, JavaScript or Lua, and sinks to other systems.
+- **You stay in charge.** Every automatic decision can run on its own, wait for your approval, or only recommend.
+- **Studio and `sprig`.** A browser workspace and a terminal shell with the same calm, coral-gold look.
+
+## A look inside
+
+| Studio | Editing a table |
+|---|---|
+| ![Studio's workspace with the explorer and the mascot](site/public/img/shots/welcome-light.png) | ![A table with staged edits: changed cells amber, new rows green, deleted rows struck through](site/public/img/shots/table-staged.png) |
+| **Automatic indexing** | **`sprig`, the terminal UI** |
+| ![Automatic indexing in the Performance section](site/public/img/shots/performance-light.png) | ![The sprig terminal UI with a result grid](site/public/img/shots/tui-grid.png) |
+
+## Quick start
+
+You need Docker with Compose v2, and Rust: `rust-toolchain.toml` pins the version, and rustup installs it on first use.
+
+```sh
+# 1. MariaDB (single node, primary with replicas, and Galera) and etcd
+cd deploy/compose && docker compose --profile all up -d --wait && cd -
+
+# 2. A controller and a gateway on your machine
+deploy/compose/gateway-dev.sh up
+
+# 3. Connect with any MySQL or MariaDB client, as user app of the sample tenant acme
+mysql -h 127.0.0.1 -P 13306 -u acme.app -psprig-dev-app \
+      --ssl-mode=VERIFY_IDENTITY --ssl-ca=deploy/compose/gateway-certs/ca.pem
+```
+
+```sql
+CREATE DATABASE shop;
+CREATE TABLE shop.orders (id INT PRIMARY KEY, status VARCHAR(20), total DECIMAL(10,2));
+INSERT INTO shop.orders VALUES (1, 'paid', 42.50);
+SELECT * FROM shop.orders;
+```
+
+The gateway makes two sample tenants, `acme` and `globex`, each with a user `app`. Port 13307 is the MariaDB persona.
+
+To try **Studio**, run Studio's test setup, `deploy/compose/studio/e2e.sh setup`. It turns on the HTTP listener and adds sample data; then open <http://127.0.0.1:18080/studio> and sign in as `acme.app`. The **`sprig`** shell is `cargo run -p sprig-shell --bin sprig -- --url http://127.0.0.1:18080 -u acme.app`.
+
+These credentials are for local development only. Never reuse them.
+
+## Documentation
+
+- **[Guides](docs/guides/)**: getting started, compatibility, sharding, automatic indexing, approvals, streams and queues, operations.
+- **[Reference](docs/reference/)**: every setting, error code, metric, REST route and command. These pages are generated from the code, so they always match this release.
+- **[Developing SprigDB](docs/guides/development.md)**: building from source, the local environments, running a single role, the tests.
+
+The same pages are published as a website, with search and a PDF download, from [`site/`](site/).
+
+## Project status
+
+SprigDB is under active development, and not yet ready for production. The protocols, sharding, automatic indexing, multi-data-centre failover, Studio and `sprig` all work today. Expect changes before 1.0.
+
+## Building from source
 
 ```sh
 cargo build --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
-cargo deny check          # needs `cargo install cargo-deny`
 ```
 
-CI (`.github/workflows/ci.yml`) runs the same checks on every push.
+See [Developing SprigDB](docs/guides/development.md) for everything else.
 
-### Run a role
+## Licence
 
-The server is one binary; the role is a subcommand (`gateway`, `controller`, `worker`, `agent`, `operator`). Each role serves `/healthz`, `/readyz` and `/metrics` on port 9180 and drains on SIGTERM. The controller connects to etcd, bootstraps or verifies the deployment, elects a DC leader and runs the job scheduler (below); the other roles are skeletons for now: they start, report ready and shut down cleanly.
+SprigDB is licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE).
 
-```sh
-SPRIGDB_NODE_DC=dc-a SPRIGDB_TELEMETRY_LOG_FORMAT=pretty cargo run -p sprigdb -- gateway
-curl localhost:9180/readyz
-```
-
-Configuration comes from `sprigdb.toml` (`--config`, or `./sprigdb.toml` if present) with `SPRIGDB_<SECTION>_<FIELD>` environment overrides. A minimal file:
-
-```toml
-[node]
-dc = "dc-a"
-
-[telemetry]
-log_format = "pretty"            # json (default) or pretty
-bootstrap_addr = "127.0.0.1:9180"
-```
-
-### Run a controller (one DC)
-
-With the Compose etcd running (below), `deploy/compose/sprigdb.dev.toml` runs a controller in single-etcd mode: the first one to start bootstraps the deployment (`system.deployment_id`, `dcs/dc-a`, `ids/tenant`), then the controllers elect a DC leader that runs the job scheduler and the `registry` loop, which probes every registered cluster and keeps its capability profile and health current. Settings at global, dc and cluster scope are mirrored from etcd and apply live. Start a second one with `SPRIGDB_NODE_ID=ctl-2 SPRIGDB_TELEMETRY_BOOTSTRAP_ADDR=127.0.0.1:9181 SPRIGDB_CONTROLLER_ADMIN_ADDR=127.0.0.1:7481` to see a hand-over on SIGTERM.
-
-Each controller serves the Admin API (chapter 37, REST under `/admin/v1/`) on `[controller] admin_addr`, by default `127.0.0.1:7480`; `sprigctl` talks to it (`--endpoint`, or `SPRIGCTL_ENDPOINT`), never to etcd. A non-loopback address needs `[controller] admin_token_file`, whose token `sprigctl` sends from `--token-file`. Calls that write cluster records go to the DC leader; elsewhere they fail with 39504, naming it.
-
-```sh
-cargo run -p sprigdb -- --config deploy/compose/sprigdb.dev.toml controller
-cargo run -p sprigctl -- dc list
-cargo run -p sprigctl -- dc show dc-a          # includes the current leader
-cargo run -p sprigctl -- dc register ams1 --tags jurisdiction=EU
-```
-
-### Change settings
-
-Every setting is declared once in code, with its type, default, accepted scopes and hard bounds, and set at one of six scopes: object > database > tenant (and its ancestors) > cluster > dc > global. The nearest value wins, and every wider scope's bounds (min, max, allowed values, lock) limit it. `global`, `dc` and `cluster` values live in etcd and are written through the DC leader; tenant, database and object values live in the tenant's catalog. Everything applies live. `sprigctl settings` (also `sprigctl config`) shows and changes them through the Admin API:
-
-```sh
-sprigctl settings list --prefix catalog.            # keys, types, defaults, scopes; --tenant-settable, --accepts tenant
-sprigctl settings describe catalog.cache_max_mb      # type, default, scopes, hard bounds, who may set it
-sprigctl settings get auto_index.max_per_table --tenant acme --db shop --object orders
-                                                     # effective value, where it comes from, each scope's row and bounds
-sprigctl settings set catalog.cache_max_mb 1024 --scope dc --reason "bigger caches"
-sprigctl settings set auto_index.mode on --scope object --tenant acme --db shop --object orders
-sprigctl settings bounds auto_index.max_per_table --scope global --max 8    # parts not named are kept
-sprigctl settings bounds auto_index.mode --scope tenant --tenant acme --allowed off,recommend
-sprigctl settings lock auto_index.mode --scope tenant --tenant acme         # unlock undoes it
-sprigctl settings reset auto_index.mode --scope tenant --tenant acme [--bounds | --all]
-sprigctl tenant settings acme [--all]                # the tenant's own rows; --all adds its ancestors' copies
-```
-
-`--scope` also takes chapter 47's one-word form (`--scope object:acme.shop.orders`, `--scope dc:dc-a`). A value outside the bounds in force is refused (39080), as are an unknown key (39081), a scope the key doesn't accept (39082), a key locked by a wider scope (39083) and a value of the wrong type (39084). Tightening bounds is accepted and lists the narrower values that will now be clamped or ignored. Writes are recorded as `op:<actor>` (`--actor`, `SPRIGCTL_ACTOR` or `$USER`) with `--reason`, and logged as `settings.changed` events.
-
-### Register clusters
-
-`sprigctl cluster register` prechecks a cluster (TLS, grants, the binlog settings the mover and the change feed need, account creation, a short binlog read as `sprig_repl`, the capability profile) and registers it as `active`, or refuses it with 39511 and every missing item. A binlog `sprig_repl` can't read (no `REPLICATION SLAVE`, a server that refuses plain-text connections: the binlog reader has no TLS yet and speaks only `mysql_native_password`) doesn't block registration: the feed and the mover show as `unsupported`, with the fix among the advisories. Credentials are never stored in etcd: the record names them by reference (`file:<path>` or `env:<name>`), and a credentials file holds a `[sprig_ctl]` and a `[sprig_repl]` table. For the Compose servers, which have self-signed certificates and no system accounts, use root:
-
-```sh
-cat > /tmp/sprig-dev-creds.toml <<'TOML'
-[sprig_ctl]
-user = "root"
-password = "sprig-dev-root"
-tls = "skip_verify"     # development only; the default verifies the certificate
-[sprig_repl]
-user = "root"
-password = "sprig-dev-root"
-tls = "skip_verify"
-TOML
-C=file:/tmp/sprig-dev-creds.toml
-cargo run -p sprigctl -- cluster register dc-a-single --topology single --node 127.0.0.1:13301 --credentials $C
-cargo run -p sprigctl -- cluster register dc-a-repl --topology primary_replica \
-    --node 127.0.0.1:13311 --node 127.0.0.1:13312 --node 127.0.0.1:13313 --credentials $C
-cargo run -p sprigctl -- cluster register dc-a-galera --topology galera \
-    --node 127.0.0.1:13321 --node 127.0.0.1:13322 --node 127.0.0.1:13323 --credentials $C
-cargo run -p sprigctl -- cluster list
-cargo run -p sprigctl -- cluster show dc-a-c2            # nodes, health, profile, gaps
-cargo run -p sprigctl -- cluster probe dc-a-c2 --full     # probe now, with the active probes
-cargo run -p sprigctl -- cluster drain dc-a-c2 --yes
-```
-
-`--dry-run` runs the prechecks only; `-f cluster.toml` takes chapter 27's registration fields (`dc`, `name`, `topology`, `[endpoints]` or `[[nodes]]`, `credentials_ref`, `[capacity]`, `[declared]`); `-o json` prints the API's JSON. `sprigctl`'s text output is pinned by golden files in `crates/sprigctl/tests/golden/`; after an intended change, rewrite them with `SPRIG_UPDATE_GOLDEN=1 cargo test -p sprigctl` and review the diff.
-
-### The M0.1 check
-
-`crates/sprigctl/tests/m01_done_when.rs` is milestone M0.1's "done when" check (chapter 48), ignored by default because it needs the whole Compose stack (`docker compose --profile all up -d --wait`). It runs a controller in its own DC (`m01-<hex>`) against the Compose etcd, registers the single node, the primary with replicas and the Galera cluster with the `sprigctl` binary, checks each capability profile, then switches semi-sync off on the primary and waits for the published profile to lose `zero_loss_failover`, and switches it back on and waits for the upgrade. Semi-sync is restored to its original value whatever happens, and the etcd keys the test wrote are deleted.
-
-```sh
-cargo test -p sprigctl --test m01_done_when -- --ignored --nocapture
-```
-
-### Local environment
-
-`deploy/compose/` runs etcd and MariaDB with the binlog settings SprigDB requires. Pick a topology with a profile:
-
-```sh
-cd deploy/compose
-docker compose --profile single up -d --wait        # one node
-docker compose --profile replication up -d --wait   # primary + 2 replicas, semi-sync AFTER_SYNC
-docker compose --profile galera up -d --wait        # 3-node Galera
-docker compose --profile all down -v                # stop and delete the data
-```
-
-| Service | Host port |
-|---|---|
-| etcd | 2379 |
-| single | 13301 |
-| primary, replica-1, replica-2 | 13311, 13312, 13313 |
-| galera-1, galera-2, galera-3 | 13321, 13322, 13323 |
-
-MariaDB 11.8 is the default; use `MARIADB_IMAGE=mariadb:12.3 docker compose ...` for 12.3. Development credentials are in `deploy/compose/.env` (root password `sprig-dev-root`); never reuse them.
-
-### Run the gateway locally
-
-`deploy/compose/gateway-dev.sh` runs a controller and a gateway on the host against the Compose stack (milestone M0.2), so real MySQL and MariaDB clients can log in and run statements on a registered cluster. It needs the stack (`docker compose --profile all up -d --wait`), `curl`, `jq` and `openssl`.
-
-```sh
-deploy/compose/gateway-dev.sh up        # build, start the controller, register clusters, set listeners, start the gateway
-deploy/compose/gateway-dev.sh status
-deploy/compose/gateway-dev.sh tls required   # or optional / off; applies live
-deploy/compose/gateway-dev.sh down      # stop both and remove what up wrote to etcd
-```
-
-`up` builds `sprigdb` and `sprigctl`, starts a controller with `sprigdb.dev.toml` (Admin API on 127.0.0.1:7480, bootstrapping the deployment if etcd is empty), registers `dc-a-single`, `dc-a-repl` and `dc-a-galera` as `dc-a-c1`, `dc-a-c2` and `dc-a-c3` (the ids `gateway-accounts.dev.toml` names; it stops if they would differ), writes the listener settings to etcd at dc scope, and starts the gateway with `sprigdb.gateway.dev.toml`, waiting for `/readyz` on 9190. Re-running it leaves running processes alone; after a code change run `down` and `up`. `SPRIG_GATEWAY_PROFILE=release up` builds and runs release binaries (for latency and sysbench numbers); `CARGO_TARGET_DIR` picks the target directory. Processes, logs and what `up` created are in `deploy/compose/.gateway-dev/`, the development CA and server certificate (made once with `openssl`, git-ignored) in `deploy/compose/gateway-certs/`.
-
-| Listener | Address | Logins (password `sprig-dev-app`) |
-|---|---|---|
-| MySQL persona | 127.0.0.1:13306 | `app` → `dc-a-c1` (single), `app_repl` → `dc-a-c2` (primary + replicas), `app_galera` → `dc-a-c3` (Galera) |
-| MariaDB persona | 127.0.0.1:13307 | the same |
-
-TLS is `optional` on both (`SPRIG_GATEWAY_TLS=required up` for the gateway's own default). A first `caching_sha2_password` login over plaintext needs TLS once (decision D4: no RSA key exchange); after a TLS login the account's fast-auth entry lets plaintext logins through.
-
-```sh
-mysql -h 127.0.0.1 -P 13306 -u app -psprig-dev-app --ssl-mode=VERIFY_IDENTITY --ssl-ca=deploy/compose/gateway-certs/ca.pem
-mysql -h 127.0.0.1 -P 13306 -u app -psprig-dev-app --ssl-mode=DISABLED
-docker run --rm -v "$PWD/deploy/compose/gateway-certs/ca.pem:/ca.pem:ro" mariadb:11.8 \
-    mariadb -h host.docker.internal -P 13307 -u app -psprig-dev-app --ssl-ca=/ca.pem -e 'SELECT @@version_comment'
-```
-
-On Docker Desktop a container reaches the host as `host.docker.internal` (the certificate names it); `--network host` with 127.0.0.1 works only where host networking is enabled. The MariaDB 11.8 client verifies the server certificate by default, so give it `--ssl-ca`, or `--disable-ssl-verify-server-cert`, or `--skip-ssl`.
-
-To run a second instance next to the first (another etcd, other ports), set `SPRIG_GATEWAY_DEV_STATE`, `SPRIG_ETCD`, `SPRIG_GATEWAY_MYSQL_PORT`, `SPRIG_GATEWAY_MARIADB_PORT`, `SPRIG_ADMIN_PORT`, `SPRIG_CTL_TELEMETRY_PORT` and `SPRIG_GW_TELEMETRY_PORT` for `up`; `status` and `down` need only `SPRIG_GATEWAY_DEV_STATE`.
-
-### Three data centers
-
-`deploy/compose/compose.3dc.yaml` simulates three DCs on one machine, each with its own etcd (the DC tier) and a MariaDB cluster in a different topology, plus a three-member global etcd tier with one member per DC. A `netem` service adds latency between the DCs' subnets with `tc netem`. Run it through `3dc.sh`, which always uses the project name `sprigdb-3dc` (the `.env` file's project name belongs to the single-DC setup):
-
-```sh
-cd deploy/compose
-./3dc.sh up -d --build --wait     # about a minute; builds the small netem image first
-./3dc.sh latency                  # ping between the DCs
-./3dc.sh down -v                  # stop and delete the data
-```
-
-| DC | Subnet | MariaDB cluster | Ports: DC etcd, global etcd, MariaDB |
-|---|---|---|---|
-| mum1 | 10.10.1.0/24 | `mum1-c1`: primary + 2 replicas, semi-sync AFTER_SYNC | 34179, 34180, 34106–34108 |
-| fra1 | 10.10.2.0/24 | `fra1-c1`: 3-node Galera | 34279, 34280, 34206–34208 |
-| iad1 | 10.10.3.0/24 | `iad1-c1`: single node | 34379, 34380, 34306 |
-
-One-way delays follow chapter 46: mum1–fra1 30 ms, mum1–iad1 80 ms, fra1–iad1 60 ms, so a ping shows twice that. Change them with `SPRIG3DC_DELAY_MUM1_FRA1_MS`, `SPRIG3DC_DELAY_MUM1_IAD1_MS`, `SPRIG3DC_DELAY_FRA1_IAD1_MS` and `SPRIG3DC_JITTER_MS`. Traffic from the host through published ports isn't delayed. The layout can run next to the single-DC one but only once per Docker host.
-
-### Integration tests
-
-Integration tests use `sprig-testkit` and skip themselves, with a message, unless the variable naming their service is set. Point them at the single-DC environment with:
-
-```sh
-export SPRIG_TEST_ETCD=http://127.0.0.1:2379
-export SPRIG_TEST_MARIADB_SINGLE=mysql://root:sprig-dev-root@127.0.0.1:13301
-export SPRIG_TEST_MARIADB_REPLICATION=mysql://root:sprig-dev-root@127.0.0.1:13311,mysql://root:sprig-dev-root@127.0.0.1:13312,mysql://root:sprig-dev-root@127.0.0.1:13313
-export SPRIG_TEST_MARIADB_GALERA=mysql://root:sprig-dev-root@127.0.0.1:13321,mysql://root:sprig-dev-root@127.0.0.1:13322,mysql://root:sprig-dev-root@127.0.0.1:13323
-export SPRIG_TEST_DOCKER=1        # tests that start their own Compose projects
-cargo test --workspace
-```
-
-A list holds the writer first. With `SPRIG_TEST_DOCKER=1`, clock-skew tests start throwaway MariaDB containers with `libfaketime` preloaded, from an image (`sprigdb-mariadb-faketime:<tag>`) they build once, which needs the network; the shared Compose servers' clocks are never skewed (faultd can't move one container's wall clock, see `sprig_testkit::faults::faketime`). `SPRIG_TEST_ENV_FILE=deploy/compose/env.3dc.toml` describes the three-DC layout instead (`sprig_testkit::Env`). `SPRIG_TEST_STRICT=1` turns a skip into a failure, as in CI; `SPRIG_TEST_KEEP=1` leaves Compose projects that tests start running after the test. CI runs the stages of chapter 46: S0 (format, lint, unit tests, `cargo deny`) on every push, S1 (integration tests against Compose) on pull requests and `main`, and S2 (the three-DC layout on MariaDB 11.8 and 12.3) nightly or on demand.
+<p align="center">
+  <img src="brand/mascot/coralgold/png/08-celebrating-1024.png" width="120" alt="Sprig celebrating">
+</p>

@@ -1,4 +1,4 @@
-//! Icons by name (decision R8 of `sprigdb-plan/decisions/studio-tui-redesign.md`):
+//! Icons by name (the Studio and TUI redesign):
 //! the names Studio uses, drawn as single-width Unicode glyphs with no emoji
 //! presentation, or as ASCII when the locale isn't UTF-8 or `SPRIG_ASCII` is set.
 

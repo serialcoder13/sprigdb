@@ -1,4 +1,4 @@
-// Studio's icons (decision R8 in sprigdb-plan/decisions/studio-tui-redesign.md):
+// Studio's icons (the Studio and TUI redesign):
 // Lucide (ISC) for common ideas, plus a few drawn for SprigDB on Lucide's
 // 24-pixel grid with a 2-pixel round stroke, so the two sets look like one.
 // Icons are decorative (aria-hidden); every icon-only control carries a label.

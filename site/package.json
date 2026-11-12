@@ -13,5 +13,11 @@
     "@astrojs/markdown-remark": "7.3.5",
     "@astrojs/starlight": "0.42.7",
     "astro": "7.4.3"
-  }
+  },
+  "pnpm": {
+    "overrides": {
+      "sharp": "-"
+    }
+  },
+  "//": "sharp is removed: its libvips binary is LGPL-3.0 (brief rule 14); astro.config.mjs uses the passthrough image service."
 }

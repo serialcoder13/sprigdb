@@ -1,4 +1,4 @@
-// The structure view's SprigDB tabs (decision R3, sprigdb-plan/decisions/studio-tui-redesign.md):
+// The structure view's SprigDB tabs (the Studio and TUI redesign):
 // relations, triggers, row-level policies, inheritance and shards of one table,
 // read through the same public API and statements as the dedicated pages.
 

@@ -140,6 +140,16 @@ struct Env {
 
 /// Runs `body` with a fresh schema holding the `orders` table (200k rows)
 /// and the automatic-indexing tables; drops the schema afterwards.
+/// One case per topology at a time: the driver counts every build running
+/// on the cluster's writer against `max_builds_per_cluster` (1), so two
+/// cases building in parallel on one cluster refuse each other ("no build
+/// slot ... 2 of 1 in use").
+static SERIAL: [tokio::sync::Mutex<()>; 3] = [
+    tokio::sync::Mutex::const_new(()),
+    tokio::sync::Mutex::const_new(()),
+    tokio::sync::Mutex::const_new(()),
+];
+
 async fn with_env<F, Fut>(topo: Topo, case: &str, body: F)
 where
     F: FnOnce(Env) -> Fut,
@@ -149,6 +159,13 @@ where
         eprintln!("skipped {case} ({topo:?}): set the topology's SPRIG_TEST_MARIADB_* variable");
         return;
     };
+    let _serial = SERIAL[match topo {
+        Topo::Single => 0,
+        Topo::Replication => 1,
+        Topo::Galera => 2,
+    }]
+    .lock()
+    .await;
     let env_name = match topo {
         Topo::Single => SINGLE,
         Topo::Replication => REPLICATION,

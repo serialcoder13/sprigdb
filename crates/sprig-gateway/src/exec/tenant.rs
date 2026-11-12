@@ -1953,7 +1953,12 @@ impl PassSession {
             match p.kind {
                 PacketKind::ColumnCount(n) => cols = usize::try_from(n).unwrap_or(2),
                 PacketKind::ColumnDef => {
-                    let c = ColumnDef::decode(&p.payload, sprig_proto_mysql::Caps::empty())?;
+                    // Encoded with the serving connection's capabilities
+                    // (MariaDB's extended metadata adds a field).
+                    let caps = bs
+                        .backend_caps()
+                        .unwrap_or(sprig_proto_mysql::Caps::empty());
+                    let c = ColumnDef::decode(&p.payload, caps)?;
                     if c.name.eq_ignore_ascii_case(b"Create Table") {
                         idx = seen;
                     }

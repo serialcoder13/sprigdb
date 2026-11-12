@@ -1,6 +1,5 @@
 //! `sprig-docs`: SprigDB's product documentation (chapter 55, "Product
-//! documentation and the docs pack"; decisions AI2, AI3, AI16 of
-//! `sprigdb-plan/decisions/ai-integration.md`).
+//! documentation and the docs pack"; the AI integration plan).
 //!
 //! - [`reference`]: the generated reference pages (`docs/reference/*.md`),
 //!   rendered from plain data so this crate depends on nothing in the

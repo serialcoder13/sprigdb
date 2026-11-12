@@ -18,7 +18,7 @@ import { CommandPalette } from '../workspace/CommandPalette';
 import { HistoryPanel, SavedPanel } from '../workspace/LibraryPanels';
 import { loadLibrary } from '../workspace/library';
 
-/** Studio's workspace (decision R1, sprigdb-plan/decisions/studio-tui-redesign.md):
+/** Studio's workspace (the Studio and TUI redesign):
  * a title bar, an activity bar of sections, a side panel with the section's
  * pages and the database tree, tabs for everything open, and a status bar. */
 export function Shell() {

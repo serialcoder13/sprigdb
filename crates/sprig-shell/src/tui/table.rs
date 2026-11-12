@@ -1,6 +1,5 @@
-//! The table data view and structure tabs (decisions R2, R3 and R6 of
-//! `sprigdb-plan/decisions/studio-tui-redesign.md`), the terminal form of
-//! Studio's table page.
+//! The table data view and structure tabs (the Studio and TUI redesign),
+//! the terminal form of Studio's table page.
 //!
 //! - **Data.** Keyset pages of 100 rows in primary-key order, under a filter
 //!   (a WHERE clause, typed with `/`, or `=` for "this column equals this

@@ -143,7 +143,7 @@ export const en = {
   'error.reload': 'Reload Studio',
   'common.close': 'Close',
   'common.loading': 'Loading…',
-  // The workspace shell (decision R1, sprigdb-plan/decisions/studio-tui-redesign.md).
+  // The workspace shell (the Studio and TUI redesign).
   'nav.sections': 'Sections',
   'nav.saved': 'Saved queries',
   'nav.history': 'History',

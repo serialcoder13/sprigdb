@@ -1,0 +1,35 @@
+/* SprigDB's calm palette with the coral-gold accent (decision R5 of the
+   Studio redesign): Starlight's dark theme is :root, light is [data-theme='light']. */
+:root {
+  --sl-color-accent-low: #3a2219;
+  --sl-color-accent: #e0805a;
+  --sl-color-accent-high: #f6c8b4;
+  --sl-color-white: #e6e8eb;
+  --sl-color-gray-1: #c9ced6;
+  --sl-color-gray-2: #9aa1ab;
+  --sl-color-gray-3: #6b7380;
+  --sl-color-gray-4: #3a414a;
+  --sl-color-gray-5: #2b2f36;
+  --sl-color-gray-6: #1d2025;
+  --sl-color-black: #17191d;
+}
+:root[data-theme='light'] {
+  --sl-color-accent-low: #fbe4da;
+  --sl-color-accent: #a5502c;
+  --sl-color-accent-high: #5e2a14;
+  --sl-color-white: #1c2026;
+  --sl-color-gray-1: #2b2f36;
+  --sl-color-gray-2: #3a414a;
+  --sl-color-gray-3: #5d6573;
+  --sl-color-gray-4: #9aa1ab;
+  --sl-color-gray-5: #c9ced6;
+  --sl-color-gray-6: #eef0f3;
+  --sl-color-gray-7: #f7f8fa;
+  --sl-color-black: #ffffff;
+}
+.hero img { max-width: 280px; }
+.shots { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; margin-top: 1rem; }
+.shots figure { margin: 0; }
+.shots img { width: 100%; border: 1px solid var(--sl-color-gray-5); border-radius: 8px; }
+.shots figcaption { font-size: var(--sl-text-sm); color: var(--sl-color-gray-3); margin-top: .35rem; }
+.compat td:first-child { white-space: nowrap; }

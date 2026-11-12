@@ -22,7 +22,7 @@ const root = join(here, '..');
 export const RUNTIME_OK = ['MIT', 'ISC', 'BSD-2-Clause', 'BSD-3-Clause', '0BSD', 'Apache-2.0', 'Zlib', 'Unicode-3.0', 'Unicode-DFS-2016'];
 export const DEV_OK = [...RUNTIME_OK, 'MIT-0', 'MPL-2.0', 'CC0-1.0'];
 // Development-only packages under other permissive licences, reviewed one by
-// one (decision ST3 in sprigdb-plan/decisions/studio-interim.md).
+// one (Studio's design notes).
 export const DEV_EXCEPTIONS = {
   argparse: 'Python-2.0', // js-yaml, under openapi-typescript's Redocly parser
   'caniuse-lite': 'CC-BY-4.0', // browser data under Babel (eslint-plugin-react-hooks)

@@ -1,5 +1,4 @@
-//! Saved queries and query history in the tenant's catalog (decision R4 of
-//! `sprigdb-plan/decisions/studio-tui-redesign.md`; chapter 44, "As built
+//! Saved queries and query history in the tenant's catalog (the Studio and TUI redesign; chapter 44, "As built
 //! in the workspace redesign"), so Studio and `sprig` share one library
 //! that follows the user between browsers and machines.
 //!

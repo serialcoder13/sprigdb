@@ -1,7 +1,6 @@
-//! The command palette (Ctrl-K; decision R1/R6 of
-//! `sprigdb-plan/decisions/studio-tui-redesign.md`): one search over the open
-//! tabs, the screens, the tables the explorer has loaded and the commands,
-//! ranked the way Studio's palette ranks them.
+//! The command palette (Ctrl-K; the Studio and TUI redesign): one search
+//! over the open tabs, the screens, the tables the explorer has loaded and
+//! the commands, ranked the way Studio's palette ranks them.
 
 /// What choosing an item does.
 #[derive(Debug, Clone, PartialEq, Eq)]

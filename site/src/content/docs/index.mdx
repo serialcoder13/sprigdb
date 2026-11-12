@@ -1,0 +1,90 @@
+---
+title: SprigDB
+description: An open-source, multi-model, multi-data-centre database built as a Rust layer over MariaDB.
+template: splash
+hero:
+  tagline: An open-source, multi-model database built as a Rust layer over MariaDB. It speaks MySQL, MariaDB, MongoDB, Redis, Neo4j Bolt and Kafka, and runs without a DBA. Placement, sharding, indexing and failover are automatic.
+  image:
+    file: ../../assets/hero.webp
+    alt: Sprig, the SprigDB axolotl, waving
+  actions:
+    - text: Get started
+      link: /sprigdb/docs/guides/getting-started/
+      icon: right-arrow
+    - text: Read the docs
+      link: /sprigdb/docs/
+      variant: minimal
+    - text: GitHub
+      link: https://github.com/serialcoder13/sprigdb
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## One layer, every model
+
+<CardGrid>
+  <Card title="The protocols your apps already speak" icon="puzzle">
+    MySQL 8.4 and MariaDB on their own ports. MongoDB 8 drivers, `redis-cli`, Neo4j Bolt and Kafka clients connect unchanged. REST and gRPC sit on top. Tables, documents, keys, vectors, graphs and streams live in one store and join in one query.
+  </Card>
+  <Card title="Sharding without a DBA" icon="random">
+    Tenants start on one shard. SprigDB watches the workload, chooses table groups and keys, then splits, merges and moves shards online. A fence and a two-second write pause keep every move correct.
+  </Card>
+  <Card title="Indexes from your queries" icon="rocket">
+    Repeated slow queries get indexes designed from their predicates. Each index is validated on a replica first, rolled out a shard at a time, and dropped if it stops helping. Schema tools never see a drift.
+  </Card>
+  <Card title="Many data centres" icon="laptop">
+    Tenants are routed and moved between data centres, pinned for residency, and failed over safely, using leases and fencing. That works with Galera, primary and replicas, single nodes or managed MariaDB.
+  </Card>
+  <Card title="Multi-tenant to the core" icon="seti:folder">
+    Tenant trees, inherited settings, row-level security and per-tenant schemas, isolated by MariaDB's own grants. A tenant can share tables, streams and queues with its descendants.
+  </Card>
+  <Card title="Streams, queues, sinks and logic" icon="seti:pipeline">
+    Kafka-compatible streams, AMQP queues, sinks to other systems, and functions and triggers in KIRun, JavaScript or Lua. All of them run next to the data.
+  </Card>
+  <Card title="You approve what matters" icon="approve-check">
+    Every automatic decision can run on its own, wait for approval at the right level, or only recommend. That includes indexes, splits, moves and failovers. Notifications and an inbox come with it.
+  </Card>
+  <Card title="Studio and sprig" icon="laptop">
+    A browser workspace and a terminal shell, with the same layout, keys and coral-gold calm: an explorer, a query editor, staged table edits, structure views, saved queries and history.
+  </Card>
+</CardGrid>
+
+## See it
+
+<div class="shots">
+  <figure><img src="/sprigdb/img/shots/welcome-light.png" alt="Studio's welcome page with the explorer and the mascot" /><figcaption>Studio: the workspace</figcaption></figure>
+  <figure><img src="/sprigdb/img/shots/query-dark.png" alt="A query tab in Studio's dark theme" /><figcaption>Queries, in light or dark</figcaption></figure>
+  <figure><img src="/sprigdb/img/shots/table-staged.png" alt="A table view with staged edits coloured by kind" /><figcaption>Edit tables: stage, review, apply</figcaption></figure>
+  <figure><img src="/sprigdb/img/shots/structure-shards.png" alt="A table's shards tab" /><figcaption>Where a table's shards live</figcaption></figure>
+  <figure><img src="/sprigdb/img/shots/performance-light.png" alt="Automatic indexing in the Performance section" /><figcaption>Automatic indexing, with its evidence</figcaption></figure>
+  <figure><img src="/sprigdb/img/shots/tui-grid.png" alt="The sprig terminal UI showing a result grid" /><figcaption><code>sprig</code>, the terminal UI</figcaption></figure>
+</div>
+
+## Clients that work unchanged
+
+<div class="compat">
+
+| Model | Protocol and port | Clients |
+|---|---|---|
+| SQL | MySQL 8.4 (3306), MariaDB (3307) | `mysql`, `mariadb`, Connector/J, `go-sql-driver/mysql`, `mysql2`, PyMySQL, PHP PDO, Hibernate, SQLAlchemy, `mysqldump` |
+| Documents | MongoDB 8 wire protocol | `mongosh`, MongoDB Java, Node, Python and Go drivers, Mongoose, Spring Data MongoDB |
+| Key-value | Redis (RESP) | `redis-cli`, common Redis clients |
+| Graphs | Neo4j Bolt, Cypher | `cypher-shell`, Neo4j drivers |
+| Streams | Kafka | Kafka clients, `kcat` |
+| Queues | AMQP 0-9-1 | RabbitMQ clients |
+| APIs | REST and gRPC | `curl`, generated clients |
+
+</div>
+
+## Start here
+
+<CardGrid>
+  <LinkCard title="Getting started" href="/sprigdb/docs/guides/getting-started/" description="Run SprigDB locally with Docker Compose, connect with mysql, mongosh or redis-cli." />
+  <LinkCard title="Settings reference" href="/sprigdb/docs/reference/settings/" description="Every setting, its default, scopes and bounds, generated from the code." />
+  <LinkCard title="Error codes" href="/sprigdb/docs/reference/errors/" description="What each SprigDB error means and what to do about it." />
+  <LinkCard title="REST API" href="/sprigdb/docs/reference/api/" description="Every route of the gateway's API." />
+</CardGrid>
+
+SprigDB is licensed under the Apache License 2.0.

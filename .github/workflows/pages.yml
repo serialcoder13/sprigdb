@@ -1,0 +1,54 @@
+# The SprigDB website on GitHub Pages: the showcase home page and the docs
+# (site/, built from docs/). Turn it on once the repository is public, or on
+# GitHub Pro: Settings → Pages → Source: GitHub Actions.
+#
+# The generated reference pages are checked by the test
+# `docs_reference_is_current` (sprig-docs-gen) in ci.yml, not here.
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths: ['docs/**', 'site/**', 'brand/**', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: site/pnpm-lock.yaml
+      - name: Build the site
+        working-directory: site
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

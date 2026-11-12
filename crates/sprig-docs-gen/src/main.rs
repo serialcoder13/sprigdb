@@ -17,7 +17,7 @@
 //!
 //! With `--check` it writes nothing and exits 1 if any page would change.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -255,7 +255,11 @@ fn command_help(bin: &Path, tool: &str) -> Result<Vec<CommandHelp>, String> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1));
+    let flag = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+    };
     let check = args.iter().any(|a| a == "--check");
     let root = flag("--root").map_or_else(
         || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
@@ -291,14 +295,14 @@ fn main() -> ExitCode {
         }
     }
     let dir = root.join("docs/reference");
-    let mut stale = BTreeMap::new();
+    let mut stale = BTreeSet::new();
     for (name, text) in &all {
         let path = dir.join(name);
         if read(&path).as_deref() == Some(text.as_str()) {
             continue;
         }
         if check {
-            stale.insert(name.clone(), ());
+            stale.insert(name.clone());
         } else if let Err(e) =
             std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, text))
         {
@@ -311,7 +315,7 @@ fn main() -> ExitCode {
     if !stale.is_empty() {
         eprintln!(
             "docs/reference is stale: {}. Run `cargo run -p sprig-docs-gen` and commit the pages.",
-            stale.keys().cloned().collect::<Vec<_>>().join(", ")
+            stale.iter().cloned().collect::<Vec<_>>().join(", ")
         );
         return ExitCode::from(1);
     }
@@ -326,7 +330,11 @@ mod tests {
     /// missing here would be missing from the docs.
     #[test]
     fn the_registry_holds_every_crates_settings() {
-        let keys: Vec<String> = settings().expect("registry").into_iter().map(|s| s.key).collect();
+        let keys: Vec<String> = settings()
+            .expect("registry")
+            .into_iter()
+            .map(|s| s.key)
+            .collect();
         for k in [
             "auto_index.min_runs",
             "studio.history_max",
