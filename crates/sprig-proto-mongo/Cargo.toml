@@ -28,9 +28,9 @@ tokio = { workspace = true, features = ["io-util"] }
 hex = "0.4"
 tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread", "macros"] }
 # Live tests through a real driver (Apache-2.0), without TLS or DNS
-# resolution; TLS through the system OpenSSL, since its rustls option
-# brings webpki-roots (CDLA-Permissive-2.0, outside the allowed licences).
-mongodb = { version = "=3.9.1", default-features = false, features = ["compat-3-0-0", "openssl-tls", "zstd-compression", "snappy-compression", "zlib-compression"] }
+# resolution; TLS through rustls (deny.toml bans OpenSSL; webpki-roots'
+# CDLA-Permissive-2.0 is allowed for that crate only).
+mongodb = { version = "=3.9.1", default-features = false, features = ["compat-3-0-0", "rustls-tls", "zstd-compression", "snappy-compression", "zlib-compression"] }
 futures-util = "0.3"
 # The unified spec-test runner (tests/spec_live.rs): the JSON test files.
 serde.workspace = true

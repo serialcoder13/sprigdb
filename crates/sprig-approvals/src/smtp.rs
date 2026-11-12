@@ -13,6 +13,7 @@
 //! offered when both are set. `AUTH PLAIN` follows `approvals.smtp_username`.
 //! The protocol is a few lines of text (RFC 5321); no mail crate is needed.
 
+use rustls::pki_types::pem::PemObject as _;
 use std::fmt::Write as _;
 use std::io;
 use std::pin::Pin;
@@ -252,9 +253,8 @@ pub fn tls_config(t: &TlsFiles) -> Result<Arc<rustls::ClientConfig>> {
     let bad = |m: String| SprigError::new(SprigCode::ApprovalPolicyInvalid, m);
     let mut roots = rustls::RootCertStore::empty();
     if let Some(pem) = &t.ca_pem {
-        let mut rd = io::BufReader::new(pem.as_bytes());
         let mut n = 0;
-        for c in rustls_pemfile::certs(&mut rd) {
+        for c in rustls::pki_types::CertificateDer::pem_slice_iter(pem.as_bytes()) {
             let c = c.map_err(|e| bad(format!("smtp_ca_file: {e}")))?;
             roots
                 .add(c)
@@ -274,14 +274,18 @@ pub fn tls_config(t: &TlsFiles) -> Result<Arc<rustls::ClientConfig>> {
         .with_root_certificates(roots);
     let cfg = match (&t.client_cert_pem, &t.client_key_pem) {
         (Some(cert), Some(key)) => {
-            let mut rd = io::BufReader::new(cert.as_bytes());
-            let chain: Vec<_> = rustls_pemfile::certs(&mut rd)
+            let chain: Vec<_> = rustls::pki_types::CertificateDer::pem_slice_iter(cert.as_bytes())
                 .collect::<std::result::Result<_, _>>()
                 .map_err(|e| bad(format!("smtp_client_cert_file: {e}")))?;
-            let mut rd = io::BufReader::new(key.as_bytes());
-            let key = rustls_pemfile::private_key(&mut rd)
-                .map_err(|e| bad(format!("smtp_client_key_file: {e}")))?
-                .ok_or_else(|| bad("smtp_client_key_file holds no key".into()))?;
+            let key =
+                rustls::pki_types::PrivateKeyDer::from_pem_slice(key.as_bytes()).map_err(|e| {
+                    match e {
+                        rustls::pki_types::pem::Error::NoItemsFound => {
+                            bad("smtp_client_key_file holds no key".into())
+                        }
+                        e => bad(format!("smtp_client_key_file: {e}")),
+                    }
+                })?;
             b.with_client_auth_cert(chain, key)
                 .map_err(|e| bad(format!("smtp client certificate: {e}")))?
         }

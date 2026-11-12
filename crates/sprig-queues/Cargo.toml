@@ -44,7 +44,6 @@ sprig-mover.workspace = true
 sprig-shard.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "test-util", "rt-multi-thread"] }
 rustls.workspace = true
-rustls-pemfile.workspace = true
 tokio-rustls.workspace = true
 
 [lints]

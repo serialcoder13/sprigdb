@@ -9,6 +9,7 @@
     clippy::many_single_char_names
 )]
 
+use rustls::pki_types::pem::PemObject as _;
 use std::sync::Arc;
 
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, SanType};
@@ -49,15 +50,13 @@ impl Ca {
 }
 
 fn pem_certs(pem: &str) -> Vec<rustls::pki_types::CertificateDer<'static>> {
-    rustls_pemfile::certs(&mut std::io::BufReader::new(pem.as_bytes()))
+    rustls::pki_types::CertificateDer::pem_slice_iter(pem.as_bytes())
         .collect::<std::result::Result<_, _>>()
         .unwrap()
 }
 
 fn pem_key(pem: &str) -> rustls::pki_types::PrivateKeyDer<'static> {
-    rustls_pemfile::private_key(&mut std::io::BufReader::new(pem.as_bytes()))
-        .unwrap()
-        .unwrap()
+    rustls::pki_types::PrivateKeyDer::from_pem_slice(pem.as_bytes()).unwrap()
 }
 
 /// A server config for `ca`'s leaf; with `clients`, client certificates of

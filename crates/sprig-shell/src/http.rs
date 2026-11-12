@@ -7,6 +7,7 @@
 //! dropped: that is how a running `Sql.Query` is cancelled (the gateway
 //! kills the backend query when the stream goes away).
 
+use rustls::pki_types::pem::PemObject as _;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -155,7 +156,7 @@ fn tls_config(ca_file: Option<&Path>) -> Result<tokio_rustls::TlsConnector> {
         let pem = std::fs::read(p).map_err(|e| {
             ShellError::shell(ShellCode::ProfileInvalid, format!("{}: {e}", p.display()))
         })?;
-        for c in rustls_pemfile::certs(&mut pem.as_slice()) {
+        for c in rustls::pki_types::CertificateDer::pem_slice_iter(&pem) {
             let c = c.map_err(|e| {
                 ShellError::shell(ShellCode::ProfileInvalid, format!("{}: {e}", p.display()))
             })?;

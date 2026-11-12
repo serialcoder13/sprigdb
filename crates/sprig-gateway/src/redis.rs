@@ -740,8 +740,13 @@ mod mark_tests {
     fn marks_writes_where_the_feed_reads_them() {
         let m = mark("UPDATE `d`.`db0` SET v = 1");
         assert!(m.starts_with("/*sprig h=") && m.ends_with("*/ UPDATE `d`.`db0` SET v = 1"));
-        let b = mark("BEGIN NOT ATOMIC SET @a = 1; INSERT INTO x VALUES (1) ON DUPLICATE KEY UPDATE v = 1; IF @a THEN UPDATE y SET v = 2; END IF; DELETE FROM z; END");
-        assert_eq!(b.matches("o=k*/").count(), 4, "{b}");
+        let b = mark(
+            "BEGIN NOT ATOMIC SET @a = 1; INSERT INTO x VALUES (1) ON DUPLICATE KEY UPDATE v = 1; IF @a THEN UPDATE y SET v = 2; END IF; DELETE FROM z; END",
+        );
+        // Three writes: the INSERT (its ON DUPLICATE KEY UPDATE is part of
+        // it, not a statement), the UPDATE after THEN, the DELETE.
+        assert_eq!(b.matches("o=k*/").count(), 3, "{b}");
+        assert!(b.contains("ON DUPLICATE KEY UPDATE v = 1"), "{b}");
         assert!(b.contains("INSERT /*sprig h=") && b.contains("THEN UPDATE /*sprig h="));
         assert!(is_write(" insert into t values (1)") && is_write("BEGIN NOT ATOMIC END"));
         assert!(!is_write("SELECT 1") && !is_write("BEGIN"));

@@ -33,7 +33,6 @@ parquet = { version = "=60.1.0", default-features = false, features = ["zstd"] }
 # SHA-256 (batch ids, payload hashes).
 ring.workspace = true
 rustls.workspace = true
-rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sprig-catalog.workspace = true

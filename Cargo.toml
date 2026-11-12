@@ -63,7 +63,6 @@ mysql_async = { version = "0.37", default-features = false, features = ["minimal
 mysql_common = { version = "0.37", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
-rustls-pemfile = "2.2"
 rcgen = "0.14"
 
 # The binlog client and parser (chapter 10): CRC32 event checksums, zlib for

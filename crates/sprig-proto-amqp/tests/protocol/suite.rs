@@ -4,6 +4,7 @@
 // and `sprig-queues/tests/protocol.rs` (the queue engine), each of which
 // defines `engine_under_test` and the `Blocker` type before including it.
 
+use rustls::pki_types::pem::PemObject as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -2919,7 +2920,7 @@ fn unused(_: Incoming, _: SocketAddr) {}
 async fn tls_stream(addr: &str) -> tokio_rustls::client::TlsStream<TcpStream> {
     let mut roots = rustls::RootCertStore::empty();
     let pem = std::fs::read(var("SPRIG_AMQP_CA").unwrap()).unwrap();
-    for c in rustls_pemfile::certs(&mut pem.as_slice()) {
+    for c in rustls::pki_types::CertificateDer::pem_slice_iter(&pem) {
         roots.add(c.unwrap()).unwrap();
     }
     let cfg = rustls::ClientConfig::builder()

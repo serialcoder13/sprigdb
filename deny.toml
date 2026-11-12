@@ -32,6 +32,19 @@ allow = [
 crate = "webpki-roots"
 allow = ["CDLA-Permissive-2.0"]
 
+# dragonbox_ecma (float printing, via the oxc JavaScript compiler that the
+# logic layer uses, R7) is "Apache-2.0 WITH LLVM-exception OR BSL-1.0". Both
+# are permissive and Apache-2.0-compatible. Allowed for this crate only.
+[[licenses.exceptions]]
+crate = "dragonbox_ecma"
+allow = ["Apache-2.0 WITH LLVM-exception", "BSL-1.0"]
+
+# tiny-keccak (SHA-3) is CC0-1.0, a public-domain dedication. Allowed for this
+# crate only.
+[[licenses.exceptions]]
+crate = "tiny-keccak"
+allow = ["CC0-1.0"]
+
 [licenses.private]
 # Workspace crates are Apache-2.0 and never published from here.
 ignore = true

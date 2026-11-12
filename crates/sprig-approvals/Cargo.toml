@@ -22,7 +22,6 @@ sha2.workspace = true
 # roots (the same `webpki-roots` 1.x sprig-sinks uses; CDLA-Permissive-2.0
 # data under an MPL-2.0 crate, already in the tree).
 rustls.workspace = true
-rustls-pemfile.workspace = true
 tokio-rustls.workspace = true
 webpki-roots = "1"
 # The `approvals` migration module and the catalog locator.

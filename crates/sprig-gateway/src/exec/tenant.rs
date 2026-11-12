@@ -1149,7 +1149,17 @@ impl PassSession {
         // (typed tables in inheritance groups).
         let mut deferred = false;
         if let Some(step) = self
-            .tenant_inherit(cx, text, attrs, more, format, &cat, out, false, &mut deferred)
+            .tenant_inherit(
+                cx,
+                text,
+                attrs,
+                more,
+                format,
+                &cat,
+                out,
+                false,
+                &mut deferred,
+            )
             .await?
         {
             return Ok(step);
@@ -1165,7 +1175,17 @@ impl PassSession {
         // didn't take.
         if deferred
             && let Some(step) = self
-                .tenant_inherit(cx, text, attrs, more, format, &cat, out, true, &mut deferred)
+                .tenant_inherit(
+                    cx,
+                    text,
+                    attrs,
+                    more,
+                    format,
+                    &cat,
+                    out,
+                    true,
+                    &mut deferred,
+                )
                 .await?
         {
             return Ok(step);

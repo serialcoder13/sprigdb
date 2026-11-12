@@ -32,6 +32,7 @@
     clippy::cast_precision_loss
 )]
 
+use rustls::pki_types::pem::PemObject as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -57,7 +58,7 @@ async fn connect(tls: bool) -> Client<Box<dyn Io>> {
     }
     let mut roots = rustls::RootCertStore::empty();
     let pem = std::fs::read(env("SPRIG_KAFKA_CA").unwrap()).unwrap();
-    for c in rustls_pemfile::certs(&mut pem.as_slice()) {
+    for c in rustls::pki_types::CertificateDer::pem_slice_iter(&pem) {
         roots.add(c.unwrap()).unwrap();
     }
     let cfg = rustls::ClientConfig::builder()

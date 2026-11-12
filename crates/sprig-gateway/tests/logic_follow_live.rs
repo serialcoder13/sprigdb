@@ -388,18 +388,14 @@ async fn test_runs() {
         .insert("authorization", auth.parse().unwrap());
     let r = client.test_run(req).await;
     let ok = match &r {
-        Ok(resp) => {
-            let resp = resp.get_ref();
-            let report = resp
-                .report
-                .as_ref()
-                .map(|s| {
-                    unproto(&prost_types::Value {
-                        kind: Some(prost_types::value::Kind::StructValue(s.clone())),
-                    })
+        Ok(answer) => {
+            let answer = answer.get_ref();
+            let report = answer.report.as_ref().map_or(Value::Null, |s| {
+                unproto(&prost_types::Value {
+                    kind: Some(prost_types::value::Kind::StructValue(s.clone())),
                 })
-                .unwrap_or(Value::Null);
-            resp.event == "output"
+            });
+            answer.event == "output"
                 && report["result"]["value"].as_f64() == Some(42.0)
                 && report["draft"] == true
                 && report["logs"] == json!(["doubling 21"])

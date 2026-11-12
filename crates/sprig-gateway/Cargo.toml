@@ -123,7 +123,7 @@ sprig-meta = { workspace = true, features = ["conformance"] }
 lapin = { version = "=4.12.3", default-features = false, features = ["default-runtime"] }
 # The live test of logic calls from MongoDB and Redis (chapter 41, R7):
 # the drivers the R5 and R6 suites use, same versions and features.
-mongodb = { version = "=3.9.1", default-features = false, features = ["compat-3-0-0", "openssl-tls", "zstd-compression", "snappy-compression", "zlib-compression"] }
+mongodb = { version = "=3.9.1", default-features = false, features = ["compat-3-0-0", "rustls-tls", "zstd-compression", "snappy-compression", "zlib-compression"] }
 redis = { version = "=0.27.6", default-features = false, features = ["aio", "tokio-comp"] }
 
 [lints]

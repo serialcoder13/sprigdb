@@ -8,6 +8,7 @@ pub mod s3;
 pub mod script;
 pub mod webhook;
 
+use rustls::pki_types::pem::PemObject as _;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -264,8 +265,7 @@ impl TargetCtx {
 pub fn tls_config(conn: &Conn, alpn: &[&[u8]]) -> Result<Arc<rustls::ClientConfig>> {
     let mut roots = rustls::RootCertStore::empty();
     if let Some(pem) = conn.opt("ca_pem") {
-        let mut rd = std::io::BufReader::new(pem.as_bytes());
-        for c in rustls_pemfile::certs(&mut rd) {
+        for c in rustls::pki_types::CertificateDer::pem_slice_iter(pem.as_bytes()) {
             let c = c.map_err(|e| bad_option(format!("ca_pem: {e}")))?;
             roots
                 .add(c)
@@ -281,14 +281,18 @@ pub fn tls_config(conn: &Conn, alpn: &[&[u8]]) -> Result<Arc<rustls::ClientConfi
         .with_root_certificates(roots);
     let mut cfg = match (conn.secrets.get("tls_cert"), conn.secrets.get("tls_key")) {
         (Some(cert), Some(key)) => {
-            let mut rd = std::io::BufReader::new(cert.as_bytes());
-            let chain: Vec<_> = rustls_pemfile::certs(&mut rd)
+            let chain: Vec<_> = rustls::pki_types::CertificateDer::pem_slice_iter(cert.as_bytes())
                 .collect::<std::result::Result<_, _>>()
                 .map_err(|e| err(SprigCode::SinkCredentialsInvalid, format!("tls_cert: {e}")))?;
-            let mut rd = std::io::BufReader::new(key.as_bytes());
-            let key = rustls_pemfile::private_key(&mut rd)
-                .map_err(|e| err(SprigCode::SinkCredentialsInvalid, format!("tls_key: {e}")))?
-                .ok_or_else(|| err(SprigCode::SinkCredentialsInvalid, "tls_key holds no key"))?;
+            let key =
+                rustls::pki_types::PrivateKeyDer::from_pem_slice(key.as_bytes()).map_err(|e| {
+                    match e {
+                        rustls::pki_types::pem::Error::NoItemsFound => {
+                            err(SprigCode::SinkCredentialsInvalid, "tls_key holds no key")
+                        }
+                        e => err(SprigCode::SinkCredentialsInvalid, format!("tls_key: {e}")),
+                    }
+                })?;
             b.with_client_auth_cert(chain, key)
                 .map_err(|e| err(SprigCode::SinkCredentialsInvalid, format!("mTLS: {e}")))?
         }

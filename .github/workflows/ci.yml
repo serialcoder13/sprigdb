@@ -53,6 +53,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
+      # etcd-client and tonic build scripts need protoc.
+      - run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
@@ -62,6 +64,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
+      # etcd-client and tonic build scripts need protoc.
+      - run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
@@ -92,6 +96,8 @@ jobs:
       - run: pnpm check
       - run: pnpm build
       - run: rustup toolchain install
+      # etcd-client and tonic build scripts need protoc.
+      - run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
         working-directory: .
       - uses: Swatinem/rust-cache@v2
       - run: SPRIG_STUDIO_DIST=$PWD/studio/dist cargo test --locked -p sprig-studio
@@ -130,6 +136,8 @@ jobs:
           name: studio-dist
           path: studio/dist
       - run: rustup toolchain install
+      # etcd-client and tonic build scripts need protoc.
+      - run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - uses: Swatinem/rust-cache@v2
       - name: Start Compose (etcd + one node)
         working-directory: deploy/compose
@@ -163,6 +171,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
+          # The action's container must install rust-toolchain.toml's version.
+          rust-version: "1.94.0"
           command: check advisories bans licenses sources
 
   compose:
@@ -208,6 +218,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install nightly --profile minimal
+      # etcd-client and tonic build scripts need protoc.
+      - run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
@@ -259,6 +271,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
+      # etcd-client and tonic build scripts need protoc.
+      - run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
@@ -314,6 +328,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
+      # etcd-client and tonic build scripts need protoc.
+      - run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - uses: Swatinem/rust-cache@v2
         with:
           key: tokio-unstable
@@ -367,6 +383,8 @@ jobs:
             sudo modprobe sch_netem
           }
       - run: rustup toolchain install
+      # etcd-client and tonic build scripts need protoc.
+      - run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
@@ -439,6 +457,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
+      # etcd-client and tonic build scripts need protoc.
+      - run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - uses: Swatinem/rust-cache@v2
       - name: Start Compose (one node) and build the connector images
         working-directory: deploy/compose
@@ -505,6 +525,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
+      # etcd-client and tonic build scripts need protoc.
+      - run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - uses: Swatinem/rust-cache@v2
       - name: Start Compose (etcd + one node) and build the m03 images
         working-directory: deploy/compose
@@ -567,6 +589,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
+      # etcd-client and tonic build scripts need protoc.
+      - run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - uses: Swatinem/rust-cache@v2
       - name: Start Compose (etcd and every topology) and build the m03 images
         working-directory: deploy/compose
