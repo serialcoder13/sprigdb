@@ -635,7 +635,11 @@ async fn grpc_test_calls_answer_the_statements_rows() {
     )
     .await;
     ok(&mut c, "CREATE STREAM ev PARTITIONS 1").await;
-    ok(&mut c, "CREATE SINK s FROM STREAM ev TO WEBHOOK CONNECTION hook").await;
+    ok(
+        &mut c,
+        "CREATE SINK s FROM STREAM ev TO WEBHOOK CONNECTION hook",
+    )
+    .await;
     ok(&mut c, "ALTER SINK s PAUSE").await;
     for i in 0..3 {
         ok(

@@ -303,6 +303,10 @@ impl SessionExec for ObservedSession {
         self.inner.attach_capture(capture);
     }
 
+    fn workload(&self, db: &str, table: &str) -> Option<crate::workload::FrontCapture> {
+        self.inner.workload(db, table)
+    }
+
     fn idle_timeout(&self) -> Option<std::time::Duration> {
         self.inner.idle_timeout()
     }
@@ -317,6 +321,10 @@ impl SessionExec for ObservedSession {
 
     fn row_policy_docs(&self) -> Option<std::sync::Arc<crate::tenant::rls::DocViews>> {
         self.inner.row_policy_docs()
+    }
+
+    fn holds_tenant_privilege(&self, action: sprig_auth::authz::Action) -> Option<bool> {
+        self.inner.holds_tenant_privilege(action)
     }
 }
 

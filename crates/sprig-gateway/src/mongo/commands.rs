@@ -666,41 +666,46 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
         c.sql = Some(s);
         return Err(e);
     }
+    // Chapter 12's workload store (`Fingerprinter::mongo`, S130).
+    let wl = super::workload::start(&c.shared.engine, &mut s, tenant, name, body, &db).await;
     let started = Instant::now();
     // Retryable writes (chapter 30 step 7): the writes and their record
     // in one MariaDB transaction.
     let mut tries = 0u64;
-    let r = loop {
-        let r = match (&lsid, txn_number) {
-            (Some(l), Some(n)) if super::retry::applies(name, body) => {
-                super::retry::run(c, &mut s, name, body, &db, l, n).await
+    let r = super::workload::scoped(wl.as_ref(), async {
+        loop {
+            let r = match (&lsid, txn_number) {
+                (Some(l), Some(n)) if super::retry::applies(name, body) => {
+                    super::retry::run(c, &mut s, name, body, &db, l, n).await
+                }
+                _ => {
+                    // MongoDB 9.0's per-operation memory limit (M3, S99).
+                    let mem = c.shared.settings().max_operation_memory_bytes;
+                    sprig_doc::opmem::scope(
+                        mem,
+                        Box::pin(exec(c, &mut s, name, body, &db, lsid.as_deref())),
+                    )
+                    .await
+                }
+            };
+            // Concurrent first writes to a new database: another session
+            // created it a moment ago, and this one's names may not show it
+            // yet (chapter 07's name map follows the catalog's watch).
+            match &r {
+                Err(e)
+                    if e.code == code::NAMESPACE_NOT_FOUND
+                        && e.message.contains("Unknown database")
+                        && super::writes::is_write(name)
+                        && tries < 8 =>
+                {
+                    tries += 1;
+                    tokio::time::sleep(Duration::from_millis(50 * tries)).await;
+                }
+                _ => break r,
             }
-            _ => {
-                // MongoDB 9.0's per-operation memory limit (M3, S99).
-                let mem = c.shared.settings().max_operation_memory_bytes;
-                sprig_doc::opmem::scope(
-                    mem,
-                    Box::pin(exec(c, &mut s, name, body, &db, lsid.as_deref())),
-                )
-                .await
-            }
-        };
-        // Concurrent first writes to a new database: another session
-        // created it a moment ago, and this one's names may not show it
-        // yet (chapter 07's name map follows the catalog's watch).
-        match &r {
-            Err(e)
-                if e.code == code::NAMESPACE_NOT_FOUND
-                    && e.message.contains("Unknown database")
-                    && super::writes::is_write(name)
-                    && tries < 8 =>
-            {
-                tries += 1;
-                tokio::time::sleep(Duration::from_millis(50 * tries)).await;
-            }
-            _ => break r,
         }
-    };
+    })
+    .await;
     let r = if applied.max_time_ms.is_some() {
         super::qsettings::reset_max_time(&mut s).await;
         r.map_err(super::qsettings::map_timeout)
@@ -708,14 +713,17 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
         r
     };
     c.sql = Some(s);
+    // A point read answers with raw bytes (`Conn::raw`): count them.
+    let raw_n = c.raw.as_ref().and_then(|raw| {
+        let cur = raw.get_document("cursor").ok()?;
+        let b = cur.get_array("firstBatch").ok()?;
+        i64::try_from(b.into_iter().count()).ok()
+    });
+    if let Some(st) = wl {
+        super::workload::finish(st, &r, raw_n, name);
+    }
     // `$queryStats` (M3, S98).
     if let Ok(d) = &r {
-        // A point read answers with raw bytes (`Conn::raw`): count them.
-        let raw_n = c.raw.as_ref().and_then(|raw| {
-            let cur = raw.get_document("cursor").ok()?;
-            let b = cur.get_array("firstBatch").ok()?;
-            i64::try_from(b.into_iter().count()).ok()
-        });
         super::qsettings::record(
             tenant,
             name,
@@ -727,6 +735,8 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
             raw_n,
         );
     }
+    // `$collStats.latencyStats` (M5, S79).
+    super::diag::record_latency(tenant, name, body, &db, started.elapsed());
     r
 }
 
@@ -920,7 +930,10 @@ async fn open_change_stream(
         expanded: super::changes::expanded_of(stage),
         visibility,
     };
-    let stream = feed.open(spec, resume.as_ref()).await?;
+    let stream = feed
+        .open(spec, resume.as_ref())
+        .await
+        .inspect_err(super::status::stream_error)?;
     let token = stream.token.clone();
     let ns = if coll.is_empty() {
         format!("{db}.$cmd.aggregate")
@@ -941,6 +954,8 @@ async fn open_change_stream(
         bs,
         c.shared.settings().max_cursors,
     )?;
+    // MongoDB 9.0's option counters (bugfix-60).
+    super::status::stream_options(stage, body);
     Ok(
         doc! {"cursor": {"firstBatch": [], "postBatchResumeToken": token_doc(&token), "id": id, "ns": ns}, "ok": 1.0},
     )
@@ -1286,6 +1301,7 @@ async fn exec(
             }
             CursorTable::touch(cursor);
             if let Some(st) = cursor.stream.as_mut() {
+                super::status::stream_get_more(body);
                 // A change stream: wait up to maxTimeMS for events.
                 let wait = Duration::from_millis(
                     i64_of(body, "maxTimeMS")
@@ -1314,17 +1330,20 @@ async fn exec(
                     crate::tenant::rls::DocViews::fingerprint(sql.row_policy_docs().as_deref());
                 if now != opened_with {
                     c.shared.cursors.remove(id);
-                    return Err(MongoError::new(
+                    let e = MongoError::new(
                         234,
                         "row-level security for this change stream changed; resume it to apply \
                          the new policies",
                     )
-                    .label("ResumableChangeStreamError"));
+                    .label("ResumableChangeStreamError");
+                    super::status::stream_error(&e);
+                    return Err(e);
                 }
                 let batch = match r {
                     Ok(b) => b,
                     Err(e) => {
                         c.shared.cursors.remove(id);
+                        super::status::stream_error(&e);
                         return Err(e);
                     }
                 };
@@ -1433,6 +1452,7 @@ async fn exec(
                 db: db.to_owned(),
                 coll: coll.clone(),
             };
+            let mut spilled = None;
             let docs = if coll.is_empty()
                 && pipeline
                     .first()
@@ -1501,14 +1521,30 @@ async fn exec(
                 }
                 docs
             } else {
+                // M5: `allowDiskUse` (S72–S76); the result may be on disk.
+                let ctx = super::spill::ctx_for(
+                    body,
+                    "aggregate",
+                    owner(c).tenant,
+                    c.shared.d.live.as_ref(),
+                )?;
                 // `$out`/`$merge` with `bypassDocumentValidation` (M3).
-                sprig_doc::validate::bypass(
-                    body.get_bool("bypassDocumentValidation").unwrap_or(false),
-                    Box::pin(engine.aggregate(sql, &ns, &pipeline)),
-                )
-                .await?
+                spilled = Some(
+                    sprig_doc::validate::bypass(
+                        body.get_bool("bypassDocumentValidation").unwrap_or(false),
+                        sprig_doc::spill::scope(
+                            ctx,
+                            Box::pin(engine.aggregate_seq(sql, &ns, &pipeline)),
+                        ),
+                    )
+                    .await?,
+                );
+                Vec::new()
             };
-            let plan = sprig_doc::engine::CursorPlan::from_docs(ns.clone(), docs);
+            let plan = match spilled {
+                Some(seq) => sprig_doc::engine::CursorPlan::from_seq(ns.clone(), seq)?,
+                None => sprig_doc::engine::CursorPlan::from_docs(ns.clone(), docs),
+            };
             open_cursor(
                 &c.shared,
                 owner(c),
@@ -1549,7 +1585,9 @@ async fn exec(
         }
         "listIndexes" => {
             let ns = ns_of("listIndexes")?;
-            let Some(list) = engine.list_indexes(sql, &ns).await? else {
+            // Automatic indexes only when asked (chapter 13, S131).
+            let show_auto = body.get_bool("showAutoIndexes").unwrap_or(false);
+            let Some(list) = engine.list_indexes_with(sql, &ns, show_auto).await? else {
                 return Err(MongoError::new(
                     code::NAMESPACE_NOT_FOUND,
                     format!("ns does not exist: {ns}"),

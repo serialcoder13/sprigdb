@@ -82,17 +82,35 @@ pub(crate) fn scope_for(
         ) && sprig_doc::serverjs::mentions_js(body));
     let tenants = c.shared.d.tenants.clone();
     let tenant = c.sql.as_ref().map(SqlRunner::tenant).filter(|t| *t != 0);
+    // The command's maxTimeMS bounds its code too (bugfix-57); a getMore's
+    // is its wait for a tailable cursor, not a time limit.
+    let max_time_ms = (name != "getMore")
+        .then(|| max_time_ms(body))
+        .flatten();
     async move {
         if !wanted {
             return None;
         }
-        resolve(tenants, tenant).await
+        resolve(tenants, tenant, max_time_ms).await
     }
+}
+
+/// A command's `maxTimeMS` (a whole number of milliseconds; 0: none).
+fn max_time_ms(body: &Document) -> Option<u64> {
+    let v = match body.get("maxTimeMS")? {
+        Bson::Int32(n) => i64::from(*n),
+        Bson::Int64(n) => *n,
+        #[allow(clippy::cast_possible_truncation)]
+        Bson::Double(f) if f.fract() == 0.0 => *f as i64,
+        _ => return None,
+    };
+    u64::try_from(v).ok().filter(|n| *n > 0)
 }
 
 async fn resolve(
     tenants: Option<Arc<crate::tenant::TenantServices>>,
     tenant: Option<u64>,
+    max_time_ms: Option<u64>,
 ) -> Option<Arc<Scope>> {
     let mut limits = sprig_logic_js::Limits::default();
     if let Some(svc) = &tenants {
@@ -108,9 +126,10 @@ async fn resolve(
         }
         limits = sprig_logic::settings::limits(&svc.settings, &ctx, Some(&cat.settings)).0;
     }
-    Some(Scope::new(
+    Some(Scope::with_max_time(
         Arc::new(Qjs),
         limits.wall,
         usize::try_from(limits.memory_bytes).unwrap_or(usize::MAX),
+        max_time_ms,
     ))
 }

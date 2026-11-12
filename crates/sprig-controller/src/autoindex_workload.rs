@@ -175,6 +175,48 @@ pub fn bind_sample(
     })
 }
 
+/// [`bind_sample`] for a statement already written with its values (a
+/// MongoDB sample's replay, S132): only rewritten to physical names.
+#[must_use]
+pub fn bind_text(
+    map: &dyn NameMap,
+    fp: Fingerprint,
+    sql: &str,
+    role: StatementRole,
+    s: &OpenedSample,
+) -> Option<ReplayStatement> {
+    let c = &s.payload.context;
+    let logical = c.database.as_deref();
+    let physical = match logical {
+        Some(db) => Some(map.physical(db, Purpose::Session).ok()?.single()?.to_string()),
+        None => None,
+    };
+    let ctx = RewriteCtx::new(map, Persona::MariaDb)
+        .lex(lex_for(None))
+        .current_db(logical);
+    let sql = match rewrite(sql.as_bytes(), &ctx) {
+        Ok(r) => r.sql_lossy(),
+        Err(e) => {
+            tracing::debug!(fingerprint = %fp, sample = s.sample_id, errno = e.errno(),
+                "a MongoDB sample's names didn't map; skipped");
+            return None;
+        }
+    };
+    Some(ReplayStatement {
+        fingerprint: fp,
+        sample_id: s.sample_id,
+        role,
+        sql,
+        context: SessionContext {
+            database: physical,
+            sql_mode: None,
+            time_zone: None,
+            charset: None,
+            collation: None,
+        },
+    })
+}
+
 /// Opens up to `max` samples of each fingerprint in `fps` and binds them
 /// in physical names, in `fps` order. Samples that don't open or bind are
 /// skipped.
@@ -188,6 +230,7 @@ pub async fn statements(
     tenant: TenantId,
     fps: &[(Fingerprint, StatementRole)],
     max: usize,
+    doc: Option<&sprig_advisor::autoindex::model::IndexDef>,
 ) -> Result<Vec<ReplayStatement>> {
     if fps.is_empty() {
         return Ok(Vec::new());
@@ -196,15 +239,30 @@ pub async fn statements(
     let mut conn = crate::catalogs::acquire(&ep.pool, "workload samples").await?;
     let t = WorkloadTables::new(ep.store.schema());
     let ids: Vec<Fingerprint> = fps.iter().map(|(f, _)| *f).collect();
-    let texts: BTreeMap<Fingerprint, String> = t
+    let rows: BTreeMap<Fingerprint, sprig_workload::store::FingerprintRow> = t
         .fingerprints(&mut conn, &ids)
         .await?
         .into_iter()
-        .map(|r| (r.id, r.text.to_string()))
+        .map(|r| (r.id, r))
         .collect();
     let mut out = Vec::new();
     for (fp, role) in fps {
-        let Some(text) = texts.get(fp) else { continue };
+        let Some(row) = rows.get(fp) else { continue };
+        let text = &row.text.to_string();
+        if row.kind == FpKind::Mongo {
+            // A MongoDB sample is its condition values (S132): replayed as
+            // the statement the engine sends under the document index.
+            let Some(def) = doc.filter(|d| sprig_advisor::autoindex::doc::is_doc(d)) else {
+                continue;
+            };
+            let opened = t.open_samples(&mut conn, keyring, tenant, *fp, max).await?;
+            out.extend(opened.iter().filter_map(|s| {
+                let sql =
+                    sprig_advisor::autoindex::doc::replay_sql(&row.shape, &s.payload.literals, def)?;
+                bind_text(map, *fp, &sql, *role, s)
+            }));
+            continue;
+        }
         let opened = t.open_samples(&mut conn, keyring, tenant, *fp, max).await?;
         out.extend(
             opened
@@ -383,7 +441,7 @@ impl observe::WorkloadSource for ObserveSource {
             .iter()
             .map(|f| (f.id, StatementRole::Regression))
             .collect();
-        let bound = statements(&*self.locator, &**keyring, &map, tenant, &fps, 1).await?;
+        let bound = statements(&*self.locator, &**keyring, &map, tenant, &fps, 1, None).await?;
         Ok(Some(
             bound
                 .into_iter()

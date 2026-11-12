@@ -40,11 +40,14 @@ pub mod search;
 /// Server-side JavaScript (M4).
 pub mod serverjs;
 pub mod snapshot;
+/// Spilling's settings and `allowDiskUse` (M5).
+pub mod spill;
 pub mod sql;
 /// `serverStatus`, `connectionStatus` and change-stream reporting (M4).
 pub mod status;
 pub mod txn;
 pub mod users;
+pub mod workload;
 pub mod writes;
 
 use std::borrow::Cow;
@@ -389,6 +392,8 @@ impl MongoFrontend {
             }
             _ => None,
         };
+        // M5: this gateway's spill directory; stale ones are removed.
+        spill::start(d.live.as_ref(), &d.gateway_id);
         let mut decoy_secret = [0u8; 32];
         let _ = getrandom::fill(&mut decoy_secret);
         let shared = Arc::new(Shared {
@@ -401,7 +406,7 @@ impl MongoFrontend {
                 // Chapter 39: text and search indexes through the
                 // gateway's search service.
                 Some(c) => sprig_doc::engine::Engine::with_catalog(
-                    sprig_doc::engine::EngineConfig::default(),
+                    spill::engine_config(d.live.as_ref()),
                     Arc::clone(c) as Arc<dyn sprig_doc::catalog::DocCatalog>,
                 )
                 .with_text(Arc::new(crate::search::docs::DocSearch::default())),

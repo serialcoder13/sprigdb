@@ -448,7 +448,9 @@ impl CostModel for Model {
                 .iter()
                 .map(String::as_str),
         ) * p.maintenance_cost_ms;
-        let bytes = if c.def.kind == super::model::IndexKind::FieldColumn {
+        let bytes = if super::doc::is_doc(&c.def) {
+            super::doc::bytes(&c.def, t.stats)
+        } else if c.def.kind == super::model::IndexKind::FieldColumn {
             t.field_bytes(&c.def.parts)
         } else {
             t.bytes(&c.def.parts)

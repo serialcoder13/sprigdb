@@ -1489,6 +1489,7 @@ impl Evaluator {
                     IndexKind::Vector => DataModel::Vector,
                     IndexKind::Spatial | IndexKind::S2 => DataModel::Geo,
                     _ if super::kv::is_kv(&f.candidate) => DataModel::Kv,
+                    _ if super::doc::is_doc_candidate(&f.candidate) => DataModel::Document,
                     _ => DataModel::Sql,
                 },
                 kind: StoredKind::from(f.candidate.def.kind),

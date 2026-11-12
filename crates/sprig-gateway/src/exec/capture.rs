@@ -232,7 +232,11 @@ impl PassSession {
 
     /// `workload.capture_samples` for the tenant (and its current
     /// database).
-    fn wl_capture_allowed(&self, ts: &TenantSession, cat: Option<&TenantCatalog>) -> bool {
+    pub(super) fn wl_capture_allowed(
+        &self,
+        ts: &TenantSession,
+        cat: Option<&TenantCatalog>,
+    ) -> bool {
         let Some(cat) = cat else {
             return false;
         };

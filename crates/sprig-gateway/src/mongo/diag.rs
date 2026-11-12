@@ -3,8 +3,11 @@
 //!
 //! - `$currentOp` (`aggregate: 1` on `admin`) lists the caller's own
 //!   connections on this gateway, as `SHOW PROCESSLIST` does for a user
-//!   without chapter 29's `PROCESS` privilege; `allUsers: true` is accepted
-//!   and shows the same. The running command is always listed;
+//!   without chapter 29's `PROCESS` privilege. `allUsers: true` lists
+//!   every session of the tenant on this gateway for a user holding
+//!   `PROCESS` on the tenant (MongoDB's `inprog`), and answers 13
+//!   `Unauthorized` otherwise (M5, decision S78). The running command is
+//!   always listed;
 //!   `idleConnections: true` adds idle ones. Fields with no meaning in
 //!   SprigDB (locks, yields, flow control) are zero or empty.
 //! - `$listSessions` (on `config.system.sessions`) lists the caller's
@@ -98,11 +101,27 @@ fn current_op(
     }
     let idle = spec.get_bool("idleConnections").unwrap_or(false);
     let who = owner(c);
+    // M5 (S78): every user's sessions need `PROCESS` on the tenant.
+    let all_users = spec.get_bool("allUsers").unwrap_or(false);
+    if all_users
+        && c.sql
+            .as_ref()
+            .and_then(|s| s.holds_tenant_privilege(sprig_auth::authz::Action::Process))
+            != Some(true)
+    {
+        return Err(MongoError::new(
+            code::UNAUTHORIZED,
+            format!(
+                "not authorized on admin to execute command {{ aggregate: 1, pipeline: [ {{ $currentOp: {spec} }} ] }} (needs the PROCESS privilege)"
+            ),
+        ));
+    }
     let own = c.sql.as_ref().map(super::sql::SqlSession::session_id);
     let now = DateTime::now();
     let mut out = Vec::new();
     for r in c.shared.d.sessions.list() {
-        if r.tenant.map_or(0, |t| t.0) != who.tenant || r.user.as_deref() != Some(who.user.as_str())
+        if r.tenant.map_or(0, |t| t.0) != who.tenant
+            || (!all_users && r.user.as_deref() != Some(who.user.as_str()))
         {
             continue;
         }
@@ -138,7 +157,7 @@ fn current_op(
         d.insert(
             "effectiveUsers",
             vec![Bson::Document(
-                doc! {"user": who.user.clone(), "db": "admin"},
+                doc! {"user": r.user.clone().unwrap_or_default(), "db": "admin"},
             )],
         );
         d.insert("isFromUserConnection", true);
@@ -204,6 +223,37 @@ fn current_op(
         out.extend(super::status::change_stream_ops(c));
     }
     Ok(out)
+}
+
+/// Records a command on a collection for `$collStats.latencyStats` (M5,
+/// decision S79): reads, writes, other commands, and anything inside a
+/// transaction as a transaction.
+pub(super) fn record_latency(
+    tenant: u64,
+    name: &str,
+    body: &Document,
+    db: &str,
+    took: std::time::Duration,
+) {
+    use sprig_doc::usage::Class;
+    let coll = match name {
+        "getMore" => body.get_str("collection").ok(),
+        _ => body.get_str(name).ok(),
+    };
+    let Some(coll) = coll.filter(|c| !c.is_empty()) else {
+        return;
+    };
+    let class = if body.get_bool("autocommit") == Ok(false) {
+        Class::Transactions
+    } else {
+        match name {
+            "find" | "aggregate" | "count" | "distinct" | "getMore" => Class::Reads,
+            "insert" | "update" | "delete" | "findAndModify" => Class::Writes,
+            _ => Class::Commands,
+        }
+    };
+    let micros = u64::try_from(took.as_micros()).unwrap_or(u64::MAX);
+    sprig_doc::usage::record_latency(tenant, db, coll, class, micros);
 }
 
 fn list_sessions(c: &Conn, arg: &Bson, lsid: Option<Vec<u8>>) -> Result<Vec<Document>, MongoError> {

@@ -320,6 +320,14 @@ pub trait SessionExec: Send {
     /// it (chapter 12). Executors that don't ignore it.
     fn attach_capture(&mut self, _capture: crate::workload::SessionCapture) {}
 
+    /// The gateway's workload capture attached to this session, if any
+    /// (chapter 12: front ends that fingerprint their own requests, such
+    /// as MongoDB's `Fingerprinter::mongo`, record through it), and whether
+    /// the tenant captures parameter samples (`workload.capture_samples`).
+    fn workload(&self, _db: &str, _table: &str) -> Option<crate::workload::FrontCapture> {
+        None
+    }
+
     /// The `wait_timeout` the client set for its session, if it set one:
     /// the front end closes the session after that long without a command,
     /// as MySQL and MariaDB do. `None`: no limit from the client.
@@ -349,6 +357,14 @@ pub trait SessionExec: Send {
     /// what a change stream shows. `None` when the executor can't tell:
     /// callers show nothing then.
     fn row_policy_docs(&self) -> Option<std::sync::Arc<crate::tenant::rls::DocViews>> {
+        None
+    }
+
+    /// Whether the session holds `action` on the whole tenant (chapter
+    /// 29), as `$currentOp` with `allUsers` asks for `PROCESS` (M5).
+    /// `None` when the executor can't tell: callers refuse then.
+    fn holds_tenant_privilege(&self, action: sprig_auth::authz::Action) -> Option<bool> {
+        let _ = action;
         None
     }
 }
@@ -599,6 +615,10 @@ impl SessionExec for HookedSession {
         self.inner.attach_capture(capture);
     }
 
+    fn workload(&self, db: &str, table: &str) -> Option<crate::workload::FrontCapture> {
+        self.inner.workload(db, table)
+    }
+
     fn idle_timeout(&self) -> Option<std::time::Duration> {
         self.inner.idle_timeout()
     }
@@ -613,6 +633,10 @@ impl SessionExec for HookedSession {
 
     fn row_policy_docs(&self) -> Option<std::sync::Arc<crate::tenant::rls::DocViews>> {
         self.inner.row_policy_docs()
+    }
+
+    fn holds_tenant_privilege(&self, action: sprig_auth::authz::Action) -> Option<bool> {
+        self.inner.holds_tenant_privilege(action)
     }
 }
 

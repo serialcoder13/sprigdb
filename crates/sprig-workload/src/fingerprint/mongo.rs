@@ -189,7 +189,11 @@ pub fn fingerprint(input: &MongoInput<'_>) -> (Fingerprint, SampledLiterals) {
     for (path, dir) in &input.sort {
         shape.order_by.push(OrderItem {
             column: ColumnRef::new(alias.clone(), path.clone()),
-            dir: if *dir < 0 { SortDir::Desc } else { SortDir::Asc },
+            dir: if *dir < 0 {
+                SortDir::Desc
+            } else {
+                SortDir::Asc
+            },
         });
     }
     shape.limit = input.limit;
@@ -254,7 +258,11 @@ pub fn quoted(kind: LiteralKind, s: &str) -> SampleValue {
 pub fn boolean(b: bool) -> SampleValue {
     SampleValue {
         kind: LiteralKind::Bool,
-        text: if b { b"TRUE".to_vec() } else { b"FALSE".to_vec() },
+        text: if b {
+            b"TRUE".to_vec()
+        } else {
+            b"FALSE".to_vec()
+        },
     }
 }
 
@@ -282,7 +290,10 @@ mod tests {
                 },
                 MongoPred {
                     path: "qty".into(),
-                    cmp: PredOp::Range { lo: true, hi: false },
+                    cmp: PredOp::Range {
+                        lo: true,
+                        hi: false,
+                    },
                     multikey: false,
                     values: vec![number(&v.to_string())],
                 },
@@ -330,7 +341,10 @@ mod tests {
         let j = f.shape.to_json();
         let back = Shape::from_json(&j).unwrap();
         assert_eq!(back, *f.shape);
-        assert_eq!(f.shape.main_table().unwrap().object_id, Some(ObjectId(1201)));
+        assert_eq!(
+            f.shape.main_table().unwrap().object_id,
+            Some(ObjectId(1201))
+        );
         let PredOp::JsonPath { path, func, cmp } = &f.shape.predicates[0].op else {
             panic!()
         };

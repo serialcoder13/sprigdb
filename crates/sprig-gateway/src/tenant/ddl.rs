@@ -50,6 +50,59 @@ pub struct GatewayDdl<'a> {
     /// The version string the session's persona reports: `VERSION()` in a
     /// body becomes it (gaps row 53).
     version: Option<String>,
+    /// The backends' OK packets for the statement's object DDL, summed
+    /// (R4, decision X36): what the client's OK reports.
+    rows: Option<Arc<BackendRows>>,
+}
+
+/// The rows the backends' OK packets reported for one DDL statement (R4,
+/// decision X36): affected rows, and the `Records: R  Duplicates: D
+/// Warnings: W` info an `ALTER TABLE`, `CREATE INDEX` or `DROP INDEX`
+/// carries (on MariaDB as on MySQL), summed over the statements run.
+#[derive(Debug, Default)]
+pub struct BackendRows(std::sync::Mutex<(u64, Option<[u64; 3]>)>);
+
+impl BackendRows {
+    fn add(&self, affected: u64, info: &[u8]) {
+        let mut g = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        g.0 += affected;
+        if let Some(n) = parse_records(info) {
+            let sum = g.1.get_or_insert([0; 3]);
+            for (s, v) in sum.iter_mut().zip(n) {
+                *s += v;
+            }
+        }
+    }
+
+    /// The affected rows, and the info line when a backend sent one.
+    #[must_use]
+    pub fn get(&self) -> (u64, Option<String>) {
+        let g = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (
+            g.0,
+            g.1.map(|[r, d, w]| format!("Records: {r}  Duplicates: {d}  Warnings: {w}")),
+        )
+    }
+}
+
+/// `Records: R  Duplicates: D  Warnings: W` as its three numbers.
+fn parse_records(info: &[u8]) -> Option<[u64; 3]> {
+    let t = std::str::from_utf8(info).ok()?;
+    let mut it = t.split_whitespace();
+    let mut out = [0u64; 3];
+    for (slot, label) in out.iter_mut().zip(["Records:", "Duplicates:", "Warnings:"]) {
+        if it.next()? != label {
+            return None;
+        }
+        *slot = it.next()?.parse().ok()?;
+    }
+    Some(out)
 }
 
 impl std::fmt::Debug for GatewayDdl<'_> {
@@ -66,7 +119,15 @@ impl<'a> GatewayDdl<'a> {
             ctl,
             ctl_pool: None,
             version: None,
+            rows: None,
         }
+    }
+
+    /// Sums the backends' OK packets into `rows` (R4, decision X36).
+    #[must_use]
+    pub fn counting(mut self, rows: Arc<BackendRows>) -> Self {
+        self.rows = Some(rows);
+        self
     }
 
     /// `VERSION()` in views and stored programs gives `v`, the version the
@@ -563,11 +624,17 @@ impl DdlExecutor for GatewayDdl<'_> {
         let mut err = None;
         loop {
             match bs.next().await {
-                Ok(Some(p)) => {
-                    if let PacketKind::Err(e) = p.kind {
+                Ok(Some(p)) => match &p.kind {
+                    PacketKind::Err(e) => {
                         err = Some(SprigError::backend(e.code, e.sqlstate, e.message.clone()));
                     }
-                }
+                    PacketKind::Ok(ok) => {
+                        if let Some(r) = &self.rows {
+                            r.add(ok.affected_rows, &ok.info);
+                        }
+                    }
+                    _ => {}
+                },
                 Ok(None) => break,
                 Err(e) => {
                     return Err(SprigError::new(
@@ -959,6 +1026,23 @@ impl DdlExecutor for ShardedDdl<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R4, decision X36: the backends' `Records:` info lines are summed;
+    /// a statement without one (a rename) leaves none.
+    #[test]
+    fn backend_rows_sum_the_info_lines() {
+        let r = BackendRows::default();
+        assert_eq!(r.get(), (0, None));
+        r.add(0, b"");
+        assert_eq!(r.get(), (0, None));
+        r.add(2, b"Records: 2  Duplicates: 0  Warnings: 0");
+        r.add(3, b"Records: 3  Duplicates: 1  Warnings: 2");
+        assert_eq!(
+            r.get(),
+            (5, Some("Records: 5  Duplicates: 1  Warnings: 2".into()))
+        );
+        assert_eq!(parse_records(b"Rows matched: 1  Changed: 1  Warnings: 0"), None);
+    }
 
     fn create(kind: ObjectKind) -> Effect {
         Effect::Create {

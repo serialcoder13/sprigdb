@@ -149,19 +149,17 @@ impl Engine {
             "localTime": DateTime::now(),
         };
         if let Ok(l) = spec.get_document("latencyStats") {
-            // Per-collection latencies aren't kept (chapter 12 keeps them
-            // per statement fingerprint): zeros, MongoDB's shape.
-            let z =
-                || doc! {"latency": 0i64, "ops": 0i64, "queryableEncryptionLatencyMicros": 0i64};
-            let mut ls = doc! {"reads": z(), "writes": z(), "commands": z(), "transactions": z()};
-            if l.get_bool("histograms").unwrap_or(false) {
-                for k in ["reads", "writes", "commands", "transactions"] {
-                    if let Ok(d) = ls.get_document_mut(k) {
-                        d.insert("histogram", Bson::Array(Vec::new()));
-                    }
-                }
-            }
-            out.insert("latencyStats", ls);
+            // M5 (S79): the gateway's per-collection latencies since its
+            // start.
+            out.insert(
+                "latencyStats",
+                crate::usage::latency_stats(
+                    sql.tenant(),
+                    &ns.db,
+                    &ns.coll,
+                    l.get_bool("histograms").unwrap_or(false),
+                ),
+            );
         }
         if let Ok(s) = spec.get_document("storageStats") {
             let scale = s
@@ -225,17 +223,19 @@ impl Engine {
         let Some(list) = self.list_indexes(sql, ns).await? else {
             return Ok(Vec::new());
         };
-        // Index use isn't counted per index: `ops` is 0 since the
+        // M5 (S80): the uses the engine planned for each index since the
         // gateway's start (MongoDB counts from mongod's start too).
-        let since = *START.get_or_init(DateTime::now);
+        let tenant = sql.tenant();
         Ok(list
             .into_iter()
             .map(|spec| {
+                let name = spec.get_str("name").unwrap_or_default().to_owned();
+                let (ops, since) = crate::usage::index_accesses(tenant, &ns.db, &ns.coll, &name);
                 doc! {
                     "name": spec.get("name").cloned().unwrap_or(Bson::Null),
                     "key": spec.get("key").cloned().unwrap_or(Bson::Null),
                     "host": "sprigdb",
-                    "accesses": {"ops": 0i64, "since": since},
+                    "accesses": {"ops": ops, "since": since},
                     "spec": spec,
                 }
             })
@@ -290,4 +290,3 @@ impl Engine {
     }
 }
 
-static START: std::sync::OnceLock<DateTime> = std::sync::OnceLock::new();

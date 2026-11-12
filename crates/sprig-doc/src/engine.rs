@@ -979,6 +979,8 @@ impl Engine {
         let Some(m) = self.meta(sql, ns).await? else {
             return Ok(CursorPlan::from_docs(ns.clone(), Vec::new()));
         };
+        // M5 (S80): `$indexStats.accesses`.
+        crate::usage::note(sql.tenant(), &ns.db, &ns.coll, &m, &spec.filter, spec.sort.as_ref());
         // Chapter 36 (R6 round 3): `$near` sorts by distance.
         models::check_near(&pred, true)?;
         if let Some((path, near)) = models::near_of(&pred) {
@@ -1385,6 +1387,7 @@ impl Engine {
         let Some(m) = self.meta(sql, ns).await? else {
             return Ok(0);
         };
+        crate::usage::note(sql.tenant(), &ns.db, &ns.coll, &m, filter_doc, None);
         let gm = self.geo_sides(sql, ns, &m, &pred).await?;
         let sqlp = translate(&pred, gm.as_ref().unwrap_or(&m));
         let total = if sqlp.exact {
@@ -1447,6 +1450,7 @@ impl Engine {
         let Some(m) = self.meta(sql, ns).await? else {
             return Ok(Vec::new());
         };
+        crate::usage::note(sql.tenant(), &ns.db, &ns.coll, &m, filter_doc, None);
         let gm = self.geo_sides(sql, ns, &m, &pred).await?;
         let sqlp = translate(&pred, gm.as_ref().unwrap_or(&m));
         let docs = self
@@ -1505,6 +1509,7 @@ impl Engine {
             None if upsert => self.create(sql, ns, Document::new(), false).await?,
             None => return Ok(UpdateOutcome::default()),
         };
+        crate::usage::note(sql.tenant(), &ns.db, &ns.coll, &m, q, sort);
         let gm = self.geo_sides(sql, ns, &m, &pred).await?;
         let sqlp = translate(&pred, gm.as_ref().unwrap_or(&m));
         // Schema validation (M3, decision S90).
@@ -1786,6 +1791,7 @@ impl Engine {
         let Some(m) = self.meta(sql, ns).await? else {
             return Ok((0, None));
         };
+        crate::usage::note(sql.tenant(), &ns.db, &ns.coll, &m, q, sort);
         let gm = self.geo_sides(sql, ns, &m, &pred).await?;
         let sqlp = translate(&pred, gm.as_ref().unwrap_or(&m));
         if !limit_one && sqlp.exact && !matches!(pred, Pred::Expr(_)) {
@@ -1916,7 +1922,10 @@ impl Engine {
                 continue;
             }
             let unique = s.get_bool("unique").unwrap_or(false);
-            if let Some(ex) = m.indexes.iter().find(|i| i.name == name) {
+            // An automatic index (chapter 13) never conflicts: the user's
+            // index is made beside it, and automatic indexing retires its
+            // own as redundant.
+            if let Some(ex) = m.indexes.iter().find(|i| i.name == name && !i.is_auto()) {
                 if ex.key == pattern && ex.unique == unique {
                     continue;
                 }
@@ -1928,7 +1937,11 @@ impl Engine {
                     ),
                 ));
             }
-            if let Some(ex) = m.indexes.iter().find(|i| i.key == pattern) {
+            if let Some(ex) = m
+                .indexes
+                .iter()
+                .find(|i| i.key == pattern && !i.is_auto())
+            {
                 return Err(MongoError::new(
                     code::INDEX_OPTIONS_CONFLICT,
                     format!("Index already exists with a different name: {}", ex.name),
@@ -1969,6 +1982,8 @@ impl Engine {
                     "user".into()
                 },
                 extra,
+                mariadb: None,
+                auto_index_id: None,
             };
             if let Some(p) = &geo_path {
                 self.create_geo_index(sql, ns, &m, &idx, p).await?;
@@ -2017,11 +2032,31 @@ impl Engine {
         sql: &mut dyn SqlRunner,
         ns: &Ns,
     ) -> Result<Option<Vec<Document>>, MongoError> {
+        self.list_indexes_with(sql, ns, false).await
+    }
+
+    /// `listIndexes`, with automatic indexes (chapter 13) when `show_auto`
+    /// (the command's `showAutoIndexes: true`, decision S131); they are
+    /// hidden otherwise, as `SHOW INDEX` hides SQL ones.
+    ///
+    /// # Errors
+    /// SQL errors.
+    pub async fn list_indexes_with(
+        &self,
+        sql: &mut dyn SqlRunner,
+        ns: &Ns,
+        show_auto: bool,
+    ) -> Result<Option<Vec<Document>>, MongoError> {
         let Some(m) = self.meta(sql, ns).await? else {
             return Ok(None);
         };
         let mut out = vec![doc! {"v": 2, "key": {"_id": 1}, "name": "_id_"}];
-        out.extend(m.indexes.iter().map(IndexDef::spec));
+        out.extend(
+            m.indexes
+                .iter()
+                .filter(|i| show_auto || !i.is_auto())
+                .map(IndexDef::spec),
+        );
         out.extend(self.text_index_specs(sql, ns).await?);
         Ok(Some(out))
     }
@@ -2050,9 +2085,11 @@ impl Engine {
             .collect();
         let before = m.indexes.len() + 1 + text_names.len();
         let names: Vec<String> = match which {
+            // Chapter 13: `*` leaves automatic indexes alone.
             Bson::String(s) if s == "*" => m
                 .indexes
                 .iter()
+                .filter(|i| !i.is_auto())
                 .map(|i| i.name.clone())
                 .chain(text_names.iter().cloned())
                 .collect(),
@@ -2081,7 +2118,12 @@ impl Engine {
                         d.get_document("key").is_ok_and(|x| x == k) || crate::text::is_text_key(k)
                     })
                     .and_then(|d| d.get_str("name").ok().map(str::to_owned));
-                match m.indexes.iter().find(|i| i.key == pat) {
+                match m
+                    .indexes
+                    .iter()
+                    .filter(|i| !i.is_auto())
+                    .find(|i| i.key == pat)
+                {
                     Some(i) => vec![i.name.clone()],
                     None if text_key.is_some() => vec![text_key.unwrap_or_default()],
                     None if pat == [("_id".to_owned(), 1)] => vec!["_id_".into()],
@@ -2301,6 +2343,7 @@ impl Engine {
             models::check_near(&pred, false)?;
             match self.meta(sql, ns).await? {
                 Some(m) => {
+                    crate::usage::note(sql.tenant(), &ns.db, &ns.coll, &m, &leading, None);
                     let gm = self.geo_sides(sql, ns, &m, &pred).await?;
                     let sqlp = translate(&pred, gm.as_ref().unwrap_or(&m));
                     if spill::allowed() {
@@ -2471,6 +2514,7 @@ impl Engine {
                 }
                 "$out" | "$merge" => {
                     models::strip_scores(&mut docs);
+                    crate::text::strip(&mut docs);
                     let target = match s.get(name) {
                         Some(Bson::String(c)) => c.clone(),
                         Some(Bson::Document(d)) => d

@@ -29,6 +29,10 @@ sprig-settings.workspace = true
 sprig-shard.workspace = true
 # The shapes candidates are generated from (chapter 12, `sprig-workload::shape`).
 sprig-workload.workspace = true
+# Document candidates (chapter 13 "Other models", R5; S131): the field
+# columns and class codes of chapter 31's doc indexes, so an automatic
+# index is built exactly as `createIndexes` builds one.
+sprig-doc = { path = "../sprig-doc" }
 # Which tables stored code names (chapter 16, bugfix-31): the lexer and
 # the row-level security swap's table positions.
 sprig-sql.workspace = true

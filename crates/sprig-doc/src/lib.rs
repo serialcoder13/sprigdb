@@ -46,5 +46,7 @@ pub mod sql;
 pub mod text;
 pub mod translate;
 pub mod update;
+/// Per-collection latencies and per-index use (M5).
+pub mod usage;
 /// Schema validation, `$jsonSchema` and the `$bits*` operators (M3).
 pub mod validate;

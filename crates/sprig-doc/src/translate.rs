@@ -581,6 +581,8 @@ mod tests {
                     expire_after: None,
                     origin: "user".into(),
                     extra: doc! {},
+                    mariadb: None,
+                    auto_index_id: None,
                 })
                 .collect(),
             options: doc! {},

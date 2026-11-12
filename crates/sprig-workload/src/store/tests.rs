@@ -486,7 +486,10 @@ async fn an_old_shape_version_row_is_rewritten() {
         .await
         .unwrap();
         let before = t.fingerprints(&mut conn, &[fp.id]).await.unwrap();
-        assert!(before[0].shape.all_unsargable(), "the old row: no field column");
+        assert!(
+            before[0].shape.all_unsargable(),
+            "the old row: no field column"
+        );
         // The statement is seen again: the row is rewritten (2 affected).
         assert_eq!(
             t.insert_fingerprints(&mut conn, std::slice::from_ref(&n))

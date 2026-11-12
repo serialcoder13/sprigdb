@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { confirmTyped, moveLag } from './ops';
+import { confirmTyped, legacyOperatorMode, moveLag } from './ops';
 
 describe('operator mode', () => {
   it('asks for the target name and a reason', () => {
@@ -40,5 +40,15 @@ describe('operator sign-in', () => {
     const { secretOf } = await import('./ops');
     expect(secretOf('otpauth://totp/SprigDB:alice?secret=JBSWY3DPEHPK3PXP&issuer=SprigDB')).toBe('JBSWY3DPEHPK3PXP');
     expect(secretOf('not a link')).toBe('');
+  });
+});
+
+describe('the older operator mode', () => {
+  it('is deprecated only while no named operator is signed in', () => {
+    const named = { token: 't', name: 'ana', expires_ms: 1 };
+    expect(legacyOperatorMode(['operator'], null)).toBe(true);
+    expect(legacyOperatorMode(['operator'], named)).toBe(false);
+    expect(legacyOperatorMode([], null)).toBe(false);
+    expect(legacyOperatorMode(undefined, null)).toBe(false);
   });
 });

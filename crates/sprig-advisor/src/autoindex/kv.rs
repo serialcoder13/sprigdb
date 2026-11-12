@@ -385,6 +385,16 @@ pub fn fields_of(def: &super::model::IndexDef) -> Vec<(String, String)> {
     if def.kind != IndexKind::FieldColumn {
         return Vec::new();
     }
+    // A document index (S131): its pair columns, each with its path.
+    if super::doc::is_doc(def) {
+        return super::doc::paths_of(def)
+            .into_iter()
+            .flat_map(|(p, _)| {
+                let (c, n, s) = sprig_doc::meta::columns(&p);
+                [c, n, s].map(|x| (x.to_ascii_lowercase(), p.clone()))
+            })
+            .collect();
+    }
     def.parts
         .iter()
         .filter_map(|p| {
@@ -399,6 +409,9 @@ pub fn fields_of(def: &super::model::IndexDef) -> Vec<(String, String)> {
 /// ALGORITHM=INSTANT` before the index (see [`add_field_clause`]).
 #[must_use]
 pub fn add_fields_clause(def: &super::model::IndexDef) -> Option<String> {
+    if super::doc::is_doc(def) {
+        return super::doc::add_fields_clause(def);
+    }
     let f = fields_of(def);
     (!f.is_empty()).then(|| {
         f.iter()
@@ -445,7 +458,10 @@ pub fn drop_fields_sql(schema: &str, table: &str, columns: &[String]) -> Option<
 #[must_use]
 pub fn maintained_columns(def: &super::model::IndexDef) -> Vec<String> {
     let mut cols: Vec<String> = def.columns().map(str::to_owned).collect();
-    if def.kind == IndexKind::FieldColumn {
+    if super::doc::is_doc(def) {
+        // A document index changes with the document (S131).
+        cols.push(sprig_workload::fingerprint::mongo::DOC_COLUMN.to_owned());
+    } else if def.kind == IndexKind::FieldColumn {
         cols.push(VALUE_COLUMN.to_owned());
     }
     cols

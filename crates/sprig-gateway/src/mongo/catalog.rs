@@ -235,11 +235,19 @@ type IndexRow = (
     Option<i64>,
     String,
     Option<Vec<u8>>,
+    Option<String>,
+    Option<u64>,
 );
 
+/// The `doc_indexes` columns [`index_of`] reads, in order.
+const INDEX_COLS: &str = "collection_id, index_id, name, key_pattern, is_unique, is_sparse, \
+     expire_seconds, origin, options, mariadb_name, auto_index_id";
+
 fn index_of(r: Row) -> Option<(u64, IndexDef)> {
-    let (cid, id, name, key, uniq, sparse, expire, origin, opts): IndexRow =
+    let (cid, id, name, key, uniq, sparse, expire, origin, opts, mariadb, auto_id): IndexRow =
         mysql_async::from_row_opt(r).ok()?;
+    // `sprig_dix_<id>` is implied; only another name is kept.
+    let mariadb = mariadb.filter(|m| *m != format!("sprig_dix_{id}"));
     let k = bson::from_slice::<Document>(&key).ok()?;
     let key = k
         .iter()
@@ -259,6 +267,8 @@ fn index_of(r: Row) -> Option<(u64, IndexDef)> {
             expire_after: expire,
             origin,
             extra: bson_doc(opts),
+            mariadb,
+            auto_index_id: auto_id,
         },
     ))
 }
@@ -383,8 +393,7 @@ impl DocTables {
             .collect();
         let idx: Vec<Row> = q
             .query(format!(
-                "SELECT collection_id, index_id, name, key_pattern, is_unique, is_sparse, \
-                 expire_seconds, origin, options FROM {} WHERE state = 'ready' \
+                "SELECT {INDEX_COLS} FROM {} WHERE state = 'ready' \
                  ORDER BY collection_id, index_id",
                 t(&self.schema, "doc_indexes")
             ))
@@ -445,8 +454,7 @@ impl DocTables {
         let idx: Vec<Row> = q
             .exec(
                 format!(
-                    "SELECT collection_id, index_id, name, key_pattern, is_unique, is_sparse, \
-                     expire_seconds, origin, options FROM {} WHERE collection_id = ? \
+                    "SELECT {INDEX_COLS} FROM {} WHERE collection_id = ? \
                      ORDER BY index_id",
                     t(&self.schema, "doc_indexes")
                 ),
@@ -506,8 +514,8 @@ impl DocTables {
                 format!(
                     "INSERT INTO {} (collection_id, index_id, name, key_pattern, impl, mariadb_name, \
                      field_columns, is_unique, is_sparse, expire_seconds, multikey_paths, origin, \
-                     options, state, created_at) VALUES (?, ?, ?, ?, 'column', ?, ?, ?, ?, ?, '[]', ?, ?, \
-                     'ready', UTC_TIMESTAMP(3))",
+                     options, auto_index_id, state, created_at) VALUES (?, ?, ?, ?, 'column', ?, ?, ?, ?, ?, '[]', ?, ?, \
+                     ?, 'ready', UTC_TIMESTAMP(3))",
                     t(&self.schema, "doc_indexes")
                 ),
                 mysql_async::Params::Positional(vec![
@@ -522,6 +530,7 @@ impl DocTables {
                     i.expire_after.into(),
                     origin.into(),
                     bson_bytes(&i.extra).into(),
+                    i.auto_index_id.into(),
                 ]),
             )
             .await

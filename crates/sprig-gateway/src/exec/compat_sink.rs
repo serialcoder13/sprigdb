@@ -146,6 +146,14 @@ struct Rows {
     /// SET`'s `Default collation`) and `SHOW CREATE
     /// DATABASE`'s text (R4 round 6, gaps rows 67 and 78): MySQL's names.
     colls: Vec<usize>,
+    /// `SHOW CREATE TRIGGER`'s statement (R4, decision X36): the head as
+    /// MySQL rebuilds it ([`sprig_sql::compat::trigger`]).
+    trigs: Vec<usize>,
+    /// `SHOW PROCEDURE STATUS` and `SHOW FUNCTION STATUS` (R4, decision
+    /// X36): MySQL's `Language` column (always `SQL`) goes in at this
+    /// position of the client's columns (text rows; `after` stays the
+    /// backend's shape).
+    language: Option<usize>,
     /// A traditional `EXPLAIN` (R4 round 3): `partitions` goes in at
     /// [`sprig_sql::compat::explain::PARTITIONS_AT`] (text rows).
     explain: bool,
@@ -226,6 +234,8 @@ impl<'a> IntMetaSink<'a> {
                 originals: false,
                 checks: Vec::new(),
                 colls: Vec::new(),
+                trigs: Vec::new(),
+                language: None,
                 explain: true,
                 tree: None,
             });
@@ -250,6 +260,8 @@ impl<'a> IntMetaSink<'a> {
                 originals: false,
                 checks: Vec::new(),
                 colls: Vec::new(),
+                trigs: Vec::new(),
+                language: None,
                 explain: false,
                 tree: Some((analyze, limit)),
             });
@@ -326,8 +338,30 @@ impl<'a> IntMetaSink<'a> {
         } else {
             Vec::new()
         };
+        let trigs: Vec<usize> = if show {
+            after
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.name.eq_ignore_ascii_case(b"SQL Original Statement"))
+                .map(|(i, _)| i)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let language = if show && format == RowFormat::Text {
+            routine_status_language_at(after)
+        } else {
+            None
+        };
         let widened = fixed.is_some() && format == RowFormat::Binary;
-        if widened || !json.is_empty() || !exprs.is_empty() || originals || !colls.is_empty() {
+        if widened
+            || !json.is_empty()
+            || !exprs.is_empty()
+            || originals
+            || !colls.is_empty()
+            || !trigs.is_empty()
+            || language.is_some()
+        {
             self.cur = Some(Rows {
                 format,
                 before: columns.to_vec(),
@@ -338,12 +372,39 @@ impl<'a> IntMetaSink<'a> {
                 originals,
                 checks,
                 colls,
+                trigs,
+                language,
                 explain: false,
                 tree: None,
             });
         }
+        if let Some(at) = language {
+            let mut cols = after.to_vec();
+            cols.insert(at, language_column(&after[at - 1]));
+            return Some(cols);
+        }
         fixed
     }
+}
+
+/// Where MySQL's `Language` column goes in a `SHOW PROCEDURE STATUS` or
+/// `SHOW FUNCTION STATUS` result (after `Type`), when MariaDB's lacks it.
+fn routine_status_language_at(columns: &[ColumnDef]) -> Option<usize> {
+    let at = |n: &[u8]| columns.iter().position(|c| c.name.eq_ignore_ascii_case(n));
+    let ty = at(b"Type")?;
+    (at(b"Db") == Some(0)
+        && at(b"Name") == Some(1)
+        && at(b"Definer") == Some(ty + 1)
+        && at(b"Language").is_none())
+    .then_some(ty + 1)
+}
+
+/// MySQL's `Language` column, shaped like `Type` (a short text column).
+fn language_column(like: &ColumnDef) -> ColumnDef {
+    let mut c = like.clone();
+    c.name = Bytes::from_static(b"Language");
+    c.org_name = Bytes::from_static(b"Language");
+    c
 }
 
 /// MariaDB's `EXPLAIN EXTENDED` columns as MySQL 8.4's `EXPLAIN` has
@@ -447,6 +508,7 @@ impl Rows {
                 .iter()
                 .chain(&self.exprs)
                 .chain(&self.colls)
+                .chain(&self.trigs)
                 .copied()
                 .collect()
         }
@@ -454,6 +516,15 @@ impl Rows {
 
     /// Column `i`'s value `v` as the client gets it, if it changes.
     fn fix(&self, i: usize, v: &[u8]) -> Option<Vec<u8>> {
+        if self.trigs.contains(&i) {
+            let restored = (self.originals && sprig_sql::compat::stored::has_original(v))
+                .then(|| sprig_sql::compat::stored::restore_original(v))
+                .flatten();
+            let t = std::str::from_utf8(restored.as_deref().unwrap_or(v)).ok()?;
+            return sprig_sql::compat::trigger::mysql_trigger_statement(t)
+                .map(String::into_bytes)
+                .or(restored);
+        }
         if self.originals && sprig_sql::compat::stored::has_original(v) {
             return sprig_sql::compat::stored::restore_original(v);
         }
@@ -492,6 +563,8 @@ impl Rows {
                 if self.json.is_empty()
                     && self.exprs.is_empty()
                     && self.colls.is_empty()
+                    && self.trigs.is_empty()
+                    && self.language.is_none()
                     && !self.originals
                 {
                     return None;
@@ -507,12 +580,18 @@ impl Rows {
                         any = true;
                     }
                 }
-                if !any {
+                if !any && self.language.is_none() {
                     return None;
                 }
-                Some(encode_text_row(
-                    vals.iter().zip(&fixed).map(|(v, f)| f.as_deref().or(*v)),
-                ))
+                let mut out: Vec<Option<&[u8]>> = vals
+                    .iter()
+                    .zip(&fixed)
+                    .map(|(v, f)| f.as_deref().or(*v))
+                    .collect();
+                if let Some(at) = self.language {
+                    out.insert(at.min(out.len()), Some(b"SQL"));
+                }
+                Some(encode_text_row(out))
             }
             RowFormat::Binary if self.explain => {
                 let vals = decode_binary_row(payload, &self.before).ok()?;
@@ -599,6 +678,8 @@ impl ResultSink for IntMetaSink<'_> {
             && !(cur.json.is_empty()
                 && cur.exprs.is_empty()
                 && cur.colls.is_empty()
+                && cur.trigs.is_empty()
+                && cur.language.is_none()
                 && !cur.originals)
         {
             let mut fixed: Vec<Option<Vec<u8>>> = vec![None; vals.len()];
@@ -607,12 +688,15 @@ impl ResultSink for IntMetaSink<'_> {
                     fixed[i] = cur.fix(i, v);
                 }
             }
-            if fixed.iter().any(Option::is_some) {
-                let out: Vec<Option<&[u8]>> = vals
+            if fixed.iter().any(Option::is_some) || cur.language.is_some() {
+                let mut out: Vec<Option<&[u8]>> = vals
                     .iter()
                     .zip(&fixed)
                     .map(|(v, f)| f.as_deref().or(*v))
                     .collect();
+                if let Some(at) = cur.language {
+                    out.insert(at.min(out.len()), Some(b"SQL"));
+                }
                 return self.inner.row(RowValues::Text(&out)).await;
             }
         }

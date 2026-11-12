@@ -10,6 +10,7 @@ import { QrCode } from '../auth/QrCode';
 import {
   confirmTyped,
   fmtMs,
+  legacyOperatorMode,
   loginBody,
   moveLag,
   operatorHeaders,
@@ -545,6 +546,11 @@ export function OpsPage() {
           <h1>
             <FormattedMessage id={`ops.${area}`} />
           </h1>
+          {!signIn && legacyOperatorMode(me?.platform_roles, op) && (
+            <p className="banner" role="status" data-testid="ops-legacy-banner">
+              <FormattedMessage id="ops.legacyDeprecated" />
+            </p>
+          )}
           {signIn ? (
             <OperatorSignIn
               onSignedIn={() => {

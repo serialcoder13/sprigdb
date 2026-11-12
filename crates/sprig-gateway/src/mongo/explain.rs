@@ -166,6 +166,8 @@ struct Ran {
     planned: Vec<String>,
     /// Extra `executionStats` fields (`nMatched`, `nWouldDelete`).
     stats: Document,
+    /// What an aggregation's stages spilled (M5).
+    spills: Vec<sprig_doc::spill::StageSpill>,
 }
 
 /// The explain of `cmd` (the document under `explain`) in `db`; `None` for
@@ -331,7 +333,16 @@ pub(super) async fn explain(
             cursor.insert("executionStats", s);
         }
         let mut stages = vec![Bson::Document(doc! {"$cursor": cursor})];
-        stages.extend(pipeline_rest(cmd).into_iter().map(Bson::Document));
+        // M5: MongoDB 8.2's spill fields on each stage (executionStats).
+        let all = cmd.get_array("pipeline").map_or(0, Vec::len);
+        let rest = pipeline_rest(cmd);
+        let first = all - rest.len();
+        stages.extend(rest.into_iter().enumerate().map(|(i, mut st)| {
+            if execute {
+                st.extend(super::spill::stage_fields(&ran.spills, first + i));
+            }
+            Bson::Document(st)
+        }));
         out.insert("stages", stages);
     } else {
         out.insert("queryPlanner", planner);
@@ -457,7 +468,13 @@ async fn run(
                 .await?;
                 ran.gateway.push("$out / $merge not run by explain".into());
             } else {
-                ran.n = engine.aggregate(rec, ns, &pipeline).await?.len() as u64;
+                // M5: the command's `allowDiskUse`, and what it spilled.
+                let ctx = super::spill::ctx_for(cmd, "aggregate", rec.tenant(), None)?;
+                let seen = ctx.clone();
+                ran.n = sprig_doc::spill::scope(ctx, Box::pin(engine.aggregate(rec, ns, &pipeline)))
+                    .await?
+                    .len() as u64;
+                ran.spills = seen.stats();
             }
             ran.gateway
                 .push("the pipeline's stages after the collection's read, in the gateway".into());

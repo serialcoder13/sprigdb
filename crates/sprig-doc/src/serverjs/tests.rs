@@ -197,6 +197,47 @@ fn function_budget() {
     assert_eq!(r.unwrap_err().code, 11601);
 }
 
+/// bugfix-57 (S111's leftover): the command's `maxTimeMS` stops its code
+/// before `logic.function_budget_ms` does, with 50 `MaxTimeMSExpired` for
+/// every kind (MongoDB's answer when the time limit ends a `$where` or a
+/// `$function` stage); a call after the time is up fails at once.
+#[test]
+fn max_time_ms_bounds_javascript() {
+    let d = Document::new();
+    let scope = || Scope::with_max_time(Arc::new(Qjs), Duration::from_secs(5), 32 << 20, Some(150));
+    let t = std::time::Instant::now();
+    let r = sync_scope(Some(scope()), || {
+        eval(
+            &bson!({"$function": {"body": "function () { while (true) {} }", "args": [], "lang": "js"}}),
+            &Vars::new(&d, bson::DateTime::now()),
+        )
+    });
+    let e = r.unwrap_err();
+    assert_eq!(e.code, 50, "{e:?}");
+    assert!(e.message.contains("maxTimeMS (150 ms)"), "{}", e.message);
+    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    // $where, and a later call once the time is up.
+    let s = scope();
+    let (first, second) = sync_scope(Some(Arc::clone(&s)), || {
+        let p = filter::parse(&doc! {"$where": "function () { var t = Date.now(); while (Date.now() - t < 100) {} return true; }"}).unwrap();
+        (p.matches(&d), p.matches(&d))
+    });
+    assert!(first, "the first call ends before maxTimeMS");
+    assert!(!second);
+    assert_eq!(s.take_error().unwrap().code, 50);
+    // Without maxTimeMS the budget still decides (11601 for $function).
+    let r = sync_scope(
+        Some(Scope::with_max_time(Arc::new(Qjs), Duration::from_millis(100), 32 << 20, None)),
+        || {
+            eval(
+                &bson!({"$function": {"body": "function () { while (true) {} }", "args": [], "lang": "js"}}),
+                &Vars::new(&d, bson::DateTime::now()),
+            )
+        },
+    );
+    assert_eq!(r.unwrap_err().code, 11601);
+}
+
 fn group(spec: Document, id_expr: &str) -> Result<Vec<Document>, MongoError> {
     let rows = vec![
         doc! {"k": "a", "v": 1},

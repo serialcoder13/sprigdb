@@ -1062,6 +1062,8 @@ mod tests {
                 expire_after: None,
                 origin: "user".into(),
                 extra: doc! {"2dsphereIndexVersion": 3},
+                mariadb: None,
+                auto_index_id: None,
             }],
             options: Document::new(),
             next_index: 2,

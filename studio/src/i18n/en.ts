@@ -73,6 +73,8 @@ export const en = {
   'ops.failovers': 'Failovers',
   'ops.txns': 'In-doubt transactions',
   'ops.leave': 'Leave operator mode',
+  'ops.legacyDeprecated':
+    'This operator mode (a Studio login listed in studio.operator_logins, using the gateway\'s token) is deprecated and will be removed in the release after Phase 1. Sign in as a named operator instead.',
   'mfa.title': 'Second factor',
   'mfa.code': 'Code',
   'mfa.hint': 'The 6-digit code from your authenticator app, or one of your recovery codes.',

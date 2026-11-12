@@ -1762,10 +1762,13 @@ impl PassSession {
         let Some(bs) = self.bs.as_mut() else {
             return Err(SprigError::internal("no backend session"));
         };
+        // R4, decision X36: the backends' OK rows and `Records:` line.
+        let backend_rows = Arc::new(crate::tenant::ddl::BackendRows::default());
         let result = {
             let exec = GatewayDdl::new(bs, ctl)
                 .checked_by(ctl_pool)
-                .reporting_version(version);
+                .reporting_version(version)
+                .counting(Arc::clone(&backend_rows));
             match layout {
                 Some(layout) => {
                     let mut sharded = crate::tenant::ddl::ShardedDdl::new(
@@ -1845,6 +1848,16 @@ impl PassSession {
                 let mut ok = OkPacket::new(status);
                 ok.affected_rows = outcome.affected_rows;
                 ok.warnings = u16::try_from(outcome.notes.len()).unwrap_or(u16::MAX);
+                // R4, decision X36: an `ALTER TABLE`, `CREATE INDEX` or
+                // `DROP INDEX` reports what the backend did, with its
+                // `Records: R  Duplicates: D  Warnings: W` line, as MariaDB
+                // and MySQL do.
+                if let (affected, Some(info)) = backend_rows.get()
+                    && matches!(stmt, DdlStatement::AlterObject { .. })
+                {
+                    ok.affected_rows = ok.affected_rows.max(affected);
+                    ok.info = Bytes::from(info);
+                }
                 if matches!(stmt, DdlStatement::DropDatabase { .. })
                     && self.current_logical().is_none()
                     && current.is_some()

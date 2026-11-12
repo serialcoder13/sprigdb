@@ -1684,11 +1684,12 @@ impl GatewayGraphs {
                         sh.tables.edges
                     )
                 };
-                let rows: Vec<(u64, u64, String, String, Option<String>)> = conn(self, &mut conns, &sh.cluster)
-                    .await?
-                    .query(sql)
-                    .await
-                    .map_err(backend_error)?;
+                let rows: Vec<(u64, u64, String, String, Option<String>)> =
+                    conn(self, &mut conns, &sh.cluster)
+                        .await?
+                        .query(sql)
+                        .await
+                        .map_err(backend_error)?;
                 let Some(last) = rows.last() else { break };
                 after = last.0;
                 for (id, rk, tok, props, types) in rows {
@@ -1703,7 +1704,8 @@ impl GatewayGraphs {
                     } else {
                         tok.parse::<u32>().ok() == Some(d.token_id)
                     };
-                    let Some(key) = has.then(|| claim_key(d, &props, types.as_ref())).flatten() else {
+                    let Some(key) = has.then(|| claim_key(d, &props, types.as_ref())).flatten()
+                    else {
                         continue;
                     };
                     let h = claim_rk(d.id, &key);

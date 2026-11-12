@@ -83,13 +83,27 @@ pub struct IndexDef {
     pub origin: String,
     /// Options passed through to `listIndexes` as given.
     pub extra: Document,
+    /// The MariaDB index's name when it isn't `sprig_dix_<id>`: an
+    /// automatic index's `sprig_auto_<8 hex>` (chapter 13, S131).
+    pub mariadb: Option<String>,
+    /// The automatic index (`auto_indexes.index_id`) behind an `auto` one.
+    pub auto_index_id: Option<u64>,
 }
 
 impl IndexDef {
     /// The MariaDB index name.
     #[must_use]
     pub fn mariadb_name(&self) -> String {
-        format!("sprig_dix_{}", self.id)
+        self.mariadb
+            .clone()
+            .unwrap_or_else(|| format!("sprig_dix_{}", self.id))
+    }
+
+    /// An index made by automatic indexing (chapter 13): hidden from
+    /// `listIndexes` unless asked, never dropped by `dropIndexes: "*"`.
+    #[must_use]
+    pub fn is_auto(&self) -> bool {
+        self.origin == "auto"
     }
 
     /// The key pattern as a document.
@@ -138,6 +152,8 @@ impl IndexDef {
             "expire": self.expire_after,
             "origin": self.origin,
             "extra": Bson::Document(self.extra.clone()).into_relaxed_extjson(),
+            "mariadb": self.mariadb,
+            "auto_index_id": self.auto_index_id,
         })
     }
 
@@ -172,6 +188,8 @@ impl IndexDef {
                 .unwrap_or("user")
                 .to_owned(),
             extra,
+            mariadb: v.get("mariadb").and_then(Value::as_str).map(str::to_owned),
+            auto_index_id: v.get("auto_index_id").and_then(Value::as_u64),
         })
     }
 }
@@ -435,6 +453,19 @@ WHEN 'maxKey' THEN 250 ELSE 20 END"
 /// `ALTER TABLE` adding the field columns of `path` (instant; no index).
 #[must_use]
 pub fn add_columns_sql(db: &str, table: &str, path: &str) -> String {
+    format!(
+        "ALTER TABLE {}.{} {}",
+        ident(db),
+        ident(table),
+        add_columns_clause(path)
+    )
+}
+
+/// The three `ADD COLUMN IF NOT EXISTS` clauses of `path`'s field columns,
+/// joined by `, ` (automatic indexing builds them like a user index,
+/// chapter 13, S131).
+#[must_use]
+pub fn add_columns_clause(path: &str) -> String {
     let parts: Vec<&str> = path.split('.').collect();
     let p = str_lit(&json_path(&parts, &[]));
     let t = str_lit(&types_path(path));
@@ -456,11 +487,9 @@ END, 0)"
 THEN LEFT({val}, {S_CHARS}) END, '')"
     );
     format!(
-        "ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS {} TINYINT UNSIGNED AS ({}) VIRTUAL INVISIBLE, \
+        "ADD COLUMN IF NOT EXISTS {} TINYINT UNSIGNED AS ({}) VIRTUAL INVISIBLE, \
 ADD COLUMN IF NOT EXISTS {} DOUBLE AS ({num}) VIRTUAL INVISIBLE, \
 ADD COLUMN IF NOT EXISTS {} VARCHAR({S_CHARS}) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin AS ({st}) VIRTUAL INVISIBLE",
-        ident(db),
-        ident(table),
         ident(&c),
         class_expr(path),
         ident(&n),
@@ -560,6 +589,8 @@ mod tests {
                 expire_after: None,
                 origin: "user".into(),
                 extra: doc! {"collation": {"locale": "simple"}},
+                mariadb: None,
+                auto_index_id: None,
             }],
             options: doc! {},
             next_index: 2,

@@ -63,6 +63,38 @@ tokio::task_local! {
     pub static CALLER: Option<sprig_workload::fingerprint::Caller>;
 }
 
+/// A front end's own request (a MongoDB command, `Fingerprinter::mongo`)
+/// while its statements run in this task: whether they are probed
+/// whatever their own fingerprints' plans say, and the rows examined their
+/// probes counted. [`SessionCapture::start`] and
+/// [`SessionCapture::finish`] read and add to it.
+#[derive(Debug, Default)]
+pub struct FrontRun {
+    /// Probe every statement of the request (its fingerprint is watched).
+    pub probe: bool,
+    /// Rows examined, summed over the probed statements.
+    pub examined: std::sync::atomic::AtomicU64,
+    /// Statements that were probed.
+    pub probed: std::sync::atomic::AtomicU32,
+}
+
+tokio::task_local! {
+    /// The front-end request whose statements run in this task.
+    pub static FRONT_RUN: Arc<FrontRun>;
+}
+
+/// What a front end that fingerprints its own requests gets from its SQL
+/// session ([`crate::pipeline::SessionExec::workload`]).
+#[derive(Debug, Clone)]
+pub struct FrontCapture {
+    /// The gateway's capture.
+    pub workload: GatewayWorkload,
+    /// The tenant captures parameter samples (`workload.capture_samples`).
+    pub samples: bool,
+    /// The request's table in the tenant catalog, when it resolves.
+    pub table: Option<ResolvedTable>,
+}
+
 /// The workload caller of the running task ([`CALLER`]), if one is set.
 #[must_use]
 pub fn task_caller() -> Option<sprig_workload::fingerprint::Caller> {
@@ -181,6 +213,52 @@ impl GatewayWorkload {
     #[must_use]
     pub fn gateway_id(&self) -> u32 {
         self.0.gateway_id
+    }
+
+    /// A front end's own request is about to run (`Fingerprinter::mongo`):
+    /// the recorder's probe and sample plan for its fingerprint.
+    #[must_use]
+    pub fn front_plan(&self, tenant: TenantId, fp: &Fingerprint) -> ProbePlan {
+        self.0.recorder.plan(tenant, fp)
+    }
+
+    /// Records a front end's own request (`Fingerprinter::mongo`) and,
+    /// when `sample` is set, seals its values as a parameter sample, as
+    /// [`SessionCapture::finish`] does for SQL.
+    pub fn front_record(
+        &self,
+        tenant: TenantId,
+        fp: &Fingerprint,
+        ex: &ExecSummary,
+        sample: Option<SamplePayload>,
+    ) {
+        let w = &self.0;
+        w.recorder.record(tenant, fp, ex);
+        let Some(payload) = sample.filter(|_| !ex.error && !fp.sensitive) else {
+            return;
+        };
+        let wall = w.clock.wall();
+        let meta = CaptureMeta {
+            captured_at: wall,
+            latency_us: ex.latency_us,
+            rows_examined: ex.examined,
+            rows_returned: ex.rows_returned.max(ex.rows_affected),
+            expires_at: wall
+                + Duration::from_secs(u64::from(w.settings.sample_retention_days) * 86_400),
+        };
+        match seal(&*w.keyring, &w.rng, tenant, fp.id, &payload, meta) {
+            Ok(sealed) => {
+                let secs = wall.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                let bucket = u64::from(w.recorder.config().bucket_minutes.max(1)) * 60;
+                if w.outbox.offer(tenant, secs - secs % bucket, sealed) {
+                    metrics::counter!("sprig_workload_samples_kept_total").increment(1);
+                }
+            }
+            Err(e) => {
+                metrics::counter!("sprig_workload_samples_skipped_total").increment(1);
+                tracing::trace!(error = %e, "workload sample not sealed");
+            }
+        }
     }
 
     /// `xxh3_64(gateway id, connection id)`: the session of a statement,
@@ -313,6 +391,9 @@ impl SessionCapture {
     #[must_use]
     pub fn start(&self, tenant: TenantId, fp: Fingerprint, multi: bool) -> Pending {
         let mut plan = self.wl.0.recorder.plan(tenant, &fp);
+        if FRONT_RUN.try_with(|r| r.probe).unwrap_or(false) {
+            plan.examined = true;
+        }
         if multi {
             plan.examined = false;
         }
@@ -343,6 +424,13 @@ impl SessionCapture {
             session,
         };
         w.recorder.record(tenant, &p.fp, &ex);
+        if let Some(x) = done.examined {
+            let _ = FRONT_RUN.try_with(|r| {
+                r.examined
+                    .fetch_add(x, std::sync::atomic::Ordering::Relaxed);
+                r.probed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            });
+        }
 
         // Transaction footprints (chapter 12, build step 7), from the
         // backend's transaction state after each statement.

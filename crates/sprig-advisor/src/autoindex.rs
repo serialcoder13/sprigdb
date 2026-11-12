@@ -35,6 +35,7 @@
 
 pub mod candidates;
 pub mod cost;
+pub mod doc;
 pub mod evaluate;
 #[cfg(test)]
 mod fixtures;

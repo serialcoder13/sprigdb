@@ -149,3 +149,29 @@ fn projection_and_sort() {
     assert_eq!(docs[0], doc! {"v": "s"});
     assert_eq!(docs[1], doc! {"v": [5, 1]});
 }
+
+/// bugfix-58 (S114's leftover): a document's metadata survives `$project`
+/// and `$replaceRoot`, as in MongoDB 8.0.34 (checked there with
+/// `textScore` and, with `featureFlagRankFusionFull`, `score`); `$group`
+/// drops it, as there.
+#[test]
+fn meta_survives_project_and_replace_root() {
+    let score = crate::engine::models::SCORE_FIELD;
+    let fused = crate::engine::fusion::FUSION_SCORE;
+    let docs = vec![doc! {"_id": 1, "a": 1, "b": 2, score: 0.75, fused: 0.5}];
+    let meta = doc! {"$addFields": {"s": {"$meta": "score"}, "t": {"$meta": "textScore"}}};
+    for stage in [
+        doc! {"$project": {"b": 1}},
+        doc! {"$project": {"a": 0}},
+        doc! {"$replaceRoot": {"newRoot": {"x": "$b"}}},
+    ] {
+        let out = run(docs.clone(), vec![stage.clone(), meta.clone()]);
+        assert_eq!(out[0].get("s"), Some(&Bson::Double(0.5)), "{stage}");
+        assert_eq!(out[0].get("t"), Some(&Bson::Double(0.75)), "{stage}");
+    }
+    let out = run(
+        docs,
+        vec![doc! {"$group": {"_id": "$a"}}, meta],
+    );
+    assert_eq!(out[0].get("s"), Some(&Bson::Null));
+}

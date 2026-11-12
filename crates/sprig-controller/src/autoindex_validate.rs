@@ -318,6 +318,7 @@ impl ValidationHook for SampleValidation {
                     tenant,
                     &fps,
                     settings.replay.samples_per_fingerprint,
+                    Some(&candidate.def),
                 )
                 .await?
             }

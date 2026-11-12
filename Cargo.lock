@@ -5544,6 +5544,7 @@ dependencies = [
  "sprig-catalog",
  "sprig-cluster",
  "sprig-common",
+ "sprig-doc",
  "sprig-settings",
  "sprig-shard",
  "sprig-sql",

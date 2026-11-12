@@ -149,6 +149,15 @@ pub fn db_level_error(first: &str) -> Option<MongoError> {
 
 // --- $graphLookup --------------------------------------------------------------------------
 
+/// `doc.graph_lookup_max_bytes`: the documents one input document's
+/// search may hold (M5, decision S77).
+static GRAPH_MAX: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(104_857_600);
+
+/// Sets `doc.graph_lookup_max_bytes`.
+pub fn set_graph_lookup_max_bytes(n: usize) {
+    GRAPH_MAX.store(n.max(1), std::sync::atomic::Ordering::Relaxed);
+}
+
 /// A parsed `$graphLookup`.
 #[derive(Debug, Clone)]
 pub struct GraphSpec {
@@ -329,7 +338,7 @@ impl GraphSpec {
             found: Vec::new(),
             bytes: 0,
             depth: 0,
-            limit: lim.stage_bytes,
+            limit: GRAPH_MAX.load(std::sync::atomic::Ordering::Relaxed),
         })
     }
 
@@ -368,6 +377,12 @@ pub struct GraphSearch<'a> {
 }
 
 impl GraphSearch<'_> {
+    /// The values the next level looks for.
+    #[must_use]
+    pub fn frontier(&self) -> &[Bson] {
+        &self.frontier
+    }
+
     /// The next level's filter, or `None` when the search is over.
     #[must_use]
     pub fn next_filter(&self) -> Option<Document> {
@@ -404,10 +419,16 @@ impl GraphSearch<'_> {
             }
             self.bytes += bson::to_vec(&f).map_or(0, |b| b.len());
             if self.bytes > self.limit {
+                // One search's matches can't spill: 146 with `allowDiskUse`,
+                // 292 without (decision S77).
                 return Err(MongoError::new(
-                    code::QUERY_EXCEEDED_MEMORY_LIMIT,
+                    if crate::spill::allowed() {
+                        code::EXCEEDED_MEMORY_LIMIT
+                    } else {
+                        code::QUERY_EXCEEDED_MEMORY_LIMIT
+                    },
                     format!(
-                        "$graphLookup exceeded memory limit of {} bytes (doc.agg_stage_memory_bytes)",
+                        "$graphLookup reached maximum memory consumption: {} bytes (doc.graph_lookup_max_bytes)",
                         self.limit
                     ),
                 ));

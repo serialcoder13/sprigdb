@@ -355,8 +355,7 @@ impl PassSession {
         let mut hidden: Vec<String> = Vec::new();
         // RL55: a key-value namespace's element tables next to it, each
         // with its columns, per shard.
-        let mut element_cols: HashMap<String, Vec<(String, Vec<(String, bool)>)>> =
-            HashMap::new();
+        let mut element_cols: HashMap<String, Vec<(String, Vec<(String, bool)>)>> = HashMap::new();
         let mut element_hidden: Vec<(String, Vec<String>)> = Vec::new();
         for (schema, _) in &list {
             let s = probe.session(schema).await?;
@@ -446,7 +445,11 @@ impl PassSession {
                 stmts.extend(v.views);
                 // RL55: the element tables' views, after the context
                 // function.
-                for (e, ec) in element_cols.get(schema).map(Vec::as_slice).unwrap_or_default() {
+                for (e, ec) in element_cols
+                    .get(schema)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+                {
                     stmts.extend(spec.element_view_statements(&definer, e, ec)?);
                 }
             } else {

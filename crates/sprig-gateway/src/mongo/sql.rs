@@ -250,11 +250,27 @@ impl std::fmt::Debug for SqlSession {
 }
 
 impl SqlSession {
+    /// The gateway's workload capture of this session, for collection
+    /// table `table` of logical database `db` (chapter 12;
+    /// `Fingerprinter::mongo`).
+    #[must_use]
+    pub fn workload(&self, db: &str, table: &str) -> Option<crate::workload::FrontCapture> {
+        self.exec.workload(db, table)
+    }
+
     /// Chapter 29 (RL34): the tables whose policies bind this session, as
     /// MongoDB filters; `None` when it can't tell.
     #[must_use]
     pub fn row_policy_docs(&self) -> Option<std::sync::Arc<crate::tenant::rls::DocViews>> {
         self.exec.row_policy_docs()
+    }
+
+    /// Whether the session holds `action` on the whole tenant (M5:
+    /// `$currentOp`'s `allUsers` needs `PROCESS`); `None` when it can't
+    /// tell.
+    #[must_use]
+    pub fn holds_tenant_privilege(&self, action: sprig_auth::authz::Action) -> Option<bool> {
+        self.exec.holds_tenant_privilege(action)
     }
 
     /// The gateway session's id (chapter 29: internal exemptions).

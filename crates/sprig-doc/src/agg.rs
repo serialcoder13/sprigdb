@@ -40,7 +40,10 @@ mod window;
 // M5 (12 Nov 2026): the stages over sequences that may be on disk.
 mod spilled;
 pub use spilled::{run_stage_seq, run_stages_seq};
-pub use stages_misc::{GraphSearch, GraphSpec, db_level_error, documents, graph_lookup_in_memory};
+pub use stages_misc::{
+    GraphSearch, GraphSpec, db_level_error, documents, graph_lookup_in_memory,
+    set_graph_lookup_max_bytes,
+};
 
 fn bad(msg: impl Into<String>) -> MongoError {
     MongoError::new(code::BAD_VALUE, msg)
@@ -1622,7 +1625,7 @@ pub fn run_stage(
         "$project" => {
             let p = Projection::parse(doc_arg()?)?;
             docs.iter()
-                .map(|d| p.apply(d, lim.now))
+                .map(|d| p.apply(d, lim.now).map(|n| keep_meta(d, n)))
                 .collect::<Result<_, _>>()?
         }
         "$addFields" | "$set" => {
@@ -1676,7 +1679,7 @@ pub fn run_stage(
             };
             docs.iter()
                 .map(|d| match eval(&e, &Vars::new(d, lim.now))? {
-                    Bson::Document(n) => Ok(n),
+                    Bson::Document(n) => Ok(keep_meta(d, n)),
                     other => Err(loc(40228, format!("'newRoot' expression must evaluate to an object, but resulting value was: {other}. Type of resulting value: '{}'", type_name(&other)))),
                 })
                 .collect::<Result<_, _>>()?
@@ -1855,6 +1858,30 @@ pub fn run_stage(
             ));
         }
     })
+}
+
+/// The hidden fields that carry a document's metadata (`{$meta: ...}`:
+/// search, text and vector scores, fused scores and their details,
+/// highlights).
+const META_FIELDS: [&str; 4] = [
+    crate::engine::models::SCORE_FIELD,
+    crate::engine::fusion::FUSION_SCORE,
+    crate::engine::fusion::FUSION_DETAILS,
+    crate::text::HIGHLIGHT_FIELD,
+];
+
+/// `out` with `from`'s metadata fields, which `$project` and `$replaceRoot`
+/// keep as MongoDB keeps a document's metadata apart from its fields
+/// (bugfix-58: `{$meta: "score"}` after a `$project` that names neither).
+fn keep_meta(from: &Document, mut out: Document) -> Document {
+    for f in META_FIELDS {
+        if let Some(v) = from.get(f)
+            && !out.contains_key(f)
+        {
+            out.insert(f, v.clone());
+        }
+    }
+    out
 }
 
 /// Runs an update pipeline on one document.

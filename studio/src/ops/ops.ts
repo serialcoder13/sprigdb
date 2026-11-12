@@ -136,6 +136,14 @@ export function operatorHeaders(s: OperatorSession | null = operatorSession()): 
   return s ? { [OPERATOR_HEADER]: s.token } : {};
 }
 
+/** Whether this tab is in the older operator mode (a Studio login listed
+ * in `studio.operator_logins`, using the gateway's token), which is
+ * deprecated in favour of named operators (decision ST73): the login has
+ * the platform role and no named operator is signed in. */
+export function legacyOperatorMode(platformRoles: readonly string[] | undefined, s: OperatorSession | null): boolean {
+  return !s && (platformRoles ?? []).includes('operator');
+}
+
 /** The session a login answer opens, or null (enrolment or no token). */
 export function sessionOf(r: OperatorLogin): OperatorSession | null {
   return r.token && r.expires_ms ? { token: r.token, name: r.operator.name, expires_ms: r.expires_ms } : null;

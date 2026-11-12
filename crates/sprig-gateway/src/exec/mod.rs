@@ -1229,11 +1229,38 @@ impl SessionExec for PassSession {
         )))
     }
 
+    fn holds_tenant_privilege(&self, action: sprig_auth::authz::Action) -> Option<bool> {
+        // M5: `$currentOp` with `allUsers` needs `PROCESS`.
+        let ts = self.tenant.as_deref()?;
+        let cat = ts.catalog()?;
+        let p = crate::tenant::authz::privileges(ts, cat);
+        Some(p.unrestricted() || p.allows(action, sprig_auth::authz::Target::Tenant))
+    }
+
     fn attach_capture(&mut self, capture: crate::workload::SessionCapture) {
         // Tenant sessions only: accounts-file logins have no catalog.
         if self.tenant.is_some() {
             self.wl = Some(capture);
         }
+    }
+
+    fn workload(&self, db: &str, table: &str) -> Option<crate::workload::FrontCapture> {
+        use sprig_workload::shape::TableResolver as _;
+        let wl = self.wl.as_ref()?.workload().clone();
+        let ts = self.tenant.as_deref()?;
+        let cat = ts.catalog().cloned();
+        let samples = self.wl_capture_allowed(ts, cat.as_deref());
+        let map = ts.map();
+        let resolver = crate::workload::CatalogResolver::new(
+            cat.as_deref(),
+            &*map,
+            ts.lower_case_table_names(),
+        );
+        Some(crate::workload::FrontCapture {
+            workload: wl,
+            samples,
+            table: resolver.resolve(Some(db), table),
+        })
     }
 
     async fn close(&mut self) {

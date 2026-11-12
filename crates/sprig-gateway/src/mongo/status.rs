@@ -15,11 +15,196 @@ use super::conn::Conn;
 
 /// Change-stream cursors opened on this gateway.
 static OPENED: AtomicU64 = AtomicU64::new(0);
-/// Change-stream cursors closed, and their summed lifespans.
+/// Change-stream cursors closed.
 static CLOSED: AtomicU64 = AtomicU64::new(0);
-static LIFESPAN_MICROS: AtomicU64 = AtomicU64::new(0);
 /// Opened per scope: cluster, database, collection.
 static SCOPE: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+
+/// The exponential moving average of closed streams' lifespans, in µs
+/// (MongoDB 9.0's `cursor.lifespan.average`; `None` before the first).
+static LIFESPAN_AVERAGE: Mutex<Option<f64>> = Mutex::new(None);
+/// The weight of the newest lifespan in [`LIFESPAN_AVERAGE`].
+const LIFESPAN_ALPHA: f64 = 0.2;
+
+/// MongoDB 9.0's `metrics.changeStreams` option and error counters
+/// (bugfix-60), by path below `metrics.changeStreams`.
+fn counters() -> std::sync::MutexGuard<'static, HashMap<String, u64>> {
+    static M: std::sync::OnceLock<Mutex<HashMap<String, u64>>> = std::sync::OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+fn bump(path: &str) {
+    *counters().entry(path.to_owned()).or_default() += 1;
+}
+
+/// `option.cursor.batchSize`'s bucket bounds.
+const BATCH_BOUNDS: [i64; 5] = [1, 10, 100, 1000, 10000];
+/// `option.cursor.maxTimeMS`'s bucket bounds.
+const MAX_TIME_BOUNDS: [i64; 13] = [
+    100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100_000, 200_000, 500_000, 1_000_000,
+];
+
+/// The bucket labels of a histogram with `bounds`: `(-inf, b0)`,
+/// `[b0, b1)`, ..., `[bn, inf)`.
+fn buckets(bounds: &[i64]) -> Vec<String> {
+    let mut out = vec![format!("(-inf, {})", bounds[0])];
+    for w in bounds.windows(2) {
+        out.push(format!("[{}, {})", w[0], w[1]));
+    }
+    out.push(format!("[{}, inf)", bounds[bounds.len() - 1]));
+    out
+}
+
+fn observe(histogram: &str, bounds: &[i64], v: i64) {
+    let i = bounds.iter().take_while(|b| v >= **b).count();
+    bump(&format!("option.cursor.{histogram}.{}", buckets(bounds)[i]));
+}
+
+fn num_of(v: Option<&Bson>) -> Option<i64> {
+    match v? {
+        Bson::Int32(n) => Some(i64::from(*n)),
+        Bson::Int64(n) => Some(*n),
+        #[allow(clippy::cast_possible_truncation)]
+        Bson::Double(f) => Some(*f as i64),
+        _ => None,
+    }
+}
+
+/// A change stream opened with `$changeStream` options `stage` by the
+/// `aggregate` command `body`: its option counters and the cursor
+/// option histograms (an `aggregate` without `batchSize` counts the
+/// default first batch, 101, as MongoDB backfills one).
+pub(crate) fn stream_options(stage: &Document, body: &Document) {
+    for (k, v) in stage {
+        match (k.as_str(), v) {
+            ("fullDocument", Bson::String(m))
+                if matches!(m.as_str(), "required" | "updateLookup" | "whenAvailable") =>
+            {
+                bump(&format!("option.fullDocument.{m}"));
+            }
+            ("fullDocumentBeforeChange", Bson::String(m))
+                if matches!(m.as_str(), "required" | "whenAvailable") =>
+            {
+                bump(&format!("option.fullDocumentBeforeChange.{m}"));
+            }
+            ("resumeAfter" | "startAfter" | "startAtOperationTime", _) => {
+                bump(&format!("option.{k}"));
+            }
+            (
+                "showExpandedEvents"
+                | "showMigrationEvents"
+                | "showSystemEvents"
+                | "showRawUpdateDescription"
+                | "ignoreRemovedShards"
+                | "matchCollectionUUIDForUpdateLookup",
+                Bson::Boolean(true),
+            ) => bump(&format!("option.{k}")),
+            _ => {}
+        }
+    }
+    let batch = body
+        .get_document("cursor")
+        .ok()
+        .and_then(|c| num_of(c.get("batchSize")))
+        .unwrap_or(101);
+    observe("batchSize", &BATCH_BOUNDS, batch);
+    if let Some(ms) = num_of(body.get("maxTimeMS")) {
+        observe("maxTimeMS", &MAX_TIME_BOUNDS, ms);
+    }
+}
+
+/// A `getMore` on a change stream: the cursor option histograms, for
+/// the options it sets.
+pub(crate) fn stream_get_more(body: &Document) {
+    if let Some(n) = num_of(body.get("batchSize")) {
+        observe("batchSize", &BATCH_BOUNDS, n);
+    }
+    if let Some(ms) = num_of(body.get("maxTimeMS")) {
+        observe("maxTimeMS", &MAX_TIME_BOUNDS, ms);
+    }
+}
+
+/// An error a change stream's cursor met (opening, resuming or reading),
+/// counted as MongoDB 9.0 sorts them.
+pub(crate) fn stream_error(e: &sprig_proto_mongo::errors::MongoError) {
+    // MongoDB's resumable change-stream errors (network, step-down and
+    // shutdown codes), besides the label.
+    const RETRIABLE: [i32; 16] = [
+        6, 7, 63, 89, 91, 133, 150, 189, 234, 262, 9001, 10107, 11600, 13388, 13435, 13436,
+    ];
+    let path = match e.code {
+        10334 => "error.nonRetriable.bsonObjectTooLarge",
+        280 => "error.nonRetriable.changeStreamFatalError",
+        286 => "error.nonRetriable.changeStreamHistoryLost",
+        11602 => "error.retriable.interruptedDueToReplStateChange",
+        c if RETRIABLE.contains(&c)
+            || e.labels.contains(&"ResumableChangeStreamError") =>
+        {
+            "error.retriable.other"
+        }
+        _ => "error.nonRetriable.other",
+    };
+    bump(path);
+}
+
+/// The option and error counters as `serverStatus` shows them.
+fn option_and_error_metrics() -> (Document, Document) {
+    let m = counters().clone();
+    let get = |p: &str| n(m.get(p).copied().unwrap_or(0));
+    let histogram = |name: &str, bounds: &[i64]| {
+        let mut d = Document::new();
+        let mut total = 0;
+        for b in buckets(bounds) {
+            let c = m
+                .get(&format!("option.cursor.{name}.{b}"))
+                .copied()
+                .unwrap_or(0);
+            total += c;
+            d.insert(b, doc! {"count": n(c)});
+        }
+        d.insert("totalCount", n(total));
+        d
+    };
+    let option = doc! {
+        "fullDocument": {
+            "required": get("option.fullDocument.required"),
+            "updateLookup": get("option.fullDocument.updateLookup"),
+            "whenAvailable": get("option.fullDocument.whenAvailable"),
+        },
+        "fullDocumentBeforeChange": {
+            "required": get("option.fullDocumentBeforeChange.required"),
+            "whenAvailable": get("option.fullDocumentBeforeChange.whenAvailable"),
+        },
+        "ignoreRemovedShards": get("option.ignoreRemovedShards"),
+        "matchCollectionUUIDForUpdateLookup": get("option.matchCollectionUUIDForUpdateLookup"),
+        "resumeAfter": get("option.resumeAfter"),
+        "showExpandedEvents": get("option.showExpandedEvents"),
+        "showMigrationEvents": get("option.showMigrationEvents"),
+        "showRawUpdateDescription": get("option.showRawUpdateDescription"),
+        "showSystemEvents": get("option.showSystemEvents"),
+        "startAfter": get("option.startAfter"),
+        "startAtOperationTime": get("option.startAtOperationTime"),
+        "cursor": {
+            "batchSize": histogram("batchSize", &BATCH_BOUNDS),
+            "maxTimeMS": histogram("maxTimeMS", &MAX_TIME_BOUNDS),
+        },
+    };
+    let error = doc! {
+        "nonRetriable": {
+            "bsonObjectTooLarge": get("error.nonRetriable.bsonObjectTooLarge"),
+            "changeStreamFatalError": get("error.nonRetriable.changeStreamFatalError"),
+            "changeStreamHistoryLost": get("error.nonRetriable.changeStreamHistoryLost"),
+            "other": get("error.nonRetriable.other"),
+        },
+        "retriable": {
+            "interruptedDueToReplStateChange": get("error.retriable.interruptedDueToReplStateChange"),
+            "other": get("error.retriable.other"),
+        },
+    };
+    (option, error)
+}
 
 /// The open change-stream cursors and when each opened.
 fn open_at() -> std::sync::MutexGuard<'static, HashMap<i64, Instant>> {
@@ -56,11 +241,14 @@ pub(crate) fn cursor_closed(id: i64) {
 }
 
 fn close(t: Instant) {
+    let micros = u64::try_from(t.elapsed().as_micros()).unwrap_or(u64::MAX);
     CLOSED.fetch_add(1, Ordering::Relaxed);
-    LIFESPAN_MICROS.fetch_add(
-        u64::try_from(t.elapsed().as_micros()).unwrap_or(u64::MAX),
-        Ordering::Relaxed,
-    );
+    #[allow(clippy::cast_precision_loss)]
+    let x = micros as f64;
+    let mut avg = LIFESPAN_AVERAGE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    *avg = Some(avg.map_or(x, |a| a + LIFESPAN_ALPHA * (x - a)));
 }
 
 /// Streams the table no longer holds (timed out, their session killed)
@@ -93,13 +281,21 @@ fn change_stream_metrics(c: &Conn) -> Document {
         .filter(|(_, cur)| cur.try_lock().is_err())
         .count();
     let closed = CLOSED.load(Ordering::Relaxed);
-    let total = LIFESPAN_MICROS.load(Ordering::Relaxed);
+    // MongoDB 9.0's names (bugfix-60): `average` is an exponential moving
+    // average in µs, `totalCount` the streams closed.
+    let average = LIFESPAN_AVERAGE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .unwrap_or(0.0);
+    let (option, error) = option_and_error_metrics();
     doc! {
         "cursor": {
             "open": {"total": n(open as u64), "pinned": n(pinned.min(open) as u64)},
             "totalOpened": n(OPENED.load(Ordering::Relaxed)),
-            "lifespan": {"count": n(closed), "averageMicros": n(total.checked_div(closed).unwrap_or(0))},
+            "lifespan": {"average": average, "totalCount": n(closed)},
         },
+        "option": option,
+        "error": error,
         "scope": {
             "cluster": n(SCOPE[0].load(Ordering::Relaxed)),
             "db": n(SCOPE[1].load(Ordering::Relaxed)),
@@ -232,4 +428,68 @@ pub(crate) fn change_stream_ops(c: &Conn) -> Vec<Document> {
         out.push(d);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use sprig_proto_mongo::errors::MongoError;
+
+    use super::*;
+
+    /// bugfix-60 (S116's leftover): the option counters and histograms, and
+    /// the error counters, under MongoDB 9.0's names.
+    #[test]
+    fn change_stream_option_and_error_counters() {
+        stream_options(
+            &doc! {"fullDocument": "updateLookup", "fullDocumentBeforeChange": "off", "resumeAfter": {"_data": "00"}, "showExpandedEvents": true},
+            &doc! {"aggregate": "c", "cursor": {}, "maxTimeMS": 250},
+        );
+        stream_options(
+            &doc! {"fullDocument": "default", "showExpandedEvents": false},
+            &doc! {"aggregate": "c", "cursor": {"batchSize": 5}},
+        );
+        stream_get_more(&doc! {"getMore": 1i64, "collection": "c", "maxTimeMS": 1000});
+        stream_error(&MongoError::new(286, "history lost"));
+        stream_error(&MongoError::new(280, "pre-image required"));
+        stream_error(&MongoError::new(234, "rls changed").label("ResumableChangeStreamError"));
+        stream_error(&MongoError::new(2, "bad value"));
+        let (o, e) = option_and_error_metrics();
+        let at = |d: &Document, p: &str| {
+            let mut cur = d.clone();
+            let parts: Vec<&str> = p.split('/').collect();
+            for k in &parts[..parts.len() - 1] {
+                cur = cur.get_document(k).unwrap().clone();
+            }
+            cur.get_i64(parts[parts.len() - 1]).unwrap()
+        };
+        assert_eq!(at(&o, "fullDocument/updateLookup"), 1);
+        assert_eq!(at(&o, "fullDocument/required"), 0);
+        assert_eq!(at(&o, "fullDocumentBeforeChange/whenAvailable"), 0);
+        assert_eq!(at(&o, "resumeAfter"), 1);
+        assert_eq!(at(&o, "showExpandedEvents"), 1);
+        assert_eq!(at(&o, "startAfter"), 0);
+        assert_eq!(at(&o, "cursor/batchSize/[100, 1000)/count"), 1);
+        assert_eq!(at(&o, "cursor/batchSize/[1, 10)/count"), 1);
+        assert_eq!(at(&o, "cursor/batchSize/totalCount"), 2);
+        assert_eq!(at(&o, "cursor/maxTimeMS/[200, 500)/count"), 1);
+        assert_eq!(at(&o, "cursor/maxTimeMS/[1000, 2000)/count"), 1);
+        assert_eq!(at(&o, "cursor/maxTimeMS/totalCount"), 2);
+        assert_eq!(
+            o.get_document("cursor")
+                .unwrap()
+                .get_document("maxTimeMS")
+                .unwrap()
+                .len(),
+            15
+        );
+        assert_eq!(at(&e, "nonRetriable/changeStreamHistoryLost"), 1);
+        assert_eq!(at(&e, "nonRetriable/changeStreamFatalError"), 1);
+        assert_eq!(at(&e, "nonRetriable/other"), 1);
+        assert_eq!(at(&e, "nonRetriable/bsonObjectTooLarge"), 0);
+        assert_eq!(at(&e, "retriable/other"), 1);
+        assert_eq!(at(&e, "retriable/interruptedDueToReplStateChange"), 0);
+        // The lifespan average is exponential: the newest weighs 0.2.
+        close(Instant::now());
+        assert!(LIFESPAN_AVERAGE.lock().unwrap().is_some());
+    }
 }

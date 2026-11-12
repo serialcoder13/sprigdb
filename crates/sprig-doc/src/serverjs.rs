@@ -91,6 +91,9 @@ pub struct Scope {
     memory_bytes: usize,
     used: Mutex<Duration>,
     error: Mutex<Option<MongoError>>,
+    /// The command's `maxTimeMS`: when its time ends, and the value
+    /// (bugfix-57).
+    max_time: Option<(Instant, u64)>,
 }
 
 impl std::fmt::Debug for Scope {
@@ -124,7 +127,42 @@ impl Scope {
             memory_bytes,
             used: Mutex::new(Duration::ZERO),
             error: Mutex::new(None),
+            max_time: None,
         })
+    }
+
+    /// A scope as [`Self::new`] for a command with `maxTimeMS` (from now):
+    /// its code also stops when the command's time ends, with MongoDB's 50
+    /// `MaxTimeMSExpired` (bugfix-57; MongoDB checks its time limit
+    /// between documents, SprigDB also inside a call).
+    #[must_use]
+    pub fn with_max_time(
+        runner: Arc<dyn Runner>,
+        wall: Duration,
+        memory_bytes: usize,
+        max_time_ms: Option<u64>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            runner,
+            op: OPS.fetch_add(1, Ordering::Relaxed),
+            wall,
+            memory_bytes,
+            used: Mutex::new(Duration::ZERO),
+            error: Mutex::new(None),
+            max_time: max_time_ms
+                .filter(|ms| *ms > 0)
+                .map(|ms| (Instant::now() + Duration::from_millis(ms), ms)),
+        })
+    }
+
+    fn max_time_expired(&self) -> MongoError {
+        MongoError::new(
+            code::MAX_TIME_MS_EXPIRED,
+            format!(
+                "operation exceeded time limit: server-side JavaScript ran past the command's maxTimeMS ({} ms)",
+                self.max_time.map_or(0, |(_, ms)| ms)
+            ),
+        )
     }
 
     /// The first error the command's code met, if any (taken).
@@ -162,13 +200,24 @@ impl Scope {
         }
         let used = *self.used.lock().unwrap_or_else(PoisonError::into_inner);
         let start = Instant::now();
+        let mut deadline = start + self.wall.saturating_sub(used);
+        // The command's maxTimeMS, when it ends first (bugfix-57).
+        let by_max_time = self.max_time.is_some_and(|(t, _)| t < deadline);
+        if let Some((t, _)) = self.max_time.filter(|_| by_max_time) {
+            if t <= start {
+                let e = self.max_time_expired();
+                self.keep(&e);
+                return Err(e);
+            }
+            deadline = t;
+        }
         let c = JsCall {
             op: self.op,
             src,
             this,
             args,
             as_bool: kind == Kind::Where,
-            deadline: start + self.wall.saturating_sub(used),
+            deadline,
             memory_bytes: self.memory_bytes,
         };
         let r = if used >= OFF_WORKER_AFTER {
@@ -179,6 +228,7 @@ impl Scope {
         *self.used.lock().unwrap_or_else(PoisonError::into_inner) += start.elapsed();
         r.map_err(|f| {
             let e = match f {
+                JsFailure::Interrupted if by_max_time => self.max_time_expired(),
                 JsFailure::Interrupted if kind == Kind::Where => MongoError::new(
                     code::MAX_TIME_MS_EXPIRED,
                     format!(

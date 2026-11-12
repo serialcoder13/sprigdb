@@ -530,6 +530,20 @@ impl Generator {
             let acc = access(f, &t.alias, object, stats);
             // Chapter 33's element tables (R6 round 5) get only their own
             // shapes' indexes (`super::kv`).
+            // Chapter 31's collection tables (R5, S131) get only document
+            // indexes, from MongoDB shapes (`super::doc`).
+            if super::doc::is_collection_table(stats) {
+                let cands = super::doc::candidates(f, &t.alias, object, stats);
+                if cands.is_empty() {
+                    out.skipped.push(skip(if super::doc::has_multikey(&f.shape, &t.alias) {
+                        "doc_multikey"
+                    } else {
+                        "no_doc_path"
+                    }));
+                }
+                out.candidates.extend(cands);
+                continue;
+            }
             let cands = if super::kv::is_element_table(stats) {
                 super::kv::candidates(f, &t.alias, object, stats)
             } else {
