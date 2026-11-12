@@ -27,7 +27,7 @@ name: heavy-protocols
 
 on:
   schedule:
-    - cron: "47 3 * * *"
+    - cron: "47 3 * * 0" # weekly while private; nightly once public
   workflow_dispatch:
     inputs:
       jobs:

@@ -2,12 +2,12 @@
 #
 #   S0  every push and pull request   rustfmt, clippy, unit tests, cargo deny,
 #                                     Compose files validated
-#   S1  pull requests, main           integration tests against Compose (all
+#   S1  main, PRs labelled full-ci    integration tests against Compose (all
 #                                     single-DC profiles, plus toxiproxy,
 #                                     faultd and elle-cli), SPRIG_TEST_* set;
 #                                     simulations, 200 seeds per suite
 #                                     (5,000 nightly), tokio's RNG seeded
-#   S2  nightly and on demand         the three-DC layout with netem latency;
+#   S2  weekly and on demand          the three-DC layout with netem latency;
 #                                     the same suites against it, on MariaDB
 #                                     11.8 and 12.3
 #
@@ -18,12 +18,24 @@
 # suites they run.
 name: ci
 
+# Runs (Kiran, 12 Nov 2026: CI was running all the time):
+# - push: main only; branches are covered by their pull requests, so a
+#   change no longer runs twice (branch push + pull request).
+# - Docs, the website, brand assets and Markdown don't run the Rust jobs.
+# - S1 runs on main, on demand, weekly, and on pull requests labelled
+#   `full-ci`; other pull requests get S0 only.
+# - S2 weekly (Sunday) while the repository is private and minutes are
+#   billed; back to nightly once it's public.
 on:
   push:
+    branches: [main]
+    paths-ignore: ["docs/**", "site/**", "brand/**", "**/*.md"]
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    paths-ignore: ["docs/**", "site/**", "brand/**", "**/*.md"]
   workflow_dispatch:
   schedule:
-    - cron: "17 2 * * *" # S2, nightly
+    - cron: "17 2 * * 0" # S2, weekly (Sunday 02:17 UTC)
 
 permissions:
   contents: read
@@ -117,7 +129,8 @@ jobs:
     name: S1 Studio end to end
     needs: [studio]
     if: >-
-      github.event_name == 'pull_request' ||
+      (github.event_name == 'pull_request' &&
+        contains(github.event.pull_request.labels.*.name, 'full-ci')) ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
       github.ref == 'refs/heads/main'
@@ -207,7 +220,8 @@ jobs:
     name: S1 fuzz smoke
     needs: [fmt, clippy, test]
     if: >-
-      github.event_name == 'pull_request' ||
+      (github.event_name == 'pull_request' &&
+        contains(github.event.pull_request.labels.*.name, 'full-ci')) ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
       github.ref == 'refs/heads/main'
@@ -250,7 +264,8 @@ jobs:
     name: S1 integration (Compose, one DC)
     needs: [fmt, clippy, test, compose]
     if: >-
-      github.event_name == 'pull_request' ||
+      (github.event_name == 'pull_request' &&
+        contains(github.event.pull_request.labels.*.name, 'full-ci')) ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
       github.ref == 'refs/heads/main'
@@ -313,7 +328,8 @@ jobs:
     name: S1 simulation (seeded)
     needs: [fmt, clippy, test]
     if: >-
-      github.event_name == 'pull_request' ||
+      (github.event_name == 'pull_request' &&
+        contains(github.event.pull_request.labels.*.name, 'full-ci')) ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
       github.ref == 'refs/heads/main'
@@ -514,7 +530,8 @@ jobs:
     name: M0.3 and M0.5 tenants, names, settings and isolation (gateway)
     needs: [integration]
     if: >-
-      github.event_name == 'pull_request' ||
+      (github.event_name == 'pull_request' &&
+        contains(github.event.pull_request.labels.*.name, 'full-ci')) ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
       github.ref == 'refs/heads/main'
