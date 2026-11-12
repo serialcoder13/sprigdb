@@ -34,9 +34,12 @@ Every page's front matter names its audience:
 ## Keeping the reference current
 
 ```sh
-cargo run -p sprig-docs-gen                         # settings, errors, metrics, API
+SPRIG_DOCS_REGEN=1 cargo test -p sprigdb --test docs_settings   # settings, from the server binary
+cargo run -p sprig-docs-gen                         # errors, metrics, API
 cargo run -p sprig-docs-gen -- --sprigctl target/debug/sprigctl --sprig target/debug/sprig
 cargo run -p sprig-docs-gen -- --check              # CI: fails if a page is stale
 ```
 
-The test `docs_reference_is_current` (in `sprig-docs-gen`) fails when a setting, an error code, a metric or an API route changes without regenerating the pages.
+Two tests fail when the pages fall behind the code:
+- `settings_reference_is_current` (in `sprigdb`) covers settings;
+- `docs_reference_is_current` (in `sprig-docs-gen`) covers error codes, metrics and API routes.

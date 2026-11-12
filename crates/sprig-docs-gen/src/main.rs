@@ -9,7 +9,7 @@
 //!
 //! | Page | From |
 //! |---|---|
-//! | `settings.md` | the settings registry, linked as in the `sprigdb` binary |
+//! | `settings.md` | not here: `sprigdb docs-settings`, checked and rewritten by `cargo test -p sprigdb --test docs_settings` |
 //! | `errors.md` | `SprigCode::ALL` and `docs/errors-what-to-do.toml` |
 //! | `metrics.md` | the metric macros under `crates/`, and `docs/metrics-help.toml` |
 //! | `api.md` | the gateway's `OpenAPI` document |
@@ -23,8 +23,7 @@ use std::process::ExitCode;
 
 use sprig_docs::metrics_scan::Scanner;
 use sprig_docs::reference::{
-    self, ApiOp, CommandHelp, ErrorDoc, SettingDoc, api_page, cli_page, errors_page, metrics_page,
-    settings_page,
+    self, ApiOp, CommandHelp, ErrorDoc, api_page, cli_page, errors_page, metrics_page,
 };
 
 /// The pages generated from code alone, by file name.
@@ -38,7 +37,6 @@ fn pages(root: &Path) -> Result<Vec<(String, String)>, String> {
         .transpose()?
         .unwrap_or_default();
     Ok(vec![
-        ("settings.md".into(), settings_page(&settings()?)),
         ("errors.md".into(), errors_page(&errors(), &error_help)),
         (
             "metrics.md".into(),
@@ -50,72 +48,6 @@ fn pages(root: &Path) -> Result<Vec<(String, String)>, String> {
 
 fn read(p: &Path) -> Option<String> {
     std::fs::read_to_string(p).ok()
-}
-
-fn scope_names(s: sprig_settings::Scopes) -> Vec<String> {
-    ["object", "database", "tenant", "cluster", "dc", "global"]
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| s.0 & (1 << i) != 0)
-        .map(|(_, n)| (*n).to_owned())
-        .collect()
-}
-
-fn value_text(v: &sprig_settings::Value) -> String {
-    use sprig_settings::Value;
-    match v {
-        Value::Bool(b) => b.to_string(),
-        Value::Int(i) => i.to_string(),
-        Value::Float(f) => f.to_string(),
-        Value::Str(s) => s.clone(),
-    }
-}
-
-fn bound(x: f64) -> String {
-    if x.fract() == 0.0 && x.abs() < 1e15 {
-        format!("{x:.0}")
-    } else {
-        x.to_string()
-    }
-}
-
-fn settings() -> Result<Vec<SettingDoc>, String> {
-    use sprig_settings::{Apply, ValueKind};
-    let reg = sprig_settings::Registry::global().map_err(|e| e.message)?;
-    Ok(reg
-        .iter()
-        .map(|s| {
-            let h = s.hard();
-            let bounds = match (h.min, h.max, h.allowed) {
-                (_, _, Some(a)) => a.join(", "),
-                (Some(lo), Some(hi), None) => format!("{} to {}", bound(lo), bound(hi)),
-                (Some(lo), None, None) => format!("at least {}", bound(lo)),
-                (None, Some(hi), None) => format!("at most {}", bound(hi)),
-                (None, None, None) => String::new(),
-            };
-            SettingDoc {
-                key: s.key().to_owned(),
-                kind: match s.kind() {
-                    ValueKind::Bool => "bool",
-                    ValueKind::Int => "int",
-                    ValueKind::Float => "float",
-                    ValueKind::Str => "text",
-                }
-                .to_owned(),
-                default: value_text(&s.default_value()),
-                scopes: scope_names(s.scopes()),
-                bounds,
-                apply: match s.apply() {
-                    Apply::Live => "live",
-                    Apply::NewSessions => "new sessions",
-                    Apply::Rebind => "rebind",
-                }
-                .to_owned(),
-                operator_only: s.operator_only(),
-                doc: s.doc().to_owned(),
-            }
-        })
-        .collect())
 }
 
 fn errors() -> Vec<ErrorDoc> {
@@ -325,27 +257,6 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Settings from crates all over the workspace are linked in; a key
-    /// missing here would be missing from the docs.
-    #[test]
-    fn the_registry_holds_every_crates_settings() {
-        let keys: Vec<String> = settings()
-            .expect("registry")
-            .into_iter()
-            .map(|s| s.key)
-            .collect();
-        for k in [
-            "auto_index.min_runs",
-            "studio.history_max",
-            "studio.persist_drafts",
-        ] {
-            assert!(keys.iter().any(|x| x == k), "{k} missing");
-        }
-        let prefixes: std::collections::BTreeSet<&str> =
-            keys.iter().filter_map(|k| k.split('.').next()).collect();
-        assert!(prefixes.len() > 20, "only {prefixes:?}");
-    }
 
     /// The generated pages in `docs/reference` match the code.
     #[test]

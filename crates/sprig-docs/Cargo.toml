@@ -10,6 +10,8 @@ publish.workspace = true
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
+sprig-settings.workspace = true
 toml.workspace = true
 
 [lints]
