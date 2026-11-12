@@ -355,7 +355,7 @@ Every setting SprigDB declares, with its default, the scopes that may set it, ha
 | `failover.max_parallel_promotions` | int | `16` | global (operator only) | 1 to 1024 | live | Concurrent tenant promotions |
 | `failover.min_interval_minutes` | int | `30` | cluster, dc, global (operator only) | 0 to 10080 | live | Only hard failures fail over again within it |
 | `failover.min_sites` | int | `3` | global (operator only) | 2 to 64 | live | Sites needed for automatic DC failover |
-| `failover.mode` | text | `auto` | tenant, cluster, dc, global (operator only) | auto, approve, manual | live | auto, approve (global scope only, chapter 52) or manual (the dry run) |
+| `failover.mode` | text | `auto` | tenant, cluster, dc, global (operator only) | auto, approve, manual | live | auto, approve (global scope only) or manual (the dry run) |
 | `failover.observe_settle_ms` | int | `2000` | cluster, dc, global (operator only) | 0 to 60000 | live | An observed writer change holds this long before it is published |
 | `failover.observer_probe_interval_ms` | int | `1000` | global (operator only) | 10 to 60000 | live | Gap between probes |
 | `failover.observer_probes` | int | `3` | global (operator only) | 1 to 20 | live | Probes per observer |

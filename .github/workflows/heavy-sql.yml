@@ -30,7 +30,7 @@ name: heavy-sql
 
 on:
   schedule:
-    - cron: "37 1 * * *"
+    - cron: "37 1 * * 0" # weekly while private; nightly once public
   workflow_dispatch:
     inputs:
       jobs:

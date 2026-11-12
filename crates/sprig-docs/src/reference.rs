@@ -45,6 +45,14 @@ pub fn public(s: &str) -> String {
             rest = &rest[end + 1..];
             continue;
         }
+        // ", chapter N" inside a longer parenthesis or list: drop it.
+        if lower.starts_with(", chapter ") {
+            let digits = rest[10..].bytes().take_while(u8::is_ascii_digit).count();
+            if digits > 0 {
+                rest = &rest[10 + digits..];
+                continue;
+            }
+        }
         // "Chapter N's ": drop it.
         if lower.starts_with("chapter ") {
             let digits = rest[8..].bytes().take_while(u8::is_ascii_digit).count();
@@ -530,6 +538,10 @@ mod tests {
             "a webhook connection that gets"
         );
         assert_eq!(public("the chapter on this"), "the chapter on this");
+        assert_eq!(
+            public("auto, approve (global scope only, chapter 52) or manual"),
+            "auto, approve (global scope only) or manual"
+        );
         assert_eq!(public("p95 → 40 ms"), "p95 → 40 ms");
     }
 
