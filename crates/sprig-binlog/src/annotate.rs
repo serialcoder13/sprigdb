@@ -27,6 +27,10 @@ pub enum OpHint {
     Delete,
     /// `x`: a TTL expiry.
     Expire,
+    /// `k`: a Redis command's write, whose keyspace notifications the
+    /// command sent itself (chapter 40; RLS round 5, RL51): the gateways'
+    /// notifications from the feed pass over its rows.
+    Notified,
 }
 
 impl OpHint {
@@ -37,6 +41,7 @@ impl OpHint {
             "r" => Self::Replace,
             "d" => Self::Delete,
             "x" => Self::Expire,
+            "k" => Self::Notified,
             _ => return None,
         })
     }
@@ -48,6 +53,7 @@ impl OpHint {
             Self::Replace => 'r',
             Self::Delete => 'd',
             Self::Expire => 'x',
+            Self::Notified => 'k',
         }
     }
 }
@@ -104,13 +110,48 @@ impl SprigComment {
     }
 }
 
+/// A statement comment for a Redis command's write (`o=k`, RL51), with an
+/// HLC in the feed's layout (seconds in the high 32 bits, a counter in the
+/// low 32) that never goes backwards in this process.
+#[must_use]
+pub fn notified_comment() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let wall = secs << 32;
+    let mut cur = LAST.load(Ordering::SeqCst);
+    let h = loop {
+        let next = wall.max(cur + 1);
+        match LAST.compare_exchange(cur, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => break next,
+            Err(c) => cur = c,
+        }
+    };
+    SprigComment::new(h, OpHint::Notified).render()
+}
+
 /// Parses the comment at the start of an annotate text (leading spaces
 /// allowed). `None` when the statement has no SprigDB comment (maintenance
 /// statements) or the comment is malformed: such statements contribute no
 /// stamp.
 #[must_use]
 pub fn parse_comment(text: &str) -> Option<SprigComment> {
-    let rest = text.trim_start().strip_prefix("/*sprig ")?;
+    let t = text.trim_start();
+    // RL51: an inner statement of a compound statement (`BEGIN NOT ATOMIC`)
+    // is annotated without any comment before it, so writers mark those
+    // right after the verb: `INSERT /*sprig ...*/ INTO ...`.
+    let rest = t.strip_prefix("/*sprig ").or_else(|| {
+        let verb = ["INSERT", "UPDATE", "DELETE", "REPLACE"]
+            .into_iter()
+            .find(|v| t.get(..v.len()).is_some_and(|h| h.eq_ignore_ascii_case(v)))?;
+        let after = &t[verb.len()..];
+        after
+            .starts_with(|c: char| c.is_ascii_whitespace())
+            .then(|| after.trim_start().strip_prefix("/*sprig "))
+            .flatten()
+    })?;
     let body = &rest[..rest.find("*/")?];
     let mut hlc = None;
     let mut op = None;
@@ -149,6 +190,15 @@ mod tests {
         c.command = Some("HSET".into());
         let text = format!("  {} UPDATE t SET a = 'x */ y'", c.render());
         assert_eq!(parse_comment(&text), Some(c));
+    }
+
+    #[test]
+    fn reads_a_comment_after_the_verb() {
+        let c = parse_comment("UPDATE /*sprig h=0000000100000002 o=k*/ t SET v = 1")
+            .expect("a comment after the verb");
+        assert_eq!((c.hlc, c.op), (0x1_0000_0002, OpHint::Notified));
+        assert!(parse_comment("SELECT /*sprig h=0000000100000002 o=k*/ 1").is_none());
+        assert!(parse_comment("UPDATEX /*sprig h=0000000100000002 o=k*/ t").is_none());
     }
 
     #[test]

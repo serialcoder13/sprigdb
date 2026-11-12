@@ -69,6 +69,7 @@ pub mod backend;
 pub mod exec;
 pub mod mem;
 mod multi;
+mod owners;
 mod repair;
 pub mod shards;
 
@@ -100,6 +101,9 @@ pub use exec::{
     ShardTarget, drop_sql, kind_keyword, outcome_unknown,
 };
 pub use multi::{ShardRef, ShardSet, jobs_on_shards};
+pub use owners::{
+    GATEWAY_PROCESS_PREFIX, OWNER_MIN_AGE, ProcessOwners, gateway_label, is_gateway_owner,
+};
 pub use repair::{Resolution, drop_schema, job_schemas};
 
 use crate::store::{

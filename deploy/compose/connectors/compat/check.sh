@@ -93,8 +93,14 @@ c_mysql_stored() { admin "$(corpus mysql_stored)"; }
 # names, stored code as written, USE performance_schema, statement
 # digests (3306 only).
 c_mysql_json_index() { admin "$(corpus mysql_json_index)"; }
+# R4 round 6: MySQL's answers to DDL that MariaDB answers differently
+# (gaps rows 67 and 78: collation names, foreign key errors, long names,
+# MyISAM's descending parts, DEFAULT (now()), escaped defaults, a column
+# of a multi-column unique index, KILL QUERY of the session's own
+# statement, stored programs' character sets; 3306 only).
+c_mysql_ddl_answers() { admin "$(corpus mysql_ddl_answers)"; }
 
-CHECKS=${SPRIG_COMPAT_CHECKS:-"sql_mode max_execution_time errors show_index show_grants roles gis stored_mode group_by int_meta mysql_compat mysql_ddl session_status perf_schema mysql_stored mysql_json_index"}
+CHECKS=${SPRIG_COMPAT_CHECKS:-"sql_mode max_execution_time errors show_index show_grants roles gis stored_mode group_by int_meta mysql_compat mysql_ddl session_status perf_schema mysql_stored mysql_json_index mysql_ddl_answers"}
 for check in $CHECKS; do
   if [[ $check == gis && $SPRIG_PERSONA != mysql ]]; then
     emit gis n/a "MySQL's SRID 4326 semantics are the MySQL persona's only"
@@ -106,6 +112,10 @@ for check in $CHECKS; do
   fi
   if [[ $check == mysql_json_index && $SPRIG_PERSONA != mysql ]]; then
     emit mysql_json_index n/a "MySQL's JSON operators, functional key parts and performance_schema are 3306's"
+    continue
+  fi
+  if [[ $check == mysql_ddl_answers && $SPRIG_PERSONA != mysql ]]; then
+    emit mysql_ddl_answers n/a "MySQL's DDL answers are 3306's; 3307 keeps MariaDB's"
     continue
   fi
   if [[ $check == perf_schema && $SPRIG_PERSONA != mysql ]]; then

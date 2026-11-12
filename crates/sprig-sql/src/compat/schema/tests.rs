@@ -393,3 +393,63 @@ fn functional_parts_show_as_mysql_writes_them() {
         "CREATE TABLE `t` (\n  `a` int\n)"
     );
 }
+
+#[test]
+fn expression_defaults_print_in_parentheses() {
+    // R4 round 6 (gaps row 78): MariaDB 11.8.9's text of
+    // `DEFAULT (now())` (stored as `localtimestamp()` on 3306),
+    // `DEFAULT (now(6))`, `DEFAULT (curdate())` and the special
+    // `CURRENT_TIMESTAMP` default; MySQL 8.4.11 prints the first three in
+    // parentheses with `now`.
+    let maria = "CREATE TABLE `dn` (
+  `ts` datetime DEFAULT localtimestamp(),
+  `ts2` datetime(6) DEFAULT localtimestamp(6),
+  `d` date DEFAULT curdate(),
+  `ts3` timestamp NULL DEFAULT current_timestamp(),
+  `s` varchar(9) DEFAULT 'f(x)',
+  `e` datetime DEFAULT (current_timestamp() + interval 1 day)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci";
+    let out = mysql_create_table(maria);
+    assert!(out.contains("`ts` datetime DEFAULT (now()),"), "{out}");
+    assert!(out.contains("`ts2` datetime(6) DEFAULT (now(6)),"), "{out}");
+    assert!(out.contains("`d` date DEFAULT (curdate()),"), "{out}");
+    assert!(
+        out.contains("`ts3` timestamp NULL DEFAULT CURRENT_TIMESTAMP,"),
+        "{out}"
+    );
+    assert!(out.contains("`s` varchar(9) DEFAULT 'f(x)',"), "{out}");
+}
+
+#[test]
+fn column_defaults_are_unescaped_and_read_now() {
+    // R4 round 6 (gaps row 78): MariaDB writes a newline in a literal
+    // default as `\n`; MySQL shows the character. `localtimestamp()`
+    // reads `now()`.
+    let cols = mysql_view("COLUMNS", &lit).unwrap();
+    let Some((_, Src::Sql(d))) = cols.iter().find(|(n, _)| *n == "COLUMN_DEFAULT") else {
+        panic!("no COLUMN_DEFAULT");
+    };
+    assert!(d.contains("'\\\\n', '\n'"), "{d}");
+    assert!(d.contains(r"'^localtimestamp\\([0-6]?\\)$'"), "{d}");
+    assert!(
+        d.contains("CONCAT('now', SUBSTRING(`COLUMN_DEFAULT`, 15))"),
+        "{d}"
+    );
+}
+
+#[test]
+fn create_database_in_mysqls_spelling() {
+    // R4 round 6: MariaDB 11.8.9's and MySQL 8.4.11's text.
+    assert_eq!(
+        mysql_create_database(
+            "CREATE DATABASE `r4six_x` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_uca1400_ai_ci */"
+        ),
+        "CREATE DATABASE `r4six_x` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci */ /*!80016 DEFAULT ENCRYPTION='N' */"
+    );
+    assert_eq!(
+        mysql_collation_value("utf8mb4_uca1400_ai_ci"),
+        "utf8mb4_0900_ai_ci"
+    );
+    assert_eq!(mysql_collation_value("utf8mb4_bin"), "utf8mb4_bin");
+    assert_eq!(mysql_collation_value("A"), "A");
+}

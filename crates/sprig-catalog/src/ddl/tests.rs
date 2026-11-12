@@ -782,7 +782,10 @@ async fn a_job_its_engine_abandoned_is_resolved_by_the_next_ddl_at_once() {
     assert_eq!(env.intents(), 1);
     let started = std::time::Instant::now();
     engine
-        .execute(&req(alter("orders"), "ALTER TABLE orders ADD d INT"), &env.exec)
+        .execute(
+            &req(alter("orders"), "ALTER TABLE orders ADD d INT"),
+            &env.exec,
+        )
         .await
         .unwrap();
     assert!(
@@ -801,13 +804,19 @@ async fn a_job_its_engine_abandoned_is_resolved_by_the_next_ddl_at_once() {
     let engine = patient(&env);
     env.exec.inject(Fault::LostAfter);
     let e = engine
-        .execute(&req(alter("orders"), "ALTER TABLE orders ADD c INT"), &env.exec)
+        .execute(
+            &req(alter("orders"), "ALTER TABLE orders ADD c INT"),
+            &env.exec,
+        )
         .await
         .unwrap_err();
     assert_eq!(e.code(), Some(SprigCode::OutcomeUnknown));
     let started = std::time::Instant::now();
     engine
-        .execute(&req(drop_tables(&["orders"], false), "DROP TABLE orders"), &env.exec)
+        .execute(
+            &req(drop_tables(&["orders"], false), "DROP TABLE orders"),
+            &env.exec,
+        )
         .await
         .unwrap();
     assert!(started.elapsed() < Duration::from_secs(1));
@@ -821,20 +830,29 @@ async fn a_job_its_engine_abandoned_is_resolved_by_the_next_ddl_at_once() {
     env.exec.inject(Fault::LostBefore);
     assert!(
         engine
-            .execute(&req(alter("orders"), "ALTER TABLE orders ADD c INT"), &env.exec)
+            .execute(
+                &req(alter("orders"), "ALTER TABLE orders ADD c INT"),
+                &env.exec
+            )
             .await
             .is_err()
     );
     env.exec.set_busy(shard(1, 1, 1), true);
     let e = engine
-        .execute(&req(alter("orders"), "ALTER TABLE orders ADD d INT"), &env.exec)
+        .execute(
+            &req(alter("orders"), "ALTER TABLE orders ADD d INT"),
+            &env.exec,
+        )
         .await
         .unwrap_err();
     assert_eq!(e.code(), Some(SprigCode::CatalogConflict), "{e}");
     assert_eq!(env.intents(), 1);
     env.exec.set_busy(shard(1, 1, 1), false);
     engine
-        .execute(&req(alter("orders"), "ALTER TABLE orders ADD d INT"), &env.exec)
+        .execute(
+            &req(alter("orders"), "ALTER TABLE orders ADD d INT"),
+            &env.exec,
+        )
         .await
         .unwrap();
     assert_eq!(env.intents(), 0);
@@ -850,7 +868,10 @@ async fn a_job_its_engine_abandoned_is_resolved_by_the_next_ddl_at_once() {
         tokio::time::sleep(Duration::from_millis(50)).await;
         tokio::time::timeout(
             Duration::from_millis(1500),
-            engine.execute(&req(alter("orders"), "ALTER TABLE orders ADD d INT"), &env.exec),
+            engine.execute(
+                &req(alter("orders"), "ALTER TABLE orders ADD d INT"),
+                &env.exec,
+            ),
         )
         .await
     };
@@ -865,7 +886,10 @@ async fn a_job_its_engine_abandoned_is_resolved_by_the_next_ddl_at_once() {
     let env = billing_with_orders().await;
     assert!(
         env.crashing(DdlStep::Prepared)
-            .execute(&req(alter("orders"), "ALTER TABLE orders ADD c INT"), &env.exec)
+            .execute(
+                &req(alter("orders"), "ALTER TABLE orders ADD c INT"),
+                &env.exec
+            )
             .await
             .is_err()
     );
@@ -876,7 +900,10 @@ async fn a_job_its_engine_abandoned_is_resolved_by_the_next_ddl_at_once() {
     assert_eq!(e.code(), Some(SprigCode::CatalogConflict));
     env.engine()
         .with_owner("gateway:dc1:gw-2", Some(Arc::new(AllGone)))
-        .execute(&req(alter("orders"), "ALTER TABLE orders ADD d INT"), &env.exec)
+        .execute(
+            &req(alter("orders"), "ALTER TABLE orders ADD d INT"),
+            &env.exec,
+        )
         .await
         .unwrap();
     assert_eq!(env.intents(), 0);
@@ -900,8 +927,17 @@ async fn the_janitor_resolves_an_abandoned_job_without_another_ddl() {
     let exec = Arc::new(exec);
     let engine = DdlEngine::new(v.clone(), Arc::new(SystemClock))
         .with_janitor(Arc::new(OneCluster(Arc::clone(&exec))));
-    let intents =
-        || DdlIntent::all(&v.backend().tables(T).unwrap().settings.into_values().collect::<Vec<_>>()).len();
+    let intents = || {
+        DdlIntent::all(
+            &v.backend()
+                .tables(T)
+                .unwrap()
+                .settings
+                .into_values()
+                .collect::<Vec<_>>(),
+        )
+        .len()
+    };
     let pending = || {
         v.backend()
             .tables(T)
@@ -931,7 +967,10 @@ async fn the_janitor_resolves_an_abandoned_job_without_another_ddl() {
 
     // A finished statement leaves the janitor nothing to do.
     engine
-        .execute(&req(alter("orders"), "ALTER TABLE orders ADD d INT"), &*exec)
+        .execute(
+            &req(alter("orders"), "ALTER TABLE orders ADD d INT"),
+            &*exec,
+        )
         .await
         .unwrap();
     assert_eq!(intents(), 0);

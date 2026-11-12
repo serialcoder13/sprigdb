@@ -1671,7 +1671,7 @@ mod replaced_queue_tests {
     /// under its name (another id) takes nothing from it: the messages go
     /// back at once and the source is lost (39223). Before, a dropped
     /// definition's member sink kept reading the member's new queue and
-    /// held its messages for the lease (inherit_live's queue sink test).
+    /// held its messages for the lease (`inherit_live`'s queue sink test).
     #[tokio::test]
     async fn a_queue_made_again_under_the_name_is_not_read() {
         let peer = Arc::new(Peer {

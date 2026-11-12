@@ -26,6 +26,9 @@
 //!   | SET SCRIPT AS $$ ... $$
 //! DROP SINK [IF EXISTS] s [WITH DEAD LETTERS]
 //! SHOW SINKS [FROM db] | SHOW CREATE SINK s | SHOW SINK STATUS s
+//! TEST [PLATFORM] CONNECTION c [WRITE [TO 't']] | TEST SINK s [WITH SAMPLE n]
+//! TEST CREATE CONNECTION ...            (ST68: an unsaved definition's checks)
+//! TEST CREATE SINK ... [WITH SAMPLE n]  (ST69: an unsaved definition's dry run)
 //! ```
 //!
 //! The tokenizer is this module's own: it knows `$$` bodies, which
@@ -514,6 +517,18 @@ pub enum Stmt {
         /// Records sampled.
         sample: u32,
     },
+    /// `TEST CREATE CONNECTION ...` (ST68): `TEST CONNECTION`'s checks of
+    /// a definition that isn't saved (the whole `CREATE CONNECTION`
+    /// after `TEST`); nothing is created.
+    TestNewConnection(CreateConnection),
+    /// `TEST CREATE SINK ... [WITH SAMPLE n]` (ST69): `TEST SINK`'s dry run
+    /// of a definition that isn't saved; nothing is created or delivered.
+    TestNewSink {
+        /// The definition.
+        def: Box<CreateSink>,
+        /// Records sampled.
+        sample: u32,
+    },
 }
 
 /// A cheap check before tokenizing: could `sql` be a sink statement?
@@ -975,6 +990,28 @@ pub fn parse(sql: &str) -> Result<Option<Stmt>> {
             return Ok(None);
         }
     } else if p.peek_kw("TEST")
+        && p.peek_kw_at(1, "CREATE")
+        && (p.peek_kw_at(2, "CONNECTION") || p.peek_kw_at(2, "SINK"))
+    {
+        // ST68, ST69: the checks of a definition that isn't saved.
+        p.need_kw("TEST")?;
+        p.need_kw("CREATE")?;
+        if p.kw("CONNECTION") {
+            let Stmt::CreateConnection(c) = create_connection(&mut p)? else {
+                return Err(p.unexpected("CREATE CONNECTION"));
+            };
+            Stmt::TestNewConnection(c)
+        } else {
+            p.need_kw("SINK")?;
+            let Stmt::CreateSink(def) = create_sink(&mut p)? else {
+                return Err(p.unexpected("CREATE SINK"));
+            };
+            Stmt::TestNewSink {
+                def,
+                sample: sample_clause(&mut p)?,
+            }
+        }
+    } else if p.peek_kw("TEST")
         && (p.peek_kw_at(1, "CONNECTION")
             || p.peek_kw_at(1, "SINK")
             || (p.peek_kw_at(1, "PLATFORM") && p.peek_kw_at(2, "CONNECTION")))
@@ -982,21 +1019,7 @@ pub fn parse(sql: &str) -> Result<Option<Stmt>> {
         p.need_kw("TEST")?;
         if p.kw("SINK") {
             let name = p.qname()?;
-            let sample = if p.kws(&["WITH", "SAMPLE"]) {
-                match p.peek() {
-                    Some(t) if t.kind == Tk::Num => {
-                        p.i += 1;
-                        t.text
-                            .parse::<u32>()
-                            .ok()
-                            .filter(|n| (1..=1000).contains(n))
-                            .ok_or_else(|| p.unexpected("a sample of 1 to 1000 records"))?
-                    }
-                    _ => return Err(p.unexpected("a sample of 1 to 1000 records")),
-                }
-            } else {
-                10
-            };
+            let sample = sample_clause(&mut p)?;
             Stmt::TestSink { name, sample }
         } else {
             let platform = p.kw("PLATFORM");
@@ -1050,6 +1073,24 @@ pub fn parse(sql: &str) -> Result<Option<Stmt>> {
     };
     p.end()?;
     Ok(Some(st))
+}
+
+/// `[WITH SAMPLE n]` of `TEST SINK`: 1 to 1,000, 10 when absent.
+fn sample_clause(p: &mut P<'_>) -> Result<u32> {
+    if !p.kws(&["WITH", "SAMPLE"]) {
+        return Ok(10);
+    }
+    match p.peek() {
+        Some(t) if t.kind == Tk::Num => {
+            p.i += 1;
+            t.text
+                .parse::<u32>()
+                .ok()
+                .filter(|n| (1..=1000).contains(n))
+                .ok_or_else(|| p.unexpected("a sample of 1 to 1000 records"))
+        }
+        _ => Err(p.unexpected("a sample of 1 to 1000 records")),
+    }
 }
 
 fn show_from(p: &mut P<'_>) -> Result<Option<String>> {
@@ -1313,7 +1354,9 @@ fn create_sink(p: &mut P<'_>) -> Result<Stmt> {
             });
         } else if p.kws(&["START", "AT"]) {
             start_at = p.start_at()?;
-        } else if p.kw("WITH") {
+        } else if p.peek_kw("WITH") && !p.peek_kw_at(1, "SAMPLE") {
+            // (`WITH SAMPLE n` ends `TEST CREATE SINK`, ST69.)
+            p.need_kw("WITH")?;
             options = p.options()?;
         } else {
             break;
@@ -1693,5 +1736,52 @@ mod tests {
         assert!(parse("TEST CONNECTION k WRITE TO").is_err());
         // Not ours: a table or a word that merely starts like it.
         assert_eq!(parse("TEST_SINK_TABLE").unwrap(), None);
+    }
+
+    #[test]
+    fn tests_of_unsaved_definitions() {
+        // ST68: TEST CREATE CONNECTION, credentials and all; redacted as
+        // CREATE CONNECTION is.
+        let sql = "TEST CREATE CONNECTION crm TYPE webhook WITH (url = 'https://h.example.com/in', auth = 'bearer') CREDENTIALS (token = 'very-secret')";
+        let Some(Stmt::TestNewConnection(c)) = parse(sql).unwrap() else {
+            panic!("not a connection test")
+        };
+        assert_eq!((c.name.name.as_str(), c.kind), ("crm", ConnKind::Webhook));
+        assert_eq!(c.credentials, vec![("token".into(), "very-secret".into())]);
+        let (shown, values) = redact(sql).unwrap();
+        assert!(!shown.contains("very-secret") && shown.contains("token = '***'"));
+        assert_eq!(values.len(), 1);
+        // ST69: TEST CREATE SINK, its own WITH (...) options and then WITH
+        // SAMPLE n.
+        let Some(Stmt::TestNewSink { def, sample }) = parse(
+            "TEST CREATE SINK out FROM STREAM shop.orders WHERE amount > 10 TO WEBHOOK CONNECTION crm WITH (batch_max_records = 5) WITH SAMPLE 25",
+        )
+        .unwrap() else {
+            panic!("not a sink test")
+        };
+        assert_eq!((def.name.name.as_str(), sample), ("out", 25));
+        assert_eq!(def.options.len(), 1);
+        assert!(def.filter.is_some());
+        assert!(matches!(
+            parse("test create sink s from queue q to webhook connection c").unwrap(),
+            Some(Stmt::TestNewSink { sample: 10, .. })
+        ));
+        assert!(
+            parse("TEST CREATE SINK s FROM QUEUE q TO WEBHOOK CONNECTION c WITH SAMPLE 0").is_err()
+        );
+        assert!(
+            parse("TEST CREATE SINK s FROM QUEUE q TO WEBHOOK CONNECTION c WITH SAMPLE 5 PAUSE")
+                .is_err()
+        );
+        // CREATE SINK's own WITH (...) still parses.
+        assert!(matches!(
+            parse(
+                "CREATE SINK s FROM QUEUE q TO WEBHOOK CONNECTION c WITH (batch_max_records = 5)"
+            )
+            .unwrap(),
+            Some(Stmt::CreateSink(_))
+        ));
+        // Not a test of anything else.
+        assert_eq!(parse("TEST CREATE TABLE t").unwrap(), None);
     }
 }

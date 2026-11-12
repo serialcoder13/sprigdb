@@ -82,6 +82,12 @@ fn round4_paths() -> Value {
             "Marks dead letters for replay ({ids} or {all: true})", None, "JsonReply"), &[p("database"), p("sink")])},
         "/v1/databases/{database}/sinks/{sink}/deadLetters:discard": {"post": with_params(op("Sinks.DiscardDeadLetters", "sprig.v1.Sinks",
             "Discards dead letters ({ids} or {all: true})", None, "JsonReply"), &[p("database"), p("sink")])},
+        "/v1/databases/{database}/sinks/{sink}:test": {"post": with_params(op("Sinks.Test", "sprig.v1.Sinks",
+            "A saved sink's dry run ({sample}, 10 by default): TEST SINK as the caller; {columns, rows}", None, "JsonReply"),
+            &[p("database"), p("sink")])},
+        "/v1/databases/{database}/connections/{connection}:test": {"post": with_params(op("Connections.Test", "sprig.v1.Connections",
+            "A saved connection's checks ({platform, write, to}): TEST [PLATFORM] CONNECTION [WRITE [TO 'to']] as the caller; {columns, rows}",
+            None, "JsonReply"), &[p("database"), p("connection")])},
         "/v1/policies:testAs": {"post": op("Policies.TestAs", "sprig.v1.Policies",
             "One read-only statement run as another user of the tenant ({tenant, user, host, database, sql})", None, "JsonReply")},
     })

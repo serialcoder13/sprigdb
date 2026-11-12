@@ -49,7 +49,7 @@ sprig_settings::register!(LEASE_TTL_SECONDS);
 /// process (its [`process_token`](sprig_catalog::ddl::process_token)),
 /// under the registration lease; the value is the gateway's id. A DDL job
 /// whose owner's key is gone was abandoned (bugfix-38).
-pub const PROCESS_PREFIX: &str = "gateway-processes/";
+pub const PROCESS_PREFIX: &str = sprig_catalog::ddl::GATEWAY_PROCESS_PREFIX;
 
 /// How often the load report is rewritten.
 pub const LOAD_PERIOD: Duration = Duration::from_secs(5);

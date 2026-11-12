@@ -723,10 +723,33 @@ fn with_header(
 /// The clusters'; a member that fails is counted as skipped.
 #[allow(clippy::too_many_lines)]
 pub async fn fan_out(svc: &Arc<TenantServices>, def_key: DefKey, schema: &str) -> Result<usize> {
-    let acat = catalog(svc, def_key.tenant).await?;
+    let acat = match catalog(svc, def_key.tenant).await {
+        Ok(c) => c,
+        Err(e) => {
+            // A deleted declarer (bugfix-46): its catalog and its
+            // definitions are gone, and so are its members (39362).
+            if super::dir_entry(svc, def_key.tenant).await?.is_none() {
+                tracing::info!(def = %def_key, "broadcast log unlisted: the declarer is deleted");
+                unlist(svc, def_key).await?;
+                return Ok(0);
+            }
+            return Err(e);
+        }
+    };
     let Some(def) = super::state_of(&acat).def_by_id(def_key.object).cloned() else {
+        // The definition is gone (its drop finished): unlisted once it
+        // has been missing for a while, so a snapshot a moment behind a
+        // new definition never unlists its log (bugfix-46).
+        if missing_long(def_key) {
+            tracing::info!(def = %def_key, "broadcast log unlisted: the definition is gone");
+            unlist(svc, def_key).await?;
+        }
         return Ok(0);
     };
+    missing()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(&def_key);
     let cluster = svc.locator.cluster(def_key.tenant).await?;
     let pool = svc.locator.ctl_pool(&cluster).await?;
     let rate = svc
@@ -1196,6 +1219,47 @@ pub async fn show(svc: &Arc<TenantServices>, def: &Definition) -> Result<Vec<Sho
             ]
         })
         .collect())
+}
+
+/// How long a listed definition must be missing from its declarer's
+/// catalog before its log is unlisted (bugfix-46).
+const MISSING_FOR: Duration = Duration::from_secs(60);
+
+fn missing() -> &'static Mutex<std::collections::HashMap<DefKey, Instant>> {
+    static M: OnceLock<Mutex<std::collections::HashMap<DefKey, Instant>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Notes `def` as missing now; whether it has been for [`MISSING_FOR`].
+fn missing_long(def: DefKey) -> bool {
+    let mut m = missing().lock().unwrap_or_else(PoisonError::into_inner);
+    m.entry(def).or_insert_with(Instant::now).elapsed() >= MISSING_FOR
+}
+
+/// Removes `inherit-bcast/<def>` (bugfix-46: a deleted declarer's, or a
+/// dropped definition's, were listed for ever and looked at every 2 s by
+/// every gateway). The log's tables stay in the declarer's database and go
+/// with it.
+async fn unlist(svc: &TenantServices, def: DefKey) -> Result<()> {
+    let store = svc.locator.dc_store();
+    let key = store.tier().key(&format!("inherit-bcast/{def}"))?;
+    store
+        .txn(sprig_meta::Txn {
+            when: Vec::new(),
+            then: vec![sprig_meta::Op::Delete(key)],
+            otherwise: Vec::new(),
+        })
+        .await?;
+    for set in [made(), retry_made()] {
+        set.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&def);
+    }
+    missing()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(&def);
+    Ok(())
 }
 
 /// Every log this DC lists.

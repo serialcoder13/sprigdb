@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mqBrowse, mqInfo, mqPurge, mqRepublish, outcomes, queueInfo, scratchName, stepRows, testConnection, testSink } from './statements';
+import { mqBrowse, mqInfo, mqPurge, mqRepublish, outcomes, queueInfo, stepRows, testConnection, testSink } from './statements';
 
 describe('queue pages (round 6, R9 item 89)', () => {
   it('calls take the vhost last, and leave it out for /', () => {
@@ -34,10 +34,6 @@ describe('dry runs (round 6, R9 items 104–105)', () => {
     expect(testSink('s', 1000)).toBe('TEST SINK `s` WITH SAMPLE 1000');
     expect(() => testSink('s', 0)).toThrow();
     expect(() => testSink('s', 1001)).toThrow();
-  });
-  it('scratch names are distinct from the real one and safe as identifiers', () => {
-    expect(scratchName('crm-api', () => 0.5)).toBe('crm_api_studiotest_7fffff');
-    expect(scratchName('x'.repeat(80), () => 0)).toMatch(/^x{40}_studiotest_000000$/);
   });
   it('reads the step and record rows', () => {
     const steps = stepRows(

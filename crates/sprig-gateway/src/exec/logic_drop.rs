@@ -14,6 +14,10 @@
 //!   every version; a validation's CHECK through chapter 21's ALTER TABLE
 //! the catalog: dropped, versions retired, rollout ended, index entries
 //! ```
+//!
+//! `SHOW DEPENDENTS OF FUNCTION | PROCEDURE [db.]name` (ST67) answers what
+//! the drop would find, as rows (`Kind`, `Name`, `Cascade`, `Detail`), so
+//! clients needn't read 39875's text.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,7 +27,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 use sprig_logic::catalog::ModuleRow;
 use sprig_logic::declare::Kind;
 use sprig_logic::deploy::ShardSessions;
-use sprig_logic::drop::DropStmt;
+use sprig_logic::drop::{DropStmt, ShowDependents};
 use sprig_proto_mysql::StatusFlags;
 use sprig_proto_mysql::packets::OkPacket;
 
@@ -301,6 +305,110 @@ impl PassSession {
             ),
         );
         Ok(Some(notes))
+    }
+
+    /// `SHOW DEPENDENTS OF FUNCTION | PROCEDURE [db.]name` (ST67): what
+    /// `DROP ... RESTRICT` would refuse with 39875, one row each, with what
+    /// `CASCADE` does to it. The same module and the same rights as the
+    /// drop (`ALTER ROUTINE` or `CREATE ROUTINE` on the database).
+    pub(super) async fn tenant_logic_dependents(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        d: Result<ShowDependents>,
+        more: bool,
+        format: crate::pipeline::RowFormat,
+        out: &mut dyn ResultSink,
+    ) -> Result<Step> {
+        let r = match d {
+            Ok(d) => Box::pin(self.logic_dependents(&d)).await,
+            Err(e) => Err(e),
+        };
+        let rows = match r {
+            Ok(rows) => rows,
+            Err(e) => return self.fail(out, &e).await,
+        };
+        let mut status = self.status();
+        if more {
+            status |= StatusFlags::MORE_RESULTS_EXISTS;
+        }
+        let rows = sprig_types::Rows {
+            columns: sprig_logic::drop::DEPENDENTS_COLUMNS
+                .iter()
+                .map(|n| crate::pipeline::text_column(n, cx.proto.collation))
+                .collect(),
+            rows: rows
+                .into_iter()
+                .map(|r| r.into_iter().map(|c| Some(c.into_bytes())).collect())
+                .collect(),
+        };
+        super::types::send_rows(out, &rows, format, status).await?;
+        Ok(Step {
+            errored: false,
+            status: Some(status),
+        })
+    }
+
+    async fn logic_dependents(&mut self, d: &ShowDependents) -> Result<Vec<[String; 4]>> {
+        let current = self.current_logical();
+        let ts = self
+            .tenant
+            .as_deref_mut()
+            .ok_or_else(|| SprigError::internal("no tenant"))?;
+        let db =
+            d.db.clone()
+                .or(current)
+                .ok_or_else(|| SprigError::standard(1046, *b"3D000", "No database selected"))?;
+        let catalog = match ts.catalog() {
+            Some(c) => Arc::clone(c),
+            None => ts.refresh().await?,
+        };
+        let row = catalog
+            .database(&db)
+            .or_else(|| catalog.database(&db.to_ascii_lowercase()))
+            .cloned()
+            .ok_or_else(|| {
+                SprigError::standard(1049, *b"42000", format!("Unknown database '{db}'"))
+            })?;
+        {
+            use sprig_auth::authz::{Action, Target};
+            let grants = crate::tenant::authz::privileges(ts, &catalog);
+            let db_key = sprig_catalog::ddl::database_key(&row.name, ts.lower_case_table_names());
+            let on = Target::Database { db_key: &db_key };
+            if !(grants.unrestricted()
+                || grants.allows(Action::AlterRoutine, on)
+                || grants.allows(Action::CreateRoutine, on))
+            {
+                return Err(SprigError::standard(
+                    1044,
+                    *b"42000",
+                    format!(
+                        "Access denied for user '{}' to database '{}'",
+                        ts.principal.user, row.name
+                    ),
+                ));
+            }
+        }
+        let svc = Arc::clone(ts.services());
+        let ep = svc.locator.writer(ts.tenant).await?;
+        let store = sprig_logic::LogicStore::new(ep.store.schema());
+        let mut conn = ep.pool.get_conn().await.map_err(catalog_err)?;
+        let module = match store
+            .module(&mut conn, row.db_id.0, d.kind.as_str(), &d.name)
+            .await
+        {
+            Ok(m) => m,
+            Err(e) if format!("{e:?}").contains("1146") => None,
+            Err(e) => return Err(e),
+        };
+        let m = module.ok_or_else(|| {
+            SprigError::new(
+                SprigCode::LogicNotFound,
+                format!("no {} {} in {}", d.kind.as_str(), d.name, row.name),
+            )
+        })?;
+        let deps =
+            sprig_logic::drop::dependents(&mut conn, &store, row.db_id.0, &row.name, &m).await?;
+        Ok(deps.rows())
     }
 
     /// Runs an `ALTER TABLE` of the drop through the session, as a

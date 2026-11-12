@@ -11,7 +11,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { errorText, isApiError } from '../api/errors';
 import { execute } from '../api/sql';
 import { autoRollback, getRollout, logs as fetchLogs, type VersionStats } from './api';
-import { dependentsOf, dropStatement, rolloutStatement, type Dependents, type LogicKind, type RolloutBy } from './declaration';
+import { dependentsFromRows, dependentsOf, dropStatement, noDependents, rolloutStatement, showDependents, type Dependents, type LogicKind, type RolloutBy } from './declaration';
 
 /** A statement shown before it runs, with an optional explanation. */
 export function useAsk() {
@@ -232,13 +232,43 @@ const CASCADE_DOES: [keyof Dependents, string, string][] = [
   ['sinks', 'Sinks using it as TRANSFORM', 'never dropped: alter or drop the sink first'],
 ];
 
-/** "Drop…": `DROP ... RESTRICT` first; a refusal (39875) lists what still uses the module, and `CASCADE` is offered when it may go ahead. */
+/**
+ * What uses the module (`SHOW DEPENDENTS`, ST67), or `null` when nothing
+ * can (not a function or procedure) or the gateway can't say (older ones:
+ * the refused drop's 39875 text is read then).
+ */
+async function dependentsNow(db: string, kind: string, name: string): Promise<Dependents | null> {
+  const sql = showDependents(db, kind, name);
+  if (!sql) return null;
+  try {
+    const r = await execute(db, sql);
+    const t = r.results.find((x) => x.columns?.length);
+    if (!t) return null;
+    return dependentsFromRows((t.columns ?? []).map((c) => c.name), t.rows ?? []);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * "Drop…": what still uses the module first (`SHOW DEPENDENTS`): if
+ * something does, the table of it, with what `CASCADE` does to each and
+ * "Drop with CASCADE…" when it may go ahead; otherwise `DROP ... RESTRICT`
+ * after showing it. A refusal (39875) in between lists them the same way.
+ */
 export function DropModule({ db, kind, name, onDropped }: Readonly<{ db: string; kind: string; name: string; onDropped: () => void }>) {
   const confirm = useAsk();
   const [deps, setDeps] = useState<{ d: Dependents; message: string } | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const drop = async (cascade: boolean) => {
     setErr(null);
+    if (!cascade) {
+      const d = await dependentsNow(db, kind, name);
+      if (d && !noDependents(d)) {
+        setDeps({ d, message: '' });
+        return;
+      }
+    }
     let sql: string;
     try {
       sql = dropStatement(db, kind, name, cascade);
@@ -255,8 +285,8 @@ export function DropModule({ db, kind, name, onDropped }: Readonly<{ db: string;
       setDeps(null);
       onDropped();
     } catch (e) {
-      const d = isApiError(e) && e.code === 39875 ? dependentsOf(e.message) : null;
-      if (d) setDeps({ d, message: e instanceof Error ? e.message : '' });
+      const d = isApiError(e) && e.code === 39875 ? ((await dependentsNow(db, kind, name)) ?? dependentsOf(e.message)) : null;
+      if (d && !noDependents(d)) setDeps({ d, message: e instanceof Error ? e.message : '' });
       else setErr(errorText(e));
     }
   };
@@ -275,7 +305,7 @@ export function DropModule({ db, kind, name, onDropped }: Readonly<{ db: string;
       {deps && (
         <section className="card stack" aria-labelledby="logic-deps-h" data-testid="logic-dependents">
           <h3 id="logic-deps-h" style={{ margin: 0 }}>
-            {name} is still in use (39875)
+            {name} is still in use: DROP … RESTRICT is refused (39875)
           </h3>
           <table className="table">
             <thead>

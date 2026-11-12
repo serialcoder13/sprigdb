@@ -16,7 +16,7 @@
 //! ```
 //!
 //! `test_connection_write` (R9, r9last) also writes one marked test record
-//! per target with `TEST CONNECTION ... WRITE`: into the MinIO bucket `qcr`
+//! per target with `TEST CONNECTION ... WRITE`: into the `MinIO` bucket `qcr`
 //! (deleted again), a Kafka topic named after the run, and the webhook.
 //!
 //! Every address must be on the tenant's `sink.destination_allowlist`.

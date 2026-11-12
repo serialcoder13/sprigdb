@@ -274,7 +274,13 @@ impl Ctx<'_> {
             return Vec::new();
         }
         self.types().map_or_else(Vec::new, |t| {
-            sprig_types::derived_columns(t, o.db, &o.table, self.lctn, self.lex.no_backslash_escapes)
+            sprig_types::derived_columns(
+                t,
+                o.db,
+                &o.table,
+                self.lctn,
+                self.lex.no_backslash_escapes,
+            )
         })
     }
 

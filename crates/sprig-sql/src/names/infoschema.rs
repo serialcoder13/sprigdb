@@ -1379,6 +1379,17 @@ fn column_sql(
             e = format!("REGEXP_REPLACE({e}, {}, {})", lit(pat, ctx), lit(rep, ctx));
         }
         e
+    } else if ctx.lex.persona == Persona::MySql84
+        && matches!(
+            up.as_str(),
+            "COLLATION_CONNECTION" | "DATABASE_COLLATION" | "COLLATION_NAME"
+        )
+    {
+        // R4 round 6 (gaps row 67): the collations of stored programs,
+        // views and parameters (`ROUTINES`, `TRIGGERS`, `EVENTS`, `VIEWS`,
+        // `PARAMETERS`) in MySQL's names, as the tables 3306 reshapes
+        // already show them.
+        crate::compat::collation::sql_case(&qc, &|v| lit(v, ctx))
     } else {
         qc
     }

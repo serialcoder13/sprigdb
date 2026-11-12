@@ -23,7 +23,13 @@
 //! The members are children of the system tenant; every tenant has the
 //! user `app` (password `sprig-dev-app`).
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines, missing_docs)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::too_many_lines,
+    clippy::many_single_char_names,
+    missing_docs
+)]
 
 use std::time::{Duration, Instant};
 
@@ -178,7 +184,10 @@ async fn including_self_definitions_can_be_dropped_with_their_database() {
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
     println!("grace end after {:?}", t.elapsed());
-    assert!(!declared(&mut sys, db, s).await, "the definition is still there");
+    assert!(
+        !declared(&mut sys, db, s).await,
+        "the definition is still there"
+    );
     let r = sql(&mut c0, &q).await;
     assert!(r.is_err(), "the member's instance went: {r:?}");
 
@@ -237,7 +246,11 @@ async fn a_member_dropping_its_instance_database_gets_the_instance_back() {
         tokio::time::sleep(Duration::from_secs(2)).await;
     };
     r.expect("a publish to the member works again");
-    assert_eq!(wait_count(&mut c0, &q, 1, 60).await, 1, "the new instance has the publish");
+    assert_eq!(
+        wait_count(&mut c0, &q, 1, 60).await,
+        1,
+        "the new instance has the publish"
+    );
 
     ok(&mut sys, &format!("DROP STREAM {db}.{s} IMMEDIATE")).await;
     ok(&mut sys, &format!("DROP DATABASE {db}")).await;

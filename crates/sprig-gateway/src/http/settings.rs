@@ -65,6 +65,33 @@ key!(
     "Rows per streamed batch"
 );
 key!(
+    STREAM_MAX_PER_TENANT,
+    "api.stream.max_per_tenant",
+    1000,
+    Scopes::TREE,
+    0,
+    1_000_000,
+    "Open change streams per tenant per gateway"
+);
+key!(
+    STREAM_HEARTBEAT_SECONDS,
+    "api.stream.heartbeat_seconds",
+    15,
+    Scopes::TREE,
+    1,
+    3600,
+    "Heartbeat when no change event arrives"
+);
+key!(
+    STREAM_MAX_BUFFERED_EVENTS,
+    "api.stream.max_buffered_events",
+    10_000,
+    Scopes::PROCESS,
+    16,
+    10_000_000,
+    "Change events buffered for a slow client"
+);
+key!(
     REST_MAX_BUFFERED_BYTES,
     "api.rest.max_buffered_bytes",
     16 << 20,
@@ -109,6 +136,14 @@ pub struct ApiSettings {
     pub max_request: usize,
     /// `api.max_concurrent_streams`.
     pub max_streams: u32,
+    /// `api.stream.max_per_tenant` (RL53): open change streams per tenant
+    /// on this gateway.
+    pub change_streams_max: usize,
+    /// `api.stream.heartbeat_seconds`.
+    pub change_heartbeat: Duration,
+    /// `api.stream.max_buffered_events`: a client further behind is ended
+    /// (39790).
+    pub change_buffer: usize,
 }
 
 impl Default for ApiSettings {
@@ -122,6 +157,9 @@ impl Default for ApiSettings {
             max_buffered: us(REST_MAX_BUFFERED_BYTES.default),
             max_request: us(MAX_REQUEST_BYTES.default),
             max_streams: u32::try_from(MAX_CONCURRENT_STREAMS.default).unwrap_or(100),
+            change_streams_max: us(STREAM_MAX_PER_TENANT.default),
+            change_heartbeat: Duration::from_secs(STREAM_HEARTBEAT_SECONDS.default),
+            change_buffer: us(STREAM_MAX_BUFFERED_EVENTS.default),
         }
     }
 }
@@ -172,6 +210,11 @@ impl ApiSettingsSource {
                     max_request: us(&MAX_REQUEST_BYTES),
                     max_streams: u32::try_from(snap.get(&MAX_CONCURRENT_STREAMS, &ctx))
                         .unwrap_or(100),
+                    change_streams_max: us(&STREAM_MAX_PER_TENANT),
+                    change_heartbeat: Duration::from_secs(
+                        snap.get(&STREAM_HEARTBEAT_SECONDS, &ctx),
+                    ),
+                    change_buffer: us(&STREAM_MAX_BUFFERED_EVENTS),
                 }
             }
         }

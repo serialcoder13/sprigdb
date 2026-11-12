@@ -171,6 +171,32 @@ export interface Dependents {
   callers: string[];
 }
 
+/** `SHOW DEPENDENTS OF FUNCTION | PROCEDURE db.name` (ST67): what `DROP ... RESTRICT` would refuse, as rows. */
+export function showDependents(db: string, kind: string, name: string): string | null {
+  const k = kind.toLowerCase();
+  if (k !== 'function' && k !== 'procedure') return null;
+  return `SHOW DEPENDENTS OF ${k.toUpperCase()} ${ident(db)}.${ident(name)}`;
+}
+
+/** `SHOW DEPENDENTS`' rows (`Kind`, `Name`, `Cascade`, `Detail`) as lists by kind. */
+export function dependentsFromRows(columns: readonly string[], rows: readonly (readonly (string | null)[])[]): Dependents {
+  const at = (n: string) => columns.findIndex((c) => c.toLowerCase() === n);
+  const [k, n] = [at('kind'), at('name')];
+  const d: Dependents = { schedules: [], sinks: [], columns: [], callers: [] };
+  const into: Record<string, keyof Dependents> = { schedule: 'schedules', sink: 'sinks', column: 'columns', caller: 'callers' };
+  for (const row of rows) {
+    const key = into[(row[k] ?? '').toLowerCase()];
+    const name = row[n];
+    if (key && name) d[key].push(name);
+  }
+  return d;
+}
+
+/** Whether nothing uses the module. */
+export function noDependents(d: Dependents): boolean {
+  return !d.schedules.length && !d.sinks.length && !d.columns.length && !d.callers.length;
+}
+
 /** What 39875 says still uses the module (`... is in use: schedules a, b; sinks s (TRANSFORM); computed columns t.c; code that calls it: function g. Drop or ...`). */
 export function dependentsOf(message: string): Dependents | null {
   const m = /is in use: (.*?)\. Drop or change them first/s.exec(message);

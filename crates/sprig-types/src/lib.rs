@@ -24,7 +24,7 @@
 //! that sends the plan's statements back through the session (logical
 //! names, chapter 29's checks, chapter 17's router).
 //!
-//! Not built: the `NOT NULL` check of single-table storage, composites and arrays, documents and
+//! Not built: composites and arrays, documents and
 //! the other models (they need R5), footprints for chapter 29, rename
 //! jobs, cross-shard moves, `$graphLookup`, typed upserts and
 //! `INSERT ... SELECT` into subtypes, prepared statements on typed tables.
@@ -349,12 +349,8 @@ pub async fn handle(
         )),
         Stmt::AddHierarchy(ah) => hier::add(&ah, ctx, r).await.map(Handled::Ok),
         Stmt::DropHierarchy(n) => hier::drop(&n, ctx, r).await.map(Handled::Ok),
-        Stmt::AddDiscriminator(d) => ddl::add_discriminator(&d, ctx, r)
-            .await
-            .map(Handled::Ok),
-        Stmt::DropDiscriminator(n) => ddl::drop_discriminator(&n, ctx, r)
-            .await
-            .map(Handled::Ok),
+        Stmt::AddDiscriminator(d) => ddl::add_discriminator(&d, ctx, r).await.map(Handled::Ok),
+        Stmt::DropDiscriminator(n) => ddl::drop_discriminator(&n, ctx, r).await.map(Handled::Ok),
         Stmt::AlterTable(at) => {
             let Some(types) = ctx.lookup.db(at.table.db.as_deref()) else {
                 return Ok(Handled::NotTyped);
@@ -510,7 +506,10 @@ mod tests;
 /// single-table subtype (4025, or 3819, naming a `_sprig_nn_` constraint) becomes
 /// MySQL's 1048 for the column. `None` for any other error.
 #[must_use]
-pub fn map_error(state: Option<&TypesState>, e: &sprig_common::SprigError) -> Option<sprig_common::SprigError> {
+pub fn map_error(
+    state: Option<&TypesState>,
+    e: &sprig_common::SprigError,
+) -> Option<sprig_common::SprigError> {
     // MariaDB's 4025, or MySQL's 3819 on the MySQL persona.
     if !matches!(e.protocol().mysql_errno, 4025 | 3819) {
         return None;
@@ -590,7 +589,12 @@ pub fn derived_columns(
 /// The names of the tables of `table`'s type tree (its root and every
 /// subtype), when `table` is a typed table of a tree; `None` otherwise.
 #[must_use]
-pub fn type_tree(state: &TypesState, db: DbId, table: &str, lctn: bool) -> Option<(String, Vec<String>)> {
+pub fn type_tree(
+    state: &TypesState,
+    db: DbId,
+    table: &str,
+    lctn: bool,
+) -> Option<(String, Vec<String>)> {
     let d = state.db(db)?;
     let t = d.get(table, lctn)?;
     let root = d.root_of(t.id)?;
@@ -605,4 +609,20 @@ pub fn has_hierarchy(state: &TypesState, db: DbId, table: &str, lctn: bool) -> b
     state
         .db(db)
         .is_some_and(|d| d.hierarchy(table, lctn).is_some())
+}
+
+/// Whether any single-table subtype has a `NOT NULL` check
+/// ([`map_error`]): writes the type layer leaves alone are still sent
+/// through the gateway's error mapping then.
+#[must_use]
+pub fn has_nn_checks(state: Option<&TypesState>) -> bool {
+    state.is_some_and(|s| {
+        s.dbs().any(|(_, d)| {
+            d.iter().any(|t| {
+                !t.is_root()
+                    && t.storage == model::Storage::SingleTable
+                    && t.own_fields.iter().any(ddl::needs_nn)
+            })
+        })
+    })
 }

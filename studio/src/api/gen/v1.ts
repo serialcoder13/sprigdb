@@ -306,6 +306,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/databases/{database}/connections/{connection}:test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** A saved connection's checks ({platform, write, to}): TEST [PLATFORM] CONNECTION [WRITE [TO 'to']] as the caller; {columns, rows} */
+        post: operations["Connections.Test"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/databases/{database}/cursors": {
         parameters: {
             query?: never;
@@ -762,6 +779,23 @@ export interface paths {
         put?: never;
         /** Marks dead letters for replay ({ids} or {all: true}) */
         post: operations["Sinks.ReplayDeadLetters"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/databases/{database}/sinks/{sink}:test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** A saved sink's dry run ({sample}, 10 by default): TEST SINK as the caller; {columns, rows} */
+        post: operations["Sinks.Test"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2199,6 +2233,38 @@ export interface operations {
             };
         };
     };
+    "Connections.Test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                database: string;
+                connection: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     "Cursors.Open": {
         parameters: {
             query?: never;
@@ -3232,6 +3298,38 @@ export interface operations {
         };
     };
     "Sinks.ReplayDeadLetters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                database: string;
+                sink: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Sinks.Test": {
         parameters: {
             query?: never;
             header?: never;

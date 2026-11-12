@@ -567,7 +567,7 @@ pub mod retry {
                 continue;
             }
             n += 1;
-            match try_once(svc, &e).await {
+            match Box::pin(try_once(svc, &e)).await {
                 Ok(Some(())) => {
                     tracing::info!(tenant = %e.tenant, def = %e.sink, attempts = e.attempts, "inherited sink deployed on retry");
                     metrics::counter!("sprig_inherit_sink_retries_total", "result" => "deployed")
@@ -1166,6 +1166,45 @@ pub async fn drop_instance(
     }
     let mut conn = ep.pool.get_conn().await.map_err(cat_err)?;
     store.delete_instance(&mut conn, s.key()).await?;
+    Ok(true)
+}
+
+/// Drops member `t`'s sink `db.name` as its `sprig_inherited` (`run_as`),
+/// with its dead letters: an instance no definition reaches any more
+/// ([`super::orphan_sinks`], bugfix-47). `false` when it is gone already.
+///
+/// # Errors
+/// The catalog's.
+pub(crate) async fn drop_member_sink(
+    svc: &Arc<TenantServices>,
+    t: TenantId,
+    run_as: UserId,
+    db: &str,
+    name: &str,
+) -> Result<bool> {
+    let mut host = DeployHost::new(svc, t, run_as, db).await?;
+    let Some(db_id) = host.db_id(db) else {
+        return Ok(false);
+    };
+    if host
+        .state()
+        .sink(db_id, name)
+        .is_none_or(|d| d.owner_user_id != run_as.0)
+    {
+        return Ok(false);
+    }
+    sprig_sinks::sql::handle_stmt(
+        sg::Stmt::DropSink {
+            name: sg::QName {
+                db: Some(db.to_owned()),
+                name: name.to_owned(),
+            },
+            if_exists: true,
+            with_dead_letters: true,
+        },
+        &mut host,
+    )
+    .await?;
     Ok(true)
 }
 

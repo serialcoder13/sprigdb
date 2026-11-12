@@ -8,7 +8,7 @@
 //   without taking (mq_browse), republish and purge with their
 //   confirmations, and a user without queue rights refused;
 // - sinks: TEST CONNECTION's steps (ok and failed), a test record written
-//   on request, an unsaved connection tested under a scratch name, and
+//   on request, an unsaved connection tested (TEST CREATE CONNECTION), and
 //   TEST SINK's dry run (nothing delivered);
 // - logic: test runs of a draft and of the deployed version with
 //   arguments, snapshot rows and fetch mocks, and the report; a staged
@@ -67,8 +67,11 @@ async function waitFor(what: string, f: () => Promise<boolean>, ms = 20_000) {
 /** Replaces a Monaco editor's text, once Monaco has drawn its lines (a
  * select-all before then selects nothing). */
 async function typeInto(page: Page, label: string, text: string) {
-  // Chrome's Monaco labels an EditContext element, Firefox's a textarea.
-  const host = page.getByTestId('sql-editor').filter({ has: page.getByLabel(label, { exact: true }) });
+  // The page's only Monaco; `label` is checked on Chrome, whose Monaco
+  // labels its EditContext element (Firefox's and WebKit's label a hidden
+  // textarea Playwright's locators don't match the same way).
+  const host = page.getByTestId('sql-editor').first();
+  if (test.info().project.name === 'chromium') await expect(host.getByLabel(label, { exact: true })).toHaveCount(1);
   const lines = host.locator('.view-lines');
   await lines.click();
   for (let i = 0; i < 5 && (await lines.innerText()).trim() !== ''; i++) {
@@ -77,7 +80,12 @@ async function typeInto(page: Page, label: string, text: string) {
     await page.waitForTimeout(100);
   }
   await expect(lines).toHaveText('');
-  await page.keyboard.insertText(text);
+  // One line at a time: Firefox's Monaco doubles a multi-line insertText.
+  const parts = text.split('\n');
+  for (const [i, l] of parts.entries()) {
+    await page.keyboard.insertText(l);
+    if (i < parts.length - 1) await page.keyboard.press('Enter');
+  }
   await expect(host.locator('.view-lines')).toContainText(text.split('\n')[0]!.slice(0, 12).replace(/ /g, '\u00a0'));
 }
 
@@ -203,6 +211,9 @@ test.describe.serial('Studio round 6', () => {
     await shot(page, 'queue-refused');
     const r = first(await sql(request, token, DB6, `CALL sprig.mq_info('orders6_q', '${DB6}')`));
     expect(r[0]?.[0]).toBe('2');
+    // Round 7 (ST66): every queue in one call, the same counts.
+    const all = first(await sql(request, token, DB6, `CALL sprig.mq_info(NULL, '${DB6}')`));
+    expect(all.find((x) => x[0] === 'orders6_q')?.slice(1)).toEqual([r[0]?.[0], r[0]?.[1], r[0]?.[2]]);
   });
 
   test('sinks: connection tests, a test before saving, a test record, the dry run', async ({ page, request }) => {
@@ -234,7 +245,7 @@ test.describe.serial('Studio round 6', () => {
     await expect(page.getByTestId('conn-test-steps')).toBeVisible();
     await waitFor('the test record', async () => Promise.resolve(seen.slice(before).some((s) => s.startsWith('POST'))));
 
-    // An unsaved connection, tested under a scratch name and dropped again.
+    // An unsaved connection, tested with TEST CREATE CONNECTION (ST68): nothing is created.
     await page.getByTestId('conn-new-open').click();
     await page.getByTestId('conn-name').fill('db6');
     await page.getByTestId('conn-kind').selectOption('mysql');
@@ -251,9 +262,8 @@ test.describe.serial('Studio round 6', () => {
     await page.getByTestId('conn-new-cred-1').fill('studio6-never-shown');
     await page.getByTestId('conn-test-first').click();
     const shown = page.getByTestId('msg-confirm-sql');
-    await expect(shown).toContainText('_studiotest_');
+    await expect(shown).toContainText('TEST CREATE CONNECTION `db6` TYPE mysql');
     await expect(shown).toContainText("username = '********', password = '********'");
-    await expect(shown).toContainText('DROP CONNECTION');
     await page.getByTestId('msg-confirm').click();
     await expect(page.getByTestId('conn-test-first-result')).toContainText(/1 of \d+ steps failed\./);
     await expect(page.getByTestId('conn-test-first-result')).toContainText('failed');
@@ -276,6 +286,30 @@ test.describe.serial('Studio round 6', () => {
     await expect(page.getByTestId('sink-dry-run').getByRole('alert')).toContainText('1 to 1,000');
     await axe(page, 'sink-dry-run');
     await shot(page, 'sink-dry-run');
+
+    // Round 7: a new sink from the form (ST70), dry-run before it exists
+    // (TEST CREATE SINK, ST69), then created.
+    await page.getByTestId('sink-new-open').click();
+    const form = page.getByTestId('sink-new');
+    await form.getByTestId('sink-new-name').fill('s6b');
+    await form.getByTestId('sink-new-source').fill('events6');
+    await form.getByTestId('sink-new-where').fill("value->>'$.kind' = 'b'");
+    await form.getByTestId('sink-new-connection').fill('hook6');
+    await form.getByTestId('sink-new-dry-sample').fill('6');
+    await form.getByTestId('sink-new-dry-run-go').click();
+    await expect(form.getByTestId('sink-new-dry-summary')).toHaveText('3 deliver, 3 filtered');
+    await expect(form.getByTestId('sink-new-dry-rows').locator('tbody tr')).toHaveCount(6);
+    expect(first(await sql(request, token, DB6, `SHOW SINKS FROM ${DB6}`)).map((r) => r[1])).toEqual(['s6']);
+    expect(seen.filter((s) => s.startsWith('POST')).length).toBe(posts);
+    await axe(page, 'sink-new-dry-run');
+    await shot(page, 'sink-new-dry-run');
+    await form.getByTestId('sink-new-create').click();
+    await expect(page.getByTestId('msg-confirm-sql')).toHaveText(
+      "CREATE SINK `s6b` FROM STREAM `events6` WHERE value->>'$.kind' = 'b' TO WEBHOOK CONNECTION `hook6`",
+    );
+    await page.getByTestId('msg-confirm').click();
+    await waitFor('the new sink', async () => first(await sql(request, token, DB6, `SHOW SINKS FROM ${DB6}`)).some((r) => r[1] === 's6b'));
+    await sql(request, token, DB6, 'ALTER SINK s6b PAUSE');
   });
 
   test('logic: test runs with inputs, snapshot rows and fetch mocks; rollout; drop with dependents', async ({ page, request }) => {
@@ -370,11 +404,12 @@ test.describe.serial('Studio round 6', () => {
     await expect(page.getByTestId('logic-rollout-none')).toBeVisible();
     await expect(page.getByTestId('logic-active')).toHaveText('2');
 
-    // Drop: refused while a schedule calls it (39875), then CASCADE.
+    // Drop: what uses it is shown first (SHOW DEPENDENTS, ST67), since
+    // RESTRICT would be refused (39875) while a schedule calls it; then CASCADE.
     await sql(request, token, DB6, `CREATE SCHEDULE quote6_nightly CRON '0 3 * * *' DO CALL quote6(7, 1)`);
+    const deps = (await sql(request, token, DB6, `SHOW DEPENDENTS OF FUNCTION ${DB6}.quote6`)) as Rows;
+    expect(first(deps)).toEqual([['schedule', 'quote6_nightly', 'dropped', 'the schedule calls it and is dropped with it']]);
     await page.getByTestId('logic-drop').click();
-    await expect(page.getByTestId('logic-confirm-sql')).toHaveText(`DROP FUNCTION \`${DB6}\`.\`quote6\` RESTRICT`);
-    await page.getByTestId('logic-confirm').click();
     await expect(page.getByTestId('logic-dependents')).toContainText('39875');
     await expect(page.getByTestId('logic-dep-schedules')).toContainText('quote6_nightly');
     await expect(page.getByTestId('logic-dep-schedules')).toContainText('dropped too');

@@ -94,6 +94,8 @@ pub mod standby;
 pub mod streams_loop;
 // Chapter 43 (R8 round 5): the graph mirror applier jobs.
 pub mod graph_mirror_loop;
+// RLS round 5 (RL52): `queue.change_exchange` forwarders.
+pub mod change_exchange_loop;
 // Chapter 39 (R5 round 6): search copies on workers.
 pub mod search_loop;
 // Chapter 50 (R9, r9fwd): the feed-driven queue outbox forwarder jobs.
@@ -250,7 +252,11 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         )
         .with_group_maps(Arc::new(sprig_shard::ShardMapStore::new(Arc::clone(
             &stores.dc,
-        )))),
+        ))))
+        // bugfix-45: a crashed gateway's DDL job goes within about a minute.
+        .with_owners(Arc::new(sprig_catalog::ddl::ProcessOwners::new(
+            Arc::clone(&stores.dc),
+        ))),
     );
     let settings_admin = Arc::new(SettingsService::new(
         settings.live.clone(),
@@ -583,6 +589,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .with_loop(Loop::new(inherit_loop::InheritLoop))
         .with_loop(Loop::new(streams_loop::StreamsLoop))
         .with_loop(Loop::new(graph_mirror_loop::GraphMirrorLoop))
+        .with_loop(Loop::new(change_exchange_loop::ChangeExchangeLoop))
         .with_loop(Loop::new(search_loop::SearchPlacementLoop))
         .with_loop(Loop::new(queue_forwarder_loop::QueueForwarderLoop))
         .with_loop(Loop::new(kv_sweep_loop::KvSweepLoop::new(Some((

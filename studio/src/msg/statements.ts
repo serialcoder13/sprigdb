@@ -270,6 +270,11 @@ export function mqInfo(queue: string, vhost?: string | null): string {
   return `CALL sprig.mq_info(${sqlString(queue)}${vh(vhost)})`;
 }
 
+/** `CALL sprig.mq_info(NULL [, vhost])` (ST66): one row per queue the user may read (`queue`, `ready`, `unacked`, `consumers`). */
+export function mqInfoAll(vhost?: string | null): string {
+  return `CALL sprig.mq_info(NULL${vh(vhost)})`;
+}
+
 /** `CALL sprig.mq_browse(q, n [, vhost])`: up to n stored messages, not taken, not locked. */
 export function mqBrowse(queue: string, max: number, vhost?: string | null): string {
   const m = Math.min(1000, Math.max(1, Math.floor(Number.isFinite(max) ? max : 50)));
@@ -305,6 +310,18 @@ export function queueInfo(columns: readonly string[], row: readonly (string | nu
   return { ready: n('ready'), unacked: n('unacked'), consumers: n('consumers') };
 }
 
+/** The batch `mq_info`'s rows by queue name. */
+export function queueInfos(columns: readonly string[], rows: readonly (readonly (string | null)[])[]): Map<string, QueueInfo> {
+  const q = columns.indexOf('queue');
+  const out = new Map<string, QueueInfo>();
+  for (const row of rows) {
+    const name = row[q];
+    const info = queueInfo(columns, row);
+    if (name != null && info) out.set(name, info);
+  }
+  return out;
+}
+
 // ---- Dry runs (Studio round 6; chapter 51, R9 items 104–105) ----
 
 /** `TEST CONNECTION c`, or with `write`, `TEST CONNECTION c WRITE [TO 'target']` (writes one marked record). */
@@ -320,12 +337,78 @@ export function testSink(name: string, sample = 10): string {
   return `TEST SINK ${ident(name)} WITH SAMPLE ${sample}`;
 }
 
-/** A name for a connection that exists only while it is tested (dry run before saving). */
-export function scratchName(name: string, rand: () => number = Math.random): string {
-  const tag = Math.floor(rand() * 0xffffff)
-    .toString(16)
-    .padStart(6, '0');
-  return `${name.replace(/[^A-Za-z0-9_]/g, '_').slice(0, 40)}_studiotest_${tag}`;
+/** `TEST CREATE CONNECTION ...` (ST68): the checks of a definition that isn't saved; masked as {@link createConnection}. */
+export function testNewConnection(name: string, kind: ConnKind, options: readonly Pair[], credentials: readonly Pair[], mask = false): string {
+  return `TEST ${createConnection(name, kind, options, credentials, mask)}`;
+}
+
+/** `TEST CREATE SINK ... WITH SAMPLE n` (ST69): the dry run of a sink that isn't saved. */
+export function testNewSink(create: string, sample = 10): string {
+  if (!/^CREATE SINK /.test(create)) throw new Error('not a CREATE SINK statement');
+  if (!Number.isInteger(sample) || sample < 1 || sample > 1000) throw new Error('sample 1 to 1,000 records');
+  return `TEST ${create} WITH SAMPLE ${sample}`;
+}
+
+export type TargetKind = 'webhook' | 'kafka' | 's3' | 'database';
+export const TARGET_KINDS: readonly TargetKind[] = ['webhook', 'kafka', 's3', 'database'];
+
+/** What the sink form holds (chapter 51's `CREATE SINK`, a connection target). */
+export interface SinkSpec {
+  name: string;
+  from: SinkSource;
+  /** `WHERE ...`, as written; empty for none. */
+  where: string;
+  /** `COLUMNS (a, b)`; empty for every column. */
+  columns: string;
+  /** `TRANSFORM f`; empty for none. */
+  transform: string;
+  target: TargetKind;
+  connection: string;
+  /** A webhook's PATH, a Kafka TOPIC, an S3 PREFIX, a database TABLE. */
+  where_to: string;
+  /** A Kafka record's KEY expression. */
+  key: string;
+  guarantee: 'at least once' | 'exactly once';
+  start: 'latest' | 'earliest' | 'snapshot';
+  options: readonly Pair[];
+}
+
+/** `CREATE SINK name FROM ... [WHERE] [COLUMNS] [TRANSFORM] TO <target> CONNECTION c ... [GUARANTEE] [START AT] [WITH (...)]`. */
+export function createSink(s: SinkSpec): string {
+  if (!s.name.trim()) throw new Error('name the sink');
+  if (!s.connection.trim()) throw new Error('choose a connection');
+  const parts = [`CREATE SINK ${ident(s.name.trim())} FROM ${source(s.from)}`];
+  if (s.where.trim()) parts.push(`WHERE ${s.where.trim()}`);
+  const cols = s.columns
+    .split(',')
+    .map((c) => c.trim())
+    .filter(Boolean);
+  if (cols.length) parts.push(`COLUMNS (${cols.map((c) => ident(c)).join(', ')})`);
+  if (s.transform.trim()) parts.push(`TRANSFORM ${ident(s.transform.trim())}`);
+  const conn = `CONNECTION ${ident(s.connection.trim())}`;
+  const to = s.where_to.trim();
+  switch (s.target) {
+    case 'webhook':
+      parts.push(`TO WEBHOOK ${conn}${to ? ` PATH ${sqlString(to)}` : ''}`);
+      break;
+    case 'kafka':
+      if (!to) throw new Error('a Kafka sink needs a topic');
+      parts.push(`TO KAFKA ${conn} TOPIC ${sqlString(to)}${s.key.trim() ? ` KEY ${sqlString(s.key.trim())}` : ''}`);
+      break;
+    case 's3':
+      if (!to) throw new Error('an S3 sink needs a key prefix');
+      parts.push(`TO S3 ${conn} PREFIX ${sqlString(to)}`);
+      break;
+    case 'database':
+      if (!to) throw new Error('a database sink needs a table');
+      parts.push(`TO DATABASE ${conn} TABLE ${sqlString(to)}`);
+      break;
+  }
+  if (s.guarantee === 'exactly once') parts.push('GUARANTEE EXACTLY ONCE');
+  if (s.start !== 'latest') parts.push(`START AT ${s.start.toUpperCase()}`);
+  const opts = filled(s.options);
+  if (opts.length) parts.push(`WITH (${pairs(opts, false)})`);
+  return parts.join(' ');
 }
 
 export interface StepRow {

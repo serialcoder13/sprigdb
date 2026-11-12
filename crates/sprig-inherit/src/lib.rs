@@ -330,6 +330,23 @@ pub async fn handle(sql: &str, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Hand
         return Ok(Handled::NotInherit);
     }
     if !ctx.from_types && plan::touches_typed(sql, ctx) {
+        // A drop on an inheritable type tree meets the rules of shared and
+        // received tables first (decision T18); chapter 32 then drops this
+        // tenant's own tables, every space's rows included. A tree is one
+        // group, so the named tables decide for a CASCADE's subtypes.
+        if let Stmt::DropTable(names) = &stmt {
+            guard::drop_tables(names, ctx)?;
+        }
+        // A tree's discriminator is its top tenant's: below, the tree
+        // follows the parent's at the next statement (decision T19).
+        if let Stmt::AlterTable(n) = &stmt
+            && grammar::identifiers(sql.as_bytes(), &ctx.lex)
+                .iter()
+                .any(|i| i.eq_ignore_ascii_case("DISCRIMINATOR"))
+            && let Some(res) = ctx.resolve(n)?
+        {
+            guard::refuse_if_received(ctx, &res.obj, "ADD | DROP DISCRIMINATOR")?;
+        }
         return Ok(Handled::Typed);
     }
     // A type plan's DDL (type columns, extension tables) is the type

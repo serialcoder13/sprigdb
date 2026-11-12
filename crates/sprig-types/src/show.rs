@@ -42,7 +42,11 @@ fn not_null_text(def: &str) -> String {
     let upper = def.to_ascii_uppercase();
     if let Some(i) = upper.find(" DEFAULT NULL") {
         let end = i + " DEFAULT NULL".len();
-        if upper[end..].chars().next().is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_') {
+        if upper[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
+        {
             return format!("{} NOT NULL{}", &def[..i], &def[end..]);
         }
     }
@@ -248,7 +252,12 @@ pub async fn columns(
             .chain(t.id)
             .iter()
             .filter(|x| !x.is_root())
-            .flat_map(|x| x.own_fields.iter().filter(|f| !f.nullable).map(|f| f.name.to_lowercase()))
+            .flat_map(|x| {
+                x.own_fields
+                    .iter()
+                    .filter(|f| !f.nullable)
+                    .map(|f| f.name.to_lowercase())
+            })
             .collect();
         let name_of = |row: &Vec<Option<Vec<u8>>>| {
             row.first()

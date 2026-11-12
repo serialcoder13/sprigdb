@@ -84,6 +84,8 @@ pub(crate) mod rls_images;
 // Chapter 29 (RLS round 5): change topics' filter views, for views and
 // stored code over them.
 mod change_views;
+// RLS round 5 (RL52): `queue.change_exchange`.
+pub(crate) mod change_exchange;
 // Chapter 28 (R4): ONLY_FULL_GROUP_BY on 3306.
 mod groupby;
 // Chapter 36 (R6 round 3): nearest neighbours with a growing radius on 3306.
@@ -92,6 +94,8 @@ mod geo_knn;
 mod lateral;
 // Chapter 28 (R4 round 4): functional key parts typed from the catalog.
 mod fxindex;
+// Chapter 28 (R4 round 6): MySQL's DDL answers that need a lookup.
+mod mysql_ddl;
 // Per-session status counters (gaps rows 46 and 61; chapter 28).
 pub(crate) mod status;
 // Chapter 39 (R5 round 5): search DDL, MATCH ... AGAINST, sprig_search().

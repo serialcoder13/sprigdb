@@ -37,6 +37,8 @@ pub struct MemCatalog {
     next_id: Mutex<u64>,
     settings: Mutex<QueueSettings>,
     key: Arc<TokenKey>,
+    /// What [`MqCatalog::feed_forwarder_runs`] answers (bugfix-42).
+    feed_runs: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for MemCatalog {
@@ -56,7 +58,14 @@ impl MemCatalog {
             next_id: Mutex::new(1000),
             settings: Mutex::new(QueueSettings::default()),
             key: Arc::new(TokenKey::new(b"memory-catalog-token-key")),
+            feed_runs: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Says whether the feed-driven forwarder runs (bugfix-42).
+    pub fn set_feed_forwarder_runs(&self, runs: bool) {
+        self.feed_runs
+            .store(runs, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Changes the settings every vhost runs with.
@@ -172,6 +181,10 @@ impl MqCatalog for MemCatalog {
 
     fn settings(&self, _v: &VhostRef) -> QueueSettings {
         lock(&self.settings).clone()
+    }
+
+    async fn feed_forwarder_runs(&self, _v: &VhostRef) -> bool {
+        self.feed_runs.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 

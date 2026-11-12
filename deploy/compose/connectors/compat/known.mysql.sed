@@ -13,6 +13,3 @@ s/^\(c_md_f\t[01]\t[^\t]*\t[0-9]*\t[^\t]*\t[AD]\t\)[0-9][0-9]*\t/\1(estimate)\t/
 # A stored program's definer (check mysql_ddl): the reference runs as root,
 # the gateway as the tenant's user.
 s/CREATE DEFINER=`[^`]*`@`%` PROCEDURE `c_md_lp`/CREATE DEFINER=(user) PROCEDURE `c_md_lp`/
-# Its character set columns (check mysql_ddl): stored programs record the
-# creating sprig_ctl connection's collation, not the client's (gaps row 67).
-s/^\(SELECT GET_LOCK('c_md_jobs', 0), RELEASE_LOCK('c_md_jobs')\)\t.*/\1\t(collations)/

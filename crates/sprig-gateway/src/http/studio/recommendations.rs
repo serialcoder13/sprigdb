@@ -181,6 +181,7 @@ pub async fn proxy(
         ("GET", ":policy") => {
             let mut q = keep(&["db", "object"]);
             q.push(format!("tenant={}", enc(&tenant)));
+            q.push(format!("caller={}", enc(&claim_json)));
             (
                 Method::GET,
                 format!("{base}:policy?{}", q.join("&")),
@@ -189,7 +190,11 @@ pub async fn proxy(
         }
         ("GET", ":subscriptions") => (
             Method::GET,
-            format!("{base}:subscriptions?tenant={}", enc(&tenant)),
+            format!(
+                "{base}:subscriptions?tenant={}&caller={}",
+                enc(&tenant),
+                enc(&claim_json)
+            ),
             Bytes::new(),
         ),
         ("POST", ":subscriptions") => {

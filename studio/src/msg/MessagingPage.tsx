@@ -14,7 +14,7 @@ import { errorText } from '../api/errors';
 import { execute, rows as rowsOf } from '../api/sql';
 import { useDatabases } from '../catalog/snapshot';
 import { binaryText } from './body';
-import { QueueCounts, QueueDetail } from './QueuePanel';
+import { QueueCounts, QueueCountsFrom, QueueDetail, useAllQueueInfo } from './QueuePanel';
 import { SinkDryRun } from './DryRuns';
 import {
   alterInherited,
@@ -396,6 +396,8 @@ function Queues({ db }: Readonly<{ db: string }>) {
   // The database is its own vhost; gateways before round 6 sent null
   // when the vhost had no mq_vhosts row, even with queues.
   const vhost = t ? (t.vhost ?? (t.exchanges.length || t.queues.length ? db : null)) : null;
+  // Every queue's counts in one call (ST66).
+  const all = useAllQueueInfo(db, vhost);
   return (
     <div className="stack">
       {topo.error && (
@@ -458,7 +460,17 @@ function Queues({ db }: Readonly<{ db: string }>) {
                     <td>{q.lanes}</td>
                     <td className="mono">{dlx(q.arguments)}</td>
                     <td>{q.state}</td>
-                    <QueueCounts db={db} queue={q.name} vhost={vhost} />
+                    {all.data ? (
+                      <QueueCountsFrom queue={q.name} all={all.data} />
+                    ) : all.isPending ? (
+                      <>
+                        <td className="num">…</td>
+                        <td className="num">…</td>
+                        <td className="num">…</td>
+                      </>
+                    ) : (
+                      <QueueCounts db={db} queue={q.name} vhost={vhost} />
+                    )}
                     <td>
                       <button onClick={() => setOpen(q.name)} data-testid={`mq-open-${q.name}`} aria-label={`Open queue ${q.name}`}>
                         Open

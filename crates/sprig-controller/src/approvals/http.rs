@@ -269,10 +269,27 @@ async fn bulk(State(app): State<Arc<RecApp>>, headers: HeaderMap, body: Bytes) -
     respond(r.await)
 }
 
+/// `uri` without its `caller` parameter (a gateway's claim), for queries
+/// whose structs refuse unknown keys.
+fn without_caller(uri: &Uri) -> Result<Uri> {
+    let rest: Vec<&str> = uri
+        .query()
+        .unwrap_or_default()
+        .split('&')
+        .filter(|kv| !kv.is_empty() && kv.split('=').next() != Some("caller"))
+        .collect();
+    format!("{}?{}", uri.path(), rest.join("&"))
+        .parse()
+        .map_err(|e| invalid(format!("query: {e}")))
+}
+
 async fn policy(State(app): State<Arc<RecApp>>, headers: HeaderMap, uri: Uri) -> Response {
     let r = async {
-        let c = app.caller(&headers, None, None)?;
-        let q: SettingContextQuery = query(&uri)?;
+        // A gateway sends its Studio user as a claim (round 7: the
+        // policy page refused the gateway credential without one).
+        let cq: CallerQ = query(&uri)?;
+        let c = app.caller(&headers, claim(cq.caller.as_ref())?, None)?;
+        let q: SettingContextQuery = query(&without_caller(&uri)?)?;
         if !c.platform && c.dc_operator.is_none() && q.tenant.is_none() {
             return Err(invalid("name a tenant"));
         }
@@ -343,8 +360,9 @@ struct TenantQ {
 
 async fn subscriptions(State(app): State<Arc<RecApp>>, headers: HeaderMap, uri: Uri) -> Response {
     let r = async {
-        let _ = app.caller(&headers, None, None)?;
-        let q: TenantQ = query(&uri)?;
+        let cq: CallerQ = query(&uri)?;
+        let _ = app.caller(&headers, claim(cq.caller.as_ref())?, None)?;
+        let q: TenantQ = query(&without_caller(&uri)?)?;
         app.svc.subscriptions(&q.tenant).await
     };
     respond(r.await)

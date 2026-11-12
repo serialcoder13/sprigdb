@@ -144,6 +144,21 @@ async fn kill(
     if row.user.is_none() || row.user != user || row.tenant != tenant {
         return sink.error(&not_owner()).await;
     }
+    // The session's own statement (R4 round 6, gaps row 78): `KILL
+    // QUERY` interrupts the `KILL` itself, which fails with 1317 as on
+    // MySQL and MariaDB; `KILL CONNECTION` closes the session and fails
+    // with MySQL's 1317 or MariaDB's 1927.
+    if id == me.id {
+        if !query_only {
+            target.flags().kill_conn();
+        }
+        let e = if query_only || env.persona == Persona::MySql84 {
+            SprigError::standard(1317, *b"70100", "Query execution was interrupted")
+        } else {
+            SprigError::standard(1927, *b"70100", "Connection was killed")
+        };
+        return sink.error(&e).await;
+    }
     if query_only {
         target.flags().kill_query();
     } else {

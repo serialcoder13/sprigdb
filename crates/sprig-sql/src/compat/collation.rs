@@ -646,8 +646,11 @@ pub fn output_pairs() -> Vec<(String, &'static str)> {
     for c in MAP {
         if let Some(m) = c.mariadb {
             v.push((m.to_owned(), c.mysql));
+            // The PAD SPACE twin of a UCA 14.0 collation only: the twin of
+            // `utf8mb4_nopad_bin` is `utf8mb4_bin`, which MySQL has too
+            // (R4 round 6, gaps row 78: it read as `utf8mb4_0900_bin`).
             let pad = without_nopad(m);
-            if pad != m {
+            if pad != m && m.starts_with("utf8mb4_uca1400_") {
                 v.push((pad.into_owned(), c.mysql));
             }
         }
@@ -732,6 +735,13 @@ mod tests {
         assert!(s.starts_with("CASE `COLLATION_NAME` WHEN"));
         assert!(s.contains("WHEN 'utf8mb4_uca1400_ai_ci' THEN 'utf8mb4_0900_ai_ci'"));
         assert!(s.contains("WHEN 'utf8mb4_nopad_bin' THEN 'utf8mb4_0900_bin'"));
+        // R4 round 6 (gaps row 78): MySQL has `utf8mb4_bin` too.
+        assert!(!s.contains("WHEN 'utf8mb4_bin'"), "{s}");
+        assert!(
+            !output_pairs()
+                .iter()
+                .any(|(m, _)| m.as_str() == "utf8mb4_bin")
+        );
         assert!(!s.contains("german2"));
         assert!(s.ends_with("ELSE `COLLATION_NAME` END"));
     }

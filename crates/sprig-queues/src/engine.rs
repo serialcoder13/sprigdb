@@ -118,7 +118,25 @@ pub trait MqCatalog: Send + Sync + 'static {
 
     /// Settings for the vhost.
     fn settings(&self, v: &VhostRef) -> QueueSettings;
+
+    /// Whether the feed-driven forwarder that serves the vhost's tenant
+    /// runs now (its cluster's `queue-forwarder-beats/` beat is fresh; chapter
+    /// 50, bugfix-42). The fallback then leaves transactional publishes to
+    /// it for [`FALLBACK_WHILE_FEED_RUNS_MS`]. `false` (the default) when
+    /// unknown: the fallback takes them after `queue.forward_fallback_ms`.
+    async fn feed_forwarder_runs(&self, _v: &VhostRef) -> bool {
+        false
+    }
 }
+
+/// With `queue.forwarder = feed`, while the feed-driven forwarder runs
+/// ([`MqCatalog::feed_forwarder_runs`]), the polling fallback takes only
+/// transactional publishes older than this (bugfix-42). The fallback reads
+/// rows in insert order, which isn't their commit order: before, it took
+/// rows older than `queue.forward_fallback_ms` (2 s) whenever the feed was
+/// slow to forward them (a tenant's first forwards, a loaded machine), and
+/// some then reached the queue ahead of rows committed before them.
+pub const FALLBACK_WHILE_FEED_RUNS_MS: u64 = 30_000;
 
 /// What [`Leases::acquire`] found.
 #[derive(Debug, Clone)]
@@ -847,13 +865,37 @@ impl VShared {
             Some(b) => store.outbox_due(500, b).await,
             None => store.outbox(500).await,
         };
-        let rows = match rows {
+        let mut rows = match rows {
             Ok(r) => r,
             Err(e) => {
                 tracing::debug!(error = %e, "outbox read failed");
                 return 0;
             }
         };
+        // bugfix-42: late transactional publishes are the feed's while it
+        // runs (it forwards them in commit order); only those past the
+        // longer delay are taken, in case the feed gave up on them.
+        if let Some(b) = publish_before
+            && rows.iter().any(|r| r.kind == OutKind::Publish)
+            && let Some(e) = self.engine.upgrade()
+            && e.deps.catalog.feed_forwarder_runs(&self.r).await
+        {
+            let qs = e.deps.catalog.settings(&self.r);
+            let wait = qs.forward_fallback_ms.max(FALLBACK_WHILE_FEED_RUNS_MS);
+            let hold = crate::store::msg_id_floor(
+                now_ms.saturating_sub(i64::try_from(wait).unwrap_or(i64::MAX)),
+            );
+            drop(e);
+            if hold < b {
+                rows = match store.outbox_due(500, hold).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "outbox read failed");
+                        return 0;
+                    }
+                };
+            }
+        }
         if rows.is_empty() {
             return 0;
         }

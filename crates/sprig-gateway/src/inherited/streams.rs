@@ -158,7 +158,7 @@ pub async fn ensure(
             db_name,
             created: false,
         };
-        after_use(svc, chain, def, &si).await?;
+        Box::pin(after_use(svc, chain, def, &si)).await?;
         return Ok(si);
     }
     if def.state != DefState::Active {
@@ -209,7 +209,7 @@ pub async fn ensure(
                             db_name,
                             created,
                         };
-                        after_use(svc, chain, def, &si).await?;
+                        Box::pin(after_use(svc, chain, def, &si)).await?;
                         return Ok(si);
                     }
                     if Instant::now() > deadline {

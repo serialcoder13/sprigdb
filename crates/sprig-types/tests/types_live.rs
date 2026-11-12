@@ -1450,8 +1450,17 @@ async fn not_null_checks_and_discriminator_conversion() {
              WITH (SPRIG_STORAGE = 'single_table')",
         )
         .await;
-        exec(&mut c, "INSERT INTO lorry (id, name, payload) VALUES (3, 'l3', 30)").await;
-        fails(&mut c, "INSERT INTO lorry (id, name) VALUES (4, 'l4')", 1048).await;
+        exec(
+            &mut c,
+            "INSERT INTO lorry (id, name, payload) VALUES (3, 'l3', 30)",
+        )
+        .await;
+        fails(
+            &mut c,
+            "INSERT INTO lorry (id, name) VALUES (4, 'l4')",
+            1048,
+        )
+        .await;
         fails(
             &mut c,
             "INSERT INTO lorry (id, name, payload) VALUES (4, 'l4', NULL)",
@@ -1466,19 +1475,33 @@ async fn not_null_checks_and_discriminator_conversion() {
         .await;
         fails(&mut c, "UPDATE lorry SET payload = NULL", 1048).await;
         // A van becoming a truck needs a payload.
-        fails(&mut c, "UPDATE fleet SET vtype = 'TRUCK' WHERE id = 1", 1048).await;
-        exec(&mut c, "INSERT INTO fleet (id, vtype, name) VALUES (5, 'CAR', 'c5')").await;
+        fails(
+            &mut c,
+            "UPDATE fleet SET vtype = 'TRUCK' WHERE id = 1",
+            1048,
+        )
+        .await;
+        exec(
+            &mut c,
+            "INSERT INTO fleet (id, vtype, name) VALUES (5, 'CAR', 'c5')",
+        )
+        .await;
         let n = rows(&mut c, "SELECT COUNT(*) FROM fleet").await;
         assert_eq!(n[0][0], "3");
         // What schema tools see: NOT NULL on the subtype, nothing internal.
         let sc = rows(&mut c, "SHOW CREATE TABLE lorry").await;
         assert!(
-            sc[0][1].contains("`payload` int(11) NOT NULL") || sc[0][1].contains("`payload` int NOT NULL"),
+            sc[0][1].contains("`payload` int(11) NOT NULL")
+                || sc[0][1].contains("`payload` int NOT NULL"),
             "{}",
             sc[0][1]
         );
         let sc = rows(&mut c, "SHOW CREATE TABLE fleet").await;
-        assert!(!sc[0][1].contains("_sprig_") && !sc[0][1].contains("CHECK"), "{}", sc[0][1]);
+        assert!(
+            !sc[0][1].contains("_sprig_") && !sc[0][1].contains("CHECK"),
+            "{}",
+            sc[0][1]
+        );
         let cols = rows(&mut c, "SHOW COLUMNS FROM lorry").await;
         let payload = cols.iter().find(|r| r[0] == "payload").unwrap();
         assert_eq!(payload[2], "NO", "{cols:?}");
@@ -1502,8 +1525,17 @@ async fn not_null_checks_and_discriminator_conversion() {
         assert_eq!(cc[0][0], "0", "checks are hidden");
         // ALTER: a NOT NULL column existing trucks can't fill is refused;
         // with a default it is added.
-        fails(&mut c, "ALTER TABLE lorry ADD COLUMN axles INT NOT NULL", 39710).await;
-        exec(&mut c, "ALTER TABLE lorry ADD COLUMN axles INT NOT NULL DEFAULT 2").await;
+        fails(
+            &mut c,
+            "ALTER TABLE lorry ADD COLUMN axles INT NOT NULL",
+            39710,
+        )
+        .await;
+        exec(
+            &mut c,
+            "ALTER TABLE lorry ADD COLUMN axles INT NOT NULL DEFAULT 2",
+        )
+        .await;
         // A subtype declared later keeps the checks, and inherits them.
         exec(
             &mut c,
@@ -1521,14 +1553,23 @@ async fn not_null_checks_and_discriminator_conversion() {
             "INSERT INTO minilorry (id, name, seats, payload) VALUES (6, 'm6', 2, 5)",
         )
         .await;
-        fails(&mut c, "INSERT INTO lorry (id, name, payload) VALUES (7, 'l7', NULL)", 1048).await;
+        fails(
+            &mut c,
+            "INSERT INTO lorry (id, name, payload) VALUES (7, 'l7', NULL)",
+            1048,
+        )
+        .await;
         assert_eq!(
             ids(&mut c, "SELECT id FROM lorry ORDER BY id").await,
             vec![3, 6]
         );
         // Dropping the subtype keeps its rows (T8) and its column, nullable.
         exec(&mut c, "DROP TABLE minilorry").await;
-        exec(&mut c, "INSERT INTO fleet (id, vtype, name) VALUES (8, 'MINI', 'm8')").await;
+        exec(
+            &mut c,
+            "INSERT INTO fleet (id, vtype, name) VALUES (8, 'MINI', 'm8')",
+        )
+        .await;
         assert_eq!(
             ids(&mut c, "SELECT id FROM ONLY fleet ORDER BY id").await,
             vec![1, 5, 6, 8]
@@ -1536,7 +1577,11 @@ async fn not_null_checks_and_discriminator_conversion() {
 
         // 2. A `_type` hierarchy takes a discriminator, and gives it back.
         for joined in [true, false] {
-            let storage = if joined { "" } else { " WITH (SPRIG_STORAGE = 'joined')" };
+            let storage = if joined {
+                ""
+            } else {
+                " WITH (SPRIG_STORAGE = 'joined')"
+            };
             exec(&mut c, "DROP TABLE IF EXISTS kart CASCADE").await;
             exec(
                 &mut c,
@@ -1564,7 +1609,11 @@ async fn not_null_checks_and_discriminator_conversion() {
             )
             .await;
             // A row disagreeing with the column: refused, nothing changed.
-            exec(&mut c, "INSERT INTO gokart (id, kind, name) VALUES (5, 'RACE', 'odd')").await;
+            exec(
+                &mut c,
+                "INSERT INTO gokart (id, kind, name) VALUES (5, 'RACE', 'odd')",
+            )
+            .await;
             fails(&mut c, "ALTER TABLE kart ADD DISCRIMINATOR (kind)", 39717).await;
             exec(&mut c, "UPDATE gokart SET kind = 'GO' WHERE id = 5").await;
             // pedal has no rows: its value is given.
@@ -1579,16 +1628,31 @@ async fn not_null_checks_and_discriminator_conversion() {
             let sc = rows(&mut c, "SHOW CREATE TABLE racer").await;
             assert!(sc[0][1].contains("WHERE `kind` = 'RACE'"), "{}", sc[0][1]);
             let sc = rows(&mut c, "SHOW CREATE TABLE kart").await;
-            assert!(sc[0][1].contains("SPRIG_DISCRIMINATOR = 'kind'"), "{}", sc[0][1]);
+            assert!(
+                sc[0][1].contains("SPRIG_DISCRIMINATOR = 'kind'"),
+                "{}",
+                sc[0][1]
+            );
             assert_eq!(
                 ids(&mut c, "SELECT id FROM gokart ORDER BY id").await,
                 vec![2, 3, 4, 5]
             );
             // Open values from now on: a new value is the root's, a
             // declared one types its row.
-            exec(&mut c, "INSERT INTO kart (id, kind, name) VALUES (6, 'PEDAL', 'p6')").await;
-            exec(&mut c, "INSERT INTO kart (id, kind, name) VALUES (7, 'NEW', 'n7')").await;
-            assert_eq!(ids(&mut c, "SELECT id FROM pedal ORDER BY id").await, vec![6]);
+            exec(
+                &mut c,
+                "INSERT INTO kart (id, kind, name) VALUES (6, 'PEDAL', 'p6')",
+            )
+            .await;
+            exec(
+                &mut c,
+                "INSERT INTO kart (id, kind, name) VALUES (7, 'NEW', 'n7')",
+            )
+            .await;
+            assert_eq!(
+                ids(&mut c, "SELECT id FROM pedal ORDER BY id").await,
+                vec![6]
+            );
             assert_eq!(
                 ids(&mut c, "SELECT id FROM ONLY kart ORDER BY id").await,
                 vec![1, 7]
@@ -1620,12 +1684,19 @@ async fn not_null_checks_and_discriminator_conversion() {
             let sc = rows(&mut c, "SHOW CREATE TABLE racer").await;
             assert!(!sc[0][1].contains("WHERE"), "{}", sc[0][1]);
             // kind is an ordinary column again.
-            exec(&mut c, "INSERT INTO kart (id, kind, name) VALUES (9, 'RACE', 'k9')").await;
+            exec(
+                &mut c,
+                "INSERT INTO kart (id, kind, name) VALUES (9, 'RACE', 'k9')",
+            )
+            .await;
             assert_eq!(
                 ids(&mut c, "SELECT id FROM ONLY kart ORDER BY id").await,
                 vec![1, 7, 9]
             );
-            assert_eq!(ids(&mut c, "SELECT id FROM racer ORDER BY id").await, vec![4]);
+            assert_eq!(
+                ids(&mut c, "SELECT id FROM racer ORDER BY id").await,
+                vec![4]
+            );
             eprintln!(
                 "conversion[{} {}]: ADD DISCRIMINATOR {add_ms} ms, DROP DISCRIMINATOR {drop_ms} ms",
                 persona(pi),

@@ -6,7 +6,9 @@
 //! row that becomes hers as an insert, one that stops being hers as a
 //! delete, and nothing of bob's; a policy change applies from the next
 //! batch; a resumed stream starts after its token; a user without SELECT
-//! is refused.
+//! is refused. Keyspace notifications also come from the change feed for
+//! writes that aren't the gateway's own Redis commands: scripts, SQL and
+//! expiries (RL51).
 //!
 //! ```sh
 //! export SPRIG_TEST_RLS_SQL=127.0.0.1:39306
@@ -328,6 +330,34 @@ async fn change_streams_filtered_per_event() {
             }));
         }
     });
+    // Keys an earlier run left would make the writes below no-ops (an
+    // unchanged row reaches no binlog); cleared before anyone subscribes.
+    {
+        let mut ar = tokio::net::TcpStream::connect(&redis_addr).await.unwrap();
+        let mut b = Vec::new();
+        ar.write_all(&resp(&[
+            "AUTH",
+            &format!("{}.app", tenant()),
+            "sprig-dev-app",
+        ]))
+        .await
+        .unwrap();
+        ar.write_all(&resp(&[
+            "DEL",
+            "rlsc_alice:k1",
+            "rlsc_alice:h",
+            "rlsc_alice:lua",
+            "rlsc_bob:lua",
+            "rlsc_alice:exp",
+            "rlsc_bob:secret",
+        ]))
+        .await
+        .unwrap();
+        read_for(&mut ar, &mut b, 1).await;
+    }
+    let _ = admin
+        .query_drop("DELETE FROM redis.db0 WHERE k IN ('rlsc_alice:sql', 'rlsc_bob:sql')")
+        .await;
     // Redis: alice's keyspace notifications.
     let mut rd = tokio::net::TcpStream::connect(&redis_addr).await.unwrap();
     rd.write_all(&resp(&["AUTH", &format!("{}.rlsc_alice", tenant()), PW]))
@@ -339,7 +369,7 @@ async fn change_streams_filtered_per_event() {
         .await
         .unwrap();
     let mut rd_admin = tokio::net::TcpStream::connect(&redis_addr).await.unwrap();
-    let mut rabuf = Vec::new();
+    let mut admin_rbuf = Vec::new();
     rd_admin
         .write_all(&resp(&[
             "AUTH",
@@ -348,7 +378,7 @@ async fn change_streams_filtered_per_event() {
         ]))
         .await
         .unwrap();
-    read_for(&mut rd_admin, &mut rabuf, 1).await;
+    read_for(&mut rd_admin, &mut admin_rbuf, 1).await;
     rd_admin
         .write_all(&resp(&["PSUBSCRIBE", "__key*__:*"]))
         .await
@@ -425,6 +455,35 @@ async fn change_streams_filtered_per_event() {
         }
         let t = String::from_utf8_lossy(&b).into_owned();
         ck.ok("redis setup", !t.contains("-ERR"), || t.clone());
+        // RL51: writes that aren't Redis commands this gateway knows notify
+        // from the change feed: a script's, SQL's, and a key's expiry.
+        let mut b = Vec::new();
+        for c in [
+            resp(&[
+                "EVAL",
+                "redis.call('SET', KEYS[1], 'x'); redis.call('SET', KEYS[2], 'y'); return 1",
+                "2",
+                "rlsc_alice:lua",
+                "rlsc_bob:lua",
+            ]),
+            resp(&["SET", "rlsc_alice:exp", "v", "PX", "300"]),
+        ] {
+            ar.write_all(&c).await.unwrap();
+            read_for(&mut ar, &mut b, 1).await;
+        }
+        let t = String::from_utf8_lossy(&b).into_owned();
+        ck.ok("redis script and expiry setup", !t.contains("-ERR"), || {
+            t.clone()
+        });
+    }
+    for k in ["rlsc_alice:sql", "rlsc_bob:sql"] {
+        must(
+            &mut admin,
+            &format!(
+                "INSERT INTO redis.db0 (k, type, v, g, _v) VALUES ('{k}', 'string', 'from-sql', 1, 1)"
+            ),
+        )
+        .await;
     }
 
     // What each stream got.
@@ -553,8 +612,15 @@ async fn change_streams_filtered_per_event() {
         });
     }
 
-    // Redis keyspace notifications.
-    read_for(&mut rd, &mut rbuf, 4).await;
+    // Redis keyspace notifications (the expiry's comes from the worker's
+    // sweeper, within seconds).
+    let end = tokio::time::Instant::now() + Duration::from_secs(40);
+    while tokio::time::Instant::now() < end
+        && !String::from_utf8_lossy(&rbuf).contains("__keyevent@0__:expired")
+    {
+        read_for(&mut rd, &mut rbuf, 2).await;
+    }
+    read_for(&mut rd, &mut rbuf, 2).await;
     let rt = String::from_utf8_lossy(&rbuf).into_owned();
     ck.ok(
         "Redis: alice's keys' notifications",
@@ -564,8 +630,8 @@ async fn change_streams_filtered_per_event() {
             && rt.contains("hset"),
         || rt.clone(),
     );
-    read_for(&mut rd_admin, &mut rabuf, 1).await;
-    let rat = String::from_utf8_lossy(&rabuf).into_owned();
+    read_for(&mut rd_admin, &mut admin_rbuf, 1).await;
+    let rat = String::from_utf8_lossy(&admin_rbuf).into_owned();
     ck.ok(
         "control: the administrator's notifications name bob's key",
         rat.contains("__keyspace@0__:rlsc_bob:secret") && rat.contains("del"),
@@ -574,6 +640,27 @@ async fn change_streams_filtered_per_event() {
     ck.ok(
         "LEAK: Redis: bob's key in a notification",
         !rt.contains("rlsc_bob"),
+        || rt.clone(),
+    );
+    // RL51.
+    ck.ok(
+        "Redis: a script's write notifies (from the feed)",
+        rt.contains("__keyspace@0__:rlsc_alice:lua"),
+        || rt.clone(),
+    );
+    ck.ok(
+        "Redis: a key written through SQL notifies",
+        rt.contains("__keyspace@0__:rlsc_alice:sql") && rt.contains("__keyevent@0__:set"),
+        || rt.clone(),
+    );
+    ck.ok(
+        "Redis: an expired key notifies",
+        rt.contains("__keyspace@0__:rlsc_alice:exp") && rt.contains("__keyevent@0__:expired"),
+        || rt.clone(),
+    );
+    ck.ok(
+        "Redis: a command's notification isn't repeated from the feed",
+        rt.matches("__keyspace@0__:rlsc_alice:k1").count() == 1,
         || rt.clone(),
     );
 
@@ -590,13 +677,24 @@ async fn change_streams_filtered_per_event() {
         .unwrap();
         for c in [
             resp(&["CONFIG", "SET", "notify-keyspace-events", ""]),
-            resp(&["DEL", "rlsc_alice:k1", "rlsc_alice:h", "rlsc_init"]),
+            resp(&[
+                "DEL",
+                "rlsc_alice:k1",
+                "rlsc_alice:h",
+                "rlsc_init",
+                "rlsc_alice:lua",
+                "rlsc_bob:lua",
+                "rlsc_alice:sql",
+                "rlsc_bob:sql",
+                "rlsc_alice:exp",
+            ]),
         ] {
             ar.write_all(&c).await.unwrap();
             read_for(&mut ar, &mut b, 1).await;
         }
     }
     for s in [
+        "DELETE FROM redis.db0 WHERE k IN ('rlsc_alice:sql', 'rlsc_bob:sql')".to_owned(),
         "DROP POLICY IF EXISTS rlsc_own ON redis.db0".to_owned(),
         "ALTER TABLE redis.db0 DISABLE ROW LEVEL SECURITY".to_owned(),
         format!("DROP DATABASE IF EXISTS {DB}"),
@@ -608,6 +706,160 @@ async fn change_streams_filtered_per_event() {
     }
     eprintln!(
         "change streams filtered per event: {} checks, {} failed",
+        ck.n,
+        ck.failed.len()
+    );
+    assert!(ck.failed.is_empty(), "{:#?}", ck.failed);
+}
+
+/// `sprigctl settings set <key> <value> --scope global` through the
+/// command in `SPRIG_TEST_RLS_CTL` (a private deployment's wrapper).
+fn global_setting(ctl: &str, key: &str, value: Option<&str>) {
+    let mut c = std::process::Command::new(ctl);
+    match value {
+        Some(v) => c.args([
+            "settings", "set", key, v, "--scope", "global", "--reason", "rls test",
+        ]),
+        None => c.args([
+            "settings", "reset", key, "--scope", "global", "--reason", "rls test",
+        ]),
+    };
+    let out = c.output().unwrap();
+    assert!(
+        out.status.success() || value.is_none(),
+        "{key}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A GET of `/v1/databases/rlsl_suite/changes<query>` as the tenant's
+/// administrator, NDJSON.
+async fn open_limits(addr: &str, query: &str) -> tokio::net::TcpStream {
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let req = format!(
+        "GET /v1/databases/rlsl_suite/changes{query} HTTP/1.1\r\nhost: {addr}\r\nauthorization: {}\r\n\r\n",
+        basic("app", "sprig-dev-app")
+    );
+    s.write_all(req.as_bytes()).await.unwrap();
+    s
+}
+
+/// Chapter 37's limits on `Changes.Watch` (RLS round 5, RL53): the open
+/// streams per tenant on a gateway (39780), the slow-consumer end (39790);
+/// `start_at_hlc` stays refused (39802).
+#[allow(clippy::many_single_char_names)] // streams a to d, h
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn change_stream_limits() {
+    let (Ok(sql_addr), Ok(http_addr), Ok(ctl)) = (
+        std::env::var("SPRIG_TEST_RLS_SQL"),
+        std::env::var("SPRIG_TEST_RLS_HTTP"),
+        std::env::var("SPRIG_TEST_RLS_CTL"),
+    ) else {
+        eprintln!("skipped: set SPRIG_TEST_RLS_SQL, SPRIG_TEST_RLS_HTTP and SPRIG_TEST_RLS_CTL");
+        return;
+    };
+    let mut ck = Checks {
+        n: 0,
+        failed: Vec::new(),
+    };
+    let mut admin = sql(&sql_addr, "app", "sprig-dev-app").await;
+    let _ = admin.query_drop("DROP DATABASE IF EXISTS rlsl_suite").await;
+    must(&mut admin, "CREATE DATABASE rlsl_suite").await;
+    must(
+        &mut admin,
+        "CREATE TABLE rlsl_suite.big (id INT PRIMARY KEY, body LONGTEXT)",
+    )
+    .await;
+    // Cleared at the end; a run that panicked can leave them set.
+    global_setting(&ctl, "api.stream.max_per_tenant", Some("2"));
+    global_setting(&ctl, "api.stream.max_buffered_events", Some("16"));
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // 1. Two streams open; the third is refused (39780); closing one frees
+    // its slot.
+    let mut a = open_limits(&http_addr, "?objects=big").await;
+    let mut b = open_limits(&http_addr, "?objects=big").await;
+    let (mut ab, mut bb) = (Vec::new(), Vec::new());
+    read_for(&mut a, &mut ab, 1).await;
+    read_for(&mut b, &mut bb, 1).await;
+    let mut c = open_limits(&http_addr, "?objects=big").await;
+    let mut cb = Vec::new();
+    read_for(&mut c, &mut cb, 2).await;
+    let ct = String::from_utf8_lossy(&cb).into_owned();
+    ck.ok(
+        "the tenant's third stream is refused (api.stream.max_per_tenant)",
+        String::from_utf8_lossy(&ab).starts_with("HTTP/1.1 200")
+            && String::from_utf8_lossy(&bb).starts_with("HTTP/1.1 200")
+            && !ct.starts_with("HTTP/1.1 200")
+            && ct.contains("39780"),
+        || ct.clone(),
+    );
+    drop(a);
+    drop(b);
+    drop(c);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let mut d = open_limits(&http_addr, "?objects=big").await;
+    let mut db = Vec::new();
+    read_for(&mut d, &mut db, 1).await;
+    ck.ok(
+        "a closed stream frees its slot",
+        String::from_utf8_lossy(&db).starts_with("HTTP/1.1 200"),
+        || String::from_utf8_lossy(&db).into_owned(),
+    );
+
+    // 2. A client that doesn't read falls behind and its stream ends with
+    // 39790 (after at most api.stream.max_buffered_events events).
+    for chunk in 0..6 {
+        let rows: Vec<String> = (1..=500)
+            .map(|i| format!("({}, REPEAT('x', 4000))", chunk * 500 + i))
+            .collect();
+        must(
+            &mut admin,
+            &format!("INSERT INTO rlsl_suite.big VALUES {}", rows.join(", ")),
+        )
+        .await;
+    }
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    let mut slow = Vec::new();
+    let end = tokio::time::Instant::now() + Duration::from_secs(60);
+    while tokio::time::Instant::now() < end && !String::from_utf8_lossy(&slow).contains("39790") {
+        read_for(&mut d, &mut slow, 2).await;
+    }
+    let st = String::from_utf8_lossy(&slow).into_owned();
+    let events = st.matches("\"op\":\"insert\"").count();
+    ck.ok(
+        "a slow client's stream ends with 39790",
+        st.contains("39790") && events < 3000,
+        || {
+            format!(
+                "{events} events; tail {}",
+                &st[st.len().saturating_sub(300)..]
+            )
+        },
+    );
+    drop(d);
+
+    // 3. start_at_hlc is refused (39802): the feed can't position by time.
+    global_setting(&ctl, "api.stream.max_buffered_events", None);
+    let mut h = open_limits(
+        &http_addr,
+        &format!("?objects=big&start_at_hlc={}", 1u64 << 32),
+    )
+    .await;
+    let mut hb = Vec::new();
+    read_for(&mut h, &mut hb, 3).await;
+    let ht = String::from_utf8_lossy(&hb).into_owned();
+    ck.ok(
+        "start_at_hlc is refused (39802)",
+        !ht.starts_with("HTTP/1.1 200") && ht.contains("39802"),
+        || ht.chars().take(600).collect(),
+    );
+    drop(h);
+
+    global_setting(&ctl, "api.stream.max_per_tenant", None);
+    let _ = admin.query_drop("DROP DATABASE IF EXISTS rlsl_suite").await;
+    eprintln!(
+        "change stream limits: {} checks, {} failed",
         ck.n,
         ck.failed.len()
     );

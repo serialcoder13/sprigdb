@@ -297,7 +297,9 @@ stop() {
     say "$name stopped"
 }
 
-ctl() { "$bin/sprigctl" --endpoint "$admin" "$@"; }
+# SPRIG_CTL_TOKEN_FILE: the Admin API credential once the controller has an
+# admin token or named operators (deploy/compose/studio/e2e.sh sets it).
+ctl() { "$bin/sprigctl" --endpoint "$admin" ${SPRIG_CTL_TOKEN_FILE:+--token-file "$SPRIG_CTL_TOKEN_FILE"} "$@"; }
 
 # --- dev certificates ---------------------------------------------------------
 
@@ -492,7 +494,7 @@ remove_tenants() {
                 case $db in information_schema | performance_schema | mysql | sys | "") continue ;; esac
                 if ! "${my[@]}" -e "DROP DATABASE $q${db//$q/$q$q}$q" >/dev/null 2>&1; then
                     left=$((left + 1))
-                    [[ $pass == 4 ]] && say "couldn't drop $t's database $db"
+                    [[ $pass == 4 ]] && say "couldn't drop $t's database $db through the gateway; deleting the tenant drops it"
                 fi
             done <<<"$dbs"
             [[ $left == 0 ]] && break

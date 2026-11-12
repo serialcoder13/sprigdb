@@ -17,6 +17,8 @@
 //!                       (crate::inherited::fanin_sink)
 //! Images {tables}       (RL50) which row images the user may see: rows
 //!                       (t, i, v) of crate::exec::rls_images
+//! Publish {statements}  (RL52) a change exchange's CALL sprig.mq_publish
+//!                       calls, autocommit, in order
 //! ```
 
 use std::net::SocketAddr;
@@ -46,6 +48,7 @@ pub async fn serve(
     }
 }
 
+#[allow(clippy::too_many_lines)] // one arm per operation
 async fn serve_inner(
     login: &Arc<sprig_auth::LoginService>,
     engine: &Arc<SqlEngine>,
@@ -189,6 +192,25 @@ async fn serve_inner(
             };
             let sql = crate::exec::rls_images::statement(&req);
             let results = run(engine, &caller, "", sql, None, caps).await?;
+            Ok(SqlReply {
+                results,
+                ..SqlReply::default()
+            })
+        }
+        // Chapter 50 (RL52): a change exchange's publishes as the user who
+        // set it (its privileges on the exchange apply).
+        SqlOp::Publish { statements } => {
+            sprig_sinks::peer::check_publish_calls(&statements)?;
+            let mut results = Vec::with_capacity(statements.len());
+            for sql in statements {
+                match run(engine, &caller, "", sql, None, caps).await {
+                    Ok(mut r) => results.push(r.pop().unwrap_or_default()),
+                    Err(e) => results.push(SqlResult {
+                        error: Some(PeerError::of(&e)),
+                        ..SqlResult::default()
+                    }),
+                }
+            }
             Ok(SqlReply {
                 results,
                 ..SqlReply::default()

@@ -67,7 +67,7 @@ impl PassSession {
     /// The table `table` (as written, perhaps qualified) as two SQL
     /// literals for `information_schema`: its schema (`DATABASE()` when
     /// unqualified) and name.
-    fn table_literals(&self, table: &str) -> Option<(String, String)> {
+    pub(super) fn table_literals(&self, table: &str) -> Option<(String, String)> {
         let (lex, _) = self.lex_opts();
         let names: Vec<String> = sprig_sql::lex::lex(table.as_bytes(), &lex)
             .map(|t| {

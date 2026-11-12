@@ -642,16 +642,20 @@ fn cookie(req: &Request<Incoming>, name: &str) -> Option<String> {
 }
 
 /// Whether the refresh cookie gets `Secure`: over TLS, and on loopback
-/// unless the page itself is plain `http://` (Studio round 6). Safari and
-/// WebKit drop a `Secure` cookie set for an `http://127.0.0.1` page
+/// unless the page itself is plain `http://` (Studio round 6). Safari's
+/// engine drops a `Secure` cookie set for an `http://127.0.0.1` page
 /// (Chrome and Firefox keep it), which signed Studio out on every reload
 /// (chapter 44's open question 6); a loopback connection never leaves the
 /// machine, so the flag adds nothing there. A TLS proxy on the same host
 /// (an `https://` origin) still gets `Secure`.
 fn cookie_secure(info: &ConnInfo, req: &Request<Incoming>) -> bool {
+    cookie_secure_for(info, hdr(req, "origin").as_deref())
+}
+
+/// [`cookie_secure`] from the request's `Origin`.
+pub(super) fn cookie_secure_for(info: &ConnInfo, origin: Option<&str>) -> bool {
     info.tls.is_some()
-        || (info.peer.ip().is_loopback()
-            && !hdr(req, "origin").is_some_and(|o| o.starts_with("http://")))
+        || (info.peer.ip().is_loopback() && !origin.is_some_and(|o| o.starts_with("http://")))
 }
 
 fn set_cookie(secure: bool, value: &str, max_age: u64) -> String {
@@ -1050,7 +1054,11 @@ async fn login(
 /// kept a `Secure` cookie from before round 6 on an `http://` loopback page
 /// then sends both, and the older one must not count as a reused token.
 fn refresh_cookie(req: &Request<Incoming>, secure: bool) -> Option<String> {
-    let (a, b) = if secure { (COOKIE_SECURE, COOKIE_PLAIN) } else { (COOKIE_PLAIN, COOKIE_SECURE) };
+    let (a, b) = if secure {
+        (COOKIE_SECURE, COOKIE_PLAIN)
+    } else {
+        (COOKIE_PLAIN, COOKIE_SECURE)
+    };
     cookie(req, a).or_else(|| cookie(req, b))
 }
 

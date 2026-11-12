@@ -16,6 +16,9 @@
 //!     (sprig_feed::shared): one binlog dump per cluster, whatever the
 //!     number of tenants, keeping only __sprig_qo and __sprig_xo rows
 //!   report progress every 2 s (tenants, rows); losing the job stops all
+//!   write queue-forwarder-beats/<cluster> every 2 s, removed when stopping:
+//!     the gateways' fallback leaves rows to the feed while it is fresh
+//!     (bugfix-42)
 //!
 //! tenant task(tenant):
 //!   start after the subscription's checkpoint (feed/checkpoints/<tenant>/
@@ -40,10 +43,16 @@
 //! id, which the destination dedups.
 //!
 //! **The fallback.** The gateways' polling forwarder takes transactional
-//! publishes older than `queue.forward_fallback_ms` (2 s): if this job is
-//! down or behind, rows still go, in insert order. A run that keeps
-//! failing is given up after [`RUN_GIVE_UP`] and left to the fallback, so
-//! one unreachable destination doesn't hold the tenant's other queues.
+//! publishes older than `queue.forward_fallback_ms` (2 s) while this job
+//! isn't running (its `queue-forwarder-beats/<cluster>` beat is missing or
+//! older than 6 s): rows still go, in insert order. While the job runs,
+//! the fallback takes only rows older than 30 s
+//! (`sprig_queues::engine::FALLBACK_WHILE_FEED_RUNS_MS`): before
+//! bugfix-42 it raced the feed for rows the feed was slow to forward (a
+//! tenant's first forwards, a loaded machine) and, taking them in insert
+//! order, put some after rows committed later. A run that keeps failing is
+//! given up after [`RUN_GIVE_UP`] and left to the fallback, so one
+//! unreachable destination doesn't hold the tenant's other queues.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -315,6 +324,15 @@ impl ClusterForwarder {
             if !held {
                 break;
             }
+            // The gateways' fallback leaves the feed's rows alone while
+            // this beat is fresh (bugfix-42).
+            let beat = sprig_feed::beat::Beat {
+                at_ms: now_ms(),
+                tenants: self.running.len() as u64,
+            };
+            if let Err(e) = sprig_feed::beat::write(&self.env.dc, &self.cluster, beat).await {
+                tracing::debug!(cluster = %self.cluster, error = %e, "queue forwarder beat not written");
+            }
             tokio::select! {
                 () = cx.cancel.cancelled() => break,
                 () = tokio::time::sleep(Duration::from_secs(2)) => {}
@@ -322,6 +340,8 @@ impl ClusterForwarder {
             }
         }
         watcher.abort();
+        // The fallback takes over at once (bugfix-42).
+        let _ = sprig_feed::beat::clear(&self.env.dc, &self.cluster).await;
         // Stop every tenant task and let it acknowledge its position.
         let tasks: Vec<Running> = self.running.drain().map(|(_, r)| r).collect();
         for r in &tasks {

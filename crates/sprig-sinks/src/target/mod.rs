@@ -395,12 +395,12 @@ pub fn preview(
             Ok(text(&e.bytes))
         }
         TargetSpec::Database { .. } => {
-            let opts = db::DbOpts::from_ctx(ctx).map_err(|e| e.to_string())?;
+            let db_opts = db::DbOpts::from_ctx(ctx).map_err(|e| e.to_string())?;
             let d = match ctx.conn.as_ref().map(|c| c.kind) {
                 Some(ConnKind::Postgresql) => db::plan::Dialect::Postgres,
                 _ => db::plan::Dialect::Mysql,
             };
-            let ops = db::plan::plan(std::slice::from_ref(r), &opts, d)
+            let ops = db::plan::plan(std::slice::from_ref(r), &db_opts, d)
                 .map_err(|e| e.message().to_owned())?;
             Ok(Value::Array(
                 ops.into_iter()

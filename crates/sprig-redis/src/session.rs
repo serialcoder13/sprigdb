@@ -281,11 +281,34 @@ impl Session {
             .then(|| self.multi.clone())
             .flatten()
             .filter(|_| !self.multi_err);
+        // RL51: a write command whose events crate::keyspace knows sends
+        // them itself, and its writes are marked so the gateways'
+        // notifications from the change feed pass over them; the feed
+        // sends the others' (scripts, commands it doesn't know, and an
+        // EXEC holding any of those).
+        let mark = match &queued {
+            Some(q) => q.iter().all(|c| {
+                let n = c
+                    .args
+                    .first()
+                    .map(|a| String::from_utf8_lossy(a).to_ascii_lowercase())
+                    .unwrap_or_default();
+                !spec::lookup(&n).is_some_and(|s| s.has('w')) || crate::keyspace::covered(&n)
+            }),
+            None => spec.has('w') && crate::keyspace::covered(&name),
+        };
+        if mark && let Some(l) = self.login.as_mut() {
+            l.sql.notified(true);
+        }
         let frames = match self.dispatch(&name, spec, &c.args, false).await {
             Ok(f) => f,
             Err(e) => vec![reply::backend(&e)],
         };
-        if (spec.has('w') || queued.is_some())
+        if mark && let Some(l) = self.login.as_mut() {
+            l.sql.notified(false);
+        }
+        if mark
+            && (spec.has('w') || queued.is_some())
             && let Some(scope) = self.login.as_ref().map(|l| l.scope.clone())
         {
             Self::notify(
@@ -1148,6 +1171,12 @@ impl Session {
                 // Registered with the hub before the reply, so a later
                 // PUBLISH on any gateway is delivered.
                 self.env.hold(&scope, interest(kind, c)).await;
+                // RL51: the notifications from the change feed.
+                if (kind == Kind::Pattern || c.starts_with(b"__key"))
+                    && let Some(f) = self.env.keyspace_feed()
+                {
+                    f.watch(&scope);
+                }
             }
             let count = match kind {
                 Kind::Shard => self.ssubs.len(),

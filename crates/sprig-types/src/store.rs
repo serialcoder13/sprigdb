@@ -310,8 +310,7 @@ impl TypesStore {
             };
             let storage: String = col(r, 7)?;
             let state: String = col(r, 9)?;
-            let (discriminator, disc_value, disc_operand) =
-                parse_discriminator_full(col(r, 12)?)?;
+            let (discriminator, disc_value, disc_operand) = parse_discriminator_full(col(r, 12)?)?;
             types.push(TypeDef {
                 id: ObjectId(col(r, 0)?),
                 db: DbId(col(r, 1)?),

@@ -9,13 +9,22 @@
 //   sprigctl operator create <name> --role platform --password-file ...
 //   (or `sprigctl operator reset-factor <name>` before a rerun)
 // STUDIO_OPERATOR=<name> STUDIO_OPERATOR_PASSWORD=<password> pnpm e2e operators
+// `{browser}` in STUDIO_OPERATOR stands for the Playwright project, so each
+// browser enrols its own operator (deploy/compose/studio/e2e.sh setup makes
+// studio-e2e-chromium, -firefox and -webkit, and run resets their factors).
 import { createHmac } from 'node:crypto';
 import { expect, test, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { SHOTS, signIn } from './fixtures';
 
-const OPERATOR = process.env.STUDIO_OPERATOR ?? '';
+const OPERATOR_NAME = process.env.STUDIO_OPERATOR ?? '';
+/** This browser's operator. */
+const op = () => OPERATOR_NAME.replace('{browser}', test.info().project.name);
 const PASSWORD = process.env.STUDIO_OPERATOR_PASSWORD ?? '';
+/** A Studio login that isn't in `studio.operator_logins` (the e2e setup
+ * lists acme.app there for the older operator mode), so operator mode
+ * asks for a named operator's sign-in. */
+const STUDIO_LOGIN = process.env.STUDIO_OPERATOR_STUDIO_LOGIN ?? 'globex.app';
 
 /** RFC 4648 base32 (no padding) to bytes. */
 function base32(s: string): Buffer {
@@ -56,7 +65,7 @@ async function axe(page: Page, name: string) {
 async function signInForm(page: Page, password = PASSWORD) {
   const form = page.getByTestId('ops-signin');
   await expect(form).toBeVisible();
-  await form.getByLabel('Operator').fill(OPERATOR);
+  await form.getByLabel('Operator').fill(op());
   await form.getByLabel('Password').fill(password);
   await form.getByRole('button', { name: 'Sign in' }).click();
   return form;
@@ -74,12 +83,12 @@ async function signOut(page: Page) {
 }
 
 test.describe.serial('Operator sign-in (chapter 14, OP10, OP12)', () => {
-  test.skip(!OPERATOR || !PASSWORD, 'STUDIO_OPERATOR and STUDIO_OPERATOR_PASSWORD name an operator without a factor');
+  test.skip(!OPERATOR_NAME || !PASSWORD, 'STUDIO_OPERATOR and STUDIO_OPERATOR_PASSWORD name an operator without a factor');
   let secret = '';
   let recovery: string[] = [];
 
   test('first sign-in enrols TOTP and shows the recovery codes once', async ({ page }) => {
-    await signIn(page);
+    await signIn(page, STUDIO_LOGIN);
     await page.goto('/studio/ops/clusters');
     await axe(page, 'operator sign-in');
     await page.screenshot({ path: `${SHOTS}/ops-signin.png` });
@@ -114,7 +123,7 @@ test.describe.serial('Operator sign-in (chapter 14, OP10, OP12)', () => {
     await axe(page, 'operator recovery codes');
     await page.getByRole('button', { name: 'I have saved them' }).click();
 
-    await expect(page.getByTestId('whoami')).toHaveText(`operator ${OPERATOR}`);
+    await expect(page.getByTestId('whoami')).toHaveText(`operator ${op()}`);
     await expect(page.getByTestId('ops-clusters')).toBeVisible();
     await expect(page.getByTestId('nav-operator')).toHaveCount(0); // operator mode has its own nav
     await axe(page, 'operator clusters');
@@ -125,8 +134,8 @@ test.describe.serial('Operator sign-in (chapter 14, OP10, OP12)', () => {
     expect(t).toMatch(/^sprigop_/);
     const who = await page.request.get('/admin/v1/operators:whoami', { headers: { authorization: `Bearer ${t}` } });
     expect(who.status()).toBe(200);
-    expect(JSON.stringify(await who.json())).toContain(OPERATOR);
-    const me = await page.request.get(`/admin/v1/operators/${OPERATOR}`, { headers: { authorization: `Bearer ${t}` } });
+    expect(JSON.stringify(await who.json())).toContain(op());
+    const me = await page.request.get(`/admin/v1/operators/${op()}`, { headers: { authorization: `Bearer ${t}` } });
     expect(me.status()).toBe(200);
     expect(((await me.json()) as { recovery_codes_left?: number }).recovery_codes_left).toBe(10);
 
@@ -137,7 +146,7 @@ test.describe.serial('Operator sign-in (chapter 14, OP10, OP12)', () => {
 
   test('a later sign-in takes a TOTP code, then a recovery code once', async ({ page }) => {
     test.skip(!secret, 'needs the enrolment of the previous test');
-    await signIn(page);
+    await signIn(page, STUDIO_LOGIN);
     await page.goto('/studio/ops/dcs');
 
     // Password first; the code field appears when the controller asks.
@@ -146,7 +155,7 @@ test.describe.serial('Operator sign-in (chapter 14, OP10, OP12)', () => {
     // The enrolment used this step: the next one is accepted (one step of drift).
     await form.getByLabel('Code', { exact: true }).fill(totp(secret, 1));
     await form.getByRole('button', { name: 'Sign in' }).click();
-    await expect(page.getByTestId('whoami')).toHaveText(`operator ${OPERATOR}`);
+    await expect(page.getByTestId('whoami')).toHaveText(`operator ${op()}`);
     await expect(page.getByTestId('ops-dcs')).toBeVisible();
     await signOut(page);
 
@@ -154,9 +163,9 @@ test.describe.serial('Operator sign-in (chapter 14, OP10, OP12)', () => {
     form = await signInForm(page);
     await form.getByLabel('Code', { exact: true }).fill(recovery[0] ?? '');
     await form.getByRole('button', { name: 'Sign in' }).click();
-    await expect(page.getByTestId('whoami')).toHaveText(`operator ${OPERATOR}`);
+    await expect(page.getByTestId('whoami')).toHaveText(`operator ${op()}`);
     const t = await token(page);
-    const me = await page.request.get(`/admin/v1/operators/${OPERATOR}`, { headers: { authorization: `Bearer ${t}` } });
+    const me = await page.request.get(`/admin/v1/operators/${op()}`, { headers: { authorization: `Bearer ${t}` } });
     expect(((await me.json()) as { recovery_codes_left?: number }).recovery_codes_left).toBe(9);
     await signOut(page);
 

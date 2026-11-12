@@ -568,3 +568,100 @@ async fn shard_schemas_of_mapped_groups_are_never_orphans() {
     }
     assert!(env.exec.has_schema(&child) && env.exec.has_schema(&stray));
 }
+
+/// Whether a gateway process has ended, as the test says (bugfix-45).
+#[derive(Default)]
+struct Ended(std::sync::atomic::AtomicBool);
+
+#[async_trait::async_trait]
+impl sprig_catalog::ddl::OwnerCheck for Ended {
+    async fn gone(&self, owner: &str, _age: Duration) -> bool {
+        owner.starts_with("gateway:") && self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// bugfix-45 (bugfix-38's leftover): a gateway that crashed in the middle
+/// of a DDL statement left its job, and with it the table, for
+/// `catalog.stuck_state_minutes` unless another DDL on the same table came
+/// and resolved it. The reconciler now asks the gateways' process keys: a
+/// job whose gateway process has ended is resolved at its next look, and a
+/// tenant with a young gateway job is looked at again after `JOB_RECHECK`,
+/// not after the full interval.
+#[tokio::test]
+async fn a_job_whose_gateway_process_ended_goes_before_the_stuck_age() {
+    use std::sync::atomic::Ordering;
+    let env = billing().await;
+    // A gateway's engine (its jobs name its process) dies after phase 1.
+    let f: DdlFailpoint = Arc::new(|_, s| {
+        if s == DdlStep::Prepared {
+            Err(SprigError::internal("injected crash"))
+        } else {
+            Ok(())
+        }
+    });
+    assert!(
+        env.engine()
+            .with_owner("gateway:mum1", None)
+            .with_failpoint(f)
+            .execute(
+                &env.req(alter("orders"), "ALTER TABLE orders ADD c INT"),
+                &*env.exec
+            )
+            .await
+            .is_err()
+    );
+    let cfg = ReconcileConfig {
+        stuck: Duration::from_secs(15 * 60),
+        ..now_cfg()
+    };
+    // Before bugfix-45 (no owner check): the job waits for the stuck age.
+    let r = env.reconciler(cfg).pass(env.tenant).await.unwrap();
+    assert_eq!((r.jobs_waiting, r.resolved.len()), (1, 0), "{r:?}");
+    assert_eq!(r.gateway_jobs_waiting, 1);
+
+    // With the process keys, while the gateway still runs: left alone,
+    // and looked at again after JOB_RECHECK, not the full interval.
+    let ended = Arc::new(Ended::default());
+    let rec = env
+        .reconciler(cfg)
+        .with_owners(Arc::clone(&ended) as Arc<dyn sprig_catalog::ddl::OwnerCheck>);
+    let store = MemStore::new(Tier::Dc(dc()));
+    let cx = LoopCx::new(
+        Arc::new(store.clone()),
+        Arc::new(store.with_tier(Tier::Global)),
+        None,
+        Arc::new(SystemClock),
+        sprig_common::CancellationToken::new(),
+        tokio::sync::watch::channel(Arc::new(crate::settings::ControlSettings::default())).1,
+    );
+    assert_eq!(
+        rec.reconcile(&cx, &env.tenant).await.unwrap(),
+        Outcome::RequeueAfter(JOB_RECHECK)
+    );
+    assert!(env.live("orders").unwrap().pending_job_id.is_some());
+
+    // The gateway process ends: the next look, inside the full interval,
+    // resolves the job (rolled back: the ALTER never ran).
+    ended.0.store(true, Ordering::SeqCst);
+    match rec.reconcile(&cx, &env.tenant).await.unwrap() {
+        Outcome::RequeueAfter(d) => assert!(d > JOB_RECHECK, "back to the interval: {d:?}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(env.live("orders").unwrap().pending_job_id, None);
+    assert!(
+        env.snapshot()
+            .settings
+            .iter()
+            .all(|s| !s.key.starts_with("sprig.ddl.")),
+        "the intent is gone"
+    );
+    // A job of the controller's own engine is never taken this way.
+    env.crash(
+        DdlStep::Prepared,
+        alter("orders"),
+        "ALTER TABLE orders ADD d INT",
+    )
+    .await;
+    let r = rec.pass(env.tenant).await.unwrap();
+    assert_eq!((r.jobs_waiting, r.gateway_jobs_waiting), (1, 0), "{r:?}");
+}

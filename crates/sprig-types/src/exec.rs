@@ -128,13 +128,34 @@ pub trait Runner: Send {
         let _ = (db, root);
         Ok(false)
     }
+
+    /// `true`: the following statements run on the physical tables, every
+    /// space's layer rows included, instead of through chapter 42's merged
+    /// views; `false`: back through them. A drop on an inheritable type
+    /// tree changes the rows of every space (decision T18). A no-op where
+    /// there is no inheritance layer.
+    fn set_physical(&mut self, on: bool) {
+        let _ = on;
+    }
 }
 
 /// The savepoint a plan inside a client's transaction uses.
 pub const SAVEPOINT: &str = "sprig_types";
 
+/// The isolation of a plan's own transaction ([`Txn`]), for the next
+/// transaction only.
+pub const PLAN_ISOLATION: &str = "SET TRANSACTION ISOLATION LEVEL READ COMMITTED";
+
 /// A plan's transaction: `BEGIN ... COMMIT` in autocommit mode, a
 /// savepoint inside the client's transaction.
+///
+/// In autocommit mode the bracket runs at `READ COMMITTED`
+/// ([`PLAN_ISOLATION`]): a plan stands for one client statement, which
+/// never fails with 1020 on MariaDB, but its own first read would open a
+/// `REPEATABLE READ` snapshot, and MariaDB 11.8's
+/// `innodb_snapshot_isolation` then fails the plan's later writes with
+/// 1020 when another session (a parent tenant, the copy worker) changed
+/// those rows in between (decision T17).
 #[derive(Debug)]
 pub struct Txn {
     nested: bool,
@@ -150,6 +171,7 @@ impl Txn {
         if nested {
             r.exec(&format!("SAVEPOINT {SAVEPOINT}")).await?;
         } else {
+            r.exec(PLAN_ISOLATION).await?;
             r.exec("BEGIN").await?;
         }
         Ok(Self { nested })
@@ -229,6 +251,8 @@ pub(crate) mod fake {
         pub(crate) in_txn: bool,
         pub(crate) committed: Vec<TypesChange>,
         pub(crate) ids: Vec<(String, u64)>,
+        /// [`super::PLAN_ISOLATION`]s seen (not logged).
+        pub(crate) plan_isolation: usize,
     }
 
     #[async_trait::async_trait]
@@ -238,6 +262,10 @@ pub(crate) mod fake {
             Ok(self.answers.pop_front().unwrap_or_default())
         }
         async fn exec(&mut self, sql: &str) -> Result<Done> {
+            if sql == super::PLAN_ISOLATION {
+                self.plan_isolation += 1;
+                return Ok(Done::default());
+            }
             self.log.push(sql.to_owned());
             Ok(Done {
                 affected_rows: 1,

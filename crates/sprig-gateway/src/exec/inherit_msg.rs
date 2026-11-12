@@ -857,10 +857,11 @@ impl PassSession {
         // guard, its database).
         if own.def(&db, kind, &name).is_none()
             && let Some(i) = own.instances.values().find(|i| {
-            i.kind == kind
-                && i.state != sprig_inherit::msg::InstanceState::Detached
-                && phys_name(i.physical.as_ref()) == Some((&db, &name))
-        }) {
+                i.kind == kind
+                    && i.state != sprig_inherit::msg::InstanceState::Detached
+                    && phys_name(i.physical.as_ref()) == Some((&db, &name))
+            })
+        {
             let _ = i;
             return Err(inherited::not_overridable(format!(
                 "{} {db}.{name} is inherited; use ALTER INHERITED {} {db}.{name} ... (settings, \

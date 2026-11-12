@@ -29,6 +29,11 @@ deployment_id = "sprigdb-dev"
 # logins app, app_repl and app_galera on the raw clusters, names unchanged).
 # gateway-dev.sh sets SPRIGDB_GATEWAY_LOGIN_MODE from SPRIG_GATEWAY_LOGIN_MODE.
 login_mode = "catalog"
+# The address workers and other gateways use to reach this gateway. Without
+# it the hostname is advertised, and on a laptop that can resolve to the LAN
+# address while the peer listener is on 127.0.0.1 (seen after the 12 Nov
+# reboot). SPRIGDB_GATEWAY_ADVERTISE_ADDR overrides it.
+advertise_addr = "127.0.0.1"
 # Paths are relative to the working directory, so run from the repository
 # root, or set SPRIGDB_GATEWAY_* to absolute paths.
 # accounts_file mode: the logins.

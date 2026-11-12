@@ -45,8 +45,9 @@ use super::super::sql::Caller;
 use super::super::{ConnInfo, Core};
 use super::session::ACCESS_PREFIX;
 use super::{
-    CSRF_HEADER, bearer, csrf_reject, grants, hdr, invalid, json_response, parse_json, read_body,
-    rows_of, run_sql, same_origin, session, session_caller, set_cookie, tenant_tree, text,
+    CSRF_HEADER, bearer, cookie_secure_for, csrf_reject, grants, hdr, invalid, json_response,
+    parse_json, read_body, rows_of, run_sql, same_origin, session, session_caller, set_cookie,
+    tenant_tree, text,
 };
 
 /// Seeds sealed with keys derived from the tenant-data-key file.
@@ -250,6 +251,7 @@ async fn sign_in(
     client: &str,
     amr: Vec<String>,
     cookie: bool,
+    secure: bool,
     extra: Value,
 ) -> Result<Response<Body>, SprigError> {
     let login = core.studio.login.as_ref().ok_or_else(unavailable)?;
@@ -286,7 +288,7 @@ async fn sign_in(
     }
     if cookie {
         let mut r = json_response(200, &out);
-        let c = set_cookie(info, &issued.refresh_token, limits.max_age.as_secs());
+        let c = set_cookie(secure, &issued.refresh_token, limits.max_age.as_secs());
         if let Ok(v) = HeaderValue::from_str(&c) {
             r.headers_mut().append(header::SET_COOKIE, v);
         }
@@ -386,6 +388,7 @@ pub(super) async fn complete(
         &client,
         vec!["pwd".into(), method.into()],
         cookie,
+        cookie_secure_for(info, hdrs.origin.as_deref()),
         left,
     )
     .await
@@ -491,6 +494,7 @@ pub(super) async fn factors(
                         &client,
                         vec!["pwd".into(), "otp".into()],
                         cookie,
+                        cookie_secure_for(info, hdrs.origin.as_deref()),
                         extra,
                     )
                     .await

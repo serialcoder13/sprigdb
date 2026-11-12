@@ -189,6 +189,23 @@ impl PassSession {
             errored: false,
             status: Some(status),
         };
+        // A write the type layer leaves alone (to a single-table root, say)
+        // can still fail a subtype's NOT NULL check: it goes on through the
+        // error mapping. Its text names no reserved name, so the plan mode
+        // grants it nothing.
+        let handled = match handled {
+            Ok(Handled::NotTyped)
+                if sprig_types::has_nn_checks(state)
+                    && !sprig_types::grammar::names_reserved(text, &lex)
+                    && is_write(text) =>
+            {
+                Ok(Handled::Forward {
+                    sql: sql.to_owned(),
+                    meta: Vec::new(),
+                })
+            }
+            other => other,
+        };
         match handled {
             Ok(Handled::NotTyped) => Ok(None),
             Err(e) => {
@@ -235,6 +252,18 @@ impl PassSession {
             }
         }
     }
+}
+
+/// `INSERT`, `REPLACE` or `UPDATE` (after leading spaces and comments are
+/// ignored by the first word only).
+fn is_write(text: &[u8]) -> bool {
+    let t: Vec<u8> = text
+        .iter()
+        .skip_while(|b| b.is_ascii_whitespace() || **b == b'(')
+        .take(7)
+        .map(u8::to_ascii_uppercase)
+        .collect();
+    t.starts_with(b"INSERT") || t.starts_with(b"REPLACE") || t.starts_with(b"UPDATE")
 }
 
 pub(super) async fn send_rows(
@@ -381,6 +410,11 @@ impl Runner for GwRunner<'_, '_, '_> {
             .ext
             .get::<sprig_inherit::InheritState>(sprig_inherit::MODULE)
             .is_some_and(|s| s.object_named_ci(d.db_id, root).is_some()))
+    }
+
+    fn set_physical(&mut self, on: bool) {
+        // Not a type plan's statement: chapter 42 doesn't plan it.
+        self.typed = !on;
     }
 
     async fn tree_changed(&mut self, db: Option<&str>, root: &str, key: &[String]) -> Result<()> {

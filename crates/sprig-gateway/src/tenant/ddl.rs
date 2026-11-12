@@ -206,13 +206,30 @@ impl GatewayDdl<'_> {
         (stored, lex)
     }
 
+    /// The session's `character_set_client` and `collation_connection`,
+    /// which a stored program records (R4 round 6, gaps row 67): MariaDB
+    /// keeps the creating connection's, which would be `sprig_ctl`'s.
+    async fn session_charsets(&self) -> Charsets {
+        let bs = self.bs.lock().await;
+        let v = &bs.vars().vars;
+        Charsets {
+            client: v.get("character_set_client").cloned(),
+            collation: v.get("collation_connection").cloned(),
+        }
+    }
+
     /// A stored program: as `sprig_ctl`, with the session's account as
     /// `DEFINER` and the session's `sql_mode`, then the definer MariaDB
     /// recorded is checked.
     async fn stored_program(&self, stmt: &PhysicalDdl, mode: Option<&str>) -> Result<()> {
         let (user, host) = self.session_account().await?;
         let definer = format!("DEFINER={}@{}", bq(&user), bq(&host));
-        let sql = in_mode(&with_definer(&stmt.sql, &definer, &stmt.effect), mode);
+        let charsets = self.session_charsets().await;
+        let sql = in_mode(
+            &with_definer(&stmt.sql, &definer, &stmt.effect),
+            mode,
+            &charsets,
+        );
         let st = PhysicalDdl {
             sql,
             ..stmt.clone()
@@ -409,14 +426,38 @@ fn insert_definer(sql: &[u8], lex: LexOptions, definer: &str) -> Option<Vec<u8>>
 /// as MySQL does, and parses the statement under it. `sprig_ctl`'s pooled
 /// connection gets `SET SESSION sql_mode` first, in the same request; the
 /// pool resets the connection when it comes back.
-fn in_mode(sql: &str, mode: Option<&str>) -> String {
-    match mode {
-        Some(m) => format!(
-            "SET SESSION sql_mode = {}; {sql}",
-            sprig_sql::names::rewrite::sql_string(m, false)
-        ),
-        None => sql.to_owned(),
+fn in_mode(sql: &str, mode: Option<&str>, charsets: &Charsets) -> String {
+    let lit = |v: &str| sprig_sql::names::rewrite::sql_string(v, false);
+    let mut sets: Vec<String> = Vec::new();
+    if let Some(m) = mode {
+        sets.push(format!("sql_mode = {}", lit(m)));
     }
+    // R4 round 6 (gaps row 67): the session's character sets, which MariaDB
+    // records with the program. The client character set only when the
+    // text reads the same in it (the gateway holds the statement as UTF-8).
+    if let Some(cs) = charsets.client.as_deref()
+        && (sql.is_ascii()
+            || ["utf8mb4", "utf8mb3", "utf8"]
+                .iter()
+                .any(|u| cs.eq_ignore_ascii_case(u)))
+    {
+        sets.push(format!("character_set_client = {}", lit(cs)));
+    }
+    if let Some(c) = charsets.collation.as_deref() {
+        sets.push(format!("collation_connection = {}", lit(c)));
+    }
+    if sets.is_empty() {
+        return sql.to_owned();
+    }
+    format!("SET SESSION {}; {sql}", sets.join(", "))
+}
+
+/// The character-set variables a stored program records (see
+/// `GatewayDdl::session_charsets`); `None`: the server's.
+#[derive(Debug, Clone, Default)]
+struct Charsets {
+    client: Option<String>,
+    collation: Option<String>,
 }
 
 /// Chapter 07 step 12: a `CREATE` or `ALTER` of a view, routine, trigger
@@ -796,8 +837,13 @@ impl<'a> ShardedDdl<'a> {
             ));
         };
         let definer = format!("DEFINER={}@{}", bq(&user), bq(&host));
+        let charsets = self.inner.session_charsets().await;
         let st = PhysicalDdl {
-            sql: in_mode(&with_definer(&stmt.sql, &definer, &stmt.effect), mode),
+            sql: in_mode(
+                &with_definer(&stmt.sql, &definer, &stmt.effect),
+                mode,
+                &charsets,
+            ),
             ..stmt.clone()
         };
         MariaExecutor::new(pool.clone()).execute(&st).await?;
@@ -926,13 +972,34 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)] // one case per kind of stored code
     fn stored_code_runs_in_the_session_mode_with_logical_names() {
+        let none = Charsets::default();
         assert_eq!(
-            in_mode("CREATE PROCEDURE p() SELECT 1", Some("PIPES_AS_CONCAT")),
+            in_mode(
+                "CREATE PROCEDURE p() SELECT 1",
+                Some("PIPES_AS_CONCAT"),
+                &none
+            ),
             "SET SESSION sql_mode = 'PIPES_AS_CONCAT'; CREATE PROCEDURE p() SELECT 1"
         );
         assert_eq!(
-            in_mode("CREATE VIEW v AS SELECT 1", None),
+            in_mode("CREATE VIEW v AS SELECT 1", None, &none),
             "CREATE VIEW v AS SELECT 1"
+        );
+        // R4 round 6 (gaps row 67): the session's character sets too; a
+        // client character set the UTF-8 text doesn't read the same in is
+        // left out unless the text is ASCII.
+        let latin1 = Charsets {
+            client: Some("latin1".to_owned()),
+            collation: Some("latin1_swedish_ci".to_owned()),
+        };
+        assert_eq!(
+            in_mode("CREATE PROCEDURE p() SELECT 1", Some("ANSI"), &latin1),
+            "SET SESSION sql_mode = 'ANSI', character_set_client = 'latin1', \
+             collation_connection = 'latin1_swedish_ci'; CREATE PROCEDURE p() SELECT 1"
+        );
+        assert_eq!(
+            in_mode("CREATE PROCEDURE p() SELECT 'é'", None, &latin1),
+            "SET SESSION collation_connection = 'latin1_swedish_ci'; CREATE PROCEDURE p() SELECT 'é'"
         );
         let schema: SchemaName = "t1_d1_g1_s1".parse().unwrap();
         let stmt = |sql: &str, effect: Effect| PhysicalDdl {

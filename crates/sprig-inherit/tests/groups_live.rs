@@ -1023,10 +1023,8 @@ async fn names_become(c: &mut Conn, sql: &str, want: &[&str]) {
     loop {
         let got = match c.query::<Row, _>(sql).await {
             Ok(r) => {
-                let mut v: Vec<String> = r
-                    .into_iter()
-                    .filter_map(|r| text(&r.unwrap()[0]))
-                    .collect();
+                let mut v: Vec<String> =
+                    r.into_iter().filter_map(|r| text(&r.unwrap()[0])).collect();
                 v.sort();
                 v
             }
@@ -1107,7 +1105,11 @@ async fn typed_tables_in_groups() {
                  vehicle (id))",
             )
             .await;
-            exec(&mut c[0], "INSERT INTO vehicle (vtype, name) VALUES ('VAN', 'a-van')").await;
+            exec(
+                &mut c[0],
+                "INSERT INTO vehicle (vtype, name) VALUES ('VAN', 'a-van')",
+            )
+            .await;
             exec(
                 &mut c[0],
                 "INSERT INTO truck (name, payload_kg) VALUES ('a-truck', 1000), ('a-truck2', 3000)",
@@ -1131,7 +1133,12 @@ async fn typed_tables_in_groups() {
                 tb.contains("vehicle") && tb.contains("truck") && tb.contains("trip"),
                 "b: {tb:?}"
             );
-            names_become(&mut c[1], "SELECT name FROM truck", &["a-truck", "a-truck2"]).await;
+            names_become(
+                &mut c[1],
+                "SELECT name FROM truck",
+                &["a-truck", "a-truck2"],
+            )
+            .await;
             names_become(
                 &mut c[1],
                 "SELECT name FROM vehicle",
@@ -1174,12 +1181,20 @@ async fn typed_tables_in_groups() {
                 ["a-van", "b-small"]
             );
             assert_eq!(
-                rows(&mut c[1], "SELECT payload_kg FROM truck WHERE name = 'a-truck'").await,
+                rows(
+                    &mut c[1],
+                    "SELECT payload_kg FROM truck WHERE name = 'a-truck'"
+                )
+                .await,
                 vec![vec![Some("1500".to_owned())]]
             );
             // a sees none of it.
             assert_eq!(
-                rows(&mut c[0], "SELECT payload_kg FROM truck WHERE name = 'a-truck'").await,
+                rows(
+                    &mut c[0],
+                    "SELECT payload_kg FROM truck WHERE name = 'a-truck'"
+                )
+                .await,
                 vec![vec![Some("1000".to_owned())]]
             );
             assert_eq!(
@@ -1194,28 +1209,42 @@ async fn typed_tables_in_groups() {
                 &["a-truck", "a-truck2", "b-truck"],
             )
             .await;
-            names_become(&mut c[2], "SELECT name FROM ONLY vehicle", &["a-van", "b-small"])
-                .await;
+            names_become(
+                &mut c[2],
+                "SELECT name FROM ONLY vehicle",
+                &["a-van", "b-small"],
+            )
+            .await;
+            // Every table of the tree serves at c (across clusters each
+            // copy must, IG9) before c's own subtype reads them.
+            names_become(
+                &mut c[2],
+                "SELECT payload_kg FROM truck WHERE name = 'a-truck'",
+                &["1500"],
+            )
+            .await;
             exec(
                 &mut c[2],
                 "CREATE TABLE smalltruck (axles INT NULL) INHERITS (truck) WHERE vtype = \
                  'SMALLTRUCK'",
             )
             .await;
+            // (Across clusters c's copy serves again once reseeded after
+            // its own column: 39889 until then.)
+            names_become(&mut c[2], "SELECT name FROM smalltruck", &["b-small"]).await;
+            names_become(
+                &mut c[2],
+                "SELECT name FROM truck",
+                &["a-truck", "a-truck2", "b-small", "b-truck"],
+            )
+            .await;
+            names_become(&mut c[2], "SELECT name FROM ONLY vehicle", &["a-van"]).await;
             assert_eq!(
-                names(&mut c[2], "SELECT name FROM smalltruck").await,
-                ["b-small"]
-            );
-            assert_eq!(
-                names(&mut c[2], "SELECT name FROM truck").await,
-                ["a-truck", "a-truck2", "b-small", "b-truck"]
-            );
-            assert_eq!(
-                names(&mut c[2], "SELECT name FROM ONLY vehicle").await,
-                ["a-van"]
-            );
-            assert_eq!(
-                rows(&mut c[2], "SELECT payload_kg FROM truck WHERE name = 'a-truck'").await,
+                rows(
+                    &mut c[2],
+                    "SELECT payload_kg FROM truck WHERE name = 'a-truck'"
+                )
+                .await,
                 vec![vec![Some("1500".to_owned())]]
             );
             exec(
@@ -1250,12 +1279,14 @@ async fn typed_tables_in_groups() {
                 .collect();
             assert_eq!(ids.len(), 6, "c's vehicles: {ids:?}");
             assert!(ids.contains(&b_small) && ids.contains(&c_small));
-            // Foreign keys against each level's merged view.
-            exec(
+            // Foreign keys against each level's merged view (across
+            // clusters once trip's copy serves at c).
+            settled(
                 &mut c[2],
                 &format!("INSERT INTO trip (vehicle_id, note) VALUES ({b_small}, 'c->b-small')"),
             )
-            .await;
+            .await
+            .unwrap();
             exec(
                 &mut c[2],
                 &format!("INSERT INTO trip (vehicle_id, note) VALUES ({a_truck2}, 'c->a-truck2')"),
@@ -1280,7 +1311,11 @@ async fn typed_tables_in_groups() {
                 &format!("DELETE FROM trip WHERE vehicle_id = {a_truck2}"),
             )
             .await;
-            exec(&mut c[0], &format!("DELETE FROM truck WHERE id = {a_truck2}")).await;
+            exec(
+                &mut c[0],
+                &format!("DELETE FROM truck WHERE id = {a_truck2}"),
+            )
+            .await;
             names_become(
                 &mut c[2],
                 "SELECT name FROM truck",
@@ -1302,5 +1337,505 @@ async fn typed_tables_in_groups() {
             );
             cleanup(&mut c, &t, &db, &shares).await;
         }
+    }
+}
+
+/// Round 3 (`groups_live::orphans_keep_their_references` failing with 1020
+/// on the MariaDB persona): a child's write plan reads the merged view and
+/// then writes from it in one gateway transaction. While its parent (or
+/// the copy worker) changes the same records, MariaDB 11.8's snapshot
+/// isolation failed the plan's second statement with 1020 ("Record has
+/// changed since last read"), which a single MariaDB statement never
+/// gives. `b` overrides, deletes and resets `a`'s records while `a`
+/// updates them: no statement may fail with 1020.
+#[tokio::test]
+async fn concurrent_parent_writes_never_1020() {
+    let Some(eps) = endpoints("concurrent_parent_writes_never_1020") else {
+        return;
+    };
+    let t = tenants();
+    let mode = mode();
+    let mat = mode == "materialized";
+    let secs: u64 = std::env::var("SPRIG_TEST_IG_RACE_S")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(6);
+    for (pi, ep) in eps.iter().enumerate() {
+        let p = if pi == 0 { "my" } else { "ma" };
+        let db = format!("ig_race_{p}_{}", if mat { "mat" } else { "rt" });
+        let s1 = format!("igr{p}{}", u8::from(mat));
+        let mut c = Vec::new();
+        for name in &t[..2] {
+            c.push(conn(ep, name).await);
+        }
+        let shares = [(0, s1.as_str())];
+        cleanup(&mut c, &t, &db, &shares).await;
+        for (i, x) in c.iter_mut().enumerate() {
+            exec(x, &format!("USE SPACE `{}`", t[i])).await;
+            if mat {
+                exec(x, "SPRIG SET inherit.merge = 'materialized'").await;
+            } else {
+                let _ = try_exec(x, "SPRIG RESET inherit.merge").await;
+            }
+        }
+        exec(&mut c[0], &format!("CREATE DATABASE {db}")).await;
+        exec(&mut c[0], &format!("USE {db}")).await;
+        exec(
+            &mut c[0],
+            "CREATE TABLE r (id INT PRIMARY KEY, x INT NOT NULL, note VARCHAR(40) NULL)",
+        )
+        .await;
+        exec(&mut c[0], "ALTER TABLE r SPRIG INHERITABLE KEY (id)").await;
+        exec(
+            &mut c[0],
+            &format!("CREATE SHARE {s1} ON r TO ALL CHILDREN"),
+        )
+        .await;
+        exec(
+            &mut c[0],
+            "INSERT INTO r VALUES (1, 0, 'a'), (2, 0, 'a'), (3, 0, 'a')",
+        )
+        .await;
+        exec(&mut c[1], &format!("USE {db}")).await;
+        eventually(&mut c[1], "SELECT id FROM r", 3).await;
+        let mut b = c.pop().unwrap();
+        let mut a = c.pop().unwrap();
+        let stop = Instant::now() + Duration::from_secs(secs);
+        let parent = async move {
+            let mut n = 0u64;
+            let mut errs: BTreeMap<u16, u64> = BTreeMap::new();
+            while Instant::now() < stop {
+                let k = n % 3 + 1;
+                match try_exec(&mut a, &format!("UPDATE r SET x = x + 1 WHERE id = {k}")).await {
+                    Ok(_) => {}
+                    Err(e) => *errs.entry(e).or_default() += 1,
+                }
+                n += 1;
+            }
+            (a, n, errs)
+        };
+        let child = async move {
+            let mut n = 0u64;
+            let mut errs: BTreeMap<u16, u64> = BTreeMap::new();
+            while Instant::now() < stop {
+                let k = n % 3 + 1;
+                let sql = match n % 4 {
+                    0 | 1 => format!("UPDATE r SET note = 'b{n}' WHERE id = {k}"),
+                    2 => format!("DELETE FROM r WHERE id = {k}"),
+                    _ => format!("SPRIG RESET r WHERE id = {k}"),
+                };
+                match try_exec(&mut b, &sql).await {
+                    Ok(_) => {}
+                    Err(e) => *errs.entry(e).or_default() += 1,
+                }
+                n += 1;
+            }
+            (b, n, errs)
+        };
+        let ((a, na, ea), (b, nb, eb)) = tokio::join!(parent, child);
+        eprintln!(
+            "{p}/{mode}: {na} parent updates (errors {ea:?}), {nb} child writes (errors {eb:?})"
+        );
+        assert!(
+            !ea.contains_key(&1020) && !eb.contains_key(&1020),
+            "{p}/{mode}: 1020 in a gateway plan: parent {ea:?}, child {eb:?}"
+        );
+        assert!(
+            ea.is_empty() && eb.is_empty(),
+            "{p}/{mode}: errors: parent {ea:?}, child {eb:?}"
+        );
+        let mut c = vec![a, b];
+        cleanup(&mut c, &t, &db, &shares).await;
+    }
+}
+
+/// Round 3 (decision T16's refusals lifted, T18 and T20): drops on an
+/// inheritable type tree follow the rules of any inheritable table. `c`
+/// declares its own subtype under the tree it receives (across clusters
+/// its copy keeps serving: read at once, no 39889) and drops it again; its
+/// row of that type becomes a plain `vehicle`. Nobody may drop a table it
+/// receives (39897), and `a` may not drop a subtype while the tree is
+/// shared (39895); once the shares are gone it may, and the rows stay as
+/// vehicles. Inside one tenant, a drop changes every space's rows (a
+/// `_type` tree in joined storage).
+#[tokio::test]
+async fn drops_on_inheritable_type_trees() {
+    let Some(eps) = endpoints("drops_on_inheritable_type_trees") else {
+        return;
+    };
+    let t = tenants();
+    let mode = mode();
+    let mat = mode == "materialized";
+    for (pi, ep) in eps.iter().enumerate() {
+        let p = if pi == 0 { "my" } else { "ma" };
+        for storage in ["single_table", "joined"] {
+            let st = if storage == "joined" { "j" } else { "s" };
+            let db = format!("ig_dr_{p}_{st}_{}", if mat { "mat" } else { "rt" });
+            let sa = format!("igdr{p}{st}{}", u8::from(mat));
+            let sb = format!("igdrb{p}{st}{}", u8::from(mat));
+            let mut c = Vec::new();
+            for name in &t {
+                c.push(conn(ep, name).await);
+            }
+            let shares = [(1, sb.as_str()), (0, sa.as_str())];
+            cleanup(&mut c, &t, &db, &shares).await;
+            for (i, x) in c.iter_mut().enumerate() {
+                exec(x, &format!("USE SPACE `{}`", t[i])).await;
+                if mat {
+                    exec(x, "SPRIG SET inherit.merge = 'materialized'").await;
+                } else {
+                    let _ = try_exec(x, "SPRIG RESET inherit.merge").await;
+                }
+            }
+            exec(&mut c[0], &format!("CREATE DATABASE {db}")).await;
+            exec(&mut c[0], &format!("USE {db}")).await;
+            exec(
+                &mut c[0],
+                "CREATE TABLE vehicle (id INT AUTO_INCREMENT PRIMARY KEY, vtype VARCHAR(20) NOT \
+                 NULL, name VARCHAR(40) NULL)",
+            )
+            .await;
+            exec(
+                &mut c[0],
+                &format!(
+                    "CREATE TABLE truck (payload_kg INT NULL) INHERITS (vehicle) WHERE vtype = \
+                     'TRUCK' WITH (SPRIG_STORAGE = '{storage}')"
+                ),
+            )
+            .await;
+            exec(
+                &mut c[0],
+                "INSERT INTO vehicle (vtype, name) VALUES ('VAN', 'a-van')",
+            )
+            .await;
+            exec(
+                &mut c[0],
+                "INSERT INTO truck (name, payload_kg) VALUES ('a-truck', 1000)",
+            )
+            .await;
+            exec(&mut c[0], "ALTER TABLE vehicle SPRIG INHERITABLE KEY (id)").await;
+            exec(
+                &mut c[0],
+                &format!("CREATE SHARE {sa} ON vehicle TO ALL CHILDREN WITH RESHARE"),
+            )
+            .await;
+            exec(&mut c[1], &format!("USE {db}")).await;
+            names_become(&mut c[1], "SELECT name FROM truck", &["a-truck"]).await;
+            exec(
+                &mut c[1],
+                &format!("CREATE SHARE {sb} ON vehicle TO ALL CHILDREN WITH RESHARE"),
+            )
+            .await;
+            exec(&mut c[2], &format!("USE {db}")).await;
+            names_become(&mut c[2], "SELECT name FROM truck", &["a-truck"]).await;
+            names_become(&mut c[2], "SELECT name FROM vehicle", &["a-truck", "a-van"]).await;
+            // c's own subtype: in single-table storage a column on the root
+            // it receives. Its reads work at once (T20).
+            exec(
+                &mut c[2],
+                "CREATE TABLE smalltruck (axles INT NULL) INHERITS (truck) WHERE vtype = \
+                 'SMALLTRUCK'",
+            )
+            .await;
+            assert!(
+                rows(&mut c[2], "SELECT name FROM smalltruck")
+                    .await
+                    .is_empty()
+            );
+            exec(
+                &mut c[2],
+                "INSERT INTO smalltruck (name, payload_kg, axles) VALUES ('c-small', 5, 2)",
+            )
+            .await;
+            assert_eq!(
+                names(&mut c[2], "SELECT name FROM truck").await,
+                ["a-truck", "c-small"]
+            );
+            assert_eq!(
+                names(&mut c[2], "SELECT name FROM vehicle").await,
+                ["a-truck", "a-van", "c-small"]
+            );
+            // Received tables can't be dropped below; a shared one can't be
+            // dropped above.
+            for (i, table, code) in [
+                (2, "truck", 39897),
+                (2, "vehicle", 39897),
+                (1, "truck", 39895),
+            ] {
+                let m = fails(&mut c[i], &format!("DROP TABLE {table}"), code).await;
+                eprintln!("{p}/{mode}/{storage}: level {i}'s DROP TABLE {table} refused: {m}");
+            }
+            let m = fails(&mut c[0], "DROP TABLE truck", 39895).await;
+            eprintln!("{p}/{mode}/{storage}: a's DROP TABLE truck refused: {m}");
+            // c drops its own subtype: its row is a vehicle again.
+            exec(&mut c[2], "DROP TABLE smalltruck").await;
+            fails(&mut c[2], "SELECT * FROM smalltruck", 1146).await;
+            assert_eq!(
+                names(&mut c[2], "SELECT name FROM truck").await,
+                ["a-truck"]
+            );
+            assert_eq!(
+                names(&mut c[2], "SELECT name FROM ONLY vehicle").await,
+                ["a-van", "c-small"]
+            );
+            assert_eq!(
+                rows(
+                    &mut c[2],
+                    "SELECT vtype FROM vehicle WHERE name = 'c-small'"
+                )
+                .await,
+                vec![vec![Some("SMALLTRUCK".to_owned())]]
+            );
+            // Unshared, a's subtype goes and its rows stay.
+            for (i, s) in &shares {
+                exec(&mut c[*i], &format!("USE SPACE `{}`", t[*i])).await;
+                exec(&mut c[*i], &format!("DROP SHARE {s}")).await;
+            }
+            exec(&mut c[0], "DROP TABLE truck").await;
+            fails(&mut c[0], "SELECT * FROM truck", 1146).await;
+            // (A root without subtypes reads as a plain table: no ONLY.)
+            assert_eq!(
+                names(&mut c[0], "SELECT name FROM vehicle").await,
+                ["a-truck", "a-van"]
+            );
+            assert_eq!(
+                rows(
+                    &mut c[0],
+                    "SELECT vtype FROM vehicle WHERE name = 'a-truck'"
+                )
+                .await,
+                vec![vec![Some("TRUCK".to_owned())]]
+            );
+            cleanup(&mut c, &t, &db, &shares).await;
+        }
+        // Inside one tenant: a `_type` tree's drop retypes every space's
+        // rows (each space's own rows here; no share).
+        let db = format!("ig_drsp_{p}_{}", if mat { "mat" } else { "rt" });
+        let sp = format!("igdrx{p}{}", u8::from(mat));
+        let mut a = conn(ep, &t[0]).await;
+        exec(&mut a, &format!("USE SPACE `{}`", t[0])).await;
+        exec(&mut a, &format!("DROP DATABASE IF EXISTS {db}")).await;
+        let _ = try_exec(&mut a, &format!("DROP SPACE {sp} CASCADE")).await;
+        exec(&mut a, &format!("CREATE DATABASE {db}")).await;
+        exec(&mut a, &format!("USE {db}")).await;
+        exec(&mut a, &format!("CREATE SPACE {sp}")).await;
+        exec(
+            &mut a,
+            "CREATE TABLE kart (id INT PRIMARY KEY, name VARCHAR(40) NULL)",
+        )
+        .await;
+        exec(
+            &mut a,
+            "CREATE TABLE gokart (speed INT NULL) INHERITS (kart)",
+        )
+        .await;
+        // (A second subtype keeps kart typed after the drop, for ONLY.)
+        exec(
+            &mut a,
+            "CREATE TABLE pedalkart (gears INT NULL) INHERITS (kart)",
+        )
+        .await;
+        exec(&mut a, "ALTER TABLE kart SPRIG INHERITABLE KEY (id)").await;
+        exec(
+            &mut a,
+            "INSERT INTO gokart (id, name, speed) VALUES (1, 'root-go', 9)",
+        )
+        .await;
+        exec(&mut a, &format!("USE SPACE {sp}")).await;
+        exec(
+            &mut a,
+            "INSERT INTO gokart (id, name, speed) VALUES (2, 'x-go', 7)",
+        )
+        .await;
+        assert_eq!(names(&mut a, "SELECT name FROM gokart").await, ["x-go"]);
+        exec(&mut a, &format!("USE SPACE `{}`", t[0])).await;
+        exec(&mut a, "DROP TABLE gokart").await;
+        assert_eq!(
+            names(&mut a, "SELECT name FROM ONLY kart").await,
+            ["root-go"]
+        );
+        exec(&mut a, &format!("USE SPACE {sp}")).await;
+        assert_eq!(names(&mut a, "SELECT name FROM ONLY kart").await, ["x-go"]);
+        exec(&mut a, &format!("USE SPACE `{}`", t[0])).await;
+        exec(&mut a, &format!("DROP DATABASE {db}")).await;
+        exec(&mut a, &format!("DROP SPACE {sp} CASCADE")).await;
+        eprintln!("{p}/{mode}: drops on inheritable type trees");
+    }
+}
+
+/// Round 3 (decision T19): `ADD | DROP DISCRIMINATOR` on an inheritable
+/// type tree (joined storage, typed by `_type` first). `a` adds the
+/// discriminator while sharing the tree; `b` and `c` follow at their next
+/// statement, `c` keeping its own subtype with the value its rows hold:
+/// a row inserted with a value then takes that value's type at every
+/// level. Below the top only the parent's discriminator counts (39897).
+/// `a`'s `DROP DISCRIMINATOR` goes back the same way, every row keeping
+/// its type.
+#[tokio::test]
+async fn discriminators_on_inheritable_type_trees() {
+    let Some(eps) = endpoints("discriminators_on_inheritable_type_trees") else {
+        return;
+    };
+    let t = tenants();
+    let mode = mode();
+    let mat = mode == "materialized";
+    for (pi, ep) in eps.iter().enumerate() {
+        let p = if pi == 0 { "my" } else { "ma" };
+        let db = format!("ig_dc_{p}_{}", if mat { "mat" } else { "rt" });
+        let sa = format!("igdc{p}{}", u8::from(mat));
+        let sb = format!("igdcb{p}{}", u8::from(mat));
+        let mut c = Vec::new();
+        for name in &t {
+            c.push(conn(ep, name).await);
+        }
+        let shares = [(1, sb.as_str()), (0, sa.as_str())];
+        cleanup(&mut c, &t, &db, &shares).await;
+        for (i, x) in c.iter_mut().enumerate() {
+            exec(x, &format!("USE SPACE `{}`", t[i])).await;
+            if mat {
+                exec(x, "SPRIG SET inherit.merge = 'materialized'").await;
+            } else {
+                let _ = try_exec(x, "SPRIG RESET inherit.merge").await;
+            }
+        }
+        exec(&mut c[0], &format!("CREATE DATABASE {db}")).await;
+        exec(&mut c[0], &format!("USE {db}")).await;
+        exec(
+            &mut c[0],
+            "CREATE TABLE kart (id INT AUTO_INCREMENT PRIMARY KEY, kind VARCHAR(20) NOT NULL, \
+             name VARCHAR(40) NULL)",
+        )
+        .await;
+        exec(
+            &mut c[0],
+            "CREATE TABLE gokart (speed INT NULL) INHERITS (kart)",
+        )
+        .await;
+        exec(
+            &mut c[0],
+            "INSERT INTO kart (kind, name) VALUES ('KART', 'a-kart')",
+        )
+        .await;
+        exec(
+            &mut c[0],
+            "INSERT INTO gokart (kind, name, speed) VALUES ('GO', 'a-go', 30)",
+        )
+        .await;
+        exec(&mut c[0], "ALTER TABLE kart SPRIG INHERITABLE KEY (id)").await;
+        exec(
+            &mut c[0],
+            &format!("CREATE SHARE {sa} ON kart TO ALL CHILDREN WITH RESHARE"),
+        )
+        .await;
+        exec(&mut c[1], &format!("USE {db}")).await;
+        names_become(&mut c[1], "SELECT name FROM gokart", &["a-go"]).await;
+        exec(
+            &mut c[1],
+            &format!("CREATE SHARE {sb} ON kart TO ALL CHILDREN WITH RESHARE"),
+        )
+        .await;
+        exec(
+            &mut c[1],
+            "INSERT INTO gokart (kind, name, speed) VALUES ('GO', 'b-go', 20)",
+        )
+        .await;
+        exec(&mut c[2], &format!("USE {db}")).await;
+        names_become(&mut c[2], "SELECT name FROM gokart", &["a-go", "b-go"]).await;
+        // c's own subtype, typed by _type: its rows hold one kind.
+        exec(
+            &mut c[2],
+            "CREATE TABLE pedalkart (gears INT NULL) INHERITS (kart)",
+        )
+        .await;
+        exec(
+            &mut c[2],
+            "INSERT INTO pedalkart (kind, name, gears) VALUES ('PEDAL', 'c-pedal', 3)",
+        )
+        .await;
+        // a adds the discriminator while sharing the tree.
+        exec(&mut c[0], "ALTER TABLE kart ADD DISCRIMINATOR (kind)").await;
+        let m = fails(&mut c[1], "ALTER TABLE kart DROP DISCRIMINATOR", 39897).await;
+        eprintln!("{p}/{mode}: b's DROP DISCRIMINATOR refused: {m}");
+        // An insert into the root with a kind takes that type at every
+        // level that declares it (it didn't before: a _type tree).
+        exec(
+            &mut c[1],
+            "INSERT INTO kart (kind, name) VALUES ('GO', 'b-go2')",
+        )
+        .await;
+        names_become(
+            &mut c[1],
+            "SELECT name FROM gokart",
+            &["a-go", "b-go", "b-go2"],
+        )
+        .await;
+        let sc: Vec<String> = rows(&mut c[1], "SHOW CREATE TABLE kart")
+            .await
+            .into_iter()
+            .filter_map(|r| r[1].clone())
+            .collect();
+        assert!(sc[0].contains("SPRIG_DISCRIMINATOR"), "b: {sc:?}");
+        names_become(
+            &mut c[2],
+            "SELECT name FROM gokart",
+            &["a-go", "b-go", "b-go2"],
+        )
+        .await;
+        // (Across clusters c's copy is seeded again after the change of
+        // its columns: 39889 until then, IG9.)
+        settled(
+            &mut c[2],
+            "INSERT INTO kart (kind, name) VALUES ('PEDAL', 'c-pedal2')",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            names(&mut c[2], "SELECT name FROM pedalkart").await,
+            ["c-pedal", "c-pedal2"]
+        );
+        assert_eq!(
+            names(&mut c[2], "SELECT name FROM ONLY kart").await,
+            ["a-kart"]
+        );
+        // And back: every row keeps its type; a new value types nothing.
+        exec(&mut c[0], "ALTER TABLE kart DROP DISCRIMINATOR").await;
+        exec(
+            &mut c[0],
+            "INSERT INTO kart (kind, name) VALUES ('GO', 'a-plain')",
+        )
+        .await;
+        assert_eq!(names(&mut c[0], "SELECT name FROM gokart").await, ["a-go"]);
+        // (Across clusters c's copy is seeded again after the change of
+        // its columns: 39889 until then, IG9.)
+        settled(
+            &mut c[2],
+            "INSERT INTO kart (kind, name) VALUES ('PEDAL', 'c-plain')",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            names(&mut c[2], "SELECT name FROM pedalkart").await,
+            ["c-pedal", "c-pedal2"]
+        );
+        names_become(
+            &mut c[2],
+            "SELECT name FROM gokart",
+            &["a-go", "b-go", "b-go2"],
+        )
+        .await;
+        names_become(
+            &mut c[2],
+            "SELECT name FROM ONLY kart",
+            &["a-kart", "a-plain", "c-plain"],
+        )
+        .await;
+        let sc: Vec<String> = rows(&mut c[2], "SHOW CREATE TABLE kart")
+            .await
+            .into_iter()
+            .filter_map(|r| r[1].clone())
+            .collect();
+        assert!(!sc[0].contains("SPRIG_DISCRIMINATOR"), "c: {sc:?}");
+        eprintln!("{p}/{mode}: discriminators on inheritable type trees");
+        cleanup(&mut c, &t, &db, &shares).await;
     }
 }

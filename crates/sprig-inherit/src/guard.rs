@@ -682,7 +682,24 @@ pub async fn alter(sql: &str, n: &Name, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Re
         None => r.exec(sql).await?,
     };
     follow_columns(ctx, r, &res).await?;
+    // Only columns added (a child's own, a single-table subtype's): a
+    // serving copy from the parent tenant keeps serving (decision T20).
+    if only_adds(sql) && ctx.up_edge(&res.obj)?.is_some() {
+        let added: Vec<String> = show_columns(r, &res.layer)
+            .await?
+            .into_iter()
+            .map(|c| c.name)
+            .filter(|c| !old.iter().any(|o| o.name.eq_ignore_ascii_case(c)))
+            .collect();
+        crate::copy::keep_serving(ctx, r, &res.obj, &res.db_name, &added, res.obj.version).await?;
+    }
     Ok(Handled::Ok(d))
+}
+
+/// Whether `sql` is an `ALTER TABLE` that only adds columns.
+fn only_adds(sql: &str) -> bool {
+    matches!(parse_one(sql), Ok(Statement::AlterTable(at))
+        if at.operations.iter().all(|op| matches!(op, AlterTableOperation::AddColumn { .. })))
 }
 
 /// Reads the object's columns and unique keys again after a change and

@@ -24,8 +24,16 @@
 //!
 //! The resume token of an event the caller may not see still moves the
 //! stream on (heartbeats carry it), so a resumed stream never sees it
-//! either. `start_at_hlc` is refused (39802): the feed can't position by
-//! time yet.
+//! either.
+//!
+//! Limits (RLS round 5, decision RL53): at most `api.stream.max_per_tenant`
+//! open streams per tenant on a gateway (39780 past it); a client more than
+//! `api.stream.max_buffered_events` behind gets 39790 and the stream ends
+//! (it resumes from its last token); heartbeats every
+//! `api.stream.heartbeat_seconds`. `start_at_hlc` is refused (39802): the
+//! feed can't position by time (MariaDB keeps no index of binlog positions
+//! by time, and reading a binlog file from its start to find one took
+//! minutes on a busy cluster).
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -44,10 +52,67 @@ use super::Core;
 use super::sql::{Caller, SqlCall, collect};
 use crate::exec::rls_images::{ImagesRequest, TableImages, answer, statement};
 
-/// Events kept for a slow client before the tail waits.
+/// Events read from the feed per batch at most.
 const DEPTH: usize = 256;
-/// A heartbeat after this long without an event.
-const HEARTBEAT: Duration = Duration::from_secs(10);
+
+/// Open streams per tenant on this gateway (`api.stream.max_per_tenant`).
+fn open_streams() -> &'static std::sync::Mutex<HashMap<TenantId, usize>> {
+    static OPEN: OnceLock<std::sync::Mutex<HashMap<TenantId, usize>>> = OnceLock::new();
+    OPEN.get_or_init(Default::default)
+}
+
+/// One open stream of a tenant, counted while it lives.
+struct Slot(TenantId);
+
+impl Slot {
+    /// A slot, unless the tenant has `max` open here (39780).
+    fn take(tenant: TenantId, max: usize) -> Result<Self> {
+        let mut m = open_streams()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let n = m.entry(tenant).or_insert(0);
+        if *n >= max {
+            return Err(SprigError::new(
+                SprigCode::RateLimited,
+                format!(
+                    "ER_SPRIG_RATE_LIMITED: the tenant has {max} change streams open on this \
+                     gateway (api.stream.max_per_tenant)"
+                ),
+            ));
+        }
+        *n += 1;
+        Ok(Self(tenant))
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut m = open_streams()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(n) = m.get_mut(&self.0) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                m.remove(&self.0);
+            }
+        }
+    }
+}
+
+/// Sends `ev` unless the client is `api.stream.max_buffered_events` behind:
+/// then 39790 goes out in the last slot. `false`: the stream ends.
+fn deliver(tx: &mpsc::Sender<Result<WatchEvent>>, ev: WatchEvent) -> bool {
+    if tx.capacity() <= 1 {
+        metrics::counter!("sprig_api_change_stream_slow_total").increment(1);
+        let _ = tx.try_send(Err(SprigError::new(
+            SprigCode::StreamSlowConsumer,
+            "ER_SPRIG_STREAM_SLOW_CONSUMER: the client fell more than \
+             api.stream.max_buffered_events behind; resume from the last token",
+        )));
+        return false;
+    }
+    tx.try_send(Ok(ev)).is_ok()
+}
 
 /// What to watch.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -58,7 +123,7 @@ pub struct WatchSpec {
     pub objects: Vec<String>,
     /// A resume token, or empty for now.
     pub start_after: String,
-    /// Not supported yet (39802 when set).
+    /// Not supported (39802 when set).
     pub start_at_hlc: u64,
     /// Whole rows after updates.
     pub full_document: bool,
@@ -141,8 +206,9 @@ type FeedParts = (
     Arc<dyn sprig_feed::names::Resolver>,
 );
 
-/// The feed's parts, one set per process.
-fn feed(svc: &crate::tenant::TenantServices) -> Result<FeedParts> {
+/// The feed's parts, one set per process (also the Redis keyspace
+/// notifications', RL51).
+pub(crate) fn feed(svc: &crate::tenant::TenantServices) -> Result<FeedParts> {
     static F: OnceLock<FeedParts> = OnceLock::new();
     if let Some(f) = F.get() {
         return Ok(f.clone());
@@ -206,7 +272,9 @@ fn denied(caller: &Caller, db: &str, table: &str) -> SprigError {
 ///
 /// # Errors
 /// 1142 for a requested table the caller can't read; 39801 for a bad or
-/// foreign token; 39802 for `start_at_hlc`; the feed's.
+/// foreign token; 39802 for `start_at_hlc`; 39780 past
+/// `api.stream.max_per_tenant`; the feed's.
+#[allow(clippy::too_many_lines)] // the steps of the module docs, in order
 pub async fn open(
     core: &Arc<Core>,
     caller: Caller,
@@ -226,9 +294,10 @@ pub async fn open(
     if spec.start_at_hlc != 0 {
         return Err(SprigError::new(
             SprigCode::FeedSourceUnsupported,
-            "ER_SPRIG_FEED_SOURCE_UNSUPPORTED: start_at_hlc isn't supported yet; use start_after",
+            "ER_SPRIG_FEED_SOURCE_UNSUPPORTED: start_at_hlc isn't supported; use start_after",
         ));
     }
+    let limits = core.engine.settings();
     if spec.database.is_empty() {
         return Err(SprigError::standard(
             1046,
@@ -255,6 +324,8 @@ pub async fn open(
             return Err(denied(&caller, &spec.database, &spec.objects[i]));
         }
     }
+    let slot = Slot::take(tenant, limits.change_streams_max)?;
+    let (clusters, placement, names) = feed(&svc)?;
     let start = if spec.start_after.is_empty() {
         StartAt::Now
     } else {
@@ -267,7 +338,6 @@ pub async fn open(
         }
         StartAt::After(t)
     };
-    let (clusters, placement, names) = feed(&svc)?;
     let tail = TenantTail::start(
         tenant,
         start,
@@ -299,13 +369,24 @@ pub async fn open(
     } else {
         spec.start_after.clone()
     };
-    let (tx, rx) = mpsc::channel(DEPTH);
+    // One slot more than the buffer: the slow-consumer error's (RL53).
+    let (tx, rx) = mpsc::channel(limits.change_buffer.max(16) + 1);
     let core = Arc::clone(core);
     tokio::spawn(async move {
+        let _slot = slot;
         metrics::gauge!("sprig_api_change_streams").increment(1.0);
-        let r = run(&core, &caller, tenant, &spec, tail, first, &tx).await;
+        let r = run(
+            &core,
+            &caller,
+            &spec,
+            tail,
+            first,
+            limits.change_heartbeat,
+            &tx,
+        )
+        .await;
         if let Err(e) = r {
-            let _ = tx.send(Err(e)).await;
+            let _ = tx.try_send(Err(e));
         }
         metrics::gauge!("sprig_api_change_streams").decrement(1.0);
     });
@@ -422,27 +503,26 @@ fn wanted(spec: &WatchSpec, e: &sprig_feed::ChangeEvent) -> bool {
 async fn run(
     core: &Core,
     caller: &Caller,
-    tenant: TenantId,
     spec: &WatchSpec,
     mut tail: TenantTail,
     first: String,
+    heartbeat: Duration,
     tx: &mpsc::Sender<Result<WatchEvent>>,
 ) -> Result<()> {
-    let _ = tenant;
     let mut last = first;
     let mut quiet = tokio::time::Instant::now();
     loop {
         // A batch: the first item (or a heartbeat's timeout), then what
         // follows within 20 ms, up to 256 events.
         let mut items = Vec::new();
-        let until = quiet + HEARTBEAT;
+        let until = quiet + heartbeat;
         tokio::select! {
             () = tx.closed() => return Ok(()),
             r = tokio::time::timeout_at(until, tail.next()) => if let Ok(i) = r {
                 items.push(i?);
             } else {
                 let hb = WatchEvent { resume_token: last.clone(), op: "heartbeat".into(), ..WatchEvent::default() };
-                if tx.send(Ok(hb)).await.is_err() {
+                if !deliver(tx, hb) {
                     return Ok(());
                 }
                 quiet = tokio::time::Instant::now();
@@ -510,7 +590,7 @@ async fn run(
         let mut sent = 0u64;
         for p in &pending {
             if let Some(ev) = shown(p, &seen, spec.full_document) {
-                if tx.send(Ok(ev)).await.is_err() {
+                if !deliver(tx, ev) {
                     return Ok(());
                 }
                 sent += 1;

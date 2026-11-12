@@ -730,6 +730,10 @@ sprig_codes! {
     /// A logic function called over HTTP or gRPC that isn't exposed to
     /// that protocol (chapter 37, "Logic functions as endpoints").
     FunctionNotExposed = 39789, "ER_SPRIG_FUNCTION_NOT_EXPOSED", "SprigFunctionNotExposed", SQLSTATE_GENERAL, false;
+    /// A change stream's client fell more than
+    /// `api.stream.max_buffered_events` behind and the stream ended; it
+    /// resumes from its last token (chapter 37; RLS round 5, RL53).
+    StreamSlowConsumer = 39790, "ER_SPRIG_STREAM_SLOW_CONSUMER", "SprigStreamSlowConsumer", SQLSTATE_GENERAL, true;
     /// gRPC over HTTP/1.1, or another transport the call can't use (chapter
     /// 37).
     TransportUnsupported = 39791, "ER_SPRIG_TRANSPORT_UNSUPPORTED", "SprigTransportUnsupported", SQLSTATE_GENERAL, false;
@@ -1370,7 +1374,8 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::InheritInstanceQuota
         | SprigCode::InheritBroadcastLimit
         | SprigCode::DimTooManyGroups
-        | SprigCode::RateLimited => (Code::ResourceExhausted, 429),
+        | SprigCode::RateLimited
+        | SprigCode::StreamSlowConsumer => (Code::ResourceExhausted, 429),
         SprigCode::PlacementUnavailable | SprigCode::ProvisionNoHosts | SprigCode::NoDcCapacity => {
             (Code::ResourceExhausted, 503)
         }

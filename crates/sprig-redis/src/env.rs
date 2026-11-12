@@ -111,6 +111,8 @@ pub struct Env {
     /// Who may see a keyspace notification (chapter 29, RL46); unset,
     /// every subscriber does.
     key_filter: OnceLock<Arc<dyn crate::keyspace::KeyFilter>>,
+    /// The notifications from the change feed (RL51); unset, none.
+    keyspace_feed: OnceLock<Arc<dyn crate::keyspace::KeyspaceFeed>>,
 }
 
 impl Default for Env {
@@ -136,6 +138,7 @@ impl Env {
             logic: OnceLock::new(),
             keyspace: Mutex::new(std::collections::HashMap::new()),
             key_filter: OnceLock::new(),
+            keyspace_feed: OnceLock::new(),
         }
     }
 
@@ -170,6 +173,18 @@ impl Env {
     #[must_use]
     pub fn key_filter(&self) -> Option<&Arc<dyn crate::keyspace::KeyFilter>> {
         self.key_filter.get()
+    }
+
+    /// Installs the notifications from the change feed (the gateway does,
+    /// once; RL51).
+    pub fn set_keyspace_feed(&self, f: Arc<dyn crate::keyspace::KeyspaceFeed>) {
+        let _ = self.keyspace_feed.set(f);
+    }
+
+    /// The notifications from the change feed, when installed.
+    #[must_use]
+    pub fn keyspace_feed(&self) -> Option<&Arc<dyn crate::keyspace::KeyspaceFeed>> {
+        self.keyspace_feed.get()
     }
 
     /// Installs the logic layer's `FCALL` hook (the gateway does, once).

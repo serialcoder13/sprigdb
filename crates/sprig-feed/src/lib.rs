@@ -26,6 +26,7 @@
 //! per-shard subscriptions, `FeedReader/Tail` on 7401, `sprigctl feed`, and
 //! the application transports.
 
+pub mod beat;
 pub mod binlog;
 pub mod decode;
 pub mod event;

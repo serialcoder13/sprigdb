@@ -71,6 +71,8 @@ pub struct GatewayMq {
     /// When each tenant's catalog was last refreshed for routing.
     refreshed: Mutex<HashMap<u64, std::time::Instant>>,
     grants: Mutex<HashMap<GrantKey, Arc<dyn SessionGrants>>>,
+    /// Each cluster's feed-forwarder beat as last read (bugfix-42).
+    beats: Mutex<HashMap<String, (std::time::Instant, bool)>>,
 }
 
 impl std::fmt::Debug for GatewayMq {
@@ -92,6 +94,7 @@ impl GatewayMq {
             maria: Mutex::new(HashMap::new()),
             refreshed: Mutex::new(HashMap::new()),
             grants: Mutex::new(HashMap::new()),
+            beats: Mutex::new(HashMap::new()),
         }
     }
 
@@ -477,6 +480,41 @@ impl MqCatalog for GatewayMq {
             forward_feed: t(&qs::FORWARDER) == "feed",
             forward_fallback_ms: n(&qs::FORWARD_FALLBACK_MS),
         }
+    }
+
+    /// The tenant's cluster's `queue-forwarder-beats/` beat, in its home DC's
+    /// tier, read at most once a second per cluster (bugfix-42).
+    async fn feed_forwarder_runs(&self, v: &VhostRef) -> bool {
+        const REREAD: Duration = Duration::from_secs(1);
+        let tenant = TenantId(v.tenant);
+        let Ok(cluster) = self.svc.locator.cluster(tenant).await else {
+            return false;
+        };
+        let name = cluster.to_string();
+        if let Some((at, runs)) = lock(&self.beats).get(&name)
+            && at.elapsed() < REREAD
+        {
+            return *runs;
+        }
+        let home = self.svc.locator.home_of(tenant);
+        let dc = self.svc.locator.dc_store();
+        let store = if home == self.svc.dc {
+            dc
+        } else {
+            sprig_meta::TierView::over(&dc, sprig_meta::Tier::Dc(home))
+        };
+        let now = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis()),
+        )
+        .unwrap_or(0);
+        let runs = matches!(
+            sprig_feed::beat::read(&store, &cluster).await,
+            Ok(Some(b)) if b.fresh(now)
+        );
+        lock(&self.beats).insert(name, (std::time::Instant::now(), runs));
+        runs
     }
 }
 

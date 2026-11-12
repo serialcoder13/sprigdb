@@ -122,6 +122,14 @@ pub enum SqlOp {
         /// The tables and their images.
         tables: Vec<ImageTable>,
     },
+    /// Chapter 50 (RLS round 5, RL52): a change exchange's publishes, each
+    /// a `CALL sprig.mq_publish(...)` (39235 otherwise), autocommit, in
+    /// order, in one session of the setting's user; each statement's error
+    /// is its own result's.
+    Publish {
+        /// The calls.
+        statements: Vec<String>,
+    },
 }
 
 /// One table's images for [`SqlOp::Images`].
@@ -150,6 +158,27 @@ pub fn images_answer(tables: &[ImageTable], reply: &SqlReply) -> Vec<Vec<bool>> 
         }
     }
     out
+}
+
+/// Checks [`SqlOp::Publish`]'s statements: each one `CALL
+/// sprig.mq_publish(...)`.
+///
+/// # Errors
+/// 39235 for any other statement.
+pub fn check_publish_calls(statements: &[String]) -> Result<()> {
+    for s in statements {
+        let t = s.trim().trim_end_matches(';').trim();
+        if !(t.to_ascii_lowercase().starts_with("call sprig.mq_publish(")
+            && t.ends_with(')')
+            && !inner_semicolon(t))
+        {
+            return Err(SprigError::new(
+                SprigCode::SinkScriptReadOnly,
+                "a change exchange's session runs sprig.mq_publish only",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// `SinkSql`'s request.

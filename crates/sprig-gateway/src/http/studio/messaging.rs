@@ -81,36 +81,31 @@ pub fn is_messaging_path(path: &str) -> bool {
 /// statements Studio would run, names quoted.
 fn test_statement(db: &str, kind: &str, name: &str, body: &Value) -> Result<String, SprigError> {
     let q = |s: &str| format!("{}.{}", ident(db), ident(s));
-    match kind {
-        "sinks" => {
-            let n = body.get("sample").and_then(Value::as_u64).unwrap_or(10);
-            if !(1..=1000).contains(&n) {
-                return Err(invalid("sample must be 1 to 1000"));
-            }
-            Ok(format!("TEST SINK {} WITH SAMPLE {n}", q(name)))
+    if kind == "sinks" {
+        let n = body.get("sample").and_then(Value::as_u64).unwrap_or(10);
+        if !(1..=1000).contains(&n) {
+            return Err(invalid("sample must be 1 to 1000"));
         }
-        _ => {
-            let platform = body
-                .get("platform")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let mut sql = if platform {
-                format!("TEST PLATFORM CONNECTION {}", ident(name))
-            } else {
-                format!("TEST CONNECTION {}", q(name))
-            };
-            if body.get("write").and_then(Value::as_bool).unwrap_or(false) {
-                sql.push_str(" WRITE");
-                if let Some(to) = body.get("to").and_then(Value::as_str) {
-                    sql.push_str(&format!(
-                        " TO '{}'",
-                        to.replace('\\', "\\\\").replace('\'', "''")
-                    ));
-                }
-            }
-            Ok(sql)
+        return Ok(format!("TEST SINK {} WITH SAMPLE {n}", q(name)));
+    }
+    let platform = body
+        .get("platform")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut sql = if platform {
+        format!("TEST PLATFORM CONNECTION {}", ident(name))
+    } else {
+        format!("TEST CONNECTION {}", q(name))
+    };
+    if body.get("write").and_then(Value::as_bool).unwrap_or(false) {
+        sql.push_str(" WRITE");
+        if let Some(to) = body.get("to").and_then(Value::as_str) {
+            sql.push_str(" TO '");
+            sql.push_str(&to.replace('\\', "\\\\").replace('\'', "''"));
+            sql.push('\'');
         }
     }
+    Ok(sql)
 }
 
 /// `Sinks.Test` / `Connections.Test` (see the module docs).

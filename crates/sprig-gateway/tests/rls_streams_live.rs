@@ -652,7 +652,16 @@ async fn row_level_security_on_streamed_rows() {
     ck.ok(
         "LEAK: alice's CHANGES OF sink exported bob's rows",
         !lh,
-        || format!("{:?}", got.lock().unwrap().iter().filter(|b| b.starts_with("/c2 ")).collect::<Vec<_>>()),
+        || {
+            format!(
+                "{:?}",
+                got.lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|b| b.starts_with("/c2 "))
+                    .collect::<Vec<_>>()
+            )
+        },
     );
 
     // 4. The same paths set up by mgr (a manager: not bound) deliver ...

@@ -147,9 +147,11 @@ test.describe.serial('Studio round 3', () => {
     for (let i = 0; i < 14; i++) {
       if (await page.getByTestId('all-fetched').isVisible()) break;
       await page.getByTestId('fetch-more').click();
-      await expect
-        .poll(async () => (await page.getByTestId('all-fetched').isVisible()) || (await page.getByTestId('fetch-more').isEnabled()), { timeout: 30_000 })
-        .toBe(true);
+      // One locator for "done or ready for the next page": the last page
+      // replaces the button with "all fetched" in one render, and asking
+      // the two apart raced it (isEnabled then waited for a button that
+      // had gone; WebKit's flake, ST72).
+      await expect(page.getByTestId('all-fetched').or(page.locator('[data-testid="fetch-more"]:enabled'))).toBeVisible({ timeout: 30_000 });
     }
     await expect(page.getByTestId('all-fetched')).toBeVisible();
     await expect(page.getByTestId('window')).toContainText('Rows 12,501–22,500');

@@ -34,6 +34,7 @@ pub mod keywords;
 pub mod lateral;
 pub mod locks;
 pub mod meta;
+pub mod mysqlddl;
 pub mod perfschema;
 pub mod rollup;
 pub mod rowsyntax;
@@ -452,7 +453,10 @@ pub fn mysql_text_rewrites(sql: &[u8], opts: &LexOptions, backend_version: u32) 
     }
     let mut out: Option<Vec<u8>> =
         lex::versioned::expand_text_for_mariadb(sql, opts, backend_version);
-    let steps: [TextStep; 14] = [
+    let steps: [TextStep; 15] = [
+        // R4 round 6: `DEFAULT (now())` kept apart from `CURRENT_TIMESTAMP`
+        // (gaps row 78).
+        mysqlddl::now_defaults,
         // R4 round 5: `->` and `->>`, and JSON string constants in
         // comparisons (before the functional key parts read them).
         jsonops::rewrite_arrows,

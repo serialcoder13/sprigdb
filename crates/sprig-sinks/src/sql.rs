@@ -835,9 +835,18 @@ pub async fn handle_stmt(st: Stmt, h: &mut dyn Host) -> Result<Handled> {
         }
         Stmt::TestConnection(c, db) => test_connection(h, &c, db.as_deref(), None).await,
         Stmt::TestConnectionWrite { conn, db, to } => {
-            test_connection(h, &conn, db.as_deref(), Some(to)).await
+            test_connection(h, &conn, db.as_deref(), Some(crate::probe::Write { to })).await
         }
         Stmt::TestSink { name, sample } => test_sink(h, &name, sample).await,
+        Stmt::TestNewConnection(c) => test_new_connection(h, c).await,
+        Stmt::TestNewSink { def, sample } => {
+            // ST69: CREATE SINK's rights and checks, then TEST SINK's dry
+            // run of the definition; nothing is saved.
+            need_admin(h)?;
+            let (_, db_name) = db_of(h, def.name.db.as_deref())?;
+            let def = sink_def(h, *def).await?;
+            dry_run_rows(h, &def, &db_name, sample).await
+        }
         Stmt::ShowSinkStatus(name) => {
             let (db, _) = db_of(h, name.db.as_deref())?;
             let st = h.state();
@@ -919,7 +928,7 @@ async fn test_connection(
     h: &mut dyn Host,
     c: &ConnName,
     db: Option<&str>,
-    write: Option<Option<String>>,
+    write: Option<crate::probe::Write>,
 ) -> Result<Handled> {
     let (db_id, db_name) = db_of(h, db)?;
     let (r, _) = resolve_conn(h, db_id, c).await?;
@@ -930,13 +939,53 @@ async fn test_connection(
         &r,
         db_id,
         &db_name,
-        write.as_ref().map(Option::as_deref),
+        write.as_ref(),
     )
     .await?;
     metrics::counter!("sprig_sink_connection_tests_total",
         "result" => if steps.iter().all(|s| s.ok) { "ok" } else { "failed" })
     .increment(1);
-    Ok(Handled::Rows {
+    Ok(step_rows(steps))
+}
+
+/// `TEST CREATE CONNECTION ...` (ST68; [`crate::probe::test_definition`]):
+/// `CREATE CONNECTION`'s rights and checks (options, credential names, the
+/// allowlist and residency of its hosts), then `TEST CONNECTION`'s steps
+/// with the given credentials; nothing is saved or sealed.
+async fn test_new_connection(h: &mut dyn Host, c: grammar::CreateConnection) -> Result<Handled> {
+    need_admin(h)?;
+    let (db, db_name) = db_of(h, c.name.db.as_deref())?;
+    if let Some(k) = c.required_credentials.first() {
+        return Err(bad_option(format!(
+            "{k} = REQUIRED is for FOR EACH TENANT connections, whose members each set it"
+        )));
+    }
+    let options = opts_map(&c.options)?;
+    let (hosts, tags) = check_hosts(h, db, c.kind, &options)?;
+    let secrets = secrets_of(c.kind, &c.credentials)?;
+    let def = ConnectionDef {
+        id: ConnectionId(0),
+        db_id: db,
+        name: c.name.name.clone(),
+        kind: c.kind,
+        options,
+        hosts,
+        residency_tags: tags,
+        owner_user_id: h.user_id().unwrap_or(0),
+        secrets: Vec::new(),
+    };
+    let env = h.sink_env().ok_or_else(no_env)?;
+    let steps =
+        crate::probe::test_definition(env.as_ref(), h.tenant(), &def, secrets, &db_name).await?;
+    metrics::counter!("sprig_sink_connection_tests_total",
+        "result" => if steps.iter().all(|s| s.ok) { "ok" } else { "failed" })
+    .increment(1);
+    Ok(step_rows(steps))
+}
+
+/// `TEST CONNECTION`'s rows.
+fn step_rows(steps: Vec<crate::probe::Step>) -> Handled {
+    Handled::Rows {
         columns: ["Step", "Result", "Detail", "Elapsed ms"]
             .map(String::from)
             .to_vec(),
@@ -951,7 +1000,7 @@ async fn test_connection(
                 ]
             })
             .collect(),
-    })
+    }
 }
 
 /// `TEST SINK` (R9, r9tests; [`crate::probe`]): `SPRIG_SINK_ADMIN` or the
@@ -968,6 +1017,17 @@ async fn test_sink(h: &mut dyn Host, name: &grammar::QName, sample: u32) -> Resu
     if !(h.sink_admin() || def.owner_user_id == me) {
         need_admin(h)?;
     }
+    dry_run_rows(h, &def, &db_name, sample).await
+}
+
+/// `TEST SINK`'s dry run of `def` (saved, or `TEST CREATE SINK`'s): the
+/// sample read as the caller, then the rows.
+async fn dry_run_rows(
+    h: &mut dyn Host,
+    def: &SinkDef,
+    db_name: &str,
+    sample: u32,
+) -> Result<Handled> {
     let env = h.sink_env().ok_or_else(no_env)?;
     let n = sample as usize;
     let records = match &def.source {
@@ -976,7 +1036,7 @@ async fn test_sink(h: &mut dyn Host, name: &grammar::QName, sample: u32) -> Resu
             name: s,
             partitions,
         } => {
-            if !h.can_select(&db_name, s) {
+            if !h.can_select(db_name, s) {
                 return Err(err(
                     SprigCode::SinkPrivilege,
                     format!("TEST SINK reads stream {s} for you: you need SELECT on it"),
@@ -984,7 +1044,7 @@ async fn test_sink(h: &mut dyn Host, name: &grammar::QName, sample: u32) -> Resu
             }
             crate::probe::sample_stream(env.as_ref(), h.tenant(), *id, *partitions, n).await?
         }
-        SourceSpec::Queue { name: q, .. } => h.sample_queue(&db_name, q, n).await?,
+        SourceSpec::Queue { name: q, .. } => h.sample_queue(db_name, q, n).await?,
         other => {
             return Err(err(
                 SprigCode::SinkOptionInvalid,
@@ -995,7 +1055,7 @@ async fn test_sink(h: &mut dyn Host, name: &grammar::QName, sample: u32) -> Resu
             ));
         }
     };
-    let rows = crate::probe::dry_run(env.as_ref(), h.tenant(), &def, records).await?;
+    let rows = crate::probe::dry_run(env.as_ref(), h.tenant(), def, records).await?;
     metrics::counter!("sprig_sink_dry_runs_total").increment(1);
     Ok(Handled::Rows {
         columns: [
@@ -1132,10 +1192,9 @@ async fn resolve_conn(h: &mut dyn Host, db: u32, c: &ConnName) -> Result<(ConnRe
     ))
 }
 
-#[allow(clippy::too_many_lines)]
 async fn create_sink(h: &mut dyn Host, c: grammar::CreateSink) -> Result<Handled> {
     need_admin(h)?;
-    let (db, dbname) = db_of(h, c.name.db.as_deref())?;
+    let (db, _) = db_of(h, c.name.db.as_deref())?;
     if h.state().sink(db, &c.name.name).is_some() {
         if c.if_not_exists {
             return Ok(Handled::Ok { affected: 0 });
@@ -1155,6 +1214,19 @@ async fn create_sink(h: &mut dyn Host, c: grammar::CreateSink) -> Result<Handled
             format!("the tenant has {max} sinks (sink.max_per_tenant)"),
         ));
     }
+    let mut def = sink_def(h, c).await?;
+    def.id = SinkId(h.next_id().await?);
+    h.commit(Change::InsertSink(def.clone())).await?;
+    publish_index(h, &def).await?;
+    Ok(Handled::Ok { affected: 0 })
+}
+
+/// `CREATE SINK`'s definition, every check made (the source's and
+/// connections' rights, the transform, the target), with id 0: what
+/// `CREATE SINK` saves and `TEST CREATE SINK` dry-runs (ST69).
+#[allow(clippy::too_many_lines)] // one arm per source and target
+async fn sink_def(h: &mut dyn Host, c: grammar::CreateSink) -> Result<SinkDef> {
+    let (db, dbname) = db_of(h, c.name.db.as_deref())?;
     // The source, readable by the owner.
     let source = match &c.source {
         grammar::SourceAst::Stream(q) => {
@@ -1484,11 +1556,10 @@ async fn create_sink(h: &mut dyn Host, c: grammar::CreateSink) -> Result<Handled
             ));
         }
     }
-    let id = h.next_id().await?;
     let mut opts: BTreeMap<String, String> = options;
     opts.insert("__db_name".into(), dbname.clone());
-    let def = SinkDef {
-        id: SinkId(id),
+    Ok(SinkDef {
+        id: SinkId(0),
         db_id: db,
         name: c.name.name.clone(),
         source,
@@ -1505,10 +1576,7 @@ async fn create_sink(h: &mut dyn Host, c: grammar::CreateSink) -> Result<Handled
         state_reason: None,
         definition_ver: 1,
         options: opts,
-    };
-    h.commit(Change::InsertSink(def.clone())).await?;
-    publish_index(h, &def).await?;
-    Ok(Handled::Ok { affected: 0 })
+    })
 }
 
 fn q(s: &str) -> String {

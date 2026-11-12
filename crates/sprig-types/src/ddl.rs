@@ -48,7 +48,11 @@ fn fnv(s: &str) -> u64 {
 pub fn nn_name(table: &str, column: &str) -> String {
     format!(
         "{NN_PREFIX}{:016x}",
-        fnv(&format!("{}.{}", table.to_lowercase(), column.to_lowercase()))
+        fnv(&format!(
+            "{}.{}",
+            table.to_lowercase(),
+            column.to_lowercase()
+        ))
     )
 }
 
@@ -89,7 +93,11 @@ pub(crate) fn needs_nn(f: &FieldDef) -> bool {
 
 /// The `NOT NULL` checks of `root`'s hierarchy (single-table storage),
 /// without the types in `without`.
-pub(crate) fn nn_checks(types: &DbTypes, root: &TypeDef, without: &BTreeSet<TypeId>) -> Vec<NnCheck> {
+pub(crate) fn nn_checks(
+    types: &DbTypes,
+    root: &TypeDef,
+    without: &BTreeSet<TypeId>,
+) -> Vec<NnCheck> {
     if root.storage != Storage::SingleTable {
         return Vec::new();
     }
@@ -347,7 +355,12 @@ async fn disc_map(
         .discriminator
         .clone()
         .ok_or_else(|| SprigError::internal("a root without a discriminator"))?;
-    let operand = disc_operand(db, &root.name, &col, r).await?;
+    // The operand the catalog keeps, else read (a read of the root goes
+    // through chapter 42's merged view when the tree is inheritable).
+    let operand = match &root.disc_operand {
+        Some(o) => o.clone(),
+        None => disc_operand(db, &root.name, &col, r).await?,
+    };
     let mut arms: Vec<(DiscValue, String, String)> = types
         .descendants(root.id)
         .into_iter()
@@ -399,11 +412,12 @@ async fn set_disc_columns(
             quote(TYPE_PATH_INDEX)
         ))
         .await?;
-        let drops: String = checks
-            .old
-            .iter()
-            .map(|n| format!("DROP CONSTRAINT IF EXISTS {}, ", quote(n)))
-            .collect();
+        let mut drops = String::new();
+        for n in &checks.old {
+            drops.push_str("DROP CONSTRAINT IF EXISTS ");
+            drops.push_str(&quote(n));
+            drops.push_str(", ");
+        }
         r.exec(&format!(
             "ALTER TABLE {t} {drops}DROP COLUMN {}, DROP COLUMN {}, {add}",
             quote(TYPE_COLUMN),
@@ -540,7 +554,10 @@ fn single_table_plan(
                     // Every row of the root table has the column: it takes
                     // NULL there, and a CHECK keeps it filled in this
                     // subtype's rows ([`NnCheck`]).
-                    adds.push(format!("ADD COLUMN {}", nullable_text(&text[range.clone()])));
+                    adds.push(format!(
+                        "ADD COLUMN {}",
+                        nullable_text(&text[range.clone()])
+                    ));
                     unfilled.push(c.name.clone());
                 } else {
                     adds.push(format!("ADD COLUMN {}", &text[range.clone()]));
@@ -582,7 +599,11 @@ async fn refuse_unfilled(
     }
     let operand = disc_operand(db, root, disc, r).await?;
     let holds = format!("{operand} = {}", v.sql(nbe));
-    let mut nulls: Vec<String> = plan.tightened.iter().map(|c| format!("{} IS NULL", quote(c))).collect();
+    let mut nulls: Vec<String> = plan
+        .tightened
+        .iter()
+        .map(|c| format!("{} IS NULL", quote(c)))
+        .collect();
     if !plan.unfilled.is_empty() {
         nulls.push("TRUE".into());
     }
@@ -1205,8 +1226,12 @@ pub async fn create(ct: &CreateTable, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Resu
     fill_operands(&mut change, &types, pdb, r).await?;
     r.commit_types(&change).await?;
     tracing::info!(type_name = %child, parent = %parent_name.name, "type created");
-    r.tree_changed(pdb, &root_name, &root_key.iter().map(|k| k.name.clone()).collect::<Vec<_>>())
-        .await?;
+    r.tree_changed(
+        pdb,
+        &root_name,
+        &root_key.iter().map(|k| k.name.clone()).collect::<Vec<_>>(),
+    )
+    .await?;
     Ok(Done::default())
 }
 
@@ -1294,7 +1319,7 @@ pub async fn alter(
                     });
                 }
                 Element::Column(c) => {
-                    clauses.push(format!("ADD COLUMN {}", piece));
+                    clauses.push(format!("ADD COLUMN {piece}"));
                     if !c.nullable && !c.auto_increment {
                         checks.push(NnCheck {
                             name: nn_name(&t.name, &c.name),
@@ -1307,7 +1332,11 @@ pub async fn alter(
             }
         }
         clauses.extend(checks.iter().map(NnCheck::add));
-        let text = format!("ALTER TABLE {} {}", table_sql(db, &root.name), clauses.join(", "));
+        let text = format!(
+            "ALTER TABLE {} {}",
+            table_sql(db, &root.name),
+            clauses.join(", ")
+        );
         let done = match r.exec(&text).await {
             Err(e) if matches!(e.protocol().mysql_errno, 4025 | 3819) => {
                 return Err(unsupported(format!(
@@ -1439,13 +1468,12 @@ async fn fill_operands(
             continue;
         };
         let operand = disc_operand(db, &root.name, col, r).await?;
-        match change.upsert_types.iter_mut().find(|t| t.id == id) {
-            Some(t) => t.disc_operand = Some(operand),
-            None => {
-                let mut t = root;
-                t.disc_operand = Some(operand);
-                change.upsert_types.push(t);
-            }
+        if let Some(t) = change.upsert_types.iter_mut().find(|t| t.id == id) {
+            t.disc_operand = Some(operand);
+        } else {
+            let mut t = root;
+            t.disc_operand = Some(operand);
+            change.upsert_types.push(t);
         }
     }
     Ok(())
@@ -1648,13 +1676,37 @@ pub async fn drop(dt: &DropTable, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<D
             .await?;
         }
     }
+    // An inheritable tree (chapter 42): chapter 42 refused the drop already
+    // when the tree is shared (39895) or received from the parent tenant
+    // (39897); what is left is this tenant's own, and the drop changes
+    // every space's rows, so its statements run on the physical tables
+    // (decision T18).
+    let mut physical = false;
     for (db, types, ids) in &groups {
-        if let Some(t) = ids.iter().filter_map(|i| types.by_id(*i)).next()
+        if let Some(t) = ids.iter().find_map(|i| types.by_id(*i))
             && let Some(root) = types.root_of(t.id)
+            && r.tree_inheritable(db.as_deref(), &root.name).await?
         {
-            refuse_inheritable(db.as_deref(), &root.name, "DROP TABLE", r).await?;
+            physical = true;
         }
     }
+    if physical {
+        r.set_physical(true);
+    }
+    let dropped = drop_groups(groups, ctx, r).await;
+    if physical {
+        r.set_physical(false);
+    }
+    dropped?;
+    Ok(Done::default())
+}
+
+/// [`drop`]'s typed tables, per database.
+async fn drop_groups(
+    groups: Vec<(Option<String>, Arc<DbTypes>, BTreeSet<TypeId>)>,
+    ctx: &Ctx<'_>,
+    r: &mut dyn Runner,
+) -> Result<()> {
     for (db, types, ids) in groups {
         let db = db.as_deref();
         let mut doomed: Vec<Arc<TypeDef>> = ids
@@ -1755,7 +1807,7 @@ pub async fn drop(dt: &DropTable, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<D
         r.commit_types(&change).await?;
         tracing::info!(types = doomed.len(), "types dropped");
     }
-    Ok(Done::default())
+    Ok(())
 }
 
 /// The `CHECK` that holds `_type` to a discriminator's mapping while a
@@ -1767,31 +1819,21 @@ pub const DISC_CHECK: &str = "_sprig_disc_check";
 fn numeric_type(data_type: &str) -> bool {
     let t = data_type.to_ascii_lowercase();
     [
-        "tinyint", "smallint", "mediumint", "int", "integer", "bigint", "decimal", "numeric",
-        "float", "double", "real", "bit",
+        "tinyint",
+        "smallint",
+        "mediumint",
+        "int",
+        "integer",
+        "bigint",
+        "decimal",
+        "numeric",
+        "float",
+        "double",
+        "real",
+        "bit",
     ]
     .iter()
     .any(|n| t.starts_with(n) && !t[n.len()..].starts_with(|c: char| c.is_ascii_alphabetic()))
-}
-
-/// Refuses `what` on an inheritable type tree (chapter 42): its layers'
-/// rows would change meaning under the other tenants' feet.
-///
-/// # Errors
-/// 39710.
-async fn refuse_inheritable(
-    db: Option<&str>,
-    root: &str,
-    what: &str,
-    r: &mut dyn Runner,
-) -> Result<()> {
-    if r.tree_inheritable(db, root).await? {
-        return Err(unsupported(format!(
-            "{what} on an inheritable type tree ('{root}'): make it not inheritable first \
-             (ALTER TABLE {root} DROP SPRIG INHERITABLE)"
-        )));
-    }
-    Ok(())
 }
 
 /// The root type `name` names, for `ADD | DROP DISCRIMINATOR`.
@@ -1829,8 +1871,33 @@ pub async fn add_discriminator(
 ) -> Result<Done> {
     let (types, root) = root_named(ctx, &d.table)?;
     let db = d.table.db.as_deref();
+    // An inheritable tree (decision T19): every space's rows are checked
+    // and converted, on the physical table; child tenants follow at their
+    // next statement. Chapter 42 refused it already in a tenant that
+    // receives the tree (39897).
+    let physical = r.tree_inheritable(db, &root.name).await?;
+    if physical {
+        r.set_physical(true);
+    }
+    let done = add_discriminator_rows(d, &types, &root, ctx, r).await;
+    if physical {
+        r.set_physical(false);
+    }
+    done?;
+    r.tree_changed(db, &root.name, &root.key_fields).await?;
+    Ok(Done::default())
+}
+
+/// [`add_discriminator`]'s checks and conversion.
+async fn add_discriminator_rows(
+    d: &crate::grammar::AddDiscriminator,
+    types: &DbTypes,
+    root: &Arc<TypeDef>,
+    ctx: &Ctx<'_>,
+    r: &mut dyn Runner,
+) -> Result<()> {
+    let db = d.table.db.as_deref();
     let nbe = ctx.lex.no_backslash_escapes;
-    refuse_inheritable(db, &root.name, "ADD DISCRIMINATOR", r).await?;
     if let Some(c) = &root.discriminator {
         return Err(unsupported(format!(
             "'{}' already has the discriminator '{c}'",
@@ -1951,8 +2018,10 @@ pub async fn add_discriminator(
                 let k: Vec<String> = row[..keys.len()]
                     .iter()
                     .map(|v| {
-                        v.as_ref()
-                            .map_or_else(|| "NULL".into(), |v| String::from_utf8_lossy(v).into_owned())
+                        v.as_ref().map_or_else(
+                            || "NULL".into(),
+                            |v| String::from_utf8_lossy(v).into_owned(),
+                        )
                     })
                     .collect();
                 let ty = row
@@ -1993,9 +2062,19 @@ pub async fn add_discriminator(
         old: vec![DISC_CHECK.to_owned()],
         new: Vec::new(),
     };
-    set_disc_columns(db, &root.name, &root.key_fields, &map, true, &checks, nbe, r).await?;
+    set_disc_columns(
+        db,
+        &root.name,
+        &root.key_fields,
+        &map,
+        true,
+        &checks,
+        nbe,
+        r,
+    )
+    .await?;
     let mut change = TypesChange::default();
-    let mut nr = (*root).clone();
+    let mut nr = (**root).clone();
     nr.discriminator = Some(col.name.clone());
     nr.disc_operand = Some(map.operand.clone());
     change.upsert_types.push(nr);
@@ -2006,8 +2085,192 @@ pub async fn add_discriminator(
     }
     r.commit_types(&change).await?;
     tracing::info!(root = %root.name, column = %col.name, "discriminator added");
-    r.tree_changed(db, &root.name, &root.key_fields).await?;
-    Ok(Done::default())
+    Ok(())
+}
+
+/// A child tenant's copy of an inherited type tree whose parent added or
+/// dropped the tree's discriminator (decision T19): the child's physical
+/// root table in `schema` is converted the same way, and the types the
+/// child must write are returned (none when nothing differs). Inherited
+/// subtypes take the parent's values; the child's own subtypes keep their
+/// rows' value (all of them must hold one). `rows`: the condition picking
+/// the rows that count (a layer table's live rows).
+///
+/// # Errors
+/// 39710 when an own subtype's value can't be told; 39717 when rows
+/// disagree with the discriminator; the backend's.
+pub async fn follow_discriminator(
+    schema: &str,
+    parent: &DbTypes,
+    parent_root: &TypeDef,
+    child: &DbTypes,
+    child_root: &TypeDef,
+    rows: &str,
+    r: &mut dyn Runner,
+) -> Result<Vec<TypeDef>> {
+    let db = Some(schema);
+    let t = table_sql(db, &child_root.name);
+    let tc = quote(TYPE_COLUMN);
+    match (&parent_root.discriminator, &child_root.discriminator) {
+        (Some(col), None) => {
+            let operand = match &parent_root.disc_operand {
+                Some(o) => o.clone(),
+                None => disc_operand(db, &child_root.name, col, r).await?,
+            };
+            let ty = r
+                .query(&format!(
+                    "SELECT DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {} \
+                     AND TABLE_NAME = {} AND COLUMN_NAME = {}",
+                    quote_str(schema, false),
+                    quote_str(&child_root.name, false),
+                    quote_str(col, false)
+                ))
+                .await?;
+            let numeric = ty
+                .rows
+                .first()
+                .and_then(|row| row.first().cloned().flatten())
+                .is_some_and(|v| numeric_type(&String::from_utf8_lossy(&v)));
+            let mut values: Vec<(Arc<TypeDef>, DiscValue)> = Vec::new();
+            for st in child.descendants(child_root.id) {
+                if st.is_abstract {
+                    continue;
+                }
+                if let Some(p) = parent.get(&st.name, false) {
+                    if let Some(v) = &p.disc_value {
+                        values.push((Arc::clone(&st), v.clone()));
+                    }
+                    continue;
+                }
+                // The child's own subtype: the value its rows hold.
+                let found = r
+                    .query(&format!(
+                        "SELECT DISTINCT {operand} FROM {t} WHERE {tc} = {} AND ({rows}) LIMIT 2",
+                        quote_str(&st.name, false)
+                    ))
+                    .await?;
+                let vals: Vec<Option<String>> = found
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        row.first()
+                            .cloned()
+                            .flatten()
+                            .map(|v| String::from_utf8_lossy(&v).into_owned())
+                    })
+                    .collect();
+                match vals.as_slice() {
+                    [Some(v)] => values.push((
+                        Arc::clone(&st),
+                        if numeric {
+                            DiscValue::Num(v.clone())
+                        } else {
+                            DiscValue::Str(v.clone())
+                        },
+                    )),
+                    [] => {
+                        return Err(unsupported(format!(
+                            "no row of this tenant's own subtype '{}' says which value of {col} \
+                             marks it: drop it, and declare it again with WHERE {col} = ... once \
+                             the tree has its parent's discriminator",
+                            st.name
+                        )));
+                    }
+                    _ => {
+                        return Err(disc_mismatch(format!(
+                            "rows of this tenant's own subtype '{}' hold no single value of {col}",
+                            st.name
+                        )));
+                    }
+                }
+            }
+            for (i, (a, v)) in values.iter().enumerate() {
+                if let Some((o, _)) = values[..i].iter().find(|(_, w)| w.same(v)) {
+                    return Err(disc_mismatch(format!(
+                        "the value {v} would mark both '{}' and '{}'",
+                        o.name, a.name
+                    )));
+                }
+            }
+            let map = DiscMap {
+                operand: operand.clone(),
+                root: (child_root.name.clone(), child_root.path.clone()),
+                arms: values
+                    .iter()
+                    .map(|(t, v)| (v.clone(), t.name.clone(), t.path.clone()))
+                    .collect(),
+            };
+            let (te, _) = map.exprs(false);
+            let off = r
+                .query(&format!(
+                    "SELECT 1 FROM {t} WHERE ({rows}) AND {tc} <> ({te}) LIMIT 1"
+                ))
+                .await?;
+            if !off.rows.is_empty() {
+                return Err(disc_mismatch(format!(
+                    "this tenant's rows disagree with {col} as the discriminator"
+                )));
+            }
+            match r
+                .exec(&format!(
+                    "ALTER TABLE {t} ADD CONSTRAINT {} CHECK (NOT ({rows}) OR {tc} = ({te}))",
+                    quote(DISC_CHECK)
+                ))
+                .await
+            {
+                Err(e) if matches!(e.protocol().mysql_errno, 4025 | 3819) => {
+                    return Err(disc_mismatch(format!(
+                        "rows written meanwhile disagree with {col} as the discriminator"
+                    )));
+                }
+                other => {
+                    other?;
+                }
+            }
+            let checks = Checks {
+                old: vec![DISC_CHECK.to_owned()],
+                new: Vec::new(),
+            };
+            set_disc_columns(
+                db,
+                &child_root.name,
+                &child_root.key_fields,
+                &map,
+                true,
+                &checks,
+                false,
+                r,
+            )
+            .await?;
+            let mut out = Vec::new();
+            let mut nr = child_root.clone();
+            nr.discriminator = Some(col.clone());
+            nr.disc_operand = Some(operand);
+            out.push(nr);
+            for (st, v) in values {
+                let mut nt = (*st).clone();
+                nt.disc_value = Some(v);
+                out.push(nt);
+            }
+            Ok(out)
+        }
+        (None, Some(_)) => {
+            let map = disc_map(db, child_root, child, None, &BTreeSet::new(), r).await?;
+            stored_type_columns(db, child_root, &map, false, r).await?;
+            let mut out = Vec::new();
+            let mut nr = child_root.clone();
+            nr.discriminator = None;
+            nr.disc_operand = None;
+            out.push(nr);
+            for st in child.descendants(child_root.id) {
+                let mut nt = (*st).clone();
+                nt.disc_value = None;
+                out.push(nt);
+            }
+            Ok(out)
+        }
+        _ => Ok(Vec::new()),
+    }
 }
 
 /// `ALTER TABLE root DROP DISCRIMINATOR`: back to SprigDB's own `_type`
@@ -2017,25 +2280,56 @@ pub async fn add_discriminator(
 ///
 /// # Errors
 /// 39710, or a step's error.
-pub async fn drop_discriminator(
-    table: &Name,
-    ctx: &Ctx<'_>,
-    r: &mut dyn Runner,
-) -> Result<Done> {
+pub async fn drop_discriminator(table: &Name, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Done> {
     let (types, root) = root_named(ctx, table)?;
     let db = table.db.as_deref();
     let nbe = ctx.lex.no_backslash_escapes;
-    refuse_inheritable(db, &root.name, "DROP DISCRIMINATOR", r).await?;
     if root.discriminator.is_none() {
-        return Err(unsupported(format!(
-            "'{}' has no discriminator",
-            root.name
-        )));
+        return Err(unsupported(format!("'{}' has no discriminator", root.name)));
     }
     if root.storage == Storage::SingleTable {
         return Err(single_needs_discriminator());
     }
-    let map = disc_map(db, &root, &types, None, &BTreeSet::new(), r).await?;
+    // An inheritable tree: on the physical table, every space's rows
+    // (decision T19); child tenants follow at their next statement.
+    let physical = r.tree_inheritable(db, &root.name).await?;
+    if physical {
+        r.set_physical(true);
+    }
+    let done = async {
+        let map = disc_map(db, &root, &types, None, &BTreeSet::new(), r).await?;
+        stored_type_columns(db, &root, &map, nbe, r).await
+    }
+    .await;
+    if physical {
+        r.set_physical(false);
+    }
+    done?;
+    let mut change = TypesChange::default();
+    let mut nr = (*root).clone();
+    nr.discriminator = None;
+    nr.disc_operand = None;
+    change.upsert_types.push(nr);
+    for t in types.descendants(root.id) {
+        let mut nt = (*t).clone();
+        nt.disc_value = None;
+        change.upsert_types.push(nt);
+    }
+    r.commit_types(&change).await?;
+    tracing::info!(root = %root.name, "discriminator dropped");
+    r.tree_changed(db, &root.name, &root.key_fields).await?;
+    Ok(Done::default())
+}
+
+/// The type columns of `root`'s table made stored columns again, each row
+/// keeping the type `map` gives it ([`drop_discriminator`]).
+async fn stored_type_columns(
+    db: Option<&str>,
+    root: &TypeDef,
+    map: &DiscMap,
+    nbe: bool,
+    r: &mut dyn Runner,
+) -> Result<()> {
     let (te, pe) = map.exprs(nbe);
     let t = table_sql(db, &root.name);
     let (tc, pc) = (quote(TYPE_COLUMN), quote(TYPE_PATH_COLUMN));
@@ -2063,25 +2357,32 @@ pub async fn drop_discriminator(
         keys.join(", ")
     ))
     .await?;
-    let mut change = TypesChange::default();
-    let mut nr = (*root).clone();
-    nr.discriminator = None;
-    nr.disc_operand = None;
-    change.upsert_types.push(nr);
-    for t in types.descendants(root.id) {
-        let mut nt = (*t).clone();
-        nt.disc_value = None;
-        change.upsert_types.push(nt);
-    }
-    r.commit_types(&change).await?;
-    tracing::info!(root = %root.name, "discriminator dropped");
-    r.tree_changed(db, &root.name, &root.key_fields).await?;
-    Ok(Done::default())
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn not_null_becomes_null_outside_quotes() {
+        assert_eq!(nullable_text("payload INT NOT NULL"), "payload INT NULL");
+        assert_eq!(
+            nullable_text("note VARCHAR(9) not  null COMMENT 'NOT NULL'"),
+            "note VARCHAR(9) NULL COMMENT 'NOT NULL'"
+        );
+        assert_eq!(nullable_text("`not null` INT"), "`not null` INT");
+        assert_eq!(
+            nullable_text("knot INT NOT NULLABLE"),
+            "knot INT NOT NULLABLE"
+        );
+        let a = nn_name("truck", "payload");
+        assert!(a.starts_with(NN_PREFIX) && a.len() <= 64);
+        assert_eq!(a, nn_name("TRUCK", "Payload"));
+        assert_ne!(a, nn_name("truck", "axles"));
+        assert!(numeric_type("int(11) unsigned") && numeric_type("decimal(10,2)"));
+        assert!(!numeric_type("varchar(20)") && !numeric_type("integerish"));
+    }
 
     #[test]
     fn fk_names_fit() {

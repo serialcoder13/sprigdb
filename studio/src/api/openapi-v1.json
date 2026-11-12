@@ -1830,6 +1830,55 @@
         ]
       }
     },
+    "/v1/databases/{database}/connections/{connection}:test": {
+      "post": {
+        "operationId": "Connections.Test",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "connection",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "A saved connection's checks ({platform, write, to}): TEST [PLATFORM] CONNECTION [WRITE [TO 'to']] as the caller; {columns, rows}",
+        "tags": [
+          "sprig.v1.Connections"
+        ]
+      }
+    },
     "/v1/databases/{database}/cursors": {
       "post": {
         "operationId": "Cursors.Open",
@@ -3521,6 +3570,55 @@
           }
         },
         "summary": "Marks dead letters for replay ({ids} or {all: true})",
+        "tags": [
+          "sprig.v1.Sinks"
+        ]
+      }
+    },
+    "/v1/databases/{database}/sinks/{sink}:test": {
+      "post": {
+        "operationId": "Sinks.Test",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "sink",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "A saved sink's dry run ({sample}, 10 by default): TEST SINK as the caller; {columns, rows}",
         "tags": [
           "sprig.v1.Sinks"
         ]

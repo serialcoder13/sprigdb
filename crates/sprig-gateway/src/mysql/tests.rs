@@ -437,6 +437,21 @@ async fn kill_query_and_connection() {
     let one: Option<i64> = a.query_first("SELECT 1").await.unwrap();
     assert_eq!(one, Some(1));
 
+    // The session's own statement (R4 round 6): the KILL itself is
+    // interrupted, 1317, and the session stays.
+    let e = a
+        .query_drop(format!("KILL QUERY {a_id}"))
+        .await
+        .unwrap_err();
+    assert_eq!(server_code(&e), Some(1317));
+    let e = a
+        .query_drop("KILL QUERY CONNECTION_ID()")
+        .await
+        .unwrap_err();
+    assert_eq!(server_code(&e), Some(1317));
+    let one: Option<i64> = a.query_first("SELECT 1").await.unwrap();
+    assert_eq!(one, Some(1));
+
     // Another user can't kill it; unknown ids are 1094.
     let mut o = connect(opts(gw.mysql, "other", OTHER_PW, true))
         .await
@@ -459,7 +474,17 @@ async fn kill_query_and_connection() {
             .is_none()
     );
     b.disconnect().await.unwrap();
-    o.disconnect().await.unwrap();
+    // Its own connection: MySQL's 1317, then the session is gone.
+    let o_id = o.id();
+    let e = o.query_drop("KILL CONNECTION_ID()").await.unwrap_err();
+    assert_eq!(server_code(&e), Some(1317));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        gw.ctx
+            .sessions
+            .get(sprig_common::ids::ConnId(o_id))
+            .is_none()
+    );
     gw.stop().await;
 }
 

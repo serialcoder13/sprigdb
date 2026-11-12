@@ -527,7 +527,7 @@ fn create(t: &Toks<'_>, sql: &[u8]) -> Result<Stmt, SprigError> {
                     "a WHERE clause other than WHERE column = value",
                 ));
             }
-            let (value, last) = disc_literal(&t, j + 3)?;
+            let (value, last) = disc_literal(t, j + 3)?;
             if ct.disc_where.is_some() {
                 return Err(unsupported("two WHERE clauses"));
             }
@@ -1108,6 +1108,34 @@ mod tests {
 
     #[test]
     fn hierarchy_clauses() {
+        let Stmt::AddDiscriminator(d) =
+            c("ALTER TABLE kart ADD DISCRIMINATOR (kind) VALUES (pedal = 'PEDAL', racer = -2)")
+        else {
+            panic!()
+        };
+        assert_eq!(d.column, "kind");
+        assert_eq!(
+            d.values,
+            vec![
+                ("pedal".into(), DiscValue::Str("PEDAL".into())),
+                ("racer".into(), DiscValue::Num("-2".into()))
+            ]
+        );
+        let Stmt::AddDiscriminator(d) = c("alter table kart add discriminator (`kind`)") else {
+            panic!()
+        };
+        assert!(d.values.is_empty());
+        assert!(matches!(
+            c("ALTER TABLE kart DROP DISCRIMINATOR"),
+            Stmt::DropDiscriminator(_)
+        ));
+        assert!(
+            classify(
+                b"ALTER TABLE kart ADD DISCRIMINATOR kind",
+                &LexOptions::mariadb()
+            )
+            .is_err()
+        );
         let Stmt::AddHierarchy(h) =
             c("ALTER TABLE org_unit ADD HIERARCHY (parent_id) ON DELETE RESTRICT MAX DEPTH 32")
         else {

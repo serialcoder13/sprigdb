@@ -453,9 +453,13 @@ impl BackendConn {
         if names.is_empty() {
             return Ok(Vec::new());
         }
+        // Each variable and its collation (gaps row 57, R4 round 6).
         let cols: Vec<String> = names
             .iter()
-            .map(|n| format!("@{}", quote_ident(n)))
+            .map(|n| {
+                let v = format!("@{}", quote_ident(n));
+                format!("{v}, COLLATION({v})")
+            })
             .collect();
         let rs = self
             .client
@@ -469,12 +473,13 @@ impl BackendConn {
         let row = rows.into_iter().next().unwrap_or_default();
         let mut out = Vec::with_capacity(names.len());
         for (i, name) in names.iter().enumerate() {
-            let col = rs.columns.get(i);
+            let col = rs.columns.get(2 * i);
             let v = VarValue::from_column(
                 col.map_or(0, |c| c.col_type),
                 col.map_or(63, |c| c.charset),
-                row.get(i).and_then(Option::as_deref),
-            );
+                row.get(2 * i).and_then(Option::as_deref),
+            )
+            .with_collation(row.get(2 * i + 1).and_then(Option::as_deref));
             out.push((name.clone(), v));
         }
         Ok(out)

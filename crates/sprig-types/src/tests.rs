@@ -133,6 +133,8 @@ async fn inserts_write_each_level() {
     let Handled::Ok(d) = h else { panic!("{h:?}") };
     assert_eq!(d.affected_rows, 2);
     assert_eq!(d.info, "Records: 2  Duplicates: 0  Warnings: 0");
+    // The plan's own transaction runs at READ COMMITTED (decision T17).
+    assert_eq!(f.plan_isolation, 1);
     assert_eq!(
         f.log,
         [
@@ -419,29 +421,28 @@ async fn drops_need_cascade_and_go_deepest_first() {
     assert_eq!(e.protocol().mysql_errno, 39707);
     let mut f = Fake::default();
     run("DROP TABLE vehicle CASCADE", &mut f).await.unwrap();
+    // The rows stay, as the root's (T8, the lead's choice of 12 November).
     assert_eq!(
         f.log,
         [
             "DROP TABLE IF EXISTS `truck`",
             "DROP TABLE IF EXISTS `vehicle`",
-            "SELECT `id` FROM `asset` WHERE `_type_path` >= '/asset/vehicle/' AND `_type_path` < \
-             '/asset/vehicle0' LIMIT 1000",
+            "UPDATE `asset` SET `_type` = 'asset', `_type_path` = '/asset/' WHERE `_type_path` \
+             >= '/asset/vehicle/' AND `_type_path` < '/asset/vehicle0' LIMIT 1000",
         ]
     );
     assert_eq!(f.committed.len(), 2);
     assert_eq!(f.committed[1].delete_types.len(), 2);
-    // A leaf under a subtype: its rows leave the parent's table too.
+    // A leaf under a subtype: its rows become the parent's, keeping their
+    // rows in the parent's table.
     let mut f = Fake::default();
-    f.answers
-        .push_back(rows(&[("id", column_type::LONGLONG)], &[&[Some("7")]]));
     run("DROP TABLE truck", &mut f).await.unwrap();
     assert_eq!(
-        &f.log[1..4],
+        &f.log[1..],
         [
-            "SELECT `id` FROM `asset` WHERE `_type_path` >= '/asset/vehicle/truck/' AND \
-             `_type_path` < '/asset/vehicle/truck0' LIMIT 1000",
-            "DELETE FROM `vehicle` WHERE `id` IN (7)",
-            "DELETE FROM `asset` WHERE `id` IN (7)",
+            "UPDATE `asset` SET `_type` = 'vehicle', `_type_path` = '/asset/vehicle/' WHERE \
+             `_type_path` >= '/asset/vehicle/truck/' AND `_type_path` < '/asset/vehicle/truck0' \
+             LIMIT 1000",
         ]
     );
 }
@@ -977,10 +978,6 @@ mod discriminator {
             ("CREATE TABLE m3 (x INT) INHERITS (truck)", 39710),
             (
                 "CREATE TABLE m4 (x INT) INHERITS (truck) WHERE kind = 'X'",
-                39710,
-            ),
-            (
-                "CREATE TABLE m5 (x INT NOT NULL) INHERITS (truck) WHERE vtype = 'M5'",
                 39710,
             ),
         ] {

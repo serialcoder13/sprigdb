@@ -319,8 +319,14 @@ async fn follow_tree(
             .filter(|c| !c.generated() && !c.name.to_ascii_lowercase().starts_with("_sprig_"))
             .map(|c| c.name)
             .collect();
-        if cols.iter().any(|c| o.column(c).is_none()) {
-            let mut all = o.columns.clone();
+        // Type columns a discriminator made generated (decision T19)
+        // aren't fields any more: merged views compute them.
+        let gone = |c: &String| {
+            (c.eq_ignore_ascii_case("_type") || c.eq_ignore_ascii_case("_type_path"))
+                && !cols.iter().any(|x| x.eq_ignore_ascii_case(c))
+        };
+        if cols.iter().any(|c| o.column(c).is_none()) || o.columns.iter().any(gone) {
+            let mut all: Vec<String> = o.columns.iter().filter(|c| !gone(c)).cloned().collect();
             all.extend(cols.into_iter().filter(|c| o.column(c).is_none()));
             if let Some(n) = o.with_slots_for(&all) {
                 *o = n;

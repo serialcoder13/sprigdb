@@ -263,3 +263,13 @@ text!(
     26,
     "on: a client's residency also refuses messages published into another tenant's streams and queues"
 );
+number!(
+    ORPHAN_SINK_SWEEP_SECONDS,
+    "inherit.orphan_sink_sweep_seconds",
+    600,
+    Scopes::PROCESS,
+    0,
+    86_400,
+    42,
+    "How often each gateway looks for members' inherited sinks that no FOR EACH TENANT definition reaches any more (0: never); one found in two passes in a row is dropped"
+);

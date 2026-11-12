@@ -11,7 +11,9 @@
 //!                 webhook: options, OPTIONS on the URL with its authentication
 //!   every address is resolved through the destination allowlist and the
 //!   tenant's residency first, as a sink's would be; nothing is written
-//! TEST SINK s [WITH SAMPLE n]
+//! TEST CREATE CONNECTION ...   (ST68) the same steps for a definition that
+//!   isn't saved, with its credentials as given (never stored)
+//! TEST SINK s [WITH SAMPLE n]   (and TEST CREATE SINK ... [WITH SAMPLE n], ST69)
 //!   the last n records of the source (stream: the newest of each
 //!   partition; queue: browsed, not taken), through WHERE, columns and
 //!   TRANSFORM, shown as they would be delivered; nothing is delivered and
@@ -29,12 +31,13 @@ use sprig_common::{Result, SprigCode, SprigError};
 use crate::filter::SinkPrepare;
 use crate::job::{SinkEnv, open_conn, over_global, resolve_opts};
 use crate::model::{
-    ConnKind, ConnRef, Guarantee, SinkDef, SinkId, SinkRecord, SinkState, SourceSpec, StartAt,
-    TargetSpec, TaskEpoch,
+    ConnKind, ConnRef, ConnectionDef, Guarantee, SinkDef, SinkId, SinkRecord, SinkState,
+    SourceSpec, StartAt, TargetSpec, TaskEpoch,
 };
+use crate::policy::{Destinations, parse_allowlist};
 use crate::runtime::{Prepare, TaskInfo};
 use crate::store::SinksStore;
-use crate::target::{Conn, Opts, TargetCtx};
+use crate::target::{Conn, MemSecrets, Opts, TargetCtx};
 
 /// One step of a connection test.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,7 +156,7 @@ pub async fn test_connection_with(
     r: &ConnRef,
     db_id: u32,
     db_name: &str,
-    write: Option<Option<&str>>,
+    write: Option<&Write>,
 ) -> Result<Vec<Step>> {
     let t0 = Instant::now();
     let ms = || u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -190,13 +193,82 @@ pub async fn test_connection_with(
     push(steps, &mut out);
     if let Some(to) = write {
         let steps = if passed {
-            write_steps(conn, &opts, db_id, to).await
+            write_steps(conn, &opts, db_id, to.to.as_deref()).await
         } else {
             vec![("write", Err("not tried: a check above failed".to_owned()))]
         };
         push(steps, &mut out);
     }
     Ok(out)
+}
+
+/// `TEST CREATE CONNECTION ...` (ST68): [`test_connection`]'s steps for a
+/// definition that isn't saved, opened with the credentials as given
+/// (never sealed or stored, dropped when the test ends) under the same
+/// destination allowlist and residency a saved connection's are. The
+/// first step, `credentials`, says how many were given.
+///
+/// # Errors
+/// The catalog's and the settings' (a failing destination is a failed
+/// step, not an error).
+pub async fn test_definition(
+    env: &dyn SinkEnv,
+    tenant: TenantId,
+    def: &ConnectionDef,
+    secrets: Vec<(String, zeroize::Zeroizing<String>)>,
+    db_name: &str,
+) -> Result<Vec<Step>> {
+    let t0 = Instant::now();
+    let stand = stand_in(
+        def.db_id,
+        "test_connection",
+        TargetSpec::Webhook { path: None },
+    );
+    let mut opts = options(env, tenant, &stand).await?;
+    opts.0.insert("__db_name".into(), db_name.to_owned());
+    let allow = parse_allowlist(opts.get("destination_allowlist").unwrap_or("[]"))?;
+    let given = secrets.len();
+    let mut mem = MemSecrets::default();
+    for (k, v) in secrets {
+        mem.set(&k, v);
+    }
+    let conn = Conn {
+        name: def.name.clone(),
+        kind: def.kind,
+        options: def.options.clone(),
+        secrets: Arc::new(mem),
+        dest: Arc::new(Destinations {
+            allow,
+            residency: env.residency_of(tenant).await?,
+            platform_hosts: None,
+            metadata_allowed: opts.get("platform_identity") == Some("full"),
+        }),
+    };
+    let ms = || u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let mut out = vec![Step {
+        step: "credentials".into(),
+        ok: true,
+        detail: format!(
+            "{given} given with the definition (not saved: TEST CREATE CONNECTION creates nothing)"
+        ),
+        elapsed_ms: ms(),
+    }];
+    let steps = probe(conn, &opts, def.db_id).await;
+    let at = ms();
+    out.extend(steps.into_iter().map(|(step, res)| Step {
+        step: step.to_owned(),
+        ok: res.is_ok(),
+        detail: res.unwrap_or_else(|e| e),
+        elapsed_ms: at,
+    }));
+    Ok(out)
+}
+
+/// `TEST CONNECTION ... WRITE [TO 'target']` (R9, r9last).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Write {
+    /// `TO 'target'`: a topic, an object key prefix or a table.
+    pub to: Option<String>,
 }
 
 /// The id of a test record: `sprig-test-<ms>-<random>`.

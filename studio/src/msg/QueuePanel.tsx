@@ -1,5 +1,6 @@
 // A queue's counts and its page (chapter 44 step 29; Studio round 6): ready,
-// unacknowledged and consumers from `sprig.mq_info`, browsing without taking
+// unacknowledged and consumers from `sprig.mq_info` (every queue of the page
+// in one call, ST66), browsing without taking
 // (`sprig.mq_browse`), "get and requeue", purge and republish. Every call is
 // a statement run as the signed-in user, so the queue engine checks their
 // queue permissions (R9 item 89); purge and republish are shown first, with
@@ -10,7 +11,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { errorText } from '../api/errors';
 import { begin, execute, rollback } from '../api/sql';
 import { Generic, table, useStatement, type Table } from './MessagingPage';
-import { getMessages, mqBrowse, mqInfo, mqPurge, mqRepublish, queueInfo, settle, type QueueInfo } from './statements';
+import { getMessages, mqBrowse, mqInfo, mqInfoAll, mqPurge, mqRepublish, queueInfo, queueInfos, settle, type QueueInfo } from './statements';
 
 const visible = () => (document.visibilityState === 'visible' ? 5000 : false);
 
@@ -27,13 +28,35 @@ export function useQueueInfo(db: string, queue: string, vhost: string | null) {
   });
 }
 
-/** Three cells: ready, unacknowledged, consumers. */
-export function QueueCounts({ db, queue, vhost }: Readonly<{ db: string; queue: string; vhost: string | null }>) {
-  const q = useQueueInfo(db, queue, vhost);
-  const why = q.error ? errorText(q.error) : undefined;
+/**
+ * `mq_info` for every queue of the vhost in one call (ST66), refreshed every
+ * 5 s while the page shows: a map by queue name, which leaves out queues the
+ * user may not read. `null` from a gateway without the batch form; the rows
+ * then ask one queue each.
+ */
+export function useAllQueueInfo(db: string, vhost: string | null) {
+  return useQuery<Map<string, QueueInfo> | null>({
+    queryKey: ['mq-info', db, vhost, '*'],
+    enabled: vhost !== null,
+    queryFn: async () => {
+      try {
+        const t = await table(db, mqInfoAll(vhost));
+        return t.columns.includes('queue') ? queueInfos(t.columns, t.rows) : null;
+      } catch {
+        return null;
+      }
+    },
+    refetchInterval: visible,
+    retry: false,
+  });
+}
+
+const NOT_READABLE = 'Not shown: you may not read this queue (39253)';
+
+function Cells({ queue, info, why, loading }: Readonly<{ queue: string; info: QueueInfo | null | undefined; why?: string; loading: boolean }>) {
   const cell = (k: keyof QueueInfo) => (
     <td className="num" title={why} data-testid={`mq-${k}-${queue}`}>
-      {q.data ? q.data[k] : q.error ? '?' : '…'}
+      {info ? info[k] : loading ? '…' : '?'}
     </td>
   );
   return (
@@ -43,6 +66,18 @@ export function QueueCounts({ db, queue, vhost }: Readonly<{ db: string; queue: 
       {cell('consumers')}
     </>
   );
+}
+
+/** Three cells: ready, unacknowledged, consumers, one `mq_info` call for this queue. */
+export function QueueCounts({ db, queue, vhost }: Readonly<{ db: string; queue: string; vhost: string | null }>) {
+  const q = useQueueInfo(db, queue, vhost);
+  return <Cells queue={queue} info={q.data} why={q.error ? errorText(q.error) : undefined} loading={!q.error} />;
+}
+
+/** The same cells from the batch answer: a queue missing from it may not be read. */
+export function QueueCountsFrom({ queue, all }: Readonly<{ queue: string; all: ReadonlyMap<string, QueueInfo> }>) {
+  const info = all.get(queue);
+  return <Cells queue={queue} info={info} why={info ? undefined : NOT_READABLE} loading={false} />;
 }
 
 export function QueueDetail({

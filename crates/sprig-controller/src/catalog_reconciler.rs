@@ -7,6 +7,7 @@
 //! | Finding (`finding` label) | Action |
 //! |---|---|
 //! | DDL job older than `catalog.stuck_state_minutes` (`stuck_job`) | Finish if the physical state matches, else roll back; drops roll forward ([`DdlEngine::resolve`]) |
+//! | DDL job of a gateway process that has ended, at least a minute old (`stuck_job`, bugfix-45) | The same, at once ([`CatalogReconciler::with_owners`]) |
 //! | Shard schema missing (`schema_missing`) | Alert (R0 has no mover-created shards to recreate) |
 //! | Object missing (`object_missing`) | Alert |
 //! | Physical schema with no catalog entry (`orphan_schema`) | Quarantine; drop after `catalog.orphan_retention_days` if empty |
@@ -16,8 +17,17 @@
 //! | Setting values clamped or ignored (`clamped_values`) | Count in `sprig_settings_clamped_values` |
 //!
 //! Rules that keep repairs from fighting live DDL:
-//! - a job younger than the stuck age is left alone, and so is a schema in
-//!   which MariaDB is running DDL right now ([`DdlExecutor::busy`]);
+//! - a job younger than the stuck age is left alone, unless its owner is a
+//!   gateway process whose `gateway-processes/<token>` key has gone and
+//!   the job is at least a minute old
+//!   ([`OWNER_MIN_AGE`](sprig_catalog::ddl::OWNER_MIN_AGE), bugfix-45); a
+//!   schema in which MariaDB is running DDL right now is left alone
+//!   whatever the job's age ([`DdlExecutor::busy`]);
+//! - while a tenant has a young gateway job, its jobs (only) are looked
+//!   at again every [`JOB_RECHECK`] between full passes, so a crashed
+//!   gateway's job goes about a minute after the crash, not at the next
+//!   full pass (`catalog.reconcile_interval_seconds`, 300) or after the
+//!   stuck age (15 minutes);
 //! - a database with any job in flight (its own or one of its objects') is
 //!   not compared: a rename that ran but hasn't been published would look
 //!   like an outside table.
@@ -42,8 +52,9 @@ use std::time::{Duration, SystemTime};
 use sprig_catalog::cache::{Loaded, TenantCatalog};
 use sprig_catalog::ddl::{
     DdlBackend, DdlEngine, DdlExecutor, DdlIntent, DdlTx, IntentOp, LOWER_CASE_TABLE_NAMES,
-    MariaExecutor, ORPHAN_RETENTION_DAYS, RECONCILE_INTERVAL_SECONDS, Resolution, RoutedExecutor,
-    STUCK_STATE_MINUTES, TOMBSTONE_RETENTION_HOURS, drop_schema, object_key, shard_schemas,
+    MariaExecutor, ORPHAN_RETENTION_DAYS, OwnerCheck, RECONCILE_INTERVAL_SECONDS, Resolution,
+    RoutedExecutor, STUCK_STATE_MINUTES, TOMBSTONE_RETENTION_HOURS, drop_schema, is_gateway_owner,
+    object_key, shard_schemas,
 };
 use sprig_catalog::store::{DbState, ObjectKind, ObjectState, PurgeReport, Snapshot};
 use sprig_common::ids::{ClusterId, DbId, DcId, GroupId, TenantId};
@@ -55,6 +66,10 @@ use sprig_settings::{LiveSettings, MemSettings, Registry, SettingCtx, TenantScop
 use crate::catalogs::ShardMapLocator;
 use crate::runtime::{LoopCx, LoopTier, MetaEvent, Outcome, Reconciler};
 use crate::tree::{Directory, StoredEntry, TenantState};
+
+/// Between full passes, how often the jobs of a tenant with a young
+/// gateway-owned DDL job are looked at again (bugfix-45).
+pub const JOB_RECHECK: Duration = Duration::from_secs(30);
 
 /// Where the reconciler reaches a tenant's cluster.
 #[async_trait::async_trait]
@@ -283,6 +298,9 @@ pub struct PassReport {
     pub resolved: Vec<(String, Resolution)>,
     /// Jobs left alone: too young, or their schema busy.
     pub jobs_waiting: usize,
+    /// Of those, jobs younger than the stuck age whose owner is a gateway
+    /// process (bugfix-45): looked at again after [`JOB_RECHECK`].
+    pub gateway_jobs_waiting: usize,
     /// Objects adopted.
     pub adopted: usize,
     /// Shard schemas missing.
@@ -314,6 +332,8 @@ struct TenantMemory {
     orphans: HashMap<SchemaName, SystemTime>,
     last_pass: Option<std::time::Instant>,
     clamped: BTreeMap<&'static str, usize>,
+    /// A young gateway job was waiting at the last look (bugfix-45).
+    jobs_recheck: bool,
 }
 
 /// The `catalog_reconciler` loop.
@@ -333,6 +353,8 @@ where
     /// The groups with shard maps (chapter 20): their shard schemas are
     /// never orphans. `None`: no shard schema of a non-default group is.
     group_maps: Option<Arc<dyn GroupMaps>>,
+    /// Whose jobs are abandoned (bugfix-45); `None`: only the stuck age.
+    owners: Option<Arc<dyn OwnerCheck>>,
 }
 
 /// The table groups of a tenant that have shard maps (chapters 15 and
@@ -416,7 +438,21 @@ where
             clock,
             memory: Mutex::new(HashMap::new()),
             group_maps: None,
+            owners: None,
         }
+    }
+
+    /// Resolves a job whose owner `owners` finds gone at once, without
+    /// waiting for the stuck age (bugfix-45): a gateway that crashed or
+    /// restarted mid-DDL (its `gateway-processes/<token>` key gone, the
+    /// job at least [`OWNER_MIN_AGE`](sprig_catalog::ddl::OWNER_MIN_AGE)
+    /// old). Before, such a job held its
+    /// table for `catalog.stuck_state_minutes` unless another DDL on the
+    /// same target came and resolved it.
+    #[must_use]
+    pub fn with_owners(mut self, owners: Arc<dyn OwnerCheck>) -> Self {
+        self.owners = Some(owners);
+        self
     }
 
     /// Recognises the shard schemas of groups with shard maps in
@@ -505,8 +541,14 @@ where
             for s in &schemas {
                 busy |= exec.busy(s).await.unwrap_or(true);
             }
-            if age < cfg.stuck || busy {
+            let young = age < cfg.stuck;
+            // bugfix-45: a gateway process that ended left the job.
+            let abandoned = young && !busy && self.owner_gone(&intent, age).await;
+            if busy || (young && !abandoned) {
                 report.jobs_waiting += 1;
+                if young && intent.owner.as_deref().is_some_and(is_gateway_owner) {
+                    report.gateway_jobs_waiting += 1;
+                }
                 continue;
             }
             let subject = format!("job {}", intent.job);
@@ -515,6 +557,11 @@ where
                     resolved_any = true;
                     let detail = match &r {
                         Resolution::Left { reason } => format!("{reason}: {}", short(&intent.ddl)),
+                        _ if abandoned => format!(
+                            "{} after {} s; its gateway process has ended",
+                            short(&intent.ddl),
+                            age.as_secs()
+                        ),
                         _ => format!("{} after {} s", short(&intent.ddl), age.as_secs()),
                     };
                     self.decide(
@@ -880,10 +927,86 @@ where
             Err(e) => report.errors.push(format!("clamped values: {e}")),
         }
 
-        self.memory().entry(tenant).or_default().last_pass = Some(self.clock.now());
+        {
+            let mut mem = self.memory();
+            let m = mem.entry(tenant).or_default();
+            m.last_pass = Some(self.clock.now());
+            m.jobs_recheck = report.gateway_jobs_waiting > 0;
+        }
         for e in &report.errors {
             tracing::warn!(%tenant, error = %e, "catalog reconciler step failed");
         }
+        Ok(report)
+    }
+
+    /// Whether `intent`'s owner has certainly gone (bugfix-45).
+    async fn owner_gone(&self, intent: &DdlIntent, age: Duration) -> bool {
+        match (&self.owners, intent.owner.as_deref()) {
+            (Some(o), Some(owner)) => o.gone(owner, age).await,
+            _ => false,
+        }
+    }
+
+    /// Between full passes (bugfix-45): `tenant`'s DDL jobs only, each
+    /// resolved once its gateway process has ended (or the stuck age has
+    /// passed) and none of its schemas is busy. A multi-shard job waits
+    /// for the full pass.
+    ///
+    /// # Errors
+    /// The catalog or the cluster unreadable.
+    pub async fn recheck_jobs(&self, tenant: TenantId) -> Result<PassReport> {
+        let cfg = self.config();
+        let now = self.clock.wall();
+        let mut report = PassReport::default();
+        let snap = self
+            .engine
+            .versioner()
+            .backend()
+            .full_snapshot(tenant)
+            .await?;
+        let intents = DdlIntent::all(&snap.settings);
+        if !intents.is_empty() {
+            let exec = self.executors.executor(tenant).await?;
+            for intent in intents {
+                let age = now.duration_since(intent.started()).unwrap_or_default();
+                let gateway_young =
+                    age < cfg.stuck && intent.owner.as_deref().is_some_and(is_gateway_owner);
+                let mut busy = intent.shards.is_some();
+                if !busy {
+                    for s in intent_schemas(tenant, &intent, &snap) {
+                        busy |= exec.busy(&s).await.unwrap_or(true);
+                    }
+                }
+                if busy || (age < cfg.stuck && !self.owner_gone(&intent, age).await) {
+                    report.jobs_waiting += 1;
+                    if gateway_young {
+                        report.gateway_jobs_waiting += 1;
+                    }
+                    continue;
+                }
+                let subject = format!("job {}", intent.job);
+                match self.engine.resolve(tenant, &intent, &snap, &*exec).await {
+                    Ok(r) => {
+                        let detail = match &r {
+                            Resolution::Left { reason } => {
+                                format!("{reason}: {}", short(&intent.ddl))
+                            }
+                            _ if gateway_young => format!(
+                                "{} after {} s; its gateway process has ended",
+                                short(&intent.ddl),
+                                age.as_secs()
+                            ),
+                            _ => format!("{} after {} s", short(&intent.ddl), age.as_secs()),
+                        };
+                        self.decide(tenant, Finding::StuckJob, subject, r.label(), detail)
+                            .await;
+                        report.resolved.push((intent.job.to_string(), r));
+                    }
+                    Err(e) => report.errors.push(format!("{subject}: {e}")),
+                }
+            }
+        }
+        self.memory().entry(tenant).or_default().jobs_recheck = report.gateway_jobs_waiting > 0;
         Ok(report)
     }
 
@@ -1061,13 +1184,34 @@ where
         if let Some(s) = since
             && s < cfg.interval
         {
-            return Ok(Outcome::RequeueAfter(cfg.interval.saturating_sub(s)));
+            let left = cfg.interval.saturating_sub(s);
+            let recheck = self.memory().get(key).is_some_and(|m| m.jobs_recheck);
+            if !recheck || self.owners.is_none() {
+                return Ok(Outcome::RequeueAfter(left));
+            }
+            // bugfix-45: a young gateway job was waiting; its process may
+            // have ended since.
+            let report = self.recheck_jobs(*key).await?;
+            for e in &report.errors {
+                tracing::warn!(tenant = %key, error = %e, "catalog reconciler job recheck failed; retried");
+            }
+            return Ok(Outcome::RequeueAfter(if report.gateway_jobs_waiting > 0 {
+                left.min(JOB_RECHECK)
+            } else {
+                left
+            }));
         }
         let report = self.pass(*key).await?;
         for e in &report.errors {
             tracing::warn!(tenant = %key, error = %e, "catalog reconciler step failed; retried next pass");
         }
-        Ok(Outcome::RequeueAfter(cfg.interval))
+        Ok(Outcome::RequeueAfter(
+            if report.gateway_jobs_waiting > 0 && self.owners.is_some() {
+                cfg.interval.min(JOB_RECHECK)
+            } else {
+                cfg.interval
+            },
+        ))
     }
 }
 

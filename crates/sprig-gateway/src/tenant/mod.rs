@@ -203,18 +203,8 @@ impl TenantServices {
         // Chapter 42: no destructive change of a shared object, checked
         // under the catalog lock (decision I7).
         let ddl = DdlEngine::new(catalog.clone(), Arc::clone(&clock))
-            .with_check(sprig_inherit::guard::SharedCheck::shared())
-            // bugfix-38: abandoned DDL jobs are resolved by the next DDL
-            // that waits for them.
-            .with_owner(
-                &ddl_owners::label(&dc),
-                Some(Arc::new(ddl_owners::GatewayOwners::new(Arc::clone(
-                    &stores.dc,
-                )))),
-            )
-            .with_janitor(Arc::new(ddl_owners::CtlExecutors::new(Arc::clone(
-                &locator,
-            ))));
+            .with_check(sprig_inherit::guard::SharedCheck::shared());
+        let ddl = ddl_owners::owned(ddl, &dc, &stores.dc, &locator);
         // Chapter 29: SPRIG SET auth.authorizer only names an engine every
         // live gateway knows.
         let writer = TenantSettingsWriter::new(
@@ -253,6 +243,8 @@ impl TenantServices {
         crate::inherited::lifecycle::start_sweeper(&svc);
         // R9 (r9queue): members' failed inherited sink deploys, on a timer.
         crate::inherited::sinks::retry::start(&svc);
+        // bugfix-47: members' inherited sinks no definition reaches any more.
+        crate::inherited::orphan_sinks::start(&svc);
         // Decision bugfix-29: a deleted tenant's pooled backend
         // connections close as soon as its directory entry goes.
         close_deleted_tenants(&svc);

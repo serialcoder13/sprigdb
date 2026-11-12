@@ -44,6 +44,12 @@ pub trait SqlRunner: Send {
     async fn query(&mut self, sql: &str) -> Result<Vec<Row>, SqlError>;
     /// A statement returning an affected-row count.
     async fn exec(&mut self, sql: &str) -> Result<u64, SqlError>;
+    /// Marks the writes that follow, until called with `false`, as a Redis
+    /// command's whose keyspace notifications the command sends itself, so
+    /// the notifications from the change feed pass over them (chapter 40;
+    /// RLS round 5, RL51). The gateway's runner prefixes each write
+    /// statement with chapter 38's comment `o=k`; by default nothing.
+    fn notified(&mut self, _on: bool) {}
 }
 
 /// `X'...'`, or `''` for empty bytes.

@@ -240,7 +240,13 @@ pub async fn database_dropped(
     let here = |p: Option<&Value>| {
         p.and_then(|p| p.get("db"))
             .and_then(Value::as_str)
-            .is_some_and(|d| if lctn { d.eq_ignore_ascii_case(db) } else { d == db })
+            .is_some_and(|d| {
+                if lctn {
+                    d.eq_ignore_ascii_case(db)
+                } else {
+                    d == db
+                }
+            })
     };
     let gone: Vec<_> = own
         .instances

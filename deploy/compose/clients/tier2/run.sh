@@ -90,11 +90,11 @@ PY
       sed -e 's/\tPASS$/\tpass/' -e 's/\tFAIL$/\tfail/' -e 's/\tSKIP$/\tskip/' > "$OUT/steps.tsv"
     ;;
   sequelize)
-    # Sequelize v6.37.7's integration tests for the mysql dialect. Tests
-    # named "supports schemas" are left out (R4 round 5): through the
-    # gateway one left a DDL job pending on `work.Users` (39071), and
-    # Sequelize aborts the whole run when its 10 s cleanup can't finish;
-    # see decisions/r4-interim.md X22.
+    # Sequelize v6.37.7's integration tests for the mysql dialect, all of
+    # them. Its "supports schemas" tests were left out in R4 round 5 (a DDL
+    # job left pending on `work.Users`, 39071 for 15 minutes, decision X22);
+    # since bugfix-38 an abandoned DDL job is resolved within seconds, and
+    # they pass (12 Nov 2026: 1,803 of 1,808, the rest listed or flaky).
     docker run --rm --name "$NAME" --memory "$MEM" -e DIALECT=mysql -e SEQ_MYSQL_DB=tiertwo_sequelize \
       -e SEQ_MYSQL_USER="$USER" -e SEQ_MYSQL_PW="$PASS" -e SEQ_MYSQL_HOST="$HOST" -e SEQ_MYSQL_PORT="$PORT" \
       node:22-bookworm-slim sh -c "
@@ -102,7 +102,7 @@ PY
         git clone -q --depth 1 --branch v6.37.7 https://github.com/sequelize/sequelize.git /s && cd /s &&
         npm install --no-audit --no-fund --ignore-scripts >/dev/null 2>&1 && node ./build.js >/dev/null 2>&1 &&
         npx mocha -r ./test/registerEsbuild --globals setImmediate,clearImmediate --exit --check-leaks --colors=false -t 30000 \
-          --grep 'supports schemas' --invert --reporter tap 'test/integration/**/*.test.js' 2>&1" > "$OUT/sequelize.log"
+          --reporter tap 'test/integration/**/*.test.js' 2>&1" > "$OUT/sequelize.log"
     sed -n -E 's/^(ok|not ok) [0-9]+ (.*)$/\2\t\1/p' "$OUT/sequelize.log" |
       sed -e 's/\tok$/\tpass/' -e 's/\tnot ok$/\tfail/' > "$OUT/steps.tsv"
     ;;

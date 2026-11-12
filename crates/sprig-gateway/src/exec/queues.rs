@@ -292,7 +292,7 @@ impl PassSession {
             MqCall::Release => (2, 3, "sprig.mq_release"),
             MqCall::Ack => (1, 1, "sprig.mq_ack"),
             MqCall::Nack => (1, 2, "sprig.mq_nack"),
-            MqCall::Info => (1, 2, "sprig.mq_info"),
+            MqCall::Info => (0, 2, "sprig.mq_info"),
             MqCall::Browse => (1, 3, "sprig.mq_browse"),
             MqCall::Purge => (1, 2, "sprig.mq_purge"),
             MqCall::Republish => (2, 5, "sprig.mq_republish"),
@@ -301,7 +301,9 @@ impl PassSession {
             return Err(arg_error(name));
         }
         // The arguments, evaluated by the session under the user's rights.
-        let vals = {
+        let vals = if n == 0 {
+            Vec::new()
+        } else {
             let c = self
                 .mq_run(cx, &format!("SELECT {}", call.args.join(", ")), false)
                 .await?;
@@ -448,6 +450,25 @@ impl PassSession {
                     .sql_vhost(principal, &vhost(1), session)
                     .await
                     .map_err(|e| sql_error(&e))?;
+                // ST66: no queue (NULL, or no argument) answers every
+                // queue the user may read, one row each.
+                if text(0).is_none() {
+                    let all = v.info_all().await.map_err(|e| sql_error(&e))?;
+                    let n = |x: u64| Some(x.to_string().into_bytes());
+                    return Ok(Reply::Rows(
+                        vec!["queue", "ready", "unacked", "consumers"],
+                        all.into_iter()
+                            .map(|(q, i)| {
+                                vec![
+                                    Some(q.into_bytes()),
+                                    n(i.ready),
+                                    n(i.unacked),
+                                    n(i.consumers),
+                                ]
+                            })
+                            .collect(),
+                    ));
+                }
                 let i = v
                     .info(&text(0).unwrap_or_default())
                     .await

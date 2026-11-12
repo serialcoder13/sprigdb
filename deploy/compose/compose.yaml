@@ -53,12 +53,10 @@ x-mariadb: &mariadb
 x-galera-health: &galera-health
   # Synced (wsrep_local_state 4). Uses root: after SST a joiner holds the
   # donor's users, so the image's own healthcheck account isn't reliable.
-  test:
-    - CMD-SHELL
-    - >-
-      mariadb -uroot -p"$$MARIADB_ROOT_PASSWORD" -Nse
-      "SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS
-      WHERE VARIABLE_NAME = 'wsrep_local_state'" | grep -qx 4
+  # It also records the node's last committed position in the shared
+  # galera-state volume, which a full restart's bootstrap reads
+  # (mariadb/galera-start.sh, bugfix-41).
+  test: [CMD, /bin/bash, /usr/local/bin/sprig-galera-start.sh, health]
   interval: 5s
   timeout: 5s
   retries: 60
@@ -164,6 +162,7 @@ services:
       - ./mariadb/binlog.cnf:/etc/mysql/conf.d/10-binlog.cnf:ro
       - ./mariadb/galera.cnf:/etc/mysql/conf.d/20-galera.cnf:ro
       - ./mariadb/galera-start.sh:/usr/local/bin/sprig-galera-start.sh:ro
+      - galera-state:/sprig-galera
 
   galera-2:
     <<: *mariadb
@@ -370,3 +369,5 @@ networks:
 # MariaDB data lives in each container's anonymous volume: `down -v` resets it.
 volumes:
   etcd-data: {}
+  # Each Galera node's last committed position (mariadb/galera-start.sh).
+  galera-state: {}

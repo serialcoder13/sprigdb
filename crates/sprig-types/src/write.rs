@@ -890,6 +890,50 @@ pub async fn update(upd: &Update, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<W
         unchanged.join(" AND "),
         order_limit(&order_by, upd.limit.as_ref())
     );
+    // Step B: one single-table UPDATE per table whose new values read only
+    // that table (chapter 42 can then write each table's layer, typed
+    // tables in inheritance groups); else one UPDATE over the join.
+    let mut by_alias: Vec<(String, Vec<String>)> = Vec::new();
+    for ((c, _), sql) in assigned.iter().zip(&set) {
+        let a = plan.alias_for(tr.owner_of(c), false).to_owned();
+        match by_alias.iter_mut().find(|(x, _)| *x == a) {
+            Some((_, v)) => v.push(sql.clone()),
+            None => by_alias.push((a, vec![sql.clone()])),
+        }
+    }
+    let reads_other = by_alias.iter().any(|(a, sets)| {
+        plan.tables
+            .iter()
+            .filter(|(_, x)| x != a)
+            .any(|(_, x)| sets.iter().any(|s| s.contains(&format!("{}.", quote(x)))))
+    });
+    let step_b: Vec<(String, String)> = if reads_other {
+        vec![(
+            ka.clone(),
+            format!("UPDATE {join} SET {} WHERE {KEYS}", set.join(", ")),
+        )]
+    } else {
+        by_alias
+            .iter()
+            .map(|(a, sets)| {
+                let t = plan
+                    .tables
+                    .iter()
+                    .find(|(_, x)| x == a)
+                    .map(|(t, _)| t.name.clone())
+                    .unwrap_or_default();
+                (
+                    a.clone(),
+                    format!(
+                        "UPDATE {} AS {} SET {} WHERE {KEYS}",
+                        table_sql(tr.db_name.as_deref(), &t),
+                        quote(a),
+                        sets.join(", ")
+                    ),
+                )
+            })
+            .collect()
+    };
     let nbe = ctx.lex.no_backslash_escapes;
     let batch = ctx.limits.write_batch_rows.max(1);
     let tx = Txn::begin(r).await?;
@@ -912,12 +956,10 @@ pub async fn update(upd: &Update, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<W
             })
             .collect();
         for chunk in keys.chunks(batch) {
-            r.exec(&format!(
-                "UPDATE {join} SET {} WHERE {}",
-                set.join(", "),
-                key_in(Some(&ka), &key_names, chunk)
-            ))
-            .await?;
+            for (alias, stmt) in &step_b {
+                r.exec(&stmt.replace(KEYS, &key_in(Some(alias), &key_names, chunk)))
+                    .await?;
+            }
         }
         if moves {
             sync_extensions(&tr.db, &root, tr.db_name.as_deref(), &keys, ctx, r).await?;
@@ -935,6 +977,9 @@ pub async fn update(upd: &Update, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<W
         warnings: 0,
     }))
 }
+
+/// Where a step-B statement's key condition goes.
+const KEYS: &str = "\u{0}keys\u{0}";
 
 /// The extension tables a delete of rows of `t` (and its subtypes) must
 /// clean, deepest first.

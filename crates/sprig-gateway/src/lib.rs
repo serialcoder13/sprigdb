@@ -58,6 +58,12 @@
 //! Not yet: the other front ends (chapters 37, 40), limits,
 //! registration and the other `MetaStore` caches (steps 4-10).
 
+// The compiler's `Send` check of a session's future walks the inherited-sink
+// deploy path down into sqlparser's AST (`TEST SINK`); since 12 Nov the chain
+// is deeper than the default limit of 128 (E0275; bugfix-37 saw it close,
+// bugfix-49 added this when a build needed it).
+#![recursion_limit = "256"]
+
 pub mod amqp;
 pub mod backend;
 // Chapter 43 (R8): the Bolt listener on 7687.
@@ -464,14 +470,19 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     ));
     // Redis (chapter 40, R6): catalog logins through AUTH; commands run as
     // SQL in the user's executor session.
-    let redis_fe = Arc::new(redis::RedisFrontend::new(redis::RedisDeps {
+    let redis_fe = redis::RedisFrontend::new(redis::RedisDeps {
         login: Arc::clone(&login),
         executor: Arc::clone(&shared_exec),
         sessions: Arc::clone(&sessions),
         live: live.clone(),
         dc: dc.clone(),
         gateway_id: gateway_id.clone(),
-    }));
+    });
+    // RL51: keyspace notifications from the change feed.
+    let redis_fe = Arc::new(match &tenants {
+        Some(t) => redis_fe.with_feed(Arc::clone(t)),
+        None => redis_fe,
+    });
     let amqp_fe = Arc::new(amqp::AmqpFrontend::with_replies(
         Arc::new(amqp::identity::AmqpIdentity::new(
             Arc::clone(&login),

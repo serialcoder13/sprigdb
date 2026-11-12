@@ -145,7 +145,11 @@ async fn a_ddl_whose_client_hangs_up_does_not_hold_its_table() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
     println!("job gone after {:?} with no other DDL", t.elapsed());
-    assert!(gone, "the abandoned job is still there: {:?}", jobs(&e).await);
+    assert!(
+        gone,
+        "the abandoned job is still there: {:?}",
+        jobs(&e).await
+    );
     drop(holder);
 
     // 2. The next ALTER comes at once.

@@ -108,6 +108,16 @@ key!(
     HardBounds::range(200, 3_600_000), "Polling forwarder takes outbox rows older than this when the feed forwarder lags, in ms"
 );
 
+key!(
+    /// `queue.change_exchange`: publish the object's committed changes to
+    /// this exchange of the object's database (vhost), as the user who set
+    /// it, filtered per change by that user's privileges and row-level
+    /// security (chapter 50, "Change feed to an exchange"; chapter 29,
+    /// RL52). Empty: none.
+    CHANGE_EXCHANGE: Text = "queue.change_exchange", Cow::Borrowed(""), Scopes(0b00_0001),
+    HardBounds::NONE, "Publish the object's changes to this exchange"
+);
+
 /// What one vhost's queues run with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueSettings {

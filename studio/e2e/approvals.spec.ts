@@ -2,12 +2,12 @@
 // view with its evidence, comment, snooze, approve in a window, ignore,
 // bulk actions and the policy page; accessibility with axe-core.
 //
-// Needs open recommendations in tenant acme (the live tests raise them:
-// target/agent-approvals/live_*.sh) and STUDIO_URL of a gateway built
-// with this Studio.
+// Needs open index recommendations in tenant acme (deploy/compose/studio/
+// e2e.sh setup raises them in approvals_shop) and STUDIO_URL of a gateway
+// built with this Studio.
 import { expect, test, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
-import { SHOTS, signIn } from './fixtures';
+import { apiToken, SHOTS, signIn } from './fixtures';
 
 const T = 'acme';
 
@@ -29,6 +29,24 @@ function answer(page: Page, values: string[]) {
 }
 
 test.describe.serial('Approvals inbox (chapter 52)', () => {
+  // Each run snoozes and ignores the items it found open, so an earlier
+  // run's (another browser's) index items are reopened first (ST65).
+  test.beforeAll(async ({ request }) => {
+    const token = await apiToken(request);
+    const headers = { authorization: `Bearer ${token}` };
+    const r = await request.get('/v1/recommendations?kind=index&all=true&limit=200', { headers });
+    expect(r.status()).toBe(200);
+    const items = ((await r.json()) as { items: { id: string; state: string }[] }).items;
+    for (const it of items.filter((i) => i.state === 'snoozed' || i.state === 'ignored')) {
+      // A newer item for the same index may have taken its place: then
+      // the reopen is refused, and the newer one is open anyway.
+      await request.post(`/v1/recommendations/${encodeURIComponent(it.id)}:reopen`, {
+        headers,
+        data: { reason: 'Studio e2e: reopened for this browser' },
+      });
+    }
+  });
+
   test('inbox: badge, filters, item, comment, snooze, window, ignore, bulk', async ({ page }) => {
     await signIn(page);
     await page.goto(`/studio/t/${T}/inbox`);
@@ -84,7 +102,8 @@ test.describe.serial('Approvals inbox (chapter 52)', () => {
       await page.getByLabel('Select all').check();
       answer(page, ['1']);
       await page.getByRole('button', { name: 'Snooze selected' }).click();
-      await expect(page.getByRole('status')).toContainText(`${n} of ${n} done`);
+      // One item goes through the single-item route, which names it.
+      await expect(page.getByRole('status')).toContainText(n === 1 ? 'is snoozed' : `${n} of ${n} done`);
     }
   });
 

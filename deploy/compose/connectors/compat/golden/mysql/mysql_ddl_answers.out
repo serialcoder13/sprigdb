@@ -1,0 +1,56 @@
+a	varchar(1)	utf8mb4_bin	YES		NULL		select,insert,update,references	
+b	varchar(1)	utf8mb4_general_ci	YES		NULL		select,insert,update,references	
+c	varchar(1)	utf8mb4_0900_ai_ci	YES		NULL		select,insert,update,references	
+t	tinytext	utf8mb4_0900_ai_ci	YES		NULL		select,insert,update,references	
+m	mediumtext	utf8mb4_0900_ai_ci	YES		NULL		select,insert,update,references	
+a	utf8mb4_bin	varchar(1)	1
+b	utf8mb4_general_ci	varchar(1)	1
+c	utf8mb4_0900_ai_ci	varchar(1)	1
+t	utf8mb4_0900_ai_ci	tinytext	255
+m	utf8mb4_0900_ai_ci	mediumtext	16777215
+@DB@	CREATE DATABASE `@DB@` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci */ /*!80016 DEFAULT ENCRYPTION='N' */
+ERROR 1824 (HY000): Failed to open the referenced table 'c_md6_missing'
+ERROR 1826 (HY000): Duplicate foreign key constraint name 'c_md6_fk1'
+ERROR 1824 (HY000): Failed to open the referenced table 'c_md6_nope'
+ERROR 1059 (42000): Identifier name 'c_md6_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' is too long
+ERROR 1059 (42000): Identifier name 'c_md6_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' is too long
+ERROR 1059 (42000): Identifier name 'c_md6_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' is too long
+ERROR 1059 (42000): Identifier name 'c_md6_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' is too long
+ERROR 1178 (42000): The storage engine for the table doesn't support descending indexes
+ERROR 1178 (42000): The storage engine for the table doesn't support descending indexes
+ERROR 1178 (42000): The storage engine for the table doesn't support descending indexes
+c_md6_dn	CREATE TABLE `c_md6_dn` (
+  `id` int DEFAULT NULL,
+  `ts` datetime DEFAULT (now()),
+  `ts2` datetime(6) DEFAULT (now(6)),
+  `ts3` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `d` date DEFAULT (curdate()),
+  `lt` datetime DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+id	NULL	
+ts	now()	DEFAULT_GENERATED
+ts2	now(6)	DEFAULT_GENERATED
+ts3	CURRENT_TIMESTAMP	DEFAULT_GENERATED
+d	curdate()	DEFAULT_GENERATED
+lt	CURRENT_TIMESTAMP	DEFAULT_GENERATED
+id	int	NULL	YES		NULL		select,insert,update,references	
+ts	datetime	NULL	YES		now()	DEFAULT_GENERATED	select,insert,update,references	
+ts2	datetime(6)	NULL	YES		now(6)	DEFAULT_GENERATED	select,insert,update,references	
+ts3	timestamp	NULL	YES		CURRENT_TIMESTAMP	DEFAULT_GENERATED	select,insert,update,references	
+d	date	NULL	YES		curdate()	DEFAULT_GENERATED	select,insert,update,references	
+lt	datetime	NULL	YES		now()	DEFAULT_GENERATED	select,insert,update,references	
+a	780A79
+b	615C6E62
+c	69742773
+c_md6_mu	CREATE TABLE `c_md6_mu` (
+  `id` int NOT NULL,
+  `b` varchar(20) DEFAULT NULL,
+  `c` int DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `u` (`b`(10) DESC) COMMENT 'cm',
+  KEY `k` (`c`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+ERROR 1317 (70100): Query execution was interrupted
+after kill
+latin1	latin1_swedish_ci	utf8mb4_0900_ai_ci
+utf8mb4	utf8mb4_0900_ai_ci	utf8mb4_0900_ai_ci

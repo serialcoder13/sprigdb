@@ -140,6 +140,20 @@ impl Hub {
         })
     }
 
+    /// Whether tenant `scope` has a subscription here a keyspace
+    /// notification could reach: a pattern, or a `__key...` channel (RL51:
+    /// the gateway's notifications from the change feed run while one
+    /// does).
+    #[must_use]
+    pub fn keyspace_interest(&self, scope: &str) -> bool {
+        self.with(|h| {
+            h.patterns.keys().any(|(sc, _)| sc == scope)
+                || h.channels
+                    .keys()
+                    .any(|(sc, c)| sc == scope && c.starts_with(b"__key"))
+        })
+    }
+
     /// `PUBSUB CHANNELS` / `SHARDCHANNELS` with an optional pattern.
     #[must_use]
     pub fn channels(&self, scope: &str, pattern: Option<&[u8]>, shard: bool) -> Vec<Bytes> {

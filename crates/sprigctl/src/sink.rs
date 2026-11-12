@@ -270,10 +270,9 @@ fn test_connection_sql(name: &str, platform: bool, write: bool, to: Option<&str>
     if write {
         sql.push_str(" WRITE");
         if let Some(t) = to {
-            sql.push_str(&format!(
-                " TO '{}'",
-                t.replace('\\', "\\\\").replace('\'', "''")
-            ));
+            sql.push_str(" TO '");
+            sql.push_str(&t.replace('\\', "\\\\").replace('\'', "''"));
+            sql.push('\'');
         }
     }
     sql

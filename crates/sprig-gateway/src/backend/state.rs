@@ -136,6 +136,10 @@ pub enum VarValue {
     Text(Vec<u8>),
     /// A binary string.
     Binary(Vec<u8>),
+    /// Text (sent in `utf8mb4`) and the collation the variable held
+    /// (gaps row 57, R4 round 6): replayed with it, so a variable read on
+    /// another backend connection compares as it did where it was set.
+    Collated(Vec<u8>, String),
 }
 
 impl VarValue {
@@ -181,6 +185,34 @@ impl VarValue {
             VarValue::Integer(s) | VarValue::Decimal(s) => s.clone(),
             VarValue::Text(b) => format!("CONVERT(X'{}' USING utf8mb4)", hex(b)),
             VarValue::Binary(b) => format!("X'{}'", hex(b)),
+            VarValue::Collated(b, coll) => {
+                let cs = coll.split('_').next().unwrap_or_default();
+                if cs.eq_ignore_ascii_case("utf8mb4") {
+                    format!("CONVERT(X'{}' USING utf8mb4) COLLATE {coll}", hex(b))
+                } else {
+                    format!(
+                        "CONVERT(CONVERT(X'{}' USING utf8mb4) USING {cs}) COLLATE {coll}",
+                        hex(b)
+                    )
+                }
+            }
+        }
+    }
+
+    /// The value with the collation `COLLATION(@v)` reported, for text
+    /// (gaps row 57). A name that isn't a plain collation name, and
+    /// `binary`, leave the value as it is.
+    #[must_use]
+    pub fn with_collation(self, collation: Option<&[u8]>) -> Self {
+        let Some(c) = collation.and_then(|c| std::str::from_utf8(c).ok()) else {
+            return self;
+        };
+        let plain = !c.is_empty()
+            && c.contains('_')
+            && c.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+        match self {
+            VarValue::Text(b) if plain => VarValue::Collated(b, c.to_owned()),
+            other => other,
         }
     }
 }
@@ -914,6 +946,27 @@ mod tests {
             "CONVERT(X'612762' USING utf8mb4)"
         );
         assert_eq!(VarValue::Binary(vec![0, 255]).literal(), "X'00FF'");
+        // Gaps row 57 (R4 round 6): the variable's collation comes along.
+        assert_eq!(
+            VarValue::Text(b"ab".to_vec())
+                .with_collation(Some(b"utf8mb4_0900_ai_ci"))
+                .literal(),
+            "CONVERT(X'6162' USING utf8mb4) COLLATE utf8mb4_0900_ai_ci"
+        );
+        assert_eq!(
+            VarValue::Text(b"ab".to_vec())
+                .with_collation(Some(b"latin1_swedish_ci"))
+                .literal(),
+            "CONVERT(CONVERT(X'6162' USING utf8mb4) USING latin1) COLLATE latin1_swedish_ci"
+        );
+        assert_eq!(
+            VarValue::Text(b"ab".to_vec()).with_collation(Some(b"x; DROP")),
+            VarValue::Text(b"ab".to_vec())
+        );
+        assert_eq!(
+            VarValue::Binary(b"ab".to_vec()).with_collation(Some(b"binary")),
+            VarValue::Binary(b"ab".to_vec())
+        );
         assert_eq!(
             VarValue::from_column(column_type::LONGLONG, 63, Some(b"-7")).literal(),
             "-7"

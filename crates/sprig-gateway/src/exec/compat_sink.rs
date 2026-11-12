@@ -139,6 +139,13 @@ struct Rows {
     /// value with a marked segment (`sprig_sql::compat::stored::
     /// restore_original`), for statements that can read stored code.
     originals: bool,
+    /// Columns of `exprs` holding a check's clause (R4 round 6).
+    checks: Vec<usize>,
+    /// `SHOW` columns holding collation names (`Collation`,
+    /// `collation_connection`, `Database Collation`, `SHOW CHARACTER
+    /// SET`'s `Default collation`) and `SHOW CREATE
+    /// DATABASE`'s text (R4 round 6, gaps rows 67 and 78): MySQL's names.
+    colls: Vec<usize>,
     /// A traditional `EXPLAIN` (R4 round 3): `partitions` goes in at
     /// [`sprig_sql::compat::explain::PARTITIONS_AT`] (text rows).
     explain: bool,
@@ -202,6 +209,7 @@ impl<'a> IntMetaSink<'a> {
     }
 
     /// Starts a resultset: the client's columns, and the row state.
+    #[allow(clippy::too_many_lines)] // one branch per kind of rewrite
     fn start(&mut self, columns: &[ColumnDef], format: RowFormat) -> Option<Vec<ColumnDef>> {
         self.cur = None;
         // MySQL's twelve EXPLAIN columns (chapter 28, R4 round 3).
@@ -216,6 +224,8 @@ impl<'a> IntMetaSink<'a> {
                 json: Vec::new(),
                 exprs: Vec::new(),
                 originals: false,
+                checks: Vec::new(),
+                colls: Vec::new(),
                 explain: true,
                 tree: None,
             });
@@ -238,6 +248,8 @@ impl<'a> IntMetaSink<'a> {
                 json: Vec::new(),
                 exprs: Vec::new(),
                 originals: false,
+                checks: Vec::new(),
+                colls: Vec::new(),
                 explain: false,
                 tree: Some((analyze, limit)),
             });
@@ -256,23 +268,66 @@ impl<'a> IntMetaSink<'a> {
             .trim_ascii_start()
             .get(..4)
             .is_some_and(|w| w.eq_ignore_ascii_case(b"SHOW"));
-        let exprs: Vec<usize> = after
+        let has = |w: &[u8]| self.sql.windows(w.len()).any(|x| x.eq_ignore_ascii_case(w));
+        // R4 round 6: a check's clause, as MySQL prints it. Clients alias
+        // it (Rails: `cc.check_clause AS expression`, whose metadata names
+        // no table), so in a statement over `CHECK_CONSTRAINTS` its one
+        // long text column is taken for the clause.
+        let over_checks = has(b"CHECK_CONSTRAINTS");
+        let checks: Vec<usize> = after
             .iter()
             .enumerate()
             .filter(|(_, c)| {
-                c.name.eq_ignore_ascii_case(b"expression")
-                    && (show || c.table.eq_ignore_ascii_case(b"STATISTICS"))
+                (c.name.eq_ignore_ascii_case(b"CHECK_CLAUSE")
+                    && c.table.eq_ignore_ascii_case(b"CHECK_CONSTRAINTS"))
+                    || (over_checks
+                        && c.charset != 63
+                        && matches!(
+                            c.col_type,
+                            sprig_proto_mysql::resultset::column_type::BLOB
+                                | sprig_proto_mysql::resultset::column_type::MEDIUM_BLOB
+                                | sprig_proto_mysql::resultset::column_type::LONG_BLOB
+                        ))
             })
             .map(|(i, _)| i)
             .collect();
-        let has = |w: &[u8]| self.sql.windows(w.len()).any(|x| x.eq_ignore_ascii_case(w));
+        let exprs: Vec<usize> = after
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| {
+                (c.name.eq_ignore_ascii_case(b"expression")
+                    && (show || c.table.eq_ignore_ascii_case(b"STATISTICS")))
+                    || checks.contains(i)
+            })
+            .map(|(i, _)| i)
+            .collect();
         let originals = (show && has(b"CREATE"))
             || has(b"ROUTINE")
             || has(b"TRIGGER")
             || has(b"EVENT")
             || has(b"PROC");
+        let colls: Vec<usize> = if show {
+            after
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| {
+                    [
+                        &b"Collation"[..],
+                        b"collation_connection",
+                        b"Database Collation",
+                        b"Default collation",
+                        b"Create Database",
+                    ]
+                    .iter()
+                    .any(|n| c.name.eq_ignore_ascii_case(n))
+                })
+                .map(|(i, _)| i)
+                .collect()
+        } else {
+            Vec::new()
+        };
         let widened = fixed.is_some() && format == RowFormat::Binary;
-        if widened || !json.is_empty() || !exprs.is_empty() || originals {
+        if widened || !json.is_empty() || !exprs.is_empty() || originals || !colls.is_empty() {
             self.cur = Some(Rows {
                 format,
                 before: columns.to_vec(),
@@ -281,6 +336,8 @@ impl<'a> IntMetaSink<'a> {
                 json,
                 exprs,
                 originals,
+                checks,
+                colls,
                 explain: false,
                 tree: None,
             });
@@ -349,13 +406,49 @@ fn expr_value(v: &[u8]) -> Option<Vec<u8>> {
     (p.as_slice() != v).then_some(p)
 }
 
+/// A check's clause (`CHECK_CONSTRAINTS.CHECK_CLAUSE`; 3306's view puts it
+/// in parentheses) as MySQL 8.4 prints it, if that changes it: the
+/// expression printed MySQL's way, each `'` written `\'` (R4 round 6;
+/// Rails compares it, `_utf8mb4'x'` included). MariaDB's text when the
+/// printer doesn't know a construct.
+fn check_value(v: &[u8]) -> Option<Vec<u8>> {
+    let t = std::str::from_utf8(v).ok()?;
+    let inner = t
+        .strip_prefix('(')
+        .and_then(|x| x.strip_suffix(')'))
+        .filter(|x| sprig_sql::compat::exprprint::mysql_expr(x, "utf8mb4").is_some())
+        .unwrap_or(t);
+    let p =
+        sprig_sql::compat::exprprint::mysql_expr(inner, "utf8mb4").unwrap_or_else(|| t.to_owned());
+    let p = p.replace('\'', "\\'").into_bytes();
+    (p.as_slice() != v).then_some(p)
+}
+
+/// A `SHOW` value holding a collation name (or `SHOW CREATE DATABASE`'s
+/// text, `column` names which) with MySQL's names, if that changes it.
+fn coll_value(column: &[u8], v: &[u8]) -> Option<Vec<u8>> {
+    use sprig_sql::compat::schema;
+    let t = std::str::from_utf8(v).ok()?;
+    let m = if column.eq_ignore_ascii_case(b"Create Database") {
+        schema::mysql_create_database(t)
+    } else {
+        schema::mysql_collation_value(t).to_owned()
+    };
+    (m.as_bytes() != v).then(|| m.into_bytes())
+}
+
 impl Rows {
     /// The columns whose values may change.
     fn checked(&self) -> Vec<usize> {
         if self.originals {
             (0..self.after.len()).collect()
         } else {
-            self.json.iter().chain(&self.exprs).copied().collect()
+            self.json
+                .iter()
+                .chain(&self.exprs)
+                .chain(&self.colls)
+                .copied()
+                .collect()
         }
     }
 
@@ -364,7 +457,12 @@ impl Rows {
         if self.originals && sprig_sql::compat::stored::has_original(v) {
             return sprig_sql::compat::stored::restore_original(v);
         }
-        if self.exprs.contains(&i) {
+        if self.colls.contains(&i) {
+            return coll_value(&self.after[i].name, v);
+        }
+        if self.checks.contains(&i) {
+            check_value(v)
+        } else if self.exprs.contains(&i) {
             expr_value(v)
         } else {
             json_value(v)
@@ -391,7 +489,11 @@ impl Rows {
                 Some(encode_text_row(out))
             }
             RowFormat::Text => {
-                if self.json.is_empty() && self.exprs.is_empty() && !self.originals {
+                if self.json.is_empty()
+                    && self.exprs.is_empty()
+                    && self.colls.is_empty()
+                    && !self.originals
+                {
                     return None;
                 }
                 let vals = decode_text_row(payload, self.after.len()).ok()?;
@@ -494,7 +596,10 @@ impl ResultSink for IntMetaSink<'_> {
         }
         // Rows the gateway built (sharded tenants): JSON text values.
         if let (Some(cur), RowValues::Text(vals)) = (&self.cur, &values)
-            && !(cur.json.is_empty() && cur.exprs.is_empty() && !cur.originals)
+            && !(cur.json.is_empty()
+                && cur.exprs.is_empty()
+                && cur.colls.is_empty()
+                && !cur.originals)
         {
             let mut fixed: Vec<Option<Vec<u8>>> = vec![None; vals.len()];
             for i in cur.checked() {
@@ -579,7 +684,7 @@ pub(super) fn prepared_columns(
 
 #[cfg(test)]
 mod tests {
-    use super::expr_value;
+    use super::{check_value, coll_value, expr_value};
 
     #[test]
     fn functional_part_expressions_as_mysql_prints_them() {
@@ -596,5 +701,42 @@ mod tests {
             Some("cast(json_unquote(json_extract(`data`,_utf8mb4\\'$.\"some_key\"\\')) as signed)")
         );
         assert_eq!(p("lower(`title`)"), None);
+    }
+
+    #[test]
+    fn checks_and_collations_as_mysql_prints_them() {
+        // R4 round 6: MySQL 8.4.11's `CHECK_CONSTRAINTS.CHECK_CLAUSE` for
+        // the gateway's (MariaDB 11.8.9's) text.
+        let c = |v: &str| check_value(v.as_bytes()).map(|b| String::from_utf8(b).unwrap());
+        assert_eq!(
+            c("(`name` <> 'forbidden_string')").as_deref(),
+            Some("(`name` <> _utf8mb4\\'forbidden_string\\')")
+        );
+        assert_eq!(
+            c("(`a` * 2 + 1 > 0)").as_deref(),
+            Some("(((`a` * 2) + 1) > 0)")
+        );
+        assert_eq!(c("(((`a` * 2) + 1) > 0)"), None);
+        // `SHOW` values (gaps rows 67 and 78).
+        let v = |col: &str, v: &str| {
+            coll_value(col.as_bytes(), v.as_bytes()).map(|b| String::from_utf8(b).unwrap())
+        };
+        assert_eq!(
+            v("Collation", "utf8mb4_uca1400_ai_ci").as_deref(),
+            Some("utf8mb4_0900_ai_ci")
+        );
+        assert_eq!(v("Collation", "utf8mb4_bin"), None);
+        assert_eq!(v("Collation", "A"), None);
+        assert_eq!(
+            v("Database Collation", "utf8mb4_uca1400_nopad_ai_ci").as_deref(),
+            Some("utf8mb4_0900_ai_ci")
+        );
+        assert!(
+            v(
+                "Create Database",
+                "CREATE DATABASE `d` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_uca1400_ai_ci */"
+            )
+            .is_some_and(|t| t.ends_with("utf8mb4_0900_ai_ci */ /*!80016 DEFAULT ENCRYPTION='N' */"))
+        );
     }
 }

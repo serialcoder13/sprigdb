@@ -135,6 +135,54 @@ pub fn parse(sql: &str) -> Option<Result<DropStmt>> {
     }))
 }
 
+/// `SHOW DEPENDENTS OF {FUNCTION | PROCEDURE} [db.]name` (ST67): what
+/// [`dependents`] finds, one row each, as `DROP ... RESTRICT` would refuse
+/// it and what `CASCADE` would do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShowDependents {
+    /// A function or a procedure.
+    pub kind: Kind,
+    /// The database, if the name was qualified.
+    pub db: Option<String>,
+    /// The name.
+    pub name: String,
+}
+
+/// Parses `SHOW DEPENDENTS OF FUNCTION | PROCEDURE [db.]name`; `None` for
+/// any other statement.
+#[must_use]
+pub fn parse_show_dependents(sql: &str) -> Option<Result<ShowDependents>> {
+    let head: String = sql.chars().take(512).collect();
+    let w = words(&head);
+    if w.len() < 3 || !w[0].eq_ignore_ascii_case("show") || !w[1].eq_ignore_ascii_case("dependents")
+    {
+        return None;
+    }
+    let w = words(sql);
+    let usage = || {
+        SprigError::new(
+            SprigCode::LogicSyntax,
+            "SHOW DEPENDENTS OF FUNCTION | PROCEDURE [db.]name",
+        )
+    };
+    if w.len() != 5 || !w[2].eq_ignore_ascii_case("of") {
+        return Some(Err(usage()));
+    }
+    let kind = match w[3].to_ascii_lowercase().as_str() {
+        "function" => Kind::Function,
+        "procedure" => Kind::Procedure,
+        _ => return Some(Err(usage())),
+    };
+    let (db, name) = match w[4].rsplit_once('.') {
+        Some((d, n)) if !d.is_empty() && !n.is_empty() => (Some(d.to_owned()), n.to_owned()),
+        _ => (None, w[4].clone()),
+    };
+    Some(Ok(ShowDependents { kind, db, name }))
+}
+
+/// `SHOW DEPENDENTS`' columns.
+pub const DEPENDENTS_COLUMNS: [&str; 4] = ["Kind", "Name", "Cascade", "Detail"];
+
 /// What uses a function or procedure.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Dependents {
@@ -156,6 +204,50 @@ impl Dependents {
             && self.sinks.is_empty()
             && self.columns.is_empty()
             && self.callers.is_empty()
+    }
+
+    /// One row per dependent for `SHOW DEPENDENTS` ([`DEPENDENTS_COLUMNS`]):
+    /// its kind (`schedule`, `sink`, `column`, `caller`), its name, what
+    /// `CASCADE` does to it (`dropped`, `refused`, `kept`) and why, in
+    /// the order `DROP`'s refusal lists them.
+    #[must_use]
+    pub fn rows(&self) -> Vec<[String; 4]> {
+        let mut out = Vec::new();
+        for (_, n) in &self.schedules {
+            out.push([
+                "schedule".into(),
+                n.clone(),
+                "dropped".into(),
+                "the schedule calls it and is dropped with it".into(),
+            ]);
+        }
+        for n in &self.sinks {
+            out.push([
+                "sink".into(),
+                n.clone(),
+                "refused".into(),
+                "its TRANSFORM: CASCADE doesn't drop sinks, so ALTER SINK or DROP SINK first"
+                    .into(),
+            ]);
+        }
+        for (_, n) in &self.columns {
+            out.push([
+                "column".into(),
+                n.clone(),
+                "kept".into(),
+                "a computed column made from it: it keeps its own expression; the link is removed"
+                    .into(),
+            ]);
+        }
+        for n in &self.callers {
+            out.push([
+                "caller".into(),
+                n.clone(),
+                "kept".into(),
+                "its code calls it: kept, and those calls fail with 39860".into(),
+            ]);
+        }
+        out
     }
 
     fn list(&self) -> String {
@@ -455,6 +547,56 @@ mod tests {
         assert!(parse("DROP TRIGGER a, b").is_none());
         assert!(parse("SELECT 1").is_none());
         assert!(parse("DROP FUNCTION").is_none());
+    }
+
+    #[test]
+    fn show_dependents_parses_and_lists() {
+        let d = parse_show_dependents("SHOW DEPENDENTS OF FUNCTION shop.rate;")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            d,
+            ShowDependents {
+                kind: Kind::Function,
+                db: Some("shop".into()),
+                name: "rate".into()
+            }
+        );
+        let p = parse_show_dependents("show dependents of procedure `nightly`")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (p.kind, p.db, p.name.as_str()),
+            (Kind::Procedure, None, "nightly")
+        );
+        assert!(
+            parse_show_dependents("SHOW DEPENDENTS OF TABLE t")
+                .unwrap()
+                .is_err()
+        );
+        assert!(parse_show_dependents("SHOW DEPENDENTS f").unwrap().is_err());
+        assert!(parse_show_dependents("SHOW DATABASES").is_none());
+        let deps = Dependents {
+            schedules: vec![(7, "nightly".into())],
+            sinks: vec!["out".into()],
+            columns: vec![(3, "orders.total".into())],
+            callers: vec!["function other".into()],
+        };
+        let rows = deps.rows();
+        let kinds: Vec<(&str, &str, &str)> = rows
+            .iter()
+            .map(|r| (r[0].as_str(), r[1].as_str(), r[2].as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("schedule", "nightly", "dropped"),
+                ("sink", "out", "refused"),
+                ("column", "orders.total", "kept"),
+                ("caller", "function other", "kept"),
+            ]
+        );
+        assert!(Dependents::default().rows().is_empty());
     }
 
     #[test]

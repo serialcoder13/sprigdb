@@ -102,7 +102,8 @@ fn limits(ts: &TenantSession, cat: &TenantCatalog) -> Limits {
 
 /// The copies of `cat`'s objects and their states (chapter 42,
 /// "Materialized copies"), read as the provisioning account at most once
-/// a second per tenant.
+/// a second per tenant and catalog version (a schema change that keeps a
+/// copy serving, decision T20, is seen by the next statement).
 async fn copy_states(
     ts: &TenantSession,
     cat: &TenantCatalog,
@@ -111,7 +112,7 @@ async fn copy_states(
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
-    type Cached = (Instant, sprig_inherit::copy::CopyStates);
+    type Cached = (Instant, u64, sprig_inherit::copy::CopyStates);
     static CACHE: OnceLock<Mutex<HashMap<u64, Cached>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let schemas = sprig_inherit::copy::copy_schemas(
@@ -123,8 +124,9 @@ async fn copy_states(
         return sprig_inherit::copy::CopyStates::default();
     }
     if let Ok(c) = cache.lock()
-        && let Some((at, st)) = c.get(&cat.tenant.0)
+        && let Some((at, v, st)) = c.get(&cat.tenant.0)
         && at.elapsed() < Duration::from_secs(1)
+        && *v == cat.version
     {
         return st.clone();
     }
@@ -141,7 +143,7 @@ async fn copy_states(
         }
     }
     if let Ok(mut c) = cache.lock() {
-        c.insert(cat.tenant.0, (Instant::now(), out.clone()));
+        c.insert(cat.tenant.0, (Instant::now(), cat.version, out.clone()));
     }
     out
 }
@@ -281,10 +283,9 @@ impl PassSession {
         };
         let migrated = state.migrated && state.ext_ready;
         // A type plan's statement keeps its mode once the plan here ran.
-        let saved = self
-            .tenant
-            .as_deref()
-            .map_or((false, false), |ts| (ts.types.internal, ts.types.typed_plan));
+        let saved = self.tenant.as_deref().map_or((false, false), |ts| {
+            (ts.types.internal, ts.types.typed_plan)
+        });
         let handled = {
             let mut runner = InhRunner {
                 gw: GwRunner {

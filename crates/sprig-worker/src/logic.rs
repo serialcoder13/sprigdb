@@ -178,7 +178,7 @@ impl Clusters for RegistryClusters {
 }
 
 /// The tenant catalog's pool, for the feed's name resolver.
-struct Catalogs(Arc<ShardMapLocator>);
+pub(crate) struct Catalogs(pub(crate) Arc<ShardMapLocator>);
 
 #[async_trait]
 impl CatalogPools for Catalogs {
@@ -248,7 +248,6 @@ impl DefinerGuard {
 
     /// `[before, after]` visible to `definer`, checked on a gateway.
     async fn visible(&self, definer: u32, ev: &triggers::TriggerEvent) -> Result<(bool, bool)> {
-        use sprig_sinks::peer::{ImageTable, RunAs, SqlOp, images_answer};
         let wait = |why: &str| {
             let mut e = SprigError::new(
                 SprigCode::RlsUnsupported,
@@ -266,45 +265,15 @@ impl DefinerGuard {
         let Some((peer, global)) = &self.gateways else {
             return Err(wait("this worker reaches no gateway to check the event"));
         };
-        let img = |i: Option<&sprig_feed::Image>| match i.map(sprig_streams::envelope::image_json) {
-            Some(Value::Object(m)) => Some(m),
-            _ => None,
-        };
-        let (before, after) = (img(feed.before.as_ref()), img(feed.after.as_ref()));
-        let mut images = Vec::new();
-        let bi = before.map(|m| {
-            images.push(Some(m));
-            images.len() - 1
-        });
-        let ai = after.map(|m| {
-            images.push(Some(m));
-            images.len() - 1
-        });
-        let tables = vec![ImageTable {
-            db: feed.db_name.clone(),
-            table: feed.table.clone(),
-            images,
-        }];
-        let run_as = RunAs {
-            tenant: self.tenant.0,
-            tenant_name: sprig_sinks::peer::tenant_name(global.as_ref(), self.tenant.0).await?,
-            user_id: definer,
-            database: String::new(),
-        };
-        let reply = peer
-            .sql(
-                self.binding_id,
-                &run_as.request(SqlOp::Images {
-                    tables: tables.clone(),
-                }),
-            )
-            .await?
-            .ok()?;
-        let seen = images_answer(&tables, &reply);
-        let v = |i: Option<usize>| {
-            i.is_some_and(|i| seen.first().and_then(|t| t.get(i)).copied().unwrap_or(false))
-        };
-        Ok((v(bi), v(ai)))
+        crate::change_exchange::visible_to(
+            peer.as_ref(),
+            global.as_ref(),
+            self.tenant,
+            definer,
+            self.binding_id,
+            feed,
+        )
+        .await
     }
 }
 

@@ -586,6 +586,17 @@ impl PassSession {
                 return Ok(step);
             }
         }
+        // ST67: `SHOW DEPENDENTS OF FUNCTION | PROCEDURE`, what that DROP
+        // would find, as rows.
+        if self
+            .tenant
+            .as_deref()
+            .is_some_and(|ts| !ts.principal.must_change_password)
+            && let Some(d) =
+                sprig_logic::drop::parse_show_dependents(&String::from_utf8_lossy(text))
+        {
+            return Box::pin(self.tenant_logic_dependents(cx, d, more, format, out)).await;
+        }
         let charset = cx.proto.collation;
         let previous_warnings = self.tenant.as_deref_mut().and_then(|ts| ts.warnings.take());
         let Some(ts) = self.tenant.as_deref_mut() else {
@@ -888,10 +899,16 @@ impl PassSession {
             // Chapter 45: `stream.change_topic` creates or drops the change
             // topic (R9).
             let r = match r {
-                Ok(SettingsAnswer::Ok { warnings }) => self
-                    .streams_after_settings(text)
-                    .await
-                    .map(|()| SettingsAnswer::Ok { warnings }),
+                Ok(SettingsAnswer::Ok { warnings }) => {
+                    match self.streams_after_settings(text).await {
+                        // Chapter 50 (RL52): `queue.change_exchange` starts or
+                        // stops the table's forwarder.
+                        Ok(()) => Box::pin(self.change_exchange_after_settings(text))
+                            .await
+                            .map(|()| SettingsAnswer::Ok { warnings }),
+                        Err(e) => Err(e),
+                    }
+                }
                 other => other,
             };
             let s = status(self.status());
@@ -1015,6 +1032,18 @@ impl PassSession {
             }
             Ok(None) => text,
             Err(e) => return self.fail(out, &e).await,
+        };
+        // MySQL's answers to DDL that need a lookup: long names, descending
+        // parts of MyISAM tables, a column of a multi-column unique index
+        // (chapter 28, R4 round 6; exec/mysql_ddl.rs).
+        let ddl_owned;
+        let text: &Bytes = match Box::pin(self.mysql_ddl_checks(cx, text)).await {
+            super::mysql_ddl::DdlCheck::Run => text,
+            super::mysql_ddl::DdlCheck::Rewritten(t) => {
+                ddl_owned = t;
+                &ddl_owned
+            }
+            super::mysql_ddl::DdlCheck::Refused(e) => return self.fail(out, &e).await,
         };
         // 3306: a LATERAL the text rewrite left, applied in the gateway
         // (chapter 28 step 9, R4 round 4).
@@ -1809,6 +1838,8 @@ impl PassSession {
                 }))
             }
             Err(e) => {
+                // MySQL's foreign key errors (chapter 28, R4 round 6).
+                let e = Box::pin(self.mysql_ddl_error(cx, original, e)).await;
                 let accounts = Accounts(self.tenant.as_deref().and_then(|t| t.auth()));
                 let octx = OutputCtx::new(&*map).accounts(&accounts);
                 let e = map_error(e, &octx);
@@ -2118,7 +2149,15 @@ impl PassSession {
         if ts.principal.must_change_password {
             return Err(must_reset());
         }
-        ts.refresh().await?;
+        let cat = ts.refresh().await?;
+        // Chapter 42 (bugfix-43): a database a parent has just shared is
+        // the child's before its first statement, as in `tenant_text`: a
+        // client connecting with it as its default database, or sending
+        // COM_INIT_DB first, got 1049 until a statement ran.
+        Box::pin(self.inherit_adopt(cat)).await?;
+        let Some(ts) = self.tenant.as_deref_mut() else {
+            return Err(SprigError::internal("no tenant"));
+        };
         let schema = if let Some(s) = SystemSchema::parse(name) {
             // R4 round 5 (gaps row 68): on 3306 the gateway answers
             // `performance_schema` and `sys`, so `USE` of either succeeds
@@ -2305,7 +2344,13 @@ impl PassSession {
         if let Some(columns) = keep {
             return Ok(self.prepared_deferred(sql, columns));
         }
-        ts.refresh().await?;
+        let cat = ts.refresh().await?;
+        // Chapter 42 (bugfix-43): as `tenant_text`, the tables a parent
+        // shares are the child's before the statement is prepared.
+        Box::pin(self.inherit_adopt(cat)).await?;
+        let Some(ts) = self.tenant.as_deref_mut() else {
+            return Err(SprigError::internal("no tenant"));
+        };
         // Chapter 32: prepared statements on typed tables come later.
         if let Some(e) = super::types::prepare_refusal(ts, &sql, lex) {
             return Err(e);

@@ -218,21 +218,44 @@ fn column_type(expr: &str, lit: Lit<'_>) -> String {
 
 /// `COLUMN_DEFAULT` as MySQL shows it: literals unquoted, no default and
 /// `DEFAULT NULL` both `NULL`, `CURRENT_TIMESTAMP` in capitals.
+///
+/// R4 round 6 (gaps row 78): a literal's escapes are undone as well
+/// (MariaDB writes a newline `\n`, a carriage return `\r` and a backslash
+/// `\\`; MySQL shows the characters), and `localtimestamp(n)`, which an
+/// expression default `(now(n))` becomes on 3306 ([`super::mysqlddl`]),
+/// reads `now(n)`.
 fn column_default(lit: Lit<'_>) -> String {
     let d = "`COLUMN_DEFAULT`";
+    // A backslash first becomes NUL, which MariaDB never leaves raw in the
+    // quoted text (it writes `\0`), so `\\n` stays a backslash and `n`.
+    let body = format!("SUBSTRING({d}, 2, CHAR_LENGTH({d}) - 2)");
+    let unescaped = format!(
+        "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE({body}, {bs2}, {nul}), {nl_esc}, {nl}), \
+         {cr_esc}, {cr}), {two}, {one}), {nul}, {bs})",
+        bs2 = lit("\\\\"),
+        nul = lit("\0"),
+        nl_esc = lit("\\n"),
+        nl = lit("\n"),
+        cr_esc = lit("\\r"),
+        cr = lit("\r"),
+        two = lit("''"),
+        one = lit("'"),
+        bs = lit("\\"),
+    );
     format!(
         "CASE WHEN {d} IS NULL OR {d} = {null} THEN NULL \
-         WHEN {d} LIKE {quoted} THEN REPLACE(SUBSTRING({d}, 2, CHAR_LENGTH({d}) - 2), {two}, {one}) \
+         WHEN {d} LIKE {quoted} THEN {unescaped} \
          WHEN {d} = {now} THEN {now_mysql} \
          WHEN {d} REGEXP {now_n} THEN UPPER({d}) \
+         WHEN {d} REGEXP {local_n} THEN CONCAT({now_fn}, SUBSTRING({d}, 15)) \
          ELSE {d} END",
         null = lit("NULL"),
         quoted = lit("'%'"),
-        two = lit("''"),
-        one = lit("'"),
         now = lit("current_timestamp()"),
         now_mysql = lit("CURRENT_TIMESTAMP"),
         now_n = lit(r"^current_timestamp\([0-6]\)$"),
+        local_n = lit(r"^localtimestamp\([0-6]?\)$"),
+        now_fn = lit("now"),
     )
 }
 
@@ -1118,6 +1141,25 @@ fn mysql_collations(s: &str) -> String {
     out
 }
 
+/// `SHOW CREATE DATABASE` text as MySQL 8.4 prints it on 3306: MySQL's
+/// collation names and its `/*!80016 DEFAULT ENCRYPTION='N' */` (R4 round
+/// 6; Rails reads the collation to decide which columns' it dumps).
+#[must_use]
+pub fn mysql_create_database(text: &str) -> String {
+    let mut out = mysql_collations(text);
+    if out.starts_with("CREATE DATABASE") && !out.contains("ENCRYPTION") {
+        out.push_str(" /*!80016 DEFAULT ENCRYPTION='N' */");
+    }
+    out
+}
+
+/// A collation name as a client of 3306 sees it in `SHOW` output
+/// (`Collation`, `collation_connection`, `Database Collation`).
+#[must_use]
+pub fn mysql_collation_value(v: &str) -> &str {
+    collation::mysql_name(v)
+}
+
 /// One column line of `SHOW CREATE TABLE` in MySQL 8.4's spelling.
 fn mysql_column_line(line: &str) -> String {
     let Some((name, at)) = column_line_name(line) else {
@@ -1152,7 +1194,67 @@ fn mysql_column_line(line: &str) -> String {
     if let Some(b) = body.strip_suffix(" INVISIBLE") {
         rest = format!("{b} /*!80023 INVISIBLE */{comma}");
     }
-    format!("{head}{}", mysql_now(&rest))
+    format!("{head}{}", expression_default(&mysql_now(&rest)))
+}
+
+/// A column's `DEFAULT name(...)` as MySQL 8.4 prints an expression
+/// default, in parentheses (`DEFAULT (curdate())`), with `localtimestamp`
+/// (what `DEFAULT (now())` becomes on 3306, [`super::mysqlddl`]) read
+/// `now`. MariaDB prints a lone function call without them. The special
+/// `CURRENT_TIMESTAMP` default stays as it is (R4 round 6, gaps row 78).
+fn expression_default(rest: &str) -> String {
+    let Some(at) = rest.find(" DEFAULT ") else {
+        return rest.to_owned();
+    };
+    let start = at + " DEFAULT ".len();
+    let tail = &rest[start..];
+    let name_len = tail
+        .bytes()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == b'_')
+        .count();
+    if name_len == 0
+        || !tail[name_len..].starts_with('(')
+        || tail.as_bytes()[0].is_ascii_digit()
+        || tail[..name_len].eq_ignore_ascii_case("CURRENT_TIMESTAMP")
+    {
+        return rest.to_owned();
+    }
+    // The `)` closing the call, skipping quoted text.
+    let bytes = tail.as_bytes();
+    let mut depth = 0usize;
+    let mut quoted: Option<u8> = None;
+    let mut end = None;
+    let mut i = name_len;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if let Some(q) = quoted {
+            if c == b'\\' {
+                i += 1;
+            } else if c == q {
+                quoted = None;
+            }
+        } else if matches!(c, b'\'' | b'"' | b'`') {
+            quoted = Some(c);
+        } else if c == b'(' {
+            depth += 1;
+        } else if c == b')' {
+            depth -= 1;
+            if depth == 0 {
+                end = Some(i + 1);
+                break;
+            }
+        }
+        i += 1;
+    }
+    let Some(end) = end else {
+        return rest.to_owned();
+    };
+    let call = if tail[..name_len].eq_ignore_ascii_case("localtimestamp") {
+        format!("now{}", &tail[name_len..end])
+    } else {
+        tail[..end].to_owned()
+    };
+    format!("{}({call}){}", &rest[..start], &tail[end..])
 }
 
 /// `SHOW CREATE TABLE` text in MySQL 8.4's spelling, for 3306: JSON

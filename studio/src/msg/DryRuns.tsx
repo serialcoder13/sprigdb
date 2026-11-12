@@ -1,23 +1,26 @@
 // Dry runs for connections and sinks (chapter 44 step 30; chapter 51,
-// "Testing connections and sinks"; Studio round 6, R9 items 104–105):
+// "Testing connections and sinks"; Studio rounds 6 and 7, R9 items 104–105):
 //
-// - `TEST CONNECTION c` opens the destination as a sink would and answers
-//   one row per step (credentials, options, connect, metadata, ...), each
-//   `ok` or `failed` with the destination's own message and the time;
-// - `TEST CONNECTION c WRITE [TO 'target']` also writes one marked test
-//   record, so it is shown first, like any change;
-// - a new connection is tested before it is saved under a scratch name:
-//   CREATE (credentials masked on screen), TEST, DROP, whatever the test
-//   found;
-// - `TEST SINK s WITH SAMPLE n` runs the sink's WHERE, columns and
-//   TRANSFORM over the source's latest records and shows each record's
-//   outcome, delivering nothing and moving no position.
+// - a saved connection's test is `Connections.Test` (`POST .../connections/
+//   {name}:test`, TEST CONNECTION as the caller): one row per step
+//   (credentials, options, connect, metadata, ...), each `ok` or `failed`
+//   with the destination's own message and the time;
+// - with `write`, it also writes one marked test record, so it is shown
+//   first, like any change;
+// - a new connection is tested before it is saved with `TEST CREATE
+//   CONNECTION ...` (ST68): the same steps, nothing created; shown first,
+//   credentials masked;
+// - a saved sink's dry run is `Sinks.Test` (`POST .../sinks/{name}:test`,
+//   TEST SINK WITH SAMPLE n): the sink's WHERE, columns and TRANSFORM over
+//   the source's latest records, each record's outcome, delivering nothing
+//   and moving no position; a new sink's is `TEST CREATE SINK ... WITH
+//   SAMPLE n` (ST69).
 
 import { useEffect, useRef, useState } from 'react';
+import { json } from '../api/client';
 import { errorText } from '../api/errors';
-import { execute } from '../api/sql';
 import { Generic, table, useStatement, type Table } from './MessagingPage';
-import { dropConnection, outcomes, stepRows, testConnection, testSink, type StepRow } from './statements';
+import { outcomes, stepRows, testConnection, testNewSink, type StepRow } from './statements';
 
 export function StepTable({ steps, testid = 'conn-test-steps' }: Readonly<{ steps: StepRow[]; testid?: string }>) {
   const failed = steps.filter((s) => !s.ok).length;
@@ -54,9 +57,26 @@ export function StepTable({ steps, testid = 'conn-test-steps' }: Readonly<{ step
   );
 }
 
-async function steps(db: string, sql: string): Promise<StepRow[]> {
+export async function steps(db: string, sql: string): Promise<StepRow[]> {
   const t = await table(db, sql);
   return stepRows(t.columns, t.rows);
+}
+
+type Reply = { columns: string[]; rows: (string | null)[][] };
+const base = (db: string, kind: 'sinks' | 'connections', name: string) =>
+  `/v1/databases/${encodeURIComponent(db)}/${kind}/${encodeURIComponent(name)}:test`;
+
+/** `Connections.Test` (r9last's route): TEST CONNECTION [WRITE [TO 'to']] as the caller. */
+async function connectionTest(db: string, name: string, write: { to: string } | null): Promise<StepRow[]> {
+  const body = write ? { write: true, ...(write.to.trim() ? { to: write.to.trim() } : {}) } : {};
+  const r = await json<Reply>(base(db, 'connections', name), { body });
+  return stepRows(r.columns, r.rows);
+}
+
+/** `Sinks.Test` (r9last's route): TEST SINK WITH SAMPLE n as the caller. */
+async function sinkTest(db: string, name: string, sample: number): Promise<Table> {
+  if (!Number.isInteger(sample) || sample < 1 || sample > 1000) throw new Error('sample 1 to 1,000 records');
+  return json<Reply>(base(db, 'sinks', name), { body: { sample } });
 }
 
 /** "Test connection" and "Write a test record" on a saved connection. */
@@ -70,11 +90,12 @@ export function ConnectionTest({ db, name, autoRun = 0 }: Readonly<{ db: string;
   const run = async (write: boolean) => {
     setErr(null);
     setOut(null);
+    // The statement Connections.Test runs, shown before a write.
     const sql = testConnection(name, write ? { to } : null);
     if (write && !(await st.ask(sql, 'This writes one marked test record to the destination (a webhook request, a Kafka record, an S3 object deleted again).'))) return;
     setBusy(true);
     try {
-      setOut({ steps: await steps(db, sql), write });
+      setOut({ steps: await connectionTest(db, name, write ? { to } : null), write });
     } catch (e) {
       setErr(errorText(e));
     } finally {
@@ -115,34 +136,27 @@ export function ConnectionTest({ db, name, autoRun = 0 }: Readonly<{ db: string;
   );
 }
 
-/**
- * Tests an unsaved connection: CREATE under a scratch name, TEST, DROP.
- * `create` is the statement sent, `shown` the one on screen (credentials
- * masked); both name `scratch`.
- */
-export async function testUnsaved(db: string, scratch: string, create: string): Promise<{ steps: StepRow[]; dropped: boolean }> {
-  await execute(db, create);
-  let found: StepRow[] = [];
-  let failure: Error | null = null;
-  try {
-    found = await steps(db, testConnection(scratch));
-  } catch (e) {
-    failure = e instanceof Error ? e : new Error(errorText(e));
-  }
-  let dropped = true;
-  try {
-    await execute(db, dropConnection(scratch));
-  } catch {
-    dropped = false;
-  }
-  if (failure) throw failure;
-  return { steps: found, dropped };
-}
-
 const OUTCOME_ORDER = ['deliver', 'filtered', 'dropped', 'failed'];
 
-/** `TEST SINK s WITH SAMPLE n`: what the sink would deliver now. */
-export function SinkDryRun({ db, name }: Readonly<{ db: string; name: string }>) {
+function Outcomes({ out, tid }: Readonly<{ out: Table; tid: string }>) {
+  const counts = outcomes(out.columns, out.rows);
+  return (
+    <>
+      <p role="status" data-testid={`${tid}-summary`}>
+        {out.rows.length
+          ? [...OUTCOME_ORDER.filter((k) => counts[k]), ...Object.keys(counts).filter((k) => !OUTCOME_ORDER.includes(k))].map((k) => `${counts[k]} ${k}`).join(', ')
+          : 'The source has no records to sample.'}
+      </p>
+      {out.rows.length > 0 && <Generic t={out} testid={`${tid}-rows`} />}
+    </>
+  );
+}
+
+/**
+ * A dry run: a saved sink's (`Sinks.Test`), or with `create`, the `CREATE
+ * SINK` statement of a sink not saved yet (`TEST CREATE SINK`, ST69).
+ */
+export function SinkDryRun({ db, name, create }: Readonly<{ db: string; name: string; create?: () => string }>) {
   const [sample, setSample] = useState('10');
   const [out, setOut] = useState<Table | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -152,28 +166,29 @@ export function SinkDryRun({ db, name }: Readonly<{ db: string; name: string }>)
     setOut(null);
     setBusy(true);
     try {
-      setOut(await table(db, testSink(name, Number(sample))));
+      const n = Number(sample);
+      setOut(create ? await table(db, testNewSink(create(), n)) : await sinkTest(db, name, n));
     } catch (e) {
       setErr(errorText(e));
     } finally {
       setBusy(false);
     }
   };
-  const counts = out ? outcomes(out.columns, out.rows) : null;
+  const tid = create ? 'sink-new-dry' : 'sink-dry';
   return (
-    <section className="stack" aria-labelledby="sink-dry-h" data-testid="sink-dry-run">
-      <h3 id="sink-dry-h" style={{ margin: 0 }}>
-        Dry run
+    <section className="stack" aria-labelledby={`${tid}-h`} data-testid={`${tid}-run`}>
+      <h3 id={`${tid}-h`} style={{ margin: 0 }}>
+        {create ? 'Dry run before creating' : 'Dry run'}
       </h3>
       <p className="muted">
         Runs the sink&apos;s WHERE, columns and TRANSFORM over the source&apos;s latest records (a stream&apos;s newest, a queue&apos;s next, browsed
-        and not taken). Nothing is delivered and no position moves.
+        and not taken). Nothing is delivered and no position moves{create ? '; nothing is created' : ''}.
       </p>
       <div className="row">
         <label className="row">
-          Records <input value={sample} onChange={(e) => setSample(e.target.value)} size={5} inputMode="numeric" data-testid="sink-dry-sample" />
+          Records <input value={sample} onChange={(e) => setSample(e.target.value)} size={5} inputMode="numeric" data-testid={`${tid}-sample`} />
         </label>
-        <button onClick={() => void run()} disabled={busy} data-testid="sink-dry-run-go">
+        <button type="button" onClick={() => void run()} disabled={busy} data-testid={`${tid}-run-go`}>
           Dry run
         </button>
         {busy && <span className="muted">Running…</span>}
@@ -183,14 +198,7 @@ export function SinkDryRun({ db, name }: Readonly<{ db: string; name: string }>)
           {err}
         </p>
       )}
-      {counts && (
-        <p role="status" data-testid="sink-dry-summary">
-          {out!.rows.length
-            ? [...OUTCOME_ORDER.filter((k) => counts[k]), ...Object.keys(counts).filter((k) => !OUTCOME_ORDER.includes(k))].map((k) => `${counts[k]} ${k}`).join(', ')
-            : 'The source has no records to sample.'}
-        </p>
-      )}
-      {out && out.rows.length > 0 && <Generic t={out} testid="sink-dry-rows" />}
+      {out && <Outcomes out={out} tid={tid} />}
     </section>
   );
 }

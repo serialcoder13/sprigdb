@@ -27,6 +27,7 @@ pub mod fanin_sink;
 pub mod fanin_triggers;
 pub mod lifecycle;
 pub mod mq;
+pub mod orphan_sinks;
 pub mod outbox;
 pub mod sinks;
 pub mod streams;

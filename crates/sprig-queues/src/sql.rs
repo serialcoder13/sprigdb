@@ -58,7 +58,9 @@ pub enum MqCall {
     Ack,
     /// `sprig.mq_nack(token, requeue)`.
     Nack,
-    /// `sprig.mq_info(queue [, vhost])`: ready, consumers, unacked (ST50).
+    /// `sprig.mq_info(queue [, vhost])`: ready, consumers, unacked (ST50);
+    /// with no queue (`mq_info()`, `mq_info(NULL, vhost)`), one row per
+    /// queue the user may read (ST66).
     Info,
     /// `sprig.mq_browse(queue [, max [, vhost]])`: messages, not consumed.
     Browse,
@@ -749,6 +751,52 @@ impl SqlVhost {
         })
     }
 
+    /// `mq_info` for every durable queue of the vhost the user may read
+    /// (`CALL sprig.mq_info(NULL [, vhost])`; ST66), in name order: one call
+    /// answers a page of queues. Queues the user may not read are left out,
+    /// and so is a queue dropped while the call runs.
+    ///
+    /// # Errors
+    /// 39261 (engine stopped), the catalog's, the store's.
+    pub async fn info_all(&self) -> Result<Vec<(String, QueueInfo)>, MqError> {
+        use futures::StreamExt as _;
+        let e = self
+            .v
+            .engine
+            .upgrade()
+            .ok_or_else(|| MqError::new(MqCode::OwnerMoved, "engine stopped"))?;
+        let topo = e.deps.catalog.refresh(&self.v.r).await?;
+        let mut names: Vec<String> = topo
+            .queues
+            .keys()
+            .filter(|n| {
+                e.deps
+                    .catalog
+                    .allowed(&self.cx.principal, &self.v.r, Perm::Read, "queue", n)
+            })
+            .cloned()
+            .collect();
+        drop(e);
+        names.sort();
+        let answers: Vec<_> = futures::stream::iter(names)
+            .map(|n| async move {
+                let i = self.info(&n).await;
+                (n, i)
+            })
+            .buffered(8)
+            .collect()
+            .await;
+        let mut out = Vec::with_capacity(answers.len());
+        for (n, i) in answers {
+            match i {
+                Ok(i) => out.push((n, i)),
+                Err(err) if matches!(err.code, MqCode::NotFound | MqCode::AccessRefused) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(out)
+    }
+
     /// Whether the session's user may consume the queue `t` names (the
     /// right `mq_get` checks: read, which for a queue is `SELECT` and
     /// `DELETE` on it or its database). R9 (r9tests): an acknowledgement
@@ -1022,6 +1070,12 @@ mod tests {
         // R9 (r9cluster, ST50): queue pages' calls.
         let p = |s: &str| parse_call(s).map(|c| (c.call, c.args.len()));
         assert_eq!(p("CALL sprig.mq_info('q')"), Some((MqCall::Info, 1)));
+        // ST66: every queue of a vhost in one call.
+        assert_eq!(p("CALL sprig.mq_info()"), Some((MqCall::Info, 0)));
+        assert_eq!(
+            p("CALL sprig.mq_info(NULL, 'shop')"),
+            Some((MqCall::Info, 2))
+        );
         assert_eq!(
             p("CALL sprig.mq_browse('q', 50, 'mq')"),
             Some((MqCall::Browse, 3))

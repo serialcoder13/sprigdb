@@ -200,3 +200,70 @@ async fn the_poller_leaves_young_publishes_to_the_feed() {
     assert!(start.elapsed() < Duration::from_millis(1_000));
     conn.close(0, "done".into()).await.unwrap();
 }
+
+/// bugfix-42 (`live_forward`'s commit-order inversions): the fallback read
+/// late transactional publishes in insert order while the feed was still
+/// forwarding them in commit order, and the two raced into the queue. Now,
+/// while the feed-driven forwarder runs, the fallback leaves a publish to
+/// it until the publish is older than `FALLBACK_WHILE_FEED_RUNS_MS` (30 s);
+/// when the forwarder stops, `queue.forward_fallback_ms` applies again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_fallback_leaves_late_publishes_to_a_running_feed() {
+    let s = server_with(QueueSettings {
+        forward_feed: true,
+        forward_fallback_ms: 300,
+        ..QueueSettings::default()
+    })
+    .await;
+    let Some(cat) = s.catalog.as_ref() else {
+        return; // an external server: nothing to switch
+    };
+    cat.set_feed_forwarder_runs(true);
+    let e = Arc::clone(s.engine.as_ref().unwrap());
+    let conn = lapin(&s).await;
+    let ch = conn.create_channel().await.unwrap();
+    let q = uniq("fwd-feed-runs");
+    declare(&ch, &q).await;
+    let v = vhost(&e).await;
+    v.ensure_store().await.unwrap();
+    let store = cat.store_of(42, "mq").unwrap();
+    // One publish past the 300 ms fallback delay, one past the 30 s
+    // (a run the feed gave up on): only the second is the fallback's.
+    let late = row(&v, &q, "late").await;
+    let mut given_up = row(&v, &q, "given-up").await;
+    let now_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let wait = i64::try_from(sprig_queues::engine::FALLBACK_WHILE_FEED_RUNS_MS).unwrap();
+    let mut old = sprig_queues::store::msg_id_floor(now_ms - wait - 10_000);
+    old[15] = 1;
+    given_up.out_id = old;
+    store.put_outbox(vec![late.clone(), given_up]);
+    v.committed();
+    let start = Instant::now();
+    let mut got = Vec::new();
+    while start.elapsed() < Duration::from_millis(1_500) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        got.extend(drain(&ch, &q).await);
+    }
+    assert_eq!(
+        got,
+        ["given-up"],
+        "while the feed runs, a 1.5 s old publish stays the feed's"
+    );
+    assert_eq!(store.outbox_len(), 1);
+    // The forwarder stops: the fallback takes the row after its delay.
+    cat.set_feed_forwarder_runs(false);
+    let start = Instant::now();
+    while got.len() < 2 && start.elapsed() < Duration::from_secs(5) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        got.extend(drain(&ch, &q).await);
+    }
+    assert_eq!(got, ["given-up", "late"]);
+    assert_eq!(store.outbox_len(), 0);
+    conn.close(0, "done".into()).await.unwrap();
+}

@@ -340,9 +340,9 @@ impl PassSession {
             let r = match gate {
                 Some(f) => {
                     let mut gated = crate::failover::GatedSink::new(&mut fs, f);
-                    self.run_request(cx, req.clone(), &mut gated).await
+                    Box::pin(self.run_request(cx, req.clone(), &mut gated)).await
                 }
-                None => self.run_request(cx, req.clone(), &mut fs).await,
+                None => Box::pin(self.run_request(cx, req.clone(), &mut fs)).await,
             };
             let (sent, held) = (fs.sent(), fs.take_held());
             drop(fs);

@@ -10,6 +10,8 @@
 //! don't run here yet.
 
 // Chapter 43 (R8): the asynchronous graph mirror applier.
+// RLS round 5 (RL52): `queue.change_exchange` forwarders.
+pub mod change_exchange;
 pub mod graph_mirror;
 pub mod inherit;
 // Chapter 33 (R6): the key-value expiry and old-generation sweeper.
@@ -283,6 +285,13 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         .with_handler(Arc::new(logic::LogicTrigger(logic::LogicEnv {
             // Chapter 29 (RL50): after-commit triggers check a bound
             // definer's events on the gateways.
+            gateways: Some((
+                Arc::clone(&msg_env.gateways) as Arc<dyn sprig_sinks::peer::SinkPeer>,
+                Arc::clone(&global),
+            )),
+            ..env.clone()
+        })))
+        .with_handler(Arc::new(change_exchange::ChangeExchange(logic::LogicEnv {
             gateways: Some((
                 Arc::clone(&msg_env.gateways) as Arc<dyn sprig_sinks::peer::SinkPeer>,
                 Arc::clone(&global),

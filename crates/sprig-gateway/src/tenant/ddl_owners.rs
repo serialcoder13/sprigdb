@@ -23,67 +23,46 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use sprig_catalog::ddl::{DdlExecutor, JobExecutors, MariaExecutor, OwnerCheck, owner_parts};
+use sprig_catalog::MariaBackend;
+use sprig_catalog::ddl::{DdlEngine, DdlExecutor, JobExecutors, MariaExecutor};
 use sprig_common::Result;
 use sprig_common::ids::{DcId, TenantId};
-use sprig_meta::{Consistency, MetaStore, Tier, TierView};
+use sprig_meta::MetaStore;
 
 use super::locator::GatewayLocator;
-use crate::registry::PROCESS_PREFIX;
 
 /// A job younger than this is never treated as abandoned by another
 /// process: several registration leases (`gateway.lease_ttl_seconds`, 10).
-pub const MIN_AGE: Duration = Duration::from_secs(60);
+pub const MIN_AGE: Duration = sprig_catalog::ddl::OWNER_MIN_AGE;
 
 /// The label of a gateway's DDL engine in `dc`.
 #[must_use]
 pub fn label(dc: &DcId) -> String {
-    format!("gateway:{dc}")
+    sprig_catalog::ddl::gateway_label(dc)
 }
 
-/// [`OwnerCheck`] over the gateways' process keys, read through `store`
-/// (any DC's tier is reached through it).
-pub struct GatewayOwners {
-    store: Arc<dyn MetaStore>,
+/// `engine` as this gateway's (bugfix-38): its jobs name the gateway's
+/// process, another gateway's abandoned jobs are found through `dc_store`,
+/// and its own are resolved by its janitor through `locator`.
+#[must_use]
+pub fn owned(
+    engine: DdlEngine<MariaBackend>,
+    dc: &DcId,
+    dc_store: &Arc<dyn MetaStore>,
+    locator: &Arc<GatewayLocator>,
+) -> DdlEngine<MariaBackend> {
+    engine
+        .with_owner(
+            &label(dc),
+            Some(Arc::new(GatewayOwners::new(Arc::clone(dc_store)))),
+        )
+        .with_janitor(Arc::new(CtlExecutors::new(Arc::clone(locator))))
 }
 
-impl GatewayOwners {
-    /// Reads process keys through `store`.
-    #[must_use]
-    pub fn new(store: Arc<dyn MetaStore>) -> Self {
-        Self { store }
-    }
-}
-
-impl std::fmt::Debug for GatewayOwners {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GatewayOwners").finish_non_exhaustive()
-    }
-}
-
-#[async_trait::async_trait]
-impl OwnerCheck for GatewayOwners {
-    async fn gone(&self, owner: &str, age: Duration) -> bool {
-        if age < MIN_AGE {
-            return false;
-        }
-        let Some((label, token)) = owner_parts(owner) else {
-            return false;
-        };
-        let Some(dc) = label
-            .strip_prefix("gateway:")
-            .and_then(|d| DcId::new(d).ok())
-        else {
-            return false;
-        };
-        let store = TierView::over(&self.store, Tier::Dc(dc));
-        let Ok(key) = store.tier().key(&format!("{PROCESS_PREFIX}{token}")) else {
-            return false;
-        };
-        // An unreadable store is doubt: not gone.
-        matches!(store.get(&key, Consistency::Linearizable).await, Ok(None))
-    }
-}
+/// [`OwnerCheck`](sprig_catalog::ddl::OwnerCheck) over the gateways'
+/// process keys; shared with the controller's catalog reconciler since
+/// bugfix-45 (`sprig_catalog::ddl::ProcessOwners`).
+pub use sprig_catalog::ddl::ProcessOwners as GatewayOwners;
 
 /// The DDL engine's janitor reaches a tenant's cluster as `sprig_ctl`, as
 /// the reconciler does ([`JobExecutors`]).
@@ -119,7 +98,9 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
-    use sprig_meta::{MemStore, Op, Txn};
+    use crate::registry::PROCESS_PREFIX;
+    use sprig_catalog::ddl::OwnerCheck;
+    use sprig_meta::{MemStore, Op, Tier, Txn};
 
     #[tokio::test]
     async fn a_gateway_process_is_gone_once_its_key_is() {

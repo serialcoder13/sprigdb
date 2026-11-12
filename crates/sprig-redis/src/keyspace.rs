@@ -14,12 +14,18 @@
 //!   a key it may not see is not delivered
 //! ```
 //!
-//! **As built.** Events come from the commands on the gateway that ran them,
-//! not from the feed: writes through SQL, the key-value API and scripts,
-//! and keys expiring, send none; `new`, `evicted` and `keymiss` never
-//! occur. Whether a command changed anything is read from its reply (an
-//! integer above 0, `OK`, a value), so a multi-key `DEL` that deleted some
-//! of its keys names all of them.
+//! **As built.** A write command this module knows ([`covered`]) sends its
+//! events from the gateway that ran it, under Redis's names, and marks its
+//! writes in the binlog (chapter 38's comment `o=k`). Everything else
+//! reaches the change feed unmarked: SQL, the key-value API, scripts,
+//! commands this module doesn't know, and keys expiring. Each gateway with
+//! a subscriber who could receive a notification tails the tenant's feed
+//! and publishes those changes' events to its own subscribers (RLS round
+//! 5, RL51; the gateway's `redis_keyspace`), with names read from the rows
+//! (a key row deleted after its expiry is `expired`, a new key also `new`).
+//! Whether a command changed anything is read from its reply (an integer
+//! above 0, `OK`, a value), so a multi-key `DEL` that deleted some of its
+//! keys names all of them. `evicted` and `keymiss` never occur.
 
 use bytes::Bytes;
 use sprig_proto_redis::Frame;
@@ -32,6 +38,15 @@ pub trait KeyFilter: Send + Sync + std::fmt::Debug {
     fn statement(&self, database: &str, table: &str, keys: &[Bytes]) -> String;
     /// Its rows as one flag per key.
     fn visible(&self, rows: &[sprig_kv::sql::Row], keys: usize) -> Vec<bool>;
+}
+
+/// The gateway's notifications from the change feed (RL51): started for a
+/// tenant when one of its connections here subscribes to a channel or
+/// pattern a notification could reach; they run while
+/// [`crate::pubsub::Hub::keyspace_interest`] holds.
+pub trait KeyspaceFeed: Send + Sync + std::fmt::Debug {
+    /// Makes sure tenant `scope`'s feed notifications run on this gateway.
+    fn watch(&self, scope: &str);
 }
 
 /// Flag bits.
@@ -187,6 +202,23 @@ pub fn events(a: &[Bytes], reply: &Frame) -> Vec<(&'static str, u16, Bytes)> {
         "zpopmax" => one("zpopmax", ZSET),
         _ => Vec::new(),
     }
+}
+
+/// Whether write command `name` sends its own notifications ([`events`]
+/// knows it); the change feed sends the others' (RL51).
+#[must_use]
+pub fn covered(name: &str) -> bool {
+    let k = Bytes::from_static(b"k");
+    !events(
+        &[
+            Bytes::copy_from_slice(name.as_bytes()),
+            k.clone(),
+            k.clone(),
+            k,
+        ],
+        &Frame::Integer(1),
+    )
+    .is_empty()
 }
 
 /// The publishes of `events` under `flags` in database `db`:

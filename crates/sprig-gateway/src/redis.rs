@@ -14,6 +14,7 @@
 //!   reserved-name check.
 
 pub mod hub;
+mod keyspace_feed;
 pub mod logic;
 
 use std::borrow::Cow;
@@ -269,6 +270,16 @@ pub struct RedisDeps {
     pub dc: DcId,
     /// This gateway's id.
     pub gateway_id: String,
+}
+
+impl RedisFrontend {
+    /// Starts keyspace notifications from the change feed for the tenants
+    /// of `svc` (chapter 40; RLS round 5, RL51).
+    #[must_use]
+    pub fn with_feed(self, svc: Arc<crate::tenant::TenantServices>) -> Self {
+        keyspace_feed::FeedNotifier::install(&self.env, svc);
+        self
+    }
 }
 
 /// The Redis front end.
@@ -574,6 +585,8 @@ pub(crate) struct SqlSession {
     session: Session,
     exec: Box<dyn SessionExec>,
     proto: ProtoState,
+    /// RL51: writes carry `/*sprig ... o=k*/` (`SqlRunner::notified`).
+    notified: bool,
 }
 
 impl SqlSession {
@@ -614,10 +627,20 @@ impl SqlSession {
             session,
             exec,
             proto,
+            notified: false,
         })
     }
 
     async fn run(&mut self, sql: &str) -> std::result::Result<Collect, SqlError> {
+        // RL51: a Redis command's write is marked in the binlog, so the
+        // keyspace notifications from the feed pass over it.
+        let marked;
+        let sql = if self.notified && is_write(sql) {
+            marked = mark(sql);
+            marked.as_str()
+        } else {
+            sql
+        };
         let mut sink = Collect::default();
         self.session
             .begin_command("Query", Some(sql.chars().take(1024).collect()));
@@ -660,5 +683,67 @@ impl SqlRunner for SqlSession {
 
     async fn exec(&mut self, sql: &str) -> std::result::Result<u64, SqlError> {
         Ok(self.run(sql).await?.affected)
+    }
+
+    fn notified(&mut self, on: bool) {
+        self.notified = on;
+    }
+}
+
+/// `sql` with chapter 38's comment `o=k` where the change feed reads it
+/// (RL51): before a plain write; after the verb of each write inside a
+/// guarded batch, whose inner statements MariaDB annotates one by one
+/// without the comments before them.
+fn mark(sql: &str) -> String {
+    let c = sprig_binlog::annotate::notified_comment();
+    let t = sql.trim_start();
+    if !t
+        .get(..16)
+        .is_some_and(|h| h.eq_ignore_ascii_case("BEGIN NOT ATOMIC"))
+    {
+        return format!("{c} {sql}");
+    }
+    let mut out = sql.to_owned();
+    for (from, to) in [
+        ("INSERT INTO ", format!("INSERT {c} INTO ")),
+        ("REPLACE INTO ", format!("REPLACE {c} INTO ")),
+        ("DELETE FROM ", format!("DELETE {c} FROM ")),
+        ("; UPDATE ", format!("; UPDATE {c} ")),
+        ("THEN UPDATE ", format!("THEN UPDATE {c} ")),
+        ("ELSE UPDATE ", format!("ELSE UPDATE {c} ")),
+    ] {
+        out = out.replace(from, &to);
+    }
+    out
+}
+
+/// Whether `sql` is a row write (`INSERT`, `UPDATE`, `DELETE`, `REPLACE`,
+/// or a guarded batch `BEGIN NOT ATOMIC ...`, whose rows MariaDB annotates
+/// with the whole block's text).
+fn is_write(sql: &str) -> bool {
+    let head: String = sql
+        .trim_start()
+        .chars()
+        .take(16)
+        .collect::<String>()
+        .to_ascii_uppercase();
+    ["INSERT", "UPDATE", "DELETE", "REPLACE", "BEGIN NOT ATOMIC"]
+        .iter()
+        .any(|w| head.starts_with(w))
+}
+
+#[cfg(test)]
+mod mark_tests {
+    use super::*;
+
+    #[test]
+    fn marks_writes_where_the_feed_reads_them() {
+        let m = mark("UPDATE `d`.`db0` SET v = 1");
+        assert!(m.starts_with("/*sprig h=") && m.ends_with("*/ UPDATE `d`.`db0` SET v = 1"));
+        let b = mark("BEGIN NOT ATOMIC SET @a = 1; INSERT INTO x VALUES (1) ON DUPLICATE KEY UPDATE v = 1; IF @a THEN UPDATE y SET v = 2; END IF; DELETE FROM z; END");
+        assert_eq!(b.matches("o=k*/").count(), 4, "{b}");
+        assert!(b.contains("INSERT /*sprig h=") && b.contains("THEN UPDATE /*sprig h="));
+        assert!(is_write(" insert into t values (1)") && is_write("BEGIN NOT ATOMIC END"));
+        assert!(!is_write("SELECT 1") && !is_write("BEGIN"));
     }
 }

@@ -1651,6 +1651,130 @@ impl Maintainer {
     }
 }
 
+/// A child's own columns added to an object it receives through a
+/// serving materialized copy (decision T20): the copy gets the same
+/// columns, `NULL` (the parent has no values for them), and its state
+/// moves to the object's new version, so reads keep using it instead of
+/// failing with 39889 until the worker reseeds (across clusters, read
+/// through can't stand in). `added`: the columns the statement added;
+/// `before`: the object's version before them. Only the edge from the
+/// parent tenant: copies of the tenant's own spaces need the new values
+/// and are reseeded as before.
+///
+/// # Errors
+/// The backend's.
+pub(crate) async fn keep_serving(
+    ctx: &Ctx<'_>,
+    r: &mut dyn crate::Runner,
+    o: &InheritableObject,
+    db_name: &str,
+    added: &[String],
+    before: u64,
+) -> Result<()> {
+    if added.is_empty() {
+        return Ok(());
+    }
+    let Some(up) = ctx.up_edge(o)? else {
+        return Ok(());
+    };
+    if up.share.mode != MergeMode::Materialized
+        || added.iter().any(|c| up.parent_obj.column(c).is_some())
+    {
+        return Ok(());
+    }
+    let key = CopyKey {
+        tenant: ctx.cat.tenant,
+        object: o.object_id,
+        share: UPSTREAM,
+    };
+    if ctx.copies.ready(key, before, up.share.version).is_none() {
+        return Ok(());
+    }
+    let t = ctx.cat.tenant;
+    let schema = physical_schema(ctx.cat, db_name, ctx.lctn)?;
+    let text = |v: &Option<Vec<u8>>| {
+        v.as_ref()
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .unwrap_or_default()
+    };
+    let lit = |s: &str| format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"));
+    let cols = r
+        .ctl_query(
+            t,
+            &format!(
+                "SELECT COLUMN_NAME, COLUMN_TYPE, COLLATION_NAME FROM information_schema.COLUMNS \
+                 WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} ORDER BY ORDINAL_POSITION",
+                lit(&schema),
+                lit(&o.table)
+            ),
+        )
+        .await?;
+    let have: Vec<String> = r
+        .ctl_query(
+            t,
+            &format!(
+                "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = {} AND \
+                 TABLE_NAME = {} ORDER BY ORDINAL_POSITION",
+                lit(&schema),
+                lit(&copy_table(o.object_id))
+            ),
+        )
+        .await?
+        .iter()
+        .map(|row| text(&row[0]))
+        .collect();
+    if have.is_empty() {
+        return Ok(());
+    }
+    let mut adds = Vec::new();
+    let mut prev: Option<String> = None;
+    for row in &cols {
+        let name = text(&row[0]);
+        if added.iter().any(|a| a.eq_ignore_ascii_case(&name))
+            && !have.iter().any(|h| h.eq_ignore_ascii_case(&name))
+        {
+            let collate = row
+                .get(2)
+                .and_then(Option::as_ref)
+                .map(|c| format!(" COLLATE {}", String::from_utf8_lossy(c)))
+                .unwrap_or_default();
+            adds.push(format!(
+                "ADD COLUMN {} {}{collate} NULL{}",
+                q(&name),
+                text(&row[1]),
+                prev.as_ref()
+                    .map_or_else(|| " FIRST".to_owned(), |p| format!(" AFTER {}", q(p)))
+            ));
+        }
+        if have.iter().any(|h| h.eq_ignore_ascii_case(&name))
+            || added.iter().any(|a| a.eq_ignore_ascii_case(&name))
+        {
+            prev = Some(name);
+        }
+    }
+    if !adds.is_empty() {
+        r.ctl(&format!(
+            "ALTER TABLE {}.{} {}",
+            q(&schema),
+            q(&copy_table(o.object_id)),
+            adds.join(", ")
+        ))
+        .await?;
+    }
+    r.ctl(&format!(
+        "UPDATE {}.{} SET object_version = {} WHERE object_id = {} AND share_key = {UPSTREAM} \
+         AND object_version = {before} AND state = 'serving'",
+        q(&schema),
+        q(STATE_TABLE),
+        before + 1,
+        o.object_id.0
+    ))
+    .await?;
+    metrics::counter!("sprig_inherit_copy_kept_serving_total").increment(1);
+    tracing::info!(tenant = %t, table = %o.table, columns = ?added, "copy kept serving after own columns");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
