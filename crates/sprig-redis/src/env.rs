@@ -50,6 +50,9 @@ pub struct Config {
     /// statement ([`crate::batch`]); `false` keeps every command on the
     /// statement path.
     pub guarded_batches: bool,
+    /// `redis.notify_keyspace_events`: Redis's flag string; empty sends no
+    /// keyspace notifications ([`crate::keyspace`]).
+    pub notify_keyspace_events: String,
 }
 
 impl Default for Config {
@@ -72,6 +75,7 @@ impl Default for Config {
             idle_timeout: Duration::ZERO,
             pubsub_buffer_bytes: 32 << 20,
             guarded_batches: true,
+            notify_keyspace_events: String::new(),
         }
     }
 }
@@ -101,6 +105,12 @@ pub struct Env {
     /// `FCALL` of logic-layer functions (chapter 41); unset, only Lua
     /// library functions are found.
     logic: OnceLock<Arc<dyn crate::logic::LogicCalls>>,
+    /// `CONFIG SET notify-keyspace-events` per tenant on this gateway,
+    /// over [`Config::notify_keyspace_events`].
+    keyspace: Mutex<std::collections::HashMap<String, String>>,
+    /// Who may see a keyspace notification (chapter 29, RL46); unset,
+    /// every subscriber does.
+    key_filter: OnceLock<Arc<dyn crate::keyspace::KeyFilter>>,
 }
 
 impl Default for Env {
@@ -124,7 +134,42 @@ impl Env {
             scripts: crate::lua::Running::default(),
             mesh: OnceLock::new(),
             logic: OnceLock::new(),
+            keyspace: Mutex::new(std::collections::HashMap::new()),
+            key_filter: OnceLock::new(),
         }
+    }
+
+    /// The keyspace notification flags of tenant `scope` (canonical).
+    #[must_use]
+    pub fn keyspace_flags(&self, scope: &str) -> String {
+        let own = self
+            .keyspace
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(scope)
+            .cloned();
+        own.unwrap_or_else(|| self.config().notify_keyspace_events)
+    }
+
+    /// `CONFIG SET notify-keyspace-events` for tenant `scope` on this
+    /// gateway.
+    pub fn set_keyspace_flags(&self, scope: &str, flags: String) {
+        self.keyspace
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(scope.to_owned(), flags);
+    }
+
+    /// Installs the keyspace notifications' privilege and row-level check
+    /// (the gateway does, once).
+    pub fn set_key_filter(&self, f: Arc<dyn crate::keyspace::KeyFilter>) {
+        let _ = self.key_filter.set(f);
+    }
+
+    /// The check, when installed.
+    #[must_use]
+    pub fn key_filter(&self) -> Option<&Arc<dyn crate::keyspace::KeyFilter>> {
+        self.key_filter.get()
     }
 
     /// Installs the logic layer's `FCALL` hook (the gateway does, once).

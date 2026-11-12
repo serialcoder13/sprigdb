@@ -116,8 +116,7 @@ impl PassSession {
         if let Some(a) = sg::parse_inherited(sql)? {
             let chain = inherited::chain(&svc, cat).await?;
             let own = inherited::state_of(cat);
-            return self
-                .alter_inherited_sink(&svc, cat, &chain, &own, a)
+            return Box::pin(self.alter_inherited_sink(&svc, cat, &chain, &own, a))
                 .await
                 .map(Some);
         }
@@ -775,7 +774,7 @@ impl PassSession {
                 if !hit {
                     continue;
                 }
-                if crate::inherited::sinks::reapply_source(svc, e.tenant, sk).await? {
+                if Box::pin(crate::inherited::sinks::reapply_source(svc, e.tenant, sk)).await? {
                     reached += 1;
                 }
             }

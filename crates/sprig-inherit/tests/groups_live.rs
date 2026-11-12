@@ -778,30 +778,32 @@ async fn orphans_keep_their_references() {
             )
             .await;
         }
-        exec(
-            &mut c[0],
-            &format!("UPDATE t1 SET t2_id = {k2} WHERE id = {r}"),
-        )
-        .await;
+        assert_eq!(
+            exec(
+                &mut c[0],
+                &format!("UPDATE t1 SET t2_id = {k2} WHERE id = {r}"),
+            )
+            .await,
+            1,
+            "{p}: a's update of R"
+        );
         exec(&mut c[0], &format!("DELETE FROM t1 WHERE id = {r}")).await;
         // Right away (before the worker has made the orphans): refused,
         // the overrides below will hold k2.
         let m = fails(&mut c[0], &format!("DELETE FROM t2 WHERE id = {k2}"), 1451).await;
         eprintln!("{p}/{mode}: a's delete during the handover refused: {m}");
         // The orphans hold k2, what their views showed, not the k1 stored
-        // with the overrides.
+        // with the overrides. (A materialized copy still holding a's record
+        // shows its values for a moment: wait for the orphan; a stale value
+        // stays and fails after the wait.)
         for i in [1, 2] {
-            let got = until_rows(
+            let want = vec![Some(k2.to_string()), Some(format!("lvl{i}"))];
+            until_rows(
                 &mut c[i],
                 &format!("SELECT t2_id, note FROM t1 WHERE id = {r}"),
-                |g| g.len() == 1,
+                |g| g.len() == 1 && g[0] == want,
             )
             .await;
-            assert_eq!(
-                got[0],
-                vec![Some(k2.to_string()), Some(format!("lvl{i}"))],
-                "{p}: level {i}'s orphan"
-            );
         }
         // Their claims refuse a's delete of k2 now; k1 is free.
         let m = fails(&mut c[0], &format!("DELETE FROM t2 WHERE id = {k2}"), 1451).await;
@@ -1000,5 +1002,305 @@ async fn widened_types_reach_children() {
         );
         eprintln!("{p}/{mode}: widened types reach b and c");
         cleanup(&mut c, &t, &db, &shares).await;
+    }
+}
+
+/// The names `sql` returns (one column), sorted.
+async fn names(c: &mut Conn, sql: &str) -> Vec<String> {
+    let mut v: Vec<String> = rows(c, sql)
+        .await
+        .into_iter()
+        .filter_map(|r| r[0].clone())
+        .collect();
+    v.sort();
+    v
+}
+
+/// Waits until `sql` returns exactly `want` (sorted names), as copies lag.
+async fn names_become(c: &mut Conn, sql: &str, want: &[&str]) {
+    let want: Vec<String> = want.iter().map(|s| (*s).to_owned()).collect();
+    let t0 = Instant::now();
+    loop {
+        let got = match c.query::<Row, _>(sql).await {
+            Ok(r) => {
+                let mut v: Vec<String> = r
+                    .into_iter()
+                    .filter_map(|r| text(&r.unwrap()[0]))
+                    .collect();
+                v.sort();
+                v
+            }
+            Err(mysql_async::Error::Server(s)) if s.code == 39889 => Vec::new(),
+            Err(e) => panic!("{sql}: {e}"),
+        };
+        if got == want {
+            return;
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(60),
+            "{sql}: {got:?}, want {want:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Kiran's example with a typed table (inheritance plan step 6b and Q2):
+/// `a`'s `vehicle` with subtype `truck` (`WHERE vtype = 'TRUCK'`, single
+/// table and joined) and `trip` referencing `vehicle` by foreign key, made
+/// inheritable and shared. `b` and `c` receive the tables and the types;
+/// `b` adds a row with a value no type declares (`'SMALLTRUCK'`) and
+/// overrides a truck's payload; `c` declares its own subtype `smalltruck`
+/// and so sees `b`'s row as a smalltruck (and a truck), which `a` and `b`
+/// don't; ids come from the tree's sequence; `c`'s trip referencing `a`'s
+/// truck refuses `a`'s delete (1451) until it is gone.
+#[tokio::test]
+async fn typed_tables_in_groups() {
+    let Some(eps) = endpoints("typed_tables_in_groups") else {
+        return;
+    };
+    let t = tenants();
+    let mode = mode();
+    let mat = mode == "materialized";
+    for (pi, ep) in eps.iter().enumerate() {
+        let p = if pi == 0 { "my" } else { "ma" };
+        for storage in ["single_table", "joined"] {
+            let st = if storage == "joined" { "j" } else { "s" };
+            let db = format!("ig_ty_{p}_{st}_{}", if mat { "mat" } else { "rt" });
+            let sa = format!("igty{p}{st}{}", u8::from(mat));
+            let sb = format!("igtyb{p}{st}{}", u8::from(mat));
+            let mut c = Vec::new();
+            for name in &t {
+                c.push(conn(ep, name).await);
+            }
+            let shares = [(1, sb.as_str()), (0, sa.as_str())];
+            cleanup(&mut c, &t, &db, &shares).await;
+            for (i, x) in c.iter_mut().enumerate() {
+                exec(x, &format!("USE SPACE `{}`", t[i])).await;
+                if mat {
+                    exec(x, "SPRIG SET inherit.merge = 'materialized'").await;
+                } else {
+                    let _ = try_exec(x, "SPRIG RESET inherit.merge").await;
+                }
+            }
+            let t0 = Instant::now();
+            // a: the typed tree and a table referencing it.
+            exec(&mut c[0], &format!("CREATE DATABASE {db}")).await;
+            exec(&mut c[0], &format!("USE {db}")).await;
+            exec(
+                &mut c[0],
+                "CREATE TABLE vehicle (id INT AUTO_INCREMENT PRIMARY KEY, vtype VARCHAR(20) NOT \
+                 NULL, name VARCHAR(40) NULL)",
+            )
+            .await;
+            exec(
+                &mut c[0],
+                &format!(
+                    "CREATE TABLE truck (payload_kg INT NULL) INHERITS (vehicle) WHERE vtype = \
+                     'TRUCK' WITH (SPRIG_STORAGE = '{storage}')"
+                ),
+            )
+            .await;
+            exec(
+                &mut c[0],
+                "CREATE TABLE trip (id INT AUTO_INCREMENT PRIMARY KEY, vehicle_id INT NULL, note \
+                 VARCHAR(40) NULL, CONSTRAINT fk_vehicle FOREIGN KEY (vehicle_id) REFERENCES \
+                 vehicle (id))",
+            )
+            .await;
+            exec(&mut c[0], "INSERT INTO vehicle (vtype, name) VALUES ('VAN', 'a-van')").await;
+            exec(
+                &mut c[0],
+                "INSERT INTO truck (name, payload_kg) VALUES ('a-truck', 1000), ('a-truck2', 3000)",
+            )
+            .await;
+            exec(&mut c[0], "ALTER TABLE vehicle SPRIG INHERITABLE KEY (id)").await;
+            exec(
+                &mut c[0],
+                &format!("CREATE SHARE {sa} ON vehicle TO ALL CHILDREN WITH RESHARE"),
+            )
+            .await;
+            let a_truck2: u64 = c[0]
+                .query_first("SELECT id FROM truck WHERE name = 'a-truck2'")
+                .await
+                .unwrap()
+                .unwrap();
+            // b: the tables and types arrive without DDL.
+            exec(&mut c[1], &format!("USE {db}")).await;
+            let tb = tables(&mut c[1]).await;
+            assert!(
+                tb.contains("vehicle") && tb.contains("truck") && tb.contains("trip"),
+                "b: {tb:?}"
+            );
+            names_become(&mut c[1], "SELECT name FROM truck", &["a-truck", "a-truck2"]).await;
+            names_become(
+                &mut c[1],
+                "SELECT name FROM vehicle",
+                &["a-truck", "a-truck2", "a-van"],
+            )
+            .await;
+            // b adds an undeclared value (open values, Q2) and a truck, and
+            // overrides a's truck's payload.
+            exec(
+                &mut c[1],
+                "INSERT INTO vehicle (vtype, name) VALUES ('SMALLTRUCK', 'b-small')",
+            )
+            .await;
+            let b_small: u64 = c[1]
+                .query_first("SELECT LAST_INSERT_ID()")
+                .await
+                .unwrap()
+                .unwrap();
+            exec(
+                &mut c[1],
+                "INSERT INTO truck (name, payload_kg) VALUES ('b-truck', 2000)",
+            )
+            .await;
+            exec(
+                &mut c[1],
+                "UPDATE truck SET payload_kg = 1500 WHERE name = 'a-truck'",
+            )
+            .await;
+            exec(
+                &mut c[1],
+                &format!("CREATE SHARE {sb} ON vehicle TO ALL CHILDREN WITH RESHARE"),
+            )
+            .await;
+            assert_eq!(
+                names(&mut c[1], "SELECT name FROM truck").await,
+                ["a-truck", "a-truck2", "b-truck"]
+            );
+            assert_eq!(
+                names(&mut c[1], "SELECT name FROM ONLY vehicle").await,
+                ["a-van", "b-small"]
+            );
+            assert_eq!(
+                rows(&mut c[1], "SELECT payload_kg FROM truck WHERE name = 'a-truck'").await,
+                vec![vec![Some("1500".to_owned())]]
+            );
+            // a sees none of it.
+            assert_eq!(
+                rows(&mut c[0], "SELECT payload_kg FROM truck WHERE name = 'a-truck'").await,
+                vec![vec![Some("1000".to_owned())]]
+            );
+            assert_eq!(
+                names(&mut c[0], "SELECT name FROM vehicle").await,
+                ["a-truck", "a-truck2", "a-van"]
+            );
+            // c: b's view, then c's own subtype adopts b's row.
+            exec(&mut c[2], &format!("USE {db}")).await;
+            names_become(
+                &mut c[2],
+                "SELECT name FROM truck",
+                &["a-truck", "a-truck2", "b-truck"],
+            )
+            .await;
+            names_become(&mut c[2], "SELECT name FROM ONLY vehicle", &["a-van", "b-small"])
+                .await;
+            exec(
+                &mut c[2],
+                "CREATE TABLE smalltruck (axles INT NULL) INHERITS (truck) WHERE vtype = \
+                 'SMALLTRUCK'",
+            )
+            .await;
+            assert_eq!(
+                names(&mut c[2], "SELECT name FROM smalltruck").await,
+                ["b-small"]
+            );
+            assert_eq!(
+                names(&mut c[2], "SELECT name FROM truck").await,
+                ["a-truck", "a-truck2", "b-small", "b-truck"]
+            );
+            assert_eq!(
+                names(&mut c[2], "SELECT name FROM ONLY vehicle").await,
+                ["a-van"]
+            );
+            assert_eq!(
+                rows(&mut c[2], "SELECT payload_kg FROM truck WHERE name = 'a-truck'").await,
+                vec![vec![Some("1500".to_owned())]]
+            );
+            exec(
+                &mut c[2],
+                "INSERT INTO smalltruck (name, payload_kg, axles) VALUES ('c-small', 10, 2)",
+            )
+            .await;
+            let c_small: u64 = c[2]
+                .query_first("SELECT LAST_INSERT_ID()")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                rows(
+                    &mut c[2],
+                    &format!("SELECT vtype, axles FROM smalltruck WHERE id = {c_small}")
+                )
+                .await,
+                vec![vec![Some("SMALLTRUCK".to_owned()), Some("2".to_owned())]]
+            );
+            // b and a don't know smalltruck: b's row stays a vehicle there.
+            assert_eq!(
+                names(&mut c[1], "SELECT name FROM truck").await,
+                ["a-truck", "a-truck2", "b-truck"]
+            );
+            fails(&mut c[1], "SELECT * FROM smalltruck", 1146).await;
+            // Ids: one sequence for the tree.
+            let ids: BTreeSet<u64> = rows(&mut c[2], "SELECT id FROM vehicle")
+                .await
+                .into_iter()
+                .map(|r| r[0].clone().unwrap().parse().unwrap())
+                .collect();
+            assert_eq!(ids.len(), 6, "c's vehicles: {ids:?}");
+            assert!(ids.contains(&b_small) && ids.contains(&c_small));
+            // Foreign keys against each level's merged view.
+            exec(
+                &mut c[2],
+                &format!("INSERT INTO trip (vehicle_id, note) VALUES ({b_small}, 'c->b-small')"),
+            )
+            .await;
+            exec(
+                &mut c[2],
+                &format!("INSERT INTO trip (vehicle_id, note) VALUES ({a_truck2}, 'c->a-truck2')"),
+            )
+            .await;
+            fails(
+                &mut c[1],
+                &format!("INSERT INTO trip (vehicle_id, note) VALUES ({c_small}, 'b->c')"),
+                1452,
+            )
+            .await;
+            // a's delete of its truck that c references: refused.
+            let m = fails(
+                &mut c[0],
+                &format!("DELETE FROM truck WHERE id = {a_truck2}"),
+                1451,
+            )
+            .await;
+            eprintln!("{p}/{mode}/{storage}: a's delete refused: {m}");
+            exec(
+                &mut c[2],
+                &format!("DELETE FROM trip WHERE vehicle_id = {a_truck2}"),
+            )
+            .await;
+            exec(&mut c[0], &format!("DELETE FROM truck WHERE id = {a_truck2}")).await;
+            names_become(
+                &mut c[2],
+                "SELECT name FROM truck",
+                &["a-truck", "b-small", "b-truck", "c-small"],
+            )
+            .await;
+            // A subtype a declares later reaches b and c.
+            exec(
+                &mut c[0],
+                "CREATE TABLE van (doors INT NULL) INHERITS (vehicle) WHERE vtype = 'VAN'",
+            )
+            .await;
+            assert_eq!(names(&mut c[0], "SELECT name FROM van").await, ["a-van"]);
+            names_become(&mut c[1], "SELECT name FROM van", &["a-van"]).await;
+            names_become(&mut c[2], "SELECT name FROM van", &["a-van"]).await;
+            eprintln!(
+                "{p}/{mode}/{storage}: typed tree inherited a > b > c, c's own subtype, {} ms",
+                t0.elapsed().as_millis()
+            );
+            cleanup(&mut c, &t, &db, &shares).await;
+        }
     }
 }

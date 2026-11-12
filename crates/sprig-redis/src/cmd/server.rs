@@ -104,14 +104,14 @@ pub fn info(f: &InfoFacts, sections: &[Bytes]) -> Frame {
 }
 
 /// `CONFIG GET|SET|RESETSTAT|REWRITE|HELP`.
-pub fn config(a: &[Bytes], databases: u32) -> Frame {
+pub fn config(a: &[Bytes], databases: u32, keyspace: &str) -> Frame {
     match upper(&a[1]).as_str() {
         "GET" if a.len() >= 3 => {
             let known: Vec<(&str, String)> = vec![
                 ("databases", databases.to_string()),
                 ("maxmemory", "0".into()),
                 ("maxmemory-policy", "noeviction".into()),
-                ("notify-keyspace-events", String::new()),
+                ("notify-keyspace-events", keyspace.to_owned()),
                 ("timeout", "0".into()),
                 ("save", String::new()),
                 ("appendonly", "no".into()),
@@ -142,7 +142,7 @@ pub fn config(a: &[Bytes], databases: u32) -> Frame {
                 .chunks(2)
                 .all(|c| upper(&c[0]) == "NOTIFY-KEYSPACE-EVENTS")
             {
-                // Accepted; keyspace notifications come from the feed later.
+                // The session keeps the flags (crate::keyspace).
                 Frame::ok()
             } else {
                 reply::restricted("config set")

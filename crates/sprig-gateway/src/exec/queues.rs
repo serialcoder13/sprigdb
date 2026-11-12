@@ -229,7 +229,7 @@ impl PassSession {
         let Some(call) = mq::parse_call(sql) else {
             return Ok(None);
         };
-        let r = self.mq_call(cx, call).await;
+        let r = Box::pin(self.mq_call(cx, call)).await;
         let mut status = self.status();
         if more {
             status |= StatusFlags::MORE_RESULTS_EXISTS;
@@ -337,9 +337,8 @@ impl PassSession {
                 // Chapter 42: an inherited exchange or queue (a targeted
                 // publish into a member's instance, or the headers stamped
                 // on one into this tenant's own).
-                if let Some(routed) = self
-                    .inherit_mq_publish(cx, &mut m, mandatory, &vhost(5))
-                    .await?
+                if let Some(routed) =
+                    Box::pin(self.inherit_mq_publish(cx, &mut m, mandatory, &vhost(5))).await?
                 {
                     return Ok(Reply::Rows(
                         vec!["routed"],

@@ -9,6 +9,8 @@
 //! | `CREATE TYPE ...` | [`Stmt::CreateType`] (refused in this release) |
 //! | `ALTER TABLE t ADD HIERARCHY (parent) [ON DELETE RESTRICT \| CASCADE] [MAX DEPTH n]` | [`Stmt::AddHierarchy`] |
 //! | `ALTER TABLE t DROP HIERARCHY` | [`Stmt::DropHierarchy`] |
+//! | `ALTER TABLE t ADD DISCRIMINATOR (c) [VALUES (subtype = v, ...)]` | [`Stmt::AddDiscriminator`] |
+//! | `ALTER TABLE t DROP DISCRIMINATOR` | [`Stmt::DropDiscriminator`] |
 //! | `SET @sprig_inheritance = 'only' \| 'polymorphic' \| DEFAULT` | [`Stmt::SetInheritance`] |
 //! | `ONLY t` in `FROM`, `UPDATE` and `DELETE` | the name `` `__sprig_only__t` `` before parsing ([`mark_only`]) |
 //!
@@ -56,6 +58,11 @@ pub enum Stmt {
     AddHierarchy(AddHierarchy),
     /// `ALTER TABLE t DROP HIERARCHY`.
     DropHierarchy(Name),
+    /// `ALTER TABLE t ADD DISCRIMINATOR (c) [VALUES (...)]`: a hierarchy
+    /// typed by `_type` takes a discriminator column.
+    AddDiscriminator(AddDiscriminator),
+    /// `ALTER TABLE t DROP DISCRIMINATOR`: back to `_type`.
+    DropDiscriminator(Name),
     /// Another `ALTER TABLE`.
     AlterTable(AlterTable),
     /// `DROP TABLE`.
@@ -117,6 +124,17 @@ impl CreateTable {
             || self.discriminator.is_some()
             || self.disc_where.is_some()
     }
+}
+
+/// `ALTER TABLE t ADD DISCRIMINATOR (c) [VALUES (subtype = v, ...)]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddDiscriminator {
+    /// The root.
+    pub table: Name,
+    /// The column.
+    pub column: String,
+    /// Values given per subtype; the others are read from the rows.
+    pub values: Vec<(String, DiscValue)>,
 }
 
 /// `ALTER TABLE t ADD HIERARCHY (parent) ...`.
@@ -509,17 +527,7 @@ fn create(t: &Toks<'_>, sql: &[u8]) -> Result<Stmt, SprigError> {
                     "a WHERE clause other than WHERE column = value",
                 ));
             }
-            let (value, last) = if let Some(v) = t.string(j + 3) {
-                (DiscValue::Str(v), j + 3)
-            } else if t.kind(j + 3) == Some(TokenKind::Number) {
-                (DiscValue::Num(t.text(j + 3, j + 3)), j + 3)
-            } else if t.punct(j + 3, b'-') && t.kind(j + 4) == Some(TokenKind::Number) {
-                (DiscValue::Num(format!("-{}", t.text(j + 4, j + 4))), j + 4)
-            } else {
-                return Err(unsupported(
-                    "a discriminator value other than a string or a number",
-                ));
-            };
+            let (value, last) = disc_literal(&t, j + 3)?;
             if ct.disc_where.is_some() {
                 return Err(unsupported("two WHERE clauses"));
             }
@@ -586,6 +594,22 @@ fn create(t: &Toks<'_>, sql: &[u8]) -> Result<Stmt, SprigError> {
             .clone_into(&mut ct.plain);
     }
     Ok(Stmt::CreateTable(ct))
+}
+
+/// A discriminator value at token `j`: a string, a number or a negative
+/// number; with its last token.
+fn disc_literal(t: &Toks<'_>, j: usize) -> Result<(DiscValue, usize), SprigError> {
+    if let Some(v) = t.string(j) {
+        Ok((DiscValue::Str(v), j))
+    } else if t.kind(j) == Some(TokenKind::Number) {
+        Ok((DiscValue::Num(t.text(j, j)), j))
+    } else if t.punct(j, b'-') && t.kind(j + 1) == Some(TokenKind::Number) {
+        Ok((DiscValue::Num(format!("-{}", t.text(j + 1, j + 1))), j + 1))
+    } else {
+        Err(unsupported(
+            "a discriminator value other than a string or a number",
+        ))
+    }
 }
 
 fn alter(t: &Toks<'_>) -> Result<Stmt, SprigError> {
@@ -657,6 +681,49 @@ fn alter(t: &Toks<'_>) -> Result<Stmt, SprigError> {
     }
     if t.is(i, "DROP") && t.is(i + 1, "HIERARCHY") {
         return Ok(Stmt::DropHierarchy(table));
+    }
+    if t.is(i, "DROP") && t.is(i + 1, "DISCRIMINATOR") && i + 2 >= t.len() {
+        return Ok(Stmt::DropDiscriminator(table));
+    }
+    if t.is(i, "ADD") && t.is(i + 1, "DISCRIMINATOR") {
+        let bad = || unsupported("ADD DISCRIMINATOR (column) [VALUES (subtype = value, ...)]");
+        let column = if t.punct(i + 2, b'(') && t.punct(i + 4, b')') {
+            t.ident(i + 3).ok_or_else(bad)?
+        } else {
+            return Err(bad());
+        };
+        let mut d = AddDiscriminator {
+            table,
+            column,
+            values: Vec::new(),
+        };
+        let mut k = i + 5;
+        if t.is(k, "VALUES") {
+            if !t.punct(k + 1, b'(') {
+                return Err(bad());
+            }
+            let close = t.close_of(k + 1).ok_or_else(bad)?;
+            k += 2;
+            while k < close {
+                let sub = t.ident(k).ok_or_else(bad)?;
+                if !t.punct(k + 1, b'=') {
+                    return Err(bad());
+                }
+                let (v, last) = disc_literal(t, k + 2)?;
+                d.values.push((sub, v));
+                k = last + 1;
+                if t.punct(k, b',') {
+                    k += 1;
+                } else if k != close {
+                    return Err(bad());
+                }
+            }
+            k = close + 1;
+        }
+        if k < t.len() {
+            return Err(bad());
+        }
+        return Ok(Stmt::AddDiscriminator(d));
     }
     let mut at = AlterTable {
         table,

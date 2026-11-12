@@ -493,6 +493,18 @@ pub enum Stmt {
     /// `TEST [PLATFORM] CONNECTION c` (R9, r9tests): open and check the
     /// destination, write nothing.
     TestConnection(ConnName, Option<String>),
+    /// `TEST [PLATFORM] CONNECTION c WRITE [TO 'target']` (R9, r9last):
+    /// the checks, then one marked test record written (a webhook's
+    /// request, a Kafka record into topic `target`, an S3 object deleted
+    /// again; a database table's `INSERT` right, checked without a row).
+    TestConnectionWrite {
+        /// The connection.
+        conn: ConnName,
+        /// Its database.
+        db: Option<String>,
+        /// `TO 'target'`: a topic, an object key prefix, a table.
+        to: Option<String>,
+    },
     /// `TEST SINK s [WITH SAMPLE n]` (R9, r9tests): the sink's last `n`
     /// source records (10 by default, at most 1,000) as they would be
     /// delivered, delivering nothing.
@@ -990,13 +1002,16 @@ pub fn parse(sql: &str) -> Result<Option<Stmt>> {
             let platform = p.kw("PLATFORM");
             p.need_kw("CONNECTION")?;
             let q = p.qname()?;
-            Stmt::TestConnection(
-                ConnName {
-                    name: q.name,
-                    platform,
-                },
-                q.db,
-            )
+            let conn = ConnName {
+                name: q.name,
+                platform,
+            };
+            if p.kw("WRITE") {
+                let to = if p.kw("TO") { Some(p.string()?) } else { None };
+                Stmt::TestConnectionWrite { conn, db: q.db, to }
+            } else {
+                Stmt::TestConnection(conn, q.db)
+            }
         }
     } else if p.peek_kw("GRANT") || p.peek_kw("REVOKE") {
         let grant = p.kw("GRANT");
@@ -1659,6 +1674,23 @@ mod tests {
         assert!(parse("TEST SINK s WITH SAMPLE 1001").is_err());
         assert!(parse("TEST SINK s WITH SAMPLE x").is_err());
         assert!(parse("TEST CONNECTION").is_err());
+        // R9 (r9last): WRITE [TO 'target'].
+        assert_eq!(
+            parse("TEST CONNECTION shop.k WRITE TO 'audit'").unwrap(),
+            Some(Stmt::TestConnectionWrite {
+                conn: ConnName {
+                    name: "k".into(),
+                    platform: false
+                },
+                db: Some("shop".into()),
+                to: Some("audit".into())
+            })
+        );
+        assert!(matches!(
+            parse("test platform connection pk write").unwrap(),
+            Some(Stmt::TestConnectionWrite { to: None, .. })
+        ));
+        assert!(parse("TEST CONNECTION k WRITE TO").is_err());
         // Not ours: a table or a word that merely starts like it.
         assert_eq!(parse("TEST_SINK_TABLE").unwrap(), None);
     }

@@ -498,6 +498,10 @@ pub enum Stmt {
     },
     /// Leaves the innermost loop.
     Break,
+    /// Goes on with the innermost loop's next iteration (its condition
+    /// is checked again). Front ends put a counted loop's update before
+    /// it (R7 follow-ups).
+    Continue,
     /// Raises an event: the first event raised is the call's result
     /// (later ones are ignored), and raising `output` ends the call.
     Emit(String, Vec<(String, Expr)>),
@@ -656,7 +660,7 @@ impl Function {
                 Stmt::Emit(_, f) => f.iter().map(|(_, e)| expr(e)).sum(),
                 Stmt::Throw(e) => expr(&e.message),
                 Stmt::Db(DbOp::Sql { binds, .. }) => binds.iter().map(expr).sum(),
-                Stmt::Break | Stmt::Return => 0,
+                Stmt::Break | Stmt::Continue | Stmt::Return => 0,
             }
         }
         block(&self.body)
@@ -773,6 +777,7 @@ impl Printer<'_> {
                 self.block(body, d + 1);
             }
             Stmt::Break => self.line(d, "break"),
+            Stmt::Continue => self.line(d, "continue"),
             Stmt::Return => self.line(d, "return"),
             Stmt::Emit(name, fields) => {
                 let fs: Vec<String> = fields

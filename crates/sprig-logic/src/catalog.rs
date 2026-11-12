@@ -175,6 +175,13 @@ pub static LOGIC_MIGRATIONS: &[Migration] = &[
             crate::messages::DML_SOURCES_FANIN_UNPACK,
         ],
     },
+    // R7 follow-ups: staged rollout and per-version numbers.
+    Migration {
+        format: 5,
+        phase: Phase::Expand,
+        name: "logic_rollouts, logic_version_stats",
+        statements: &[crate::rollout::DDL_ROLLOUTS, crate::rollout::DDL_STATS],
+    },
 ];
 
 /// The module, for [`Migrator::new`](sprig_catalog::Migrator::new) and
@@ -258,6 +265,7 @@ fn map_err(e: mysql_async::Error) -> SprigError {
 /// Reads and writes of the logic tables in one catalog schema.
 #[derive(Debug, Clone)]
 pub struct LogicStore {
+    schema: String,
     modules: String,
     versions: String,
     bindings: String,
@@ -536,6 +544,7 @@ impl LogicStore {
     pub fn new(schema: &str) -> Self {
         let q = quote(schema);
         Self {
+            schema: schema.to_owned(),
             modules: format!("{q}.logic_modules"),
             versions: format!("{q}.logic_versions"),
             bindings: format!("{q}.logic_bindings"),
@@ -543,6 +552,12 @@ impl LogicStore {
             dead: format!("{q}.logic_dead_letters"),
             log: format!("{q}.logic_log"),
         }
+    }
+
+    /// The catalog schema (`t<tenant>_sprig`), unquoted.
+    #[must_use]
+    pub fn schema(&self) -> &str {
+        &self.schema
     }
 
     /// The live module of `kind` called `name` in `db_id`.

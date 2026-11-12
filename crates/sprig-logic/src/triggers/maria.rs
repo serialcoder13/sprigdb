@@ -150,6 +150,29 @@ pub trait RunGuard: Send + Sync {
     async fn context(&self) -> Result<Option<String>> {
         Ok(None)
     }
+
+    /// The event as the definer may see it (chapter 29, RLS round 5,
+    /// RL50): its row's images checked against the table's policies for
+    /// the definer; by default unchanged.
+    ///
+    /// # Errors
+    /// Why it can't be checked (retryable: the event waits).
+    async fn shown(&self, _ev: &TriggerEvent) -> Result<Shown> {
+        Ok(Shown::Unchanged)
+    }
+}
+
+/// What [`RunGuard::shown`] makes of an event.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Shown {
+    /// Run as it is.
+    Unchanged,
+    /// Passed over: the definer may not see its row (or the binding
+    /// doesn't listen to what it became).
+    Hidden,
+    /// Run as this (an update whose row became visible or hidden, as an
+    /// insert or a delete).
+    As(Box<TriggerEvent>),
 }
 
 /// An error's number.
@@ -233,12 +256,22 @@ impl Apply for MariaApply {
             e.retryable = true;
             e
         };
-        let ctx = match &self.guard {
+        let changed;
+        let (ev, ctx) = match &self.guard {
             Some(g) => {
                 g.check().await.map_err(retry)?;
-                g.context().await.map_err(retry)?
+                // RL50: the definer's view of the row.
+                let ev = match g.shown(ev).await.map_err(retry)? {
+                    Shown::Unchanged => ev,
+                    Shown::Hidden => return Ok(Applied::Hidden),
+                    Shown::As(e) => {
+                        changed = *e;
+                        &changed
+                    }
+                };
+                (ev, g.context().await.map_err(retry)?)
             }
-            None => None,
+            None => (ev, None),
         };
         let pool = self.pools.pool(self.tenant).await?;
         let mut c = pool.get_conn().await.map_err(|e| {

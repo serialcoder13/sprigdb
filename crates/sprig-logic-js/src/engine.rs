@@ -184,6 +184,7 @@ impl SyncHost {
     /// [`MAX_LOG_LINES`] are kept for the outcome, all go to tracing.
     pub fn log(&self, line: String) {
         tracing::debug!(target: "sprig_logic::code", "{line}");
+        self.host.db.log(&line);
         let mut v = self
             .logs
             .lock()

@@ -33,6 +33,8 @@ pub struct MemStore {
     indexes: Vec<IndexDef>,
     /// Statements per shard, for tests.
     pub per_shard: HashMap<usize, u64>,
+    /// `CALL { } IN TRANSACTIONS`: the store as the current batch began.
+    batch_base: Option<Box<MemStore>>,
 }
 
 /// The unique key of `props` under `d`: `None` if a property is missing
@@ -161,6 +163,46 @@ pub fn shard_of_rk(rk: u64, n: usize) -> usize {
 impl GraphStore for MemStore {
     fn graph_id(&self) -> u64 {
         1
+    }
+
+    async fn batches(&mut self) -> Result<()> {
+        self.batch_base = Some(Box::new(Self {
+            batch_base: None,
+            ..self.clone()
+        }));
+        Ok(())
+    }
+
+    async fn end_batch(&mut self, ok: bool, deleted: &[u64]) -> Result<()> {
+        let r = if ok {
+            match deleted
+                .iter()
+                .find(|n| self.edges.values().any(|e| e.src == **n || e.dst == **n))
+            {
+                Some(n) => Err(sprig_common::SprigError::new(
+                    sprig_common::SprigCode::GraphNodeHasRelationships,
+                    format!(
+                        "Cannot delete node<{n}>, because it still has relationships. To delete this node, you must first delete its relationships."
+                    ),
+                )),
+                None => Ok(()),
+            }
+        } else {
+            Ok(())
+        };
+        let restore = !ok || r.is_err();
+        if restore && let Some(b) = self.batch_base.take() {
+            let stats = self.stats;
+            *self = (*b).clone();
+            self.stats = stats;
+            self.batch_base = Some(b);
+        } else {
+            self.batch_base = Some(Box::new(Self {
+                batch_base: None,
+                ..self.clone()
+            }));
+        }
+        r
     }
 
     fn shards(&self) -> usize {

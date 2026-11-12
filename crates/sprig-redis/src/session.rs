@@ -275,10 +275,93 @@ impl Session {
             q.push(c);
             return vec![Frame::simple("QUEUED")];
         }
-        match self.dispatch(&name, spec, &c.args, false).await {
+        // Keyspace notifications (crate::keyspace): a write's events, or
+        // EXEC's commands' events, once committed.
+        let queued = (name == "exec")
+            .then(|| self.multi.clone())
+            .flatten()
+            .filter(|_| !self.multi_err);
+        let frames = match self.dispatch(&name, spec, &c.args, false).await {
             Ok(f) => f,
             Err(e) => vec![reply::backend(&e)],
+        };
+        if (spec.has('w') || queued.is_some())
+            && let Some(scope) = self.login.as_ref().map(|l| l.scope.clone())
+        {
+            Self::notify(
+                Arc::clone(&self.env),
+                scope,
+                self.db,
+                &c.args,
+                queued.as_deref(),
+                &frames,
+            )
+            .await;
         }
+        frames
+    }
+
+    /// Publishes the keyspace events of a command that answered `frames`
+    /// (EXEC's: `queued` with its replies), under tenant `scope`'s flags.
+    async fn notify(
+        env: Arc<Env>,
+        scope: String,
+        db: u32,
+        a: &[Bytes],
+        queued: Option<&[Command]>,
+        frames: &[Frame],
+    ) {
+        let flags =
+            crate::keyspace::parse_flags(env.keyspace_flags(&scope).as_bytes()).unwrap_or(0);
+        if flags == 0 {
+            return;
+        }
+        let mut evs = Vec::new();
+        match (queued, frames.first()) {
+            (Some(q), Some(Frame::Array(replies))) => {
+                for (c, r) in q.iter().zip(replies) {
+                    evs.extend(crate::keyspace::events(&c.args, r));
+                }
+            }
+            (None, Some(f)) => evs = crate::keyspace::events(a, f),
+            _ => {}
+        }
+        for (channel, data) in crate::keyspace::publishes(flags, db, &evs) {
+            if let Err(e) = env.publish(&scope, &channel, &data, false).await {
+                tracing::debug!(error = %e, "keyspace notification not published");
+            }
+        }
+    }
+
+    /// A pub/sub message as this connection may see it (chapter 29,
+    /// RL46): a keyspace notification goes out only when the session may
+    /// read its key (the gateway's [`crate::keyspace::KeyFilter`]).
+    pub async fn deliver(&mut self, m: Msg) -> Option<Frame> {
+        let (channel, data) = match &m {
+            Msg::Message(c, d) | Msg::PMessage(_, c, d) | Msg::SMessage(c, d) => (c, d),
+        };
+        if let Some((db, key)) = crate::keyspace::key_of(channel, data)
+            && let Some(f) = self.env.key_filter().cloned()
+        {
+            let cfg = self.env.config();
+            let ns = self
+                .ns_override
+                .clone()
+                .unwrap_or_else(|| sprig_kv::Namespace::redis(&cfg.logical_database, db));
+            let login = self.login.as_mut()?;
+            let sql = f.statement(&ns.database, &ns.table, std::slice::from_ref(&key));
+            let ok = match login.sql.query(&sql).await {
+                Ok(rows) => f.visible(&rows, 1).first().copied().unwrap_or(false),
+                Err(e) => {
+                    tracing::debug!(error = %e, "keyspace notification check failed; not delivered");
+                    false
+                }
+            };
+            if !ok {
+                return None;
+            }
+        }
+        Some(self.message_frame(m))
     }
 
     /// Runs a command. `in_txn`: inside `EXEC` or a script, whose
@@ -403,7 +486,36 @@ impl Session {
             "blpop" | "brpop" | "blmove" | "brpoplpush" | "blmpop" | "bzpopmin" | "bzpopmax"
             | "bzmpop" => self.blocking(name, a, in_txn).await,
             "info" => Ok(vec![self.info(&a[1..]).await]),
-            "config" => one(server::config(a, self.env.config().databases)),
+            "config" => {
+                // CONFIG SET notify-keyspace-events: this tenant's flags on
+                // this gateway (crate::keyspace).
+                let scope = self
+                    .login
+                    .as_ref()
+                    .map(|l| l.scope.clone())
+                    .unwrap_or_default();
+                if a.len() >= 4
+                    && String::from_utf8_lossy(&a[1]).eq_ignore_ascii_case("set")
+                    && a[2..].chunks(2).all(|c| {
+                        String::from_utf8_lossy(&c[0])
+                            .eq_ignore_ascii_case("notify-keyspace-events")
+                    })
+                {
+                    for c in a[2..].chunks(2) {
+                        let Some(f) = c.get(1).and_then(|v| crate::keyspace::parse_flags(v)) else {
+                            return one(Frame::err(
+                                "CONFIG SET failed (possibly related to argument \
+                                 'notify-keyspace-events') - Invalid event class character. Use \
+                                 'Ag$lshzxeKEtmdn'.",
+                            ));
+                        };
+                        self.env
+                            .set_keyspace_flags(&scope, crate::keyspace::flags_text(f));
+                    }
+                }
+                let flags = self.env.keyspace_flags(&scope);
+                one(server::config(a, self.env.config().databases, &flags))
+            }
             "command" => one(server::command(a)),
             "cluster" => one(server::cluster(a, "127.0.0.1:6379", &self.env.gateway_id)),
             "acl" => {

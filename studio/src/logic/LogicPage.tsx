@@ -2,11 +2,13 @@
 // in @fincity/kirun-ui, JavaScript and Lua in Monaco. "Check" is
 // Logic.Compile, a dry run showing the tier and each reason where it
 // applies (Monaco markers for script lines, the step's name for KIRun),
-// and the generated PL/SQL for users with ALTER ROUTINE. Deploy, rollback
-// and test runs are the statements a SQL client would run, shown before
-// they run; a test run is a CALL inside a transaction handle that is rolled
-// back unless the user keeps its changes. Logs poll Logic.TailLogs; dead
-// letters are replayed or discarded.
+// and the generated PL/SQL for users with ALTER ROUTINE. Deploy, rollback,
+// rollout stages and drops are the statements a SQL client would run, shown
+// before they run. Test runs (round 6) are Logic.TestRun, of the deployed
+// versions or of the editor's draft, with inputs, snapshot rows and fetch
+// mocks, always rolled back; a CALL that keeps its changes stays as a
+// second choice. Logs poll Logic.TailLogs; dead letters are replayed or
+// discarded.
 
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
@@ -28,6 +30,9 @@ import {
   type LogRow,
   type ModuleDetail,
 } from './api';
+import { DropModule, RolloutView } from './Rollout';
+import { TestRunPanel } from './TestRunPanel';
+import { kirunParams, parseParams, type Param } from './testrun';
 import {
   callStatement,
   declaration,
@@ -38,6 +43,7 @@ import {
   template,
   type DeclForm,
   type LogicKind,
+  type RolloutBy,
   type Runtime,
 } from './declaration';
 
@@ -153,7 +159,10 @@ export function LogicPage({ creating = false }: Readonly<{ creating?: boolean }>
 
 function Module({ db, kind, name }: Readonly<{ db: string; kind: string; name: string }>) {
   const q = useQuery({ queryKey: ['logic', db, kind, name], queryFn: () => getModule(db, kind, name) });
-  const [tab, setTab] = useState<'code' | 'versions' | 'test' | 'logs' | 'dead'>('code');
+  const [tab, setTab] = useState<'code' | 'versions' | 'rollout' | 'test' | 'logs' | 'dead'>('code');
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+  const { tenant = '' } = useParams();
   if (q.error)
     return (
       <p className="error" role="alert">
@@ -202,6 +211,7 @@ function Module({ db, kind, name }: Readonly<{ db: string; kind: string; name: s
           [
             ['code', 'Code'],
             ['versions', 'Versions'],
+            ...(m.kind === 'function' || m.kind === 'procedure' ? ([['rollout', 'Rollout']] as const) : []),
             ['test', 'Test run'],
             ['logs', 'Logs'],
             ['dead', 'Dead letters'],
@@ -219,9 +229,21 @@ function Module({ db, kind, name }: Readonly<{ db: string; kind: string; name: s
           <p className="muted">Viewing code needs ALTER ROUTINE, CREATE ROUTINE or ALL on {db}.</p>
         ))}
       {tab === 'versions' && <Versions db={db} detail={d} />}
+      {tab === 'rollout' && <RolloutView db={db} kind={m.kind === 'procedure' ? 'procedure' : 'function'} name={m.name} routines={d.routines} />}
       {tab === 'test' && <TestRun db={db} detail={d} />}
       {tab === 'logs' && <Logs db={db} kind={kind} name={name} />}
       {tab === 'dead' && <DeadLetters db={db} kind={kind} name={name} />}
+      {d.routines && (
+        <DropModule
+          db={db}
+          kind={m.kind}
+          name={m.name}
+          onDropped={() => {
+            void qc.invalidateQueries({ queryKey: ['logic', db] });
+            void navigate(`/t/${encodeURIComponent(tenant)}/logic?db=${encodeURIComponent(db)}`);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -253,6 +275,8 @@ function Editor({ db, detail, isNew, newKind }: Readonly<{ db: string; detail?: 
   const [err, setErr] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [staged, setStaged] = useState<{ on: boolean; pct: string; by: RolloutBy }>({ on: false, pct: '10', by: 'user' });
   const editor = useRef<MonacoHandle | null>(null);
   const confirm = useConfirm();
   const set = (p: Partial<DeclForm>) => {
@@ -299,7 +323,7 @@ function Editor({ db, detail, isNew, newKind }: Readonly<{ db: string; detail?: 
     setNotice(null);
     let text: string;
     try {
-      text = declaration(db, form);
+      text = declaration(db, staged.on ? { ...form, rollout: { pct: Number(staged.pct), by: staged.by } } : form);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
       return;
@@ -308,7 +332,8 @@ function Editor({ db, detail, isNew, newKind }: Readonly<{ db: string; detail?: 
     setBusy(true);
     try {
       const r = await execute(db, text);
-      setNotice(`Deployed${r.results[0]?.warnings ? ` with ${r.results[0].warnings} notes` : ''}.`);
+      setNotice(`${staged.on ? `Deployed as a rollout to ${staged.pct}% of callers` : 'Deployed'}${r.results[0]?.warnings ? ` with ${r.results[0].warnings} notes` : ''}.`);
+      await qc.invalidateQueries({ queryKey: ['logic-rollout', db] });
       await qc.invalidateQueries({ queryKey: ['logic', db] });
       if (isNew) void navigate(`/t/${encodeURIComponent(tenant)}/logic/${encodeURIComponent(db)}/${form.kind}/${encodeURIComponent(form.name)}`);
     } catch (e) {
@@ -416,10 +441,42 @@ function Editor({ db, detail, isNew, newKind }: Readonly<{ db: string; detail?: 
         <button onClick={() => void check()} disabled={busy || !form.name} data-testid="logic-check" title="Ctrl/⌘ + Enter">
           Check
         </button>
-        <button className="primary" onClick={() => void deploy()} disabled={busy || !form.name} data-testid="logic-deploy">
-          Deploy
+        <button onClick={() => setTesting((t) => !t)} disabled={!form.name} aria-expanded={testing} data-testid="logic-test-draft">
+          Test run…
         </button>
+        <button className="primary" onClick={() => void deploy()} disabled={busy || !form.name} data-testid="logic-deploy">
+          {staged.on ? 'Deploy as a rollout' : 'Deploy'}
+        </button>
+        {!isNew && (
+          <span className="row">
+            <label className="row">
+              <input type="checkbox" checked={staged.on} onChange={(e) => setStaged({ ...staged, on: e.target.checked })} data-testid="logic-staged" />
+              as a rollout to
+            </label>
+            <input
+              value={staged.pct}
+              onChange={(e) => setStaged({ ...staged, pct: e.target.value })}
+              size={3}
+              inputMode="numeric"
+              aria-label="Rollout share, percent"
+              disabled={!staged.on}
+              data-testid="logic-staged-pct"
+            />
+            % of callers, picked by
+            <select value={staged.by} onChange={(e) => setStaged({ ...staged, by: e.target.value as RolloutBy })} disabled={!staged.on} aria-label="Rollout picked by">
+              <option value="user">caller</option>
+              <option value="tenant">tenant</option>
+            </select>
+          </span>
+        )}
       </div>
+      {testing && form.name && (
+        <TestRunPanel
+          db={db}
+          target={{ kind: form.kind, draft: () => declaration(db, form) }}
+          params={form.runtime === 'kirun' ? kirunParams(form.body) : parseParams(form.params)}
+        />
+      )}
       {err && (
         <p className="error" role="alert" data-testid="logic-error">
           {err}
@@ -541,10 +598,7 @@ function Versions({ db, detail }: Readonly<{ db: string; detail: ModuleDetail }>
           ))}
         </tbody>
       </table>
-      <p className="muted">
-        Rollout by percentage (candidate versions) isn&apos;t built in the logic layer yet; a deploy activates the new version, and rollback
-        switches at once (chapter 41).
-      </p>
+      <p className="muted">A deploy activates the new version at once unless it is deployed as a rollout (the Rollout tab); a rollback switches at once.</p>
       {err && (
         <p className="error" role="alert">
           {err}
@@ -570,26 +624,47 @@ function Versions({ db, detail }: Readonly<{ db: string; detail: ModuleDetail }>
 function TestRun({ db, detail }: Readonly<{ db: string; detail: ModuleDetail }>) {
   const m = detail.module;
   const v = detail.versions.find((x) => x.version === m.active_version) ?? detail.versions[0];
-  const params = v?.signature?.params ?? [];
+  const sig = v?.signature?.params ?? [];
+  const params: Param[] = sig.map((p) => ({ name: p.name, type: p.sql ?? p.type }));
+  if (!['function', 'procedure', 'trigger', 'validation'].includes(m.kind)) return <p className="muted">Test runs take functions, procedures, triggers and validations.</p>;
+  return (
+    <div className="stack">
+      <TestRunPanel
+        db={db}
+        target={{ kind: m.kind, name: m.name, versions: detail.versions.map((x) => x.version), active: m.active_version }}
+        params={params}
+        binding={detail.binding ? `${detail.binding.timing} ${detail.binding.events}` : null}
+      />
+      {(m.kind === 'function' || m.kind === 'procedure') && (
+        <details>
+          <summary style={{ paddingBlock: 6, cursor: 'pointer' }}>Run for real and keep its changes (CALL)</summary>
+          <CallAndKeep db={db} name={m.name} params={sig} />
+        </details>
+      )}
+    </div>
+  );
+}
+
+/** The round-4 path, kept for "keep its changes": `CALL db.f(args)` in a
+ * transaction handle, committed after the statement was shown. */
+function CallAndKeep({ db, name, params }: Readonly<{ db: string; name: string; params: { name: string; type: string; sql?: string }[] }>) {
   const [values, setValues] = useState<Record<string, string>>({});
-  const [keep, setKeep] = useState(false);
-  const [out, setOut] = useState<{ columns: string[]; rows: (string | null)[][]; ms: number; kept: boolean } | null>(null);
+  const [out, setOut] = useState<{ columns: string[]; rows: (string | null)[][]; ms: number } | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const confirm = useConfirm();
   const me = useSession((s) => s.me);
-  if (m.kind !== 'function' && m.kind !== 'procedure') return <p className="muted">Only functions and procedures run on their own.</p>;
   const run = async () => {
     setErr(null);
     setOut(null);
     let text: string;
     try {
-      text = callStatement(db, m.name, params, values);
+      text = callStatement(db, name, params, values);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
       return;
     }
-    if (keep && !(await confirm.ask(`${text}\n-- then COMMIT`))) return;
+    if (!(await confirm.ask(`${text}\n-- then COMMIT`))) return;
     setBusy(true);
     const t0 = performance.now();
     const tx = await begin(db).catch((e: unknown) => {
@@ -603,14 +678,8 @@ function TestRun({ db, detail }: Readonly<{ db: string; detail: ModuleDetail }>)
     try {
       const r = await execute(db, text, { transaction: tx.name, timeoutMs: me?.studio.statement_timeout_ms });
       const first = r.results.find((x) => x.columns?.length);
-      if (keep) await commit(tx);
-      else await rollback(tx);
-      setOut({
-        columns: (first?.columns ?? []).map((c) => c.name),
-        rows: first?.rows ?? [],
-        ms: Math.round(performance.now() - t0),
-        kept: keep,
-      });
+      await commit(tx);
+      setOut({ columns: (first?.columns ?? []).map((c) => c.name), rows: first?.rows ?? [], ms: Math.round(performance.now() - t0) });
     } catch (e) {
       await rollback(tx).catch(() => undefined);
       setErr(errorText(e));
@@ -620,34 +689,28 @@ function TestRun({ db, detail }: Readonly<{ db: string; detail: ModuleDetail }>)
   };
   return (
     <div className="stack">
-      {params.length === 0 && <p className="muted">No parameters.</p>}
+      <p className="muted">Runs the deployed version on its own tier and commits what it wrote.</p>
       {params.map((p) => (
         <label key={p.name} className="row">
           <span className="mono">
             {p.name} ({p.sql ?? p.type})
           </span>
-          <input value={values[p.name] ?? ''} onChange={(e) => setValues({ ...values, [p.name]: e.target.value })} data-testid={`logic-arg-${p.name}`} />
+          <input value={values[p.name] ?? ''} onChange={(e) => setValues({ ...values, [p.name]: e.target.value })} data-testid={`logic-call-arg-${p.name}`} />
         </label>
       ))}
-      <label className="row">
-        <input type="checkbox" checked={keep} onChange={(e) => setKeep(e.target.checked)} />
-        Keep its changes (commit); otherwise the run is rolled back
-      </label>
-      <div className="row">
-        <button className="primary" onClick={() => void run()} disabled={busy} data-testid="logic-run">
-          Run
+      <div>
+        <button onClick={() => void run()} disabled={busy} data-testid="logic-call-keep">
+          Call and commit…
         </button>
       </div>
       {err && (
-        <p className="error" role="alert" data-testid="logic-run-error">
+        <p className="error" role="alert">
           {err}
         </p>
       )}
       {out && (
         <div className="stack" data-testid="logic-run-result">
-          <p className="muted">
-            {out.ms} ms, {out.kept ? 'committed' : 'rolled back'}
-          </p>
+          <p className="muted">{out.ms} ms, committed</p>
           <table className="table">
             <thead>
               <tr>

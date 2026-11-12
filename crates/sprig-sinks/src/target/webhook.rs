@@ -648,6 +648,13 @@ impl WebhookTarget {
         Value::Object(m)
     }
 
+    /// The body a request for `recs` would carry (R9, r9last: `TEST
+    /// SINK`'s payload preview).
+    #[must_use]
+    pub fn preview_body(&self, recs: &[SinkRecord]) -> Vec<u8> {
+        self.body(recs)
+    }
+
     /// The body of a request for `recs`.
     fn body(&self, recs: &[SinkRecord]) -> Vec<u8> {
         match self.format {

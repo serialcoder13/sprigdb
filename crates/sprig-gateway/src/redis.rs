@@ -87,6 +87,12 @@ key!(
     "Home of the Redis databases' namespaces"
 );
 key!(
+    /// `redis.notify_keyspace_events`: Redis's flag string (`KEA`, `Kg$`,
+    /// ...); empty sends no keyspace notifications.
+    NOTIFY_KEYSPACE_EVENTS: Text = "redis.notify_keyspace_events", Cow::Borrowed(""), HardBounds::NONE,
+    "Keyspace notification classes (Redis's notify-keyspace-events)"
+);
+key!(
     /// `redis.default_user`: the login of one-argument `AUTH`.
     DEFAULT_USER: Text = "redis.default_user", Cow::Borrowed(""), HardBounds::NONE,
     "User for one-argument AUTH; empty refuses it"
@@ -189,7 +195,63 @@ fn read_config(live: &LiveSettings, dc: &DcId) -> sprig_redis::Config {
         max_bulk_bytes: us(live.get(&MAX_BULK_BYTES, &cx)),
         max_command_bytes: us(live.get(&MAX_COMMAND_BYTES, &cx)),
         guarded_batches: live.get(&GUARDED_BATCHES, &cx),
+        notify_keyspace_events: sprig_redis::keyspace::parse_flags(
+            live.get(&NOTIFY_KEYSPACE_EVENTS, &cx).as_bytes(),
+        )
+        .map(sprig_redis::keyspace::flags_text)
+        .unwrap_or_default(),
         ..sprig_redis::Config::default()
+    }
+}
+
+/// Keyspace notifications' check (chapter 29, RL46): `SELECT` on the key
+/// table and its row-level security over the row `{k: key}`, in the
+/// subscriber's session (`exec::rls_images`).
+#[derive(Debug)]
+struct KeyImages;
+
+impl sprig_redis::keyspace::KeyFilter for KeyImages {
+    fn statement(&self, database: &str, table: &str, keys: &[Bytes]) -> String {
+        use crate::exec::rls_images::{ImagesRequest, TableImages};
+        let images = keys
+            .iter()
+            .map(|k| {
+                let mut m = serde_json::Map::new();
+                m.insert(
+                    "k".into(),
+                    serde_json::Value::String(String::from_utf8_lossy(k).into_owned()),
+                );
+                Some(m)
+            })
+            .collect();
+        crate::exec::rls_images::statement(&ImagesRequest {
+            tables: vec![TableImages {
+                db: database.to_owned(),
+                table: table.to_owned(),
+                images,
+            }],
+            plain_binary: true,
+        })
+    }
+
+    fn visible(&self, rows: &[sprig_kv::sql::Row], keys: usize) -> Vec<bool> {
+        use crate::exec::rls_images::{ImagesRequest, TableImages, answer};
+        let req = ImagesRequest {
+            tables: vec![TableImages {
+                images: vec![None; keys],
+                ..TableImages::default()
+            }],
+            plain_binary: true,
+        };
+        let text: Vec<Vec<Option<String>>> = rows
+            .iter()
+            .map(|r| {
+                r.iter()
+                    .map(|c| c.as_ref().map(|b| String::from_utf8_lossy(b).into_owned()))
+                    .collect()
+            })
+            .collect();
+        answer(&req, &text).into_iter().next().unwrap_or_default()
     }
 }
 
@@ -231,6 +293,9 @@ impl RedisFrontend {
         ));
         // FCALL of logic-layer functions (chapter 41, R7).
         env.set_logic(Arc::new(logic::GatewayLogic));
+        // Keyspace notifications reach only subscribers who may read the
+        // key (chapter 29, RL46).
+        env.set_key_filter(Arc::new(KeyImages));
         Self {
             d: Arc::new(d),
             env,

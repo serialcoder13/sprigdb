@@ -343,6 +343,7 @@ impl Applier {
                         mirrors: true,
                         mirror_async: true,
                         mirror_building: false,
+                        route: None,
                     }),
                 },
             );

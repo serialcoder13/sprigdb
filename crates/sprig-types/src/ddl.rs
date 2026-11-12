@@ -18,7 +18,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 
 use crate::Ctx;
 use crate::exec::{Done, Runner, Txn, unsupported};
-use crate::grammar::{AlterTable, CreateTable, DropTable};
+use crate::grammar::{AlterTable, CreateTable, DropTable, Name};
 use crate::model::{
     AUTO_INCREMENT, DbTypes, DiscValue, FieldDef, Storage, TypeDef, TypeId, TypeState, upper,
 };
@@ -32,6 +32,134 @@ pub const TYPE_PATH_INDEX: &str = "_sprig_type_path";
 pub const FK_PREFIX: &str = "_sprig_fk_";
 /// The longest type path.
 pub const MAX_TYPE_PATH: usize = 255;
+/// The prefix of the `CHECK` that keeps a single-table subtype's `NOT
+/// NULL` column filled in that subtype's rows.
+pub const NN_PREFIX: &str = "_sprig_nn_";
+
+fn fnv(s: &str) -> u64 {
+    s.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// The name of the `NOT NULL` check of column `column` of single-table
+/// subtype `table`.
+#[must_use]
+pub fn nn_name(table: &str, column: &str) -> String {
+    format!(
+        "{NN_PREFIX}{:016x}",
+        fnv(&format!("{}.{}", table.to_lowercase(), column.to_lowercase()))
+    )
+}
+
+/// One `NOT NULL` check of single-table storage (chapter 32, "Single-table
+/// storage"): rows whose path starts with `path` need `column`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NnCheck {
+    pub(crate) name: String,
+    pub(crate) path: String,
+    pub(crate) column: String,
+}
+
+impl NnCheck {
+    fn of(t: &TypeDef, f: &FieldDef) -> Self {
+        Self {
+            name: nn_name(&t.name, &f.name),
+            path: t.path.clone(),
+            column: f.name.clone(),
+        }
+    }
+
+    fn add(&self) -> String {
+        format!(
+            "ADD CONSTRAINT {} CHECK (LEFT({}, {}) <> {} OR {} IS NOT NULL)",
+            quote(&self.name),
+            quote(TYPE_PATH_COLUMN),
+            self.path.chars().count(),
+            quote_str(&self.path, false),
+            quote(&self.column)
+        )
+    }
+}
+
+/// Whether a single-table subtype's field gets a `NOT NULL` check.
+pub(crate) fn needs_nn(f: &FieldDef) -> bool {
+    !f.nullable && !f.auto_increment()
+}
+
+/// The `NOT NULL` checks of `root`'s hierarchy (single-table storage),
+/// without the types in `without`.
+pub(crate) fn nn_checks(types: &DbTypes, root: &TypeDef, without: &BTreeSet<TypeId>) -> Vec<NnCheck> {
+    if root.storage != Storage::SingleTable {
+        return Vec::new();
+    }
+    types
+        .descendants(root.id)
+        .into_iter()
+        .filter(|t| !without.contains(&t.id))
+        .flat_map(|t| {
+            t.own_fields
+                .iter()
+                .filter(|f| needs_nn(f))
+                .map(|f| NnCheck::of(&t, f))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The checks [`set_disc_columns`] drops (`old`, by name) and adds (`new`)
+/// with the type columns they read.
+#[derive(Debug, Default)]
+pub(crate) struct Checks {
+    pub(crate) old: Vec<String>,
+    pub(crate) new: Vec<NnCheck>,
+}
+
+/// `def` (a column definition) with its `NOT NULL` made `NULL`: outside
+/// quotes and comments, the words `NOT NULL` in sequence.
+fn nullable_text(def: &str) -> String {
+    let b = def.as_bytes();
+    let mut out = String::with_capacity(def.len());
+    let mut i = 0;
+    let mut quote: Option<u8> = None;
+    while i < b.len() {
+        let c = b[i];
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+            out.push(c as char);
+            i += 1;
+            continue;
+        }
+        if c == b'\'' || c == b'"' || c == b'`' {
+            quote = Some(c);
+            out.push(c as char);
+            i += 1;
+            continue;
+        }
+        let word_start = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+        if word_start && def.len() >= i + 3 && def[i..i + 3].eq_ignore_ascii_case("NOT") {
+            let mut j = i + 3;
+            while j < b.len() && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            let end = j + 4;
+            if j > i + 3
+                && end <= def.len()
+                && def[j..end].eq_ignore_ascii_case("NULL")
+                && (end == b.len() || !(b[end].is_ascii_alphanumeric() || b[end] == b'_'))
+            {
+                out.push_str("NULL");
+                i = end;
+                continue;
+            }
+        }
+        out.push(c as char);
+        i += 1;
+    }
+    out
+}
 
 fn table_sql(db: Option<&str>, t: &str) -> String {
     match db {
@@ -237,24 +365,32 @@ async fn disc_map(
 /// Gives a discriminated root its generated type columns (replacing them
 /// when they exist), then their index. Rows take their types from the
 /// discriminator at once: the columns are virtual.
+#[allow(clippy::too_many_arguments)]
 async fn set_disc_columns(
     db: Option<&str>,
     root: &str,
     key: &[String],
     map: &DiscMap,
     replace: bool,
+    checks: &Checks,
     nbe: bool,
     r: &mut dyn Runner,
 ) -> Result<()> {
     let t = table_sql(db, root);
     let (te, pe) = map.exprs(nbe);
-    let add = format!(
+    let mut add = format!(
         "ADD COLUMN {tc} VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin AS ({te}) VIRTUAL \
          INVISIBLE, ADD COLUMN {pc} VARCHAR({MAX_TYPE_PATH}) CHARACTER SET utf8mb4 COLLATE \
          utf8mb4_bin AS ({pe}) VIRTUAL INVISIBLE",
         tc = quote(TYPE_COLUMN),
         pc = quote(TYPE_PATH_COLUMN),
     );
+    // Single-table `NOT NULL` checks read the path column: they go and
+    // come back with it, and MariaDB checks every row against them.
+    for c in &checks.new {
+        add.push_str(", ");
+        add.push_str(&c.add());
+    }
     if replace {
         // MariaDB can't drop and add virtual columns and an index on them
         // in one online ALTER: the index goes first and comes back last.
@@ -263,8 +399,13 @@ async fn set_disc_columns(
             quote(TYPE_PATH_INDEX)
         ))
         .await?;
+        let drops: String = checks
+            .old
+            .iter()
+            .map(|n| format!("DROP CONSTRAINT IF EXISTS {}, ", quote(n)))
+            .collect();
         r.exec(&format!(
-            "ALTER TABLE {t} DROP COLUMN {}, DROP COLUMN {}, {add}",
+            "ALTER TABLE {t} {drops}DROP COLUMN {}, DROP COLUMN {}, {add}",
             quote(TYPE_COLUMN),
             quote(TYPE_PATH_COLUMN)
         ))
@@ -299,36 +440,50 @@ async fn adopt_rows(
     let tx = Txn::begin(r).await?;
     let result: Result<u64> = async {
         let mut n = 0;
+        let key = &root.key_fields;
+        let cols: Vec<String> = key.iter().map(|k| quote(k)).collect();
         for (table, _) in chain_below_root {
-            let keys = |a: &str| -> Vec<String> {
-                root.key_fields
-                    .iter()
-                    .map(|k| format!("{}.{}", quote(a), quote(k)))
-                    .collect()
-            };
-            let on: Vec<String> = root
-                .key_fields
+            let on: Vec<String> = key
                 .iter()
                 .map(|k| format!("e.{q} = r.{q}", q = quote(k)))
                 .collect();
-            let d = r
-                .exec(&format!(
-                    "INSERT INTO {e} ({cols}) SELECT {rk} FROM {root} AS r WHERE {holds} AND NOT \
-                     EXISTS (SELECT 1 FROM {e} AS e WHERE {on})",
-                    e = table_sql(db, table),
-                    cols = root
-                        .key_fields
-                        .iter()
-                        .map(|k| quote(k))
+            // Keys first, then plain VALUES: the tables may be inheritable
+            // (chapter 42 refuses INSERT ... SELECT into them).
+            let found = r
+                .query(&format!(
+                    "SELECT {} FROM {root} AS r WHERE {holds} AND NOT EXISTS (SELECT 1 FROM {e} \
+                     AS e WHERE {on})",
+                    key.iter()
+                        .map(|k| format!("r.{}", quote(k)))
                         .collect::<Vec<_>>()
                         .join(", "),
-                    rk = keys("r").join(", "),
+                    e = table_sql(db, table),
                     root = table_sql(db, &root.name),
                     holds = map.holds("r", v, nbe),
                     on = on.join(" AND "),
                 ))
                 .await?;
-            n += d.affected_rows;
+            let keys: Vec<String> = found
+                .rows
+                .iter()
+                .map(|row| {
+                    let k: Vec<String> = (0..key.len())
+                        .map(|i| crate::write::literal(&found, i, row[i].as_ref(), nbe))
+                        .collect();
+                    format!("({})", k.join(", "))
+                })
+                .collect();
+            for chunk in keys.chunks(1000) {
+                let d = r
+                    .exec(&format!(
+                        "INSERT INTO {} ({}) VALUES {}",
+                        table_sql(db, table),
+                        cols.join(", "),
+                        chunk.join(", ")
+                    ))
+                    .await?;
+                n += d.affected_rows;
+            }
         }
         Ok(n)
     }
@@ -341,10 +496,16 @@ async fn adopt_rows(
 struct SingleTablePlan {
     /// `ADD ...` clauses for the root.
     adds: Vec<String>,
-    /// Adopted root columns, as the root table defines them.
+    /// Adopted root columns, as the root table defines them (`NOT NULL`
+    /// when the subtype declares it so).
     adopted: Vec<FieldDef>,
     /// The subtype's own fields, in its declared order.
     own: Vec<FieldDef>,
+    /// New columns that existing rows of the subtype can't fill: `NOT
+    /// NULL` without a default.
+    unfilled: Vec<String>,
+    /// Adopted columns the subtype makes `NOT NULL`.
+    tightened: Vec<String>,
 }
 
 fn single_table_plan(
@@ -353,10 +514,12 @@ fn single_table_plan(
     root: &str,
     root_def: &TableDef,
     adoptable: &[String],
-) -> Result<SingleTablePlan> {
+) -> SingleTablePlan {
     let mut adds = Vec::new();
     let mut adopted = Vec::new();
     let mut own = Vec::new();
+    let mut unfilled = Vec::new();
+    let mut tightened = Vec::new();
     for (e, range) in &def.elements {
         match e {
             Element::Column(c) => {
@@ -364,27 +527,86 @@ fn single_table_plan(
                     let Some(pc) = root_def.column(&c.name) else {
                         continue;
                     };
-                    let f = field_of(pc, root, own.len());
+                    let mut f = field_of(pc, root, own.len());
+                    if !c.nullable && pc.nullable {
+                        f.nullable = false;
+                        tightened.push(pc.name.clone());
+                    }
                     adopted.push(f.clone());
                     own.push(f);
                     continue;
                 }
                 if !c.nullable && c.default.is_none() && !c.auto_increment {
-                    return Err(unsupported(format!(
-                        "column '{}' is NOT NULL without a default: in single-table storage every \
-                         row of the root table has a subtype's columns, so they must take NULL or \
-                         have a default",
-                        c.name
-                    )));
+                    // Every row of the root table has the column: it takes
+                    // NULL there, and a CHECK keeps it filled in this
+                    // subtype's rows ([`NnCheck`]).
+                    adds.push(format!("ADD COLUMN {}", nullable_text(&text[range.clone()])));
+                    unfilled.push(c.name.clone());
+                } else {
+                    adds.push(format!("ADD COLUMN {}", &text[range.clone()]));
                 }
-                adds.push(format!("ADD COLUMN {}", &text[range.clone()]));
                 own.push(field_of(c, root, own.len()));
             }
             Element::PrimaryKey(_) => {}
             Element::Other { .. } => adds.push(format!("ADD {}", &text[range.clone()])),
         }
     }
-    Ok(SingleTablePlan { adds, adopted, own })
+    SingleTablePlan {
+        adds,
+        adopted,
+        own,
+        unfilled,
+        tightened,
+    }
+}
+
+/// Refuses a single-table subtype whose `NOT NULL` columns existing rows
+/// with its value `v` couldn't fill: a new column without a default
+/// (`unfilled`), or an adopted one holding `NULL` (`tightened`).
+///
+/// # Errors
+/// 39710.
+#[allow(clippy::too_many_arguments)]
+async fn refuse_unfilled(
+    db: Option<&str>,
+    root: &str,
+    disc: &str,
+    v: &DiscValue,
+    child: &str,
+    plan: &SingleTablePlan,
+    nbe: bool,
+    r: &mut dyn Runner,
+) -> Result<()> {
+    if plan.unfilled.is_empty() && plan.tightened.is_empty() {
+        return Ok(());
+    }
+    let operand = disc_operand(db, root, disc, r).await?;
+    let holds = format!("{operand} = {}", v.sql(nbe));
+    let mut nulls: Vec<String> = plan.tightened.iter().map(|c| format!("{} IS NULL", quote(c))).collect();
+    if !plan.unfilled.is_empty() {
+        nulls.push("TRUE".into());
+    }
+    let found = r
+        .query(&format!(
+            "SELECT 1 FROM {} WHERE {holds} AND ({}) LIMIT 1",
+            table_sql(db, root),
+            nulls.join(" OR ")
+        ))
+        .await?;
+    if found.rows.is_empty() {
+        return Ok(());
+    }
+    let cols: Vec<&str> = plan
+        .unfilled
+        .iter()
+        .chain(&plan.tightened)
+        .map(String::as_str)
+        .collect();
+    Err(unsupported(format!(
+        "rows with {disc} = {v} exist and would have no value in {} of '{child}', which is NOT \
+         NULL: give it a default, fill it first, or let it take NULL",
+        cols.join(", ")
+    )))
 }
 
 fn field_of(c: &crate::tabledef::Column, table: &str, i: usize) -> FieldDef {
@@ -519,12 +741,15 @@ pub async fn create(ct: &CreateTable, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Resu
             own_fields: fields_of(&pdef, &child, &key, true),
             discriminator: disc_col,
             disc_value: None,
+            disc_operand: None,
             state: TypeState::Active,
             version: 1,
         };
+        let mut root = root;
         if root.discriminator.is_some() {
             let map = disc_map(db, &root, &types, None, &BTreeSet::new(), r).await?;
-            set_disc_columns(db, &child, &key, &map, false, nbe, r).await?;
+            set_disc_columns(db, &child, &key, &map, false, &Checks::default(), nbe, r).await?;
+            root.disc_operand = Some(map.operand.clone());
         } else {
             add_type_columns(db, &child, &key, r).await?;
         }
@@ -753,6 +978,7 @@ pub async fn create(ct: &CreateTable, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Resu
         own_fields: root_fields.clone(),
         discriminator: disc_col.clone(),
         disc_value: None,
+        disc_operand: None,
         state: TypeState::Active,
         version: 1,
     };
@@ -760,7 +986,10 @@ pub async fn create(ct: &CreateTable, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Resu
     let mut single_own: Option<Vec<FieldDef>> = None;
     let mut root_own_after: Option<Vec<FieldDef>> = None;
     if storage == Storage::SingleTable {
-        let plan = single_table_plan(&def, &ct.plain, &root_name, &root_def, &adoptable)?;
+        let plan = single_table_plan(&def, &ct.plain, &root_name, &root_def, &adoptable);
+        if let (Some(d), Some(v)) = (&disc_col, &disc_value) {
+            refuse_unfilled(pdb, &root_name, d, v, &child, &plan, nbe, r).await?;
+        }
         if parent_typed.is_none() && disc_col.is_none() {
             add_type_columns(pdb, &root_name, &key_names, r).await?;
         }
@@ -796,6 +1025,16 @@ pub async fn create(ct: &CreateTable, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Resu
                     .collect(),
             );
         }
+        let new_checks: Vec<NnCheck> = plan
+            .own
+            .iter()
+            .filter(|f| needs_nn(f))
+            .map(|f| NnCheck {
+                name: nn_name(&child, &f.name),
+                path: path.clone(),
+                column: f.name.clone(),
+            })
+            .collect();
         single_own = Some(plan.own);
         if disc_col.is_some() && (root_typed.is_none() || extra.is_some()) {
             let (pdb_id, parent_id) = r
@@ -807,15 +1046,38 @@ pub async fn create(ct: &CreateTable, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Resu
                 .as_ref()
                 .map_or_else(|| the_root(rid, pdb_id), |t| (**t).clone());
             let map = disc_map(pdb, &root, &types, extra.clone(), &BTreeSet::new(), r).await?;
-            set_disc_columns(
+            let old = nn_checks(&types, &root, &BTreeSet::new());
+            let mut new = old.clone();
+            new.extend(new_checks);
+            let checks = Checks {
+                old: old.into_iter().map(|c| c.name).collect(),
+                new,
+            };
+            if let Err(e) = set_disc_columns(
                 pdb,
                 &root_name,
                 &key_names,
                 &map,
                 root_typed.is_some(),
+                &checks,
                 nbe,
                 r,
             )
+            .await
+            {
+                let _ = r
+                    .exec(&format!("DROP TABLE IF EXISTS {}", table_sql(db, &child)))
+                    .await;
+                return Err(e);
+            }
+        } else if !new_checks.is_empty() {
+            // An abstract subtype: its checks cover its subtypes' rows.
+            let adds: Vec<String> = new_checks.iter().map(NnCheck::add).collect();
+            r.exec(&format!(
+                "ALTER TABLE {} {}",
+                table_sql(pdb, &root_name),
+                adds.join(", ")
+            ))
             .await?;
         }
     } else {
@@ -874,6 +1136,7 @@ pub async fn create(ct: &CreateTable, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Resu
                 &key_names,
                 &map,
                 root_typed.is_some(),
+                &Checks::default(),
                 nbe,
                 r,
             )
@@ -887,7 +1150,17 @@ pub async fn create(ct: &CreateTable, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Resu
                 .ok_or_else(|| SprigError::internal("the parent vanished"))?;
             let root = the_root(parent_id, pdb_id);
             let map = disc_map(pdb, &root, &types, None, &BTreeSet::new(), r).await?;
-            set_disc_columns(pdb, &root_name, &key_names, &map, false, nbe, r).await?;
+            set_disc_columns(
+                pdb,
+                &root_name,
+                &key_names,
+                &map,
+                false,
+                &Checks::default(),
+                nbe,
+                r,
+            )
+            .await?;
         }
     }
     let (pdb_id, parent_id) = r
@@ -925,11 +1198,15 @@ pub async fn create(ct: &CreateTable, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Resu
         own_fields: own,
         discriminator: None,
         disc_value,
+        disc_operand: None,
         state: TypeState::Active,
         version: 1,
     });
+    fill_operands(&mut change, &types, pdb, r).await?;
     r.commit_types(&change).await?;
     tracing::info!(type_name = %child, parent = %parent_name.name, "type created");
+    r.tree_changed(pdb, &root_name, &root_key.iter().map(|k| k.name.clone()).collect::<Vec<_>>())
+        .await?;
     Ok(Done::default())
 }
 
@@ -997,33 +1274,64 @@ pub async fn alter(
                 "in single-table storage a subtype's ALTER TABLE may only add columns",
             ));
         }
-        // The same clauses, on the root's table.
-        let text = format!(
-            "{}{}{}",
-            &sql[..at.name_span.start],
-            table_sql(db, &root.name),
-            &sql[at.name_span.end..]
-        );
-        let added = TableDef::parse(
-            &format!("CREATE TABLE x ({})", added_columns_text(sql, at)),
-            &ctx.lex,
-        );
-        if let Some(a) = &added
-            && let Some(c) = a
-                .columns()
-                .find(|c| !c.nullable && c.default.is_none() && !c.auto_increment)
-        {
-            return Err(unsupported(format!(
-                "column '{}' is NOT NULL without a default: in single-table storage every row of                  the root table has a subtype's columns",
-                c.name
-            )));
+        // The same columns, on the root's table. A `NOT NULL` column
+        // without a default takes NULL there, with a CHECK for this
+        // subtype's rows (and its subtypes').
+        let added_text = format!("CREATE TABLE x ({})", added_columns_text(sql, at));
+        let added = TableDef::parse(&added_text, &ctx.lex)
+            .ok_or_else(|| unsupported("these added columns"))?;
+        let mut clauses = Vec::new();
+        let mut checks = Vec::new();
+        for (e, range) in &added.elements {
+            let piece = &added_text[range.clone()];
+            match e {
+                Element::Column(c) if !c.nullable && c.default.is_none() && !c.auto_increment => {
+                    clauses.push(format!("ADD COLUMN {}", nullable_text(piece)));
+                    checks.push(NnCheck {
+                        name: nn_name(&t.name, &c.name),
+                        path: t.path.clone(),
+                        column: c.name.clone(),
+                    });
+                }
+                Element::Column(c) => {
+                    clauses.push(format!("ADD COLUMN {}", piece));
+                    if !c.nullable && !c.auto_increment {
+                        checks.push(NnCheck {
+                            name: nn_name(&t.name, &c.name),
+                            path: t.path.clone(),
+                            column: c.name.clone(),
+                        });
+                    }
+                }
+                _ => clauses.push(format!("ADD {piece}")),
+            }
         }
-        let done = r.exec(&text).await?;
+        clauses.extend(checks.iter().map(NnCheck::add));
+        let text = format!("ALTER TABLE {} {}", table_sql(db, &root.name), clauses.join(", "));
+        let done = match r.exec(&text).await {
+            Err(e) if matches!(e.protocol().mysql_errno, 4025 | 3819) => {
+                return Err(unsupported(format!(
+                    "rows of '{}' exist and would have no value in {}, which is NOT NULL: give \
+                     it a default, or let it take NULL",
+                    t.name,
+                    checks
+                        .iter()
+                        .map(|c| c.column.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+            other => other?,
+        };
         let after = show_create(db, &root.name, ctx, r).await?;
         let mut own = t.own_fields.clone();
         for c in &at.added {
             if let Some(pc) = after.column(c) {
-                own.push(field_of(pc, &root.name, own.len()));
+                let mut f = field_of(pc, &root.name, own.len());
+                if checks.iter().any(|k| k.column.eq_ignore_ascii_case(c)) {
+                    f.nullable = false;
+                }
+                own.push(f);
             }
         }
         r.commit_types(&TypesChange {
@@ -1031,6 +1339,7 @@ pub async fn alter(
             ..TypesChange::default()
         })
         .await?;
+        r.tree_changed(db, &root.name, &root.key_fields).await?;
         return Ok(done);
     }
     let done = r.exec(sql).await?;
@@ -1045,6 +1354,7 @@ pub async fn alter(
         ..TypesChange::default()
     })
     .await?;
+    r.tree_changed(db, &root.name, &root.key_fields).await?;
     Ok(done)
 }
 
@@ -1089,6 +1399,182 @@ fn added_columns_text(sql: &str, at: &AlterTable) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The nearest type above `t` that rows may have: its parent, or the next
+/// one up past abstract types. `None` when every type above is abstract.
+fn heir(types: &DbTypes, t: &TypeDef) -> Option<Arc<TypeDef>> {
+    types
+        .chain(t.id)
+        .into_iter()
+        .rev()
+        .skip(1)
+        .find(|x| !x.is_abstract)
+}
+
+/// Gives every discriminated root `change` writes, or whose subtypes it
+/// writes, its comparison operand ([`TypeDef::disc_operand`]) when it has
+/// none yet.
+async fn fill_operands(
+    change: &mut TypesChange,
+    types: &DbTypes,
+    db: Option<&str>,
+    r: &mut dyn Runner,
+) -> Result<()> {
+    let mut roots: Vec<TypeId> = Vec::new();
+    for t in &change.upsert_types {
+        roots.push(if t.is_root() { t.id } else { t.root });
+    }
+    roots.sort();
+    roots.dedup();
+    for id in roots {
+        let root = match change.upsert_types.iter().find(|t| t.id == id) {
+            Some(t) => t.clone(),
+            None => match types.by_id(id) {
+                Some(t) => (**t).clone(),
+                None => continue,
+            },
+        };
+        let (Some(col), None) = (&root.discriminator, &root.disc_operand) else {
+            continue;
+        };
+        let operand = disc_operand(db, &root.name, col, r).await?;
+        match change.upsert_types.iter_mut().find(|t| t.id == id) {
+            Some(t) => t.disc_operand = Some(operand),
+            None => {
+                let mut t = root;
+                t.disc_operand = Some(operand);
+                change.upsert_types.push(t);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The type the rows of dropped subtype `t` become: under a discriminator
+/// the root (their values are undeclared once the type columns are
+/// regenerated: Kiran's Q2), else the nearest type above that rows may
+/// have ([`heir`]). `None`: every type above is abstract.
+fn successor(types: &DbTypes, root: &Arc<TypeDef>, t: &TypeDef) -> Option<Arc<TypeDef>> {
+    if root.discriminator.is_some() {
+        Some(Arc::clone(root))
+    } else {
+        heir(types, t)
+    }
+}
+
+/// Whether dropped subtype `t` has rows (in its whole subtree).
+async fn has_rows(
+    db: Option<&str>,
+    root: &TypeDef,
+    t: &TypeDef,
+    r: &mut dyn Runner,
+) -> Result<bool> {
+    let pc = quote(TYPE_PATH_COLUMN);
+    let any = r
+        .query(&format!(
+            "SELECT 1 FROM {} WHERE {pc} >= {} AND {pc} < {} LIMIT 1",
+            table_sql(db, &root.name),
+            quote_str(&t.path, false),
+            quote_str(&String::from_utf8_lossy(&upper(t.path.as_bytes())), false),
+        ))
+        .await?;
+    Ok(!any.rows.is_empty())
+}
+
+/// Keeps the rows of dropped subtype `t` (its extension table, and those of
+/// its dropped subtypes, are gone already) as rows of `to` ([`successor`]),
+/// in batches of `batch`: in joined storage their rows in the extension
+/// tables between `to` and `t` go, and typed by `_type` their type columns
+/// say `to` (a discriminator's columns are regenerated by the caller).
+///
+/// # Errors
+/// A step's error.
+#[allow(clippy::too_many_arguments)]
+async fn leave_rows(
+    db: Option<&str>,
+    types: &DbTypes,
+    root: &TypeDef,
+    t: &TypeDef,
+    to: &TypeDef,
+    batch: usize,
+    nbe: bool,
+    r: &mut dyn Runner,
+) -> Result<()> {
+    let lo = quote_str(&t.path, false);
+    let hi = quote_str(&String::from_utf8_lossy(&upper(t.path.as_bytes())), false);
+    let pc = quote(TYPE_PATH_COLUMN);
+    let range = |alias: &str| format!("{alias}{pc} >= {lo} AND {alias}{pc} < {hi}");
+    // The extension tables strictly between `to` and `t`, deepest first.
+    let between: Vec<Arc<TypeDef>> = if root.storage == Storage::SingleTable {
+        Vec::new()
+    } else {
+        types
+            .chain(t.id)
+            .into_iter()
+            .filter(|x| x.depth > to.depth && x.id != t.id)
+            .rev()
+            .collect()
+    };
+    if let Some(nearest) = between.first().cloned() {
+        let key = &root.key_fields;
+        let cols: Vec<String> = key.iter().map(|k| format!("r.{}", quote(k))).collect();
+        let on: Vec<String> = key
+            .iter()
+            .map(|k| format!("e.{q} = r.{q}", q = quote(k)))
+            .collect();
+        loop {
+            let found = r
+                .query(&format!(
+                    "SELECT {} FROM {} AS r JOIN {} AS e ON {} WHERE {} LIMIT {batch}",
+                    cols.join(", "),
+                    table_sql(db, &root.name),
+                    table_sql(db, &nearest.name),
+                    on.join(" AND "),
+                    range("r.")
+                ))
+                .await?;
+            if found.rows.is_empty() {
+                break;
+            }
+            let keys: Vec<Vec<String>> = found
+                .rows
+                .iter()
+                .map(|row| {
+                    (0..key.len())
+                        .map(|i| crate::write::literal(&found, i, row[i].as_ref(), nbe))
+                        .collect()
+                })
+                .collect();
+            for x in &between {
+                r.exec(&format!(
+                    "DELETE FROM {} WHERE {}",
+                    table_sql(db, &x.name),
+                    crate::write::key_in(None, key, &keys)
+                ))
+                .await?;
+            }
+        }
+    }
+    if root.discriminator.is_none() {
+        loop {
+            let d = r
+                .exec(&format!(
+                    "UPDATE {} SET {} = {}, {pc} = {} WHERE {} LIMIT {batch}",
+                    table_sql(db, &root.name),
+                    quote(TYPE_COLUMN),
+                    quote_str(&to.name, false),
+                    quote_str(&to.path, false),
+                    range("")
+                ))
+                .await?;
+            // Updated rows leave the range: a short batch was the last.
+            if d.affected_rows < batch as u64 {
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `DROP TABLE` naming typed tables or tables with hierarchies.
@@ -1162,6 +1648,13 @@ pub async fn drop(dt: &DropTable, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<D
             .await?;
         }
     }
+    for (db, types, ids) in &groups {
+        if let Some(t) = ids.iter().filter_map(|i| types.by_id(*i)).next()
+            && let Some(root) = types.root_of(t.id)
+        {
+            refuse_inheritable(db.as_deref(), &root.name, "DROP TABLE", r).await?;
+        }
+    }
     for (db, types, ids) in groups {
         let db = db.as_deref();
         let mut doomed: Vec<Arc<TypeDef>> = ids
@@ -1169,6 +1662,29 @@ pub async fn drop(dt: &DropTable, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<D
             .filter_map(|i| types.by_id(*i).cloned())
             .collect();
         doomed.sort_by(|a, b| b.depth.cmp(&a.depth).then(a.id.cmp(&b.id)));
+        // Rows of dropped subtypes whose root stays are kept (the lead's
+        // choice on T8, 12 November 2026), as rows of their successor.
+        let mut tops: Vec<(Arc<TypeDef>, Arc<TypeDef>, Arc<TypeDef>)> = Vec::new();
+        for t in doomed
+            .iter()
+            .filter(|t| !t.is_root() && !t.parent.is_some_and(|p| ids.contains(&p)))
+            .filter(|t| !ids.contains(&t.root))
+        {
+            let Some(root) = types.by_id(t.root).cloned() else {
+                continue;
+            };
+            match successor(&types, &root, t) {
+                Some(to) => tops.push((Arc::clone(t), root, to)),
+                None if has_rows(db, &root, t, r).await? => {
+                    return Err(unsupported(format!(
+                        "the rows of '{}' would keep no type: every type above it is abstract, \
+                         so DELETE them first",
+                        t.name
+                    )));
+                }
+                None => {}
+            }
+        }
         r.commit_types(&TypesChange {
             type_states: doomed.iter().map(|t| (t.id, TypeState::Dropping)).collect(),
             ..TypesChange::default()
@@ -1178,65 +1694,10 @@ pub async fn drop(dt: &DropTable, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<D
             r.exec(&format!("DROP TABLE IF EXISTS {}", table_sql(db, &t.name)))
                 .await?;
         }
-        // Rows of dropped subtypes whose root stays.
-        let tops: Vec<&Arc<TypeDef>> = doomed
-            .iter()
-            .filter(|t| !t.is_root() && !t.parent.is_some_and(|p| ids.contains(&p)))
-            .filter(|t| !ids.contains(&t.root))
-            .collect();
         let batch = ctx.limits.write_batch_rows.max(1);
         let nbe = ctx.lex.no_backslash_escapes;
-        for t in tops {
-            let Some(root) = types.by_id(t.root) else {
-                continue;
-            };
-            // Their rows in the ancestors' extension tables go first
-            // (deepest first), then the root rows, by key. Single-table
-            // subtypes' tables hold no rows.
-            let ancestors: Vec<Arc<TypeDef>> = if root.storage == Storage::SingleTable {
-                Vec::new()
-            } else {
-                types
-                    .chain(t.id)
-                    .into_iter()
-                    .filter(|x| !x.is_root() && x.id != t.id)
-                    .rev()
-                    .collect()
-            };
-            let key: Vec<String> = root.key_fields.clone();
-            let cols: Vec<String> = key.iter().map(|k| quote(k)).collect();
-            loop {
-                let found = r
-                    .query(&format!(
-                        "SELECT {} FROM {} WHERE {pc} >= {lo} AND {pc} < {hi} LIMIT {batch}",
-                        cols.join(", "),
-                        table_sql(db, &root.name),
-                        pc = quote(TYPE_PATH_COLUMN),
-                        lo = quote_str(&t.path, false),
-                        hi = quote_str(&String::from_utf8_lossy(&upper(t.path.as_bytes())), false),
-                    ))
-                    .await?;
-                if found.rows.is_empty() {
-                    break;
-                }
-                let keys: Vec<Vec<String>> = found
-                    .rows
-                    .iter()
-                    .map(|row| {
-                        (0..key.len())
-                            .map(|i| crate::write::literal(&found, i, row[i].as_ref(), nbe))
-                            .collect()
-                    })
-                    .collect();
-                for x in ancestors.iter().chain(std::iter::once(&root.clone())) {
-                    r.exec(&format!(
-                        "DELETE FROM {} WHERE {}",
-                        table_sql(db, &x.name),
-                        crate::write::key_in(None, &key, &keys)
-                    ))
-                    .await?;
-                }
-            }
+        for (t, root, to) in &tops {
+            leave_rows(db, &types, root, t, to, batch, nbe, r).await?;
         }
         let mut change = TypesChange {
             delete_types: doomed.iter().map(|t| t.id).collect(),
@@ -1256,12 +1717,37 @@ pub async fn drop(dt: &DropTable, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<D
             };
             if root.discriminator.is_some() {
                 let map = disc_map(db, &root, &types, None, &ids, r).await?;
-                set_disc_columns(db, &root.name, &root.key_fields, &map, true, nbe, r).await?;
+                let checks = Checks {
+                    old: nn_checks(&types, &root, &BTreeSet::new())
+                        .into_iter()
+                        .map(|c| c.name)
+                        .collect(),
+                    new: nn_checks(&types, &root, &ids),
+                };
+                set_disc_columns(
+                    db,
+                    &root.name,
+                    &root.key_fields,
+                    &map,
+                    true,
+                    &checks,
+                    nbe,
+                    r,
+                )
+                .await?;
             }
             if root.storage == Storage::SingleTable {
                 let mut own = root.own_fields.clone();
+                // Columns that took NULL under a NOT NULL check are the
+                // root's as they are: nullable.
                 for t in doomed.iter().filter(|t| t.root == rid) {
-                    own.extend(t.own_fields.iter().cloned());
+                    own.extend(t.own_fields.iter().map(|f| {
+                        let mut f = f.clone();
+                        if needs_nn(&f) && f.default_expr.is_none() {
+                            f.nullable = true;
+                        }
+                        f
+                    }));
                 }
                 change.fields.push((rid, own));
             }
@@ -1269,6 +1755,327 @@ pub async fn drop(dt: &DropTable, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<D
         r.commit_types(&change).await?;
         tracing::info!(types = doomed.len(), "types dropped");
     }
+    Ok(Done::default())
+}
+
+/// The `CHECK` that holds `_type` to a discriminator's mapping while a
+/// hierarchy converts ([`add_discriminator`]).
+pub const DISC_CHECK: &str = "_sprig_disc_check";
+
+/// Whether a column type is a number (its discriminator values are
+/// numbers).
+fn numeric_type(data_type: &str) -> bool {
+    let t = data_type.to_ascii_lowercase();
+    [
+        "tinyint", "smallint", "mediumint", "int", "integer", "bigint", "decimal", "numeric",
+        "float", "double", "real", "bit",
+    ]
+    .iter()
+    .any(|n| t.starts_with(n) && !t[n.len()..].starts_with(|c: char| c.is_ascii_alphabetic()))
+}
+
+/// Refuses `what` on an inheritable type tree (chapter 42): its layers'
+/// rows would change meaning under the other tenants' feet.
+///
+/// # Errors
+/// 39710.
+async fn refuse_inheritable(
+    db: Option<&str>,
+    root: &str,
+    what: &str,
+    r: &mut dyn Runner,
+) -> Result<()> {
+    if r.tree_inheritable(db, root).await? {
+        return Err(unsupported(format!(
+            "{what} on an inheritable type tree ('{root}'): make it not inheritable first \
+             (ALTER TABLE {root} DROP SPRIG INHERITABLE)"
+        )));
+    }
+    Ok(())
+}
+
+/// The root type `name` names, for `ADD | DROP DISCRIMINATOR`.
+fn root_named(ctx: &Ctx<'_>, table: &Name) -> Result<(Arc<DbTypes>, Arc<TypeDef>)> {
+    let lctn = ctx.lookup.lctn();
+    let types = ctx.lookup.db(table.db.as_deref()).unwrap_or_default();
+    let Some(t) = types.get(&table.name, lctn).cloned() else {
+        return Err(unsupported(format!(
+            "'{}' is not a typed table: a discriminator belongs to a hierarchy's root",
+            table.name
+        )));
+    };
+    if !t.is_root() {
+        return Err(unsupported(format!(
+            "'{}' is a subtype: a discriminator belongs to its root",
+            t.name
+        )));
+    }
+    Ok((types, t))
+}
+
+/// `ALTER TABLE root ADD DISCRIMINATOR (c) [VALUES (subtype = v, ...)]`: a
+/// hierarchy typed by SprigDB's `_type` takes a discriminator column
+/// (chapter 32, "Discriminator columns"), online. A subtype's value is the
+/// one given, or the one value its rows hold. Every row must already agree
+/// with the mapping (39717 otherwise, nothing changed): a `CHECK` holds
+/// writes to it while `_type` and `_type_path` become generated columns.
+///
+/// # Errors
+/// 39710, 39717, 1054, or a step's error.
+pub async fn add_discriminator(
+    d: &crate::grammar::AddDiscriminator,
+    ctx: &Ctx<'_>,
+    r: &mut dyn Runner,
+) -> Result<Done> {
+    let (types, root) = root_named(ctx, &d.table)?;
+    let db = d.table.db.as_deref();
+    let nbe = ctx.lex.no_backslash_escapes;
+    refuse_inheritable(db, &root.name, "ADD DISCRIMINATOR", r).await?;
+    if let Some(c) = &root.discriminator {
+        return Err(unsupported(format!(
+            "'{}' already has the discriminator '{c}'",
+            root.name
+        )));
+    }
+    let def = show_create(db, &root.name, ctx, r).await?;
+    let col = def
+        .column(&d.column)
+        .ok_or_else(|| unknown_column(&d.column, &root.name))?
+        .clone();
+    if is_type_column(&col.name) || root.is_key(&col.name) {
+        return Err(unsupported(format!(
+            "'{}' can't be a discriminator: it is a key or type column",
+            col.name
+        )));
+    }
+    let numeric = numeric_type(&col.data_type);
+    let subtypes = types.descendants(root.id);
+    let mut values: Vec<(Arc<TypeDef>, DiscValue)> = Vec::new();
+    for (name, v) in &d.values {
+        let Some(t) = subtypes
+            .iter()
+            .find(|t| t.name.eq_ignore_ascii_case(name))
+            .cloned()
+        else {
+            return Err(unsupported(format!(
+                "'{name}' is not a subtype of '{}'",
+                root.name
+            )));
+        };
+        values.push((t, v.clone()));
+    }
+    let operand = disc_operand(db, &root.name, &col.name, r).await?;
+    let tc = quote(TYPE_COLUMN);
+    // The others' values, from their rows.
+    for t in &subtypes {
+        if values.iter().any(|(x, _)| x.id == t.id) || t.is_abstract {
+            continue;
+        }
+        let found = r
+            .query(&format!(
+                "SELECT DISTINCT {operand} FROM {} WHERE {tc} = {} LIMIT 2",
+                table_sql(db, &root.name),
+                quote_str(&t.name, false)
+            ))
+            .await?;
+        let vals: Vec<Option<String>> = found
+            .rows
+            .iter()
+            .map(|row| {
+                row.first()
+                    .cloned()
+                    .flatten()
+                    .map(|v| String::from_utf8_lossy(&v).into_owned())
+            })
+            .collect();
+        match vals.as_slice() {
+            [] => {
+                return Err(unsupported(format!(
+                    "no row of '{}' says which value marks it: give it in VALUES ({} = ...)",
+                    t.name, t.name
+                )));
+            }
+            [Some(v)] => values.push((
+                Arc::clone(t),
+                if numeric {
+                    DiscValue::Num(v.clone())
+                } else {
+                    DiscValue::Str(v.clone())
+                },
+            )),
+            [None] => {
+                return Err(disc_mismatch(format!(
+                    "rows of '{}' have no {}: NULL can't mark a type",
+                    t.name, col.name
+                )));
+            }
+            _ => {
+                return Err(disc_mismatch(format!(
+                    "rows of '{}' hold more than one value of {}",
+                    t.name, col.name
+                )));
+            }
+        }
+    }
+    for (i, (t, v)) in values.iter().enumerate() {
+        if let Some((o, _)) = values[..i].iter().find(|(_, w)| w.same(v)) {
+            return Err(disc_mismatch(format!(
+                "the value {v} would mark both '{}' and '{}'",
+                o.name, t.name
+            )));
+        }
+    }
+    let map = DiscMap {
+        operand,
+        root: (root.name.clone(), root.path.clone()),
+        arms: values
+            .iter()
+            .map(|(t, v)| (v.clone(), t.name.clone(), t.path.clone()))
+            .collect(),
+    };
+    let (te, _) = map.exprs(nbe);
+    // Every row must already be the type its value says.
+    let keys: Vec<String> = root.key_fields.iter().map(|k| quote(k)).collect();
+    let off = r
+        .query(&format!(
+            "SELECT {}, {tc} FROM {} WHERE {tc} <> ({te}) LIMIT 10",
+            keys.join(", "),
+            table_sql(db, &root.name)
+        ))
+        .await?;
+    if !off.rows.is_empty() {
+        let shown: Vec<String> = off
+            .rows
+            .iter()
+            .map(|row| {
+                let k: Vec<String> = row[..keys.len()]
+                    .iter()
+                    .map(|v| {
+                        v.as_ref()
+                            .map_or_else(|| "NULL".into(), |v| String::from_utf8_lossy(v).into_owned())
+                    })
+                    .collect();
+                let ty = row
+                    .get(keys.len())
+                    .cloned()
+                    .flatten()
+                    .map(|v| String::from_utf8_lossy(&v).into_owned())
+                    .unwrap_or_default();
+                format!("({}) is a {ty}", k.join(", "))
+            })
+            .collect();
+        return Err(disc_mismatch(format!(
+            "rows disagree with {} as the discriminator: {}",
+            col.name,
+            shown.join("; ")
+        )));
+    }
+    let t = table_sql(db, &root.name);
+    // Writes from now on must agree too; MariaDB checks every row again.
+    match r
+        .exec(&format!(
+            "ALTER TABLE {t} ADD CONSTRAINT {} CHECK ({tc} = ({te}))",
+            quote(DISC_CHECK)
+        ))
+        .await
+    {
+        Err(e) if matches!(e.protocol().mysql_errno, 4025 | 3819) => {
+            return Err(disc_mismatch(format!(
+                "rows written meanwhile disagree with {} as the discriminator",
+                col.name
+            )));
+        }
+        other => {
+            other?;
+        }
+    }
+    let checks = Checks {
+        old: vec![DISC_CHECK.to_owned()],
+        new: Vec::new(),
+    };
+    set_disc_columns(db, &root.name, &root.key_fields, &map, true, &checks, nbe, r).await?;
+    let mut change = TypesChange::default();
+    let mut nr = (*root).clone();
+    nr.discriminator = Some(col.name.clone());
+    nr.disc_operand = Some(map.operand.clone());
+    change.upsert_types.push(nr);
+    for (t, v) in values {
+        let mut nt = (*t).clone();
+        nt.disc_value = Some(v);
+        change.upsert_types.push(nt);
+    }
+    r.commit_types(&change).await?;
+    tracing::info!(root = %root.name, column = %col.name, "discriminator added");
+    r.tree_changed(db, &root.name, &root.key_fields).await?;
+    Ok(Done::default())
+}
+
+/// `ALTER TABLE root DROP DISCRIMINATOR`: back to SprigDB's own `_type`
+/// (joined storage only: single-table storage needs a discriminator). The
+/// type columns become ordinary columns holding each row's current type,
+/// filled by MariaDB from the discriminator in the same `ALTER`.
+///
+/// # Errors
+/// 39710, or a step's error.
+pub async fn drop_discriminator(
+    table: &Name,
+    ctx: &Ctx<'_>,
+    r: &mut dyn Runner,
+) -> Result<Done> {
+    let (types, root) = root_named(ctx, table)?;
+    let db = table.db.as_deref();
+    let nbe = ctx.lex.no_backslash_escapes;
+    refuse_inheritable(db, &root.name, "DROP DISCRIMINATOR", r).await?;
+    if root.discriminator.is_none() {
+        return Err(unsupported(format!(
+            "'{}' has no discriminator",
+            root.name
+        )));
+    }
+    if root.storage == Storage::SingleTable {
+        return Err(single_needs_discriminator());
+    }
+    let map = disc_map(db, &root, &types, None, &BTreeSet::new(), r).await?;
+    let (te, pe) = map.exprs(nbe);
+    let t = table_sql(db, &root.name);
+    let (tc, pc) = (quote(TYPE_COLUMN), quote(TYPE_PATH_COLUMN));
+    r.exec(&format!(
+        "ALTER TABLE {t} DROP INDEX IF EXISTS {}",
+        quote(TYPE_PATH_INDEX)
+    ))
+    .await?;
+    // A column default may read other columns: MariaDB fills every row's
+    // new columns from the discriminator inside the ALTER.
+    r.exec(&format!(
+        "ALTER TABLE {t} DROP COLUMN {tc}, DROP COLUMN {pc}, ADD COLUMN {tc} VARCHAR(64) \
+         CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT ({te}) INVISIBLE, ADD COLUMN \
+         {pc} VARCHAR({MAX_TYPE_PATH}) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT \
+         ({pe}) INVISIBLE"
+    ))
+    .await?;
+    let keys: Vec<String> = root.key_fields.iter().map(|k| quote(k)).collect();
+    r.exec(&format!(
+        "ALTER TABLE {t} ALTER COLUMN {tc} SET DEFAULT {}, ALTER COLUMN {pc} SET DEFAULT {}, \
+         ADD INDEX IF NOT EXISTS {} ({pc}, {})",
+        quote_str(&root.name, false),
+        quote_str(&root.path, false),
+        quote(TYPE_PATH_INDEX),
+        keys.join(", ")
+    ))
+    .await?;
+    let mut change = TypesChange::default();
+    let mut nr = (*root).clone();
+    nr.discriminator = None;
+    nr.disc_operand = None;
+    change.upsert_types.push(nr);
+    for t in types.descendants(root.id) {
+        let mut nt = (*t).clone();
+        nt.disc_value = None;
+        change.upsert_types.push(nt);
+    }
+    r.commit_types(&change).await?;
+    tracing::info!(root = %root.name, "discriminator dropped");
+    r.tree_changed(db, &root.name, &root.key_fields).await?;
     Ok(Done::default())
 }
 

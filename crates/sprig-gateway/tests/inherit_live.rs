@@ -24,12 +24,27 @@
 //! sprigctl settings set sink.destination_allowlist '["127.0.0.1:<SPRIG_TEST_INHERIT_HOOK_PORT>"]' --scope tenant:$SYSTEM ...
 //! ```
 //!
+//! The members' inherited sinks check their own allowlist, so on a private
+//! deployment set the hook port at global scope too, or
+//! `inherited_queue_sink_end_to_end` gets nothing (with no error logged):
+//!
+//! ```sh
+//! sprigctl settings set sink.destination_allowlist '["127.0.0.1:<SPRIG_TEST_INHERIT_HOOK_PORT>"]' --scope global ...
+//! ```
+//!
+//! Clean-up (R9, r9last): each test first drops what an earlier run left
+//! in its declaring tenant's databases (every `FOR EACH TENANT` definition
+//! there, by the exact names `SHOW INHERITED DEFINITIONS` lists, then the
+//! database), and a failing test does the same before it ends and starts
+//! again a worker or controller it had stopped, so one failure doesn't
+//! fail the tests after it.
+//!
 //! `SPRIG_TEST_INHERIT_CONTROLLER_PIDFILE` and `..._START` let
 //! `fan_in_sink_end_to_end` stop the controller for a moment (a sink made
 //! while its task can't start yet).
 //!
 //! With `SPRIG_TEST_INHERIT_LATE=x`, each test creates its own late member
-//! (`x`, `xa`, `xs`, `xq`, `xk`, `xb1`, `xb2`, `xfi`), so use a new `x` per run.
+//! (`x`, `xa`, `xs`, `xq`, `xk`, `xb1`, `xb2`, `xfi`, `xg`), so use a new `x` per run.
 //!
 //! Every tenant has the user `app` (password `sprig-dev-app`). Kiran's
 //! case: the system tenant declares `security.user_events FOR EACH TENANT`
@@ -283,6 +298,8 @@ async fn for_each_tenant_end_to_end() {
         return;
     };
     let mut sys = conn(&e.addr, &e.system).await;
+    // A failure drops what the test declared (R9, r9last).
+    let _leftovers = Leftovers::dbs(&e, &["security"]);
     let mut members = Vec::new();
     for m in &e.members {
         let mut c = conn(&e.addr, m).await;
@@ -297,7 +314,7 @@ async fn for_each_tenant_end_to_end() {
         "DROP STREAM security.user_events IMMEDIATE CASCADE",
     )
     .await;
-    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS security").await;
+    clean_db(&mut sys, "security").await;
     ok(&mut sys, "CREATE DATABASE security").await;
 
     // 1. The definitions.
@@ -671,10 +688,12 @@ async fn in_tenant_publish_up() {
         return;
     };
     let mut sys = conn(&e.addr, &e.system).await;
+    // A failure drops what the test declared (R9, r9last).
+    let _leftovers = Leftovers::dbs(&e, &["platform"]);
     let (m0, m1) = (e.members[0].clone(), e.members[1].clone());
     let mut c0 = conn(&e.addr, &m0).await;
     let mut c1 = conn(&e.addr, &m1).await;
-    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS platform").await;
+    clean_db(&mut sys, "platform").await;
     ok(&mut sys, "CREATE DATABASE platform").await;
     ok(
         &mut sys,
@@ -747,11 +766,13 @@ async fn cross_tenant_publishes_in_transactions() {
         return;
     };
     let mut sys = conn(&e.addr, &e.system).await;
+    // A failure drops what the test declared (R9, r9last).
+    let _leftovers = Leftovers::dbs(&e, &["platform", "security"]);
     let m0 = e.members[0].clone();
     let mut c0 = conn(&e.addr, &m0).await;
     let _ = sql(&mut sys, "DROP STREAM security.tx_events IMMEDIATE CASCADE").await;
-    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS security").await;
-    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS platform").await;
+    clean_db(&mut sys, "security").await;
+    clean_db(&mut sys, "platform").await;
     let _ = sql(&mut c0, "DROP DATABASE IF EXISTS security").await;
     let _ = sql(&mut c0, "DROP DATABASE IF EXISTS app_x").await;
     ok(&mut sys, "CREATE DATABASE security").await;
@@ -946,10 +967,12 @@ async fn drop_database_forwards_the_outbox_first() {
         return;
     };
     let mut sys = conn(&e.addr, &e.system).await;
+    // A failure drops what the test declared (R9, r9last).
+    let _leftovers = Leftovers::dbs(&e, &["obx"]);
     let m0 = e.members[0].clone();
     let mut c0 = conn(&e.addr, &m0).await;
     let _ = sql(&mut sys, "DROP STREAM obx.drop_events IMMEDIATE CASCADE").await;
-    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS obx").await;
+    clean_db(&mut sys, "obx").await;
     let _ = sql(&mut c0, "DROP DATABASE IF EXISTS obx").await;
     // The outbox of a publish goes into the database it names (here obx,
     // the definition's database in the declarer).
@@ -1133,6 +1156,8 @@ async fn inherited_queues_end_to_end() {
         return;
     };
     let mut sys = conn(&e.addr, &e.system).await;
+    // A failure drops what the test declared (R9, r9last).
+    let _leftovers = Leftovers::dbs(&e, &["r9mq"]);
     let mut ms = Vec::new();
     for m in &e.members {
         let mut c = conn(&e.addr, m).await;
@@ -1150,7 +1175,7 @@ async fn inherited_queues_end_to_end() {
     let _ = sql(&mut sys, "DROP EXCHANGE r9mq.jobs IMMEDIATE CASCADE").await;
     let _ = sql(&mut sys, "DROP QUEUE r9mq.welcome_mail IMMEDIATE CASCADE").await;
     let _ = sql(&mut sys, "DROP QUEUE r9mq.audit_q IMMEDIATE CASCADE").await;
-    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS r9mq").await;
+    clean_db(&mut sys, "r9mq").await;
     ok(&mut sys, "CREATE DATABASE r9mq").await;
     let t = Instant::now();
     for q in [
@@ -1445,6 +1470,8 @@ async fn broadcast_end_to_end() {
         return;
     };
     let mut sys = conn(&e.addr, &e.system).await;
+    // A failure drops what the test declared (R9, r9last).
+    let _leftovers = Leftovers::dbs(&e, &["security"]);
     let mut ms = Vec::new();
     for m in &e.members {
         ms.push((m.clone(), conn(&e.addr, m).await));
@@ -1680,11 +1707,13 @@ async fn detach_and_the_end_of_the_drop_grace() {
         return;
     };
     let mut sys = conn(&e.addr, &e.system).await;
+    // A failure drops what the test declared (R9, r9last).
+    let _leftovers = Leftovers::dbs(&e, &["dt"]);
     let (m0, m1) = (e.members[0].clone(), e.members[1].clone());
     let mut c0 = conn(&e.addr, &m0).await;
     let mut c1 = conn(&e.addr, &m1).await;
     let _ = sql(&mut sys, "DROP STREAM dt.dt_events IMMEDIATE").await;
-    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS dt").await;
+    clean_db(&mut sys, "dt").await;
     for c in [&mut c0, &mut c1] {
         let _ = sql(c, "DROP DATABASE IF EXISTS dt").await;
     }
@@ -1786,6 +1815,8 @@ async fn broadcast_retry_and_the_drop_database_guard() {
         return;
     };
     let mut sys = conn(&e.addr, &e.system).await;
+    // A failure drops what the test declared (R9, r9last).
+    let _leftovers = Leftovers::dbs(&e, &["r9nguard", "security"]);
     let mut ms = Vec::new();
     for m in &e.members {
         ms.push((m.clone(), conn(&e.addr, m).await));
@@ -1793,7 +1824,7 @@ async fn broadcast_retry_and_the_drop_database_guard() {
     // The guard: a database holding live definitions isn't dropped.
     let _ = sql(&mut sys, "DROP STREAM r9nguard.g_events IMMEDIATE CASCADE").await;
     let _ = sql(&mut sys, "DROP QUEUE r9nguard.g_jobs IMMEDIATE CASCADE").await;
-    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS r9nguard").await;
+    clean_db(&mut sys, "r9nguard").await;
     ok(&mut sys, "CREATE DATABASE r9nguard").await;
     ok(
         &mut sys,
@@ -2025,11 +2056,13 @@ async fn fan_in_trigger_end_to_end() {
         return;
     };
     let mut sys = conn(&e.addr, &e.system).await;
+    // A failure drops what the test declared (R9, r9last).
+    let _leftovers = Leftovers::dbs(&e, &["r9naudit", "security"]);
     let ms = e.members.clone();
     let _ = sql(&mut sys, "DROP TRIGGER r9naudit.fi_audit").await;
     let _ = sql(&mut sys, "DROP STREAM security.fi_events IMMEDIATE CASCADE").await;
     let _ = sql(&mut sys, "CREATE DATABASE IF NOT EXISTS security").await;
-    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS r9naudit").await;
+    clean_db(&mut sys, "r9naudit").await;
     ok(&mut sys, "CREATE DATABASE r9naudit").await;
     ok(
         &mut sys,
@@ -2066,11 +2099,12 @@ async fn fan_in_trigger_end_to_end() {
     let half = wait_count(&mut sys, q, 60, 120).await;
     // The worker dies mid-stream.
     let killed = kill_worker(&e);
+    let mut worker = Restart(killed.then(|| e.start.clone()).flatten());
     println!("{half} runs before the kill -9 (killed: {killed})");
     for m in &ms {
         publish_fi(&mut sys, m, 200, 220).await;
     }
-    if killed {
+    if worker.done().is_some() {
         start_worker(&e);
     }
     let want = (ms.len() * 60) as u64;
@@ -2169,7 +2203,9 @@ async fn stream_trigger_dead_letter_replay() {
     };
     let root = var("SPRIG_TEST_INHERIT_ROOT").expect("SPRIG_TEST_INHERIT_ROOT");
     let mut sys = conn(&e.addr, &e.system).await;
-    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS r9ndl").await;
+    // A failure drops what the test declared (R9, r9last).
+    let _leftovers = Leftovers::dbs(&e, &["r9ndl"]);
+    clean_db(&mut sys, "r9ndl").await;
     ok(&mut sys, "CREATE DATABASE r9ndl").await;
     ok(
         &mut sys,
@@ -2350,9 +2386,11 @@ async fn amqp_fan_in_consumer() {
         return;
     };
     let mut sys = conn(&e.addr, &e.system).await;
+    // A failure drops what the test declared (R9, r9last).
+    let _leftovers = Leftovers::dbs(&e, &["r9fq"]);
     let ms = e.members.clone();
     let _ = sql(&mut sys, "DROP QUEUE r9fq.work IMMEDIATE CASCADE").await;
-    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS r9fq").await;
+    clean_db(&mut sys, "r9fq").await;
     ok(&mut sys, "CREATE DATABASE r9fq").await;
     ok(&mut sys, "CREATE QUEUE r9fq.work FOR EACH TENANT").await;
     let sc = amqp(&amqp_addr, &e.system, "r9fq").await;
@@ -2705,6 +2743,8 @@ async fn fan_in_sink_end_to_end() {
     };
     let got = hook_receiver(port).await;
     let mut sys = conn(&e.addr, &e.system).await;
+    // A failure drops what the test declared (R9, r9last).
+    let _leftovers = Leftovers::dbs(&e, &["r9fsink", "security"]);
     let ms = e.members.clone();
     let _ = sql(&mut sys, "DROP SINK r9fsink.audit").await;
     let _ = sql(&mut sys, "DROP SINK r9fsink.ch").await;
@@ -2714,7 +2754,7 @@ async fn fan_in_sink_end_to_end() {
     tokio::time::sleep(Duration::from_secs(8)).await;
     got.lock().unwrap().clear();
     let _ = sql(&mut sys, "CREATE DATABASE IF NOT EXISTS security").await;
-    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS r9fsink").await;
+    clean_db(&mut sys, "r9fsink").await;
     ok(&mut sys, "CREATE DATABASE r9fsink").await;
     ok(&mut sys, "GRANT SPRIG_SINK_ADMIN ON *.* TO app").await;
     ok(
@@ -2944,7 +2984,7 @@ async fn fan_in_sink_end_to_end() {
         wait_count(&mut sys, "SELECT COUNT(*) FROM r9fsink.ev", 1, 60).await,
         1
     );
-    let ctl = stop_controller();
+    let mut ctl = Restart(stop_controller());
     ok(
         &mut sys,
         "CREATE SINK r9fsink.dl FROM STREAM ev TO WEBHOOK CONNECTION hook \
@@ -2959,11 +2999,12 @@ async fn fan_in_sink_end_to_end() {
         )
         .await;
     }
-    if let Some(start) = ctl {
+    if ctl.0.is_some() {
         assert_eq!(
             wait_count(&mut sys, "SELECT COUNT(*) FROM r9fsink.ev", 4, 60).await,
             4
         );
+        let start = ctl.done().unwrap_or_default();
         let st = std::process::Command::new("sh")
             .args(["-c", &start])
             .status()
@@ -3031,8 +3072,10 @@ async fn queue_trigger_dead_letter_replay() {
     };
     let root = var("SPRIG_TEST_INHERIT_ROOT").expect("SPRIG_TEST_INHERIT_ROOT");
     let mut sys = conn(&e.addr, &e.system).await;
+    // A failure drops what the test declared (R9, r9last).
+    let _leftovers = Leftovers::dbs(&e, &["r9fqdl"]);
     let _ = sql(&mut sys, "DROP TRIGGER r9fqdl.on_job").await;
-    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS r9fqdl").await;
+    clean_db(&mut sys, "r9fqdl").await;
     ok(&mut sys, "CREATE DATABASE r9fqdl").await;
     ok(
         &mut sys,
@@ -3195,10 +3238,12 @@ async fn inherited_queue_sink_end_to_end() {
     };
     let got = hook_receiver(port).await;
     let mut sys = conn(&e.addr, &e.system).await;
+    // A failure drops what the test declared (R9, r9last).
+    let _leftovers = Leftovers::dbs(&e, &["r9fqs"]);
     let _ = sql(&mut sys, "DROP SINK r9fqs.out").await;
     let _ = sql(&mut sys, "DROP CONNECTION r9fqs.hook").await;
     let _ = sql(&mut sys, "DROP QUEUE r9fqs.jobs IMMEDIATE CASCADE").await;
-    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS r9fqs").await;
+    clean_db(&mut sys, "r9fqs").await;
     tokio::time::sleep(Duration::from_secs(5)).await;
     got.lock().unwrap().clear();
     ok(&mut sys, "CREATE DATABASE r9fqs").await;
@@ -3259,6 +3304,23 @@ async fn inherited_queue_sink_end_to_end() {
             "{m}: once each, in queue order"
         );
     }
+    // Least privilege (R9, r9last): each member's sprig_inherited holds
+    // SELECT, DELETE on the queue, nothing on the database.
+    for (m, c) in &mut cs {
+        let g: Vec<String> = ok(c, "SHOW GRANTS FOR sprig_inherited")
+            .await
+            .into_iter()
+            .filter_map(|r| r[0].clone())
+            .filter(|g| g.contains("`r9fqs`"))
+            .collect();
+        println!("{m} sprig_inherited on r9fqs: {g:?}");
+        assert!(
+            g.iter()
+                .any(|x| x.contains("`r9fqs`.`jobs`") && x.contains("DELETE")),
+            "{m}: {g:?}"
+        );
+        assert!(!g.iter().any(|x| x.contains("`r9fqs`.*")), "{m}: {g:?}");
+    }
     // The member sees its own sink instance, owned by sprig_inherited.
     let (m0, c0) = &mut cs[0];
     let inst = ok(c0, "SHOW INHERITED INSTANCES").await;
@@ -3289,8 +3351,493 @@ async fn inherited_queue_sink_end_to_end() {
         );
         assert_eq!(arrived(&received(&got), &late), (0..10).collect::<Vec<_>>());
     }
+    // Dropping the definition drops every member's sink (R9, r9last:
+    // a queue-sourced definition left them running, and in the next run
+    // the old task took a member's first messages from its new queue).
     ok(&mut sys, "DROP SINK r9fqs.out").await;
+    let t = Instant::now();
+    for m in &e.members {
+        // A new session (an open one keeps its catalog snapshot's sinks).
+        let mut c = conn(&e.addr, m).await;
+        let end = Instant::now() + Duration::from_secs(15);
+        let mut sinks = ok(&mut c, "SHOW SINKS FROM r9fqs").await;
+        while !sinks.is_empty() && Instant::now() < end {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            c = conn(&e.addr, m).await;
+            sinks = ok(&mut c, "SHOW SINKS FROM r9fqs").await;
+        }
+        println!(
+            "{m} sinks after DROP SINK of the definition ({:?}): {sinks:?}",
+            t.elapsed()
+        );
+        assert!(sinks.is_empty(), "{m}: {sinks:?}");
+    }
     ok(&mut sys, "DROP CONNECTION r9fqs.hook").await;
     let _ = sql(&mut sys, "DROP QUEUE r9fqs.jobs IMMEDIATE CASCADE").await;
-    let _ = sql(&mut sys, "DROP DATABASE IF EXISTS r9fqs").await;
+    clean_db(&mut sys, "r9fqs").await;
+}
+
+/// Publishes `gf-<m>-<i>` for member `m`, i in `from..to`, into
+/// `r9grp.gf_events`.
+async fn publish_gf(c: &mut Conn, m: &str, from: u64, to: u64) {
+    let v: Vec<String> = (from..to)
+        .map(|i| format!("('k{i}', 'gf-{m}-{i}')"))
+        .collect();
+    for chunk in v.chunks(100) {
+        ok(
+            c,
+            &format!(
+                "INSERT INTO r9grp.gf_events FOR TENANT {m} (`key`, `value`) VALUES {}",
+                chunk.join(", ")
+            ),
+        )
+        .await;
+    }
+}
+
+/// Distinct `gf-<m>-<i>` values of member `m` with `i` in `range`.
+fn gf_in(
+    r: &[(String, String, String)],
+    m: &str,
+    range: std::ops::Range<u64>,
+) -> std::collections::BTreeSet<u64> {
+    let p = format!("gf-{m}-");
+    r.iter()
+        .filter(|(t, _, _)| t == m)
+        .filter_map(|(_, v, _)| v.strip_prefix(&p).and_then(|n| n.parse().ok()))
+        .filter(|n| range.contains(n))
+        .collect()
+}
+
+/// A fan-in sink's task rows in `SHOW SINK STATUS` (the first row is the
+/// sink's own): (task, state, reads).
+async fn fan_in_tasks(c: &mut Conn, sink: &str) -> Vec<(u32, String, String)> {
+    ok(c, &format!("SHOW SINK STATUS {sink}"))
+        .await
+        .into_iter()
+        .skip(1)
+        .filter_map(|r| {
+            Some((
+                r[0].as_deref()?.parse().ok()?,
+                r[1].clone().unwrap_or_default(),
+                r[5].clone().unwrap_or_default(),
+            ))
+        })
+        .collect()
+}
+
+/// Waits until the sink's tasks `0..n` all run as `of = n` (their claim's
+/// `"of"`), up to `secs`; the tasks seen last.
+async fn wait_fan_in_tasks(
+    c: &mut Conn,
+    sink: &str,
+    n: u32,
+    secs: u64,
+) -> Vec<(u32, String, String)> {
+    let end = Instant::now() + Duration::from_secs(secs);
+    loop {
+        let t = fan_in_tasks(c, sink).await;
+        let of = format!("\"of\":{n}");
+        let running = (0..n).all(|k| {
+            t.iter().any(|(no, st, reads)| {
+                *no == k && st == "running" && reads.replace(' ', "").contains(&of)
+            })
+        });
+        if running || Instant::now() > end {
+            return t;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Grouped fan-in tasks (R9, r9last; chapter 51, "Fan-in sinks", item
+/// 110.1): with `fanin_instances_per_task = 1` and one partition per
+/// instance, a fan-in sink over three members' instances runs three
+/// tasks, each reading its members only (every record arrives once); a
+/// member created later grows it to four tasks (the old ones stop before
+/// the new ones start), and nothing is lost through the regrouping.
+#[tokio::test]
+async fn grouped_fan_in_sink_end_to_end() {
+    let Some(e) = env("grouped_fan_in_sink_end_to_end") else {
+        return;
+    };
+    let Some(port) = var("SPRIG_TEST_INHERIT_HOOK_PORT").and_then(|p| p.parse::<u16>().ok()) else {
+        eprintln!("no SPRIG_TEST_INHERIT_HOOK_PORT: skipped");
+        return;
+    };
+    let got = hook_receiver(port).await;
+    let mut sys = conn(&e.addr, &e.system).await;
+    // A failure drops what the test declared (R9, r9last).
+    let _leftovers = Leftovers::dbs(&e, &["r9grp"]);
+    let ms = e.members.clone();
+    let clean = [
+        "DROP SINK r9grp.grp",
+        "DROP CONNECTION r9grp.hook",
+        "DROP STREAM r9grp.gf_events IMMEDIATE CASCADE",
+        "DROP DATABASE IF EXISTS r9grp",
+    ];
+    for q in clean {
+        let _ = sql(&mut sys, q).await;
+    }
+    ok(&mut sys, "CREATE DATABASE r9grp").await;
+    ok(&mut sys, "GRANT SPRIG_SINK_ADMIN ON *.* TO app").await;
+    ok(&mut sys, "GRANT SPRIG_FAN_IN ON *.* TO app").await;
+    ok(
+        &mut sys,
+        "CREATE STREAM r9grp.gf_events FOR EACH TENANT PARTITIONS 1",
+    )
+    .await;
+    // The three members' instances, before the sink.
+    for m in &ms {
+        publish_gf(&mut sys, m, 0, 1).await;
+    }
+    ok(
+        &mut sys,
+        &format!(
+            "CREATE CONNECTION r9grp.hook TYPE WEBHOOK WITH (url = 'http://127.0.0.1:{port}', \
+             format = 'ndjson', signature = 'none')"
+        ),
+    )
+    .await;
+    let t = Instant::now();
+    ok(
+        &mut sys,
+        "CREATE SINK r9grp.grp FROM STREAM r9grp.gf_events FAN IN \
+         TO WEBHOOK CONNECTION hook PATH '/grp' \
+         WITH (batch_max_wait_ms = 100, fanin_refresh_seconds = 2, fanin_instances_per_task = 1)",
+    )
+    .await;
+    let tasks = wait_fan_in_tasks(&mut sys, "r9grp.grp", 3, 60).await;
+    println!("three instances: tasks {tasks:?} after {:?}", t.elapsed());
+    for k in 0..3u32 {
+        assert!(
+            tasks.iter().any(|(no, st, r)| *no == k
+                && st == "running"
+                && r.replace(' ', "").contains("\"of\":3")),
+            "task {k} of 3: {tasks:?}"
+        );
+    }
+    for m in &ms {
+        publish_gf(&mut sys, m, 100, 150).await;
+    }
+    wait_received(
+        &got,
+        |r| ms.iter().all(|m| gf_in(r, m, 100..150).len() >= 50),
+        90,
+    )
+    .await;
+    // Give a duplicate time to arrive, then: each record once.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let r = received(&got);
+    println!("three tasks: {} records in {:?}", r.len(), t.elapsed());
+    for m in &ms {
+        assert_eq!(gf_in(&r, m, 100..150).len(), 50, "{m}");
+        // Each once: no two tasks read one member. (The instance's first
+        // record, published just before the sink, may come too: a record's
+        // time is when the stream's sequencer stamped it.)
+        let p = format!("gf-{m}-");
+        let all = r
+            .iter()
+            .filter(|(tn, v, _)| {
+                tn == m
+                    && v.strip_prefix(&p)
+                        .and_then(|n| n.parse::<u64>().ok())
+                        .is_some_and(|n| (100..150).contains(&n))
+            })
+            .count();
+        assert_eq!(all, 50, "{m}: each record once with three tasks");
+    }
+    // A fourth member: four tasks, the three old ones stopped first.
+    if let Some(late) = e.late.as_ref().map(|l| format!("{l}g")) {
+        create_tenant(&e, &late);
+        got.lock().unwrap().clear();
+        let t = Instant::now();
+        publish_gf(&mut sys, &late, 0, 1).await;
+        // Records published while the sink regroups.
+        let mut all = ms.clone();
+        all.push(late.clone());
+        for m in &all {
+            publish_gf(&mut sys, m, 200, 230).await;
+        }
+        let tasks = wait_fan_in_tasks(&mut sys, "r9grp.grp", 4, 90).await;
+        println!("four instances: tasks {tasks:?} after {:?}", t.elapsed());
+        for k in 0..4u32 {
+            assert!(
+                tasks.iter().any(|(no, st, r)| *no == k
+                    && st == "running"
+                    && r.replace(' ', "").contains("\"of\":4")),
+                "task {k} of 4: {tasks:?}"
+            );
+        }
+        for m in &all {
+            publish_gf(&mut sys, m, 300, 330).await;
+        }
+        wait_received(
+            &got,
+            |r| {
+                all.iter()
+                    .all(|m| gf_in(r, m, 200..230).len() >= 30 && gf_in(r, m, 300..330).len() >= 30)
+            },
+            120,
+        )
+        .await;
+        let r = received(&got);
+        println!(
+            "after regrouping: {} records ({} expected at least) in {:?}",
+            r.len(),
+            all.len() * 60,
+            t.elapsed()
+        );
+        for m in &all {
+            assert_eq!(
+                gf_in(&r, m, 200..230).len(),
+                30,
+                "{m}: through the regrouping"
+            );
+            assert_eq!(gf_in(&r, m, 300..330).len(), 30, "{m}: after it");
+        }
+        assert!(
+            gf_in(&r, &late, 0..1).len() == 1,
+            "the new member's first record"
+        );
+    }
+    ok(&mut sys, "DROP SINK r9grp.grp").await;
+    ok(&mut sys, "DROP CONNECTION r9grp.hook").await;
+    let _ = sql(&mut sys, "DROP STREAM r9grp.gf_events IMMEDIATE CASCADE").await;
+    clean_db(&mut sys, "r9grp").await;
+}
+
+/// A process the test stopped (the controller, a killed worker): started
+/// again by its command if the test fails before it does (R9, r9last), so
+/// one failure doesn't leave the later tests without it.
+struct Restart(Option<String>);
+
+impl Restart {
+    /// Disarms the guard: the test starts the process itself.
+    fn done(&mut self) -> Option<String> {
+        self.0.take()
+    }
+}
+
+impl Drop for Restart {
+    fn drop(&mut self) {
+        if std::thread::panicking()
+            && let Some(cmd) = self.0.take()
+        {
+            let st = std::process::Command::new("sh").args(["-c", &cmd]).status();
+            eprintln!("clean-up after the failure: started again ({st:?})");
+        }
+    }
+}
+
+/// A failed test's leftovers (R9, r9last): statements run as `tenant.app`
+/// when the test panics, so one failure doesn't fail later tests with
+/// "database exists" or definitions still live. Each runs on its own
+/// thread and runtime (the test's is unwinding); errors are ignored.
+struct Leftovers {
+    addr: String,
+    tenant: String,
+    stmts: Vec<String>,
+    dbs: Vec<String>,
+}
+
+impl Leftovers {
+    fn new(e: &Env, tenant: &str, stmts: &[&str]) -> Self {
+        Self {
+            addr: e.addr.clone(),
+            tenant: tenant.to_owned(),
+            stmts: stmts.iter().map(|s| (*s).to_owned()).collect(),
+            dbs: Vec::new(),
+        }
+    }
+
+    /// The declaring tenant's databases `dbs`, cleaned with [`clean_db`].
+    fn dbs(e: &Env, dbs: &[&str]) -> Self {
+        let mut l = Self::new(e, &e.system, &[]);
+        l.dbs = dbs.iter().map(|s| (*s).to_owned()).collect();
+        l
+    }
+}
+
+impl Drop for Leftovers {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        let (addr, tenant, stmts, dbs) = (
+            self.addr.clone(),
+            self.tenant.clone(),
+            std::mem::take(&mut self.stmts),
+            std::mem::take(&mut self.dbs),
+        );
+        let _ = std::thread::spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            rt.block_on(async move {
+                let mut c = conn(&addr, &tenant).await;
+                for q in &stmts {
+                    let r = sql(&mut c, q).await;
+                    eprintln!(
+                        "clean-up after the failure: {q}: {}",
+                        if r.is_ok() { "ok" } else { "-" }
+                    );
+                }
+                for db in &dbs {
+                    clean_db(&mut c, db).await;
+                    eprintln!("clean-up after the failure: database {db} and its definitions");
+                }
+            });
+        })
+        .join();
+    }
+}
+
+/// Drops every `FOR EACH TENANT` definition the connection's tenant
+/// declared in `db`, by the exact names `SHOW INHERITED DEFINITIONS` lists
+/// (sinks and triggers first, then connections, then streams, queues and
+/// exchanges with their instances), then the database (R9, r9last). A
+/// failed earlier run's definitions otherwise refuse `DROP DATABASE`
+/// (39895), and the next test fails with "database exists".
+async fn clean_db(c: &mut Conn, db: &str) {
+    let defs = sql(c, "SHOW INHERITED DEFINITIONS")
+        .await
+        .unwrap_or_default();
+    let named = |kinds: &[&str]| -> Vec<(String, String)> {
+        defs.iter()
+            .filter(|r| r.get(1).and_then(Option::as_deref) == Some(db))
+            .filter_map(|r| {
+                let k = r.first()?.as_deref()?;
+                let n = r.get(2)?.clone()?;
+                kinds.contains(&k).then(|| (k.to_owned(), n))
+            })
+            .collect()
+    };
+    for (k, n) in named(&["sink", "trigger"]) {
+        let _ = sql(c, &format!("DROP {} {db}.{n}", k.to_ascii_uppercase())).await;
+    }
+    for (_, n) in named(&["connection"]) {
+        let _ = sql(c, &format!("DROP CONNECTION {db}.{n}")).await;
+    }
+    for (k, n) in named(&["stream", "queue", "exchange"]) {
+        let _ = sql(
+            c,
+            &format!("DROP {} {db}.{n} IMMEDIATE CASCADE", k.to_ascii_uppercase()),
+        )
+        .await;
+    }
+    let _ = sql(c, &format!("DROP DATABASE IF EXISTS {db}")).await;
+}
+
+/// Publishes `fq-<m>-<i>` into member `m`'s instance of `r9fiq.jobs`, as
+/// the member, i in `from..to`.
+async fn publish_fq(c: &mut Conn, m: &str, from: u64, to: u64) {
+    for i in from..to {
+        ok(
+            c,
+            &format!("CALL sprig.mq_publish('', 'jobs', 'fq-{m}-{i}', '{{}}', 0, 'r9fiq')"),
+        )
+        .await;
+    }
+}
+
+/// Lease tags for fan-in queue sinks (R9, r9last; item 110.3): a fan-in
+/// sink over three members' queue instances, its worker killed with
+/// `kill -9` mid-stream and started again 2 s later. The new task gives
+/// back what the dead one held in each member at once (its lease tag), so
+/// every message arrives well before `queue_lease_ms` (here 120 s; before,
+/// those messages waited it out).
+#[tokio::test]
+async fn fan_in_queue_sink_after_a_crash() {
+    let Some(e) = env("fan_in_queue_sink_after_a_crash") else {
+        return;
+    };
+    let Some(port) = var("SPRIG_TEST_INHERIT_HOOK_PORT").and_then(|p| p.parse::<u16>().ok()) else {
+        eprintln!("no SPRIG_TEST_INHERIT_HOOK_PORT: skipped");
+        return;
+    };
+    if e.pidfile.is_none() || e.start.is_none() {
+        eprintln!("no SPRIG_TEST_INHERIT_WORKER_PIDFILE / _START: skipped");
+        return;
+    }
+    let got = hook_receiver(port).await;
+    let mut sys = conn(&e.addr, &e.system).await;
+    // A failure drops what the test declared (R9, r9last).
+    let _leftovers = Leftovers::dbs(&e, &["r9fiq"]);
+    clean_db(&mut sys, "r9fiq").await;
+    ok(&mut sys, "CREATE DATABASE r9fiq").await;
+    ok(&mut sys, "GRANT SPRIG_SINK_ADMIN ON *.* TO app").await;
+    ok(&mut sys, "GRANT SPRIG_FAN_IN ON *.* TO app").await;
+    ok(&mut sys, "CREATE QUEUE r9fiq.jobs FOR EACH TENANT").await;
+    let ms = e.members.clone();
+    let n = 600u64;
+    let mut cs = Vec::new();
+    for m in &ms {
+        let mut c = conn(&e.addr, m).await;
+        let _ = sql(&mut c, "DROP DATABASE IF EXISTS r9fiq").await;
+        publish_fq(&mut c, m, 0, n).await;
+        cs.push(c);
+    }
+    ok(
+        &mut sys,
+        &format!(
+            "CREATE CONNECTION r9fiq.hook TYPE WEBHOOK WITH (url = 'http://127.0.0.1:{port}', \
+             format = 'ndjson', signature = 'none')"
+        ),
+    )
+    .await;
+    got.lock().unwrap().clear();
+    let t = Instant::now();
+    ok(
+        &mut sys,
+        "CREATE SINK r9fiq.out FROM QUEUE jobs FAN IN TO WEBHOOK CONNECTION hook PATH '/fq' \
+         WITH (batch_max_wait_ms = 100, batch_max_records = 25, queue_lease_ms = 120000, \
+         fanin_refresh_seconds = 2)",
+    )
+    .await;
+    let fq = |r: &[(String, String, String)], m: &str| -> std::collections::BTreeSet<String> {
+        let p = format!("fq-{m}-");
+        r.iter()
+            .filter(|(_, v, _)| v.starts_with(&p))
+            .map(|(_, v, _)| v.clone())
+            .collect()
+    };
+    wait_received(&got, |r| r.len() >= 200, 90).await;
+    assert!(kill_worker(&e));
+    let mut worker = Restart(e.start.clone());
+    let before = received(&got).len();
+    println!(
+        "worker killed with kill -9 after {before} records ({:?})",
+        t.elapsed()
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    worker.done();
+    start_worker(&e);
+    let restarted = Instant::now();
+    wait_received(&got, |r| ms.iter().all(|m| fq(r, m).len() as u64 >= n), 100).await;
+    let r = received(&got);
+    let took = restarted.elapsed();
+    println!(
+        "after the restart: {} records, {} distinct, the last {:?} after it",
+        r.len(),
+        ms.iter().map(|m| fq(&r, m).len()).sum::<usize>(),
+        took
+    );
+    for m in &ms {
+        assert_eq!(fq(&r, m).len() as u64, n, "{m}: every message");
+    }
+    assert!(
+        took < Duration::from_secs(60),
+        "the dead task's messages came back after {took:?}: their lease (120 s), not at once"
+    );
+    for (m, c) in ms.iter().zip(cs.iter_mut()) {
+        let info = ok(c, "CALL sprig.mq_info('jobs', 'r9fiq')").await;
+        assert_eq!(info[0][0].as_deref(), Some("0"), "{m}: {info:?}");
+    }
+    ok(&mut sys, "DROP SINK r9fiq.out").await;
+    ok(&mut sys, "DROP CONNECTION r9fiq.hook").await;
+    clean_db(&mut sys, "r9fiq").await;
 }

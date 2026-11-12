@@ -678,6 +678,277 @@ async fn differential_against_neo4j() {
     tokio::time::sleep(Duration::from_millis(1)).await;
 }
 
+/// Every operator's `Details` in a Bolt plan (or profile) tree.
+fn plan_details(p: &PackValue, out: &mut Vec<String>) {
+    if let Some(d) = p
+        .get("args")
+        .and_then(|a| a.get("Details"))
+        .and_then(PackValue::as_str)
+    {
+        out.push(d.to_owned());
+    }
+    for c in p
+        .get("children")
+        .and_then(PackValue::as_list)
+        .unwrap_or(&[])
+    {
+        plan_details(c, out);
+    }
+}
+
+/// R8 round 8 (G64, decision G69): Bolt hops are router routes. On the
+/// differential's graph (`SPRIG_TEST_BOLT_DIFF_DB`, 4 shards over two
+/// clusters in the round's runs), `EXPLAIN` shows the router's group and
+/// every shard with its cluster, `PROFILE` the routes each step ran, and
+/// `sprig_router_graph_routes_total` counts them. Before this round
+/// neither the lines nor the metric existed.
+#[tokio::test]
+async fn bolt_hops_are_router_routes() {
+    let (Some(addr), Some(user), Some(pw), Some(diff_db)) = (
+        env("SPRIG_TEST_BOLT_ADDR"),
+        env("SPRIG_TEST_BOLT_USER"),
+        env("SPRIG_TEST_BOLT_PASSWORD"),
+        env("SPRIG_TEST_BOLT_DIFF_DB"),
+    ) else {
+        eprintln!("skipped: SPRIG_TEST_BOLT_* and SPRIG_TEST_BOLT_DIFF_DB not set");
+        return;
+    };
+    let db = vec![("db", PackValue::String(diff_db.clone()))];
+    let mut g = connect(&addr, &user, &pw).await.expect("gateway");
+    fresh(&mut g, &db).await;
+    g.query(
+        "UNWIND range(1, 40) AS i CREATE (:R {i: i})",
+        vec![],
+        db.clone(),
+    )
+    .await
+    .expect("nodes");
+    g.query(
+        "MATCH (a:R), (b:R) WHERE b.i = a.i + 1 CREATE (a)-[:NEXT]->(b)",
+        vec![],
+        db.clone(),
+    )
+    .await
+    .expect("edges");
+    let e = g
+        .query(
+            "EXPLAIN MATCH (a:R {i: 1})-[:NEXT*1..5]->(b) RETURN b.i",
+            vec![],
+            db.clone(),
+        )
+        .await
+        .expect("explain");
+    let mut lines = Vec::new();
+    plan_details(e.summary.get("plan").expect("plan"), &mut lines);
+    eprintln!("EXPLAIN: {lines:#?}");
+    let group = lines
+        .iter()
+        .find(|l| l.starts_with("GraphRoutes: group"))
+        .expect("the router's group in EXPLAIN");
+    let n: usize = group
+        .split(", ")
+        .nth(1)
+        .and_then(|x| x.split(' ').next())
+        .and_then(|x| x.parse().ok())
+        .expect("shard count");
+    let shards: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.trim_start().starts_with("GraphShard: s"))
+        .collect();
+    assert_eq!(shards.len(), n, "one line per shard");
+    if n > 1 {
+        assert!(lines.iter().any(|l| l.contains("Route expand_out")));
+    }
+    let p = g
+        .query(
+            "PROFILE MATCH (a:R)-[:NEXT]->(b)<-[:NEXT]-(c) RETURN count(*) AS n",
+            vec![],
+            db.clone(),
+        )
+        .await
+        .expect("profile");
+    assert_eq!(p.records[0][0], PackValue::Int(0));
+    let mut lines = Vec::new();
+    plan_details(p.summary.get("profile").expect("profile"), &mut lines);
+    eprintln!("PROFILE: {lines:#?}");
+    for op in ["scan", "expand_out"] {
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with(&format!("GraphRoute {op}:"))),
+            "{op} route in PROFILE"
+        );
+    }
+    let r = g
+        .query(
+            "MATCH (a:R {i: 1})-[:NEXT*1..5]->(b) RETURN b.i ORDER BY b.i",
+            vec![],
+            db.clone(),
+        )
+        .await
+        .expect("reach");
+    assert_eq!(r.records.len(), 5);
+    if let Some(m) = env("SPRIG_TEST_R1_GW_METRICS") {
+        let total = metric(
+            &format!("http://{m}/metrics"),
+            "sprig_router_graph_routes_total",
+        )
+        .await;
+        eprintln!("sprig_router_graph_routes_total = {total}");
+        assert!(total > 0.0, "routes counted");
+    }
+    g.query("MATCH (n) DETACH DELETE n", vec![], db)
+        .await
+        .expect("clean");
+}
+
+/// Connects offering Bolt 5.8 down to 5.0.
+async fn connect_58(addr: &str, user: &str, pw: &str) -> Client {
+    let s = TcpStream::connect(addr).await.expect("connect");
+    let mut c = BoltClient::handshake(
+        s,
+        Some([[0, 8, 8, 5], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]),
+    )
+    .await
+    .expect("handshake");
+    c.login(user, pw).await.expect("login");
+    c
+}
+
+/// `RUN` and `PULL`: the records (before a failure, if one came) and the
+/// failure's code (`None`: it succeeded).
+async fn run_pull(
+    c: &mut Client,
+    q: &str,
+    params: Vec<(&str, PackValue)>,
+    db: &[(&str, PackValue)],
+) -> (Vec<String>, Option<String>) {
+    c.send(&Request::Run {
+        query: q.into(),
+        params: PackValue::map(params),
+        extra: PackValue::map(db.to_vec()),
+    })
+    .await
+    .expect("send");
+    c.send(&Request::Pull(PackValue::map([("n", PackValue::Int(-1))])))
+        .await
+        .expect("send");
+    let mut recs = Vec::new();
+    let mut fail = None;
+    let mut got_run = false;
+    loop {
+        match c.recv().await.expect("recv") {
+            Response::Success(_) if !got_run => got_run = true,
+            Response::Record(r) => recs.push(r.iter().map(norm).collect::<Vec<_>>().join("|")),
+            Response::Success(_) => break,
+            Response::Failure { code, .. } => {
+                fail = Some(code);
+                if !got_run {
+                    // PULL is IGNORED.
+                    let _ = c.recv().await;
+                }
+                c.reset().await.expect("reset");
+                break;
+            }
+            other => panic!("{q}: {other:?}"),
+        }
+    }
+    (recs, fail)
+}
+
+/// R8 round 8 against Neo4j 5.26: Bolt 5.8 is negotiated; `CALL { } IN
+/// TRANSACTIONS` (reads and writes, `ON ERROR CONTINUE | BREAK | FAIL`,
+/// `REPORT STATUS`, the refusal inside an explicit transaction); byte
+/// arrays as parameters, properties and results; and a row error after
+/// the rows before it. Every answer is compared with the reference's.
+#[tokio::test]
+async fn round_eight_against_neo4j() {
+    let (Some(addr), Some(user), Some(pw), Some(neo), Some(neo_pw), Some(diff_db)) = (
+        env("SPRIG_TEST_BOLT_ADDR"),
+        env("SPRIG_TEST_BOLT_USER"),
+        env("SPRIG_TEST_BOLT_PASSWORD"),
+        env("SPRIG_TEST_NEO4J_ADDR"),
+        env("SPRIG_TEST_NEO4J_PASSWORD"),
+        env("SPRIG_TEST_BOLT_DIFF_DB"),
+    ) else {
+        eprintln!(
+            "skipped: SPRIG_TEST_BOLT_*, SPRIG_TEST_NEO4J_* and SPRIG_TEST_BOLT_DIFF_DB not set"
+        );
+        return;
+    };
+    let db = vec![("db", PackValue::String(diff_db.clone()))];
+    let mut g = connect_58(&addr, &user, &pw).await;
+    let mut n = connect_58(&neo, "neo4j", &neo_pw).await;
+    assert_eq!(g.version.to_string(), "5.8");
+    assert_eq!(n.version.to_string(), "5.8");
+    fresh(&mut g, &db).await;
+    fresh(&mut n, &[]).await;
+    let bytes = || vec![("b", PackValue::Bytes(vec![1, 2, 255]))];
+    let cases: &[(&str, bool)] = &[
+        (
+            "UNWIND [1, 0, 2] AS x CALL (x) { RETURN 10 / x AS y } IN TRANSACTIONS OF 1 ROW ON ERROR CONTINUE RETURN x, y",
+            false,
+        ),
+        (
+            "UNWIND [1, 0, 2] AS x CALL (x) { RETURN 10 / x AS y } IN TRANSACTIONS OF 1 ROW ON ERROR BREAK RETURN x, y",
+            false,
+        ),
+        (
+            "UNWIND [1, 0, 2] AS x CALL (x) { CREATE (:T {x: 10 / x}) } IN TRANSACTIONS OF 1 ROW ON ERROR CONTINUE REPORT STATUS AS s RETURN x, s.started, s.committed, s.errorMessage",
+            false,
+        ),
+        ("MATCH (t:T) RETURN t.x ORDER BY t.x", false),
+        (
+            "UNWIND [1, 0, 2] AS x CALL (x) { CREATE (:U {x: 10 / x}) } IN TRANSACTIONS OF 1 ROW",
+            false,
+        ),
+        ("MATCH (u:U) RETURN count(*) AS c", false),
+        (
+            "UNWIND range(1, 7) AS x CALL (x) { CREATE (:V {x: x}) } IN TRANSACTIONS OF 3 ROWS",
+            false,
+        ),
+        ("MATCH (v:V) RETURN sum(v.x) AS s, count(*) AS c", false),
+        (
+            "MATCH (v:V) CALL (v) { DETACH DELETE v } IN TRANSACTIONS OF 2 ROWS",
+            false,
+        ),
+        ("MATCH (v:V) RETURN count(*) AS c", false),
+        (
+            "RETURN $b AS b, valueType($b) AS t, size($b) AS n, $b = $b AS eq",
+            true,
+        ),
+        ("CREATE (x:BB {b: $b}) RETURN x.b AS b", true),
+        (
+            "MATCH (x:BB) WHERE x.b = $b RETURN x.b AS b, count(*) AS c",
+            true,
+        ),
+        ("UNWIND [1, 0, 2] AS x RETURN 10 / x AS y", false),
+        ("UNWIND [1, 0] AS x RETURN 10 / x AS y LIMIT 1", false),
+        ("MATCH (n) DETACH DELETE n", false),
+    ];
+    let mut same = 0;
+    for (q, with_bytes) in cases {
+        let p = if *with_bytes { bytes() } else { vec![] };
+        let a = run_pull(&mut g, q, p.clone(), &db).await;
+        let b = run_pull(&mut n, q, p, &[]).await;
+        eprintln!("{q}\n  sprig: {a:?}\n  neo4j: {b:?}");
+        assert_eq!(a, b, "{q}");
+        same += 1;
+    }
+    // Explicit transactions refuse batches, with Neo4j's code.
+    let batched = "UNWIND [1] AS x CALL (x) { RETURN x AS y } IN TRANSACTIONS RETURN y";
+    g.begin(db.clone()).await.expect("begin");
+    let (_, f) = run_pull(&mut g, batched, vec![], &[]).await;
+    n.begin(vec![]).await.expect("begin");
+    let (_, f2) = run_pull(&mut n, batched, vec![], &[]).await;
+    assert_eq!(f, f2);
+    assert_eq!(
+        f.as_deref(),
+        Some("Neo.DatabaseError.Transaction.TransactionStartFailed")
+    );
+    eprintln!("round eight: {same} statements identical to Neo4j 5.26 over Bolt 5.8");
+}
+
 /// Pulls everything of an open result with `PULL {n}` batches: (records,
 /// batches, the last summary).
 async fn pull_all(c: &mut Client, n: i64, qid: i64) -> (usize, usize, PackValue) {

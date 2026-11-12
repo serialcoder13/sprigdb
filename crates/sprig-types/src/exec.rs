@@ -106,6 +106,28 @@ pub trait Runner: Send {
     /// # Errors
     /// The catalog's.
     async fn commit_types(&mut self, change: &TypesChange) -> Result<()>;
+
+    /// After type DDL changed the tables of the tree rooted at `root`
+    /// (chapter 42, typed tables in inheritance groups): when the tree is
+    /// inheritable, its new tables and columns follow
+    /// (`SPRIG INHERITABLE KEY (key)` again on the root). A no-op
+    /// otherwise.
+    ///
+    /// # Errors
+    /// The inheritance layer's.
+    async fn tree_changed(&mut self, db: Option<&str>, root: &str, key: &[String]) -> Result<()> {
+        let _ = (db, root, key);
+        Ok(())
+    }
+
+    /// Whether the tree rooted at `root` is inheritable (chapter 42).
+    ///
+    /// # Errors
+    /// The catalog's.
+    async fn tree_inheritable(&mut self, db: Option<&str>, root: &str) -> Result<bool> {
+        let _ = (db, root);
+        Ok(false)
+    }
 }
 
 /// The savepoint a plan inside a client's transaction uses.

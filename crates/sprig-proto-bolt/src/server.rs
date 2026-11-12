@@ -246,7 +246,8 @@ struct Conn {
     in_tx: bool,
     info: ConnInfo,
     session: Option<Box<dyn BoltSession>>,
-    results: Vec<(i64, QueryResult)>,
+    /// Open results: qid, the result, and whether a record was taken.
+    results: Vec<(i64, QueryResult, bool)>,
     next_qid: i64,
     out: BytesMut,
 }
@@ -266,10 +267,21 @@ impl Conn {
     fn fail(&mut self, f: &BoltFailure) {
         metrics::counter!("sprig_bolt_messages_total", "message" => "FAILURE", "result" => "sent")
             .increment(1);
-        self.send(&Response::Failure {
-            code: f.code.clone(),
-            message: f.message.clone(),
-        });
+        if self.info.version >= BoltVersion::new(5, 7) {
+            let (gql_status, description, diagnostic) = gql_error(&f.code);
+            self.send(&Response::GqlFailure {
+                code: f.code.clone(),
+                message: f.message.clone(),
+                gql_status: gql_status.to_owned(),
+                description: description.to_owned(),
+                diagnostic,
+            });
+        } else {
+            self.send(&Response::Failure {
+                code: f.code.clone(),
+                message: f.message.clone(),
+            });
+        }
         self.in_tx = matches!(self.state, State::TxReady | State::TxStreaming);
         self.results.clear();
         self.state = State::Failed;
@@ -328,7 +340,7 @@ impl Conn {
         if qid < 0 {
             return self.results.len().checked_sub(1);
         }
-        self.results.iter().position(|(q, _)| *q == qid)
+        self.results.iter().position(|(q, _, _)| *q == qid)
     }
 
     #[allow(clippy::too_many_lines)] // take, look ahead, summarize
@@ -354,7 +366,7 @@ impl Conn {
         let mut end: Option<StreamEnd> = None;
         let mut failed: Option<BoltFailure> = None;
         {
-            let r = &mut self.results[i].1;
+            let (_, r, had_rows) = &mut self.results[i];
             let mut sent = 0usize;
             while sent < take {
                 let rec = if let Some(rec) = r.records.pop_front() {
@@ -379,6 +391,7 @@ impl Conn {
                     rows.push(rec);
                 }
                 sent += 1;
+                *had_rows = true;
             }
             // Look ahead one record, so `has_more` is exact.
             if failed.is_none()
@@ -404,7 +417,7 @@ impl Conn {
         }
         let r = &self.results[i].1;
         if r.records.is_empty() && r.stream.is_none() {
-            let (_, r) = self.results.remove(i);
+            let (_, r, had_rows) = self.results.remove(i);
             let mut stats = r.stats;
             let mut bookmark = None;
             if let Some(e) = end {
@@ -420,7 +433,24 @@ impl Conn {
             if let Some(db) = r.db {
                 meta.push(("db", PackValue::String(db)));
             }
-            meta.extend(r.summary);
+            let gql = self.info.version >= BoltVersion::new(5, 5);
+            let mut statuses: Vec<PackValue> = Vec::new();
+            for (k, v) in r.summary {
+                match k {
+                    // From Bolt 5.5 notifications come as GQL status
+                    // objects (the session gives both).
+                    "notifications" if gql => {}
+                    "statuses" if gql => {
+                        statuses.extend(v.as_list().unwrap_or(&[]).iter().cloned());
+                    }
+                    "statuses" => {}
+                    _ => meta.push((k, v)),
+                }
+            }
+            if gql {
+                statuses.insert(0, completion_status(r.fields.is_empty(), had_rows));
+                meta.push(("statuses", PackValue::List(statuses)));
+            }
             if !stats.is_empty() {
                 meta.push((
                     "stats",
@@ -452,7 +482,7 @@ impl Conn {
     /// Buffers every open stream (a transaction runs another statement
     /// while earlier results are open), up to `limit` bytes per result.
     async fn buffer_streams(&mut self, limit: usize) -> Result<(), BoltFailure> {
-        for (_, r) in &mut self.results {
+        for (_, r, _) in &mut self.results {
             let Some(mut s) = r.stream.take() else {
                 continue;
             };
@@ -564,7 +594,16 @@ impl Conn {
                         } else {
                             self.results.clear();
                         }
-                        self.results.push((qid, r));
+                        // Bolt 5.8: the database the statement ran in, for
+                        // the driver's home-database cache; SprigDB echoes
+                        // the name the client gave (an empty one: none).
+                        if self.info.version >= BoltVersion::new(5, 8)
+                            && let Some(db) = extra.get("db").and_then(PackValue::as_str)
+                            && !db.is_empty()
+                        {
+                            meta.push(("db", PackValue::str(db)));
+                        }
+                        self.results.push((qid, r, false));
                         self.success(meta);
                         self.state = if in_tx {
                             State::TxStreaming
@@ -812,4 +851,42 @@ where
             Err(_) => return Ok(End::Timeout),
         }
     }
+}
+
+/// The completion status Neo4j puts first in a summary's `statuses` (Bolt
+/// 5.5 on): `00001` for a statement without columns, `00000` when a
+/// record came back, `02000` (no data) otherwise.
+fn completion_status(no_columns: bool, had_rows: bool) -> PackValue {
+    let (code, text) = if no_columns {
+        ("00001", "note: successful completion - omitted result")
+    } else if had_rows {
+        ("00000", "note: successful completion")
+    } else {
+        ("02000", "note: no data")
+    };
+    PackValue::map([
+        ("gql_status", PackValue::str(code)),
+        ("status_description", PackValue::str(text)),
+    ])
+}
+
+/// A failure's GQL fields (Bolt 5.7 on), as Neo4j 5.26 sends them: a
+/// syntax error is `42001` with its classification; every other error is
+/// Neo4j's general `50N42`, the Neo4j code telling drivers what it is.
+fn gql_error(code: &str) -> (&'static str, &'static str, Option<PackValue>) {
+    if code == "Neo.ClientError.Statement.SyntaxError" {
+        return (
+            "42001",
+            "error: syntax error or access rule violation - invalid syntax",
+            Some(PackValue::map([(
+                "_classification",
+                PackValue::str("CLIENT_ERROR"),
+            )])),
+        );
+    }
+    (
+        "50N42",
+        "error: general processing exception - unexpected error. Unexpected error has occurred. See debug log for details.",
+        None,
+    )
 }

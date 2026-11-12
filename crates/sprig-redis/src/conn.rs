@@ -94,8 +94,9 @@ where
                         None => std::future::pending().await,
                     }
                 } => {
-                    if let Some(m) = m {
-                        let f = sess.message_frame(m);
+                    if let Some(m) = m
+                        && let Some(f) = sess.deliver(m).await
+                    {
                         encode(&f, sess.proto, &mut out);
                     }
                 }

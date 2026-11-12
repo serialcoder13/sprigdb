@@ -153,6 +153,10 @@ pub struct StoredRecord {
     pub headers: Vec<Header>,
     /// The epoch that appended it.
     pub leader_epoch: i32,
+    /// Left out by the reader's row-level security (chapter 29, RL44): its
+    /// offset still counts (a batch spans it, so the consumer moves past
+    /// it), its key, value and headers aren't sent.
+    pub filtered: bool,
 }
 
 /// Live limits for a principal's requests.
@@ -430,8 +434,12 @@ pub fn encode_batches(records: &[StoredRecord]) -> Result<Vec<u8>, CodecError> {
         }
         let run = &records[i..j];
         let base = run[0].offset;
-        let base_ts = run.iter().map(|r| r.timestamp_ms).min().unwrap_or(0);
-        let max_ts = run.iter().map(|r| r.timestamp_ms).max().unwrap_or(0);
+        // Filtered records (RL44) leave offset gaps inside the batch, and
+        // a batch of only filtered records is sent empty: either way its
+        // last offset delta covers them, so the consumer goes past them.
+        let kept = || run.iter().filter(|r| !r.filtered);
+        let base_ts = kept().map(|r| r.timestamp_ms).min().unwrap_or(0);
+        let max_ts = kept().map(|r| r.timestamp_ms).max().unwrap_or(0);
         let delta =
             |o: i64| i32::try_from(o - base).map_err(|_| CodecError::Invalid("offset delta"));
         let batch = RecordBatch {
@@ -444,8 +452,7 @@ pub fn encode_batches(records: &[StoredRecord]) -> Result<Vec<u8>, CodecError> {
             producer_id: -1,
             producer_epoch: -1,
             base_sequence: -1,
-            records: run
-                .iter()
+            records: kept()
                 .map(|r| {
                     Ok(Record {
                         attributes: 0,
@@ -477,6 +484,9 @@ fn epoch_check(current: i32, b: &Bounds) -> i16 {
 }
 
 fn record_bytes(r: &StoredRecord) -> usize {
+    if r.filtered {
+        return 0;
+    }
     r.key.as_ref().map_or(0, Vec::len)
         + r.value.as_ref().map_or(0, Vec::len)
         + r.headers
@@ -1043,6 +1053,7 @@ mod tests {
                 value: None,
             }],
             leader_epoch: epoch,
+            filtered: false,
         };
         // A gap (offset 3 compacted away) and an epoch change.
         let recs = vec![rec(1, 4), rec(2, 4), rec(4, 4), rec(5, 6)];
@@ -1065,6 +1076,34 @@ mod tests {
         assert_eq!(back[1].base_offset, 5);
         assert_eq!(back[1].partition_leader_epoch, 6);
         assert!(encode_batches(&[]).unwrap().is_empty());
+        // RL44: filtered records leave gaps, and a batch of only filtered
+        // records goes empty, its last delta still covering them.
+        let mut recs = vec![rec(10, 4), rec(11, 4), rec(12, 4), rec(13, 4)];
+        recs[1].filtered = true;
+        recs[3].filtered = true;
+        let back =
+            RecordBatch::decode_all(&encode_batches(&recs).unwrap(), 1 << 20, false).unwrap();
+        assert_eq!(back[0].base_offset, 10);
+        assert_eq!(back[0].last_offset_delta, 3);
+        assert_eq!(
+            back[0]
+                .records
+                .iter()
+                .map(|r| r.offset_delta)
+                .collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+        for r in &mut recs {
+            r.filtered = true;
+        }
+        let back =
+            RecordBatch::decode_all(&encode_batches(&recs).unwrap(), 1 << 20, false).unwrap();
+        assert_eq!(back.len(), 1);
+        assert!(back[0].records.is_empty());
+        assert_eq!(
+            back[0].base_offset + i64::from(back[0].last_offset_delta),
+            13
+        );
     }
 
     #[test]

@@ -352,6 +352,72 @@ pub struct FlushRow {
     pub last_seen: SystemTime,
 }
 
+/// One fingerprint's totals on this gateway since it was first counted or
+/// since the tenant's last reset: what `performance_schema`'s
+/// `events_statements_summary_by_digest` shows on port 3306 (chapter 28
+/// step 13, R4 round 5). Unlike [`Stats`], it doesn't start again with
+/// each bucket; it goes when the entry is evicted.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Digest {
+    /// Executions.
+    pub exec_count: u64,
+    /// Executions that ended in an error.
+    pub error_count: u64,
+    /// Sum of latencies.
+    pub total_us: u64,
+    /// Shortest latency.
+    pub min_us: u64,
+    /// Longest latency.
+    pub max_us: u64,
+    /// Latency histogram, for the quantiles.
+    pub latency_hist: Histogram,
+    /// Rows sent.
+    pub rows_returned: u64,
+    /// Rows changed.
+    pub rows_affected: u64,
+    /// Rows examined over the probed executions.
+    pub rows_examined: u64,
+    /// First counted (since the last reset).
+    pub first_seen: Option<SystemTime>,
+    /// Last counted.
+    pub last_seen: Option<SystemTime>,
+}
+
+impl Digest {
+    fn add(&mut self, ex: &ExecSummary, wall: SystemTime) {
+        self.min_us = if self.exec_count == 0 {
+            ex.latency_us
+        } else {
+            self.min_us.min(ex.latency_us)
+        };
+        self.exec_count += 1;
+        self.error_count += u64::from(ex.error);
+        self.total_us = self.total_us.saturating_add(ex.latency_us);
+        self.max_us = self.max_us.max(ex.latency_us);
+        self.latency_hist.record(ex.latency_us);
+        self.rows_returned = self.rows_returned.saturating_add(ex.rows_returned);
+        self.rows_affected = self.rows_affected.saturating_add(ex.rows_affected);
+        if let Some(x) = ex.examined {
+            self.rows_examined = self.rows_examined.saturating_add(x);
+        }
+        self.first_seen.get_or_insert(wall);
+        self.last_seen = Some(wall);
+    }
+}
+
+/// A fingerprint's [`Digest`] with what names it.
+#[derive(Debug, Clone)]
+pub struct DigestRow {
+    /// The fingerprint.
+    pub id: FingerprintId,
+    /// Its normalized text.
+    pub text: Arc<str>,
+    /// Its logical database (`DbId(0)` for none).
+    pub db_id: DbId,
+    /// The totals.
+    pub digest: Digest,
+}
+
 /// Counters for the metrics of chapter 12 ("Observability").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RecorderMetrics {
@@ -394,11 +460,20 @@ struct Entry {
     first_seen: SystemTime,
     /// Parameter captures asked for: (bucket, count).
     samples_in_bucket: (u64, u32),
+    /// Totals since the entry began or the tenant's last reset.
+    digest: Digest,
 }
 
 impl Entry {
     fn heap_bytes(&self) -> usize {
-        ENTRY_BYTES + self.stats.latency_hist.heap_bytes() + self.meta.heap_bytes()
+        ENTRY_BYTES
+            + self.stats.latency_hist.heap_bytes()
+            + self.digest.latency_hist.heap_bytes()
+            + self.meta.heap_bytes()
+    }
+
+    fn hist_bytes(&self) -> usize {
+        self.stats.latency_hist.heap_bytes() + self.digest.latency_hist.heap_bytes()
     }
 }
 
@@ -626,9 +701,10 @@ impl Recorder {
                 if e.bucket_start != bucket {
                     self.roll(tenant, e, bucket);
                 }
-                let before = e.stats.latency_hist.heap_bytes();
+                let before = e.hist_bytes();
                 self.add(e, fp, ex, secs);
-                let grew = e.stats.latency_hist.heap_bytes().saturating_sub(before);
+                e.digest.add(ex, wall);
+                let grew = e.hist_bytes().saturating_sub(before);
                 if grew > 0 {
                     e.bytes += grew;
                     self.memory.fetch_add(grew, Ordering::Relaxed);
@@ -767,6 +843,7 @@ impl Recorder {
             bytes: 0,
             first_seen: wall,
             samples_in_bucket: (bucket, 0),
+            digest: Digest::default(),
         };
         {
             let mut m = lock(self.shard(&key));
@@ -776,9 +853,11 @@ impl Recorder {
                     self.roll(tenant, existing, bucket);
                 }
                 self.add(existing, fp, ex, secs);
+                existing.digest.add(ex, wall);
                 return;
             }
             self.add(&mut e, fp, ex, secs);
+            e.digest.add(ex, wall);
             e.bytes = e.heap_bytes();
             let bytes = e.bytes;
             m.insert(key, e);
@@ -1008,6 +1087,42 @@ impl Recorder {
         }
         out.sort_by_key(|w| w.id);
         out
+    }
+
+    /// A tenant's digests on this gateway (see [`Digest`]), executed at
+    /// least once since the last reset.
+    #[must_use]
+    pub fn digests(&self, tenant: TenantId) -> Vec<DigestRow> {
+        let mut out = Vec::new();
+        for s in &*self.shards {
+            let m = lock(s);
+            for (_, e) in m.iter().filter(|(k, _)| k.0 == tenant) {
+                if e.digest.exec_count > 0 {
+                    out.push(DigestRow {
+                        id: e.meta.id,
+                        text: Arc::clone(&e.meta.text),
+                        db_id: e.meta.db_id,
+                        digest: e.digest.clone(),
+                    });
+                }
+            }
+        }
+        out.sort_by_key(|d| d.id);
+        out
+    }
+
+    /// Starts a tenant's digests again (`TRUNCATE` of the digest summary
+    /// on 3306); the workload statistics are untouched.
+    pub fn reset_digests(&self, tenant: TenantId) {
+        for s in &*self.shards {
+            let mut m = lock(s);
+            for (_, e) in m.iter_mut().filter(|(k, _)| k.0 == tenant) {
+                let freed = e.digest.latency_hist.heap_bytes();
+                e.digest = Digest::default();
+                e.bytes = e.bytes.saturating_sub(freed);
+                self.sub_memory(freed);
+            }
+        }
     }
 
     /// The metrics.

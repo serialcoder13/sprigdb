@@ -26,6 +26,7 @@ pub mod authz;
 pub mod autoindex;
 pub mod backends;
 pub mod ddl;
+pub mod ddl_owners;
 pub mod locator;
 pub mod names;
 pub mod password;
@@ -202,7 +203,18 @@ impl TenantServices {
         // Chapter 42: no destructive change of a shared object, checked
         // under the catalog lock (decision I7).
         let ddl = DdlEngine::new(catalog.clone(), Arc::clone(&clock))
-            .with_check(sprig_inherit::guard::SharedCheck::shared());
+            .with_check(sprig_inherit::guard::SharedCheck::shared())
+            // bugfix-38: abandoned DDL jobs are resolved by the next DDL
+            // that waits for them.
+            .with_owner(
+                &ddl_owners::label(&dc),
+                Some(Arc::new(ddl_owners::GatewayOwners::new(Arc::clone(
+                    &stores.dc,
+                )))),
+            )
+            .with_janitor(Arc::new(ddl_owners::CtlExecutors::new(Arc::clone(
+                &locator,
+            ))));
         // Chapter 29: SPRIG SET auth.authorizer only names an engine every
         // live gateway knows.
         let writer = TenantSettingsWriter::new(

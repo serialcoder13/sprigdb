@@ -302,12 +302,12 @@ test.describe.serial('Studio round 4: logic', () => {
     await expect(page.getByTestId('logic-active')).toHaveText('1');
     await expect(page.getByTestId('logic-modules')).toContainText('studio3_double');
     await shot(page, 'logic-js');
-    // A test run: CALL in a transaction, rolled back.
+    // A test run (Logic.TestRun since round 6): always rolled back.
     await page.getByTestId('logic-tab-test').click();
     await page.getByTestId('logic-arg-a').fill('21');
-    await page.getByTestId('logic-run').click();
-    await expect(page.getByTestId('logic-run-result')).toContainText('42');
-    await expect(page.getByTestId('logic-run-result')).toContainText('rolled back');
+    await page.getByTestId('logic-test-run').click();
+    await expect(page.getByTestId('logic-report-result')).toContainText('42');
+    await expect(page.getByTestId('logic-report')).toContainText('Writes, rolled back');
     // A second version, then roll back to the first.
     await page.getByTestId('logic-tab-code').click();
     await typeSql(page, 'return a * 3;');
@@ -316,8 +316,8 @@ test.describe.serial('Studio round 4: logic', () => {
     await expect(page.getByTestId('logic-active')).toHaveText('2');
     await page.getByTestId('logic-tab-test').click();
     await page.getByTestId('logic-arg-a').fill('21');
-    await page.getByTestId('logic-run').click();
-    await expect(page.getByTestId('logic-run-result')).toContainText('63');
+    await page.getByTestId('logic-test-run').click();
+    await expect(page.getByTestId('logic-report-result')).toContainText('63');
     await page.getByTestId('logic-tab-versions').click();
     await expect(page.getByTestId('logic-versions')).toContainText('2');
     await page.getByTestId('logic-rollback-1').click();
@@ -326,8 +326,8 @@ test.describe.serial('Studio round 4: logic', () => {
     await expect(page.getByTestId('logic-active')).toHaveText('1');
     await page.getByTestId('logic-tab-test').click();
     await page.getByTestId('logic-arg-a').fill('21');
-    await page.getByTestId('logic-run').click();
-    await expect(page.getByTestId('logic-run-result')).toContainText('42');
+    await page.getByTestId('logic-test-run').click();
+    await expect(page.getByTestId('logic-report-result')).toContainText('42');
     await page.getByTestId('logic-tab-logs').click();
     await expect(page.getByTestId('logic-logs')).toBeVisible();
     await page.getByTestId('logic-tab-dead').click();
@@ -351,8 +351,8 @@ test.describe.serial('Studio round 4: logic', () => {
     await expect(page.getByTestId('logic-active')).toHaveText('1');
     await page.getByTestId('logic-tab-test').click();
     await page.getByTestId('logic-arg-a').fill('8');
-    await page.getByTestId('logic-run').click();
-    await expect(page.getByTestId('logic-run-result')).toContainText('16');
+    await page.getByTestId('logic-test-run').click();
+    await expect(page.getByTestId('logic-report-result')).toContainText('16');
   });
 });
 

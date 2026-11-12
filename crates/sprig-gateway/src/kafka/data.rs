@@ -4,9 +4,12 @@
 //!
 //! - **Topics** come from the tenant's catalog snapshot. Producing needs
 //!   `INSERT` on the stream (by name, or on its database), reading
-//!   `SELECT`; a change topic is read with `SELECT` on its table, and is
-//!   refused (`TOPIC_AUTHORIZATION_FAILED`, 39366) when the authorization
-//!   engine filters that table's rows, as SQL reads of it are. Privileges
+//!   `SELECT`; a change topic is read with `SELECT` on its table. When the
+//!   table's row-level security policies bind the reader, each fetched
+//!   batch is filtered through the topic's SQL read in a session of the
+//!   reader (chapter 29, RL44): hidden records are left out of the batches
+//!   (their offsets are gaps the batches span), and an update whose row
+//!   became visible or hidden arrives as an insert or a delete. Privileges
 //!   are chapter 29's, compiled for the user with the roles active at
 //!   login, and cached per catalog and auth version.
 //! - **Produce** writes the outbox directly on the stream's shard, as
@@ -184,6 +187,9 @@ pub struct GatewayData {
     grants: Mutex<GrantCache>,
     epochs: Mutex<EpochCache>,
     expired: Mutex<HashMap<(u64, u64), Instant>>,
+    /// Chapter 29 (RL44): change-topic reads by users a table's policies
+    /// bind go through a session of the user (the SQL read's filter).
+    engine: std::sync::OnceLock<Arc<crate::http::sql::SqlEngine>>,
 }
 
 impl std::fmt::Debug for GatewayData {
@@ -234,7 +240,114 @@ impl GatewayData {
             grants: Mutex::new(HashMap::new()),
             epochs: Mutex::new(HashMap::new()),
             expired: Mutex::new(HashMap::new()),
+            engine: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The SQL engine filtered change-topic reads run through (RL44).
+    pub fn set_engine(&self, engine: Arc<crate::http::sql::SqlEngine>) {
+        let _ = self.engine.set(engine);
+    }
+
+    /// Chapter 29 (RL44): `records` (of change topic `r`, partition
+    /// `partition`) as user `p`, whom the table's policies bind, may see
+    /// them: the change topic's SQL read over the same offsets, in a
+    /// session of `p` (its policies, session values and grants); records it
+    /// leaves out are marked filtered (their offsets still count), the
+    /// others take its value (an update whose row became visible or hidden
+    /// reads as an insert or a delete).
+    async fn filter_records(
+        &self,
+        p: &Principal,
+        r: &Resolved,
+        partition: i32,
+        records: &mut [StoredRecord],
+    ) -> Result<(), TopicError> {
+        let (Some(first), Some(last)) = (records.first(), records.last()) else {
+            return Ok(());
+        };
+        let engine = self.engine.get().cloned().ok_or_else(|| {
+            TopicError::new(
+                err::TOPIC_AUTHORIZATION_FAILED,
+                "39366 ER_SPRIG_RLS_UNSUPPORTED: this gateway can't filter change records",
+            )
+        })?;
+        let auth = p
+            .handle
+            .as_ref()
+            .and_then(|h| h.downcast_ref::<sprig_auth::Principal>())
+            .cloned()
+            .ok_or_else(|| TopicError::new(err::TOPIC_AUTHORIZATION_FAILED, "no SQL identity"))?;
+        let db = r
+            .cat
+            .databases
+            .get(r.def.db)
+            .map(|d| d.name.clone())
+            .ok_or_else(|| unknown(&r.topic.name))?;
+        let sql = format!(
+            "SELECT offset_no, `value` FROM {}.{} WHERE partition_no = {partition} AND offset_no \
+             BETWEEN {} AND {}",
+            sprig_common::names::quote(&db),
+            sprig_common::names::quote(&r.def.name),
+            first.offset,
+            last.offset
+        );
+        let caller = crate::http::sql::Caller {
+            peer: std::net::SocketAddr::new(auth.client_ip, 0),
+            principal: auth,
+            tls: None,
+            listener: "kafka",
+            generation: 0,
+            authorization: None,
+            client_dc: None,
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let call = crate::http::sql::SqlCall {
+            database: String::new(),
+            sql,
+            multi: false,
+        };
+        let task = tokio::spawn(async move { engine.run(&caller, call, None, tx).await });
+        let resp = crate::http::sql::collect(rx, 256 << 20, None).await;
+        let _ = task.await;
+        let resp = resp.map_err(|e| kafka_err(&e))?;
+        let res = resp
+            .results
+            .first()
+            .ok_or_else(|| kafka_err(&SprigError::internal("a filtered read without rows")))?;
+        let binary: Vec<bool> = res
+            .columns
+            .iter()
+            .map(|c| sprig_api::results::is_binary(c.mysql_type, c.charset))
+            .collect();
+        let mut shown: HashMap<i64, Option<Vec<u8>>> = HashMap::new();
+        for row in &res.rows {
+            let value_at = |i: usize| {
+                row.values.get(i).and_then(|v| {
+                    sprig_api::results::cell_bytes(v, binary.get(i).copied().unwrap_or(false))
+                })
+            };
+            let Some(o) = value_at(0)
+                .and_then(|b| String::from_utf8(b).ok())
+                .and_then(|t| t.parse::<i64>().ok())
+            else {
+                continue;
+            };
+            shown.insert(o, value_at(1));
+        }
+        for rec in records.iter_mut() {
+            if let Some(v) = shown.remove(&rec.offset) {
+                rec.value = v;
+            } else {
+                rec.filtered = true;
+                rec.key = None;
+                rec.value = None;
+                rec.headers.clear();
+            }
+        }
+        metrics::counter!("sprig_rls_feed_events_filtered_total", "protocol" => "kafka")
+            .increment(records.iter().filter(|x| x.filtered).count() as u64);
+        Ok(())
     }
 
     async fn catalog(&self, p: &Principal) -> Result<Arc<TenantCatalog>, TopicError> {
@@ -389,16 +502,8 @@ impl GatewayData {
                      writes it"
                 ),
             )),
-            Access::Read if def.kind == StreamKind::Changes && self.row_filtered(p, cat, def) => {
-                Err(TopicError::new(
-                    err::TOPIC_AUTHORIZATION_FAILED,
-                    format!(
-                        "39366 ER_SPRIG_RLS_UNSUPPORTED: the authorization engine filters rows of \
-                         '{}', which change topic '{name}' can't apply yet",
-                        def.source_name.as_deref().unwrap_or("")
-                    ),
-                ))
-            }
+            // A change topic whose table's policies bind the reader is read
+            // record by record through its filter (RL44, `read`).
             _ => Ok(()),
         }
     }
@@ -789,7 +894,7 @@ impl StreamData for GatewayData {
             .read(&mut c, r.def.id, Self::part(partition)?, Offset(from), lim)
             .await
             .map_err(|e| kafka_err(&e))?;
-        let records = batch
+        let mut records: Vec<StoredRecord> = batch
             .records
             .into_iter()
             .map(|x| StoredRecord {
@@ -803,8 +908,17 @@ impl StreamData for GatewayData {
                     .map(|(key, value)| Header { key, value })
                     .collect(),
                 leader_epoch: i32::try_from(x.leader_epoch.0).unwrap_or(i32::MAX),
+                filtered: false,
             })
             .collect();
+        // Chapter 29 (RL44): checked at every fetch, so a policy, role or
+        // grant change applies from the next one.
+        if r.def.kind == StreamKind::Changes
+            && !records.is_empty()
+            && self.row_filtered(p, &r.cat, &r.def)
+        {
+            self.filter_records(p, &r, partition, &mut records).await?;
+        }
         Ok((Self::bounds_of(&batch.bounds), records))
     }
 

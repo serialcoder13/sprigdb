@@ -1,0 +1,60 @@
+// sprig.v1: the logic layer's own calls (chapter 41; chapter 44's logic
+// editors). `TestRun` runs a function, procedure or trigger body against
+// given inputs in a sandbox that never writes: its statements run in the
+// caller's session (rights and row policies apply) inside a transaction
+// that is always rolled back; `fetch` is answered by mocks, never sent.
+syntax = "proto3";
+
+package sprig.v1;
+
+import "google/api/annotations.proto";
+import "google/protobuf/struct.proto";
+
+// The logic layer.
+service Logic {
+  // Runs a deployed version (or a draft's source) and reports its event,
+  // fields or error, every statement with its timing, the writes (rolled
+  // back), log lines, outbound calls, the snapshot tables after the run,
+  // and the budgets used.
+  rpc TestRun(TestRunRequest) returns (TestRunResponse) {
+    option (google.api.http) = {
+      post: "/v1/databases/{database}/logic:testRun"
+      body: "*"
+    };
+  }
+}
+
+message TestRunRequest {
+  // The logical database.
+  string database = 1;
+  // `function` (default), `procedure`, `trigger` or `validation`.
+  string kind = 2;
+  // The deployed module's name (not needed with `source`).
+  string name = 3;
+  // The version to run; 0 is the active one.
+  uint64 version = 4;
+  // A draft: a whole `CREATE ... AS ...` declaration, run without being
+  // recorded or deployed (needs CREATE ROUTINE or ALTER ROUTINE).
+  string source = 5;
+  // Function arguments: a list (by position), an object (by parameter
+  // name), one value, or null.
+  google.protobuf.Value args = 6;
+  // The other inputs, as the REST body takes them: `row`, `old` and `op`
+  // (validations, after-commit triggers), `record` (stream triggers),
+  // `message` (queue triggers), `rows` (the snapshot: table → rows) and
+  // `fetch` (mocked outbound answers: method, url or prefix*, status,
+  // headers, body).
+  google.protobuf.Struct inputs = 7;
+}
+
+message TestRunResponse {
+  // The event raised, empty when the run failed.
+  string event = 1;
+  // Its fields.
+  google.protobuf.Struct result = 2;
+  // The whole report: event, result, error {code, name, message},
+  // statements [{sql, kind, rows, affected, ms, error}], writes, logs,
+  // fetches, tables, budget {limits, used}, timing {totalMs, setupMs,
+  // runMs, dbMs}, notes.
+  google.protobuf.Struct report = 3;
+}

@@ -159,3 +159,29 @@ fn leak_detector() {
     assert_eq!(physical_name_leaks(b"`t42_u7`@`%`"), ["t42_u7"]);
     assert!(physical_name_leaks(b"billing.orders t42 at1_x").is_empty());
 }
+
+#[test]
+fn chosen_column_names_that_look_like_accounts_stay() {
+    // R4 round 5: Rails' eager loading names columns t0_r0, t1_r2; they
+    // read as backend role accounts of tenant 0 and 1 and became `?`.
+    let m = acme();
+    let ctx = OutputCtx::new(&m);
+    let mut cd = ColumnDef {
+        schema: Bytes::from_static(b"t42_d1_g1_s1"),
+        table: Bytes::from_static(b"tags"),
+        org_table: Bytes::from_static(b"tags"),
+        name: Bytes::from_static(b"t0_r0"),
+        org_name: Bytes::from_static(b"id"),
+        ext_type: None,
+        charset: 45,
+        length: 10,
+        col_type: 3,
+        flags: 0,
+        decimals: 0,
+    };
+    assert_eq!(map_column_def(&mut cd, &ctx), 0);
+    assert_eq!(&cd.name[..], b"t0_r0");
+    assert_eq!(&cd.schema[..], b"billing");
+    // Values and messages still hide foreign names.
+    assert_eq!(&map_bytes(b"t0_r0", &ctx).text[..], b"?");
+}

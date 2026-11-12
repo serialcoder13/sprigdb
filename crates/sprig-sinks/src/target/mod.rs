@@ -303,3 +303,209 @@ pub fn tls_config(conn: &Conn, alpn: &[&[u8]]) -> Result<Arc<rustls::ClientConfi
     cfg.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
     Ok(Arc::new(cfg))
 }
+
+/// What `ctx`'s target would send for record `r` (R9, r9last: `TEST
+/// SINK`'s payload preview), built by the target's own encoding and sent
+/// nowhere: a webhook's request body; a Kafka record's topic, key, value
+/// and headers; an S3 object's content before compression (Parquet as its
+/// size and columns); a database sink's row operation. `Err` with the
+/// reason when it can't be shown.
+pub fn preview(
+    ctx: &TargetCtx,
+    r: &crate::model::SinkRecord,
+) -> std::result::Result<String, String> {
+    use crate::model::TargetSpec;
+    let text = |b: &[u8]| match std::str::from_utf8(b) {
+        Ok(s) => s.to_owned(),
+        Err(_) => {
+            use std::fmt::Write as _;
+            let mut s = String::from("0x");
+            for x in b {
+                let _ = write!(s, "{x:02x}");
+            }
+            s
+        }
+    };
+    match &ctx.sink.target {
+        TargetSpec::Webhook { .. } => {
+            // The body doesn't depend on the signature: a connection
+            // without its signing secret still shows it (as TEST
+            // CONNECTION's OPTIONS request is sent unsigned).
+            let mut opts = ctx.opts.clone();
+            opts.0.insert("signature".into(), "none".into());
+            let c = TargetCtx {
+                task: ctx.task.clone(),
+                sink: Arc::clone(&ctx.sink),
+                conn: ctx.conn.clone(),
+                extra: ctx.extra.clone(),
+                opts,
+                db_name: ctx.db_name.clone(),
+            };
+            webhook::WebhookTarget::new(&c)
+                .map(|w| text(&w.preview_body(std::slice::from_ref(r))))
+                .map_err(|e| e.to_string())
+        }
+        TargetSpec::Kafka { topic, .. } => {
+            let k = kafka::KafkaTarget::new(ctx).map_err(|e| e.to_string())?;
+            let (key, value, headers) = k.encode_record(r);
+            let h: Map<String, Value> = headers
+                .into_iter()
+                .map(|x| {
+                    (
+                        x.key,
+                        x.value.map_or(Value::Null, |v| Value::from(text(&v))),
+                    )
+                })
+                .collect();
+            Ok(serde_json::json!({
+                "topic": topic,
+                "key": key.map(|b| text(&b)),
+                "value": value.map(|b| text(&b)),
+                "headers": h,
+            })
+            .to_string())
+        }
+        TargetSpec::S3 { .. } => {
+            use s3::format::{Compress, Format, encode, infer_columns, parse_columns};
+            let format =
+                Format::parse(&ctx.opts.text("format", "jsonl")).map_err(|e| e.to_string())?;
+            let columns = match ctx.opts.get("columns").map(parse_columns).transpose() {
+                Ok(Some(c)) => Some(c),
+                Ok(None) => Some(infer_columns(&[r])),
+                Err(e) => return Err(e.to_string()),
+            };
+            let e = encode(format, Compress::None, columns.as_deref(), &[r])
+                .map_err(|e| e.to_string())?;
+            if let Some((_, why)) = e.failed.first() {
+                return Err(why.clone());
+            }
+            let ext = format.ext(Compress::None);
+            if ext.starts_with("parquet") {
+                let names: Vec<String> = columns
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|c| c.name.clone())
+                    .collect();
+                return Ok(format!(
+                    "Parquet, {} bytes, columns {}",
+                    e.bytes.len(),
+                    names.join(", ")
+                ));
+            }
+            Ok(text(&e.bytes))
+        }
+        TargetSpec::Database { .. } => {
+            let opts = db::DbOpts::from_ctx(ctx).map_err(|e| e.to_string())?;
+            let d = match ctx.conn.as_ref().map(|c| c.kind) {
+                Some(ConnKind::Postgresql) => db::plan::Dialect::Postgres,
+                _ => db::plan::Dialect::Mysql,
+            };
+            let ops = db::plan::plan(std::slice::from_ref(r), &opts, d)
+                .map_err(|e| e.message().to_owned())?;
+            Ok(Value::Array(
+                ops.into_iter()
+                    .map(|o| {
+                        serde_json::json!({
+                            "op": format!("{:?}", o.kind).to_ascii_lowercase(),
+                            "table": o.table,
+                            "columns": o.cols.into_iter().collect::<Map<String, Value>>(),
+                        })
+                    })
+                    .collect(),
+            )
+            .to_string())
+        }
+        TargetSpec::Script { .. } => Err("a script sink's script decides what it sends".into()),
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    use crate::model::{Position, SinkRecord, TargetSpec, TaskEpoch};
+
+    fn ctx(target: TargetSpec, opts: &[(&str, &str)]) -> TargetCtx {
+        TargetCtx {
+            task: TaskInfo {
+                tenant: 1,
+                sink: 2,
+                task_no: 0,
+                epoch: TaskEpoch(1),
+            },
+            sink: Arc::new(crate::probe::stand_in(1, "s", target)),
+            conn: None,
+            extra: Vec::new(),
+            opts: Opts(
+                opts.iter()
+                    .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                    .collect(),
+            ),
+            db_name: "shop".into(),
+        }
+    }
+
+    fn rec() -> SinkRecord {
+        SinkRecord {
+            key: Some(br#"{"id": 7}"#.to_vec()),
+            value: Some(br#"{"id": 7, "total": 12.5}"#.to_vec()),
+            headers: vec![("h".into(), b"v".to_vec())],
+            op: None,
+            before: None,
+            after: None,
+            ts_ms: 1_700_000_000_000,
+            idem_key: "s/1/0/5".into(),
+            pos: Position::Stream {
+                stream: 1,
+                partition: 0,
+                offset: 5,
+                epoch: 0,
+            },
+        }
+    }
+
+    /// R9 (r9last): `TEST SINK`'s payload preview is the target's own
+    /// encoding: an S3 JSON line, a database row operation, a script's
+    /// refusal; nothing is sent.
+    #[test]
+    fn previews_use_the_targets_encoding() {
+        let s3 = preview(
+            &ctx(
+                TargetSpec::S3 {
+                    prefix: "p/".into(),
+                },
+                &[("format", "jsonl")],
+            ),
+            &rec(),
+        )
+        .unwrap();
+        assert!(s3.ends_with('\n') && s3.contains("\"total\":12.5"), "{s3}");
+        let db = preview(
+            &ctx(
+                TargetSpec::Database {
+                    table: "orders".into(),
+                },
+                &[],
+            ),
+            &rec(),
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&db).unwrap();
+        assert_eq!(v[0]["op"], "upsert", "{db}");
+        assert_eq!(v[0]["table"], "orders", "{db}");
+        assert!(v[0]["columns"].get("total").is_some(), "{db}");
+        assert!(
+            preview(
+                &ctx(
+                    TargetSpec::Script {
+                        language: crate::model::ScriptLanguage::Javascript,
+                        source: None,
+                        function: Some("f".into()),
+                    },
+                    &[]
+                ),
+                &rec()
+            )
+            .is_err()
+        );
+    }
+}

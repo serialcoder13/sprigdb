@@ -257,3 +257,103 @@ end
 }
 `,
 };
+
+// ---- Queue pages (Studio round 6; chapter 50, R9 item 89) ----
+
+/** The optional vhost argument: absent for the default `/`. */
+function vh(vhost?: string | null): string {
+  return vhost && vhost !== '/' ? `, ${sqlString(vhost)}` : '';
+}
+
+/** `CALL sprig.mq_info(q [, vhost])`: one row, `ready`, `unacked`, `consumers`. */
+export function mqInfo(queue: string, vhost?: string | null): string {
+  return `CALL sprig.mq_info(${sqlString(queue)}${vh(vhost)})`;
+}
+
+/** `CALL sprig.mq_browse(q, n [, vhost])`: up to n stored messages, not taken, not locked. */
+export function mqBrowse(queue: string, max: number, vhost?: string | null): string {
+  const m = Math.min(1000, Math.max(1, Math.floor(Number.isFinite(max) ? max : 50)));
+  return `CALL sprig.mq_browse(${sqlString(queue)}, ${m}${vh(vhost)})`;
+}
+
+/** `CALL sprig.mq_purge(q [, vhost])`: removes the ready messages (delivered ones stay). */
+export function mqPurge(queue: string, vhost?: string | null): string {
+  return `CALL sprig.mq_purge(${sqlString(queue)}${vh(vhost)})`;
+}
+
+/**
+ * `CALL sprig.mq_republish(q, exchange, routing_key | NULL, max [, vhost])`:
+ * moves up to `max` messages to an exchange, keeping each one's routing
+ * key when `routingKey` is empty. At least once (R9 item 89).
+ */
+export function mqRepublish(queue: string, exchange: string, routingKey: string, max: number, vhost?: string | null): string {
+  if (!Number.isInteger(max) || max < 1 || max > 10_000) throw new Error('move 1 to 10,000 messages');
+  const rk = routingKey.trim() ? sqlString(routingKey.trim()) : 'NULL';
+  return `CALL sprig.mq_republish(${sqlString(queue)}, ${sqlString(exchange)}, ${rk}, ${max}${vh(vhost)})`;
+}
+
+export interface QueueInfo {
+  ready: number;
+  unacked: number;
+  consumers: number;
+}
+
+/** `mq_info`'s row as numbers. */
+export function queueInfo(columns: readonly string[], row: readonly (string | null)[] | undefined): QueueInfo | null {
+  if (!row) return null;
+  const n = (c: string) => Number(row[columns.indexOf(c)] ?? 0) || 0;
+  return { ready: n('ready'), unacked: n('unacked'), consumers: n('consumers') };
+}
+
+// ---- Dry runs (Studio round 6; chapter 51, R9 items 104–105) ----
+
+/** `TEST CONNECTION c`, or with `write`, `TEST CONNECTION c WRITE [TO 'target']` (writes one marked record). */
+export function testConnection(name: string, write?: { to: string } | null): string {
+  if (!name.trim()) throw new Error('name the connection');
+  const w = write ? ` WRITE${write.to.trim() ? ` TO ${sqlString(write.to.trim())}` : ''}` : '';
+  return `TEST CONNECTION ${ident(name.trim())}${w}`;
+}
+
+/** `TEST SINK s WITH SAMPLE n` (1 to 1,000; 10 by default). */
+export function testSink(name: string, sample = 10): string {
+  if (!Number.isInteger(sample) || sample < 1 || sample > 1000) throw new Error('sample 1 to 1,000 records');
+  return `TEST SINK ${ident(name)} WITH SAMPLE ${sample}`;
+}
+
+/** A name for a connection that exists only while it is tested (dry run before saving). */
+export function scratchName(name: string, rand: () => number = Math.random): string {
+  const tag = Math.floor(rand() * 0xffffff)
+    .toString(16)
+    .padStart(6, '0');
+  return `${name.replace(/[^A-Za-z0-9_]/g, '_').slice(0, 40)}_studiotest_${tag}`;
+}
+
+export interface StepRow {
+  step: string;
+  ok: boolean;
+  detail: string;
+  ms: number | null;
+}
+
+/** `TEST CONNECTION`'s rows (`Step`, `Result`, `Detail`, `Elapsed ms`). */
+export function stepRows(columns: readonly string[], rows: readonly (readonly (string | null)[])[]): StepRow[] {
+  const at = (n: string) => columns.findIndex((c) => c.toLowerCase() === n.toLowerCase());
+  const [s, r, d, e] = [at('Step'), at('Result'), at('Detail'), at('Elapsed ms')];
+  return rows.map((row) => ({
+    step: row[s] ?? '',
+    ok: (row[r] ?? '').toLowerCase() === 'ok',
+    detail: row[d] ?? '',
+    ms: e >= 0 && row[e] != null ? Number(row[e]) : null,
+  }));
+}
+
+/** How many records of a sink dry run had each outcome (`deliver`, `filtered`, `dropped`, `failed`). */
+export function outcomes(columns: readonly string[], rows: readonly (readonly (string | null)[])[]): Record<string, number> {
+  const i = columns.findIndex((c) => c.toLowerCase() === 'outcome');
+  const out: Record<string, number> = {};
+  for (const r of rows) {
+    const k = (i >= 0 ? r[i] : null) ?? 'unknown';
+    out[k] = (out[k] ?? 0) + 1;
+  }
+  return out;
+}

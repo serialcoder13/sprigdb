@@ -833,7 +833,10 @@ pub async fn handle_stmt(st: Stmt, h: &mut dyn Host) -> Result<Handled> {
                 rows: vec![vec![Some(s.name.clone()), Some(render_sink(s))]],
             })
         }
-        Stmt::TestConnection(c, db) => test_connection(h, &c, db.as_deref()).await,
+        Stmt::TestConnection(c, db) => test_connection(h, &c, db.as_deref(), None).await,
+        Stmt::TestConnectionWrite { conn, db, to } => {
+            test_connection(h, &conn, db.as_deref(), Some(to)).await
+        }
         Stmt::TestSink { name, sample } => test_sink(h, &name, sample).await,
         Stmt::ShowSinkStatus(name) => {
             let (db, _) = db_of(h, name.db.as_deref())?;
@@ -892,7 +895,9 @@ pub async fn handle_stmt(st: Stmt, h: &mut dyn Host) -> Result<Handled> {
 /// `__sprig_sink_seen`; Kafka and S3 keep positions per partition, which
 /// fan-in tasks don't have (39217). Other targets are refused later.
 fn fan_in_guarantee(g: Guarantee, target: &TargetAst) -> Result<()> {
-    if g == Guarantee::ExactlyOnce && matches!(target, TargetAst::Kafka { .. } | TargetAst::S3 { .. }) {
+    if g == Guarantee::ExactlyOnce
+        && matches!(target, TargetAst::Kafka { .. } | TargetAst::S3 { .. })
+    {
         return Err(err(
             SprigCode::SinkExactlyOnceUnsupported,
             "EXACTLY ONCE from a fan-in source is built for database targets only (Kafka and S3 keep positions per partition, which fan-in tasks don't have)",
@@ -910,11 +915,24 @@ fn no_env() -> sprig_common::SprigError {
 
 /// `TEST [PLATFORM] CONNECTION` (R9, r9tests; [`crate::probe`]): the
 /// rights to name the connection in a sink, then each step's result.
-async fn test_connection(h: &mut dyn Host, c: &ConnName, db: Option<&str>) -> Result<Handled> {
+async fn test_connection(
+    h: &mut dyn Host,
+    c: &ConnName,
+    db: Option<&str>,
+    write: Option<Option<String>>,
+) -> Result<Handled> {
     let (db_id, db_name) = db_of(h, db)?;
     let (r, _) = resolve_conn(h, db_id, c).await?;
     let env = h.sink_env().ok_or_else(no_env)?;
-    let steps = crate::probe::test_connection(env.as_ref(), h.tenant(), &r, db_id, &db_name).await?;
+    let steps = crate::probe::test_connection_with(
+        env.as_ref(),
+        h.tenant(),
+        &r,
+        db_id,
+        &db_name,
+        write.as_ref().map(Option::as_deref),
+    )
+    .await?;
     metrics::counter!("sprig_sink_connection_tests_total",
         "result" => if steps.iter().all(|s| s.ok) { "ok" } else { "failed" })
     .increment(1);
@@ -980,9 +998,11 @@ async fn test_sink(h: &mut dyn Host, name: &grammar::QName, sample: u32) -> Resu
     let rows = crate::probe::dry_run(env.as_ref(), h.tenant(), &def, records).await?;
     metrics::counter!("sprig_sink_dry_runs_total").increment(1);
     Ok(Handled::Rows {
-        columns: ["Position", "Outcome", "Key", "Value", "Headers", "Detail"]
-            .map(String::from)
-            .to_vec(),
+        columns: [
+            "Position", "Outcome", "Key", "Value", "Headers", "Detail", "Payload",
+        ]
+        .map(String::from)
+        .to_vec(),
         rows: rows
             .into_iter()
             .map(|r| {
@@ -993,6 +1013,7 @@ async fn test_sink(h: &mut dyn Host, name: &grammar::QName, sample: u32) -> Resu
                     r.value,
                     Some(r.headers),
                     r.detail,
+                    r.payload,
                 ]
             })
             .collect(),
@@ -1016,11 +1037,46 @@ async fn publish_index(h: &mut dyn Host, def: &SinkDef) -> Result<()> {
         .get("partitions_per_task")
         .and_then(|v| v.parse().ok())
         .unwrap_or(per_task);
+    // R9 (r9last): a fan-in sink starts with one task; the controller's
+    // `sinks` loop counts its member instances and regroups it before
+    // the first task starts.
+    let fan_in = match &def.source {
+        SourceSpec::FanIn {
+            def_tenant,
+            def_object,
+            partitions,
+            ..
+        } => Some((*def_tenant, *def_object, "stream", *partitions)),
+        SourceSpec::FanInQueue {
+            def_tenant,
+            def_object,
+            ..
+        } => Some((*def_tenant, *def_object, "queue", 1)),
+        _ => None,
+    }
+    .map(|(def_tenant, def_object, kind, partitions)| {
+        let per = h
+            .setting("fanin_instances_per_task", def.db_id)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(256);
+        crate::meta::FanInGroups {
+            def_tenant,
+            def_object,
+            kind: kind.to_owned(),
+            partitions,
+            per_task: def
+                .options
+                .get("fanin_instances_per_task")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(per),
+        }
+    });
     let ix = SinkIndex {
         tenant: h.tenant().0,
         sink: def.id.0,
         tasks: crate::job::task_count(def, per_task),
         definition_ver: def.definition_ver,
+        fan_in,
     };
     h.index(def.id, Some(ix)).await
 }

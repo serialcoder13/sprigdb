@@ -18,9 +18,9 @@ use std::collections::BTreeMap;
 use sprig_common::{Result, SprigCode, SprigError};
 
 use crate::ast::{
-    BinOp, Clause, Dir, Entity, Explain, Expr, IndexKind, LabelExpr, MapItem, NodePat, PathKind,
-    PathPattern, Projection, Query, RelPat, RemoveItem, Schema, SetItem, SingleQuery, SubqueryKind,
-    UnOp,
+    BinOp, Clause, Dir, Entity, Explain, Expr, IndexKind, LabelExpr, MapItem, NodePat, OnError,
+    PathKind, PathPattern, Projection, Query, RelPat, RemoveItem, Schema, SetItem, SingleQuery,
+    SubqueryKind, TxBatch, UnOp,
 };
 use crate::value::Value;
 
@@ -489,6 +489,71 @@ impl Parser {
         })
     }
 
+    /// After `CALL { } IN`: `[n] CONCURRENT TRANSACTIONS`, or
+    /// `TRANSACTIONS`, then `OF n ROW[S]`, `ON ERROR CONTINUE | BREAK |
+    /// FAIL` and `REPORT STATUS AS s`, in any order, each once.
+    fn tx_batch(&mut self) -> Result<TxBatch> {
+        let mut concurrent = false;
+        if self.accept_kw("CONCURRENT") {
+            concurrent = true;
+        } else if !self.is_kw("TRANSACTIONS") {
+            // `IN n CONCURRENT TRANSACTIONS`: the count is accepted, the
+            // batches still run one after another.
+            let _ = self.expr()?;
+            self.expect_kw("CONCURRENT")?;
+            concurrent = true;
+        }
+        self.expect_kw("TRANSACTIONS")?;
+        let mut b = TxBatch {
+            rows: None,
+            on_error: OnError::Fail,
+            report: None,
+            concurrent,
+        };
+        let (mut of, mut on, mut report) = (false, false, false);
+        loop {
+            if !of && self.accept_kw("OF") {
+                of = true;
+                b.rows = Some(self.expr()?);
+                if !self.accept_kw("ROWS") {
+                    self.expect_kw("ROW")?;
+                }
+            } else if !on && self.is_kw("ON") && self.is_kw_at(1, "ERROR") {
+                on = true;
+                self.expect_kw("ON")?;
+                self.expect_kw("ERROR")?;
+                b.on_error = if self.accept_kw("CONTINUE") {
+                    OnError::Continue
+                } else if self.accept_kw("BREAK") {
+                    OnError::Break
+                } else if self.accept_kw("FAIL") {
+                    OnError::Fail
+                } else if self.is_kw("RETRY") {
+                    return Err(SprigError::new(
+                        SprigCode::GraphUnsupported,
+                        "ON ERROR RETRY is not supported (Cypher 25)",
+                    ));
+                } else {
+                    return Err(self.err("CONTINUE, BREAK or FAIL"));
+                };
+            } else if !report && self.accept_kw("REPORT") {
+                report = true;
+                self.expect_kw("STATUS")?;
+                self.expect_kw("AS")?;
+                b.report = Some(self.var()?);
+            } else {
+                break;
+            }
+        }
+        if b.report.is_some() && b.on_error == OnError::Fail {
+            return Err(SprigError::new(
+                SprigCode::GraphSyntax,
+                "REPORT STATUS can only be used when specifying ON ERROR CONTINUE or ON ERROR BREAK",
+            ));
+        }
+        Ok(b)
+    }
+
     /// `{ query }` after `CALL`, `EXISTS`, `COUNT` or `COLLECT`.
     fn braced_query(&mut self) -> Result<Query> {
         self.expect_sym("{")?;
@@ -799,13 +864,16 @@ impl Parser {
                         None
                     };
                     let query = Box::new(self.braced_query()?);
-                    if self.is_kw("IN") && self.is_kw_at(1, "TRANSACTIONS") {
-                        return Err(SprigError::new(
-                            SprigCode::GraphUnsupported,
-                            "CALL { } IN TRANSACTIONS is not supported yet",
-                        ));
+                    let batch = if self.accept_kw("IN") {
+                        Some(Box::new(self.tx_batch()?))
+                    } else {
+                        None
+                    };
+                    Clause::Subquery {
+                        imports,
+                        query,
+                        batch,
                     }
-                    Clause::Subquery { imports, query }
                 } else {
                     self.call()?
                 }
@@ -1902,8 +1970,9 @@ mod tests {
             assert_eq!(e.code(), Some(SprigCode::GraphSyntax), "{s}");
             assert!(e.to_string().contains("offset"), "{e}");
         }
-        let e = parse("CALL { RETURN 1 } IN TRANSACTIONS").expect_err("batches");
-        assert_eq!(e.code(), Some(SprigCode::GraphUnsupported));
+        let e = parse("UNWIND [1] AS x CALL { RETURN 1 } IN TRANSACTIONS OF ROWS")
+            .expect_err("batches");
+        assert_eq!(e.code(), Some(SprigCode::GraphSyntax));
         let e = parse("WITH 1 + 1 RETURN 1").expect_err("alias");
         assert_eq!(e.code(), Some(SprigCode::GraphSyntax));
     }

@@ -510,7 +510,7 @@ pub mod retry {
             loop {
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 let Some(svc) = weak.upgrade() else { return };
-                match pass(&svc).await {
+                match Box::pin(pass(&svc)).await {
                     Ok(0) => {}
                     Ok(n) => tracing::debug!(n, "inherited sink deploys retried"),
                     Err(e) => tracing::debug!(error = %e, "inherited sink retry pass"),
@@ -789,11 +789,22 @@ async fn ensure_one(
     };
     let phys = row.as_ref().and_then(|r| r.physical.clone());
     let had_error = phys.as_ref().is_some_and(|p| p.get("error").is_some());
+    // R9 (r9last): a queue sink's instance is granted its queue alone; one
+    // deployed before (with the database grant) is granted again, and the
+    // database grant taken back.
+    let queue_source = spec.source_kind() == DefKind::Queue;
+    let queue_grant_due = queue_source
+        && phys
+            .as_ref()
+            .and_then(|p| p.get("grant"))
+            .and_then(Value::as_str)
+            != Some("queue");
     if phys
         .as_ref()
         .and_then(|p| p.get("applied"))
         .and_then(Value::as_str)
         == Some(sig.as_str())
+        && !queue_grant_due
     {
         return Ok(false);
     }
@@ -819,13 +830,16 @@ async fn ensure_one(
         return Ok(had_error);
     }
     // The member's sprig_inherited: the definition's GRANTS, and reading
-    // the stream's instance. A queue (R9, r9tests: least privilege) is
+    // the stream's instance. A queue (R9, r9last: least privilege) is
     // granted alone: SELECT and DELETE on the queue, the right `mq_get`
-    // checks; its acknowledgements outside a transaction are then settled
-    // by the queue's owner, and the vhost opens for a right on one of its
-    // queues. Nothing on the database's tables.
+    // checks; its acknowledgements outside a transaction are settled by
+    // the queue's owner, and the vhost opens for a right on one of its
+    // queues. Nothing on the database's tables. (r9tests saw members
+    // receive nothing with this grant: the cause was a dropped
+    // definition's member sinks left running, which took the new queue's
+    // first messages; see `members_of`.)
     let first = phys.as_ref().and_then(|p| p.get("sink")).is_none();
-    let extra = if spec.source_kind() == DefKind::Queue {
+    let extra = if queue_source {
         vec![GrantItem {
             privileges: vec!["SELECT".into(), "DELETE".into()],
             db: spec.db.clone(),
@@ -838,7 +852,15 @@ async fn ensure_one(
             name: spec.source.clone(),
         }]
     };
-    let run_as = super::triggers::ensure_run_as(svc, t, s, first, &extra).await?;
+    let run_as =
+        super::triggers::ensure_run_as(svc, t, s, first || queue_grant_due, &extra).await?;
+    // The database grant an earlier deploy made (of this definition or an
+    // earlier one in the same database) is taken back once per instance.
+    if queue_grant_due
+        && let Err(e) = super::triggers::revoke_database_grant(svc, chain, t, &spec.db).await
+    {
+        tracing::warn!(tenant = %t, def = %s.key(), error = %e, "inherited queue sink: the old database grant not taken back yet");
+    }
     let mut host = DeployHost::new(svc, t, run_as, &spec.db).await?;
     let db_id = host
         .db_id(&spec.db)
@@ -1060,6 +1082,7 @@ async fn ensure_one(
             "sink": sink_id,
             "connections": conn_ids,
             "disabled": disabled,
+            "grant": if queue_source { Value::from("queue") } else { Value::Null },
             "applied": sig,
         }),
         InstanceState::Active,
@@ -1147,7 +1170,7 @@ pub async fn drop_instance(
 }
 
 /// The members holding an instance of sink definition `s` (those with an
-/// instance of its source stream).
+/// instance of its source stream or queue).
 ///
 /// # Errors
 /// The catalog's.
@@ -1156,20 +1179,14 @@ pub async fn members_of(
     chain: &Chain,
     s: &Definition,
 ) -> Result<Vec<TenantId>> {
-    let spec: SinkSpec = serde_json::from_value(s.definition.clone()).unwrap_or_default();
-    let Some(d) = chain
-        .resolve(&spec.db, DefKind::Stream, &spec.source)
-        .or_else(|| {
-            chain
-                .levels
-                .first()
-                .and_then(|l| l.state.as_ref())
-                .and_then(|st| st.def(&spec.db, DefKind::Stream, &spec.source).cloned())
-        })
-    else {
+    // The source's kind (R9, r9last): a queue-sourced definition's
+    // members were looked up as a stream's, found none, and `DROP SINK`
+    // left every member's instance running (inherit_live's queue sink
+    // test then lost a member's messages to the old task in a later run).
+    let Some(d) = source_of(chain, s) else {
         return Ok(Vec::new());
     };
-    Ok(super::instances_of(svc, d.key())
+    Ok(super::instances_of(svc, d)
         .await?
         .into_iter()
         .map(|e| e.tenant)
@@ -1214,7 +1231,7 @@ pub async fn reapply_source(
         ensure_for_queue(svc, &chain, &d, t).await;
     } else {
         super::streams::forget_applied(t, source);
-        super::streams::ensure(svc, &chain, &d, Cause::Declare).await?;
+        Box::pin(super::streams::ensure(svc, &chain, &d, Cause::Declare)).await?;
     }
     Ok(true)
 }

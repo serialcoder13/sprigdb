@@ -694,14 +694,41 @@ async fn types_and_subtypes() {
             "type columns are invisible"
         );
 
-        // Dropping a leaf, then a subtree with CASCADE.
+        // Dropping a leaf, then a subtree with CASCADE: their rows stay,
+        // as rows of the parent (T8, the lead's choice of 12 November).
         exec(&mut c, "DROP TABLE truck").await;
-        model.retain(|_, a| a.ty != "truck");
+        for a in model.values_mut().filter(|a| a.ty == "truck") {
+            a.ty = "vehicle";
+            a.payload = None;
+        }
         check_without(&mut c, &model, &["truck"]).await;
+        let only = ids(&mut c, "SELECT id FROM ONLY vehicle ORDER BY id").await;
+        let want: Vec<i64> = model
+            .values()
+            .filter(|a| a.ty == "vehicle")
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(only, want, "ONLY vehicle after DROP TABLE truck");
+        let v = rows(&mut c, "SELECT id, vin FROM ONLY vehicle ORDER BY id").await;
+        let want: Vec<Vec<String>> = model
+            .values()
+            .filter(|a| a.ty == "vehicle")
+            .map(|a| vec![a.id.to_string(), a.vin.clone().unwrap()])
+            .collect();
+        assert_eq!(v, want, "former trucks keep their vehicle fields");
         exec(&mut c, "DROP TABLE vehicle CASCADE").await;
-        model.retain(|_, a| !is_a(a.ty, "vehicle"));
-        let all = ids(&mut c, "SELECT id FROM asset ORDER BY id").await;
-        assert_eq!(all, model.keys().copied().collect::<Vec<_>>());
+        for a in model.values_mut().filter(|a| is_a(a.ty, "vehicle")) {
+            a.ty = "asset";
+            a.vin = None;
+            a.payload = None;
+            a.doors = None;
+        }
+        let all = rows(&mut c, "SELECT id, _type FROM asset ORDER BY id").await;
+        let want: Vec<Vec<String>> = model
+            .values()
+            .map(|a| vec![a.id.to_string(), a.ty.to_owned()])
+            .collect();
+        assert_eq!(all, want, "rows of a dropped subtree are the root's");
         fails(&mut c, "SELECT * FROM car", 1146).await;
 
         eprintln!(
@@ -1358,10 +1385,11 @@ async fn discriminator_columns() {
             exec(&mut c, "UPDATE car SET doors = 4").await;
             let d = rows(&mut c, "SELECT COUNT(*) FROM car WHERE doors = 4").await;
             assert_eq!(d[0][0], m.ids("car", false).len().to_string());
-            // Dropping smalltruck deletes its rows; its value is then the root's.
+            // Dropping smalltruck keeps its rows (T8, the lead's choice of
+            // 12 November): their value is undeclared now, so they are the
+            // root's.
             exec(&mut c, "DROP TABLE smalltruck").await;
             m.declared.retain(|d| d.1 != "smalltruck");
-            m.rows.retain(|_, v| v != "SMALLTRUCK");
             exec(
                 &mut c,
                 &format!("INSERT INTO vehicle (id, vtype) VALUES ({next}, 'SMALLTRUCK')"),
@@ -1378,5 +1406,234 @@ async fn discriminator_columns() {
             );
             exec(&mut c, &format!("DROP DATABASE {db}")).await;
         }
+    }
+}
+
+/// The types round of 12 November 2026: a single-table subtype's `NOT
+/// NULL` column without a default (a CHECK on the subtype's rows, refused
+/// when existing rows can't fill it), and an existing `_type` hierarchy
+/// taking a discriminator column and giving it back, online.
+#[tokio::test]
+async fn not_null_checks_and_discriminator_conversion() {
+    let Some(eps) = endpoints("not_null_checks_and_discriminator_conversion") else {
+        return;
+    };
+    for (pi, ep) in eps.iter().enumerate() {
+        let db = format!("r6_round_{}", persona(pi));
+        let mut c = conn(ep, None).await;
+        fresh_db(&mut c, &db).await;
+
+        // 1. NOT NULL in single-table storage.
+        exec(
+            &mut c,
+            "CREATE TABLE fleet (id INT PRIMARY KEY, vtype VARCHAR(20) NOT NULL, name VARCHAR(40))",
+        )
+        .await;
+        exec(
+            &mut c,
+            "INSERT INTO fleet VALUES (1, 'VAN', 'v1'), (2, 'TRUCK', 't-old')",
+        )
+        .await;
+        // A TRUCK row exists and would have no payload: refused, nothing made.
+        fails(
+            &mut c,
+            "CREATE TABLE lorry (payload INT NOT NULL) INHERITS (fleet) WHERE vtype = 'TRUCK' \
+             WITH (SPRIG_STORAGE = 'single_table')",
+            39710,
+        )
+        .await;
+        fails(&mut c, "SELECT * FROM lorry", 1146).await;
+        exec(&mut c, "DELETE FROM fleet WHERE id = 2").await;
+        exec(
+            &mut c,
+            "CREATE TABLE lorry (payload INT NOT NULL) INHERITS (fleet) WHERE vtype = 'TRUCK' \
+             WITH (SPRIG_STORAGE = 'single_table')",
+        )
+        .await;
+        exec(&mut c, "INSERT INTO lorry (id, name, payload) VALUES (3, 'l3', 30)").await;
+        fails(&mut c, "INSERT INTO lorry (id, name) VALUES (4, 'l4')", 1048).await;
+        fails(
+            &mut c,
+            "INSERT INTO lorry (id, name, payload) VALUES (4, 'l4', NULL)",
+            1048,
+        )
+        .await;
+        fails(
+            &mut c,
+            "INSERT INTO fleet (id, vtype, name) VALUES (4, 'TRUCK', 'via root')",
+            1048,
+        )
+        .await;
+        fails(&mut c, "UPDATE lorry SET payload = NULL", 1048).await;
+        // A van becoming a truck needs a payload.
+        fails(&mut c, "UPDATE fleet SET vtype = 'TRUCK' WHERE id = 1", 1048).await;
+        exec(&mut c, "INSERT INTO fleet (id, vtype, name) VALUES (5, 'CAR', 'c5')").await;
+        let n = rows(&mut c, "SELECT COUNT(*) FROM fleet").await;
+        assert_eq!(n[0][0], "3");
+        // What schema tools see: NOT NULL on the subtype, nothing internal.
+        let sc = rows(&mut c, "SHOW CREATE TABLE lorry").await;
+        assert!(
+            sc[0][1].contains("`payload` int(11) NOT NULL") || sc[0][1].contains("`payload` int NOT NULL"),
+            "{}",
+            sc[0][1]
+        );
+        let sc = rows(&mut c, "SHOW CREATE TABLE fleet").await;
+        assert!(!sc[0][1].contains("_sprig_") && !sc[0][1].contains("CHECK"), "{}", sc[0][1]);
+        let cols = rows(&mut c, "SHOW COLUMNS FROM lorry").await;
+        let payload = cols.iter().find(|r| r[0] == "payload").unwrap();
+        assert_eq!(payload[2], "NO", "{cols:?}");
+        let nn = rows(
+            &mut c,
+            &format!(
+                "SELECT IS_NULLABLE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '{db}' \
+                 AND TABLE_NAME = 'lorry' AND COLUMN_NAME = 'payload'"
+            ),
+        )
+        .await;
+        assert_eq!(nn, vec![vec!["NO".to_owned()]]);
+        let cc = rows(
+            &mut c,
+            &format!(
+                "SELECT COUNT(*) FROM information_schema.CHECK_CONSTRAINTS WHERE \
+                 CONSTRAINT_SCHEMA = '{db}'"
+            ),
+        )
+        .await;
+        assert_eq!(cc[0][0], "0", "checks are hidden");
+        // ALTER: a NOT NULL column existing trucks can't fill is refused;
+        // with a default it is added.
+        fails(&mut c, "ALTER TABLE lorry ADD COLUMN axles INT NOT NULL", 39710).await;
+        exec(&mut c, "ALTER TABLE lorry ADD COLUMN axles INT NOT NULL DEFAULT 2").await;
+        // A subtype declared later keeps the checks, and inherits them.
+        exec(
+            &mut c,
+            "CREATE TABLE minilorry (seats INT NOT NULL) INHERITS (lorry) WHERE vtype = 'MINI'",
+        )
+        .await;
+        fails(
+            &mut c,
+            "INSERT INTO minilorry (id, name, seats) VALUES (6, 'm6', 2)",
+            1048,
+        )
+        .await;
+        exec(
+            &mut c,
+            "INSERT INTO minilorry (id, name, seats, payload) VALUES (6, 'm6', 2, 5)",
+        )
+        .await;
+        fails(&mut c, "INSERT INTO lorry (id, name, payload) VALUES (7, 'l7', NULL)", 1048).await;
+        assert_eq!(
+            ids(&mut c, "SELECT id FROM lorry ORDER BY id").await,
+            vec![3, 6]
+        );
+        // Dropping the subtype keeps its rows (T8) and its column, nullable.
+        exec(&mut c, "DROP TABLE minilorry").await;
+        exec(&mut c, "INSERT INTO fleet (id, vtype, name) VALUES (8, 'MINI', 'm8')").await;
+        assert_eq!(
+            ids(&mut c, "SELECT id FROM ONLY fleet ORDER BY id").await,
+            vec![1, 5, 6, 8]
+        );
+
+        // 2. A `_type` hierarchy takes a discriminator, and gives it back.
+        for joined in [true, false] {
+            let storage = if joined { "" } else { " WITH (SPRIG_STORAGE = 'joined')" };
+            exec(&mut c, "DROP TABLE IF EXISTS kart CASCADE").await;
+            exec(
+                &mut c,
+                "CREATE TABLE kart (id INT PRIMARY KEY, kind VARCHAR(10) NOT NULL, name \
+                 VARCHAR(20))",
+            )
+            .await;
+            exec(
+                &mut c,
+                &format!("CREATE TABLE gokart (speed INT) INHERITS (kart){storage}"),
+            )
+            .await;
+            exec(&mut c, "CREATE TABLE racer (wing INT) INHERITS (gokart)").await;
+            exec(&mut c, "CREATE TABLE pedal (gears INT) INHERITS (kart)").await;
+            exec(&mut c, "INSERT INTO kart VALUES (1, 'K', 'k1')").await;
+            exec(
+                &mut c,
+                "INSERT INTO gokart (id, kind, name, speed) VALUES (2, 'GO', 'g2', 20), (3, 'GO', \
+                 'g3', 30)",
+            )
+            .await;
+            exec(
+                &mut c,
+                "INSERT INTO racer (id, kind, name, speed, wing) VALUES (4, 'RACE', 'r4', 40, 1)",
+            )
+            .await;
+            // A row disagreeing with the column: refused, nothing changed.
+            exec(&mut c, "INSERT INTO gokart (id, kind, name) VALUES (5, 'RACE', 'odd')").await;
+            fails(&mut c, "ALTER TABLE kart ADD DISCRIMINATOR (kind)", 39717).await;
+            exec(&mut c, "UPDATE gokart SET kind = 'GO' WHERE id = 5").await;
+            // pedal has no rows: its value is given.
+            fails(&mut c, "ALTER TABLE kart ADD DISCRIMINATOR (kind)", 39710).await;
+            let t0 = Instant::now();
+            exec(
+                &mut c,
+                "ALTER TABLE kart ADD DISCRIMINATOR (kind) VALUES (pedal = 'PEDAL')",
+            )
+            .await;
+            let add_ms = t0.elapsed().as_millis();
+            let sc = rows(&mut c, "SHOW CREATE TABLE racer").await;
+            assert!(sc[0][1].contains("WHERE `kind` = 'RACE'"), "{}", sc[0][1]);
+            let sc = rows(&mut c, "SHOW CREATE TABLE kart").await;
+            assert!(sc[0][1].contains("SPRIG_DISCRIMINATOR = 'kind'"), "{}", sc[0][1]);
+            assert_eq!(
+                ids(&mut c, "SELECT id FROM gokart ORDER BY id").await,
+                vec![2, 3, 4, 5]
+            );
+            // Open values from now on: a new value is the root's, a
+            // declared one types its row.
+            exec(&mut c, "INSERT INTO kart (id, kind, name) VALUES (6, 'PEDAL', 'p6')").await;
+            exec(&mut c, "INSERT INTO kart (id, kind, name) VALUES (7, 'NEW', 'n7')").await;
+            assert_eq!(ids(&mut c, "SELECT id FROM pedal ORDER BY id").await, vec![6]);
+            assert_eq!(
+                ids(&mut c, "SELECT id FROM ONLY kart ORDER BY id").await,
+                vec![1, 7]
+            );
+            fails(
+                &mut c,
+                "INSERT INTO racer (id, kind, name) VALUES (8, 'GO', 'x')",
+                39717,
+            )
+            .await;
+            // And back to `_type`: every row keeps its type.
+            let t0 = Instant::now();
+            exec(&mut c, "ALTER TABLE kart DROP DISCRIMINATOR").await;
+            let drop_ms = t0.elapsed().as_millis();
+            let types = rows(&mut c, "SELECT id, _type FROM kart ORDER BY id").await;
+            let want: Vec<Vec<String>> = [
+                (1, "kart"),
+                (2, "gokart"),
+                (3, "gokart"),
+                (4, "racer"),
+                (5, "gokart"),
+                (6, "pedal"),
+                (7, "kart"),
+            ]
+            .iter()
+            .map(|(i, t)| vec![i.to_string(), (*t).to_owned()])
+            .collect();
+            assert_eq!(types, want);
+            let sc = rows(&mut c, "SHOW CREATE TABLE racer").await;
+            assert!(!sc[0][1].contains("WHERE"), "{}", sc[0][1]);
+            // kind is an ordinary column again.
+            exec(&mut c, "INSERT INTO kart (id, kind, name) VALUES (9, 'RACE', 'k9')").await;
+            assert_eq!(
+                ids(&mut c, "SELECT id FROM ONLY kart ORDER BY id").await,
+                vec![1, 7, 9]
+            );
+            assert_eq!(ids(&mut c, "SELECT id FROM racer ORDER BY id").await, vec![4]);
+            eprintln!(
+                "conversion[{} {}]: ADD DISCRIMINATOR {add_ms} ms, DROP DISCRIMINATOR {drop_ms} ms",
+                persona(pi),
+                if joined { "joined" } else { "joined, explicit" }
+            );
+        }
+        // Single-table storage keeps its discriminator.
+        fails(&mut c, "ALTER TABLE fleet DROP DISCRIMINATOR", 39710).await;
+        exec(&mut c, &format!("DROP DATABASE {db}")).await;
     }
 }

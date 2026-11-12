@@ -187,7 +187,11 @@ fn check_clause(c: &Clause, s: &mut Scope) -> Result<()> {
                 }
             }
         }
-        Clause::Subquery { imports, query } => {
+        Clause::Subquery {
+            imports,
+            query,
+            batch,
+        } => {
             let mut inner = Scope {
                 vars: s.vars.clone(),
                 open: true,
@@ -206,6 +210,9 @@ fn check_clause(c: &Clause, s: &mut Scope) -> Result<()> {
                     }
                 }
                 None => s.open = true,
+            }
+            if let Some(r) = batch.as_ref().and_then(|b| b.report.as_ref()) {
+                s.vars.insert(r.clone(), Kind::Any);
             }
         }
         Clause::Foreach { var: v, list, body } => {
@@ -241,7 +248,7 @@ fn check_clause(c: &Clause, s: &mut Scope) -> Result<()> {
 }
 
 /// The columns a subquery returns; `None` for `RETURN *` or none known.
-fn returns_of(q: &Query) -> Option<Vec<String>> {
+pub(crate) fn returns_of(q: &Query) -> Option<Vec<String>> {
     let last = q.parts.first()?.clauses.last()?;
     match last {
         Clause::Return(p) if !p.star => Some(p.items.iter().map(|(_, n)| n.clone()).collect()),

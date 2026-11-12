@@ -77,9 +77,9 @@ macro_rules! key {
 
 key!(
     /// `bolt.max_version`: the highest Bolt version offered. This build
-    /// speaks 5.0 to 5.4.
-    MAX_VERSION: Text = "bolt.max_version", Cow::Borrowed("5.4"), Scopes::PROCESS,
-    HardBounds::one_of(&["5.0", "5.1", "5.2", "5.3", "5.4"]),
+    /// speaks 5.0 to 5.8 (5.5 to 5.8 since R8 round 8).
+    MAX_VERSION: Text = "bolt.max_version", Cow::Borrowed("5.8"), Scopes::PROCESS,
+    HardBounds::one_of(&["5.0", "5.1", "5.2", "5.3", "5.4", "5.5", "5.6", "5.7", "5.8"]),
     "Highest Bolt version offered"
 );
 key!(
@@ -168,6 +168,7 @@ pub fn to_pack(v: &Value) -> PackValue {
         Value::Int(i) => PackValue::Int(*i),
         Value::Float(f) => PackValue::Float(*f),
         Value::String(s) => PackValue::String(s.clone()),
+        Value::Bytes(b) => PackValue::Bytes(b.clone()),
         Value::List(l) => PackValue::List(l.iter().map(to_pack).collect()),
         Value::Map(m) => PackValue::Map(m.iter().map(|(k, x)| (k.clone(), to_pack(x))).collect()),
         Value::Node(n) => node_pack(n),
@@ -408,12 +409,8 @@ pub fn from_pack(v: &PackValue) -> Result<Value> {
                 .collect::<Result<BTreeMap<_, _>>>()?,
         ),
         PackValue::Struct { tag, fields } => struct_value(*tag, fields)?,
-        PackValue::Bytes(_) => {
-            return Err(SprigError::new(
-                SprigCode::GraphPropertyType,
-                "byte arrays are not supported as parameters",
-            ));
-        }
+        // R8 round 8: byte arrays (Neo4j's `byte[]`).
+        PackValue::Bytes(b) => Value::Bytes(b.clone()),
     })
 }
 
@@ -641,7 +638,7 @@ impl BoltFrontend {
         let s = &self.service;
         let ctx = s.sctx();
         let max =
-            BoltVersion::parse(&s.live.get(&MAX_VERSION, &ctx)).unwrap_or(BoltVersion::new(5, 4));
+            BoltVersion::parse(&s.live.get(&MAX_VERSION, &ctx)).unwrap_or(BoltVersion::new(5, 8));
         Config {
             server_agent: s.live.get(&SERVER_AGENT, &ctx).into_owned(),
             versions: sprig_proto_bolt::message::SUPPORTED
@@ -768,7 +765,11 @@ mod tests {
                 PackValue::Int(0)
             ])
         );
-        assert!(from_pack(&PackValue::Bytes(vec![1])).is_err());
+        assert_eq!(
+            from_pack(&PackValue::Bytes(vec![1, 255])).expect("bytes"),
+            Value::Bytes(vec![1, 255])
+        );
+        assert_eq!(to_pack(&Value::Bytes(vec![7])), PackValue::Bytes(vec![7]));
         // Temporal and spatial values round-trip through Bolt structures.
         for (kind, text) in [
             ("date", "2020-01-05"),

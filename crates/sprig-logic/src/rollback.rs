@@ -19,6 +19,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 
 use crate::catalog::LogicStore;
 use crate::declare::{Declaration, Kind, Param, TierPref};
+use crate::rollout::{RolloutOp, RolloutSpec};
 
 /// A parsed rollback.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +32,10 @@ pub struct Rollback {
     pub name: String,
     /// `TO VERSION n`.
     pub to: Option<u64>,
+    /// `ALTER ... ROLLOUT ...` instead of `ROLLBACK` (R7 follow-ups,
+    /// [`crate::rollout`]): the candidate's next stage, its promotion, or
+    /// the end of the rollout.
+    pub rollout: Option<RolloutOp>,
 }
 
 fn words(sql: &str) -> Vec<String> {
@@ -61,7 +66,7 @@ pub fn is_rollback(sql: &str) -> bool {
     w.len() >= 4
         && w[0].eq_ignore_ascii_case("alter")
         && (w[1].eq_ignore_ascii_case("function") || w[1].eq_ignore_ascii_case("procedure"))
-        && w[3].eq_ignore_ascii_case("rollback")
+        && (w[3].eq_ignore_ascii_case("rollback") || w[3].eq_ignore_ascii_case("rollout"))
 }
 
 /// Parses a rollback; `None` when `sql` isn't one.
@@ -84,6 +89,15 @@ pub fn parse(sql: &str) -> Option<Result<Rollback>> {
         _ => (None, w[2].clone()),
     };
     let rest: Vec<String> = w[4..].iter().map(|x| x.to_ascii_lowercase()).collect();
+    if w[3].eq_ignore_ascii_case("rollout") {
+        return Some(crate::rollout::parse_op(&rest).map(|op| Rollback {
+            kind,
+            db,
+            name,
+            to: None,
+            rollout: Some(op),
+        }));
+    }
     let to = match rest.as_slice() {
         [] => None,
         [t, v, n] if t == "to" && v == "version" => match n.parse::<u64>() {
@@ -102,7 +116,13 @@ pub fn parse(sql: &str) -> Option<Result<Rollback>> {
             )));
         }
     };
-    Some(Ok(Rollback { kind, db, name, to }))
+    Some(Ok(Rollback {
+        kind,
+        db,
+        name,
+        to,
+        rollout: None,
+    }))
 }
 
 impl Rollback {
@@ -128,6 +148,7 @@ impl Rollback {
             schedule: None,
             params: Vec::new(),
             returns: None,
+            rollout: None,
         }
     }
 }
@@ -163,8 +184,35 @@ pub async fn resolve(
         .ok_or_else(|| not_found(format!("no {} {}", r.kind.as_str(), r.name)))?;
     let active = module.active_version.unwrap_or(0);
     let versions = store.versions(c, module.module_id).await?;
-    let usable = |s: &str| matches!(s, "superseded" | "active" | "retired");
-    let target = match r.to {
+    let usable = |s: &str| matches!(s, "superseded" | "active" | "retired" | "rolling_out");
+    // `ROLLOUT ...`: the candidate (a stage or its promotion) or the
+    // active version (the end of the rollout).
+    let mut stage: Option<RolloutSpec> = None;
+    let to = match r.rollout {
+        None => r.to,
+        Some(op) => {
+            let ro = crate::rollout::get(c, store.schema(), module.module_id)
+                .await?
+                .ok_or_else(|| {
+                    not_found(format!(
+                        "{} has no rollout: deploy a candidate WITH (SPRIG_ROLLOUT = n)",
+                        r.name
+                    ))
+                })?;
+            match op {
+                RolloutOp::To(pct, by) => {
+                    stage = Some(RolloutSpec {
+                        pct,
+                        by: by.unwrap_or(ro.by),
+                    });
+                    Some(ro.candidate_version)
+                }
+                RolloutOp::Promote => Some(ro.candidate_version),
+                RolloutOp::Abort => Some(ro.active_version),
+            }
+        }
+    };
+    let target = match to {
         Some(n) => {
             let v = versions
                 .iter()
@@ -238,6 +286,7 @@ pub async fn resolve(
         schedule: None,
         params,
         returns: sig["returns"].as_str().map(str::to_owned),
+        rollout: stage,
     };
     Ok((d, target.version))
 }
@@ -259,9 +308,19 @@ mod tests {
                 kind: Kind::Function,
                 db: Some("shop".into()),
                 name: "quote".into(),
-                to: None
+                to: None,
+                rollout: None,
             }
         );
+        let r = parse("ALTER FUNCTION shop.quote ROLLOUT TO 25 PERCENT BY TENANT")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            r.rollout,
+            Some(RolloutOp::To(25, Some(crate::rollout::RolloutBy::Tenant)))
+        );
+        assert!(is_rollback("alter procedure p rollout promote"));
+        assert!(parse("ALTER FUNCTION f ROLLOUT").unwrap().is_err());
         let r = parse("ALTER PROCEDURE place ROLLBACK TO VERSION 3;")
             .unwrap()
             .unwrap();

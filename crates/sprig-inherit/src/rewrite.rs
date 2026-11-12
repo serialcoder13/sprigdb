@@ -218,12 +218,19 @@ fn expand_wildcards(stmt: &mut Statement, rf: &Ref) {
                 return ControlFlow::Continue(());
             };
             let single = s.from.len() == 1 && s.from[0].joins.is_empty();
+            // A typed table's type columns are invisible, as in its table.
+            let typed = self.rf.r.obj.type_root.is_some();
             let cols = |a: &str| -> Vec<SelectItem> {
                 self.rf
                     .r
                     .obj
                     .columns
                     .iter()
+                    .filter(|c| {
+                        !(typed
+                            && (c.eq_ignore_ascii_case("_type")
+                                || c.eq_ignore_ascii_case("_type_path")))
+                    })
                     .map(|c| {
                         SelectItem::UnnamedExpr(Expr::CompoundIdentifier(vec![
                             Ident::with_quote('`', a.to_owned()),
@@ -271,6 +278,7 @@ pub(crate) fn view_of(
         layer: r.layer.clone(),
         keys,
         origin,
+        derived: r.derived.clone(),
     }
     .view(&chain))
 }

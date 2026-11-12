@@ -295,9 +295,7 @@ impl EtcdStore {
                 .await;
             match r {
                 Ok(_) => break,
-                Err(e)
-                    if tries < 3 * seeds && tokio::time::Instant::now() < deadline =>
-                {
+                Err(e) if tries < 3 * seeds && tokio::time::Instant::now() < deadline => {
                     tracing::debug!(error = %e, tries, "an etcd seed didn't answer; trying again");
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
@@ -384,6 +382,34 @@ impl EtcdStore {
         }
     }
 
+    /// Runs one request with the store's deadline, sending it again when
+    /// the channel couldn't connect to the endpoint it picked (hardening
+    /// round 3). The balanced channel may pick a member that is down; such
+    /// a call never reached etcd, so sending it again is safe even for a
+    /// transaction, and the next pick is usually a live member. Without
+    /// this, every control-plane call failed with probability 1/3 while
+    /// one member of three was down, and a cluster failover that needs a
+    /// dozen calls in a row stalled for minutes.
+    async fn call_retry<T, F, Fut>(&self, op: &'static str, f: F) -> Result<T>
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = std::result::Result<T, etcd_client::Error>>,
+    {
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        let mut tries = 0u32;
+        loop {
+            tries += 1;
+            match tokio::time::timeout_at(deadline, f()).await {
+                Ok(Ok(v)) => return Ok(v),
+                Ok(Err(e)) if not_sent(&e) && tries < CONNECT_RETRIES => {
+                    tracing::debug!(op, tries, error = %e, "etcd endpoint unreachable; sending the call again");
+                }
+                Ok(Err(e)) => return Err(map_err(op, e)),
+                Err(_) => return Err(timed_out(op, self.timeout)),
+            }
+        }
+    }
+
     fn keeper_slot(&self, lease: LeaseId) -> KeeperSlot {
         Arc::clone(lock(&self.shared.keepers).entry(lease).or_default())
     }
@@ -431,6 +457,22 @@ impl EtcdStore {
 /// The longest one keep-alive may take inside the store; callers bound it
 /// by their lease's deadline.
 pub const KEEP_ALIVE_BOUND: Duration = Duration::from_secs(10);
+
+/// How many times [`EtcdStore::call_retry`] sends a call that couldn't
+/// connect: with one member of three down, the chance that every pick is
+/// the dead one is (1/3)^8.
+const CONNECT_RETRIES: u32 = 8;
+
+/// Whether the channel failed to connect to the endpoint it picked, so the
+/// request never reached etcd.
+fn not_sent(e: &etcd_client::Error) -> bool {
+    match e {
+        etcd_client::Error::GRpcStatus(s) => {
+            s.code() == tonic::Code::Unavailable && s.message().contains("connect error")
+        }
+        _ => false,
+    }
+}
 
 fn timed_out(op: &str, after: Duration) -> SprigError {
     SprigError::new(
@@ -627,7 +669,11 @@ impl MetaStore for EtcdStore {
             opts = opts.with_serializable();
         }
         let resp = self
-            .call("get", self.client.kv_client().get(key.as_str(), Some(opts)))
+            .call_retry("get", || {
+                let mut kv = self.client.kv_client();
+                let opts = opts.clone();
+                async move { kv.get(key.as_str(), Some(opts)).await }
+            })
             .await?;
         resp.kvs().first().map(kv_from).transpose()
     }
@@ -649,7 +695,11 @@ impl MetaStore for EtcdStore {
             get = get.with_revision(to_i64(at)?);
         }
         let resp = self
-            .call("list", self.client.kv_client().get(start, Some(get)))
+            .call_retry("list", || {
+                let mut kv = self.client.kv_client();
+                let (start, get) = (start.clone(), get.clone());
+                async move { kv.get(start, Some(get)).await }
+            })
             .await?;
         let kvs = resp.kvs().iter().map(kv_from).collect::<Result<Vec<_>>>()?;
         Ok(ListPage {
@@ -664,7 +714,13 @@ impl MetaStore for EtcdStore {
             .when(compares(&txn.when)?)
             .and_then(txn_ops(&txn.then))
             .or_else(txn_ops(&txn.otherwise));
-        let resp = self.call("txn", self.client.kv_client().txn(req)).await?;
+        let resp = self
+            .call_retry("txn", || {
+                let mut kv = self.client.kv_client();
+                let req = req.clone();
+                async move { kv.txn(req).await }
+            })
+            .await?;
         let results = resp
             .op_responses()
             .iter()
@@ -741,7 +797,10 @@ impl MetaStore for EtcdStore {
         let secs = ttl.as_secs() + u64::from(ttl.subsec_nanos() > 0);
         let secs = i64::try_from(secs.max(1)).unwrap_or(i64::MAX);
         let resp = self
-            .call("grant_lease", self.client.lease_client().grant(secs, None))
+            .call_retry("grant_lease", || {
+                let mut lc = self.client.lease_client();
+                async move { lc.grant(secs, None).await }
+            })
             .await?;
         if !resp.error().is_empty() {
             return Err(SprigError::internal(format!(
@@ -786,7 +845,10 @@ impl MetaStore for EtcdStore {
 
     async fn revoke_lease(&self, lease: LeaseId) -> Result<()> {
         let r = self
-            .call("revoke_lease", self.client.lease_client().revoke(lease.0))
+            .call_retry("revoke_lease", || {
+                let mut lc = self.client.lease_client();
+                async move { lc.revoke(lease.0).await }
+            })
             .await;
         self.forget_lease(lease);
         match r {

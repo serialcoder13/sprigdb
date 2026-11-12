@@ -102,6 +102,7 @@ gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug80615 :: 
 gateway-mysql fail testsuite.regression.StatementRegressionTest.testBug84783 :: statement cancellation, as testBug103796
 gateway-mysql fail testsuite.regression.SyntaxRegressionTest.testCreateTablespace :: MySQL-only DDL MariaDB lacks (general tablespaces; translator step 10)
 gateway-mysql fail testsuite.regression.SyntaxRegressionTest.testDiscardImportPartitions :: MySQL-only DDL (partition tablespace import; translator step 10)
+gateway-mysql fail testsuite.regression.SyntaxRegressionTest.testFULLTEXTSearchInnoDB :: R4 round 5 (r4five): its FULLTEXT index is now a search index (chapter 39, R5), and MATCH ... WITH QUERY EXPANSION isn't supported by search indexes (passed in R4 round 4)
 gateway-mysql fail testsuite.regression.SyntaxRegressionTest.testExchangePartition :: ALTER TABLE ... EXCHANGE PARTITION through the gateway's DDL path (not investigated further)
 gateway-mysql fail testsuite.regression.SyntaxRegressionTest.testGcsReplicationCmds :: group replication statements: MySQL-only, and server-wide
 gateway-mysql fail testsuite.regression.SyntaxRegressionTest.testGetStackedDiagnostics :: GET STACKED DIAGNOSTICS: MySQL-only syntax

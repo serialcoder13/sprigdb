@@ -50,11 +50,7 @@ fn migrated() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
 }
 
 /// A stream log record as a sink record (also `TEST SINK`'s samples).
-pub(crate) fn stream_record(
-    stream: u64,
-    p: u32,
-    rec: sprig_streams::model::Record,
-) -> SinkRecord {
+pub(crate) fn stream_record(stream: u64, p: u32, rec: sprig_streams::model::Record) -> SinkRecord {
     SinkRecord {
         idem_key: stream_key(stream, p, rec.offset.0, rec.leader_epoch.0),
         pos: Position::Stream {
@@ -805,13 +801,12 @@ impl QueueSource {
     /// Takes messages under lease tag `tag`, and first gives back those a
     /// dead earlier task held under `release` (R9, r9tests: chapter 51,
     /// "Queue sources after a crash"): they return to the queue at once
-    /// instead of after `sink.queue_lease_ms`. The sink's own queue only.
+    /// instead of after `sink.queue_lease_ms`. The sink's own queue, and
+    /// (R9, r9last) a member's instance read by a fan-in task.
     #[must_use]
     pub fn with_lease_tag(mut self, tag: String, release: Option<String>) -> Self {
-        if matches!(self.at, QueueAt::Own { .. }) {
-            self.tag = Some(tag);
-            self.release = release;
-        }
+        self.tag = Some(tag);
+        self.release = release;
         self
     }
 
@@ -819,16 +814,26 @@ impl QueueSource {
     /// A failure is logged: those messages then return after their lease.
     async fn release_dead(&mut self) {
         use crate::peer::{SqlOp, quote};
-        let (Some(tag), QueueAt::Own { db, .. }) = (self.release.take(), &self.at) else {
+        let Some(tag) = self.release.take() else {
             return;
         };
-        let op = SqlOp::Queue {
-            statements: vec![format!(
-                "CALL sprig.mq_release({}, {}, {})",
-                quote(&self.queue),
-                quote(&tag),
-                quote(db)
-            )],
+        let op = match &self.at {
+            QueueAt::Own { db, .. } => SqlOp::Queue {
+                statements: vec![format!(
+                    "CALL sprig.mq_release({}, {}, {})",
+                    quote(&self.queue),
+                    quote(&tag),
+                    quote(db)
+                )],
+            },
+            QueueAt::Member { def, member, db } => SqlOp::FanInRelease {
+                def_tenant: def.0,
+                def_object: def.1,
+                member: *member,
+                db: db.clone(),
+                queue: self.queue.clone(),
+                tag: tag.clone(),
+            },
         };
         let outcome = match self.run(op).await {
             Ok(r) => match r.results.into_iter().next().and_then(|x| x.error) {
@@ -864,8 +869,8 @@ impl QueueSource {
     }
 
     /// Waits until the queue has no unacknowledged message (an earlier
-    /// task's leases ended or were settled), at most the lease plus 5 s;
-    /// without `mq_info` (an older gateway) for the whole lease.
+    /// task's leases ended or were settled), at most the lease plus 5 s,
+    /// asking every 500 ms (also after a failed `mq_info`).
     async fn wait_out_leases(&mut self) -> Result<()> {
         use crate::peer::{SqlOp, quote};
         let QueueAt::Own { db, .. } = &self.at else {
@@ -881,10 +886,16 @@ impl QueueSource {
                 quote(db)
             )],
         };
+        let mut now_first = true;
         loop {
             let r = self.run(op.clone()).await?;
             let res = r.results.into_iter().next().unwrap_or_default();
-            let unacked = if res.error.is_some() {
+            let unacked = if let Some(e) = &res.error {
+                // Said once per wait (r9tests found a refusal hidden here).
+                if now_first {
+                    tracing::warn!(queue = %self.queue, code = e.code, error = %e.message, "queue sink (ordering = queue): mq_info failed; asking again every 500 ms until the lease ends");
+                    now_first = false;
+                }
                 None
             } else {
                 res.col("unacked")
@@ -908,11 +919,10 @@ impl QueueSource {
             if unacked.is_some() {
                 tracing::debug!(queue = %self.queue, unacked, "queue sink (ordering = queue): waiting for earlier leases");
             }
-            let step = if unacked.is_some() {
-                Duration::from_millis(500)
-            } else {
-                end - now
-            };
+            // Asked again every 500 ms, also after a failed mq_info (a
+            // grant not seen yet, a gateway restarting): r9tests found a
+            // single early refusal made the task wait out the whole lease.
+            let step = Duration::from_millis(500);
             tokio::time::sleep(step.min(end - now)).await;
         }
     }
@@ -922,6 +932,34 @@ impl QueueSource {
             .sql(self.seed, &self.run_as.request(op))
             .await?
             .ok()
+    }
+
+    /// Gives a get's messages back to their queue at once (requeued), as
+    /// if their lease had ended (R9, r9last). Failures are logged: the
+    /// messages then return after their lease.
+    async fn requeue(&self, res: &crate::peer::SqlResult) {
+        use crate::peer::{SqlOp, quote};
+        let Some(i) = res.col("delivery_token") else {
+            return;
+        };
+        let statements: Vec<String> = res
+            .rows
+            .iter()
+            .filter_map(|row| crate::peer::SqlResult::text(row, i))
+            .map(|t| format!("CALL sprig.mq_nack({}, 1)", quote(&t)))
+            .collect();
+        if statements.is_empty() {
+            return;
+        }
+        let n = statements.len();
+        match self.run(SqlOp::Queue { statements }).await {
+            Ok(r) if r.results.iter().all(|x| x.error.is_none()) => {
+                tracing::warn!(queue = %self.queue, n, "queue sink: messages of a queue made again under the sink's queue name given back");
+            }
+            Ok(_) | Err(_) => {
+                tracing::warn!(queue = %self.queue, n, "queue sink: messages of a queue made again under the sink's queue name not all given back; they return after their lease");
+            }
+        }
     }
 
     /// Settles tokens: acknowledged (`ack`) or rejected without requeue.
@@ -959,6 +997,21 @@ impl QueueSource {
         }
         Ok(())
     }
+}
+
+/// The id of the queue a get's messages came from, when it isn't the
+/// sink's own queue (R9, r9last): its delivery tokens name the queue.
+fn replaced_queue(at: &QueueAt, res: &crate::peer::SqlResult) -> Option<u64> {
+    let QueueAt::Own { id, .. } = at else {
+        return None;
+    };
+    let i = res.col("delivery_token")?;
+    res.rows.iter().find_map(|row| {
+        crate::peer::SqlResult::text(row, i)
+            .and_then(|t| token_parts(&t))
+            .map(|(q, _)| q)
+            .filter(|q| q != id)
+    })
 }
 
 /// A queue message's record: the body as the value, the routing key as
@@ -1137,6 +1190,7 @@ impl SourceReader for QueueSource {
                 queue: self.queue.clone(),
                 max: n,
                 lease_ms: self.lease_ms,
+                tag: self.tag.clone(),
             },
         };
         let r = match self.run(op).await {
@@ -1158,6 +1212,21 @@ impl SourceReader for QueueSource {
             }
             self.leases_clear = !self.queue_order;
             return Err(e.error());
+        }
+        if let Some(other) = replaced_queue(&self.at, &res) {
+            // R9 (r9last): the sink's queue was dropped and another made
+            // under its name (a dropped definition's member instance whose
+            // sink lived on). Its messages aren't this sink's: back to
+            // that queue at once, and the sink's source is lost.
+            self.requeue(&res).await;
+            return Err(crate::model::err(
+                SprigCode::SinkSourceLost,
+                format!(
+                    "queue {} isn't the sink's any more (it was dropped and made again: id \
+                     {other}); drop the sink, or make it again over the new queue",
+                    self.queue
+                ),
+            ));
         }
         let out: Vec<SinkRecord> = res
             .rows
@@ -1512,5 +1581,134 @@ mod queue_order_tests {
     fn mq_info_is_allowed_in_a_sinks_queue_session() {
         crate::peer::check_queue_calls(&["CALL sprig.mq_info('q', 'd')".to_owned()]).unwrap();
         assert!(crate::peer::check_queue_calls(&["SELECT 1".to_owned()]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod replaced_queue_tests {
+    use super::*;
+    use crate::peer::{SinkPeer, SqlOp, SqlReply, SqlRequest, SqlResult};
+    use base64::Engine as _;
+    use std::sync::{Arc, Mutex};
+
+    /// A delivery token of queue `queue` (chapter 50's layout, MAC zeros).
+    fn token(queue: u64, msg: u8) -> String {
+        let mut b = Vec::new();
+        b.extend_from_slice(&1u64.to_be_bytes()); // tenant
+        b.extend_from_slice(&2u32.to_be_bytes()); // database
+        b.extend_from_slice(&queue.to_be_bytes());
+        b.extend_from_slice(&[0, 0, 0]); // lane, class
+        b.extend_from_slice(&7u64.to_be_bytes()); // sequence
+        b.extend_from_slice(&[msg; 16]); // message id
+        b.extend_from_slice(&1u64.to_be_bytes()); // owner epoch
+        b.extend_from_slice(&[0; 16]); // MAC
+        format!(
+            "q1.{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+        )
+    }
+
+    /// A gateway whose `mq_get` hands out two messages of queue `queue`;
+    /// it records every statement.
+    struct Peer {
+        queue: u64,
+        calls: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl SinkPeer for Peer {
+        async fn sql(&self, _seed: u64, req: &SqlRequest) -> Result<SqlReply> {
+            let SqlOp::Queue { statements } = &req.op else {
+                panic!("{:?}", req.op);
+            };
+            self.calls
+                .lock()
+                .unwrap()
+                .extend(statements.iter().cloned());
+            let res = if statements[0].starts_with("CALL sprig.mq_get(") {
+                SqlResult {
+                    columns: vec!["delivery_token".into(), "body".into()],
+                    rows: (1..=2u8)
+                        .map(|m| {
+                            vec![
+                                SqlResult::cell(Some(token(self.queue, m).as_bytes())),
+                                SqlResult::cell(Some(b"x")),
+                            ]
+                        })
+                        .collect(),
+                    ..SqlResult::default()
+                }
+            } else {
+                SqlResult::default()
+            };
+            Ok(SqlReply {
+                results: statements.iter().map(|_| res.clone()).collect(),
+                ..SqlReply::default()
+            })
+        }
+    }
+
+    fn source(peer: &Arc<Peer>) -> QueueSource {
+        QueueSource::new(
+            Arc::clone(peer) as Arc<dyn SinkPeer>,
+            crate::peer::RunAs {
+                tenant: 1,
+                tenant_name: "t".into(),
+                user_id: 1,
+                database: "d".into(),
+            },
+            QueueAt::Own {
+                id: 9,
+                db: "d".into(),
+            },
+            "jobs".into(),
+            60_000,
+            1,
+        )
+    }
+
+    /// R9 (r9last): a queue sink whose queue was dropped and made again
+    /// under its name (another id) takes nothing from it: the messages go
+    /// back at once and the source is lost (39223). Before, a dropped
+    /// definition's member sink kept reading the member's new queue and
+    /// held its messages for the lease (inherit_live's queue sink test).
+    #[tokio::test]
+    async fn a_queue_made_again_under_the_name_is_not_read() {
+        let peer = Arc::new(Peer {
+            queue: 10,
+            calls: Mutex::new(Vec::new()),
+        });
+        let mut s = source(&peer);
+        let e = s.next_batch(10, 1 << 20, Duration::ZERO).await.unwrap_err();
+        assert_eq!(
+            e.kind,
+            sprig_common::ErrorKind::Sprig(SprigCode::SinkSourceLost),
+            "{e}"
+        );
+        let calls = peer.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| c.contains("mq_nack(") && c.ends_with(", 1)"))
+                .count(),
+            2,
+            "{calls:?}"
+        );
+        // The sink's own queue reads as before.
+        let peer = Arc::new(Peer {
+            queue: 9,
+            calls: Mutex::new(Vec::new()),
+        });
+        let mut s = source(&peer);
+        let got = s.next_batch(10, 1 << 20, Duration::ZERO).await.unwrap();
+        assert_eq!(got.len(), 2);
+        assert!(
+            !peer
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.contains("mq_nack"))
+        );
     }
 }

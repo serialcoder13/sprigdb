@@ -4335,3 +4335,687 @@ pub mod search_server {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TestRunRequest {
+    /// The logical database.
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    /// `function` (default), `procedure`, `trigger` or `validation`.
+    #[prost(string, tag = "2")]
+    pub kind: ::prost::alloc::string::String,
+    /// The deployed module's name (not needed with `source`).
+    #[prost(string, tag = "3")]
+    pub name: ::prost::alloc::string::String,
+    /// The version to run; 0 is the active one.
+    #[prost(uint64, tag = "4")]
+    pub version: u64,
+    /// A draft: a whole `CREATE ... AS ...` declaration, run without being
+    /// recorded or deployed (needs CREATE ROUTINE or ALTER ROUTINE).
+    #[prost(string, tag = "5")]
+    pub source: ::prost::alloc::string::String,
+    /// Function arguments: a list (by position), an object (by parameter
+    /// name), one value, or null.
+    #[prost(message, optional, tag = "6")]
+    pub args: ::core::option::Option<::prost_types::Value>,
+    /// The other inputs, as the REST body takes them: `row`, `old` and `op`
+    /// (validations, after-commit triggers), `record` (stream triggers),
+    /// `message` (queue triggers), `rows` (the snapshot: table → rows) and
+    /// `fetch` (mocked outbound answers: method, url or prefix\*, status,
+    /// headers, body).
+    #[prost(message, optional, tag = "7")]
+    pub inputs: ::core::option::Option<::prost_types::Struct>,
+}
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TestRunResponse {
+    /// The event raised, empty when the run failed.
+    #[prost(string, tag = "1")]
+    pub event: ::prost::alloc::string::String,
+    /// Its fields.
+    #[prost(message, optional, tag = "2")]
+    pub result: ::core::option::Option<::prost_types::Struct>,
+    /// The whole report: event, result, error {code, name, message},
+    /// statements \[{sql, kind, rows, affected, ms, error}\], writes, logs,
+    /// fetches, tables, budget {limits, used}, timing {totalMs, setupMs,
+    /// runMs, dbMs}, notes.
+    #[prost(message, optional, tag = "3")]
+    pub report: ::core::option::Option<::prost_types::Struct>,
+}
+/// Generated client implementations.
+pub mod logic_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    /// The logic layer.
+    #[derive(Debug, Clone)]
+    pub struct LogicClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl<T> LogicClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> LogicClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            LogicClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        /// Runs a deployed version (or a draft's source) and reports its event,
+        /// fields or error, every statement with its timing, the writes (rolled
+        /// back), log lines, outbound calls, the snapshot tables after the run,
+        /// and the budgets used.
+        pub async fn test_run(
+            &mut self,
+            request: impl tonic::IntoRequest<super::TestRunRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::TestRunResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/sprig.v1.Logic/TestRun");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.Logic", "TestRun"));
+            self.inner.unary(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod logic_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with LogicServer.
+    #[async_trait]
+    pub trait Logic: std::marker::Send + std::marker::Sync + 'static {
+        /// Runs a deployed version (or a draft's source) and reports its event,
+        /// fields or error, every statement with its timing, the writes (rolled
+        /// back), log lines, outbound calls, the snapshot tables after the run,
+        /// and the budgets used.
+        async fn test_run(
+            &self,
+            request: tonic::Request<super::TestRunRequest>,
+        ) -> std::result::Result<tonic::Response<super::TestRunResponse>, tonic::Status>;
+    }
+    /// The logic layer.
+    #[derive(Debug)]
+    pub struct LogicServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> LogicServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for LogicServer<T>
+    where
+        T: Logic,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/sprig.v1.Logic/TestRun" => {
+                    #[allow(non_camel_case_types)]
+                    struct TestRunSvc<T: Logic>(pub Arc<T>);
+                    impl<T: Logic> tonic::server::UnaryService<super::TestRunRequest>
+                    for TestRunSvc<T> {
+                        type Response = super::TestRunResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::TestRunRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Logic>::test_run(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = TestRunSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for LogicServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "sprig.v1.Logic";
+    impl<T> tonic::server::NamedService for LogicServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}
+/// What to watch.
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WatchRequest {
+    /// The logical database.
+    #[prost(string, tag = "1")]
+    pub database: ::prost::alloc::string::String,
+    /// Tables (or collections); empty: every table the caller may read.
+    #[prost(string, repeated, tag = "2")]
+    pub objects: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// A resume token (chapter 38), or empty for "now".
+    #[prost(string, tag = "3")]
+    pub start_after: ::prost::alloc::string::String,
+    /// An alternative start point; 0 if unused (not supported yet: 39787).
+    #[prost(uint64, tag = "4")]
+    pub start_at_hlc: u64,
+    /// Include the whole row after an update, not only the changed columns.
+    #[prost(bool, tag = "5")]
+    pub full_document: bool,
+}
+/// One change, or a heartbeat.
+#[allow(clippy::all)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ChangeEvent {
+    /// Resume after this event.
+    #[prost(string, tag = "1")]
+    pub resume_token: ::prost::alloc::string::String,
+    /// The transaction's commit clamp (HLC).
+    #[prost(uint64, tag = "2")]
+    pub commit_hlc: u64,
+    /// The table.
+    #[prost(string, tag = "3")]
+    pub object: ::prost::alloc::string::String,
+    /// `table`.
+    #[prost(string, tag = "4")]
+    pub model: ::prost::alloc::string::String,
+    /// `insert`, `update`, `delete`, `ddl`, `truncate` or `heartbeat`.
+    #[prost(string, tag = "5")]
+    pub op: ::prost::alloc::string::String,
+    /// The primary key, as a JSON object.
+    #[prost(string, tag = "6")]
+    pub key: ::prost::alloc::string::String,
+    /// The row after the change (inserts; updates with `full_document`), JSON.
+    #[prost(string, tag = "7")]
+    pub after: ::prost::alloc::string::String,
+    /// An update's changed columns with their new values, JSON.
+    #[prost(string, tag = "8")]
+    pub update: ::prost::alloc::string::String,
+    /// A DDL statement, with logical names.
+    #[prost(string, tag = "9")]
+    pub ddl: ::prost::alloc::string::String,
+}
+/// Generated client implementations.
+pub mod changes_client {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    use tonic::codegen::http::Uri;
+    /// Watches a database's changes.
+    #[derive(Debug, Clone)]
+    pub struct ChangesClient<T> {
+        inner: tonic::client::Grpc<T>,
+    }
+    impl<T> ChangesClient<T>
+    where
+        T: tonic::client::GrpcService<tonic::body::Body>,
+        T::Error: Into<StdError>,
+        T::ResponseBody: Body<Data = Bytes> + std::marker::Send + 'static,
+        <T::ResponseBody as Body>::Error: Into<StdError> + std::marker::Send,
+    {
+        pub fn new(inner: T) -> Self {
+            let inner = tonic::client::Grpc::new(inner);
+            Self { inner }
+        }
+        pub fn with_origin(inner: T, origin: Uri) -> Self {
+            let inner = tonic::client::Grpc::with_origin(inner, origin);
+            Self { inner }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> ChangesClient<InterceptedService<T, F>>
+        where
+            F: tonic::service::Interceptor,
+            T::ResponseBody: Default,
+            T: tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<
+                    <T as tonic::client::GrpcService<tonic::body::Body>>::ResponseBody,
+                >,
+            >,
+            <T as tonic::codegen::Service<
+                http::Request<tonic::body::Body>,
+            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+        {
+            ChangesClient::new(InterceptedService::new(inner, interceptor))
+        }
+        /// Compress requests with the given encoding.
+        ///
+        /// This requires the server to support it otherwise it might respond with an
+        /// error.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.send_compressed(encoding);
+            self
+        }
+        /// Enable decompressing responses.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.inner = self.inner.accept_compressed(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_decoding_message_size(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.inner = self.inner.max_encoding_message_size(limit);
+            self
+        }
+        /// The changes of the database's tables (or of `objects`), from `start_after`
+        /// or now, until the caller cancels.
+        pub async fn watch(
+            &mut self,
+            request: impl tonic::IntoRequest<super::WatchRequest>,
+        ) -> std::result::Result<
+            tonic::Response<tonic::codec::Streaming<super::ChangeEvent>>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/sprig.v1.Changes/Watch");
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("sprig.v1.Changes", "Watch"));
+            self.inner.server_streaming(req, path, codec).await
+        }
+    }
+}
+/// Generated server implementations.
+pub mod changes_server {
+    #![allow(
+        unused_variables,
+        dead_code,
+        missing_docs,
+        clippy::wildcard_imports,
+        clippy::let_unit_value,
+    )]
+    use tonic::codegen::*;
+    /// Generated trait containing gRPC methods that should be implemented for use with ChangesServer.
+    #[async_trait]
+    pub trait Changes: std::marker::Send + std::marker::Sync + 'static {
+        /// Server streaming response type for the Watch method.
+        type WatchStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<super::ChangeEvent, tonic::Status>,
+            >
+            + std::marker::Send
+            + 'static;
+        /// The changes of the database's tables (or of `objects`), from `start_after`
+        /// or now, until the caller cancels.
+        async fn watch(
+            &self,
+            request: tonic::Request<super::WatchRequest>,
+        ) -> std::result::Result<tonic::Response<Self::WatchStream>, tonic::Status>;
+    }
+    /// Watches a database's changes.
+    #[derive(Debug)]
+    pub struct ChangesServer<T> {
+        inner: Arc<T>,
+        accept_compression_encodings: EnabledCompressionEncodings,
+        send_compression_encodings: EnabledCompressionEncodings,
+        max_decoding_message_size: Option<usize>,
+        max_encoding_message_size: Option<usize>,
+    }
+    impl<T> ChangesServer<T> {
+        pub fn new(inner: T) -> Self {
+            Self::from_arc(Arc::new(inner))
+        }
+        pub fn from_arc(inner: Arc<T>) -> Self {
+            Self {
+                inner,
+                accept_compression_encodings: Default::default(),
+                send_compression_encodings: Default::default(),
+                max_decoding_message_size: None,
+                max_encoding_message_size: None,
+            }
+        }
+        pub fn with_interceptor<F>(
+            inner: T,
+            interceptor: F,
+        ) -> InterceptedService<Self, F>
+        where
+            F: tonic::service::Interceptor,
+        {
+            InterceptedService::new(Self::new(inner), interceptor)
+        }
+        /// Enable decompressing requests with the given encoding.
+        #[must_use]
+        pub fn accept_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.accept_compression_encodings.enable(encoding);
+            self
+        }
+        /// Compress responses with the given encoding, if the client supports it.
+        #[must_use]
+        pub fn send_compressed(mut self, encoding: CompressionEncoding) -> Self {
+            self.send_compression_encodings.enable(encoding);
+            self
+        }
+        /// Limits the maximum size of a decoded message.
+        ///
+        /// Default: `4MB`
+        #[must_use]
+        pub fn max_decoding_message_size(mut self, limit: usize) -> Self {
+            self.max_decoding_message_size = Some(limit);
+            self
+        }
+        /// Limits the maximum size of an encoded message.
+        ///
+        /// Default: `usize::MAX`
+        #[must_use]
+        pub fn max_encoding_message_size(mut self, limit: usize) -> Self {
+            self.max_encoding_message_size = Some(limit);
+            self
+        }
+    }
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for ChangesServer<T>
+    where
+        T: Changes,
+        B: Body + std::marker::Send + 'static,
+        B::Error: Into<StdError> + std::marker::Send + 'static,
+    {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+        fn poll_ready(
+            &mut self,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::result::Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, req: http::Request<B>) -> Self::Future {
+            match req.uri().path() {
+                "/sprig.v1.Changes/Watch" => {
+                    #[allow(non_camel_case_types)]
+                    struct WatchSvc<T: Changes>(pub Arc<T>);
+                    impl<
+                        T: Changes,
+                    > tonic::server::ServerStreamingService<super::WatchRequest>
+                    for WatchSvc<T> {
+                        type Response = super::ChangeEvent;
+                        type ResponseStream = T::WatchStream;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::ResponseStream>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::WatchRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Changes>::watch(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = WatchSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.server_streaming(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                _ => {
+                    Box::pin(async move {
+                        let mut response = http::Response::new(
+                            tonic::body::Body::default(),
+                        );
+                        let headers = response.headers_mut();
+                        headers
+                            .insert(
+                                tonic::Status::GRPC_STATUS,
+                                (tonic::Code::Unimplemented as i32).into(),
+                            );
+                        headers
+                            .insert(
+                                http::header::CONTENT_TYPE,
+                                tonic::metadata::GRPC_CONTENT_TYPE,
+                            );
+                        Ok(response)
+                    })
+                }
+            }
+        }
+    }
+    impl<T> Clone for ChangesServer<T> {
+        fn clone(&self) -> Self {
+            let inner = self.inner.clone();
+            Self {
+                inner,
+                accept_compression_encodings: self.accept_compression_encodings,
+                send_compression_encodings: self.send_compression_encodings,
+                max_decoding_message_size: self.max_decoding_message_size,
+                max_encoding_message_size: self.max_encoding_message_size,
+            }
+        }
+    }
+    /// Generated gRPC service name
+    pub const SERVICE_NAME: &str = "sprig.v1.Changes";
+    impl<T> tonic::server::NamedService for ChangesServer<T> {
+        const NAME: &'static str = SERVICE_NAME;
+    }
+}

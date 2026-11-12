@@ -67,13 +67,13 @@ pub struct DryRow {
     pub headers: String,
     /// Why it failed.
     pub detail: Option<String>,
+    /// What the target would send for it (R9, r9last): its own encoding
+    /// ([`crate::target::preview`]); for `deliver` rows only.
+    pub payload: Option<String>,
 }
 
 /// The catalog's pool, schema and a connection.
-async fn catalog(
-    env: &dyn SinkEnv,
-    tenant: TenantId,
-) -> Result<(mysql_async::Conn, String)> {
+async fn catalog(env: &dyn SinkEnv, tenant: TenantId) -> Result<(mysql_async::Conn, String)> {
     let (pool, schema) = env.catalog(tenant).await?;
     let c = pool.get_conn().await.map_err(|e| {
         SprigError::new(SprigCode::CatalogUnavailable, "catalog unavailable").with_source(e)
@@ -138,6 +138,23 @@ pub async fn test_connection(
     db_id: u32,
     db_name: &str,
 ) -> Result<Vec<Step>> {
+    test_connection_with(env, tenant, r, db_id, db_name, None).await
+}
+
+/// [`test_connection`], and with `write` (`TEST CONNECTION c WRITE [TO
+/// 'target']`, R9 r9last) a marked test record written once the checks
+/// pass ([`write_steps`]).
+///
+/// # Errors
+/// As [`test_connection`].
+pub async fn test_connection_with(
+    env: &dyn SinkEnv,
+    tenant: TenantId,
+    r: &ConnRef,
+    db_id: u32,
+    db_name: &str,
+    write: Option<Option<&str>>,
+) -> Result<Vec<Step>> {
     let t0 = Instant::now();
     let ms = || u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
     let mut out = Vec::new();
@@ -168,9 +185,193 @@ pub async fn test_connection(
         }
     };
     drop(c);
-    let steps = probe(conn, &opts, db_id).await;
+    let steps = probe(conn.clone(), &opts, db_id).await;
+    let passed = steps.iter().all(|(_, r)| r.is_ok());
     push(steps, &mut out);
+    if let Some(to) = write {
+        let steps = if passed {
+            write_steps(conn, &opts, db_id, to).await
+        } else {
+            vec![("write", Err("not tried: a check above failed".to_owned()))]
+        };
+        push(steps, &mut out);
+    }
     Ok(out)
+}
+
+/// The id of a test record: `sprig-test-<ms>-<random>`.
+fn test_id() -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    let mut b = [0u8; 4];
+    let _ = ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut b);
+    format!("sprig-test-{ms}-{:08x}", u32::from_be_bytes(b))
+}
+
+/// The marked test record `TEST CONNECTION ... WRITE` sends: header
+/// `x-sprig-test: 1`, value `{"sprig_test": true, "id": ...}`.
+fn test_record(id: &str) -> SinkRecord {
+    SinkRecord {
+        key: Some(id.as_bytes().to_vec()),
+        value: Some(
+            serde_json::json!({"sprig_test": true, "id": id})
+                .to_string()
+                .into_bytes(),
+        ),
+        headers: vec![("x-sprig-test".to_owned(), b"1".to_vec())],
+        op: None,
+        before: None,
+        after: None,
+        ts_ms: i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis()),
+        )
+        .unwrap_or(0),
+        idem_key: id.to_owned(),
+        pos: crate::model::Position::Queue {
+            queue: 0,
+            msg_id: id.to_owned(),
+            delivery: String::new(),
+        },
+    }
+}
+
+/// `TEST CONNECTION c WRITE [TO 'target']` (R9, r9last): one marked test
+/// record, written as a sink would write it and removed again where the
+/// target allows:
+///
+/// - webhook: one request with the record (the connection's format), the
+///   receiver keeps it;
+/// - Kafka: one record into topic `target` (required), kept until the
+///   topic's retention;
+/// - S3: an object `<target, default _sprig_test/><id>.json`, then
+///   deleted;
+/// - MySQL, MariaDB, PostgreSQL: `INSERT INTO target SELECT * FROM target
+///   WHERE 1 = 0` in a rolled-back transaction: the `INSERT` right is
+///   checked, no row is written.
+async fn write_steps(conn: Conn, opts: &Opts, db_id: u32, to: Option<&str>) -> Steps {
+    let id = test_id();
+    let rec = test_record(&id);
+    let batch = |r: SinkRecord| crate::model::Batch {
+        id: id.clone(),
+        records: vec![r],
+        attempt: 1,
+        lane: 0,
+        ends: Vec::new(),
+    };
+    let outcome = |o: Result<crate::model::BatchOutcome>| match o {
+        Ok(crate::model::BatchOutcome::All(crate::model::Outcome::Ok)) => Ok(()),
+        Ok(crate::model::BatchOutcome::Each(v))
+            if v.iter().all(|o| matches!(o, crate::model::Outcome::Ok)) =>
+        {
+            Ok(())
+        }
+        Ok(other) => Err(format!("{other:?}")),
+        Err(e) => Err(e.to_string()),
+    };
+    match conn.kind {
+        ConnKind::Webhook => {
+            let def = stand_in(db_id, "test_connection", TargetSpec::Webhook { path: None });
+            let mut o = opts.clone();
+            o.0.entry("signature".into())
+                .or_insert_with(|| "none".into());
+            let ctx = context(def, Some(conn), o);
+            match crate::target::webhook::build(&ctx) {
+                Err(e) => vec![("write", Err(e.to_string()))],
+                Ok(t) => vec![
+                    (
+                        "write",
+                        outcome(t.deliver(&batch(rec)).await).map(|()| {
+                            format!("one request with test record {id} (header x-sprig-test: 1)")
+                        }),
+                    ),
+                    (
+                        "clean_up",
+                        Ok("not possible: the receiver keeps the request".into()),
+                    ),
+                ],
+            }
+        }
+        ConnKind::Kafka => {
+            let Some(topic) = to.filter(|t| !t.is_empty()) else {
+                return vec![(
+                    "write",
+                    Err("name the topic: TEST CONNECTION c WRITE TO 'topic'".into()),
+                )];
+            };
+            let def = stand_in(
+                db_id,
+                "test_connection",
+                TargetSpec::Kafka {
+                    topic: topic.to_owned(),
+                    key: None,
+                },
+            );
+            let ctx = context(def, Some(conn), opts.clone());
+            match crate::target::kafka::build(&ctx) {
+                Err(e) => vec![("write", Err(e.to_string()))],
+                Ok(t) => vec![
+                    (
+                        "write",
+                        outcome(t.deliver(&batch(rec)).await).map(|()| {
+                            format!("one record into {topic}, key {id}, header x-sprig-test: 1")
+                        }),
+                    ),
+                    (
+                        "clean_up",
+                        Ok("not possible: the topic keeps it until its retention".into()),
+                    ),
+                ],
+            }
+        }
+        ConnKind::S3 => {
+            let client = match crate::target::s3::client::S3Client::new(&conn, opts) {
+                Ok(c) => c,
+                Err(e) => return vec![("write", Err(e.to_string()))],
+            };
+            let key = format!("{}{id}.json", to.unwrap_or("_sprig_test/"));
+            let body = bytes::Bytes::from(rec.value.clone().unwrap_or_default());
+            match client
+                .put_object(&key, body, "application/json", true)
+                .await
+            {
+                Err(e) => vec![("write", Err(e.to_string()))],
+                Ok(_) => vec![
+                    ("write", Ok(format!("PutObject {key}"))),
+                    (
+                        "clean_up",
+                        client
+                            .delete_object(&key)
+                            .await
+                            .map(|()| format!("DeleteObject {key}"))
+                            .map_err(|e| format!("{key} stays: {e}")),
+                    ),
+                ],
+            }
+        }
+        ConnKind::Mysql | ConnKind::Postgresql => {
+            let Some(table) = to
+                .filter(|t| !t.is_empty())
+                .or_else(|| opts.get("test_table"))
+            else {
+                return vec![(
+                    "write",
+                    Err("name the table: TEST CONNECTION c WRITE TO 'table'".into()),
+                )];
+            };
+            let def = stand_in(
+                db_id,
+                "test_connection",
+                TargetSpec::Database {
+                    table: table.to_owned(),
+                },
+            );
+            let ctx = context(def, Some(conn), opts.clone());
+            crate::target::db::write_probe(&ctx, table).await
+        }
+    }
 }
 
 /// The type's checks on an opened connection.
@@ -189,7 +390,9 @@ async fn probe(conn: Conn, opts: &Opts, db_id: u32) -> Steps {
                     "head_bucket",
                     match client.head_bucket().await {
                         Ok(s) if (200..300).contains(&s) => Ok(format!("HTTP {s}")),
-                        Ok(403) => Err("HTTP 403: the credentials were refused for this bucket".into()),
+                        Ok(403) => {
+                            Err("HTTP 403: the credentials were refused for this bucket".into())
+                        }
                         Ok(404) => Err(format!("HTTP 404: no bucket {bucket}")),
                         Ok(s) => Err(format!("HTTP {s}")),
                         Err(e) => Err(e.to_string()),
@@ -274,7 +477,7 @@ fn position(r: &SinkRecord) -> String {
             partition, offset, ..
         } => format!("partition {partition} offset {offset}"),
         Position::Queue { msg_id, .. } => format!("message {msg_id}"),
-        other => format!("{other:?}"),
+        other @ Position::Change { .. } => format!("{other:?}"),
     }
 }
 
@@ -297,7 +500,32 @@ fn shown(r: &SinkRecord, outcome: &'static str, detail: Option<String>) -> DryRo
         value,
         headers: Value::Object(headers).to_string(),
         detail,
+        payload: None,
     }
+}
+
+/// The target context a sink's payload preview is built in (R9,
+/// r9last): its first connection opened as a task opens it (sealed
+/// credentials, allowlist, residency); nothing is sent.
+async fn preview_ctx(
+    env: &dyn SinkEnv,
+    tenant: TenantId,
+    def: &SinkDef,
+    opts: &Opts,
+) -> std::result::Result<TargetCtx, String> {
+    let conn = match def.connections.first() {
+        Some(r) => {
+            let (mut c, schema) = catalog(env, tenant).await.map_err(|e| e.to_string())?;
+            let store = SinksStore::new(schema);
+            Some(
+                open_conn(env, tenant, &mut c, &store, r, opts)
+                    .await
+                    .map_err(|e| format!("the connection: {e}"))?,
+            )
+        }
+        None => None,
+    };
+    Ok(context(def.clone(), conn, opts.clone()))
 }
 
 /// `TEST SINK`'s dry run over `sample` (see the module docs): `WHERE`,
@@ -324,6 +552,16 @@ pub async fn dry_run(
         projection: def.projection.clone(),
         transform,
     };
+    let ctx = preview_ctx(env, tenant, def, &opts).await;
+    let payload = |x: &SinkRecord| {
+        Some(
+            match &ctx {
+                Ok(c) => crate::target::preview(c, x),
+                Err(e) => Err(e.clone()),
+            }
+            .unwrap_or_else(|e| format!("not shown: {e}")),
+        )
+    };
     let mut out = Vec::new();
     for r in sample {
         let shaped = match prepare.prepare(r.clone()) {
@@ -339,7 +577,10 @@ pub async fn dry_run(
         }
         match prepare.transform(shaped).await {
             Ok(v) if v.is_empty() => out.push(shown(&r, "dropped", None)),
-            Ok(v) => out.extend(v.iter().map(|x| shown(x, "deliver", None))),
+            Ok(v) => out.extend(v.iter().map(|x| DryRow {
+                payload: payload(x),
+                ..shown(x, "deliver", None)
+            })),
             Err(e) => out.push(shown(&r, "failed", Some(e))),
         }
     }
@@ -365,8 +606,11 @@ pub async fn sample_stream(
     let (log_schema, _) = crate::job::stream_log_schema(&pool, &schema, tenant, stream).await?;
     let shard = env.shard_pool(tenant).await?;
     let mut c = shard.get_conn().await.map_err(|e| {
-        let mut x = SprigError::new(SprigCode::CatalogUnavailable, "the stream's shard is unavailable")
-            .with_source(e);
+        let mut x = SprigError::new(
+            SprigCode::CatalogUnavailable,
+            "the stream's shard is unavailable",
+        )
+        .with_source(e);
         x.retryable = true;
         x
     })?;

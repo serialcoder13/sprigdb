@@ -9,17 +9,18 @@
 //! | Table created outside SprigDB                | Adopt it                                 |
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::SystemTime;
 
-use sprig_common::ids::{DbId, ObjectId, TenantId};
+use sprig_common::ids::{DbId, JobId, ObjectId, TenantId};
 use sprig_common::names::{SchemaName, is_internal_object};
 use sprig_common::{Result, SprigError};
 
 use super::backend::{DdlBackend, DdlTx};
 use super::exec::{DdlExecutor, Effect, PhysicalDdl, PhysicalObject, drop_sql};
 use super::{
-    DdlEngine, DdlIntent, FactTarget, Facts, IntentOp, gather, logical_text, object_key, sha256,
-    shard_schemas, single_schema,
+    DdlEngine, DdlIntent, FactTarget, Facts, IntentOp, JobExecutors, gather, logical_text,
+    object_key, sha256, shard_schemas, single_schema,
 };
 use crate::store::{
     Counter, DatabaseRow, DbState, ObjectFlags, ObjectKind, ObjectRow, ObjectState,
@@ -100,10 +101,176 @@ impl<'a> Rows<'a> {
     }
 }
 
+/// The schemas a job works in: its shards, or its databases' schemas.
+#[must_use]
+pub fn job_schemas(tenant: TenantId, intent: &DdlIntent, snap: &Snapshot) -> Vec<SchemaName> {
+    if let Some(set) = &intent.shards {
+        return set.routes().into_iter().map(|(s, _)| s).collect();
+    }
+    let mut dbs: BTreeSet<DbId> = BTreeSet::new();
+    if let Some(db) = intent.database() {
+        dbs.insert(db);
+    }
+    for id in intent.objects() {
+        if let Some(o) = snap.objects.iter().find(|o| o.object_id == id) {
+            dbs.insert(o.db_id);
+        }
+    }
+    if let IntentOp::Rename { moves } = &intent.op {
+        dbs.extend(moves.iter().map(|m| m.db));
+    }
+    snap.databases
+        .iter()
+        .filter(|d| dbs.contains(&d.db_id))
+        .flat_map(|d| shard_schemas(tenant, d))
+        .collect()
+}
+
 impl<B: DdlBackend> DdlEngine<B>
 where
     B::Tx: DdlTx,
 {
+    /// Whether `intent`'s job was abandoned by its engine (bugfix-38):
+    /// this engine's job that no longer runs here, or another engine's
+    /// whose process its [`OwnerCheck`](super::OwnerCheck) finds gone.
+    async fn abandoned(&self, intent: &DdlIntent, now: SystemTime) -> bool {
+        let Some(owner) = &intent.owner else {
+            return false;
+        };
+        if *owner == self.owner.id {
+            return !self.owner.jobs().contains(&intent.job);
+        }
+        match &self.owner.check {
+            Some(c) => {
+                let age = now.duration_since(intent.started()).unwrap_or_default();
+                c.gone(owner, age).await
+            }
+            None => false,
+        }
+    }
+
+    /// Resolves (as the reconciler would, [`resolve`](Self::resolve)) the
+    /// jobs of `tenant` their engine abandoned, other than `me`, that
+    /// `exec` reaches and in whose schemas no DDL runs: a DDL waiting for
+    /// a target such a job holds goes ahead within a second instead of
+    /// failing with 39071 until the reconciler's `catalog.stuck_state_minutes`
+    /// (bugfix-38). Returns how many were resolved.
+    ///
+    /// # Errors
+    /// The catalog's, when it can't be read; a job that fails to resolve
+    /// is logged and left.
+    pub(super) async fn resolve_abandoned(
+        &self,
+        tenant: TenantId,
+        me: JobId,
+        exec: &dyn DdlExecutor,
+    ) -> Result<usize> {
+        let snap = self.versioner().backend().full_snapshot(tenant).await?;
+        let now = self.clock.wall();
+        let mut n = 0;
+        for intent in DdlIntent::all(&snap.settings) {
+            if intent.job == me || !self.abandoned(&intent, now).await {
+                continue;
+            }
+            if self
+                .resolve_idle(tenant, &intent, &snap, exec, "waiter")
+                .await
+                .is_some()
+            {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// The janitor's work on `job`, which this engine abandoned
+    /// ([`with_janitor`](Self::with_janitor)): looks at it at each of
+    /// [`JANITOR_LOOKS`](super::JANITOR_LOOKS) until it is resolved or gone,
+    /// then leaves it to the reconciler.
+    pub(super) async fn tidy(&self, tenant: TenantId, job: JobId, executors: &dyn JobExecutors) {
+        for wait in super::JANITOR_LOOKS {
+            tokio::time::sleep(wait).await;
+            let exec = match executors.executor(tenant).await {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::debug!(%tenant, %job, error = %e, "janitor: no executor yet");
+                    continue;
+                }
+            };
+            let snap = match self.versioner().backend().full_snapshot(tenant).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::debug!(%tenant, %job, error = %e, "janitor: catalog unreadable");
+                    continue;
+                }
+            };
+            let Some(intent) = DdlIntent::all(&snap.settings)
+                .into_iter()
+                .find(|i| i.job == job)
+            else {
+                // Finished, or resolved by a waiting DDL.
+                return;
+            };
+            if self
+                .resolve_idle(tenant, &intent, &snap, &*exec, "janitor")
+                .await
+                .is_some()
+            {
+                return;
+            }
+        }
+        tracing::warn!(%tenant, %job,
+            "an abandoned DDL job is still unresolved; the reconciler will resolve it");
+    }
+
+    /// Resolves `intent` unless `exec` doesn't reach one of its shards or
+    /// MariaDB still runs DDL in one of its schemas; logs and counts it.
+    async fn resolve_idle(
+        &self,
+        tenant: TenantId,
+        intent: &DdlIntent,
+        snap: &Snapshot,
+        exec: &dyn DdlExecutor,
+        by: &'static str,
+    ) -> Option<Resolution> {
+        // A shard on a cluster this executor doesn't reach is left to the
+        // reconciler, which reaches every shard.
+        if let Some(set) = &intent.shards
+            && set
+                .routes()
+                .iter()
+                .any(|(s, c)| c.is_some() && exec.cluster_of(s) != *c)
+        {
+            return None;
+        }
+        for s in job_schemas(tenant, intent, snap) {
+            // Its statement still runs (a killed ALTER rolling back): looked
+            // at again later.
+            if exec.busy(&s).await.unwrap_or(true) {
+                return None;
+            }
+        }
+        let mine = intent.owner.as_deref() == Some(self.owner.id.as_str());
+        match self.resolve(tenant, intent, snap, exec).await {
+            Ok(r) => {
+                metrics::counter!("sprig_ddl_abandoned_jobs_resolved_total",
+                    "by" => by,
+                    "owner" => if mine { "this_engine" } else { "gone" },
+                    "action" => r.label())
+                .increment(1);
+                tracing::warn!(%tenant, job = %intent.job, owner = ?intent.owner, by,
+                    action = r.label(), ddl = %intent.ddl,
+                    "resolved a DDL job its engine abandoned");
+                Some(r)
+            }
+            Err(e) => {
+                tracing::warn!(%tenant, job = %intent.job, error = %e, by,
+                    "resolving an abandoned DDL job failed; tried again later");
+                None
+            }
+        }
+    }
+
     /// Finishes, rolls back or rolls forward a job whose process died,
     /// from the physical state (module docs). `snap` is a full snapshot
     /// read after the intent was found. The caller checks the intent's

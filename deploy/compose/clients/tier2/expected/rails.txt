@@ -1,0 +1,21 @@
+# Rails 8.0.3 Active Record (mysql2): tests that pass on MySQL 8.4.11 and not through 3306 (tab, reason).
+# Measured 12 Nov 2026 (R4 round 5, r4five): MySQL 8.4.11 8,420 pass, 0 fail, 42 skip; gateway 8,402 / 18 / 42,
+# after the round's fix of column names like t0_r0 (decision X23). None of the 18 investigated in round 5.
+CaseSensitivityTest#test_columns_include_collation_different_from_table	a column's utf8mb4_bin reads back as utf8mb4_0900_bin on 3306 (collation name map, chapter 28 step 3)
+CharsetCollationTest#test_add_column_with_charset_and_collation	as above: utf8mb4_bin reads back as utf8mb4_0900_bin
+CharsetCollationTest#test_schema_dump_includes_collation	as above, in the schema dump
+SchemaDumperTest#test_schema_dump_keeps_id_column_when_id_is_false_and_id_column_added	the dump adds collation: utf8mb4_0900_ai_ci to a column MySQL dumps without one (collation shown although it is the table's)
+OptimizerHintsTest#test_optimizer_hints	EXPLAIN with a NO_RANGE_OPTIMIZATION hint: MariaDB ignores MySQL's hint, so the plan differs
+OptimizerHintsTest#test_optimizer_hints_is_sanitized	as test_optimizer_hints
+SchemaDumperTest#test_schema_dumps_index_type	a FULLTEXT index is a search index (chapter 39) and doesn't appear as an index in the dump
+ActiveRecord::ConnectionAdapters::SchemaTest#test_dump_indexes	as test_schema_dumps_index_type: one index fewer (FULLTEXT)
+SchemaDumperTest#test_schema_dump_includes_length_for_mysql_blob_and_text_fields	tinytext/mediumtext sizes not dumped as MySQL's: COLUMNS types differ (not investigated)
+SchemaDumperTest#test_schema_dump_does_not_include_limit_for_text_field	a text column dumps a limit (COLUMNS type length; not investigated)
+ActiveRecord::Migration::ForeignKeyTest#test_add_foreign_key_with_if_not_exists_not_set	a duplicate foreign key name: MariaDB's 1005 errno 121 where MySQL says 1826 Duplicate foreign key constraint name (error mapping)
+ActiveRecord::Migration::CompatibilityTest#test_rename_table_on_7_0	a 65-character table name: MariaDB's 1103 Incorrect table name where MySQL says 1059 Identifier name is too long
+ActiveRecord::Migration::CompatibilityTest#test_create_table_on_7_0	a 65-character table name fails in the catalog (1406) where MySQL says 1059 Identifier name is too long
+ActiveRecord::Migration::ColumnsTest#test_remove_column_with_multi_column_index	dropping a column of a multi-column index: MariaDB refuses (1072) where MySQL drops the column from the index
+ActiveRecord::Migration::ColumnsTest#test_change_column_null_does_not_change_default_functions	a DEFAULT (now()) reads back as CURRENT_TIMESTAMP
+ActiveRecord::Migration::ColumnAttributesTest#test_add_column_newline_default	a default holding a newline reads back differently (escaping in COLUMN_DEFAULT; not investigated)
+Mysql2CheckConstraintQuotingTest#test_check_constraint_no_duplicate_expression_quoting	a check's expression text differs in CHECK_CONSTRAINTS (not investigated)
+AdapterPreventWritesTest#test_doesnt_error_when_a_kill_query_is_called_while_preventing_writes	KILL QUERY of the session's own query raises nothing through the gateway

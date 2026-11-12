@@ -15,6 +15,10 @@
 //! cargo test -p sprig-gateway --test sink_test_live -- --nocapture --test-threads 1
 //! ```
 //!
+//! `test_connection_write` (R9, r9last) also writes one marked test record
+//! per target with `TEST CONNECTION ... WRITE`: into the MinIO bucket `qcr`
+//! (deleted again), a Kafka topic named after the run, and the webhook.
+//!
 //! Every address must be on the tenant's `sink.destination_allowlist`.
 //! Each test works in a database of its own (`st_<time>`) and drops it.
 
@@ -56,7 +60,9 @@ async fn conn(addr: &str, user: &str, password: &str) -> Conn {
         .ssl_opts(Some(
             SslOpts::default().with_danger_accept_invalid_certs(true),
         ));
-    Conn::new(opts).await.unwrap_or_else(|e| panic!("login as {user}: {e}"))
+    Conn::new(opts)
+        .await
+        .unwrap_or_else(|e| panic!("login as {user}: {e}"))
 }
 
 async fn sql(c: &mut Conn, q: &str) -> Result<Vec<Vec<Option<String>>>, (u16, String)> {
@@ -88,7 +94,7 @@ async fn steps(c: &mut Conn, name: &str) -> Vec<(String, String, String)> {
     let rows = ok(c, &format!("TEST CONNECTION {name}")).await;
     println!("TEST CONNECTION {name}:");
     for r in &rows {
-        println!("  {:?}", r);
+        println!("  {r:?}");
     }
     rows.into_iter()
         .map(|r| {
@@ -132,8 +138,7 @@ async fn hook(port: u16) -> Arc<Mutex<Vec<String>>> {
                     let head = String::from_utf8_lossy(&buf[..n]).to_string();
                     let method = head.split(' ').next().unwrap_or("").to_owned();
                     seen.lock().unwrap().push(method);
-                    if s
-                        .write_all(b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n")
+                    if s.write_all(b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n")
                         .await
                         .is_err()
                     {
@@ -216,7 +221,15 @@ async fn test_connection_reports_each_step() {
                  CREDENTIALS (access_key_id = '{key}', secret_access_key = '{secret}')"
             )
         };
-        ok(&mut c, &mk("s3_missing", &format!("{}-none", db.replace('_', "-")), &secret)).await;
+        ok(
+            &mut c,
+            &mk(
+                "s3_missing",
+                &format!("{}-none", db.replace('_', "-")),
+                &secret,
+            ),
+        )
+        .await;
         ok(&mut c, &mk("s3_badkey", "qcr", "wrong-secret")).await;
         let s = steps(&mut c, "s3_missing").await;
         assert_eq!(step(&s, "head_bucket").1, "failed", "{s:?}");
@@ -239,10 +252,18 @@ async fn test_connection_reports_each_step() {
         assert!(s.iter().all(|x| x.1 == "ok"), "{s:?}");
         assert!(step(&s, "request").2.contains("204"), "{s:?}");
         let methods = seen.lock().unwrap().clone();
-        assert_eq!(methods, ["OPTIONS"], "a test sends OPTIONS only, never a POST");
+        assert_eq!(
+            methods,
+            ["OPTIONS"],
+            "a test sends OPTIONS only, never a POST"
+        );
     }
     // Rights: a user without USAGE on the connection is refused.
-    ok(&mut c, "CREATE USER IF NOT EXISTS st_nouse IDENTIFIED BY 'sprig-dev-nouse'").await;
+    ok(
+        &mut c,
+        "CREATE USER IF NOT EXISTS st_nouse IDENTIFIED BY 'sprig-dev-nouse'",
+    )
+    .await;
     ok(&mut c, &format!("GRANT SELECT ON {db}.* TO st_nouse")).await;
     let mut u = conn(&addr, &format!("{tenant}.st_nouse"), "sprig-dev-nouse").await;
     let r = sql(&mut u, &format!("TEST CONNECTION {db}.k_none")).await;
@@ -250,7 +271,11 @@ async fn test_connection_reports_each_step() {
     if var("SPRIG_TEST_SINKTEST_KAFKA").is_some() {
         let r = sql(&mut u, &format!("TEST CONNECTION {db}.k_ok")).await;
         assert_eq!(r.unwrap_err().0, 39212, "needs USAGE");
-        ok(&mut c, &format!("GRANT USAGE ON CONNECTION {db}.k_ok TO st_nouse")).await;
+        ok(
+            &mut c,
+            &format!("GRANT USAGE ON CONNECTION {db}.k_ok TO st_nouse"),
+        )
+        .await;
         // A new session sees the grant.
         let mut u = conn(&addr, &format!("{tenant}.st_nouse"), "sprig-dev-nouse").await;
         let r = sql(&mut u, &format!("TEST CONNECTION {db}.k_ok")).await;
@@ -267,7 +292,8 @@ async fn test_sink_shows_records_and_delivers_nothing() {
         skip::report_missing(GATEWAY, "test_sink_shows_records_and_delivers_nothing");
         return;
     };
-    let Some(port) = var("SPRIG_TEST_SINKTEST_HOOK_PORT").and_then(|p| p.parse::<u16>().ok()) else {
+    let Some(port) = var("SPRIG_TEST_SINKTEST_HOOK_PORT").and_then(|p| p.parse::<u16>().ok())
+    else {
         eprintln!("no SPRIG_TEST_SINKTEST_HOOK_PORT: skipped");
         return;
     };
@@ -317,18 +343,36 @@ async fn test_sink_shows_records_and_delivers_nothing() {
         println!("  {r:?}");
     }
     assert_eq!(rows.len(), 6, "every published record shown");
-    let deliver: Vec<&Vec<Option<String>>> =
-        rows.iter().filter(|r| r[1].as_deref() == Some("deliver")).collect();
+    let deliver: Vec<&Vec<Option<String>>> = rows
+        .iter()
+        .filter(|r| r[1].as_deref() == Some("deliver"))
+        .collect();
     let filtered = rows
         .iter()
         .filter(|r| r[1].as_deref() == Some("filtered"))
         .count();
-    assert_eq!((deliver.len(), filtered), (3, 3), "WHERE kept the three 'a's");
+    assert_eq!(
+        (deliver.len(), filtered),
+        (3, 3),
+        "WHERE kept the three 'a's"
+    );
     for r in &deliver {
         let v: serde_json::Value = serde_json::from_str(r[3].as_deref().unwrap()).unwrap();
         assert_eq!(v["kind"], "a");
         assert!(r[2].as_deref().unwrap().starts_with('k'));
+        // R9 (r9last): the webhook's own request body for the record.
+        let payload = r.get(6).cloned().flatten().unwrap_or_default();
+        assert!(
+            !payload.starts_with("not shown") && payload.contains("\"kind\""),
+            "payload preview: {payload}"
+        );
     }
+    // Filtered records have no payload.
+    assert!(
+        rows.iter()
+            .filter(|r| r[1].as_deref() == Some("filtered"))
+            .all(|r| r.get(6).cloned().flatten().is_none())
+    );
     let r = sql(&mut c, "TEST SINK s WITH SAMPLE 2").await.unwrap();
     assert!(r.len() <= 2, "the sample is capped: {r:?}");
     // Nothing delivered, no position moved.
@@ -360,7 +404,11 @@ async fn test_sink_shows_records_and_delivers_nothing() {
         for _ in 0..20 {
             c = conn(&addr, &format!("{tenant}.app"), "sprig-dev-app").await;
             ok(&mut c, &format!("USE {db}")).await;
-            made = sql(&mut c, "CREATE SINK sq FROM QUEUE jobs TO WEBHOOK CONNECTION hook").await;
+            made = sql(
+                &mut c,
+                "CREATE SINK sq FROM QUEUE jobs TO WEBHOOK CONNECTION hook",
+            )
+            .await;
             if made.is_ok() {
                 break;
             }
@@ -393,7 +441,11 @@ async fn test_sink_shows_records_and_delivers_nothing() {
         assert_eq!(rows.len(), 4);
         assert!(rows.iter().all(|r| r[1].as_deref() == Some("deliver")));
         assert_eq!(rows[0][3].as_deref(), Some("{\"job\": 0}"));
-        assert_eq!(rows[0][2].as_deref(), Some("jobs"), "the routing key is the key");
+        assert_eq!(
+            rows[0][2].as_deref(),
+            Some("jobs"),
+            "the routing key is the key"
+        );
         let info = ok(&mut c, &format!("CALL sprig.mq_info('jobs', '{db}')")).await;
         assert_eq!(info[0][0].as_deref(), Some("4"), "still ready: {info:?}");
         assert_eq!(info[0][1].as_deref(), Some("0"), "none taken: {info:?}");
@@ -406,14 +458,147 @@ async fn test_sink_shows_records_and_delivers_nothing() {
         seen.lock().unwrap()
     );
     // Rights: a user who isn't a sink administrator or the owner.
-    ok(&mut c, "CREATE USER IF NOT EXISTS st_plain IDENTIFIED BY 'sprig-dev-plain'").await;
+    ok(
+        &mut c,
+        "CREATE USER IF NOT EXISTS st_plain IDENTIFIED BY 'sprig-dev-plain'",
+    )
+    .await;
     ok(&mut c, &format!("GRANT SELECT ON {db}.* TO st_plain")).await;
     let mut u = conn(&addr, &format!("{tenant}.st_plain"), "sprig-dev-plain").await;
     let r = sql(&mut u, &format!("TEST SINK {db}.s")).await;
-    assert_eq!(r.unwrap_err().0, 39212, "needs SPRIG_SINK_ADMIN or ownership");
+    assert_eq!(
+        r.unwrap_err().0,
+        39212,
+        "needs SPRIG_SINK_ADMIN or ownership"
+    );
     drop(u);
     ok(&mut c, "DROP USER st_plain").await;
     ok(&mut c, "DROP SINK s").await;
     ok(&mut c, "DROP STREAM ev").await;
+    ok(&mut c, &format!("DROP DATABASE {db}")).await;
+}
+
+/// `TEST CONNECTION c WRITE [TO 'target']` (R9, r9last; decision 105's
+/// "write a test record when asked"): after the checks, one marked record
+/// written as a sink writes it: the webhook gets one request besides the
+/// `OPTIONS`; a Kafka topic named with `TO` gets a record (refused without
+/// `TO`); an S3 object is put and deleted again; a database table's
+/// `INSERT` right is checked without a row (a missing table fails).
+#[tokio::test]
+async fn test_connection_write() {
+    let Some(addr) = skip::var(GATEWAY) else {
+        skip::report_missing(GATEWAY, "test_connection_write");
+        return;
+    };
+    let tenant = var("SPRIG_TEST_SINKTEST_TENANT").unwrap_or_else(|| "r9tqc".into());
+    let mut c = conn(&addr, &format!("{tenant}.app"), "sprig-dev-app").await;
+    let db = run_id();
+    ok(&mut c, &format!("CREATE DATABASE {db}")).await;
+    ok(&mut c, &format!("USE {db}")).await;
+    let write = |name: &str, to: Option<&str>| match to {
+        Some(t) => format!("TEST CONNECTION {name} WRITE TO '{t}'"),
+        None => format!("TEST CONNECTION {name} WRITE"),
+    };
+    let rows_of = |rows: Vec<Vec<Option<String>>>| -> Vec<(String, String, String)> {
+        rows.into_iter()
+            .map(|r| {
+                (
+                    r[0].clone().unwrap_or_default(),
+                    r[1].clone().unwrap_or_default(),
+                    r[2].clone().unwrap_or_default(),
+                )
+            })
+            .collect()
+    };
+    if let Some(port) = var("SPRIG_TEST_SINKTEST_HOOK_PORT").and_then(|p| p.parse::<u16>().ok()) {
+        let seen = hook(port).await;
+        ok(
+            &mut c,
+            &format!(
+                "CREATE CONNECTION hook TYPE WEBHOOK WITH (url = 'http://127.0.0.1:{port}/in', format = 'ndjson')"
+            ),
+        )
+        .await;
+        let s = rows_of(ok(&mut c, &write("hook", None)).await);
+        println!("{s:?}");
+        assert_eq!(step(&s, "write").1, "ok", "{s:?}");
+        assert!(step(&s, "write").2.contains("sprig-test-"), "{s:?}");
+        assert_eq!(step(&s, "clean_up").1, "ok", "{s:?}");
+        let methods = seen.lock().unwrap().clone();
+        assert_eq!(methods, ["OPTIONS", "POST"], "the checks, then one request");
+    }
+    if let Some(k) = var("SPRIG_TEST_SINKTEST_KAFKA") {
+        ok(
+            &mut c,
+            &format!("CREATE CONNECTION k_ok TYPE KAFKA WITH (bootstrap = '{k}')"),
+        )
+        .await;
+        let s = rows_of(ok(&mut c, &write("k_ok", None)).await);
+        println!("{s:?}");
+        assert_eq!(step(&s, "write").1, "failed", "{s:?}");
+        assert!(step(&s, "write").2.contains("TO 'topic'"), "{s:?}");
+        let topic = format!("{db}_test");
+        let mut s = Vec::new();
+        // A topic the broker makes on first use answers after a moment.
+        for _ in 0..10 {
+            s = rows_of(ok(&mut c, &write("k_ok", Some(&topic))).await);
+            if step(&s, "write").1 == "ok" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        println!("{s:?}");
+        assert_eq!(step(&s, "write").1, "ok", "{s:?}");
+        assert!(step(&s, "write").2.contains(&topic), "{s:?}");
+    }
+    if let (Some(s3), Some(key), Some(secret)) = (
+        var("SPRIG_TEST_SINKTEST_S3"),
+        var("SPRIG_TEST_SINKTEST_S3_KEY"),
+        var("SPRIG_TEST_SINKTEST_S3_SECRET"),
+    ) {
+        ok(
+            &mut c,
+            &format!(
+                "CREATE CONNECTION s3_ok TYPE S3 WITH (endpoint = 'http://{s3}', bucket = 'qcr', \
+                 region = 'us-east-1', path_style = 'on') \
+                 CREDENTIALS (access_key_id = '{key}', secret_access_key = '{secret}')"
+            ),
+        )
+        .await;
+        let s = rows_of(ok(&mut c, &write("s3_ok", Some(&format!("{db}/")))).await);
+        println!("{s:?}");
+        assert_eq!(step(&s, "write").1, "ok", "{s:?}");
+        assert!(step(&s, "write").2.contains("PutObject"), "{s:?}");
+        assert_eq!(step(&s, "clean_up").1, "ok", "{s:?}");
+        assert!(step(&s, "clean_up").2.contains("DeleteObject"), "{s:?}");
+    }
+    if let (Some(pg), Some(pw)) = (
+        var("SPRIG_TEST_SINKTEST_PG"),
+        var("SPRIG_TEST_SINKTEST_PG_PASSWORD"),
+    ) {
+        let (h, p) = pg.rsplit_once(':').unwrap();
+        ok(
+            &mut c,
+            &format!(
+                "CREATE CONNECTION pg_ok TYPE POSTGRESQL WITH (host = '{h}', port = {p}, \
+                 database = 'postgres', tls = 'off') CREDENTIALS (username = 'postgres', password = '{pw}')"
+            ),
+        )
+        .await;
+        let s = rows_of(ok(&mut c, &write("pg_ok", Some("no_such_table"))).await);
+        println!("{s:?}");
+        assert_eq!(step(&s, "write").1, "failed", "{s:?}");
+        assert!(step(&s, "write").2.contains("no_such_table"), "{s:?}");
+        let s = rows_of(
+            ok(
+                &mut c,
+                &write("pg_ok", Some("information_schema.sql_features")),
+            )
+            .await,
+        );
+        println!("{s:?}");
+        assert_eq!(step(&s, "write").1, "ok", "{s:?}");
+        assert!(step(&s, "write").2.contains("INSERT"), "{s:?}");
+    }
     ok(&mut c, &format!("DROP DATABASE {db}")).await;
 }

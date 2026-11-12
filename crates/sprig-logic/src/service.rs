@@ -61,6 +61,11 @@ pub struct Outcome {
     /// [`deploy::select_function`]), for the gateway to create through
     /// `sprig_ctl` with the deploying user as `DEFINER`.
     pub select_fn: Option<String>,
+    /// The version is a staged rollout's candidate (R7 follow-ups): the
+    /// active version keeps its `SELECT` function.
+    pub staged: Option<crate::rollout::RolloutSpec>,
+    /// Notes about the rollout, for the client.
+    pub rollout_notes: Vec<String>,
 }
 
 impl Outcome {
@@ -74,6 +79,7 @@ impl Outcome {
             placement::explain(&self.placement).replace('\n', ";")
         )];
         v.extend(self.placement.reasons.iter().map(Reason::to_string));
+        v.extend(self.rollout_notes.iter().cloned());
         v
     }
 }
@@ -271,6 +277,8 @@ pub struct At<'a> {
     /// Every shard of a sharded database: the routines go on each, all or
     /// nothing (chapter 21's rule), with the creator's definer.
     pub shards: Option<&'a mut dyn ShardSessions>,
+    /// The tenant, for a staged rollout `BY TENANT` (decided at deploy).
+    pub tenant: u64,
 }
 
 /// [`deploy`] at a fixed version and on several shards.
@@ -298,6 +306,7 @@ pub async fn deploy_at(
             format!("{} {} already exists", kind.to_ascii_uppercase(), d.name),
         ));
     }
+    let previous = existing.clone();
     let module = match existing {
         Some(mut m) => {
             m.runtime = d.runtime.as_str().to_owned();
@@ -371,6 +380,54 @@ pub async fn deploy_at(
         // the language); `SQL SECURITY DEFINER` is fine in MariaDB.
         sprig_logic_js::Program::new(d.runtime.as_str(), &d.name, &d.body, script_sig(d))?;
     }
+    // A staged rollout (R7 follow-ups): the active version stays for most
+    // callers; it must take the same parameters, in the same language,
+    // with the same rights, so one wrapper can hold both.
+    let mut rollout_notes = Vec::new();
+    let stage = match (d.rollout, &previous) {
+        (Some(spec), Some(prev))
+            if matches!(d.kind, Kind::Function | Kind::Procedure)
+                && prev.active_version.is_some_and(|a| a != version) =>
+        {
+            let active = prev.active_version.unwrap_or_default();
+            let blocked = |why: String| {
+                SprigError::new(
+                    SprigCode::LogicRolloutBlocked,
+                    format!(
+                        "{}: a staged rollout {why}; deploy without SPRIG_ROLLOUT to switch at once",
+                        d.name
+                    ),
+                )
+            };
+            if prev.runtime != d.runtime.as_str() {
+                return Err(blocked(format!(
+                    "keeps the language ({} now)",
+                    prev.runtime
+                )));
+            }
+            if (prev.security == "definer") != d.definer_security {
+                return Err(blocked(format!(
+                    "keeps SQL SECURITY ({} now)",
+                    prev.security.to_ascii_uppercase()
+                )));
+            }
+            let versions = store.versions(t.catalog, module.module_id).await?;
+            let av = versions
+                .iter()
+                .find(|v| v.version == active)
+                .cloned()
+                .ok_or_else(|| blocked(format!("needs the active version {active}")))?;
+            Some((spec, av))
+        }
+        (Some(_), _) => {
+            rollout_notes.push(format!(
+                "SPRIG_ROLLOUT ignored: {} has no other active version, so this one is active at once",
+                d.name
+            ));
+            None
+        }
+        (None, _) => None,
+    };
     if store
         .module(t.catalog, t.db_id, kind, &d.name)
         .await?
@@ -455,10 +512,82 @@ pub async fn deploy_at(
                     !compiled.analysis.writes.is_empty(),
                 );
             }
-            match (tier, p) {
-                (Tier::MariaDb, Some(p)) => Some(deploy::plan_compiled(t.shard_schema, p, &w)),
-                _ => Some(deploy::plan_engine(t.shard_schema, &w)),
+            let mut plan = match (tier, p) {
+                (Tier::MariaDb, Some(p)) => deploy::plan_compiled(t.shard_schema, p, &w),
+                _ => deploy::plan_engine(t.shard_schema, &w),
+            };
+            if let Some((spec, av)) = &stage {
+                // The wrapper under the logical name is the last routine
+                // of both plans: it becomes the rollout's.
+                let active_f = crate::rollout::function_of(&d.name, &av.signature);
+                if !crate::rollout::same_params(&active_f, f) {
+                    return Err(SprigError::new(
+                        SprigCode::LogicRolloutBlocked,
+                        format!(
+                            "{}: a staged rollout keeps the parameters (version {} takes ({})); \
+                             deploy without SPRIG_ROLLOUT to switch at once",
+                            d.name,
+                            av.version,
+                            active_f
+                                .params
+                                .iter()
+                                .map(|p| format!("{} {}", p.name, p.ty.name()))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    ));
+                }
+                let active_side = deploy::Side {
+                    spec: WrapperSpec {
+                        name: &d.name,
+                        func: &active_f,
+                        definer_security: d.definer_security,
+                        budget_ms: t.budget_ms,
+                        module_id: module.module_id,
+                        version: av.version,
+                    },
+                    entry: (av.tier == "mariadb")
+                        .then(|| format!("__sprig_l{}_v{}", module.module_id, av.version)),
+                };
+                let cand_side = deploy::Side {
+                    spec: w.clone(),
+                    entry: match (tier, p) {
+                        (Tier::MariaDb, Some(p)) => Some(p.entry.clone()),
+                        _ => None,
+                    },
+                };
+                let sql = match spec.by {
+                    crate::rollout::RolloutBy::User => deploy::rollout_wrapper(
+                        t.shard_schema,
+                        &active_side,
+                        &cand_side,
+                        &crate::rollout::user_condition(module.module_id, spec.pct),
+                        spec.pct,
+                    ),
+                    // Decided here: one tenant, one pick.
+                    crate::rollout::RolloutBy::Tenant => {
+                        let cand =
+                            crate::rollout::picks_candidate(*spec, "", at.tenant, module.module_id);
+                        rollout_notes.push(format!(
+                            "this tenant gets version {} (rollout by tenant at {}%)",
+                            if cand { version } else { av.version },
+                            spec.pct
+                        ));
+                        deploy::rollout_wrapper(
+                            t.shard_schema,
+                            &active_side,
+                            &cand_side,
+                            if cand { "TRUE" } else { "FALSE" },
+                            spec.pct,
+                        )
+                    }
+                };
+                if let Some(last) = plan.routines.last_mut() {
+                    last.sql = sql;
+                }
+                select_fn = None;
             }
+            Some(plan)
         }
         (None, _, _) => None,
     };
@@ -498,9 +627,40 @@ pub async fn deploy_at(
         },
         (None, _) => String::new(),
     };
-    store
-        .activate(t.catalog, module.module_id, version, t.catalog_version)
+    let staged = stage.as_ref().map(|(spec, _)| *spec);
+    if let Some((spec, av)) = &stage {
+        crate::rollout::put(
+            t.catalog,
+            t.catalog_schema,
+            module.module_id,
+            av.version,
+            version,
+            *spec,
+        )
         .await?;
+        rollout_notes.push(format!(
+            "version {version} is the candidate for {}% of callers (by {}); version {} answers the rest. \
+             ALTER {} {} ROLLOUT TO n | PROMOTE | ABORT",
+            spec.pct,
+            spec.by.as_str(),
+            av.version,
+            kind.to_ascii_uppercase(),
+            d.name
+        ));
+    } else {
+        store
+            .activate(t.catalog, module.module_id, version, t.catalog_version)
+            .await?;
+        if matches!(d.kind, Kind::Function | Kind::Procedure)
+            && let Some(r) =
+                crate::rollout::clear(t.catalog, t.catalog_schema, module.module_id).await?
+        {
+            rollout_notes.push(format!(
+                "the rollout of version {} ended; version {version} is active",
+                r.candidate_version
+            ));
+        }
+    }
     store
         .set_exposure(t.catalog, module.module_id, &d.exposure)
         .await?;
@@ -509,6 +669,7 @@ pub async fn deploy_at(
         version,
         tier = placed.tier.as_str(),
         name = %d.name,
+        staged = staged.map(|s| s.pct),
         "logic version deployed"
     );
     Ok(Outcome {
@@ -518,6 +679,8 @@ pub async fn deploy_at(
         placement: placed,
         definer,
         select_fn,
+        staged,
+        rollout_notes,
     })
 }
 

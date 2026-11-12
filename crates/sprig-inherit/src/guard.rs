@@ -320,6 +320,13 @@ pub(crate) struct OldColumn {
     pub(crate) extra: String,
 }
 
+impl OldColumn {
+    /// A generated column (`VIRTUAL` or `STORED GENERATED`).
+    pub(crate) fn generated(&self) -> bool {
+        self.extra.to_ascii_uppercase().contains("GENERATED")
+    }
+}
+
 /// The `AUTO_INCREMENT` column among `cols`.
 pub(crate) fn auto_column(cols: &[OldColumn]) -> Option<String> {
     cols.iter()
@@ -327,6 +334,9 @@ pub(crate) fn auto_column(cols: &[OldColumn]) -> Option<String> {
         .map(|c| c.name.clone())
 }
 
+/// The table's columns as `SHOW COLUMNS` lists them, without generated
+/// columns (a discriminated root's type columns, which merged views
+/// compute: [`crate::plan::Ctx::derived`]), which are never fields.
 pub(crate) async fn show_columns(r: &mut dyn Runner, layer: &str) -> Result<Vec<OldColumn>> {
     let rows = r.query(&format!("SHOW COLUMNS FROM {layer}")).await?;
     let text = |row: &Vec<Option<Vec<u8>>>, i: usize| {
@@ -344,6 +354,7 @@ pub(crate) async fn show_columns(r: &mut dyn Runner, layer: &str) -> Result<Vec<
             nullable: text(row, 2).eq_ignore_ascii_case("YES"),
             extra: text(row, 5),
         })
+        .filter(|c| !c.generated())
         .collect())
 }
 

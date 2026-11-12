@@ -13,7 +13,10 @@
 //!                       otherwise), autocommit, in order; each statement's
 //!                       error is its own result's
 //! FanInGet / FanInSettle  a fan-in queue sink's reads of member instances
+//! FanInRelease            (R9, r9last) a dead fan-in task's leases back
 //!                       (crate::inherited::fanin_sink)
+//! Images {tables}       (RL50) which row images the user may see: rows
+//!                       (t, i, v) of crate::exec::rls_images
 //! ```
 
 use std::net::SocketAddr;
@@ -99,8 +102,12 @@ async fn serve_inner(
         SqlOp::Queue { statements } => {
             sprig_sinks::peer::check_queue_calls(&statements)?;
             let mut results = Vec::with_capacity(statements.len());
+            // Every queue call names its vhost (an argument, or the
+            // delivery token's), so the session selects no database: a
+            // user granted only the queue (an inherited queue sink's
+            // sprig_inherited, R9 r9tests) may not `USE` the database.
             for sql in statements {
-                match run(engine, &caller, &req.database, sql, None, caps).await {
+                match run(engine, &caller, "", sql, None, caps).await {
                     Ok(mut r) => results.push(r.pop().unwrap_or_default()),
                     Err(e) => results.push(SqlResult {
                         error: Some(PeerError::of(&e)),
@@ -121,6 +128,7 @@ async fn serve_inner(
             queue,
             max,
             lease_ms,
+            tag,
         } => {
             let svc = engine
                 .tenants
@@ -135,10 +143,57 @@ async fn serve_inner(
                 &queue,
                 max,
                 lease_ms,
+                tag.as_deref(),
+            )
+            .await
+        }
+        // R9 (r9last): a dead fan-in task's leases in one member.
+        SqlOp::FanInRelease {
+            def_tenant,
+            def_object,
+            member,
+            db,
+            queue,
+            tag,
+        } => {
+            let svc = engine
+                .tenants
+                .clone()
+                .ok_or_else(|| SprigError::internal("this gateway serves no tenant catalogs"))?;
+            crate::inherited::fanin_sink::release(
+                &svc,
+                &caller,
+                (def_tenant, def_object),
+                member,
+                &db,
+                &queue,
+                &tag,
             )
             .await
         }
         SqlOp::OutboxForward { .. } => Err(SprigError::internal("served above")),
+        // Chapter 29 (RLS round 5, RL50): an after-commit trigger's images
+        // as its definer may see them, through the marked image check
+        // (crate::exec::rls_images), whose nonce only this process knows.
+        SqlOp::Images { tables } => {
+            let req = crate::exec::rls_images::ImagesRequest {
+                tables: tables
+                    .into_iter()
+                    .map(|t| crate::exec::rls_images::TableImages {
+                        db: t.db,
+                        table: t.table,
+                        images: t.images,
+                    })
+                    .collect(),
+                plain_binary: false,
+            };
+            let sql = crate::exec::rls_images::statement(&req);
+            let results = run(engine, &caller, "", sql, None, caps).await?;
+            Ok(SqlReply {
+                results,
+                ..SqlReply::default()
+            })
+        }
         SqlOp::FanInSettle { tokens, ack } => {
             let svc = engine
                 .tenants

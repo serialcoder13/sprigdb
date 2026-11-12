@@ -359,6 +359,31 @@ fn cluster_group() -> Command {
                 .about("Retire a drained cluster's record; probes stop")
                 .arg(id()),
         )
+        // HD24: a registration's node addresses change (a bundle moving
+        // from one VM to three) without an alias host.
+        .subcommand(
+            Command::new("set-nodes")
+                .about("Change a cluster's node addresses: nodes named get the new address, new ids are added")
+                .arg(id())
+                .arg(
+                    Arg::new("node")
+                        .long("node")
+                        .action(ArgAction::Append)
+                        .help("A node as [id=]host:port; repeat for each"),
+                )
+                .arg(
+                    Arg::new("remove")
+                        .long("remove")
+                        .action(ArgAction::Append)
+                        .help("A node id to remove; repeat for each"),
+                )
+                .arg(
+                    Arg::new("only")
+                        .long("only")
+                        .action(ArgAction::SetTrue)
+                        .help("The --node list is the whole set, in order (the writer first)"),
+                ),
+        )
         // Chapter 25 (r2close): recovery jobs for a diverged or broken node.
         .subcommand(
             Command::new("extract")
@@ -536,8 +561,7 @@ fn main() -> ExitCode {
     let implemented = match group {
         "dc" | "cluster" | "settings" | "index" | "job" | "gateway" | "check" | "advisor"
         | "shard" | "space" | "txn" | "sink" | "graph" | "search" | "recommendations"
-        | "inherit" => true,
-        "login" | "logout" | "whoami" | "operator" | "token" => true,
+        | "inherit" | "login" | "logout" | "whoami" | "operator" | "token" => true,
         "explain" => matches!(name.as_str(), "query" | "decision" | "placement"),
         "tenant" => !TENANT_LATER.contains(&name.as_str()),
         "logic" => logic::implemented(&name),
@@ -973,6 +997,35 @@ async fn run_cluster(
                 .post(
                     &format!("/admin/v1/clusters/{id}:retire"),
                     &serde_json::json!({}),
+                )
+                .await?;
+            print(out, &r, render::cluster_show);
+            Ok(ExitCode::SUCCESS)
+        }
+        "set-nodes" => {
+            let id = id();
+            let list = |k: &str| -> Vec<String> {
+                sub.get_many::<String>(k)
+                    .map(|v| v.cloned().collect())
+                    .unwrap_or_default()
+            };
+            let current: ClusterView = c.get(&format!("/admin/v1/clusters/{id}")).await?;
+            let nodes = cluster::set_nodes(
+                &current.record.nodes,
+                &list("node"),
+                &list("remove"),
+                sub.get_flag("only"),
+            )?;
+            if m.get_flag("dry-run") {
+                for n in &nodes {
+                    println!("would set {}: {} = {}", id, n.node, n.addr);
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+            let r: ClusterView = c
+                .post(
+                    &format!("/admin/v1/clusters/{id}:setNodes"),
+                    &serde_json::json!({ "nodes": nodes }),
                 )
                 .await?;
             print(out, &r, render::cluster_show);

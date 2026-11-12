@@ -584,8 +584,26 @@ impl Position {
     pub fn unit_seq(&self) -> Option<(u64, u64)> {
         match self {
             Position::Stream {
-                partition, offset, ..
-            } => Some((u64::from(*partition), *offset)),
+                stream,
+                partition,
+                offset,
+                ..
+            } => {
+                // A fan-in task reads many member instances, each in its
+                // slot (bit 62 and a counter): their partitions are units
+                // of their own. Keyed by the partition alone, member A's
+                // offset 7 and member B's offset 7 of partition 0 were one
+                // entry, so settling B's could commit A's partition past
+                // records A hadn't delivered, lost after a crash (R9,
+                // r9tests). A plain stream task keeps the partition alone
+                // (destination offset rows are keyed by it).
+                let unit = if stream & (1 << 62) == 0 {
+                    u64::from(*partition)
+                } else {
+                    (1 << 63) | ((stream & ((1 << 38) - 1)) << 24) | u64::from(*partition)
+                };
+                Some((unit, *offset))
+            }
             Position::Change { shard, seq, .. } => Some((u64::from(*shard), *seq)),
             Position::Queue { .. } => None,
         }

@@ -699,6 +699,254 @@ async fn a_second_ddl_on_a_held_object_waits_then_fails_with_39071() {
     assert_eq!(env2.object("orders").unwrap().schema_version, 3);
 }
 
+/// An executor whose first statement never returns, so the statement's
+/// future can be dropped after phase 1, as a client hanging up does.
+struct Hang<'a> {
+    inner: &'a MemExecutor,
+    hung: std::sync::atomic::AtomicBool,
+}
+
+impl<'a> Hang<'a> {
+    fn new(inner: &'a MemExecutor) -> Self {
+        Self {
+            inner,
+            hung: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl DdlExecutor for Hang<'_> {
+    async fn execute(&self, stmt: &PhysicalDdl) -> Result<()> {
+        if !self.hung.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        self.inner.execute(stmt).await
+    }
+    async fn schema(&self, schema: &SchemaName) -> Result<Option<SchemaInfo>> {
+        self.inner.schema(schema).await
+    }
+    async fn show_create(
+        &self,
+        schema: &SchemaName,
+        kind: ObjectKind,
+        name: &str,
+    ) -> Result<Option<String>> {
+        self.inner.show_create(schema, kind, name).await
+    }
+    async fn objects(&self, schema: &SchemaName) -> Result<Vec<PhysicalObject>> {
+        self.inner.objects(schema).await
+    }
+    async fn tenant_schemas(&self, tenant: TenantId) -> Result<Vec<SchemaName>> {
+        self.inner.tenant_schemas(tenant).await
+    }
+    async fn busy(&self, schema: &SchemaName) -> Result<bool> {
+        self.inner.busy(schema).await
+    }
+}
+
+/// Says every owner but the engine's own is gone.
+struct AllGone;
+
+#[async_trait::async_trait]
+impl OwnerCheck for AllGone {
+    async fn gone(&self, _owner: &str, _age: Duration) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+async fn a_job_its_engine_abandoned_is_resolved_by_the_next_ddl_at_once() {
+    // bugfix-38: the next DDL on the target would wait `ddl_wait`, then
+    // fail with 39071 until the reconciler, 15 minutes later.
+    let patient = |env: &Env| {
+        env.engine().with_opts(DdlOpts {
+            ddl_wait: Duration::from_secs(5),
+            poll: Duration::from_millis(10),
+            ..DdlOpts::default()
+        })
+    };
+
+    // 1. The client hangs up while the ALTER runs: its future is dropped
+    //    after phase 1, before the statement reached the server.
+    let env = billing_with_orders().await;
+    let engine = patient(&env);
+    let hang = Hang::new(&env.exec);
+    let dropped = tokio::time::timeout(
+        Duration::from_millis(100),
+        engine.execute(&req(alter("orders"), "ALTER TABLE orders ADD c INT"), &hang),
+    )
+    .await;
+    assert!(dropped.is_err(), "the statement's future was dropped");
+    assert!(env.object("orders").unwrap().pending_job_id.is_some());
+    assert_eq!(env.intents(), 1);
+    let started = std::time::Instant::now();
+    engine
+        .execute(&req(alter("orders"), "ALTER TABLE orders ADD d INT"), &env.exec)
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "resolved at once, not after the wait: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(env.intents(), 0);
+    // Rolled back (the statement never ran), then the second published.
+    assert_eq!(env.object("orders").unwrap().schema_version, 2);
+    assert!(env.object("orders").unwrap().pending_job_id.is_none());
+
+    // 2. The connection is lost after the statement took effect (outcome
+    //    unknown): the next DDL finishes the job, then runs.
+    let env = billing_with_orders().await;
+    let engine = patient(&env);
+    env.exec.inject(Fault::LostAfter);
+    let e = engine
+        .execute(&req(alter("orders"), "ALTER TABLE orders ADD c INT"), &env.exec)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), Some(SprigCode::OutcomeUnknown));
+    let started = std::time::Instant::now();
+    engine
+        .execute(&req(drop_tables(&["orders"], false), "DROP TABLE orders"), &env.exec)
+        .await
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(env.object("orders").is_none());
+    assert_eq!(env.intents(), 0);
+
+    // 3. While MariaDB still runs DDL in the schema (a killed statement
+    //    rolling back), the job is left alone: 39071 as before.
+    let env = billing_with_orders().await;
+    let engine = env.engine();
+    env.exec.inject(Fault::LostBefore);
+    assert!(
+        engine
+            .execute(&req(alter("orders"), "ALTER TABLE orders ADD c INT"), &env.exec)
+            .await
+            .is_err()
+    );
+    env.exec.set_busy(shard(1, 1, 1), true);
+    let e = engine
+        .execute(&req(alter("orders"), "ALTER TABLE orders ADD d INT"), &env.exec)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), Some(SprigCode::CatalogConflict), "{e}");
+    assert_eq!(env.intents(), 1);
+    env.exec.set_busy(shard(1, 1, 1), false);
+    engine
+        .execute(&req(alter("orders"), "ALTER TABLE orders ADD d INT"), &env.exec)
+        .await
+        .unwrap();
+    assert_eq!(env.intents(), 0);
+
+    // 4. A job of a running statement isn't touched: the second waits for
+    //    the first, which then publishes.
+    let env = billing_with_orders().await;
+    let engine = patient(&env);
+    let hang = Hang::new(&env.exec);
+    let first_req = req(alter("orders"), "ALTER TABLE orders ADD c INT");
+    let first = engine.execute(&first_req, &hang);
+    let second = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::timeout(
+            Duration::from_millis(1500),
+            engine.execute(&req(alter("orders"), "ALTER TABLE orders ADD d INT"), &env.exec),
+        )
+        .await
+    };
+    tokio::select! {
+        _ = first => panic!("the hung statement returned"),
+        r = second => assert!(r.is_err(), "the second waited for the running job: {r:?}"),
+    }
+    assert_eq!(env.intents(), 1, "the running job was left alone");
+
+    // 5. Another engine's job: left for the reconciler, unless the engine's
+    //    check says its process is gone.
+    let env = billing_with_orders().await;
+    assert!(
+        env.crashing(DdlStep::Prepared)
+            .execute(&req(alter("orders"), "ALTER TABLE orders ADD c INT"), &env.exec)
+            .await
+            .is_err()
+    );
+    let e = env
+        .run(alter("orders"), "ALTER TABLE orders ADD d INT")
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), Some(SprigCode::CatalogConflict));
+    env.engine()
+        .with_owner("gateway:dc1:gw-2", Some(Arc::new(AllGone)))
+        .execute(&req(alter("orders"), "ALTER TABLE orders ADD d INT"), &env.exec)
+        .await
+        .unwrap();
+    assert_eq!(env.intents(), 0);
+}
+
+/// The janitor's executors: always the one in-memory cluster.
+struct OneCluster(Arc<MemExecutor>);
+
+#[async_trait::async_trait]
+impl JobExecutors for OneCluster {
+    async fn executor(&self, _tenant: TenantId) -> Result<Arc<dyn DdlExecutor>> {
+        Ok(Arc::clone(&self.0) as Arc<dyn DdlExecutor>)
+    }
+}
+
+#[tokio::test]
+async fn the_janitor_resolves_an_abandoned_job_without_another_ddl() {
+    // bugfix-38: nothing else touches the table; the job still goes
+    // within seconds, not after the reconciler's 15 minutes.
+    let Env { v, exec } = billing_with_orders().await;
+    let exec = Arc::new(exec);
+    let engine = DdlEngine::new(v.clone(), Arc::new(SystemClock))
+        .with_janitor(Arc::new(OneCluster(Arc::clone(&exec))));
+    let intents =
+        || DdlIntent::all(&v.backend().tables(T).unwrap().settings.into_values().collect::<Vec<_>>()).len();
+    let pending = || {
+        v.backend()
+            .tables(T)
+            .unwrap()
+            .objects
+            .values()
+            .find(|o| o.name == "orders")
+            .unwrap()
+            .pending_job_id
+    };
+    let hang = Hang::new(&exec);
+    let dropped = tokio::time::timeout(
+        Duration::from_millis(100),
+        engine.execute(&req(alter("orders"), "ALTER TABLE orders ADD c INT"), &hang),
+    )
+    .await;
+    assert!(dropped.is_err());
+    assert_eq!(intents(), 1);
+    assert!(pending().is_some());
+    let t = std::time::Instant::now();
+    while intents() > 0 && t.elapsed() < Duration::from_secs(5) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(intents(), 0, "resolved after {:?}", t.elapsed());
+    assert!(pending().is_none());
+    assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+
+    // A finished statement leaves the janitor nothing to do.
+    engine
+        .execute(&req(alter("orders"), "ALTER TABLE orders ADD d INT"), &*exec)
+        .await
+        .unwrap();
+    assert_eq!(intents(), 0);
+}
+
+#[test]
+fn owner_ids_name_the_label_and_the_process() {
+    let env_owner = format!("gateway:dc-a:gw-1@{}.7", process_token());
+    assert_eq!(
+        owner_parts(&env_owner),
+        Some(("gateway:dc-a:gw-1", process_token()))
+    );
+    assert_eq!(owner_parts("no-process"), None);
+}
+
 #[tokio::test]
 async fn concurrent_creates_of_one_name_admit_exactly_one() {
     let env = Env::new().await;
@@ -1366,6 +1614,7 @@ fn intents_round_trip_as_json() {
         ddl: "RENAME TABLE a TO b".to_owned(),
         user: Some(UserId(7)),
         shards: None,
+        owner: Some("gateway:dc1:gw-1@p.1".to_owned()),
         op: IntentOp::Rename {
             moves: vec![Move {
                 object: ObjectId(3),

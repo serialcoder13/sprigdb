@@ -170,6 +170,9 @@ pub async fn run_stream(
         plan: Vec::new(),
         slot: 0,
         star_in_order: false,
+        late_ok: false,
+        returning: false,
+        late_error: None,
     };
     let mut clauses = q.parts[0].clauses.clone();
     // SKIP and LIMIT apply to the whole stream, not to each page.

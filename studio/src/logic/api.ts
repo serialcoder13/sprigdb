@@ -120,3 +120,48 @@ export const settleDeadLetters = (db: string, kind: string, name: string, verb: 
   json<{ replaying?: number; skipped?: number; discarded?: number }>(`${one(db, kind, name)}/deadLetters:${verb}`, {
     body: ids === 'all' ? { all: true } : { ids },
   });
+
+// ---- Rollout (Studio round 6; decisions RC18–RC21) ----
+
+export interface RolloutRow {
+  module_id: number;
+  active_version: number;
+  candidate_version: number;
+  pct: number;
+  by: 'user' | 'tenant';
+  started_at: string;
+}
+
+export interface VersionStats {
+  version: number;
+  calls: number;
+  errors: number;
+  errorRate: number;
+  meanMs: number;
+  p95Ms: number | null;
+  /** Calls per bucket: bounds `buckets_ms`, then slower. */
+  histogram: number[];
+  since: string;
+}
+
+export interface RolloutView {
+  module: number;
+  active_version: number | null;
+  rollout: RolloutRow | null;
+  stats: VersionStats[];
+  /** Why the gateway would roll the candidate back now, if it would. */
+  verdict: string | null;
+  min_calls: number;
+  buckets_ms: number[];
+}
+
+export const getRollout = (db: string, kind: string, name: string) => json<RolloutView>(`${one(db, kind, name)}/rollout`);
+
+/** The newest log line saying a rollout rolled back by itself (RC19), if any. */
+export function autoRollback(rows: readonly LogRow[]): LogRow | null {
+  let best: LogRow | null = null;
+  for (const l of rows) {
+    if (/rolled back by itself/i.test(l.message) && (!best || l.log_id > best.log_id)) best = l;
+  }
+  return best;
+}

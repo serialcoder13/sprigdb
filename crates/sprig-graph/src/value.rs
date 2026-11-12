@@ -100,6 +100,8 @@ pub enum Value {
     Duration(Dur),
     /// A `POINT`.
     Point(Point),
+    /// A byte array (Neo4j's `byte[]`; Bolt's bytes; R8 round 8).
+    Bytes(Vec<u8>),
 }
 
 /// Element id of a node: `n:<graph>:<rk hex>:<id>`.
@@ -212,6 +214,7 @@ impl Value {
             Value::DateTime(_) => "ZONED DATETIME",
             Value::Duration(_) => "DURATION",
             Value::Point(_) => "POINT",
+            Value::Bytes(_) => "BYTE ARRAY",
         }
     }
 
@@ -234,6 +237,7 @@ impl Value {
             Value::List(l) => Key::List(l.iter().map(Value::key).collect()),
             Value::Map(m) => Key::Map(m.iter().map(|(k, v)| (k.clone(), v.key())).collect()),
             Value::Node(n) => Key::Node(n.id),
+            Value::Bytes(b) => Key::Other(3, self.display() + &format!("#{}", b.len())),
             Value::Rel(r) => Key::Rel(r.id),
             Value::Path(p) => Key::Path(
                 p.nodes
@@ -295,6 +299,7 @@ impl Value {
             (Value::Path(_), Value::Path(_)) => Some(self.key() == o.key()),
             (Value::Duration(a), Value::Duration(b)) => Some(a == b),
             (Value::Point(a), Value::Point(b)) => Some(a == b),
+            (Value::Bytes(a), Value::Bytes(b)) => Some(a == b),
             // Zoned values are equal only in the same zone (Neo4j).
             (Value::DateTime(a), Value::DateTime(b)) => {
                 Some(a.epoch() == b.epoch() && a.offset == b.offset && a.zone == b.zone)
@@ -317,6 +322,7 @@ impl Value {
             (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
             (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
             (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
+            (Value::Bytes(a), Value::Bytes(b)) => Some(a.cmp(b)),
             (Value::List(a), Value::List(b)) => {
                 for (x, y) in a.iter().zip(b) {
                     match x.cypher_cmp(y)? {
@@ -339,7 +345,8 @@ impl Value {
             Value::Map(_) => 0,
             Value::Node(_) => 1,
             Value::Rel(_) => 2,
-            Value::List(_) => 3,
+            // Neo4j orders byte arrays with the lists.
+            Value::List(_) | Value::Bytes(_) => 3,
             Value::Path(_) => 4,
             Value::Point(_) => 5,
             Value::DateTime(_) => 6,
@@ -431,6 +438,18 @@ impl Value {
             Value::Node(n) => format!("(:{} {})", n.labels.join(":"), props_literal(&n.props)),
             Value::Rel(r) => format!("[:{} {}]", r.rtype, props_literal(&r.props)),
             Value::Path(p) => format!("<path of {}>", p.rels.len()),
+            Value::Bytes(b) => {
+                let mut s = String::with_capacity(b.len() * 2 + 2);
+                s.push('[');
+                for (i, x) in b.iter().enumerate() {
+                    if i > 0 {
+                        s.push_str(", ");
+                    }
+                    let _ = write!(s, "{}", i8::from_ne_bytes([*x]));
+                }
+                s.push(']');
+                s
+            }
             other => crate::temporal::text(other).unwrap_or_default(),
         }
     }
@@ -504,7 +523,8 @@ pub fn check_property(key: &str, v: &Value) -> Result<()> {
         | Value::LocalDateTime(_)
         | Value::DateTime(_)
         | Value::Duration(_)
-        | Value::Point(_) => Ok(()),
+        | Value::Point(_)
+        | Value::Bytes(_) => Ok(()),
         Value::List(l) => {
             let mut kind: Option<&'static str> = None;
             for x in l {

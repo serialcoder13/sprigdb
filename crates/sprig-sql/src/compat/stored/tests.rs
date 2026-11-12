@@ -56,14 +56,16 @@ fn lateral_in_a_view_and_a_procedure() {
     .unwrap();
     assert!(v.ends_with(" WITH CASCADED CHECK OPTION"), "{v}");
     assert!(!v.contains("LATERAL"), "{v}");
-    let p = rw(&format!(
+    let written = format!(
         "CREATE PROCEDURE p(IN x INT)\nBEGIN\n  DECLARE n INT;\n  IF x > 0 THEN\n    {TOP2};\n  END IF;\n  SET n = (SELECT COUNT(*) FROM o);\nEND"
-    ))
-    .unwrap()
-    .unwrap();
-    assert!(
-        p.contains("IF x > 0 THEN\n    SELECT c.name, l.amt FROM c, (SELECT"),
-        "{p}"
+    );
+    let p = rw(&written).unwrap().unwrap();
+    assert!(p.contains("IF x > 0 THEN\n    /*sprig:o:"), "{p}");
+    assert!(p.contains("*/SELECT c.name, l.amt FROM c, (SELECT"), "{p}");
+    // R4 round 5 (gaps row 69): the text as written comes back.
+    assert_eq!(
+        String::from_utf8(restore_original(p.as_bytes()).unwrap()).unwrap(),
+        written
     );
     assert!(
         p.contains(";\n  END IF;\n  SET n = (SELECT COUNT(*) FROM o);\nEND"),
@@ -137,4 +139,67 @@ fn others_are_left_alone() {
     // 3307 isn't touched.
     let o = LexOptions::mariadb();
     assert!(rewrite(format!("CREATE VIEW v AS {TOP2}").as_bytes(), &o).is_none());
+}
+
+#[test]
+fn write_targets_of_bodies() {
+    // R4 round 5: what the gateway resolves for chapter 31's collection rule.
+    let o = LexOptions::mysql84();
+    let w = |s: &str| write_targets(s.as_bytes(), &o);
+    let n = |d: Option<&str>, t: &str| (d.map(str::to_owned), t.to_owned());
+    assert_eq!(
+        w(
+            "CREATE PROCEDURE p(x INT) MODIFIES SQL DATA BEGIN INSERT INTO docs (doc) VALUES ('{}'); \
+           UPDATE LOW_PRIORITY shop.orders o JOIN items i ON i.o = o.id SET o.n = 1; \
+           DELETE FROM `logs` WHERE id = x; REPLACE INTO t2 SELECT * FROM t3 ON DUPLICATE KEY UPDATE a = 1; END"
+        ),
+        vec![
+            n(None, "docs"),
+            n(Some("shop"), "orders"),
+            n(None, "items"),
+            n(None, "logs"),
+            n(None, "t2"),
+        ]
+    );
+    // A trigger's event is no write; its body's DELETE is; multi-table DELETE.
+    assert_eq!(
+        w(
+            "CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW DELETE a, b FROM a JOIN b ON a.id = b.id"
+        ),
+        vec![n(None, "a"), n(None, "b")]
+    );
+    // Functions named like the statements, and views: nothing.
+    assert!(w("CREATE FUNCTION f(s TEXT) RETURNS TEXT DETERMINISTIC RETURN REPLACE(INSERT(s, 1, 1, 'x'), 'a', 'b')").is_empty());
+    assert!(w("CREATE VIEW v AS SELECT * FROM docs").is_empty());
+    assert!(w("INSERT INTO docs VALUES (1)").is_empty());
+    let e = collection_write_error(
+        b"CREATE EVENT e ON SCHEDULE EVERY 1 HOUR DO DELETE FROM docs",
+        &o,
+        "shop.docs",
+    );
+    assert_eq!(e.code, 39602);
+    assert!(
+        e.message
+            .contains("an event can't use a write to the collection shop.docs"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn originals_restore_from_any_text() {
+    // As in a `SHOW CREATE PROCEDURE` answer or `ROUTINE_DEFINITION`.
+    let body = format!(
+        "BEGIN {}; SELECT 2; END",
+        String::from_utf8(marked(b"SELECT 'a*/b' FROM t LATERAL", "SELECT 1")).unwrap()
+    );
+    assert!(has_original(body.as_bytes()));
+    assert_eq!(
+        restore_original(body.as_bytes()).as_deref(),
+        Some(&b"BEGIN SELECT 'a*/b' FROM t LATERAL; SELECT 2; END"[..])
+    );
+    assert_eq!(restore_original(b"BEGIN SELECT 1; END"), None);
+    // Views carry no marks.
+    let v = rw(&format!("CREATE VIEW v AS {TOP2}")).unwrap().unwrap();
+    assert!(!has_original(v.as_bytes()), "{v}");
 }

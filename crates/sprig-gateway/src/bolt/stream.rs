@@ -123,3 +123,25 @@ pub(super) async fn start(mut rx: mpsc::Receiver<Msg>) -> std::result::Result<St
 pub(super) fn summary(stats: BTreeMap<String, i64>, bookmark: Option<String>) -> StreamEnd {
     StreamEnd { stats, bookmark }
 }
+
+/// The rest of a result whose top `RETURN` failed on a row (R8 round 8):
+/// after the records before that row, `PULL` gets the failure, as with
+/// Neo4j's lazy results.
+pub(super) struct LateError(pub(super) Option<BoltFailure>);
+
+#[async_trait]
+impl RecordStream for LateError {
+    async fn next(&mut self) -> std::result::Result<Option<Vec<PackValue>>, BoltFailure> {
+        match self.0.take() {
+            Some(f) => Err(f),
+            None => Ok(None),
+        }
+    }
+
+    fn end(&mut self) -> StreamEnd {
+        StreamEnd {
+            stats: BTreeMap::new(),
+            bookmark: None,
+        }
+    }
+}

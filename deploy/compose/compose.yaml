@@ -144,22 +144,12 @@ services:
     <<: *mariadb
     profiles: [galera, all]
     hostname: galera-1
-    # Bootstraps a new cluster only when it should: on a fresh volume (no
-    # grastate.dat) or when Galera marked this node safe_to_bootstrap: 1 (it
-    # was the last to leave). Otherwise it joins the running cluster, so a
-    # restarted or recreated galera-1 rejoins instead of refusing to start or
-    # splitting the cluster. If every node is down and galera-1 wasn't the
-    # last one, start the node with safe_to_bootstrap: 1 first, or reset the
-    # cluster with `down -v`.
-    entrypoint:
-      - /bin/bash
-      - -c
-      - >-
-        g=/var/lib/mysql/grastate.dat;
-        if [ ! -s "$$g" ] || grep -q '^safe_to_bootstrap: *1' "$$g"; then
-        set -- --wsrep-new-cluster "$$@"; fi;
-        exec docker-entrypoint.sh mariadbd "$$@"
-      - galera-1
+    # mariadb/galera-start.sh: after a crash it recovers the node's position
+    # from InnoDB first, so a full restart keeps the cluster's state UUID
+    # (bugfix-41); it bootstraps only a node marked safe_to_bootstrap: 1, or
+    # galera-1 on a fresh volume, and otherwise joins. Reset the cluster with
+    # `down -v`.
+    entrypoint: [/bin/bash, /usr/local/bin/sprig-galera-start.sh, first]
     command:
       - --server-id=301
       - --gtid-domain-id=301
@@ -168,14 +158,19 @@ services:
       - --wsrep-sst-auth=root:${MARIADB_ROOT_PASSWORD:-sprig-dev-root}
     healthcheck: *galera-health
     ports: ["127.0.0.1:13321:3306"]
+    # A clean stop writes the node's position; give InnoDB time for it.
+    stop_grace_period: 2m
     volumes: &galera-conf
       - ./mariadb/binlog.cnf:/etc/mysql/conf.d/10-binlog.cnf:ro
       - ./mariadb/galera.cnf:/etc/mysql/conf.d/20-galera.cnf:ro
+      - ./mariadb/galera-start.sh:/usr/local/bin/sprig-galera-start.sh:ro
 
   galera-2:
     <<: *mariadb
     profiles: [galera, all]
     hostname: galera-2
+    entrypoint: [/bin/bash, /usr/local/bin/sprig-galera-start.sh, join]
+    stop_grace_period: 2m
     command:
       - --server-id=302
       - --gtid-domain-id=302
@@ -192,6 +187,8 @@ services:
     <<: *mariadb
     profiles: [galera, all]
     hostname: galera-3
+    entrypoint: [/bin/bash, /usr/local/bin/sprig-galera-start.sh, join]
+    stop_grace_period: 2m
     command:
       - --server-id=303
       - --gtid-domain-id=303

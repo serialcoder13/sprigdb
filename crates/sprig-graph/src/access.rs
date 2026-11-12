@@ -272,6 +272,22 @@ impl GraphStore for FilteredStore<'_> {
         self.inner.stats()
     }
 
+    fn explain_routes(&self) -> Vec<String> {
+        self.inner.explain_routes()
+    }
+
+    fn routes(&self) -> Vec<String> {
+        self.inner.routes()
+    }
+
+    async fn batches(&mut self) -> Result<()> {
+        self.inner.batches().await
+    }
+
+    async fn end_batch(&mut self, ok: bool, deleted: &[u64]) -> Result<()> {
+        self.inner.end_batch(ok, deleted).await
+    }
+
     async fn scan(&mut self, s: &Scan) -> Result<Vec<NodeRow>> {
         let Some(limit) = s.limit else {
             let rows = self.inner.scan(s).await?;

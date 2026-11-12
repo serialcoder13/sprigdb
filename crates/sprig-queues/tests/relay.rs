@@ -750,17 +750,14 @@ async fn lease_tags_are_released_through_any_gateway() {
     // The dead task's gets: four under its tag, ten-minute leases. Two more
     // by a plain session, two under another tag.
     let vb = b.engine.sql_vhost(Arc::clone(&p), "/", 7).await.unwrap();
-    let dead = vb
-        .get_tagged(&q, 4, 600_000, Some("s9/0/3"))
-        .await
-        .unwrap();
-    assert_eq!(dead.iter().map(body).collect::<Vec<_>>(), ["m-0", "m-1", "m-2", "m-3"]);
+    let dead = vb.get_tagged(&q, 4, 600_000, Some("s9/0/3")).await.unwrap();
+    assert_eq!(
+        dead.iter().map(body).collect::<Vec<_>>(),
+        ["m-0", "m-1", "m-2", "m-3"]
+    );
     let plain = vb.get(&q, 2, 600_000).await.unwrap();
     assert_eq!(plain.len(), 2);
-    let other = vb
-        .get_tagged(&q, 2, 600_000, Some("s9/1/1"))
-        .await
-        .unwrap();
+    let other = vb.get_tagged(&q, 2, 600_000, Some("s9/1/1")).await.unwrap();
     assert_eq!(other.len(), 2);
     // The new task, on another gateway and session, releases the tag.
     let vc = c.engine.sql_vhost(Arc::clone(&p), "/", 8).await.unwrap();
@@ -780,7 +777,7 @@ async fn lease_tags_are_released_through_any_gateway() {
         ["m-0", "m-1", "m-2", "m-3", "m-8", "m-9"],
         "the tag's four came back at once; the plain and other-tag ones stayed held"
     );
-    for d in again.iter().filter(|d| body(d) < "m-4".to_owned()) {
+    for d in again.iter().filter(|d| body(d).as_str() < "m-4") {
         assert!(d.redelivered, "{} is a redelivery", body(d));
         assert_eq!(d.delivery_count, 1, "a release counts as a failed delivery");
     }

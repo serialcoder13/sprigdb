@@ -29,11 +29,12 @@ use crate::rewrite::{TYPE_COLUMN, TYPE_PATH_COLUMN, parse_one, quote_str};
 
 /// The views this module rewrites, with the column naming internal
 /// objects.
-const FILTERED: [(&str, &str); 4] = [
+const FILTERED: [(&str, &str); 5] = [
     ("STATISTICS", "INDEX_NAME"),
     ("KEY_COLUMN_USAGE", "CONSTRAINT_NAME"),
     ("TABLE_CONSTRAINTS", "CONSTRAINT_NAME"),
     ("REFERENTIAL_CONSTRAINTS", "CONSTRAINT_NAME"),
+    ("CHECK_CONSTRAINTS", "CONSTRAINT_NAME"),
 ];
 
 /// Whether identifiers of a statement name a view this module rewrites.
@@ -122,6 +123,23 @@ pub fn columns_view(dbs: &[(String, Arc<DbTypes>)], columns: &[String]) -> Strin
         subtypes.sort_by(|a, b| a.name.cmp(&b.name));
         for t in subtypes {
             let fields = types.all_fields(t.id);
+            // Single-table NOT NULL columns take NULL in the root's table.
+            let not_null: Vec<String> = if t.storage == crate::model::Storage::SingleTable {
+                types
+                    .chain(t.id)
+                    .iter()
+                    .filter(|x| !x.is_root())
+                    .flat_map(|x| {
+                        x.own_fields
+                            .iter()
+                            .filter(|f| !f.nullable)
+                            .map(|f| lit(&f.name))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let mut picks = Vec::new();
             let mut cases = Vec::new();
             for (i, f) in fields.iter().enumerate() {
@@ -150,6 +168,12 @@ pub fn columns_view(dbs: &[(String, Arc<DbTypes>)], columns: &[String]) -> Strin
                 .map(|c| {
                     if c.eq_ignore_ascii_case("TABLE_NAME") {
                         format!("{} AS {}", lit(&t.name), quote(c))
+                    } else if c.eq_ignore_ascii_case("IS_NULLABLE") && !not_null.is_empty() {
+                        format!(
+                            "IF(COLUMN_NAME IN ({}), 'NO', IS_NULLABLE) AS {}",
+                            not_null.join(", "),
+                            quote(c)
+                        )
                     } else if c.eq_ignore_ascii_case("ORDINAL_POSITION") {
                         format!(
                             "CASE CONCAT(TABLE_NAME, '/', COLUMN_NAME) {} END AS {}",

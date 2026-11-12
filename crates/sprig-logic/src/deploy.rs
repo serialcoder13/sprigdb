@@ -156,6 +156,17 @@ fn wrapper_params(f: &Function) -> Vec<(String, Ty)> {
 }
 
 fn header(w: &WrapperSpec<'_>, schema: &str, tier: &str) -> String {
+    header_with(
+        w,
+        schema,
+        &format!(
+            "sprig logic module {} version {} ({tier}, {})",
+            w.module_id, w.version, w.func.name
+        ),
+    )
+}
+
+fn header_with(w: &WrapperSpec<'_>, schema: &str, comment: &str) -> String {
     let params: Vec<String> = wrapper_params(w.func)
         .iter()
         .map(|(n, t)| format!("IN {n} {}", sql_type(*t)))
@@ -170,16 +181,18 @@ fn header(w: &WrapperSpec<'_>, schema: &str, tier: &str) -> String {
         } else {
             "INVOKER"
         },
-        quote(&format!(
-            "sprig logic module {} version {} ({tier}, {})",
-            w.module_id, w.version, w.func.name
-        ))
+        quote(comment)
     )
 }
 
 /// The compiled-tier wrapper.
 #[must_use]
 pub fn wrapper(w: &WrapperSpec<'_>, schema: &str, entry: &str) -> String {
+    format!("{}{}", header(w, schema, "mariadb"), wrapper_body(w, entry))
+}
+
+/// The compiled-tier wrapper's `BEGIN ... END`.
+fn wrapper_body(w: &WrapperSpec<'_>, entry: &str) -> String {
     let args: Vec<String> = wrapper_params(w.func).into_iter().map(|(n, _)| n).collect();
     let mut call_args = args.join(", ");
     if !call_args.is_empty() {
@@ -213,14 +226,13 @@ pub fn wrapper(w: &WrapperSpec<'_>, schema: &str, entry: &str) -> String {
     // in its own transaction, rolled back on an error, as the engine tier
     // and `Functions.Call` run theirs.
     format!(
-        "{}BEGIN\n  DECLARE v__event VARCHAR(64);\n  DECLARE v__result LONGTEXT;\n  \
+        "BEGIN\n  DECLARE v__event VARCHAR(64);\n  DECLARE v__result LONGTEXT;\n  \
          DECLARE v__own INT DEFAULT 0;\n  \
          DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN IF v__own = 1 THEN ROLLBACK; END IF; RESIGNAL; END;\n  \
          IF @@in_transaction = 0 AND @@autocommit = 1 THEN START TRANSACTION; SET v__own = 1; END IF;\n  \
          SET STATEMENT max_statement_time = {secs} FOR CALL {}({call_args}v__event, v__result);\n  \
          IF v__own = 1 THEN COMMIT; END IF;\n  \
          SELECT {};\nEND",
-        header(w, schema, "mariadb"),
         bq(entry),
         select.join(", ")
     )
@@ -233,6 +245,10 @@ pub fn wrapper(w: &WrapperSpec<'_>, schema: &str, entry: &str) -> String {
 /// which a gateway with the fallback runtime never shows.
 #[must_use]
 pub fn engine_wrapper(w: &WrapperSpec<'_>, schema: &str) -> String {
+    format!("{}{}", header(w, schema, "engine"), engine_wrapper_body(w))
+}
+
+fn engine_wrapper_body(w: &WrapperSpec<'_>) -> String {
     let msg: String = format!(
         "{} runs in the engine tier, which this gateway can't run",
         w.name
@@ -248,15 +264,57 @@ pub fn engine_wrapper(w: &WrapperSpec<'_>, schema: &str) -> String {
         })
         .collect();
     format!(
-        "{}BEGIN\n  SELECT 'sprig' AS `{}`, {} AS `module`, {} AS `version`, JSON_ARRAY({}) AS `args`;\n  \
+        "BEGIN\n  SELECT 'sprig' AS `{}`, {} AS `module`, {} AS `version`, JSON_ARRAY({}) AS `args`;\n  \
          SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO = {}, MESSAGE_TEXT = {};\nEND",
-        header(w, schema, "engine"),
         crate::invoke::MARKER,
         w.module_id,
         w.version,
         args.join(", "),
         SprigCode::LogicEngineUnavailable.number(),
         quote(&msg)
+    )
+}
+
+/// One side of a staged rollout's wrapper: the version and, when it is
+/// compiled, its entry procedure.
+#[derive(Debug, Clone)]
+pub struct Side<'a> {
+    /// The version's wrapper spec.
+    pub spec: WrapperSpec<'a>,
+    /// The compiled entry (`None`: the engine tier).
+    pub entry: Option<String>,
+}
+
+impl Side<'_> {
+    fn body(&self) -> String {
+        match &self.entry {
+            Some(e) => wrapper_body(&self.spec, e),
+            None => engine_wrapper_body(&self.spec),
+        }
+    }
+}
+
+/// A staged rollout's wrapper ([`crate::rollout`]): one procedure under
+/// the logical name holding both versions' bodies, the candidate's for
+/// the calls `condition` picks. Both versions take the same parameters
+/// and run with the same `SQL SECURITY` (the deploy checks that).
+#[must_use]
+pub fn rollout_wrapper(
+    schema: &str,
+    active: &Side<'_>,
+    candidate: &Side<'_>,
+    condition: &str,
+    pct: u8,
+) -> String {
+    let comment = format!(
+        "sprig logic module {} version {}, candidate version {} for {pct}% ({})",
+        active.spec.module_id, active.spec.version, candidate.spec.version, active.spec.func.name
+    );
+    format!(
+        "{}BEGIN\n  IF {condition} THEN\n{};\n  ELSE\n{};\n  END IF;\nEND",
+        header_with(&active.spec, schema, &comment),
+        candidate.body(),
+        active.body()
     )
 }
 
@@ -789,6 +847,49 @@ mod tests {
         assert!(
             e.contains("SELECT 'sprig' AS `__sprig_engine`, 44 AS `module`, 1 AS `version`, JSON_ARRAY((p_productid + 0), (p_qty + 0)) AS `args`;"),
             "{e}"
+        );
+    }
+
+    #[test]
+    fn rollout_wrapper_holds_both_versions() {
+        let func = f();
+        let spec = |version| WrapperSpec {
+            name: "quote",
+            func: &func,
+            definer_security: false,
+            budget_ms: 5000,
+            module_id: 44,
+            version,
+        };
+        let active = Side {
+            spec: spec(1),
+            entry: Some("__sprig_l44_v1".into()),
+        };
+        let cand = Side {
+            spec: spec(2),
+            entry: None,
+        };
+        let pick = crate::rollout::user_condition(44, 10);
+        let s = rollout_wrapper("t42_d1", &active, &cand, &pick, 10);
+        assert!(s.starts_with("CREATE OR REPLACE PROCEDURE `t42_d1`.`quote`(IN p_productid BIGINT, IN p_qty BIGINT)"), "{s}");
+        assert!(s.contains("COMMENT 'sprig logic module 44 version 1, candidate version 2 for 10% (Shop.Quote)'"), "{s}");
+        let (then, other) = s.split_once("ELSE").unwrap();
+        assert!(then.contains(&format!("IF {pick} THEN")), "{s}");
+        // The candidate (engine tier) answers the picked calls with its marker.
+        assert!(then.contains("44 AS `module`, 2 AS `version`"), "{s}");
+        assert!(
+            other.contains("FOR CALL `__sprig_l44_v1`(p_productid, p_qty, v__event, v__result);"),
+            "{s}"
+        );
+        assert!(s.ends_with("END;\n  END IF;\nEND"), "{s}");
+        // Without a rollout, the wrapper is as before.
+        assert_eq!(
+            wrapper(&spec(1), "t42_d1", "__sprig_l44_v1"),
+            format!(
+                "{}{}",
+                header(&spec(1), "t42_d1", "mariadb"),
+                wrapper_body(&spec(1), "__sprig_l44_v1")
+            )
         );
     }
 

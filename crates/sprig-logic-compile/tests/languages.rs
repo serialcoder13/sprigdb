@@ -534,6 +534,42 @@ export default function (x) {
   return { half: x / 2, kind: x === null ? 'none' : 'some' };
 }";
 
+// R7 follow-ups: `continue` in each kind of loop, and `switch`.
+const FLOW_JS: &str = r"
+let sum = 0;
+for (let i = 0; i < n; i++) {
+  if (i % 3 === 0) continue;
+  sum += i;
+}
+let k = 0;
+let kept = 0;
+while (k < n) {
+  k++;
+  if (k % 2 === 0) { continue; }
+  kept++;
+}
+let seen = 0;
+for (const o of db.sql('SELECT qty, note FROM orders ORDER BY id', [])) {
+  if (o.note === null) continue;
+  seen += o.qty;
+}
+let label = 'none';
+switch (kind) {
+  case 'a':
+  case 'b':
+    label = 'ab';
+    break;
+  case 'z':
+    return { sum, kept, seen, label: 'zed' };
+  default:
+    label = 'other';
+}
+switch (n % 3) {
+  case 0: label = label + '/0'; break;
+  case 1: label = label + '/1'; break;
+}
+return { sum, kept, seen, label };";
+
 #[test]
 fn kirun_javascript_and_lua_agree() {
     let Ok(url) = std::env::var("SPRIG_TEST_MARIADB_SINGLE") else {
@@ -660,6 +696,17 @@ fn kirun_javascript_and_lua_agree() {
         let j = s.deploy_js(errs.name, errs.js, &errs.sig, 9208);
         for a in [json!(-1), json!(0), json!(4), J::Null] {
             s.js_case(&errs, &j, &[a]);
+        }
+        let flow = js_only("flow", FLOW_JS, sig(&[("n", i), ("kind", ParamTy::Str)]));
+        let j = s.deploy_js(flow.name, flow.js, &flow.sig, 9209);
+        for a in [
+            [json!(7), json!("a")],
+            [json!(3), json!("z")],
+            [json!(0), json!("q")],
+            [J::Null, json!("b")],
+            [json!(11), J::Null],
+        ] {
+            s.js_case(&flow, &j, &a);
         }
     }));
     let elapsed = start.elapsed();

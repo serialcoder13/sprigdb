@@ -95,6 +95,44 @@ impl GraphRef {
     }
 }
 
+/// Waits for a mover's hold that a graph route met (R8 round 8, G69): an
+/// auto-commit Bolt read waits until the hold is gone from the map cache
+/// (as `after_holds` does for writes, and the SQL router for its reads),
+/// then fails with 39424 so the session plans it again on the new map.
+pub(crate) struct RouteHolds {
+    pub(crate) graphs: Arc<GatewayGraphs>,
+    pub(crate) g: GraphRef,
+}
+
+#[async_trait]
+impl sprig_graph::maria::HoldWait for RouteHolds {
+    async fn wait(&self, until_ms: u64) -> Result<()> {
+        metrics::counter!("sprig_graph_route_hold_waits_total").increment(1);
+        let started = std::time::Instant::now();
+        loop {
+            let now = u64::try_from(
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis()),
+            )
+            .unwrap_or(u64::MAX);
+            if now > until_ms.saturating_add(5_000)
+                || started.elapsed() > std::time::Duration::from_secs(30)
+            {
+                break;
+            }
+            if self.graphs.refresh(&self.g).await?.held_until.is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        Err(SprigError::new(
+            SprigCode::ShardMapChanged,
+            "a split, merge or move held the graph's shards; the statement plans again",
+        ))
+    }
+}
+
 /// The gateway's graph services.
 pub struct GatewayGraphs {
     pub(crate) svc: Arc<TenantServices>,
@@ -324,6 +362,9 @@ impl GatewayGraphs {
                 mirrors: true,
                 mirror_async: def.mirror_async,
                 mirror_building: !def.mirrors,
+                // R8 round 8 (G69): the router plans every read step over
+                // its own group (shards, epochs and holds).
+                route: Some(Arc::new(routed)),
             }),
             held,
         ))

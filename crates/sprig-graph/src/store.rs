@@ -164,6 +164,15 @@ impl IndexDef {
 /// The counters a schema command changed (`indexes-added`, ...).
 pub type SchemaCounts = Vec<(&'static str, i64)>;
 
+/// `CALL { } IN TRANSACTIONS` where batches can't commit on their own.
+#[must_use]
+pub fn not_implicit() -> sprig_common::SprigError {
+    sprig_common::SprigError::new(
+        sprig_common::SprigCode::GraphUnsupported,
+        "[Neo.DatabaseError.Transaction.TransactionStartFailed] A query with 'CALL { ... } IN TRANSACTIONS' can only be executed in an implicit transaction, but tried to execute in an explicit transaction.",
+    )
+}
+
 /// The routing hash of a node's `part` (chapter 15's numeric class).
 #[must_use]
 pub fn rk_of(part: u64) -> u64 {
@@ -264,6 +273,40 @@ pub trait GraphStore: Send {
 
     /// Every relationship type, by name.
     fn all_types(&self) -> Vec<String>;
+
+    /// `EXPLAIN`'s lines for how the router plans this graph's steps (R8
+    /// round 8, G69): its group and shards and each step's rule; none for
+    /// stores the router doesn't plan (in memory, mapped graphs).
+    fn explain_routes(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// `PROFILE`'s lines for the routes the statement ran: per step and
+    /// plan kind, how many and on which shards.
+    fn routes(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// `CALL { } IN TRANSACTIONS` (R8 round 8): whether the statement may
+    /// commit batches of its own, checked before the first batch. Only an
+    /// auto-commit statement may (Neo4j's rule).
+    ///
+    /// # Errors
+    /// Neo4j's `TransactionStartFailed` (39901) when it may not.
+    async fn batches(&mut self) -> Result<()> {
+        Err(not_implicit())
+    }
+
+    /// Ends the current batch: commits it (`ok`; nodes `deleted` by a
+    /// plain `DELETE` in it must have no relationships left) or rolls it
+    /// back. The statement's next step starts a new transaction.
+    ///
+    /// # Errors
+    /// The commit's (the batch is then rolled back).
+    async fn end_batch(&mut self, ok: bool, deleted: &[u64]) -> Result<()> {
+        let _ = (ok, deleted);
+        Err(not_implicit())
+    }
 
     /// The graph's indexes and constraints.
     fn indexes(&self) -> Vec<IndexDef> {

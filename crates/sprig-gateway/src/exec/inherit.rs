@@ -175,6 +175,13 @@ impl PassSession {
     /// Chapter 42's step of [`PassSession::tenant_text`]: `None` when the
     /// statement isn't the inheritance layer's.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    ///
+    /// A statement naming a typed table goes to chapter 32 first (its
+    /// plan's statements come back here, [`TypesSession::typed_plan`]):
+    /// `deferred` is set, and the caller calls again with `after_types`
+    /// when chapter 32 doesn't take it.
+    ///
+    /// [`TypesSession::typed_plan`]: super::types::TypesSession::typed_plan
     pub(super) async fn tenant_inherit(
         &mut self,
         cx: &mut ExecCtx<'_>,
@@ -184,11 +191,14 @@ impl PassSession {
         format: RowFormat,
         cat: &Arc<TenantCatalog>,
         out: &mut dyn ResultSink,
+        after_types: bool,
+        deferred: &mut bool,
     ) -> Result<Option<Step>> {
         let Some(ts) = self.tenant.as_deref() else {
             return Ok(None);
         };
-        if ts.types.internal || ts.principal.must_change_password {
+        let from_types = ts.types.typed_plan;
+        if (ts.types.internal && !from_types) || ts.principal.must_change_password {
             return Ok(None);
         }
         let state = cat.ext.get::<InheritState>(sprig_inherit::MODULE);
@@ -219,6 +229,7 @@ impl PassSession {
         let typed: Vec<String> = cat
             .ext
             .get::<TypesState>(sprig_types::store::MODULE)
+            .filter(|_| !from_types && !after_types)
             .map(|t| {
                 let mut v = Vec::new();
                 for (_, d) in t.dbs() {
@@ -262,12 +273,18 @@ impl PassSession {
             privileges: &privileges,
             typed: &typed,
             copies: &copies,
+            from_types,
         };
         let wire = Wire {
             persona: self.persona,
             caps: cx.proto.caps,
         };
         let migrated = state.migrated && state.ext_ready;
+        // A type plan's statement keeps its mode once the plan here ran.
+        let saved = self
+            .tenant
+            .as_deref()
+            .map_or((false, false), |ts| (ts.types.internal, ts.types.typed_plan));
         let handled = {
             let mut runner = InhRunner {
                 gw: GwRunner {
@@ -275,12 +292,13 @@ impl PassSession {
                     cx,
                     wire,
                     migrated: true,
+                    typed: false,
                 },
                 migrated,
             };
             let h = Box::pin(sprig_inherit::handle(sql, &ctx, &mut runner)).await;
             if let Some(ts) = runner.gw.sess.tenant.as_deref_mut() {
-                ts.types.internal = false;
+                (ts.types.internal, ts.types.typed_plan) = saved;
             }
             h
         };
@@ -298,6 +316,10 @@ impl PassSession {
         };
         match handled {
             Ok(Handled::NotInherit) => Ok(None),
+            Ok(Handled::Typed) => {
+                *deferred = true;
+                Ok(None)
+            }
             Err(e) => Ok(Some(self.fail(out, &e).await?)),
             Ok(Handled::Space(s)) => {
                 if let Some(ts) = self.tenant.as_deref_mut() {
@@ -322,6 +344,7 @@ impl PassSession {
             Ok(Handled::Forward(sql)) => {
                 if let Some(ts) = self.tenant.as_deref_mut() {
                     ts.types.internal = true;
+                    ts.types.typed_plan = false;
                 }
                 let text = Bytes::from(sql.into_bytes());
                 let r = Box::pin(self.tenant_text(cx, &text, attrs, more, format, out)).await;
@@ -340,7 +363,10 @@ impl PassSession {
     /// above it, top first) gets every table and column its parent shares
     /// ([`super::inherit_tree::adopt`]). `cat` again, or the fresh
     /// snapshot when anything changed.
-    pub(super) async fn inherit_adopt(&mut self, cat: Arc<TenantCatalog>) -> Result<Arc<TenantCatalog>> {
+    pub(super) async fn inherit_adopt(
+        &mut self,
+        cat: Arc<TenantCatalog>,
+    ) -> Result<Arc<TenantCatalog>> {
         let Some(ts) = self.tenant.as_deref_mut() else {
             return Ok(cat);
         };

@@ -268,7 +268,7 @@ pub async fn ensure(
                 };
                 if store.claim(&mut conn, &row).await? {
                     let started = Instant::now();
-                    if let Err(e) = create(svc, t, def, id).await {
+                    if let Err(e) = create_retrying(svc, t, def, id).await {
                         tracing::warn!(tenant = %t, def = %key, error = %e, "inherited stream instance not created; the next use retries");
                         let mut u = unavailable(format!(
                             "tenant {t}'s instance of {}.{}: {}",
@@ -542,6 +542,43 @@ pub async fn ensure_database(
 
 /// Step 4: the database and the stream, with id `id`.
 #[allow(clippy::too_many_lines)]
+/// [`create`], tried again after a transient failure (R9, r9last): up to
+/// [`CREATE_TRIES`] tries, 100 ms then 200 ms apart, with the same id
+/// (`CREATE STREAM IF NOT EXISTS` finds what a failed try made). A late
+/// member's first instance once failed with MariaDB's 1412 ("Table
+/// definition has changed, please retry transaction") in a full
+/// `inherit_live` run, and its claim then held every use for 30 s.
+async fn create_retrying(
+    svc: &Arc<TenantServices>,
+    t: TenantId,
+    def: &Definition,
+    id: u64,
+) -> Result<()> {
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        match create(svc, t, def, id).await {
+            Err(e) if tries < CREATE_TRIES && transient(&e) => {
+                tracing::info!(tenant = %t, def = %def.key(), tries, error = %e, "inherited stream instance: creating again after a transient failure");
+                metrics::counter!("sprig_inherit_instance_create_retries_total", "kind" => "stream")
+                    .increment(1);
+                tokio::time::sleep(Duration::from_millis(100 * u64::from(tries))).await;
+            }
+            r => return r,
+        }
+    }
+}
+
+/// Tries of an instance's creation ([`create_retrying`]).
+const CREATE_TRIES: u32 = 3;
+
+/// Whether an instance's creation failed for a reason a new try can
+/// clear: a retryable error, MariaDB's 1412 (a table changed under the
+/// transaction's snapshot) or 1020 (a row changed since it was read).
+fn transient(e: &SprigError) -> bool {
+    e.retryable || matches!(e.protocol().mysql_errno, 1412 | 1020)
+}
+
 async fn create(svc: &Arc<TenantServices>, t: TenantId, def: &Definition, id: u64) -> Result<()> {
     let spec: StreamSpec = serde_json::from_value(def.definition.clone())
         .map_err(|e| SprigError::internal(format!("stream definition: {e}")))?;
@@ -889,4 +926,35 @@ pub async fn remove(svc: &Arc<TenantServices>, t: TenantId, def: DefKey) -> Resu
     super::delete_index(svc, t, def).await?;
     forget_applied(t, def);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R9 (r9last): a 1412 from the stream layer (its message passed
+    /// through, as a late member's 39899 showed it) is tried again; a
+    /// refusal isn't.
+    #[test]
+    fn transient_creation_failures() {
+        let e = SprigError::backend(
+            1412,
+            *b"HY000",
+            "Table definition has changed, please retry transaction",
+        );
+        assert!(transient(&e));
+        assert!(transient(&SprigError::backend(1213, *b"40001", "deadlock")));
+        assert!(transient(&SprigError::backend(
+            1020,
+            *b"HY000",
+            "Record has changed"
+        )));
+        assert!(!transient(&SprigError::backend(
+            1044,
+            *b"42000",
+            "access denied"
+        )));
+        assert!(!transient(&super::super::target_err("not a member")));
+        assert_eq!(CREATE_TRIES, 3);
+    }
 }

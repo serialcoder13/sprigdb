@@ -1,0 +1,51 @@
+ERROR 3819 (HY000): Check constraint 'c_mj_ck' is violated.
+ok	[1, 2]	5	ok	[1, 2]
+1
+1
+c_mj_j	CREATE TABLE `c_mj_j` (
+  `id` int NOT NULL,
+  `d` json DEFAULT NULL,
+  `s` longtext GENERATED ALWAYS AS (json_unquote(json_extract(`d`,_utf8mb4'$."status"'))) STORED,
+  `v` json GENERATED ALWAYS AS (json_extract(`d`,_utf8mb4'$.v')) VIRTUAL,
+  PRIMARY KEY (`id`),
+  KEY `c_mj_jk` ((cast(json_unquote(json_extract(`d`,_utf8mb4'$.n')) as signed))),
+  CONSTRAINT `c_mj_ck` CHECK ((json_extract(`d`,_utf8mb4'$."version"') = json_extract(_utf8mb4'"stable"',_utf8mb4'$')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+c_mj_a	c_mj_au	1	height	D	NULL
+c_mj_a	c_mj_au	2	uuid	A	NULL
+c_mj_a	c_mj_au	3	NULL	A	lower(`name`)
+c_mj_b	c_mj_bi	1	author_id	D	NULL
+c_mj_b	c_mj_bi	2	NULL	A	lower(`title`)
+c_mj_b	c_mj_bi	3	pub_date	A	NULL
+c_mj_j	c_mj_jk	1	NULL	A	cast(json_unquote(json_extract(`d`,_utf8mb4\'$.n\')) as signed)
+c_mj_x	c_mj_x1	1	NULL	A	((`a` * 2) + 1)
+c_mj_x	c_mj_x2	1	NULL	A	concat(`s`,_utf8mb4\'x\')
+c_mj_x	c_mj_x3	1	NULL	A	(`a` between 1 and 5)
+c_mj_x	1	c_mj_x1	1	NULL	A	0	NULL	NULL	YES	BTREE			YES	((`a` * 2) + 1)
+c_mj_x	1	c_mj_x2	1	NULL	A	0	NULL	NULL	YES	BTREE			YES	concat(`s`,_utf8mb4\'x\')
+c_mj_x	1	c_mj_x3	1	NULL	A	0	NULL	NULL	YES	BTREE			YES	(`a` between 1 and 5)
+c_mj_fk	author_id	A
+PRIMARY	id	A
+15	3	23	15
+MAX(l.t)
+SUM(l.t) + 1
+m
+15	23	15
+BEGIN
+  -- the top order of each customer
+  SELECT c.id, l.amt FROM c_mj_c AS c, LATERAL (SELECT o.amt FROM c_mj_o AS o WHERE o.cid = c.id ORDER BY o.amt DESC LIMIT 1) AS l WHERE c.id <= x ORDER BY c.id;
+END
+1	10
+2	7
+performance_schema
+events_statements_summary_by_digest
+1
+@DB@
+1
+2
+ERROR 1054 (42S22): Unknown column 'nope' in 'field list'
+1	3	2	0	1	1	1
+1	1	0	1	1	1	1
+1	3	0
+1	1	1
+1	1	100.0000

@@ -181,27 +181,42 @@ fn bad(what: &str) -> SprigError {
 /// A `types.discriminator` value: a root's column, or a subtype's value.
 fn discriminator_json(t: &TypeDef) -> Option<String> {
     if let Some(c) = &t.discriminator {
-        return Some(serde_json::json!({ "column": c }).to_string());
+        return Some(match &t.disc_operand {
+            Some(o) => serde_json::json!({ "column": c, "operand": o }).to_string(),
+            None => serde_json::json!({ "column": c }).to_string(),
+        });
     }
     t.disc_value.as_ref().map(|v| v.to_json().to_string())
 }
 
 /// Reads [`discriminator_json`]'s text back.
+#[cfg(test)]
 fn parse_discriminator(j: Option<String>) -> Result<(Option<String>, Option<DiscValue>)> {
+    parse_discriminator_full(j).map(|(c, v, _)| (c, v))
+}
+
+/// [`parse_discriminator`], with a root's operand.
+fn parse_discriminator_full(
+    j: Option<String>,
+) -> Result<(Option<String>, Option<DiscValue>, Option<String>)> {
     let Some(j) = j else {
-        return Ok((None, None));
+        return Ok((None, None, None));
     };
     let v: serde_json::Value = serde_json::from_str(&j).map_err(|_| bad("discriminator"))?;
     if let Some(c) = v.get("column").and_then(serde_json::Value::as_str) {
-        return Ok((Some(c.to_owned()), None));
+        let o = v
+            .get("operand")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        return Ok((Some(c.to_owned()), None, o));
     }
     if let Some(s) = v.get("value").and_then(serde_json::Value::as_str) {
-        return Ok((None, Some(DiscValue::Str(s.to_owned()))));
+        return Ok((None, Some(DiscValue::Str(s.to_owned())), None));
     }
     if let Some(n) = v.get("number").and_then(serde_json::Value::as_str) {
-        return Ok((None, Some(DiscValue::Num(n.to_owned()))));
+        return Ok((None, Some(DiscValue::Num(n.to_owned())), None));
     }
-    Ok((None, None))
+    Ok((None, None, None))
 }
 
 /// The JSON of a hierarchy's `key_fields`: `[{"name":..,"class":..,"type":..}]`.
@@ -295,7 +310,8 @@ impl TypesStore {
             };
             let storage: String = col(r, 7)?;
             let state: String = col(r, 9)?;
-            let (discriminator, disc_value) = parse_discriminator(col(r, 12)?)?;
+            let (discriminator, disc_value, disc_operand) =
+                parse_discriminator_full(col(r, 12)?)?;
             types.push(TypeDef {
                 id: ObjectId(col(r, 0)?),
                 db: DbId(col(r, 1)?),
@@ -312,6 +328,7 @@ impl TypesStore {
                 name: col(r, 11)?,
                 discriminator,
                 disc_value,
+                disc_operand,
             });
         }
         let fields: Vec<Row> = q

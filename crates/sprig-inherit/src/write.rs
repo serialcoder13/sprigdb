@@ -113,6 +113,7 @@ fn view(r: &Resolved, chain: &Chain, keys: Option<Vec<String>>) -> String {
         layer: r.layer.clone(),
         keys,
         origin: false,
+        derived: r.derived.clone(),
     }
     .view(chain)
 }
@@ -589,6 +590,7 @@ async fn delete_keys(
         layer: res.layer.clone(),
         keys: Some(keys.to_vec()),
         origin: false,
+        derived: Vec::new(),
     })
     .inherited(chain)
     {

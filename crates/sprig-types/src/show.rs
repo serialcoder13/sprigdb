@@ -18,7 +18,7 @@ use sprig_common::Result;
 use sprig_common::names::quote;
 
 use crate::Ctx;
-use crate::ddl::{FK_PREFIX, TYPE_PATH_INDEX};
+use crate::ddl::{FK_PREFIX, NN_PREFIX, TYPE_PATH_INDEX};
 use crate::exec::{Rows, Runner};
 use crate::grammar::{Name, ShowColumns};
 use crate::model::{DbTypes, Storage, TypeDef};
@@ -34,6 +34,23 @@ fn table_sql(db: Option<&str>, t: &str) -> String {
 
 fn is_type_column(c: &str) -> bool {
     c.eq_ignore_ascii_case(TYPE_COLUMN) || c.eq_ignore_ascii_case(TYPE_PATH_COLUMN)
+}
+
+/// A nullable column's definition (MariaDB's `SHOW CREATE TABLE` text)
+/// made `NOT NULL`: `DEFAULT NULL` becomes `NOT NULL`.
+fn not_null_text(def: &str) -> String {
+    let upper = def.to_ascii_uppercase();
+    if let Some(i) = upper.find(" DEFAULT NULL") {
+        let end = i + " DEFAULT NULL".len();
+        if upper[end..].chars().next().is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_') {
+            return format!("{} NOT NULL{}", &def[..i], &def[end..]);
+        }
+    }
+    if upper.contains("NOT NULL") {
+        def.to_owned()
+    } else {
+        format!("{def} NOT NULL")
+    }
 }
 
 /// The logical `CREATE TABLE` of type `t` from its table's physical one.
@@ -64,14 +81,15 @@ pub fn logical_create_from(
             let n = name.as_deref().unwrap_or("");
             !n.eq_ignore_ascii_case(TYPE_PATH_INDEX)
                 && !n.starts_with(FK_PREFIX)
+                && !n.starts_with(NN_PREFIX)
                 && !columns.iter().any(|c| is_type_column(c))
         }
     };
-    let mut keep: Vec<&str> = def
+    let mut keep: Vec<String> = def
         .elements
         .iter()
         .filter(|(e, _)| keep_element(e))
-        .map(|(_, r)| &physical[r.clone()])
+        .map(|(_, r)| physical[r.clone()].to_owned())
         .collect();
     // A single-table subtype's own columns live in its root's table.
     if let Some(rt) = root
@@ -83,7 +101,13 @@ pub fn logical_create_from(
             .filter_map(|f| {
                 rdef.elements.iter().find_map(|(e, r)| match e {
                     Element::Column(c) if c.name.eq_ignore_ascii_case(&f.name) => {
-                        Some(&rt[r.clone()])
+                        // A NOT NULL column takes NULL in the root's table,
+                        // under a CHECK: the subtype shows it NOT NULL.
+                        Some(if !f.nullable && c.nullable {
+                            not_null_text(&rt[r.clone()])
+                        } else {
+                            rt[r.clone()].to_owned()
+                        })
                     }
                     _ => None,
                 })
@@ -215,6 +239,17 @@ pub async fn columns(
             ))
             .await?;
         out.columns = rows.columns;
+        // A NOT NULL column takes NULL in the root's table, under a CHECK.
+        let null_at = out
+            .columns
+            .iter()
+            .position(|c| c.name.as_ref().eq_ignore_ascii_case(b"Null"));
+        let not_null: Vec<String> = types
+            .chain(t.id)
+            .iter()
+            .filter(|x| !x.is_root())
+            .flat_map(|x| x.own_fields.iter().filter(|f| !f.nullable).map(|f| f.name.to_lowercase()))
+            .collect();
         let name_of = |row: &Vec<Option<Vec<u8>>>| {
             row.first()
                 .cloned()
@@ -228,7 +263,14 @@ pub async fn columns(
                 .iter()
                 .find(|row| name_of(row).eq_ignore_ascii_case(&f.name))
             {
-                out.rows.push(row.clone());
+                let mut row = row.clone();
+                if let Some(i) = null_at
+                    && not_null.contains(&f.name.to_lowercase())
+                    && let Some(v) = row.get_mut(i)
+                {
+                    *v = Some(b"NO".to_vec());
+                }
+                out.rows.push(row);
             }
         }
         return Ok(out);

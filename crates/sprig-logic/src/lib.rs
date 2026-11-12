@@ -18,7 +18,10 @@
 //! - [`invoke`]: calling an engine-tier version through its wrapper's
 //!   marker row, on the fallback runtime ([`engine`]);
 //! - [`settings`]: the fallback tier's budgets and outbound allowlist;
-//! - [`messages`]: triggers on streams and queues (R9).
+//! - [`messages`]: triggers on streams and queues (R9);
+//! - [`testrun`]: `Logic.TestRun`, a run that never writes (R7 follow-ups);
+//! - [`rollout`]: staged rollout by percentage (RC10, R7 follow-ups);
+//! - [`drop`]: `DROP FUNCTION | PROCEDURE` and their dependents.
 //!
 //! Not yet: validations, triggers, schedules, computed fields, QuickJS
 //! for JavaScript, invocation from other protocols, rollout and rollback,
@@ -37,15 +40,19 @@ pub mod catalog;
 pub mod cron;
 pub mod declare;
 pub mod deploy;
+pub mod drop;
+pub mod dropdb;
 pub mod enforce;
 pub mod invoke;
 pub mod messages;
 pub mod msgrun;
 pub mod placement;
 pub mod rollback;
+pub mod rollout;
 pub mod schedule;
 pub mod service;
 pub mod settings;
+pub mod testrun;
 pub mod triggers;
 
 /// The fallback tier (`sprig-logic-js`): the native KIRun runtime, its

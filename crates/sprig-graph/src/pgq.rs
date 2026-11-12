@@ -38,6 +38,15 @@ pub fn literal(v: &Value) -> String {
         Value::Float(f) if f.is_finite() => format!("{f:e}"),
         Value::Null | Value::Float(_) => "NULL".into(),
         Value::String(s) => sql_string(s),
+        Value::Bytes(b) => {
+            let mut o = String::with_capacity(b.len() * 2 + 3);
+            o.push_str("X'");
+            for x in b {
+                let _ = std::fmt::Write::write_fmt(&mut o, format_args!("{x:02X}"));
+            }
+            o.push('\'');
+            o
+        }
         Value::List(_) | Value::Map(_) | Value::Node(_) | Value::Rel(_) | Value::Path(_) => {
             sql_string(&crate::value::to_json(v).to_string())
         }
@@ -58,5 +67,6 @@ mod tests {
         assert_eq!(literal(&Value::Float(f64::NAN)), "NULL");
         assert_eq!(literal(&Value::Bool(true)), "TRUE");
         assert_eq!(literal(&Value::String("a\\b".into())), "'a\\\\b'");
+        assert_eq!(literal(&Value::Bytes(vec![0, 255, 16])), "X'00FF10'");
     }
 }

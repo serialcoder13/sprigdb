@@ -97,6 +97,10 @@ pub struct Output {
     pub profiled: bool,
     /// Neo4j's notifications for the statement (see [`notifications`]).
     pub notifications: Vec<Notification>,
+    /// A read's final `RETURN` failed on a row (R8 round 8): `rows` are
+    /// the rows before it, and the error comes after them, as Neo4j's lazy
+    /// results give it (on `PULL`, after the first records).
+    pub late_error: Option<Arc<SprigError>>,
 }
 
 /// A Neo4j notification (Bolt `notifications` in the summary).
@@ -112,6 +116,11 @@ pub struct Notification {
     pub severity: &'static str,
     /// `PERFORMANCE`, ...
     pub category: &'static str,
+    /// Its GQLSTATUS (Bolt 5.5 on: `statuses` in place of
+    /// `notifications`).
+    pub gql_status: &'static str,
+    /// The GQL status description.
+    pub status_description: String,
 }
 
 /// The notifications SprigDB gives for a statement. Only Neo4j's
@@ -189,6 +198,14 @@ fn cartesian_products(clauses: &[Clause], out: &mut Vec<Notification>) {
                         ),
                         severity: "INFORMATION",
                         category: "PERFORMANCE",
+                        gql_status: "03N90",
+                        status_description: format!(
+                            "info: cartesian product. The disconnected pattern '{}' builds a cartesian product. A cartesian product may produce a large amount of data and slow down query processing.",
+                            vars.iter()
+                                .map(|vs| format!("({})", vs.join(", ")))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
                     });
                 }
                 bound.extend(vars.into_iter().flatten());
@@ -238,6 +255,31 @@ pub async fn run(
     params: &Params,
     budgets: &Budgets,
 ) -> Result<Output> {
+    run_with(store, q, params, budgets, false).await
+}
+
+/// [`run`], but a read's top `RETURN` that fails on a row answers the
+/// rows before it with the error in [`Output::late_error`] (Bolt: records,
+/// then the failure on `PULL`, as Neo4j's lazy results; R8 round 8).
+///
+/// # Errors
+/// As [`run`].
+pub async fn run_lazy(
+    store: &mut dyn GraphStore,
+    q: &Query,
+    params: &Params,
+    budgets: &Budgets,
+) -> Result<Output> {
+    run_with(store, q, params, budgets, true).await
+}
+
+async fn run_with(
+    store: &mut dyn GraphStore,
+    q: &Query,
+    params: &Params,
+    budgets: &Budgets,
+    lazy: bool,
+) -> Result<Output> {
     let mut ex = Exec {
         store,
         params,
@@ -249,9 +291,13 @@ pub async fn run(
         plan: Vec::new(),
         slot: 0,
         star_in_order: false,
+        late_ok: lazy && q.explain == Explain::None && q.parts.len() == 1 && !has_writes(q),
+        returning: false,
+        late_error: None,
     };
     if q.explain == Explain::Explain {
-        let plan = explain(q);
+        let mut plan = explain(q);
+        plan.extend(ex.store.explain_routes());
         return Ok(Output {
             qtype: if has_writes(q) { "rw" } else { "r" },
             plan: Some(plan),
@@ -278,6 +324,7 @@ pub async fn run(
             "shard statements: {}, of which recursive CTEs: {}",
             s.shard_queries, s.cte_queries
         ));
+        p.extend(ex.store.routes());
         p
     });
     Ok(Output {
@@ -289,6 +336,7 @@ pub async fn run(
         plan,
         profiled: q.explain == Explain::Profile,
         notifications: notifications(q),
+        late_error: ex.late_error.take().map(Arc::new),
     })
 }
 
@@ -347,7 +395,12 @@ pub fn explain(q: &Query) -> Vec<String> {
                 Clause::Remove(_) => out.push("Remove".into()),
                 Clause::Delete { .. } => out.push("Delete".into()),
                 Clause::Call { name, .. } => out.push(format!("ProcedureCall {name}")),
-                Clause::Subquery { .. } => out.push("CallSubquery: once per row".into()),
+                Clause::Subquery { batch: None, .. } => {
+                    out.push("CallSubquery: once per row".into());
+                }
+                Clause::Subquery { batch: Some(_), .. } => out.push(
+                    "CallSubqueryInTransactions: once per row, committed per batch of rows".into(),
+                ),
                 Clause::Foreach { .. } => out.push("Foreach".into()),
                 Clause::Schema(_) => out.push("SchemaCommand".into()),
             }
@@ -369,6 +422,8 @@ type CallRows = (Vec<String>, Vec<(usize, Vec<Value>)>);
 /// Hidden row keys start with a space, so no variable can clash.
 pub(crate) const RELS: &str = " rels";
 
+// Flags of one statement's run, each independent.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Exec<'a> {
     pub(crate) store: &'a mut dyn GraphStore,
     pub(crate) params: &'a Params,
@@ -381,6 +436,13 @@ pub(crate) struct Exec<'a> {
     slot: usize,
     /// `RETURN *` after `SHOW ... YIELD` keeps the yield order (Neo4j).
     star_in_order: bool,
+    /// The statement is a read whose top `RETURN` may fail late
+    /// ([`Output::late_error`]).
+    late_ok: bool,
+    /// The projection running is that `RETURN`.
+    returning: bool,
+    /// The error it met.
+    late_error: Option<SprigError>,
 }
 
 /// Whether duplicates of rows coming out of a `MATCH` can't change the
@@ -776,6 +838,131 @@ impl Exec<'_> {
         Ok((next, new_cols))
     }
 
+    /// `CALL { } IN TRANSACTIONS` (R8 round 8): the rows in batches of
+    /// `OF n ROWS` (1,000), each batch's subquery run and committed on its
+    /// own transaction; a failed batch rolls back, then `ON ERROR` decides:
+    /// `FAIL` ends the statement (earlier batches stay committed, as in
+    /// Neo4j), `CONTINUE` gives the batch's rows `null`s and goes on,
+    /// `BREAK` gives every later row `null`s too. `REPORT STATUS AS s`
+    /// adds each row's batch status.
+    async fn call_in_transactions(
+        &mut self,
+        rows: Vec<Row>,
+        imports: Option<&Vec<String>>,
+        q: &Query,
+        b: &crate::ast::TxBatch,
+    ) -> Result<(Vec<Row>, Vec<String>)> {
+        use crate::ast::OnError;
+        self.store.batches().await?;
+        let size = match &b.rows {
+            None => 1000,
+            Some(e) => match self.eval_full(e, &Row::new()).await? {
+                Value::Int(n) if n > 0 => usize::try_from(n).unwrap_or(usize::MAX),
+                other => {
+                    return Err(SprigError::new(
+                        SprigCode::GraphSyntax,
+                        format!(
+                            "[Neo.ClientError.Statement.ArgumentError] OF ... ROWS needs a positive integer, got {other:?}"
+                        ),
+                    ));
+                }
+            },
+        };
+        let returned = crate::semantic::returns_of(q).unwrap_or_default();
+        let status = |started: bool, committed: bool, tx: Option<u64>, err: Option<String>| {
+            Value::Map(
+                [
+                    ("started".to_owned(), Value::Bool(started)),
+                    ("committed".to_owned(), Value::Bool(committed)),
+                    (
+                        "transactionId".to_owned(),
+                        tx.map_or(Value::Null, |t| Value::String(format!("sprig-batch-{t}"))),
+                    ),
+                    (
+                        "errorMessage".to_owned(),
+                        err.map_or(Value::Null, Value::String),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            )
+        };
+        let nulls = |r: &Row, st: Value| {
+            let mut nr = r.clone();
+            for c in &returned {
+                nr.insert(c.clone(), Value::Null);
+            }
+            if let Some(s) = &b.report {
+                nr.insert(s.clone(), st);
+            }
+            nr
+        };
+        let mut out = Vec::new();
+        let mut cols: Vec<String> = returned.clone();
+        let mut committed = 0u64;
+        let mut broke = false;
+        let mut tx = 0u64;
+        for chunk in rows.chunks(size) {
+            if broke {
+                out.extend(
+                    chunk
+                        .iter()
+                        .map(|r| nulls(r, status(false, false, None, None))),
+                );
+                continue;
+            }
+            tx += 1;
+            let before = self.stats.clone();
+            let deleted = self.deleted.len();
+            let r = match Box::pin(self.call_subquery(chunk.to_vec(), imports, q)).await {
+                Ok(x) => {
+                    let done: Vec<u64> = self.deleted[deleted..].to_vec();
+                    self.store.end_batch(true, &done).await.map(|()| x)
+                }
+                Err(e) => {
+                    let _ = self.store.end_batch(false, &[]).await;
+                    Err(e)
+                }
+            };
+            match r {
+                Ok((next, c)) => {
+                    committed += 1;
+                    // Checked at the batch's commit.
+                    self.deleted.truncate(deleted);
+                    if !c.is_empty() {
+                        cols = c;
+                    }
+                    out.extend(next.into_iter().map(|mut nr| {
+                        if let Some(s) = &b.report {
+                            nr.insert(s.clone(), status(true, true, Some(tx), None));
+                        }
+                        nr
+                    }));
+                }
+                Err(mut e) => {
+                    self.stats = before;
+                    self.deleted.truncate(deleted);
+                    if b.on_error == OnError::Fail {
+                        e.message = format!("{} (Transactions committed: {committed})", e.message);
+                        return Err(e);
+                    }
+                    let msg = crate::neo4j::message(&e);
+                    out.extend(
+                        chunk
+                            .iter()
+                            .map(|r| nulls(r, status(true, false, Some(tx), Some(msg.clone())))),
+                    );
+                    broke = b.on_error == OnError::Break;
+                }
+            }
+            self.check_rows(out.len())?;
+        }
+        if let Some(s) = &b.report {
+            cols.push(s.clone());
+        }
+        Ok((out, cols))
+    }
+
     /// Runs `clauses` over `rows` with `scope` bound: the columns and rows
     /// of the final `RETURN` (none for an update statement).
     pub(crate) async fn clauses(
@@ -843,7 +1030,10 @@ impl Exec<'_> {
                     scope = cols;
                 }
                 Clause::Return(p) => {
-                    let (cols, out) = self.project(rows, p, &scope).await?;
+                    self.returning = std::mem::take(&mut self.late_ok);
+                    let r = self.project(rows, p, &scope).await;
+                    self.returning = false;
+                    let (cols, out) = r?;
                     return Ok((cols, out));
                 }
                 Clause::Create(pats) => {
@@ -873,8 +1063,18 @@ impl Exec<'_> {
                 Clause::Delete { detach, exprs } => {
                     rows = self.delete(rows, exprs, *detach).await?;
                 }
-                Clause::Subquery { imports, query } => {
-                    let (next, cols) = self.call_subquery(rows, imports.as_ref(), query).await?;
+                Clause::Subquery {
+                    imports,
+                    query,
+                    batch,
+                } => {
+                    let (next, cols) = match batch {
+                        None => self.call_subquery(rows, imports.as_ref(), query).await?,
+                        Some(b) => {
+                            self.call_in_transactions(rows, imports.as_ref(), query, b)
+                                .await?
+                        }
+                    };
                     rows = next;
                     for c in cols {
                         if !scope.contains(&c) {
@@ -1157,10 +1357,32 @@ impl Exec<'_> {
                 out.push((vals, gr));
             }
         } else {
-            for r in rows {
+            // A read's top RETURN without DISTINCT or ORDER BY evaluates
+            // rows as Neo4j's lazy results do: only those SKIP and LIMIT
+            // keep, and an error on a row comes after the rows before it.
+            let in_order = !p.distinct && p.order.is_empty();
+            let lazy = std::mem::take(&mut self.returning) && in_order;
+            let needed = if in_order {
+                let skip = self.const_int(p.skip.as_ref(), "SKIP")?.unwrap_or(0);
+                self.const_int(p.limit.as_ref(), "LIMIT")?
+                    .map(|l| skip.saturating_add(l))
+            } else {
+                None
+            };
+            'rows: for r in rows {
+                if needed.is_some_and(|n| out.len() >= n) {
+                    break;
+                }
                 let mut vals = Vec::with_capacity(items.len());
                 for (e, _) in &items {
-                    vals.push(self.eval_full(e, &r).await?);
+                    match self.eval_full(e, &r).await {
+                        Ok(v) => vals.push(v),
+                        Err(e) if lazy && is_row_error(&e) => {
+                            self.late_error = Some(e);
+                            break 'rows;
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
                 let mut merged = if p.distinct { Row::new() } else { r };
                 for (c, v) in cols.iter().zip(&vals) {
@@ -1212,6 +1434,21 @@ impl Exec<'_> {
             .collect();
         Ok((cols, rows))
     }
+}
+
+/// Whether `e` is an error of one row's values (a type or arithmetic
+/// error, a bad argument), which Neo4j's lazy results report on the row
+/// that has it; budget, storage and syntax errors stay errors of the
+/// statement.
+fn is_row_error(e: &SprigError) -> bool {
+    let code = crate::neo4j::status_code(e);
+    matches!(
+        code.as_str(),
+        "Neo.ClientError.Statement.ArithmeticError"
+            | "Neo.ClientError.Statement.TypeError"
+            | "Neo.ClientError.Statement.ArgumentError"
+            | "Neo.ClientError.Statement.InvalidArgument"
+    )
 }
 
 /// The variables a pattern binds.

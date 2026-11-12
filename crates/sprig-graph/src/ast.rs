@@ -86,6 +86,9 @@ pub enum Clause {
         imports: Option<Vec<String>>,
         /// The subquery.
         query: Box<Query>,
+        /// `IN TRANSACTIONS ...`: the incoming rows in batches, each batch's
+        /// subquery committed on its own (R8 round 8).
+        batch: Option<Box<TxBatch>>,
     },
     /// `FOREACH (var IN list | updates)`.
     Foreach {
@@ -595,4 +598,30 @@ pub enum RemoveItem {
     Prop(Expr, String),
     /// `v:A:B`.
     Labels(String, Vec<String>),
+}
+
+/// What `CALL { } IN TRANSACTIONS` does with a batch that fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OnError {
+    /// The statement fails (batches committed before stay).
+    #[default]
+    Fail,
+    /// The batch rolls back, its rows get `null`s, the next batch runs.
+    Continue,
+    /// The batch rolls back, it and every later batch's rows get `null`s.
+    Break,
+}
+
+/// `IN [n CONCURRENT] TRANSACTIONS [OF n ROWS] [ON ERROR ...] [REPORT
+/// STATUS AS s]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TxBatch {
+    /// `OF n ROWS` (default 1,000).
+    pub rows: Option<Expr>,
+    /// `ON ERROR`.
+    pub on_error: OnError,
+    /// `REPORT STATUS AS s`.
+    pub report: Option<String>,
+    /// `IN [n] CONCURRENT`: accepted; batches run one after another.
+    pub concurrent: bool,
 }

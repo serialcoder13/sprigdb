@@ -244,14 +244,9 @@ impl PassSession {
             Ok(PolicyAnswer::Unchanged) => out.ok(OkPacket::new(s)).await?,
             Ok(PolicyAnswer::Changed { object, .. }) => {
                 let mut ok = OkPacket::new(s);
-                // RL14 (round 2): change sinks over the table whose owners
-                // are now bound stop.
-                if let Some(ts) = self.tenant.as_deref()
-                    && let Some(cat) = ts.catalog().cloned()
-                    && let Err(e) = crate::tenant::rls::pause_bound_sinks(ts, &cat, object).await
-                {
-                    tracing::warn!(error = %e, "sinks over a protected table not checked");
-                }
+                // RL50: change sinks over the table aren't paused when its
+                // policies come to bind their owners (RL14 paused them):
+                // their workers filter each batch for the owner.
                 if let Err(e) = Box::pin(self.deploy_checks(object)).await {
                     tracing::warn!(error = %e, "row-level security write checks not deployed");
                     if let Some(ts) = self.tenant.as_deref_mut() {
@@ -464,6 +459,9 @@ impl PassSession {
                 if let Some(ts) = self.tenant.as_deref_mut() {
                     crate::tenant::rls::await_auth(ts, v).await;
                 }
+                // RLS round 5 (RL47): the table's change topic filter view
+                // follows its policies.
+                Box::pin(self.redeploy_change_view(object)).await;
                 Ok(())
             }
             Err(e) => {

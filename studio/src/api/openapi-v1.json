@@ -94,6 +94,10 @@
         ],
         "type": "object"
       },
+      "ChangeEvent": {
+        "description": "The ChangeEvent message as JSON (proto3 mapping)",
+        "type": "object"
+      },
       "CheckReply": {
         "properties": {
           "statements": {
@@ -782,6 +786,14 @@
         },
         "type": "object"
       },
+      "SearchQueryRequest": {
+        "description": "The SearchQueryRequest message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "SearchQueryResponse": {
+        "description": "The SearchQueryResponse message as JSON (proto3 mapping)",
+        "type": "object"
+      },
       "SearchVectorsRequest": {
         "description": "The SearchVectorsRequest message as JSON (proto3 mapping)",
         "type": "object"
@@ -845,6 +857,14 @@
         "description": "The call's JSON body",
         "type": "object"
       },
+      "TestRunRequest": {
+        "description": "The TestRunRequest message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "TestRunResponse": {
+        "description": "The TestRunResponse message as JSON (proto3 mapping)",
+        "type": "object"
+      },
       "TokenReply": {
         "properties": {
           "access_token": {
@@ -897,6 +917,10 @@
       },
       "VectorIndex": {
         "description": "The VectorIndex message as JSON (proto3 mapping)",
+        "type": "object"
+      },
+      "WatchRequest": {
+        "description": "The WatchRequest message as JSON (proto3 mapping)",
         "type": "object"
       },
       "WhoAmI": {
@@ -1757,6 +1781,55 @@
         ]
       }
     },
+    "/v1/databases/{database}/changes": {
+      "get": {
+        "operationId": "Changes.Watch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filters, as the route documents them",
+            "in": "query",
+            "name": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChangeEvent"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Changes"
+        ]
+      }
+    },
     "/v1/databases/{database}/cursors": {
       "post": {
         "operationId": "Cursors.Open",
@@ -2216,6 +2289,63 @@
         ]
       }
     },
+    "/v1/databases/{database}/logic/{kind}/{name}/rollout": {
+      "get": {
+        "operationId": "Logic.GetRollout",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "kind",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "A staged rollout (active and candidate versions, share, key) and each version's calls, errors, p95 and histogram",
+        "tags": [
+          "sprig.v1.Logic"
+        ]
+      }
+    },
     "/v1/databases/{database}/logic/{kind}/{name}/versions/{version}": {
       "get": {
         "operationId": "Logic.GetVersion",
@@ -2317,6 +2447,56 @@
           }
         },
         "summary": "A dry run of a CREATE FUNCTION or PROCEDURE: tier, reasons, signature, PL/SQL; nothing recorded",
+        "tags": [
+          "sprig.v1.Logic"
+        ]
+      }
+    },
+    "/v1/databases/{database}/logic:testRun": {
+      "post": {
+        "operationId": "Logic.TestRun",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestRunRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestRunResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
         "tags": [
           "sprig.v1.Logic"
         ]
@@ -3138,6 +3318,64 @@
         },
         "tags": [
           "sprig.v1.KeyValue"
+        ]
+      }
+    },
+    "/v1/databases/{database}/search/{index}:query": {
+      "post": {
+        "operationId": "Search.Query",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "database",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchQueryRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchQueryResponse"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "tags": [
+          "sprig.v1.Search"
         ]
       }
     },

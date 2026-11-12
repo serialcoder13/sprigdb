@@ -32,19 +32,34 @@ services:
     extends: { file: compose.yaml, service: controller }
     depends_on: !override
       etcd: { condition: service_healthy }
+    extra_hosts: &db-alias
+      # A bundle grown from one VM (RUNBOOK.md, "From one VM to three"): its
+      # MariaDB was registered under the Compose name mariadb-1, which these
+      # VMs resolve to VM 1's private address. Unset: a harmless entry.
+      - "${SPRIG_DB_ALIAS_HOST:-sprig-db-alias.invalid}:${SPRIG_DB_ALIAS_IP:-127.0.0.1}"
+    environment:
+      SPRIGDB_CONTROLLER_INTERNAL_TLS: ${SPRIG_INTERNAL_TLS:-true}
     ports:
       - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_INTERNAL_PORT:-7481}:${SPRIG_INTERNAL_PORT:-7481}"
+      - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_TELEMETRY_PORT_CONTROLLER:-9181}:9180"
 
   gateway:
     extends: { file: compose.yaml, service: gateway }
     depends_on: !override
       controller: { condition: service_healthy }
+    extra_hosts: *db-alias
+    environment:
+      SPRIGDB_GATEWAY_KAFKA_ADVERTISE_HOST: ${SPRIG_KAFKA_HOST:-${SPRIG_PUBLIC_HOST:-127.0.0.1}}
     ports:
       - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_PEER_PORT:-7403}:${SPRIG_PEER_PORT:-7403}"
+      - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_TELEMETRY_PORT_GATEWAY:-9180}:9180"
 
   worker:
     extends: { file: compose.yaml, service: worker }
     profiles: [worker]
+    extra_hosts: *db-alias
+    ports:
+      - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_TELEMETRY_PORT_WORKER:-9182}:9180"
     depends_on: !override
       controller: { condition: service_healthy }
 

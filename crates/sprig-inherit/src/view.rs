@@ -124,6 +124,10 @@ pub struct ViewSql<'a> {
     pub keys: Option<Vec<String>>,
     /// Carry `_sprig_o`, the origin of each field (`SPRIG_ORIGIN()`).
     pub origin: bool,
+    /// Columns computed from the merged row rather than read: `(column,
+    /// expression over the object's columns)` (a discriminated root's type
+    /// columns, [`crate::plan::Ctx::derived`]).
+    pub derived: Vec<(String, String)>,
 }
 
 const ORIGIN: &str = "`_sprig_o`";
@@ -357,6 +361,9 @@ impl ViewSql<'_> {
         if self.origin {
             cols.push(ORIGIN.into());
         }
+        for (c, e) in &self.derived {
+            cols.push(format!("{e} AS {}", q(c)));
+        }
         cols.join(", ")
     }
 
@@ -451,6 +458,7 @@ mod tests {
             layer: "`products`".into(),
             keys: None,
             origin: false,
+            derived: Vec::new(),
         };
         let sql = v.view(&chain());
         assert_eq!(
@@ -489,6 +497,7 @@ mod tests {
             layer: "`shop`.`products`".into(),
             keys: Some(vec!["2".into(), "5".into()]),
             origin: false,
+            derived: Vec::new(),
         };
         let base = v.view(&chain().upto(1));
         assert_eq!(
@@ -511,6 +520,7 @@ mod tests {
             layer: "`products`".into(),
             keys: None,
             origin: true,
+            derived: Vec::new(),
         };
         let c = Chain {
             top: Top::Upstream {

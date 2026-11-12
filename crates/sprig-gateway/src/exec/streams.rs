@@ -186,6 +186,57 @@ impl Host for GwHost<'_> {
             .is_some()
     }
 
+    async fn change_view(&mut self, def: &StreamDef) -> Result<()> {
+        // Chapter 29 (RL47).
+        Box::pin(self.sess.deploy_change_view(def)).await
+    }
+
+    async fn change_filter(
+        &mut self,
+        db_name: &str,
+        def: &StreamDef,
+    ) -> Result<Option<sprig_streams::read::RecordFilter>> {
+        // Chapter 29 (RL44): the records whose images this session's
+        // policies show.
+        let (Some(object), Some(db)) = (def.source_object, self.db_id(db_name)) else {
+            return Err(crate::tenant::rls_streams::bound(
+                def.source_name.as_deref().unwrap_or_default(),
+                &def.name,
+            ));
+        };
+        let obj = self
+            .cat
+            .objects
+            .get(object)
+            .cloned()
+            .ok_or_else(|| SprigError::internal("a change topic's table is gone"))?;
+        let slot = self
+            .table(db, &obj.name)
+            .and_then(|t| t.slots.into_iter().next())
+            .ok_or_else(|| SprigError::internal("a change topic's table has no shard"))?;
+        let (lex, _) = self.sess.lex_opts();
+        let current = self.sess.current_logical();
+        let ts = self.ts().ok_or_else(|| SprigError::internal("no tenant"))?;
+        let columns = crate::tenant::rls_streams::filter_columns(
+            ts.services(),
+            self.cat.tenant.0,
+            &obj,
+            &slot.cluster,
+            &slot.schema,
+        )
+        .await?;
+        crate::tenant::rls_streams::record_filter(
+            ts,
+            &self.cat,
+            db_name,
+            object,
+            &columns,
+            lex,
+            current.as_deref(),
+        )
+        .await
+    }
+
     fn settings(&self, db: DbId) -> StmtSettings {
         use sprig_streams::settings as s;
         let Some(ts) = self.ts() else {

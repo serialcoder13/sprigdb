@@ -53,7 +53,7 @@ use super::{
 };
 use crate::graphs::mirror::CatalogGate;
 use crate::graphs::txn::{CoordConns, GraphBackend, ReadConns, Touched, check_epochs};
-use crate::graphs::{GatewayGraphs, GraphRef};
+use crate::graphs::{GatewayGraphs, GraphRef, RouteHolds};
 use crate::reads::GtidSet;
 
 /// What an explicit transaction runs on.
@@ -136,11 +136,12 @@ async fn run_on(
     p: &Params,
     b: &sprig_graph::Budgets,
 ) -> Result<sprig_graph::Output> {
+    // Lazy: a read's row error comes after the rows before it (R8 round 8).
     match vis {
-        None => sprig_graph::exec::run(store, q, p, b).await,
+        None => sprig_graph::exec::run_lazy(store, q, p, b).await,
         Some(v) => {
             let mut f = FilteredStore::guarded(store, v.vis, v.writes).await?;
-            sprig_graph::exec::run(&mut f, q, p, b).await
+            sprig_graph::exec::run_lazy(&mut f, q, p, b).await
         }
     }
 }
@@ -334,6 +335,36 @@ fn notification_pack(n: &sprig_graph::exec::Notification) -> PackValue {
         ("description", PackValue::String(n.description.clone())),
         ("severity", PackValue::str(n.severity)),
         ("category", PackValue::str(n.category)),
+    ])
+}
+
+/// A notification as a GQL status object (Bolt 5.5 on), as Neo4j 5.26
+/// sends it.
+fn status_pack(n: &sprig_graph::exec::Notification) -> PackValue {
+    PackValue::map(vec![
+        ("gql_status", PackValue::str(n.gql_status)),
+        ("neo4j_code", PackValue::str(n.code)),
+        (
+            "status_description",
+            PackValue::String(n.status_description.clone()),
+        ),
+        (
+            "diagnostic_record",
+            PackValue::map(vec![
+                ("_classification", PackValue::str(n.category)),
+                ("_severity", PackValue::str(n.severity)),
+                (
+                    "_position",
+                    PackValue::map(vec![
+                        ("offset", PackValue::Int(0)),
+                        ("line", PackValue::Int(1)),
+                        ("column", PackValue::Int(1)),
+                    ]),
+                ),
+            ]),
+        ),
+        ("description", PackValue::String(n.description.clone())),
+        ("title", PackValue::str(n.title)),
     ])
 }
 
@@ -984,7 +1015,10 @@ impl GwSession {
         self.backend.set_config(self.txn_config(&cat));
         if self.tx.is_none() {
             if !writes {
-                let mut rc = ReadConns::default();
+                let mut rc = ReadConns {
+                    implicit: true,
+                    ..ReadConns::default()
+                };
                 if let Err(e) = self.open_reads(&mut rc, &g, read_mode, &cat).await {
                     rc.end().await;
                     return Err(e);
@@ -1009,11 +1043,18 @@ impl GwSession {
                     });
                     return Ok(StartOrResult::Stream(rx, g.name));
                 }
+                // A route over a range a mover holds waits for the hold,
+                // then plans again (R8 round 8, G69).
+                let holds: Arc<dyn sprig_graph::maria::HoldWait> = Arc::new(RouteHolds {
+                    graphs: Arc::clone(&self.graphs),
+                    g: g.clone(),
+                });
                 let r = {
                     let mut store =
                         MariaStore::new(&mut rc, Arc::clone(&g.shards), labels, types, dict, ids)
                             .with_schema(g.def.indexes.clone(), Some(self.graphs.schema_ops(&g)))
-                            .with_gate(gate);
+                            .with_gate(gate)
+                            .with_holds(Some(holds));
                     run_on(&mut store, visible.clone(), &q, &p, &budgets).await
                 };
                 rc.end().await;
@@ -1033,6 +1074,7 @@ impl GwSession {
                     db: DbId(g.shards.db),
                     group: GroupId(g.shards.group),
                     touched: &mut touched,
+                    batches: Some((Arc::clone(&self.graphs), g.clone())),
                 };
                 let r = {
                     let mut store =
@@ -1123,6 +1165,7 @@ impl GwSession {
                                 db: DbId(layout.db),
                                 group: GroupId(layout.group),
                                 touched: &mut touched,
+                                batches: None,
                             };
                             &mut cc
                         }
@@ -1151,6 +1194,7 @@ impl GwSession {
                         db: DbId(g.shards.db),
                         group: GroupId(g.shards.group),
                         touched: &mut touched,
+                        batches: None,
                     };
                     &mut cc
                 }
@@ -1226,7 +1270,17 @@ impl GwSession {
                 "notifications",
                 PackValue::List(out.notifications.iter().map(notification_pack).collect()),
             ));
+            // Bolt 5.5 on: the same as GQL status objects (the protocol
+            // layer sends one or the other, by version).
+            summary.push((
+                "statuses",
+                PackValue::List(out.notifications.iter().map(status_pack).collect()),
+            ));
         }
+        let stream = out.late_error.map(|e| {
+            Box::new(super::stream::LateError(Some(failure(&e))))
+                as Box<dyn sprig_proto_bolt::server::RecordStream>
+        });
         Ok(QueryResult {
             fields: out.columns,
             records,
@@ -1234,6 +1288,7 @@ impl GwSession {
             stats: out.stats.into_iter().collect(),
             db: Some(graph.to_owned()),
             summary,
+            stream,
             ..QueryResult::default()
         })
     }
@@ -1479,6 +1534,7 @@ impl BoltSession for GwSession {
                     db: DbId(layout.db),
                     group: GroupId(layout.group),
                     touched: &mut touched,
+                    batches: None,
                 };
                 check_deleted(&mut cc, layout, ids).await?;
             }

@@ -326,8 +326,53 @@ fn infer(s: &Sig<'_>, a: usize, b: usize, cols: &BTreeMap<String, String>) -> Op
             "abs" => first_col
                 .filter(|t| is_integer_type(t))
                 .map(|_| "BIGINT".to_owned()),
+            // R4 round 5: string columns and literals, `VARCHAR` of their
+            // lengths' sum, as MySQL types it.
+            // R4 round 5: string columns and literals, `VARCHAR` of their
+            // lengths' sum (`CONCAT_WS`: the separator once between each
+            // pair), as MySQL types it.
+            "concat" | "concat_ws" => {
+                let mut lens = Vec::new();
+                for &(x, y) in &args {
+                    lens.push(string_len(s, x, y, &col_type)?);
+                }
+                let n = if f == "concat_ws" {
+                    let (sep, rest) = lens.split_first()?;
+                    rest.iter().sum::<u64>() + sep * (rest.len().max(1) as u64 - 1)
+                } else {
+                    lens.iter().sum()
+                };
+                (n > 0 && n <= 16_383).then(|| format!("VARCHAR({n})"))
+            }
             _ => None,
         };
+    }
+    // R4 round 5: `CASE ... END`, the type its results share (strings:
+    // the longest).
+    if s.word(a, b"CASE") && s.word(b, b"END") {
+        return case_type(s, a, b, cols);
+    }
+    // R4 round 5: a comparison at the top level is 0, 1 or NULL.
+    {
+        let mut d = 0i32;
+        for k in a..=b {
+            if s.punct(k, b'(') {
+                d += 1;
+            } else if s.punct(k, b')') {
+                d -= 1;
+            } else if d == 0
+                && (matches!(s.t[k].kind, TokenKind::Op)
+                    && matches!(
+                        s.t[k].bytes(s.sql),
+                        b"=" | b"<" | b">" | b"<=" | b">=" | b"<>" | b"!=" | b"<=>"
+                    )
+                    || [&b"BETWEEN"[..], b"LIKE", b"IN", b"IS", b"REGEXP"]
+                        .iter()
+                        .any(|w| s.word(k, w)))
+            {
+                return Some("BIGINT".to_owned());
+            }
+        }
     }
     // `c COLLATE x` over a string column (R4 round 4): the column's type
     // with that collation.
@@ -374,6 +419,91 @@ fn infer(s: &Sig<'_>, a: usize, b: usize, cols: &BTreeMap<String, String>) -> Op
         }
     }
     any_col.then(|| if real { "DOUBLE" } else { "BIGINT" }.to_owned())
+}
+
+/// The length of a string argument `[x, y)`: a literal (with or without
+/// an introducer such as `_utf8mb4`) or a `CHAR`/`VARCHAR` column.
+fn string_len<'c>(
+    s: &Sig<'_>,
+    x: usize,
+    y: usize,
+    col_type: &dyn Fn(usize) -> Option<&'c String>,
+) -> Option<u64> {
+    let lit_at = if y == x + 1 {
+        Some(x)
+    } else if y == x + 2
+        && s.t[x].kind == TokenKind::Word
+        && s.t[x].bytes(s.sql).first() == Some(&b'_')
+    {
+        Some(x + 1)
+    } else {
+        None
+    };
+    if let Some(l) = lit_at
+        && s.t[l].kind == TokenKind::String
+    {
+        let lit = lex::string_value(s.t[l].bytes(s.sql), false)?;
+        return Some(String::from_utf8_lossy(&lit).chars().count() as u64);
+    }
+    let single = y == x + 1 || (y == x + 3 && s.punct(x + 1, b'.'));
+    let t = if single { col_type(x)? } else { return None };
+    if !is_string_type(t) {
+        return None;
+    }
+    t.split_once('(')
+        .and_then(|(_, r)| r.split_once(')'))
+        .and_then(|(l, _)| l.trim().parse().ok())
+}
+
+/// The type of `CASE ... END` at `[a, b]`: every `THEN` and `ELSE` result
+/// typed alike (`NULL` results left out); strings give the longest.
+#[allow(clippy::many_single_char_names)] // as infer
+fn case_type(s: &Sig<'_>, a: usize, b: usize, cols: &BTreeMap<String, String>) -> Option<String> {
+    let mut results: Vec<(usize, usize)> = Vec::new();
+    let mut d = 0i32;
+    let mut start: Option<usize> = None;
+    for k in a + 1..=b {
+        if s.punct(k, b'(') {
+            d += 1;
+        } else if s.punct(k, b')') {
+            d -= 1;
+        } else if d == 0 {
+            let ends = s.word(k, b"WHEN") || s.word(k, b"ELSE") || s.word(k, b"END");
+            if ends && let Some(st) = start.take() {
+                results.push((st, k - 1));
+            }
+            if s.word(k, b"THEN") || s.word(k, b"ELSE") {
+                start = Some(k + 1);
+            }
+        }
+    }
+    let mut types: Vec<String> = Vec::new();
+    for (x, y) in results {
+        if x > y {
+            return None;
+        }
+        if x == y && s.word(x, b"NULL") {
+            continue;
+        }
+        types.push(infer(s, x, y, cols)?);
+    }
+    let first = types.first()?.clone();
+    if types.iter().all(|t| *t == first) {
+        return Some(first);
+    }
+    // Strings of several lengths: the longest VARCHAR.
+    let mut n = 0u64;
+    for t in &types {
+        if !is_string_type(t) {
+            return None;
+        }
+        n = n.max(
+            t.split_once('(')
+                .and_then(|(_, r)| r.split_once(')'))
+                .and_then(|(l, _)| l.trim().parse().ok())?,
+        );
+    }
+    Some(format!("VARCHAR({n})"))
 }
 
 /// One functional part found: the part's `(` and `)`, its expression's
@@ -617,12 +747,199 @@ pub fn rewrite_with(
     None
 }
 
+/// `DROP INDEX i ON t` or `ALTER TABLE t DROP {INDEX | KEY} i` alone
+/// (Django's `remove_index` and `remove_constraint`): the table as
+/// written and the index's name (R4 round 5, [`fk_indexes_kept`]).
+#[must_use]
+pub fn drop_index_target(sql: &[u8], opts: &LexOptions) -> Option<(String, String)> {
+    if sql.len() > 4096 || !sql.windows(4).any(|w| w.eq_ignore_ascii_case(b"DROP")) {
+        return None;
+    }
+    let tokens = lex::lex(sql, opts).ok()?;
+    let s = Sig {
+        sql,
+        t: tokens.into_iter().filter(|t| !t.kind.is_trivia()).collect(),
+    };
+    let n = s.t.len() - usize::from(s.punct(s.t.len().checked_sub(1)?, b';'));
+    let table_end = |from: usize| -> Option<usize> {
+        // `t` or `d.t`.
+        if s.punct(from + 1, b'.') {
+            s.ident(from + 2).map(|_| from + 2)
+        } else {
+            s.ident(from).map(|_| from)
+        }
+    };
+    if s.word(0, b"DROP") && s.word(1, b"INDEX") && s.word(3, b"ON") {
+        let name = s.ident(2)?;
+        let end = table_end(4)?;
+        return (end + 1 == n).then(|| (s.text(4, end), name));
+    }
+    if s.word(0, b"ALTER") && s.word(1, b"TABLE") {
+        let end = table_end(2)?;
+        if s.word(end + 1, b"DROP")
+            && (s.word(end + 2, b"INDEX") || s.word(end + 2, b"KEY"))
+            && end + 4 == n
+        {
+            return Some((s.text(2, end), s.ident(end + 3)?));
+        }
+    }
+    None
+}
+
+/// One key part of a table's index, as `information_schema.STATISTICS`
+/// lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexPart {
+    /// The index.
+    pub index: String,
+    /// Its position, from 1.
+    pub seq: u32,
+    /// The column (`None` for an expression).
+    pub column: Option<String>,
+    /// Descending.
+    pub desc: bool,
+}
+
+/// The foreign keys MySQL would still back with their own index once
+/// `dropping` is gone (R4 round 5; Django's `test_composed_desc_func_index_with_fk`).
+///
+/// Both servers create an index for a foreign key and drop it silently
+/// when a later index can serve the key. MySQL never counts an index whose
+/// leading parts are descending as one that can; MariaDB does. So after
+/// `CREATE INDEX i ON book (author_id DESC, title)` MySQL keeps the
+/// foreign key's index and `DROP INDEX i` works, while MariaDB dropped it
+/// and refuses with 1553. For each foreign key (name, columns) whose only
+/// serving index in MariaDB's sense is `dropping`, and which no
+/// ascending index serves (MySQL's sense, so MySQL would refuse too):
+/// the key's name and columns, for an `ADD INDEX` in the same `ALTER`.
+#[must_use]
+pub fn fk_indexes_kept(
+    dropping: &str,
+    parts: &[IndexPart],
+    fks: &[(String, Vec<String>)],
+) -> Vec<(String, Vec<String>)> {
+    let mut by_index: BTreeMap<String, Vec<&IndexPart>> = BTreeMap::new();
+    for p in parts {
+        by_index.entry(p.index.to_lowercase()).or_default().push(p);
+    }
+    for v in by_index.values_mut() {
+        v.sort_by_key(|p| p.seq);
+    }
+    // Whether `ps` leads with `cols`; `asc`: every one of them ascending.
+    let leads = |ps: &[&IndexPart], cols: &[String], asc: bool| {
+        ps.len() >= cols.len()
+            && cols.iter().zip(ps).all(|(c, p)| {
+                p.column
+                    .as_deref()
+                    .is_some_and(|pc| pc.eq_ignore_ascii_case(c))
+                    && (!asc || !p.desc)
+            })
+    };
+    let drop_key = dropping.to_lowercase();
+    let Some(dropped) = by_index.get(&drop_key) else {
+        return Vec::new();
+    };
+    fks.iter()
+        .filter(|(_, cols)| {
+            !cols.is_empty()
+                && leads(dropped, cols, false)
+                && !leads(dropped, cols, true)
+                && !by_index
+                    .iter()
+                    .any(|(k, ps)| *k != drop_key && leads(ps, cols, false))
+        })
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn descending_index_over_a_foreign_key() {
+        let o = LexOptions::mysql84();
+        assert_eq!(
+            drop_index_target(b"DROP INDEX `book_author_title_idx` ON `schema_book`", &o),
+            Some((
+                "`schema_book`".to_owned(),
+                "book_author_title_idx".to_owned()
+            ))
+        );
+        assert_eq!(
+            drop_index_target(b"ALTER TABLE d.t DROP KEY k;", &o),
+            Some(("d.t".to_owned(), "k".to_owned()))
+        );
+        assert_eq!(
+            drop_index_target(b"ALTER TABLE t DROP INDEX k, ADD INDEX j (a)", &o),
+            None
+        );
+        assert_eq!(
+            drop_index_target(b"DROP INDEX k ON t ALGORITHM=INPLACE", &o),
+            None
+        );
+        let p = |index: &str, seq: u32, column: &str, desc: bool| IndexPart {
+            index: index.to_owned(),
+            seq,
+            column: Some(column.to_owned()),
+            desc,
+        };
+        let fks = vec![("book_author_id_fk".to_owned(), vec!["author_id".to_owned()])];
+        // After CREATE INDEX i (author_id DESC, title), MariaDB dropped the
+        // key's own index.
+        let parts = vec![
+            p("PRIMARY", 1, "id", false),
+            p("i", 1, "author_id", true),
+            p("i", 2, "title", false),
+        ];
+        assert_eq!(fk_indexes_kept("i", &parts, &fks), fks);
+        // Ascending: MySQL refuses with 1553 too.
+        let asc = vec![p("i", 1, "author_id", false), p("i", 2, "title", false)];
+        assert!(fk_indexes_kept("i", &asc, &fks).is_empty());
+        // Another index still serves the key.
+        let mut other = parts.clone();
+        other.push(p("book_author_id_fk", 1, "author_id", false));
+        assert!(fk_indexes_kept("i", &other, &fks).is_empty());
+        // The index doesn't lead with the key's column.
+        let unrelated = vec![p("i", 1, "title", true), p("i", 2, "author_id", true)];
+        assert!(fk_indexes_kept("i", &unrelated, &fks).is_empty());
+    }
+
     fn rw(s: &str) -> Option<String> {
         rewrite(s.as_bytes(), &LexOptions::mysql84()).map(|v| String::from_utf8(v).unwrap())
+    }
+
+    #[test]
+    fn concat_and_comparisons() {
+        // R4 round 5: MySQL indexes these; the hidden column needs a type.
+        let out = rw("CREATE TABLE fx (id INT PRIMARY KEY, a INT, s VARCHAR(20), KEY k2 ((CONCAT(s, 'x'))), KEY k3 ((a BETWEEN 1 AND 5)), KEY k4 ((a = 1)))").unwrap();
+        assert!(
+            out.contains("` VARCHAR(21) GENERATED ALWAYS AS (CONCAT(s, 'x'))"),
+            "{out}"
+        );
+        assert!(
+            out.contains("` BIGINT GENERATED ALWAYS AS (a BETWEEN 1 AND 5)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("` BIGINT GENERATED ALWAYS AS (a = 1)"),
+            "{out}"
+        );
+        assert_eq!(rw("CREATE TABLE t (j JSON, KEY ((CONCAT(j, 'x'))))"), None);
+        // Rails' Active Record test schema (companies).
+        let out = rw("CREATE TABLE `companies` (`id` int NOT NULL, `firm_name` varchar(255), `name` varchar(255), `rating` int DEFAULT 1, INDEX `company_expression_index` ((CASE WHEN rating > 0 THEN lower(name) END) DESC), INDEX `full_name_index` ((CONCAT_WS(`firm_name`, `name`, _utf8mb4' '))))").unwrap();
+        assert!(
+            out.contains(
+                "` varchar(255) GENERATED ALWAYS AS (CASE WHEN rating > 0 THEN lower(name) END)"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "` VARCHAR(511) GENERATED ALWAYS AS (CONCAT_WS(`firm_name`, `name`, _utf8mb4' '))"
+            ),
+            "{out}"
+        );
     }
 
     #[test]

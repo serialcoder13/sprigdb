@@ -430,3 +430,61 @@ async fn summary_entries_end_the_result() {
     );
     assert_eq!(r.summary.get("type").and_then(PackValue::as_str), Some("r"));
 }
+
+/// R8 round 8: Bolt 5.5 to 5.8. A 5.8 client gets 5.8; summaries carry
+/// GQL status objects instead of notifications (a completion status first:
+/// `00000` with rows, `02000` without); failures name the Neo4j code as
+/// `neo4j_code`; `RUN` echoes the database. A 5.4 client sees none of it.
+#[tokio::test]
+async fn bolt_5_8_statuses_gql_failures_and_db() {
+    let (mut c, _h) = start(Some([
+        [0, 8, 8, 5],
+        [0, 0, 0, 0],
+        [0, 0, 0, 0],
+        [0, 0, 0, 0],
+    ]))
+    .await;
+    assert_eq!(c.version.to_string(), "5.8");
+    c.login("u", "pw").await.expect("login");
+    let r = c.query("PLAN", vec![], vec![]).await.expect("run");
+    assert_eq!(r.summary.get("notifications"), None);
+    let st = r
+        .summary
+        .get("statuses")
+        .and_then(PackValue::as_list)
+        .expect("statuses");
+    assert_eq!(
+        st[0].get("gql_status").and_then(PackValue::as_str),
+        Some("00000")
+    );
+    let r = c.query("0", vec![], vec![]).await.expect("run");
+    let st = r
+        .summary
+        .get("statuses")
+        .and_then(PackValue::as_list)
+        .expect("statuses");
+    assert_eq!(
+        st[0].get("gql_status").and_then(PackValue::as_str),
+        Some("02000")
+    );
+    // The failure's code arrives as `neo4j_code` (the client reads both).
+    let e = c.query("BAD", vec![], vec![]).await.expect_err("bad");
+    assert_eq!(e.code, "Neo.ClientError.Statement.SyntaxError");
+    c.send(&Request::Run {
+        query: "1".into(),
+        params: PackValue::Map(vec![]),
+        extra: PackValue::map([("db", PackValue::str("g1"))]),
+    })
+    .await
+    .expect("send");
+    let Response::Success(m) = c.recv().await.expect("run") else {
+        panic!("run")
+    };
+    assert_eq!(m.get("db").and_then(PackValue::as_str), Some("g1"));
+    // A 5.4 client: notifications, no statuses, no db on RUN.
+    let (mut c, _h) = start(None).await;
+    c.login("u", "pw").await.expect("login");
+    let r = c.query("PLAN", vec![], vec![]).await.expect("run");
+    assert_eq!(r.summary.get("statuses"), None);
+    assert!(r.summary.get("notifications").is_some());
+}

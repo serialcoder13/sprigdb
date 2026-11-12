@@ -432,7 +432,9 @@ impl Cx<'_> {
                         next.extend(self.block(a, sa)?);
                         next.extend(self.block(b, sb)?);
                     }
-                    Stmt::While { .. } | Stmt::Break => return Err("a loop".into()),
+                    Stmt::While { .. } | Stmt::Break | Stmt::Continue => {
+                        return Err("a loop".into());
+                    }
                     Stmt::Db(_) => return Err("data access".into()),
                     Stmt::Emit(name, fields) => {
                         if s.end.is_none() {

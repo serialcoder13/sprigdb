@@ -1,0 +1,57 @@
+// sprig.v1: change streams (chapter 37, "Change streams"; chapter 38). A
+// subscription to a database's row changes, over gRPC streaming, and over
+// REST as Server-Sent Events, WebSocket or NDJSON. Each event is checked
+// against the subscriber's privileges and row-level security before it is
+// sent (chapter 29, RLS round 5, decision RL45).
+syntax = "proto3";
+
+package sprig.v1;
+
+import "google/api/annotations.proto";
+
+// Watches a database's changes.
+service Changes {
+  // The changes of the database's tables (or of `objects`), from `start_after`
+  // or now, until the caller cancels.
+  rpc Watch(WatchRequest) returns (stream ChangeEvent) {
+    option (google.api.http) = {
+      get: "/v1/databases/{database}/changes"
+    };
+  }
+}
+
+// What to watch.
+message WatchRequest {
+  // The logical database.
+  string database = 1;
+  // Tables (or collections); empty: every table the caller may read.
+  repeated string objects = 2;
+  // A resume token (chapter 38), or empty for "now".
+  string start_after = 3;
+  // An alternative start point; 0 if unused (not supported yet: 39787).
+  uint64 start_at_hlc = 4;
+  // Include the whole row after an update, not only the changed columns.
+  bool full_document = 5;
+}
+
+// One change, or a heartbeat.
+message ChangeEvent {
+  // Resume after this event.
+  string resume_token = 1;
+  // The transaction's commit clamp (HLC).
+  uint64 commit_hlc = 2;
+  // The table.
+  string object = 3;
+  // `table`.
+  string model = 4;
+  // `insert`, `update`, `delete`, `ddl`, `truncate` or `heartbeat`.
+  string op = 5;
+  // The primary key, as a JSON object.
+  string key = 6;
+  // The row after the change (inserts; updates with `full_document`), JSON.
+  string after = 7;
+  // An update's changed columns with their new values, JSON.
+  string update = 8;
+  // A DDL statement, with logical names.
+  string ddl = 9;
+}

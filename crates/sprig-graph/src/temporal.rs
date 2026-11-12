@@ -666,10 +666,34 @@ pub fn construct(name: &str, args: &[Value]) -> Result<Option<Value>> {
         (_, Value::String(s)) => parse(kind, &s)?,
         (_, Value::Map(m)) => temporal_from_map(kind, &m)?,
         (k, v) if same_kind(k, &v) => v,
-        (_, v) => {
-            return Err(bad(format!("{name}() can't take a {}", v.type_name())));
-        }
+        (k, v) => match convert(k, &v) {
+            Some(x) => x,
+            None => return Err(bad(format!("{name}() can't take a {}", v.type_name()))),
+        },
     }))
+}
+
+/// Another temporal value's parts as `kind` (Neo4j 5: `date(dt)`,
+/// `localdatetime(datetime(...))`, ...; local values become zoned at UTC).
+/// `None` when `v` lacks a part `kind` needs (a date has no time).
+fn convert(kind: &str, v: &Value) -> Option<Value> {
+    Some(match (kind, v) {
+        ("date", Value::DateTime(z)) => Value::Date(z.local.date()),
+        ("date", Value::LocalDateTime(l)) => Value::Date(l.date()),
+        ("localtime", Value::DateTime(z)) => Value::LocalTime(z.local.time()),
+        ("localtime", Value::LocalDateTime(l)) => Value::LocalTime(l.time()),
+        ("localtime", Value::Time(t, _)) => Value::LocalTime(*t),
+        ("time", Value::DateTime(z)) => Value::Time(z.local.time(), z.offset),
+        ("time", Value::LocalDateTime(l)) => Value::Time(l.time(), 0),
+        ("time", Value::LocalTime(t)) => Value::Time(*t, 0),
+        ("localdatetime", Value::DateTime(z)) => Value::LocalDateTime(z.local),
+        ("datetime", Value::LocalDateTime(l)) => Value::DateTime(Box::new(Zoned {
+            local: *l,
+            offset: 0,
+            zone: None,
+        })),
+        _ => return None,
+    })
 }
 
 /// `<kind>.truncate(unit, value [, map])` (round 3): the value cut down to
@@ -1304,6 +1328,13 @@ pub fn to_stored(v: &Value) -> Option<(&'static str, serde_json::Value)> {
         Value::LocalDateTime(_) => "localdatetime",
         Value::DateTime(_) => "datetime",
         Value::Duration(_) => "duration",
+        Value::Bytes(b) => {
+            use base64::Engine as _;
+            return Some((
+                "bytes",
+                serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(b)),
+            ));
+        }
         Value::Point(p) => {
             let mut m = serde_json::Map::new();
             m.insert("srid".into(), serde_json::Value::from(p.srid));
@@ -1336,6 +1367,13 @@ pub fn from_stored(kind: &str, j: &serde_json::Value) -> Option<Value> {
             "date" | "localtime" | "time" | "localdatetime" | "datetime" | "duration",
             serde_json::Value::String(s),
         ) => parse(kind, s).ok(),
+        ("bytes", serde_json::Value::String(s)) => {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD
+                .decode(s)
+                .ok()
+                .map(Value::Bytes)
+        }
         _ => None,
     }
 }

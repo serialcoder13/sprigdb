@@ -55,8 +55,14 @@ impl std::fmt::Display for BoltVersion {
     }
 }
 
-/// The versions this build speaks, highest first: 5.0 to 5.4.
-pub const SUPPORTED: [BoltVersion; 5] = [
+/// The versions this build speaks, highest first: 5.0 to 5.8 (5.5 to 5.8
+/// since R8 round 8: GQL status objects in summaries from 5.5, GQL errors
+/// from 5.7, the database echoed on `RUN` from 5.8).
+pub const SUPPORTED: [BoltVersion; 9] = [
+    BoltVersion::new(5, 8),
+    BoltVersion::new(5, 7),
+    BoltVersion::new(5, 6),
+    BoltVersion::new(5, 5),
     BoltVersion::new(5, 4),
     BoltVersion::new(5, 3),
     BoltVersion::new(5, 2),
@@ -332,6 +338,21 @@ pub enum Response {
         /// The message.
         message: String,
     },
+    /// `FAILURE` (`7F`) from Bolt 5.7 on: GQL's error fields (`gql_status`,
+    /// `description`, `diagnostic_record`) beside the Neo4j code, now
+    /// named `neo4j_code`.
+    GqlFailure {
+        /// The Neo4j status code.
+        code: String,
+        /// The message.
+        message: String,
+        /// The GQLSTATUS (`42001`, `50N42`, ...).
+        gql_status: String,
+        /// Its description.
+        description: String,
+        /// `_classification` and the like; `None`: left out.
+        diagnostic: Option<PackValue>,
+    },
 }
 
 impl Response {
@@ -358,6 +379,27 @@ impl Response {
                     ("message", PackValue::str(message.clone())),
                 ])],
             },
+            Response::GqlFailure {
+                code,
+                message,
+                gql_status,
+                description,
+                diagnostic,
+            } => {
+                let mut m = vec![
+                    ("neo4j_code", PackValue::str(code.clone())),
+                    ("message", PackValue::str(message.clone())),
+                    ("gql_status", PackValue::str(gql_status.clone())),
+                    ("description", PackValue::str(description.clone())),
+                ];
+                if let Some(d) = diagnostic {
+                    m.push(("diagnostic_record", d.clone()));
+                }
+                PackValue::Struct {
+                    tag: 0x7F,
+                    fields: vec![PackValue::map(m)],
+                }
+            }
         };
         let mut b = BytesMut::new();
         packstream::encode(&v, &mut b);
@@ -414,11 +456,17 @@ mod tests {
         // Java driver 5.x: 5.4..5.0 as one range, then 4.4..4.2.
         let p = [[0, 4, 4, 5], [0, 2, 4, 4], [0, 0, 0, 0], [0, 0, 0, 0]];
         assert_eq!(negotiate(&p, ours), Some(BoltVersion::new(5, 4)));
-        // A newer client: 5.8 down to 5.0.
+        // A newer client: 5.8 down to 5.0 (R8 round 8: 5.8 itself).
         let p = [[0, 8, 8, 5], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
-        assert_eq!(negotiate(&p, ours), Some(BoltVersion::new(5, 4)));
-        // Only 5.8..5.6: nothing in common.
+        assert_eq!(negotiate(&p, ours), Some(BoltVersion::new(5, 8)));
+        // Only 5.8..5.6: 5.8.
         let p = [[0, 2, 8, 5], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
+        assert_eq!(negotiate(&p, ours), Some(BoltVersion::new(5, 8)));
+        // 5.7 down to 5.5 only: 5.7.
+        let p = [[0, 2, 7, 5], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
+        assert_eq!(negotiate(&p, ours), Some(BoltVersion::new(5, 7)));
+        // 6.0 only: nothing in common.
+        let p = [[0, 0, 0, 6], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
         assert_eq!(negotiate(&p, ours), None);
         // 4.x only: refused (00 00 00 00).
         let p = [[0, 0, 4, 4], [0, 0, 3, 4], [0, 0, 0, 0], [0, 0, 0, 0]];
@@ -430,6 +478,43 @@ mod tests {
         let p = [[0, 0, 1, 5], [0, 0, 4, 5], [0, 0, 0, 0], [0, 0, 0, 0]];
         assert_eq!(negotiate(&p, ours), Some(BoltVersion::new(5, 1)));
         assert_eq!(BoltVersion::new(5, 4).to_bytes(), [0, 0, 4, 5]);
+    }
+
+    #[test]
+    fn gql_failures_name_the_neo4j_code() {
+        let f = Response::GqlFailure {
+            code: "Neo.ClientError.Statement.SyntaxError".into(),
+            message: "bad".into(),
+            gql_status: "42001".into(),
+            description: "error: syntax error or access rule violation - invalid syntax".into(),
+            diagnostic: Some(PackValue::map([(
+                "_classification",
+                PackValue::str("CLIENT_ERROR"),
+            )])),
+        };
+        let v = packstream::decode(&f.encode()).expect("decode");
+        let PackValue::Struct { tag: 0x7F, fields } = v else {
+            panic!("{v:?}")
+        };
+        let m = &fields[0];
+        assert_eq!(
+            m.get("neo4j_code").and_then(PackValue::as_str),
+            Some("Neo.ClientError.Statement.SyntaxError")
+        );
+        assert_eq!(m.get("code"), None);
+        assert_eq!(
+            m.get("gql_status").and_then(PackValue::as_str),
+            Some("42001")
+        );
+        assert!(m.get("diagnostic_record").is_some());
+        // Decoded as a plain failure, the code is kept.
+        assert_eq!(
+            Response::decode(&f.encode()).expect("decode"),
+            Response::Failure {
+                code: "Neo.ClientError.Statement.SyntaxError".into(),
+                message: "bad".into()
+            }
+        );
     }
 
     #[test]

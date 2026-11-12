@@ -18,7 +18,11 @@ export interface DeclForm {
   security: 'invoker' | 'definer';
   tier: 'auto' | 'mariadb' | 'engine';
   body: string;
+  /** Deploy as a staged rollout (round 6, RC18): the candidate's share and key. */
+  rollout?: { pct: number; by: RolloutBy } | null;
 }
+
+export type RolloutBy = 'user' | 'tenant';
 
 export const ident = (s: string) => `\`${s.replace(/`/g, '``')}\``;
 
@@ -30,7 +34,13 @@ export function sqlString(s: string): string {
 /** `CREATE OR REPLACE ...` for the form. */
 export function declaration(db: string, f: DeclForm): string {
   const head = `CREATE OR REPLACE ${f.kind.toUpperCase()} ${ident(db)}.${ident(f.name)}`;
-  const opts = `SQL SECURITY ${f.security.toUpperCase()} WITH (SPRIG_TIER = '${f.tier}')`;
+  let staged = '';
+  if (f.rollout) {
+    const n = f.rollout.pct;
+    if (!Number.isInteger(n) || n < 1 || n > 99) throw new Error('a rollout stage is 1 to 99 percent');
+    staged = `, SPRIG_ROLLOUT = ${n}${f.rollout.by === 'tenant' ? ", SPRIG_ROLLOUT_BY = 'tenant'" : ''}`;
+  }
+  const opts = `SQL SECURITY ${f.security.toUpperCase()} WITH (SPRIG_TIER = '${f.tier}'${staged})`;
   if (f.runtime === 'kirun') return `${head} LANGUAGE kirun ${opts} AS ${sqlString(f.body)}`;
   if (f.body.includes('$$')) throw new Error('the body may not contain $$');
   const params = `(${f.params.trim()})`;
@@ -131,4 +141,49 @@ export function template(runtime: Runtime, kind: LogicKind, name: string): Pick<
   }
   if (runtime === 'lua') return { params: 'a BIGINT', returns: kind === 'function' ? 'BIGINT' : '', body: 'return a * 2' };
   return { params: 'a BIGINT', returns: kind === 'function' ? 'BIGINT' : '', body: 'return a * 2;' };
+}
+
+export type RolloutAction = { to: number; by?: RolloutBy } | 'promote' | 'abort';
+
+/** `ALTER FUNCTION | PROCEDURE db.f ROLLOUT TO n [BY USER | TENANT] | PROMOTE | ABORT` (RC19). */
+export function rolloutStatement(db: string, kind: LogicKind, name: string, a: RolloutAction): string {
+  const head = `ALTER ${kind.toUpperCase()} ${ident(db)}.${ident(name)} ROLLOUT`;
+  if (a === 'promote') return `${head} PROMOTE`;
+  if (a === 'abort') return `${head} ABORT`;
+  if (!Number.isInteger(a.to) || a.to < 1 || a.to > 99) throw new Error('a rollout stage is 1 to 99 percent (100 promotes, 0 aborts)');
+  return `${head} TO ${a.to}${a.by ? ` BY ${a.by.toUpperCase()}` : ''}`;
+}
+
+/** The kinds `DROP` takes for a logic module. */
+export const DROP_KINDS = ['function', 'procedure', 'validation', 'trigger', 'schedule'] as const;
+
+/** `DROP {FUNCTION | ...} db.name RESTRICT | CASCADE` (RC22). */
+export function dropStatement(db: string, kind: string, name: string, cascade: boolean): string {
+  const k = kind.toLowerCase();
+  if (!(DROP_KINDS as readonly string[]).includes(k)) throw new Error(`a ${kind} isn't dropped with DROP`);
+  return `DROP ${k.toUpperCase()} ${ident(db)}.${ident(name)} ${cascade ? 'CASCADE' : 'RESTRICT'}`;
+}
+
+export interface Dependents {
+  schedules: string[];
+  sinks: string[];
+  columns: string[];
+  callers: string[];
+}
+
+/** What 39875 says still uses the module (`... is in use: schedules a, b; sinks s (TRANSFORM); computed columns t.c; code that calls it: function g. Drop or ...`). */
+export function dependentsOf(message: string): Dependents | null {
+  const m = /is in use: (.*?)\. Drop or change them first/s.exec(message);
+  const sink = /is the TRANSFORM of sinks (.*?):/s.exec(message);
+  if (!m && !sink) return null;
+  const d: Dependents = { schedules: [], sinks: [], columns: [], callers: [] };
+  if (sink) d.sinks = sink[1]!.split(',').map((x) => x.trim()).filter(Boolean);
+  for (const part of (m?.[1] ?? '').split('; ')) {
+    const list = (rest: string) => rest.split(',').map((x) => x.trim()).filter(Boolean);
+    if (part.startsWith('schedules ')) d.schedules = list(part.slice('schedules '.length));
+    else if (part.startsWith('sinks ')) d.sinks = list(part.slice('sinks '.length).replace(/ \(TRANSFORM\)$/, ''));
+    else if (part.startsWith('computed columns ')) d.columns = list(part.slice('computed columns '.length));
+    else if (part.startsWith('code that calls it: ')) d.callers = list(part.slice('code that calls it: '.length));
+  }
+  return d;
 }

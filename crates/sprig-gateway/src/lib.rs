@@ -376,6 +376,8 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             dc.clone(),
         ));
         let data = Arc::new(kafka::data::GatewayData::start(Arc::clone(t), stop.clone()));
+        // Chapter 29 (RL44): filtered change-topic reads run as the reader.
+        data.set_engine(Arc::clone(&engine));
         Arc::new(kafka::KafkaFrontend::start(
             kafka::KafkaDeps {
                 live: live.clone(),

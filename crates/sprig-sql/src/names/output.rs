@@ -157,10 +157,14 @@ fn internal_owner(name: &str) -> Option<&str> {
 /// them under `@sprig_show_internal`.
 #[must_use]
 pub fn map_bytes<'t>(text: &'t [u8], ctx: &OutputCtx<'_>) -> Mapped<'t> {
-    scan(text, ctx, false)
+    scan(text, ctx, false, false)
 }
 
-fn scan<'t>(text: &'t [u8], ctx: &OutputCtx<'_>, owners: bool) -> Mapped<'t> {
+/// `keep_foreign`: a run that looks like a physical name but isn't the
+/// tenant's stays as it is instead of becoming `?` (column names, R4
+/// round 5: Rails names eager-loaded columns `t0_r0`, `t1_r2`, which read
+/// as backend role accounts).
+fn scan<'t>(text: &'t [u8], ctx: &OutputCtx<'_>, owners: bool, keep_foreign: bool) -> Mapped<'t> {
     let mut out: Option<Vec<u8>> = None;
     let mut foreign = 0;
     let mut copied = 0;
@@ -187,6 +191,7 @@ fn scan<'t>(text: &'t [u8], ctx: &OutputCtx<'_>, owners: bool) -> Mapped<'t> {
         let repl = match map_run(run, ctx, owners) {
             Repl::Keep => continue,
             Repl::Logical(l) => l,
+            Repl::Foreign if keep_foreign => continue,
             Repl::Foreign => {
                 foreign += 1;
                 UNKNOWN.to_owned()
@@ -220,7 +225,7 @@ fn scan<'t>(text: &'t [u8], ctx: &OutputCtx<'_>, owners: bool) -> Mapped<'t> {
 /// [`map_message`] with the foreign-name count.
 #[must_use]
 pub fn map_text<'t>(msg: &'t str, ctx: &OutputCtx<'_>) -> (Cow<'t, str>, usize) {
-    let m = scan(msg.as_bytes(), ctx, true);
+    let m = scan(msg.as_bytes(), ctx, true, false);
     let text = match m.text {
         Cow::Borrowed(_) => Cow::Borrowed(msg),
         Cow::Owned(o) => Cow::Owned(
@@ -269,7 +274,9 @@ pub fn map_column_def(cd: &mut ColumnDef, ctx: &OutputCtx<'_>) -> usize {
         if let Cow::Owned(o) = super::stored::restore(field) {
             *field = bytes::Bytes::from(o);
         }
-        let m = map_bytes(field, ctx);
+        // A name the statement chose (`AS t0_r0`) that only looks like
+        // another tenant's physical name stays: it is the client's own text.
+        let m = scan(field, ctx, false, true);
         if let Cow::Owned(o) = m.text {
             foreign += m.foreign;
             *field = bytes::Bytes::from(o);

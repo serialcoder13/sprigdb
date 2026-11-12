@@ -45,6 +45,12 @@ pub static LEASE_TTL_SECONDS: Setting<u64> = Setting {
 };
 sprig_settings::register!(LEASE_TTL_SECONDS);
 
+/// `gateway-processes/<token>` in the DC tier: a running gateway
+/// process (its [`process_token`](sprig_catalog::ddl::process_token)),
+/// under the registration lease; the value is the gateway's id. A DDL job
+/// whose owner's key is gone was abandoned (bugfix-38).
+pub const PROCESS_PREFIX: &str = "gateway-processes/";
+
 /// How often the load report is rewritten.
 pub const LOAD_PERIOD: Duration = Duration::from_secs(5);
 /// Wait before registering again after a failure.
@@ -352,6 +358,16 @@ impl Registrar {
             lease: Some(session.lease()),
         }];
         then.extend(load.as_ref().map(|(op, _)| op.clone()));
+        // bugfix-38: this process's token under the same lease, so another
+        // gateway can tell its DDL jobs were abandoned once it is gone.
+        then.push(Op::Put {
+            key: store.tier().key(&format!(
+                "{PROCESS_PREFIX}{}",
+                sprig_catalog::ddl::process_token()
+            ))?,
+            value: id.clone().into_bytes(),
+            lease: Some(session.lease()),
+        });
         store
             .txn(Txn {
                 when: vec![],

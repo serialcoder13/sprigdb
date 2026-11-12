@@ -977,3 +977,168 @@ async fn explain_and_profile_plans() {
     let plain = q(&mut s, "MATCH (n:Person) RETURN n.name").await;
     assert!(plain.plan.is_none() && !plain.profiled && plain.notifications.is_empty());
 }
+
+/// R8 round 8: `CALL { } IN TRANSACTIONS`, reads and writes, with
+/// Neo4j 5.26's answers (checked on the reference): batches commit on their
+/// own; a failed batch rolls back and `ON ERROR` decides what follows.
+#[tokio::test]
+async fn call_in_transactions_batches_and_errors() {
+    for shards in [1, 4] {
+        let mut s = MemStore::new(shards);
+        // A read, one row per batch, errors become nulls.
+        let o = q(
+            &mut s,
+            "UNWIND [1, 0, 2] AS x CALL (x) { RETURN 10 / x AS y } IN TRANSACTIONS OF 1 ROW ON ERROR CONTINUE RETURN x, y",
+        )
+        .await;
+        assert_eq!(show(&o), ["1|10", "0|null", "2|5"]);
+        let o = q(
+            &mut s,
+            "UNWIND [1, 0, 2] AS x CALL { WITH x RETURN 10 / x AS y } IN TRANSACTIONS OF 1 ROW ON ERROR BREAK RETURN x, y",
+        )
+        .await;
+        assert_eq!(show(&o), ["1|10", "0|null", "2|null"]);
+        // Writes with a status report: the failed batch is rolled back.
+        let o = q(
+            &mut s,
+            "UNWIND [1, 0, 2] AS x CALL (x) { CREATE (:T {x: 10 / x}) } IN TRANSACTIONS OF 1 ROW ON ERROR CONTINUE REPORT STATUS AS s RETURN x, s.committed AS c, s.errorMessage IS NULL AS ok",
+        )
+        .await;
+        assert_eq!(show(&o), ["1|true|true", "0|false|false", "2|true|true"]);
+        assert_eq!(o.stats.get("nodes-created"), Some(&2));
+        let o = q(&mut s, "MATCH (t:T) RETURN t.x ORDER BY t.x").await;
+        assert_eq!(show(&o), ["5", "10"]);
+        // ON ERROR FAIL (the default): earlier batches stay.
+        let e = crate::execute(
+            &mut s,
+            "UNWIND [1, 0, 2] AS x CALL (x) { CREATE (:U {x: 10 / x}) } IN TRANSACTIONS OF 1 ROW",
+            &Params::new(),
+            &Budgets::default(),
+        )
+        .await
+        .expect_err("division by zero");
+        assert!(e.message.ends_with("(Transactions committed: 1)"), "{e}");
+        let o = q(&mut s, "MATCH (u:U) RETURN count(*)").await;
+        assert_eq!(show(&o), ["1"]);
+        // Batches of two rows.
+        let o = q(
+            &mut s,
+            "UNWIND range(1, 5) AS x CALL (x) { CREATE (:V {x: x}) } IN TRANSACTIONS OF 2 ROWS",
+        )
+        .await;
+        assert_eq!(o.stats.get("nodes-created"), Some(&5));
+        // Grammar: REPORT STATUS needs CONTINUE or BREAK; RETRY is refused.
+        for bad in [
+            "UNWIND [1] AS x CALL (x) { RETURN 1 AS y } IN TRANSACTIONS REPORT STATUS AS s RETURN s",
+            "UNWIND [1] AS x CALL (x) { RETURN 1 AS y } IN TRANSACTIONS ON ERROR RETRY RETURN y",
+        ] {
+            assert!(crate::parser::parse(bad).is_err(), "{bad}");
+        }
+        assert!(
+            crate::parser::parse(
+                "UNWIND [1] AS x CALL (x) { RETURN 1 AS y } IN 2 CONCURRENT TRANSACTIONS OF 10 ROWS ON ERROR BREAK REPORT STATUS AS s RETURN y, s"
+            )
+            .is_ok()
+        );
+    }
+}
+
+/// R8 round 8: a read's top `RETURN` evaluates rows as Neo4j's lazy
+/// results do. `run_lazy` answers the rows before a row's error with the
+/// error after them; rows past `LIMIT` are never evaluated; `run` still
+/// fails the statement.
+#[tokio::test]
+async fn row_errors_come_after_the_rows_before_them() {
+    let mut s = MemStore::new(1);
+    let qy = crate::parser::parse("UNWIND [1, 0, 2] AS x RETURN 10 / x AS y").expect("parse");
+    let o = crate::exec::run_lazy(&mut s, &qy, &Params::new(), &Budgets::default())
+        .await
+        .expect("lazy");
+    assert_eq!(show(&o), ["10"]);
+    let e = o.late_error.expect("late error");
+    assert_eq!(
+        crate::neo4j::status_code(&e),
+        "Neo.ClientError.Statement.ArithmeticError"
+    );
+    assert!(
+        crate::exec::run(&mut s, &qy, &Params::new(), &Budgets::default())
+            .await
+            .is_err()
+    );
+    // Past LIMIT nothing is evaluated (Neo4j answers 10).
+    let o = q(&mut s, "UNWIND [1, 0] AS x RETURN 10 / x AS y LIMIT 1").await;
+    assert_eq!(show(&o), ["10"]);
+    // ORDER BY needs every row: the error is the statement's.
+    let qy =
+        crate::parser::parse("UNWIND [1, 0] AS x RETURN 10 / x AS y ORDER BY y").expect("parse");
+    assert!(
+        crate::exec::run_lazy(&mut s, &qy, &Params::new(), &Budgets::default())
+            .await
+            .is_err()
+    );
+}
+
+/// R8 round 8: byte arrays are values, properties (stored with a `bytes`
+/// type entry) and comparable, as in Neo4j.
+#[tokio::test]
+async fn byte_arrays_are_values_and_properties() {
+    let mut s = MemStore::new(4);
+    let b = Value::Bytes(vec![1, 2, 255]);
+    let o = qp(
+        &mut s,
+        "CREATE (x:B {b: $b}) RETURN x.b AS b, size($b) AS n, valueType($b) AS t, $b = $b AS eq",
+        &[("b", b.clone())],
+    )
+    .await;
+    assert_eq!(o.rows[0][0], b);
+    assert_eq!(o.rows[0][1], Value::Int(3));
+    assert_eq!(
+        o.rows[0][2],
+        Value::String("LIST<INTEGER NOT NULL> NOT NULL".into())
+    );
+    assert_eq!(o.rows[0][3], Value::Bool(true));
+    let o = qp(
+        &mut s,
+        "MATCH (x:B) WHERE x.b = $b RETURN count(*)",
+        &[("b", b.clone())],
+    )
+    .await;
+    assert_eq!(show(&o), ["1"]);
+    let (props, types) =
+        crate::value::props_to_json(&[("b".to_owned(), b.clone())].into_iter().collect());
+    assert_eq!(props["b"], serde_json::json!("AQL/"));
+    assert_eq!(
+        crate::value::props_from_json(&props, types.as_ref()).get("b"),
+        Some(&b)
+    );
+}
+
+/// R8 round 8 (the drivers' testkit): a temporal function takes another
+/// temporal value and keeps the parts it needs, as Neo4j 5.26 answers.
+#[tokio::test]
+async fn temporal_functions_take_other_temporal_values() {
+    let mut s = MemStore::new(1);
+    let o = q(
+        &mut s,
+        "WITH datetime('2020-03-04T05:06:07.123456789[Europe/Berlin]') AS d, localdatetime('2021-01-02T03:04:05') AS l \
+         RETURN toString(localdatetime(d)), toString(date(d)), toString(localtime(d)), toString(time(d)), \
+                toString(date(l)), toString(localtime(l)), toString(datetime(l)), toString(time(l))",
+    )
+    .await;
+    assert_eq!(
+        show(&o),
+        [
+            "2020-03-04T05:06:07.123456789|2020-03-04|05:06:07.123456789|05:06:07.123456789+01:00|2021-01-02|03:04:05|2021-01-02T03:04:05Z|03:04:05Z"
+        ]
+    );
+    assert!(
+        crate::execute(
+            &mut s,
+            "RETURN localdatetime(date('2022-02-03'))",
+            &Params::new(),
+            &Budgets::default()
+        )
+        .await
+        .is_err()
+    );
+}

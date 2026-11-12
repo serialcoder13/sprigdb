@@ -20,6 +20,7 @@ fn session<'a>(
         connection_id: 7,
         connect_attrs: attrs,
         current_db: db,
+        digests: &[],
     }
 }
 
@@ -295,4 +296,114 @@ fn functions() {
     assert!(!sql.to_ascii_uppercase().contains("FORMAT_BYTES"), "{sql}");
     // A parameter is used once: left alone.
     assert!(rw("SELECT FORMAT_BYTES(?)", None).is_none());
+}
+
+#[test]
+fn statement_digests() {
+    // R4 round 5: the gateway's digests in MySQL's digest summary and sys views.
+    let v = vars();
+    let d = [PsDigest {
+        schema: Some("shop".to_owned()),
+        digest: "00ab00cd00ef0011".to_owned(),
+        text: "SELECT * FROM shop.t WHERE id = ?".to_owned(),
+        count: 4,
+        errors: 1,
+        sum_us: 1_000,
+        min_us: 100,
+        max_us: 400,
+        rows_sent: 3,
+        first_seen_us: 1_700_000_000_000_001,
+        last_seen_us: 1_700_000_100_250_000,
+        p95_us: 512,
+        ..PsDigest::default()
+    }];
+    let s = PsSession {
+        digests: &d,
+        ..session(&v, &[], None)
+    };
+    let rw = |q: &str| {
+        String::from_utf8(
+            rewrite(q.as_bytes(), &LexOptions::mysql84(), &s)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let sql =
+        rw("SELECT DIGEST, COUNT_STAR FROM performance_schema.events_statements_summary_by_digest");
+    for want in [
+        "CAST('shop' AS CHAR(64)) AS `SCHEMA_NAME`",
+        "CAST('00ab00cd00ef0011' AS CHAR(64)) AS `DIGEST`",
+        "CAST(4 AS UNSIGNED) AS `COUNT_STAR`",
+        "CAST(1000000000 AS UNSIGNED) AS `SUM_TIMER_WAIT`",
+        "CAST(250000000 AS UNSIGNED) AS `AVG_TIMER_WAIT`",
+        "CAST(0 AS UNSIGNED) AS `SUM_LOCK_TIME`",
+        "CAST(FROM_UNIXTIME(1700000000.000001) AS DATETIME(6)) AS `FIRST_SEEN`",
+        "CAST(NULL AS CHAR(65535)) AS `QUERY_SAMPLE_TEXT`",
+    ] {
+        assert!(sql.contains(want), "{want} in {sql}");
+    }
+    assert!(!sql.contains("LIMIT 0"), "{sql}");
+    let sa = rw("SELECT * FROM sys.statement_analysis");
+    assert!(
+        sa.contains("AS `total_latency`") && sa.contains("' us'"),
+        "{sa}"
+    );
+    let xa = rw("SELECT * FROM sys.x$statement_analysis");
+    assert!(
+        xa.contains("CAST(1000000000 AS UNSIGNED) AS `total_latency`"),
+        "{xa}"
+    );
+    let ew = rw("SELECT * FROM sys.statements_with_errors_or_warnings");
+    assert!(ew.contains("ROUND(100 * 1 / 4, 4)"), "{ew}");
+    // No digests: the empty table, as before.
+    let none = String::from_utf8(
+        rewrite(
+            b"SELECT * FROM performance_schema.events_statements_summary_by_digest",
+            &LexOptions::mysql84(),
+            &session(&v, &[], None),
+        )
+        .unwrap()
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(none.contains("LIMIT 0"), "{none}");
+    assert!(wants_digests(b"select * from sys.statement_analysis"));
+    assert!(!wants_digests(b"select * from performance_schema.threads"));
+    assert!(is_truncate_digests(
+        b"TRUNCATE TABLE performance_schema.events_statements_summary_by_digest",
+        None
+    ));
+    assert!(is_truncate_digests(
+        b"truncate `events_statements_summary_by_digest`;",
+        Some("performance_schema")
+    ));
+    assert!(!is_truncate_digests(
+        b"TRUNCATE t",
+        Some("performance_schema")
+    ));
+}
+
+#[test]
+fn show_tables_in_the_system_schemas() {
+    // R4 round 5: after `USE performance_schema`, and named.
+    let s = rw("SHOW TABLES", Some("performance_schema"))
+        .unwrap()
+        .unwrap();
+    assert!(
+        s.contains("SELECT 'threads' AS `Tables_in_performance_schema`"),
+        "{s}"
+    );
+    assert!(s.ends_with("ORDER BY 1"), "{s}");
+    let s = rw("SHOW FULL TABLES FROM sys LIKE 'x$%'", None)
+        .unwrap()
+        .unwrap();
+    assert!(s.contains("'VIEW' AS `Table_type`"), "{s}");
+    assert!(s.contains("WHERE `Tables_in_sys` LIKE 'x$%'"), "{s}");
+    assert!(
+        s.starts_with("SELECT `Tables_in_sys` AS `Tables_in_sys (x$%)`, `Table_type` FROM"),
+        "{s}"
+    );
+    assert!(rw("SHOW TABLES", Some("shop")).is_none());
+    assert!(rw("SHOW TABLES FROM performance_schema WHERE 1", None).is_none());
 }

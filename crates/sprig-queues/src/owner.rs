@@ -1386,8 +1386,7 @@ impl Core {
             .map(|(s, _)| *s)
             .collect();
         if tag {
-            metrics::counter!("sprig_queue_lease_tag_returned_total")
-                .increment(seqs.len() as u64);
+            metrics::counter!("sprig_queue_lease_tag_returned_total").increment(seqs.len() as u64);
         }
         for s in seqs {
             self.requeue(s, true);

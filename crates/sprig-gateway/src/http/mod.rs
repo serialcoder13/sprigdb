@@ -34,6 +34,8 @@
 pub mod admin;
 pub mod analytics;
 pub mod auth;
+// Chapter 37 step 11: change streams (gRPC, SSE, WebSocket, NDJSON).
+pub mod changes;
 pub mod functions;
 pub mod grpc;
 pub mod kv;
@@ -359,7 +361,8 @@ where
     };
     let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
     builder.http2().max_concurrent_streams(max_streams);
-    let served = builder.serve_connection(TokioIo::new(conn.stream), svc);
+    // With upgrades: `GET .../changes` may become a WebSocket (chapter 37).
+    let served = builder.serve_connection_with_upgrades(TokioIo::new(conn.stream), svc);
     tokio::pin!(served);
     let r = tokio::select! {
         r = served.as_mut() => r,

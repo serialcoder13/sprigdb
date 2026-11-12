@@ -65,6 +65,29 @@ pub enum SqlOp {
         max: u32,
         /// How long each is held unless settled.
         lease_ms: u64,
+        /// The task's lease tag (R9, r9last), so a later task can give
+        /// the messages back with [`SqlOp::FanInRelease`]; absent from
+        /// older workers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tag: Option<String>,
+    },
+    /// Gives back what a dead fan-in queue sink task held in member
+    /// `member`'s instance under lease tag `tag` (R9, r9last; as
+    /// `mq_release` for a sink's own queue): an empty result once the
+    /// queue's owner has them.
+    FanInRelease {
+        /// The definition's declaring tenant.
+        def_tenant: u64,
+        /// The definition's object id there.
+        def_object: u64,
+        /// The member.
+        member: u64,
+        /// The instance's database (vhost).
+        db: String,
+        /// The queue's name.
+        queue: String,
+        /// The dead task's lease tag.
+        tag: String,
     },
     /// Settles a fan-in queue sink's deliveries by their tokens:
     /// acknowledged (`ack`) or rejected without requeue (dead-lettered).
@@ -90,6 +113,43 @@ pub enum SqlOp {
         /// Out ids, hex, in commit order.
         ids: Vec<String>,
     },
+    /// Chapter 29 (RLS round 5, RL50): which row images the session's
+    /// user may see, each checked as the gateway checks change events for
+    /// a subscriber (`SELECT` on the table, and its row policies with the
+    /// user's session values, evaluated by MariaDB over the image): one
+    /// result, rows `(t, i, v)`: table `t`, image `i`, visible `v` (0/1).
+    Images {
+        /// The tables and their images.
+        tables: Vec<ImageTable>,
+    },
+}
+
+/// One table's images for [`SqlOp::Images`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageTable {
+    /// The logical database.
+    pub db: String,
+    /// The table.
+    pub table: String,
+    /// Each image as a JSON object of column values (binary values in
+    /// base64, as change records carry them), or `null` for the privilege
+    /// alone.
+    pub images: Vec<Option<serde_json::Map<String, serde_json::Value>>>,
+}
+
+/// [`SqlOp::Images`]'s answer as `[table][image] → visible`.
+#[must_use]
+pub fn images_answer(tables: &[ImageTable], reply: &SqlReply) -> Vec<Vec<bool>> {
+    let mut out: Vec<Vec<bool>> = tables.iter().map(|t| vec![false; t.images.len()]).collect();
+    for r in reply.results.iter().flat_map(|r| &r.rows) {
+        let n = |i: usize| SqlResult::text(r, i).and_then(|v| v.parse::<usize>().ok());
+        if let (Some(t), Some(i), Some(v)) = (n(0), n(1), n(2))
+            && let Some(slot) = out.get_mut(t).and_then(|x| x.get_mut(i))
+        {
+            *slot = v == 1;
+        }
+    }
+    out
 }
 
 /// `SinkSql`'s request.
@@ -532,11 +592,37 @@ mod tests {
             SqlOp::Queue {
                 statements: vec!["CALL sprig.mq_get('q', 10, 60000, 'shop')".into()],
             },
+            SqlOp::FanInGet {
+                def_tenant: 1,
+                def_object: 2,
+                member: 3,
+                db: "shop".into(),
+                queue: "jobs".into(),
+                max: 10,
+                lease_ms: 60_000,
+                tag: Some("sink/7/0/3".into()),
+            },
+            SqlOp::FanInRelease {
+                def_tenant: 1,
+                def_object: 2,
+                member: 3,
+                db: "shop".into(),
+                queue: "jobs".into(),
+                tag: "sink/7/0/3".into(),
+            },
         ] {
             let req = r.request(op);
             let j = serde_json::to_string(&req).unwrap();
             assert_eq!(serde_json::from_str::<SqlRequest>(&j).unwrap(), req);
         }
+        // R9 (r9last): a FanInGet from a worker before lease tags reads
+        // as untagged.
+        let old = r#"{"tenant":1,"tenant_name":"acme","user_id":3,"database":"shop","op":"fan_in_get","def_tenant":1,"def_object":2,"member":3,"db":"shop","queue":"jobs","max":10,"lease_ms":60000}"#;
+        let req = serde_json::from_str::<SqlRequest>(old).unwrap();
+        assert!(
+            matches!(req.op, SqlOp::FanInGet { tag: None, .. }),
+            "{req:?}"
+        );
         let reply = SqlReply {
             handle: None,
             results: vec![SqlResult {

@@ -174,6 +174,7 @@ struct Ran {
 ///
 /// # Errors
 /// The command's own errors (parsing, privileges on reads that ran).
+#[allow(clippy::too_many_lines)] // one pass building the explain document, verbosity by verbosity
 pub(super) async fn explain(
     engine: &Engine,
     sql: &mut SqlSession,
@@ -344,6 +345,7 @@ pub(super) async fn explain(
 }
 
 /// Runs `name` through the engine on `rec`.
+#[allow(clippy::too_many_lines)] // one arm per explained command
 async fn run(
     engine: &Engine,
     rec: &mut Recorder<'_>,
@@ -484,9 +486,9 @@ async fn run(
             )
             .await?;
             ran.n = n;
-            let t = format!("{}.{}", ident(&ns.db), ident(&m.table));
+            let table = format!("{}.{}", ident(&ns.db), ident(&m.table));
             ran.planned.push(inline(
-                &format!("UPDATE {t} SET _v = ?, doc = ?, _types = ? WHERE _id = ? AND _v = ?"),
+                &format!("UPDATE {table} SET _v = ?, doc = ?, _types = ? WHERE _id = ? AND _v = ?"),
                 &[
                     Param::Int(0),
                     Param::Text("{}".into()),
@@ -497,7 +499,7 @@ async fn run(
             ));
             if upsert {
                 ran.planned.push(format!(
-                    "INSERT INTO {t} (_id, doc, _types, _v) VALUES (X'00', '{{}}', NULL, 0)"
+                    "INSERT INTO {table} (_id, doc, _types, _v) VALUES (X'00', '{{}}', NULL, 0)"
                 ));
             }
             ran.gateway.push("apply the update to each document in the gateway, then write it if its _v is unchanged".into());
@@ -825,9 +827,9 @@ mod tests {
             name: "c".into(),
             table: "c".into(),
             uuid: [0; 16],
-            array_paths: Default::default(),
+            array_paths: std::collections::BTreeSet::default(),
             arrays_full: false,
-            pending_paths: Default::default(),
+            pending_paths: std::collections::BTreeSet::default(),
             indexes: Vec::new(),
             options: Document::new(),
             next_index: 1,

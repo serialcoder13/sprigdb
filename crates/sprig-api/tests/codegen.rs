@@ -15,6 +15,8 @@ const PROTOS: &[&str] = &[
     "sprig/v1/vectors.proto",
     "sprig/v1/analytics.proto",
     "sprig/v1/search.proto",
+    "sprig/v1/logic.proto",
+    "sprig/v1/changes.proto",
     "sprig/admin/v1/admin.proto",
     "sprig/internal/v1/peer.proto",
     "sprig/internal/logic/v1/logic.proto",

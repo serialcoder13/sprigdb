@@ -5,9 +5,11 @@
 //! | Route | Does |
 //! |---|---|
 //! | `GET /v1/databases/{db}/streams/{name}/groups` | `Streams.ListGroups`: per partition the log start and high watermark (read as the caller, so `SELECT` on the stream is checked), and every consumer group with its committed offset, lag, generation and state (`stream_groups`, `stream_offsets`) |
-//! | `GET /v1/databases/{db}/mq` | The database's virtual host (`mq_vhosts`), exchanges, queues and bindings, with names (`mq_exchanges`, `mq_queues`, `mq_bindings`) |
+//! | `GET /v1/databases/{db}/mq` | The database's virtual host (`mq_vhosts`, else the database's own name once it has topology), exchanges, queues and bindings, with names (`mq_exchanges`, `mq_queues`, `mq_bindings`) |
 //! | `GET /v1/databases/{db}/sinks/{name}/deadLetters` | The sink's dead letters (`sink_dead_letters`) |
 //! | `POST /v1/databases/{db}/sinks/{name}/deadLetters:replay`, `:discard` | `{ids}` or `{all: true}`: marked `replaying` (the sink's task feeds them back) or `discarded` |
+//! | `POST /v1/databases/{db}/sinks/{name}:test` | `Sinks.Test` (R9, r9last): `{sample}` (10 by default): `TEST SINK db.name WITH SAMPLE n` as the caller; `{columns, rows}` |
+//! | `POST /v1/databases/{db}/connections/{name}:test` | `Connections.Test` (R9, r9last): `{platform, write, to}`: `TEST [PLATFORM] CONNECTION [db.]name [WRITE [TO 'to']]` as the caller; `{columns, rows}` |
 //!
 //! Everything else the views show comes from the statements a SQL client
 //! runs, which the gateway checks as for any client: `SHOW STREAMS FROM`,
@@ -70,6 +72,69 @@ pub fn is_messaging_path(path: &str) -> bool {
     tail == "mq"
         || (tail.starts_with("streams/") && tail.ends_with("/groups"))
         || (tail.starts_with("sinks/") && tail.contains("/deadLetters"))
+        || ((tail.starts_with("sinks/") || tail.starts_with("connections/"))
+            && tail.ends_with(":test")
+            && tail.matches('/').count() == 1)
+}
+
+/// `Sinks.Test` and `Connections.Test`'s statement (R9, r9last): the
+/// statements Studio would run, names quoted.
+fn test_statement(db: &str, kind: &str, name: &str, body: &Value) -> Result<String, SprigError> {
+    let q = |s: &str| format!("{}.{}", ident(db), ident(s));
+    match kind {
+        "sinks" => {
+            let n = body.get("sample").and_then(Value::as_u64).unwrap_or(10);
+            if !(1..=1000).contains(&n) {
+                return Err(invalid("sample must be 1 to 1000"));
+            }
+            Ok(format!("TEST SINK {} WITH SAMPLE {n}", q(name)))
+        }
+        _ => {
+            let platform = body
+                .get("platform")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let mut sql = if platform {
+                format!("TEST PLATFORM CONNECTION {}", ident(name))
+            } else {
+                format!("TEST CONNECTION {}", q(name))
+            };
+            if body.get("write").and_then(Value::as_bool).unwrap_or(false) {
+                sql.push_str(" WRITE");
+                if let Some(to) = body.get("to").and_then(Value::as_str) {
+                    sql.push_str(&format!(
+                        " TO '{}'",
+                        to.replace('\\', "\\\\").replace('\'', "''")
+                    ));
+                }
+            }
+            Ok(sql)
+        }
+    }
+}
+
+/// `Sinks.Test` / `Connections.Test` (see the module docs).
+async fn test_route(
+    core: &Arc<Core>,
+    caller: &Caller,
+    db: &str,
+    kind: &str,
+    name: &str,
+    body: &Value,
+) -> Result<Response<Body>, SprigError> {
+    let sql = test_statement(db, kind, name, body)?;
+    let r = run_sql(core, caller, db, sql).await?;
+    let columns: Vec<String> = r
+        .results
+        .iter()
+        .find(|x| !x.columns.is_empty())
+        .map(|x| x.columns.iter().map(|c| c.name.clone()).collect())
+        .unwrap_or_default();
+    let rows = rows_of(&r);
+    Ok(json_response(
+        200,
+        &json!({"columns": columns, "rows": rows}),
+    ))
 }
 
 fn decode(seg: &str) -> String {
@@ -179,6 +244,19 @@ pub async fn route(
         (&Method::GET, ["streams", name, "groups"]) => groups(core, &caller, &db, name).await,
         (&Method::GET, ["sinks", name, "deadLetters"]) => {
             sink_dead(core, &caller, &db, name, None).await
+        }
+        (&Method::POST, [kind @ ("sinks" | "connections"), name]) if name.ends_with(":test") => {
+            let (kind, name) = (
+                (*kind).to_owned(),
+                name.trim_end_matches(":test").to_owned(),
+            );
+            let body = read_body(req).await?;
+            let body = if body.is_empty() {
+                json!({})
+            } else {
+                parse_json(&body)?
+            };
+            test_route(core, &caller, &db, &kind, &name, &body).await
         }
         (&Method::POST, ["sinks", name, verb])
             if *verb == "deadLetters:replay" || *verb == "deadLetters:discard" =>
@@ -389,10 +467,19 @@ async fn topology(
                    "destination_kind": kind, "binding_key": text(Some(key)), "arguments": json_text(args)})
         })
         .collect();
+    // A database is its own virtual host (AMQP clients name it in the
+    // vhost; `/` maps to `amqp.default_vhost_database`). `mq_vhosts` only
+    // holds a row when a vhost got limits or a description, so without one
+    // the database's name is the vhost once it has any topology (Studio
+    // round 6: the queue pages showed "no virtual host yet" otherwise).
+    let vhost_name = vhost
+        .as_ref()
+        .map(|v| v.0.clone())
+        .or_else(|| (!exchanges.is_empty() || !queues.is_empty()).then(|| db.to_owned()));
     Ok(json_response(
         200,
         &json!({
-            "vhost": vhost.as_ref().map(|v| v.0.clone()),
+            "vhost": vhost_name,
             "default_queue_type": vhost.map(|v| v.1),
             "exchanges": exchanges,
             "queues": queues,
@@ -507,6 +594,31 @@ mod tests {
             "/v1/databases/shop/sinks/out/deadLetters:replay"
         ));
         assert!(!is_messaging_path("/v1/databases/shop/streams/orders"));
+        // R9 (r9last): Sinks.Test and Connections.Test.
+        assert!(is_messaging_path("/v1/databases/shop/sinks/out:test"));
+        assert!(is_messaging_path(
+            "/v1/databases/shop/connections/hook:test"
+        ));
+        assert!(!is_messaging_path("/v1/databases/shop/sinks/out/x:test"));
+        assert_eq!(
+            test_statement("shop", "sinks", "out", &json!({})).unwrap(),
+            "TEST SINK `shop`.`out` WITH SAMPLE 10"
+        );
+        assert!(test_statement("shop", "sinks", "out", &json!({"sample": 0})).is_err());
+        assert_eq!(
+            test_statement(
+                "shop",
+                "connections",
+                "h`k",
+                &json!({"write": true, "to": "t'1"})
+            )
+            .unwrap(),
+            "TEST CONNECTION `shop`.`h``k` WRITE TO 't''1'"
+        );
+        assert_eq!(
+            test_statement("-", "connections", "kafka_main", &json!({"platform": true})).unwrap(),
+            "TEST PLATFORM CONNECTION `kafka_main`"
+        );
         assert!(!is_messaging_path("/v1/databases/shop/sql:query"));
         assert_eq!(decode("a%20b%2Fc"), "a b/c");
         assert_eq!(decode("%zz%"), "%zz%");

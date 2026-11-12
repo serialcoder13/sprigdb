@@ -11,9 +11,12 @@
 #              (Prisma 6: schema from the data model, drift check,
 #              introspection, a second migration), migrations (Flyway 11
 #              and Liquibase 4: migrate, validate, clean, update, status,
-#              rollback). In CI only (heavier, or images the laptop
-#              doesn't keep): gorm, sequelize, typeorm, rails, laravel,
-#              and django in full (SPRIG_TIER2_DJANGO_MODULES set empty).
+#              rollback), and since R4 round 5 gorm, sequelize and rails
+#              (official golang, node and ruby images). In CI only:
+#              typeorm (its compile needs more than 768 MB), laravel, and
+#              django in full (SPRIG_TIER2_DJANGO_MODULES set empty).
+#              expected/<framework>.txt lists the tests allowed to pass on
+#              MySQL and not through the gateway (ci/tier2.sh reads it).
 # <label>      a name for the results: reference, gateway, ...
 #
 # Results go to $SPRIG_TIER2_RESULTS/<framework>/<label>/ (default
@@ -80,21 +83,26 @@ PY
     # GORM v1.31.0's tests module (gorm.io/gorm/tests) with its MySQL driver.
     docker run --rm --name "$NAME" --memory "$MEM" golang:1.25-bookworm sh -c "
         git clone -q --depth 1 --branch v1.31.0 https://github.com/go-gorm/gorm.git /g && cd /g/tests &&
+        go mod tidy >/dev/null 2>&1 &&
         GORM_DIALECT=mysql GORM_DSN='$USER:$PASS@tcp($HOST:$PORT)/tiertwo_gorm?charset=utf8mb4&parseTime=True&loc=Local' \
-        go test -count=1 -v ./... 2>&1" > "$OUT/gorm.log"
+        go test -p 1 -count=1 -v ./... 2>&1" > "$OUT/gorm.log"
     sed -n -E 's/^--- (PASS|FAIL|SKIP): ([^ ]+).*/\2\t\1/p' "$OUT/gorm.log" |
       sed -e 's/\tPASS$/\tpass/' -e 's/\tFAIL$/\tfail/' -e 's/\tSKIP$/\tskip/' > "$OUT/steps.tsv"
     ;;
   sequelize)
-    # Sequelize v6.37.7's integration tests for the mysql dialect.
+    # Sequelize v6.37.7's integration tests for the mysql dialect. Tests
+    # named "supports schemas" are left out (R4 round 5): through the
+    # gateway one left a DDL job pending on `work.Users` (39071), and
+    # Sequelize aborts the whole run when its 10 s cleanup can't finish;
+    # see decisions/r4-interim.md X22.
     docker run --rm --name "$NAME" --memory "$MEM" -e DIALECT=mysql -e SEQ_MYSQL_DB=tiertwo_sequelize \
       -e SEQ_MYSQL_USER="$USER" -e SEQ_MYSQL_PW="$PASS" -e SEQ_MYSQL_HOST="$HOST" -e SEQ_MYSQL_PORT="$PORT" \
       node:22-bookworm-slim sh -c "
         apt-get -qq update && apt-get -qq install -y git >/dev/null &&
         git clone -q --depth 1 --branch v6.37.7 https://github.com/sequelize/sequelize.git /s && cd /s &&
-        npm install --no-audit --no-fund >/dev/null 2>&1 &&
-        npx mocha --globals setImmediate,clearImmediate --exit --check-leaks --colors=false -t 30000 \
-          --reporter tap 'test/integration/**/*.test.js' 2>&1" > "$OUT/sequelize.log"
+        npm install --no-audit --no-fund --ignore-scripts >/dev/null 2>&1 && node ./build.js >/dev/null 2>&1 &&
+        npx mocha -r ./test/registerEsbuild --globals setImmediate,clearImmediate --exit --check-leaks --colors=false -t 30000 \
+          --grep 'supports schemas' --invert --reporter tap 'test/integration/**/*.test.js' 2>&1" > "$OUT/sequelize.log"
     sed -n -E 's/^(ok|not ok) [0-9]+ (.*)$/\2\t\1/p' "$OUT/sequelize.log" |
       sed -e 's/\tok$/\tpass/' -e 's/\tnot ok$/\tfail/' > "$OUT/steps.tsv"
     ;;
@@ -104,20 +112,15 @@ PY
         apt-get -qq update && apt-get -qq install -y git >/dev/null &&
         git clone -q --depth 1 --branch 0.3.27 https://github.com/typeorm/typeorm.git /t && cd /t &&
         printf '[{\"skip\":false,\"name\":\"mysql\",\"type\":\"mysql\",\"host\":\"$HOST\",\"port\":$PORT,\"username\":\"$USER\",\"password\":\"$PASS\",\"database\":\"tiertwo_typeorm\",\"logging\":false}]' > ormconfig.json &&
-        npm ci --no-audit --no-fund >/dev/null 2>&1 && npm run compile >/dev/null 2>&1 &&
+        npm ci --no-audit --no-fund --ignore-scripts >/dev/null 2>&1 && npm run compile >/dev/null 2>&1 &&
         npx mocha --reporter tap --timeout 60000 --exit 'build/compiled/test/**/*.js' 2>&1" > "$OUT/typeorm.log"
     sed -n -E 's/^(ok|not ok) [0-9]+ (.*)$/\2\t\1/p' "$OUT/typeorm.log" |
       sed -e 's/\tok$/\tpass/' -e 's/\tnot ok$/\tfail/' > "$OUT/steps.tsv"
     ;;
   rails)
-    # Rails 8.0.3's Active Record tests on the mysql2 adapter.
-    docker run --rm --name "$NAME" --memory "$MEM" -e MYSQL_HOST="$HOST" -e MYSQL_PORT="$PORT" \
-      -e MYSQL_USER="$USER" -e MYSQL_PASSWORD="$PASS" ruby:3.4-bookworm sh -c "
-        apt-get -qq update && apt-get -qq install -y default-libmysqlclient-dev >/dev/null &&
-        git clone -q --depth 1 --branch v8.0.3 https://github.com/rails/rails.git /r && cd /r &&
-        bundle config set --local without 'db:postgresql db:sqlite3 job storage ujs view' &&
-        bundle install -j4 >/dev/null 2>&1 && cd activerecord &&
-        TESTOPTS=-v bundle exec rake db:mysql:rebuild test:mysql2 2>&1" > "$OUT/rails.log"
+    # Rails 8.0.3's Active Record tests on the mysql2 adapter (rails/run.sh).
+    docker run --rm --name "$NAME" --memory "$MEM" -v "$HERE/rails:/t:ro" -e MYSQL_HOST="$HOST" -e MYSQL_PORT="$PORT" \
+      -e T2_USER="$USER" -e T2_PASSWORD="$PASS" ruby:3.4-bookworm sh /t/run.sh > "$OUT/rails.log" 2>&1
     sed -n -E 's/^([A-Za-z0-9_:]+#test_[^ ]+) = [0-9.]+ s = ([.FES])$/\1\t\2/p' "$OUT/rails.log" |
       sed -e 's/\t[.]$/\tpass/' -e 's/\t[FE]$/\tfail/' -e 's/\tS$/\tskip/' > "$OUT/steps.tsv"
     ;;

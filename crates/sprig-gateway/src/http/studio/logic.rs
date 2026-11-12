@@ -8,6 +8,7 @@
 //! | `GET /v1/databases/{db}/logic/{kind}/{name}` | One module with its versions (tier, placement, state, compiler), the active version's source, its binding and schedule, and, for routine administrators, the generated PL/SQL |
 //! | `GET /v1/databases/{db}/logic/{kind}/{name}/versions/{v}` | One version's source (and PL/SQL for routine administrators) |
 //! | `POST /v1/databases/{db}/logic:compile` | `Logic.Compile`: a dry run of a `CREATE FUNCTION | PROCEDURE ... LANGUAGE ...` declaration against the database's columns: tier, reasons with where they are, lints, cost, tables read and written, the signature, and the PL/SQL for routine administrators. Nothing is recorded or deployed |
+//! | `GET .../{kind}/{name}/rollout` | A function's or procedure's staged rollout (active and candidate versions, share, key) and each version's calls, errors, mean, p95 and latency histogram (R7 follow-ups) |
 //! | `GET .../{kind}/{name}/logs?after=&limit=` | `Logic.TailLogs`: what the module's triggers and schedules did (`logic_log`), newest first, after an id (Studio polls it) |
 //! | `GET .../{kind}/{name}/deadLetters?state=` | The module's dead letters (`logic_dead_letters` of its binding) |
 //! | `POST .../{kind}/{name}/deadLetters:replay`, `:discard` | `{ids: [..]}` or `{all: true}`: back to the trigger's worker, in order with the active version, or discarded |
@@ -257,6 +258,9 @@ pub async fn route(
             let v: u64 = v.parse().map_err(|_| invalid("a version is a number"))?;
             version(core, &caller, &db, kind, name, v).await
         }
+        (&Method::GET, ["logic", kind, name, "rollout"]) => {
+            rollout(core, &caller, &db, kind, name).await
+        }
         (&Method::GET, ["logic", kind, name, "logs"]) => {
             logs(core, &caller, &db, kind, name, &query).await
         }
@@ -329,6 +333,8 @@ async fn show(
         "binding": binding,
         "schedule": schedule,
         "routines": a.routines,
+        "rollout": sprig_logic::rollout::get(&mut conn, st.schema(), m.module_id).await.ok().flatten(),
+        "stats": sprig_logic::rollout::stats(&mut conn, st.schema(), m.module_id).await.unwrap_or_default(),
     });
     if a.routines
         && let Some(v) = m
@@ -340,6 +346,43 @@ async fn show(
         out["source_version"] = json!(v);
     }
     Ok(json_response(200, &out))
+}
+
+/// `GET .../{kind}/{name}/rollout`: the staged rollout (or `null`) and
+/// each version's numbers (R7 follow-ups). Stages change through
+/// statements: `CREATE OR REPLACE ... WITH (SPRIG_ROLLOUT = n)`, `ALTER
+/// ... ROLLOUT TO n | PROMOTE | ABORT`.
+async fn rollout(
+    core: &Arc<Core>,
+    caller: &Caller,
+    db: &str,
+    kind: &str,
+    name: &str,
+) -> Result<Response<Body>, SprigError> {
+    let a = access(core, caller, db).await?;
+    if !a.list {
+        return Err(denied(caller, db));
+    }
+    let (mut conn, st, db_id) = store(core, caller, db).await?;
+    let m = module_of(&st, &mut conn, db_id, kind, name).await?;
+    let r = sprig_logic::rollout::get(&mut conn, st.schema(), m.module_id).await?;
+    let stats = sprig_logic::rollout::stats(&mut conn, st.schema(), m.module_id).await?;
+    let verdict = r.as_ref().and_then(|r| {
+        let cand = stats.iter().find(|s| s.version == r.candidate_version)?;
+        sprig_logic::rollout::verdict(stats.iter().find(|s| s.version == r.active_version), cand)
+    });
+    Ok(json_response(
+        200,
+        &json!({
+            "module": m.module_id,
+            "active_version": m.active_version,
+            "rollout": r,
+            "stats": stats,
+            "verdict": verdict,
+            "min_calls": sprig_logic::rollout::MIN_CALLS,
+            "buckets_ms": sprig_logic::rollout::BUCKETS_MS,
+        }),
+    ))
 }
 
 async fn version(

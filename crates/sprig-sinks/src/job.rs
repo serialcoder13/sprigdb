@@ -415,6 +415,42 @@ struct CatalogControl {
     /// Chapter 29 (RL31): a change sink's owner and tables, checked before
     /// each batch (every poll).
     rls: Option<(Arc<dyn SinkEnv>, TenantId, u32, Vec<u64>)>,
+    /// R9 (r9last): a grouped fan-in task's check of its sink's task
+    /// count (see [`Regroup`]).
+    regroup: Option<Regroup>,
+}
+
+/// A fan-in task started as one of `of` tasks: it stops once the sink's
+/// index entry has another count (the controller regrouped the sink), so
+/// the new tasks start after it ends. The entry is read at most every 5 s.
+struct Regroup {
+    dc: Arc<dyn sprig_meta::MetaStore>,
+    tenant: u64,
+    sink: u64,
+    of: u32,
+    next: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl Regroup {
+    /// Whether the task should stop now (see the type's docs).
+    async fn moved(&self) -> bool {
+        let now = std::time::Instant::now();
+        {
+            let mut n = self
+                .next
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if n.is_some_and(|t| now < t) {
+                return false;
+            }
+            *n = Some(now + Duration::from_secs(5));
+        }
+        match crate::meta::index_get(&self.dc, self.tenant, self.sink).await {
+            Ok(Some(ix)) => ix.tasks != self.of,
+            // Gone: the catalog state stops the task.
+            Ok(None) | Err(_) => false,
+        }
+    }
 }
 
 impl CatalogControl {
@@ -483,6 +519,17 @@ impl Control for CatalogControl {
         // RL31: row-level security now binds the owner (checked each poll,
         // so before each batch is cut).
         if self.rls_bound(&mut c).await? {
+            return Ok(Directive::Stop);
+        }
+        if let Some(g) = &self.regroup
+            && g.moved().await
+        {
+            tracing::info!(
+                sink = self.sink.0,
+                task = self.task.0,
+                of = g.of,
+                "fan-in sink regrouped: task stops"
+            );
             return Ok(Directive::Stop);
         }
         Ok(match state {
@@ -791,12 +838,29 @@ pub async fn build_target_with(
 /// # Errors
 /// What stops the task for good (the job then fails and the controller
 /// starts it again).
-#[allow(clippy::too_many_lines)]
 pub async fn run_sink_task(
     env: Arc<dyn SinkEnv>,
     tenant: TenantId,
     sink: SinkId,
     task_no: TaskNo,
+    cancel: Cancel,
+) -> Result<TaskEnd> {
+    run_sink_task_of(env, tenant, sink, task_no, 1, cancel).await
+}
+
+/// [`run_sink_task`] for task `task_no` of `of` (R9, r9last): a fan-in
+/// sink's task reads the member instances [`crate::meta::fanin_task_of`]
+/// gives it, and stops when the sink's index entry has another count.
+///
+/// # Errors
+/// As [`run_sink_task`].
+#[allow(clippy::too_many_lines)]
+pub async fn run_sink_task_of(
+    env: Arc<dyn SinkEnv>,
+    tenant: TenantId,
+    sink: SinkId,
+    task_no: TaskNo,
+    of: u32,
     cancel: Cancel,
 ) -> Result<TaskEnd> {
     let (cat_pool, cat_schema) = env.catalog(tenant).await?;
@@ -828,7 +892,7 @@ pub async fn run_sink_task(
     if let SourceSpec::FanIn { .. } | SourceSpec::FanInQueue { .. } | SourceSpec::Changes { .. } =
         &def.source
     {
-        return run_fan_in_task(env, tenant, sink, task_no, cancel, c, store, def, opts).await;
+        return run_fan_in_task(env, tenant, sink, task_no, of, cancel, c, store, def, opts).await;
     }
     if let SourceSpec::Queue { .. } = &def.source {
         return run_queue_task(env, tenant, sink, task_no, cancel, c, store, def, opts).await;
@@ -925,6 +989,23 @@ pub async fn run_sink_task(
         sink,
     )
     .await?;
+    // Chapter 29 (RL44): a change topic's records reach a sink whose owner
+    // the table's policies bind only as the owner may see them, filtered
+    // batch by batch through the topic's SQL read as the owner.
+    let source: Box<dyn crate::runtime::SourceReader> = match change_source {
+        Some(object) => Box::new(crate::rls_filter::FilteredChanges {
+            inner: Box::new(source),
+            env: Arc::clone(&env),
+            tenant,
+            owner: def.owner_user_id,
+            object,
+            topic: crate::rls_filter::topic_sql(&cat_pool, &cat_schema, stream).await?,
+            run_as: run_as(env.as_ref(), tenant, &def, &opts).await.ok(),
+            peer: env.peer(),
+            seed: sink.0,
+        }),
+        None => Box::new(source),
+    };
     let prepare = SinkPrepare {
         condition: def
             .filter_sql
@@ -942,9 +1023,10 @@ pub async fn run_sink_task(
         epoch,
         definition_ver: def.definition_ver,
         delivered: AtomicU64::new(0),
-        // RL36: `FROM STREAM t.changes` exports table t's rows, so its
-        // owner is checked before each batch as for `CHANGES OF t` (RL31).
-        rls: change_source.map(|o| (Arc::clone(&env), tenant, def.owner_user_id, vec![o])),
+        // RL44: `FROM STREAM t.changes` is filtered for its owner (above)
+        // instead of paused when t's policies bind the owner (RL36).
+        rls: None,
+        regroup: None,
     });
     let dead = Arc::new(CatalogDead {
         pool: cat_pool.clone(),
@@ -957,7 +1039,7 @@ pub async fn run_sink_task(
     let end = run_task(
         TaskParts {
             info,
-            source: Box::new(source),
+            source,
             target,
             dead,
             control,
@@ -991,6 +1073,8 @@ struct EnvFanIn {
     /// When the sink was created (ms): instances made later start at
     /// their beginning, so the records that made them aren't missed.
     sink_created_ms: u64,
+    /// This task's group: (task, of) (R9, r9last).
+    task_group: (u32, u32),
 }
 
 #[async_trait]
@@ -1027,6 +1111,9 @@ impl crate::source::FanInOpener for EnvFanIn {
             ) else {
                 continue;
             };
+            if crate::meta::fanin_task_of(member, self.task_group.1) != self.task_group.0 {
+                continue;
+            }
             let Some(global) = self.env.global() else {
                 continue;
             };
@@ -1185,6 +1272,12 @@ struct EnvChanges {
     start: crate::model::StartAt,
     sink: SinkId,
     sink_created_ms: u64,
+    /// Chapter 29 (RLS round 5, RL50): the sink's owner, whose view of
+    /// each change topic the records are filtered to while the table's
+    /// policies bind it.
+    owner: u32,
+    /// The owner on a gateway (the filter's reads).
+    run_as: Option<crate::peer::RunAs>,
 }
 
 #[async_trait]
@@ -1238,7 +1331,7 @@ impl crate::source::FanInOpener for EnvChanges {
         } else {
             self.start
         };
-        crate::source::StreamSource::open(
+        let src = crate::source::StreamSource::open(
             shard,
             self.cat_pool.clone(),
             self.cat_schema.clone(),
@@ -1249,8 +1342,30 @@ impl crate::source::FanInOpener for EnvChanges {
             start,
             self.sink,
         )
-        .await
-        .map(|s| Box::new(s) as Box<dyn crate::runtime::SourceReader>)
+        .await?;
+        // Chapter 29 (RLS round 5, RL50): each table's change topic is
+        // filtered batch by batch for the owner while the table's policies
+        // bind it, as `FROM STREAM t.changes` is (RL44); before, the sink
+        // was paused (RL14, RL25, RL31).
+        let (topic, object) =
+            crate::rls_filter::topic_of(&self.cat_pool, &self.cat_schema, m.stream).await?;
+        let object = object.ok_or_else(|| {
+            err(
+                SprigCode::SinkSourceLost,
+                format!("stream {} isn't a change topic", m.stream),
+            )
+        })?;
+        Ok(Box::new(crate::rls_filter::FilteredChanges {
+            inner: Box::new(src),
+            env: Arc::clone(&self.env),
+            tenant: t,
+            owner: self.owner,
+            object,
+            topic,
+            run_as: self.run_as.clone(),
+            peer: self.env.peer(),
+            seed: self.sink.0,
+        }))
     }
 }
 
@@ -1262,6 +1377,7 @@ async fn run_fan_in_task(
     tenant: TenantId,
     sink: SinkId,
     task_no: TaskNo,
+    of: u32,
     cancel: Cancel,
     mut c: mysql_async::Conn,
     store: SinksStore,
@@ -1270,13 +1386,36 @@ async fn run_fan_in_task(
 ) -> Result<TaskEnd> {
     let (cat_pool, cat_schema) = env.catalog(tenant).await?;
     let created = sink_created_at(&mut c, &cat_schema, sink).await?;
+    // R9 (r9last): a fan-in queue task takes its members' messages under
+    // a lease tag, as a queue task does (r9tests), and gives back a dead
+    // predecessor's in each member it opens.
+    let me = env.worker_id();
+    let (my_lease, release) = if matches!(def.source, SourceSpec::FanInQueue { .. }) {
+        let my_lease = worker_lease(env.dc().as_ref(), &me).await;
+        let prev = store.task_claim(&mut c, sink, task_no).await?;
+        let prev_reg = match &prev {
+            Some((_, Some(w), _)) => Some(worker_lease(env.dc().as_ref(), w).await),
+            _ => None,
+        };
+        (
+            my_lease,
+            dead_lease_tag(sink, task_no, prev.as_ref(), prev_reg),
+        )
+    } else {
+        (None, None)
+    };
     let epoch = store
         .claim_task(
             &mut c,
             sink,
             task_no,
-            &json!({"source": def.source.kind().as_str(), "multi": def.source.name()}),
-            &env.worker_id(),
+            &json!({
+                "source": def.source.kind().as_str(),
+                "multi": def.source.name(),
+                "of": of.max(1),
+                "worker_lease": my_lease,
+            }),
+            &me,
         )
         .await?;
     let mut conns = Vec::new();
@@ -1338,6 +1477,7 @@ async fn run_fan_in_task(
                     start: def.start_at,
                     sink,
                     sink_created_ms,
+                    task_group: (task_no.0, of.max(1)),
                 }),
                 refresh,
             )
@@ -1368,6 +1508,9 @@ async fn run_fan_in_task(
                     queue: name.clone(),
                     lease_ms: opts.u64("queue_lease_ms", 300_000)?.max(1000),
                     seed: sink.0,
+                    task_group: (task_no.0, of.max(1)),
+                    tag: lease_tag(sink, task_no, epoch),
+                    release: release.clone(),
                 }),
                 refresh,
             )
@@ -1384,6 +1527,8 @@ async fn run_fan_in_task(
                 start: def.start_at,
                 sink,
                 sink_created_ms: sink_created_s_ms,
+                owner: def.owner_user_id,
+                run_as: run_as(env.as_ref(), tenant, &def, &opts).await.ok(),
             }))
             .await?
         }
@@ -1406,14 +1551,17 @@ async fn run_fan_in_task(
         epoch,
         definition_ver: def.definition_ver,
         delivered: AtomicU64::new(0),
-        // RL31: a change sink's owner is checked before each batch.
-        rls: match &def.source {
-            SourceSpec::Changes { objects } => Some((
-                Arc::clone(&env),
-                tenant,
-                def.owner_user_id,
-                objects.iter().map(|o| o.0).collect(),
-            )),
+        // RL50: a `CHANGES OF` sink is filtered for its owner (EnvChanges)
+        // instead of paused when its tables' policies bind the owner (RL31).
+        rls: None,
+        regroup: match &def.source {
+            SourceSpec::FanIn { .. } | SourceSpec::FanInQueue { .. } => Some(Regroup {
+                dc: env.dc(),
+                tenant: tenant.0,
+                sink: sink.0,
+                of: of.max(1),
+                next: std::sync::Mutex::new(None),
+            }),
             _ => None,
         },
     });
@@ -1463,6 +1611,12 @@ struct EnvFanInQueue {
     queue: String,
     lease_ms: u64,
     seed: u64,
+    /// This task's group: (task, of) (R9, r9last).
+    task_group: (u32, u32),
+    /// This task's lease tag, and a dead predecessor's to give back in
+    /// each member (R9, r9last).
+    tag: String,
+    release: Option<String>,
 }
 
 #[async_trait]
@@ -1502,6 +1656,9 @@ impl crate::source::FanInOpener for EnvFanInQueue {
             ) else {
                 continue;
             };
+            if crate::meta::fanin_task_of(member, self.task_group.1) != self.task_group.0 {
+                continue;
+            }
             let Some(e) = global
                 .get(
                     &global.tier().key(&format!("tenants/{member}"))?,
@@ -1555,18 +1712,21 @@ impl crate::source::FanInOpener for EnvFanInQueue {
         m: &crate::source::FanInMember,
         _partitions: Vec<u32>,
     ) -> Result<Box<dyn crate::runtime::SourceReader>> {
-        Ok(Box::new(crate::source::QueueSource::new(
-            Arc::clone(&self.peer),
-            self.run_as.clone(),
-            crate::source::QueueAt::Member {
-                def: self.def,
-                member: m.tenant,
-                db: self.db.clone(),
-            },
-            self.queue.clone(),
-            self.lease_ms,
-            self.seed ^ m.tenant,
-        )))
+        Ok(Box::new(
+            crate::source::QueueSource::new(
+                Arc::clone(&self.peer),
+                self.run_as.clone(),
+                crate::source::QueueAt::Member {
+                    def: self.def,
+                    member: m.tenant,
+                    db: self.db.clone(),
+                },
+                self.queue.clone(),
+                self.lease_ms,
+                self.seed ^ m.tenant,
+            )
+            .with_lease_tag(self.tag.clone(), self.release.clone()),
+        ))
     }
 }
 
@@ -1582,9 +1742,8 @@ pub fn lease_tag(sink: SinkId, task_no: TaskNo, epoch: TaskEpoch) -> String {
 /// when it isn't registered. An error reads as `Some(-1)`: never taken
 /// for a process that is gone.
 async fn worker_lease(dc: &dyn MetaStore, worker: &str) -> Option<i64> {
-    let key = match dc.tier().key(&format!("workers/{worker}")) {
-        Ok(k) => k,
-        Err(_) => return Some(-1),
+    let Ok(key) = dc.tier().key(&format!("workers/{worker}")) else {
+        return Some(-1);
     };
     match dc.get(&key, sprig_meta::Consistency::Linearizable).await {
         Ok(kv) => kv.map(|kv| kv.lease.map_or(0, |l| l.0)),
@@ -1737,6 +1896,7 @@ async fn run_queue_task(
         definition_ver: def.definition_ver,
         delivered: AtomicU64::new(0),
         rls: None,
+        regroup: None,
     });
     let dead = Arc::new(CatalogDead {
         pool: cat_pool.clone(),
@@ -1949,9 +2109,16 @@ mod tests {
         assert_eq!(dead_lease_tag(s, t, Some(&p), None), None);
         // No predecessor, or one from before lease tags.
         assert_eq!(dead_lease_tag(s, t, None, Some(None)), None);
-        let old = (TaskEpoch(3), Some("wkr-1".to_owned()), json!({"source": "queue"}));
+        let old = (
+            TaskEpoch(3),
+            Some("wkr-1".to_owned()),
+            json!({"source": "queue"}),
+        );
         assert_eq!(dead_lease_tag(s, t, Some(&old), Some(None)), None);
-        assert_eq!(dead_lease_tag(s, t, Some(&prev(Value::Null)), Some(None)), None);
+        assert_eq!(
+            dead_lease_tag(s, t, Some(&prev(Value::Null)), Some(None)),
+            None
+        );
         // Change topics keep whole seconds.
         assert_eq!(
             fan_in_created_ms(Some(1_794_000_000_900), true),

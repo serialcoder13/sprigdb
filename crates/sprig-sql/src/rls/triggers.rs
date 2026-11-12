@@ -315,6 +315,73 @@ impl TriggerSpec<'_> {
     }
 }
 
+impl TriggerSpec<'_> {
+    /// The filter view of a change topic of this table (chapter 29, RLS
+    /// round 5, decision RL47), to run after `USE` of the topic's log
+    /// schema: view `view` over log table `log` showing each reader (by the
+    /// context `__sprig_rls_ctx()` of its connection) the records whose
+    /// row images its `SELECT` policies show, an update that hides or shows
+    /// the row as a delete or an insert (`sprig_streams::read`'s rules).
+    /// `columns` is the table's `JSON_TABLE` column list; `filtered` false
+    /// (security off) makes a plain view of the log.
+    ///
+    /// # Errors
+    /// 39364 if a stored expression can't be rendered.
+    pub fn change_view_statement(
+        &self,
+        view: &str,
+        log: &str,
+        columns: &str,
+        definer: &str,
+        filtered: bool,
+    ) -> Result<String, SprigError> {
+        const COLS: &str = "partition_no, offset_no, day, ts, k";
+        const TAIL: &str = "headers, source_event, leader_epoch";
+        let head = format!(
+            "CREATE OR REPLACE DEFINER = {definer} SQL SECURITY DEFINER VIEW {} AS ",
+            quote(view)
+        );
+        if !filtered {
+            return Ok(format!(
+                "{head}SELECT {COLS}, v, {TAIL} FROM {}",
+                quote(log)
+            ));
+        }
+        let ctx = format!("{}()", quote(super::views::CTX_FUNCTION));
+        let qual = "`__sprig_ci`";
+        let ok = self.combination(1, Clause::Using, qual, &ctx)?;
+        let guard = self.guard(&ctx);
+        let v = "CONVERT(`__sprig_cl`.v USING utf8mb4)";
+        let vis = |path: &str| {
+            format!(
+                "COALESCE(({guard}) OR (JSON_TYPE(JSON_EXTRACT({v}, '{path}')) = 'OBJECT' AND \
+                 EXISTS (SELECT 1 FROM JSON_TABLE({v}, '{path}' COLUMNS ({columns})) AS {qual} \
+                 WHERE {ok})), FALSE)"
+            )
+        };
+        let set = |op: &str, gone: &str| {
+            format!(
+                "CAST(JSON_COMPACT(JSON_SET(CONVERT(x.v USING utf8mb4), '$.op', '{op}', \
+                 '$.{gone}', NULL)) AS BINARY)"
+            )
+        };
+        Ok(format!(
+            "{head}SELECT x.partition_no, x.offset_no, x.day, x.ts, x.k, CASE WHEN x.o = 'u' AND \
+             NOT x.a THEN {to_d} WHEN x.o = 'u' AND NOT x.b THEN {to_c} ELSE x.v END AS v, \
+             x.headers, x.source_event, x.leader_epoch FROM (SELECT `__sprig_cl`.partition_no, \
+             `__sprig_cl`.offset_no, `__sprig_cl`.day, `__sprig_cl`.ts, `__sprig_cl`.k, \
+             `__sprig_cl`.v, `__sprig_cl`.headers, `__sprig_cl`.source_event, \
+             `__sprig_cl`.leader_epoch, JSON_VALUE({v}, '$.op') AS o, {b} AS b, {a} AS a FROM {log} \
+             AS `__sprig_cl`) AS x WHERE x.o IS NULL OR x.o NOT IN ('c', 'u', 'd') OR x.b OR x.a",
+            to_d = set("d", "after"),
+            to_c = set("c", "before"),
+            b = vis("$.before"),
+            a = vis("$.after"),
+            log = quote(log),
+        ))
+    }
+}
+
 /// [`TriggerSpec::view_statements`]: the context function, then (after
 /// its definer may run it) the views.
 #[derive(Debug, Clone)]

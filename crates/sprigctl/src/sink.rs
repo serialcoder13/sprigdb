@@ -14,7 +14,10 @@
 //!   global tier in etcd (`--etcd http://host:port`), operator only. Secret
 //!   values never pass through here: only `file:<path>` references.
 //!
-//! `test` (dry runs) is not built.
+//! - `test <db.sink> [--sample n]` and `connections test <db.c>
+//!   [--platform] [--write [--to target]]` (R9, r9last): `TEST SINK` and
+//!   `TEST [PLATFORM] CONNECTION ... [WRITE [TO 'target']]` through the
+//!   gateway, as Studio runs them; the rows printed as for `list`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -75,6 +78,17 @@ pub(crate) fn group() -> Command {
                 .arg(Arg::new("to").long("to").required(true)),
         )
         .subcommand(
+            Command::new("test")
+                .about("TEST SINK: the latest source records as they would be delivered")
+                .arg(sink())
+                .arg(gw())
+                .arg(
+                    Arg::new("sample")
+                        .long("sample")
+                        .value_parser(clap::value_parser!(u32).range(1..=1000)),
+                ),
+        )
+        .subcommand(
             Command::new("dead-letters")
                 .subcommand_required(true)
                 .subcommand(Command::new("list").arg(sink()).arg(cat()))
@@ -101,6 +115,19 @@ pub(crate) fn group() -> Command {
                     Command::new("show")
                         .arg(Arg::new("name").required(true))
                         .arg(gw()),
+                )
+                .subcommand(
+                    Command::new("test")
+                        .about("TEST CONNECTION: open and check it; --write sends a test record")
+                        .arg(Arg::new("name").required(true))
+                        .arg(gw())
+                        .arg(
+                            Arg::new("platform")
+                                .long("platform")
+                                .action(ArgAction::SetTrue),
+                        )
+                        .arg(Arg::new("write").long("write").action(ArgAction::SetTrue))
+                        .arg(Arg::new("to").long("to").requires("write")),
                 ),
         )
         .subcommand(
@@ -225,6 +252,33 @@ async fn exec(gw: &str, sql: &str) -> Result<(), Failed> {
     Ok(())
 }
 
+/// `sprigctl sink test`'s statement (R9, r9last).
+fn test_sink_sql(sink: &str, sample: Option<u32>) -> String {
+    match sample {
+        Some(n) => format!("TEST SINK {} WITH SAMPLE {n}", ident(sink)),
+        None => format!("TEST SINK {}", ident(sink)),
+    }
+}
+
+/// `sprigctl sink connections test`'s statement (R9, r9last).
+fn test_connection_sql(name: &str, platform: bool, write: bool, to: Option<&str>) -> String {
+    let mut sql = format!(
+        "TEST {}CONNECTION {}",
+        if platform { "PLATFORM " } else { "" },
+        ident(name)
+    );
+    if write {
+        sql.push_str(" WRITE");
+        if let Some(t) = to {
+            sql.push_str(&format!(
+                " TO '{}'",
+                t.replace('\\', "\\\\").replace('\'', "''")
+            ));
+        }
+    }
+    sql
+}
+
 fn ident(s: &str) -> String {
     s.split('.')
         .map(|p| format!("`{}`", p.replace('`', "``")))
@@ -293,6 +347,10 @@ pub(crate) async fn run(sub: &ArgMatches, out: Output) -> Result<(), Failed> {
                 out,
             )
             .await
+        }
+        Some(("test", m)) => {
+            let sql = test_sink_sql(&sink(m), m.get_one::<u32>("sample").copied());
+            rows(&gw(m), &sql, out).await
         }
         Some(("pause", m)) => exec(&gw(m), &format!("ALTER SINK {} PAUSE", ident(&sink(m)))).await,
         Some(("resume", m)) => {
@@ -394,7 +452,17 @@ pub(crate) async fn run(sub: &ArgMatches, out: Output) -> Result<(), Failed> {
                 )
                 .await
             }
-            _ => Err(Failed("connections needs list or show".into())),
+            Some(("test", m)) => {
+                let n = m.get_one::<String>("name").cloned().unwrap_or_default();
+                let sql = test_connection_sql(
+                    &n,
+                    m.get_flag("platform"),
+                    m.get_flag("write"),
+                    m.get_one::<String>("to").map(String::as_str),
+                );
+                rows(&gw(m), &sql, out).await
+            }
+            _ => Err(Failed("connections needs list, show or test".into())),
         },
         Some(("platform-connections", d)) => {
             let Some((cmd, m)) = d.subcommand() else {
@@ -499,5 +567,41 @@ pub(crate) async fn run(sub: &ArgMatches, out: Output) -> Result<(), Failed> {
             Ok(())
         }
         _ => Err(Failed("sink needs a command".into())),
+    }
+}
+
+#[cfg(test)]
+mod test_statements {
+    use super::*;
+
+    /// R9 (r9last): the wrappers send the statements Studio runs.
+    #[test]
+    fn sink_and_connection_tests() {
+        assert_eq!(test_sink_sql("shop.out", None), "TEST SINK `shop`.`out`");
+        assert_eq!(
+            test_sink_sql("shop.out", Some(25)),
+            "TEST SINK `shop`.`out` WITH SAMPLE 25"
+        );
+        assert_eq!(
+            test_connection_sql("shop.hook", false, false, None),
+            "TEST CONNECTION `shop`.`hook`"
+        );
+        assert_eq!(
+            test_connection_sql("kafka_main", true, true, Some("audit's")),
+            "TEST PLATFORM CONNECTION `kafka_main` WRITE TO 'audit''s'"
+        );
+        let m = group()
+            .try_get_matches_from([
+                "sink",
+                "connections",
+                "test",
+                "shop.k",
+                "--gateway",
+                "mysql://a:b@127.0.0.1:1/x",
+                "--to",
+                "t",
+            ])
+            .unwrap_err();
+        assert!(m.to_string().contains("--write"), "{m}");
     }
 }

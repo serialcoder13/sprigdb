@@ -16,7 +16,9 @@
 //!
 //! - `const`, `let`, `var` with an initializer; `if`/`else`, `while`,
 //!   `for (init; test; update)`, `for (const x of rows)`, `break`,
-//!   `return`, `throw`, blocks;
+//!   `continue` (a `for` loop's update runs first), `return`, `throw`,
+//!   blocks; `switch` without fall-through (cases with no statements
+//!   share the next one's; `===` against each case, `default` last);
 //! - numbers, strings, booleans, `null` and `undefined` (both `NULL`),
 //!   template literals, object and array literals;
 //! - arithmetic, where a possibly-`null` number reads as 0 as in
@@ -229,6 +231,9 @@ struct L<'s, 'c> {
     /// Inside a conditionally evaluated operand.
     cond: u32,
     loops: u32,
+    /// Per enclosing loop, what `continue` runs first: a counted loop's
+    /// update (R7 follow-ups).
+    conts: Vec<Block>,
     /// Declaration offset → wider type for the next pass.
     widen: BTreeMap<u32, Ty>,
     /// Event name → fields in first-seen order.
@@ -283,6 +288,7 @@ impl<'s, 'c> L<'s, 'c> {
             guards: Vec::new(),
             cond: 0,
             loops: 0,
+            conts: Vec::new(),
             widen,
             events: vec![("output".to_owned(), Vec::new())],
             tmp: 0,
@@ -586,7 +592,9 @@ impl<'s, 'c> L<'s, 'c> {
                 self.loop_entry();
                 let test = self.loop_test(&w.test)?;
                 self.loops += 1;
+                self.conts.push(Vec::new());
                 let body = self.sub_block(&w.body);
+                self.conts.pop();
                 self.loops -= 1;
                 self.loop_entry();
                 out.push(Stmt::While {
@@ -641,8 +649,18 @@ impl<'s, 'c> L<'s, 'c> {
                         }
                         _ => Bound::Guarded,
                     };
+                    // `continue` runs the update first: lowered once here
+                    // for it (facts unchanged), and again after the body.
+                    let mut cont = Vec::new();
+                    if let Some(u) = &fs.update {
+                        let facts = self.facts.clone();
+                        self.expr_stmt(u, &mut cont)?;
+                        self.facts = facts;
+                    }
                     self.loops += 1;
+                    self.conts.push(cont);
                     let mut body = self.sub_block(&fs.body);
+                    self.conts.pop();
                     self.loops -= 1;
                     if let Some(u) = &fs.update {
                         if exits(&body) {
@@ -699,14 +717,17 @@ impl<'s, 'c> L<'s, 'c> {
                 Ok(())
             }
             Statement::ContinueStatement(c) => {
-                self.stop("js.continue", c.span, "continue runs in the engine tier")
+                let Some(pre) = self.conts.last().cloned().filter(|_| c.label.is_none()) else {
+                    return self.stop("js.label", c.span, "labelled continue");
+                };
+                out.extend(pre);
+                out.push(Stmt::Continue);
+                Ok(())
             }
             Statement::TryStatement(t) => {
                 self.stop("js.try", t.span, "try/catch runs in the engine tier")
             }
-            Statement::SwitchStatement(t) => {
-                self.stop("js.switch", t.span, "switch runs in the engine tier")
-            }
+            Statement::SwitchStatement(sw) => self.switch(sw, out),
             Statement::DoWhileStatement(t) => {
                 self.stop("js.do_while", t.span, "do/while runs in the engine tier")
             }
@@ -721,6 +742,137 @@ impl<'s, 'c> L<'s, 'c> {
                 "this statement runs in the engine tier",
             ),
         }
+    }
+
+    /// `switch` without fall-through (R7 follow-ups): the discriminant
+    /// once, then `if ... else if ...` on `===`, `default` last. Cases
+    /// with no statements share the next case's body; any other case
+    /// ends with `break`, `return`, `throw` or `continue`, and has no
+    /// other `break` of the switch inside it. Anything else is
+    /// `js.switch`.
+    fn switch(&mut self, sw: &oxc_ast::ast::SwitchStatement<'_>, out: &mut Block) -> R<()> {
+        let d = self.val(&sw.discriminant)?;
+        let guards = std::mem::take(&mut self.guards);
+        out.extend(self.guard_stmts(guards));
+        let d = match &d.e {
+            Expr::Lit(_) | Expr::Param(_) | Expr::Local(_) => d,
+            _ => {
+                if d.ty == Ty::Null {
+                    return self.stop("js.switch", sw.span, "a switch on null");
+                }
+                self.tmp += 1;
+                let l = self.f.local(&format!("switch{}", self.tmp), d.ty);
+                out.push(Stmt::Assign(l, d.e.clone()));
+                V {
+                    e: Expr::Local(l),
+                    ty: d.ty,
+                    nn: d.nn,
+                }
+            }
+        };
+        // (tests, has default, body without its final break)
+        let mut groups: Vec<(Vec<&Expression<'_>>, bool, &[Statement<'_>])> = Vec::new();
+        let mut tests: Vec<&Expression<'_>> = Vec::new();
+        let mut default = false;
+        let n = sw.cases.len();
+        for (i, case) in sw.cases.iter().enumerate() {
+            match &case.test {
+                Some(t) => tests.push(t),
+                None => default = true,
+            }
+            let body = case.consequent.as_slice();
+            if body.is_empty() && i + 1 < n {
+                continue;
+            }
+            let ends = match body.last() {
+                Some(Statement::BreakStatement(b)) if b.label.is_none() => Some(true),
+                Some(
+                    Statement::ReturnStatement(_)
+                    | Statement::ThrowStatement(_)
+                    | Statement::ContinueStatement(_),
+                ) => Some(false),
+                _ if i + 1 == n => Some(false),
+                _ => None,
+            };
+            let Some(strip) = ends else {
+                return self.stop(
+                    "js.switch",
+                    case.span,
+                    "a case falls through to the next one",
+                );
+            };
+            let body = if strip { &body[..body.len() - 1] } else { body };
+            if body.iter().any(breaks_switch) {
+                return self.stop(
+                    "js.switch",
+                    case.span,
+                    "a break inside a case (not at its end)",
+                );
+            }
+            groups.push((std::mem::take(&mut tests), default, body));
+            default = false;
+        }
+        let before = self.facts.clone();
+        let mut arms: Vec<(Expr, Block)> = Vec::new();
+        let mut otherwise: Option<Block> = None;
+        let mut after: Option<BTreeSet<Key>> = None;
+        let mut all_exit = true;
+        for (tests, is_default, body) in &groups {
+            let mut cond: Option<Expr> = None;
+            for t in tests {
+                let tv = self.val(t)?;
+                let eq = self.binary(BinaryOperator::StrictEquality, d.clone(), tv, t.span())?;
+                let eq = self.truthy(eq, t.span())?;
+                cond = Some(match cond {
+                    None => eq,
+                    Some(c) => Expr::bin(BinOp::Or, c, eq),
+                });
+            }
+            if !self.guards.is_empty() {
+                self.guards.clear();
+                return self.stop(
+                    "js.null_row",
+                    sw.span,
+                    "a case reads a row that may be null",
+                );
+            }
+            self.facts.clone_from(&before);
+            let block = self.scoped(|l| l.block(body));
+            if exits(&block) {
+                // Facts after the switch come from arms that go on.
+            } else {
+                all_exit = false;
+                after = Some(match after {
+                    None => self.facts.clone(),
+                    Some(a) => a.intersection(&self.facts).copied().collect(),
+                });
+            }
+            if let Some(c) = cond {
+                arms.push((c, block.clone()));
+            }
+            if *is_default {
+                otherwise = Some(block);
+            }
+        }
+        let mut chain = otherwise.unwrap_or_else(|| {
+            // No default: falling out of the switch keeps the facts before.
+            all_exit = false;
+            after = Some(match after.take() {
+                None => before.clone(),
+                Some(a) => a.intersection(&before).copied().collect(),
+            });
+            Vec::new()
+        });
+        for (c, b) in arms.into_iter().rev() {
+            chain = vec![Stmt::If(c, b, chain)];
+        }
+        out.extend(chain);
+        self.facts = if all_exit {
+            before
+        } else {
+            after.unwrap_or(before)
+        };
+        Ok(())
     }
 
     /// A loop's entry: facts about locals may not hold on every
@@ -974,7 +1126,10 @@ impl<'s, 'c> L<'s, 'c> {
                 },
             );
             l.loops += 1;
+            // The index moves at the top of each iteration.
+            l.conts.push(Vec::new());
             let b = l.sub_block(&fo.body);
+            l.conts.pop();
             l.loops -= 1;
             b
         });
@@ -1306,6 +1461,29 @@ impl<'s, 'c> L<'s, 'c> {
             self.facts.remove(&Key::L(*found));
         }
         Ok(Some(var))
+    }
+}
+
+/// Whether `s` holds a `break` that would leave an enclosing `switch`
+/// (one not inside a loop or another switch of its own).
+fn breaks_switch(s: &Statement<'_>) -> bool {
+    match s {
+        Statement::BreakStatement(b) => b.label.is_none(),
+        Statement::BlockStatement(b) => b.body.iter().any(breaks_switch),
+        Statement::IfStatement(i) => {
+            breaks_switch(&i.consequent) || i.alternate.as_ref().is_some_and(breaks_switch)
+        }
+        Statement::LabeledStatement(l) => breaks_switch(&l.body),
+        Statement::TryStatement(t) => {
+            t.block.body.iter().any(breaks_switch)
+                || t.handler
+                    .as_ref()
+                    .is_some_and(|h| h.body.body.iter().any(breaks_switch))
+                || t.finalizer
+                    .as_ref()
+                    .is_some_and(|f| f.body.iter().any(breaks_switch))
+        }
+        _ => false,
     }
 }
 

@@ -292,6 +292,12 @@ impl Held {
 struct FailoverView {
     #[serde(default)]
     history: Vec<FormerView>,
+    /// The writer the controller published, and its epoch: a lease this
+    /// agent writes afresh carries that epoch (hardening round 3).
+    #[serde(default)]
+    writer: Option<String>,
+    #[serde(default)]
+    writer_epoch: u64,
 }
 
 impl sprig_meta::Versioned for FailoverView {
@@ -322,6 +328,16 @@ fn kept_out(v: &FailoverView, node: &str) -> bool {
                 Some("fenced" | "diverged" | "rebuilding")
             )
         })
+}
+
+/// The writer epoch a lease this agent writes afresh carries: the
+/// record's epoch when the record names `node` the writer, else 0.
+fn lease_epoch(v: &FailoverView, node: &str) -> u64 {
+    if v.writer.as_deref() == Some(node) {
+        v.writer_epoch
+    } else {
+        0
+    }
 }
 
 /// The agent's fence (see the module docs).
@@ -456,16 +472,24 @@ impl AgentFence {
         };
         let (agent_id, node_id) = (self.agent_id.clone(), self.target.node.to_string());
         // The writer epoch carries over from a lease the controller claimed
-        // for this node.
+        // for this node, or, when the lease is written afresh (a restarted
+        // agent whose old lease ended with its session), from the failover
+        // record that names this node the writer: a lease at epoch 0 after
+        // a failover is one gateways refuse (hardening round 3).
+        let published_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let epoch_for_lease = Arc::clone(&published_epoch);
         let lease_value = move |found: Option<&WriterLease>| {
             Record::new(WriterLease {
                 node_id: node_id.clone(),
                 agent: agent_id.clone(),
-                writer_epoch: found.map_or(0, |l| l.writer_epoch),
+                writer_epoch: found
+                    .map_or(0, |l| l.writer_epoch)
+                    .max(epoch_for_lease.load(Ordering::SeqCst)),
             })
             .encode()
             .ok()
         };
+        let mut record_read = false;
         let mut conn: Option<ProbeSession> = None;
         // `None`: not known yet. MariaDB boots read-only (chapter 25).
         let mut serving: Option<bool> = None;
@@ -527,7 +551,9 @@ impl AgentFence {
             // A node the controller keeps out (a former writer not yet
             // rejoined, a diverged one, one being rebuilt) and a node under
             // rebuild never take the writer lease (r2close).
-            if replicating == Some(false) && !writer.valid(&*self.clock) && round.is_multiple_of(5)
+            if replicating == Some(false)
+                && !writer.valid(&*self.clock)
+                && (round.is_multiple_of(5) || !record_read)
             {
                 kept = match tokio::time::timeout(
                     bounded,
@@ -535,15 +561,30 @@ impl AgentFence {
                 )
                 .await
                 {
-                    Ok(Ok(Some(kv))) => Record::<FailoverView>::decode(&kv.value)
-                        .map(|r| kept_out(&r.body, self.target.node.as_str()))
-                        .unwrap_or(false),
-                    Ok(Ok(None)) => false,
+                    Ok(Ok(Some(kv))) => {
+                        record_read = true;
+                        match Record::<FailoverView>::decode(&kv.value) {
+                            Ok(r) => {
+                                published_epoch.store(
+                                    lease_epoch(&r.body, self.target.node.as_str()),
+                                    Ordering::SeqCst,
+                                );
+                                kept_out(&r.body, self.target.node.as_str())
+                            }
+                            Err(_) => false,
+                        }
+                    }
+                    Ok(Ok(None)) => {
+                        record_read = true;
+                        false
+                    }
                     // Unknown: keep the last answer.
                     _ => kept,
                 };
             }
-            let held_back = kept || self.hold.load(Ordering::SeqCst);
+            // Until the record has been read, a fresh lease could carry a
+            // stale epoch: wait for it.
+            let held_back = kept || !record_read || self.hold.load(Ordering::SeqCst);
             // The agent fences, then releases the lease (chapter 25 step
             // 1): a down mysqld can't be the writer, and the controller's
             // cluster failover waits for the lease to go.
@@ -665,5 +706,32 @@ impl AgentFence {
         }
         let _ = keeper_task.await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn view(json: &str) -> FailoverView {
+        Record::<FailoverView>::decode(json.as_bytes())
+            .expect("record")
+            .body
+    }
+
+    /// A restarted writer's agent writes its lease with the epoch of the
+    /// last failover that made it the writer (hardening round 3: a fresh
+    /// lease at epoch 0 after two failovers was refused by every gateway).
+    #[test]
+    fn a_fresh_lease_carries_the_published_writer_epoch() {
+        let v = view(
+            r#"{"v":1,"state":"healthy","writer":"db1","writer_epoch":2,
+                "history":[{"kind":"promote","from":"db2","to":"db1","writer_epoch":2,"former":"rejoined"}]}"#,
+        );
+        assert_eq!(lease_epoch(&v, "db1"), 2);
+        assert_eq!(lease_epoch(&v, "db2"), 0, "not the published writer");
+        assert!(!kept_out(&v, "db2"), "rejoined: not kept out");
+        let fresh = view(r#"{"v":1,"state":"healthy"}"#);
+        assert_eq!(lease_epoch(&fresh, "db1"), 0, "no failover yet");
     }
 }

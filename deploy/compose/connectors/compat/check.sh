@@ -88,8 +88,13 @@ c_perf_schema() { admin "$(corpus perf_schema)"; }
 # R4 round 4: LATERAL and rollup inside views and stored programs; MySQL's
 # printing of expressions in SHOW CREATE TABLE (3306 only).
 c_mysql_stored() { admin "$(corpus mysql_stored)"; }
+# R4 round 5: JSON operators, mixed functional key parts and their
+# printing, a descending index over a foreign key, lateral aggregate
+# names, stored code as written, USE performance_schema, statement
+# digests (3306 only).
+c_mysql_json_index() { admin "$(corpus mysql_json_index)"; }
 
-CHECKS=${SPRIG_COMPAT_CHECKS:-"sql_mode max_execution_time errors show_index show_grants roles gis stored_mode group_by int_meta mysql_compat mysql_ddl session_status perf_schema mysql_stored"}
+CHECKS=${SPRIG_COMPAT_CHECKS:-"sql_mode max_execution_time errors show_index show_grants roles gis stored_mode group_by int_meta mysql_compat mysql_ddl session_status perf_schema mysql_stored mysql_json_index"}
 for check in $CHECKS; do
   if [[ $check == gis && $SPRIG_PERSONA != mysql ]]; then
     emit gis n/a "MySQL's SRID 4326 semantics are the MySQL persona's only"
@@ -97,6 +102,10 @@ for check in $CHECKS; do
   fi
   if [[ $check == mysql_stored && $SPRIG_PERSONA != mysql ]]; then
     emit mysql_stored n/a "MySQL's LATERAL and rollup rules and expression printing are 3306's"
+    continue
+  fi
+  if [[ $check == mysql_json_index && $SPRIG_PERSONA != mysql ]]; then
+    emit mysql_json_index n/a "MySQL's JSON operators, functional key parts and performance_schema are 3306's"
     continue
   fi
   if [[ $check == perf_schema && $SPRIG_PERSONA != mysql ]]; then

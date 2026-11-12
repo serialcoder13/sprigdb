@@ -33,11 +33,11 @@ function Tables() {
   const q = useQuery({ queryKey: ['inherit', 'tables'], queryFn: () => objects('-', SHOW_TABLES) });
   return (
     <section className="card stack" aria-labelledby="inh-tables-h">
-      <h2 id="inh-tables-h">Inheritable tables</h2>
+      <h2 id="inh-tables-h" style={{ margin: 0 }}>Inheritable tables</h2>
       {q.error ? <Failure e={q.error} /> : null}
       {q.data && q.data.length === 0 && <p className="muted">No inheritable tables.</p>}
       {q.data && q.data.length > 0 && (
-        <table data-testid="inh-tables">
+        <table className="table" data-testid="inh-tables">
           <thead>
             <tr>
               <th>Table</th>
@@ -79,16 +79,17 @@ function Shares() {
   const groups = q.data ? sharesByName(q.data) : [];
   return (
     <section className="card stack" aria-labelledby="inh-shares-h">
-      <h2 id="inh-shares-h">Shares and their groups</h2>
+      <h2 id="inh-shares-h" style={{ margin: 0 }}>Shares and their groups</h2>
       <p className="muted">Sharing a table shares every table linked to it by foreign keys.</p>
       {q.error ? <Failure e={q.error} /> : null}
       {q.data && groups.length === 0 && <p className="muted">No shares.</p>}
       {groups.length > 0 && (
-        <table data-testid="inh-shares">
+        <table className="table" data-testid="inh-shares">
           <thead>
             <tr>
               <th>Share</th>
               <th>Role</th>
+              <th>From</th>
               <th>To</th>
               <th>Tables</th>
               <th />
@@ -99,6 +100,7 @@ function Shares() {
               <tr key={`${g.role}:${g.name}`}>
                 <td>{g.name}</td>
                 <td>{g.role}</td>
+                <td>{g.from}</td>
                 <td>{g.to}</td>
                 <td>{g.tables.join(', ')}</td>
                 <td>{g.role === 'granted' && <button onClick={() => void show(g.name)}>Definition</button>}</td>
@@ -141,7 +143,7 @@ function Blockers() {
   };
   return (
     <section className="card stack" aria-labelledby="inh-block-h">
-      <h2 id="inh-block-h">Why a delete is refused</h2>
+      <h2 id="inh-block-h" style={{ margin: 0 }}>Why a delete is refused</h2>
       <p className="muted">
         A delete is refused (1451) while a row anywhere below still references it. Tenant administrators see which tenant and row.
       </p>
@@ -177,7 +179,7 @@ function Blockers() {
         </p>
       )}
       {out?.rows && out.rows.length > 0 && (
-        <table data-testid="inh-blockers">
+        <table className="table" data-testid="inh-blockers">
           <thead>
             <tr>
               {Object.keys(out.rows[0] ?? {}).map((k) => (

@@ -255,11 +255,14 @@ services:
     networks: [sprig]
     mem_limit: ${PROMETHEUS_MEM_LIMIT:-1g}
     command:
-      - --config.file=/etc/prometheus/prometheus.yml
+      # prometheus.yml: this VM's processes. Several VMs: prometheus.ha.yml,
+      # every VM's (config/prometheus-targets.json, sprig-vm.sh
+      # monitoring-config), on the private addresses.
+      - --config.file=/etc/prometheus/sprig/${SPRIG_PROMETHEUS_CONFIG:-prometheus.yml}
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
     volumes:
-      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config:/etc/prometheus/sprig:ro
       - ../alerts:/etc/prometheus/rules:ro
       - prometheus-data:/prometheus
     ports: ["127.0.0.1:${SPRIG_METRICS_PORT:-9090}:9090"]

@@ -138,6 +138,14 @@ pub async fn handle(core: &Arc<Core>, info: &ConnInfo, req: Request<Incoming>) -
     };
     let rpc = m.route.short_name();
     metrics::counter!("sprig_api_requests_total", "service" => m.route.service, "method" => m.route.rpc, "protocol" => "rest").increment(1);
+    // Chapter 37 step 11 (RLS round 5): change streams as SSE, WebSocket
+    // or NDJSON.
+    if rpc == "Changes.Watch" {
+        let db = m.vars.get("database").cloned().unwrap_or_default();
+        return super::changes::rest(core, info, &db, req)
+            .await
+            .unwrap_or_else(|e| error_response(&e));
+    }
     let r = if m.route.is_admin() {
         admin(core, info, m, req).await
     } else {
@@ -344,6 +352,10 @@ async fn run_local(
                 &transaction,
             )
             .await?;
+            Ok((200, Local::Json(v)))
+        }
+        "Logic.TestRun" => {
+            let v = super::functions::test_run(engine, caller, database, body.clone()).await?;
             Ok((200, Local::Json(v)))
         }
         r if r.starts_with("KeyValue.") => {

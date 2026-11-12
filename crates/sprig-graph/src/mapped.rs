@@ -903,6 +903,15 @@ impl GraphStore for MappedStore<'_> {
         self.graph
     }
 
+    // Read-only: a batch has nothing to commit.
+    async fn batches(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn end_batch(&mut self, _ok: bool, _deleted: &[u64]) -> Result<()> {
+        Ok(())
+    }
+
     fn shards(&self) -> usize {
         1
     }

@@ -138,9 +138,14 @@ pub(crate) fn cypher_param(p: &sprig_proto_mysql::command::BoundParam) -> Result
 
 /// Where call `call`'s graph is, as `Plan::Graph` shows it.
 fn step(call: usize, g: &crate::graphs::GraphRef, cypher: &str) -> GraphStep {
-    let tiers = sprig_graph::parser::parse(cypher)
+    let mut tiers = sprig_graph::parser::parse(cypher)
         .map(|q| sprig_graph::exec::explain(&q))
         .unwrap_or_default();
+    // R8 round 8 (G69): the call's hops are router routes over this group.
+    tiers.extend(sprig_router::graph_route::explain_lines(
+        &g.shards.group(),
+        g.shards.mirror_async,
+    ));
     GraphStep {
         call,
         graph: format!("{}.{}", g.db, g.name),

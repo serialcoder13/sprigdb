@@ -17,6 +17,7 @@ import { lazy, Suspense, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { errorText } from '../api/errors';
 import { Generic, col, table, useStatement } from './MessagingPage';
+import { ConnectionTest, StepTable, testUnsaved } from './DryRuns';
 import {
   CONN_CREDENTIALS,
   CONN_KINDS,
@@ -25,13 +26,16 @@ import {
   createConnection,
   createScriptSink,
   dropConnection,
+  scratchName,
   scriptOf,
+  testConnection,
   setCredentials,
   setScript,
   type ConnKind,
   type Pair,
   type ScriptLanguage,
   type SinkSource,
+  type StepRow,
 } from './statements';
 
 const Monaco = lazy(() => import('../editor/Monaco'));
@@ -105,17 +109,40 @@ function NewConnection({ db, onDone }: Readonly<{ db: string; onDone: () => void
   const [more, setMore] = useState('');
   const [creds, setCreds] = useState<Pair[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const [tested, setTested] = useState<{ steps: StepRow[]; dropped: boolean; scratch: string } | null>(null);
+  const [testing, setTesting] = useState(false);
+  const options = () => [...CONN_REQUIRED[kind].map((k) => ({ key: k, value: req[k] ?? '' })), ...parsePairs(more)];
   const submit = async () => {
     setErr(null);
     try {
-      const opts = [...CONN_REQUIRED[kind].map((k) => ({ key: k, value: req[k] ?? '' })), ...parsePairs(more)];
+      const opts = options();
       const sql = createConnection(name, kind, opts, creds);
       if (await st.run(sql, createConnection(name, kind, opts, creds, true))) {
         setCreds([]);
+        setTested(null);
         onDone();
       }
     } catch (e) {
       setErr(errorText(e));
+    }
+  };
+  // Dry run before saving: the connection exists only while it is tested,
+  // under a scratch name, and is dropped whatever the test found.
+  const testFirst = async () => {
+    setErr(null);
+    setTested(null);
+    try {
+      const opts = options();
+      const scratch = scratchName(name || kind);
+      const shown = [createConnection(scratch, kind, opts, creds, true), testConnection(scratch), dropConnection(scratch)].join(';\n');
+      if (!(await st.ask(shown, 'The test creates the connection under a scratch name, tests it and drops it again; it writes nothing to the destination.'))) return;
+      setTesting(true);
+      const r = await testUnsaved(db, scratch, createConnection(scratch, kind, opts, creds));
+      setTested({ ...r, scratch });
+    } catch (e) {
+      setErr(errorText(e));
+    } finally {
+      setTesting(false);
     }
   };
   return (
@@ -164,11 +191,25 @@ function NewConnection({ db, onDone }: Readonly<{ db: string; onDone: () => void
         <textarea rows={3} value={more} onChange={(e) => setMore(e.target.value)} spellCheck={false} data-testid="conn-more" />
       </label>
       <CredentialFields kind={kind} value={creds} onChange={setCreds} idPrefix="conn-new" />
-      <div>
+      <div className="row">
+        <button type="button" onClick={() => void testFirst()} disabled={testing} data-testid="conn-test-first">
+          Test before creating…
+        </button>
         <button className="primary" type="submit" data-testid="conn-create">
           Create connection…
         </button>
+        {testing && <span className="muted">Testing…</span>}
       </div>
+      {tested && (
+        <div className="stack" data-testid="conn-test-first-result">
+          <StepTable steps={tested.steps} />
+          {!tested.dropped && (
+            <p className="error" role="alert">
+              The scratch connection {tested.scratch} couldn&apos;t be dropped: drop it by hand.
+            </p>
+          )}
+        </div>
+      )}
       {err && (
         <p className="error" role="alert">
           {err}
@@ -185,6 +226,7 @@ function ConnectionDetail({ db, name, kind, onChanged }: Readonly<{ db: string; 
   const def = useQuery({ queryKey: ['conn-def', db, name], queryFn: () => table(db, `SHOW CREATE CONNECTION ${qn}`) });
   const [creds, setCreds] = useState<Pair[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const [retest, setRetest] = useState(0);
   const k: ConnKind = kind ?? 'webhook';
   const save = async () => {
     setErr(null);
@@ -193,6 +235,7 @@ function ConnectionDetail({ db, name, kind, onChanged }: Readonly<{ db: string; 
         setCreds([]);
         await def.refetch();
         onChanged();
+        setRetest((n) => n + 1);
       }
     } catch (e) {
       setErr(errorText(e));
@@ -209,6 +252,7 @@ function ConnectionDetail({ db, name, kind, onChanged }: Readonly<{ db: string; 
           {def.data.rows.map((r) => r[r.length - 1]).join('\n')}
         </pre>
       )}
+      <ConnectionTest db={db} name={name} autoRun={retest} />
       <form
         className="stack"
         aria-label={`Set credentials of ${name}`}

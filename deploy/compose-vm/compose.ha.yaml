@@ -4,10 +4,15 @@
 #
 #   COMPOSE_FILE=compose.yaml:compose.ha.yaml
 #
-# etcd's client and peer ports and the gateway's peer service use mutual
-# TLS, and MariaDB requires TLS. The controller's internal port (permits)
-# is still plain HTTP (RUNBOOK.md, "Not done yet"): keep the private
-# network closed to everything but these VMs.
+# etcd's client and peer ports, the gateway's peer service and the
+# controller's internal port (permits; SPRIG_INTERNAL_TLS, hardening round
+# 3) use mutual TLS, and MariaDB requires TLS. The telemetry ports
+# (/metrics, /readyz) are plain HTTP on the private address, for the load
+# balancer's health checks and Prometheus (RUNBOOK.md, "Monitoring").
+#
+# Needs a sprigdb image from hardening round 3 or later (it sets
+# controller.internal_tls and gateway.kafka_advertise_host, which older
+# builds refuse); to roll back past round 3, use that round's files.
 
 services:
   etcd:
@@ -22,9 +27,24 @@ services:
       - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_BACKEND_PORT:-3306}:3306"
 
   controller:
+    environment:
+      # Mutual TLS on the internal port with the process certificate
+      # (client.pem); every SprigDB process calls it with its own.
+      SPRIGDB_CONTROLLER_INTERNAL_TLS: ${SPRIG_INTERNAL_TLS:-true}
     ports:
       - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_INTERNAL_PORT:-7481}:${SPRIG_INTERNAL_PORT:-7481}"
+      - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_TELEMETRY_PORT_CONTROLLER:-9181}:9180"
+
+  worker:
+    ports:
+      - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_TELEMETRY_PORT_WORKER:-9182}:9180"
 
   gateway:
+    environment:
+      # The name Kafka clients reach this gateway at (Kafka's Metadata lists
+      # every gateway by its own); one per VM.
+      SPRIGDB_GATEWAY_KAFKA_ADVERTISE_HOST: ${SPRIG_KAFKA_HOST:-${SPRIG_PUBLIC_HOST:-127.0.0.1}}
     ports:
       - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_PEER_PORT:-7403}:${SPRIG_PEER_PORT:-7403}"
+      # /readyz for the load balancer's health checks, /metrics for Prometheus.
+      - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_TELEMETRY_PORT_GATEWAY:-9180}:9180"

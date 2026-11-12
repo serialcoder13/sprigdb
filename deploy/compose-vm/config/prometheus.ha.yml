@@ -1,0 +1,15 @@
+# Prometheus for a data center on several VMs (RUNBOOK.md, "Monitoring"):
+# every VM's gateway, controller, worker and agent, at the telemetry ports
+# compose.ha.yaml and compose.db-ha.yaml publish on the private addresses.
+# The targets file comes from `sprig-vm.sh monitoring-config`
+# (SPRIG_VM_HOSTS) and is re-read when it changes.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 30s
+rule_files:
+  - /etc/prometheus/rules/*.rules.yaml
+scrape_configs:
+  - job_name: sprigdb
+    file_sd_configs:
+      - files: [/etc/prometheus/sprig/prometheus-targets.json]
+        refresh_interval: 1m

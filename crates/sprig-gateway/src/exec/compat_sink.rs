@@ -131,6 +131,14 @@ struct Rows {
     widened: bool,
     /// JSON columns.
     json: Vec<usize>,
+    /// Functional key parts' expressions of `SHOW INDEX` and
+    /// `STATISTICS.EXPRESSION` (R4 round 5, gaps row 64): printed MySQL's
+    /// way.
+    exprs: Vec<usize>,
+    /// Stored programs' text as written (R4 round 5, gaps row 69): every
+    /// value with a marked segment (`sprig_sql::compat::stored::
+    /// restore_original`), for statements that can read stored code.
+    originals: bool,
     /// A traditional `EXPLAIN` (R4 round 3): `partitions` goes in at
     /// [`sprig_sql::compat::explain::PARTITIONS_AT`] (text rows).
     explain: bool,
@@ -167,12 +175,20 @@ impl<'a> IntMetaSink<'a> {
             || starts(b"EXECUTE")
             || starts(b"CALL")
             || starts(b"TABLE")
+            || starts(b"SHOW")
     }
 
     /// `columns` as MySQL types them, if any changes.
     fn fixed(&mut self, columns: &[ColumnDef]) -> Option<Vec<ColumnDef>> {
         use sprig_sql::compat::intmeta;
-        if !intmeta::candidates(columns) {
+        // `SHOW` is wanted only for `SHOW INDEX`'s expressions.
+        if !intmeta::candidates(columns)
+            || self
+                .sql
+                .trim_ascii_start()
+                .get(..4)
+                .is_some_and(|w| w.eq_ignore_ascii_case(b"SHOW"))
+        {
             return None;
         }
         if matches!(self.plan, PlanState::Unread) {
@@ -198,6 +214,8 @@ impl<'a> IntMetaSink<'a> {
                 after: after.clone(),
                 widened: false,
                 json: Vec::new(),
+                exprs: Vec::new(),
+                originals: false,
                 explain: true,
                 tree: None,
             });
@@ -218,6 +236,8 @@ impl<'a> IntMetaSink<'a> {
                 after: after.clone(),
                 widened: false,
                 json: Vec::new(),
+                exprs: Vec::new(),
+                originals: false,
                 explain: false,
                 tree: Some((analyze, limit)),
             });
@@ -231,14 +251,36 @@ impl<'a> IntMetaSink<'a> {
             .filter(|(_, c)| c.col_type == sprig_proto_mysql::resultset::column_type::JSON)
             .map(|(i, _)| i)
             .collect();
+        let show = self
+            .sql
+            .trim_ascii_start()
+            .get(..4)
+            .is_some_and(|w| w.eq_ignore_ascii_case(b"SHOW"));
+        let exprs: Vec<usize> = after
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                c.name.eq_ignore_ascii_case(b"expression")
+                    && (show || c.table.eq_ignore_ascii_case(b"STATISTICS"))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let has = |w: &[u8]| self.sql.windows(w.len()).any(|x| x.eq_ignore_ascii_case(w));
+        let originals = (show && has(b"CREATE"))
+            || has(b"ROUTINE")
+            || has(b"TRIGGER")
+            || has(b"EVENT")
+            || has(b"PROC");
         let widened = fixed.is_some() && format == RowFormat::Binary;
-        if widened || !json.is_empty() {
+        if widened || !json.is_empty() || !exprs.is_empty() || originals {
             self.cur = Some(Rows {
                 format,
                 before: columns.to_vec(),
                 after: after.to_vec(),
                 widened,
                 json,
+                exprs,
+                originals,
                 explain: false,
                 tree: None,
             });
@@ -296,7 +338,39 @@ fn json_value(v: &[u8]) -> Option<Vec<u8>> {
     jsontext::canonical(v).filter(|c| c.as_slice() != v)
 }
 
+/// A functional key part's expression (MariaDB's text) as MySQL prints
+/// it in `SHOW INDEX` and `STATISTICS`, if that changes it: its item text
+/// with each `'` written `\'` (MySQL 8.4.11 does), MariaDB's text when the
+/// printer doesn't know a construct.
+fn expr_value(v: &[u8]) -> Option<Vec<u8>> {
+    let t = std::str::from_utf8(v).ok()?;
+    let p = sprig_sql::compat::exprprint::mysql_expr(t, "utf8mb4").unwrap_or_else(|| t.to_owned());
+    let p = p.replace('\'', "\\'").into_bytes();
+    (p.as_slice() != v).then_some(p)
+}
+
 impl Rows {
+    /// The columns whose values may change.
+    fn checked(&self) -> Vec<usize> {
+        if self.originals {
+            (0..self.after.len()).collect()
+        } else {
+            self.json.iter().chain(&self.exprs).copied().collect()
+        }
+    }
+
+    /// Column `i`'s value `v` as the client gets it, if it changes.
+    fn fix(&self, i: usize, v: &[u8]) -> Option<Vec<u8>> {
+        if self.originals && sprig_sql::compat::stored::has_original(v) {
+            return sprig_sql::compat::stored::restore_original(v);
+        }
+        if self.exprs.contains(&i) {
+            expr_value(v)
+        } else {
+            json_value(v)
+        }
+    }
+
     /// A row as the client gets it; `None` when it is unchanged.
     fn rewrite(&self, payload: &Bytes) -> Option<Bytes> {
         use sprig_proto_mysql::Value;
@@ -317,15 +391,15 @@ impl Rows {
                 Some(encode_text_row(out))
             }
             RowFormat::Text => {
-                if self.json.is_empty() {
+                if self.json.is_empty() && self.exprs.is_empty() && !self.originals {
                     return None;
                 }
                 let vals = decode_text_row(payload, self.after.len()).ok()?;
                 let mut fixed: Vec<Option<Vec<u8>>> = vec![None; vals.len()];
                 let mut any = false;
-                for &i in &self.json {
+                for i in self.checked() {
                     if let Some(Some(v)) = vals.get(i)
-                        && let Some(c) = json_value(v)
+                        && let Some(c) = self.fix(i, v)
                     {
                         fixed[i] = Some(c);
                         any = true;
@@ -345,9 +419,9 @@ impl Rows {
             RowFormat::Binary => {
                 let mut vals = decode_binary_row(payload, &self.before).ok()?;
                 let mut any = self.widened;
-                for &i in &self.json {
+                for i in self.checked() {
                     if let Some(Value::Bytes(b)) = vals.get(i)
-                        && let Some(c) = json_value(b)
+                        && let Some(c) = self.fix(i, b)
                     {
                         vals[i] = Value::Bytes(Bytes::from(c));
                         any = true;
@@ -420,12 +494,12 @@ impl ResultSink for IntMetaSink<'_> {
         }
         // Rows the gateway built (sharded tenants): JSON text values.
         if let (Some(cur), RowValues::Text(vals)) = (&self.cur, &values)
-            && !cur.json.is_empty()
+            && !(cur.json.is_empty() && cur.exprs.is_empty() && !cur.originals)
         {
             let mut fixed: Vec<Option<Vec<u8>>> = vec![None; vals.len()];
-            for &i in &cur.json {
+            for i in cur.checked() {
                 if let Some(Some(v)) = vals.get(i) {
-                    fixed[i] = json_value(v);
+                    fixed[i] = cur.fix(i, v);
                 }
             }
             if fixed.iter().any(Option::is_some) {
@@ -500,5 +574,27 @@ pub(super) fn prepared_columns(
         && let Some(plan) = intmeta::plan(sql, &lex)
     {
         intmeta::apply(&plan, cols);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expr_value;
+
+    #[test]
+    fn functional_part_expressions_as_mysql_prints_them() {
+        // R4 round 5 (gaps row 64): MySQL 8.4.11's `STATISTICS.EXPRESSION`
+        // and `SHOW INDEX` text for the same parts.
+        let p = |v: &str| expr_value(v.as_bytes()).map(|b| String::from_utf8(b).unwrap());
+        assert_eq!(p("`a` * 2 + 1").as_deref(), Some("((`a` * 2) + 1)"));
+        assert_eq!(
+            p("concat(`s`,'x')").as_deref(),
+            Some("concat(`s`,_utf8mb4\\'x\\')")
+        );
+        assert_eq!(
+            p("cast(json_unquote(json_extract(`data`,'$.\"some_key\"')) as signed)").as_deref(),
+            Some("cast(json_unquote(json_extract(`data`,_utf8mb4\\'$.\"some_key\"\\')) as signed)")
+        );
+        assert_eq!(p("lower(`title`)"), None);
     }
 }

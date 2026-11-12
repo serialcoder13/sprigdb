@@ -259,7 +259,12 @@ pub async fn serve(
     let (forwarded, gone, left) = if feed_on(svc, tenant, Some(db)) {
         match table {
             QO => forward_qo(svc, tenant, db, &ids).await?,
-            XO => crate::inherited::outbox::forward_ordered(svc, tenant, schema, &ids).await?,
+            XO => {
+                Box::pin(crate::inherited::outbox::forward_ordered(
+                    svc, tenant, schema, &ids,
+                ))
+                .await?
+            }
             t => return Err(bad(format!("{t} is not an outbox"))),
         }
     } else {

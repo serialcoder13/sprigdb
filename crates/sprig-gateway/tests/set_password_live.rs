@@ -17,7 +17,12 @@
 //! The login must be able to create users; the test drops the users it
 //! makes (`bf7sp_*`).
 
-#![allow(clippy::doc_markdown, clippy::unwrap_used, missing_docs)]
+#![allow(
+    clippy::doc_markdown,
+    clippy::unwrap_used,
+    clippy::many_single_char_names,
+    missing_docs
+)]
 
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, OptsBuilder, SslOpts};

@@ -67,12 +67,16 @@ services:
       - ./config/agent.toml:/etc/sprigdb/agent.toml:ro
       - ./secrets/tls:/run/sprig/tls:ro
       - ./secrets/sprig:/run/sprig/sprig:ro
+    # Alive, not ready: the agent turns ready once its cluster is
+    # registered, which sprig-vm.sh configure does after every VM is up.
     healthcheck:
-      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9180 && printf 'GET /readyz HTTP/1.0\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q ' 200 '"]
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9180 && printf 'GET /healthz HTTP/1.0\\r\\n\\r\\n' >&3 && head -1 <&3 | grep -q ' 200 '"]
       interval: 5s
       timeout: 5s
       retries: 60
       start_period: 20s
+    ports:
+      - "${SPRIG_PRIVATE_IP:-127.0.0.1}:${SPRIG_TELEMETRY_PORT_AGENT:-9183}:9180"
     depends_on:
       etcd: { condition: service_healthy }
       mariadb-1: { condition: service_healthy }

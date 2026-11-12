@@ -17,7 +17,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 use sprig_controller::catalogs::{ClusterPools, ShardMapLocator};
 use sprig_controller::dispatch::JobClass;
 use sprig_meta::MetaStore;
-use sprig_sinks::job::{SinkEnv, run_sink_task};
+use sprig_sinks::job::{SinkEnv, run_sink_task_of};
 use sprig_sinks::meta::JOB_KIND;
 use sprig_sinks::model::{SinkId, TaskNo};
 use sprig_sinks::runtime::{Cancel, TaskEnd};
@@ -324,6 +324,11 @@ impl JobHandler for SinkTask {
             u32::try_from(cx.spec["task"].as_u64().ok_or("spec.task is missing")?)
                 .map_err(|_| "spec.task is out of range")?,
         );
+        // R9 (r9last): a fan-in task's group count (the index's `tasks`
+        // when it was submitted); 1 for jobs from before grouping.
+        let of = cx.spec["of"]
+            .as_u64()
+            .map_or(1, |n| u32::try_from(n).unwrap_or(u32::MAX));
         let env: Arc<dyn SinkEnv> = Arc::new(self.0.clone());
         let cancel = Cancel::new();
         let c2 = cancel.clone();
@@ -332,7 +337,7 @@ impl JobHandler for SinkTask {
             token.cancelled().await;
             c2.cancel();
         });
-        let r = run_sink_task(env, tenant, sink, task, cancel).await;
+        let r = run_sink_task_of(env, tenant, sink, task, of, cancel).await;
         watch.abort();
         match r {
             Ok(TaskEnd::Stopped) => Ok(json!({"end": "stopped", "sink": sink.0, "task": task.0})),

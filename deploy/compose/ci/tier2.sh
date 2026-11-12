@@ -24,8 +24,17 @@ ref=$SPRIG_TIER2_RESULTS/$fw/reference/steps.tsv gw=$SPRIG_TIER2_RESULTS/$fw/gat
 worse=$(join -t $'\t' <(sort "$ref") <(sort "$gw") | awk -F'\t' '$2 == "pass" && $3 != "pass" {print $1}')
 missing=$(join -t $'\t' -v1 <(awk -F'\t' '$2 == "pass"' "$ref" | sort) <(sort "$gw") | cut -f1)
 echo "tier2 $fw: $(cat "$SPRIG_TIER2_RESULTS/$fw/reference/summary.txt") | $(cat "$SPRIG_TIER2_RESULTS/$fw/gateway/summary.txt" 2>/dev/null)"
+# Known differences (R4 round 5): clients/tier2/expected/<framework>.txt
+# lists, one per line with its reason after a tab, the tests allowed to
+# pass on MySQL and not through the gateway.
+exp=deploy/compose/clients/tier2/expected/$fw.txt
+if [[ -f $exp ]]; then
+    listed=$(grep -v '^#' "$exp" | cut -f1 | sed '/^$/d' | sort -u)
+    worse=$(comm -23 <(printf '%s\n' "$worse" | sed '/^$/d' | sort -u) <(printf '%s\n' "$listed"))
+    missing=$(comm -23 <(printf '%s\n' "$missing" | sed '/^$/d' | sort -u) <(printf '%s\n' "$listed"))
+fi
 if [[ -n $worse$missing ]]; then
     echo "tier2 $fw: passed on MySQL 8.4, not through the gateway:"
-    printf '%s\n' $worse $missing | head -200
+    printf '%s\n' "$worse" "$missing" | sed '/^$/d' | head -200
     exit 1
 fi

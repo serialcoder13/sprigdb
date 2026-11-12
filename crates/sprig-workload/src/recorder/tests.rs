@@ -279,3 +279,42 @@ fn forget_tenant_closes_its_entries() {
     assert_eq!(r.metrics().fingerprints_active, 0);
     assert_eq!(r.drain_closed().len(), 1);
 }
+
+#[test]
+fn digests_outlive_buckets_and_reset_per_tenant() {
+    // R4 round 5: the totals `performance_schema`'s digest summary shows.
+    let (r, c, f) = setup(RecorderConfig::default());
+    let a = fp(&f, 1, "SELECT * FROM t WHERE id = 1");
+    let b = fp(&f, 2, "SELECT * FROM t WHERE id = 1");
+    r.record(TenantId(1), &a, &ex(50));
+    c.advance(Duration::from_secs(3600));
+    r.record(TenantId(1), &a, &ex(30));
+    let mut failed = ex(90);
+    failed.error = true;
+    r.record(TenantId(1), &a, &failed);
+    r.record(TenantId(2), &b, &ex(10));
+    // The bucket started again; the digest didn't.
+    assert_eq!(r.stats(TenantId(1), a.id).unwrap().exec_count, 2);
+    let d = r.digests(TenantId(1));
+    assert_eq!(d.len(), 1);
+    let g = &d[0].digest;
+    assert_eq!(
+        (
+            g.exec_count,
+            g.error_count,
+            g.total_us,
+            g.min_us,
+            g.max_us,
+            g.rows_returned
+        ),
+        (3, 1, 170, 30, 90, 3)
+    );
+    assert_eq!(&*d[0].text, "SELECT * FROM shop.t WHERE id = ?");
+    assert!(g.first_seen.unwrap() < g.last_seen.unwrap());
+    r.reset_digests(TenantId(1));
+    assert!(r.digests(TenantId(1)).is_empty());
+    assert_eq!(r.digests(TenantId(2)).len(), 1);
+    r.record(TenantId(1), &a, &ex(40));
+    assert_eq!(r.digests(TenantId(1))[0].digest.exec_count, 1);
+    assert_eq!(r.stats(TenantId(1), a.id).unwrap().exec_count, 3);
+}

@@ -247,6 +247,10 @@ pub struct TriggerEvent {
     pub row: Value,
     /// Resume after this event.
     pub token: Option<ResumeToken>,
+    /// The feed's event it came from (its images as the feed has them),
+    /// for the row-level security check of a bound definer (chapter 29,
+    /// RLS round 5, RL50); `None` for a dead letter's.
+    pub feed: Option<Arc<ChangeEvent>>,
 }
 
 fn image(i: Option<&sprig_feed::Image>) -> Vec<(String, String)> {
@@ -293,7 +297,24 @@ impl TriggerEvent {
                 Value::Object(i.0.iter().map(|(n, v)| (n.clone(), display(v))).collect())
             }),
             token: Some(e.token.clone()),
+            feed: Some(Arc::new(e.clone())),
         })
+    }
+
+    /// The event as a definer whose row policies changed its row's
+    /// visibility sees it (chapter 29, RL50): an update whose row became
+    /// visible as an insert (`op` "insert", no before image), one whose
+    /// row became hidden as a delete ("delete", no after image).
+    #[must_use]
+    pub fn shown_as(&self, op: &str) -> Self {
+        let mut e = self.clone();
+        op.clone_into(&mut e.op);
+        match op {
+            "insert" => e.before.clear(),
+            "delete" => e.after.clear(),
+            _ => {}
+        }
+        e
     }
 
     /// The physical shard schema of the event's row.
@@ -350,6 +371,7 @@ impl TriggerEvent {
             after: pairs("after")?,
             row: v["row"].clone(),
             token: None,
+            feed: None,
         })
     }
 
@@ -448,6 +470,9 @@ pub enum Applied {
     Ran(u64),
     /// The marker was there: an earlier delivery ran it.
     AlreadyDone,
+    /// Row-level security hides the event's row from the binding's definer
+    /// (chapter 29, RL50): passed over, nothing run.
+    Hidden,
 }
 
 /// Runs a binding's active version on one event, exactly once.
@@ -567,6 +592,8 @@ pub struct Stats {
     pub ran: AtomicU64,
     /// Deliveries a marker stopped.
     pub already: AtomicU64,
+    /// Events passed over: their rows are hidden from the definer (RL50).
+    pub hidden: AtomicU64,
     /// Failed attempts.
     pub retries: AtomicU64,
     /// Dead letters written.
@@ -612,6 +639,10 @@ async fn deliver(
             }
             Ok(Applied::AlreadyDone) => {
                 stats.already.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+            Ok(Applied::Hidden) => {
+                stats.hidden.fetch_add(1, Ordering::Relaxed);
                 return;
             }
             Err(e) => {

@@ -80,6 +80,87 @@ pub fn derived_sql(db: Option<&str>, id: StreamId) -> String {
     format!("(SELECT partition_no, offset_no, ts, k AS `key`, v AS `value`, headers FROM {table})")
 }
 
+/// The alias a change record's image has in a [`RecordFilter`]'s
+/// predicate (`` `__sprig_ci`.`col` ``).
+pub const FILTER_QUAL: &str = "`__sprig_ci`";
+
+/// A change topic's records as one reader may see them (chapter 29,
+/// "Change feed consumers"; RLS round 5, decision RL44): each record's
+/// `before` and `after` images are read as rows of the table
+/// (`JSON_TABLE` with the table's column types and collations) and the
+/// reader's `SELECT` policies, rendered with its session values over
+/// [`FILTER_QUAL`], decide whether each image is visible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordFilter {
+    /// `JSON_TABLE`'s column list: `` `owner` VARCHAR(64) CHARACTER SET
+    /// utf8mb4 COLLATE utf8mb4_general_ci PATH '$."owner"', ... ``.
+    pub columns: String,
+    /// The predicate over [`FILTER_QUAL`] (`FALSE` hides every image).
+    pub predicate: String,
+}
+
+/// Whether image `path` (`'$.before'` or `'$.after'`) of the JSON in
+/// column `v` of the row `` `__sprig_cl` `` passes `f`: `FALSE` for a
+/// missing image.
+#[must_use]
+pub fn image_visible(f: &RecordFilter, path: &str) -> String {
+    let v = "CONVERT(`__sprig_cl`.v USING utf8mb4)";
+    format!(
+        "COALESCE(JSON_TYPE(JSON_EXTRACT({v}, '{path}')) = 'OBJECT' AND EXISTS (SELECT 1 FROM \
+         JSON_TABLE({v}, '{path}' COLUMNS ({cols})) AS {q} WHERE {pred}), FALSE)",
+        cols = f.columns,
+        q = FILTER_QUAL,
+        pred = f.predicate,
+    )
+}
+
+/// The derived table reading change topic `id`'s log through `f`
+/// (`db` qualifies it):
+///
+/// ```text
+/// op c: kept when the after image is visible
+/// op d: kept when the before image is visible
+/// op u: both visible: kept; before only: becomes op d (after null);
+///       after only: becomes op c (before null); neither: left out
+/// ddl, t (truncate): kept
+/// ```
+///
+/// Records left out leave gaps in the offsets; nothing is renumbered.
+#[must_use]
+pub fn filtered_derived_sql(db: Option<&str>, id: StreamId, f: &RecordFilter) -> String {
+    let table = match db {
+        Some(d) => format!("{}.{}", quote(d), quote(&log_table(id))),
+        None => quote(&log_table(id)),
+    };
+    let set = |op: &str, gone: &str| {
+        format!(
+            "CAST(JSON_COMPACT(JSON_SET(CONVERT(`value` USING utf8mb4), '$.op', '{op}', '$.{gone}', NULL)) AS BINARY)"
+        )
+    };
+    format!(
+        "(SELECT partition_no, offset_no, ts, `key`, CASE \
+         WHEN `__sprig_o` = 'u' AND NOT `__sprig_a` THEN {to_d} \
+         WHEN `__sprig_o` = 'u' AND NOT `__sprig_b` THEN {to_c} \
+         ELSE `value` END AS `value`, headers FROM (SELECT `__sprig_cl`.partition_no, \
+         `__sprig_cl`.offset_no, `__sprig_cl`.ts, `__sprig_cl`.k AS `key`, `__sprig_cl`.v AS \
+         `value`, `__sprig_cl`.headers, JSON_VALUE(CONVERT(`__sprig_cl`.v USING utf8mb4), \
+         '$.op') AS `__sprig_o`, {b} AS `__sprig_b`, {a} AS `__sprig_a` FROM {table} AS \
+         `__sprig_cl`) AS `__sprig_cf` WHERE `__sprig_o` IS NULL OR `__sprig_o` NOT IN ('c', \
+         'u', 'd') OR `__sprig_b` OR `__sprig_a`)",
+        to_d = set("d", "after"),
+        to_c = set("c", "before"),
+        b = image_visible(f, "$.before"),
+        a = image_visible(f, "$.after"),
+    )
+}
+
+/// The placeholder table a filtered stream read gets before its derived
+/// table is put in as text (the parser doesn't print `JSON_TABLE`'s
+/// column types back).
+fn placeholder(id: StreamId) -> String {
+    format!("__sprig_sfp_{}", id.0)
+}
+
 fn parse(sql: &str) -> Option<Vec<Statement>> {
     Parser::new(&MySqlDialect {})
         .with_options(ParserOptions::new().with_unescape(false))
@@ -94,6 +175,9 @@ pub type Lookup<'a> = dyn Fn(Option<&str>, &str) -> Option<StreamId> + 'a;
 struct Swap<'a> {
     lookup: &'a Lookup<'a>,
     hits: Vec<(Option<String>, String, StreamId)>,
+    /// Streams read through a [`RecordFilter`]: a placeholder table now,
+    /// the filtered derived table after printing.
+    filtered: &'a std::collections::HashMap<StreamId, RecordFilter>,
 }
 
 fn part(p: &ObjectNamePart) -> Option<String> {
@@ -129,10 +213,14 @@ impl VisitorMut for Swap<'_> {
                 t.strip_prefix("AS ").map_or(t.clone(), str::to_owned)
             },
         );
-        let snippet = format!(
-            "SELECT * FROM {} AS {alias_text}",
-            derived_sql(db.as_deref(), id)
-        );
+        let snippet = if self.filtered.contains_key(&id) {
+            format!("SELECT * FROM {} AS {alias_text}", quote(&placeholder(id)))
+        } else {
+            format!(
+                "SELECT * FROM {} AS {alias_text}",
+                derived_sql(db.as_deref(), id)
+            )
+        };
         let Some(mut stmts) = parse(&snippet) else {
             return ControlFlow::Break(());
         };
@@ -170,6 +258,21 @@ pub fn rewrite_select(
     lex_opts: &LexOptions,
     lookup: &Lookup<'_>,
 ) -> Result<Option<Rewritten>> {
+    rewrite_select_filtered(sql, lex_opts, lookup, &std::collections::HashMap::new())
+}
+
+#[allow(clippy::implicit_hasher)] // the caller's own map
+/// [`rewrite_select`], with the change topics in `filters` read through
+/// their [`RecordFilter`] ([`filtered_derived_sql`]).
+///
+/// # Errors
+/// As [`rewrite_select`].
+pub fn rewrite_select_filtered(
+    sql: &str,
+    lex_opts: &LexOptions,
+    lookup: &Lookup<'_>,
+    filters: &std::collections::HashMap<StreamId, RecordFilter>,
+) -> Result<Option<Rewritten>> {
     let quoted = quote_columns(sql, lex_opts);
     let Some(mut stmts) = parse(&quoted) else {
         return Ok(None);
@@ -180,6 +283,7 @@ pub fn rewrite_select(
     let mut v = Swap {
         lookup,
         hits: Vec::new(),
+        filtered: filters,
     };
     if stmts[0].visit(&mut v).is_break() {
         return Err(SprigError::standard(
@@ -191,8 +295,22 @@ pub fn rewrite_select(
     if v.hits.is_empty() {
         return Ok(None);
     }
+    let mut out = stmts[0].to_string();
+    for (db, _, id) in &v.hits {
+        if let Some(f) = filters.get(id) {
+            let p = quote(&placeholder(*id));
+            if !out.contains(&p) {
+                return Err(SprigError::standard(
+                    1235,
+                    *b"42000",
+                    "This version of SprigDB doesn't yet support this statement on a stream",
+                ));
+            }
+            out = out.replacen(&p, &filtered_derived_sql(db.as_deref(), *id, f), 1);
+        }
+    }
     Ok(Some(Rewritten {
-        sql: stmts[0].to_string(),
+        sql: out,
         streams: v.hits,
     }))
 }
@@ -514,6 +632,42 @@ mod tests {
             quote_columns("SELECT 'key' FROM s", &o),
             "SELECT 'key' FROM s"
         );
+    }
+
+    #[test]
+    fn filtered_reads_put_the_filter_in_as_text() {
+        let o = LexOptions::mariadb();
+        let f = RecordFilter {
+            columns: "`owner` VARCHAR(64) PATH '$.\"owner\"'".into(),
+            predicate: "(`__sprig_ci`.`owner` = 'alice@%')".into(),
+        };
+        let filters = std::collections::HashMap::from([(StreamId(41), f)]);
+        let r = rewrite_select_filtered(
+            "SELECT CAST(value AS CHAR) FROM shop.order_events WHERE offset_no > 3",
+            &o,
+            &look,
+            &filters,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!r.sql.contains("__sprig_sfp_"), "{}", r.sql);
+        assert!(
+            r.sql
+                .contains("FROM `shop`.`__sprig_sl_41` AS `__sprig_cl`"),
+            "{}",
+            r.sql
+        );
+        assert!(r.sql.contains("JSON_TABLE(CONVERT(`__sprig_cl`.v USING utf8mb4), '$.before' COLUMNS (`owner` VARCHAR(64) PATH '$.\"owner\"')) AS `__sprig_ci` WHERE (`__sprig_ci`.`owner` = 'alice@%')"), "{}", r.sql);
+        assert!(
+            r.sql.contains(") AS `order_events` WHERE offset_no > 3"),
+            "{}",
+            r.sql
+        );
+        // A stream without a filter reads its log as before.
+        let r = rewrite_select("SELECT * FROM shop.order_events", &o, &look)
+            .unwrap()
+            .unwrap();
+        assert!(!r.sql.contains("__sprig_cl"), "{}", r.sql);
     }
 
     #[test]

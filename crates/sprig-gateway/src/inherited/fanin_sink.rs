@@ -12,6 +12,10 @@
 //!   → a get on the member's instance (an internal principal of the member,
 //!     as the AMQP fan-in consumer's), each message held lease_ms:
 //!     mq_get's columns (delivery_token first)
+//!   (R9, r9last: under the task's lease tag when it gives one)
+//! FanInRelease {def, member, db, queue, tag}
+//!   the same checks → the member's instance gives back what was held
+//!   under tag (a dead task's leases, as mq_release)
 //! FanInSettle {tokens, ack}
 //!   each token checked (its MAC, its tenant below P) and settled with its
 //!   owner: acknowledged, or rejected without requeue (the queue's
@@ -98,43 +102,11 @@ pub async fn get(
     queue: &str,
     max: u32,
     lease_ms: u64,
+    tag: Option<&str>,
 ) -> Result<SqlReply> {
-    let reader = caller
-        .principal
-        .tenant
-        .ok_or_else(|| SprigError::internal("a sink owner without a tenant"))?;
-    let cat = super::catalog(svc, reader).await?;
-    let chain = super::chain(svc, &cat).await?;
-    let want = DefKey {
-        tenant: TenantId(def.0),
-        object: def.1,
-    };
-    super::fanin_mq::queue_definition(&chain, db, queue)
-        .filter(|d| d.key() == want)
-        .ok_or_else(|| {
-            super::target_err(format!(
-                "no FOR EACH TENANT queue {db}.{queue} in reach for FAN IN"
-            ))
-        })?;
-    let p = sprig_proto_amqp::auth::Principal {
-        tenant_id: reader.0,
-        tenant: caller.principal.tenant_name.clone().unwrap_or_default(),
-        user: caller.principal.user.clone(),
-        user_id: caller.principal.user_id.map(|u| u64::from(u.0)),
-        handle: None,
-    };
-    if !super::fanin_mq::allowed(svc, &cat, &p, db, queue) {
-        return Err(denied("SPRIG_FAN_IN, SELECT and DELETE"));
-    }
-    let m = TenantId(member);
-    let name = member_of(svc, reader, m).await?;
-    let e = engine(svc)?;
-    let v = e
-        .sql_vhost(Arc::new(internal_principal(m, &name)), db, 0)
-        .await
-        .map_err(|x| mq_err(&x))?;
+    let v = member_vhost(svc, caller, def, member, db, queue).await?;
     let ds = v
-        .get(queue, max.clamp(1, 1000), lease_ms.max(1))
+        .get_tagged(queue, max.clamp(1, 1000), lease_ms.max(1), tag)
         .await
         .map_err(|x| mq_err(&x))?;
     let rows = ds
@@ -177,6 +149,73 @@ pub async fn get(
         }],
         ..SqlReply::default()
     })
+}
+
+/// See the module docs: a dead task's leases in member `member`'s
+/// instance go back to the queue (R9, r9last).
+///
+/// # Errors
+/// As [`get`].
+pub async fn release(
+    svc: &Arc<TenantServices>,
+    caller: &Caller,
+    def: (u64, u64),
+    member: u64,
+    db: &str,
+    queue: &str,
+    tag: &str,
+) -> Result<SqlReply> {
+    let v = member_vhost(svc, caller, def, member, db, queue).await?;
+    v.release_tag(queue, tag).await.map_err(|x| mq_err(&x))?;
+    Ok(SqlReply {
+        results: vec![SqlResult::default()],
+        ..SqlReply::default()
+    })
+}
+
+/// Member `member`'s instance vhost of definition `def`, for the caller
+/// as a fan-in reader (see the module docs for the checks).
+async fn member_vhost(
+    svc: &Arc<TenantServices>,
+    caller: &Caller,
+    def: (u64, u64),
+    member: u64,
+    db: &str,
+    queue: &str,
+) -> Result<sprig_queues::sql::SqlVhost> {
+    let reader = caller
+        .principal
+        .tenant
+        .ok_or_else(|| SprigError::internal("a sink owner without a tenant"))?;
+    let cat = super::catalog(svc, reader).await?;
+    let chain = super::chain(svc, &cat).await?;
+    let want = DefKey {
+        tenant: TenantId(def.0),
+        object: def.1,
+    };
+    super::fanin_mq::queue_definition(&chain, db, queue)
+        .filter(|d| d.key() == want)
+        .ok_or_else(|| {
+            super::target_err(format!(
+                "no FOR EACH TENANT queue {db}.{queue} in reach for FAN IN"
+            ))
+        })?;
+    let p = sprig_proto_amqp::auth::Principal {
+        tenant_id: reader.0,
+        tenant: caller.principal.tenant_name.clone().unwrap_or_default(),
+        user: caller.principal.user.clone(),
+        user_id: caller.principal.user_id.map(|u| u64::from(u.0)),
+        handle: None,
+    };
+    if !super::fanin_mq::allowed(svc, &cat, &p, db, queue) {
+        return Err(denied("SPRIG_FAN_IN, SELECT and DELETE"));
+    }
+    let m = TenantId(member);
+    let name = member_of(svc, reader, m).await?;
+    let e = engine(svc)?;
+    e.sql_vhost(Arc::new(internal_principal(m, &name)), db, 0)
+        .await
+        .map_err(|x| mq_err(&x))
 }
 
 /// See the module docs: one result per token, with its error if it

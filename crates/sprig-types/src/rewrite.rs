@@ -204,6 +204,11 @@ pub struct RefPlan {
     pub tables: Vec<(Arc<TypeDef>, String)>,
     /// The type filter (`_type = 'T'` or the path range), on the root.
     pub filter: Option<String>,
+    /// The extension tables are `LEFT JOIN`ed (a discriminated joined
+    /// subtype: its rows are the root's rows its value marks, whether or not
+    /// an extension row exists, as when a parent tenant wrote a value only
+    /// a child tenant declares).
+    pub left: bool,
 }
 
 impl RefPlan {
@@ -251,7 +256,8 @@ impl RefPlan {
                 })
                 .collect();
             s.push_str(&format!(
-                " JOIN {} AS {} ON {}",
+                " {}JOIN {} AS {} ON {}",
+                if self.left { "LEFT " } else { "" },
                 table(t),
                 quote(a),
                 on.join(" AND ")
@@ -284,7 +290,10 @@ pub fn build_plan(r: &TypedRef, owners: &BTreeSet<TypeId>, extra: &[TypeId]) -> 
         need.clear();
     }
     let root_only = need.iter().all(|o| *o == root.id);
-    if only || root_only || r.t.is_root() {
+    // A discriminated joined subtype is the root's rows its value marks:
+    // read from the root with the path range, its tables LEFT JOINed.
+    let open = root.discriminator.is_some() && root.storage == Storage::Joined && !r.t.is_root();
+    if only || root_only || r.t.is_root() || open {
         need.insert(root.id);
     } else {
         need.insert(r.t.id);
@@ -320,7 +329,7 @@ pub fn build_plan(r: &TypedRef, owners: &BTreeSet<TypeId>, extra: &[TypeId]) -> 
                 quote(TYPE_COLUMN),
                 quote_str(&r.t.name, false)
             ));
-        } else if !r.t.is_root() && !tables.iter().any(|(t, _)| t.id == r.t.id) {
+        } else if !r.t.is_root() && (open || !tables.iter().any(|(t, _)| t.id == r.t.id)) {
             let lo = &r.t.path;
             let hi = String::from_utf8_lossy(&upper(lo.as_bytes())).into_owned();
             filter = Some(format!(
@@ -332,7 +341,12 @@ pub fn build_plan(r: &TypedRef, owners: &BTreeSet<TypeId>, extra: &[TypeId]) -> 
             ));
         }
     }
-    RefPlan { tables, filter }
+    let left = open && tables.len() > 1;
+    RefPlan {
+        tables,
+        filter,
+        left,
+    }
 }
 
 /// Which `SPRIG_*` function.

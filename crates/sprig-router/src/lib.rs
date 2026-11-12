@@ -27,6 +27,8 @@
 //! - **Graph** (R8 round 6): a statement with `GRAPH_TABLE` ([`graph`]):
 //!   the graph calls run first, then the statement with their rows as
 //!   derived tables plans again; literal rows join inside each shard.
+//!   Each hop of a graph read is a router route too ([`graph_route`], R8
+//!   round 8): Bolt and `GRAPH_TABLE` share this planner.
 //! - **Reject**: `ER_SPRIG_STATEMENT_NOT_DISTRIBUTABLE` (39420) with a
 //!   reason code; never a different answer.
 //!
@@ -50,6 +52,7 @@ pub mod exec;
 pub mod fk;
 pub mod gather;
 pub mod graph;
+pub mod graph_route;
 pub mod plan;
 pub mod planner;
 pub mod reject;

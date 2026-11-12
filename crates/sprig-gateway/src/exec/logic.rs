@@ -154,8 +154,25 @@ impl PassSession {
         }
     }
 
-    #[allow(clippy::too_many_lines)] // the deploy, then the SELECT function
     async fn logic_deploy(&mut self, cx: &mut ExecCtx<'_>, text: &Bytes) -> Result<Vec<String>> {
+        let r = self.logic_deploy_with(cx, text, None).await;
+        if let Some(ts) = self.tenant.as_deref() {
+            super::logic_rollout::invalidate(ts.tenant.0);
+        }
+        r
+    }
+
+    /// [`Self::logic_deploy`]; with `auto`, SprigDB itself runs the
+    /// statement for that user (the module's owner): an automatic
+    /// rollback of a staged rollout (R7 follow-ups). Rights aren't checked
+    /// then, and the columns are read as `sprig_ctl` sees them.
+    #[allow(clippy::too_many_lines)] // the deploy, then the SELECT function
+    pub(super) async fn logic_deploy_with(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        text: &Bytes,
+        auto: Option<sprig_common::ids::UserId>,
+    ) -> Result<Vec<String>> {
         let text_s = String::from_utf8_lossy(text);
         // `ALTER FUNCTION f ROLLBACK [TO VERSION n]` (R7 close-out): the
         // declaration comes from the catalog once it is read (below).
@@ -202,48 +219,19 @@ impl PassSession {
             })?;
         // Every shard of the database (chapter 21's layout; R7 close-out):
         // a sharded database gets the routines on each, all or nothing.
-        let template = ts.schema_of(Some(&db));
-        let shard_list: Vec<(String, sprig_common::ids::ClusterId)> = {
-            let layout = super::router::ddl_layout(ts);
-            let first = template.clone().or_else(|| {
-                sprig_catalog::ddl::shard_schemas(ts.tenant, &row)
-                    .first()
-                    .map(ToString::to_string)
-            });
-            let from_layout = match (&layout, &first) {
-                (Some(l), Some(t)) => l(t, None),
-                _ => None,
-            };
-            // The session's own schema (the default group's shard, where
-            // a statement naming no table goes) first, then the groups'.
-            let from_layout = from_layout.map(|mut v| {
-                if let Some(t) = &template
-                    && !v.iter().any(|(s, _)| s == t)
-                {
-                    v.insert(0, (t.clone(), self.target.cluster.clone()));
-                }
-                v
-            });
-            match (from_layout.filter(|v| v.len() > 1), &template) {
-                (Some(v), _) => v,
-                (None, Some(t)) => vec![(t.clone(), self.target.cluster.clone())],
-                (None, None) => {
-                    return Err(SprigError::new(
-                        SprigCode::LogicUnsupported,
-                        format!("database {db} has no shard this gateway can find"),
-                    ));
-                }
-            }
-        };
+        let shard_list = shard_list(ts, &self.target.cluster, &db, &row)?;
         let schema = shard_list[0].0.clone();
         let single_shard = shard_list.len() == 1;
-        let user = ts
-            .principal
-            .user_id
-            .ok_or_else(|| SprigError::internal("a logic deploy without a user"))?;
+        let user = match auto {
+            Some(u) => u,
+            None => ts
+                .principal
+                .user_id
+                .ok_or_else(|| SprigError::internal("a logic deploy without a user"))?,
+        };
         // Chapter 29's `CREATE ROUTINE` on the database: the routines are
         // created through `sprig_ctl` (below), so MariaDB doesn't check it.
-        {
+        if auto.is_none() {
             let grants = crate::tenant::authz::privileges(ts, &catalog);
             let db_key = sprig_catalog::ddl::database_key(&db, ts.lower_case_table_names());
             let action = if rollback.is_some() {
@@ -286,11 +274,27 @@ impl PassSession {
                 .await
                 .map_err(sprig_logic::deploy::conn_err)?,
         );
+        // The columns are read as the deploying user sees them; an
+        // automatic rollback reads them as `sprig_ctl` (a second
+        // connection: the first creates the routines).
+        let mut ctl_cols = match auto {
+            Some(_) => Some(sprig_logic::deploy::ConnSession(
+                ctl_pool
+                    .get_conn()
+                    .await
+                    .map_err(sprig_logic::deploy::conn_err)?,
+            )),
+            None => None,
+        };
         let _ = self.bs(cx);
         let Some(bs) = self.bs.as_mut() else {
             return Err(SprigError::internal("no backend session"));
         };
-        let mut session = Bs(bs);
+        let mut user_session = Bs(bs);
+        let session: &mut dyn Session = match ctl_cols.as_mut() {
+            Some(c) => c,
+            None => &mut user_session,
+        };
         let (decl, fixed) = match &rollback {
             Some(r) => {
                 let store = sprig_logic::LogicStore::new(ep.store.schema());
@@ -319,7 +323,7 @@ impl PassSession {
                 max_loop_iterations: MAX_LOOP_ITERATIONS,
                 compile_max_cost: COMPILE_MAX_COST,
             },
-            &mut session,
+            session,
             Some(service::Creator {
                 session: &mut ctl,
                 definer: definer.clone(),
@@ -329,12 +333,34 @@ impl PassSession {
                 shards: shards
                     .as_mut()
                     .map(|s| s as &mut dyn sprig_logic::deploy::ShardSessions),
+                tenant: tenant.0,
             },
         )
         .await?;
         let mut notes = outcome.notes();
         if let Some(v) = fixed {
-            notes.insert(0, format!("{} rolled back to version {v}", decl.name));
+            let what = match rollback.as_ref().and_then(|r| r.rollout) {
+                Some(sprig_logic::rollout::RolloutOp::Promote) => {
+                    format!(
+                        "{}: version {v} promoted, active for every caller",
+                        decl.name
+                    )
+                }
+                Some(sprig_logic::rollout::RolloutOp::Abort) => {
+                    format!(
+                        "{}: rollout ended, version {v} active for every caller",
+                        decl.name
+                    )
+                }
+                Some(sprig_logic::rollout::RolloutOp::To(pct, _)) => {
+                    format!(
+                        "{}: version {v} is the candidate for {pct}% of callers",
+                        decl.name
+                    )
+                }
+                None => format!("{} rolled back to version {v}", decl.name),
+            };
+            notes.insert(0, what);
         }
         if !single_shard {
             notes.push(format!("deployed on {} shards", shard_list.len()));
@@ -343,7 +369,14 @@ impl PassSession {
         // needs `SUPER` with the binary log on: created as `sprig_ctl`
         // with the deploying user as `DEFINER` (checked afterwards). A
         // failure leaves `CALL` working and says why.
-        if let Some(sql) = outcome.select_fn {
+        if outcome.staged.is_some() {
+            // The active version keeps its SELECT function during a
+            // staged rollout; CALL and every protocol follow the stage.
+            notes.push(format!(
+                "SELECT {}(...) keeps the active version until the candidate is promoted",
+                decl.name
+            ));
+        } else if let Some(sql) = outcome.select_fn {
             let plan = sprig_logic::deploy::plan_select(&schema, &decl.name, sql, &definer);
             let r = match shards.as_mut() {
                 Some(sh) => sprig_logic::deploy::deploy_shards(sh, &plan).await,
@@ -378,6 +411,45 @@ impl PassSession {
             ));
         }
         Ok(notes)
+    }
+}
+
+/// Every shard schema of database `db` (chapter 21's layout; R7
+/// close-out): the session's own schema (the default group's shard, where
+/// a statement naming no table goes) first, then the groups'; one for an
+/// unsharded database.
+pub(super) fn shard_list(
+    ts: &crate::tenant::session::TenantSession,
+    cluster: &sprig_common::ids::ClusterId,
+    db: &str,
+    row: &sprig_catalog::DatabaseRow,
+) -> Result<Vec<(String, sprig_common::ids::ClusterId)>> {
+    let template = ts.schema_of(Some(db));
+    let layout = super::router::ddl_layout(ts);
+    let first = template.clone().or_else(|| {
+        sprig_catalog::ddl::shard_schemas(ts.tenant, row)
+            .first()
+            .map(ToString::to_string)
+    });
+    let from_layout = match (&layout, &first) {
+        (Some(l), Some(t)) => l(t, None),
+        _ => None,
+    };
+    let from_layout = from_layout.map(|mut v| {
+        if let Some(t) = &template
+            && !v.iter().any(|(s, _)| s == t)
+        {
+            v.insert(0, (t.clone(), cluster.clone()));
+        }
+        v
+    });
+    match (from_layout.filter(|v| v.len() > 1), &template) {
+        (Some(v), _) => Ok(v),
+        (None, Some(t)) => Ok(vec![(t.clone(), cluster.clone())]),
+        (None, None) => Err(SprigError::new(
+            SprigCode::LogicUnsupported,
+            format!("database {db} has no shard this gateway can find"),
+        )),
     }
 }
 
@@ -702,7 +774,7 @@ impl ResultSink for Collect {
 }
 
 /// The wrapper's column for an output column.
-fn out_column(c: &invoke::OutCol, charset: u16) -> ColumnDef {
+pub(super) fn out_column(c: &invoke::OutCol, charset: u16) -> ColumnDef {
     let name = Bytes::copy_from_slice(c.name.as_bytes());
     match c.ty {
         OutTy::Event => ColumnDef {
@@ -739,7 +811,7 @@ fn out_column(c: &invoke::OutCol, charset: u16) -> ColumnDef {
     }
 }
 
-fn binary_value(text: Option<&String>, ty: OutTy) -> Value {
+pub(super) fn binary_value(text: Option<&String>, ty: OutTy) -> Value {
     let Some(t) = text else {
         return Value::Null;
     };
@@ -770,6 +842,10 @@ impl PassSession {
         map: &dyn NameMap,
         out: &mut dyn ResultSink,
     ) -> Result<Step> {
+        // A function in a staged rollout (R7 follow-ups): its calls are
+        // counted per version (`exec::logic_rollout`).
+        let pick = self.rollout_pick(original).await;
+        let called = std::time::Instant::now();
         let marker = {
             let mut tap = Tap {
                 inner: &mut *out,
@@ -779,6 +855,10 @@ impl PassSession {
                 Box::pin(self.routed(cx, sql, original, more, format, mapper, map, &mut tap))
                     .await?;
             if !tap.captured() {
+                if let Some((m, v)) = pick {
+                    self.rollout_count(cx, m, v, called.elapsed(), step.errored)
+                        .await;
+                }
                 return Ok(step);
             }
             tap.into_marker()
@@ -793,7 +873,12 @@ impl PassSession {
         };
         let charset = cx.proto.collation;
         let started = std::time::Instant::now();
-        match self.engine_call(cx, &marker).await {
+        let r = self.engine_call(cx, &marker).await;
+        if let Some((m, _)) = pick.filter(|(m, _)| *m == marker.module_id) {
+            self.rollout_count(cx, m, marker.version, called.elapsed(), r.is_err())
+                .await;
+        }
+        match r {
             Ok((v, event, result)) => {
                 tracing::debug!(
                     module = v.module_id,
@@ -863,6 +948,7 @@ impl PassSession {
         Box::pin(LOGIC_DEPTH.scope(depth + 1, self.engine_call_inner(cx, marker))).await
     }
 
+    #[allow(clippy::too_many_lines)] // the version, budgets, the run and its statements
     async fn engine_call_inner(
         &mut self,
         cx: &mut ExecCtx<'_>,
@@ -920,9 +1006,21 @@ impl PassSession {
             "function": v.name.clone(),
             "version": v.version,
         });
+        // Inside a test run (`exec::logic_test`), a nested call sends no
+        // outbound calls and meets the run's refusals.
+        let testing = super::logic_test::in_test_run();
+        let outbound: Arc<dyn sprig_logic::engine::outbound::Outbound> = if testing {
+            Arc::new(sprig_logic::testrun::MockOutbound {
+                policy,
+                mocks: Vec::new(),
+                rec: Arc::new(sprig_logic::testrun::Recorder::default()),
+            })
+        } else {
+            Arc::new(HttpOutbound::new(policy))
+        };
         let host = Host {
             db: Arc::new(ChannelDb(tx)),
-            outbound: Arc::new(HttpOutbound::new(policy)),
+            outbound,
             default_db: db_row.map(|r| r.name.clone()),
             info,
         };
@@ -937,6 +1035,13 @@ impl PassSession {
                 biased;
                 r = &mut run => break r,
                 Some((op, reply)) = rx.recv() => {
+                    if testing
+                        && let sprig_logic::testrun::StmtClass::Refused(why) =
+                            sprig_logic::testrun::classify(&op.sql)
+                    {
+                        let _ = reply.send(Err(SprigError::new(SprigCode::LogicUnsupported, why)));
+                        continue;
+                    }
                     if !opened && matches!(op.shape, eb::Shape::Exec | eb::Shape::Call | eb::Shape::Sprig) {
                         let st = self.status();
                         if st.contains(StatusFlags::AUTOCOMMIT) && !st.contains(StatusFlags::IN_TRANS) {

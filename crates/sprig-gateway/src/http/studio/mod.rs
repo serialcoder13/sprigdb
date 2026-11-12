@@ -118,10 +118,10 @@ pub static TOKEN_KEY_ROTATION_DAYS: Setting<u64> = Setting {
 };
 sprig_settings::register!(TOKEN_KEY_ROTATION_DAYS);
 
-/// The refresh cookie on TLS or loopback (`Secure`, so the `__Secure-`
-/// prefix applies).
+/// The refresh cookie over TLS (`Secure`, so the `__Secure-` prefix
+/// applies).
 pub const COOKIE_SECURE: &str = "__Secure-sprig-refresh";
-/// The refresh cookie on plain HTTP from another host, allowed only with
+/// The refresh cookie on plain HTTP: loopback, or another host only with
 /// `studio.allow_insecure_http`.
 pub const COOKIE_PLAIN: &str = "sprig-refresh";
 /// The header every cookie request must carry (forces a CORS preflight).
@@ -641,14 +641,21 @@ fn cookie(req: &Request<Incoming>, name: &str) -> Option<String> {
         .map(|(_, v)| v.to_owned())
 }
 
-/// A secure context for cookies: TLS, or a loopback client (browsers
-/// treat `http://localhost` and `127.0.0.1` as secure).
-fn secure_context(info: &ConnInfo) -> bool {
-    info.tls.is_some() || info.peer.ip().is_loopback()
+/// Whether the refresh cookie gets `Secure`: over TLS, and on loopback
+/// unless the page itself is plain `http://` (Studio round 6). Safari and
+/// WebKit drop a `Secure` cookie set for an `http://127.0.0.1` page
+/// (Chrome and Firefox keep it), which signed Studio out on every reload
+/// (chapter 44's open question 6); a loopback connection never leaves the
+/// machine, so the flag adds nothing there. A TLS proxy on the same host
+/// (an `https://` origin) still gets `Secure`.
+fn cookie_secure(info: &ConnInfo, req: &Request<Incoming>) -> bool {
+    info.tls.is_some()
+        || (info.peer.ip().is_loopback()
+            && !hdr(req, "origin").is_some_and(|o| o.starts_with("http://")))
 }
 
-fn set_cookie(info: &ConnInfo, value: &str, max_age: u64) -> String {
-    if secure_context(info) {
+fn set_cookie(secure: bool, value: &str, max_age: u64) -> String {
+    if secure {
         format!(
             "{COOKIE_SECURE}={value}; HttpOnly; Secure; SameSite=Strict; Path=/v1/auth; Max-Age={max_age}"
         )
@@ -948,6 +955,7 @@ async fn login(
 ) -> Result<Response<Body>, SprigError> {
     let host = hdr(&req, "host");
     let origin = hdr(&req, "origin");
+    let secure = cookie_secure(info, &req);
     let fetch_site = hdr(&req, "sec-fetch-site");
     let tenant = hdr(&req, super::rest::TENANT_HEADER);
     let has_csrf = req.headers().get(CSRF_HEADER).is_some();
@@ -1027,7 +1035,7 @@ async fn login(
     let mut r;
     if cookie_transport {
         r = json_response(200, &out);
-        let c = set_cookie(info, &issued.refresh_token, limits.max_age.as_secs());
+        let c = set_cookie(secure, &issued.refresh_token, limits.max_age.as_secs());
         if let Ok(v) = HeaderValue::from_str(&c) {
             r.headers_mut().append(header::SET_COOKIE, v);
         }
@@ -1038,8 +1046,12 @@ async fn login(
     Ok(r)
 }
 
-fn refresh_cookie(req: &Request<Incoming>) -> Option<String> {
-    cookie(req, COOKIE_SECURE).or_else(|| cookie(req, COOKIE_PLAIN))
+/// The refresh cookie, the one this transport sets first: a browser that
+/// kept a `Secure` cookie from before round 6 on an `http://` loopback page
+/// then sends both, and the older one must not count as a reused token.
+fn refresh_cookie(req: &Request<Incoming>, secure: bool) -> Option<String> {
+    let (a, b) = if secure { (COOKIE_SECURE, COOKIE_PLAIN) } else { (COOKIE_PLAIN, COOKIE_SECURE) };
+    cookie(req, a).or_else(|| cookie(req, b))
 }
 
 async fn refresh(
@@ -1048,7 +1060,8 @@ async fn refresh(
     info: &ConnInfo,
     req: Request<Incoming>,
 ) -> Result<Response<Body>, SprigError> {
-    let from_cookie = refresh_cookie(&req);
+    let secure = cookie_secure(info, &req);
+    let from_cookie = refresh_cookie(&req, secure);
     let token = if let Some(c) = from_cookie.clone() {
         cookie_checks(cfg, info, &req)?;
         c
@@ -1068,7 +1081,7 @@ async fn refresh(
             }
             let mut r = error(&e);
             if from_cookie.is_some()
-                && let Ok(v) = HeaderValue::from_str(&set_cookie(info, "", 0))
+                && let Ok(v) = HeaderValue::from_str(&set_cookie(secure, "", 0))
             {
                 r.headers_mut().append(header::SET_COOKIE, v);
             }
@@ -1083,7 +1096,7 @@ async fn refresh(
     });
     if from_cookie.is_some() {
         let mut r = json_response(200, &out);
-        let c = set_cookie(info, &issued.refresh_token, limits.max_age.as_secs());
+        let c = set_cookie(secure, &issued.refresh_token, limits.max_age.as_secs());
         if let Ok(v) = HeaderValue::from_str(&c) {
             r.headers_mut().append(header::SET_COOKIE, v);
         }
@@ -1101,9 +1114,10 @@ async fn logout(
     req: &Request<Incoming>,
 ) -> Result<Response<Body>, SprigError> {
     let auth = hdr(req, "authorization");
+    let secure = cookie_secure(info, req);
     let now = SystemTime::now();
     let mut sid = None;
-    if let Some(c) = refresh_cookie(req) {
+    if let Some(c) = refresh_cookie(req, secure) {
         cookie_checks(cfg, info, req)?;
         sid = st.tokens.logout_refresh(&c, now).await?;
     }
@@ -1121,7 +1135,7 @@ async fn logout(
             reason = "logout", "Studio session ended");
     }
     let mut r = json_response(200, &json!({ "ended": sid.is_some() }));
-    if let Ok(v) = HeaderValue::from_str(&set_cookie(info, "", 0)) {
+    if let Ok(v) = HeaderValue::from_str(&set_cookie(secure, "", 0)) {
         r.headers_mut().append(header::SET_COOKIE, v);
     }
     Ok(r)

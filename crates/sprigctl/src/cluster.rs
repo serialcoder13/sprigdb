@@ -111,6 +111,60 @@ fn node(i: usize, spec: &str) -> Result<NodeSpec, String> {
     })
 }
 
+/// `sprigctl cluster set-nodes` (HD24): the record's nodes after the
+/// changes `specs` asks for (`[id=]host:port`, as `register --node`): a
+/// node named there gets the new address (its zone kept), a new id is
+/// added at the end, and with `only` the list is exactly `specs`, in that
+/// order. `remove` drops nodes by id. The answer is `:setNodes`' body.
+///
+/// # Errors
+/// A message for a malformed spec, an unknown node to remove, or an empty
+/// result.
+pub(crate) fn set_nodes(
+    current: &[NodeSpec],
+    specs: &[String],
+    remove: &[String],
+    only: bool,
+) -> Result<Vec<NodeSpec>, String> {
+    let given: Vec<NodeSpec> = specs
+        .iter()
+        .enumerate()
+        .map(|(i, s)| node(i, s))
+        .collect::<Result<_, _>>()?;
+    let mut out: Vec<NodeSpec> = if only {
+        given
+            .iter()
+            .map(|g| NodeSpec {
+                zone: current
+                    .iter()
+                    .find(|c| c.node == g.node)
+                    .and_then(|c| c.zone.clone()),
+                ..g.clone()
+            })
+            .collect()
+    } else {
+        let mut v = current.to_vec();
+        for g in given {
+            match v.iter_mut().find(|c| c.node == g.node) {
+                Some(c) => c.addr = g.addr,
+                None => v.push(g),
+            }
+        }
+        v
+    };
+    for r in remove {
+        let before = out.len();
+        out.retain(|n| n.node.as_str() != r);
+        if out.len() == before {
+            return Err(format!("no node {r:?} to remove"));
+        }
+    }
+    if out.is_empty() {
+        return Err("a cluster needs at least one node".to_owned());
+    }
+    Ok(out)
+}
+
 /// Merges the file and the flags into a request.
 ///
 /// # Errors
@@ -337,5 +391,48 @@ mod tests {
         for (flags, want) in cases {
             assert_eq!(build(&flags).unwrap_err(), want);
         }
+    }
+
+    /// HD24: a round-1 bundle's `mariadb-1:3306` moves to VM 1's private
+    /// address; the replica keeps its address and zone.
+    #[test]
+    fn set_nodes_changes_named_addresses_only() {
+        let cur = vec![
+            NodeSpec {
+                node: NodeId::new("n1").unwrap(),
+                addr: "mariadb-1:3306".into(),
+                zone: Some("z1".into()),
+            },
+            NodeSpec {
+                node: NodeId::new("n2").unwrap(),
+                addr: "10.0.0.6:3306".into(),
+                zone: Some("z2".into()),
+            },
+        ];
+        let got = set_nodes(&cur, &["n1=10.0.0.5:3306".into()], &[], false).unwrap();
+        assert_eq!(got[0].addr, "10.0.0.5:3306");
+        assert_eq!(got[0].zone.as_deref(), Some("z1"));
+        assert_eq!(got[1], cur[1]);
+        // A new id is added; --remove drops one.
+        let got = set_nodes(&cur, &["n3=10.0.0.7:3306".into()], &["n2".into()], false).unwrap();
+        let ids: Vec<&str> = got.iter().map(|n| n.node.as_str()).collect();
+        assert_eq!(ids, ["n1", "n3"]);
+        // --only: exactly the list, in order, zones kept by id.
+        let got = set_nodes(
+            &cur,
+            &["n2=10.0.0.6:3306".into(), "n1=10.0.0.5:3306".into()],
+            &[],
+            true,
+        )
+        .unwrap();
+        let ids: Vec<&str> = got.iter().map(|n| n.node.as_str()).collect();
+        assert_eq!(ids, ["n2", "n1"]);
+        assert_eq!(got[1].zone.as_deref(), Some("z1"));
+        assert_eq!(
+            set_nodes(&cur, &[], &["n9".into()], false).unwrap_err(),
+            "no node \"n9\" to remove"
+        );
+        assert!(set_nodes(&cur, &[], &["n1".into(), "n2".into()], false).is_err());
+        assert!(set_nodes(&cur, &["bad id=x:1".into()], &[], false).is_err());
     }
 }

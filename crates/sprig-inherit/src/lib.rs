@@ -204,6 +204,9 @@ pub enum Handled {
     Rows(Rows),
     /// `USE SPACE`: the session's new space.
     Space(SpaceId),
+    /// The statement names a typed table: chapter 32 plans it first, and
+    /// its statements come back here ([`Ctx::from_types`]).
+    Typed,
 }
 
 /// A quick test on the raw text: could the statement concern the
@@ -326,11 +329,30 @@ pub async fn handle(sql: &str, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Hand
     if !touches {
         return Ok(Handled::NotInherit);
     }
-    if plan::touches_typed(sql, ctx) {
-        return Err(grammar::unsupported(
-            "a statement naming both an inheritable object and a typed or hierarchical table \
-             is not supported yet",
-        ));
+    if !ctx.from_types && plan::touches_typed(sql, ctx) {
+        return Ok(Handled::Typed);
+    }
+    // A type plan's DDL (type columns, extension tables) is the type
+    // layer's; it makes new tables of an inheritable tree inheritable
+    // itself (`SPRIG INHERITABLE`, above).
+    if ctx.from_types {
+        let type_columns = || {
+            grammar::identifiers(sql.as_bytes(), &ctx.lex)
+                .iter()
+                .any(|i| i.eq_ignore_ascii_case("_type") || i.eq_ignore_ascii_case("_type_path"))
+        };
+        match &stmt {
+            // A client's ALTER of a typed table, run by the type layer:
+            // the schema-change rules of shared tables still apply.
+            Stmt::AlterTable(_) if !type_columns() => {}
+            Stmt::AlterTable(_)
+            | Stmt::CreateTable(_)
+            | Stmt::DropTable(_)
+            | Stmt::Rename(_)
+            | Stmt::Truncate(_)
+            | Stmt::CreateOther => return Ok(Handled::NotInherit),
+            _ => {}
+        }
     }
     match stmt {
         Stmt::Query => Box::pin(rewrite::query(sql, ctx, r)).await,

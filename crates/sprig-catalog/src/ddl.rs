@@ -100,7 +100,7 @@ pub use exec::{
     ShardTarget, drop_sql, kind_keyword, outcome_unknown,
 };
 pub use multi::{ShardRef, ShardSet, jobs_on_shards};
-pub use repair::{Resolution, drop_schema};
+pub use repair::{Resolution, drop_schema, job_schemas};
 
 use crate::store::{
     Counter, DatabaseRow, DbState, Namespace, ObjectFlags, ObjectKind, ObjectRow, ObjectState,
@@ -612,6 +612,12 @@ pub struct DdlIntent {
     /// one schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shards: Option<ShardSet>,
+    /// The engine running the job ([`DdlEngine::owner_id`]): another DDL
+    /// that finds the job abandoned by it resolves it at once instead of
+    /// waiting for the reconciler (bugfix-38). `None` in rows written
+    /// before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
     /// What it does.
     #[serde(flatten)]
     pub op: IntentOp,
@@ -789,6 +795,129 @@ where
     opts: DdlOpts,
     failpoint: Option<DdlFailpoint>,
     checks: Vec<Arc<dyn PrepareCheck>>,
+    owner: Arc<Owner>,
+}
+
+// ---- abandoned jobs (bugfix-38) ----
+
+/// How often a DDL waiting for a held target looks for abandoned jobs.
+const ABANDONED_SWEEP_EVERY: Duration = Duration::from_secs(1);
+
+/// This process's token: a random id fixed for the process's life, so a
+/// restarted process can be told from the one that started a job.
+#[must_use]
+pub fn process_token() -> &'static str {
+    static TOKEN: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| uuid::Uuid::now_v7().simple().to_string());
+    &TOKEN
+}
+
+/// Splits an owner id (`<label>@<process token>.<engine>`) into its label
+/// and process token.
+#[must_use]
+pub fn owner_parts(owner: &str) -> Option<(&str, &str)> {
+    let (label, rest) = owner.rsplit_once('@')?;
+    let (process, _) = rest.split_once('.')?;
+    Some((label, process))
+}
+
+/// Tells whether another engine's jobs are abandoned: its process ended.
+/// Asked by a DDL that waits for a target such a job holds.
+#[async_trait::async_trait]
+pub trait OwnerCheck: Send + Sync {
+    /// Whether the engine `owner` (an intent's [`DdlIntent::owner`]) is
+    /// certainly gone, for a job started `age` ago. `false` when in doubt:
+    /// the reconciler resolves the job after `catalog.stuck_state_minutes`.
+    async fn gone(&self, owner: &str, age: Duration) -> bool;
+}
+
+/// Where an engine's janitor reaches a tenant's cluster to resolve a job
+/// the engine abandoned ([`DdlEngine::with_janitor`]).
+#[async_trait::async_trait]
+pub trait JobExecutors: Send + Sync {
+    /// An executor on `tenant`'s cluster.
+    ///
+    /// # Errors
+    /// The cluster is unknown or unreachable.
+    async fn executor(&self, tenant: TenantId) -> Result<Arc<dyn DdlExecutor>>;
+}
+
+/// When the janitor looks at an abandoned job, after it was abandoned:
+/// the first look leaves the session's `KILL QUERY` time to land; the
+/// later ones wait for a statement MariaDB still runs (or rolls back).
+/// After the last, the reconciler resolves the job.
+const JANITOR_LOOKS: [Duration; 7] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(15),
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+];
+
+/// Who runs an engine's jobs: the id written into its intent rows and the
+/// jobs running now. A job of this engine that isn't running is abandoned:
+/// the statement's future was dropped (the client hung up, `KILL QUERY`)
+/// or it failed with its outcome unknown.
+struct Owner {
+    id: String,
+    running: std::sync::Mutex<std::collections::HashSet<JobId>>,
+    check: Option<Arc<dyn OwnerCheck>>,
+    janitor: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<(TenantId, JobId)>>,
+}
+
+impl Owner {
+    fn new(label: &str, check: Option<Arc<dyn OwnerCheck>>) -> Self {
+        static ENGINES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let n = ENGINES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self {
+            id: format!("{label}@{}.{n}", process_token()),
+            running: std::sync::Mutex::default(),
+            check,
+            janitor: std::sync::OnceLock::new(),
+        }
+    }
+
+    fn jobs(&self) -> std::sync::MutexGuard<'_, std::collections::HashSet<JobId>> {
+        self.running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn start(self: &Arc<Self>, tenant: TenantId, job: JobId) -> Running {
+        self.jobs().insert(job);
+        Running {
+            owner: Arc::clone(self),
+            tenant,
+            job,
+            committed: false,
+            finished: false,
+        }
+    }
+}
+
+/// A job running in its engine, until dropped (also when the statement's
+/// future is). A job whose phase 1 committed and that didn't finish goes
+/// to the engine's janitor, if it has one.
+struct Running {
+    owner: Arc<Owner>,
+    tenant: TenantId,
+    job: JobId,
+    committed: bool,
+    finished: bool,
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.owner.jobs().remove(&self.job);
+        if self.committed
+            && !self.finished
+            && let Some(tx) = self.owner.janitor.get()
+        {
+            let _ = tx.send((self.tenant, self.job));
+        }
+    }
 }
 
 /// A check another module runs in the prepare phase, under the catalog
@@ -815,6 +944,7 @@ where
             opts: self.opts,
             failpoint: self.failpoint.clone(),
             checks: self.checks.clone(),
+            owner: Arc::clone(&self.owner),
         }
     }
 }
@@ -965,7 +1095,53 @@ where
             opts: DdlOpts::default(),
             failpoint: None,
             checks: Vec::new(),
+            owner: Arc::new(Owner::new("engine", None)),
         }
+    }
+
+    /// The same engine under a new owner id `<label>@<process>.<n>`
+    /// (bugfix-38), with `check` telling whether other owners' processes
+    /// are gone. A gateway passes `gateway:<dc>:<gateway id>`.
+    #[must_use]
+    pub fn with_owner(mut self, label: &str, check: Option<Arc<dyn OwnerCheck>>) -> Self {
+        self.owner = Arc::new(Owner::new(label, check));
+        self
+    }
+
+    /// The same engine with a janitor (bugfix-38): a job this engine
+    /// abandons (the statement's future dropped, or failed with its outcome
+    /// unknown) is resolved within seconds through `executors`, as the
+    /// reconciler would, once no DDL runs in its schemas; not only when
+    /// another DDL waits for it. Needs a Tokio runtime; the janitor lives
+    /// as long as the process.
+    #[must_use]
+    pub fn with_janitor(self, executors: Arc<dyn JobExecutors>) -> Self
+    where
+        B: 'static,
+    {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(TenantId, JobId)>();
+        if self.owner.janitor.set(tx).is_err() {
+            return self;
+        }
+        // The task holds a clone, so it lives as long as the process (a
+        // gateway's engine does anyway).
+        let engine = self.clone();
+        tokio::spawn(async move {
+            while let Some((tenant, job)) = rx.recv().await {
+                let engine = engine.clone();
+                let executors = Arc::clone(&executors);
+                tokio::spawn(async move {
+                    engine.tidy(tenant, job, &*executors).await;
+                });
+            }
+        });
+        self
+    }
+
+    /// The id this engine writes into its jobs' intent rows.
+    #[must_use]
+    pub fn owner_id(&self) -> &str {
+        &self.owner.id
     }
 
     /// The same engine with another module's prepare-phase check.
@@ -1033,6 +1209,8 @@ where
     ) -> Result<DdlOutcome> {
         let tenant = req.tenant;
         let job = self.new_job();
+        // Until this returns or its future is dropped (bugfix-38).
+        let mut running = self.owner.start(tenant, job);
         let plan = match self.prepare(req, job, exec).await? {
             Planned::Busy(what) => return Err(conflict(&what)),
             Planned::Done(o) => return Ok(o),
@@ -1049,6 +1227,7 @@ where
             }
             Planned::Go(p) => *p,
         };
+        running.committed = true;
         self.fail(tenant, DdlStep::Prepared)?;
         if let Some(set) = plan.intent.shards.clone() {
             self.apply_shards(tenant, &plan, &set, exec).await?;
@@ -1072,9 +1251,10 @@ where
                 for schema in &created {
                     drop_if_ours(exec, tenant, job, schema).await;
                 }
-                if let Err(r) = self.rollback(tenant, &plan.intent).await {
-                    tracing::warn!(%tenant, job = %job, error = %r,
-                        "rolling back a refused DDL failed; the reconciler will");
+                match self.rollback(tenant, &plan.intent).await {
+                    Ok(_) => running.finished = true,
+                    Err(r) => tracing::warn!(%tenant, job = %job, error = %r,
+                        "rolling back a refused DDL failed; the reconciler will"),
                 }
                 return Err(map_names(e, tenant, &plan.names));
             }
@@ -1088,6 +1268,7 @@ where
             multi::check_skew(tenant, job, set, &plan.targets, exec).await;
         }
         let version = self.finish(tenant, &plan.intent, &facts).await?;
+        running.finished = true;
         if version.is_none() {
             tracing::warn!(%tenant, job = %job, "the reconciler resolved this DDL before it finished");
         }
@@ -1143,6 +1324,7 @@ where
     ) -> Result<Planned> {
         let tenant = req.tenant;
         let deadline = self.clock.now() + self.opts.ddl_wait;
+        let mut next_sweep = self.clock.now();
         loop {
             let mut locked = self.versioner.lock(tenant, VersionKind::Catalog).await?;
             let planned = match self.plan(&mut locked, req, job).await {
@@ -1160,6 +1342,17 @@ where
                 }
                 Ok(Planned::Busy(what)) => {
                     locked.release().await?;
+                    // bugfix-38: a job its engine abandoned is resolved
+                    // here, not after `catalog.stuck_state_minutes`.
+                    if self.clock.now() >= next_sweep {
+                        next_sweep = self.clock.now() + ABANDONED_SWEEP_EVERY;
+                        match self.resolve_abandoned(tenant, job, exec).await {
+                            Ok(0) => {}
+                            Ok(_) => continue,
+                            Err(e) => tracing::warn!(%tenant, job = %job, error = %e,
+                                "looking for abandoned DDL jobs failed"),
+                        }
+                    }
                     if self.clock.now() >= deadline {
                         return Err(conflict(&what));
                     }
@@ -1207,6 +1400,7 @@ where
             ddl: req.logical_sql.to_owned(),
             user: req.user,
             shards: None,
+            owner: Some(self.owner.id.clone()),
             op,
         };
         let tx = locked.tx();
@@ -1827,6 +2021,7 @@ where
             ddl: req.logical_sql.to_owned(),
             user: req.user,
             shards: None,
+            owner: Some(self.owner.id.clone()),
             op: IntentOp::Rename { moves },
         };
         tx.put_internal(&it.row(previous, now)?).await?;
@@ -1908,6 +2103,7 @@ where
             ddl: req.logical_sql.to_owned(),
             user: req.user,
             shards: None,
+            owner: Some(self.owner.id.clone()),
             op: IntentOp::Rename {
                 moves: vec![Move {
                     object: o.object_id,

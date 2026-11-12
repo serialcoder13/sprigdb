@@ -644,6 +644,9 @@ async fn sync_one(
                 if o.auto.is_none() {
                     o.auto.clone_from(&p.auto);
                 }
+                if o.type_root.is_none() {
+                    o.type_root.clone_from(&p.type_root);
+                }
                 o
             }
             None => {
@@ -660,6 +663,7 @@ async fn sync_one(
                     auto: p.auto.clone(),
                     links: p.links.clone(),
                     adopted: true,
+                    type_root: p.type_root.clone(),
                 };
                 empty.with_slots_for(&p.columns).unwrap_or(empty)
             }
@@ -793,7 +797,7 @@ pub(crate) async fn adopt(
             continue;
         }
         let did = sync_one(svc, &line[j - 1], &child, lctn).await?;
-        let now = if let Some(v) = did {
+        let mut now = if let Some(v) = did {
             changed = true;
             let fresh = svc
                 .cache
@@ -804,6 +808,15 @@ pub(crate) async fn adopt(
         } else {
             child
         };
+        // The types of inherited type trees (typed tables in groups).
+        if let Some(v) = super::inherit_types::adopt_types(svc, &line[j - 1], &now, lctn).await? {
+            changed = true;
+            now = svc
+                .cache
+                .get(now.tenant, Freshness::Cached { min_version: v })
+                .await?;
+            line[j] = Arc::clone(&now);
+        }
         synced()
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

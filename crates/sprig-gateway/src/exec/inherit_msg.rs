@@ -319,9 +319,8 @@ impl PassSession {
         if !kw && !inherited::has_defs(&chain) && own.instances.is_empty() {
             return Ok(None);
         }
-        let r = self
-            .inherit_msg(cx, sql, &head, &lex_opts, &svc, &cat, &chain, &own)
-            .await;
+        let r =
+            Box::pin(self.inherit_msg(cx, sql, &head, &lex_opts, &svc, &cat, &chain, &own)).await;
         let mut status = self.status();
         if more {
             status |= StatusFlags::MORE_RESULTS_EXISTS;
@@ -397,7 +396,9 @@ impl PassSession {
         if let Some(s) = grammar::statement(sql, lex_opts)? {
             return match s {
                 Stmt::Show(s) => self.inherit_show(svc, cat, chain, own, &s).await.map(Some),
-                Stmt::Alter(a) => self.inherit_alter(svc, cat, chain, own, &a).await.map(Some),
+                Stmt::Alter(a) => Box::pin(self.inherit_alter(svc, cat, chain, own, &a))
+                    .await
+                    .map(Some),
             };
         }
         match head {
@@ -440,8 +441,7 @@ impl PassSession {
             },
             "unbind" => self.unbind_def(svc, cat, own, sql, lex_opts).await,
             "insert" => {
-                self.inherit_insert(cx, svc, cat, chain, own, sql, lex_opts)
-                    .await
+                Box::pin(self.inherit_insert(cx, svc, cat, chain, own, sql, lex_opts)).await
             }
             "select" if inherited::fanin::find(sql, lex_opts).is_some() => self
                 .fan_in_select(svc, cat, chain, own, sql, lex_opts)
@@ -850,8 +850,13 @@ impl PassSession {
         let rest: Vec<String> = (next..toks.len())
             .filter_map(|j| word(j).map(|w| w.to_ascii_lowercase()))
             .collect();
-        // A member's instance: only ALTER INHERITED changes it.
-        if let Some(i) = own.instances.values().find(|i| {
+        // A member's instance: only ALTER INHERITED changes it. Not the
+        // declarer's own instance of an `INCLUDING SELF` definition
+        // (bugfix-39): there the statement names the definition, which
+        // the declarer could otherwise never drop (nor, by the 39895
+        // guard, its database).
+        if own.def(&db, kind, &name).is_none()
+            && let Some(i) = own.instances.values().find(|i| {
             i.kind == kind
                 && i.state != sprig_inherit::msg::InstanceState::Detached
                 && phys_name(i.physical.as_ref()) == Some((&db, &name))
@@ -1201,7 +1206,7 @@ pub(super) async fn rollout(svc: &Arc<TenantServices>, def: DefKey) -> Result<us
     tokio::spawn(async move {
         for e in entries {
             // A stream's derived state, or (R9, r9fanin) a queue's sinks.
-            let r = crate::inherited::sinks::reapply_source(&svc, e.tenant, def)
+            let r = Box::pin(crate::inherited::sinks::reapply_source(&svc, e.tenant, def))
                 .await
                 .and_then(|reached| {
                     if reached {
@@ -1400,14 +1405,25 @@ impl PassSession {
                 .await
                 .map(Some),
             Some(grammar::Target::In(_)) => Ok(None),
-            Some(grammar::Target::Tenant(t)) => self
-                .inherit_publish(cx, svc, cat, chain, &text, &i, &db, &def, Some(t), lex_opts)
-                .await
-                .map(Some),
-            None => self
-                .inherit_publish(cx, svc, cat, chain, &text, &i, &db, &def, None, lex_opts)
-                .await
-                .map(Some),
+            Some(grammar::Target::Tenant(t)) => Box::pin(self.inherit_publish(
+                cx,
+                svc,
+                cat,
+                chain,
+                &text,
+                &i,
+                &db,
+                &def,
+                Some(t),
+                lex_opts,
+            ))
+            .await
+            .map(Some),
+            None => Box::pin(
+                self.inherit_publish(cx, svc, cat, chain, &text, &i, &db, &def, None, lex_opts),
+            )
+            .await
+            .map(Some),
         }
     }
 
@@ -1540,7 +1556,7 @@ impl PassSession {
                         )));
                     }
                 }
-                let si = streams::ensure(svc, chain, def, Cause::Publish).await?;
+                let si = Box::pin(streams::ensure(svc, chain, def, Cause::Publish)).await?;
                 if si.created || si.cat.version > cat.version {
                     self.after_own_change(si.cat.version).await?;
                 }
@@ -1590,7 +1606,7 @@ impl PassSession {
                     continue;
                 }
                 (
-                    streams::ensure(svc, &tchain, &tdef, Cause::Publish).await?,
+                    Box::pin(streams::ensure(svc, &tchain, &tdef, Cause::Publish)).await?,
                     Dest::Other,
                 )
             };
@@ -1956,7 +1972,14 @@ impl PassSession {
                 inherited::mq::forget_applied(t, Some(&mdb));
                 let tcat = inherited::catalog(svc, t).await?;
                 let tchain = inherited::chain(svc, &tcat).await?;
-                if inherited::mq::ensure_vhost(svc, &tchain, &mdb, Cause::Declare).await? {
+                if Box::pin(inherited::mq::ensure_vhost(
+                    svc,
+                    &tchain,
+                    &mdb,
+                    Cause::Declare,
+                ))
+                .await?
+                {
                     reached += 1;
                 }
             }
@@ -1975,7 +1998,7 @@ impl PassSession {
                 let tcat = inherited::catalog(svc, e.tenant).await?;
                 let tchain = inherited::chain(svc, &tcat).await?;
                 if let Some(d) = tchain.def(sk) {
-                    streams::ensure(svc, &tchain, &d, Cause::Declare).await?;
+                    Box::pin(streams::ensure(svc, &tchain, &d, Cause::Declare)).await?;
                     reached += 1;
                 }
             }
@@ -2866,9 +2889,11 @@ impl PassSession {
                 let stamped = inherited::mq::stamp(m, &key, &tname, &my_name)
                     .map_err(|e| SprigError::standard(3140, *b"22032", e.text))?;
                 if !self.offsets_in_transaction() {
-                    return inherited::mq::publish_into(&svc, &tchain, &db, stamped, mandatory)
-                        .await
-                        .map(Some);
+                    return Box::pin(inherited::mq::publish_into(
+                        &svc, &tchain, &db, stamped, mandatory,
+                    ))
+                    .await
+                    .map(Some);
                 }
                 // Inside a transaction: through this tenant's cross-tenant
                 // outbox; forwarded into the member's queue outbox once
@@ -2899,13 +2924,25 @@ impl PassSession {
                 Ok(Some(1))
             }
             Some((_, key)) if mine => {
-                inherited::mq::ensure_vhost(&svc, &chain, &db, Cause::Publish).await?;
+                Box::pin(inherited::mq::ensure_vhost(
+                    &svc,
+                    &chain,
+                    &db,
+                    Cause::Publish,
+                ))
+                .await?;
                 *m = inherited::mq::stamp(m, &key, &my_name, &my_name)
                     .map_err(|e| SprigError::standard(3140, *b"22032", e.text))?;
                 Ok(None)
             }
             None if mine => {
-                inherited::mq::ensure_vhost(&svc, &chain, &db, Cause::Publish).await?;
+                Box::pin(inherited::mq::ensure_vhost(
+                    &svc,
+                    &chain,
+                    &db,
+                    Cause::Publish,
+                ))
+                .await?;
                 let key = m.routing_key.clone();
                 *m = inherited::mq::stamp(m, &key, &my_name, &my_name)
                     .map_err(|e| SprigError::standard(3140, *b"22032", e.text))?;
@@ -3135,7 +3172,13 @@ async fn mq_rollout(
                 }
                 let cat = inherited::catalog(&svc, t).await?;
                 let chain = inherited::chain(&svc, &cat).await?;
-                inherited::mq::ensure_vhost(&svc, &chain, &db, Cause::Declare).await
+                Box::pin(inherited::mq::ensure_vhost(
+                    &svc,
+                    &chain,
+                    &db,
+                    Cause::Declare,
+                ))
+                .await
             }
             .await;
             if let Err(e) = r {

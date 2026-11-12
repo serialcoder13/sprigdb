@@ -1482,3 +1482,39 @@ mod quota_tests {
         assert!(took >= 8.0, "{took}");
     }
 }
+
+#[cfg(test)]
+mod settler_tests {
+    use super::Settler;
+    use crate::model::Position;
+
+    fn at(stream: u64, partition: u32, offset: u64) -> Position {
+        Position::Stream {
+            stream,
+            partition,
+            offset,
+            epoch: 1,
+        }
+    }
+
+    #[test]
+    fn fan_in_members_settle_apart() {
+        // R9 (r9tests): two member instances of a fan-in task (slots 0 and
+        // 1) with records at the same partition and offset. Member B's
+        // record done must not settle member A's, still in flight.
+        let (a, b) = (
+            crate::source::FANIN_SLOT_FLAG,
+            crate::source::FANIN_SLOT_FLAG | 1,
+        );
+        let mut s = Settler::default();
+        s.read(&at(a, 0, 7));
+        s.read(&at(b, 0, 7));
+        s.done(&at(b, 0, 7));
+        assert_eq!(s.drain(), vec![at(b, 0, 7)], "only B's");
+        assert_eq!(s.pending(), 1, "A's still tracked");
+        s.done(&at(a, 0, 7));
+        assert_eq!(s.drain(), vec![at(a, 0, 7)]);
+        // A plain stream keeps the partition as its unit.
+        assert_eq!(at(42, 3, 9).unit_seq(), Some((3, 9)));
+    }
+}

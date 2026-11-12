@@ -623,6 +623,80 @@ pub async fn ensure_run_as(
     Ok(user)
 }
 
+/// Takes back `SELECT, DELETE ON db.*` from member `t`'s `sprig_inherited`
+/// (R9, r9last): the database grant inherited queue sinks had before they
+/// were granted their queue alone. Kept while an inherited trigger of
+/// `chain` is declared in `db` (a queue trigger acknowledges inside its
+/// transaction, which needs the database's `DELETE`). True when a grant
+/// was taken back.
+///
+/// # Errors
+/// The catalog's.
+pub async fn revoke_database_grant(
+    svc: &Arc<TenantServices>,
+    chain: &Chain,
+    t: TenantId,
+    db: &str,
+) -> Result<bool> {
+    if chain
+        .reaching(DefKind::Trigger)
+        .iter()
+        .any(|d| d.db_name.eq_ignore_ascii_case(db))
+    {
+        return Ok(false);
+    }
+    let cat = catalog(svc, t).await?;
+    let Some(user) = sprig_auth::cache::TenantAuth::of(&cat)
+        .and_then(|a| a.accounts(RUN_AS_USER).first().map(|u| u.row.user_id))
+    else {
+        return Ok(false);
+    };
+    let lctn = svc.settings.get(
+        &sprig_catalog::ddl::LOWER_CASE_TABLE_NAMES,
+        &cat.setting_ctx(&svc.dc),
+        Some(&cat.settings),
+    ) == 1;
+    let actions = actions_of(&GrantItem {
+        privileges: vec!["SELECT".into(), "DELETE".into()],
+        db: db.to_owned(),
+        name: "*".to_owned(),
+    })?;
+    let mut change = svc
+        .catalog
+        .change_with(t, VersionKind::Auth, ChangeOpts::default())
+        .await?;
+    let before = {
+        let (core, q) = change.tx().parts();
+        AuthzStore::new(core.schema())
+            .revoke(
+                q,
+                Grantee::User(user),
+                &PrivTarget::Database(database_key(db, lctn)),
+                actions,
+            )
+            .await
+    };
+    let before = match before {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = change.rollback().await;
+            return Err(e);
+        }
+    };
+    if before == ActionSet::EMPTY {
+        let _ = change.rollback().await;
+        return Ok(false);
+    }
+    let v = change.commit().await?;
+    let cat = wait_auth(svc, t, v).await?;
+    let cluster = svc.locator.cluster(t).await?;
+    if let Err(e) = svc.authz.ensure(svc, &cat, &cluster).await {
+        tracing::warn!(tenant = %t, error = %e, "sprig_inherited's backend grants not applied yet");
+    }
+    tracing::info!(tenant = %t, db, "inherited queue sink: the database grant taken back (its queue's grant stays)");
+    Ok(true)
+}
+
 async fn wait_auth(svc: &TenantServices, t: TenantId, v: u64) -> Result<Arc<TenantCatalog>> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {

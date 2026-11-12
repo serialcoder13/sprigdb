@@ -583,7 +583,7 @@ async fn deliver(
             let d = tchain
                 .def(def.key())
                 .ok_or_else(|| super::target_err(format!("tenant {t} left the scope")))?;
-            let si = super::streams::ensure(svc, &tchain, &d, Cause::Publish).await?;
+            let si = Box::pin(super::streams::ensure(svc, &tchain, &d, Cause::Publish)).await?;
             let mut h: Map<String, Value> = b
                 .rec
                 .headers
@@ -658,7 +658,14 @@ async fn deliver(
                 Some(m.body.to_vec()),
                 Some(super::mq::xo_headers(&m)),
             )];
-            super::mq::deliver_outbox(svc, &tchain, &def.db_name, &exchange, &rows).await?;
+            Box::pin(super::mq::deliver_outbox(
+                svc,
+                &tchain,
+                &def.db_name,
+                &exchange,
+                &rows,
+            ))
+            .await?;
         }
         _ => {
             return Err(SprigError::internal(
@@ -816,7 +823,7 @@ pub async fn fan_out(svc: &Arc<TenantServices>, def_key: DefKey, schema: &str) -
                 later.push((t.0, 0, now, "waits for an earlier broadcast".to_owned()));
                 continue;
             }
-            match deliver(svc, &def, *t, &b, b.form.with_instance).await {
+            match Box::pin(deliver(svc, &def, *t, &b, b.form.with_instance)).await {
                 Ok(true) => delivered += 1,
                 Ok(false) => skipped += 1,
                 Err(e) => {
@@ -880,7 +887,7 @@ pub async fn fan_out(svc: &Arc<TenantServices>, def_key: DefKey, schema: &str) -
         }
     }
     // Failed deliveries, from the saved retry list.
-    if let Err(e) = retry_pass(svc, &def, &pool, &tbl, &rtbl).await {
+    if let Err(e) = Box::pin(retry_pass(svc, &def, &pool, &tbl, &rtbl)).await {
         tracing::debug!(def = %def_key, error = %e, "broadcast retry pass");
     }
     // Retention.
@@ -950,7 +957,7 @@ async fn retry_pass(
     if got.flatten() != Some(1) {
         return Ok(0);
     }
-    let r = retry_locked(svc, def, &mut c, tbl, rtbl).await;
+    let r = Box::pin(retry_locked(svc, def, &mut c, tbl, rtbl)).await;
     let _ = c.exec_drop("DO RELEASE_LOCK(?)", (lock,)).await;
     r
 }
@@ -1015,7 +1022,7 @@ async fn retry_locked(
                 continue;
             };
             let b = logged(&row);
-            match deliver(svc, def, tid, &b, b.form.with_instance).await {
+            match Box::pin(deliver(svc, def, tid, &b, b.form.with_instance)).await {
                 Ok(d) => {
                     c.exec_drop(
                         format!("DELETE FROM {rtbl} WHERE tenant_id = ? AND bid = ?"),
@@ -1074,7 +1081,7 @@ pub fn replay(
     def: Arc<Definition>,
     t: TenantId,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-    Box::pin(async move { replay_inner(&svc, &def, t).await })
+    Box::pin(async move { Box::pin(replay_inner(&svc, &def, t)).await })
 }
 
 async fn replay_inner(svc: &Arc<TenantServices>, def: &Definition, t: TenantId) {
@@ -1121,7 +1128,7 @@ async fn replay_inner(svc: &Arc<TenantServices>, def: &Definition, t: TenantId) 
             let below = super::dir_entry(svc, t)
                 .await?
                 .is_some_and(|e| t == b.publisher || e.path_ids().contains(&b.publisher.0));
-            if below && deliver(svc, def, t, &b, false).await? {
+            if below && Box::pin(deliver(svc, def, t, &b, false)).await? {
                 n += 1;
             }
         }
@@ -1223,7 +1230,7 @@ pub fn start_fan_out(svc: &Arc<TenantServices>) {
                 continue;
             };
             for e in list {
-                if let Err(err) = fan_out(&svc, e.def, &e.schema).await {
+                if let Err(err) = Box::pin(fan_out(&svc, e.def, &e.schema)).await {
                     tracing::debug!(def = %e.def, error = %err, "broadcast fan-out");
                 }
             }

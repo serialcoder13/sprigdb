@@ -1,0 +1,7 @@
+# Sequelize v6.37.7 (mysql integration tests): tests that pass on MySQL 8.4.11 and not through 3306 (tab, reason).
+# Measured 12 Nov 2026 (R4 round 5, r4five), "supports schemas" tests left out by run.sh: MySQL 8.4.11 1804 pass,
+# 2 fail; gateway 1801 pass, 5 fail. Both fail "primary key should add, read & remove" and "fails with incorrect
+# database credentials (1)" (the test connects to 127.0.0.1 inside the container).
+[MYSQL] Model constructor should allow the user to specify indexes in options	its FULLTEXT index becomes a search index (chapter 39, R5) and the next ADD INDEX fails with 1061 Duplicate key name 'models_field_c'; not investigated (R5)
+[MYSQL] Model constructor descending indices (MySQL 8 specific) complains about missing support for descending indexes	ENGINE=MyISAM with a descending key part: MySQL refuses (MyISAM has no descending indexes), MariaDB accepts it
+[MYSQL] Model references emits an error event as the referenced table name is invalid	a foreign key to a missing table: MariaDB's 1005 (errno 150) where MySQL says 1824 "Failed to open the referenced table"; error mapping (chapter 28) not done

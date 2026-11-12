@@ -818,6 +818,10 @@ sprig_codes! {
     LogicTierUnavailable = 39868, "ER_SPRIG_LOGIC_TIER_UNAVAILABLE", "SprigLogicTierUnavailable", SQLSTATE_GENERAL, false;
     /// Concurrent deploys of one module (chapter 41).
     LogicVersionConflict = 39869, "ER_SPRIG_LOGIC_VERSION_CONFLICT", "SprigLogicVersionConflict", SQLSTATE_GENERAL, true;
+    /// A staged rollout can't stage this version (other parameters,
+    /// language or rights), or its candidate was rolled back by itself
+    /// (chapter 41).
+    LogicRolloutBlocked = 39870, "ER_SPRIG_LOGIC_ROLLOUT_BLOCKED", "SprigLogicRolloutBlocked", SQLSTATE_GENERAL, false;
     /// The logic engine's queue is full; retryable (chapter 41).
     LogicEngineBusy = 39871, "ER_SPRIG_LOGIC_ENGINE_BUSY", "SprigLogicEngineBusy", SQLSTATE_GENERAL, true;
     /// Nested `db.call` past `logic.max_call_depth` (chapter 41).
@@ -826,6 +830,9 @@ sprig_codes! {
     LogicScheduleInvalid = 39873, "ER_SPRIG_LOGIC_SCHEDULE_INVALID", "SprigLogicScheduleInvalid", SQLSTATE_GENERAL, false;
     /// Arguments don't match the signature (chapter 41).
     LogicSignatureMismatch = 39874, "ER_SPRIG_LOGIC_SIGNATURE_MISMATCH", "SprigLogicSignatureMismatch", SQLSTATE_GENERAL, false;
+    /// A drop of a function or procedure that a schedule, a sink's
+    /// `TRANSFORM`, a computed column or other code uses (chapter 41).
+    LogicInUse = 39875, "ER_SPRIG_LOGIC_IN_USE", "SprigLogicInUse", SQLSTATE_GENERAL, false;
     /// The function was placed in the engine tier, whose runtime this
     /// build doesn't have yet (chapter 41, as built).
     LogicEngineUnavailable = 39876, "ER_SPRIG_LOGIC_ENGINE_UNAVAILABLE", "SprigLogicEngineUnavailable", SQLSTATE_GENERAL, false;
@@ -1318,6 +1325,8 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::SearchIndexLimit
         | SprigCode::SearchNoPlacement
         | SprigCode::SearchStaleInTxn
+        | SprigCode::LogicRolloutBlocked
+        | SprigCode::LogicInUse
         | SprigCode::RecommendationStale => (Code::FailedPrecondition, 409),
         SprigCode::TenantSuspended
         | SprigCode::RemoteAccessDenied

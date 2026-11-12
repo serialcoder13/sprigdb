@@ -91,7 +91,12 @@ fn cost(
                 writes.extend(stmt.writes.iter().cloned());
                 mult
             }
-            Stmt::Assign(..) | Stmt::Break | Stmt::Emit(..) | Stmt::Throw(_) | Stmt::Return => 0,
+            Stmt::Assign(..)
+            | Stmt::Break
+            | Stmt::Continue
+            | Stmt::Emit(..)
+            | Stmt::Throw(_)
+            | Stmt::Return => 0,
         });
     }
     total

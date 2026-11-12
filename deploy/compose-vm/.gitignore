@@ -3,3 +3,5 @@ backups/
 out/
 .env
 .state/
+lb/
+config/prometheus-targets.json

@@ -309,7 +309,7 @@ pub fn after_request(session: u64, in_txn: bool) {
             continue;
         }
         tokio::spawn(async move {
-            if let Err(e) = forward(&svc, p.tenant, &p.schema, Some(&p.ids), 0).await {
+            if let Err(e) = Box::pin(forward(&svc, p.tenant, &p.schema, Some(&p.ids), 0)).await {
                 tracing::debug!(tenant = %p.tenant, error = %e, "cross-tenant outbox: forward deferred to the sweeper");
             }
         });
@@ -337,9 +337,11 @@ pub async fn forward(
     only: Option<&[[u8; 16]]>,
     older_ms: u64,
 ) -> Result<usize> {
-    forward_with(svc, tenant, schema, only, older_ms, false, false)
-        .await
-        .map(|(n, _)| n)
+    Box::pin(forward_with(
+        svc, tenant, schema, only, older_ms, false, false,
+    ))
+    .await
+    .map(|(n, _)| n)
 }
 
 /// The feed-driven forwarder's step (R9, r9fwd; [`crate::outbox_feed`]):
@@ -357,7 +359,7 @@ pub async fn forward_ordered(
     schema: &str,
     ids: &[[u8; 16]],
 ) -> Result<(usize, usize, usize)> {
-    let (n, found) = forward_with(svc, tenant, schema, Some(ids), 0, false, true).await?;
+    let (n, found) = Box::pin(forward_with(svc, tenant, schema, Some(ids), 0, false, true)).await?;
     Ok((n, ids.len().saturating_sub(found), found.saturating_sub(n)))
 }
 
@@ -471,7 +473,7 @@ async fn forward_with(
         if !force && backing_off(&key) {
             continue;
         }
-        match deliver(svc, &dest, &rows).await {
+        match Box::pin(deliver(svc, &dest, &rows)).await {
             Ok(()) => {
                 failed(&key, false);
                 done.extend(rows.into_iter().map(|r| r.id));
@@ -589,7 +591,7 @@ async fn deliver(svc: &Arc<TenantServices>, dest: &Dest, rows: &[Row]) -> Result
                     )
                 })
                 .collect();
-            super::mq::deliver_outbox(svc, &chain, db, exchange, &rows).await?;
+            Box::pin(super::mq::deliver_outbox(svc, &chain, db, exchange, &rows)).await?;
             metrics::counter!("sprig_inherit_publishes_total", "kind" => "exchange", "path" => "outbox")
                 .increment(rows.len() as u64);
             return Ok(());
@@ -609,7 +611,7 @@ async fn deliver(svc: &Arc<TenantServices>, dest: &Dest, rows: &[Row]) -> Result
             let d = chain
                 .def(key)
                 .ok_or_else(|| super::dropping(format!("the definition {key} is gone")))?;
-            let si = super::streams::ensure(svc, &chain, &d, Cause::Publish).await?;
+            let si = Box::pin(super::streams::ensure(svc, &chain, &d, Cause::Publish)).await?;
             (t, si.outbox_schema()?, si.stream)
         }
         Dest::Stream { tenant, stream } => {
@@ -715,7 +717,7 @@ pub async fn drain_for_drop(
             if pending_rows(svc, tenant, s).await? == 0 {
                 continue;
             }
-            if let Err(e) = forward_with(svc, tenant, s, None, 0, true, false).await {
+            if let Err(e) = Box::pin(forward_with(svc, tenant, s, None, 0, true, false)).await {
                 tracing::debug!(%tenant, schema = %s, error = %e, "DROP DATABASE: outbox forward failed; retried");
             }
             left += pending_rows(svc, tenant, s).await?;
@@ -807,7 +809,14 @@ pub async fn before_drop_database(
             &cat.setting_ctx(&svc.dc).with_db(row.db_id),
             Some(&cat.settings),
         );
-        drain_for_drop(svc, tenant, &row.name, &schemas, Duration::from_secs(wait)).await?;
+        Box::pin(drain_for_drop(
+            svc,
+            tenant,
+            &row.name,
+            &schemas,
+            Duration::from_secs(wait),
+        ))
+        .await?;
     }
     // The lead's choice on r9fet3's question 1: a declarer's database
     // isn't dropped from under its live definitions (every member's
@@ -849,7 +858,7 @@ pub fn start_sweeper(svc: &Arc<TenantServices>) {
                 continue;
             };
             for e in list {
-                if let Err(err) = forward(&svc, e.tenant, &e.schema, None, 5000).await {
+                if let Err(err) = Box::pin(forward(&svc, e.tenant, &e.schema, None, 5000)).await {
                     tracing::debug!(tenant = %e.tenant, schema = %e.schema, error = %err, "cross-tenant outbox sweep");
                 }
             }

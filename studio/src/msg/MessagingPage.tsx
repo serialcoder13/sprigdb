@@ -11,19 +11,19 @@ import { useSearchParams } from 'react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { json } from '../api/client';
 import { errorText } from '../api/errors';
-import { begin, execute, rollback, rows as rowsOf } from '../api/sql';
+import { execute, rows as rowsOf } from '../api/sql';
 import { useDatabases } from '../catalog/snapshot';
 import { binaryText } from './body';
+import { QueueCounts, QueueDetail } from './QueuePanel';
+import { SinkDryRun } from './DryRuns';
 import {
   alterInherited,
   alterSink,
   bindingsGraph,
   createStream,
   dropStream,
-  getMessages,
   publishTest,
   readRecords,
-  settle,
   type InheritedAction,
   type SinkAction,
   type Topology,
@@ -91,14 +91,19 @@ export function Generic({ t, testid, onPick, pickLabel }: Readonly<{ t: Table; t
 }
 
 /** Runs a statement after showing it; `shown` is the text on screen when it
- * differs (credential values masked, round 5). */
+ * differs (credential values masked, round 5). `runTable` (round 6) also
+ * shows a warning in the dialog and returns the statement's first result,
+ * whose first row is the outcome line (`purged`, `moved`, ...). */
 export function useStatement(db: string) {
-  const [c, setC] = useState<{ sql: string; resolve: (ok: boolean) => void } | null>(null);
+  const [c, setC] = useState<{ sql: string; note?: string; resolve: (ok: boolean) => void } | null>(null);
   const [msg, setMsg] = useState<{ text: string; error: boolean } | null>(null);
-  const run = async (sql: string, shown?: string): Promise<boolean> => {
-    const ok = await new Promise<boolean>((resolve) => setC({ sql: shown ?? sql, resolve }));
+  const ask = async (sql: string, note?: string): Promise<boolean> => {
+    const ok = await new Promise<boolean>((resolve) => setC({ sql, note, resolve }));
     setC(null);
-    if (!ok) return false;
+    return ok;
+  };
+  const run = async (sql: string, shown?: string): Promise<boolean> => {
+    if (!(await ask(shown ?? sql))) return false;
     try {
       const r = await execute(db, sql);
       setMsg({ text: `Done${r.results[0]?.affected_rows ? `: ${r.results[0].affected_rows} affected` : ''}.`, error: false });
@@ -106,6 +111,20 @@ export function useStatement(db: string) {
     } catch (e) {
       setMsg({ text: errorText(e), error: true });
       return false;
+    }
+  };
+  const runTable = async (sql: string, opts: { note?: string; done?: (t: Table) => string } = {}): Promise<Table | null> => {
+    if (!(await ask(sql, opts.note))) return null;
+    try {
+      const r = await execute(db, sql);
+      const first = r.results.find((x) => x.columns?.length);
+      const t: Table = { columns: (first?.columns ?? []).map((x) => x.name), rows: first?.rows ?? [] };
+      const line = t.rows[0] ? t.columns.map((name, i) => `${name} ${t.rows[0]![i] ?? 'NULL'}`).join(', ') : '';
+      setMsg({ text: opts.done ? opts.done(t) : `Done${line ? `: ${line}` : ''}.`, error: false });
+      return t;
+    } catch (e) {
+      setMsg({ text: errorText(e), error: true });
+      return null;
     }
   };
   const node = (
@@ -119,6 +138,11 @@ export function useStatement(db: string) {
         {c && (
           <div className="stack">
             <h2 id="msg-confirm-h">Run this statement?</h2>
+            {c.note && (
+              <p className="banner" data-testid="msg-confirm-note">
+                {c.note}
+              </p>
+            )}
             <pre className="logic-stmt" data-testid="msg-confirm-sql">
               {c.sql}
             </pre>
@@ -135,7 +159,7 @@ export function useStatement(db: string) {
       </dialog>
     </>
   );
-  return { run, node };
+  return { run, runTable, ask, node };
 }
 
 export function MessagingPage() {
@@ -367,29 +391,11 @@ function Queues({ db }: Readonly<{ db: string }>) {
   });
   const st = useStatement(db);
   const [pub, setPub] = useState({ exchange: '', key: '', body: '{"test": true}' });
-  const [peek, setPeek] = useState<{ queue: string; rows: Table | null; err: string | null } | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
   const t = topo.data;
-  const doPeek = async (queue: string) => {
-    // Get, then return every message with a nack (requeue): they count as
-    // redelivered, as with RabbitMQ's management UI (chapter 44).
-    setPeek({ queue, rows: null, err: null });
-    const tx = await begin(db).catch(() => null);
-    try {
-      const r = await execute(db, getMessages(queue, 10, t?.vhost), tx ? { transaction: tx.name } : {});
-      const first = r.results.find((x) => x.columns?.length);
-      const tbl: Table = { columns: (first?.columns ?? []).map((c) => c.name), rows: first?.rows ?? [] };
-      const ti = tbl.columns.indexOf('delivery_token');
-      for (const row of tbl.rows) {
-        const tok = ti >= 0 ? row[ti] : null;
-        if (tok) await execute(db, settle(tok, true), tx ? { transaction: tx.name } : {});
-      }
-      if (tx) await rollback(tx).catch(() => undefined);
-      setPeek({ queue, rows: { columns: tbl.columns.filter((c) => c !== 'delivery_token'), rows: tbl.rows.map((r) => r.filter((_, i) => i !== ti)) }, err: null });
-    } catch (e) {
-      if (tx) await rollback(tx).catch(() => undefined);
-      setPeek({ queue, rows: null, err: errorText(e) });
-    }
-  };
+  // The database is its own vhost; gateways before round 6 sent null
+  // when the vhost had no mq_vhosts row, even with queues.
+  const vhost = t ? (t.vhost ?? (t.exchanges.length || t.queues.length ? db : null)) : null;
   return (
     <div className="stack">
       {topo.error && (
@@ -397,11 +403,11 @@ function Queues({ db }: Readonly<{ db: string }>) {
           {errorText(topo.error)}
         </p>
       )}
-      {t && !t.vhost && <p className="muted">This database has no virtual host yet: it gets one when AMQP or sprig.mq_publish first uses it.</p>}
-      {t && t.vhost && (
+      {t && !vhost && <p className="muted">This database has no virtual host yet: it gets one when AMQP or sprig.mq_publish first uses it.</p>}
+      {t && vhost && (
         <>
           <p>
-            Virtual host <strong className="mono">{t.vhost}</strong>
+            Virtual host <strong className="mono">{vhost}</strong>
           </p>
           <h2>Bindings</h2>
           <Suspense fallback={<p className="muted">Loading graph…</p>}>
@@ -429,44 +435,42 @@ function Queues({ db }: Readonly<{ db: string }>) {
             </tbody>
           </table>
           <h2>Queues</h2>
-          <table className="table" data-testid="msg-queues">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Type</th>
-                <th>Lanes</th>
-                <th>Dead-letter exchange</th>
-                <th>State</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {t.queues.map((q) => (
-                <tr key={q.id}>
-                  <td className="mono">{q.name}</td>
-                  <td>{q.type}</td>
-                  <td>{q.lanes}</td>
-                  <td className="mono">{dlx(q.arguments)}</td>
-                  <td>{q.state}</td>
-                  <td>
-                    <button onClick={() => void doPeek(q.name)} data-testid={`msg-peek-${q.name}`}>
-                      Get 10 and requeue
-                    </button>
-                  </td>
+          <div className="table-scroll" tabIndex={0} role="region" aria-label="Queues">
+            <table className="table" data-testid="msg-queues">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Type</th>
+                  <th>Lanes</th>
+                  <th>Dead-letter exchange</th>
+                  <th>State</th>
+                  <th>Ready</th>
+                  <th>Unacked</th>
+                  <th>Consumers</th>
+                  <th />
                 </tr>
-              ))}
-            </tbody>
-          </table>
-          {peek && (
-            <section className="card stack" aria-label={`Messages of ${peek.queue}`}>
-              <h3>{peek.queue}</h3>
-              {peek.err && (
-                <p className="error" role="alert">
-                  {peek.err}
-                </p>
-              )}
-              {peek.rows && <Generic t={peek.rows} testid="msg-peeked" />}
-            </section>
+              </thead>
+              <tbody>
+                {t.queues.map((q) => (
+                  <tr key={q.id} aria-selected={open === q.name || undefined}>
+                    <td className="mono">{q.name}</td>
+                    <td>{q.type}</td>
+                    <td>{q.lanes}</td>
+                    <td className="mono">{dlx(q.arguments)}</td>
+                    <td>{q.state}</td>
+                    <QueueCounts db={db} queue={q.name} vhost={vhost} />
+                    <td>
+                      <button onClick={() => setOpen(q.name)} data-testid={`mq-open-${q.name}`} aria-label={`Open queue ${q.name}`}>
+                        Open
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {open && t.queues.some((q) => q.name === open) && (
+            <QueueDetail key={open} db={db} queue={open} vhost={vhost} exchanges={['', ...t.exchanges.filter((e) => !e.internal && e.name).map((e) => e.name)]} />
           )}
           <details>
             <summary>Publish a test message</summary>
@@ -487,15 +491,11 @@ function Queues({ db }: Readonly<{ db: string }>) {
               <label className="row">
                 Body <input value={pub.body} onChange={(e) => setPub({ ...pub, body: e.target.value })} size={30} />
               </label>
-              <button onClick={() => void st.run(publishTest(pub.exchange, pub.key, pub.body, t.vhost)).then(() => topo.refetch())} data-testid="msg-publish">
+              <button onClick={() => void st.run(publishTest(pub.exchange, pub.key, pub.body, vhost)).then(() => topo.refetch())} data-testid="msg-publish">
                 Publish…
               </button>
             </div>
           </details>
-          <p className="muted">
-            Ready and unacknowledged counts, consumers, browsing without consuming (sprig.mq_browse) and purge wait for the queue engine&apos;s
-            APIs (decision ST45).
-          </p>
         </>
       )}
       {st.node}
@@ -576,6 +576,7 @@ function SinkDetail({ db, name }: Readonly<{ db: string; name: string }>) {
         </p>
       )}
       {status.data && <Generic t={status.data} testid="msg-sink-status" />}
+      <SinkDryRun db={db} name={name} />
       {def.data && (
         <details>
           <summary>Definition</summary>
@@ -626,7 +627,6 @@ function SinkDetail({ db, name }: Readonly<{ db: string; name: string }>) {
           <ScriptEditor db={db} name={name} create={def.data.rows.map((r) => r[r.length - 1] ?? '').join('\n')} onSaved={() => void def.refetch()} />
         </Suspense>
       )}
-      <p className="muted">Dry runs (Sinks.Test, Connections.Test) aren&apos;t built yet (decisions ST45, ST50).</p>
       {st.node}
     </section>
   );

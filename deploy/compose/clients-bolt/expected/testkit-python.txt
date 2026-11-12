@@ -11,10 +11,9 @@
 # round's fixes 90 / 20 fail / 13 skip (the 4 missing ones failed in
 # subtests); after them (decisions/r8-interim.md G66) 109 pass / 5 fail / 13 skip, the same through neo4j:// (routing);
 # through bolt+ssc:// (TLS) 108 / 5 / 14.
-# Every remaining difference is listed below (G67).
-sprig fail tests.neo4j.datatypes.test_datatypes.TestDataTypes.test_should_echo_back :: one subtest echoes a byte array: SprigDB has no byte-array value yet and refuses bytes parameters with 39909 (G67)
-sprig fail tests.neo4j.datatypes.test_temporal_types.TestDataTypes.test_should_echo_all_timezone_ids :: the test lists the server's time zones with CALL { } IN TRANSACTIONS ... ON ERROR CONTINUE, which answers 39901 (chapter 43: not built; decisions/r8-interim.md G67)
-sprig fail tests.neo4j.datatypes.test_temporal_types.TestDataTypes.test_date_time_cypher_created_tz_id :: as above: CALL { } IN TRANSACTIONS answers 39901 (G67)
-sprig fail tests.neo4j.test_session_run.TestSessionRun.test_recover_from_fail_on_streaming :: UNWIND [1, 0, 2] AS x RETURN 10 / x is computed whole (only MATCH ... RETURN reads stream, chapter 43), so / by zero fails the RUN instead of the second PULL; the driver still gets the error and the session recovers (G67)
-sprig fail tests.neo4j.test_summary.TestSummary.test_protocol_version_information :: SprigDB speaks Bolt 5.0-5.4 (bolt.max_version, chapter 43 open question 4) while its agent string says Neo4j/5.26.0, whose drivers expect 5.8 (G67)
+# The differences that remained were listed here (G67).
+# Round 8 (r8eight, 12 November 2026; decisions/r8-interim.md G69-G75):
+# Bolt 5.5-5.8, CALL { } IN TRANSACTIONS, byte arrays, errors after the
+# first rows and temporal conversions closed the five differences G67 listed.
+# SprigDB 114 pass / 0 fail / 13 skip, the reference's own result.
 sprig flaky tests.neo4j.test_tx_run.TestTxRun.test_tx_timeout :: passes alone; in one full run on a laptop at load 45 (debug build) the 250 ms tx_timeout ran out in the MATCH before the lock wait began, answering TransactionTimedOutClientConfiguration instead of LockClientStopped (G66)

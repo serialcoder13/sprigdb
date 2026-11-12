@@ -336,7 +336,7 @@ fn operators_table(v: &[OperatorView]) -> String {
                         "dc {}",
                         o.dcs
                             .iter()
-                            .map(|d| d.as_str())
+                            .map(sprig_common::ids::DcId::as_str)
                             .collect::<Vec<_>>()
                             .join(",")
                     ),
@@ -448,7 +448,7 @@ pub(crate) async fn run(
                             "DC operator of {}",
                             p.dcs
                                 .iter()
-                                .map(|d| d.as_str())
+                                .map(sprig_common::ids::DcId::as_str)
                                 .collect::<Vec<_>>()
                                 .join(", ")
                         )

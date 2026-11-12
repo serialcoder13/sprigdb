@@ -135,6 +135,76 @@ fn loops_break_and_throw() {
 }
 
 #[test]
+fn switch_and_continue_compile() {
+    let s = sig(&[("n", Ty::Int), ("kind", Ty::Str)], None);
+    let c = js(
+        "let sum = 0;
+         for (let i = 0; i < n; i++) {
+           if (i % 2 === 1) continue;
+           sum = sum + i;
+         }
+         let k = 0;
+         let odd = 0;
+         while (k < n) {
+           k++;
+           if (k % 2 === 0) { continue; }
+           odd++;
+         }
+         let label = '';
+         switch (kind) {
+           case 'a':
+           case 'b':
+             label = 'early';
+             break;
+           case 'z':
+             return { sum, odd, label: 'last' };
+           default:
+             label = 'other';
+         }
+         let size = 'big';
+         switch (n) {
+           case 0: size = 'none'; break;
+           case 1: size = 'one'; break;
+         }
+         return { sum, odd, label, size };",
+        &s,
+    );
+    assert!(c.compilable(), "{:?}", c.analysis.reasons);
+    let text = c.plsql.as_ref().unwrap().statements.join("\n");
+    assert!(text.contains("CONTINUE;"), "{text}");
+    let r = |n: i64, k: &str| run(&c, &[Value::Int(n), Value::Str(k.into())]);
+    // 0 + 2 + 4 = 6 below 6; odd k in 1..=6: 1, 3, 5.
+    assert_eq!(
+        r(6, "b"),
+        Ok((
+            "output".into(),
+            json!({"sum": 6, "odd": 3, "label": "early", "size": "big"})
+        ))
+    );
+    assert_eq!(
+        r(1, "q"),
+        Ok((
+            "output".into(),
+            json!({"sum": 0, "odd": 1, "label": "other", "size": "one"})
+        ))
+    );
+    assert_eq!(
+        r(0, "z"),
+        Ok((
+            "output".into(),
+            json!({"sum": 0, "odd": 0, "label": "last"})
+        ))
+    );
+    assert_eq!(
+        r(0, "a"),
+        Ok((
+            "output".into(),
+            json!({"sum": 0, "odd": 0, "label": "early", "size": "none"})
+        ))
+    );
+}
+
+#[test]
 fn rows_are_guarded_unless_tested() {
     let s = sig(&[("productId", Ty::Int), ("qty", Ty::Int)], None);
     let quote = js(
@@ -180,8 +250,16 @@ fn what_runs_in_the_engine_tier() {
         ("return { u: t.toUpperCase() };", "js.nullable_receiver"),
         ("return { r: fetch('http://x') };", "js.call"),
         (
-            "for (let i = 0; i < x; i++) { continue; } return {};",
-            "js.continue",
+            "outer: for (let i = 0; i < x; i++) { continue outer; } return {};",
+            "js.statement",
+        ),
+        (
+            "switch (x) { case 1: x = 2; case 2: return {a: x}; } return {};",
+            "js.switch",
+        ),
+        (
+            "switch (x) { case 1: if (t === 'a') break; return {a: 1}; } return {};",
+            "js.switch",
         ),
         ("return { s: x == '1' };", "js.loose_equality"),
         ("return { s: t < 'b' };", "js.compare"),

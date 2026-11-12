@@ -197,6 +197,11 @@ pub struct TypeDef {
     pub discriminator: Option<String>,
     /// A subtype's discriminator value (`WHERE vtype = 'TRUCK'`).
     pub disc_value: Option<DiscValue>,
+    /// A discriminated root's comparison operand: the column under its
+    /// character set's binary collation (`(`vtype` COLLATE utf8mb4_bin)`),
+    /// as the generated type columns compare it. Kept so merged views of
+    /// inheritable trees (chapter 42) can type rows the same way.
+    pub disc_operand: Option<String>,
     /// State.
     pub state: TypeState,
     /// Bumped on every change to the row.
@@ -687,6 +692,7 @@ pub(crate) mod fixtures {
             own_fields: own,
             discriminator: None,
             disc_value: None,
+            disc_operand: None,
             state: TypeState::Active,
             version: 1,
         };
@@ -780,6 +786,7 @@ pub(crate) mod fleet {
                 own_fields: own,
                 discriminator: (oid == 21).then(|| "vtype".to_owned()),
                 disc_value: v,
+                disc_operand: None,
                 state: TypeState::Active,
                 version: 1,
             };

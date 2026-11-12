@@ -90,6 +90,7 @@ pub fn create_sql(
         layer: format!("{}.{}", q(&ps), q(&up.parent_obj.table)),
         keys: None,
         origin: false,
+        derived: Vec::new(),
     }
     .view(&chain);
     let cols = up

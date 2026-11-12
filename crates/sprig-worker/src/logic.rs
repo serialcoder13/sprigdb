@@ -34,7 +34,7 @@ use sprig_feed::subs::Subscriptions;
 use sprig_feed::{Clusters, MetaPlacement, StartAt, TailOptions, TenantTail, TxnSource};
 use sprig_logic::LogicStore;
 use sprig_logic::triggers::maria::{
-    CatalogOutcomes, CatalogVersions, MariaApply, RunGuard, ShardPools,
+    CatalogOutcomes, CatalogVersions, MariaApply, RunGuard, ShardPools, Shown,
 };
 use sprig_logic::triggers::{self, Filter, RunOpts, Stats};
 use sprig_meta::MetaStore;
@@ -61,6 +61,11 @@ pub struct LogicEnv {
     /// The worker's live settings: `logic.trigger_budget_ms` when a
     /// trigger job starts, `logic.job_budget_ms` per scheduled run.
     pub settings: crate::settings::WorkerSettings,
+    /// Chapter 29 (RLS round 5, RL50): the DC's gateways and the global
+    /// tier (tenant names), for checking an after-commit trigger's events
+    /// against its definer's row policies. `None`: a bound definer's
+    /// events wait.
+    pub gateways: Option<(Arc<dyn sprig_sinks::peer::SinkPeer>, Arc<dyn MetaStore>)>,
 }
 
 impl std::fmt::Debug for LogicEnv {
@@ -209,11 +214,16 @@ fn spec_u64(spec: &Value, k: &str) -> std::result::Result<u64, String> {
         .ok_or_else(|| format!("spec.{k} is missing"))
 }
 
-/// Chapter 29 (RL37): an after-commit trigger's code gets every changed
-/// row's images as its definer (the user who deployed the active version),
-/// so it runs only while the table's policies don't bind that user; else
-/// the event waits (retryable), and a policy, role or grant change that
-/// frees the definer lets it go on.
+/// Chapter 29 (RL37, RLS round 5 RL50): an after-commit trigger's code
+/// gets a changed row's images as its definer (the user who deployed the
+/// active version). While the table's policies bind that user, each event
+/// is checked on a gateway in a session of the definer (`SinkSql`
+/// `Images`): an insert runs when its new row is visible, a delete when its
+/// old row is, an update as an update (both), a delete (only the old row)
+/// or an insert (only the new row); hidden rows are passed over. An event
+/// that became an op the binding doesn't listen to is passed over too
+/// (the job widens an INSERT- or DELETE-only binding to updates for this).
+/// Before RL50 the events waited while the definer was bound.
 struct DefinerGuard {
     rls: crate::sinks::RlsCatalogs,
     locator: Arc<dyn CatalogLocator>,
@@ -222,6 +232,80 @@ struct DefinerGuard {
     object: u64,
     /// The definer, read at most every two seconds.
     cached: Mutex<Option<(Instant, u32)>>,
+    /// The binding's own events (`insert`, `update`, `delete`).
+    events: Vec<String>,
+    /// The gateways and the global tier.
+    gateways: Option<(Arc<dyn sprig_sinks::peer::SinkPeer>, Arc<dyn MetaStore>)>,
+    /// The binding (the gateway's rendezvous seed).
+    binding_id: u64,
+}
+
+impl DefinerGuard {
+    /// Whether the binding listens to `op`.
+    fn listens(&self, op: &str) -> bool {
+        self.events.iter().any(|e| e == op)
+    }
+
+    /// `[before, after]` visible to `definer`, checked on a gateway.
+    async fn visible(&self, definer: u32, ev: &triggers::TriggerEvent) -> Result<(bool, bool)> {
+        use sprig_sinks::peer::{ImageTable, RunAs, SqlOp, images_answer};
+        let wait = |why: &str| {
+            let mut e = SprigError::new(
+                SprigCode::RlsUnsupported,
+                format!(
+                    "ER_SPRIG_RLS_UNSUPPORTED: row-level security on the trigger's table binds its \
+                     definer, and {why}; the event waits"
+                ),
+            );
+            e.retryable = true;
+            e
+        };
+        let Some(feed) = ev.feed.as_deref() else {
+            return Err(wait("a replayed event has no images to check"));
+        };
+        let Some((peer, global)) = &self.gateways else {
+            return Err(wait("this worker reaches no gateway to check the event"));
+        };
+        let img = |i: Option<&sprig_feed::Image>| match i.map(sprig_streams::envelope::image_json) {
+            Some(Value::Object(m)) => Some(m),
+            _ => None,
+        };
+        let (before, after) = (img(feed.before.as_ref()), img(feed.after.as_ref()));
+        let mut images = Vec::new();
+        let bi = before.map(|m| {
+            images.push(Some(m));
+            images.len() - 1
+        });
+        let ai = after.map(|m| {
+            images.push(Some(m));
+            images.len() - 1
+        });
+        let tables = vec![ImageTable {
+            db: feed.db_name.clone(),
+            table: feed.table.clone(),
+            images,
+        }];
+        let run_as = RunAs {
+            tenant: self.tenant.0,
+            tenant_name: sprig_sinks::peer::tenant_name(global.as_ref(), self.tenant.0).await?,
+            user_id: definer,
+            database: String::new(),
+        };
+        let reply = peer
+            .sql(
+                self.binding_id,
+                &run_as.request(SqlOp::Images {
+                    tables: tables.clone(),
+                }),
+            )
+            .await?
+            .ok()?;
+        let seen = images_answer(&tables, &reply);
+        let v = |i: Option<usize>| {
+            i.is_some_and(|i| seen.first().and_then(|t| t.get(i)).copied().unwrap_or(false))
+        };
+        Ok((v(bi), v(ai)))
+    }
 }
 
 impl DefinerGuard {
@@ -263,15 +347,34 @@ impl DefinerGuard {
 #[async_trait]
 impl RunGuard for DefinerGuard {
     async fn check(&self) -> Result<()> {
+        // RL50: bound definers' events are filtered (`shown`), not held.
+        self.definer().await.map(|_| ())
+    }
+
+    async fn shown(&self, ev: &triggers::TriggerEvent) -> Result<Shown> {
         let definer = self.definer().await?;
-        if self.rls.binds(self.tenant, definer, &[self.object]).await? {
-            return Err(SprigError::new(
-                SprigCode::RlsUnsupported,
-                "ER_SPRIG_RLS_UNSUPPORTED: row-level security on the trigger's table binds its \
-                 definer, whose code would get every changed row unfiltered; the trigger waits",
-            ));
-        }
-        Ok(())
+        let op = if self.rls.binds(self.tenant, definer, &[self.object]).await? {
+            let (b, a) = self.visible(definer, ev).await?;
+            match (ev.op.as_str(), b, a) {
+                ("insert", _, true) | ("update", false, true) => "insert",
+                ("delete", true, _) | ("update", true, false) => "delete",
+                ("update", true, true) => "update",
+                _ => {
+                    metrics::counter!("sprig_rls_feed_events_filtered_total", "protocol" => "trigger")
+                        .increment(1);
+                    return Ok(Shown::Hidden);
+                }
+            }
+        } else {
+            ev.op.as_str()
+        };
+        Ok(if !self.listens(op) {
+            Shown::Hidden
+        } else if op == ev.op {
+            Shown::Unchanged
+        } else {
+            Shown::As(Box::new(ev.shown_as(op)))
+        })
     }
 
     async fn context(&self) -> Result<Option<String>> {
@@ -313,16 +416,28 @@ impl LogicTrigger {
         if b.state != "active" || module.state != "active" {
             return Ok(json!({"stopped": format!("binding {binding_id} is {}", b.state)}));
         }
+        let events: Vec<String> = b
+            .events
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        // RL50: an update can become an insert or a delete for a definer
+        // the table's policies bind, so an INSERT- or DELETE-only binding
+        // on a table reads updates too; the guard passes over what the
+        // binding doesn't listen to.
+        let mut wanted = events.clone();
+        if b.object_id.is_some()
+            && !wanted.iter().any(|e| e == "update")
+            && wanted.iter().any(|e| e == "insert" || e == "delete")
+        {
+            wanted.push("update".to_owned());
+        }
         let filter = Filter {
             db: module.db_id,
             object: b.object_id.unwrap_or(0),
             table: String::new(),
-            events: b
-                .events
-                .split(',')
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .collect(),
+            events: wanted,
             when_fields: b.when_fields.clone(),
         };
         let subs = Subscriptions::new(Arc::clone(&env.dc));
@@ -363,8 +478,8 @@ impl LogicTrigger {
             }),
             versions,
             budget: env.settings.trigger_budget_for(tenant),
-            // RL37: the code gets every changed row; it runs while the
-            // table's policies don't bind its definer.
+            // RL37, RL50: the code gets the changed rows its definer may
+            // see (each event checked while the table's policies bind it).
             guard: match (
                 b.object_id,
                 crate::sinks::RlsCatalogs::new(Arc::clone(&env.locator)),
@@ -376,6 +491,9 @@ impl LogicTrigger {
                     module_id: module.module_id,
                     object,
                     cached: Mutex::new(None),
+                    events: events.clone(),
+                    gateways: env.gateways.clone(),
+                    binding_id,
                 }) as Arc<dyn RunGuard>),
                 (Some(_), None) => {
                     return Err("the worker can't load row-level security catalogs".to_owned());
@@ -419,6 +537,10 @@ impl LogicTrigger {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         let mut last_replay = Instant::now();
         let mut last_purge = Instant::now();
+        // bugfix-34: a trigger whose module was dropped (its database
+        // dropped, say) ends; before, it ran until the worker stopped.
+        let mut last_check = Instant::now();
+        let mut ended = None;
         let result = loop {
             tokio::select! {
                 r = &mut run => break r.map_err(|e| e.to_string()),
@@ -448,11 +570,37 @@ impl LogicTrigger {
                         last_purge = Instant::now();
                         purge(env, tenant, binding_id, &store).await;
                     }
+                    if last_check.elapsed() > Duration::from_secs(5) {
+                        last_check = Instant::now();
+                        if let Some(why) = gone(&ep.pool, &store, binding_id, module.module_id).await {
+                            ended = Some(why);
+                            break Ok(());
+                        }
+                    }
                 }
             }
         };
-        tracing::info!(%tenant, binding = binding_id, ran = stats.ran.load(Ordering::Relaxed), "after-commit trigger stopped");
-        result.map(|()| json!({"stopped": "cancelled"}))
+        tracing::info!(%tenant, binding = binding_id, ran = stats.ran.load(Ordering::Relaxed), ended = ?ended, "after-commit trigger stopped");
+        result.map(|()| match ended {
+            Some(why) => json!({"stopped": why}),
+            None => json!({"stopped": "cancelled"}),
+        })
+    }
+}
+
+/// Why an after-commit trigger's job should end: its binding or module
+/// is gone or no longer active. `None` while both are active, or when the
+/// catalog can't be read (the next check tries again).
+async fn gone(pool: &Pool, store: &LogicStore, binding_id: u64, module_id: u64) -> Option<String> {
+    let mut c = pool.get_conn().await.ok()?;
+    let b = store.binding_by_id(&mut c, binding_id).await.ok()?;
+    let m = store.module_by_id(&mut c, module_id).await.ok()?;
+    match (b, m) {
+        (None, _) => Some(format!("binding {binding_id} is gone")),
+        (_, None) => Some(format!("module {module_id} is gone")),
+        (Some(b), _) if b.state != "active" => Some(format!("binding {binding_id} is {}", b.state)),
+        (_, Some(m)) if m.state != "active" => Some(format!("module {module_id} is {}", m.state)),
+        _ => None,
     }
 }
 
@@ -552,6 +700,9 @@ impl JobHandler for LogicSchedule {
             module_id,
             object: 0,
             cached: Mutex::new(None),
+            events: Vec::new(),
+            gateways: None,
+            binding_id: 0,
         };
         let ctx = guard.context().await.map_err(|e| e.to_string())?;
         if let Some(x) = &ctx {

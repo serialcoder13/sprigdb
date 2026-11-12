@@ -7,17 +7,23 @@
 #   ./sprig-vm.sh up-etcd               start only this VM's etcd member (several VMs: on each, first)
 #   ./sprig-vm.sh up                    start everything, then configure (idempotent)
 #   ./sprig-vm.sh configure             register the cluster, write listener and TLS settings
-#   ./sprig-vm.sh status                containers, etcd members, clusters
-#   ./sprig-vm.sh ctl <args>            sprigctl inside the controller (HTTPS, admin or ops token)
+#   ./sprig-vm.sh status                containers, etcd members, clusters (and replication, with compose.db-ha.yaml)
+#   ./sprig-vm.sh ctl <args>            sprigctl inside the controller (HTTPS, admin or ops token);
+#                                       a call only the DC leader serves goes to the leader's controller
 #   ./sprig-vm.sh tenant <name> <user>  create a tenant and a user (password on stdin)
 #   ./sprig-vm.sh backup                every MariaDB here + an etcd snapshot, encrypted, into backups/<ts>/
 #                                       (and to SPRIG_BACKUP_COPY_TO when set)
 #   ./sprig-vm.sh verify-backup <ts> [dir]   check a backup's checksums (no key needed)
 #   ./sprig-vm.sh restore <ts> [dir]    stop, put a backup back (from backups/ or dir/<ts>), start
 #   ./sprig-vm.sh etcd-rejoin           replace this VM's etcd member (lost disk, or after a restore)
-#   ./sprig-vm.sh upgrade <image>       backup, then roll this VM's controller, worker, gateway to <image>
+#   ./sprig-vm.sh upgrade <image>       backup, then roll this VM's controller, worker, agent, gateway to <image>
 #   ./sprig-vm.sh rollback              roll back to the image before the last upgrade
-#   ./sprig-vm.sh rotate-certs          new server certificates from the same CA, live
+#   ./sprig-vm.sh rotate-certs          new server and process certificates from the same CA, live
+#   ./sprig-vm.sh reload-certs          after copying a rotated secrets/tls to another VM: MariaDB re-reads it
+#   ./sprig-vm.sh db-status             this VM's MariaDB node: role, replication, semi-sync (compose.db-ha.yaml)
+#   ./sprig-vm.sh lb-config             write lb/envoy.yaml (the load balancer) from SPRIG_LB_GATEWAYS
+#   ./sprig-vm.sh lb-up                 lb-config, then start the load balancer (compose.lb.yaml)
+#   ./sprig-vm.sh monitoring-config     write config/prometheus-targets.json (every VM) from SPRIG_VM_HOSTS
 #   ./sprig-vm.sh stop                  stop this VM's containers (data stays)
 #   ./sprig-vm.sh down                  stop and remove this VM's containers (data stays in the volumes)
 #
@@ -112,16 +118,44 @@ mariadb_services() { local l; l=$(services); grep -E '^mariadb-[0-9]+$' <<<"$l" 
 # "First operator" issues to this script (secrets/sprig/ops-token).
 # SPRIGCTL_BIN runs a sprigctl on the host instead, against the published
 # Admin port (a newer sprigctl than the image's, say).
-ctl() {
-    local tok=sprig/admin-token
+ctl_at() {
+    local ep=$1 tok=sprig/admin-token
+    shift
     [[ -s secrets/sprig/ops-token ]] && tok=sprig/ops-token
     if [[ -n ${SPRIGCTL_BIN:-} ]]; then
-        "$SPRIGCTL_BIN" --endpoint "https://127.0.0.1:$admin_port" --ca-file secrets/tls/ca.pem \
-            --token-file "secrets/$tok" "$@"
+        "$SPRIGCTL_BIN" --endpoint "$ep" --ca-file secrets/tls/ca.pem --token-file "secrets/$tok" "$@"
     else
-        dc_compose exec -T controller sprigctl --endpoint "https://127.0.0.1:$admin_port" \
+        dc_compose exec -T controller sprigctl --endpoint "$ep" \
             --ca-file /run/sprig/tls/ca.pem --token-file "/run/sprig/$tok" "$@"
     fi
+}
+
+# The Admin address the controller <node> registered (its VM's private
+# address with several VMs).
+controller_admin_addr() {
+    etcdctl_retry get "/sprig/dc/$dc/controllers/$1" --print-value-only 2>/dev/null | jq -r '.admin_addr // empty'
+}
+
+# sprigctl against this VM's controller. A call only the DC leader serves
+# (tenant deletion, for example) is refused by the others with 39504 naming
+# the leader; it is then sent to the leader's controller, at the address
+# the leader registered (several VMs: its private address).
+ctl() {
+    local out rc leader addr
+    if out=$(ctl_at "https://127.0.0.1:$admin_port" "$@" 2>&1); then
+        [[ -n $out ]] && printf '%s\n' "$out"
+        return 0
+    else
+        rc=$?
+    fi
+    leader=$(sed -n 's/.*send the request to the leader, \([A-Za-z0-9._-]*\).*/\1/p' <<<"$out" | head -1)
+    if [[ -n $leader ]] && addr=$(controller_admin_addr "$leader") && [[ -n $addr ]]; then
+        say "this VM's controller doesn't lead $dc: sending the call to the leader, $leader ($addr)" >&2
+        ctl_at "https://$addr" "$@"
+        return
+    fi
+    printf '%s\n' "$out" >&2
+    return "$rc"
 }
 
 # etcd: every member's client URL, from SPRIG_ETCD_SEEDS (a TOML list).
@@ -266,6 +300,19 @@ EOF
     say "now: back up secrets/ somewhere safe, then move secrets/ca and secrets/backup/backup-key.pem off this VM (RUNBOOK.md, \"Install\")"
 }
 
+# Whether certificate $1 names every entry of SPRIG_INTERNAL_SANS.
+sans_cover() {
+    local text e
+    [[ -n ${SPRIG_INTERNAL_SANS:-} ]] || return 0
+    text=$(openssl x509 -in "$1" -noout -ext subjectAltName 2>/dev/null) || return 1
+    for e in $(tr ',' ' ' <<<"$SPRIG_INTERNAL_SANS"); do
+        case $e in
+        DNS:*) grep -q "DNS:${e#DNS:}" <<<"$text" || return 1 ;;
+        IP:*) grep -q "IP Address:${e#IP:}" <<<"$text" || return 1 ;;
+        esac
+    done
+}
+
 # Bundles made before hardening round 2 lack the controller's certificate,
 # the backups' key pair, and a process certificate that also serves (the
 # peer service): make what is missing.
@@ -277,6 +324,16 @@ ensure_secrets() {
         openssl x509 -in secrets/tls/client.pem -noout -ext extendedKeyUsage 2>/dev/null | grep -q 'Server Auth' ||
             { say "re-issuing the process certificate (client.pem) for the peer service too"; process_cert; }
     fi
+    # A bundle growing from one VM to several (RUNBOOK.md, "From one VM to
+    # three"): the etcd, MariaDB, controller and process certificates must
+    # name every VM's private address (SPRIG_INTERNAL_SANS).
+    if ! sans_cover secrets/tls/etcd.pem || ! sans_cover secrets/tls/client.pem; then
+        [[ -f secrets/ca/ca-key.pem ]] ||
+            die "secrets/tls's certificates don't name SPRIG_INTERNAL_SANS ($SPRIG_INTERNAL_SANS): bring secrets/ca back for one run of up"
+        say "re-issuing the internal certificates for SPRIG_INTERNAL_SANS ($SPRIG_INTERNAL_SANS)"
+        server_certs
+        process_cert
+    fi
     if [[ ! -s secrets/backup/backup-pub.pem ]] && has_service mariadb-1; then
         say "making the backups' key pair (secrets/backup); move backup-key.pem off this VM"
         backup_keys
@@ -287,19 +344,40 @@ ensure_secrets() {
 
 set_dc() { ctl settings set --scope "dc:$dc" --reason "sprig-vm.sh configure" --yes "$1" "$2" >/dev/null; }
 
+# The first VM (it bootstraps the deployment) writes the DC's settings.
+first_vm() { [[ ${SPRIG_CONTROLLER_BOOTSTRAP:-true} == true ]]; }
+
+# Sets KEY=VALUE in .env (replacing a line, or appending one).
+set_env() {
+    if grep -q "^$1=" .env; then
+        sed -i.bak "s|^$1=.*|$1=$2|" .env && rm -f .env.bak
+    else
+        echo "$1=$2" >>.env
+    fi
+    export "$1=$2"
+}
+
 configure() {
+    if db_ha; then
+        db_follow
+        db_register
+        db_agent_sync
+    fi
+    first_vm || { say "not the first VM: the DC's settings are the first VM's"; return 0; }
     has_service mariadb-1 || { say "no MariaDB on this VM: the first VM configures the DC"; return 0; }
-    local list node=mariadb-1:3306
-    # Several VMs: the other VMs' gateways reach the backend at this VM's
-    # private address.
-    [[ -n ${SPRIG_PRIVATE_HOST:-} ]] && node="$SPRIG_PRIVATE_HOST:${SPRIG_BACKEND_PORT:-3306}"
-    list=$(ctl -o json cluster list)
-    if ! jq -e --arg n "$cluster_name" '.clusters[]? | select(.name == $n)' <<<"$list" >/dev/null; then
-        say "registering $cluster_name (single, $node)"
-        ctl -o json cluster register "$cluster_name" --dc "$dc" --topology single --node "$node" \
-            --credentials file:/run/sprig/sprig/cluster-credentials.toml \
-            --memory-gb "${SPRIG_CLUSTER_MEMORY_GB:-4}" --storage-gb "${SPRIG_CLUSTER_STORAGE_GB:-100}" --yes |
-            jq -c '{cluster: .cluster.cluster_id, state: .cluster.admin_state}'
+    if ! db_ha; then
+        local list node=mariadb-1:3306
+        # Several VMs: the other VMs' gateways reach the backend at this VM's
+        # private address.
+        [[ -n ${SPRIG_PRIVATE_HOST:-} ]] && node="$SPRIG_PRIVATE_HOST:${SPRIG_BACKEND_PORT:-3306}"
+        list=$(ctl -o json cluster list)
+        if ! jq -e --arg n "$cluster_name" '.clusters[]? | select(.name == $n)' <<<"$list" >/dev/null; then
+            say "registering $cluster_name (single, $node)"
+            ctl -o json cluster register "$cluster_name" --dc "$dc" --topology single --node "$node" \
+                --credentials file:/run/sprig/sprig/cluster-credentials.toml \
+                --memory-gb "${SPRIG_CLUSTER_MEMORY_GB:-4}" --storage-gb "${SPRIG_CLUSTER_STORAGE_GB:-100}" --yes |
+                jq -c '{cluster: .cluster.cluster_id, state: .cluster.admin_state}'
+        fi
     fi
     say "listener and TLS settings (dc $dc)"
     set_dc tls.bundles.default.cert_path /run/sprig/tls/gateway.pem
@@ -320,12 +398,106 @@ configure() {
     set_dc listener.http.enabled false
     set_dc listener.amqp.enabled false
     # One VM: Kafka's Metadata names the public host. Several VMs: each
-    # gateway is named by its own registered address (SPRIG_PRIVATE_HOST);
-    # a DC-wide value would name VM 1 for every gateway.
+    # gateway is named by its own [gateway] kafka_advertise_host
+    # (SPRIG_KAFKA_HOST); a DC-wide value would name one VM for every gateway.
     if [[ -z ${SPRIG_PRIVATE_HOST:-} ]]; then
         set_dc kafka.advertised_host "$public_host"
     fi
     say "configured; listeners come up within a few seconds"
+}
+
+# --- MariaDB high availability (compose.db-ha.yaml) ------------------------------------
+
+# SPRIG_DB_NODES (db1=host:port,db2=host:port,db3=host:port) turns it on.
+db_ha() { [[ -n ${SPRIG_DB_NODES:-} ]] && has_service agent; }
+my_db_node() { echo "db${SPRIG_VM_ID:-1}"; }
+db_nodes() { tr ',' '\n' <<<"${SPRIG_DB_NODES:-}" | sed '/^$/d'; }
+db_addr() { db_nodes | awk -F= -v n="$1" '$1 == n {print $2; f=1} END {exit !f}'; }
+
+# SQL on this VM's MariaDB node as root (the statement on stdin, so no
+# password or statement shows in a process list).
+dbq() {
+    printf '%s\n' "$1" | dc_compose exec -T mariadb-1 bash -c \
+        'MYSQL_PWD=$(cat /run/sprig/mariadb/root-password) exec mariadb -uroot -h127.0.0.1 -P3306 --ssl-ca=/run/sprig/tls/ca.pem ${1:--N} -B' _ "${2:-}"
+}
+db_status_field() { dbq "SHOW SLAVE STATUS\G" -E | awk -F': ' -v k="$1" '$1 ~ "^ *"k"$" {print $2}'; }
+attached_replicas() { dbq "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE COMMAND LIKE 'Binlog Dump%'"; }
+
+# A replica's first start: replicate the first primary (SPRIG_DB_PRIMARY)
+# over verified TLS, from its first GTID. Only a node with no data of its
+# own; a node that already replicates is left alone.
+db_follow() {
+    local primary=${SPRIG_DB_PRIMARY:-db1} me addr host port n i
+    me=$(my_db_node)
+    [[ $me == "$primary" ]] && return 0
+    if [[ -n $(dbq "SHOW SLAVE STATUS") ]]; then return 0; fi
+    addr=$(db_addr "$primary") || die "SPRIG_DB_NODES has no $primary"
+    host=${addr%:*} port=${addr##*:}
+    n=$(dbq "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME NOT IN ('mysql','information_schema','performance_schema','sys')")
+    [[ $n == 0 ]] || die "this VM's MariaDB has data but doesn't replicate: seed it from the primary first (RUNBOOK.md, \"MariaDB high availability\")"
+    say "MariaDB $me: replicating $primary ($addr) over TLS, semi-sync"
+    dbq "RESET MASTER; SET GLOBAL gtid_slave_pos = '';
+CHANGE MASTER TO MASTER_HOST = '$host', MASTER_PORT = $port, MASTER_USER = 'sprig_repl',
+  MASTER_PASSWORD = '$(cat secrets/mariadb/sprig_repl-password)', MASTER_SSL = 1,
+  MASTER_SSL_CA = '/run/sprig/tls/ca.pem', MASTER_SSL_VERIFY_SERVER_CERT = 1, MASTER_USE_GTID = slave_pos;
+START SLAVE;" >/dev/null
+    for i in $(seq 1 60); do
+        [[ $(db_status_field Slave_IO_Running) == Yes && $(db_status_field Slave_SQL_Running) == Yes ]] && { say "MariaDB $me: replicating"; return 0; }
+        sleep 2
+    done
+    die "MariaDB $me doesn't replicate $primary: $(db_status_field Last_IO_Error) $(db_status_field Last_SQL_Error)"
+}
+
+# On the first primary's VM, once every replica is attached: open the
+# primary for its agent (registration wants one writable node), turn on
+# semi-sync's primary side, and register the three nodes as one cluster
+# (topology primary_replica; the writer first). Then the agents take over.
+db_register() {
+    local primary=${SPRIG_DB_PRIMARY:-db1} list want have n args=()
+    [[ $(my_db_node) == "$primary" ]] || return 0
+    list=$(ctl -o json cluster list)
+    jq -e --arg n "$cluster_name" '.clusters[]? | select(.name == $n)' <<<"$list" >/dev/null && return 0
+    want=$(($(db_nodes | wc -l) - 1))
+    have=$(attached_replicas)
+    if ((have < want)); then
+        say "MariaDB: $have of $want replicas attached; run ./sprig-vm.sh up on the other VMs, then ./sprig-vm.sh configure here again to register $cluster_name"
+        return 0
+    fi
+    dbq "SET GLOBAL rpl_semi_sync_master_enabled = ON; SET GLOBAL read_only = OFF;" >/dev/null
+    args=(--node "$primary=$(db_addr "$primary")")
+    while IFS= read -r n; do
+        [[ ${n%%=*} == "$primary" ]] || args+=(--node "$n")
+    done < <(db_nodes)
+    say "registering $cluster_name (primary_replica: ${SPRIG_DB_NODES})"
+    ctl -o json cluster register "$cluster_name" --dc "$dc" --topology primary_replica "${args[@]}" \
+        --credentials file:/run/sprig/sprig/cluster-credentials.toml \
+        --memory-gb "${SPRIG_CLUSTER_MEMORY_GB:-4}" --storage-gb "${SPRIG_CLUSTER_STORAGE_GB:-100}" --yes |
+        jq -c '{cluster: .cluster.cluster_id, state: .cluster.admin_state}'
+}
+
+# Every VM: the agent fences its node in the registered cluster; its id
+# goes into .env (SPRIG_DB_CLUSTER_ID) and the agent is recreated if it
+# changed.
+db_agent_sync() {
+    local id
+    id=$(ctl -o json cluster list | jq -r --arg n "$cluster_name" '.clusters[]? | select(.name == $n) | .cluster_id' | head -1)
+    [[ -n $id ]] || return 0
+    if [[ ${SPRIG_DB_CLUSTER_ID:-} != "$id" ]]; then
+        set_env SPRIG_DB_CLUSTER_ID "$id"
+        dc_compose up -d --no-deps agent >/dev/null
+    fi
+    say "MariaDB node $(my_db_node) of cluster $id: its agent fences it unless it holds the writer lease"
+}
+
+db_status() {
+    local ro sm cl
+    ro=$(dbq "SELECT @@read_only") sm=$(dbq "SELECT @@rpl_semi_sync_master_enabled")
+    cl=$(dbq "SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME = 'Rpl_semi_sync_master_clients'")
+    echo "MariaDB node $(my_db_node): read_only=$ro semi-sync primary side=$sm (replicas acknowledging: $cl), replicas attached: $(attached_replicas)"
+    if [[ -n $(dbq "SHOW SLAVE STATUS") ]]; then
+        echo "  replicates $(db_status_field Master_Host):$(db_status_field Master_Port): IO $(db_status_field Slave_IO_Running), SQL $(db_status_field Slave_SQL_Running), $(db_status_field Seconds_Behind_Master) s behind, TLS $(db_status_field Master_SSL_Allowed), received $(db_status_field Gtid_IO_Pos)"
+    fi
+    echo "  gtid_binlog_pos $(dbq "SELECT @@gtid_binlog_pos")"
 }
 
 wait_healthy() {
@@ -343,12 +515,31 @@ up_etcd() {
     say "etcd member ${SPRIG_ETCD_NAME:-etcd-0} started; it is healthy once a majority of members runs"
 }
 
+# A member that started life in a one-VM bundle advertises its peer URL
+# inside the Compose network (https://etcd:2380); growing to several VMs
+# (RUNBOOK.md, "From one VM to three") it must advertise its private
+# address, or the new members can't reach it. Updated in place.
+etcd_peer_url() {
+    [[ -n ${SPRIG_PRIVATE_HOST:-} ]] || return 0
+    local name=${SPRIG_ETCD_NAME:-etcd-0} want out id have
+    want="https://$SPRIG_PRIVATE_HOST:${SPRIG_ETCD_PEER_PORT:-2380}"
+    out=$(dc_compose exec -T etcd etcdctl --endpoints="https://127.0.0.1:${SPRIG_ETCD_CLIENT_PORT:-2379}" --cacert=/tls/ca.pem \
+        --cert=/tls/client.pem --key=/tls/client-key.pem member list 2>/dev/null) || return 0
+    id=$(awk -F', ' -v n="$name" '$3 == n {print $1}' <<<"$out")
+    have=$(awk -F', ' -v n="$name" '$3 == n {print $4}' <<<"$out")
+    [[ -n $id && $have != "$want" ]] || return 0
+    say "etcd member $name: peer URL $have -> $want"
+    dc_compose exec -T etcd etcdctl --endpoints="https://127.0.0.1:${SPRIG_ETCD_CLIENT_PORT:-2379}" --cacert=/tls/ca.pem \
+        --cert=/tls/client.pem --key=/tls/client-key.pem member update "$id" --peer-urls="$want" >/dev/null
+}
+
 up() {
     [[ -f secrets/tls/ca.pem ]] || die "no secrets/: run ./sprig-vm.sh init first (other VMs: copy the first VM's secrets/)"
     ensure_secrets
     secrets_ok
     mkdir -p backups
     dc_compose up -d --wait --wait-timeout "${SPRIG_UP_TIMEOUT:-300}"
+    etcd_peer_url
     configure
 }
 
@@ -356,6 +547,7 @@ status() {
     dc_compose ps --format 'table {{.Service}}\t{{.Image}}\t{{.Status}}'
     etcdctl_all endpoint status -w table 2>/dev/null || true
     ctl cluster list || true
+    if db_ha; then db_status || true; fi
 }
 
 tenant() {
@@ -574,11 +766,12 @@ set_image() {
 }
 
 # Controller first (it migrates the deployment's records), then the worker,
-# then the gateway (it drains its sessions for gateway.drain_timeout_seconds).
-# Only the roles this VM runs.
+# then the node agent (compose.db-ha.yaml; its node may refuse writes for a
+# second while it takes the writer lease back), then the gateway (it drains
+# its sessions for gateway.drain_timeout_seconds). Only the roles this VM runs.
 roll() {
     local s
-    for s in controller worker gateway; do
+    for s in controller worker agent gateway; do
         has_service "$s" || continue
         say "$s -> $SPRIGDB_IMAGE"
         dc_compose up -d --no-deps --wait --wait-timeout "${SPRIG_UP_TIMEOUT:-300}" "$s"
@@ -611,13 +804,145 @@ rollback() {
 rotate_certs() {
     [[ -f secrets/ca/ca-key.pem ]] || die "the CA key isn't in secrets/ca (bring it back from where you keep it)"
     server_certs
-    # The gateway re-reads its bundle within two polls; MariaDB on FLUSH SSL;
-    # etcd on each new connection; the controller's Admin API on restart.
+    process_cert
+    # Read again without a restart: the gateway's client bundle within two
+    # polls; the controller's Admin API and internal port within a few
+    # seconds (hardening round 3); MariaDB on FLUSH SSL; etcd on each new
+    # connection. The process certificate (client.pem) is presented by every
+    # SprigDB process as it connects: each picks the new one up when it next
+    # starts, and the old one stays valid until it expires.
     local s
     for s in $(mariadb_services); do
-        dc_compose exec -T "$s" bash -c 'mariadb -uroot -p"$(cat /run/sprig/mariadb/root-password)" -e "FLUSH SSL"'
+        dc_compose exec -T "$s" bash -c 'MYSQL_PWD=$(cat /run/sprig/mariadb/root-password) mariadb -uroot -h127.0.0.1 -P3306 --ssl-ca=/run/sprig/tls/ca.pem -e "FLUSH NO_WRITE_TO_BINLOG SSL"'
     done
-    say "server certificates renewed (gateway, etcd, MariaDB, controller); copy secrets/tls to the other VMs"
+    say "certificates renewed (gateway, etcd, MariaDB, controller, process); copy secrets/tls to the other VMs and run ./sprig-vm.sh reload-certs there"
+}
+
+# On the other VMs after rotate-certs (secrets/tls copied over): MariaDB
+# re-reads its certificate; everything else does by itself.
+reload_certs() {
+    local s
+    for s in $(mariadb_services); do
+        dc_compose exec -T "$s" bash -c 'MYSQL_PWD=$(cat /run/sprig/mariadb/root-password) mariadb -uroot -h127.0.0.1 -P3306 --ssl-ca=/run/sprig/tls/ca.pem -e "FLUSH NO_WRITE_TO_BINLOG SSL"'
+    done
+    say "MariaDB re-read its certificate; the gateway and controller pick theirs up within a few seconds"
+}
+
+# --- load balancer (compose.lb.yaml) -------------------------------------------------------
+
+# SPRIG_LB_GATEWAYS: the gateways' private addresses, comma-separated. A
+# laptop rehearsal whose "VMs" publish their ports shifted by N writes
+# host+N.
+lb_endpoints() { # <port>: one endpoint block per gateway
+    local port=$1 hp=${SPRIG_LB_HEALTH_PORT:-${SPRIG_TELEMETRY_PORT_GATEWAY:-9180}} g host shift
+    for g in $(tr ',' ' ' <<<"${SPRIG_LB_GATEWAYS:?SPRIG_LB_GATEWAYS (the gateways private addresses)}"); do
+        host=${g%%+*} shift=0
+        [[ $g == *+* ]] && shift=${g##*+}
+        cat <<EOT
+        - endpoint:
+            address: { socket_address: { address: $host, port_value: $((port + shift)) } }
+            health_check_config: { port_value: $((hp + shift)) }
+EOT
+    done
+}
+
+lb_config() {
+    mkdir -p lb
+    local l name var def port
+    {
+        cat <<'EOT'
+# Made by sprig-vm.sh lb-config (compose.lb.yaml); edit .env and run it again.
+admin:
+  address: { socket_address: { address: 0.0.0.0, port_value: 9901 } }
+static_resources:
+  listeners:
+EOT
+        for l in mysql:SPRIG_MYSQL_PORT:3306 mariadb:SPRIG_MARIADB_PORT:3307 https:SPRIG_HTTPS_PORT:8443 \
+            mongo:SPRIG_MONGO_PORT:27017 redis:SPRIG_REDIS_PORT:6379 bolt:SPRIG_BOLT_PORT:7687 \
+            kafka:SPRIG_KAFKA_PORT:9092 amqps:SPRIG_AMQPS_PORT:5671; do
+            IFS=: read -r name var def <<<"$l"
+            port=${!var:-$def}
+            cat <<EOT
+  - name: $name
+    address: { socket_address: { address: 0.0.0.0, port_value: $port } }
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.tcp_proxy
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+          stat_prefix: $name
+          cluster: $name
+          # A refused connection (a gateway that just closed its listeners)
+          # is tried on another gateway.
+          max_connect_attempts: 3
+          # Database sessions stay open for long: no idle timeout.
+          idle_timeout: 0s
+EOT
+        done
+        echo "  clusters:"
+        for l in mysql:SPRIG_MYSQL_PORT:3306 mariadb:SPRIG_MARIADB_PORT:3307 https:SPRIG_HTTPS_PORT:8443 \
+            mongo:SPRIG_MONGO_PORT:27017 redis:SPRIG_REDIS_PORT:6379 bolt:SPRIG_BOLT_PORT:7687 \
+            kafka:SPRIG_KAFKA_PORT:9092 amqps:SPRIG_AMQPS_PORT:5671; do
+            IFS=: read -r name var def <<<"$l"
+            port=${!var:-$def}
+            cat <<EOT
+  - name: $name
+    type: STRICT_DNS
+    connect_timeout: 2s
+    # The gateway with the fewest open connections.
+    lb_policy: LEAST_REQUEST
+    # Never send to a gateway whose readiness is off, even if all are.
+    common_lb_config: { healthy_panic_threshold: { value: 0 } }
+    health_checks:
+    - timeout: 1s
+      interval: 1s
+      no_traffic_interval: 1s
+      unhealthy_threshold: 2
+      healthy_threshold: 2
+      http_health_check: { path: /readyz }
+    load_assignment:
+      cluster_name: $name
+      endpoints:
+      - lb_endpoints:
+EOT
+            lb_endpoints "$port"
+        done
+    } >lb/envoy.yaml.new
+    mv lb/envoy.yaml.new lb/envoy.yaml
+    say "lb/envoy.yaml: 8 listeners, gateways ${SPRIG_LB_GATEWAYS}"
+}
+
+lb_up() {
+    lb_config
+    docker compose --project-directory "$here" -f "$here/compose.lb.yaml" ${SPRIG_LB_COMPOSE_EXTRA:+-f "$SPRIG_LB_COMPOSE_EXTRA"} up -d --wait --wait-timeout 120
+    say "load balancer up; gateways' health: curl -s http://127.0.0.1:${SPRIG_LB_ADMIN_PORT:-9901}/clusters | grep health_flags"
+}
+
+# --- monitoring across VMs -----------------------------------------------------------------
+
+# SPRIG_VM_HOSTS: every VM's private address (host, or host+N on a laptop
+# rehearsal); writes the targets Prometheus (profile monitoring) scrapes.
+monitoring_config() {
+    local v host shift first=1 role port
+    mkdir -p config
+    {
+        echo "["
+        for v in $(tr ',' ' ' <<<"${SPRIG_VM_HOSTS:?SPRIG_VM_HOSTS (every VM private address)}"); do
+            host=${v%%+*} shift=0
+            [[ $v == *+* ]] && shift=${v##*+}
+            for role in gateway:${SPRIG_TELEMETRY_PORT_GATEWAY:-9180} controller:${SPRIG_TELEMETRY_PORT_CONTROLLER:-9181} \
+                worker:${SPRIG_TELEMETRY_PORT_WORKER:-9182} agent:${SPRIG_TELEMETRY_PORT_AGENT:-9183}; do
+                port=$((${role#*:} + shift))
+                ((first)) || echo ","
+                first=0
+                printf '  {"targets": ["%s:%s"], "labels": {"role": "%s", "vm": "%s"}}' "$host" "$port" "${role%%:*}" "$v"
+            done
+        done
+        echo
+        echo "]"
+    } >config/prometheus-targets.json.new
+    mv config/prometheus-targets.json.new config/prometheus-targets.json
+    say "config/prometheus-targets.json: every VM's gateway, controller, worker and agent"
 }
 
 cmd=${1:-}
@@ -637,6 +962,11 @@ etcd-rejoin) etcd_rejoin ;;
 upgrade) upgrade "$@" ;;
 rollback) rollback ;;
 rotate-certs) rotate_certs ;;
+reload-certs) reload_certs ;;
+db-status) db_status ;;
+lb-config) lb_config ;;
+lb-up) lb_up ;;
+monitoring-config) monitoring_config ;;
 stop) dc_compose stop ;;
 down) dc_compose down ;;
 *) sed -n '2,/^set -euo/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; exit 2 ;;

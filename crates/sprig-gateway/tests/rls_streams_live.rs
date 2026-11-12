@@ -2,11 +2,16 @@
 //! the gateway's session rewrite (chapter 29, "Change feed consumers"; RLS
 //! round 4, decisions RL36 to RL39): change topics read in SQL, views over
 //! them, triggers on them, sinks from them, after-commit triggers on the
-//! table, and the dead letters those keep. Each path is checked twice:
-//! a user the table's policies bind can't set it up, and one that was set
-//! up by a user the policies didn't bind stops delivering when they come
-//! to bind that user (`FORCE ROW LEVEL SECURITY` binds the table's
-//! managers), and goes on when they don't any more.
+//! table, and the dead letters those keep. Change topics are read record
+//! by record (RLS round 5, RL44): a user the table's policies bind reads
+//! the topic in SQL, and sets up a trigger or a sink on it, and gets only
+//! the records whose rows the policies show (an update whose row became
+//! hidden or visible as a delete or an insert); a path set up by a user
+//! the policies didn't bind keeps running when they come to bind that user
+//! (`FORCE ROW LEVEL SECURITY` binds the table's managers), filtered from
+//! then on. `CHANGES OF` sinks and after-commit triggers are filtered row
+//! by row the same way (RLS round 5 continued, RL50); MariaDB triggers on
+//! the table stay refused to bound users.
 //!
 //! ```sh
 //! export SPRIG_TEST_RLS_SQL=127.0.0.1:37306
@@ -162,7 +167,9 @@ async fn hook_receiver(port: u16) -> Received {
                     }
                     let body = String::from_utf8_lossy(&buf[end + 4..end + 4 + len]).into_owned();
                     buf.drain(..end + 4 + len);
-                    g.lock().unwrap().push(body);
+                    // "<path> <body>": the path tells the sinks apart.
+                    let path = head.split_whitespace().nth(1).unwrap_or("/").to_owned();
+                    g.lock().unwrap().push(format!("{path} {body}"));
                     if s.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}")
                         .await
                         .is_err()
@@ -177,9 +184,20 @@ async fn hook_receiver(port: u16) -> Received {
 }
 
 async fn hook_has(got: &Received, needle: &str, secs: u64) -> bool {
+    hook_has_at(got, "", needle, secs).await
+}
+
+/// [`hook_has`] for the requests to `path` (`/c2`, ...) only.
+async fn hook_has_at(got: &Received, path: &str, needle: &str, secs: u64) -> bool {
     let end = tokio::time::Instant::now() + Duration::from_secs(secs);
+    let prefix = format!("{path} ");
     loop {
-        if got.lock().unwrap().iter().any(|b| b.contains(needle)) {
+        if got
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|b| (path.is_empty() || b.starts_with(&prefix)) && b.contains(needle))
+        {
             return true;
         }
         if tokio::time::Instant::now() > end {
@@ -262,6 +280,7 @@ async fn row_level_security_on_streamed_rows() {
         format!("DROP SINK IF EXISTS {DB}.s_alice"),
         format!("DROP SINK IF EXISTS {DB}.s_alice2"),
         format!("DROP SINK IF EXISTS {DB}.s_mgr"),
+        format!("DROP SINK IF EXISTS {DB}.s_mgr2"),
     ] {
         let _ = run(&mut admin, &s).await;
     }
@@ -282,7 +301,7 @@ async fn row_level_security_on_streamed_rows() {
         ),
     )
     .await;
-    for t in ["leak_alice", "leak_t", "leak_a", "leak_v"] {
+    for t in ["leak_alice", "leak_ac", "leak_t", "leak_a", "leak_v"] {
         must(
             &mut admin,
             &format!("CREATE TABLE {DB}.{t} (id INT AUTO_INCREMENT PRIMARY KEY, v TEXT)"),
@@ -352,12 +371,25 @@ async fn row_level_security_on_streamed_rows() {
         ),
     )
     .await;
-    for u in ["rlss_alice", "rlss_mgr"] {
+    // RL50: CHANGES OF sinks post to their own paths.
+    for (c, path) in [("hook2", "c2"), ("hook3", "c3")] {
         must(
             &mut admin,
-            &format!("GRANT USAGE ON CONNECTION {DB}.hook TO '{u}'@'%'"),
+            &format!(
+                "CREATE CONNECTION {DB}.{c} TYPE WEBHOOK WITH (url = 'http://127.0.0.1:{port}/{path}', \
+                 format = 'ndjson', signature = 'none')"
+            ),
         )
         .await;
+    }
+    for u in ["rlss_alice", "rlss_mgr"] {
+        for c in ["hook", "hook2", "hook3"] {
+            must(
+                &mut admin,
+                &format!("GRANT USAGE ON CONNECTION {DB}.{c} TO '{u}'@'%'"),
+            )
+            .await;
+        }
     }
     must(
         &mut admin,
@@ -377,12 +409,62 @@ async fn row_level_security_on_streamed_rows() {
         || format!("{rows:?}"),
     );
 
-    // 1. SQL reads of the change topic: refused to alice, read by mgr.
-    let e = run(&mut alice, "SELECT * FROM `docs.changes`").await;
+    // 1. SQL reads of the change topic (RL44): alice reads the records of
+    // her own rows, an update that gave her a row as an insert and one
+    // that took hers away as a delete; mgr (a manager) reads them all.
+    must(
+        &mut admin,
+        &format!(
+            "UPDATE {DB}.docs SET owner = 'rlss_alice@%', body = 'given-to-alice' WHERE id = 2"
+        ),
+    )
+    .await;
+    must(
+        &mut admin,
+        &format!("UPDATE {DB}.docs SET owner = 'rlss_bob@%', body = 'bob-took-1' WHERE id = 1"),
+    )
+    .await;
+    must(
+        &mut admin,
+        &format!("UPDATE {DB}.docs SET owner = 'rlss_alice@%', body = 'alice-row' WHERE id = 1"),
+    )
+    .await;
+    must(
+        &mut admin,
+        &format!("UPDATE {DB}.docs SET owner = 'rlss_bob@%', body = 'bob-secret-0' WHERE id = 2"),
+    )
+    .await;
+    let mut seen: Vec<String> = Vec::new();
+    for _ in 0..40 {
+        seen = texts(
+            &mut alice,
+            "SELECT CONCAT(JSON_VALUE(CAST(value AS CHAR), '$.op'), ':',              COALESCE(JSON_VALUE(CAST(value AS CHAR), '$.after.body'), JSON_VALUE(CAST(value AS CHAR), '$.before.body')))              FROM `docs.changes` ORDER BY ts, partition_no, offset_no",
+        )
+        .await;
+        if seen.len() >= 5 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let mut sorted = seen.clone();
+    sorted.sort();
     ck.ok(
-        "SQL change topic refused to a bound user",
-        matches!(e, Err((39366, _))),
-        || format!("{e:?}"),
+        "SQL change topic read by a bound user, record by record",
+        sorted
+            == vec![
+                "c:alice-row".to_owned(),
+                "c:alice-row".to_owned(),
+                "c:given-to-alice".to_owned(),
+                "d:alice-row".to_owned(),
+                "d:given-to-alice".to_owned(),
+            ],
+        || format!("{seen:?}"),
+    );
+    let raw = texts(&mut alice, "SELECT CAST(value AS CHAR) FROM `docs.changes`").await;
+    ck.ok(
+        "LEAK: SQL change topic shows bob's rows to alice",
+        !raw.iter().any(|x| x.contains("bob-")),
+        || format!("{raw:?}"),
     );
     // The topic's sequencer copies changes into it within seconds.
     let mut v = Vec::new();
@@ -399,34 +481,67 @@ async fn row_level_security_on_streamed_rows() {
         || format!("{v:?}"),
     );
 
-    // 2. A view over the change topic (RL38): refused even to its creator
-    // the policies don't bind, since its readers would read the log with
-    // the creator's rights.
+    // 2. A view over the change topic (RL47): made by the administrator (a
+    // manager), each reader gets the records its own policies show.
     let e = run(
         &mut admin,
         &format!("CREATE VIEW {DB}.vch AS SELECT * FROM {DB}.`docs.changes`"),
     )
     .await;
+    ck.ok("view over a change topic created", e.is_ok(), || {
+        format!("{e:?}")
+    });
+    must(
+        &mut admin,
+        &format!("GRANT SELECT ON {DB}.vch TO 'rlss_alice'@'%'"),
+    )
+    .await;
+    let v = texts(
+        &mut alice,
+        &format!("SELECT CAST(value AS CHAR) FROM {DB}.vch"),
+    )
+    .await;
     ck.ok(
-        "view over a change topic refused",
-        matches!(e, Err((39366, _))),
-        || format!("{e:?}"),
+        "view over a change topic: alice's records only",
+        v.iter().any(|x| x.contains("given-to-alice")) && !v.iter().any(|x| x.contains("bob-")),
+        || format!("{v:?}"),
     );
-    if e.is_ok() {
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        let v = texts(&mut alice, "SELECT CAST(value AS CHAR) FROM vch").await;
-        ck.ok(
-            "LEAK: alice reads bob's changes through the view",
-            !v.iter().any(|x| x.contains("bob-secret")),
-            || format!("{v:?}"),
-        );
-    }
+    let v = texts(
+        &mut admin,
+        &format!("SELECT CAST(value AS CHAR) FROM {DB}.vch"),
+    )
+    .await;
+    ck.ok(
+        "view over a change topic: the administrator's all",
+        v.iter().any(|x| x.contains("bob-secret-0")),
+        || format!("{v:?}"),
+    );
+    // A policy change reaches the view: a restrictive policy hides row 1.
+    must(
+        &mut admin,
+        &format!("CREATE POLICY not1 ON {DB}.docs AS RESTRICTIVE USING (id <> 1)"),
+    )
+    .await;
+    let v = texts(
+        &mut alice,
+        &format!("SELECT CAST(value AS CHAR) FROM {DB}.vch"),
+    )
+    .await;
+    ck.ok(
+        "view over a change topic follows a policy change",
+        v.iter().any(|x| x.contains("given-to-alice"))
+            && !v.iter().any(|x| x.contains("alice-row")),
+        || format!("{v:?}"),
+    );
+    must(&mut admin, &format!("DROP POLICY not1 ON {DB}.docs")).await;
 
-    // 3. Setting a path up as alice (RL36, RL37): every one refused.
+    // 3. Setting a path up as alice: a trigger and a sink on the change
+    // topic are allowed and filtered (RL44), and so are a `CHANGES OF` sink
+    // and an after-commit trigger (RL50); MariaDB triggers are refused.
     let e = run(&mut alice, &trigger_js("t_alice", "leak_alice")).await;
     ck.ok(
-        "stream trigger on the change topic refused",
-        refused(&e),
+        "stream trigger on the change topic set up by a bound user",
+        e.is_ok(),
         || format!("{e:?}"),
     );
     let e = run(
@@ -434,21 +549,27 @@ async fn row_level_security_on_streamed_rows() {
         &format!("CREATE SINK {DB}.s_alice FROM STREAM {DB}.`docs.changes` TO WEBHOOK CONNECTION hook WITH (batch_max_wait_ms = 100)"),
     )
     .await;
-    ck.ok("sink FROM STREAM t.changes refused", refused(&e), || {
-        format!("{e:?}")
-    });
+    ck.ok(
+        "sink FROM STREAM t.changes set up by a bound user",
+        e.is_ok(),
+        || format!("{e:?}"),
+    );
     let e = run(
         &mut alice,
-        &format!("CREATE SINK {DB}.s_alice2 FROM CHANGES OF {DB}.docs TO WEBHOOK CONNECTION hook WITH (batch_max_wait_ms = 100)"),
+        &format!("CREATE SINK {DB}.s_alice2 FROM CHANGES OF {DB}.docs TO WEBHOOK CONNECTION hook2 WITH (batch_max_wait_ms = 100)"),
     )
     .await;
-    ck.ok("sink FROM CHANGES OF refused", refused(&e), || {
-        format!("{e:?}")
-    });
-    let e = run(&mut alice, &after_commit("a_alice", "leak_alice")).await;
-    ck.ok("after-commit trigger refused", refused(&e), || {
-        format!("{e:?}")
-    });
+    ck.ok(
+        "sink FROM CHANGES OF set up by a bound user",
+        e.is_ok(),
+        || format!("{e:?}"),
+    );
+    let e = run(&mut alice, &after_commit("a_alice", "leak_ac")).await;
+    ck.ok(
+        "after-commit trigger set up by a bound user",
+        e.is_ok(),
+        || format!("{e:?}"),
+    );
     let e = run(
         &mut alice,
         &format!("CREATE TRIGGER {DB}.n_alice AFTER INSERT ON {DB}.docs FOR EACH ROW INSERT INTO {DB}.leak_alice (v) VALUES (NEW.body)"),
@@ -457,19 +578,81 @@ async fn row_level_security_on_streamed_rows() {
     ck.ok("MariaDB trigger on the table refused", refused(&e), || {
         format!("{e:?}")
     });
-    // Whatever got through would now see bob's next row.
+    // They see alice's next row, and never bob's.
+    tokio::time::sleep(Duration::from_secs(3)).await;
     must(
         &mut writer,
         &format!("INSERT INTO {DB}.docs VALUES (3, 'rlss_bob@%', 'bob-secret-alice')"),
     )
     .await;
-    let leaked_t = arrives(&mut admin, "leak_alice", "bob-secret-alice", 10).await;
+    must(
+        &mut writer,
+        &format!("INSERT INTO {DB}.docs VALUES (7, 'rlss_alice@%', 'alice-own-7')"),
+    )
+    .await;
+    ck.ok(
+        "alice's stream trigger gets her own row",
+        arrives(&mut admin, "leak_alice", "alice-own-7", 60).await,
+        String::new,
+    );
+    ck.ok(
+        "alice's sink exports her own row",
+        hook_has(&got, "alice-own-7", 60).await,
+        String::new,
+    );
+    let leaked_t = arrives(&mut admin, "leak_alice", "bob-secret-alice", 3).await;
     ck.ok("LEAK: alice's code got bob's row", !leaked_t, String::new);
     let leaked_h = hook_has(&got, "bob-secret-alice", 2).await;
     ck.ok(
         "LEAK: alice's sink exported bob's row",
         !leaked_h,
         String::new,
+    );
+    // RL50: her CHANGES OF sink and after-commit trigger get her row, and
+    // an update that gives her bob's row arrives as an insert (her
+    // after-commit trigger is FOR INSERT); one that takes it back as a
+    // delete of what she saw, never with bob's new values.
+    ck.ok(
+        "alice's CHANGES OF sink exports her own row",
+        hook_has_at(&got, "/c2", "alice-own-7", 60).await,
+        String::new,
+    );
+    ck.ok(
+        "alice's after-commit trigger gets her own row",
+        arrives(&mut admin, "leak_ac", "alice-own-7", 60).await,
+        String::new,
+    );
+    must(
+        &mut admin,
+        &format!("UPDATE {DB}.docs SET owner = 'rlss_alice@%', body = 'given-3' WHERE id = 3"),
+    )
+    .await;
+    must(
+        &mut admin,
+        &format!("UPDATE {DB}.docs SET owner = 'rlss_bob@%', body = 'bob-took-3' WHERE id = 3"),
+    )
+    .await;
+    ck.ok(
+        "alice's after-commit trigger gets a row given to her as an insert",
+        arrives(&mut admin, "leak_ac", "given-3", 60).await,
+        String::new,
+    );
+    ck.ok(
+        "alice's CHANGES OF sink exports a row given to her",
+        hook_has_at(&got, "/c2", "given-3", 60).await,
+        String::new,
+    );
+    let la = texts(&mut admin, &format!("SELECT v FROM {DB}.leak_ac")).await;
+    ck.ok(
+        "LEAK: alice's after-commit trigger got bob's rows",
+        !la.iter().any(|x| x.contains("bob-")),
+        || format!("{la:?}"),
+    );
+    let lh = hook_has_at(&got, "/c2", "bob-", 2).await;
+    ck.ok(
+        "LEAK: alice's CHANGES OF sink exported bob's rows",
+        !lh,
+        || format!("{:?}", got.lock().unwrap().iter().filter(|b| b.starts_with("/c2 ")).collect::<Vec<_>>()),
     );
 
     // 4. The same paths set up by mgr (a manager: not bound) deliver ...
@@ -478,6 +661,11 @@ async fn row_level_security_on_streamed_rows() {
     must(
         &mut mgr,
         &format!("CREATE SINK {DB}.s_mgr FROM STREAM {DB}.`docs.changes` TO WEBHOOK CONNECTION hook WITH (batch_max_wait_ms = 100)"),
+    )
+    .await;
+    must(
+        &mut mgr,
+        &format!("CREATE SINK {DB}.s_mgr2 FROM CHANGES OF {DB}.docs TO WEBHOOK CONNECTION hook3 WITH (batch_max_wait_ms = 100)"),
     )
     .await;
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -501,7 +689,14 @@ async fn row_level_security_on_streamed_rows() {
         hook_has(&got, "bob-before-force", 60).await,
         String::new,
     );
-    // ... and stop once FORCE makes the policies bind mgr.
+    ck.ok(
+        "manager's CHANGES OF sink delivers",
+        hook_has_at(&got, "/c3", "bob-before-force", 60).await,
+        String::new,
+    );
+    // ... and, once FORCE makes the policies bind mgr, deliver only what
+    // they show mgr (RL44, and RL50 for the after-commit trigger and the
+    // CHANGES OF sink: filtered, not stopped or held).
     must(
         &mut admin,
         &format!("ALTER TABLE {DB}.docs FORCE ROW LEVEL SECURITY"),
@@ -513,9 +708,34 @@ async fn row_level_security_on_streamed_rows() {
         &format!("INSERT INTO {DB}.docs VALUES (5, 'rlss_bob@%', 'bob-while-forced')"),
     )
     .await;
-    let t = arrives(&mut admin, "leak_t", "bob-while-forced", 12).await;
+    must(
+        &mut writer,
+        &format!("INSERT INTO {DB}.docs VALUES (8, 'rlss_mgr@%', 'mgr-while-forced')"),
+    )
+    .await;
     ck.ok(
-        "LEAK: forced: stream trigger still delivers",
+        "forced: mgr's stream trigger delivers mgr's row",
+        arrives(&mut admin, "leak_t", "mgr-while-forced", 60).await,
+        String::new,
+    );
+    ck.ok(
+        "forced: mgr's sink exports mgr's row",
+        hook_has(&got, "mgr-while-forced", 60).await,
+        String::new,
+    );
+    ck.ok(
+        "forced: mgr's after-commit trigger delivers mgr's row",
+        arrives(&mut admin, "leak_a", "mgr-while-forced", 60).await,
+        String::new,
+    );
+    ck.ok(
+        "forced: mgr's CHANGES OF sink exports mgr's row",
+        hook_has_at(&got, "/c3", "mgr-while-forced", 60).await,
+        String::new,
+    );
+    let t = arrives(&mut admin, "leak_t", "bob-while-forced", 3).await;
+    ck.ok(
+        "LEAK: forced: stream trigger delivers bob's row",
         !t,
         String::new,
     );
@@ -526,35 +746,77 @@ async fn row_level_security_on_streamed_rows() {
         String::new,
     );
     let h = hook_has(&got, "bob-while-forced", 2).await;
-    ck.ok("LEAK: forced: sink still exports", !h, String::new);
-    let st = texts(
-        &mut admin,
-        &format!("SELECT state FROM information_schema.SPRIG_SINKS WHERE sink_schema = '{DB}' AND sink_name = 's_mgr'"),
-    )
-    .await;
-    eprintln!("s_mgr while forced: {st:?}");
-    // NO FORCE frees mgr: the triggers go on with the rows they held back
-    // (nothing was dropped or dead-lettered), the sink after RESUME.
+    ck.ok("LEAK: forced: sink exports bob's row", !h, String::new);
+    let st: Vec<String> = admin
+        .query::<mysql_async::Row, _>(format!("SHOW SINKS FROM {DB}"))
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| {
+            (0..r.len())
+                .filter_map(|i| r.get_opt::<String, _>(i).and_then(Result::ok))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|l| l.contains("s_mgr"))
+        .collect();
+    ck.ok(
+        "forced: mgr's sinks keep running (filtered, not paused)",
+        st.len() == 2
+            && st.iter().all(|l| l.contains("running"))
+            && !st.iter().any(|l| l.contains("paused")),
+        || format!("{st:?}"),
+    );
+    // NO FORCE frees mgr: every path delivers bob's rows from then on (a
+    // record filtered while forced stays filtered: RL44, RL50).
     must(
         &mut admin,
         &format!("ALTER TABLE {DB}.docs NO FORCE ROW LEVEL SECURITY"),
     )
     .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    must(
+        &mut writer,
+        &format!("INSERT INTO {DB}.docs VALUES (9, 'rlss_bob@%', 'bob-after-unforce')"),
+    )
+    .await;
     ck.ok(
-        "unforced: stream trigger catches up",
-        arrives(&mut admin, "leak_t", "bob-while-forced", 60).await,
+        "unforced: stream trigger delivers bob's rows again",
+        arrives(&mut admin, "leak_t", "bob-after-unforce", 60).await,
         String::new,
     );
     ck.ok(
-        "unforced: after-commit trigger catches up",
-        arrives(&mut admin, "leak_a", "bob-while-forced", 60).await,
+        "unforced: sink exports bob's rows again",
+        hook_has(&got, "bob-after-unforce", 60).await,
         String::new,
     );
-    let _ = run(&mut mgr, &format!("ALTER SINK {DB}.s_mgr RESUME")).await;
     ck.ok(
-        "unforced: sink resumes",
-        hook_has(&got, "bob-while-forced", 60).await,
+        "unforced: after-commit trigger delivers bob's rows again",
+        arrives(&mut admin, "leak_a", "bob-after-unforce", 60).await,
         String::new,
+    );
+    ck.ok(
+        "unforced: CHANGES OF sink exports bob's rows again",
+        hook_has_at(&got, "/c3", "bob-after-unforce", 60).await,
+        String::new,
+    );
+    let a = arrives(&mut admin, "leak_a", "bob-while-forced", 1).await;
+    ck.ok(
+        "LEAK: a row filtered while forced reached the after-commit trigger later",
+        !a,
+        String::new,
+    );
+    let h = hook_has_at(&got, "/c3", "bob-while-forced", 1).await;
+    ck.ok(
+        "LEAK: a row filtered while forced reached the CHANGES OF sink later",
+        !h,
+        String::new,
+    );
+    let la = texts(&mut admin, &format!("SELECT v FROM {DB}.leak_alice")).await;
+    ck.ok(
+        "LEAK: alice's stream trigger got bob's rows",
+        !la.iter().any(|x| x.contains("bob-")),
+        || format!("{la:?}"),
     );
 
     // 6. Worker-run code applies its definer's policies (RL42): mgr's
@@ -661,6 +923,7 @@ async fn row_level_security_on_streamed_rows() {
         format!("DROP SINK IF EXISTS {DB}.s_mgr"),
         format!("DROP SINK IF EXISTS {DB}.s_alice"),
         format!("DROP SINK IF EXISTS {DB}.s_alice2"),
+        format!("DROP SINK IF EXISTS {DB}.s_mgr2"),
         format!("DROP DATABASE IF EXISTS {DB}"),
         "DROP USER IF EXISTS 'rlss_alice'@'%'".to_owned(),
         "DROP USER IF EXISTS 'rlss_mgr'@'%'".to_owned(),

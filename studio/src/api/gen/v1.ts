@@ -290,6 +290,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/databases/{database}/changes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["Changes.Watch"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/databases/{database}/cursors": {
         parameters: {
             query?: never;
@@ -425,6 +441,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/databases/{database}/logic/{kind}/{name}/rollout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** A staged rollout (active and candidate versions, share, key) and each version's calls, errors, p95 and histogram */
+        get: operations["Logic.GetRollout"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/databases/{database}/logic/{kind}/{name}/versions/{version}": {
         parameters: {
             query?: never;
@@ -453,6 +486,22 @@ export interface paths {
         put?: never;
         /** A dry run of a CREATE FUNCTION or PROCEDURE: tier, reasons, signature, PL/SQL; nothing recorded */
         post: operations["Logic.Compile"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/databases/{database}/logic:testRun": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["Logic.TestRun"];
         delete?: never;
         options?: never;
         head?: never;
@@ -646,6 +695,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["KeyValue.Scan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/databases/{database}/search/{index}:query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["Search.Query"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1211,6 +1276,8 @@ export interface components {
                 [key: string]: unknown;
             }[];
         };
+        /** @description The ChangeEvent message as JSON (proto3 mapping) */
+        ChangeEvent: Record<string, never>;
         CheckReply: {
             statements: {
                 checked?: string;
@@ -1434,6 +1501,10 @@ export interface components {
             truncated?: boolean;
             warnings?: number;
         };
+        /** @description The SearchQueryRequest message as JSON (proto3 mapping) */
+        SearchQueryRequest: Record<string, never>;
+        /** @description The SearchQueryResponse message as JSON (proto3 mapping) */
+        SearchQueryResponse: Record<string, never>;
         /** @description The SearchVectorsRequest message as JSON (proto3 mapping) */
         SearchVectorsRequest: Record<string, never>;
         /** @description The SearchVectorsResponse message as JSON (proto3 mapping) */
@@ -1454,6 +1525,10 @@ export interface components {
         TenantObjectRequest: Record<string, never>;
         /** @description The call's JSON body */
         TenantRequest: Record<string, never>;
+        /** @description The TestRunRequest message as JSON (proto3 mapping) */
+        TestRunRequest: Record<string, never>;
+        /** @description The TestRunResponse message as JSON (proto3 mapping) */
+        TestRunResponse: Record<string, never>;
         TokenReply: {
             access_token: string;
             expires_in: number;
@@ -1474,6 +1549,8 @@ export interface components {
         UpsertVectorsResponse: Record<string, never>;
         /** @description The VectorIndex message as JSON (proto3 mapping) */
         VectorIndex: Record<string, never>;
+        /** @description The WatchRequest message as JSON (proto3 mapping) */
+        WatchRequest: Record<string, never>;
         WhoAmI: {
             amr: string[];
             gateway?: {
@@ -2088,6 +2165,40 @@ export interface operations {
             };
         };
     };
+    "Changes.Watch": {
+        parameters: {
+            query?: {
+                /** @description Filters, as the route documents them */
+                query?: string;
+            };
+            header?: never;
+            path: {
+                database: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-ndjson": components["schemas"]["ChangeEvent"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     "Cursors.Open": {
         parameters: {
             query?: never;
@@ -2360,6 +2471,39 @@ export interface operations {
             };
         };
     };
+    "Logic.GetRollout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                database: string;
+                kind: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     "Logic.GetVersion": {
         parameters: {
             query?: never;
@@ -2412,6 +2556,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["JsonReply"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Logic.TestRun": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                database: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["TestRunRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TestRunResponse"];
                 };
             };
             /** @description An error */
@@ -2939,6 +3118,42 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["KvScanResponse"];
+                };
+            };
+            /** @description An error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    "Search.Query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                database: string;
+                index: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["SearchQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SearchQueryResponse"];
                 };
             };
             /** @description An error */

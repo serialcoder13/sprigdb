@@ -103,6 +103,9 @@ pub struct Ctx<'a> {
     pub typed: &'a [String],
     /// The materialized copies that are serving ([`crate::copy`]).
     pub copies: &'a CopyStates,
+    /// The statement is chapter 32's own (a type plan's): its DDL is the
+    /// type layer's business, and its typed tables are planned already.
+    pub from_types: bool,
 }
 
 /// Where [`Ctx::chain_with`] stops climbing.
@@ -131,6 +134,8 @@ pub struct Resolved {
     pub layer: String,
     /// The database prefix used (`` `shop`. `` or empty).
     pub prefix: String,
+    /// Columns its merged view computes ([`Ctx::derived`]).
+    pub derived: Vec<(String, String)>,
 }
 
 /// The parent tenant's edge into a tenant, for one object.
@@ -246,6 +251,33 @@ pub fn tenant_edge(
 }
 
 impl Ctx<'_> {
+    /// The tenant's types (chapter 32), if any.
+    #[must_use]
+    pub fn types(&self) -> Option<&sprig_types::TypesState> {
+        self.cat
+            .ext
+            .get::<sprig_types::TypesState>(sprig_types::store::MODULE)
+    }
+
+    /// `table`'s type tree: its root's name and every table of the tree.
+    #[must_use]
+    pub fn type_tree(&self, db: DbId, table: &str) -> Option<(String, Vec<String>)> {
+        sprig_types::type_tree(self.types()?, db, table, self.lctn)
+    }
+
+    /// The columns a merged view of `o` computes rather than reads: a
+    /// discriminated root's `_type` and `_type_path`, by this tenant's
+    /// types ([`sprig_types::derived_columns`]).
+    #[must_use]
+    pub fn derived(&self, o: &InheritableObject) -> Vec<(String, String)> {
+        if o.type_root.is_none() {
+            return Vec::new();
+        }
+        self.types().map_or_else(Vec::new, |t| {
+            sprig_types::derived_columns(t, o.db, &o.table, self.lctn, self.lex.no_backslash_escapes)
+        })
+    }
+
     /// A database's logical name.
     #[must_use]
     pub fn db_name(&self, db: DbId) -> Option<String> {
@@ -289,6 +321,7 @@ impl Ctx<'_> {
             db_name,
             layer: format!("{prefix}{}", q(&name.name)),
             prefix,
+            derived: self.derived(obj),
             obj: Arc::clone(obj),
         }))
     }

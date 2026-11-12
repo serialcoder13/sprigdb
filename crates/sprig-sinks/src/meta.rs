@@ -38,10 +38,67 @@ pub struct SinkIndex {
     pub tasks: u32,
     /// Bumps with the definition, so the loop can tell a change.
     pub definition_ver: u64,
+    /// A fan-in sink's grouping (R9, r9last): the controller's `sinks`
+    /// loop counts the definition's member instances and sets `tasks`
+    /// from it ([`fanin_tasks`]); each task reads the members
+    /// [`fanin_task_of`] gives it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fan_in: Option<FanInGroups>,
 }
 
 impl Versioned for SinkIndex {
     const V: u32 = 1;
+}
+
+/// How a fan-in sink's member instances are split into tasks (chapter
+/// 51, "Fan-in sinks"; R9, r9last).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FanInGroups {
+    /// The definition's declaring tenant.
+    pub def_tenant: u64,
+    /// The definition's object id there.
+    pub def_object: u64,
+    /// `stream` or `queue` (the `inherit-instances/` entries' kind).
+    pub kind: String,
+    /// Partitions of each instance (1 for a queue).
+    pub partitions: u32,
+    /// `sink.fanin_instances_per_task`.
+    pub per_task: u32,
+}
+
+/// The tasks a fan-in sink needs for `instances` member instances of
+/// `partitions` partitions each, at most `per_task` instance partitions
+/// per task: at least 1.
+#[must_use]
+pub fn fanin_tasks(instances: u64, partitions: u32, per_task: u32) -> u32 {
+    let total = instances.saturating_mul(u64::from(partitions.max(1)));
+    u32::try_from(total.div_ceil(u64::from(per_task.max(1))))
+        .unwrap_or(u32::MAX)
+        .max(1)
+}
+
+/// The task (of `tasks`) that reads member `member`'s instance: a mix of
+/// the member's id, so consecutive ids spread evenly and a member stays
+/// with its task while the count holds.
+#[must_use]
+pub fn fanin_task_of(member: u64, tasks: u32) -> u32 {
+    if tasks <= 1 {
+        return 0;
+    }
+    // splitmix64's finalizer.
+    let mut z = member.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    u32::try_from(z % u64::from(tasks)).unwrap_or(0)
+}
+
+/// Whether a regrouping from `current` to `wanted` tasks is worth the
+/// restart it costs: growth always; shrinking only to half or less, so a
+/// member dropped near a boundary doesn't restart every task.
+#[must_use]
+pub fn fanin_regroup(current: u32, wanted: u32) -> bool {
+    wanted > current || wanted.saturating_mul(2) <= current
 }
 
 fn put(key: sprig_meta::Key, value: Vec<u8>) -> Txn {
@@ -64,6 +121,60 @@ pub async fn index_put(dc: &Arc<dyn MetaStore>, ix: &SinkIndex) -> Result<()> {
     let key = dc.tier().key(&format!("sinks/{}/{}", ix.tenant, ix.sink))?;
     dc.txn(put(key, Record::new(ix.clone()).encode()?)).await?;
     Ok(())
+}
+
+/// The index entry of a sink, if any.
+///
+/// # Errors
+/// The DC tier's.
+pub async fn index_get(
+    dc: &Arc<dyn MetaStore>,
+    tenant: u64,
+    sink: u64,
+) -> Result<Option<SinkIndex>> {
+    let key = dc.tier().key(&format!("sinks/{tenant}/{sink}"))?;
+    Ok(dc
+        .get(&key, sprig_meta::Consistency::Serializable)
+        .await?
+        .and_then(|kv| Record::<SinkIndex>::decode(&kv.value).ok().map(|r| r.body)))
+}
+
+/// Sets a sink's task count in its index entry (a fan-in sink regrouped
+/// by the controller), if the entry still has definition version
+/// `definition_ver` and nothing wrote it in between; `false` otherwise.
+///
+/// # Errors
+/// The DC tier's.
+pub async fn index_set_tasks(
+    dc: &Arc<dyn MetaStore>,
+    tenant: u64,
+    sink: u64,
+    definition_ver: u64,
+    tasks: u32,
+) -> Result<bool> {
+    let key = dc.tier().key(&format!("sinks/{tenant}/{sink}"))?;
+    let Some(kv) = dc.get(&key, sprig_meta::Consistency::Linearizable).await? else {
+        return Ok(false);
+    };
+    let Ok(mut rec) = Record::<SinkIndex>::decode(&kv.value) else {
+        return Ok(false);
+    };
+    if rec.body.definition_ver != definition_ver || !rec.writable() {
+        return Ok(false);
+    }
+    rec.body.tasks = tasks;
+    let r = dc
+        .txn(Txn {
+            when: vec![sprig_meta::Cmp::ModRev(key.clone(), kv.mod_revision)],
+            then: vec![Op::Put {
+                key,
+                value: rec.encode()?,
+                lease: None,
+            }],
+            otherwise: Vec::new(),
+        })
+        .await?;
+    Ok(r.succeeded)
 }
 
 /// Removes the index entry of a sink (its tasks stop).
@@ -433,5 +544,38 @@ mod tests {
         assert!(!v.contains("k1:9093") && !v.contains("file:") && !v.contains("password"));
         c.visibility = Visibility::NameOnly;
         assert_eq!(c.tenant_view().as_object().unwrap().len(), 2);
+    }
+
+    /// R9 (r9last): fan-in tasks by instance partitions, members spread
+    /// evenly, and an index entry written before grouping still reads.
+    #[test]
+    fn fan_in_groups() {
+        assert_eq!(fanin_tasks(0, 4, 256), 1);
+        assert_eq!(fanin_tasks(64, 4, 256), 1);
+        assert_eq!(fanin_tasks(65, 4, 256), 2);
+        assert_eq!(fanin_tasks(10_000, 1, 256), 40);
+        assert_eq!(fanin_tasks(3, 1, 1), 3);
+        assert_eq!(fanin_tasks(5, 0, 0), 5);
+        let mut per = [0u32; 8];
+        for m in 43_306_000_000..43_306_008_000u64 {
+            per[fanin_task_of(m, 8) as usize] += 1;
+        }
+        assert!(per.iter().all(|n| (900..=1100).contains(n)), "{per:?}");
+        assert!((0..100).all(|m| fanin_task_of(m, 1) == 0));
+        assert!(fanin_regroup(1, 2) && !fanin_regroup(4, 3) && fanin_regroup(4, 2));
+        let old = br#"{"v":1,"tenant":1,"sink":2,"tasks":1,"definition_ver":3}"#;
+        let ix = Record::<SinkIndex>::decode(old).unwrap().body;
+        assert!(ix.fan_in.is_none() && ix.tasks == 1);
+        let ix = SinkIndex {
+            tenant: 1,
+            sink: 2,
+            tasks: 1,
+            definition_ver: 3,
+            fan_in: None,
+        };
+        let back = Record::<SinkIndex>::decode(&Record::new(ix.clone()).encode().unwrap())
+            .unwrap()
+            .body;
+        assert_eq!(back, ix);
     }
 }

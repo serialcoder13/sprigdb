@@ -2,9 +2,11 @@
 
 This bundle runs one SprigDB data center on one VM (etcd, one MariaDB 11.8 node, the controller, the worker and one gateway), or on three VMs for high availability (an etcd member, a controller and a gateway on each; MariaDB and the worker on the first). Every client port is TLS, the controller's Admin API is HTTPS, etcd uses mutual TLS, backups are encrypted, and passwords, tokens and keys are read from files that are checked at start. Chapter 27 ("Compose on VMs") describes the design; this file is the procedure.
 
-It was tested on the laptop (Docker Desktop, arm64) on 11 November 2026: install, first operator, tenant, a smoke test on all nine client protocols, backup and restore, upgrade and rollback between two builds, and certificate rotation (hardening round 1); then three "VMs" as three Compose projects on separate networks, reaching each other only through published ports, with three etcd members, two controllers and two gateways, an upgrade and rollback with a client writing throughout, losing an etcd member, encrypted backups copied off the VM and restored, and the secrets checks in a Linux container (round 2). "Tested" notes below give the numbers. It has **not** run on a real VM yet.
+It was tested on the laptop (Docker Desktop, arm64) on 11 November 2026: install, first operator, tenant, a smoke test on all nine client protocols, backup and restore, upgrade and rollback between two builds, and certificate rotation (hardening round 1); then three "VMs" as three Compose projects on separate networks, reaching each other only through published ports, with three etcd members, two controllers and two gateways, an upgrade and rollback with a client writing throughout, losing an etcd member, encrypted backups copied off the VM and restored, and the secrets checks in a Linux container (round 2). "Tested" notes below give the numbers. Round 3 added mutual TLS on the controllers' internal port, MariaDB high availability across the three VMs (a primary and two semi-sync replicas failed over by SprigDB), a load balancer, certificate rotation without restarts, Prometheus across VMs, and growing a one-VM bundle to three. It has **not** run on a real VM yet.
 
-Contents: [Files](#files) · [Install](#install) · [High availability](#high-availability-three-vms) · [First operator](#first-operator) · [Tenants](#tenants) · [Ports](#ports) · [Adding a cluster](#adding-a-cluster) · [Backups](#backups) · [Restore](#restore) · [Upgrade and rollback](#upgrade-and-rollback) · [etcd members](#etcd-members) · [Rotating certificates](#rotating-certificates) · [Monitoring](#monitoring) · [Logs](#logs) · [Common failures](#common-failures) · [Galera: a node that can't rejoin](#galera-a-node-that-cant-rejoin) · [Not done yet](#not-done-yet)
+Before the first run on real VMs, go through [GO-LIVE.md](GO-LIVE.md): what to prepare (VMs, network, names, certificates, secrets, backups, monitoring).
+
+Contents: [Files](#files) · [Install](#install) · [High availability](#high-availability-three-vms) · [MariaDB high availability](#mariadb-high-availability) · [Load balancer](#load-balancer) · [From one VM to three](#from-one-vm-to-three) · [First operator](#first-operator) · [Tenants](#tenants) · [Ports](#ports) · [Adding a cluster](#adding-a-cluster) · [Backups](#backups) · [Restore](#restore) · [Upgrade and rollback](#upgrade-and-rollback) · [etcd members](#etcd-members) · [Rotating certificates](#rotating-certificates) · [Monitoring](#monitoring) · [Logs](#logs) · [Common failures](#common-failures) · [Galera: a node that can't rejoin](#galera-a-node-that-cant-rejoin) · [Not done yet](#not-done-yet)
 
 ## Files
 
@@ -14,8 +16,13 @@ Contents: [Files](#files) · [Install](#install) · [High availability](#high-av
 | `compose.ha.yaml` | the first VM of three: publishes etcd, MariaDB, the controller's internal port and the gateway's peer port on the private network |
 | `compose.gateway-vm.yaml` | the second and third VMs: an etcd member, a controller and a gateway (a worker under the profile `worker`), no MariaDB |
 | `compose.mariadb-2.example.yaml` | a second MariaDB container as its own cluster ([Adding a cluster](#adding-a-cluster)) |
+| `compose.db-ha.yaml` | MariaDB high availability: a node and its agent on every VM, a primary and two semi-sync replicas as one cluster ([MariaDB high availability](#mariadb-high-availability)) |
+| `compose.lb.yaml` | the load balancer (Envoy) in front of the gateways ([Load balancer](#load-balancer)) |
+| `config/agent.toml` | the node agent's process file (`compose.db-ha.yaml`) |
+| `config/prometheus.ha.yml` | Prometheus scraping every VM ([Monitoring](#monitoring)) |
+| `GO-LIVE.md` | what to prepare before the first run on real VMs |
 | `.env.example` | every value you set per VM; copy to `.env` |
-| `sprig-vm.sh` | init, check-secrets, up-etcd, up, configure, status, tenant, backup, verify-backup, restore, etcd-rejoin, upgrade, rollback, rotate-certs, stop, down |
+| `sprig-vm.sh` | init, check-secrets, up-etcd, up, configure, status, ctl, tenant, backup, verify-backup, restore, etcd-rejoin, upgrade, rollback, rotate-certs, reload-certs, db-status, lb-config, lb-up, monitoring-config, stop, down |
 | `config/controller.toml`, `config/gateway.toml` | the process files (the worker reads the controller's) |
 | `config/mariadb/10-sprig.cnf` | chapter 27's server settings, TLS required |
 | `config/mariadb/initdb/` | creates `sprig_ctl` and `sprig_repl` on first start |
@@ -66,6 +73,14 @@ The SprigDB processes check again when they start: a token, key or backends file
 
 One VM is a single point of failure, and its upgrades refuse writes while its gateway restarts (and, with one controller, while the controller restarts). Three VMs on one private network remove both:
 
+Two layouts. **With MariaDB high availability** (the default for production, hardening round 3), every VM runs the same files and the same services:
+
+| VM | Compose files | Runs |
+|---|---|---|
+| 1, 2, 3 | `compose.yaml:compose.ha.yaml:compose.db-ha.yaml` | etcd member `etcd-vm<n>`, MariaDB node `db<n>` and its agent `agt-<n>`, controller `ctl-<n>` (VM 1's bootstraps the deployment), worker `wkr-<n>`, gateway `gw-<n>` |
+
+**With MariaDB on VM 1 only** (or on managed or separate database servers; round 2's layout):
+
 | VM | Compose files | Runs |
 |---|---|---|
 | 1 | `compose.yaml:compose.ha.yaml` | etcd member `etcd-vm1`, MariaDB, controller `ctl-1` (bootstraps the deployment), worker, gateway `gw-1` |
@@ -74,8 +89,9 @@ One VM is a single point of failure, and its upgrades refuse writes while its ga
 
 - **etcd** has three members, one per VM, with mutual TLS between members and to every client. It keeps working with any two.
 - **Every controller serves permits.** A gateway renews its write permit from any controller of its DC, so restarting one controller no longer fences writes; the DC-leader loops (balancer, mover dispatch, reconcilers) move to another controller within the leader lease.
-- **Gateways behind a load balancer.** Put the VMs' client ports behind a TCP load balancer with a health check on each gateway's port (or give clients several hosts). A gateway that stops drains: it stops accepting, and the balancer sends new connections to the others.
-- **MariaDB stays on VM 1** (or on managed or separate database servers): the other VMs reach it on the private network, and the cluster is registered at VM 1's private address. MariaDB itself isn't made highly available by this layout: use a primary/replica or Galera cluster, or a managed server, for that ([Adding a cluster](#adding-a-cluster)).
+- **The controllers' internal port is mutual TLS** (`SPRIG_INTERNAL_TLS`, true by default in `compose.ha.yaml`): each controller serves permits, peer pings, observations and the relay with its process certificate and requires one from every caller; gateways, workers, agents and the other controllers call it with theirs (decision HD18).
+- **Gateways behind a load balancer** ([Load balancer](#load-balancer)): Envoy (`compose.lb.yaml`) or the cloud's, with a health check on each gateway's `/readyz`. A gateway that stops drains: its readiness turns off, the balancer stops sending it new connections, then it closes its listeners.
+- **MariaDB:** a primary and two replicas, one per VM, failed over by SprigDB ([MariaDB high availability](#mariadb-high-availability)); or, in round 2's layout, one node on VM 1 that the other VMs reach on the private network (not highly available by itself).
 
 **Settings** (`.env.example`, "Several VMs"). The same on every VM: `SPRIG_DC`, `SPRIG_DEPLOYMENT_ID`, the client ports, `SPRIG_ETCD_INITIAL_CLUSTER`, `SPRIG_ETCD_SEEDS` and `SPRIG_INTERNAL_SANS` (every VM's private address). Per VM: `COMPOSE_FILE`, `SPRIG_VM_ID` (1, 2, 3), `SPRIG_CONTROLLER_BOOTSTRAP` (`true` on VM 1 only), `SPRIG_ETCD_NAME`, `SPRIG_PRIVATE_HOST` and `SPRIG_PRIVATE_IP` (this VM's private address) and `SPRIG_ADMIN_BIND_IP` (the private address too, so the other VMs' gateways can relay admin calls to whichever controller leads). Each internal port binds inside its container on the number it is published on, so the advertised address is the one the others reach.
 
@@ -87,15 +103,91 @@ One VM is a single point of failure, and its upgrades refuse writes while its ga
 4. On VM 1: `./sprig-vm.sh up` (it registers MariaDB at `SPRIG_PRIVATE_HOST:SPRIG_BACKEND_PORT`), then on VM 2 and VM 3: `./sprig-vm.sh up` (they don't configure anything; the DC's settings are VM 1's).
 5. `./sprig-vm.sh status` on any VM lists the three etcd members, and `./sprig-vm.sh ctl dc show <dc>` names the DC leader.
 
-**Admin calls that only the DC leader serves** (tenant deletion, for example) get 39504 "send the request to the leader, ctl-N" from the other controllers. Run `./sprig-vm.sh ctl` on the VM whose controller leads (`ctl dc show <dc>` names it), or point `sprigctl` at any gateway's HTTPS port (`--endpoint https://<gateway>:<SPRIG_HTTPS_PORT>`), which relays to the leader.
+**Admin calls that only the DC leader serves** (tenant creation and deletion, for example) get 39504 "send the request to the leader, ctl-N" from the other controllers. `./sprig-vm.sh ctl` then sends the call again to the leader's controller, at the Admin address the leader registered (its VM's private address), and says so. **Tested (round 3):** `ctl tenant create` and `ctl tenant delete` on VM 2 while `ctl-1` led: both went to `ctl-1` and succeeded.
 
-**Kafka clients** connect to each gateway directly (Kafka's Metadata lists every gateway as a broker, at its registered address, which is `SPRIG_PRIVATE_HOST` in this layout), so Kafka clients must reach the VMs' private addresses on the Kafka port; the load balancer only serves their first connection. (`configure` doesn't set the DC-wide `kafka.advertised_host` here: it would name VM 1 for every gateway.)
+**Kafka clients** connect to each gateway directly: Kafka's Metadata lists every gateway as a broker, each under its own `SPRIG_KAFKA_HOST` (`[gateway] kafka_advertise_host`, published in its registration; hardening round 3), or its registered address (`SPRIG_PRIVATE_HOST`) when unset. Give each VM a public name clients resolve (`db1.example.com`, ...) and open each VM's Kafka port to them; the load balancer serves only their first connection. **Tested (round 3):** through the balancer, Metadata named the three gateways `127.0.0.1`, `localhost` and `kafka-vm3.invalid`, each VM's own setting (the laptop can't publish three Kafka ports under one number, so producing through each broker wasn't tried).
 
-Open between the VMs only: etcd's client and peer ports, MariaDB's port, the controllers' Admin and internal ports, and the gateways' peer port. The client ports face the load balancer.
+Open between the VMs only: etcd's client and peer ports, MariaDB's port, the controllers' Admin and internal ports, the gateways' peer port, and the telemetry ports 9180–9183 (also to the load balancer and Prometheus). The client ports face the load balancer (and each VM's Kafka port, the Kafka clients).
 
 **If etcd refuses its peers** with `rejected connection on peer endpoint ... does not match any of DNSNames`, a member's connections arrive from an address its certificate doesn't name (NAT between the VMs, or Docker's userland proxy). Add that address to `SPRIG_INTERNAL_SANS` and re-issue the certificates, or set `SPRIG_ETCD_PEER_SKIP_SAN=true`: members still need a certificate from the deployment CA, but etcd stops matching it against the source address. The laptop test needed it (every "VM" was behind Docker Desktop's NAT).
 
 **Tested (laptop, 11 November 2026):** three Compose projects on separate Docker networks, reaching each other only through published ports on `host.docker.internal` (`SPRIG_ETCD_PEER_SKIP_SAN=true`, see above); VM 3 ran only its etcd member. `up` on VM 1 took 14 s and on VM 2 12 s once the three members were up; the cluster registered at VM 1's private address with TLS verified. The nine-protocol smoke test passed on VM 1's gateway, and on VM 2's except for Kafka, which named the DC's Kafka port where the laptop had remapped VM 2's (a laptop-only effect). `KILL QUERY` sent to one gateway ended a statement on the other through the peer service within 3 s. Upgrades, etcd failures and backups: their sections below.
+
+## MariaDB high availability
+
+`compose.db-ha.yaml` puts one MariaDB node on each of the three VMs: a primary and two replicas with semi-synchronous replication that waits `AFTER_SYNC` (a commit is acknowledged only once a replica has it), registered as one SprigDB cluster of topology `primary_replica`. A SprigDB **agent** runs next to each node. When the primary is lost, the DC leader promotes the replica that holds every acknowledged commit and points the other replica at it; when the old primary comes back, it rejoins as a replica (chapter 25, "Primary + replicas, driven by SprigDB").
+
+Why this and not Galera (decision HD19): cross-cluster transactions (XA) and online index builds need a non-Galera cluster (chapter 09's capability rules), and this layout was already failed over by SprigDB with no acknowledged write lost (chapter 25's live tests). Galera remains possible: register a Galera cluster as in [Adding a cluster](#adding-a-cluster).
+
+| VM | Node | At first | Agent |
+|---|---|---|---|
+| 1 | `db1` (server id 101) | primary | `agt-1` |
+| 2 | `db2` (server id 102) | replica of `db1` | `agt-2` |
+| 3 | `db3` (server id 103) | replica of `db1` | `agt-3` |
+
+- **Every node boots `read_only`, with semi-sync's primary side off.** Its agent clears `read_only` only on the node that holds the cluster's writer lease while its DC permit is valid, and switches semi-sync's primary side on once a replica is attached (also after the primary's mysqld restarts). Any other node is fenced: `read_only`, tenant sessions killed.
+- **Replication is TLS**, verified against the deployment CA (`MASTER_SSL_CA`), with `sprig_repl`. The MariaDB certificate names every VM's private address (`SPRIG_INTERNAL_SANS`).
+- **Each node creates its own accounts** on first start without writing them to the binlog, so a new replica's binlog is empty and it replicates the primary from its first GTID.
+
+**Settings** (`.env.example`, "MariaDB high availability"), on every VM: `COMPOSE_FILE=compose.yaml:compose.ha.yaml:compose.db-ha.yaml` (all three VMs run the full `compose.yaml`: a worker on each too), `SPRIG_DB_NODES=db1=<VM 1 private>:<backend port>,db2=...,db3=...` and `SPRIG_DB_PRIMARY=db1`. `SPRIG_CONTROLLER_BOOTSTRAP=true` on VM 1 only.
+
+**Install** (after `init` and copying `secrets/`, as in [High availability](#high-availability-three-vms)):
+
+1. On every VM: `./sprig-vm.sh up-etcd`.
+2. On VM 1: `./sprig-vm.sh up`. It writes the DC's settings; its MariaDB is the primary. It says it waits for the replicas before registering the cluster.
+3. On VM 2, then VM 3: `./sprig-vm.sh up`. Each MariaDB starts replicating `db1` over TLS.
+4. On VM 1: `./sprig-vm.sh configure`. With both replicas attached, it opens `db1` once, turns on semi-sync's primary side and registers `<dc>-main` with the three nodes, the writer first. Then run `./sprig-vm.sh configure` on VM 2 and VM 3: each writes the cluster's id into `.env` (`SPRIG_DB_CLUSTER_ID`) and restarts its agent if it changed.
+5. `./sprig-vm.sh status` (or `db-status`) on each VM: `db1` has `read_only=0` and 2 replicas acknowledging; `db2` and `db3` replicate with IO and SQL running.
+
+**When the primary is lost** nothing needs doing: the agent of a stopped mysqld hands the writer lease back (or its lease expires with its VM), the DC leader waits `failover.cluster_detect_seconds` (5 s) and `failover.clock_drift_margin_ms`, drains the replicas' relay logs, promotes the one that received the most, and repoints the other. Writes fail for those seconds (clients retry), then go to the new primary; the record (`./sprig-vm.sh ctl cluster show <dc>-main`) lists the failover with its detection time, its recovery time and the loss estimate. **Bring the old primary back** with `docker compose start mariadb-1` (or by restarting its VM): it boots `read_only`, and the controller rejoins it as a replica of the new primary (or, if it had commits nobody else received, keeps it out with a report: chapter 25, "Recovery after an outage").
+
+**A replica that lost its data**, or a VM rebuilt from scratch: an empty node replicates from the current primary's first GTID only while the primary still has every binlog (`binlog_expire_logs_seconds`, 7 days). Otherwise seed it from a backup of the primary first (`mariadb-backup --stream` into its empty datadir), set `gtid_slave_pos` from the backup's `mariadb_backup_binlog_info`, then `./sprig-vm.sh configure`.
+
+**Backups** run on any VM (`backup` streams the local node); take them on the primary's VM, which has the newest data, or on a replica to keep the load off the primary.
+
+**Tested (laptop, round 3; three Compose projects as three VMs, ports 42xxx–44xxx; one client inserting a row every 0.05 s through the load balancer, each on a new TLS connection):**
+
+| What was lost | SprigDB's record | Writes refused (client) | Acknowledged writes lost | Afterwards |
+|---|---|---|---|---|
+| `db1`'s mysqld killed (`docker kill`), the rest of VM 1 running | detected 5.1 s, writer `db2` 5.4 s after the kill, loss estimate 1 s (semi-sync on) | 5 of 845, for 8.6 s | **0** (840 acknowledged, 840 in the table) | `db3` repointed at `db2`; `db1` started again rejoined as a replica in 5 s, over verified TLS |
+| all of VM 1 killed (its etcd member, controller, worker, agent, gateway and `db1`, the primary) | detected 8.7 s, writer `db2` 8.8 s after the kill | 5 of 810, for 10.6 s | **0** (805 of 805) | the balancer dropped VM 1's gateway; VM 1 started again: `db1` replicating `db2` 17 s later |
+| the same with `sprigdb:harden3-a` (before decision HD20's fix) | detected 9.6 s, promoted 161 s after the kill, only once the lost VM came back | every write for 161 s | 0 | every control-plane etcd call had a one-in-three chance of failing on the dead member; see HD20 |
+
+The cluster record stayed `zero_loss = yes` and `xa = yes` throughout; `./sprig-vm.sh ctl cluster list` showed it `degraded` while a node was missing and `healthy` once it was back.
+
+## Load balancer
+
+Clients reach the gateways through one address. `compose.lb.yaml` runs **Envoy** (Apache-2.0; image `envoyproxy/envoy:v1.34.1`) as a TCP load balancer: one listener per client port, each forwarding a connection to the ready gateway with the fewest open connections. TLS passes through untouched; clients check the gateways' certificate, so it must name the balancer's address (`SPRIG_PUBLIC_HOST`, `SPRIG_TLS_SANS`).
+
+- **Health checks on readiness.** Every second Envoy asks each gateway's telemetry port (`GET /readyz`, `SPRIG_TELEMETRY_PORT_GATEWAY`, published on the private address by `compose.ha.yaml`); two failures take a gateway out, two successes bring it back. With no ready gateway it refuses connections rather than sending them to an unready one.
+- **Drain-aware upgrades.** A stopping gateway turns `/readyz` off at once and keeps serving for `gateway.drain_lb_delay_seconds` (10 s), so the balancer stops sending it new connections within about 2 s, before it closes its listeners; open sessions continue until `gateway.drain_timeout_seconds` (30 s). A connection refused anyway (a gateway that died) is tried on another gateway (`max_connect_attempts: 3`).
+- **Kafka** clients use the balancer only for their first connection: Kafka's Metadata then names every gateway by its own `SPRIG_KAFKA_HOST` (one public name per VM, set on each VM; `[gateway] kafka_advertise_host`), and clients connect to each directly. Those names must resolve, for the clients, to the VMs, and each VM's Kafka port must be open to them.
+
+**Where it runs:** on a small VM of its own (1 vCPU, 1 GB is plenty), or on every VM behind a floating address (keepalived, VRRP) if the balancer must not be a single point of failure. A cloud's TCP load balancer does the same job: TCP to each client port, HTTP health check `GET /readyz` on the telemetry port, 1–2 s interval, 2 failures.
+
+```sh
+# on the load balancer's VM: this directory, an .env with the client ports and
+SPRIG_LB_GATEWAYS=10.0.0.11,10.0.0.12,10.0.0.13
+./sprig-vm.sh lb-up        # writes lb/envoy.yaml, starts compose.lb.yaml
+curl -s http://127.0.0.1:9901/clusters | grep health_flags   # each gateway's state
+```
+
+It needs no secrets. Envoy's admin page (9901) is published on the VM's loopback only.
+
+**Tested (laptop, round 3; Envoy as a fourth Compose project in front of the three VMs' gateways):** all eight listeners up, the three gateways healthy; the nine-protocol smoke test through the balancer passed MySQL, MariaDB, MongoDB, REST, gRPC, Redis, Bolt and AMQP and refused plaintext MySQL (Kafka's Metadata named each VM's own broker host, which the laptop can't route; see "Kafka clients" above). Upgrading the three VMs one after the other, with a client writing every 0.05 s: 0 of 1,019 writes refused while VM 2's and VM 3's gateways were replaced (VM 1's 5 refusals came from its MariaDB agent, see [Upgrade and rollback](#upgrade-and-rollback)). Over every test, Envoy recorded 0 failed upstream connects: it had taken each stopping or lost gateway out by its health check before sending it a connection.
+
+## From one VM to three
+
+A bundle installed on one VM (round 1 or 2) grows into the three-VM layout without losing its data. Its MariaDB stays on VM 1 (round 2's layout). Moving its tenants onto a highly available cluster afterwards is a second step: register a `compose.db-ha.yaml`-style cluster and drain the old one (`ctl cluster drain`; the mover copies each tenant online), then `ctl cluster retire`.
+
+1. **New files, same data.** Copy this directory's new files over the old ones on VM 1 (keep `.env`, `secrets/`, `backups/`), `docker load` the new image. In `.env`, add the "Several VMs" values for VM 1 (`COMPOSE_FILE=compose.yaml:compose.ha.yaml`, the private address, `SPRIG_INTERNAL_SANS`, the three members in `SPRIG_ETCD_INITIAL_CLUSTER` and `SPRIG_ETCD_SEEDS`, the internal ports), keep `SPRIG_ETCD_NAME` as it was (`etcd-0`: the member's name is in its data), and set `SPRIGDB_IMAGE`.
+2. **Bring `secrets/ca` back for one run**, then `./sprig-vm.sh up`. It makes what the old bundle lacks (the controller's certificate, the backups' key pair, a process certificate that also serves), re-issues the internal certificates for `SPRIG_INTERNAL_SANS`, recreates the containers with the new image, and moves the etcd member's peer URL from the Compose network to the private address (`member update`). Move `secrets/ca` and `secrets/backup/backup-key.pem` off again.
+3. **Copy `secrets/`** to VM 2 and VM 3 (without the two offline keys).
+4. **etcd from one member to three:** on VM 2, then VM 3, `./sprig-vm.sh etcd-rejoin` (it adds the member and starts it empty; it copies the data). While the second member joins, etcd has no majority for a few seconds and writes may be fenced (39501) briefly.
+5. **The old registration's address.** A round-1 bundle registered its MariaDB as `mariadb-1:3306`, a name only VM 1's Compose network knows. On VM 1, point the record at the private address: `./sprig-vm.sh ctl cluster set-nodes <dc>-main --node n1=<VM 1's private address>:<SPRIG_BACKEND_PORT>` (the node id as `ctl cluster show <dc>-main` lists it; `--dry-run` prints the new list first). Every controller, worker and gateway connects to the new address from then on, and the next probe pins the server there (bugfix-40). The alias still works for a bundle that can't run the command yet: on VM 2 and VM 3 set `SPRIG_DB_ALIAS_HOST=mariadb-1` and `SPRIG_DB_ALIAS_IP=<VM 1's private address>` (`compose.gateway-vm.yaml` adds the host entry), and on VM 1 keep `SPRIG_BACKEND_PORT=3306`. (A round-2 bundle registered the private address already.)
+6. On VM 2 and VM 3: `./sprig-vm.sh up` with `COMPOSE_FILE=compose.gateway-vm.yaml`. Then the load balancer ([Load balancer](#load-balancer)).
+
+**Tested (laptop, round 3):** a round-1 bundle (the round-1 files from git, `init` and `up` of that round, one tenant with 500 rows; the round-1 image had been deleted, so the round-2 image `harden2-c` ran it) was moved to the round-3 files and `sprigdb:harden3-c` with `up` on VM 1: 36 s, everything above made, the member's peer URL moved, the 500 rows and their checksum unchanged. `etcd-rejoin` on VM 2 and VM 3 gave three members; `up` there started their controllers (internal port over mutual TLS, like VM 1's) and gateways. A row inserted through each VM's gateway was read back by the others (503 rows); a tenant created and deleted from VM 3 was forwarded to the leader on VM 1. The laptop can't give a container's `mariadb-1` the laptop's port 3306 (Kiran's MySQL is there), so VM 2 and VM 3 joined VM 1's Compose network instead of using `SPRIG_DB_ALIAS_*`.
 
 ## First operator
 
@@ -153,9 +245,9 @@ Clients log in over TLS. **A tenant that needs plaintext MySQL logins without TL
 | 9090 | Prometheus (profile `monitoring`) | no | 127.0.0.1 only |
 | 2379, 2380 | etcd client and peer | mutual TLS | one VM: inside the Compose network; several VMs: `SPRIG_PRIVATE_IP` |
 | 3306 (MariaDB) | the backend | required | one VM: inside the network; several VMs: `SPRIG_PRIVATE_IP:SPRIG_BACKEND_PORT` |
-| 7481 | controller internal (permits) | **no** (plain HTTP) | one VM: inside the network; several VMs: `SPRIG_PRIVATE_IP` |
+| 7481 | controller internal (permits, peer pings, the relay) | one VM: no (inside the network); several VMs: **mutual TLS** (`SPRIG_INTERNAL_TLS`, process certificates) | one VM: inside the network; several VMs: `SPRIG_PRIVATE_IP` |
 | 7403 | gateway peer service (KILL, drains, relays) | mutual TLS | one VM: inside the network; several VMs: `SPRIG_PRIVATE_IP` |
-| 9180 | telemetry and metrics | no | inside the Compose network only |
+| 9180–9183 | telemetry: `/readyz`, `/metrics` (gateway, controller, worker, agent) | no | one VM: inside the Compose network; several VMs: `SPRIG_PRIVATE_IP` (`SPRIG_TELEMETRY_PORT_*`), for the load balancer's health checks and Prometheus |
 
 Every port number is a variable in `.env`. The gateway listens inside its container on the same number it is published on, so Kafka advertises the address clients really use (`SPRIG_PUBLIC_HOST:SPRIG_KAFKA_PORT`). If a VM also runs RabbitMQ, MongoDB or Redis, move SprigDB's ports in `.env` (the laptop test used 3xxxx ports).
 
@@ -227,6 +319,15 @@ To restore onto a new VM: copy the bundle, the same `secrets/` and the backup di
 
 **One VM:** the gateway's restart is a short outage of this VM's ports, and the controller's restart fences writes for a few seconds: the gateway holds writes to a valid DC lease, which only that controller renews (chapter 25's self-fencing), so writes get **39501** ("data center ... is fenced") for about 3–5 s. Clients that retry ride through it.
 
+**With MariaDB high availability** the upgrade also replaces the VM's node agent (after the worker, before the gateway). On the primary's VM, the new agent fences its node until it has its DC permit and the writer lease again: about half a second of writes refused with 1290 ("read-only").
+
+**Tested (laptop, three VMs, MariaDB HA, Envoy, round 3).** One client inserting every 0.05 s through the load balancer; `upgrade` on VM 1, VM 2, VM 3 in turn (each 37–42 s, including the backup of the VM's MariaDB node):
+
+| Run | Writes | Refused | Acknowledged lost |
+|---|---|---|---|
+| `harden3-c` → `harden3-c2` (the same binaries under another tag) | 1,739 | 5, all 1290 within 0.4 s, when VM 1's agent (the writer's) restarted; none while any gateway or controller restarted | **0** |
+| `harden3-a` → `harden3-c` | 1,375 | VM 1: 7 from the stale writer lease HD20 fixes, until VM 1's agent was replaced, and 102 duplicate keys from a test table the run before had left; VM 2 and VM 3: 0 | **0** |
+
 **Tested (laptop, three "VMs", hardening round 2).** One client inserting a row every 0.2 s, each on a new TLS connection, alternating between the two gateways, and trying the other gateway at once when a connection is refused or dropped (what a load balancer with health checks does); upgrade VM 1, then VM 2, then roll back VM 1, then VM 2:
 
 | Run | Images | Writes acknowledged | Refused with 39501 | Connections refused or dropped (then sent to the other gateway) | Acknowledged rows lost |
@@ -263,14 +364,20 @@ With three members, etcd keeps working while any two run; SprigDB's processes li
 ./sprig-vm.sh rotate-certs     # needs secrets/ca/ca-key.pem back on the VM
 ```
 
-It makes new gateway, etcd, MariaDB and controller certificates from the same CA (the process certificate, `client.pem`, is made by `init`). With several VMs, copy `secrets/tls/` to the other VMs afterwards. The controller reads its Admin API certificate when it starts: `docker compose up -d --force-recreate controller` on each VM, one at a time (with three VMs that refuses no write, see "Upgrade and rollback"). **Tested (laptop, round 1, one VM):** the gateway served the new certificate 1 s after the script finished, a MySQL session in the middle of a 15 s statement finished normally, and etcd and MariaDB took new connections with their new certificates. Each file is replaced by rename, so a reader never sees half a file. The gateway re-reads its bundle within two polls (a few seconds; log event `gateway.cert_rotated`) without dropping connections. MariaDB gets `FLUSH SSL`, and etcd picks up new certificates on new connections. To use certificates from your own CA, write them to `secrets/tls/gateway.pem` and `gateway-key.pem` (key first, then the certificate, each by `mv`). The generated certificates last `SPRIG_CERT_DAYS` (397) days: put a reminder or a timer on it. `sprig_gateway_cert_expiry_seconds` (and the `SprigCertExpiringSoon` alert) warns 14 days ahead.
+It makes new gateway, etcd, MariaDB, controller and process (`client.pem`) certificates from the same CA, **with no restart**: each file is replaced by rename (key first, then certificate), so a reader never sees half a file; the gateway re-reads its client bundle within two polls (log event `gateway.cert_rotated`); the controller re-reads its Admin API and internal-port certificates within a few seconds of the files changing (hardening round 3; a pair that doesn't load keeps the old one served, with a warning); MariaDB gets `FLUSH SSL`; etcd uses its new certificate on new connections. The process certificate is also every SprigDB process's client identity (to etcd and the controllers' internal port): each process presents the new one from its next start, and the old one stays valid until it expires.
+
+**Several VMs:** run `rotate-certs` on the VM that has the CA key, copy `secrets/tls/` to the other VMs (`rsync -a secrets/tls/ vm2:/opt/sprigdb/secrets/tls/`), then `./sprig-vm.sh reload-certs` on each (MariaDB's `FLUSH SSL`; everything else picks the files up by itself).
+
+**Tested (laptop, round 3, three VMs, a client writing through the load balancer every 0.05 s):** `rotate-certs` on VM 1, the copy and `reload-certs` on VM 2 and VM 3 took 1.1 s. 8 s later all 15 TLS ports served new certificates (on each VM: the gateway's client port, the controller's Admin API and internal port, etcd and MariaDB); no container restarted; 238 writes, none failed, none lost. **Round 1 (one VM):** a MySQL session in the middle of a 15 s statement finished normally.
+
+To use certificates from your own CA for clients, write them to `secrets/tls/gateway.pem` and `gateway-key.pem` (key first, then the certificate, each by `mv`). The generated certificates last `SPRIG_CERT_DAYS` (397) days: put a reminder or a timer on it. `sprig_gateway_cert_expiry_seconds` (and the `SprigCertExpiringSoon` alert) warns 14 days ahead.
 
 Rotating the CA itself: make a new CA, put both CA certificates into `ca.pem` (old and new), restart everything once (`docker compose up -d --force-recreate`), then issue new certificates from the new CA and remove the old CA from `ca.pem`.
 
 ## Monitoring
 
-- **Tested (laptop):** Prometheus scraped all three SprigDB targets (`up` = 3) and loaded the 35 alert rules; none fired on an idle deployment.
-- `docker compose --profile monitoring up -d prometheus` starts Prometheus on 127.0.0.1:9090. It scrapes the gateway, controller and worker (`/metrics` on 9180 inside the network) and loads the alert rules from `deploy/alerts/` (`sprig-ops`, `sprig-slo`, `sprig-approvals`). To use your own Prometheus instead, scrape the three containers' port 9180 from inside the Compose network, or publish it.
+- `docker compose --profile monitoring up -d prometheus` starts Prometheus on 127.0.0.1:9090. It loads the alert rules from `deploy/alerts/` (`sprig-ops`, `sprig-slo`, `sprig-approvals`). **One VM:** it scrapes the gateway, controller and worker (`/metrics` on 9180 inside the network). **Several VMs:** run it on one VM with `SPRIG_PROMETHEUS_CONFIG=prometheus.ha.yml` and `SPRIG_VM_HOSTS` (every VM's private address) in `.env`, after `./sprig-vm.sh monitoring-config`, which writes `config/prometheus-targets.json`: every VM's gateway, controller, worker and agent at the telemetry ports `compose.ha.yaml` and `compose.db-ha.yaml` publish on the private address (`SPRIG_TELEMETRY_PORT_*`, 9180 to 9183), labelled `role` and `vm`. Prometheus re-reads the file when it changes. To use your own Prometheus instead, scrape those ports.
+- **Tested (laptop, round 3, three VMs):** 12 of 12 targets up (gateway, controller, worker and agent on each VM), the 35 alert rules loaded, none fired. **Round 1, one VM:** 3 of 3.
 - **Dashboards:** import `deploy/dashboards/*.json` (fleet, DC, cluster, tenant, data movement, approvals) into Grafana with the Prometheus data source.
 - **Alertmanager** is not in the bundle: point Prometheus's `alerting:` section at yours.
 - MariaDB itself has no exporter here; SprigDB's own metrics cover connections, latency, replication lag and probe results per cluster. Add `prom/mysqld-exporter` if you want server internals.
@@ -299,6 +406,10 @@ Rotating the CA itself: make a new CA, put both CA certificates into `ca.pem` (o
 | `sprig-vm.sh ctl` says `unexpected argument '--ca-file'` | the image's `sprigctl` predates HTTPS on the Admin API | `SPRIGCTL_BIN=<a newer sprigctl> ./sprig-vm.sh ...`, or upgrade the image |
 | etcd logs `rejected connection on peer endpoint ... does not match` | a member connects from an address its certificate doesn't name (NAT) | add the address to `SPRIG_INTERNAL_SANS` and re-issue, or `SPRIG_ETCD_PEER_SKIP_SAN=true` |
 | `up-etcd` member stays `starting` | fewer than two members run | start the other VMs' members (`up-etcd` on each) |
+| Gateways refuse writes with 39030 "the writer lease (epoch 0) is older than the last failover" | an agent from a build before hardening round 3 restarted on the primary after a failover (HD20) | upgrade the agents; restarting the primary's agent with a round-3 build fixes the lease |
+| A replica's SQL thread stops with "out-of-order sequence number ... gtid strict mode" | a statement written to that replica's own binlog (round 3 found `FLUSH SSL`; `rotate-certs` now uses `FLUSH NO_WRITE_TO_BINLOG SSL`) | on that replica: `STOP SLAVE; RESET MASTER; START SLAVE` (its binlog holds nothing the cluster needs: it replicates everything) |
+| `configure` on VM 1 says "0 of 2 replicas attached" | VM 2 and VM 3 aren't up yet, or their MariaDB can't reach VM 1's (TLS name, firewall) | `up` on VM 2 and VM 3, `db-status` there, then `configure` on VM 1 again |
+| The balancer shows a gateway unhealthy | its `/readyz` isn't reachable on the telemetry port (not published, or firewalled), or it is draining | `curl http://<vm>:9180/readyz`; publish `SPRIG_TELEMETRY_PORT_GATEWAY` (`compose.ha.yaml`) |
 | `restore` says it needs the private key | `backup-key.pem` is off the VM, as it should be | put it back at `secrets/backup/backup-key.pem` (0600) or set `SPRIG_BACKUP_KEY` for that run |
 
 ## Galera: a node that can't rejoin
@@ -314,10 +425,11 @@ A node that joins under heavy load can also fail because the donor loses contact
 
 ## Not done yet
 
-- **Run on a real VM** (Kiran decides when; nothing has touched the dev or stage VMs). The three "VMs" of round 2 were three Compose projects on one laptop, on separate networks.
-- **The controller's internal port (permits, 7481) is plain HTTP** between VMs: keep the private network closed to everything else. Chapter 23's mutual-TLS port 7400 would replace it.
-- **MariaDB isn't highly available in this layout**: it stays on VM 1. Use a primary/replica or Galera cluster, or a managed server ([Adding a cluster](#adding-a-cluster)); the bundle doesn't build one.
-- **No load balancer in the bundle**: use the cloud's, or HAProxy or nginx `stream` with a TCP health check on each gateway port. Kafka clients also need the VMs' private addresses.
+- **Run on a real VM** (Kiran decides when; nothing has touched the dev or stage VMs). Everything here ran on one laptop, three Compose projects on separate networks standing in for three VMs. [GO-LIVE.md](GO-LIVE.md) lists what to prepare.
+- **The controllers' internal port is JSON over HTTP/1.1 with mutual TLS**, not chapter 23's gRPC port 7400.
+- **Restore with MariaDB high availability** wasn't rehearsed: `restore` puts each VM's own node back; with three nodes, restore the primary's VM and rebuild the replicas from it (empty datadir, `configure`).
+- **A replica rebuilt after the primary's binlogs expired** (7 days) needs seeding from a backup by hand (see [MariaDB high availability](#mariadb-high-availability)); the agent's `node_rebuild` service isn't wired into the bundle.
+- **The load balancer is one container**: run two behind keepalived, or use the cloud's.
+- **`ctl cluster set-nodes` on a round-1 bundle** (step 5 of "From one VM to three") was tested on a laptop deployment, not on the bundle itself.
 - **Two gateways on one VM** would need different ports (the listener ports are DC-wide settings). Use one gateway per VM.
-- **Not tested with three VMs:** certificate rotation, Prometheus scraping the other VMs, and `up` migrating a round-1 bundle (it makes the controller certificate and the backups' key pair).
 - **Backups** are a few seconds apart between MariaDB and etcd (back up when no mover job runs), and there is no point-in-time restore yet (chapter 47's binlog archiving).

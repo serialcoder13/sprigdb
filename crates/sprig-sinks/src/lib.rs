@@ -26,6 +26,7 @@
     clippy::redundant_closure_for_method_calls
 )]
 
+pub mod dropdb;
 pub mod filter;
 pub mod grammar;
 pub mod job;
@@ -35,6 +36,7 @@ pub mod peer;
 pub mod policy;
 pub mod probe;
 pub mod residency;
+pub mod rls_filter;
 pub mod runtime;
 pub mod secrets;
 pub mod settings;

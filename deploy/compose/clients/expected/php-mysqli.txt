@@ -32,6 +32,7 @@ gateway-mysql fail *mysqli/tests/mysqli_info.phpt* :: not investigated (r4close)
 gateway-mysql fail *mysqli_more_results.phpt* :: not investigated (r4close): [004]
 gateway-mysql fail *mysqli_real_connect.phpt* :: gaps row 59, as mysqli_connect.phpt
 gateway-mysql fail *mysqli_real_connect_pconn.phpt* :: gaps row 59, as mysqli_connect.phpt
+gateway-mysql fail *mysqli_expire_password.phpt* :: gaps row 59 (decision D4): the test's new user logs in over plaintext with a password not yet in the gateway's caching_sha2_password cache, which needs the RSA exchange; mysqlnd reports 2006 (R4 round 5, r4five: reproduced, not load as r4four thought)
 gateway-mysql fail *mysqli_report.phpt* :: not investigated (r4close): 001- Warning: mysqli_multi_query(): (%d/%d): You have an error in your SQL syntax; check the manual that corresponds to your %s server version for the
 gateway-mysql fail *mysqli_report_new.phpt* :: decision D4, as mysqli_connect
 gateway-mysql fail *mysqli_stmt_get_result.phpt* :: not investigated (r4close): --

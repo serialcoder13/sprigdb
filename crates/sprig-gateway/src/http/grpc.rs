@@ -269,6 +269,27 @@ impl Functions for FunctionsSvc {
     }
 }
 
+/// `sprig.v1.Logic` (chapter 41; R7 follow-ups).
+#[derive(Clone)]
+struct LogicSvc(Arc<Core>);
+
+#[tonic::async_trait]
+impl sprig_api::proto::v1::logic_server::Logic for LogicSvc {
+    async fn test_run(
+        &self,
+        req: Request<sprig_api::proto::v1::TestRunRequest>,
+    ) -> GrpcResult<sprig_api::proto::v1::TestRunResponse> {
+        metrics::counter!("sprig_api_requests_total", "service" => "sprig.v1.Logic", "method" => "TestRun", "protocol" => "grpc").increment(1);
+        let c = caller(&self.0, &req).await?;
+        let r = req.into_inner();
+        let body = super::functions::test_run_json(&r);
+        super::functions::test_run(&self.0.engine, &c, r.database, body)
+            .await
+            .map(|v| Response::new(super::functions::test_run_response(&v)))
+            .map_err(|e| st(&e))
+    }
+}
+
 #[derive(Clone)]
 struct KvSvc(Arc<Core>);
 
@@ -867,6 +888,47 @@ impl Health for HealthSvc {
     }
 }
 
+/// `sprig.v1.Changes` (chapter 37 step 11; RLS round 5, RL45).
+struct ChangesSvc(Arc<Core>);
+
+#[tonic::async_trait]
+impl sprig_api::proto::v1::changes_server::Changes for ChangesSvc {
+    type WatchStream = std::pin::Pin<
+        Box<
+            dyn futures::Stream<
+                    Item = std::result::Result<sprig_api::proto::v1::ChangeEvent, Status>,
+                > + Send,
+        >,
+    >;
+
+    async fn watch(
+        &self,
+        req: Request<sprig_api::proto::v1::WatchRequest>,
+    ) -> GrpcResult<Self::WatchStream> {
+        metrics::counter!("sprig_api_requests_total", "service" => "sprig.v1.Changes", "method" => "Watch", "protocol" => "grpc").increment(1);
+        let c = caller(&self.0, &req).await?;
+        let r = req.into_inner();
+        let spec = super::changes::WatchSpec {
+            database: r.database,
+            objects: r.objects,
+            start_after: r.start_after,
+            start_at_hlc: r.start_at_hlc,
+            full_document: r.full_document,
+        };
+        let rx = super::changes::open(&self.0, c, spec)
+            .await
+            .map_err(|e| st(&e))?;
+        let stream = futures::stream::unfold(Some(rx), |rx| async move {
+            let mut rx = rx?;
+            match rx.recv().await? {
+                Ok(ev) => Some((Ok(ev.proto()), Some(rx))),
+                Err(e) => Some((Err(st(&e)), None)),
+            }
+        });
+        Ok(Response::new(Box::pin(stream)))
+    }
+}
+
 /// Every gRPC service over `core`, as one router.
 #[must_use]
 pub fn routes(core: &Arc<Core>) -> tonic::service::Routes {
@@ -884,6 +946,10 @@ pub fn routes(core: &Arc<Core>) -> tonic::service::Routes {
     tonic::service::Routes::new(SqlServer::new(SqlSvc(c())).max_decoding_message_size(max))
         .add_service(TransactionsServer::new(TxnSvc(c())))
         .add_service(FunctionsServer::new(FunctionsSvc(c())).max_decoding_message_size(max))
+        .add_service(
+            sprig_api::proto::v1::logic_server::LogicServer::new(LogicSvc(c()))
+                .max_decoding_message_size(max),
+        )
         .add_service(
             sprig_api::proto::v1::key_value_server::KeyValueServer::new(KvSvc(c()))
                 .max_decoding_message_size(max),
@@ -904,6 +970,9 @@ pub fn routes(core: &Arc<Core>) -> tonic::service::Routes {
             sprig_api::proto::v1::search_server::SearchServer::new(super::search::SearchSvc(c()))
                 .max_decoding_message_size(max),
         )
+        .add_service(sprig_api::proto::v1::changes_server::ChangesServer::new(
+            ChangesSvc(c()),
+        ))
         .add_service(HealthServer::new(HealthSvc(c())))
         .add_service(ClustersServer::new(ClustersSvc(c())))
         .add_service(DataCentersServer::new(DcsSvc(c())))

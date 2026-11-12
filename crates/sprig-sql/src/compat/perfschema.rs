@@ -56,6 +56,9 @@
 //! `sys`.
 
 mod catalog;
+mod digests;
+
+pub use digests::{PsDigest, is_truncate_digests};
 
 use std::fmt::Write as _;
 
@@ -99,6 +102,17 @@ pub struct PsSession<'a> {
     pub connect_attrs: &'a [(String, String)],
     /// The session's current database, as the client named it.
     pub current_db: Option<&'a str>,
+    /// The tenant's statement digests the user may see (R4 round 5), when
+    /// the statement reads them ([`wants_digests`]).
+    pub digests: &'a [PsDigest],
+}
+
+/// Whether `sql` reads a table computed from statement digests, so the
+/// gateway gathers [`PsSession::digests`].
+#[must_use]
+pub fn wants_digests(sql: &[u8]) -> bool {
+    let has = |w: &[u8]| sql.windows(w.len()).any(|x| x.eq_ignore_ascii_case(w));
+    has(b"by_digest") || has(b"statement_analysis") || has(b"statements_with_errors")
 }
 
 /// Which system schema.
@@ -140,6 +154,7 @@ pub fn wanted(sql: &[u8], current_db: Option<&str>) -> bool {
         || has(b"format_bytes")
         || has(b"format_pico_time")
         || has(b"thread_id")
+        || (has(b"show") && has(b"tables") && has(b"sys"))
 }
 
 /// The statement with every `performance_schema` and `sys` reference as a
@@ -149,6 +164,7 @@ pub fn wanted(sql: &[u8], current_db: Option<&str>) -> bool {
 /// # Errors
 /// 1146 for a table or view MySQL 8.4 doesn't have.
 #[must_use]
+#[allow(clippy::too_many_lines)] // one pass over the tokens
 pub fn rewrite(
     sql: &[u8],
     opts: &LexOptions,
@@ -161,6 +177,9 @@ pub fn rewrite(
     let t: Vec<Token> = tokens.into_iter().filter(|t| !t.kind.is_trivia()).collect();
     let nbe = opts.no_backslash_escapes;
     let current = s.current_db.and_then(|d| Schema::parse(d.as_bytes()));
+    if let Some(q) = show_tables(sql, &t, current, nbe) {
+        return Some(Ok(q.into_bytes()));
+    }
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
     let mut j = 0;
     while j < t.len() {
@@ -258,6 +277,82 @@ pub fn rewrite(
     }
     out.extend_from_slice(&sql[at..]);
     Some(Ok(out))
+}
+
+/// `SHOW [FULL] TABLES [{FROM | IN} db] [LIKE 'p']` in `performance_schema`
+/// or `sys` (named, or current after `USE`, R4 round 5): the catalog's
+/// names, as MySQL lists them (`sys`' objects are views but `sys_config`).
+fn show_tables(sql: &[u8], t: &[Token], current: Option<Schema>, nbe: bool) -> Option<String> {
+    let word = |k: usize, w: &[u8]| {
+        t.get(k)
+            .is_some_and(|x| x.kind == TokenKind::Word && x.bytes(sql).eq_ignore_ascii_case(w))
+    };
+    if !word(0, b"SHOW") {
+        return None;
+    }
+    let mut j = 1;
+    let full = word(j, b"FULL");
+    if full {
+        j += 1;
+    }
+    if !word(j, b"TABLES") {
+        return None;
+    }
+    j += 1;
+    let mut schema = current;
+    if word(j, b"FROM") || word(j, b"IN") {
+        let name = t
+            .get(j + 1)
+            .filter(|x| x.kind.is_ident_like())
+            .map(|x| lex::ident_value(x.bytes(sql)).into_owned())?;
+        schema = Some(Schema::parse(&name)?);
+        j += 2;
+    }
+    let schema = schema?;
+    let mut like = None;
+    if word(j, b"LIKE") {
+        let p = t.get(j + 1).filter(|x| x.kind == TokenKind::String)?;
+        like = Some(String::from_utf8_lossy(p.bytes(sql)).into_owned());
+        j += 2;
+    }
+    if j < t.len() && !(j + 1 == t.len() && t[j].bytes(sql) == b";") {
+        return None;
+    }
+    let col = format!("Tables_in_{}", schema.name());
+    let rows: Vec<String> = catalog::OBJECTS
+        .iter()
+        .filter(|(sc, _, _)| *sc == schema.name())
+        .map(|(_, name, _)| {
+            let kind = if schema == Schema::Sys && *name != "sys_config" {
+                "VIEW"
+            } else {
+                "BASE TABLE"
+            };
+            if full {
+                format!(
+                    "SELECT {} AS `{col}`, '{kind}' AS `Table_type`",
+                    sql_string(name, nbe)
+                )
+            } else {
+                format!("SELECT {} AS `{col}`", sql_string(name, nbe))
+            }
+        })
+        .collect();
+    // MySQL names the column with the pattern: `Tables_in_sys (x$%)`.
+    let shown = match &like {
+        Some(p) => {
+            let v = lex::string_value(p.as_bytes(), nbe).unwrap_or_default();
+            format!("{col} ({})", String::from_utf8_lossy(&v))
+        }
+        None => col.clone(),
+    };
+    let filter = like.map_or_else(String::new, |p| format!(" WHERE `{col}` LIKE {p}"));
+    Some(format!(
+        "SELECT `{col}` AS `{}`{} FROM ({}) AS t{filter} ORDER BY 1",
+        shown.replace('`', "``"),
+        if full { ", `Table_type`" } else { "" },
+        rows.join(" UNION ALL ")
+    ))
 }
 
 /// `expr` for the call `t[from..=to]`, with the call's text as its column
@@ -699,6 +794,12 @@ fn object_sql(schema: Schema, obj: &str, s: &PsSession<'_>, nbe: bool) -> Option
         .find(|(sc, t, _)| *sc == schema.name() && *t == lower)
         .map(|(_, _, c)| *c)?;
     let lit = |v: &str| sql_string(v, nbe);
+    if digests::is_digest_object(schema.name(), &lower) {
+        return Some(
+            digests::object(schema.name(), &lower, cols, s.digests, nbe)
+                .unwrap_or_else(|| empty(cols)),
+        );
+    }
     let computed = match (schema, lower.as_str()) {
         (Schema::Ps, "session_variables") => Some(variables("SESSION_VARIABLES", false, s, nbe)),
         (Schema::Ps, "global_variables") => Some(variables("GLOBAL_VARIABLES", true, s, nbe)),

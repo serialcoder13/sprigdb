@@ -89,6 +89,102 @@ pub async fn call(
     Ok(json!({"event": event, "result": result}))
 }
 
+/// `Logic.TestRun` (chapter 41; R7 follow-ups): `body` is the request as
+/// `sprig_logic::testrun::TestRun`'s JSON (REST's body, or gRPC's fields
+/// with `inputs` spread in); runs as one marked statement in the caller's
+/// session, as [`call`] does, and returns the report.
+///
+/// # Errors
+/// 39860, 39861, 39874, 1044 and the setup's errors; the run's own error
+/// is in the report.
+pub async fn test_run(
+    engine: &Arc<SqlEngine>,
+    caller: &Caller,
+    database: String,
+    mut body: Value,
+) -> Result<Value> {
+    if let Value::Object(o) = &mut body {
+        o.insert("database".to_owned(), Value::String(database.clone()));
+        // Empty strings and version 0 mean "not given" (gRPC's defaults).
+        for k in ["kind", "name", "source"] {
+            if o.get(k).and_then(Value::as_str) == Some("") {
+                o.remove(k);
+            }
+        }
+        if o.get("version").and_then(Value::as_u64) == Some(0) {
+            o.remove("version");
+        }
+    }
+    let req: sprig_logic::testrun::TestRun = serde_json::from_value(body).map_err(|e| {
+        SprigError::new(
+            SprigCode::LogicSignatureMismatch,
+            format!("a bad test run request: {e}"),
+        )
+    })?;
+    let call = SqlCall {
+        database,
+        sql: req.statement(),
+        multi: false,
+    };
+    let (tx, rx) = mpsc::channel(CHANNEL_DEPTH);
+    let max = engine.settings().max_buffered;
+    let charge = engine.charge(caller);
+    let e2 = Arc::clone(engine);
+    let c2 = caller.clone();
+    tokio::spawn(async move { e2.run(&c2, call, None, tx).await });
+    let reply = collect(rx, max, charge).await?;
+    let report = reply
+        .results
+        .first()
+        .and_then(|r| r.rows.first())
+        .and_then(|row| row.values.get(2))
+        .and_then(|v| match &v.kind {
+            Some(Kind::StringValue(s)) => serde_json::from_str::<Value>(s).ok(),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            SprigError::new(
+                SprigCode::BackendProtocol,
+                "the test run returned no report",
+            )
+        })?;
+    Ok(report)
+}
+
+/// A `TestRunRequest` as the JSON [`test_run`] takes.
+#[must_use]
+pub fn test_run_json(r: &sprig_api::proto::v1::TestRunRequest) -> Value {
+    let mut v = json!({
+        "kind": r.kind, "name": r.name, "version": r.version, "source": r.source,
+        "args": r.args.as_ref().map_or(Value::Null, from_proto),
+    });
+    if let Some(inputs) = &r.inputs
+        && let Value::Object(o) = from_proto(&prost_types::Value {
+            kind: Some(Kind::StructValue(inputs.clone())),
+        })
+        && let Value::Object(m) = &mut v
+    {
+        for (k, x) in o {
+            m.entry(k).or_insert(x);
+        }
+    }
+    v
+}
+
+/// A report as `TestRunResponse`.
+#[must_use]
+pub fn test_run_response(report: &Value) -> sprig_api::proto::v1::TestRunResponse {
+    let st = |v: &Value| match to_proto(v).kind {
+        Some(Kind::StructValue(s)) => Some(s),
+        _ => None,
+    };
+    sprig_api::proto::v1::TestRunResponse {
+        event: report["event"].as_str().unwrap_or_default().to_owned(),
+        result: st(&report["result"]),
+        report: st(report),
+    }
+}
+
 /// A protobuf `Value` as JSON.
 #[must_use]
 pub fn from_proto(v: &prost_types::Value) -> Value {

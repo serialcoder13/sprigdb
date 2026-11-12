@@ -8,10 +8,12 @@ fn annotated() -> Vec<(String, String, String, String)> {
     for file in [
         "sprig/v1/sql.proto",
         "sprig/v1/functions.proto",
+        "sprig/v1/logic.proto",
         "sprig/v1/kv.proto",
         "sprig/v1/vectors.proto",
         "sprig/v1/analytics.proto",
         "sprig/v1/search.proto",
+        "sprig/v1/changes.proto",
         "sprig/admin/v1/admin.proto",
     ] {
         let text = std::fs::read_to_string(root.join(file)).unwrap();
@@ -100,11 +102,36 @@ fn operator_routes_match() {
     let cases = [
         ("POST", "/admin/v1/operators:login", "Operators.Login", None),
         ("POST", "/admin/v1/operators:enrol", "Operators.Enrol", None),
-        ("POST", "/admin/v1/operators:logout", "Operators.Logout", None),
-        ("GET", "/admin/v1/operators:whoami", "Operators.WhoAmI", None),
-        ("GET", "/admin/v1/operators", "Operators.ListOperators", None),
-        ("POST", "/admin/v1/operators", "Operators.CreateOperator", None),
-        ("GET", "/admin/v1/operators/alice", "Operators.GetOperator", Some("alice")),
+        (
+            "POST",
+            "/admin/v1/operators:logout",
+            "Operators.Logout",
+            None,
+        ),
+        (
+            "GET",
+            "/admin/v1/operators:whoami",
+            "Operators.WhoAmI",
+            None,
+        ),
+        (
+            "GET",
+            "/admin/v1/operators",
+            "Operators.ListOperators",
+            None,
+        ),
+        (
+            "POST",
+            "/admin/v1/operators",
+            "Operators.CreateOperator",
+            None,
+        ),
+        (
+            "GET",
+            "/admin/v1/operators/alice",
+            "Operators.GetOperator",
+            Some("alice"),
+        ),
         (
             "POST",
             "/admin/v1/operators/alice:disable",
@@ -123,8 +150,18 @@ fn operator_routes_match() {
             "Operators.SetOperatorPassword",
             Some("alice"),
         ),
-        ("GET", "/admin/v1/operator-tokens", "Operators.ListTokens", None),
-        ("POST", "/admin/v1/operator-tokens", "Operators.CreateToken", None),
+        (
+            "GET",
+            "/admin/v1/operator-tokens",
+            "Operators.ListTokens",
+            None,
+        ),
+        (
+            "POST",
+            "/admin/v1/operator-tokens",
+            "Operators.CreateToken",
+            None,
+        ),
         (
             "POST",
             "/admin/v1/operator-tokens/k1:revoke",

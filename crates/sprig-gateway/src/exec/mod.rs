@@ -28,6 +28,8 @@
 mod capture;
 mod compat_sink;
 mod dc;
+// bugfix-34: a dropped database's sinks and logic modules go with it.
+mod dropdb;
 mod fence;
 // RL14 (r2harden): a mover's fence never reaches clients as 1146 or 1049.
 mod fence_retry;
@@ -41,6 +43,12 @@ pub mod stmt;
 mod logic;
 // Chapter 41: validations, triggers, schedules, computed fields (R7 orders 3, 5).
 mod logic_bound;
+// Chapter 41: DROP of logic modules and their dependents (R7 follow-ups).
+mod logic_drop;
+// Chapter 41: staged rollouts at call time (R7 follow-ups).
+mod logic_rollout;
+// Chapter 41: `Logic.TestRun` (R7 follow-ups).
+mod logic_test;
 // Chapter 29: row-level security (R4).
 mod rls;
 mod tenant;
@@ -49,6 +57,9 @@ pub(crate) mod inherit;
 // Chapter 42 (Kiran's decisions of 11 Nov 2026): tree id sequences, the
 // reference index, children receiving their parent's tables.
 pub(crate) mod inherit_tree;
+// Chapter 42 with chapter 32 (step 6b): children receive the types of the
+// type trees they inherit.
+mod inherit_types;
 // Chapter 42 (R9): inherited messaging objects (`FOR EACH TENANT`).
 mod inherit_msg;
 // R9 (r9more): FOR EACH TENANT connections and sinks.
@@ -66,6 +77,13 @@ mod graph_ddl;
 // chapter 45's `sprig.commit_offset`.
 pub(crate) mod msg_trigger;
 mod offsets;
+// Chapter 29 (RLS round 5): row images checked against a subscriber's
+// privileges and row-level security (gRPC, SSE and WebSocket change
+// streams, Redis keyspace notifications).
+pub(crate) mod rls_images;
+// Chapter 29 (RLS round 5): change topics' filter views, for views and
+// stored code over them.
+mod change_views;
 // Chapter 28 (R4): ONLY_FULL_GROUP_BY on 3306.
 mod groupby;
 // Chapter 36 (R6 round 3): nearest neighbours with a growing radius on 3306.
@@ -1327,11 +1345,24 @@ impl PassSession {
             return None;
         }
         let (lex, _) = self.lex_opts();
+        // R4 round 5: `TRUNCATE` of the digest summary starts the
+        // tenant's digests again; the backend answers a no-op.
+        if sprig_sql::compat::perfschema::is_truncate_digests(sql, current.as_deref()) {
+            if let (Some(wl), Some(ts)) = (self.wl.as_ref(), self.tenant.as_deref()) {
+                wl.workload().recorder().reset_digests(ts.tenant);
+            }
+            return Some(Ok(b"DO 0".to_vec()));
+        }
         let vars = self.persona_vars();
         let owned = self.owned_var_rows();
         let status = relay::ConnStatus::of(cx.proto)
             .with_rows(self.status_rows())
             .into_rows();
+        let digests = if sprig_sql::compat::perfschema::wants_digests(sql) {
+            self.ps_digests()
+        } else {
+            Vec::new()
+        };
         let s = sprig_sql::compat::perfschema::PsSession {
             vars: &vars,
             owned_vars: &owned,
@@ -1340,9 +1371,62 @@ impl PassSession {
             connection_id: u64::from(cx.session.id.0),
             connect_attrs: &cx.session.connect_attrs,
             current_db: current.as_deref(),
+            digests: &digests,
         };
         sprig_sql::compat::perfschema::rewrite(sql, &lex, &s)
             .map(|r| r.map_err(|e| SprigError::standard(e.code, e.sqlstate, e.message)))
+    }
+
+    /// The tenant's statement digests on this gateway (chapter 12's
+    /// recorder, R4 round 5) in the databases the user may see; statements
+    /// run with no current database are listed for every user.
+    fn ps_digests(&self) -> Vec<sprig_sql::compat::perfschema::PsDigest> {
+        let (Some(wl), Some(ts)) = (self.wl.as_ref(), self.tenant.as_deref()) else {
+            return Vec::new();
+        };
+        let Some(cat) = ts.catalog().cloned() else {
+            return Vec::new();
+        };
+        let p = crate::tenant::authz::privileges(ts, &cat);
+        let lctn = ts.lower_case_table_names();
+        let us = |t: Option<std::time::SystemTime>| {
+            t.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
+        };
+        wl.workload()
+            .recorder()
+            .digests(ts.tenant)
+            .into_iter()
+            .filter_map(|r| {
+                let schema = cat.databases.get(r.db_id).map(|d| d.name.clone());
+                if let Some(name) = &schema
+                    && !p
+                        .sees_database(&sprig_catalog::ddl::database_key(name, lctn), Some(r.db_id))
+                {
+                    return None;
+                }
+                let d = &r.digest;
+                let q = |x: f64| d.latency_hist.quantile_us(x).unwrap_or(d.max_us);
+                Some(sprig_sql::compat::perfschema::PsDigest {
+                    schema,
+                    digest: format!("{:016x}", r.id.0),
+                    text: r.text.to_string(),
+                    count: d.exec_count,
+                    errors: d.error_count,
+                    sum_us: d.total_us,
+                    min_us: d.min_us,
+                    max_us: d.max_us,
+                    rows_affected: d.rows_affected,
+                    rows_sent: d.rows_returned,
+                    rows_examined: d.rows_examined,
+                    first_seen_us: us(d.first_seen),
+                    last_seen_us: us(d.last_seen),
+                    p95_us: q(0.95),
+                    p99_us: q(0.99),
+                    p999_us: q(0.999),
+                })
+            })
+            .collect()
     }
 
     /// The gateway's rewrites of a statement's text for this session: the

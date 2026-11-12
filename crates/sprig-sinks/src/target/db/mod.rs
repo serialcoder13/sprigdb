@@ -71,7 +71,9 @@ pub enum DbErr {
 }
 
 impl DbErr {
-    fn message(&self) -> &str {
+    /// The destination's message.
+    #[must_use]
+    pub fn message(&self) -> &str {
         match self {
             DbErr::Retry(m) | DbErr::Row(m) | DbErr::Schema(m) | DbErr::Fenced(m) => m,
         }
@@ -264,7 +266,10 @@ pub async fn probe(
             }
         },
         other => {
-            out.push(("options", Err(format!("not a database connection: {other}"))));
+            out.push((
+                "options",
+                Err(format!("not a database connection: {other}")),
+            ));
             return out;
         }
     };
@@ -287,6 +292,51 @@ pub async fn probe(
         ));
     }
     out
+}
+
+/// `TEST CONNECTION c WRITE TO 'table'`'s write step (R9, r9last): `INSERT
+/// INTO table SELECT * FROM table WHERE 1 = 0` in a transaction rolled
+/// back, so the server checks the `INSERT` (and `SELECT`) right on the
+/// table and no row is written.
+pub async fn write_probe(
+    ctx: &TargetCtx,
+    table: &str,
+) -> Vec<(&'static str, std::result::Result<String, String>)> {
+    let conn = match ctx.conn() {
+        Ok(c) => c,
+        Err(e) => return vec![("write", Err(e.to_string()))],
+    };
+    let backend: Arc<dyn Backend> = match conn.kind {
+        ConnKind::Mysql => match mysql::MyBackend::connect(conn, ctx).await {
+            Ok(b) => Arc::new(b),
+            Err(e) => return vec![("write", Err(e.to_string()))],
+        },
+        ConnKind::Postgresql => match pg::PgBackend::connect(conn, ctx).await {
+            Ok(b) => Arc::new(b),
+            Err(e) => return vec![("write", Err(e.to_string()))],
+        },
+        other => return vec![("write", Err(format!("not a database connection: {other}")))],
+    };
+    let t = plan::table_ident(backend.dialect(), table);
+    let mut tx = match backend.begin().await {
+        Ok(tx) => tx,
+        Err(e) => return vec![("write", Err(e.message().to_owned()))],
+    };
+    let r = tx
+        .exec(
+            &format!("INSERT INTO {t} SELECT * FROM {t} WHERE 1 = 0"),
+            Vec::new(),
+        )
+        .await;
+    tx.rollback().await;
+    vec![
+        (
+            "write",
+            r.map(|_| format!("INSERT on {table} allowed (checked with no row, rolled back)"))
+                .map_err(|e| e.message().to_owned()),
+        ),
+        ("clean_up", Ok("nothing written".into())),
+    ]
 }
 
 /// Builds the database target of `ctx` (`MYSQL` or `POSTGRESQL`

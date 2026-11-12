@@ -985,9 +985,9 @@ fn command_metrics(name: &str, ok: bool, took: Duration) {
         m
     });
     if ok {
-        m.ok.increment(1)
+        m.ok.increment(1);
     } else {
-        m.error.increment(1)
+        m.error.increment(1);
     }
     m.duration.record(took.as_secs_f64());
 }

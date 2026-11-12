@@ -350,6 +350,7 @@ impl InheritStore {
                 auto: ext.auto,
                 links: ext.links,
                 adopted: ext.adopted,
+                type_root: ext.type_root,
             });
         }
         let rows: Vec<Row> = q

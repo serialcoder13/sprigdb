@@ -16,15 +16,18 @@
 //!   two equal strings compare unequal (Django's JSON key lookups and
 //!   check constraints build exactly this). When `JSON_EXTRACT(<string
 //!   literal>, '$')`, whose literal is a JSON string, is an operand of `=`,
-//!   `<>`, `!=`, `<=>` or an item of an `IN` list, it becomes
+//!   `<>`, `!=` or `<=>`, or an item of an `IN` list, it becomes
 //!   `JSON_UNQUOTE(..)`: MariaDB then compares the unquoted texts, which
-//!   is MySQL's answer for strings. Numbers, booleans, `null`, objects and
+//!   is MySQL's answer for strings. An `IN` list compares as plain
+//!   strings in MariaDB, so `JSON_EXTRACT(c, p) IN (..)` whose items are
+//!   all such constants unquotes the left side too (a JSON number `1` then
+//!   matches the string `"1"`, which MySQL wouldn't). Numbers, booleans, `null`, objects and
 //!   arrays already compare alike on both servers and are left alone.
 
 use crate::lex::{self, LexOptions, Token, TokenKind};
 
-fn sig(sql: &[u8], opts: &LexOptions) -> Option<Vec<Token>> {
-    let tokens = lex::lex(sql, opts).ok()?;
+fn sig(sql: &[u8], opts: LexOptions) -> Option<Vec<Token>> {
+    let tokens = lex::lex(sql, &opts).ok()?;
     Some(tokens.into_iter().filter(|t| !t.kind.is_trivia()).collect())
 }
 
@@ -48,7 +51,7 @@ pub fn rewrite_arrows(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
     if !sql.windows(2).any(|w| w == b"->") {
         return None;
     }
-    let t = sig(sql, opts)?;
+    let t = sig(sql, *opts)?;
     let op = |j: usize, s: &[u8]| {
         t.get(j)
             .is_some_and(|x| x.kind == TokenKind::Op && x.bytes(sql) == s)
@@ -87,9 +90,7 @@ pub fn rewrite_arrows(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
             format!("JSON_EXTRACT({col}, {path})")
         };
         if super::perfschema::whole_select_item(sql, &t, k, j + 1) {
-            let written = String::from_utf8_lossy(
-                &sql[t[k].start as usize..t[j + 1].end as usize],
-            );
+            let written = String::from_utf8_lossy(&sql[t[k].start as usize..t[j + 1].end as usize]);
             rep = format!("{rep} AS `{}`", written.replace('`', "``"));
         }
         edits.push((t[k].start as usize, t[j + 1].end as usize, rep));
@@ -100,6 +101,7 @@ pub fn rewrite_arrows(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
 /// A JSON string constant compared with `JSON_EXTRACT(..)` as
 /// `JSON_UNQUOTE(..)` (see the module docs). `None` when nothing changes.
 #[must_use]
+#[allow(clippy::too_many_lines)] // the IN-list and comparison forms
 pub fn rewrite_string_constants(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
     if !sql
         .windows(12)
@@ -107,7 +109,7 @@ pub fn rewrite_string_constants(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>
     {
         return None;
     }
-    let t = sig(sql, opts)?;
+    let t = sig(sql, *opts)?;
     let word = |j: usize, w: &[u8]| {
         t.get(j)
             .is_some_and(|x| x.kind == TokenKind::Word && x.bytes(sql).eq_ignore_ascii_case(w))
@@ -122,10 +124,9 @@ pub fn rewrite_string_constants(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>
         })
     };
     let nbe = opts.no_backslash_escapes;
-    let mut edits = Vec::new();
-    for j in 0..t.len() {
-        // JSON_EXTRACT ( 'lit' , '$' )
-        if !(word(j, b"JSON_EXTRACT")
+    // `JSON_EXTRACT('<JSON string>', '$')` at `j`.
+    let string_const = |j: usize| {
+        word(j, b"JSON_EXTRACT")
             && punct(j + 1, b'(')
             && t.get(j + 2).is_some_and(|x| x.kind == TokenKind::String)
             && punct(j + 3, b',')
@@ -133,46 +134,86 @@ pub fn rewrite_string_constants(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>
                 x.kind == TokenKind::String
                     && lex::string_value(x.bytes(sql), nbe).as_deref() == Some(b"$")
             })
-            && punct(j + 5, b')'))
-        {
+            && punct(j + 5, b')')
+            && lex::string_value(t[j + 2].bytes(sql), nbe).is_some_and(|lit| {
+                let lit = String::from_utf8_lossy(&lit);
+                let s = lit.trim();
+                s.len() >= 2 && s.starts_with('"') && s.ends_with('"')
+            })
+    };
+    let wrap = |a: usize, b: usize| {
+        (
+            t[a].start as usize,
+            t[b].end as usize,
+            format!(
+                "JSON_UNQUOTE({})",
+                String::from_utf8_lossy(&sql[t[a].start as usize..t[b].end as usize])
+            ),
+        )
+    };
+    let mut edits = Vec::new();
+    let mut taken = vec![false; t.len()];
+    // `JSON_EXTRACT(c, p) IN (<JSON string constants>)`: MariaDB compares
+    // an IN list as strings without unquoting either side, so both go
+    // unquoted (only when every item is a JSON string constant).
+    for i in 1..t.len() {
+        if !(word(i, b"IN") && punct(i + 1, b'(') && punct(i - 1, b')')) {
             continue;
         }
-        let Some(lit) = lex::string_value(t[j + 2].bytes(sql), nbe) else {
-            continue;
-        };
-        let lit = String::from_utf8_lossy(&lit);
-        let trimmed = lit.trim();
-        if !(trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"')) {
-            continue;
-        }
-        let in_list = j > 0 && (punct(j - 1, b'(') || punct(j - 1, b',')) && {
-            // Walk back to this level's `(` and look for `IN` before it.
-            let mut d = 0i32;
-            let mut k = j;
-            let mut found = false;
-            while k > 0 {
-                k -= 1;
-                if punct(k, b')') {
-                    d += 1;
-                } else if punct(k, b'(') {
-                    if d == 0 {
-                        found = k > 0 && word(k - 1, b"IN");
-                        break;
-                    }
-                    d -= 1;
+        // The left operand: `JSON_EXTRACT( ... )` ending at i - 1.
+        let mut d = 0i32;
+        let mut k = i - 1;
+        let open = loop {
+            if punct(k, b')') {
+                d += 1;
+            } else if punct(k, b'(') {
+                d -= 1;
+                if d == 0 {
+                    break Some(k);
                 }
             }
-            found
+            if k == 0 {
+                break None;
+            }
+            k -= 1;
         };
-        if !((j > 0 && cmp(j - 1)) || cmp(j + 6) || in_list) {
+        let Some(open) = open else { continue };
+        if open == 0 || !word(open - 1, b"JSON_EXTRACT") || (open >= 2 && punct(open - 2, b'.')) {
             continue;
         }
-        let text = String::from_utf8_lossy(&sql[t[j].start as usize..t[j + 5].end as usize]);
-        edits.push((
-            t[j].start as usize,
-            t[j + 5].end as usize,
-            format!("JSON_UNQUOTE({text})"),
-        ));
+        let mut items = Vec::new();
+        let mut j = i + 2;
+        let ok = loop {
+            if !string_const(j) {
+                break false;
+            }
+            items.push(j);
+            if punct(j + 6, b')') {
+                break true;
+            }
+            if !punct(j + 6, b',') {
+                break false;
+            }
+            j += 7;
+        };
+        if !ok {
+            continue;
+        }
+        edits.push(wrap(open - 1, i - 1));
+        for &a in &items {
+            edits.push(wrap(a, a + 5));
+            taken[a] = true;
+        }
+    }
+    // A constant operand of `=`, `<>`, `!=` or `<=>`.
+    for (j, &was_taken) in taken.iter().enumerate() {
+        if was_taken || !string_const(j) {
+            continue;
+        }
+        if !((j > 0 && cmp(j - 1)) || cmp(j + 6)) {
+            continue;
+        }
+        edits.push(wrap(j, j + 5));
     }
     (!edits.is_empty()).then(|| apply(sql, edits))
 }
@@ -199,13 +240,19 @@ mod tests {
         );
         // A JSON key in a functional key part.
         assert_eq!(
-            arrows("CREATE INDEX i ON t ((CAST((`field` ->> '$.\"k\"') AS signed integer)))").as_deref(),
-            Some("CREATE INDEX i ON t ((CAST((JSON_UNQUOTE(JSON_EXTRACT(`field`, '$.\"k\"'))) AS signed integer)))")
+            arrows("CREATE INDEX i ON t ((CAST((`field` ->> '$.\"k\"') AS signed integer)))")
+                .as_deref(),
+            Some(
+                "CREATE INDEX i ON t ((CAST((JSON_UNQUOTE(JSON_EXTRACT(`field`, '$.\"k\"'))) AS signed integer)))"
+            )
         );
         // Qualified columns, `->`, and MySQL's column names.
         assert_eq!(
-            arrows("SELECT t.j->'$.a', d.t.j->>'$.b' AS b FROM d.t WHERE j->>'$.c' = 'x'").as_deref(),
-            Some("SELECT JSON_EXTRACT(t.j, '$.a') AS `t.j->'$.a'`, JSON_UNQUOTE(JSON_EXTRACT(d.t.j, '$.b')) AS b FROM d.t WHERE JSON_UNQUOTE(JSON_EXTRACT(j, '$.c')) = 'x'")
+            arrows("SELECT t.j->'$.a', d.t.j->>'$.b' AS b FROM d.t WHERE j->>'$.c' = 'x'")
+                .as_deref(),
+            Some(
+                "SELECT JSON_EXTRACT(t.j, '$.a') AS `t.j->'$.a'`, JSON_UNQUOTE(JSON_EXTRACT(d.t.j, '$.b')) AS b FROM d.t WHERE JSON_UNQUOTE(JSON_EXTRACT(j, '$.c')) = 'x'"
+            )
         );
         assert_eq!(arrows("SELECT '->>', a - >b FROM t"), None);
         assert_eq!(arrows("SELECT a->? FROM t"), None);
@@ -220,12 +267,19 @@ mod tests {
         );
         assert_eq!(
             consts("SELECT * FROM m WHERE JSON_EXTRACT('\"a\"', '$') <> JSON_EXTRACT(d, '$.k') OR JSON_EXTRACT(d, '$.k') IN (JSON_EXTRACT('\"x\"', '$'), JSON_EXTRACT('1', '$'))").as_deref(),
-            Some("SELECT * FROM m WHERE JSON_UNQUOTE(JSON_EXTRACT('\"a\"', '$')) <> JSON_EXTRACT(d, '$.k') OR JSON_EXTRACT(d, '$.k') IN (JSON_UNQUOTE(JSON_EXTRACT('\"x\"', '$')), JSON_EXTRACT('1', '$'))")
+            Some("SELECT * FROM m WHERE JSON_UNQUOTE(JSON_EXTRACT('\"a\"', '$')) <> JSON_EXTRACT(d, '$.k') OR JSON_EXTRACT(d, '$.k') IN (JSON_EXTRACT('\"x\"', '$'), JSON_EXTRACT('1', '$'))")
+        );
+        // Django's `__in` on a key: every item a JSON string.
+        assert_eq!(
+            consts("SELECT * FROM m WHERE JSON_EXTRACT(`d`, '$.\"k\"') IN (JSON_EXTRACT('\"x\"', '$'), JSON_EXTRACT('\"y\"', '$'))").as_deref(),
+            Some("SELECT * FROM m WHERE JSON_UNQUOTE(JSON_EXTRACT(`d`, '$.\"k\"')) IN (JSON_UNQUOTE(JSON_EXTRACT('\"x\"', '$')), JSON_UNQUOTE(JSON_EXTRACT('\"y\"', '$')))")
         );
         // Not a comparison, or not a string: unchanged.
         assert_eq!(consts("SELECT JSON_EXTRACT('\"a\"', '$')"), None);
         assert_eq!(
-            consts("SELECT * FROM m WHERE JSON_EXTRACT(d, '$.k') = JSON_EXTRACT('{\"a\": 1}', '$')"),
+            consts(
+                "SELECT * FROM m WHERE JSON_EXTRACT(d, '$.k') = JSON_EXTRACT('{\"a\": 1}', '$')"
+            ),
             None
         );
     }

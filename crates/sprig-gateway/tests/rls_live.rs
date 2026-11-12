@@ -534,7 +534,7 @@ async fn writes(ck: &mut Checks, c: &mut Conn, admin: &mut Conn, user: &str, tag
         e.as_ref().is_err_and(|e| e.contains("39363")),
         || format!("{e:?}"),
     );
-    let id = 901 + i64::from(user.len() as u8);
+    let id = 901 + i64::try_from(user.len()).unwrap_or(0);
     let e = exec(
         c,
         &format!("INSERT INTO docs VALUES ({id}, '{me}', 0, 'x', 5000)"),

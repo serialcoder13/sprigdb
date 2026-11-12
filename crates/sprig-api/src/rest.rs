@@ -146,6 +146,13 @@ pub static ROUTES: &[Route] = &[
         "CallRequest"
     ),
     r!(
+        "sprig.v1.Logic",
+        "TestRun",
+        "POST",
+        "/v1/databases/{database}/logic:testRun",
+        "TestRunRequest"
+    ),
+    r!(
         "sprig.v1.KeyValue",
         "Get",
         "POST",
@@ -291,6 +298,14 @@ pub static ROUTES: &[Route] = &[
         "POST",
         "/v1/databases/{database}/search/{index}:query",
         "SearchQueryRequest"
+    ),
+    r!(
+        "sprig.v1.Changes",
+        "Watch",
+        "GET",
+        "/v1/databases/{database}/changes",
+        "WatchRequest",
+        stream
     ),
     r!(
         "sprig.admin.v1.Clusters",
@@ -613,7 +628,8 @@ pub static ROUTES: &[Route] = &[
         "POST",
         "/admin/v1/recommendations:subscriptions",
         "BodyRequest"
-    ),    r!(
+    ),
+    r!(
         "sprig.admin.v1.Operators",
         "Login",
         "POST",
@@ -923,11 +939,13 @@ fn reply(r: &Route) -> &'static str {
     match (r.service, r.rpc) {
         ("sprig.v1.Analytics", "Query") => "AnalyticsResult",
         ("sprig.v1.Search", "Query") => "SearchQueryResponse",
+        ("sprig.v1.Changes", "Watch") => "ChangeEvent",
         (_, "Query") => "QueryResponse",
         (_, "Execute") => "ExecuteResponse",
         (_, "Begin") => "Transaction",
         ("sprig.v1.Transactions", _) => "EndTransactionResponse",
         ("sprig.v1.Functions", "Call") => "CallResponse",
+        ("sprig.v1.Logic", "TestRun") => "TestRunResponse",
         ("sprig.v1.KeyValue", "Get") => "KvGetResponse",
         ("sprig.v1.KeyValue", "Put") => "KvPutResponse",
         ("sprig.v1.KeyValue", "Delete") => "KvDeleteResponse",

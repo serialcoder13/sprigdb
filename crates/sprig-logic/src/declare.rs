@@ -183,6 +183,11 @@ pub struct Declaration {
     /// Functions: the `RETURNS` type's text, lower case (`double`,
     /// `decimal(12,2)`).
     pub returns: Option<String>,
+    /// Functions and procedures: `WITH (SPRIG_ROLLOUT = n [,
+    /// SPRIG_ROLLOUT_BY = 'user' | 'tenant'])`, a staged rollout (R7
+    /// follow-ups, [`crate::rollout`]): the new version is the candidate
+    /// for n% of callers.
+    pub rollout: Option<crate::rollout::RolloutSpec>,
 }
 
 /// One declared parameter: `[IN] name type`.
@@ -616,6 +621,7 @@ pub fn parse(sql: &str) -> Result<Declaration> {
         schedule: None,
         params: Vec::new(),
         returns: None,
+        rollout: None,
     };
     match kind {
         Kind::Function | Kind::Procedure => {
@@ -829,23 +835,80 @@ pub fn parse(sql: &str) -> Result<Declaration> {
                 d.exposure = list;
             }
             "with" => {
-                if !p.punct('(') || !p.eat("sprig_tier") {
-                    return Err(syntax("expected WITH (SPRIG_TIER = ...)"));
+                // `WITH (SPRIG_TIER = ..., SPRIG_ROLLOUT = n, SPRIG_ROLLOUT_BY = ...)`,
+                // in any order.
+                if !p.punct('(') {
+                    return Err(syntax(
+                        "expected WITH (SPRIG_TIER = ... | SPRIG_ROLLOUT = n)",
+                    ));
                 }
-                if !p.punct('=') {
-                    return Err(syntax("expected SPRIG_TIER = '...'"));
+                let mut pct: Option<u8> = None;
+                let mut by: Option<crate::rollout::RolloutBy> = None;
+                loop {
+                    let key = p.ident()?.to_ascii_lowercase();
+                    if !p.punct('=') {
+                        return Err(syntax(format!(
+                            "expected {} = ...",
+                            key.to_ascii_uppercase()
+                        )));
+                    }
+                    let Some(Tok::Str(val) | Tok::Word(val)) = p.next() else {
+                        return Err(syntax(format!(
+                            "{} takes a value",
+                            key.to_ascii_uppercase()
+                        )));
+                    };
+                    match key.as_str() {
+                        "sprig_tier" => {
+                            d.tier = match val.to_ascii_lowercase().as_str() {
+                                "auto" => TierPref::Auto,
+                                "mariadb" => TierPref::Mariadb,
+                                "engine" => TierPref::Engine,
+                                _ => {
+                                    return Err(syntax(
+                                        "SPRIG_TIER is 'auto', 'mariadb' or 'engine'",
+                                    ));
+                                }
+                            };
+                        }
+                        "sprig_rollout" => {
+                            let n: u8 = val
+                                .trim_end_matches('%')
+                                .parse()
+                                .ok()
+                                .filter(|n| (1..=100).contains(n))
+                                .ok_or_else(|| syntax("SPRIG_ROLLOUT is a percentage, 1 to 100"))?;
+                            pct = Some(n);
+                        }
+                        "sprig_rollout_by" => {
+                            by =
+                                Some(crate::rollout::RolloutBy::parse(&val).ok_or_else(|| {
+                                    syntax("SPRIG_ROLLOUT_BY is 'user' or 'tenant'")
+                                })?);
+                        }
+                        other => {
+                            return Err(syntax(format!(
+                                "unknown option {}: WITH takes SPRIG_TIER, SPRIG_ROLLOUT and \
+                                 SPRIG_ROLLOUT_BY",
+                                other.to_ascii_uppercase()
+                            )));
+                        }
+                    }
+                    if p.punct(')') {
+                        break;
+                    }
+                    if !p.punct(',') {
+                        return Err(syntax("expected , or )"));
+                    }
                 }
-                d.tier = match p.next() {
-                    Some(Tok::Str(v) | Tok::Word(v)) => match v.to_ascii_lowercase().as_str() {
-                        "auto" => TierPref::Auto,
-                        "mariadb" => TierPref::Mariadb,
-                        "engine" => TierPref::Engine,
-                        _ => return Err(syntax("SPRIG_TIER is 'auto', 'mariadb' or 'engine'")),
-                    },
-                    _ => return Err(syntax("SPRIG_TIER takes a string")),
-                };
-                if !p.punct(')') {
-                    return Err(syntax("expected )"));
+                // 100% is an ordinary deploy.
+                if let Some(n) = pct.filter(|n| *n < 100) {
+                    d.rollout = Some(crate::rollout::RolloutSpec {
+                        pct: n,
+                        by: by.unwrap_or_default(),
+                    });
+                } else if by.is_some() && pct.is_none() {
+                    return Err(syntax("SPRIG_ROLLOUT_BY goes with SPRIG_ROLLOUT"));
                 }
             }
             "as" => {
@@ -862,6 +925,11 @@ pub fn parse(sql: &str) -> Result<Declaration> {
         }
     }
     d.runtime = language.ok_or_else(|| syntax("LANGUAGE is missing"))?;
+    if d.rollout.is_some() && !matches!(kind, Kind::Function | Kind::Procedure) {
+        return Err(syntax(
+            "SPRIG_ROLLOUT stages functions and procedures; other kinds switch at once",
+        ));
+    }
     Ok(d)
 }
 
@@ -884,6 +952,43 @@ mod tests {
         assert!(
             parse("CREATE TRIGGER t ON QUEUE q FAN IN LANGUAGE javascript AS $$ 1 $$").is_err()
         );
+    }
+
+    #[test]
+    fn staged_rollout_options() {
+        let d = parse(
+            "CREATE OR REPLACE FUNCTION f(a INT) RETURNS INT LANGUAGE javascript \
+             WITH (SPRIG_ROLLOUT = 10, SPRIG_TIER = 'engine', SPRIG_ROLLOUT_BY = 'tenant') AS $$ return a; $$",
+        )
+        .unwrap();
+        assert_eq!(
+            d.rollout,
+            Some(crate::rollout::RolloutSpec {
+                pct: 10,
+                by: crate::rollout::RolloutBy::Tenant
+            })
+        );
+        assert_eq!(d.tier, TierPref::Engine);
+        let d = parse(
+            "CREATE FUNCTION f() LANGUAGE lua WITH (SPRIG_ROLLOUT = '25%') AS $$ return 1 $$",
+        )
+        .unwrap();
+        assert_eq!(d.rollout.unwrap().pct, 25);
+        assert_eq!(d.rollout.unwrap().by, crate::rollout::RolloutBy::User);
+        // 100% is an ordinary deploy.
+        let d =
+            parse("CREATE FUNCTION f() LANGUAGE lua WITH (SPRIG_ROLLOUT = 100) AS $$ return 1 $$")
+                .unwrap();
+        assert!(d.rollout.is_none());
+        for bad in [
+            "CREATE FUNCTION f() LANGUAGE lua WITH (SPRIG_ROLLOUT = 0) AS $$ 1 $$",
+            "CREATE FUNCTION f() LANGUAGE lua WITH (SPRIG_ROLLOUT = 10, SPRIG_ROLLOUT_BY = 'row') AS $$ 1 $$",
+            "CREATE FUNCTION f() LANGUAGE lua WITH (SPRIG_ROLLOUT_BY = 'user') AS $$ 1 $$",
+            "CREATE FUNCTION f() LANGUAGE lua WITH (SPRIG_COLOUR = 'red') AS $$ 1 $$",
+            "CREATE VALIDATION v ON t FOR INSERT LANGUAGE kirun WITH (SPRIG_ROLLOUT = 5) AS '{}'",
+        ] {
+            assert!(parse(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

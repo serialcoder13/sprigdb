@@ -261,8 +261,9 @@ impl Host for GwHost<'_> {
         let lctn = self.lctn();
         let db_key = database_key(db_name, lctn);
         let name_key = object_key(ObjectKind::Table, name, lctn);
-        // Chapter 29 (RL36): `FROM STREAM t.changes` exports table t's rows:
-        // SELECT on t and its policies decide, as for `CHANGES OF t`.
+        // Chapter 29 (RL36, RL44): `FROM STREAM t.changes` exports table t's
+        // rows: SELECT on t decides; when t's policies bind the owner, the
+        // worker delivers only the records they show (rls_filter).
         if let Some(row) = self.cat.database(&db_key)
             && let Some(st) = self
                 .cat
@@ -271,7 +272,7 @@ impl Host for GwHost<'_> {
             && let Some(def) = st.get(row.db_id, name, lctn)
             && def.kind == sprig_streams::model::StreamKind::Changes
         {
-            return crate::tenant::rls_streams::change_topic_readable(
+            return crate::tenant::rls_streams::change_topic_access(
                 g.as_ref(),
                 &self.cat,
                 def,
@@ -280,26 +281,11 @@ impl Host for GwHost<'_> {
             )
             .is_ok();
         }
-        // Chapter 29: a sink would export a table whose policies bind the
-        // session unfiltered: refused.
-        if let Some(row) = self.cat.database(&db_key)
-            && let Some(o) = self.cat.object(
-                row.db_id,
-                sprig_catalog::store::Namespace::Relation,
-                &name_key,
-            )
-            && g.row_filter(
-                Target::Object {
-                    db_key: &db_key,
-                    db: row.db_id,
-                    object: o.object_id,
-                },
-                Action::Select,
-            )
-            .is_some()
-        {
-            return false;
-        }
+        // Chapter 29 (RLS round 5, RL50): a table's rows reach a sink only
+        // through its change topic (`CHANGES OF t`), which the worker
+        // filters batch by batch for the owner while t's policies bind it
+        // (sprig_sinks::rls_filter); SELECT on t decides, as for any
+        // reader. Before, a bound owner was refused (RL14).
         g.allows(
             Action::Select,
             Target::Named {
@@ -779,6 +765,10 @@ impl PassSession {
         tracing::debug!(statement = %logged.chars().take(300).collect::<String>(), "sink statement");
         // R9 (r9more): FOR EACH TENANT connections and sinks, and the
         // overrides of inherited ones.
+        // Boxing this call (clippy's large_futures, 16,416 bytes) makes the
+        // compiler's Send check of the session's future overflow its
+        // recursion limit through sprig-sinks' TEST SINK types.
+        #[allow(clippy::large_futures)]
         let handled = match self.inherit_sinks(sql, &cat).await {
             Ok(Some(h)) => Ok(h),
             Err(e) => Err(e),

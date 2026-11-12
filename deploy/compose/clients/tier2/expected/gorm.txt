@@ -1,0 +1,3 @@
+# GORM v1.31.0 (gorm.io/gorm/tests): tests that pass on MySQL 8.4.11 and not through 3306.
+# Measured 12 Nov 2026 (R4 round 5, r4five): none. Both 392 pass, 2 fail
+# (TestTableType, TestRow fail on MySQL 8.4.11 too), 14 skip.

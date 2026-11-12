@@ -113,6 +113,11 @@ pub trait DbBridge: Send + Sync {
     /// # Errors
     /// The statement's error, as a client would get it (1142, 1062, ...).
     async fn exec(&self, op: DbOp) -> Result<Reply>;
+
+    /// One log line of the code (`console.log`, `ctx.log`, Lua `log`).
+    /// Hosts that report a run's logs keep them (a test run, R7
+    /// follow-ups); the default drops them (they also go to tracing).
+    fn log(&self, _line: &str) {}
 }
 
 /// A bridge with no data: every call fails with 39862 (code that reaches

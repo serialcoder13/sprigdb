@@ -774,7 +774,7 @@ pub async fn publish_into(
     mandatory: bool,
 ) -> Result<u32> {
     let t = tchain.member();
-    ensure_vhost(svc, tchain, db, Cause::Publish).await?;
+    Box::pin(ensure_vhost(svc, tchain, db, Cause::Publish)).await?;
     let engine = svc
         .mq
         .get()
@@ -838,7 +838,7 @@ pub async fn deliver_outbox(
     rows: &[OutboxRow],
 ) -> Result<()> {
     let t = tchain.member();
-    ensure_vhost(svc, tchain, db, Cause::Publish).await?;
+    Box::pin(ensure_vhost(svc, tchain, db, Cause::Publish)).await?;
     let engine = svc
         .mq
         .get()
@@ -1110,7 +1110,7 @@ impl InheritVhost {
                 let (tid, tname, tchain) =
                     resolve_target(&svc, me, &target, &db, kind, &name).await?;
                 let m = stamp(&m, &key, &tname, &origin).map_err(|e| sql_mq(&e))?;
-                ensure_vhost(&svc, &tchain, &db, Cause::Publish).await?;
+                Box::pin(ensure_vhost(&svc, &tchain, &db, Cause::Publish)).await?;
                 let engine = svc.mq.get().cloned().ok_or_else(|| {
                     super::unavailable("the queue engine isn't running on this gateway")
                 })?;
@@ -1495,7 +1495,7 @@ pub async fn wrap_vhost(
     if defs_in(&chain, db).is_empty() && declared_in(&chain, db).is_empty() {
         return Ok(inner);
     }
-    ensure_vhost(svc, &chain, db, Cause::Declare)
+    Box::pin(ensure_vhost(svc, &chain, db, Cause::Declare))
         .await
         .map_err(|e| mq_err(&e))?;
     Ok(Arc::new(InheritVhost::new(
@@ -1518,7 +1518,7 @@ pub async fn before_open(svc: &Arc<TenantServices>, t: TenantId, db: &str) {
             return Ok(());
         }
         let chain = super::chain(svc, &cat).await?;
-        ensure_vhost(svc, &chain, db, Cause::Declare)
+        Box::pin(ensure_vhost(svc, &chain, db, Cause::Declare))
             .await
             .map(|_| ())
     }

@@ -49,6 +49,9 @@ pub struct TypesSession {
     /// A plan's own statement is running: no type planning, reserved
     /// names allowed.
     pub internal: bool,
+    /// The running internal statement is chapter 32's own: chapter 42's
+    /// layer still applies to it (typed tables in inheritance groups).
+    pub typed_plan: bool,
     /// `SET @sprig_inheritance = 'only'`.
     pub inheritance_only: bool,
 }
@@ -165,10 +168,12 @@ impl PassSession {
                 cx,
                 wire,
                 migrated,
+                typed: true,
             };
             let h = sprig_types::handle(sql, state, &ctx, &mut runner).await;
             if let Some(ts) = runner.sess.tenant.as_deref_mut() {
                 ts.types.internal = false;
+                ts.types.typed_plan = false;
             }
             h
         };
@@ -186,7 +191,10 @@ impl PassSession {
         };
         match handled {
             Ok(Handled::NotTyped) => Ok(None),
-            Err(e) => Ok(Some(self.fail(out, &e).await?)),
+            Err(e) => {
+                let e = sprig_types::map_error(state, &e).unwrap_or(e);
+                Ok(Some(self.fail(out, &e).await?))
+            }
             Ok(Handled::Inheritance(v)) => {
                 if let Some(ts) = self.tenant.as_deref_mut() {
                     ts.types.inheritance_only = v == Some(true);
@@ -210,12 +218,18 @@ impl PassSession {
             Ok(Handled::Forward { sql, meta }) => {
                 if let Some(ts) = self.tenant.as_deref_mut() {
                     ts.types.internal = true;
+                    ts.types.typed_plan = true;
                 }
-                let mut sink = MetaSink { inner: out, meta };
+                let mut sink = MetaSink {
+                    inner: out,
+                    meta,
+                    types: state,
+                };
                 let text = Bytes::from(sql.into_bytes());
                 let r = Box::pin(self.tenant_text(cx, &text, attrs, more, format, &mut sink)).await;
                 if let Some(ts) = self.tenant.as_deref_mut() {
                     ts.types.internal = false;
+                    ts.types.typed_plan = false;
                 }
                 r.map(Some)
             }
@@ -253,6 +267,9 @@ pub(super) struct GwRunner<'s, 'c, 'x> {
     pub(super) cx: &'c mut ExecCtx<'x>,
     pub(super) wire: Wire,
     pub(super) migrated: bool,
+    /// Statements of chapter 32's plans ([`TypesSession::typed_plan`]),
+    /// not chapter 42's.
+    pub(super) typed: bool,
 }
 
 impl GwRunner<'_, '_, '_> {
@@ -267,6 +284,7 @@ impl GwRunner<'_, '_, '_> {
         };
         if let Some(ts) = self.sess.tenant.as_deref_mut() {
             ts.types.internal = true;
+            ts.types.typed_plan = self.typed;
         }
         let text = Bytes::copy_from_slice(sql.as_bytes());
         let attrs = QueryAttrs::default();
@@ -281,9 +299,14 @@ impl GwRunner<'_, '_, '_> {
         .await;
         if let Some(ts) = self.sess.tenant.as_deref_mut() {
             ts.types.internal = false;
+            ts.types.typed_plan = false;
+        }
+        if let Err(e) = &r {
+            tracing::debug!(sql, code = e.protocol().mysql_errno, message = %e.message, typed = self.typed, "plan statement failed");
         }
         r?;
         if let Some(e) = sink.error.take() {
+            tracing::debug!(sql, code = e.protocol().mysql_errno, message = %e.message, typed = self.typed, "plan statement failed");
             return Err(e);
         }
         Ok(sink)
@@ -339,6 +362,48 @@ impl Runner for GwRunner<'_, '_, '_> {
         Ok(cat
             .object(d.db_id, Namespace::Relation, &key)
             .map(|o| (d.db_id, o.object_id)))
+    }
+
+    async fn tree_inheritable(&mut self, db: Option<&str>, root: &str) -> Result<bool> {
+        let current = self.sess.current_logical();
+        let Some(ts) = self.sess.tenant.as_deref_mut() else {
+            return Err(SprigError::internal("no tenant"));
+        };
+        let lctn = ts.lower_case_table_names();
+        let cat = ts.refresh().await?;
+        let Some(name) = db.map(str::to_owned).or(current) else {
+            return Ok(false);
+        };
+        let Some(d) = cat.database(&database_key(&name, lctn)) else {
+            return Ok(false);
+        };
+        Ok(cat
+            .ext
+            .get::<sprig_inherit::InheritState>(sprig_inherit::MODULE)
+            .is_some_and(|s| s.object_named_ci(d.db_id, root).is_some()))
+    }
+
+    async fn tree_changed(&mut self, db: Option<&str>, root: &str, key: &[String]) -> Result<()> {
+        if !self.tree_inheritable(db, root).await? {
+            return Ok(());
+        }
+        let table = match db {
+            Some(d) => format!(
+                "{}.{}",
+                sprig_common::names::quote(d),
+                sprig_common::names::quote(root)
+            ),
+            None => sprig_common::names::quote(root),
+        };
+        let keys: Vec<String> = key.iter().map(|k| sprig_common::names::quote(k)).collect();
+        // Through chapter 42 (a type plan's statement): the tree's new
+        // tables become inheritable and new columns get field slots.
+        self.exec(&format!(
+            "ALTER TABLE {table} SPRIG INHERITABLE KEY ({})",
+            keys.join(", ")
+        ))
+        .await
+        .map(|_| ())
     }
 
     async fn commit_types(&mut self, change: &TypesChange) -> Result<()> {
@@ -468,6 +533,8 @@ impl ResultSink for Collect {
 struct MetaSink<'a> {
     inner: &'a mut dyn ResultSink,
     meta: Vec<MetaRename>,
+    /// For [`sprig_types::map_error`].
+    types: Option<&'a TypesState>,
 }
 
 impl MetaSink<'_> {
@@ -539,7 +606,10 @@ impl ResultSink for MetaSink<'_> {
     }
 
     async fn error(&mut self, err: &SprigError) -> Result<()> {
-        self.inner.error(err).await
+        match sprig_types::map_error(self.types, err) {
+            Some(e) => self.inner.error(&e).await,
+            None => self.inner.error(err).await,
+        }
     }
 
     async fn column_list(&mut self, columns: &[ColumnDef], end: EndOfRows) -> Result<()> {

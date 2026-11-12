@@ -55,6 +55,7 @@ pub mod ctx;
 pub mod env;
 pub mod fabric;
 pub mod glob;
+pub mod keyspace;
 pub mod logic;
 pub mod lua;
 pub mod pubsub;

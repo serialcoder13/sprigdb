@@ -46,12 +46,13 @@ export function origin(t: Obj): string {
 }
 
 /** Shares grouped by name: one share covers every table of its group. */
-export function sharesByName(rows: Obj[]): { name: string; role: string; tables: string[]; to: string }[] {
-  const out = new Map<string, { name: string; role: string; tables: string[]; to: string }>();
+export function sharesByName(rows: Obj[]): { name: string; role: string; tables: string[]; from: string; to: string }[] {
+  const out = new Map<string, { name: string; role: string; tables: string[]; from: string; to: string }>();
   for (const r of rows) {
     const key = `${r.Role ?? ''}:${r.Share ?? ''}`;
-    const e = out.get(key) ?? { name: r.Share ?? '', role: r.Role ?? '', tables: [], to: r.To ?? '' };
+    const e = out.get(key) ?? { name: r.Share ?? '', role: r.Role ?? '', tables: [], from: r.From ?? '', to: r.To ?? '' };
     if (r.Object && !e.tables.includes(r.Object)) e.tables.push(r.Object);
+    e.tables.sort();
     out.set(key, e);
   }
   return [...out.values()];

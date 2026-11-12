@@ -134,6 +134,47 @@ pub trait Host: Send {
     fn allowed(&self, p: Privilege, db_name: &str, object: Option<ObjectId>, name: &str) -> bool;
     /// Whether the authorization engine filters `object`'s rows for reads.
     fn row_filtered(&self, db_name: &str, object: ObjectId) -> bool;
+    /// Chapter 29 (RLS round 5, RL47): makes change topic `def`'s filter
+    /// view (`__sprig_scf_<id>`, in its log schema) current, for a view or
+    /// stored code that reads the topic. By default 39366: such
+    /// definitions are refused (RL38).
+    ///
+    /// # Errors
+    /// 39366; the backend's.
+    async fn change_view(&mut self, def: &StreamDef) -> Result<()> {
+        Err(SprigError::new(
+            SprigCode::RlsUnsupported,
+            format!(
+                "ER_SPRIG_RLS_UNSUPPORTED: views and stored code can't read change topic '{}' \
+                 here: its readers would get the table's rows without its row-level security",
+                def.name
+            ),
+        ))
+    }
+    /// Chapter 29 (RLS round 5, RL44): how change topic `def`'s records are
+    /// filtered for this session when [`Host::row_filtered`] says its
+    /// table's rows are: `None` when the session may read them all after
+    /// all. By default 39366: a host that can't render the session's
+    /// policies refuses the topic.
+    ///
+    /// # Errors
+    /// 39366; the backend's.
+    async fn change_filter(
+        &mut self,
+        db_name: &str,
+        def: &StreamDef,
+    ) -> Result<Option<read::RecordFilter>> {
+        let _ = db_name;
+        Err(SprigError::new(
+            SprigCode::RlsUnsupported,
+            format!(
+                "ER_SPRIG_RLS_UNSUPPORTED: the authorization engine filters rows of '{}', which \
+                 change topic '{}' can't apply here",
+                def.source_name.as_deref().unwrap_or_default(),
+                def.name
+            ),
+        ))
+    }
     /// Settings for statements on `db`.
     fn settings(&self, db: DbId) -> StmtSettings;
     /// Whether `stream.change_topic` is on for table `object` of `db`.
@@ -318,7 +359,7 @@ pub async fn handle(sql: &str, cx: &Ctx<'_>, host: &mut dyn Host) -> Result<Hand
             }
             Ok(Handled::NotStream)
         }
-        Stmt::Other => select(sql, cx, host),
+        Stmt::Other => select(sql, cx, host).await,
     }
 }
 
@@ -706,7 +747,7 @@ fn publish(
     })
 }
 
-fn select(sql: &str, cx: &Ctx<'_>, host: &mut dyn Host) -> Result<Handled> {
+async fn select(sql: &str, cx: &Ctx<'_>, host: &mut dyn Host) -> Result<Handled> {
     if cx.state.is_empty() {
         return Ok(Handled::NotStream);
     }
@@ -715,14 +756,15 @@ fn select(sql: &str, cx: &Ctx<'_>, host: &mut dyn Host) -> Result<Handled> {
         return Ok(Handled::NotStream);
     }
     let mut found: BTreeMap<(String, String), std::sync::Arc<StreamDef>> = BTreeMap::new();
-    {
+    let r = {
+        let h: &dyn Host = &*host;
         let lookup = |db: Option<&str>, name: &str| -> Option<StreamId> {
             let q = QName {
                 db: db.map(str::to_owned),
                 name: name.to_owned(),
                 range: 0..0,
             };
-            stream_of(cx, &*host, &q).map(|(_, s)| s.id)
+            stream_of(cx, h, &q).map(|(_, s)| s.id)
         };
         let Some(r) = read::rewrite_select(sql, &cx.lex, &lookup)? else {
             return Ok(Handled::NotStream);
@@ -733,60 +775,83 @@ fn select(sql: &str, cx: &Ctx<'_>, host: &mut dyn Host) -> Result<Handled> {
                 name: name.clone(),
                 range: 0..0,
             };
-            if let Some((d, s)) = stream_of(cx, &*host, &q) {
+            if let Some((d, s)) = stream_of(cx, h, &q) {
                 found.insert((d, s.name.clone()), s);
             }
         }
-        // Chapter 29 (RL38): a view, routine, trigger or event over a change
-        // topic would read the log with its definer's rights, so its
-        // readers would get the table's rows without the table's policies
-        // (and without SELECT on it): refused for every user.
-        let defines = ids
-            .first()
-            .is_some_and(|w| w.eq_ignore_ascii_case("CREATE") || w.eq_ignore_ascii_case("ALTER"));
-        if defines && let Some(s) = found.values().find(|s| s.kind == StreamKind::Changes) {
-            return Err(SprigError::new(
-                SprigCode::RlsUnsupported,
-                format!(
-                    "ER_SPRIG_RLS_UNSUPPORTED: views and stored code can't read change topic \
-                     '{}': its readers would get the table's rows without its row-level \
-                     security; read the topic directly",
-                    s.name
-                ),
-            ));
-        }
-        // Privileges, and the row-level hook for change topics.
-        for ((db, _), s) in &found {
-            match (s.kind, s.source_object) {
-                (StreamKind::Changes, Some(o)) => {
-                    let src = s.source_name.clone().unwrap_or_default();
-                    if !host.allowed(Privilege::Select, db, Some(o), &src) {
-                        return Err(denied(&*host, Privilege::Select, &s.name));
-                    }
-                    if host.row_filtered(db, o) {
-                        return Err(SprigError::new(
-                            SprigCode::RlsUnsupported,
-                            format!(
-                                "ER_SPRIG_RLS_UNSUPPORTED: the authorization engine filters rows of \
-                                 '{src}', which change topic '{}' can't apply yet",
-                                s.name
-                            ),
-                        ));
-                    }
+        r
+    };
+    // Chapter 29 (RL38, RL47): a view, routine, trigger or event over a
+    // change topic would read the log with its definer's rights, so its
+    // readers would get the table's rows without the table's policies: it
+    // reads the topic's filter view instead, which applies each reader's
+    // own policies (the host deploys it; a host that can't refuses).
+    let defines = ids
+        .first()
+        .is_some_and(|w| w.eq_ignore_ascii_case("CREATE") || w.eq_ignore_ascii_case("ALTER"));
+    // Privileges, and the row-level filter for change topics (RL44: a
+    // session the table's policies bind reads the records whose images
+    // they show).
+    let mut filters = std::collections::HashMap::new();
+    for ((db, _), s) in &found {
+        match (s.kind, s.source_object) {
+            (StreamKind::Changes, Some(o)) => {
+                let src = s.source_name.clone().unwrap_or_default();
+                if !host.allowed(Privilege::Select, db, Some(o), &src) {
+                    return Err(denied(&*host, Privilege::Select, &s.name));
                 }
-                _ => {
-                    if !host.allowed(Privilege::Select, db, None, &s.name) {
-                        return Err(denied(&*host, Privilege::Select, &s.name));
-                    }
+                if !defines
+                    && host.row_filtered(db, o)
+                    && let Some(f) = host.change_filter(db, s).await?
+                {
+                    filters.insert(s.id, f);
+                }
+            }
+            _ => {
+                if !host.allowed(Privilege::Select, db, None, &s.name) {
+                    return Err(denied(&*host, Privilege::Select, &s.name));
                 }
             }
         }
-        Ok(Handled::Forward {
+    }
+    if defines {
+        let mut sql = r.sql;
+        for s in found.values().filter(|s| s.kind == StreamKind::Changes) {
+            host.change_view(s).await?;
+            sql = sql.replace(
+                &sprig_common::names::quote(&crate::model::log_table(s.id)),
+                &sprig_common::names::quote(&format!("__sprig_scf_{}", s.id.0)),
+            );
+        }
+        return Ok(Handled::Forward {
+            sql,
+            write: false,
+            compact: false,
+        });
+    }
+    if filters.is_empty() {
+        return Ok(Handled::Forward {
             sql: r.sql,
             write: false,
             compact: false,
-        })
+        });
     }
+    let h: &dyn Host = &*host;
+    let lookup = |db: Option<&str>, name: &str| -> Option<StreamId> {
+        let q = QName {
+            db: db.map(str::to_owned),
+            name: name.to_owned(),
+            range: 0..0,
+        };
+        stream_of(cx, h, &q).map(|(_, s)| s.id)
+    };
+    let r = read::rewrite_select_filtered(sql, &cx.lex, &lookup, &filters)?
+        .ok_or_else(|| SprigError::internal("a stream read that no longer parses"))?;
+    Ok(Handled::Forward {
+        sql: r.sql,
+        write: false,
+        compact: false,
+    })
 }
 
 /// Makes table `table` of `db`'s change topic match its effective

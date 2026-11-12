@@ -471,6 +471,7 @@ impl MemData {
                 value: r.value,
                 headers: r.headers,
                 leader_epoch: part.epoch,
+                filtered: false,
             });
         }
     }

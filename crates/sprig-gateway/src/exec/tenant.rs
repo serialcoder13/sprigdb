@@ -406,6 +406,15 @@ impl PassSession {
         if let Some(db) = ts.map().logical(schema) {
             return Some(db.name.clone());
         }
+        // R4 round 5: after `USE performance_schema` or `USE sys` on 3306
+        // the backend sits in `information_schema` (see `tenant_init_db`).
+        if self.persona == Persona::MySql84
+            && schema.eq_ignore_ascii_case("information_schema")
+            && let Some(s) = ts.current.as_deref().and_then(SystemSchema::parse)
+            && matches!(s, SystemSchema::PerformanceSchema | SystemSchema::Sys)
+        {
+            return Some(s.as_str().to_owned());
+        }
         SystemSchema::parse(schema).map(|s| s.as_str().to_owned())
     }
 
@@ -564,6 +573,19 @@ impl PassSession {
         {
             return Ok(step);
         }
+        // Chapter 41: `DROP` of logic modules (R7 follow-ups); a DROP that
+        // names no logic module goes on as DDL.
+        if self
+            .tenant
+            .as_deref()
+            .is_some_and(|ts| !ts.principal.must_change_password)
+            && let Some(d) = sprig_logic::drop::parse(&String::from_utf8_lossy(text))
+        {
+            let s = status(self.status());
+            if let Some(step) = Box::pin(self.tenant_logic_drop(cx, d, s, out)).await? {
+                return Ok(step);
+            }
+        }
         let charset = cx.proto.collation;
         let previous_warnings = self.tenant.as_deref_mut().and_then(|ts| ts.warnings.take());
         let Some(ts) = self.tenant.as_deref_mut() else {
@@ -575,6 +597,10 @@ impl PassSession {
         // Chapter 37: `Functions.Call` over HTTP and gRPC (R7 order 6).
         if !sandbox && let Some(req) = sprig_logic::invoke::FunctionCall::parse(text) {
             return self.tenant_function_call(cx, req, more, format, out).await;
+        }
+        // Chapter 41: `Logic.TestRun` and `TEST FUNCTION ...` (R7 follow-ups).
+        if !sandbox && let Some(req) = sprig_logic::testrun::parse_statement(text) {
+            return self.tenant_test_run(cx, req, more, format, out).await;
         }
         // Chapter 41: `CREATE FUNCTION | PROCEDURE ... LANGUAGE kirun |
         // javascript` compiles and deploys through `sprig-logic` (R7).
@@ -950,6 +976,21 @@ impl PassSession {
                 return self.fail(out, &e).await;
             }
         };
+        // Chapter 31's rule for stored bodies (chapter 28 step 12, R4
+        // round 5): a body writing a collection fails with 39602.
+        if let Some(e) = self.stored_collection_write(text, lex) {
+            return self.fail(out, &e).await;
+        }
+        // 3306: `USE performance_schema` and `USE sys` (gaps row 68, R4
+        // round 5): see `tenant_init_db`.
+        let use_owned;
+        let text: &Bytes = match self.use_system_schema(text, lex) {
+            Some(t) => {
+                use_owned = t;
+                &use_owned
+            }
+            None => text,
+        };
         // 3306: `performance_schema` and `sys` (chapter 28 step 13, R4
         // round 4), before the name layer scopes their PROCESSLIST.
         let ps_owned;
@@ -1045,6 +1086,11 @@ impl PassSession {
         if let Some(step) = Box::pin(self.tenant_msg_trigger(cx, text, more, out)).await? {
             return Ok(step);
         }
+        // Chapter 29 (RLS round 5): an image check for a change stream or a
+        // keyspace notification (from this process only).
+        if let Some(step) = Box::pin(self.tenant_rls_images(cx, text, more, out)).await? {
+            return Ok(step);
+        }
         if let Some(step) = Box::pin(self.tenant_offsets(cx, text, more, out)).await? {
             return Ok(step);
         }
@@ -1069,9 +1115,12 @@ impl PassSession {
             return Ok(step);
         }
         // Chapter 42: spaces, shares and merged views of inheritable
-        // objects (before chapter 32, which never sees them).
+        // objects. A statement naming a typed table goes to chapter 32
+        // first, whose plan's statements come back through chapter 42
+        // (typed tables in inheritance groups).
+        let mut deferred = false;
         if let Some(step) = self
-            .tenant_inherit(cx, text, attrs, more, format, &cat, out)
+            .tenant_inherit(cx, text, attrs, more, format, &cat, out, false, &mut deferred)
             .await?
         {
             return Ok(step);
@@ -1080,6 +1129,15 @@ impl PassSession {
         if let Some(step) = self
             .tenant_types(cx, text, attrs, more, format, &cat, out)
             .await?
+        {
+            return Ok(step);
+        }
+        // Chapter 42 again for what it left to chapter 32 and chapter 32
+        // didn't take.
+        if deferred
+            && let Some(step) = self
+                .tenant_inherit(cx, text, attrs, more, format, &cat, out, true, &mut deferred)
+                .await?
         {
             return Ok(step);
         }
@@ -1430,7 +1488,7 @@ impl PassSession {
             }
         }
         if let Some(target) = &sp.info.ddl {
-            return self.ddl(cx, &sp, target, original, s, out).await;
+            return Box::pin(self.ddl(cx, &sp, target, original, s, out)).await;
         }
         if is_ddl_kind(sp.info.kind) && !sp.info.nested_ddl {
             return Ok(Route::Done(self.fail(out, &ddl_unsupported()).await?));
@@ -1584,11 +1642,22 @@ impl PassSession {
         // database's cross-tenant outbox are forwarded first (39245 when
         // they can't be within inherit.outbox_drain_seconds).
         if let DdlStatement::DropDatabase { name, .. } = &stmt
-            && let Err(e) =
-                crate::inherited::outbox::before_drop_database(&svc, tenant, name, lctn).await
+            && let Err(e) = Box::pin(crate::inherited::outbox::before_drop_database(
+                &svc, tenant, name, lctn,
+            ))
+            .await
         {
             return Ok(Route::Done(self.fail(out, &e).await?));
         }
+        // bugfix-34: the database's sinks, connections and logic modules
+        // go with it once the drop has published.
+        let db_drop = match &stmt {
+            DdlStatement::DropDatabase { name, .. } => self
+                .tenant
+                .as_deref()
+                .and_then(|ts| super::dropdb::DbDrop::before(ts, name, lctn)),
+            _ => None,
+        };
         let ctl_pool = ctl.clone();
         let ctl = MariaExecutor::new(ctl);
         let req = DdlRequest {
@@ -1688,10 +1757,15 @@ impl PassSession {
         }
         match result {
             Ok(outcome) => {
+                let sinks_version = match (db_drop, outcome.version) {
+                    (Some(d), Some(v)) => Box::pin(d.after(&svc, v)).await,
+                    _ => None,
+                };
                 if let Some(ts) = self.tenant.as_deref_mut() {
                     // An `IF [NOT] EXISTS` no-op names the version it read
                     // (decision PF6), so the next statement sees what it saw.
                     ts.changed(outcome.version.or(outcome.seen));
+                    ts.changed(sinks_version);
                     if !outcome.notes.is_empty() {
                         ts.warnings = Some(
                             outcome
@@ -1942,6 +2016,98 @@ impl PassSession {
         })
     }
 
+    /// A text `USE` of a system schema on 3306: `performance_schema` and
+    /// `sys` become `USE information_schema` on the backend, as at login
+    /// (`tenant_init_db`), with the name the client gave kept as the
+    /// session's current database; `information_schema` is recorded so
+    /// the two don't mix up. `None` for any other statement.
+    fn use_system_schema(&mut self, text: &[u8], lex: sprig_sql::lex::LexOptions) -> Option<Bytes> {
+        if self.persona != Persona::MySql84 {
+            return None;
+        }
+        let head = text.trim_ascii_start();
+        if !head
+            .get(..3)
+            .is_some_and(|w| w.eq_ignore_ascii_case(b"USE"))
+        {
+            return None;
+        }
+        let toks: Vec<sprig_sql::lex::Token> = sprig_sql::lex::lex(text, &lex)
+            .ok()?
+            .into_iter()
+            .filter(|t| !t.kind.is_trivia())
+            .collect();
+        let n = toks.len() - usize::from(toks.last().is_some_and(|t| t.bytes(text) == b";"));
+        if n != 2 || !toks[1].kind.is_ident_like() {
+            return None;
+        }
+        let name =
+            String::from_utf8_lossy(&sprig_sql::lex::ident_value(toks[1].bytes(text))).into_owned();
+        let s = SystemSchema::parse(&name)?;
+        let ts = self.tenant.as_deref_mut()?;
+        ts.current = Some(s.as_str().to_owned());
+        matches!(s, SystemSchema::PerformanceSchema | SystemSchema::Sys)
+            .then(|| Bytes::from_static(b"USE information_schema"))
+    }
+
+    /// 39602 when `text` creates a procedure, function, trigger or event
+    /// whose body writes a collection (chapter 31: MariaDB would run the
+    /// write without the gateway's document path), resolved in the
+    /// session's snapshot; both ports.
+    fn stored_collection_write(
+        &self,
+        text: &[u8],
+        lex: sprig_sql::lex::LexOptions,
+    ) -> Option<SprigError> {
+        let ts = self.tenant.as_deref()?;
+        let cat = ts.catalog()?;
+        let head = text.trim_ascii_start();
+        let starts = |w: &[u8]| {
+            head.get(..w.len())
+                .is_some_and(|h| h.eq_ignore_ascii_case(w))
+        };
+        if !(starts(b"CREATE") || starts(b"ALTER")) {
+            return None;
+        }
+        let targets = sprig_sql::compat::stored::write_targets(text, &lex);
+        if targets.is_empty() {
+            return None;
+        }
+        let current = self.current_logical();
+        let lctn = ts.lower_case_table_names();
+        let key = |n: &str| sprig_catalog::ddl::database_key(n, lctn);
+        for (db, table) in targets {
+            let Some(db) = db.or_else(|| current.clone()) else {
+                continue;
+            };
+            let Some(row) = cat.database(&key(&db)) else {
+                continue;
+            };
+            // Chapter 31's collections live in the doc module's state.
+            let is_collection = cat
+                .ext
+                .get::<crate::mongo::catalog::DocState>(crate::mongo::catalog::MODULE)
+                .is_some_and(|d| {
+                    d.of(row.db_id.0).any(|m| {
+                        if lctn {
+                            m.table.eq_ignore_ascii_case(&table)
+                        } else {
+                            m.table == table
+                        }
+                    })
+                });
+            if is_collection {
+                let e = sprig_sql::compat::stored::collection_write_error(
+                    text,
+                    &lex,
+                    &format!("{db}.{table}"),
+                );
+                return Some(SprigError::standard(e.code, e.sqlstate, e.message));
+            }
+        }
+        None
+    }
+
     /// `USE` at login and `COM_INIT_DB` for a tenant session: the logical
     /// name's schema (1049 for a name the tenant doesn't have, after one
     /// writer reload); a system schema by its own name.
@@ -1954,7 +2120,17 @@ impl PassSession {
         }
         ts.refresh().await?;
         let schema = if let Some(s) = SystemSchema::parse(name) {
-            s.as_str().to_owned()
+            // R4 round 5 (gaps row 68): on 3306 the gateway answers
+            // `performance_schema` and `sys`, so `USE` of either succeeds
+            // as on MySQL; the backend, where the tenant's account has no
+            // rights there, sits in `information_schema` meanwhile.
+            if self.persona == Persona::MySql84
+                && matches!(s, SystemSchema::PerformanceSchema | SystemSchema::Sys)
+            {
+                "information_schema".to_owned()
+            } else {
+                s.as_str().to_owned()
+            }
         } else {
             let lookup = |ts: &crate::tenant::session::TenantSession| {
                 let key = if ts.lower_case_table_names() {

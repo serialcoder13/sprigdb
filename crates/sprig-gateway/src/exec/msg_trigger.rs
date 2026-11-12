@@ -237,9 +237,11 @@ impl PassSession {
                 if !allows(sprig_auth::authz::Action::Select, &sdb, &def.name) {
                     return Err(denied(ts, "SELECT", &sdb, &def.name));
                 }
-                // Chapter 29 (RL36): a change topic carries its table's rows,
-                // so its table's SELECT and policies decide, not the name's.
-                crate::tenant::rls_streams::change_topic_readable(
+                // Chapter 29 (RL36, RL44): a change topic carries its table's
+                // rows, so its table's SELECT decides, not the name's; when
+                // the table's policies bind the definer, each run gets only
+                // the records they show.
+                crate::tenant::rls_streams::change_topic_access(
                     grants.as_ref(),
                     &cat,
                     &def,
@@ -401,16 +403,18 @@ impl PassSession {
             );
             return Ok(Some(self.fail(out, &e).await?));
         };
-        let reply = if let Some(r) = self.change_topic_guard(&req).await {
+        let guard = self.change_topic_guard(&req).await;
+        let reply = if let Err(r) = guard {
             // Chapter 29 (RL36): the definer may no longer read the change
-            // topic's table (a policy, role or grant change since deploy):
-            // the trigger waits, its records neither run nor dead-letter.
+            // topic's table (a grant change since deploy): the trigger
+            // waits, its records neither run nor dead-letter.
             r
         } else if let Some(rp) = &req.replay {
             // RC11: a dead letter's replay.
             self.run_replay(cx, &req, rp).await
         } else if req.record.is_some() {
-            self.run_stream_trigger(cx, &req).await
+            let filter = guard.ok().flatten();
+            self.run_stream_trigger(cx, &req, filter.as_deref()).await
         } else {
             self.run_queue_trigger(cx, &req).await
         };
@@ -451,44 +455,83 @@ impl PassSession {
         }))
     }
 
-    /// Chapter 29 (RL36): a trigger on a change topic runs only while its
-    /// definer (this session) may read the topic's table unfiltered:
-    /// `SELECT` on the table and no policy binding the definer. Otherwise a
-    /// transient failure, so the runner retries with backoff and the record
-    /// is neither run nor dead-lettered. `None` to go on.
-    async fn change_topic_guard(&mut self, req: &RunRequest) -> Option<RunReply> {
+    /// Chapter 29 (RL36, RL44): a trigger on a change topic runs while its
+    /// definer (this session) may `SELECT` the topic's table; otherwise a
+    /// transient failure (`Err`), so the runner retries with backoff and
+    /// the record is neither run nor dead-lettered. `Ok(Some(topic))`
+    /// (`` `db`.`t.changes` ``) when the table's policies bind the definer:
+    /// the run reads its record through the topic's filter.
+    async fn change_topic_guard(
+        &mut self,
+        req: &RunRequest,
+    ) -> std::result::Result<Option<String>, RunReply> {
         if req.source.kind != SourceKind::Stream || req.instance_tenant != 0 {
-            return None;
+            return Ok(None);
         }
-        let ts = self.tenant.as_deref_mut()?;
+        let Some(ts) = self.tenant.as_deref_mut() else {
+            return Ok(None);
+        };
         let cat = match ts.refresh().await {
             Ok(c) => c,
             Err(e) => {
                 let mut r = RunReply::failed(&e);
                 r.transient = true;
-                return Some(r);
+                return Err(r);
             }
         };
-        let def = cat
+        let Some(def) = cat
             .ext
-            .get::<StreamsState>(sprig_streams::MODULE)?
-            .all()
-            .find(|s| s.id.0 == req.source.object_id)
-            .cloned()?;
+            .get::<StreamsState>(sprig_streams::MODULE)
+            .and_then(|st| st.all().find(|s| s.id.0 == req.source.object_id).cloned())
+        else {
+            return Ok(None);
+        };
         let grants = crate::tenant::authz::privileges(ts, &cat);
         let lctn = ts.lower_case_table_names();
-        let e = crate::tenant::rls_streams::change_topic_readable(
+        match crate::tenant::rls_streams::change_topic_access(
             grants.as_ref(),
             &cat,
             &def,
             lctn,
             &ts.principal.user,
-        )
-        .err()?;
-        tracing::warn!(binding = req.source.binding_id, stream = %def.name, error = %e, "trigger on a change topic waits: its definer may not read the table's rows");
-        let mut r = RunReply::failed(&e);
-        r.transient = true;
-        Some(r)
+        ) {
+            Ok(crate::tenant::rls_streams::TopicAccess::All) => Ok(None),
+            Ok(crate::tenant::rls_streams::TopicAccess::Filtered) => {
+                let db = cat
+                    .databases
+                    .get(def.db)
+                    .map(|d| d.name.clone())
+                    .unwrap_or_default();
+                Ok(Some(format!(
+                    "{}.{}",
+                    sprig_common::names::quote(&db),
+                    sprig_common::names::quote(&def.name)
+                )))
+            }
+            Err(e) => {
+                tracing::warn!(binding = req.source.binding_id, stream = %def.name, error = %e, "trigger on a change topic waits: its definer may not read the table");
+                let mut r = RunReply::failed(&e);
+                r.transient = true;
+                Err(r)
+            }
+        }
+    }
+
+    /// Chapter 29 (RL44): record `r` of change topic `topic` as this
+    /// session (the definer) may see it: its value through the topic's
+    /// filter, `None` when the definer's policies hide it.
+    async fn filtered_value(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        topic: &str,
+        r: &messages::RecordIn,
+    ) -> Result<Option<Option<Vec<u8>>>> {
+        let sql = format!(
+            "SELECT `value` FROM {topic} WHERE partition_no = {} AND offset_no = {}",
+            r.partition, r.offset
+        );
+        let mut c = self.run_checked(cx, &sql, false).await?;
+        Ok(c.rows.pop().map(|mut row| row.pop().flatten()))
     }
 
     /// One statement through this session; its error returned.
@@ -688,12 +731,40 @@ impl PassSession {
     }
 
     /// One record of a stream (see the module docs).
-    async fn run_stream_trigger(&mut self, cx: &mut ExecCtx<'_>, req: &RunRequest) -> RunReply {
+    async fn run_stream_trigger(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        req: &RunRequest,
+        filter: Option<&str>,
+    ) -> RunReply {
         let Some(r) = &req.record else {
             return RunReply::failed(&SprigError::internal("a stream run without a record"));
         };
         let stream_name = format!("{}.{}", req.source.db_name, req.source.name);
-        let event = messages::record_value(&stream_name, r);
+        // Chapter 29 (RL44): a change record the definer's policies hide is
+        // passed over (its offset committed, the code not run); one whose
+        // row became visible or hidden reads as an insert or a delete.
+        let mut shown = None;
+        if let Some(topic) = filter {
+            match self.filtered_value(cx, topic, r).await {
+                Ok(Some(v)) => {
+                    let mut x = r.clone();
+                    x.value = v;
+                    shown = Some(x);
+                }
+                Ok(None) => {
+                    metrics::counter!("sprig_rls_feed_events_filtered_total", "protocol" => "trigger")
+                        .increment(1);
+                }
+                Err(e) => {
+                    let mut f = RunReply::failed(&e);
+                    f.transient = true;
+                    return f;
+                }
+            }
+        }
+        let hidden = filter.is_some() && shown.is_none();
+        let event = messages::record_value(&stream_name, shown.as_ref().unwrap_or(r));
         if let Err(e) = self.trigger_stmt(cx, "START TRANSACTION").await {
             return RunReply::failed(&e);
         }
@@ -718,6 +789,15 @@ impl PassSession {
                 return RunReply::of(RunOutcome::Moved);
             }
             return RunReply::failed(&e);
+        }
+        if hidden {
+            return match self.trigger_stmt(cx, "COMMIT").await {
+                Ok(()) => RunReply::of(RunOutcome::Ok),
+                Err(e) => {
+                    self.rollback_quietly(cx).await;
+                    RunReply::failed(&e)
+                }
+            };
         }
         match self.run_version(cx, req, "record", event).await {
             Ok(logs) => match self.trigger_stmt(cx, "COMMIT").await {

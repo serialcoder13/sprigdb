@@ -34,6 +34,7 @@
 
 #![allow(
     clippy::too_many_lines,
+    clippy::many_single_char_names,
     clippy::doc_markdown,
     clippy::unwrap_used,
     clippy::expect_used,

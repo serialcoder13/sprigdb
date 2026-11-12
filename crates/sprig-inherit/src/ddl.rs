@@ -274,6 +274,12 @@ pub async fn inheritable(
                 .zip(key)
                 .all(|(a, b)| a.eq_ignore_ascii_case(b));
         if same {
+            // Again on a table of a type tree: the type layer changed its
+            // columns or added a table to the tree (typed tables in
+            // groups), which are followed here.
+            if o.type_root.is_some() || ctx.type_tree(db, &table.name).is_some() {
+                return follow_tree(ctx, r, db, &db_name, table, key).await;
+            }
             return Ok(Done::default());
         }
         return Err(unsupported(format!(
@@ -288,6 +294,49 @@ pub async fn inheritable(
     let objects = crate::links::convert_native(ctx, r, db, &db_name, table, key, tag).await?;
     let mut c = root_change(ctx);
     c.upsert_objects = objects;
+    r.commit(&c).await?;
+    Ok(Done::default())
+}
+
+/// `SPRIG INHERITABLE` again on a table of an inheritable type tree (the
+/// type layer's call after its DDL): new tables of the tree become
+/// inheritable ([`crate::links::convert_native`]), and new columns of the
+/// tree's tables get field slots.
+async fn follow_tree(
+    ctx: &Ctx<'_>,
+    r: &mut dyn Runner,
+    db: sprig_common::ids::DbId,
+    db_name: &str,
+    table: &Name,
+    key: &[String],
+) -> Result<Done> {
+    let mut objects = crate::links::convert_native(ctx, r, db, db_name, table, key, None).await?;
+    for o in &mut objects {
+        let layer = format!("{}.{}", q(db_name), q(&o.table));
+        let cols: Vec<String> = crate::guard::show_columns(r, &layer)
+            .await?
+            .into_iter()
+            .filter(|c| !c.generated() && !c.name.to_ascii_lowercase().starts_with("_sprig_"))
+            .map(|c| c.name)
+            .collect();
+        if cols.iter().any(|c| o.column(c).is_none()) {
+            let mut all = o.columns.clone();
+            all.extend(cols.into_iter().filter(|c| o.column(c).is_none()));
+            if let Some(n) = o.with_slots_for(&all) {
+                *o = n;
+                o.version += 1;
+            }
+        }
+    }
+    let changed: Vec<InheritableObject> = objects
+        .into_iter()
+        .filter(|o| ctx.state.object(o.object_id).is_none_or(|x| **x != *o))
+        .collect();
+    if changed.is_empty() {
+        return Ok(Done::default());
+    }
+    let mut c = root_change(ctx);
+    c.upsert_objects = changed;
     r.commit(&c).await?;
     Ok(Done::default())
 }
@@ -312,17 +361,27 @@ pub(crate) async fn enable(
     let Some((_, object_id)) = r.object_id(table.db.as_deref(), &table.name).await? else {
         return Err(no_table(table, ctx));
     };
-    if ctx.typed.contains(&table.name.to_lowercase()) {
+    if ctx
+        .types()
+        .is_some_and(|t| sprig_types::has_hierarchy(t, db, &table.name, ctx.lctn))
+    {
         return Err(unsupported(
-            "a typed or hierarchical table can't be inheritable yet",
+            "a table with a record hierarchy can't be inheritable yet",
         ));
     }
+    let type_root = ctx.type_tree(db, &table.name).map(|(root, _)| root);
     let layer = match &table.db {
         Some(d) => format!("{}.{}", q(d), q(&table.name)),
         None => q(&table.name),
     };
     let old = crate::guard::show_columns(r, &layer).await?;
-    let cols: Vec<String> = old.iter().map(|c| c.name.clone()).collect();
+    // Generated columns (a discriminated root's type columns) aren't
+    // fields: merged views compute them ([`Ctx::derived`]).
+    let cols: Vec<String> = old
+        .iter()
+        .filter(|c| !c.generated())
+        .map(|c| c.name.clone())
+        .collect();
     let (pk, uniques) = crate::guard::show_uniques(r, &layer).await?;
     let key: Vec<String> = match key {
         Some(k) => k.to_vec(),
@@ -414,6 +473,7 @@ pub(crate) async fn enable(
         auto: crate::guard::auto_column(&old),
         links: Vec::new(),
         adopted: false,
+        type_root,
     };
     Ok(empty.with_slots_for(&cols).unwrap_or(empty))
 }

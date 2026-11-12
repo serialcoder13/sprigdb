@@ -308,6 +308,11 @@ impl Gen<'_> {
             Stmt::Break => {
                 let _ = writeln!(out, "{ind}EXIT;");
             }
+            // MariaDB's `CONTINUE` (sql_mode=ORACLE): the loop's condition,
+            // and its guard, run again.
+            Stmt::Continue => {
+                let _ = writeln!(out, "{ind}CONTINUE;");
+            }
             Stmt::Return => {
                 let _ = writeln!(out, "{ind}RETURN;");
             }

@@ -147,6 +147,11 @@ pub struct InheritableObject {
     /// Created by SprigDB in this tenant because its parent tenant shares
     /// it (Kiran's decision 1, 11 November 2026), rather than declared here.
     pub adopted: bool,
+    /// The root table of the type tree this table belongs to (chapter 32,
+    /// `INHERITS`): the tables of one tree inherit together, like a
+    /// foreign-key group, without links (the type layer keeps their rows
+    /// in step itself).
+    pub type_root: Option<String>,
 }
 
 /// A foreign key of an inheritable object, kept by the gateway against
@@ -177,6 +182,9 @@ pub struct ObjectExt {
     /// [`InheritableObject::adopted`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub adopted: bool,
+    /// [`InheritableObject::type_root`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_root: Option<String>,
 }
 
 impl InheritableObject {
@@ -187,7 +195,18 @@ impl InheritableObject {
             auto: self.auto.clone(),
             links: self.links.clone(),
             adopted: self.adopted,
+            type_root: self.type_root.clone(),
         }
+    }
+
+    /// Whether this object and `other` are tables of one type tree.
+    #[must_use]
+    pub fn same_tree(&self, other: &InheritableObject) -> bool {
+        self.db == other.db
+            && match (&self.type_root, &other.type_root) {
+                (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                _ => false,
+            }
     }
 
     /// Whether this object references `table` (by name, any case).
@@ -412,7 +431,7 @@ impl InheritState {
                 if out.contains(&y.object_id) || y.db != x.db {
                     continue;
                 }
-                if x.references(&y.table) || y.references(&x.table) {
+                if x.references(&y.table) || y.references(&x.table) || x.same_tree(y) {
                     out.push(y.object_id);
                     frontier.push(Arc::clone(y));
                 }
@@ -718,6 +737,7 @@ pub(crate) mod fixtures {
             auto: None,
             links: Vec::new(),
             adopted: false,
+            type_root: None,
         }
     }
 
@@ -817,6 +837,7 @@ mod tests {
                 })
                 .collect(),
             adopted: false,
+            type_root: None,
         };
         let share = Share {
             id: 5,

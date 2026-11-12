@@ -542,6 +542,7 @@ fn aggregate_rewrite(
         tk.start(l.join_start)
     };
     let mut edits = vec![(from_byte, tk.end(end), String::new())];
+    let mut named_items: Vec<usize> = Vec::new();
     for j in 0..tk.t.len() {
         if j >= l.join_start && j <= end {
             continue;
@@ -557,6 +558,17 @@ fn aggregate_rewrite(
                 sub.clone()
             };
             edits.push((tk.start(j), tk.end(j + 2), text));
+            // A select item over it (`MAX(l.t)`, `l.t + 1`) keeps its
+            // text as its name, as on MySQL (gaps row 71, R4 round 5).
+            if let Some((a, b)) = select_item(tk, j)
+                && !(a == j && b == j + 2)
+                && !named_items.contains(&a)
+                && !has_alias(tk, a, b)
+            {
+                named_items.push(a);
+                let written = String::from_utf8_lossy(&tk.sql[tk.start(a)..tk.end(b)]);
+                edits.push((tk.end(b), tk.end(b), format!(" AS {}", quote(&written))));
+            }
         } else if tk.t[j].kind.is_ident_like() && !(j > 0 && tk.punct(j - 1, b'.')) {
             // An unqualified name of a lateral column: give up.
             let x = tk.ident(j)?.to_lowercase();
@@ -569,6 +581,64 @@ fn aggregate_rewrite(
         }
     }
     Some(apply(tk.sql, edits))
+}
+
+/// The outermost select list's item holding token `j`: its first and
+/// last token; `None` when `j` isn't in that list.
+fn select_item(tk: &Toks<'_>, j: usize) -> Option<(usize, usize)> {
+    let mut d = 0i32;
+    let mut start = None;
+    for k in 0..tk.t.len() {
+        if tk.punct(k, b'(') {
+            d += 1;
+        } else if tk.punct(k, b')') {
+            d -= 1;
+        } else if d == 0 && tk.word(k, b"SELECT") && start.is_none() {
+            let mut s = k + 1;
+            while tk.word(s, b"DISTINCT") || tk.word(s, b"ALL") || tk.word(s, b"STRAIGHT_JOIN") {
+                s += 1;
+            }
+            start = Some(s);
+            break;
+        }
+    }
+    let first = start?;
+    let mut a = first;
+    let mut d = 0i32;
+    for k in first..tk.t.len() {
+        if tk.punct(k, b'(') {
+            d += 1;
+        } else if tk.punct(k, b')') {
+            d -= 1;
+        } else if d == 0 && (tk.punct(k, b',') || tk.word(k, b"FROM") || tk.word(k, b"INTO")) {
+            if j >= a && j < k {
+                return Some((a, k - 1));
+            }
+            if !tk.punct(k, b',') {
+                return None;
+            }
+            a = k + 1;
+        }
+    }
+    None
+}
+
+/// Whether the select item `a..=b` ends with an alias (`AS x` or `x`).
+fn has_alias(tk: &Toks<'_>, a: usize, b: usize) -> bool {
+    if b <= a || !tk.t[b].kind.is_ident_like() {
+        return false;
+    }
+    if tk.word(b - 1, b"AS") {
+        return true;
+    }
+    let prev = &tk.t[b - 1];
+    !(tk.punct(b - 1, b'.')
+        || tk.punct(b - 1, b'(')
+        || tk.punct(b - 1, b',')
+        || prev.kind == TokenKind::Op
+        || [&b"END"[..], b"NULL", b"TRUE", b"FALSE"]
+            .iter()
+            .any(|w| tk.word(b, w)))
 }
 
 /// Whether tokens `a..=b` are a whole select item without an alias.
@@ -1124,6 +1194,14 @@ mod tests {
                 "SELECT name, n FROM c, LATERAL (SELECT COUNT(*) AS n FROM o WHERE o.cid = c.id) AS l"
             ),
             None
+        );
+        // Inside an expression or an outer aggregate (gaps row 71): the
+        // item keeps its text as its name, as on MySQL.
+        assert_eq!(
+            rw("SELECT MAX(l.t), COUNT(*), l.t + 1 AS u, MAX(l.t) m FROM c, LATERAL (SELECT SUM(o.amt) AS t FROM o WHERE o.cid = c.id) AS l")
+                .unwrap(),
+            "SELECT MAX((SELECT SUM(o.amt) FROM o WHERE o.cid = c.id)) AS `MAX(l.t)`, COUNT(*), \
+             (SELECT SUM(o.amt) FROM o WHERE o.cid = c.id) + 1 AS u, MAX((SELECT SUM(o.amt) FROM o WHERE o.cid = c.id)) m FROM c"
         );
     }
 

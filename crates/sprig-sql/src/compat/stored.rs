@@ -21,8 +21,11 @@
 //! - a `CALL sprig.<procedure>` (queues and stream offsets, chapters 45
 //!   and 50, which the gateway runs).
 //!
-//! Not checked here: writes to collections (chapter 31's rule needs the
-//! catalog), MySQL's `ONLY_FULL_GROUP_BY`, which MySQL itself applies only
+//! Writes to collections (chapter 31's rule) need the catalog: the gateway
+//! resolves [`write_targets`] and refuses a collection with
+//! [`collection_write_error`] (R4 round 5).
+//!
+//! Not checked here: MySQL's `ONLY_FULL_GROUP_BY`, which MySQL itself applies only
 //! when the body runs (MariaDB doesn't apply it, decision T1), and
 //! `EXPLAIN` inside a body, which keeps MariaDB's columns.
 
@@ -192,7 +195,16 @@ pub fn rewrite(sql: &[u8], opts: &LexOptions) -> Option<Result<Vec<u8>, WireErro
         let mut at = 0;
         for (s, e, rep) in &edits {
             out.extend_from_slice(&sql[at..*s]);
-            out.extend_from_slice(rep.as_bytes());
+            // R4 round 5 (gaps row 69): routines, triggers and events keep
+            // their comments, so the text as written rides along for
+            // `SHOW CREATE` and `information_schema` ([`restore_original`]);
+            // MariaDB drops a view's comments, and MySQL shows a view's
+            // query reprinted anyway.
+            if obj == Object::View {
+                out.extend_from_slice(rep.as_bytes());
+            } else {
+                out.extend_from_slice(&marked(&sql[*s..*e], rep));
+            }
             at = *e;
         }
         out.extend_from_slice(&sql[at..]);
@@ -202,6 +214,72 @@ pub fn rewrite(sql: &[u8], opts: &LexOptions) -> Option<Result<Vec<u8>, WireErro
         return Some(Err(needs_gateway_error(obj, &what)));
     }
     text.map(Ok)
+}
+
+/// The opening of a marked segment: `/*sprig:o:<hex of the text as
+/// written>*/`, then the rewritten text, then [`MARK_END`].
+const MARK_OPEN: &[u8] = b"/*sprig:o:";
+/// The end of a marked segment.
+const MARK_END: &[u8] = b"/*sprig:e*/";
+
+fn marked(original: &[u8], rewritten: &str) -> Vec<u8> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = Vec::with_capacity(original.len() * 2 + rewritten.len() + 24);
+    out.extend_from_slice(MARK_OPEN);
+    for b in original {
+        out.push(HEX[usize::from(b >> 4)]);
+        out.push(HEX[usize::from(b & 15)]);
+    }
+    out.extend_from_slice(b"*/");
+    out.extend_from_slice(rewritten.as_bytes());
+    out.extend_from_slice(MARK_END);
+    out
+}
+
+/// Whether `v` holds a marked segment (cheap test for result values).
+#[must_use]
+pub fn has_original(v: &[u8]) -> bool {
+    v.windows(MARK_OPEN.len()).any(|w| w == MARK_OPEN)
+}
+
+/// A stored program's text (a body, or a whole `SHOW CREATE` answer) with
+/// each segment the 3306 rules rewrote at `CREATE` given back as written
+/// (R4 round 5, gaps row 69): MySQL shows routines, triggers and events
+/// as their author wrote them. `None` when `v` has no marked segment.
+#[must_use]
+pub fn restore_original(v: &[u8]) -> Option<Vec<u8>> {
+    if !has_original(v) {
+        return None;
+    }
+    let find = |from: usize, pat: &[u8]| {
+        v.get(from..)?
+            .windows(pat.len())
+            .position(|w| w == pat)
+            .map(|p| p + from)
+    };
+    let nibble = |c: u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        _ => None,
+    };
+    let mut out = Vec::with_capacity(v.len());
+    let mut at = 0;
+    while let Some(open) = find(at, MARK_OPEN) {
+        let hex_from = open + MARK_OPEN.len();
+        let close = find(hex_from, b"*/")?;
+        let end = find(close + 2, MARK_END)?;
+        let hex = &v[hex_from..close];
+        if !hex.len().is_multiple_of(2) {
+            return None;
+        }
+        out.extend_from_slice(&v[at..open]);
+        for pair in hex.chunks(2) {
+            out.push((nibble(pair[0])? << 4) | nibble(pair[1])?);
+        }
+        at = end + MARK_END.len();
+    }
+    out.extend_from_slice(&v[at..]);
+    Some(out)
 }
 
 /// The last token of the query starting at `t[start]`: the token before
@@ -291,19 +369,150 @@ fn needs_gateway(sql: &[u8], opts: LexOptions) -> Option<String> {
     None
 }
 
+/// The tables the DML statements of a procedure's, function's, trigger's
+/// or event's body write (`INSERT`, `REPLACE`, `UPDATE`, `DELETE`, multi-
+/// table forms included), as written: (database, table). Empty for other
+/// statements, views and logic-layer functions. Multi-table `UPDATE` and
+/// `DELETE` list every table named before `SET` or `FROM`/`USING`, aliases
+/// too (an alias resolves to no collection).
+#[must_use]
+#[allow(clippy::too_many_lines)] // one branch per statement kind
+pub fn write_targets(sql: &[u8], opts: &LexOptions) -> Vec<(Option<String>, String)> {
+    const MODIFIERS: &[&[u8]] = &[
+        b"LOW_PRIORITY",
+        b"DELAYED",
+        b"HIGH_PRIORITY",
+        b"IGNORE",
+        b"QUICK",
+    ];
+    let Ok(tokens) = lex::lex(sql, opts) else {
+        return Vec::new();
+    };
+    let t: Vec<Token> = tokens.into_iter().filter(|t| !t.kind.is_trivia()).collect();
+    let Some((obj, kind_at)) = object_at(sql, &t) else {
+        return Vec::new();
+    };
+    if obj == Object::View
+        || t.iter().enumerate().any(|(k, _)| {
+            word(sql, &t, k, b"LANGUAGE")
+                && (word(sql, &t, k + 1, b"JAVASCRIPT") || word(sql, &t, k + 1, b"KIRUN"))
+        })
+    {
+        return Vec::new();
+    }
+    let ident = |j: usize| {
+        t.get(j)
+            .filter(|x| x.kind.is_ident_like())
+            .map(|x| String::from_utf8_lossy(&lex::ident_value(x.bytes(sql))).into_owned())
+    };
+    // `t` or `d.t` at `j`: the name and the index after it.
+    let name_at = |j: usize| -> Option<((Option<String>, String), usize)> {
+        let first = ident(j)?;
+        if punct(sql, &t, j + 1, b'.') {
+            Some(((Some(first), ident(j + 2)?), j + 3))
+        } else {
+            Some(((None, first), j + 1))
+        }
+    };
+    // A trigger's own event (`BEFORE INSERT ON t`) isn't a write.
+    let mut out: Vec<(Option<String>, String)> = Vec::new();
+    let mut push = |n: (Option<String>, String)| {
+        if !out.contains(&n) {
+            out.push(n);
+        }
+    };
+    for k in kind_at + 1..t.len() {
+        let dml = [&b"INSERT"[..], b"REPLACE", b"UPDATE", b"DELETE"]
+            .into_iter()
+            .find(|w| word(sql, &t, k, w));
+        let Some(dml) = dml else { continue };
+        if punct(sql, &t, k + 1, b'(')
+            || [&b"KEY"[..], b"BEFORE", b"AFTER", b"FOR", b"ON", b"OR"]
+                .iter()
+                .any(|w| word(sql, &t, k - 1, w))
+        {
+            continue;
+        }
+        let mut j = k + 1;
+        while MODIFIERS.iter().any(|w| word(sql, &t, j, w)) {
+            j += 1;
+        }
+        match dml {
+            b"INSERT" | b"REPLACE" => {
+                if word(sql, &t, j, b"INTO") {
+                    j += 1;
+                }
+                if let Some((n, _)) = name_at(j) {
+                    push(n);
+                }
+            }
+            _ => {
+                // UPDATE refs SET / DELETE [FROM] refs [FROM | USING]
+                let delete_from = dml == b"DELETE" && word(sql, &t, j, b"FROM");
+                if delete_from {
+                    j += 1;
+                }
+                let stops: &[&[u8]] = if dml == b"UPDATE" {
+                    &[b"SET"]
+                } else if delete_from {
+                    &[b"USING", b"WHERE", b"ORDER", b"LIMIT", b"PARTITION"]
+                } else {
+                    &[b"FROM", b"USING"]
+                };
+                let mut expect = true;
+                let mut depth = 0i32;
+                while j < t.len() && !(depth == 0 && stops.iter().any(|w| word(sql, &t, j, w))) {
+                    if punct(sql, &t, j, b';') && depth == 0 {
+                        break;
+                    }
+                    if punct(sql, &t, j, b'(') {
+                        depth += 1;
+                    } else if punct(sql, &t, j, b')') {
+                        depth -= 1;
+                    } else if depth == 0
+                        && expect
+                        && let Some((n, next)) = name_at(j)
+                    {
+                        push(n);
+                        j = next;
+                        expect = false;
+                        continue;
+                    }
+                    if depth == 0 && (punct(sql, &t, j, b',') || word(sql, &t, j, b"JOIN")) {
+                        expect = true;
+                    }
+                    j += 1;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 39602 for a stored program `sql` whose body writes the collection
+/// `name` (chapter 31: such writes take the gateway's document path).
+#[must_use]
+pub fn collection_write_error(sql: &[u8], opts: &LexOptions, name: &str) -> WireError {
+    let obj = object(sql, opts).unwrap_or(Object::Procedure);
+    needs_gateway_error(
+        obj,
+        &format!("a write to the collection {name} (the gateway's document path keeps it)"),
+    )
+}
+
 fn needs_gateway_error(obj: Object, what: &str) -> WireError {
     let kind = match obj {
-        Object::View => "view",
-        Object::Procedure => "procedure",
-        Object::Function => "function",
-        Object::Trigger => "trigger",
-        Object::Event => "event",
+        Object::View => "a view",
+        Object::Procedure => "a procedure",
+        Object::Function => "a function",
+        Object::Trigger => "a trigger",
+        Object::Event => "an event",
     };
     WireError::new(
         39602,
         *b"42000",
         format!(
-            "ER_SPRIG_NEEDS_GATEWAY: a {kind} can't use {what}: MariaDB runs stored code without \
+            "ER_SPRIG_NEEDS_GATEWAY: {kind} can't use {what}: MariaDB runs stored code without \
              the gateway; run the statement from the client instead"
         ),
     )

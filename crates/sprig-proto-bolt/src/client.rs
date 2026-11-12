@@ -202,7 +202,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> BoltClient<S> {
                         summary,
                     });
                 }
-                Response::Failure { code, message } => {
+                // A 5.7 failure decodes as `Failure`; `GqlFailure` is
+                // only ever encoded.
+                Response::Failure { code, message }
+                | Response::GqlFailure { code, message, .. } => {
                     self.reset().await?;
                     return Err(ClientError { code, message });
                 }

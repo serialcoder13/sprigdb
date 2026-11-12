@@ -95,6 +95,8 @@ sprig-queues = { path = "../sprig-queues" }
 sprig-graph = { path = "../sprig-graph" }
 sprig-proto-bolt = { path = "../sprig-proto-bolt" }
 uuid.workspace = true
+# WebSocket change streams' Sec-WebSocket-Accept (chapter 37 step 11).
+sha1.workspace = true
 # Hierarchical data inheritance (chapter 42, R6).
 sprig-inherit = { path = "../sprig-inherit" }
 # Chapter 12: fingerprints, the recorder, the flusher and samples.

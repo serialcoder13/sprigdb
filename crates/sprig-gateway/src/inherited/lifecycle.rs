@@ -169,6 +169,13 @@ pub async fn sweep(svc: &Arc<TenantServices>) -> Result<usize> {
             continue;
         }
         let r = async {
+            // A deleted declarer (bugfix-39): its definitions went with
+            // its catalog, and its members were deleted before it (39362),
+            // so only the entry is left.
+            if super::dir_entry(svc, d.def.tenant).await?.is_none() {
+                tracing::info!(def = %d.def, "drop grace: the declarer is deleted; entry removed");
+                return unlist(svc, d.def).await;
+            }
             let cat = catalog(svc, d.def.tenant).await?;
             let def = super::state_of(&cat).def_by_id(d.def.object).cloned();
             if let Some(def) = def {
@@ -210,6 +217,76 @@ pub fn start_sweeper(svc: &Arc<TenantServices>) {
             }
         }
     });
+}
+
+/// Member `t`'s `DROP DATABASE db` took the physical part of its
+/// inherited stream, exchange and queue instances there (bugfix-39):
+/// their rows and index entries go too, with `t`'s inherited triggers
+/// reading them, so the next use creates them again, as for a new member.
+/// Before, every publish to such an instance failed with 39899 until the
+/// definition was dropped. Detached instances are `t`'s own objects and
+/// went with the database. Returns how many went.
+///
+/// # Errors
+/// The catalog's and the DC tier's.
+pub async fn database_dropped(
+    svc: &Arc<TenantServices>,
+    t: TenantId,
+    db: &str,
+    lctn: bool,
+) -> Result<usize> {
+    let cat = catalog(svc, t).await?;
+    let own = super::state_of(&cat);
+    let here = |p: Option<&Value>| {
+        p.and_then(|p| p.get("db"))
+            .and_then(Value::as_str)
+            .is_some_and(|d| if lctn { d.eq_ignore_ascii_case(db) } else { d == db })
+    };
+    let gone: Vec<_> = own
+        .instances
+        .values()
+        .filter(|i| matches!(i.kind, DefKind::Stream | DefKind::Exchange | DefKind::Queue))
+        .filter(|i| i.state != InstanceState::Detached && here(i.physical.as_ref()))
+        .cloned()
+        .collect();
+    if gone.is_empty() {
+        return Ok(0);
+    }
+    let ep = svc.locator.writer(t).await?;
+    let mut conn = ep.pool.get_conn().await.map_err(cat_err)?;
+    let st = MsgStore::new(ep.store.schema());
+    let chain = super::chain(svc, &cat).await?;
+    for i in &gone {
+        let triggers = match chain.def(i.def) {
+            Some(d) if d.kind == DefKind::Stream => super::triggers::on_stream(&chain, &d),
+            Some(d) if d.kind == DefKind::Queue => super::triggers::on_queue(&chain, &d),
+            _ => Vec::new(),
+        };
+        for g in triggers {
+            if let Some(gi) = st.instance(&mut conn, g.key()).await? {
+                if let Some(b) = gi
+                    .physical
+                    .as_ref()
+                    .and_then(|p| p.get("binding"))
+                    .and_then(Value::as_u64)
+                {
+                    sprig_logic::messages::delete_index(svc.locator.dc_store().as_ref(), t, b)
+                        .await?;
+                }
+                st.delete_instance(&mut conn, g.key()).await?;
+            }
+        }
+        st.delete_instance(&mut conn, i.def).await?;
+        super::delete_index(svc, t, i.def).await?;
+        super::streams::forget_applied(t, i.def);
+    }
+    super::mq::forget_applied(t, Some(db));
+    // Every gateway reads the rows at the member's next version.
+    let c = svc.catalog.change(t, VersionKind::Catalog).await?;
+    c.commit().await?;
+    tracing::info!(tenant = %t, db, instances = gone.len(),
+        "DROP DATABASE: inherited instances in the database dropped; the next use creates them again");
+    Ok(gone.len())
 }
 
 /// `ALTER INHERITED kind name DETACH` in member `t` (see the module docs).

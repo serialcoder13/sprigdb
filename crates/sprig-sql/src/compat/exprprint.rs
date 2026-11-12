@@ -220,6 +220,32 @@ fn print(e: &Expr, cs: &str) -> Option<String> {
             if name.contains('.') || name.contains('`') {
                 return None;
             }
+            // R4 round 5: `jsonops` wrote a compared JSON string constant
+            // as `json_unquote(json_extract('"x"','$'))`; MySQL prints
+            // what was written, `json_extract('"x"','$')`.
+            if name == "json_unquote"
+                && let FunctionArguments::List(l) = &f.args
+                && let [FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Function(inner)))] =
+                    l.args.as_slice()
+                && inner.name.to_string().eq_ignore_ascii_case("json_extract")
+                && let FunctionArguments::List(il) = &inner.args
+                && let [
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(a))),
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(b))),
+                ] = il.args.as_slice()
+                && let (Value::SingleQuotedString(lit), Value::SingleQuotedString(path)) =
+                    (&a.value, &b.value)
+                && path == "$"
+                && lit.trim().len() >= 2
+                && lit.trim().starts_with('"')
+                && lit.trim().ends_with('"')
+            {
+                return Some(format!(
+                    "json_extract({},{})",
+                    string(lit, cs),
+                    string(path, cs)
+                ));
+            }
             let args = match &f.args {
                 FunctionArguments::None => String::new(),
                 FunctionArguments::List(l) => {
@@ -354,6 +380,11 @@ mod tests {
         (
             "json_unquote(json_extract(`j`,'$.k'))",
             "json_unquote(json_extract(`j`,_utf8mb4'$.k'))",
+        ),
+        // R4 round 5: a JSON string constant `jsonops` compared unquoted.
+        (
+            "json_extract(`d`,'$.\"version\"') = json_unquote(json_extract('\"stable\"','$'))",
+            "(json_extract(`d`,_utf8mb4'$.\"version\"') = json_extract(_utf8mb4'\"stable\"',_utf8mb4'$'))",
         ),
         ("`a` between 1 and 5", "(`a` between 1 and 5)"),
         ("`a` in (1,2,3)", "(`a` in (1,2,3))"),

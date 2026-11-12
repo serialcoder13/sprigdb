@@ -61,6 +61,8 @@ fn round4_paths() -> Value {
             "A module with its versions, binding, schedule and (for routine administrators) source and PL/SQL", None, "JsonReply"), &one)},
         "/v1/databases/{database}/logic/{kind}/{name}/versions/{version}": {"get": with_params(op("Logic.GetVersion", "sprig.v1.Logic",
             "One version's source and PL/SQL", None, "JsonReply"), &[p("database"), p("kind"), p("name"), p("version")])},
+        "/v1/databases/{database}/logic/{kind}/{name}/rollout": {"get": with_params(op("Logic.GetRollout", "sprig.v1.Logic",
+            "A staged rollout (active and candidate versions, share, key) and each version's calls, errors, p95 and histogram", None, "JsonReply"), &one)},
         "/v1/databases/{database}/logic/{kind}/{name}/logs": {"get": with_params(op("Logic.TailLogs", "sprig.v1.Logic",
             "The module's log lines after an id (after, limit)", None, "JsonReply"), &[p("database"), p("kind"), p("name"), q("after"), q("limit")])},
         "/v1/databases/{database}/logic/{kind}/{name}/deadLetters": {"get": with_params(op("Logic.ListDeadLetters", "sprig.v1.Logic",
@@ -334,8 +336,12 @@ mod tests {
             return;
         }
         let have = std::fs::read_to_string(&path).unwrap_or_default();
+        // Compared as JSON values: in a workspace build serde_json's
+        // `preserve_order` (another crate's feature) changes the key order
+        // of `text`, not its content.
+        let have: serde_json::Value = serde_json::from_str(&have).unwrap_or_default();
         assert!(
-            have == text,
+            have == doc,
             "studio/src/api/openapi-v1.json is stale: run SPRIG_STUDIO_REGEN=1 cargo test -p sprig-studio, then pnpm gen:api"
         );
     }

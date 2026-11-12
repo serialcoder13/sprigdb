@@ -191,6 +191,8 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         )),
         opts: live.run_opts(),
         settings: live.clone(),
+        // Set below, once the gateways are known (RL50).
+        gateways: None,
     };
     // Chapter 42's copy worker: one job per tenant tree.
     let inherit_env = Arc::new(inherit::LiveEnv::new(
@@ -278,7 +280,15 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             .with_tls(sprig_cluster::failover::internal_tls::InternalTls::from_config(t)?);
     }
     let mut jobs = runtime::WorkerRuntime::new(dc_logic, Arc::new(SystemClock), worker.clone())
-        .with_handler(Arc::new(logic::LogicTrigger(env.clone())))
+        .with_handler(Arc::new(logic::LogicTrigger(logic::LogicEnv {
+            // Chapter 29 (RL50): after-commit triggers check a bound
+            // definer's events on the gateways.
+            gateways: Some((
+                Arc::clone(&msg_env.gateways) as Arc<dyn sprig_sinks::peer::SinkPeer>,
+                Arc::clone(&global),
+            )),
+            ..env.clone()
+        })))
         .with_handler(Arc::new(logic::LogicSchedule(env)))
         .with_handler(Arc::new(inherit::InheritCopy(inherit_env)))
         .with_handler(Arc::new(graph_mirror::GraphMirror(graph_mirror_env)))

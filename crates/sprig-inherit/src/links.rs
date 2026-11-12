@@ -609,7 +609,10 @@ pub const DDL_REFS_BY_FROM: &str = "ALTER TABLE {refs} ADD INDEX IF NOT EXISTS b
 /// references over: descendants' overrides of those rows become orphans
 /// (the copy worker, asynchronously) and then hold the values themselves.
 /// Until the worker has claimed them, the handover stands in for their
-/// claims, so a delete of a referenced key can't slip between the two.
+/// claims, so a delete of a referenced key can't slip between the two. The
+/// worker reads a handover (the newest) for the values the orphans inherit;
+/// a delete of the key that finds no tenant below still needing it removes
+/// it ([`before_delete`]).
 pub const HANDOVER: char = '~';
 
 /// A key's canonical form in `inherit_refs`: its columns' text, joined by
@@ -927,8 +930,8 @@ pub fn reaches_child_tenants(ctx: &Ctx<'_>, o: &InheritableObject) -> bool {
 /// Before rows `keys` of `res` leave the session space's view (a delete,
 /// a hide or an orphan reset): handover claims for the values they show
 /// for each foreign key, when the table goes to child tenants (see
-/// [`HANDOVER`]). The copy worker replaces them with the orphans' own
-/// claims; a delete that finds one checks the descendants itself
+/// [`HANDOVER`]). The copy worker gives the orphans their own claims; a
+/// delete that finds a handover checks the descendants itself
 /// ([`before_delete`]).
 ///
 /// # Errors
@@ -958,6 +961,7 @@ pub async fn hand_over(
             layer: res.layer.clone(),
             keys: Some(keys.to_vec()),
             origin: false,
+            derived: Vec::new(),
         }
         .view(chain);
         let rows = r
@@ -998,6 +1002,15 @@ pub async fn hand_over(
             .await?;
         }
         metrics::counter!("sprig_inherit_handovers_total").increment(found.len() as u64);
+        tracing::debug!(
+            tenant = %here.at.tenant,
+            table = %o.table,
+            link = %l.name,
+            n = found.len(),
+            root = %root.0,
+            "references handed over"
+        );
+        tracing::debug!(refs = ?found, from_obj = %o.object_id, "handover rows");
     }
     Ok(())
 }
@@ -1053,6 +1066,7 @@ async fn handover_live(
         Ok(rows) => {
             let state = rows.first().and_then(|row| text(row.first()));
             if matches!(state.as_deref(), Some("own" | "orphan" | "ovr")) {
+                tracing::debug!(handover = ?c, state = ?state, "handover's row still at its level");
                 r.refs(root.0, &forget_sql(root.1, "ref", c)).await?;
                 return Ok(None);
             }
@@ -1096,6 +1110,11 @@ async fn handover_live(
             return Ok(Some((at, db, f.table.clone(), l)));
         }
     }
+    tracing::debug!(
+        handover = ?c,
+        below = tables.len(),
+        "handover no longer needed"
+    );
     r.refs(root.0, &forget_sql(root.1, "ref", c)).await?;
     Ok(None)
 }
@@ -1320,6 +1339,7 @@ pub async fn after_write(
             layer: format!("{prefix}{}", q(&rr.obj.table)),
             keys: Some(wanted.values().cloned().collect()),
             origin: false,
+            derived: Vec::new(),
         }
         .view(&chain);
         let rows = r
@@ -1356,6 +1376,7 @@ pub async fn after_write(
                     layer: rr.layer.clone(),
                     keys: Some(tuples),
                     origin: false,
+                    derived: Vec::new(),
                 }
                 .view(&chain)
             ))
@@ -1397,12 +1418,7 @@ pub async fn after_write(
 
 /// Whether a space of this tenant on the session's path, below deletion
 /// marker `m`'s level, holds `m`'s key as its own row or orphan.
-async fn provided_below(
-    r: &mut dyn Runner,
-    rr: &Resolved,
-    here: &Here,
-    m: &Entry,
-) -> Result<bool> {
+async fn provided_below(r: &mut dyn Runner, rr: &Resolved, here: &Here, m: &Entry) -> Result<bool> {
     let spaces: Vec<String> = if m.at.tenant == here.at.tenant {
         here.path
             .iter()
@@ -1600,6 +1616,7 @@ async fn claim_seen(
                 layer: res.layer.clone(),
                 keys: Some(vec![key_tuple(&c.from_hex)]),
                 origin: false,
+                derived: Vec::new(),
             }
             .view(&chain),
             canon(&l.columns, Some("`__sprig_v`")),
@@ -1774,6 +1791,7 @@ pub async fn check_refs(
             layer: res.layer.clone(),
             keys: None,
             origin: false,
+            derived: Vec::new(),
         }
         .view(&chain);
         let rows = r
@@ -1973,6 +1991,17 @@ pub async fn convert_native(
     let mut group: Vec<String> = vec![table.name.clone()];
     loop {
         let before = group.len();
+        // A typed table's whole type tree inherits with it (chapter 32's
+        // tables of one tree hold one record's parts).
+        for g in group.clone() {
+            if let Some((_, tree)) = ctx.type_tree(db, &g) {
+                for t in tree {
+                    if !group.iter().any(|x| x.eq_ignore_ascii_case(&t)) {
+                        group.push(t);
+                    }
+                }
+            }
+        }
         for (c, f) in &fks {
             let ci = group.iter().any(|g| g.eq_ignore_ascii_case(c));
             let pi = group
@@ -2001,10 +2030,24 @@ pub async fn convert_native(
             .await?;
         }
     }
+    // A subtype's key onto its parent's table is the type layer's, which
+    // writes every table of a record itself: dropped, never a link.
+    let mine: Vec<&(String, FkClause)> = mine
+        .into_iter()
+        .filter(|(_, f)| {
+            !f.name
+                .as_deref()
+                .is_some_and(|n| n.starts_with(sprig_types::ddl::FK_PREFIX))
+        })
+        .collect();
     let mut objs: Vec<InheritableObject> = Vec::new();
     for g in &group {
         if let Some(o) = ctx.state.object_named_ci(db, g) {
-            objs.push((**o).clone());
+            let mut o = (**o).clone();
+            if o.type_root.is_none() {
+                o.type_root = ctx.type_tree(db, g).map(|(root, _)| root);
+            }
+            objs.push(o);
             continue;
         }
         let n = Name {
@@ -2056,6 +2099,7 @@ pub async fn convert_native(
             obj: Arc::new(o.clone()),
             layer: format!("{}.{}", q(db_name), q(&o.table)),
             prefix: format!("{}.", q(db_name)),
+            derived: Vec::new(),
         };
         for l in &o.links {
             backfill(ctx, r, &res, l).await?;
@@ -2126,9 +2170,11 @@ pub async fn create_table(
             auto: None,
             links: Vec::new(),
             adopted: false,
+            type_root: None,
         }),
         layer: String::new(),
         prefix: String::new(),
+        derived: Vec::new(),
     };
     let goes_down = fks.iter().any(|f| {
         ctx.state
@@ -2364,6 +2410,7 @@ pub async fn alter(
             obj: Arc::new(obj.clone()),
             layer: format!("{}.{}", q(&db_name), q(&obj.table)),
             prefix: format!("{}.", q(&db_name)),
+            derived: Vec::new(),
         };
         for (l, target) in &new_links {
             check_existing(ctx, r, &res, l, target).await?;
@@ -2399,6 +2446,7 @@ async fn check_existing(
         obj: Arc::new(target.clone()),
         layer: format!("{}.{}", q(&res.db_name), q(&target.table)),
         prefix: res.prefix.clone(),
+        derived: Vec::new(),
     };
     crate::upstream::ensure(ctx, r, &tres).await?;
     for row in &spaces.rows {
@@ -2428,6 +2476,7 @@ async fn check_existing(
                     layer: res.layer.clone(),
                     keys: None,
                     origin: false,
+                    derived: Vec::new(),
                 }
                 .view(&mine),
                 l.columns
@@ -2446,6 +2495,7 @@ async fn check_existing(
                     layer: tres.layer.clone(),
                     keys: None,
                     origin: false,
+                    derived: Vec::new(),
                 }
                 .view(&theirs)
             ))

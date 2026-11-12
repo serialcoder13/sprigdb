@@ -25,7 +25,11 @@ fn unsupported(what: impl std::fmt::Display) -> SprigError {
 }
 
 fn arith_err(msg: &str) -> SprigError {
-    SprigError::new(SprigCode::GraphPropertyType, msg.to_owned())
+    // Neo4j's code for arithmetic errors (R8 round 8; 39909 in SQL).
+    SprigError::new(
+        SprigCode::GraphPropertyType,
+        format!("[Neo.ClientError.Statement.ArithmeticError] {msg}"),
+    )
 }
 
 /// Evaluates `e` over `row`.
@@ -668,6 +672,7 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
         },
         "size" => match a0 {
             Value::List(l) => Value::Int(i64::try_from(l.len()).unwrap_or(i64::MAX)),
+            Value::Bytes(b) => Value::Int(i64::try_from(b.len()).unwrap_or(i64::MAX)),
             Value::String(s) => Value::Int(i64::try_from(s.chars().count()).unwrap_or(i64::MAX)),
             Value::Null => Value::Null,
             o => return Err(type_error(format!("size() of a {}", o.type_name()))),
@@ -917,6 +922,10 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
             })
         }
         "exists" => Value::Bool(!a0.is_null()),
+        // Neo4j types a byte array as a list of integers.
+        "valuetype" if matches!(a0, Value::Bytes(_)) => {
+            Value::str("LIST<INTEGER NOT NULL> NOT NULL")
+        }
         "valuetype" => Value::str(a0.type_name()),
         other => match crate::temporal::call(other, &args)? {
             Some(v) => v,

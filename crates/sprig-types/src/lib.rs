@@ -349,6 +349,12 @@ pub async fn handle(
         )),
         Stmt::AddHierarchy(ah) => hier::add(&ah, ctx, r).await.map(Handled::Ok),
         Stmt::DropHierarchy(n) => hier::drop(&n, ctx, r).await.map(Handled::Ok),
+        Stmt::AddDiscriminator(d) => ddl::add_discriminator(&d, ctx, r)
+            .await
+            .map(Handled::Ok),
+        Stmt::DropDiscriminator(n) => ddl::drop_discriminator(&n, ctx, r)
+            .await
+            .map(Handled::Ok),
         Stmt::AlterTable(at) => {
             let Some(types) = ctx.lookup.db(at.table.db.as_deref()) else {
                 return Ok(Handled::NotTyped);
@@ -499,3 +505,104 @@ pub async fn handle(
 
 #[cfg(test)]
 mod tests;
+
+/// A backend error made the client's: a failed `NOT NULL` check of a
+/// single-table subtype (4025, or 3819, naming a `_sprig_nn_` constraint) becomes
+/// MySQL's 1048 for the column. `None` for any other error.
+#[must_use]
+pub fn map_error(state: Option<&TypesState>, e: &sprig_common::SprigError) -> Option<sprig_common::SprigError> {
+    // MariaDB's 4025, or MySQL's 3819 on the MySQL persona.
+    if !matches!(e.protocol().mysql_errno, 4025 | 3819) {
+        return None;
+    }
+    if e.message.contains(ddl::DISC_CHECK) {
+        return Some(sprig_common::SprigError::new(
+            sprig_common::SprigCode::TypeDiscriminatorMismatch,
+            "the discriminator's value doesn't match the row's type while the hierarchy takes              its discriminator",
+        ));
+    }
+    let at = e.message.find(ddl::NN_PREFIX)?;
+    let name: String = e.message[at..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    let state = state?;
+    for (_, d) in state.dbs() {
+        for t in d.iter().filter(|t| !t.is_root()) {
+            if let Some(f) = t
+                .own_fields
+                .iter()
+                .find(|f| ddl::nn_name(&t.name, &f.name) == name)
+            {
+                return Some(sprig_common::SprigError::standard(
+                    1048,
+                    *b"23000",
+                    format!("Column '{}' cannot be null", f.name),
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// The type columns a merged view of an inheritable table computes
+/// (chapter 42, typed tables in inheritance groups): for a discriminated
+/// root, `_type` and `_type_path` from the discriminator's merged value, by
+/// this tenant's types (a child tenant's own subtypes included), as
+/// `(column, expression)`. Empty for any other table: `_type` hierarchies
+/// keep their type columns as ordinary fields.
+#[must_use]
+pub fn derived_columns(
+    state: &TypesState,
+    db: DbId,
+    table: &str,
+    lctn: bool,
+    nbe: bool,
+) -> Vec<(String, String)> {
+    let Some(d) = state.db(db) else {
+        return Vec::new();
+    };
+    let Some(t) = d.get(table, lctn) else {
+        return Vec::new();
+    };
+    let (true, Some(col)) = (t.is_root(), &t.discriminator) else {
+        return Vec::new();
+    };
+    let map = ddl::DiscMap {
+        operand: t
+            .disc_operand
+            .clone()
+            .unwrap_or_else(|| sprig_common::names::quote(col)),
+        root: (t.name.clone(), t.path.clone()),
+        arms: d
+            .descendants(t.id)
+            .into_iter()
+            .filter_map(|x| Some((x.disc_value.clone()?, x.name.clone(), x.path.clone())))
+            .collect(),
+    };
+    let (te, pe) = map.exprs(nbe);
+    vec![
+        (rewrite::TYPE_COLUMN.to_owned(), te),
+        (rewrite::TYPE_PATH_COLUMN.to_owned(), pe),
+    ]
+}
+
+/// The names of the tables of `table`'s type tree (its root and every
+/// subtype), when `table` is a typed table of a tree; `None` otherwise.
+#[must_use]
+pub fn type_tree(state: &TypesState, db: DbId, table: &str, lctn: bool) -> Option<(String, Vec<String>)> {
+    let d = state.db(db)?;
+    let t = d.get(table, lctn)?;
+    let root = d.root_of(t.id)?;
+    let mut names = vec![root.name.clone()];
+    names.extend(d.descendants(root.id).iter().map(|x| x.name.clone()));
+    Some((root.name.clone(), names))
+}
+
+/// Whether `table` has a record hierarchy (`ADD HIERARCHY`).
+#[must_use]
+pub fn has_hierarchy(state: &TypesState, db: DbId, table: &str, lctn: bool) -> bool {
+    state
+        .db(db)
+        .is_some_and(|d| d.hierarchy(table, lctn).is_some())
+}

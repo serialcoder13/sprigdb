@@ -1589,7 +1589,7 @@ async fn bins_dc_cut_from_the_global_tier() {
     if !skip::flag(skip::DOCKER) {
         return;
     }
-    scenario(Fault::CutFromGlobal).await;
+    Box::pin(scenario(Fault::CutFromGlobal)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
@@ -1597,5 +1597,5 @@ async fn bins_dc_frozen_by_a_process_pause() {
     if !skip::flag(skip::DOCKER) {
         return;
     }
-    scenario(Fault::Freeze).await;
+    Box::pin(scenario(Fault::Freeze)).await;
 }

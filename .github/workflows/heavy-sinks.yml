@@ -1,0 +1,94 @@
+# The sink fault-injection suite (chapter 51, "Fault injection"; R9: r9tests
+# decision 108 ran it on a laptop, r9last made it this job). A queue sink
+# delivers 2,000 messages through toxiproxy 2.12.0 to PostgreSQL 16
+# (EXACTLY ONCE), Apache Kafka 3.9.0 or MinIO (at least once) while a fault
+# runs (deploy/compose/ci/sink-faults.sh):
+#
+#   cut, down, slow, stall    20-45 s, as decision 108's twelve runs
+#   long-cut, long-down       4 minutes, past sink.pause_after_minutes (1):
+#                             the sink pauses, its probe resumes it
+#
+# A run fails unless every message arrives, PostgreSQL has no duplicate,
+# the queue is empty, nothing is dead-lettered and the sink runs again.
+# Nightly and on demand; defined, not yet run (12 Nov 2026). Each job starts
+# a SprigDB stack (.github/actions/sprig-stack with the AMQP listener) and
+# its own containers, every image pinned by tag.
+name: heavy-sinks
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: "Targets: all, or a comma-separated list of pg, kafka, s3"
+        required: false
+        default: all
+      faults:
+        description: "Faults: all, short (cut, down, slow, stall), long (long-cut, long-down), or a comma-separated list"
+        required: false
+        default: all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: heavy-sinks-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  faults:
+    name: R9 sink ${{ matrix.target }} ${{ matrix.fault }}
+    # The matrix isn't known at job level: the Pick step skips the others.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [pg, kafka, s3]
+        fault: [cut, down, slow, stall, long-cut, long-down]
+    steps:
+      - name: Pick
+        id: pick
+        shell: bash
+        run: |
+          want=yes
+          if [[ "${{ github.event_name }}" == workflow_dispatch ]]; then
+            t="${{ inputs.targets }}"; f="${{ inputs.faults }}"
+            [[ $t == all || ",$t," == *",${{ matrix.target }},"* ]] || want=no
+            case $f in
+              all) ;;
+              short) [[ "${{ matrix.fault }}" != long-* ]] || want=no ;;
+              long) [[ "${{ matrix.fault }}" == long-* ]] || want=no ;;
+              *) [[ ",$f," == *",${{ matrix.fault }},"* ]] || want=no ;;
+            esac
+          fi
+          echo "run=$want" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        if: steps.pick.outputs.run == 'yes'
+      - uses: ./.github/actions/sprig-stack
+        if: steps.pick.outputs.run == 'yes'
+        with:
+          listeners: amqp
+      - name: Destinations and proxies
+        if: steps.pick.outputs.run == 'yes'
+        run: deploy/compose/ci/sink-faults.sh up
+      - name: ${{ matrix.target }} through ${{ matrix.fault }}
+        if: steps.pick.outputs.run == 'yes'
+        run: deploy/compose/ci/sink-faults.sh run ${{ matrix.target }} ${{ matrix.fault }} 2000
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.pick.outputs.run == 'yes'
+        with:
+          name: heavy-sinks-${{ matrix.target }}-${{ matrix.fault }}
+          path: |
+            target/ci-results/sink-faults
+            deploy/compose/.gateway-dev/*.log
+          if-no-files-found: ignore
+      - name: Stop
+        if: always() && steps.pick.outputs.run == 'yes'
+        run: |
+          deploy/compose/ci/sink-faults.sh down
+          deploy/compose/ci/stack-down.sh

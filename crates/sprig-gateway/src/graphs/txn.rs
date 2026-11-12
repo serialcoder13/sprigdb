@@ -411,6 +411,10 @@ pub(crate) struct CoordConns<'a> {
     pub(crate) group: GroupId,
     /// Shards written so far (epoch check at commit).
     pub(crate) touched: &'a mut Vec<Touched>,
+    /// An auto-commit statement's graph: `CALL { } IN TRANSACTIONS`
+    /// commits its batches here (R8 round 8); `None` in an explicit
+    /// transaction.
+    pub(crate) batches: Option<(Arc<crate::graphs::GatewayGraphs>, crate::graphs::GraphRef)>,
 }
 
 fn cluster_id(s: &str) -> Result<ClusterId> {
@@ -456,6 +460,39 @@ impl ShardConns for CoordConns<'_> {
             b.record(sql);
         }
     }
+
+    fn batches(&self) -> bool {
+        self.batches.is_some()
+    }
+
+    /// A batch commits as the whole statement does: the written shards'
+    /// epochs checked against the map now, then chapter 18's commit (Sprig
+    /// 2PC across clusters); the coordinator then starts afresh.
+    async fn end_batch(&mut self, ok: bool) -> Result<()> {
+        let Some((graphs, g)) = &self.batches else {
+            return Err(sprig_graph::store::not_implicit());
+        };
+        if ok {
+            let checked = if g.shards.group != 0 && !self.touched.is_empty() {
+                match graphs.refresh(g).await {
+                    Ok(now) => check_epochs(self.touched, &now.shards),
+                    Err(e) => Err(e),
+                }
+            } else {
+                Ok(())
+            };
+            if let Err(e) = checked {
+                let _ = self.coord.rollback().await;
+                self.touched.clear();
+                return Err(e);
+            }
+            self.touched.clear();
+            self.coord.commit().await.map(drop)
+        } else {
+            self.touched.clear();
+            self.coord.rollback().await
+        }
+    }
 }
 
 /// Read-only transactions, one per cluster (a replica after the causal
@@ -463,12 +500,16 @@ impl ShardConns for CoordConns<'_> {
 #[derive(Default)]
 pub(crate) struct ReadConns {
     pub(crate) conns: HashMap<String, Conn>,
+    /// An auto-commit read: `CALL { } IN TRANSACTIONS` may run (its
+    /// batches have nothing to commit).
+    pub(crate) implicit: bool,
 }
 
 impl std::fmt::Debug for ReadConns {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReadConns")
             .field("clusters", &self.conns.keys().collect::<Vec<_>>())
+            .field("implicit", &self.implicit)
             .finish()
     }
 }
@@ -508,6 +549,14 @@ impl ShardConns for ReadConns {
         self.conns
             .get_mut(&at.cluster)
             .ok_or_else(|| SprigError::internal(format!("no read connection to {}", at.cluster)))
+    }
+
+    fn batches(&self) -> bool {
+        self.implicit
+    }
+
+    async fn end_batch(&mut self, _ok: bool) -> Result<()> {
+        Ok(())
     }
 }
 

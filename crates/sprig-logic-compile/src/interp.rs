@@ -126,6 +126,7 @@ fn runtime(m: impl Into<String>) -> SprigError {
 enum Flow {
     Next,
     Break,
+    Continue,
     Return,
 }
 
@@ -221,13 +222,14 @@ impl Run<'_> {
                         ));
                     }
                     match self.block(body)? {
-                        Flow::Next => {}
+                        Flow::Next | Flow::Continue => {}
                         Flow::Break => break,
                         Flow::Return => return Ok(Flow::Return),
                     }
                 }
             }
             Stmt::Break => return Ok(Flow::Break),
+            Stmt::Continue => return Ok(Flow::Continue),
             Stmt::Return => return Ok(Flow::Return),
             Stmt::Emit(name, fields) => {
                 if self.event.is_none() {

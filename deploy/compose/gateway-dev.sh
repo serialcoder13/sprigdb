@@ -13,10 +13,12 @@
 #   (t<tenant>_u<user>, chapter 29, [per_user] in gateway-backends.dev.toml),
 #   granted only on the tenant's own schemas; DDL creating
 #   databases and stored programs runs as the cluster's sprig_ctl account.
-#   down drops the two tenants' databases through the gateway (needs the
-#   mysql client), deletes the tenants and waits until each is gone from
-#   the tenant list (SPRIG_GATEWAY_DELETE_WAIT seconds at most, 300) before
-#   it stops the controller.
+#   down drops the two tenants' databases through the gateway (when it runs
+#   and there is a mysql client), deletes the tenants (starting the
+#   controller if it isn't running; on a deployment whose etcd up
+#   bootstrapped, also the tenants tests made in its id range) and waits
+#   until each is gone from the tenant list (SPRIG_GATEWAY_DELETE_WAIT
+#   seconds at most, 300) before it stops the controller.
 # - accounts_file (M0.2): the logins app, app_repl and app_galera of
 #   gateway-accounts.dev.toml on the three raw clusters, names unchanged.
 #   The connector matrix runs against this mode.
@@ -434,13 +436,43 @@ provision_tenants() {
     done
 }
 
-# Drops the tenants' databases through the gateway, then deletes them.
+# Tenants of a deployment whose etcd up bootstrapped that up didn't create
+# (tests make their own): their directory entries go with the deployment,
+# so they are deleted too, or their t<id>_* schemas would stay behind. Only
+# ids inside this deployment's range, newest first (children before their
+# parents), recorded in $state/tenants before the ones up made.
+adopt_tenants() {
+    [[ $(cat "$state/etcd-created" 2>/dev/null || echo existing) == bootstrap ]] || return 0
+    [[ $tenant_id_base != none ]] || return 0
+    local list extra
+    list=$(ctl -o json tenant list 2>/dev/null) || return 0
+    extra=$(jq -r --argjson lo "$tenant_id_base" --argjson hi "$((tenant_id_base + 99999))" \
+        '[.tenants[]? | select(.tenant_id >= $lo and .tenant_id <= $hi)] | sort_by(-.tenant_id) | .[] | "\(.name) \(.tenant_id)"' \
+        <<<"$list") || return 0
+    local t id known
+    known=$(cat "$state/tenants" 2>/dev/null || true)
+    {
+        while read -r t id; do
+            [[ -n $t ]] || continue
+            grep -q "^$t " <<<"$known" && continue
+            say "tenant $t ($id) was made on this deployment after up: deleting it too" >&2
+            echo "$t $id"
+        done <<<"$extra"
+        [[ -n $known ]] && echo "$known"
+    } >"$state/tenants.new"
+    mv -f "$state/tenants.new" "$state/tenants"
+}
+
+# Deletes the tenants (sprigctl tenant delete drops their databases itself,
+# bugfix-27); with the gateway up and a mysql client, their databases are
+# dropped through the gateway first, as a client would.
 remove_tenants() {
-    [[ -f $state/tenants ]] || return 0
-    local t dbs db q
-    if ! command -v mysql >/dev/null; then
-        say "no mysql client: tenants $(cut -d' ' -f1 "$state/tenants" | tr '\n' ' ')left in place (drop their databases, then sprigctl tenant delete)"
-        return 0
+    adopt_tenants
+    [[ -s $state/tenants ]] || return 0
+    local t dbs db q via_gateway=true
+    if ! command -v mysql >/dev/null || ! running gateway; then
+        via_gateway=false
+        say "gateway not running or no mysql client: deleting the tenants directly (the controller drops their databases)"
     fi
     q='`'
     while read -r t _id; do
@@ -450,6 +482,7 @@ remove_tenants() {
         # can only go after it.
         local pass left
         for pass in 1 2 3 4; do
+            $via_gateway || break
             if ! dbs=$("${my[@]}" -e "SHOW DATABASES" 2>/dev/null); then
                 say "couldn't log in as $t.app to drop its databases"
                 break
@@ -616,7 +649,19 @@ down() {
         say "not up (no $state/)"
         return
     fi
-    if running gateway && running controller; then remove_tenants; fi
+    # Tenants are deleted whatever runs: before, a gateway that wasn't
+    # running (stopped, crashed, swapped for another binary) skipped this
+    # silently, and a bootstrapped deployment then removed the directory
+    # entries below, leaving every t<id>_* schema on the clusters.
+    if [[ -s $state/tenants || $(cat "$state/etcd-created" 2>/dev/null || echo existing) == bootstrap ]] &&
+        curl -fsS -o /dev/null "$etcd/version" 2>/dev/null; then
+        if ! running controller; then
+            say "starting the controller to delete the tenants"
+            start controller deploy/compose/sprigdb.dev.toml controller
+            wait_ready controller "$ctl_ready"
+        fi
+        remove_tenants
+    fi
     stop gateway
     stop worker
     stop controller
