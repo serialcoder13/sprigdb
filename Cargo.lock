@@ -5878,6 +5878,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "sprig-docs"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "toml",
+]
+
+[[package]]
+name = "sprig-docs-gen"
+version = "0.0.1"
+dependencies = [
+ "serde_json",
+ "sprig-agent",
+ "sprig-common",
+ "sprig-controller",
+ "sprig-docs",
+ "sprig-gateway",
+ "sprig-operator",
+ "sprig-settings",
+ "sprig-worker",
+]
+
+[[package]]
 name = "sprig-feed"
 version = "0.0.1"
 dependencies = [
