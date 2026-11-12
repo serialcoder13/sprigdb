@@ -653,11 +653,18 @@ where
         let registry = live.registry();
         // Chapter 29: auth.authorizer only names an engine every live
         // gateway knows.
-        let guard: Arc<dyn sprig_settings::ValueGuard> =
+        // bugfix-62 (Q39): txn.commit_resolve_timeout_ms stays below
+        // txn.resolver_min_age_seconds.
+        let guard: Arc<dyn sprig_settings::ValueGuard> = Arc::new(sprig_settings::AllGuards(vec![
             Arc::new(sprig_auth::authz::engine_guard::EngineGuard::new(
                 Arc::clone(&live.stores().global),
                 Arc::clone(&live.stores().dc),
-            ));
+            )),
+            Arc::new(sprig_txn::settings::ResolveWindowGuard::new(
+                live.clone(),
+                live.stores().dc_id().clone(),
+            )),
+        ]));
         let etcd = SettingsWriter::new(registry, live.stores().clone(), Arc::clone(&clock))
             .with_guard(Arc::clone(&guard));
         let catalog = TenantSettingsWriter::new(

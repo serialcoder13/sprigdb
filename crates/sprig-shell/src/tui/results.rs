@@ -1,12 +1,13 @@
 //! Results views (chapter 53, "Results"): a grid, a JSON tree and a graph
 //! path view, over the results of the last run in a tab.
 
+use crate::tui::theme;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Cell as TCell, Paragraph, Row, Table};
 use serde_json::Value;
@@ -172,18 +173,17 @@ impl Results {
         let inner = block.inner(area);
         f.render_widget(block, area);
         if let Some(e) = &self.error {
-            let p = Paragraph::new(Line::styled(e.to_string(), Style::new().fg(Color::Red)))
+            let p = Paragraph::new(Line::styled(e.to_string(), theme::error()))
                 .wrap(ratatui::widgets::Wrap { trim: false });
             f.render_widget(p, inner);
             return;
         }
         let Some(set) = self.sets.get(self.current).cloned() else {
-            let msg = if self.running.is_some() {
-                "waiting for the first rows..."
-            } else {
-                ""
-            };
-            f.render_widget(Paragraph::new(msg), inner);
+            if self.running.is_some() {
+                f.render_widget(Paragraph::new("waiting for the first rows..."), inner);
+            } else if self.note.is_empty() {
+                welcome(f, inner);
+            }
             return;
         };
         match self.view {
@@ -221,7 +221,7 @@ impl Results {
             .take(h)
             .map(|(i, l)| {
                 if i == self.row {
-                    l.style(Style::new().add_modifier(Modifier::REVERSED))
+                    l.style(theme::selected())
                 } else {
                     l
                 }
@@ -260,10 +260,7 @@ impl Results {
             let c = &set.columns[i];
             TCell::from(vec![
                 Line::styled(c.name.clone(), Style::new().add_modifier(Modifier::BOLD)),
-                Line::styled(
-                    c.type_name.to_ascii_lowercase(),
-                    Style::new().fg(Color::DarkGray),
-                ),
+                Line::styled(c.type_name.to_ascii_lowercase(), theme::muted()),
             ])
         }))
         .height(2);
@@ -294,7 +291,7 @@ impl Results {
                         t
                     };
                     let style = if v.is_none() {
-                        Style::new().fg(Color::DarkGray)
+                        theme::muted()
                     } else {
                         Style::new()
                     };
@@ -302,7 +299,7 @@ impl Results {
                 });
                 let row = Row::new(cells);
                 if ri == self.row {
-                    row.style(Style::new().add_modifier(Modifier::REVERSED))
+                    row.style(theme::selected())
                 } else {
                     row
                 }
@@ -425,10 +422,10 @@ fn badge(v: &Value) -> Option<(String, String)> {
 
 fn scalar(v: &Value) -> Span<'static> {
     match v {
-        Value::Null => Span::styled("null", Style::new().fg(Color::DarkGray)),
-        Value::Bool(b) => Span::styled(b.to_string(), Style::new().fg(Color::Magenta)),
-        Value::Number(n) => Span::styled(n.to_string(), Style::new().fg(Color::Magenta)),
-        Value::String(s) => Span::styled(format!("{s:?}"), Style::new().fg(Color::Green)),
+        Value::Null => Span::styled("null", theme::muted()),
+        Value::Bool(b) => Span::styled(b.to_string(), theme::number()),
+        Value::Number(n) => Span::styled(n.to_string(), theme::number()),
+        Value::String(s) => Span::styled(format!("{s:?}"), theme::string()),
         other => Span::raw(other.to_string()),
     }
 }
@@ -442,16 +439,13 @@ fn tree(
     folded: &BTreeSet<String>,
 ) {
     let indent = "  ".repeat(depth);
-    let key_span = key.map(|k| Span::styled(format!("{k}: "), Style::new().fg(Color::Cyan)));
+    let key_span = key.map(|k| Span::styled(format!("{k}: "), theme::keyword()));
     let mut line = vec![Span::raw(indent.clone())];
     if let Some((name, text)) = badge(v) {
         line.push(Span::raw("  "));
         line.extend(key_span);
-        line.push(Span::styled(
-            format!("[{name}] "),
-            Style::new().fg(Color::Blue),
-        ));
-        line.push(Span::styled(text, Style::new().fg(Color::Green)));
+        line.push(Span::styled(format!("[{name}] "), theme::muted()));
+        line.push(Span::styled(text, theme::string()));
         out.push(Line::from(line));
         return;
     }
@@ -654,4 +648,56 @@ pub fn graph_lines(set: &ResultSet) -> Vec<Line<'static>> {
         }
     }
     lines
+}
+
+/// The empty results pane before anything has run: the mascot waving and
+/// the keys to start with (decision R6). Nothing when the pane is too small.
+fn welcome(f: &mut Frame<'_>, area: Rect) {
+    use crate::tui::mascot::{self, ColourMode};
+    let mode = match theme::depth() {
+        theme::Depth::None => ColourMode::None,
+        theme::Depth::Ansi256 => ColourMode::Ansi256,
+        theme::Depth::TrueColor => ColourMode::TrueColor,
+    };
+    let art = &mascot::BUDDY;
+    let tips = [
+        ("Ctrl-K", "search tables, tabs and commands"),
+        ("F5", "run the statement at the cursor"),
+        ("F1", "all the keys"),
+    ];
+    let w = art.width() + 4 + 42;
+    let h = art.height().max(u16::try_from(tips.len()).unwrap_or(3) + 2);
+    if area.width < w || area.height < h {
+        return;
+    }
+    let left = area.x + (area.width - w) / 2;
+    let top = area.y + (area.height - h) / 2;
+    f.render_widget(
+        Paragraph::new(mascot::render(art, mode)),
+        Rect {
+            x: left,
+            y: top,
+            width: art.width(),
+            height: art.height(),
+        },
+    );
+    let mut lines = vec![
+        Line::styled("Ready when you are.", theme::accent()),
+        Line::from(""),
+    ];
+    for (k, what) in tips {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{k:<8}"), theme::keyword()),
+            Span::styled(what, theme::muted()),
+        ]));
+    }
+    f.render_widget(
+        Paragraph::new(lines),
+        Rect {
+            x: left + art.width() + 4,
+            y: top + 1,
+            width: 42,
+            height: h.saturating_sub(1),
+        },
+    );
 }

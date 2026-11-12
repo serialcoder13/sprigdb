@@ -73,17 +73,26 @@ export function rereadFor(t: TableRef, original: Cell[]): string {
   return `SELECT * FROM ${qualified(t.db, t.table)} WHERE ${where}`;
 }
 
-/** Keyset paging (chapter 44, "Browsing"): rows after `after` in key order. */
-export function pageQuery(t: { db: string; table: string; keyNames: string[] }, after: Cell[] | null, limit: number): string {
+/** Keyset paging (chapter 44, "Browsing"): rows after `after` in key order,
+ * within `filter` (a WHERE expression from the filter bar) when given. */
+export function pageQuery(
+  t: { db: string; table: string; keyNames: string[] },
+  after: Cell[] | null,
+  limit: number,
+  filter: string | null = null,
+): string {
   const target = qualified(t.db, t.table);
-  if (!t.keyNames.length) return `SELECT * FROM ${target} LIMIT ${limit}`;
+  const conds: string[] = filter ? [`(${filter})`] : [];
+  if (!t.keyNames.length) {
+    return `SELECT * FROM ${target}${conds.length ? ` WHERE ${conds.join(' AND ')}` : ''} LIMIT ${limit}`;
+  }
   const order = t.keyNames.map(ident).join(', ');
-  let where = '';
   if (after) {
     const lhs = t.keyNames.length === 1 ? ident(t.keyNames[0]!) : `(${order})`;
     const rhs = t.keyNames.length === 1 ? sqlValue(after[0] ?? null) : `(${after.map(sqlValue).join(', ')})`;
-    where = ` WHERE ${lhs} > ${rhs}`;
+    conds.push(`${lhs} > ${rhs}`);
   }
+  const where = conds.length ? ` WHERE ${conds.join(' AND ')}` : '';
   return `SELECT * FROM ${target}${where} ORDER BY ${order} LIMIT ${limit}`;
 }
 

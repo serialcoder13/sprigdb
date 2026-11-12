@@ -50,6 +50,31 @@ pub struct ApplyCx<'a> {
     pub now: DateTime,
 }
 
+/// MongoDB's order of update paths: component by component, numeric
+/// names numerically, others by their bytes; a prefix first.
+fn field_order(a: &str, b: &str) -> std::cmp::Ordering {
+    let mut x = a.split('.');
+    let mut y = b.split('.');
+    loop {
+        match (x.next(), y.next()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(p), Some(q)) => {
+                let o = match (p.parse::<u64>(), q.parse::<u64>()) {
+                    (Ok(m), Ok(n)) if !p.starts_with('0') || p == "0" => {
+                        m.cmp(&n).then_with(|| p.cmp(q))
+                    }
+                    _ => p.cmp(q),
+                };
+                if o != std::cmp::Ordering::Equal {
+                    return o;
+                }
+            }
+        }
+    }
+}
+
 /// Parses an update document or pipeline.
 ///
 /// # Errors
@@ -153,6 +178,11 @@ pub fn parse(u: &Bson) -> Result<UpdateSpec, MongoError> {
                     "'$set' is empty. You must specify a field like so: {$set: {<field>: ...}}",
                 ));
             }
+            // MongoDB 5.0+ applies an update's fields in field-name order,
+            // whatever the operator (numeric names numerically), so new
+            // fields are appended in that order (M7, found by the `$merge`
+            // differential).
+            out.sort_by(|a, b| field_order(&a.1, &b.1));
             Ok(UpdateSpec::Ops(out))
         }
         _ => Err(MongoError::new(

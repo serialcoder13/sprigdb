@@ -224,16 +224,43 @@ pub async fn ensure_vhost(
         return Ok(true);
     }
     let db_name = defs[0].db_name.clone();
-    let cat = super::streams::ensure_database(svc, t, &db_name).await?;
+    let started = std::time::Instant::now();
+    let ep = svc.locator.writer(t).await?;
+    // R9 (r9scale): the member's database and the catalog's `inherit_msg`
+    // and `mq` modules at once, in one migration run (they were three
+    // steps one after another on a member's first publish).
+    let modules = async {
+        let mut c = ep.pool.get_conn().await.map_err(cat_err)?;
+        sprig_catalog::Migrator::new(&[
+            sprig_inherit::msg::store::MSG_MODULE,
+            sprig_queues::catalog::MQ_MODULE,
+        ])?
+        .run(
+            &mut c,
+            ep.store.schema(),
+            &sprig_catalog::migrate::MigrateOpts::default(),
+        )
+        .await?;
+        Ok::<_, SprigError>(())
+    };
+    let (cat, ()) = tokio::try_join!(
+        super::streams::ensure_database(svc, t, &db_name),
+        modules
+    )?;
+    let prepared_ms = started.elapsed().as_millis();
     let lc = super::streams::lctn(svc, &cat);
     let row = cat
         .database(&database_key(&db_name, lc))
         .cloned()
         .ok_or_else(|| super::unavailable(format!("tenant {t}'s database {db_name}")))?;
-    super::migrate(svc, t).await?;
-    let ep = svc.locator.writer(t).await?;
+    // The queue store's shard tables and the forwarder's subscription,
+    // which the queue owner's first load would otherwise make after the
+    // catalog change, while the instances are claimed and recorded.
+    let store_warm = defs
+        .iter()
+        .any(|d| d.kind == DefKind::Queue)
+        .then(|| tokio::spawn(warm_store(Arc::clone(svc), t, Arc::clone(&row))));
     let mut conn = ep.pool.get_conn().await.map_err(cat_err)?;
-    sprig_queues::catalog::migrate(&mut conn, ep.store.schema()).await?;
     let mstore = MsgStore::new(ep.store.schema());
     let st = super::state_of(&cat);
     let mq = cat
@@ -460,7 +487,7 @@ pub async fn ensure_vhost(
                 sprig_catalog::cache::Freshness::Cached { min_version: v },
             )
             .await?;
-        tracing::info!(tenant = %t, db = %db_name, changes = all.len(), arguments = arg_updates.len(), "inherited exchanges, queues and bindings applied");
+        tracing::info!(tenant = %t, db = %db_name, changes = all.len(), arguments = arg_updates.len(), ms = started.elapsed().as_millis(), prepared_ms, "inherited exchanges, queues and bindings applied");
     }
     for (d, id) in &instances {
         super::put_index(
@@ -481,6 +508,9 @@ pub async fn ensure_vhost(
             super::sinks::ensure_for_queue(svc, chain, d, t).await;
         }
     }
+    if let Some(h) = store_warm {
+        let _ = h.await;
+    }
     applied_map()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -490,6 +520,32 @@ pub async fn ensure_vhost(
         tokio::spawn(super::broadcast::replay(Arc::clone(svc), d, t));
     }
     Ok(true)
+}
+
+/// Makes the queue store's tables in the shard schema of database `row`
+/// of tenant `t` and registers the tenant's forwarder subscription
+/// (both idempotent; the queue owner's first load does them again and
+/// finds them done). Failures are left to that load.
+async fn warm_store(
+    svc: Arc<TenantServices>,
+    t: TenantId,
+    row: Arc<sprig_catalog::store::DatabaseRow>,
+) {
+    let Some(schema) = shard_schemas(t, &row).first().map(ToString::to_string) else {
+        return;
+    };
+    let tables = async {
+        let cluster = svc.locator.cluster(t).await?;
+        let pool = svc.locator.ctl_pool(&cluster).await?;
+        sprig_queues::maria::MariaStore::new(pool, schema)
+            .ensure()
+            .await
+            .map_err(|e| super::unavailable(e.to_string()))
+    };
+    let (r, ()) = tokio::join!(tables, crate::outbox_feed::subscribe(&svc, t));
+    if let Err(e) = r {
+        tracing::debug!(tenant = %t, error = %e, "queue store tables not made ahead; the owner makes them");
+    }
 }
 
 /// Removes a member's instance of exchange or queue definition `def` now

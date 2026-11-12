@@ -1,4 +1,4 @@
- 1 sql shop │ Dashboard │ Admin │ Inbox
+ ❯ 1 sql shop │ ◔ Dashboard │ ◈ Admin │ ⚑ Inbox
 ┌ Explorer ──────────────────┐┌ Editor [sql] ────────────────────────────────────────────────────────────────┐
 │▾ shop                      ││ 1 SELECT * FROM ord                                                          │
 │  ▾ tables 2                ││                    ┌──────────────┐                                          │
@@ -7,12 +7,12 @@
 │  ▸ views 1                 │┌ Results [grid] ──────────────────────────────────────────────────────────────┐
 │  ▸ streams 1               ││                    └──────────────┘                                          │
 │▸ hr                        ││                                                                              │
-│                            ││                                                                              │
-│                            ││                                                                              │
-│                            ││                                                                              │
-│                            ││                                                                              │
-│                            ││                                                                              │
-│                            ││                                                                              │
+│                            ││               ,\|/,                                                          │
+│                            ││          \\ .-''V''-. //     Ready when you are.                             │
+│                            ││          ==| (O) (@) |==                                                     │
+│                            ││          // \ ,\uu/, / \\    Ctrl-K  search tables, tabs and commands        │
+│                            ││            .'  .*.  '.~~.    F5      run the statement at the cursor         │
+│                            ││            '-(_)-(_)-'~~'    F1      all the keys                            │
 │                            ││                                                                              │
 │                            ││                                                                              │
 │                            ││                                                                              │

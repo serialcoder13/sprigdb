@@ -157,6 +157,9 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         () = ctx.shutdown.cancelled() => return Ok(()),
         () = live.ready() => {}
     }
+    // bugfix-62 (Q39): no start with a commit-resolve window the resolver
+    // could sweep under.
+    sprig_txn::settings::check_live(&live, &dc)?;
     // Chapter 47: trace sampling, the OTLP endpoint and the audit spool
     // limit follow their settings.
     let _telemetry_settings = sprig_settings::ops::apply_live(&live, &dc);

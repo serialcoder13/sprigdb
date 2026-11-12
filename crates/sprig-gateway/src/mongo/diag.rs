@@ -88,8 +88,7 @@ pub(super) async fn process_privilege(
     if let Some(v) = sql.holds_tenant_privilege(p) {
         return Some(v);
     }
-    use sprig_doc::engine::SqlRunner as _;
-    let _ = sql.query("SELECT 1").await;
+    let _ = sprig_doc::engine::SqlRunner::query(sql, "SELECT 1").await;
     sql.holds_tenant_privilege(p)
 }
 

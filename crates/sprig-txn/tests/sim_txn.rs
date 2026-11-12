@@ -299,6 +299,9 @@ struct RelayLive {
     inc: u64,
     fence: Arc<RelayFence<SimLinks>>,
     links: Arc<SimLinks>,
+    /// Cancelled when this incarnation stops: work it was doing for a
+    /// gateway dies with it.
+    dead: sprig_common::CancellationToken,
 }
 
 /// A Galera writer node's agent relay: every gateway connection to the
@@ -344,6 +347,7 @@ impl Drop for LiveGuard {
             }
         };
         if let Some(l) = gone {
+            l.dead.cancel();
             let st = l.fence.stats();
             STATS.fences.fetch_add(st.fenced, Ordering::Relaxed);
             STATS.fence_ended.fetch_add(st.ended, Ordering::Relaxed);
@@ -485,18 +489,33 @@ impl SimRelay {
         }
     }
 
-    /// A call from a gateway to the agent (its admin's held-branch calls).
-    async fn call<T>(
+    /// A call from a gateway to the agent (its admin's held-branch calls):
+    /// the agent runs it in a task of its own, which dies with the agent
+    /// but not with the gateway.
+    async fn call<T: Send + 'static>(
         &self,
         gw: &Node,
-        f: impl std::future::Future<Output = DbResult<T>>,
+        dead: sprig_common::CancellationToken,
+        f: impl std::future::Future<Output = DbResult<T>> + Send + 'static,
     ) -> DbResult<T> {
         let started = tokio::time::Instant::now();
         if self.net.transit(gw, &self.agent).await.is_err() {
             Self::lost(started).await;
             return Err(DbError::lost("agent unreachable"));
         }
-        let r = f.await;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.world.spawn("agent call", async move {
+            let r = tokio::select! {
+                biased;
+                () = dead.cancelled() => None,
+                r = f => Some(r),
+            };
+            let _ = tx.send(r);
+        });
+        let Ok(Some(r)) = rx.await else {
+            Self::lost(started).await;
+            return Err(DbError::lost("the agent died"));
+        };
         if self.net.transit(&self.agent, gw).await.is_err() {
             Self::lost(started).await;
             return Err(DbError::lost("agent unreachable"));
@@ -1048,11 +1067,14 @@ impl ClusterAdmin for SimAdmin {
             let Some(l) = r.current() else {
                 return Err(DbError::lost("the agent is down"));
             };
+            let (fence, schema, gtrid, stmts) =
+                (l.fence.clone(), schema.to_owned(), *gtrid, stmts.to_vec());
             return r
-                .call(
-                    &self.from,
-                    l.fence.prepare(TENANT, holder, schema, dtid, gtrid, stmts),
-                )
+                .call(&self.from, l.dead.clone(), async move {
+                    fence
+                        .prepare(TENANT, holder, &schema, dtid, &gtrid, &stmts)
+                        .await
+                })
                 .await;
         }
         self.insert_redo(cluster, schema, dtid, gtrid, stmts).await
@@ -1070,7 +1092,7 @@ impl ClusterAdmin for SimAdmin {
                 return Err(DbError::lost("the agent is down"));
             };
             return r
-                .call(&self.from, async move {
+                .call(&self.from, l.dead.clone(), async move {
                     l.fence.abandon(dtid, holder);
                     Ok(())
                 })
@@ -1085,7 +1107,12 @@ impl ClusterAdmin for SimAdmin {
             let Some(l) = r.current() else {
                 return Err(DbError::lost("the agent is down"));
             };
-            return r.call(&self.from, l.fence.finished(schema, dtid)).await;
+            let (fence, schema) = (l.fence.clone(), schema.to_owned());
+            return r
+                .call(&self.from, l.dead.clone(), async move {
+                    fence.finished(&schema, dtid).await
+                })
+                .await;
         }
         for t in [REDO, REDO_MARK] {
             self.one(
@@ -1513,7 +1540,10 @@ async fn session(
                     }
                     Res::Committed
                 }
-                Err(e) => Res::Failed(code_of(&e)),
+                Err(e) => {
+                    world.record(format!("txn {tag} commit failed: {e}"));
+                    Res::Failed(code_of(&e))
+                }
             };
             let ok = r == Res::Committed;
             log.finish(tag, r);
@@ -1620,6 +1650,10 @@ fn spawn_gateway(
                 policy: sc.policy,
                 tenant_all_xa: sc.all_xa,
                 distributed_lock_wait_timeout_s: 2,
+                // Below the resolver's min_age (5 s here), as in production
+                // (5 s against 30 s): an unknown commit is raced only while
+                // its commit row can't have been swept.
+                commit_resolve_timeout: Duration::from_secs(3),
                 coordinator_id: format!("{}-{}", ctx.node.as_str(), ctx.incarnation),
                 ..TxnConfig::default()
             };
@@ -1729,6 +1763,7 @@ async fn run(world: World, plan: FaultPlan, kind: Kind) -> Result<(), String> {
                     inc,
                     fence: fence.clone(),
                     links,
+                    dead: sprig_common::CancellationToken::new(),
                 });
                 let _guard = LiveGuard {
                     relay: relay.clone(),
@@ -1833,9 +1868,7 @@ fn check_isolation(
                 }
             }
             for (tag, e) in txns {
-                if present[i].contains(tag)
-                    && e.hot.contains(&(i, key))
-                    && !seen.contains_key(tag)
+                if present[i].contains(tag) && e.hot.contains(&(i, key)) && !seen.contains_key(tag)
                 {
                     return Err(format!(
                         "isolation: LOST UPDATE: txn {tag} ({:?}, client got {:?}) committed its \
@@ -2151,7 +2184,7 @@ fn without_settling_a_straggler_the_next_read_misses_it() {
                 w,
                 plan,
                 Kind::Isolation {
-                    fence: false,
+                    fence: true,
                     ryw: Some(false),
                 },
             )
@@ -2170,7 +2203,7 @@ fn print_totals(what: &str) {
          39441 {}, partial 39442 {}, no answer (gateway crashed) {}; gateway crashes at a \
          coordinator step {}; resolver XA COMMIT {}, XA ROLLBACK {}, redo replays {}, redo drops {}; \
          relay fence: tenants fenced {}, connections ended {}, connections refused {}, agent \
-         replays {}, agent drops {}; hot-row appends {}; phase-2 stragglers {}, read-backs {}, \
+         replays {}, agent redo deletes (finished and dropped) {}; hot-row appends {}; phase-2 stragglers {}, read-backs {}, \
          settles refused (39449) {}",
         g(&s.runs),
         g(&s.txns),

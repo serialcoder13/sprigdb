@@ -17,6 +17,12 @@
 
 mod sdnotify;
 
+/// mimalloc as the process allocator, with `--features mimalloc` (perf1,
+/// S143): per-thread heaps instead of the platform allocator's.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 

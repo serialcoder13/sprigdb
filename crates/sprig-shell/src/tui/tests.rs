@@ -11,7 +11,7 @@ use super::app::{App, DataTab, Dialog, Effect, Fixed, Focus, Msg};
 use crate::dash::Panel;
 use crate::history::History;
 use crate::lang::Lang;
-use crate::model::{Column, EndInfo, ResultEvent};
+use crate::model::{Column, EndInfo, ResultEvent, ResultSet};
 use crate::profile::Confirm;
 
 fn app() -> App {
@@ -266,7 +266,8 @@ fn error_and_explorer_browse() {
     golden("error.txt", &screen(&mut a, 100, 20));
     a.on_key(key(KeyCode::Down));
     a.on_key(key(KeyCode::Down));
-    let fx = a.on_key(key(KeyCode::Enter));
+    // `r` runs a SELECT on the table in the editor; Enter opens its view.
+    let fx = a.on_key(key(KeyCode::Char('r')));
     assert_eq!(
         fx,
         vec![Effect::Run(
@@ -275,6 +276,10 @@ fn error_and_explorer_browse() {
             Lang::Sql
         )]
     );
+    a.focus = Focus::Explorer;
+    let fx = a.on_key(key(KeyCode::Enter));
+    assert_eq!(fx, vec![Effect::TableInfo(2, "shop".into())]);
+    assert!(a.tabs[1].table.is_some());
 }
 
 #[test]
@@ -395,4 +400,296 @@ fn small_terminal_and_help() {
     golden("too_small.txt", &screen(&mut a, 50, 10));
     a.on_key(key(KeyCode::F(1)));
     golden("help.txt", &screen(&mut a, 100, 28));
+}
+
+#[test]
+fn palette_searches_tables_and_opens_their_view() {
+    let mut a = app();
+    a.on_key(ctrl('k'));
+    for c in "ord".chars() {
+        a.on_key(key(KeyCode::Char(c)));
+    }
+    golden("palette.txt", &screen(&mut a, 100, 28));
+    let fx = a.on_key(key(KeyCode::Enter));
+    assert!(a.dialog.is_none());
+    assert_eq!(fx, vec![Effect::TableInfo(2, "shop".into())]);
+    assert_eq!(a.screen, 1);
+    assert_eq!(
+        a.tabs[1].table.as_ref().map(|v| v.table.as_str()),
+        Some("orders")
+    );
+    a.screen = 0;
+    // Commands are there too.
+    a.on_key(ctrl('p'));
+    for c in "quit".chars() {
+        a.on_key(key(KeyCode::Char(c)));
+    }
+    a.on_key(key(KeyCode::Enter));
+    assert!(a.quit);
+}
+
+/// Writes colour HTML snapshots of a few screens to `SPRIG_SCREENSHOT_DIR`, so
+/// people can see the theme without a terminal (run with `--ignored` and
+/// `COLORTERM=truecolor`).
+#[test]
+#[ignore = "writes HTML snapshots for review"]
+fn html_snapshots() {
+    use ratatui::style::{Color, Modifier};
+    use std::fmt::Write as _;
+    let Ok(dir) = std::env::var("SPRIG_SCREENSHOT_DIR") else {
+        return;
+    };
+    let html = |a: &mut App, w: u16, h: u16| -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).expect("terminal");
+        term.draw(|f| a.draw(f)).expect("draw");
+        let buf = term.backend().buffer().clone();
+        let css = |c: Color, default: &str| match c {
+            Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+            _ => default.to_owned(),
+        };
+        let mut out = String::from(
+            "<!doctype html><meta charset=utf-8><title>sprig TUI</title><style>body{margin:0;background:#17191d}pre{margin:0;padding:12px;font:14px/1.25 'SF Mono',Menlo,monospace;color:#e6e8eb;background:#17191d}</style><pre>",
+        );
+        for y in 0..h {
+            for x in 0..w {
+                let c = &buf[(x, y)];
+                let (mut fg, mut bg) = (css(c.fg, "#e6e8eb"), css(c.bg, "transparent"));
+                if c.modifier.contains(Modifier::REVERSED) {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                let weight = if c.modifier.contains(Modifier::BOLD) {
+                    "font-weight:700;"
+                } else {
+                    ""
+                };
+                let style = if c.modifier.contains(Modifier::ITALIC) {
+                    "font-style:italic;"
+                } else {
+                    ""
+                };
+                let sym = c
+                    .symbol()
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;");
+                let _ = write!(
+                    out,
+                    "<span style=\"color:{fg};background:{bg};{weight}{style}\">{sym}</span>"
+                );
+            }
+            out.push('\n');
+        }
+        out.push_str("</pre>");
+        out
+    };
+    let mut a = app();
+    std::fs::write(format!("{dir}/welcome.html"), html(&mut a, 110, 30)).expect("write");
+    with_rows(&mut a);
+    std::fs::write(format!("{dir}/grid.html"), html(&mut a, 110, 30)).expect("write");
+    a.on_key(ctrl('k'));
+    for c in "ord".chars() {
+        a.on_key(key(KeyCode::Char(c)));
+    }
+    std::fs::write(format!("{dir}/palette.html"), html(&mut a, 110, 30)).expect("write");
+}
+
+#[test]
+fn ctrl_s_saves_and_the_palette_finds_saved_queries_and_history() {
+    let mut a = app();
+    a.on_key(ctrl('s'));
+    for c in "paid orders".chars() {
+        a.on_key(key(KeyCode::Char(c)));
+    }
+    a.on_key(key(KeyCode::Enter));
+    assert_eq!(a.saved.items.len(), 1);
+    assert_eq!(a.saved.items[0].name, "paid orders");
+    assert!(a.status.contains("saved as"));
+    let items = a.palette_items();
+    assert!(
+        items
+            .iter()
+            .any(|i| i.label.ends_with("paid orders") && i.hint == "saved · sql")
+    );
+    // Choosing it puts its text back in the editor.
+    a.tabs[0].editor.set_text("");
+    a.on_key(ctrl('k'));
+    for c in "paid ord".chars() {
+        a.on_key(key(KeyCode::Char(c)));
+    }
+    a.on_key(key(KeyCode::Enter));
+    assert!(a.tabs[0].editor.text().contains("status = 'paid'"));
+}
+
+#[test]
+fn the_catalog_library_is_adopted_and_kept_up_to_date() {
+    let mut a = app();
+    a.saved
+        .save("only here", "SELECT 0", Lang::Sql, None)
+        .expect("save");
+    // The catalog's library arrives; the query only kept here goes there.
+    let fx = a.on_msg(Msg::Library(Ok(json!({
+        "saved": [{"name": "from studio", "language": "sql", "text": "SELECT 42"}],
+        "history": [{"language": "sql", "text": "SELECT 7", "client": "studio"}],
+    }))));
+    assert!(matches!(&fx[..], [Effect::LibrarySave(q)] if q.name == "only here"));
+    assert!(a.saved.shared);
+    let items = a.palette_items();
+    assert!(items.iter().any(|i| i.label.ends_with("from studio")));
+    assert!(
+        items
+            .iter()
+            .any(|i| i.label.ends_with("SELECT 7") && i.hint == "history · sql · studio")
+    );
+    // Ctrl-S sends the query, with its database.
+    a.on_key(ctrl('s'));
+    for c in "paid".chars() {
+        a.on_key(key(KeyCode::Char(c)));
+    }
+    let fx = a.on_key(key(KeyCode::Enter));
+    assert!(
+        matches!(&fx[..], [Effect::LibrarySave(q)] if q.name == "paid" && q.database.as_deref() == Some("shop"))
+    );
+    // A run is recorded, redacted, when it ends.
+    a.tabs[0].editor = super::editor::Editor::with_text("CREATE USER bob IDENTIFIED BY 'hunter2';");
+    a.on_key(key(KeyCode::Enter));
+    if a.dialog.is_some() {
+        a.on_key(key(KeyCode::Char('y')));
+    }
+    let fx = a.on_msg(Msg::Done {
+        tab: 1,
+        error: None,
+        elapsed_ms: 5,
+        describe: String::new(),
+        database: Some("shop".into()),
+        in_txn: false,
+    });
+    let run = fx
+        .iter()
+        .find_map(|e| match e {
+            Effect::LibraryRecord(v) => Some(v.clone()),
+            _ => None,
+        })
+        .expect("recorded");
+    let body = run.body();
+    assert_eq!(body["client"], "shell");
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["database"], "shop");
+    let text = body["text"].as_str().unwrap_or("");
+    assert!(
+        text.starts_with("CREATE USER bob") && !text.contains("hunter2"),
+        "{text}"
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // one walk through the view
+fn table_view_filters_stages_edits_and_applies() {
+    use super::table::{Purpose, Sub};
+    let mut a = app();
+    a.focus = Focus::Explorer;
+    a.on_key(key(KeyCode::Down));
+    a.on_key(key(KeyCode::Down));
+    let fx = a.on_key(key(KeyCode::Enter));
+    let id = match fx.as_slice() {
+        [Effect::TableInfo(id, db)] if db == "shop" => *id,
+        other => panic!("{other:?}"),
+    };
+    // The snapshot gives the key; the first page follows.
+    let fx = a.on_msg(Msg::TableInfo(
+        id,
+        Ok(json!({"columns": {"orders": [
+            {"name": "order_id", "type": "int(11)", "key": "PRI", "nullable": false},
+            {"name": "status", "type": "varchar(20)", "key": "MUL", "nullable": true}
+        ]}})),
+    ));
+    let sql = "SELECT * FROM `shop`.`orders` ORDER BY `order_id` LIMIT 101".to_owned();
+    assert_eq!(
+        fx,
+        vec![Effect::TableQuery(id, "shop".into(), Purpose::Page, sql)]
+    );
+    let page = ResultSet {
+        columns: vec![
+            crate::model::Column::named("order_id"),
+            crate::model::Column::named("status"),
+        ],
+        rows: vec![
+            vec![Some("1".into()), Some("open".into())],
+            vec![Some("2".into()), Some("paid".into())],
+            vec![Some("3".into()), None],
+        ],
+        ..ResultSet::default()
+    };
+    a.on_msg(Msg::TableRows(id, Purpose::Page, Ok(vec![page.clone()])));
+    // Edit row 1's status, delete row 2, add a row.
+    a.on_key(key(KeyCode::Right));
+    a.on_key(key(KeyCode::Char('e')));
+    for _ in 0..4 {
+        a.on_key(key(KeyCode::Backspace));
+    }
+    for c in "shipped".chars() {
+        a.on_key(key(KeyCode::Char(c)));
+    }
+    a.on_key(key(KeyCode::Enter));
+    a.on_key(key(KeyCode::Down));
+    a.on_key(key(KeyCode::Char('d')));
+    a.on_key(key(KeyCode::Char('o')));
+    a.on_key(key(KeyCode::Left));
+    a.on_key(key(KeyCode::Enter));
+    a.on_key(key(KeyCode::Char('9')));
+    a.on_key(key(KeyCode::Enter));
+    golden("table_staged.txt", &screen(&mut a, 100, 20));
+    // Apply asks first, then runs the three statements in one transaction.
+    assert!(a.on_key(key(KeyCode::Char('a'))).is_empty());
+    let fx = a.on_key(key(KeyCode::Char('y')));
+    let stmts = match fx.as_slice() {
+        [Effect::TableApply(i, db, s)] if *i == id && db == "shop" => s.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        stmts.iter().map(|s| s.sql.as_str()).collect::<Vec<_>>(),
+        [
+            "UPDATE `shop`.`orders` SET `status` = 'shipped' WHERE `order_id` <=> '1' AND `status` <=> 'open' LIMIT 1",
+            "DELETE FROM `shop`.`orders` WHERE `order_id` <=> '2' AND `status` <=> 'paid' LIMIT 1",
+            "INSERT INTO `shop`.`orders` (`order_id`) VALUES ('9')",
+        ]
+    );
+    // A conflict keeps the changes and shows the row as it is now.
+    a.on_msg(Msg::TableApplied(
+        id,
+        Ok(vec![(
+            0,
+            Some(vec![Some("1".into()), Some("cancelled".into())]),
+        )]),
+    ));
+    assert!(
+        a.status.contains("row 1 is now (1, cancelled)"),
+        "{}",
+        a.status
+    );
+    a.on_key(key(KeyCode::Char('t')));
+    a.on_key(key(KeyCode::Char('a')));
+    let fx = a.on_key(key(KeyCode::Char('y')));
+    assert!(
+        matches!(&fx[..], [Effect::TableApply(_, _, s)] if s[0].sql.contains("`status` <=> 'cancelled'"))
+    );
+    // Committed: the page is read again.
+    let fx = a.on_msg(Msg::TableApplied(id, Ok(Vec::new())));
+    assert!(matches!(
+        &fx[..],
+        [Effect::TableQuery(_, _, Purpose::Page, _)]
+    ));
+    assert!(a.status.starts_with("applied 3 changes"));
+    // A filter from the cell under the cursor; structure tabs.
+    a.on_msg(Msg::TableRows(id, Purpose::Page, Ok(vec![page])));
+    a.on_key(key(KeyCode::Right));
+    let fx = a.on_key(key(KeyCode::Char('=')));
+    assert!(
+        matches!(&fx[..], [Effect::TableQuery(_, _, Purpose::Page, q)] if q.contains("WHERE (`status` = 'open')"))
+    );
+    a.on_key(key(KeyCode::Char(']')));
+    golden("table_columns.txt", &screen(&mut a, 100, 16));
+    let fx = a.on_key(key(KeyCode::Char(']')));
+    assert!(
+        matches!(&fx[..], [Effect::TableQuery(_, _, Purpose::Structure(Sub::Indexes), q)] if q == "SHOW INDEX FROM `shop`.`orders`")
+    );
 }

@@ -2,7 +2,16 @@ import { useState } from 'react';
 import { NavLink, useParams } from 'react-router';
 import { useIntl, FormattedMessage } from 'react-intl';
 import { useQueryClient } from '@tanstack/react-query';
-import { invalidateCatalog, useDatabases, useSnapshot } from './snapshot';
+import { invalidateCatalog, useDatabases, useSnapshot, type ObjectInfo } from './snapshot';
+import { ChevronDown, ChevronRight, Database, Eye, RefreshCw, Share2, SquareFunction, Table2 } from '../icons';
+
+const KIND_ICON: Record<ObjectInfo['kind'], typeof Table2> = {
+  table: Table2,
+  view: Eye,
+  graph: Share2,
+  procedure: SquareFunction,
+  function: SquareFunction,
+};
 
 function DbNode({ tenant, db, filter, open: initial }: { tenant: string; db: string; filter: string; open: boolean }) {
   const [open, setOpen] = useState(initial);
@@ -15,25 +24,29 @@ function DbNode({ tenant, db, filter, open: initial }: { tenant: string; db: str
       <button
         aria-expanded={open}
         onClick={() => setOpen(!open)}
-        style={{ border: 'none', background: 'none', padding: '0 4px' }}
+        className="tree-toggle"
         aria-label={`${open ? 'Collapse' : 'Expand'} ${db}`}
       >
-        {open ? '▾' : '▸'}
+        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
       </button>
-      <NavLink to={base} end>
+      <NavLink to={base} end className="tree-db">
+        <Database size={14} />
         {db}
       </NavLink>
       {open && (
         <ul>
           {snap.isLoading && <li className="muted">…</li>}
-          {items.map((o) => (
-            <li key={`${o.kind}:${o.name}`}>
-              <NavLink to={`${base}/obj/${o.kind}/${encodeURIComponent(o.name)}`} title={o.kind}>
-                <span aria-hidden="true">{o.kind === 'view' ? '◇ ' : o.kind === 'table' ? '▤ ' : o.kind === 'graph' ? '◎ ' : 'ƒ '}</span>
-                {o.name}
-              </NavLink>
-            </li>
-          ))}
+          {items.map((o) => {
+            const Icon = KIND_ICON[o.kind] ?? Table2;
+            return (
+              <li key={`${o.kind}:${o.name}`}>
+                <NavLink to={`${base}/obj/${o.kind}/${encodeURIComponent(o.name)}`} title={o.kind} className="tree-obj">
+                  <Icon size={14} />
+                  {o.name}
+                </NavLink>
+              </li>
+            );
+          })}
         </ul>
       )}
     </li>
@@ -50,11 +63,11 @@ export function Explorer() {
   return (
     <div className="stack">
       <div className="row">
-        <h2 style={{ margin: 0, fontSize: 15, flex: 1 }}>
+        <h2 className="side-title" style={{ flex: 1 }}>
           <FormattedMessage id="explorer.title" />
         </h2>
-        <button onClick={() => invalidateCatalog(qc)} aria-label={intl.formatMessage({ id: 'explorer.refresh' })}>
-          ↻
+        <button className="icon-button" onClick={() => invalidateCatalog(qc)} aria-label={intl.formatMessage({ id: 'explorer.refresh' })}>
+          <RefreshCw size={14} />
         </button>
       </div>
       <input

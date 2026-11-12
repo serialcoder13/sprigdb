@@ -18,6 +18,12 @@
 //!                                               statement that failed)
 //! replicas (primary + replicas): a sprig_auto_* index whose definition
 //!   differs from the writer's is reported, never written
+//! every replica, and every Galera node but the writer: sprig_auto_*
+//!   indexes (replicas: and _sprig_p_ field columns) the writer lacks, the
+//!   leftovers of a validation cut off by a controller restart, dropped
+//!   with the binary log off, unless a validation of this process runs
+//!   there; Galera keeps the names of rows rolling out (bugfix-61;
+//!   validate::orphans)
 //! ```
 //!
 //! `frozen` rows are left alone; `validating` and `recommended` rows
@@ -49,6 +55,9 @@ pub struct DriftReport {
     pub visible_again: Vec<String>,
     /// Replicas whose index differs from the writer's (reported only).
     pub replica_mismatch: Vec<String>,
+    /// Leftovers of cut-off validations dropped on replicas or Galera
+    /// nodes, as `node:shard/name` (bugfix-61).
+    pub leftovers_dropped: Vec<String>,
     /// Statements that failed (retried next time).
     pub errors: Vec<String>,
 }
@@ -243,11 +252,82 @@ pub async fn reconcile_object<Q: Queryable + Send>(
             n.close().await;
         }
     }
-    if !rep.strays_dropped.is_empty() || !rep.rows_dropped.is_empty() {
+    // Leftovers of cut-off validations on the other nodes (bugfix-61).
+    leftovers(cx, &by_name, &mut rep).await;
+    if !rep.strays_dropped.is_empty()
+        || !rep.rows_dropped.is_empty()
+        || !rep.leftovers_dropped.is_empty()
+    {
         tracing::info!(
             tenant = %cx.tenant, object = object.0, strays = ?rep.strays_dropped,
-            rows = ?rep.rows_dropped, "automatic index drift reconciled"
+            rows = ?rep.rows_dropped, leftovers = ?rep.leftovers_dropped,
+            "automatic index drift reconciled"
         );
     }
     Ok(rep)
+}
+
+/// Drops the leftovers of cut-off validations on every replica, and on
+/// every Galera node but the writer (module docs).
+async fn leftovers(
+    cx: &ObserveCx<'_>,
+    by_name: &BTreeMap<&str, &AutoIndexRow>,
+    rep: &mut DriftReport,
+) {
+    use crate::autoindex::rollout::Nodes;
+    use crate::autoindex::validate::IndexTarget;
+    use crate::autoindex::validate::orphans::{NodeKind, drop_leftovers};
+    let (writer, others, kind) = match &cx.view.nodes {
+        Nodes::PrimaryReplica { writer, replicas } => (
+            writer,
+            replicas.iter().collect::<Vec<_>>(),
+            NodeKind::Replica,
+        ),
+        Nodes::Galera { nodes, writer } => {
+            let Some(w) = nodes.iter().find(|n| &n.node == writer) else {
+                return;
+            };
+            (
+                w,
+                nodes.iter().filter(|n| &n.node != writer).collect(),
+                NodeKind::Galera,
+            )
+        }
+        Nodes::Single { .. } => return,
+    };
+    // On Galera a rolling build puts a row's index on the nodes one by
+    // one: those names stay.
+    let keep: std::collections::BTreeSet<String> = if kind == NodeKind::Galera {
+        by_name
+            .values()
+            .filter(|r| !matches!(r.state, IndexState::Validating | IndexState::Recommended))
+            .map(|r| r.name.clone())
+            .collect()
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    let targets: Vec<IndexTarget> = cx
+        .shards
+        .iter()
+        .map(|t| IndexTarget {
+            schema: t.schema.clone(),
+            table: t.table.clone(),
+            pk: Vec::new(),
+        })
+        .collect();
+    for n in others {
+        match drop_leftovers(n, writer, &targets, kind, &keep).await {
+            Ok(found) => {
+                for (t, l) in cx.shards.iter().zip(found) {
+                    rep.leftovers_dropped.extend(
+                        l.indexes
+                            .iter()
+                            .chain(l.fields.iter())
+                            .map(|x| format!("{}:{}/{x}", n.node, t.shard)),
+                    );
+                }
+            }
+            Err(e) => rep.errors.push(format!("leftovers on {}: {e}", n.node)),
+        }
+    }
 }

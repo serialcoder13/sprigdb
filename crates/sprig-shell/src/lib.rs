@@ -21,6 +21,7 @@ pub mod native;
 pub mod output;
 pub mod profile;
 pub mod redact;
+pub mod saved;
 pub mod secrets;
 pub mod session;
 pub mod term;

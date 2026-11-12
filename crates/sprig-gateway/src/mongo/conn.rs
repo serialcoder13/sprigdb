@@ -168,6 +168,9 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
     // last reply's id that the next one answers.
     let mut again: Option<Vec<u8>> = None;
     let mut last_reply: Option<i32> = None;
+    // Reads go through a buffer (perf1, S146): a message's header and body
+    // then come from one `recv` instead of two or three.
+    let mut stream = tokio::io::BufReader::with_capacity(8 * 1024, &mut conn.stream);
     let r: Result<()> = async {
         loop {
             let repeat = again.is_some();
@@ -175,7 +178,7 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
                 Some(m)
             } else {
                 tokio::select! {
-                    m = codec::read_message(&mut conn.stream) => m.map_err(|e| codec_err(&e))?,
+                    m = codec::read_message(&mut stream) => m.map_err(|e| codec_err(&e))?,
                     () = close.cancelled() => return Ok(()),
                 }
             };
@@ -316,8 +319,8 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
                 let bytes = codec::encode(next_id, to, &f, used).map_err(|e| codec_err(&e))?;
                 last_reply = Some(next_id);
                 next_id = next_id.wrapping_add(1);
-                conn.stream.write_all(&bytes).await.map_err(|e| io(&e))?;
-                conn.stream.flush().await.map_err(|e| io(&e))?;
+                stream.write_all(&bytes).await.map_err(|e| io(&e))?;
+                stream.flush().await.map_err(|e| io(&e))?;
             }
         }
     }
@@ -637,6 +640,39 @@ impl Conn {
     /// [`Self::guarded_dispatch`], its reply as [`Reply`] (BSON bytes for
     /// the replies built that way).
     pub(crate) async fn guarded_reply(&mut self, m: OpMsg, size: usize) -> (String, Reply) {
+        use tracing::Instrument as _;
+        // One trace span per command (perf1, S142): the engine's statements
+        // record their SLIs but no root span of their own, and their
+        // backend steps are light children of this one.
+        let span = tracing::info_span!(
+            target: sprig_common::telemetry::trace::TARGET,
+            "gateway.request",
+            protocol = "mongo",
+            request = m
+                .body
+                .iter()
+                .next()
+                .and_then(std::result::Result::ok)
+                .map(|(k, _)| k),
+            tenant = self.principal.as_ref().and_then(|p| p.tenant).map(|t| t.0),
+            gateway_session = self.sql.as_ref().map(|s| s.session_id().0),
+            result = tracing::field::Empty,
+            error = tracing::field::Empty,
+        );
+        let (name, reply) = self
+            .guarded_reply_traced(m, size)
+            .instrument(span.clone())
+            .await;
+        if reply.ok() {
+            span.record("result", "ok");
+        } else {
+            span.record("result", "error");
+            span.record("error", true);
+        }
+        (name, reply)
+    }
+
+    async fn guarded_reply_traced(&mut self, m: OpMsg, size: usize) -> (String, Reply) {
         let threshold = usize::try_from(self.shared.large_request_bytes()).unwrap_or(usize::MAX);
         let Some(h) = self.sql.as_ref().map(SqlSession::handle) else {
             return crate::offload::run(size, threshold, Box::pin(self.dispatch(m))).await;

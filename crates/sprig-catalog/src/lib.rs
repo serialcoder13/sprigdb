@@ -60,6 +60,7 @@ pub mod ancestry;
 pub mod bootstrap;
 pub mod cache;
 pub mod ddl;
+pub mod infoschema;
 pub mod migrate;
 pub mod placement;
 pub mod rows;

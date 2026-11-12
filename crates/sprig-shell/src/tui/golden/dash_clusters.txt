@@ -1,4 +1,4 @@
- 1 sql shop │ Dashboard │ Admin │ Inbox
+ ❯ 1 sql shop │ ◔ Dashboard │ ◈ Admin │ ⚑ Inbox
 ┌ Views ─────────┐┌ clusters · not polled yet · r refresh ─────────────────────────────────────────┐
 │1 sessions      ││operators only: add admin_url (and admin_token_file) to the profile             │
 │2 fingerprints  ││                                                                                │

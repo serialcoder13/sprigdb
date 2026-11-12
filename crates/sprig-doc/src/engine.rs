@@ -368,6 +368,10 @@ pub fn array_paths(d: &Document) -> BTreeSet<String> {
     out
 }
 
+/// Documents per chunk when `$out` or `$merge` write a spilled input
+/// (M7).
+const OUT_CHUNK: usize = 1000;
+
 /// A document rendered for insert, or why it couldn't be.
 type Rendered = (usize, Result<(json::Stored, Bson), MongoError>);
 
@@ -394,6 +398,11 @@ enum PlanKind {
         last: Option<Vec<u8>>,
         to_skip: u64,
         done: bool,
+        /// The key the plan walks: `_id`, or a capped collection's
+        /// insertion order (M7).
+        order: capped::KeyOrder,
+        /// A tailable cursor (M7): reaching the end doesn't exhaust it.
+        tail: bool,
     },
     Buffer(VecDeque<Document>),
     /// An aggregation's result on disk (M5): read as the cursor goes, its
@@ -585,6 +594,9 @@ impl Engine {
         explicit: bool,
     ) -> Result<CollMeta, MongoError> {
         check_coll_name(&ns.coll)?;
+        // M7: `capped`, `size` and `max` checked and stored as MongoDB 8.0
+        // stores them.
+        let options = capped::normalize_create(options)?;
         if let Some(m) = self.meta(sql, ns).await? {
             // MongoDB 8.0 answers ok when the options are the same.
             let same = options
@@ -602,16 +614,8 @@ impl Engine {
         for k in options.keys() {
             if matches!(
                 k.as_str(),
-                "capped"
-                    | "timeseries"
-                    | "viewOn"
-                    | "pipeline"
-                    | "clusteredIndex"
-                    | "encryptedFields"
+                "timeseries" | "viewOn" | "pipeline" | "clusteredIndex" | "encryptedFields"
             ) {
-                if k == "capped" && !matches!(options.get(k), Some(Bson::Boolean(true))) {
-                    continue;
-                }
                 return Err(MongoError::new(
                     code::SPRIG_DOC_FEATURE_UNSUPPORTED,
                     format!("create with '{k}' is not supported in this release"),
@@ -622,9 +626,12 @@ impl Engine {
         crate::validate::check_create(&options)?;
         self.ensure_db(sql, &ns.db).await?;
         let table = meta::table_name(&ns.coll);
-        sql.exec(&meta::create_table_sql(&ns.db, &table))
-            .await
-            .map_err(|e| mongo_error(&e))?;
+        let ddl = if capped::Cap::of(&options).is_some() {
+            capped::table_sql(&ns.db, &table)
+        } else {
+            meta::create_table_sql(&ns.db, &table)
+        };
+        sql.exec(&ddl).await.map_err(|e| mongo_error(&e))?;
         let mut uuid = [0u8; 16];
         uuid[..12].copy_from_slice(&ObjectId::new().bytes());
         uuid[12..].copy_from_slice(
@@ -684,6 +691,10 @@ impl Engine {
         .map_err(|e| mongo_error(&e))?;
         // Chapter 34 (R33): the vector indexes' side tables.
         self.drop_vector_sides(sql, ns, &m.table, None).await;
+        // M7: a capped collection's totals row.
+        if capped::Cap::of(&m.options).is_some() {
+            capped::forget(sql, &ns.db, &m.uuid).await;
+        }
         // `2dsphere` side tables (R5 round 6).
         for i in m.indexes.iter().filter(|i| crate::geo::is_2dsphere(i)) {
             if let Some((p, _)) = i.key.first() {
@@ -835,6 +846,9 @@ impl Engine {
         // Schema validation (M3, decision S90).
         let rules = crate::validate::Rules::of(&m.options)?;
         let ns_text = ns.to_string();
+        // M7: a capped collection's documents, with their BSON sizes.
+        let cap = capped::Cap::of(&m.options);
+        let mut sizes: Vec<u64> = Vec::new();
         for (i, mut d) in docs.into_iter().enumerate() {
             if !d.contains_key("_id") {
                 let mut n = doc! {"_id": ObjectId::new()};
@@ -851,6 +865,10 @@ impl Engine {
                 continue;
             }
             let id = d.get("_id").cloned().unwrap_or(Bson::Null);
+            if cap.is_some() {
+                sizes.resize(i + 1, 0);
+                sizes[i] = crate::spill::doc_bytes(&d) as u64;
+            }
             let r = json::to_stored(&d, &self.opts());
             if r.is_ok() {
                 paths.extend(array_paths(&d));
@@ -861,6 +879,11 @@ impl Engine {
             }
         }
         self.register_arrays(sql, ns, &mut m, &paths).await?;
+        if let Some(cap) = cap {
+            return self
+                .insert_capped(sql, ns, &m, cap, rows, &sizes, ordered)
+                .await;
+        }
         let mut errors = Vec::new();
         let mut n = 0u64;
         let good: Vec<&(json::Stored, Bson)> =
@@ -970,12 +993,18 @@ impl Engine {
             .filter(|p| !p.is_empty())
             .map(Projection::parse)
             .transpose()?;
-        let sort = spec
-            .sort
-            .as_ref()
-            .map(agg::parse_sort)
-            .transpose()?
-            .unwrap_or_default();
+        // M7: `{$natural: 1}` or `{$natural: -1}`, the collection's own
+        // order (a capped collection's insertion order).
+        let natural = capped::natural_of(spec.sort.as_ref())?;
+        let sort = if natural.is_some() {
+            Vec::new()
+        } else {
+            spec.sort
+                .as_ref()
+                .map(agg::parse_sort)
+                .transpose()?
+                .unwrap_or_default()
+        };
         let Some(m) = self.meta(sql, ns).await? else {
             return Ok(CursorPlan::from_docs(ns.clone(), Vec::new()));
         };
@@ -1007,16 +1036,38 @@ impl Engine {
                 exhausted: false,
                 kind: PlanKind::Keyset {
                     sql: sqlp,
-                    desc: sort.first().is_some_and(|s| s.1 < 0),
+                    desc: natural.map_or_else(|| sort.first().is_some_and(|s| s.1 < 0), |d| d < 0),
                     last: None,
                     to_skip: spec.skip,
                     done: false,
+                    order: if sort.is_empty() {
+                        capped::KeyOrder::of(&m)
+                    } else {
+                        capped::KeyOrder::Id
+                    },
+                    tail: false,
                 },
                 collation: crate::collation::active(),
             });
         }
+        // M7: with `allowDiskUse`, a sort past `doc.max_sort_bytes`
+        // spills; `skip` + `limit` keeps only the top documents (also
+        // without it, as MongoDB's top-k sort).
+        if crate::spill::allowed() || (crate::spill::in_scope() && spec.limit > 0) {
+            return self
+                .find_sorted_spill(sql, ns, &m, &pred, &sqlp, sort, &spec, projection)
+                .await;
+        }
         let mut docs = self
-            .scan(sql, ns, &m.table, &pred, &sqlp, self.cfg.max_sort_bytes)
+            .scan(
+                sql,
+                ns,
+                &m.table,
+                &pred,
+                &sqlp,
+                self.cfg.max_sort_bytes,
+                capped::KeyOrder::of(&m),
+            )
             .await?;
         crate::heavy::run(docs.len(), || agg::sort_docs(&mut docs, &sort));
         let skip = usize::try_from(spec.skip).unwrap_or(usize::MAX);
@@ -1103,7 +1154,8 @@ impl Engine {
         Ok(Some(Some(raw)))
     }
 
-    /// Every matching document, in `_id` order, within `max_bytes`.
+    /// Every matching document, in `order`, within `max_bytes`.
+    #[allow(clippy::too_many_arguments)]
     async fn scan(
         &self,
         sql: &mut dyn SqlRunner,
@@ -1112,6 +1164,7 @@ impl Engine {
         pred: &Pred,
         sqlp: &SqlPred,
         max_bytes: usize,
+        order: capped::KeyOrder,
     ) -> Result<Vec<Document>, MongoError> {
         let mut out = Vec::new();
         let mut last: Option<Vec<u8>> = None;
@@ -1127,6 +1180,7 @@ impl Engine {
                     last.as_deref(),
                     false,
                     self.cfg.chunk_rows,
+                    order,
                 )
                 .await?;
             let n = rows.len();
@@ -1161,9 +1215,10 @@ impl Engine {
         after: Option<&[u8]>,
         desc: bool,
         n: usize,
+        order: capped::KeyOrder,
     ) -> Result<Vec<(Vec<u8>, Document)>, MongoError> {
         Ok(self
-            .read_rows(sql, ns, table, sqlp, after, desc, n, false)
+            .read_rows(sql, ns, table, sqlp, after, desc, n, false, order)
             .await?
             .into_iter()
             .map(|(k, d, _)| (k, d))
@@ -1182,30 +1237,34 @@ impl Engine {
         desc: bool,
         n: usize,
         with_v: bool,
+        order: capped::KeyOrder,
     ) -> Result<Vec<(Vec<u8>, Document, Option<String>)>, MongoError> {
         // Decision S26: a point read by `_id` runs prepared, with the key
         // bound.
         let point = after.is_none().then(|| sqlp.point_key()).flatten();
+        // The key column: `_id`, or a capped collection's `_seq` (M7),
+        // whose position is its decimal text.
+        let col = order.column();
         let q = match after {
             None if point.is_some() => format!(
-                "SELECT _id, doc, _types{} FROM {}.{} WHERE _id = ? LIMIT {n}",
+                "SELECT {col}, doc, _types{} FROM {}.{} WHERE _id = ? LIMIT {n}",
                 if with_v { ", _v" } else { "" },
                 ident(&ns.db),
                 ident(table),
             ),
             Some(k) => format!(
-                "SELECT _id, doc, _types{} FROM {}.{}{} WHERE ({}) AND _id {} {} ORDER BY _id{} LIMIT {n}",
+                "SELECT {col}, doc, _types{} FROM {}.{}{} WHERE ({}) AND {col} {} {} ORDER BY {col}{} LIMIT {n}",
                 if with_v { ", _v" } else { "" },
                 ident(&ns.db),
                 ident(table),
                 crate::hint::clause(),
                 sqlp.sql,
                 if desc { "<" } else { ">" },
-                bin_lit(k),
+                order.literal(k),
                 if desc { " DESC" } else { "" }
             ),
             None => format!(
-                "SELECT _id, doc, _types{} FROM {}.{}{} WHERE {} ORDER BY _id{} LIMIT {n}",
+                "SELECT {col}, doc, _types{} FROM {}.{}{} WHERE {} ORDER BY {col}{} LIMIT {n}",
                 if with_v { ", _v" } else { "" },
                 ident(&ns.db),
                 ident(table),
@@ -1309,7 +1368,13 @@ impl Engine {
                 last,
                 to_skip,
                 done,
+                order,
+                tail,
             } => {
+                // A tailable cursor reads on from its position each time.
+                if *tail {
+                    *done = false;
+                }
                 while out.len() < want && !*done {
                     let chunk = if sqlp.exact {
                         (want - out.len()) + usize::try_from(*to_skip).unwrap_or(0)
@@ -1326,6 +1391,7 @@ impl Engine {
                             last.as_deref(),
                             *desc,
                             chunk,
+                            *order,
                         )
                         .await?;
                     let short = rows.len() < chunk;
@@ -1359,7 +1425,7 @@ impl Engine {
                         break;
                     }
                 }
-                if *done && out.len() < want {
+                if *done && out.len() < want && !*tail {
                     plan.exhausted = true;
                 }
             }
@@ -1426,6 +1492,7 @@ impl Engine {
                         last.as_deref(),
                         false,
                         self.cfg.chunk_rows,
+                        capped::KeyOrder::Id,
                     )
                     .await?;
                 let k = rows.len();
@@ -1464,7 +1531,15 @@ impl Engine {
         let gm = self.geo_sides(sql, ns, &m, &pred).await?;
         let sqlp = translate(&pred, gm.as_ref().unwrap_or(&m));
         let docs = self
-            .scan(sql, ns, &m.table, &pred, &sqlp, self.cfg.max_sort_bytes)
+            .scan(
+                sql,
+                ns,
+                &m.table,
+                &pred,
+                &sqlp,
+                self.cfg.max_sort_bytes,
+                capped::KeyOrder::of(&m),
+            )
             .await?;
         // Every value, sorted in MongoDB order (under the active
         // collation), then one of each run of equal values: n log n, not
@@ -1535,11 +1610,19 @@ impl Engine {
         // A single update keeps the `_v` its first read saw: the first
         // write needs no second read (R5 round 4).
         let targets: Vec<(Document, Option<String>)> = if multi {
-            self.scan(sql, ns, &m.table, &pred, &sqlp, usize::MAX)
-                .await?
-                .into_iter()
-                .map(|d| (d, None))
-                .collect()
+            self.scan(
+                sql,
+                ns,
+                &m.table,
+                &pred,
+                &sqlp,
+                usize::MAX,
+                capped::KeyOrder::of(&m),
+            )
+            .await?
+            .into_iter()
+            .map(|d| (d, None))
+            .collect()
         } else {
             self.first_match_v(sql, ns, &m, &pred, &sqlp, sort)
                 .await?
@@ -1622,7 +1705,15 @@ impl Engine {
         if let Some(s) = sort.filter(|s| !s.is_empty()) {
             let spec = agg::parse_sort(s)?;
             let mut docs = self
-                .scan(sql, ns, &m.table, pred, sqlp, self.cfg.max_sort_bytes)
+                .scan(
+                    sql,
+                    ns,
+                    &m.table,
+                    pred,
+                    sqlp,
+                    self.cfg.max_sort_bytes,
+                    capped::KeyOrder::of(m),
+                )
                 .await?;
             crate::heavy::run(docs.len(), || agg::sort_docs(&mut docs, &spec));
             return Ok(docs.into_iter().next().map(|d| (d, None)));
@@ -1631,7 +1722,17 @@ impl Engine {
         loop {
             let chunk = if sqlp.exact { 1 } else { 101 };
             let rows = self
-                .read_rows(sql, ns, &m.table, sqlp, last.as_deref(), false, chunk, true)
+                .read_rows(
+                    sql,
+                    ns,
+                    &m.table,
+                    sqlp,
+                    last.as_deref(),
+                    false,
+                    chunk,
+                    true,
+                    capped::KeyOrder::of(m),
+                )
                 .await?;
             let k = rows.len();
             for (key, d, v) in rows {
@@ -1738,26 +1839,30 @@ impl Engine {
                 Ok(old_v) if hint.is_empty() => Some(old_v),
                 _ => None,
             };
+            // M7: a capped collection's row keeps its document's BSON size.
+            let sizes = capped::Cap::of(&m.options)
+                .map(|_| (crate::spill::doc_bytes(&old), crate::spill::doc_bytes(&new)));
             let done = if let Some(old_v) = bound {
                 let stmt = format!(
-                    "UPDATE {}.{} SET _v = ?, doc = ?, _types = ? WHERE _id = ? AND _v = ?",
+                    "UPDATE {}.{} SET _v = ?, doc = ?, _types = ?{} WHERE _id = ? AND _v = ?",
                     ident(&ns.db),
                     ident(&m.table),
+                    if sizes.is_some() { ", _sz = ?" } else { "" },
                 );
-                sql.exec_bound(
-                    &stmt,
-                    &[
-                        Param::Int(i64::try_from(hlc_now()).unwrap_or(i64::MAX)),
-                        Param::Text(s.doc.clone()),
-                        s.types.clone().map_or(Param::Null, Param::Text),
-                        Param::Bin(key.clone()),
-                        Param::Int(old_v),
-                    ],
-                )
-                .await
+                let mut params = vec![
+                    Param::Int(i64::try_from(hlc_now()).unwrap_or(i64::MAX)),
+                    Param::Text(s.doc.clone()),
+                    s.types.clone().map_or(Param::Null, Param::Text),
+                ];
+                if let Some((_, sz)) = sizes {
+                    params.push(Param::Int(i64::try_from(sz).unwrap_or(i64::MAX)));
+                }
+                params.push(Param::Bin(key.clone()));
+                params.push(Param::Int(old_v));
+                sql.exec_bound(&stmt, &params).await
             } else {
                 let stmt = format!(
-                    "{hint}UPDATE {}.{} SET _v = {}, doc = {}, _types = {} WHERE _id = {} AND _v = {v}",
+                    "{hint}UPDATE {}.{} SET _v = {}, doc = {}, _types = {}{} WHERE _id = {} AND _v = {v}",
                     ident(&ns.db),
                     ident(&m.table),
                     hlc_now(),
@@ -1765,12 +1870,18 @@ impl Engine {
                     s.types
                         .as_deref()
                         .map_or_else(|| "NULL".to_owned(), str_lit),
+                    sizes.map_or_else(String::new, |(_, sz)| format!(", _sz = {sz}")),
                     bin_lit(&key)
                 );
                 sql.exec(&stmt).await
             };
             match done {
                 Ok(d) if d.affected > 0 || d.info.contains("Rows matched: 1") => {
+                    if let Some((a, b)) = sizes
+                        && a != b
+                    {
+                        capped::mark_stale(sql, &ns.db, &m.uuid).await?;
+                    }
                     return Ok((true, Some(new), Some(old)));
                 }
                 Ok(_) => {}
@@ -1812,6 +1923,9 @@ impl Engine {
                 sqlp.sql
             );
             let d = sql.exec(&stmt).await.map_err(|e| mongo_error(&e))?;
+            if d.affected > 0 && capped::Cap::of(&m.options).is_some() {
+                capped::mark_stale(sql, &ns.db, &m.uuid).await?;
+            }
             return Ok((d.affected, None));
         }
         let docs: Vec<Document> = if limit_one {
@@ -1820,8 +1934,16 @@ impl Engine {
                 .into_iter()
                 .collect()
         } else {
-            self.scan(sql, ns, &m.table, &pred, &sqlp, usize::MAX)
-                .await?
+            self.scan(
+                sql,
+                ns,
+                &m.table,
+                &pred,
+                &sqlp,
+                usize::MAX,
+                capped::KeyOrder::of(&m),
+            )
+            .await?
         };
         let mut n = 0;
         let mut last = None;
@@ -1842,6 +1964,9 @@ impl Engine {
             );
             n += sql.exec(&stmt).await.map_err(|e| mongo_error(&e))?.affected;
             last = chunk.last().cloned();
+        }
+        if n > 0 && capped::Cap::of(&m.options).is_some() {
+            capped::mark_stale(sql, &ns.db, &m.uuid).await?;
         }
         Ok((n, if limit_one { last } else { None }))
     }
@@ -2356,7 +2481,8 @@ impl Engine {
                         // M5 (S75): the read itself goes to disk past the
                         // stage limit, as MongoDB streams it; blocking
                         // stages still answer 292 without `allowDiskUse`.
-                        self.scan_seq(sql, ns, &m.table, &pred, &sqlp).await?
+                        self.scan_seq(sql, ns, &m.table, &pred, &sqlp, capped::KeyOrder::of(&m))
+                            .await?
                     } else {
                         DocSeq::Mem(
                             self.scan(
@@ -2366,6 +2492,7 @@ impl Engine {
                                 &pred,
                                 &sqlp,
                                 self.cfg.agg_stage_bytes.saturating_mul(4),
+                                capped::KeyOrder::of(&m),
                             )
                             .await?,
                         )
@@ -2378,6 +2505,7 @@ impl Engine {
         for (j, s) in stages.iter().enumerate() {
             spill::set_stage(base + j);
             let name = s.keys().next().map_or("", String::as_str);
+            spill::set_kind(spill::Kind::of_stage(name));
             // M5: `$lookup` and `$graphLookup` over a spilled input, or
             // with `allowDiskUse`, run a batch of input documents at a
             // time into a builder that spills.
@@ -2463,6 +2591,29 @@ impl Engine {
                 ));
                 continue;
             }
+            // M7: `$out` and `$merge` over a spilled input write it a
+            // chunk at a time, never all of it in memory.
+            if matches!(name, "$out" | "$merge") && !seq.is_mem() {
+                let mut it = seq.into_iter_docs()?;
+                let mut first = true;
+                loop {
+                    let chunk = crate::heavy::run(crate::heavy::HEAVY_DOCS, || {
+                        it.by_ref()
+                            .take(OUT_CHUNK)
+                            .collect::<Result<Vec<Document>, MongoError>>()
+                    })?;
+                    let last = chunk.len() < OUT_CHUNK;
+                    if !chunk.is_empty() || first {
+                        self.write_out(sql, ns, s, name, chunk, first).await?;
+                    }
+                    first = false;
+                    if last {
+                        break;
+                    }
+                }
+                seq = DocSeq::Mem(Vec::new());
+                continue;
+            }
             // `$out` and `$merge` write every document; a spilled input
             // is read back here (decision S75).
             let mut docs = crate::heavy::run(crate::heavy::HEAVY_DOCS, || seq.into_vec())?;
@@ -2518,54 +2669,7 @@ impl Engine {
                     docs
                 }
                 "$out" | "$merge" => {
-                    models::strip_scores(&mut docs);
-                    crate::text::strip(&mut docs);
-                    let target = match s.get(name) {
-                        Some(Bson::String(c)) => c.clone(),
-                        Some(Bson::Document(d)) => d
-                            .get_str("coll")
-                            .or_else(|_| d.get_str("into"))
-                            .unwrap_or("")
-                            .to_owned(),
-                        _ => String::new(),
-                    };
-                    let tdb = match s.get(name) {
-                        Some(Bson::Document(d)) => match d.get("into") {
-                            Some(Bson::Document(i)) => i.get_str("db").ok().map(str::to_owned),
-                            _ => d.get_str("db").ok().map(str::to_owned),
-                        },
-                        _ => None,
-                    };
-                    let target = match s.get(name) {
-                        Some(Bson::Document(d)) => match d.get("into") {
-                            Some(Bson::Document(i)) => {
-                                i.get_str("coll").unwrap_or_default().to_owned()
-                            }
-                            _ => target,
-                        },
-                        _ => target,
-                    };
-                    let tns = Ns {
-                        db: tdb.unwrap_or_else(|| ns.db.clone()),
-                        coll: target,
-                    };
-                    if name == "$out" {
-                        // An existing target keeps its options (its
-                        // validator, M3) and the documents are checked
-                        // against them, as in MongoDB.
-                        let kept = self.meta(sql, &tns).await?.map(|m| m.options);
-                        self.drop(sql, &tns).await?;
-                        if let Some(o) = kept.filter(|o| !o.is_empty()) {
-                            self.create(sql, &tns, o, false).await?;
-                        }
-                        let (_, errs) = self.insert(sql, &tns, docs, true).await?;
-                        if let Some((_, e)) = errs.into_iter().next() {
-                            return Err(e);
-                        }
-                    } else {
-                        let spec = s.get_document(name).cloned().unwrap_or_default();
-                        self.merge_into(sql, &tns, docs, &spec).await?;
-                    }
+                    self.write_out(sql, ns, s, name, docs, true).await?;
                     Vec::new()
                 }
                 // A large set leaves the worker thread (heavy::HEAVY_DOCS).
@@ -2597,6 +2701,7 @@ impl Engine {
         table: &str,
         pred: &Pred,
         sqlp: &SqlPred,
+        order: capped::KeyOrder,
     ) -> Result<crate::spill::DocSeq, MongoError> {
         let mut out = crate::spill::SeqBuilder::new(self.cfg.agg_stage_bytes);
         let mut last: Option<Vec<u8>> = None;
@@ -2611,6 +2716,7 @@ impl Engine {
                     last.as_deref(),
                     false,
                     self.cfg.chunk_rows,
+                    order,
                 )
                 .await?;
             let n = rows.len();
@@ -2685,6 +2791,79 @@ impl Engine {
     /// `$merge` on `_id`: `whenMatched` `merge` (the default), `replace`,
     /// `keepExisting` or `fail`; `whenNotMatched` `insert` (the default),
     /// `discard` or `fail`.
+    /// `$out` or `$merge` (stage `s`) of `docs`; `first`: the first chunk
+    /// of the stage's input (`$out` replaces the target then).
+    async fn write_out(
+        &self,
+        sql: &mut dyn SqlRunner,
+        ns: &Ns,
+        s: &Document,
+        name: &str,
+        mut docs: Vec<Document>,
+        first: bool,
+    ) -> Result<(), MongoError> {
+        models::strip_scores(&mut docs);
+        crate::text::strip(&mut docs);
+        let target = match s.get(name) {
+            Some(Bson::String(c)) => c.clone(),
+            Some(Bson::Document(d)) => d
+                .get_str("coll")
+                .or_else(|_| d.get_str("into"))
+                .unwrap_or("")
+                .to_owned(),
+            _ => String::new(),
+        };
+        let tdb = match s.get(name) {
+            Some(Bson::Document(d)) => match d.get("into") {
+                Some(Bson::Document(i)) => i.get_str("db").ok().map(str::to_owned),
+                _ => d.get_str("db").ok().map(str::to_owned),
+            },
+            _ => None,
+        };
+        let target = match s.get(name) {
+            Some(Bson::Document(d)) => match d.get("into") {
+                Some(Bson::Document(i)) => i.get_str("coll").unwrap_or_default().to_owned(),
+                _ => target,
+            },
+            _ => target,
+        };
+        let tns = Ns {
+            db: tdb.unwrap_or_else(|| ns.db.clone()),
+            coll: target,
+        };
+        if name == "$out" {
+            // An existing target keeps its options (its validator, M3)
+            // and the documents are checked against them, as in MongoDB.
+            // Later chunks of a spilled input (M7) only add documents.
+            if first {
+                let kept = self.meta(sql, &tns).await?.map(|m| m.options);
+                // M7: as MongoDB, `$out` never replaces a capped
+                // collection.
+                if kept.as_ref().is_some_and(|o| capped::Cap::of(o).is_some()) {
+                    return Err(MongoError::new(
+                        17152,
+                        format!("namespace '{tns}' is capped so it can't be used for $out"),
+                    ));
+                }
+                self.drop(sql, &tns).await?;
+                if let Some(o) = kept.filter(|o| !o.is_empty()) {
+                    self.create(sql, &tns, o, false).await?;
+                }
+            }
+            if docs.is_empty() && !first {
+                return Ok(());
+            }
+            let (_, errs) = self.insert(sql, &tns, docs, true).await?;
+            if let Some((_, e)) = errs.into_iter().next() {
+                return Err(e);
+            }
+        } else {
+            let spec = s.get_document(name).cloned().unwrap_or_default();
+            self.merge_into(sql, &tns, docs, &spec).await?;
+        }
+        Ok(())
+    }
+
     async fn merge_into(
         &self,
         sql: &mut dyn SqlRunner,
@@ -2744,6 +2923,24 @@ impl Engine {
                         code::SPRIG_DOC_FEATURE_UNSUPPORTED,
                         format!("$merge whenMatched {other} is not supported in this release"),
                     ));
+                }
+                // MongoDB runs `whenMatched: "merge"` as an upsert with
+                // `$set`, so a new document's fields come in `$set`'s
+                // order (M7).
+                (false, "merge", _) if d.keys().any(|k| k != "_id") => {
+                    let mut set = d.clone();
+                    set.remove("_id");
+                    self.update(
+                        sql,
+                        ns,
+                        &q,
+                        &Bson::Document(doc! {"$set": set}),
+                        false,
+                        true,
+                        &[],
+                        None,
+                    )
+                    .await?;
                 }
                 (false, _, _) => {
                     let (_, errs) = self.insert(sql, ns, vec![d], true).await?;
@@ -2967,6 +3164,12 @@ mod tests;
 
 /// `$graphLookup` (M2).
 mod graph;
+
+/// Capped collections and tailable cursors (M7).
+pub mod capped;
+
+/// `find` with `allowDiskUse` (M7).
+mod find_spill;
 
 /// `$collStats`, `$indexStats`, `$planCacheStats`, `$listClusterCatalog`
 /// (M2).

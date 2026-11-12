@@ -20,9 +20,9 @@ import {
   ShardIcon,
   SproutIcon,
 } from '../icons';
-import { closeDoc, describe, openDoc, syncQueryTabs, useTenantWorkspace, useWorkspace, type DocKind } from './store';
+import { closeDoc, describe, openDoc, syncQueryTabs, resetForTenant, useWorkspace, type DocKind } from './store';
 
-const ICON: Record<DocKind, ComponentType<{ size?: number }>> = {
+export const DOC_ICON: Record<DocKind, ComponentType<{ size?: number }>> = {
   home: SproutIcon,
   query: SquareTerminal,
   database: Database,
@@ -57,10 +57,10 @@ export function WorkspaceTabs() {
   const navigate = useNavigate();
   const { tenant = '' } = useParams();
   const { base, rel } = useRel();
-  useTenantWorkspace(tenant);
   const queryTabs = useTabs((s) => s.tabs);
   const docs = useWorkspace((s) => s.docs);
 
+  useEffect(() => resetForTenant(tenant), [tenant]);
   // Query tabs follow the editor's store; other pages open as you visit them.
   useEffect(() => {
     syncQueryTabs(
@@ -98,39 +98,55 @@ export function WorkspaceTabs() {
   };
 
   return (
-    <div className="ws-tabs" role="tablist" aria-label={intl.formatMessage({ id: 'workspace.tabs' })} onKeyDown={onKey}>
-      {docs.map((d) => {
-        const Icon = ICON[d.kind];
-        const active = d.rel === rel || (d.rel === '' && rel === '');
-        return (
-          <div key={d.rel || 'home'} className={`ws-tab${active ? ' on' : ''}`}>
-            <button
-              role="tab"
-              aria-selected={active}
-              tabIndex={active ? 0 : -1}
-              title={d.title}
-              onClick={() => void navigate(d.rel ? `${base}/${d.rel}` : base)}
-            >
-              <Icon size={14} />
-              <span className="ws-tab-title">{d.title}</span>
-            </button>
-            <button
-              className="ws-tab-close"
-              aria-label={`${intl.formatMessage({ id: 'workspace.closeTab' })} ${d.title}`}
-              onClick={() => close(d.rel)}
-            >
-              <X size={12} aria-hidden="true" />
-            </button>
-          </div>
-        );
-      })}
+    <div className="ws-tabs">
+      <div className="ws-tablist" role="tablist" aria-label={intl.formatMessage({ id: 'workspace.tabs' })} onKeyDown={onKey}>
+        {docs.map((d) => {
+          const Icon = DOC_ICON[d.kind];
+          const active = d.rel === rel;
+          return (
+            <div key={d.rel || 'home'} role="presentation" className={`ws-tab${active ? ' on' : ''}`}>
+              <button
+                role="tab"
+                aria-selected={active}
+                tabIndex={active ? 0 : -1}
+                title={`${d.title} (Delete closes)`}
+                aria-keyshortcuts="Delete"
+                onClick={() => void navigate(d.rel ? `${base}/${d.rel}` : base)}
+                onAuxClick={(e) => {
+                  if (e.button === 1) close(d.rel);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Delete') {
+                    e.preventDefault();
+                    close(d.rel);
+                  }
+                }}
+              >
+                <Icon size={14} />
+                <span className="ws-tab-title">{d.title}</span>
+                <span
+                  className="ws-tab-close"
+                  aria-hidden="true"
+                  title={`${intl.formatMessage({ id: 'workspace.closeTab' })} ${d.title}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    close(d.rel);
+                  }}
+                >
+                  <X size={12} />
+                </span>
+              </button>
+            </div>
+          );
+        })}
+      </div>
       <button
         className="ws-tab-new"
         aria-label={intl.formatMessage({ id: 'workspace.newQuery' })}
         title={intl.formatMessage({ id: 'workspace.newQuery' })}
         onClick={() => void navigate(`${base}/q/${addTab().id}`)}
       >
-        <Plus size={14} aria-hidden="true" />
+        <Plus size={14} />
       </button>
     </div>
   );

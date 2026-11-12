@@ -132,6 +132,61 @@ pub fn cpu<R>(size: usize, f: impl FnOnce() -> R) -> R {
     }
 }
 
+// ----- graph statements (R8 round 10, decision G80) -------------------------
+
+/// How long a graph statement waits for one of [`graph_slots`] before it
+/// runs without one.
+pub const GRAPH_SLOT_WAIT: Duration = Duration::from_secs(1);
+
+/// Graph statements on blocking threads at once: the CPUs, at least 4.
+/// More wait up to [`GRAPH_SLOT_WAIT`] for one, then run anyway: a slot
+/// can be held by a statement waiting on a lock another one holds.
+pub fn graph_slots() -> &'static Arc<Semaphore> {
+    static S: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    S.get_or_init(|| {
+        let cpus = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
+        Arc::new(Semaphore::new(cpus.max(4)))
+    })
+}
+
+/// Runs a graph statement (Bolt, R8 round 10, decision G80) on a
+/// blocking thread from its first poll: matching, sorting and
+/// aggregating a large graph result are CPU work between awaits that
+/// can last seconds, and on a runtime worker they held every other
+/// session on it (the official LDBC run's IC9: polls of 0.9-2.9 s, then
+/// the watchdog). `block_in_place` hands the worker's queue to another
+/// thread; the statement's I/O, timers and `KILL QUERY` still work, in
+/// order, on this one. Waits asynchronously for one of [`graph_slots`]
+/// (at most [`GRAPH_SLOT_WAIT`]) first. Outside a multi-threaded runtime
+/// the future runs as is.
+pub async fn run_graph<F: Future>(fut: F) -> F::Output {
+    if !multi_thread() {
+        return fut.await;
+    }
+    let permit = tokio::time::timeout(GRAPH_SLOT_WAIT, Arc::clone(graph_slots()).acquire_owned())
+        .await
+        .ok()
+        .and_then(std::result::Result::ok);
+    if permit.is_none() {
+        metrics::counter!("sprig_gateway_graph_unslotted_total").increment(1);
+    }
+    metrics::counter!("sprig_gateway_graph_offloaded_total").increment(1);
+    let out = tokio::task::block_in_place(|| Handle::current().block_on(fut));
+    drop(permit);
+    out
+}
+
+/// [`run_graph`] for a streamed result's producer, which waits for the
+/// client to pull between rows: on a blocking thread too, but without a
+/// slot, so a client that reads slowly never holds one.
+pub async fn run_graph_stream<F: Future>(fut: F) -> F::Output {
+    if !multi_thread() {
+        return fut.await;
+    }
+    metrics::counter!("sprig_gateway_graph_offloaded_total").increment(1);
+    tokio::task::block_in_place(|| Handle::current().block_on(fut))
+}
+
 // ----- the stall guard (decision bugfix-1) ---------------------------------
 
 /// A request whose own polls used this much of a worker's time runs the
@@ -549,6 +604,63 @@ mod tests {
         fn describe(&self) -> String {
             "a test statement".into()
         }
+    }
+
+    /// R8 round 10: graph statements on more threads than the runtime has
+    /// workers, each one long poll that doesn't yield, leave a ticker on
+    /// the runtime free; run through the stall guard instead, the same
+    /// statements held both workers for their whole first poll.
+    #[test]
+    fn graph_statements_leave_the_workers_free() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let worst = |graph: bool| {
+            rt.block_on(async {
+                let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let s2 = Arc::clone(&stop);
+                let ticker = tokio::spawn(async move {
+                    let mut worst = Duration::ZERO;
+                    let mut last = Instant::now();
+                    while !s2.load(Ordering::Relaxed) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        worst = worst.max(last.elapsed());
+                        last = Instant::now();
+                    }
+                    worst
+                });
+                let heavy: Vec<_> = (0..4)
+                    .map(|_| {
+                        let work = async {
+                            tokio::time::sleep(Duration::from_millis(1)).await;
+                            spin(Duration::from_millis(400));
+                        };
+                        if graph {
+                            tokio::spawn(async move { run_graph(work).await })
+                        } else {
+                            tokio::spawn(async move { Guarded::new(None, work).await })
+                        }
+                    })
+                    .collect();
+                for h in heavy {
+                    h.await.unwrap();
+                }
+                stop.store(true, Ordering::Relaxed);
+                ticker.await.unwrap()
+            })
+        };
+        let guarded = worst(false);
+        let graph = worst(true);
+        assert!(
+            guarded >= Duration::from_millis(300),
+            "the stall guard alone: {guarded:?}"
+        );
+        assert!(
+            graph < Duration::from_millis(150),
+            "graph statements: {graph:?}"
+        );
     }
 
     /// The watchdog's stall handler names the statement in a long poll and

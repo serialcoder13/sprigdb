@@ -504,10 +504,7 @@ pub async fn stage_docs(
     let from_store: Vec<Document> = stored
         .iter()
         .filter_map(|x| stored_entry(x, now))
-        .filter(|d| {
-            d.get_str("queryShapeHash")
-                .is_ok_and(|h| !mine.contains(h))
-        })
+        .filter(|d| d.get_str("queryShapeHash").is_ok_and(|h| !mine.contains(h)))
         .collect();
     Ok(list
         .into_iter()
@@ -976,9 +973,27 @@ mod tests {
             "shop",
         )
         .unwrap();
-        assert_eq!(e.get_str("queryShapeHash").unwrap(), qshape::shape_hash(&mem));
-        assert_eq!(e.get_document("metrics").unwrap().get_i64("execCount").unwrap(), 7);
-        assert!(stored_entry(&super::super::catalog::StoredShape { text: "x".into(), ..x }, bson::DateTime::now()).is_none());
+        assert_eq!(
+            e.get_str("queryShapeHash").unwrap(),
+            qshape::shape_hash(&mem)
+        );
+        assert_eq!(
+            e.get_document("metrics")
+                .unwrap()
+                .get_i64("execCount")
+                .unwrap(),
+            7
+        );
+        assert!(
+            stored_entry(
+                &super::super::catalog::StoredShape {
+                    text: "x".into(),
+                    ..x
+                },
+                bson::DateTime::now()
+            )
+            .is_none()
+        );
     }
 
     #[test]

@@ -17,6 +17,7 @@
 //! | `/v1/indexing/...` | The caller's tenant's automatic indexes, recommendations, actions and explanations |
 //! | `POST /v1/databases/{db}/cursors`, `POST /v1/cursors/{h}:fetch`, `:close` | `Cursors` ([`cursors`]) |
 //! | `/v1/ops/...` | Operator mode: the Admin API for logins in `studio.operator_logins` ([`ops`]) |
+//! | `/v1/library`, `/v1/library/saved[:delete]`, `/v1/library/history[:clear]` | The caller's saved queries and history ([`library`]) |
 //! | `GET /v1/shards`, `/v1/shards/advisor[/{run}]` | The shards view: table groups, keys, maps, advisor runs ([`shards`]) |
 //! | `GET /v1/openapi.json` | The data API's document with these routes added |
 //!
@@ -38,6 +39,7 @@ pub mod catalog;
 pub mod cursors;
 pub mod exports;
 pub mod grants;
+pub mod library;
 // Round 4: the logic editors (chapter 44 step 26).
 pub mod logic;
 // Round 4: the stream, queue and sink views (chapter 44 steps 28–31).
@@ -402,6 +404,7 @@ impl StudioState {
         v["feed_view_max_events"] = n(&k::FEED_VIEW_MAX_EVENTS);
         v["graph_max_elements"] = n(&k::GRAPH_MAX_ELEMENTS);
         v["persist_drafts"] = json!(self.tenant_get(&k::PERSIST_DRAFTS, tenant, None));
+        v["history_max"] = n(&k::HISTORY_MAX);
         v["confirm_writes"] = json!(self.tenant_get(&k::CONFIRM_WRITES, tenant, None).as_ref());
         v["view_as"] = json!(self.tenant_get(&k::VIEW_AS, tenant, None).as_ref());
         v
@@ -872,6 +875,7 @@ pub async fn handle(
         }
         (_, p) if logic::is_logic_path(p) => logic::route(core, info, req).await,
         (_, p) if messaging::is_messaging_path(p) => messaging::route(core, info, req).await,
+        (_, p) if library::is_library_path(p) => library::route(core, info, req).await,
         ("POST", "/v1/policies:testAs") => policies::test_as(core, info, req).await,
         ("GET", p) if p == "/v1/shards" || p.starts_with("/v1/shards/") => {
             match core

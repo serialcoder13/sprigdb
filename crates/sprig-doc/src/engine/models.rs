@@ -378,7 +378,15 @@ impl Engine {
         }
         let sqlp = translate(pred, m);
         let docs = self
-            .scan(sql, ns, &m.table, pred, &sqlp, self.cfg.max_sort_bytes)
+            .scan(
+                sql,
+                ns,
+                &m.table,
+                pred,
+                &sqlp,
+                self.cfg.max_sort_bytes,
+                super::capped::KeyOrder::of(m),
+            )
             .await?;
         let mut ranked: Vec<(f64, Document)> = docs
             .into_iter()
@@ -565,7 +573,15 @@ impl Engine {
         };
         let sqlp = translate(&pred, &m);
         let docs = self
-            .scan(sql, ns, &m.table, &pred, &sqlp, self.cfg.max_sort_bytes)
+            .scan(
+                sql,
+                ns,
+                &m.table,
+                &pred,
+                &sqlp,
+                self.cfg.max_sort_bytes,
+                super::capped::KeyOrder::of(&m),
+            )
             .await?;
         let mult = spec.get("distanceMultiplier").and_then(num).unwrap_or(1.0);
         let locs = spec.get_str("includeLocs").ok();

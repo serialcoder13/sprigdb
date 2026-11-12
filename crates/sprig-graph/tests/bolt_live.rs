@@ -2961,3 +2961,108 @@ async fn round_five_applier_kill() {
     assert_eq!(rels, mirrors);
     assert_eq!(rels, u64::try_from(k - 1).unwrap_or(0));
 }
+
+/// R8 round 10 (the official LDBC run on OCI: 8 concurrent IC
+/// statements held every runtime worker in polls of 0.9-2.9 s, and the
+/// watchdog stopped one). Heavy graph statements, more of them than the
+/// gateway has runtime workers, each one long sort that doesn't yield;
+/// meanwhile a MySQL client pings the same gateway every 20 ms. Every
+/// ping must answer within 250 ms (before the fix they waited seconds).
+///
+/// `SPRIG_TEST_HEAVY_STATEMENTS` (default 8) sets how many run at once;
+/// the gateway should have fewer runtime workers
+/// (`SPRIGDB_GATEWAY_WORKER_THREADS`, 4 in the test deployment).
+#[tokio::test]
+async fn heavy_graph_statements_leave_the_runtime_free() {
+    let (Some(addr), Some(user), Some(pw), Some(sql)) = (
+        env("SPRIG_TEST_BOLT_ADDR"),
+        env("SPRIG_TEST_BOLT_USER"),
+        env("SPRIG_TEST_BOLT_PASSWORD"),
+        env("SPRIG_TEST_SQL_ADDR"),
+    ) else {
+        eprintln!("skipped: SPRIG_TEST_BOLT_* / SPRIG_TEST_SQL_ADDR not set");
+        return;
+    };
+    let heavy: usize =
+        env("SPRIG_TEST_HEAVY_STATEMENTS").map_or(8, |v| v.parse().expect("a count"));
+    let mut s = sql_conn(&sql, &user, &pw).await;
+    s.query_drop("CREATE DATABASE IF NOT EXISTS r8ten_heavy")
+        .await
+        .expect("db");
+    s.query_drop("CREATE GRAPH IF NOT EXISTS r8ten_heavy.g")
+        .await
+        .expect("graph");
+    let db = vec![("db", PackValue::str("r8ten_heavy.g"))];
+    // One sort of 400,000 rows: a single long poll of the statement.
+    let q = "UNWIND range(1, 400000) AS x WITH x ORDER BY x % 977, x DESC RETURN sum(x) AS s";
+    let mut warm = connect(&addr, &user, &pw).await.expect("login");
+    let t = Instant::now();
+    let r = warm.query(q, vec![], db.clone()).await.expect("alone");
+    eprintln!(
+        "one heavy statement alone: {:?}, sum {}",
+        t.elapsed(),
+        int0(&r)
+    );
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pinger = {
+        let stop = std::sync::Arc::clone(&stop);
+        let mut p = sql_conn(&sql, &user, &pw).await;
+        tokio::spawn(async move {
+            let mut lat = Vec::new();
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let t = Instant::now();
+                p.query_drop("SELECT 1").await.expect("ping");
+                lat.push(t.elapsed());
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            p.disconnect().await.expect("bye");
+            lat
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let started = Instant::now();
+    let runs: Vec<_> = (0..heavy)
+        .map(|_| {
+            let (addr, user, pw, db) = (addr.clone(), user.clone(), pw.clone(), db.clone());
+            tokio::spawn(async move {
+                let mut c = connect(&addr, &user, &pw).await.expect("login");
+                for _ in 0..2 {
+                    c.query(q, vec![], db.clone()).await.expect("heavy");
+                }
+            })
+        })
+        .collect();
+    for r in runs {
+        r.await.expect("join");
+    }
+    let took = started.elapsed();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut lat = pinger.await.expect("pinger");
+    lat.sort();
+    let p = |q: f64| {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        lat[((lat.len() as f64 - 1.0) * q) as usize]
+    };
+    let worst = *lat.last().expect("pings");
+    eprintln!(
+        "{heavy} heavy statements x 2 in {took:?}; {} pings: p50 {:?}, p99 {:?}, max {worst:?}",
+        lat.len(),
+        p(0.5),
+        p(0.99)
+    );
+    s.query_drop("DROP GRAPH r8ten_heavy.g")
+        .await
+        .expect("drop");
+    s.query_drop("DROP DATABASE r8ten_heavy")
+        .await
+        .expect("drop db");
+    s.disconnect().await.expect("bye");
+    assert!(
+        worst < Duration::from_millis(250),
+        "a MySQL ping waited {worst:?} behind graph statements"
+    );
+}

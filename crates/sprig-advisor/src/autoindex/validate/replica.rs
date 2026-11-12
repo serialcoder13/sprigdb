@@ -51,6 +51,9 @@ pub struct ReplicaValidator {
     node: NodeEndpoint,
     marker: Arc<dyn NodeMarker>,
     probe_timeout: Duration,
+    /// The primary: an index already on the node but not here is a cut-off
+    /// validation's leftover, dropped before building (bugfix-61).
+    writer: Option<NodeEndpoint>,
 }
 
 impl std::fmt::Debug for ReplicaValidator {
@@ -70,7 +73,19 @@ impl ReplicaValidator {
             node,
             marker,
             probe_timeout: Duration::from_secs(10),
+            writer: None,
         }
+    }
+
+    /// Compares with the primary `writer` before building: the node's
+    /// `sprig_auto_*` indexes and field columns the primary lacks are a
+    /// cut-off validation's leftovers, and are dropped (binary log off)
+    /// instead of aborting with `index_exists` (bugfix-61,
+    /// [`super::orphans`]).
+    #[must_use]
+    pub fn with_writer(mut self, writer: NodeEndpoint) -> Self {
+        self.writer = Some(writer);
+        self
     }
 }
 
@@ -192,8 +207,12 @@ impl Validator for ReplicaValidator {
         let mut r = report(plan, Method::Replica, &self.node.node);
         let name = plan.index_name();
         let t = &plan.target;
+        // bugfix-61: while this runs, nothing in this process takes the
+        // node's validation index for a leftover.
+        let _running = super::orphans::running(&self.node.node, t);
 
         // 1. Checks, before anything changes.
+        let mut note: Option<String> = None;
         let mut mon = match NodeSql::connect(&self.node, self.probe_timeout).await {
             Ok(m) => m,
             Err(e) => {
@@ -207,10 +226,36 @@ impl Validator for ReplicaValidator {
             if let Some(why) = unfit(state.as_ref(), set.abort_replica_lag) {
                 return Err(why);
             }
-            let existing = mon
+            let mut existing = mon
                 .index_columns(t, &name)
                 .await
                 .map_err(|e| e.to_string())?;
+            if !existing.is_empty()
+                && let Some(w) = &self.writer
+            {
+                // A cut-off validation's leftover (the primary lacks it):
+                // dropped, binary log off, then this validation goes on.
+                let left = super::orphans::sweep_from_validator(
+                    &self.node,
+                    w,
+                    t,
+                    super::orphans::NodeKind::Replica,
+                    &name,
+                )
+                .await
+                .map_err(|e| format!("leftover of an earlier validation not dropped: {e}"))?;
+                if !left.is_empty() {
+                    note = Some(format!(
+                        "leftovers of a cut-off validation dropped first: indexes {:?}, field \
+                         columns {:?}",
+                        left.indexes, left.fields
+                    ));
+                }
+                existing = mon
+                    .index_columns(t, &name)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
             if !existing.is_empty() {
                 // Kept from an earlier accepted validation, or a stray the
                 // reconciler will handle: never touch it here.
@@ -230,6 +275,9 @@ impl Validator for ReplicaValidator {
             Ok((server_id, gtid, sig))
         }
         .await;
+        if let Some(n) = note {
+            r.node_check.ok(n);
+        }
         let (server_id, gtid_before, sig_before) = match pre {
             Ok(x) => x,
             Err(why) => {

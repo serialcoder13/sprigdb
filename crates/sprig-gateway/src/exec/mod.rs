@@ -188,6 +188,7 @@ impl Executor for PassThrough {
             wl_multi: false,
             router: router::RouterState::default(),
             packet_limit: None,
+            placement_memo: follow::PlacementMemo::default(),
             status: status::SessionStatus::default(),
         })
     }
@@ -219,6 +220,8 @@ pub struct PassSession {
     packet_limit: Option<u64>,
     /// The session's own status counters, for `SHOW STATUS` (gaps row 46).
     status: status::SessionStatus,
+    /// Placement checks kept per map generation (perf1, S148).
+    placement_memo: follow::PlacementMemo,
 }
 
 impl std::fmt::Debug for PassSession {

@@ -219,6 +219,12 @@ impl sprig_router::ShardBackend for GwBackend<'_> {
             }
             return r;
         }
+        // Chapter 18, decision Q37: a branch of the session's last
+        // distributed commit still in phase 2 on this cluster is finished
+        // before the session reads or writes there again (boxed: rare).
+        if self.coord.has_straggler(&cluster) {
+            Box::pin(self.coord.settle(&cluster)).await?;
+        }
         if cluster == self.main_cluster {
             if self.explicit_ids {
                 self.main.explicit_ids_next_statement();

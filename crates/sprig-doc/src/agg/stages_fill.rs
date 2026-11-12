@@ -13,10 +13,13 @@ use std::cmp::Ordering;
 use bson::{Bson, DateTime, Document, doc};
 use sprig_proto_mongo::errors::{MongoError, code};
 
+use std::sync::Arc;
+
 use super::accum_num::{is_num, varith};
 use super::window::{date_add, set_window_fields};
 use super::{AggLimits, run_stage};
 use crate::keyenc::compare;
+use crate::spill::{self, Cmp, DocSeq, SeqBuilder};
 use crate::update::{get_path, set_path, type_name};
 
 fn err(c: i32, msg: impl Into<String>) -> MongoError {
@@ -256,7 +259,6 @@ struct PState {
 ///
 /// # Errors
 /// MongoDB 8.0's parse and run-time errors.
-#[allow(clippy::too_many_lines)]
 pub(crate) fn densify(
     docs: Vec<Document>,
     arg: &Bson,
@@ -264,38 +266,110 @@ pub(crate) fn densify(
 ) -> Result<Vec<Document>, MongoError> {
     let spec = parse_densify(arg)?;
     super::over(lim, &docs, "$densify")?;
-    let val = |d: &Document| get_path(d, &spec.field).cloned().unwrap_or(Bson::Null);
     for d in &docs {
-        let v = val(d);
+        let v = spec.val(d);
         if !matches!(v, Bson::Null) {
             spec.check(&v)?;
         }
     }
-    let full = matches!(spec.bounds, Bounds::Full);
     let mut items: Vec<(Document, Document)> = docs
         .into_iter()
         .map(|d| Ok((part_of(&d, &spec.parts)?, d)))
         .collect::<Result<_, MongoError>>()?;
-    items.sort_by(|a, b| {
-        if !full {
-            let o = compare(&Bson::Document(a.0.clone()), &Bson::Document(b.0.clone()));
+    items.sort_by(|a, b| spec.order(&a.0, &a.1, &b.0, &b.1));
+    let mut out: Vec<Document> = Vec::new();
+    densify_sorted(&spec, items.into_iter().map(Ok), lim, &mut |d| {
+        out.push(d);
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+/// `$densify` over an input that may be on disk (M7, decision S87): the
+/// input sorted on disk as in memory (by partition, then the field;
+/// `bounds: "full"` by the field alone), then the same single pass, its
+/// output collected into a builder that spills.
+///
+/// # Errors
+/// As [`densify`]; 292 past the stage's memory without `allowDiskUse`.
+pub(crate) fn densify_seq(seq: DocSeq, arg: &Bson, lim: &AggLimits) -> Result<DocSeq, MongoError> {
+    let spec = Arc::new(parse_densify(arg)?);
+    let s2 = Arc::clone(&spec);
+    let wrapped = seq.into_iter_docs()?.map(move |d| {
+        let d = d?;
+        let v = s2.val(&d);
+        if !matches!(v, Bson::Null) {
+            s2.check(&v)?;
+        }
+        Ok(doc! {"p": part_of(&d, &s2.parts)?, "d": d})
+    });
+    let s3 = Arc::clone(&spec);
+    let cmp: Cmp = Arc::new(move |a: &Document, b: &Document| {
+        let (pa, da) = split(a);
+        let (pb, db) = split(b);
+        s3.order(pa, da, pb, db)
+    });
+    let sorted = spill::sort_seq(wrapped, cmp, None, lim.stage_bytes, "Sort")?;
+    let items = sorted.into_iter_docs()?.map(|w| {
+        let mut w = w?;
+        let p = match w.remove("p") {
+            Some(Bson::Document(p)) => p,
+            _ => Document::new(),
+        };
+        let d = match w.remove("d") {
+            Some(Bson::Document(d)) => d,
+            _ => Document::new(),
+        };
+        Ok((p, d))
+    });
+    let mut out = SeqBuilder::new(lim.stage_bytes);
+    densify_sorted(&spec, items, lim, &mut |d| out.push(d))?;
+    out.finish()
+}
+
+fn split(w: &Document) -> (&Document, &Document) {
+    static EMPTY: std::sync::LazyLock<Document> = std::sync::LazyLock::new(Document::new);
+    (
+        w.get_document("p").unwrap_or(&EMPTY),
+        w.get_document("d").unwrap_or(&EMPTY),
+    )
+}
+
+impl Densify {
+    fn val(&self, d: &Document) -> Bson {
+        get_path(d, &self.field).cloned().unwrap_or(Bson::Null)
+    }
+
+    /// MongoDB's streaming order: by partition (except with full
+    /// bounds), then by the field.
+    fn order(&self, pa: &Document, da: &Document, pb: &Document, db: &Document) -> Ordering {
+        if !matches!(self.bounds, Bounds::Full) {
+            let o = compare(&Bson::Document(pa.clone()), &Bson::Document(pb.clone()));
             if o != Ordering::Equal {
                 return o;
             }
         }
-        compare(&val(&a.1), &val(&b.1))
-    });
-    let (gmin, gmax) = {
-        let vs: Vec<Bson> = items
-            .iter()
-            .map(|x| val(&x.1))
-            .filter(|v| !matches!(v, Bson::Null))
-            .collect();
-        (vs.first().cloned(), vs.last().cloned())
-    };
-    let (lo, hi, hi_inclusive) = match &spec.bounds {
-        Bounds::Full => (gmin.clone(), gmax.clone(), true),
-        Bounds::Partition => (None, None, true),
+        compare(&self.val(da), &self.val(db))
+    }
+}
+
+/// The densify pass over `(partition, document)` pairs already in
+/// [`Densify::order`]: one state per partition, documents passed through
+/// and generated ones emitted in MongoDB's order.
+#[allow(clippy::too_many_lines)]
+fn densify_sorted(
+    spec: &Densify,
+    items: impl Iterator<Item = Result<(Document, Document), MongoError>>,
+    lim: &AggLimits,
+    emit: &mut dyn FnMut(Document) -> Result<(), MongoError>,
+) -> Result<(), MongoError> {
+    // Full bounds: from the smallest value (the first, values sorted
+    // alone) to the largest (the last), which only the tail of each
+    // partition needs. Generation inside the input never passes it.
+    let mut gmin: Option<Bson> = None;
+    let mut gmax: Option<Bson> = None;
+    let (fixed_lo, fixed_hi, hi_inclusive) = match &spec.bounds {
+        Bounds::Full | Bounds::Partition => (None, None, true),
         Bounds::Range(a, b) => (Some(a.clone()), Some(b.clone()), false),
     };
     let below_hi = |v: &Bson, hi: &Bson| {
@@ -303,14 +377,20 @@ pub(crate) fn densify(
         o == Ordering::Less || (hi_inclusive && o == Ordering::Equal)
     };
     let mut states: Vec<PState> = Vec::new();
-    let mut out: Vec<Document> = Vec::new();
-    let limit = lim.stage_bytes / 64;
-    for (p, d) in items {
-        let v = val(&d);
+    let mut emitted = 0usize;
+    let limit = (lim.stage_bytes / 64).max(1_000_000);
+    for item in items {
+        let (p, d) = item?;
+        let v = spec.val(&d);
         if matches!(v, Bson::Null) {
-            out.push(d);
+            emit(d)?;
+            emitted += 1;
             continue;
         }
+        if gmin.is_none() {
+            gmin = Some(v.clone());
+        }
+        gmax = Some(v.clone());
         let si = if let Some(i) = states.iter().position(|s| s.part == p) {
             i
         } else {
@@ -323,20 +403,22 @@ pub(crate) fn densify(
         };
         let st = &mut states[si];
         // Outside explicit bounds: passed through.
-        if let (Bounds::Range(a, _), true) = (&spec.bounds, true)
+        if let Some(a) = &fixed_lo
             && compare(&v, a) == Ordering::Less
         {
-            out.push(d);
+            emit(d)?;
+            emitted += 1;
             continue;
         }
         if st.cur.is_none() {
             match &spec.bounds {
                 Bounds::Partition => st.cur = Some(v.clone()),
                 Bounds::Full => {
-                    st.cur.clone_from(&lo);
-                    if compare(&v, lo.as_ref().unwrap_or(&v)) != Ordering::Equal {
+                    st.cur.clone_from(&gmin);
+                    if compare(&v, gmin.as_ref().unwrap_or(&v)) != Ordering::Equal {
                         st.pending = true;
-                        out.push(d);
+                        emit(d)?;
+                        emitted += 1;
                         continue;
                     }
                 }
@@ -348,13 +430,14 @@ pub(crate) fn densify(
             if compare(&c, &v) != Ordering::Less {
                 break;
             }
-            if let Some(h) = &hi
+            if let Some(h) = &fixed_hi
                 && !below_hi(&c, h)
             {
                 break;
             }
-            out.push(spec.make(&st.part, &c)?);
-            if out.len() > limit.max(1_000_000) {
+            emit(spec.make(&st.part, &c)?)?;
+            emitted += 1;
+            if emitted > limit {
                 return Err(err(5_897_900, "Generated too many documents in $densify"));
             }
             st.cur = spec.next(&c);
@@ -364,9 +447,14 @@ pub(crate) fn densify(
         {
             st.cur = spec.next(c);
         }
-        out.push(d);
+        emit(d)?;
+        emitted += 1;
     }
     // The rest of each partition's range.
+    let hi = match &spec.bounds {
+        Bounds::Full => gmax,
+        _ => fixed_hi,
+    };
     if let Some(h) = &hi {
         for st in &mut states {
             if st.cur.is_none() {
@@ -376,12 +464,12 @@ pub(crate) fn densify(
                 if !below_hi(&c, h) {
                     break;
                 }
-                out.push(spec.make(&st.part, &c)?);
+                emit(spec.make(&st.part, &c)?)?;
                 st.cur = spec.next(&c);
             }
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// `$fill`.

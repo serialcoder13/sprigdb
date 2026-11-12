@@ -21,6 +21,7 @@ use mysql_async::prelude::Queryable;
 
 const PW: &str = "Rlsd-suite-pw-1";
 const DB: &str = "rlsd_suite";
+const SDB: &str = "rlst_suite";
 
 struct Checks {
     n: usize,
@@ -243,6 +244,54 @@ async fn definer_routines_apply_their_definers_policies() {
         || format!("{sc:?}"),
     );
 
+    // RL57's addition (bugfix-63): a routine without SQL SECURITY over a
+    // protected table runs as DEFINER; the gateway notes it, naming the
+    // tables. An explicit clause, either way, gets no note.
+    for (q, noted) in [
+        (
+            format!("CREATE PROCEDURE {DB}.plain_docs() SELECT COUNT(*) FROM {DB}.docs"),
+            true,
+        ),
+        (
+            format!(
+                "CREATE FUNCTION {DB}.plain_total() RETURNS INT READS SQL DATA \
+                 RETURN (SELECT COUNT(*) FROM {DB}.docs)"
+            ),
+            true,
+        ),
+        (
+            format!(
+                "CREATE PROCEDURE {DB}.inv_docs2() SQL SECURITY INVOKER SELECT COUNT(*) FROM {DB}.docs"
+            ),
+            false,
+        ),
+        (
+            format!(
+                "CREATE PROCEDURE {DB}.def_docs2() SQL SECURITY DEFINER SELECT COUNT(*) FROM {DB}.docs"
+            ),
+            false,
+        ),
+    ] {
+        let r = admin.query_drop(&q).await;
+        let warnings: Vec<(String, u32, String)> =
+            admin.query("SHOW WARNINGS").await.unwrap_or_default();
+        let note = warnings
+            .iter()
+            .find(|(_, code, _)| *code == 39369)
+            .map(|(level, _, m)| (level.clone(), m.clone()));
+        ck.ok(
+            &format!("note for a routine without SQL SECURITY = {noted}: {q}"),
+            r.is_ok()
+                && note.is_some() == noted
+                && note.as_ref().is_none_or(|(level, m)| {
+                    level == "Note"
+                        && m.contains(&format!("{DB}.docs"))
+                        && m.contains("SQL SECURITY")
+                }),
+            || format!("{r:?} {warnings:?}"),
+        );
+    }
+
     // Cleanup.
     let _ = admin
         .query_drop(format!("DROP DATABASE IF EXISTS {DB}"))
@@ -300,7 +349,6 @@ async fn large_subtrees_read_the_subtree_table() {
         );
         return;
     };
-    const SDB: &str = "rlst_suite";
     let mut ck = Checks {
         n: 0,
         failed: Vec::new(),
@@ -368,7 +416,7 @@ async fn large_subtrees_read_the_subtree_table() {
         format!("{got:?}")
     });
     // Straight to MariaDB: the account reads its own tenant's subtree, and
-    // the policy view applies it from the context's flag.
+    // the policy view applies it from the context's flag (1).
     if let Ok(direct) = std::env::var("SPRIG_TEST_RLS_DIRECT") {
         let root_pw =
             std::env::var("SPRIG_TEST_RLS_ROOT_PW").unwrap_or_else(|_| "sprig-dev-root".into());
@@ -430,7 +478,7 @@ async fn large_subtrees_read_the_subtree_table() {
         let ctx = serde_json::json!({
             "b": 0, "x": [], "p": [pid],
             "s": {"user": "rlst_alice@%", "uid": uid, "tid": tid.parse::<u64>().unwrap(),
-                  "sub": [], "subt": true}
+                  "sub": [], "subt": 1}
         })
         .to_string();
         b.query_drop(format!("SET @sprig_rls = '{ctx}'"))
@@ -460,6 +508,113 @@ async fn large_subtrees_read_the_subtree_table() {
         .await;
     eprintln!(
         "subtrees above rls.inline_subtree_max: {} checks, {} failed",
+        ck.n,
+        ck.failed.len()
+    );
+    assert!(ck.failed.is_empty(), "{:#?}", ck.failed);
+}
+
+/// bugfix-64 (RLS round 6, item 6): a session pinned to its backend
+/// connection (here by `GET_LOCK`) keeps MariaDB's database-level grants
+/// of its last `USE`. After `rls.backend_enforcement` moved from `views`
+/// to `triggers` (grants widened at database level) its reads failed with
+/// 1142 until it reconnected; now the gateway sends `USE` on the pinned
+/// connection after a reconcile that changed the account's grants.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pinned_session_follows_an_enforcement_change() {
+    const PDB: &str = "rlsp_suite";
+    let Ok(addr) = std::env::var("SPRIG_TEST_RLS_SQL") else {
+        eprintln!("skipped: set SPRIG_TEST_RLS_SQL");
+        return;
+    };
+    let mut ck = Checks {
+        n: 0,
+        failed: Vec::new(),
+    };
+    let (host, port) = addr.split_once(':').unwrap();
+    let opts = |user: String, pw: &str, db: Option<&str>| {
+        mysql_async::OptsBuilder::default()
+            .ip_or_hostname(host)
+            .tcp_port(port.parse().unwrap())
+            .user(Some(user))
+            .pass(Some(pw.to_owned()))
+            .db_name(db.map(str::to_owned))
+            .prefer_socket(false)
+            .ssl_opts(mysql_async::SslOpts::default().with_danger_accept_invalid_certs(true))
+    };
+    let mut admin =
+        mysql_async::Conn::new(opts(format!("{}.app", tenant()), "sprig-dev-app", None))
+            .await
+            .unwrap();
+    for q in [
+        format!("DROP DATABASE IF EXISTS {PDB}"),
+        "DROP USER IF EXISTS 'rlsp_alice'@'%'".to_owned(),
+        format!("CREATE DATABASE {PDB}"),
+        format!("CREATE TABLE {PDB}.docs (id INT PRIMARY KEY, owner VARCHAR(64) NOT NULL)"),
+        format!(
+            "INSERT INTO {PDB}.docs VALUES (1, 'rlsp_alice@%'), (2, 'app@%'), (3, 'rlsp_bob@%')"
+        ),
+        format!("CREATE USER 'rlsp_alice'@'%' IDENTIFIED BY '{PW}'"),
+        format!("GRANT SELECT, INSERT, UPDATE, DELETE ON {PDB}.* TO 'rlsp_alice'@'%'"),
+        format!("CREATE POLICY own ON {PDB}.docs USING (owner = CURRENT_USER())"),
+        format!("ALTER TABLE {PDB}.docs ENABLE ROW LEVEL SECURITY"),
+    ] {
+        let r = admin.query_drop(&q).await;
+        ck.ok(&format!("setup: {q}"), r.is_ok(), || format!("{r:?}"));
+    }
+    let mut a = mysql_async::Conn::new(opts(format!("{}.rlsp_alice", tenant()), PW, Some(PDB)))
+        .await
+        .unwrap();
+    let mine = n(&mut a, "SELECT COUNT(*) FROM docs").await;
+    ck.ok("views: alice reads her row", mine == Ok(1), || {
+        format!("{mine:?}")
+    });
+    // A user lock pins the session to its backend connection.
+    let got = n(&mut a, "SELECT GET_LOCK('rlsp_pin', 0)").await;
+    ck.ok("alice holds a user lock (pinned)", got == Ok(1), || {
+        format!("{got:?}")
+    });
+    for (set, label) in [
+        (
+            format!("ALTER DATABASE {PDB} SPRIG SET (rls.backend_enforcement = 'triggers')"),
+            "triggers",
+        ),
+        (
+            format!("ALTER DATABASE {PDB} SPRIG RESET (rls.backend_enforcement)"),
+            "views again",
+        ),
+    ] {
+        let r = admin.query_drop(&set).await;
+        ck.ok(&format!("{label}: set"), r.is_ok(), || format!("{r:?}"));
+        // The setting reaches the gateway's catalog within moments; every
+        // read on the pinned connection must succeed meanwhile.
+        let mut reads = Vec::new();
+        for _ in 0..10 {
+            reads.push(n(&mut a, "SELECT COUNT(*) FROM docs").await);
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        ck.ok(
+            &format!("{label}: the pinned session reads its row throughout"),
+            reads.iter().all(|r| *r == Ok(1)),
+            || format!("{reads:?}"),
+        );
+    }
+    // RELEASE_LOCK is 1 only on the connection holding the lock.
+    let still = n(&mut a, "SELECT RELEASE_LOCK('rlsp_pin')").await;
+    ck.ok(
+        "the session stayed on its connection",
+        still == Ok(1),
+        || format!("{still:?}"),
+    );
+    drop(a);
+    let _ = admin
+        .query_drop(format!("DROP DATABASE IF EXISTS {PDB}"))
+        .await;
+    let _ = admin
+        .query_drop("DROP USER IF EXISTS 'rlsp_alice'@'%'")
+        .await;
+    eprintln!(
+        "pinned session across an enforcement change: {} checks, {} failed",
         ck.n,
         ck.failed.len()
     );

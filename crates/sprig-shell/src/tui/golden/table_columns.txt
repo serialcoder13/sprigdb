@@ -1,0 +1,16 @@
+ ❯ 1 sql shop │ ▦ 2 orders … │ ◔ Dashboard │ ◈ Admin │ ⚑ Inbox
+┌ Explorer ──────────────────┐┌ ▦ shop.orders ─────────────────────────────────────────────────────┐
+│▾ shop                      ││ Data │ Cols │ Idx │ Rel │ Trig │ Pol │ Inh │ Shards │ DDL          │
+│  ▾ tables 2                ││#   Name     Type        Null Key Default Extra                     │
+│    ▸ orders ~3 rows        ││1   order_id int(11)     no   PRI NULL                              │
+│      order_items           ││2   status   varchar(20) yes  MUL NULL                              │
+│  ▸ views 1                 ││                                                                    │
+│  ▸ streams 1               ││                                                                    │
+│▸ hr                        ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────┘
+ dev  127.0.0.1:8080 db shop  applied 3 changes

@@ -1716,6 +1716,12 @@ impl Parser {
             }
             Tok::Sym("[") => {
                 self.bump();
+                // Pattern comprehension: [p = (a)-[..]-(b) WHERE .. | ..]
+                // (R8 round 10, LDBC IC14), run as the `COLLECT { }`
+                // subquery it is equivalent to.
+                if let Some(e) = self.pattern_comprehension()? {
+                    return Ok(e);
+                }
                 // List comprehension: [x IN list WHERE .. | ..].
                 if self.is_var_start() && self.is_kw_at(1, "IN") {
                     let var = self.var()?;
@@ -1823,6 +1829,9 @@ impl Parser {
                         }
                         self.pos = save;
                     }
+                    if lname == "reduce" && self.is_var_start() && self.is_sym_at(1, "=") {
+                        return self.reduce_rest();
+                    }
                     let distinct = self.accept_kw("DISTINCT");
                     let mut args = Vec::new();
                     if !self.is_sym(")") {
@@ -1846,6 +1855,83 @@ impl Parser {
             }
             _ => Err(self.err("an expression")),
         }
+    }
+
+    /// After `[`: a pattern comprehension's pattern, `WHERE` and `|`
+    /// expression up to `]`, as `COLLECT { MATCH .. WHERE .. RETURN .. }`;
+    /// `None` (nothing read) when the bracket starts another expression.
+    fn pattern_comprehension(&mut self) -> Result<Option<Expr>> {
+        let save = self.pos;
+        let named = self.is_var_start() && self.is_sym_at(1, "=");
+        if named {
+            self.bump();
+            self.bump();
+        }
+        let is_pattern = self.is_sym("(") && self.node_pat().is_ok() && self.rel_follows();
+        self.pos = save;
+        if !is_pattern {
+            return Ok(None);
+        }
+        let pattern = self.path_pattern()?;
+        if !self.is_kw("WHERE") && !self.is_sym("|") {
+            // A list holding a pattern predicate.
+            self.pos = save;
+            return Ok(None);
+        }
+        let where_ = if self.accept_kw("WHERE") {
+            Some(self.expr()?)
+        } else {
+            None
+        };
+        self.expect_sym("|")?;
+        let map = self.expr()?;
+        self.expect_sym("]")?;
+        Ok(Some(Expr::Subquery(
+            SubqueryKind::Collect,
+            Box::new(Query {
+                explain: Explain::None,
+                parts: vec![SingleQuery {
+                    clauses: vec![
+                        Clause::Match {
+                            optional: false,
+                            patterns: vec![pattern],
+                            where_,
+                        },
+                        Clause::Return(Projection {
+                            distinct: false,
+                            star: false,
+                            items: vec![(map, " pc".into())],
+                            order: vec![],
+                            skip: None,
+                            limit: None,
+                            where_: None,
+                        }),
+                    ],
+                }],
+                union_all: vec![],
+            }),
+        )))
+    }
+
+    /// `reduce(` read: `acc = init, var IN list | expr )`.
+    fn reduce_rest(&mut self) -> Result<Expr> {
+        let acc = self.var()?;
+        self.expect_sym("=")?;
+        let init = self.expr()?;
+        self.expect_sym(",")?;
+        let var = self.var()?;
+        self.expect_kw("IN")?;
+        let list = self.expr()?;
+        self.expect_sym("|")?;
+        let expr = self.expr()?;
+        self.expect_sym(")")?;
+        Ok(Expr::Reduce {
+            acc,
+            init: Box::new(init),
+            var,
+            list: Box::new(list),
+            expr: Box::new(expr),
+        })
     }
 
     fn case(&mut self) -> Result<Expr> {

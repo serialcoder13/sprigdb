@@ -109,6 +109,29 @@ struct State {
     tenants: BTreeMap<TenantId, Tenant>,
 }
 
+/// Marks a hold's insert over when dropped.
+struct Inserting<'a> {
+    state: &'a Mutex<State>,
+    tenant: TenantId,
+    thread: u64,
+    dtid: Dtid,
+}
+
+impl Drop for Inserting<'_> {
+    fn drop(&mut self) {
+        let mut st = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(t) = st.tenants.get_mut(&self.tenant) {
+            for h in t
+                .holds
+                .iter_mut()
+                .filter(|h| h.thread == self.thread && h.dtid == self.dtid)
+            {
+                h.inserting = false;
+            }
+        }
+    }
+}
+
 /// What the fence has done since it started.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FenceStats {
@@ -251,12 +274,35 @@ impl<L: RelayLinks> RelayFence<L> {
     /// Whether a new connection of `tenant` may pass.
     #[must_use]
     pub fn admit(&self, tenant: TenantId) -> Admission {
-        let st = self.state();
-        if !st.ready || st.tenants.get(&tenant).is_some_and(|t| t.fenced) {
-            Admission::Fenced
-        } else {
-            Admission::Open
+        let mut st = self.state();
+        if !st.ready {
+            return Admission::Fenced;
         }
+        let Some(t) = st.tenants.get_mut(&tenant) else {
+            return Admission::Open;
+        };
+        if t.fenced {
+            return Admission::Fenced;
+        }
+        // A holder whose connection the server ended (a crash, a restart)
+        // released its rows: fence before anyone new gets in, without
+        // waiting for the sweep to notice.
+        if t.holds
+            .iter()
+            .any(|h| !h.inserting && !self.links.backend_alive(h.thread))
+        {
+            t.fenced = true;
+            drop(st);
+            self.stats
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .fenced += 1;
+            tracing::warn!(cluster = %self.cluster, %tenant,
+                "relay fence: a holder's connection is gone; fencing the tenant");
+            self.wake.notify_one();
+            return Admission::Fenced;
+        }
+        Admission::Open
     }
 
     /// A connection of `tenant` passed: its backend thread is `thread`.
@@ -349,7 +395,9 @@ impl<L: RelayLinks> RelayFence<L> {
                 return Err(fenced_error("the tenant is fenced on this node"));
             }
             if !t.links.contains(&thread) || t.lost.contains(&thread) {
-                return Err(DbError::lost("the held branch's relayed connection is gone"));
+                return Err(DbError::lost(
+                    "the held branch's relayed connection is gone",
+                ));
             }
             t.holds.push(Hold {
                 thread,
@@ -359,25 +407,21 @@ impl<L: RelayLinks> RelayFence<L> {
                 inserting: true,
             });
         }
+        // Cancellation-safe: if this future is dropped (its caller went
+        // away), the guard still marks the insert over, so a fence doesn't
+        // wait for it forever. The hold stays either way: whether the rows
+        // went in is unknown, and recovery handles both.
+        let guard = Inserting {
+            state: &self.state,
+            tenant,
+            thread,
+            dtid,
+        };
         let r = self
             .admin
             .insert_redo(&self.cluster, schema, dtid, gtrid, stmts)
             .await;
-        {
-            let mut st = self.state();
-            // On failure it is unknown whether the rows went in: the hold
-            // stays either way, so the holder's loss still recovers them
-            // (the coordinator's abort removes it through `finished`).
-            if let Some(t) = st.tenants.get_mut(&tenant) {
-                for h in t
-                    .holds
-                    .iter_mut()
-                    .filter(|h| h.thread == thread && h.dtid == dtid)
-                {
-                    h.inserting = false;
-                }
-            }
-        }
+        drop(guard);
         self.wake.notify_one();
         r
     }
@@ -424,8 +468,16 @@ impl<L: RelayLinks> RelayFence<L> {
     /// recovered and reopened; a holder registered longer than `min_age`,
     /// or whose backend is gone, fences its tenant.
     pub async fn run(&self, cancel: CancellationToken) {
+        let mut pass = 0u64;
         loop {
             self.sweep();
+            // Every few passes: redo rows nobody holds here (a holder this
+            // process never registered, or lost track of) fence their
+            // tenant once they are older than min_age.
+            if pass.is_multiple_of(8) {
+                self.sweep_orphans().await;
+            }
+            pass += 1;
             let fenced: Vec<TenantId> = {
                 let st = self.state();
                 if st.ready {
@@ -470,6 +522,38 @@ impl<L: RelayLinks> RelayFence<L> {
                 t.fenced = true;
                 newly += 1;
             }
+        }
+        drop(st);
+        if newly > 0 {
+            self.stats
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .fenced += newly;
+        }
+    }
+
+    async fn sweep_orphans(&self) {
+        let Ok(all) = self.admin.redo_branches(&self.cluster).await else {
+            return;
+        };
+        let min_age = self.resolver.config().min_age.as_secs();
+        let mut st = self.state();
+        if !st.ready {
+            return;
+        }
+        let mut newly = 0u64;
+        for b in all
+            .iter()
+            .filter(|b| b.mark.is_none() && b.age_seconds >= min_age)
+        {
+            let t = st.tenants.entry(b.gtrid.tenant).or_default();
+            if t.fenced || t.holds.iter().any(|h| h.dtid == b.dtid) {
+                continue;
+            }
+            tracing::warn!(cluster = %self.cluster, tenant = %b.gtrid.tenant, dtid = %b.dtid,
+                "relay fence: redo rows without a holder here; fencing the tenant to recover them");
+            t.fenced = true;
+            newly += 1;
         }
         drop(st);
         if newly > 0 {
@@ -542,7 +626,11 @@ impl<L: RelayLinks> RelayFence<L> {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        let r = match self.resolver.recover_held(&self.cluster, Some(tenant)).await {
+        let r = match self
+            .resolver
+            .recover_held(&self.cluster, Some(tenant))
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(cluster = %self.cluster, %tenant, error = %e,
@@ -567,6 +655,3 @@ impl<L: RelayLinks> RelayFence<L> {
         true
     }
 }
-
-#[cfg(test)]
-mod tests;

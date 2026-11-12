@@ -86,7 +86,7 @@ test.describe.serial('Studio round 5', () => {
     await axe(page, 'graph-object');
     await shot(page, 'graph-object');
     // "Query" opens a Cypher tab on the graph; the picker lists it.
-    await page.getByRole('button', { name: 'Query' }).click();
+    await page.getByRole('button', { name: 'Query', exact: true }).click();
     await expect(page.getByTestId('graph-input')).toHaveValue('social5');
     await expect(page.getByTestId('graph-list').locator('option')).toHaveCount(1);
     await page.getByRole('button', { name: 'Run', exact: true }).click();

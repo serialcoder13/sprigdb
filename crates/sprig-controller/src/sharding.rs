@@ -615,6 +615,14 @@ impl ShardingLoop {
         manual: bool,
     ) -> Result<()> {
         let now = SystemTime::now();
+        // R9 (r9scale): the whole input only when the first split can be
+        // due; most tenants are far below the split size.
+        if !manual
+            && ts.sharding.min_shards <= 1
+            && input::first_split_bound(c, tenant).await? <= ts.sharding.split_bytes
+        {
+            return Ok(());
+        }
         let mut asm =
             input::assemble(c, tenant, now, ts.advisor.window, ts.sharding.split_bytes).await?;
         self.kv_rule_inputs(tenant, ts, home, &mut asm);

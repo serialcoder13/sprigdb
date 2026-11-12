@@ -311,6 +311,7 @@ fn eq_text(path: &str, v: &SampleValue) -> Option<String> {
 /// document index `def` (module docs), in logical names; `None` when the
 /// index holds none of its paths or a value has no field column.
 #[must_use]
+#[allow(clippy::many_single_char_names)] // c, n, s: chapter 31's pair columns
 pub fn replay_sql(shape: &Shape, sample: &SampledLiterals, def: &IndexDef) -> Option<String> {
     let t = shape.main_table()?;
     let db = t.db.as_deref()?;
@@ -384,8 +385,10 @@ mod tests {
     use crate::autoindex::stats::ColumnInfo;
 
     fn stats() -> TableStats {
-        let mut s = TableStats::default();
-        s.table = "orders".into();
+        let mut s = TableStats {
+            table: "orders".into(),
+            ..TableStats::default()
+        };
         for c in ["_id", "doc", "_types", "_v"] {
             s.columns.insert(
                 c.into(),

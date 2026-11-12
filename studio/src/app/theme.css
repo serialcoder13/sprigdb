@@ -127,8 +127,8 @@ pre { white-space: pre-wrap; word-break: break-word; background: var(--bg-sunken
 .banner { padding: 8px 12px; border-radius: var(--radius); background: var(--warn-bg); color: var(--warn-fg); }
 .card { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; background: var(--bg); }
 .tabs { display: flex; gap: 2px; border-block-end: 1px solid var(--border); margin-block-end: 8px; flex-wrap: wrap; }
-.tabs [role='tab'] { border-end-start-radius: 0; border-end-end-radius: 0; border-block-end: none; }
-.tabs [role='tab'][aria-selected='true'] { background: var(--bg); font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent); }
+.tabs [role='tab'] { border-radius: 0; border-block-end: none; }
+.tabs [role='tab'][aria-selected='true'] { background: var(--bg); font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent-fill); }
 .tree ul { list-style: none; margin: 0; padding-inline-start: 14px; }
 .tree > ul { padding-inline-start: 0; }
 .tree a { text-decoration: none; color: var(--fg); display: inline-block; padding: 2px 4px; min-block-size: 24px; border-radius: 4px; }
@@ -152,9 +152,10 @@ dialog::backdrop { background: rgb(0 0 0 / 0.4); }
 .split { display: grid; grid-template-rows: auto auto 1fr; gap: 8px; block-size: 100%; }
 .badge { display: inline-block; padding: 0 6px; border-radius: 10px; border: 1px solid var(--border); font-size: 12px; }
 .grid .deleted [role='gridcell'] { text-decoration: line-through; color: var(--danger); }
-nav.tabs a { padding: 4px 12px; border: 1px solid var(--border); border-block-end: none; border-radius: var(--radius) var(--radius) 0 0; text-decoration: none; color: var(--fg); }
-nav.tabs a[aria-current='page'] { font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent); }
-.tabs [aria-pressed='true'] { background: var(--bg); font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent); }
+nav.tabs a { padding: 4px 12px; border: 1px solid var(--border); border-block-end: none; border-radius: 0; text-decoration: none; color: var(--fg); }
+nav.tabs a[aria-current='page'] { font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent-fill); }
+.tabs [aria-pressed='true'] { background: var(--bg); font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent-fill); }
+.tabs [aria-pressed] { border-radius: 0; }
 
 /* Studio round 3: key/value lists and plain tables (shards, security, operator views). */
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; }
@@ -196,7 +197,9 @@ dialog.modal { border: 1px solid var(--border); border-radius: var(--radius); ba
 
 /* The workspace shell (decision R1): title bar, activity bar, side panel,
    tabs, status bar. One-edge indicators are straight bars on square edges. */
-.shell { display: grid; grid-template-rows: auto auto 1fr auto; block-size: 100%; }
+.shell { display: flex; flex-direction: column; block-size: 100%; }
+.shell > .body { flex: 1 1 auto; min-block-size: 0; }
+.shell > .titlebar, .shell > .statusbar, .shell > .banner { flex: 0 0 auto; }
 .titlebar { display: flex; align-items: center; gap: 10px; padding: 4px 10px; border-block-end: 1px solid var(--border); background: var(--bg-raised); min-block-size: 40px; }
 .titlebar .brand { display: flex; align-items: center; gap: 8px; font-weight: 650; margin-inline-end: 6px; white-space: nowrap; }
 .titlebar select { min-block-size: 26px; }
@@ -224,9 +227,11 @@ kbd { display: inline-flex; align-items: center; gap: 2px; font: 11px var(--mono
 .ws-tabs { display: flex; align-items: end; gap: 2px; padding: 4px 6px 0; border-block-end: 1px solid var(--border); background: var(--bg-raised); overflow-x: auto; scrollbar-width: thin; }
 .ws-tab { position: relative; display: flex; align-items: center; flex: 0 0 auto; max-inline-size: 220px; border: 1px solid transparent; border-block-end: none; border-radius: 0; color: var(--fg-muted); }
 .ws-tab button { border: none; background: none; min-block-size: 30px; border-radius: 0; }
-.ws-tab > button[role='tab'] { display: flex; align-items: center; gap: 6px; padding: 4px 4px 4px 10px; color: inherit; overflow: hidden; }
+.ws-tablist { display: flex; align-items: end; gap: 2px; min-inline-size: 0; }
+.ws-tab > button[role='tab'] { display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; color: inherit; overflow: hidden; }
 .ws-tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ws-tab-close { padding: 0 6px; min-inline-size: 22px; opacity: 0.5; color: inherit; }
+.ws-tab-close { display: inline-grid; place-items: center; inline-size: 18px; block-size: 18px; margin-inline-start: 2px; opacity: 0.45; color: inherit; cursor: pointer; }
+.ws-tab-close:hover { opacity: 1; background: var(--sel); }
 .ws-tab:hover .ws-tab-close, .ws-tab.on .ws-tab-close { opacity: 0.8; }
 .ws-tab:hover { color: var(--fg); }
 .ws-tab.on { background: var(--bg); color: var(--fg); border-color: var(--border); margin-block-end: -1px; }
@@ -255,3 +260,41 @@ kbd { display: inline-flex; align-items: center; gap: 2px; font: 11px var(--mono
   .search-button .search-text { display: none; }
   .search-button { inline-size: auto; margin-inline: 0; }
 }
+.tree-db, .tree-obj { display: inline-flex !important; align-items: center; gap: 6px; }
+.tree-db svg, .tree-obj svg { color: var(--fg-muted); flex: 0 0 auto; }
+.icon-button { display: inline-grid; place-items: center; padding: 0; inline-size: 28px; border: none; background: none; color: var(--fg-muted); }
+.icon-button:hover { color: var(--fg); background: var(--sel); }
+/* Operator mode keeps its own top bar (it has no tenant workspace). */
+.shell > .main { flex: 1 1 auto; min-block-size: 0; }
+.topbar { display: flex; align-items: center; gap: 10px; padding: 4px 10px; border-block-end: 1px solid var(--border); background: var(--bg-raised); min-block-size: 40px; flex: 0 0 auto; }
+.topbar .brand { display: flex; align-items: center; gap: 8px; font-weight: 650; margin-inline-end: 8px; white-space: nowrap; }
+.topbar nav { display: flex; gap: 2px; flex: 1; flex-wrap: wrap; }
+.topbar a { position: relative; display: inline-flex; align-items: center; min-block-size: 28px; padding: 2px 10px; border-radius: 0; text-decoration: none; color: var(--fg); }
+.topbar a:hover { background: var(--sel); }
+.topbar nav a[aria-current='page'] { font-weight: 600; background: var(--sel); }
+.topbar nav a[aria-current='page']::after { content: ''; position: absolute; inset-inline: 0; inset-block-end: -5px; block-size: 2px; background: var(--accent-fill); }
+/* Table data view (decision R2): filter bar, staged edits, footer. */
+.filterbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-raised); }
+.filter-cond { display: inline-flex; align-items: center; gap: 4px; }
+.filter-raw { display: flex; align-items: center; gap: 6px; flex: 1 1 320px; }
+.filter-raw input { flex: 1; }
+button.ghost { border-color: transparent; background: none; color: var(--fg-muted); display: inline-flex; align-items: center; gap: 4px; }
+button.ghost:hover:not(:disabled) { color: var(--fg); background: var(--sel); }
+button.ghost[aria-pressed='true'] { color: var(--fg); background: var(--sel); }
+.table-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-raised); }
+.table-footer .pending { color: var(--warn-fg); font-weight: 600; }
+.table-footer button { display: inline-flex; align-items: center; gap: 4px; }
+.grid .added [role='gridcell'] { background: var(--add-bg); }
+.grid .deleted [role='gridcell'] { background: var(--del-bg); }
+/* Panel-only sections (saved queries, history) are buttons in the activity bar. */
+.activity .activity-button { position: relative; display: grid; place-items: center; inline-size: 48px; block-size: 42px; padding: 0; border: none; border-radius: 0; background: none; color: var(--fg-muted); }
+.activity .activity-button:hover { color: var(--fg); }
+.activity .activity-button.on { color: var(--fg); }
+.activity .activity-button.on::before { content: ''; position: absolute; inset-inline-start: 0; inset-block: 6px; inline-size: 3px; background: var(--accent-fill); }
+.library-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.library-list li { display: flex; align-items: center; }
+.library-item { flex: 1; display: flex; flex-direction: column; align-items: flex-start; gap: 1px; min-inline-size: 0; padding: 4px 8px; border: none; border-radius: 0; background: none; text-align: start; }
+.library-item:hover { background: var(--sel); }
+.library-name { max-inline-size: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.library-sub { max-inline-size: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--fg-muted); }
+.small { font-size: 12px; }

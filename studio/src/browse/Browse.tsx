@@ -8,6 +8,8 @@ import type { Cell, Column } from '../api/types';
 import { pageQuery, readOnlyColumns, rereadFor, statementFor, type Change, type TableRef } from './edit';
 import type { ColumnInfo } from '../catalog/snapshot';
 import { ImportDialog } from './ImportDialog';
+import { FilterBar } from './FilterBar';
+import { ChevronRight, Plus, X } from '../icons';
 
 const PAGE = 100;
 
@@ -36,6 +38,8 @@ export function Browse({ db, table, cols, editable }: { db: string; table: strin
   const [conflicts, setConflicts] = useState<Conflict[]>([]);
   const [showImport, setShowImport] = useState(false);
   const [active, setActive] = useState(0);
+  const [filter, setFilter] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const apply = useCallback((r: { columns: Column[]; rows: Cell[][] }) => {
     setError(null);
@@ -49,19 +53,19 @@ export function Browse({ db, table, cols, editable }: { db: string; table: strin
   }, []);
   const load = useCallback(
     (after: Cell[] | null) =>
-      fetchRows(db, pageQuery({ db, table, keyNames }, after, PAGE + 1)).then(apply, (e: unknown) => setError(errorText(e))),
-    [db, table, keyNames, apply],
+      fetchRows(db, pageQuery({ db, table, keyNames }, after, PAGE + 1, filter)).then(apply, (e: unknown) => setError(errorText(e))),
+    [db, table, keyNames, apply, filter],
   );
   useEffect(() => {
     let live = true;
-    fetchRows(db, pageQuery({ db, table, keyNames }, null, PAGE + 1)).then(
+    fetchRows(db, pageQuery({ db, table, keyNames }, null, PAGE + 1, filter)).then(
       (r) => live && apply(r),
       (e: unknown) => live && setError(errorText(e)),
     );
     return () => {
       live = false;
     };
-  }, [db, table, keyNames, apply]);
+  }, [db, table, keyNames, apply, filter]);
 
   const ref: TableRef = useMemo(() => {
     const generated = new Set(cols.filter((c) => c.generated).map((c) => c.name));
@@ -118,72 +122,22 @@ export function Browse({ db, table, cols, editable }: { db: string; table: strin
   };
 
   const [pending, setPending] = useState<Change[] | null>(null);
+  let editedRows = 0;
+  for (const [r] of edits) if (!deleted.has(r)) editedRows++;
+  const pendingCount = editedRows + deleted.size + inserted.length;
 
   return (
     <div className="stack">
       {!keyNames.length && <p className="banner">{intl.formatMessage({ id: 'browse.noKey' })}</p>}
-      <div className="row">
-        <button
-          disabled={starts.length <= 1}
-          onClick={() => {
-            const s = starts.slice(0, -1);
-            setStarts(s);
-            void load(s[s.length - 1] ?? null);
+      {columns.length > 0 && (
+        <FilterBar
+          columns={columns.map((c) => c.name)}
+          onApply={(w) => {
+            setStarts([null]);
+            setFilter(w);
           }}
-        >
-          <FormattedMessage id="browse.prev" />
-        </button>
-        <button
-          disabled={!hasMore || !keyNames.length}
-          onClick={() => {
-            const last = rows[rows.length - 1];
-            if (!last) return;
-            const after = ref.key.map((i) => last[i] ?? null);
-            setStarts([...starts, after]);
-            void load(after);
-          }}
-        >
-          <FormattedMessage id="browse.next" />
-        </button>
-        <span className="muted">
-          {intl.formatMessage({ id: 'results.rows' }, { count: rows.length })} · page {starts.length}
-        </span>
-        <span style={{ flex: 1 }} />
-        {canEdit && (
-          <>
-            <button onClick={() => setInserted([...inserted, columns.map(() => null)])}>
-              <FormattedMessage id="browse.addRow" />
-            </button>
-            <button
-              onClick={() => {
-                if (active < rows.length) setDeleted(new Set(deleted).add(active));
-                else setInserted(inserted.filter((_, i) => i !== active - rows.length));
-              }}
-            >
-              <FormattedMessage id="browse.deleteRow" />
-            </button>
-            <button
-              className="primary"
-              disabled={!edits.size && !deleted.size && !inserted.length}
-              onClick={() => {
-                const list = changes();
-                setPending(list);
-                setPreview(list.map((c) => statementFor(ref, c)));
-              }}
-            >
-              <FormattedMessage id="browse.save" />
-            </button>
-            <button onClick={() => void load(starts[starts.length - 1] ?? null)}>
-              <FormattedMessage id="browse.discard" />
-            </button>
-          </>
-        )}
-        {editable && (
-          <button onClick={() => setShowImport(true)}>
-            <FormattedMessage id="browse.import" />
-          </button>
-        )}
-      </div>
+        />
+      )}
       {error && (
         <p className="error" role="alert">
           {error}
@@ -251,8 +205,8 @@ export function Browse({ db, table, cols, editable }: { db: string; table: strin
         cell={cell}
         height={480}
         editable={canEdit ? (r, c) => !ref.readOnly.has(c) && !deleted.has(r) : undefined}
-        edited={(r, c) => r >= rows.length || (edits.get(r)?.has(c) ?? false)}
-        rowClass={(r) => (deleted.has(r) ? 'deleted' : '')}
+        edited={(r, c) => r < rows.length && (edits.get(r)?.has(c) ?? false)}
+        rowClass={(r) => (deleted.has(r) ? 'deleted' : r >= rows.length ? 'added' : '')}
         onEdit={(r, c, v) => {
           setActive(r);
           if (r >= rows.length) {
@@ -268,7 +222,97 @@ export function Browse({ db, table, cols, editable }: { db: string; table: strin
           }
         }}
       />
-      {deleted.size > 0 && <p className="muted">{deleted.size} row(s) marked for deletion.</p>}
+      <div className="table-footer" role="group" aria-label="Rows">
+        {canEdit && (
+          <>
+            <span className={pendingCount ? 'pending' : 'muted'} data-testid="pending-count">
+              {intl.formatMessage({ id: 'browse.pending' }, { count: pendingCount })}
+            </span>
+            <button
+              className="primary"
+              disabled={!pendingCount}
+              data-testid="browse-apply"
+              onClick={() => {
+                const list = changes();
+                setPending(list);
+                setPreview(list.map((c) => statementFor(ref, c)));
+              }}
+            >
+              <FormattedMessage id="browse.save" />
+            </button>
+            <button disabled={!pendingCount} onClick={() => void load(starts[starts.length - 1] ?? null)}>
+              <FormattedMessage id="browse.discard" />
+            </button>
+            <button
+              className="ghost"
+              disabled={!pendingCount}
+              onClick={() => {
+                const text = `${changes()
+                  .map((c) => statementFor(ref, c))
+                  .join(';\n')};\n`;
+                void navigator.clipboard?.writeText(text).then(() => {
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 1500);
+                });
+              }}
+            >
+              {intl.formatMessage({ id: copied ? 'browse.copied' : 'browse.copySql' })}
+            </button>
+          </>
+        )}
+        <span className="grow" />
+        <span className="muted">
+          {intl.formatMessage({ id: 'results.rows' }, { count: rows.length })} · page {starts.length}
+        </span>
+        <button
+          className="icon-button"
+          disabled={starts.length <= 1}
+          aria-label={intl.formatMessage({ id: 'browse.prev' })}
+          title={intl.formatMessage({ id: 'browse.prev' })}
+          onClick={() => {
+            const s = starts.slice(0, -1);
+            setStarts(s);
+            void load(s[s.length - 1] ?? null);
+          }}
+        >
+          <ChevronRight size={16} style={{ transform: 'scaleX(-1)' }} />
+        </button>
+        <button
+          className="icon-button"
+          disabled={!hasMore || !keyNames.length}
+          aria-label={intl.formatMessage({ id: 'browse.next' })}
+          title={intl.formatMessage({ id: 'browse.next' })}
+          onClick={() => {
+            const last = rows[rows.length - 1];
+            if (!last) return;
+            const after = ref.key.map((i) => last[i] ?? null);
+            setStarts([...starts, after]);
+            void load(after);
+          }}
+        >
+          <ChevronRight size={16} />
+        </button>
+        {canEdit && (
+          <>
+            <button onClick={() => setInserted([...inserted, columns.map(() => null)])}>
+              <Plus size={14} /> <FormattedMessage id="browse.addRow" />
+            </button>
+            <button
+              onClick={() => {
+                if (active < rows.length) setDeleted(new Set(deleted).add(active));
+                else setInserted(inserted.filter((_, i) => i !== active - rows.length));
+              }}
+            >
+              <X size={14} /> <FormattedMessage id="browse.deleteRow" />
+            </button>
+          </>
+        )}
+        {editable && (
+          <button onClick={() => setShowImport(true)}>
+            <FormattedMessage id="browse.import" />
+          </button>
+        )}
+      </div>
       {showImport && me && (
         <ImportDialog
           db={db}

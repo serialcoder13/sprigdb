@@ -52,6 +52,8 @@ def!(SESSION_MAX_HOURS: u64 = "studio.session_max_hours", 12, Scopes::TREE, Hard
     "Longest session");
 def!(PERSIST_DRAFTS: bool = "studio.persist_drafts", true, Scopes::TREE, HardBounds::NONE,
     "Keep drafts in the browser until logout");
+def!(HISTORY_MAX: u64 = "studio.history_max", 500, Scopes::TREE, HardBounds::range(0, 10_000),
+    "Query runs kept per user in the tenant's catalog (Studio and sprig); 0 stops recording");
 def!(MAX_RESULT_ROWS: u64 = "studio.max_result_rows", 10_000, Scopes::DATA, HardBounds::range(1, 10_000_000),
     "Rows held per result");
 def!(MAX_RESULT_MB: u64 = "studio.max_result_mb", 64, Scopes::PROCESS, HardBounds::range(1, 4096),
@@ -246,6 +248,7 @@ impl StudioConfig {
                 "session_idle_minutes": l.n(&SESSION_IDLE_MINUTES),
                 "session_max_hours": l.n(&SESSION_MAX_HOURS),
                 "persist_drafts": l.b(&PERSIST_DRAFTS),
+                "history_max": l.n(&HISTORY_MAX),
                 "max_result_rows": l.n(&MAX_RESULT_ROWS),
                 "max_result_mb": l.n(&MAX_RESULT_MB),
                 "statement_timeout_ms": l.n(&STATEMENT_TIMEOUT_MS),

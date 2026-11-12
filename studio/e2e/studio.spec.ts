@@ -5,7 +5,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { readFileSync } from 'node:fs';
-import { apiToken, DB, PASSWORD, SHOTS, signIn, sql, typeSql } from './fixtures';
+import { apiToken, DB, PASSWORD, SHOTS, signIn, sql, typeSql, openPage } from './fixtures';
 
 const T = 'acme';
 
@@ -74,7 +74,7 @@ test.describe.serial('Studio R0', () => {
 
   test('SQL editor: run, confirm DDL, cap, cancel', async ({ page }) => {
     await signIn(page);
-    await page.getByRole('link', { name: 'Query' }).click();
+    await openPage(page, 'Query');
     await page.getByTestId('db-select').selectOption(DB);
     await typeSql(page, 'SELECT id, status FROM orders ORDER BY id');
     await page.getByRole('button', { name: 'Run', exact: true }).click();
@@ -109,9 +109,51 @@ test.describe.serial('Studio R0', () => {
     await expect(page.getByTestId('query-error')).toContainText('trace');
   });
 
+  test('saved queries and history (decision R4)', async ({ page, request, browser }) => {
+    await signIn(page);
+    await openPage(page, 'Query');
+    await page.getByTestId('db-select').selectOption(DB);
+    await typeSql(page, 'SELECT id FROM orders WHERE id = 3');
+    await page.getByRole('button', { name: 'Run', exact: true }).click();
+    await expect(page.getByTestId('result-0')).toContainText('1 row');
+    // History lists the run.
+    await page.getByRole('button', { name: 'History', exact: true }).click();
+    await expect(page.getByTestId('history-list')).toContainText('SELECT id FROM orders WHERE id = 3');
+    // Save it under a name; the saved panel lists it, and it opens in a new tab.
+    await page.getByTestId('save-query').click();
+    await page.getByTestId('save-name').fill('order three');
+    await page.getByTestId('save-name').press('Enter');
+    await page.getByRole('button', { name: 'Saved queries', exact: true }).click();
+    await expect(page.getByTestId('saved-list')).toContainText('order three');
+    await page.getByTestId('saved-list').getByRole('button', { name: /^order three/ }).click();
+    await expect(page.getByRole('tab', { name: /order three/ }).first()).toBeVisible();
+    // Both live in the tenant's catalog (shared with sprig), not this browser:
+    // the API returns them, and a fresh browser shows them.
+    const auth = { authorization: `Bearer ${token}` };
+    await expect
+      .poll(async () => {
+        const lib = (await (await request.get('/v1/library?history=50', { headers: auth })).json()) as {
+          saved: { name: string; database: string | null }[];
+          history: { text: string; client: string }[];
+        };
+        return [
+          lib.saved.some((q) => q.name === 'order three' && q.database === DB),
+          lib.history.some((h) => h.text === 'SELECT id FROM orders WHERE id = 3' && h.client === 'studio'),
+        ];
+      })
+      .toEqual([true, true]);
+    const other = await browser.newContext();
+    const p2 = await other.newPage();
+    await signIn(p2);
+    await p2.getByRole('button', { name: 'Saved queries', exact: true }).click();
+    await expect(p2.getByTestId('saved-list')).toContainText('order three');
+    await expect(p2.getByTestId('library-where')).toHaveCount(0);
+    await other.close();
+  });
+
   test('export streams every row as a download', async ({ page }) => {
     await signIn(page);
-    await page.getByRole('link', { name: 'Query' }).click();
+    await openPage(page, 'Query');
     await page.getByTestId('db-select').selectOption(DB);
     await typeSql(page, 'SELECT id, status, note FROM orders WHERE id < 90 ORDER BY id');
     await page.getByRole('button', { name: 'Run', exact: true }).click();
@@ -136,7 +178,8 @@ test.describe.serial('Studio R0', () => {
     await page.keyboard.press('Enter');
     // Bob saves status = 'paid' meanwhile.
     await sql(request, token, DB, "UPDATE orders SET status = 'paid' WHERE id = 17");
-    await page.getByRole('button', { name: 'Save changes' }).click();
+    await expect(page.getByTestId('pending-count')).toHaveText('1 change pending');
+    await page.getByTestId('browse-apply').click();
     await expect(page.getByTestId('edit-preview')).toContainText("`status` <=> 'open'");
     await shot(page, 'browse-preview');
     await page.getByRole('button', { name: 'Run them' }).click();
@@ -146,6 +189,19 @@ test.describe.serial('Studio R0', () => {
     await page.getByRole('button', { name: 'Keep mine (save against current)' }).click();
     await page.getByRole('button', { name: 'Run them' }).click();
     await expect(grid).toContainText('100.00');
+    // The filter bar (decision R2): a condition, then a raw WHERE clause.
+    await page.getByLabel('Column', { exact: true }).selectOption('status');
+    await page.getByLabel('Value', { exact: true }).fill('paid');
+    await page.getByTestId('filter-apply').click();
+    await expect(grid).toContainText('100.00');
+    await expect(grid).not.toContainText('open');
+    await page.getByRole('button', { name: '</> WHERE' }).click();
+    await page.getByTestId('filter-where').fill('id = 17');
+    await page.getByTestId('filter-apply').click();
+    await expect(grid).toContainText('100.00');
+    await expect(grid).not.toContainText('5.25');
+    await page.getByRole('button', { name: 'Clear', exact: true }).click();
+    await expect(grid).toContainText('open');
     // Hostile values render as text and run nothing.
     await expect(grid).toContainText('<img src=x onerror=');
     // The tree is open on the current database.
@@ -155,7 +211,7 @@ test.describe.serial('Studio R0', () => {
 
   test('settings at tenant and database scope', async ({ page }) => {
     await signIn(page);
-    await page.getByRole('link', { name: 'Settings' }).click();
+    await openPage(page, 'Settings');
     await expect(page.getByTestId('settings-table')).toContainText('studio.max_result_rows');
     await axe(page, 'settings');
     await shot(page, 'settings');
@@ -174,7 +230,7 @@ test.describe.serial('Studio R0', () => {
 
   test('automatic indexing view', async ({ page }) => {
     await signIn(page);
-    await page.getByRole('link', { name: 'Automatic indexing' }).click();
+    await openPage(page, 'Automatic indexing');
     await expect(page.getByRole('heading', { name: 'Automatic indexing' })).toBeVisible();
     // Several sprig_auto_ indexes once the e2e setup raised recommendations.
     await expect(page.getByText(/None\.|sprig_auto_|controller/).first()).toBeVisible({ timeout: 20_000 });
@@ -218,7 +274,7 @@ test.describe.serial('Studio R0', () => {
 
   test('users and API keys', async ({ page }) => {
     await signIn(page);
-    await page.getByRole('link', { name: 'Users and access' }).click();
+    await openPage(page, 'Users and access');
     await expect(page.getByTestId('users-table')).toContainText('app');
     await axe(page, 'access-users');
     await shot(page, 'access-users');

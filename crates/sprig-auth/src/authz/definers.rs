@@ -138,20 +138,41 @@ pub fn wanted(
 /// A backend error.
 pub async fn foreign(conn: &mut Conn, tenant: TenantId) -> Result<Vec<StoredObject>> {
     let like = format!("t{tenant}\\_d%");
-    let rows: Vec<(String, String, String, String)> = conn
+    // Routines and events come from mysql.proc and mysql.event. Triggers
+    // and views are read one schema at a time: a LIKE on their schema
+    // reads every table of every tenant on the server (R9, r9scale;
+    // `sprig_catalog::infoschema`).
+    let mut rows: Vec<(String, String, String, String)> = conn
         .exec(
             "SELECT ROUTINE_TYPE, ROUTINE_SCHEMA, ROUTINE_NAME, DEFINER \
                FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA LIKE ? \
-             UNION ALL SELECT 'TRIGGER', TRIGGER_SCHEMA, TRIGGER_NAME, DEFINER \
-               FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA LIKE ? \
              UNION ALL SELECT 'EVENT', EVENT_SCHEMA, EVENT_NAME, DEFINER \
-               FROM information_schema.EVENTS WHERE EVENT_SCHEMA LIKE ? \
-             UNION ALL SELECT 'VIEW', TABLE_SCHEMA, TABLE_NAME, DEFINER \
-               FROM information_schema.VIEWS WHERE TABLE_SCHEMA LIKE ?",
-            (&like, &like, &like, &like),
+               FROM information_schema.EVENTS WHERE EVENT_SCHEMA LIKE ?",
+            (&like, &like),
         )
         .await
         .map_err(crate::store::map_err)?;
+    let schemas = sprig_catalog::infoschema::schemas_like(conn, &like).await?;
+    rows.extend(
+        sprig_catalog::infoschema::read_per_schema::<(String, String, String, String)>(
+            conn,
+            "SELECT 'TRIGGER', TRIGGER_SCHEMA, TRIGGER_NAME, DEFINER FROM information_schema.TRIGGERS",
+            "EVENT_OBJECT_SCHEMA",
+            &schemas,
+            "",
+        )
+        .await?,
+    );
+    rows.extend(
+        sprig_catalog::infoschema::read_per_schema::<(String, String, String, String)>(
+            conn,
+            "SELECT 'VIEW', TABLE_SCHEMA, TABLE_NAME, DEFINER FROM information_schema.VIEWS",
+            "TABLE_SCHEMA",
+            &schemas,
+            "",
+        )
+        .await?,
+    );
     let mut out: Vec<StoredObject> = rows
         .into_iter()
         .filter(|(_, _, _, d)| !is_tenant_account(tenant, d))

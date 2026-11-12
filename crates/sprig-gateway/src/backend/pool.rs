@@ -516,6 +516,14 @@ impl BackendPools {
         self.retire_where(|a| a == account);
     }
 
+    /// When `account`'s connections were last retired (its grants
+    /// changed), if ever: a session pinned to a connection opened earlier
+    /// sends `USE` again (bugfix-64).
+    #[must_use]
+    pub fn retired_at(&self, account: &str) -> Option<Instant> {
+        self.shared.lock().retired.get(account).copied()
+    }
+
     /// [`Self::retire_account`] for every account `which` names, and
     /// the pools of those accounts forgotten once nothing is leased from
     /// them: a deleted tenant's accounts (decision bugfix-29), whose idle

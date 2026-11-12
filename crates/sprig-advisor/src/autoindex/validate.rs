@@ -32,6 +32,7 @@
 pub mod canary;
 pub mod galera;
 pub(crate) mod node;
+pub mod orphans;
 pub mod replica;
 
 use std::collections::BTreeMap;

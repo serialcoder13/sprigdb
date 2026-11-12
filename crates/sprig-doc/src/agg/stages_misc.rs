@@ -339,6 +339,7 @@ impl GraphSpec {
             bytes: 0,
             depth: 0,
             limit: GRAPH_MAX.load(std::sync::atomic::Ordering::Relaxed),
+            spilled: None,
         })
     }
 
@@ -374,6 +375,18 @@ pub struct GraphSearch<'a> {
     bytes: usize,
     depth: i64,
     limit: usize,
+    /// Past the limit, with `allowDiskUse` (M7, decision S88): the
+    /// matches so far and later ones, on disk until `finish`.
+    spilled: Option<Spilled>,
+}
+
+/// A search's matches on disk.
+struct Spilled(crate::spill::SpillWriter);
+
+impl std::fmt::Debug for Spilled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Spilled")
+    }
 }
 
 impl GraphSearch<'_> {
@@ -418,20 +431,31 @@ impl GraphSearch<'_> {
                 crate::update::set_path(&mut f, df, Bson::Int64(self.depth))?;
             }
             self.bytes += bson::to_vec(&f).map_or(0, |b| b.len());
+            if let Some(w) = self.spilled.as_mut() {
+                w.0.push(&f)?;
+                continue;
+            }
             if self.bytes > self.limit {
-                // One search's matches can't spill: 146 with `allowDiskUse`,
-                // 292 without (decision S77).
-                return Err(MongoError::new(
-                    if crate::spill::allowed() {
-                        code::EXCEEDED_MEMORY_LIMIT
-                    } else {
-                        code::QUERY_EXCEEDED_MEMORY_LIMIT
-                    },
-                    format!(
-                        "$graphLookup reached maximum memory consumption: {} bytes (doc.graph_lookup_max_bytes)",
-                        self.limit
-                    ),
-                ));
+                // M7 (S88): with `allowDiskUse` the search's matches go to
+                // disk and the search goes on; 292 without (S77).
+                if !crate::spill::allowed() {
+                    return Err(MongoError::new(
+                        code::QUERY_EXCEEDED_MEMORY_LIMIT,
+                        format!(
+                            "$graphLookup reached maximum memory consumption: {} bytes (doc.graph_lookup_max_bytes)",
+                            self.limit
+                        ),
+                    ));
+                }
+                let mut w = crate::spill::SpillWriter::create()?;
+                for x in self.found.drain(..) {
+                    if let Bson::Document(x) = x {
+                        w.push(&x)?;
+                    }
+                }
+                w.push(&f)?;
+                self.spilled = Some(Spilled(w));
+                continue;
             }
             self.found.push(Bson::Document(f));
         }
@@ -446,7 +470,28 @@ impl GraphSearch<'_> {
     /// 28 for an `as` path through a non-object.
     pub fn finish(self) -> Result<Document, MongoError> {
         let mut out = self.doc;
-        crate::update::set_path(&mut out, &self.spec.as_field, Bson::Array(self.found))?;
+        let found = match self.spilled {
+            None => self.found,
+            // The matches come back from disk; the output document must
+            // still fit BSON's 16 MiB.
+            Some(w) => {
+                if self.bytes > 16 * 1024 * 1024 {
+                    return Err(MongoError::new(
+                        code::BSON_OBJECT_TOO_LARGE,
+                        format!(
+                            "$graphLookup's result of {} bytes is larger than the 16 MiB a document may hold",
+                            self.bytes
+                        ),
+                    ));
+                }
+                let f = w.0.finish()?;
+                crate::spill::record_file(&f);
+                f.reader()?
+                    .map(|d| d.map(Bson::Document))
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+        };
+        crate::update::set_path(&mut out, &self.spec.as_field, Bson::Array(found))?;
         Ok(out)
     }
 }

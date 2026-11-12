@@ -1,4 +1,4 @@
- 1 sql shop │ Dashboard │ Admin │ Inbox
+ ❯ 1 sql shop │ ◔ Dashboard │ ◈ Admin │ ⚑ Inbox
 ┌ Views ─────────┐┌ sessions · not polled yet · r refresh ─────────────────────────────────────────┐
 │1 sessions      ││Id User       db   Command Time Info                                            │
 │2 fingerprints  ││41 acme.alice shop Query   3    SELECT SLEEP(30)                                │

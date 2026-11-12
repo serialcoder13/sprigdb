@@ -129,6 +129,47 @@ async fn default_schemas(
     Ok(out)
 }
 
+/// An upper bound of the bytes [`assemble`] counts for the first split
+/// (its tables' `size_bytes` summed): every base table of the
+/// default-group schemas, and 0 without reading `information_schema` when
+/// the catalog has no active table. The sharding loop asks this first
+/// and assembles the whole input (columns, keys, statistics, stored
+/// code) only when the bound passes the split size, so an idle tenant
+/// costs a catalog read a pass instead of a dozen `information_schema`
+/// queries (R9, r9scale).
+///
+/// # Errors
+/// MariaDB's.
+pub async fn first_split_bound(c: &mut Conn, tenant: TenantId) -> Result<f64> {
+    let catalog = SchemaName::catalog(tenant).to_string();
+    let tables: Option<u64> = c
+        .query_first(format!(
+            "SELECT COUNT(*) FROM `{catalog}`.objects \
+             WHERE namespace = 'relation' AND kind = 'table' AND state = 'active'"
+        ))
+        .await
+        .map_err(|e| db_err("objects", &e))?;
+    if tables.unwrap_or(0) == 0 {
+        return Ok(0.0);
+    }
+    let schemas: Vec<String> = default_schemas(c, tenant, &catalog)
+        .await?
+        .into_iter()
+        .map(|(_, s)| s)
+        .collect();
+    let sizes: Vec<u64> = sprig_catalog::infoschema::read_per_schema(
+        c,
+        "SELECT CAST(COALESCE(SUM(DATA_LENGTH + INDEX_LENGTH), 0) AS UNSIGNED) \
+         FROM information_schema.TABLES",
+        "TABLE_SCHEMA",
+        &schemas,
+        " AND TABLE_TYPE = 'BASE TABLE'",
+    )
+    .await?;
+    #[allow(clippy::cast_precision_loss)]
+    Ok(sizes.iter().sum::<u64>() as f64)
+}
+
 /// Reads the tables of the default-group schemas and their keys.
 ///
 /// # Errors

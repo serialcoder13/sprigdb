@@ -12,6 +12,7 @@
 
 pub mod fence;
 pub mod rebuild;
+pub mod relay;
 
 use std::sync::Arc;
 use std::time::Duration;

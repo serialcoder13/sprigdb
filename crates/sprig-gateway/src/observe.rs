@@ -151,6 +151,7 @@ impl Executor for Observed {
             inner: self.inner.open(login),
             tenant: login.principal.tenant.map(|t| t.0),
             sli: Sli::default(),
+            internal: false,
         })
     }
 }
@@ -159,6 +160,18 @@ struct ObservedSession {
     inner: Box<dyn SessionExec>,
     tenant: Option<u64>,
     sli: Sli,
+    /// The session runs a protocol engine's own statements
+    /// ([`SessionExec::set_internal`]).
+    internal: bool,
+}
+
+/// Whether the innermost entered span is a traced request already (a
+/// MongoDB command's `gateway.request`, perf1 S142): an engine's
+/// statements inside it record no root span of their own.
+fn in_traced_request() -> bool {
+    tracing::Span::current()
+        .metadata()
+        .is_some_and(|m| m.target() == TARGET)
 }
 
 /// A session's SLI metric handles, registered on first use (R5 round 8:
@@ -234,39 +247,48 @@ impl SessionExec for ObservedSession {
             return self.inner.execute(cx, req, out).await;
         }
         let protocol = cx.session.protocol.as_str();
-        let span = tracing::info_span!(
-            target: TARGET,
-            "gateway.request",
-            protocol,
-            request = req.name(),
-            tenant = self.tenant,
-            gateway_session = cx.session.id.0,
-            traceparent = traceparent(&req),
-            result = tracing::field::Empty,
-            error = tracing::field::Empty,
-        );
+        // One span per request (S142): an engine statement inside a
+        // traced command (MongoDB's) is part of that command's span.
+        let span = if self.internal && in_traced_request() {
+            None
+        } else {
+            Some(tracing::info_span!(
+                target: TARGET,
+                "gateway.request",
+                protocol,
+                request = req.name(),
+                tenant = self.tenant,
+                gateway_session = cx.session.id.0,
+                traceparent = traceparent(&req),
+                result = tracing::field::Empty,
+                error = tracing::field::Empty,
+            ))
+        };
         let waited = Arc::new(AtomicU64::new(0));
         let started = Instant::now();
         let mut sink = Watch {
             inner: out,
             result: None,
         };
-        let r = BACKEND_NANOS
-            .scope(
-                Arc::clone(&waited),
-                self.inner
-                    .execute(cx, req, &mut sink)
-                    .instrument(span.clone()),
-            )
-            .await;
+        let run = self.inner.execute(cx, req, &mut sink);
+        let r = match &span {
+            Some(sp) => {
+                BACKEND_NANOS
+                    .scope(Arc::clone(&waited), run.instrument(sp.clone()))
+                    .await
+            }
+            None => BACKEND_NANOS.scope(Arc::clone(&waited), run).await,
+        };
         let total = started.elapsed();
         let result = match &r {
             Ok(_) => sink.result.unwrap_or("ok"),
             Err(e) => classify(e),
         };
-        span.record("result", result);
-        if result != "ok" {
-            span.record("error", true);
+        if let Some(span) = &span {
+            span.record("result", result);
+            if result != "ok" {
+                span.record("error", true);
+            }
         }
         let backend = Duration::from_nanos(waited.load(Ordering::Relaxed));
         let busy = self
@@ -312,6 +334,7 @@ impl SessionExec for ObservedSession {
     }
 
     fn set_internal(&mut self, on: bool) {
+        self.internal = on;
         self.inner.set_internal(on);
     }
 

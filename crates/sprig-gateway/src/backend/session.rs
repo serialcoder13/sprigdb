@@ -196,8 +196,9 @@ struct Current {
     /// ([`BackendSession::explicit_ids_next_statement`]).
     explicit_ids: bool,
     /// The statement's `backend.query` trace span (chapter 47): open from
-    /// `run` until `finish` drops the statement.
-    span: Option<tracing::Span>,
+    /// `run` until `finish` drops the statement. A light child of the
+    /// request's span (S142), not a `tracing` span.
+    span: Option<sprig_common::telemetry::trace::ChildSpan>,
 }
 
 impl Current {
@@ -288,9 +289,15 @@ pub struct BackendSession {
     /// generated (chapter 19's ID blocks): its OK packet's insert id is
     /// an explicit value, not the connection's `LAST_INSERT_ID()`.
     explicit_ids_next: bool,
+    /// The running statement's `backend.query` trace context, for the
+    /// propagated `traceparent` (S142).
+    trace_ctx: Option<sprig_common::telemetry::trace::TraceContext>,
     /// Sprig 2PC (R3): a held branch's record of its writes
     /// (`sprig_txn::BranchConn::start_redo`, in `backend::txn`).
     pub(super) redo: Option<super::txn::Recording>,
+    /// The held connection (thread id) and when its database-level
+    /// grants were last refreshed with a `USE` (bugfix-64).
+    grants_seen: Option<(u64, std::time::Instant)>,
 }
 
 impl std::fmt::Debug for BackendSession {
@@ -398,6 +405,7 @@ impl BackendSession {
             opts,
             pins,
             held: None,
+            grants_seen: None,
             causal: GtidSet::new(),
             captured: Captured::default(),
             pending_capture: Vec::new(),
@@ -406,6 +414,7 @@ impl BackendSession {
             deferred: None,
             probe_next: false,
             explicit_ids_next: false,
+            trace_ctx: None,
             redo: None,
         }
     }
@@ -1144,6 +1153,37 @@ impl BackendSession {
             .is_some_and(|v| !v.parse::<u32>().is_ok_and(|n| n == 0))
     }
 
+    /// bugfix-64 (RLS round 6, item 6): MariaDB keeps a connection's
+    /// database-level privileges from its last `USE` (or its login). Pooled
+    /// connections of an account whose grants changed are retired, but a
+    /// pinned session keeps its connection, and after
+    /// `rls.backend_enforcement` moved from `views` to `triggers` its reads
+    /// failed with 1142 until it reconnected. So a held connection opened
+    /// (or refreshed) before the account's last retirement sends `USE` of
+    /// the session's database again before its next statement.
+    fn refresh_grants(&mut self, lease: &mut BackendLease) {
+        let Some(at) = self.backends.pools.retired_at(&lease.key().account) else {
+            return;
+        };
+        let conn = lease.conn();
+        let since = match self.grants_seen {
+            Some((id, t)) if id == conn.thread_id => t.max(conn.created_at),
+            _ => conn.created_at,
+        };
+        if at <= since {
+            return;
+        }
+        self.grants_seen = Some((conn.thread_id, std::time::Instant::now()));
+        if self.vars.schema.is_some() {
+            // The state sync then sends `USE` (state::sync_prefix).
+            conn.applied.schema = None;
+            tracing::debug!(
+                thread = conn.thread_id,
+                "account's grants changed: USE again on the pinned connection"
+            );
+        }
+    }
+
     fn count_pin(&self, r: PinReason) {
         metrics::counter!("sprig_backend_pins_total", "cluster" => self.target.cluster.to_string(), "reason" => r.as_str())
             .increment(1);
@@ -1306,8 +1346,7 @@ impl BackendSession {
                 },
             )
             .await;
-        metrics::histogram!("sprig_backend_pool_wait_seconds", "cluster" => view.id.to_string())
-            .record(started.elapsed().as_secs_f64());
+        stmt_metrics::pool_wait(&view.id).record(started.elapsed().as_secs_f64());
         r
     }
 
@@ -1361,11 +1400,10 @@ impl BackendSession {
                         .read_spread
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 );
-                metrics::counter!(
-                    "sprig_backend_reads_total",
-                    "cluster" => view.id.to_string(),
-                    "target" => choice.as_str(),
-                    "causal" => if target.is_empty() { "no" } else { "yes" }
+                stmt_metrics::read(
+                    &view.id,
+                    choice.as_str(),
+                    if target.is_empty() { "no" } else { "yes" },
                 )
                 .increment(1);
                 match choice {
@@ -1447,25 +1485,27 @@ impl BackendSession {
     /// [`run_statement`](Self::run_statement) inside a `backend.query`
     /// span (chapter 47), adding its time to the request's backend time.
     async fn run(&mut self, info: &StmtInfo, req: Req<'_>) -> Result<()> {
-        use tracing::Instrument as _;
-        let span = tracing::info_span!(
-            target: sprig_common::telemetry::trace::TARGET,
-            "backend.query",
-            cluster = %self.target.cluster,
-            node = tracing::field::Empty,
-            route = tracing::field::Empty,
-            error = tracing::field::Empty,
-        );
-        let started = Instant::now();
-        let r = self.run_statement(info, req).instrument(span.clone()).await;
-        crate::observe::backend_time(started.elapsed());
-        if r.is_err() {
-            span.record("error", true);
+        use sprig_common::telemetry::trace::ChildSpan;
+        // One `tracing` span per request (the caller's `gateway.request`);
+        // this step is a light child of it (perf1, S142).
+        let mut span = ChildSpan::start("backend.query");
+        if let Some(sp) = span.as_mut() {
+            sp.record("cluster", &self.target.cluster);
         }
-        if let Some(c) = self.cur.as_mut() {
-            span.record("node", tracing::field::display(c.lease.key().node_key()));
-            span.record("route", tracing::field::debug(c.route));
-            c.span = Some(span);
+        self.trace_ctx = span.as_ref().map(ChildSpan::context);
+        let started = Instant::now();
+        let r = self.run_statement(info, req).await;
+        self.trace_ctx = None;
+        crate::observe::backend_time(started.elapsed());
+        if let Some(mut sp) = span {
+            if r.is_err() {
+                sp.set_error();
+            }
+            if let Some(c) = self.cur.as_mut() {
+                sp.record("node", c.lease.key().node_key());
+                sp.record("route", format_args!("{:?}", c.route));
+                c.span = Some(sp);
+            }
         }
         r
     }
@@ -1522,6 +1562,9 @@ impl BackendSession {
                         .await?
                 }
             };
+            if route == RouteKind::Pinned {
+                self.refresh_grants(&mut lease);
+            }
             let node_key = lease.key().node_key();
             self.inflight = Some((node_key.clone(), lease.conn_ref().thread_id));
             let conn = lease.conn();
@@ -1575,8 +1618,7 @@ impl BackendSession {
                 (false, true) => "prefix",
                 (false, false) => "round_trip",
             };
-            metrics::counter!("sprig_backend_state_syncs_total", "cluster" => cluster.to_string(), "kind" => kind)
-                .increment(1);
+            stmt_metrics::state_sync(&cluster, kind).increment(1);
 
             // Sync (and wait), then send.
             let wait_started = Instant::now();
@@ -1604,7 +1646,9 @@ impl BackendSession {
                     // Sampled statements carry their trace context to
                     // MariaDB (chapter 47, "Propagation"), after
                     // fingerprinting.
-                    if let Some(tc) = sprig_common::telemetry::trace::current()
+                    if let Some(tc) = self
+                        .trace_ctx
+                        .or_else(sprig_common::telemetry::trace::current)
                         && tc.sampled
                     {
                         all.extend_from_slice(b"/* traceparent='");
@@ -2065,6 +2109,87 @@ async fn consume_statement(
                 ));
             }
         }
+    }
+}
+
+/// The metric handles every statement updates (`sprig_backend_reads_total`,
+/// `sprig_backend_state_syncs_total`, `sprig_backend_pool_wait_seconds`),
+/// kept per runtime thread and cluster (perf1, S144): registering them with
+/// their labels on every statement cost three label strings and three
+/// lookups in the shared registry per point read. Same series, same values.
+mod stmt_metrics {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    use metrics::{Counter, Histogram};
+    use sprig_common::ids::ClusterId;
+
+    /// Clusters whose handles a thread keeps; past this many, each call
+    /// registers as the macros do.
+    const MAX_CLUSTERS: usize = 256;
+
+    struct Handles {
+        reads: Vec<(&'static str, &'static str, Counter)>,
+        syncs: Vec<(&'static str, Counter)>,
+        pool_wait: Option<Histogram>,
+    }
+
+    thread_local! {
+        static HANDLES: RefCell<HashMap<String, Handles>> = RefCell::new(HashMap::new());
+    }
+
+    fn with<R>(cluster: &ClusterId, f: impl FnOnce(&mut Handles) -> R) -> R {
+        HANDLES.with(|h| {
+            let mut h = h.borrow_mut();
+            if let Some(x) = h.get_mut(cluster.as_str()) {
+                return f(x);
+            }
+            let mut fresh = Handles {
+                reads: Vec::new(),
+                syncs: Vec::new(),
+                pool_wait: None,
+            };
+            if h.len() >= MAX_CLUSTERS {
+                return f(&mut fresh);
+            }
+            f(h.entry(cluster.as_str().to_owned()).or_insert(fresh))
+        })
+    }
+
+    pub(super) fn read(cluster: &ClusterId, target: &'static str, causal: &'static str) -> Counter {
+        with(cluster, |h| {
+            if let Some((_, _, c)) = h
+                .reads
+                .iter()
+                .find(|(t, k, _)| *t == target && *k == causal)
+            {
+                return c.clone();
+            }
+            let c = metrics::counter!("sprig_backend_reads_total", "cluster" => cluster.to_string(), "target" => target, "causal" => causal);
+            h.reads.push((target, causal, c.clone()));
+            c
+        })
+    }
+
+    pub(super) fn state_sync(cluster: &ClusterId, kind: &'static str) -> Counter {
+        with(cluster, |h| {
+            if let Some((_, c)) = h.syncs.iter().find(|(k, _)| *k == kind) {
+                return c.clone();
+            }
+            let c = metrics::counter!("sprig_backend_state_syncs_total", "cluster" => cluster.to_string(), "kind" => kind);
+            h.syncs.push((kind, c.clone()));
+            c
+        })
+    }
+
+    pub(super) fn pool_wait(cluster: &ClusterId) -> Histogram {
+        with(cluster, |h| {
+            h.pool_wait
+                .get_or_insert_with(|| {
+                    metrics::histogram!("sprig_backend_pool_wait_seconds", "cluster" => cluster.to_string())
+                })
+                .clone()
+        })
     }
 }
 

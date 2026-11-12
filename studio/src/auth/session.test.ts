@@ -14,6 +14,7 @@ const me: WhoAmI = {
     session_idle_minutes: 30,
     session_max_hours: 12,
     persist_drafts: false,
+    history_max: 500,
     max_result_rows: 10,
     max_result_mb: 1,
     statement_timeout_ms: 1000,

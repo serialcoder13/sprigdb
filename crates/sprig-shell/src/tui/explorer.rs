@@ -3,7 +3,8 @@
 //! `Catalog.Snapshot`, `SHOW STREAMS FROM` and `SHOW SINKS FROM`, as the
 //! user may see them. Databases load when first opened.
 
-use ratatui::style::{Color, Modifier, Style};
+use crate::tui::theme;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
 
@@ -85,6 +86,8 @@ pub enum ExplorerAction {
     Load(String),
     /// Put this statement in the editor and run it.
     Run(String),
+    /// Open a table's view: database, name, whether it is a view.
+    Open(String, String, bool),
     /// Insert this text at the editor's cursor.
     Insert(String),
 }
@@ -278,7 +281,7 @@ impl Explorer {
                 ExplorerAction::Load(db)
             }
             Kind::Table | Kind::View if enter => {
-                ExplorerAction::Run(format!("SELECT * FROM {}.{} LIMIT 100;", q(&db), q(&name)))
+                ExplorerAction::Open(db, name, n.kind == Kind::View)
             }
             Kind::Database | Kind::Group | Kind::Table | Kind::View => {
                 n.open = !n.open;
@@ -294,6 +297,15 @@ impl Explorer {
             Kind::Column => ExplorerAction::Insert(q(&name)),
             Kind::Note => ExplorerAction::None,
         }
+    }
+
+    /// For a selected table or view: `SELECT * ... LIMIT 100`, to run in the
+    /// editor (`r`).
+    #[must_use]
+    pub fn select_sql(&self) -> Option<String> {
+        let n = self.selected_node()?;
+        matches!(n.kind, Kind::Table | Kind::View)
+            .then(|| format!("SELECT * FROM {}.{} LIMIT 100;", q(&n.db), q(&n.label)))
     }
 
     /// Closes the selected node, or moves to its parent.
@@ -320,7 +332,7 @@ impl Explorer {
     #[must_use]
     pub fn lines(&mut self, height: usize, focused: bool) -> Vec<Line<'static>> {
         if let Some(n) = &self.note {
-            return vec![Line::styled(n.clone(), Style::new().fg(Color::DarkGray))];
+            return vec![Line::styled(n.clone(), theme::muted())];
         }
         let v = self.visible();
         if self.selected < self.top {
@@ -348,26 +360,21 @@ impl Explorer {
                     Kind::Table | Kind::View if !n.children.is_empty() => "▸ ",
                     _ => "  ",
                 };
-                let color = match n.kind {
-                    Kind::Database => Color::Yellow,
-                    Kind::Group => Color::Blue,
-                    Kind::Stream | Kind::Sink => Color::Magenta,
-                    Kind::Note => Color::DarkGray,
-                    _ => Color::Reset,
+                let mut style = match n.kind {
+                    Kind::Database => Style::new().add_modifier(Modifier::BOLD),
+                    Kind::Group | Kind::Note => theme::muted(),
+                    Kind::Stream | Kind::Sink => theme::func(),
+                    _ => Style::new(),
                 };
-                let mut style = Style::new().fg(color);
                 if i == self.selected && focused {
-                    style = style.add_modifier(Modifier::REVERSED);
+                    style = style.patch(theme::selected());
                 }
                 let mut spans = vec![
                     Span::raw("  ".repeat(*depth)),
                     Span::styled(format!("{marker}{}", n.label), style),
                 ];
                 if !n.detail.is_empty() {
-                    spans.push(Span::styled(
-                        format!(" {}", n.detail),
-                        Style::new().fg(Color::DarkGray),
-                    ));
+                    spans.push(Span::styled(format!(" {}", n.detail), theme::muted()));
                 }
                 Some(Line::from(spans))
             })
@@ -399,8 +406,12 @@ mod tests {
         e.move_by(2);
         assert_eq!(e.selected_node().map(|n| n.label.as_str()), Some("orders"));
         assert_eq!(
+            e.select_sql().as_deref(),
+            Some("SELECT * FROM `shop`.`orders` LIMIT 100;")
+        );
+        assert_eq!(
             e.activate(true),
-            ExplorerAction::Run("SELECT * FROM `shop`.`orders` LIMIT 100;".into())
+            ExplorerAction::Open("shop".into(), "orders".into(), false)
         );
         e.move_by(3);
         assert_eq!(e.selected_node().map(|n| n.kind), Some(Kind::Group));

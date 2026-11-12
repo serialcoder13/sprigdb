@@ -3,7 +3,8 @@
 //! Text is kept as lines of `char`s, so the cursor moves by characters.
 //! Highlighting comes from the shell's own lexer.
 
-use ratatui::style::{Color, Modifier, Style};
+use crate::tui::theme;
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use crate::lang::{Lang, Tok, is_keyword, lex};
@@ -350,10 +351,7 @@ impl Editor {
             .map(|(i, mut l)| {
                 l.insert(
                     0,
-                    Span::styled(
-                        format!("{:>width$} ", i + 1),
-                        Style::new().fg(Color::DarkGray),
-                    ),
+                    Span::styled(format!("{:>width$} ", i + 1), theme::muted()),
                 );
                 Line::from(l)
             })
@@ -382,13 +380,11 @@ impl Editor {
 #[must_use]
 pub fn style_of(kind: Tok, keyword: bool) -> Style {
     match kind {
-        Tok::Word if keyword => Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        Tok::Str => Style::new().fg(Color::Green),
-        Tok::Number => Style::new().fg(Color::Magenta),
-        Tok::Comment => Style::new()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::ITALIC),
-        Tok::Quoted => Style::new().fg(Color::Yellow),
+        Tok::Word if keyword => theme::keyword(),
+        Tok::Str => theme::string(),
+        Tok::Number => theme::number(),
+        Tok::Comment => theme::comment(),
+        Tok::Quoted => theme::func(),
         _ => Style::new(),
     }
 }

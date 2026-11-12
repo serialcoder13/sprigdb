@@ -725,30 +725,58 @@ impl SqlVhost {
     /// delivered but not yet acknowledged (stored minus ready, read a
     /// moment apart).
     ///
+    /// bugfix-66 (R9 item 123): when the queue's owner can't answer (its
+    /// slot failed: an owner lease it couldn't take or reach, an owner that
+    /// keeps moving, a relay that broke), the owner is asked once more,
+    /// then the answer comes from the store: every stored message ready,
+    /// no consumers (an owner nobody can reach serves none here), with a
+    /// warning. Before, such a failure read as "0 ready, 0 consumers", so
+    /// every stored message showed as unacknowledged.
+    ///
     /// # Errors
     /// 39250 (no queue), 39252 (refused), the store's.
     pub async fn info(&self, queue: &str) -> Result<QueueInfo, MqError> {
         let (e, q) = self.checked_queue(queue, Perm::Read).await?;
-        let (tx, rx) = oneshot::channel();
-        let (ready, consumers) = if self.v.slot(&q).send(Cmd::Info(tx)) {
-            tokio::time::timeout(std::time::Duration::from_secs(10), rx)
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .unwrap_or((0, 0))
-        } else {
-            (0, 0)
-        };
+        let mut answer = self.owner_info(&q).await;
+        if answer.is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            answer = self.owner_info(&q).await;
+        }
         let store = e.deps.catalog.store(&self.v.r).await?;
         let stored = store
             .stored(q.id)
             .await
             .map_err(|err| MqError::new(MqCode::OwnerMoved, err.to_string()))?;
-        Ok(QueueInfo {
-            ready: u64::from(ready),
-            consumers: u64::from(consumers),
-            unacked: stored.saturating_sub(u64::from(ready)),
+        Ok(match answer {
+            Some((ready, consumers)) => QueueInfo {
+                ready: u64::from(ready),
+                consumers: u64::from(consumers),
+                unacked: stored.saturating_sub(u64::from(ready)),
+            },
+            None => {
+                tracing::warn!(queue = %q.name, vhost = %self.v.r.name, stored,
+                    "mq_info: the queue's owner didn't answer; counting every stored message as ready");
+                metrics::counter!("sprig_queue_info_unanswered_total").increment(1);
+                QueueInfo {
+                    ready: stored,
+                    consumers: 0,
+                    unacked: 0,
+                }
+            }
         })
+    }
+
+    /// The owner's ready count and consumers, or `None` when it couldn't
+    /// answer within 10 s.
+    async fn owner_info(&self, q: &Arc<crate::topology::QueueDef>) -> Option<(u32, u32)> {
+        let (tx, rx) = oneshot::channel();
+        if !self.v.slot(q).send(Cmd::Info(tx)) {
+            return None;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(10), rx)
+            .await
+            .ok()
+            .and_then(Result::ok)
     }
 
     /// `mq_info` for every durable queue of the vhost the user may read

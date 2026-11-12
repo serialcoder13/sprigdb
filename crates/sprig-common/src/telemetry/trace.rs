@@ -29,7 +29,7 @@
 
 pub mod otlp;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
@@ -48,12 +48,9 @@ pub const TARGET: &str = "sprig_trace";
 
 /// Kept traces held for `/debug/traces`.
 const RECENT: usize = 64;
-/// Spans kept per pending trace; more are dropped and counted.
+/// Finished spans a root keeps until it closes; more are dropped and
+/// counted.
 const MAX_SPANS_PER_TRACE: usize = 512;
-/// Pending traces (roots still open); more are dropped and counted.
-const MAX_PENDING: usize = 4096;
-/// Spans whose root never closed are swept after this long.
-const PENDING_TTL: Duration = Duration::from_secs(60);
 
 /// A W3C trace context (`traceparent`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,12 +192,6 @@ pub struct Tracer {
     slow_ms: AtomicU64,
     recent: Mutex<VecDeque<Arc<Trace>>>,
     exporters: RwLock<Vec<Arc<dyn TraceExporter>>>,
-    pending: Mutex<HashMap<u128, Pending>>,
-}
-
-struct Pending {
-    since: Instant,
-    spans: Vec<SpanRecord>,
 }
 
 impl fmt::Debug for Tracer {
@@ -228,7 +219,6 @@ impl Tracer {
             slow_ms: AtomicU64::new(slow_ms),
             recent: Mutex::new(VecDeque::with_capacity(RECENT)),
             exporters: RwLock::new(Vec::new()),
-            pending: Mutex::new(HashMap::new()),
         };
         t.set_policy(ratio, slow_ms);
         t
@@ -301,39 +291,17 @@ impl Tracer {
         u < ratio
     }
 
-    fn child_closed(&self, trace_id: u128, span: SpanRecord) {
-        let mut pending = lock(&self.pending);
-        let full = pending.len() >= MAX_PENDING && !pending.contains_key(&trace_id);
-        if full {
-            drop(pending);
-            dropped(1);
-            return;
-        }
-        let p = pending.entry(trace_id).or_insert_with(|| Pending {
-            since: Instant::now(),
-            spans: Vec::new(),
-        });
-        if p.spans.len() >= MAX_SPANS_PER_TRACE {
-            drop(pending);
-            dropped(1);
-            return;
-        }
-        p.spans.push(span);
-    }
-
-    fn root_closed(&self, trace_id: u128, root: SpanRecord, sampled: bool) {
-        let children = {
-            let mut pending = lock(&self.pending);
-            let mine = pending.remove(&trace_id).map(|p| p.spans);
-            let now = Instant::now();
-            let before = pending.len();
-            pending.retain(|_, p| now.saturating_duration_since(p.since) < PENDING_TTL);
-            let swept = before - pending.len();
-            if swept > 0 {
-                dropped(swept as u64);
-            }
-            mine.unwrap_or_default()
-        };
+    /// A root closed with its finished descendants (`children`, kept
+    /// with the root while it was open; perf1, S141: a process-wide map
+    /// of pending traces, locked at every span's close and swept at every
+    /// root's, made all runtime threads contend on one lock per statement).
+    fn root_closed(
+        &self,
+        trace_id: u128,
+        root: SpanRecord,
+        sampled: bool,
+        children: Vec<SpanRecord>,
+    ) {
         let kept_because = if sampled {
             KeptBecause::Sampled
         } else if root.error {
@@ -444,6 +412,8 @@ struct SpanState {
     start_unix_nanos: u64,
     attributes: Vec<(String, String)>,
     error: bool,
+    /// A root's finished descendants, in the order they closed.
+    children: Vec<SpanRecord>,
 }
 
 /// Fields of a span, as text.
@@ -568,6 +538,7 @@ where
             start_unix_nanos: unix_nanos(),
             attributes: fields.attributes,
             error: fields.error.unwrap_or(false),
+            children: Vec::new(),
         });
     }
 
@@ -607,11 +578,28 @@ where
             error: state.error,
         };
         if state.root {
-            self.tracer
-                .root_closed(state.ctx.trace_id, record, state.ctx.sampled);
-        } else {
-            self.tracer.child_closed(state.ctx.trace_id, record);
+            self.tracer.root_closed(
+                state.ctx.trace_id,
+                record,
+                state.ctx.sampled,
+                state.children,
+            );
+            return;
         }
+        // A parent outlives its children in the registry, so the root is
+        // still open here: the record waits in the root's own state.
+        for a in span.scope().skip(1) {
+            let mut ext = a.extensions_mut();
+            if let Some(r) = ext.get_mut::<SpanState>().filter(|r| r.root) {
+                if r.children.len() < MAX_SPANS_PER_TRACE {
+                    r.children.push(record);
+                } else {
+                    dropped(1);
+                }
+                return;
+            }
+        }
+        dropped(1);
     }
 }
 
@@ -622,6 +610,110 @@ pub fn current() -> Option<TraceContext> {
     tracing::Span::current()
         .with_subscriber(|(id, dispatch)| context_of(id, dispatch))
         .flatten()
+}
+
+/// A child span recorded without a `tracing` span (perf1, S142): the
+/// timing and attributes of one step under the innermost traced span,
+/// kept with that span's root and exported with its trace exactly as a
+/// `tracing` child would be, but without a registry slot, the log
+/// formatter's copy of its fields or the layers' callbacks. The gateway's
+/// `backend.query` uses it: one per statement. Log events inside it carry
+/// the enclosing span's fields instead of its own.
+#[derive(Debug)]
+pub struct ChildSpan {
+    /// The innermost traced span: a handle keeps it (and its root) open.
+    parent: tracing::Span,
+    ctx: TraceContext,
+    parent_id: u64,
+    name: &'static str,
+    start: Instant,
+    start_unix_nanos: u64,
+    attributes: Vec<(String, String)>,
+    error: bool,
+}
+
+impl ChildSpan {
+    /// Starts `name` under the innermost traced span, if there is one.
+    #[must_use]
+    pub fn start(name: &'static str) -> Option<Self> {
+        let parent = tracing::Span::current();
+        let p = parent
+            .with_subscriber(|(id, dispatch)| context_of(id, dispatch))
+            .flatten()?;
+        Some(Self {
+            parent,
+            ctx: TraceContext {
+                trace_id: p.trace_id,
+                span_id: random_u64(),
+                sampled: p.sampled,
+            },
+            parent_id: p.span_id,
+            name,
+            start: Instant::now(),
+            start_unix_nanos: unix_nanos(),
+            attributes: Vec::new(),
+            error: false,
+        })
+    }
+
+    /// Its trace context (for propagation).
+    #[must_use]
+    pub fn context(&self) -> TraceContext {
+        self.ctx
+    }
+
+    /// Sets attribute `key` to `value`.
+    pub fn record(&mut self, key: &'static str, value: impl fmt::Display) {
+        let v = value.to_string();
+        if let Some(slot) = self.attributes.iter_mut().find(|(k, _)| k == key) {
+            slot.1 = v;
+        } else {
+            self.attributes.push((key.to_owned(), v));
+        }
+    }
+
+    /// Marks it failed (`error = true`).
+    pub fn set_error(&mut self) {
+        self.error = true;
+        self.record("error", true);
+    }
+}
+
+impl Drop for ChildSpan {
+    fn drop(&mut self) {
+        let record = SpanRecord {
+            name: self.name.to_owned(),
+            span_id: self.ctx.span_id,
+            parent_id: Some(self.parent_id),
+            start_unix_nanos: self.start_unix_nanos,
+            duration_nanos: u64::try_from(self.start.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            attributes: std::mem::take(&mut self.attributes),
+            error: self.error,
+        };
+        let mut record = Some(record);
+        self.parent.with_subscriber(|(id, dispatch)| {
+            let Some(registry) = dispatch.downcast_ref::<Registry>() else {
+                return;
+            };
+            let Some(span) = registry.span(id) else {
+                return;
+            };
+            for a in span.scope() {
+                let mut ext = a.extensions_mut();
+                if let Some(r) = ext.get_mut::<SpanState>().filter(|r| r.root) {
+                    if r.children.len() < MAX_SPANS_PER_TRACE
+                        && let Some(rec) = record.take()
+                    {
+                        r.children.push(rec);
+                    }
+                    return;
+                }
+            }
+        });
+        if record.is_some() {
+            dropped(1);
+        }
+    }
 }
 
 fn context_of(id: &Id, dispatch: &Dispatch) -> Option<TraceContext> {

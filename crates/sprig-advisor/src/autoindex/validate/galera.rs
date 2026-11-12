@@ -61,6 +61,9 @@ pub struct RsuValidator {
     peers: Vec<NodeEndpoint>,
     marker: Arc<dyn NodeMarker>,
     probe_timeout: Duration,
+    /// The writer: an index already on the node but not there is a
+    /// cut-off validation's leftover, dropped before building (bugfix-61).
+    writer: Option<NodeEndpoint>,
 }
 
 impl std::fmt::Debug for RsuValidator {
@@ -83,7 +86,19 @@ impl RsuValidator {
             peers,
             marker,
             probe_timeout: Duration::from_secs(10),
+            writer: None,
         }
+    }
+
+    /// Compares with the cluster's `writer` before building: the
+    /// validation's index already on the node but not on the writer is a
+    /// cut-off validation's leftover, dropped in RSU with the binary log
+    /// off instead of aborting with `index_exists` (bugfix-61,
+    /// [`super::orphans`]).
+    #[must_use]
+    pub fn with_writer(mut self, writer: NodeEndpoint) -> Self {
+        self.writer = Some(writer);
+        self
     }
 }
 
@@ -252,8 +267,12 @@ impl Validator for RsuValidator {
         let mut r = report(plan, Method::GaleraRsu, &self.node.node);
         let name = plan.index_name();
         let t = &plan.target;
+        // bugfix-61: while this runs, nothing in this process takes the
+        // node's validation index for a leftover.
+        let _running = super::orphans::running(&self.node.node, t);
 
         // 1. Checks.
+        let mut note: Option<String> = None;
         let mon = match NodeSql::connect(&self.node, self.probe_timeout).await {
             Ok(m) => m,
             Err(e) => {
@@ -282,11 +301,36 @@ impl Validator for RsuValidator {
         let pre = async {
             NodeWatch::check(&mut watch).await?;
             let size = watch.local().await?.size;
-            let existing = watch
+            let mut existing = watch
                 .mon
                 .index_columns(t, &name)
                 .await
                 .map_err(|e| e.to_string())?;
+            if !existing.is_empty()
+                && let Some(w) = &self.writer
+            {
+                // A cut-off validation's leftover (the writer lacks it).
+                let left = super::orphans::sweep_from_validator(
+                    &self.node,
+                    w,
+                    t,
+                    super::orphans::NodeKind::Galera,
+                    &name,
+                )
+                .await
+                .map_err(|e| format!("leftover of an earlier validation not dropped: {e}"))?;
+                if !left.is_empty() {
+                    note = Some(format!(
+                        "leftover of a cut-off validation dropped first: {:?}",
+                        left.indexes
+                    ));
+                }
+                existing = watch
+                    .mon
+                    .index_columns(t, &name)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
             if !existing.is_empty() {
                 return Err(format!("index_exists: {name} is already on the node"));
             }
@@ -314,6 +358,9 @@ impl Validator for RsuValidator {
             Ok((size, globals, server_id, gtid, sig))
         }
         .await;
+        if let Some(n) = note {
+            r.node_check.ok(n);
+        }
         let (size_before, globals_before, server_id, gtid_before, sig_before) = match pre {
             Ok(x) => x,
             Err(why) => {

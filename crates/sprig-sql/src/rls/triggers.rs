@@ -133,7 +133,7 @@ impl Binder for JsonBinder<'_> {
         })
     }
 
-    /// The context's own list, or (RL58, `"subt"`/`"mant"` true) the
+    /// The context's own list, or (RL58, `"subt"`/`"mant"` 1) the
     /// session tenant's rows of `__sprig_sys.__sprig_subtree_v`.
     fn membership(&self, func: &str) -> Result<(String, String), SprigError> {
         let (path, flag) = if func == "SPRIG_TENANT_IN_SUBTREE" {
@@ -145,7 +145,7 @@ impl Binder for JsonBinder<'_> {
         Ok((
             "(".to_owned(),
             format!(
-                " IN ({sub} WHERE JSON_VALUE({c}, {flag}) = 'true' UNION ALL SELECT `__sprig_j`.id \
+                " IN ({sub} WHERE JSON_VALUE({c}, {flag}) = '1' UNION ALL SELECT `__sprig_j`.id \
                  FROM JSON_TABLE(JSON_EXTRACT({c}, {path}), '$[*]' COLUMNS (id BIGINT UNSIGNED \
                  PATH '$')) AS `__sprig_j`))",
                 sub = super::subtree::subquery(),

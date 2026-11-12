@@ -1039,9 +1039,13 @@ async fn row_level_security_suite() {
         "DROP PROCEDURE IF EXISTS p_docs",
         "DROP PROCEDURE IF EXISTS p_dyn",
         "DROP FUNCTION IF EXISTS f_cnt",
-        "CREATE PROCEDURE p_docs() SELECT id FROM docs ORDER BY id",
+        "DROP PROCEDURE IF EXISTS p_def",
+        // Invoker routines apply the caller's policies (RL20); definer
+        // routines, MariaDB's default, their definer's (RL57).
+        "CREATE PROCEDURE p_docs() SQL SECURITY INVOKER SELECT id FROM docs ORDER BY id",
         "CREATE PROCEDURE p_dyn() BEGIN PREPARE s FROM 'SELECT id FROM docs'; EXECUTE s; END",
-        "CREATE FUNCTION f_cnt() RETURNS INT READS SQL DATA RETURN (SELECT COUNT(*) FROM docs)",
+        "CREATE FUNCTION f_cnt() RETURNS INT READS SQL DATA SQL SECURITY INVOKER RETURN (SELECT COUNT(*) FROM docs)",
+        "CREATE PROCEDURE p_def() SELECT id FROM docs ORDER BY id",
     ] {
         let r = admin_db.query_drop(s).await;
         ck.ok(&format!("stored code: {s}"), r.is_ok() || sharded, || {
@@ -1092,6 +1096,21 @@ async fn row_level_security_suite() {
             "dynamic SQL refused",
             e.as_ref().is_err_and(|e| e.to_string().contains("39366")),
             || format!("{e:?}"),
+        );
+        // Its own session: a definer call pins the session's backend
+        // connection (the context switch is session state).
+        let mut a2 = conn(&addrs[0], &tenant_user("rls_alice"), PW, Some(&db)).await;
+        let got = ids(&mut a2, "CALL p_def()").await;
+        ck.ok(
+            "definer procedure: the definer's (manager's) rows",
+            got.as_ref().map(BTreeSet::len) == Ok(30),
+            || format!("{got:?}"),
+        );
+        let got = ids(&mut a2, "SELECT id FROM docs").await;
+        ck.ok(
+            "after a definer call: the caller's rows",
+            got == Ok(want.clone()),
+            || format!("{got:?}"),
         );
         // The manager (not bound) still sees every row through them.
         let got = ids(&mut admin_db, "CALL p_docs()").await;

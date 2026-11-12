@@ -1186,6 +1186,27 @@ pub fn scenarios() -> Vec<Scenario> {
             ],
         },
         Scenario {
+            // Two transactions on one node, ordered by a row lock: the
+            // second wrote before the first committed, but certification
+            // doesn't fail it (only other nodes' writesets conflict).
+            name: "galera_local_lock_order",
+            target: Target::Galera,
+            tables: vec!["t"],
+            users: vec![],
+            sessions: vec![Session::root(0), Session::root(0)],
+            actions: vec![
+                Exec(0, ins(1, "x")),
+                Exec(1, Stmt::Begin),
+                Exec(1, ins(2, "b")),
+                Exec(0, Stmt::Begin),
+                Exec(0, upd(1, "a")),
+                Exec(0, Stmt::Commit),
+                Exec(1, upd(1, "b")),
+                Exec(1, Stmt::Commit),
+                Exec(1, get(1)),
+            ],
+        },
+        Scenario {
             name: "crash_keeps_committed_and_prepared",
             target: Target::Throwaway,
             tables: vec!["t"],
@@ -1262,6 +1283,10 @@ mod tests {
                 }
                 "galera_certification" => {
                     assert!(text.contains("Exec(1, Commit) => error 1213"), "{text}");
+                }
+                "galera_local_lock_order" => {
+                    assert!(!text.contains("error 1213"), "{text}");
+                    assert!(text.contains("Exec(1, Commit) => ok"), "{text}");
                 }
                 _ => {}
             }

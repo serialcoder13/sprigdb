@@ -3,7 +3,7 @@
 // STUDIO_URL=http://127.0.0.1:27080 STUDIO_SHOTS=../target/agent-studio3/screenshots pnpm e2e studio3
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
-import { apiToken, SHOTS, signIn, sql, typeSql } from './fixtures';
+import { apiToken, SHOTS, signIn, sql, typeSql, openPage } from './fixtures';
 import { qrPath } from '../src/auth/qr';
 
 /** Everything this suite creates, dropped by exact name afterwards. */
@@ -84,7 +84,7 @@ test.describe.serial('Studio round 4', () => {
     await sql(request, token, '-', `DROP USER IF EXISTS '${MFA_USER}'@'%'`);
     await sql(request, token, '-', `CREATE USER '${MFA_USER}'@'%' IDENTIFIED BY 'sprig-dev-mfa'`);
     await signIn(page, `acme.${MFA_USER}`, 'sprig-dev-mfa');
-    await page.getByRole('link', { name: 'Security' }).click();
+    await openPage(page, 'Security');
     await page.getByRole('button', { name: 'Set up an authenticator app' }).click();
     const qr = page.getByTestId('totp-qr');
     await expect(qr).toBeVisible();
@@ -102,7 +102,7 @@ test.describe.serial('Studio round 4', () => {
 
   test('step 27: Cypher and GQL with the graph view, expand and the grid', async ({ page }) => {
     await signIn(page);
-    await page.getByRole('link', { name: 'Query' }).click();
+    await openPage(page, 'Query');
     await page.getByTestId('lang-select').selectOption('cypher');
     await page.getByTestId('db-select').selectOption(DB3);
     await page.getByTestId('graph-input').fill('social');
@@ -138,7 +138,7 @@ test.describe.serial('Studio round 4', () => {
 
   test('step 22: the Redis console and key browser', async ({ page }) => {
     await signIn(page);
-    await page.getByRole('link', { name: 'Redis' }).click();
+    await openPage(page, 'Redis');
     await page.getByTestId('kv-db').selectOption(DB3);
     await page.getByTestId('kv-ns').fill('cache');
     await typeSql(page, 'SET greeting "hello world"\nGET greeting\nHGETALL user:1\nLRANGE queue:jobs 0 -1\nGET');
@@ -207,7 +207,7 @@ test.describe.serial('Studio round 4: MongoDB', () => {
 
   test('steps 19–20: the MongoDB editor, the JSON tree with types, an edit and a conflict', async ({ page, request }) => {
     await signIn(page);
-    await page.getByRole('link', { name: 'Query' }).click();
+    await openPage(page, 'Query');
     await page.getByTestId('lang-select').selectOption('mongo');
     await page.getByTestId('db-select').selectOption(DB3);
     // Code is refused before anything is sent.
@@ -385,7 +385,7 @@ test.describe.serial('Studio round 4: messaging', () => {
 
   test('steps 28–31: streams with groups and lag, the record reader, queues, sinks, inherited objects', async ({ page }) => {
     await signIn(page);
-    await page.getByRole('link', { name: 'Messaging' }).click();
+    await openPage(page, 'Messaging');
     await page.getByTestId('msg-db').selectOption(MDB);
     const streams = page.getByTestId('msg-streams');
     await expect(streams).toContainText('order_events');
@@ -445,7 +445,7 @@ test.describe.serial('Studio round 4: view as', () => {
 
   test('step 18: view as a user, refusals, and the policy and role statements', async ({ page, request }) => {
     await signIn(page);
-    await page.getByRole('link', { name: 'Roles and policies' }).click();
+    await openPage(page, 'Roles and policies');
     await page.getByTestId('viewas-user').fill(VIEWER);
     await page.getByTestId('viewas-db').selectOption(VDB);
     await page.getByTestId('viewas-sql').fill('SELECT id, note FROM open_t ORDER BY id');

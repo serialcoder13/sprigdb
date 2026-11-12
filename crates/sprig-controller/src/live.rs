@@ -45,6 +45,9 @@ pub async fn start(
         () = shutdown.cancelled() => return Ok(None),
         () = live.ready() => {}
     }
+    // bugfix-62 (Q39): no start with a commit-resolve window the resolver
+    // could sweep under.
+    sprig_txn::settings::check_live(&live, dc)?;
     let first = ControlSettings::resolve(&live.snapshot(), dc);
     tracing::info!(?first, "settings mirrored");
     let (tx, control) = watch::channel(Arc::new(first));

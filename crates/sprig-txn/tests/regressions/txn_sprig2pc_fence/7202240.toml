@@ -1,0 +1,13 @@
+suite = "txn_sprig2pc_fence"
+seed = 7202240
+failure = "txn 14 (Some(TxnId(18446744073709551622))): client got error 39443 but rows are on {2, 3, 4}"
+
+[[plan.faults]]
+at_ms = 358
+kind = "link"
+a = "g1a"
+b = "g1n1"
+latency_ms = 499
+jitter_ms = 23
+loss = 0.2
+for_ms = 4014

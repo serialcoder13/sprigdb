@@ -4,6 +4,7 @@ import { FormattedMessage, useIntl } from 'react-intl';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSession } from '../auth/session';
 import { loadTabs, updateTab, useTabs, type Tab } from './tabs';
+import { recordRun, saveQuery } from '../workspace/library';
 import { graphsOf, invalidateCatalog, useDatabases, useSnapshot } from '../catalog/snapshot';
 import { classify, needsConfirmation, splitStatements, statementAt, type Statement } from '../lib/sql';
 import { runStatement, type RunHandle } from './runner';
@@ -217,6 +218,15 @@ export function QueryPage() {
         timeoutMs: me.studio.statement_timeout_ms,
       };
       const started = performance.now();
+      const log = (ok: boolean, err?: string) =>
+        recordRun({
+          sql: stmts.map((x) => x.text.trim()).join(';\n'),
+          db: tab.db,
+          language: tl,
+          ms: Math.round(performance.now() - started),
+          ok,
+          error: err,
+        });
       const collected: ResultItem[] = [];
       let ddl = false;
       for (const s of stmts) {
@@ -267,6 +277,7 @@ export function QueryPage() {
           if (r.outcome === 'timeout') {
             setError({ text: `Stopped at studio.statement_timeout_ms (${caps.timeoutMs} ms).` });
             setPhase('failed');
+            log(false, 'timeout');
             return;
           }
           if (r.outcome === 'cancelled' && !r.items.some((i) => i.buffer?.truncated)) {
@@ -277,6 +288,7 @@ export function QueryPage() {
         } catch (e) {
           setError({ text: errorText(e), trace: isApiError(e) ? e.traceId : undefined });
           setPhase('failed');
+          log(false, errorText(e));
           if (isApiError(e) && (e.code === 1146 || e.code === 1049)) invalidateCatalog(qc);
           return;
         } finally {
@@ -286,9 +298,24 @@ export function QueryPage() {
       if (ddl) invalidateCatalog(qc);
       setElapsed(Math.round(performance.now() - started));
       setPhase('done');
+      log(true);
     },
     [tab, me, phase, qc],
   );
+
+  const [saving, setSaving] = useState<string | null>(null);
+  const [savedNote, setSavedNote] = useState(false);
+  const title = tab?.title;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 's') {
+        e.preventDefault();
+        setSaving((v) => v ?? title ?? '');
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [title]);
 
   const cancel = () => {
     stopAll.current = true;
@@ -414,6 +441,41 @@ export function QueryPage() {
         <button onClick={cancel} disabled={!busy}>
           <FormattedMessage id="query.cancel" />
         </button>
+        <span className="grow" />
+        {saving === null ? (
+          <button onClick={() => setSaving(tab.title)} title="Ctrl/⌘ + S" data-testid="save-query">
+            <FormattedMessage id="library.save" />
+          </button>
+        ) : (
+          <form
+            className="row"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const name = saving.trim();
+              if (!name) return;
+              saveQuery({ name, sql: tab.sql, db: tab.db, language: tab.language ?? 'sql' });
+              updateTab(tab.id, { title: name });
+              setSaving(null);
+              setSavedNote(true);
+              setTimeout(() => setSavedNote(false), 1500);
+            }}
+          >
+            <input
+              autoFocus
+              value={saving}
+              onChange={(e) => setSaving(e.target.value)}
+              aria-label={intl.formatMessage({ id: 'library.saveAs' })}
+              data-testid="save-name"
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') setSaving(null);
+              }}
+            />
+            <button type="submit" className="primary">
+              <FormattedMessage id="library.save" />
+            </button>
+          </form>
+        )}
+        {savedNote && <span className="muted">{intl.formatMessage({ id: 'library.saved' })}</span>}
         <span className="muted" role="status" data-testid="phase">
           {phase === 'streaming' ? 'Running…' : phase === 'cancelled' ? intl.formatMessage({ id: 'results.cancelled' }) : ''}
           {phase === 'done' && elapsed !== null ? intl.formatMessage({ id: 'results.elapsed' }, { ms: elapsed }) : ''}

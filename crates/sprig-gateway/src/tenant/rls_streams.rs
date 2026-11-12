@@ -382,7 +382,7 @@ fn decode_binary(
     for c in &mut out {
         if c.opaque && c.plain.is_some() && read.contains(&c.name.to_lowercase()) {
             c.opaque = false;
-            c.ty = "longtext CHARACTER SET ascii".to_owned();
+            "longtext CHARACTER SET ascii".clone_into(&mut c.ty);
             predicate = map_column(&predicate, qual, &c.name, |r| format!("FROM_BASE64({r})"));
         }
     }

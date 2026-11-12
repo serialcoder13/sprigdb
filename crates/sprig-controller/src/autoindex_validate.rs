@@ -206,12 +206,14 @@ fn validator(
 ) -> Result<Box<dyn Validator>> {
     let no_node = || SprigError::new(SprigCode::ClusterUnavailable, "no node to validate on");
     Ok(match (method, &o.view.nodes) {
-        (Method::Replica, Nodes::PrimaryReplica { replicas, .. }) => {
-            Box::new(ReplicaValidator::new(
+        (Method::Replica, Nodes::PrimaryReplica { writer, replicas }) => Box::new(
+            ReplicaValidator::new(
                 replicas.first().ok_or_else(no_node)?.clone(),
                 Arc::clone(marker),
-            ))
-        }
+            )
+            // bugfix-61: a cut-off validation's leftover is dropped first.
+            .with_writer(writer.clone()),
+        ),
         (Method::GaleraRsu, Nodes::Galera { nodes, writer }) => {
             let node = nodes
                 .iter()
@@ -222,7 +224,12 @@ fn validator(
                 .filter(|n| n.node != node.node)
                 .cloned()
                 .collect();
-            Box::new(RsuValidator::new(node.clone(), peers, Arc::clone(marker)))
+            let mut v = RsuValidator::new(node.clone(), peers, Arc::clone(marker));
+            // bugfix-61: a cut-off validation's leftover is dropped first.
+            if let Some(w) = nodes.iter().find(|n| &n.node == writer) {
+                v = v.with_writer(w.clone());
+            }
+            Box::new(v)
         }
         _ => Box::new(CanaryValidator::new(
             o.view.nodes.writer().ok_or_else(no_node)?.clone(),

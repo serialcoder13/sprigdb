@@ -70,6 +70,56 @@ struct Global {
     /// Totals since start (`serverStatus`).
     total_spills: AtomicU64,
     total_bytes: AtomicU64,
+    /// By kind (M7: `serverStatus`'s `metrics.query`): spills, bytes,
+    /// records.
+    by_kind: [[AtomicU64; 3]; KINDS],
+    /// Documents and bytes sorted (`metrics.query.sort`).
+    sorted_keys: AtomicU64,
+    sorted_bytes: AtomicU64,
+    /// Commands run with `allowDiskUse: false`.
+    disallowed: AtomicU64,
+}
+
+/// What spilled, for `serverStatus` (M7): MongoDB 8.0's `metrics.query`
+/// groups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// `$sort`, `find`'s sort, `$bucketAuto`, `$densify` (sorts).
+    Sort,
+    /// `$group`, `$bucket`, `$sortByCount`.
+    Group,
+    /// `$setWindowFields`.
+    Window,
+    /// `$graphLookup`.
+    Graph,
+    /// Anything else: the collection's read, stage outputs, `$facet`.
+    Other,
+}
+
+const KINDS: usize = 5;
+
+impl Kind {
+    /// The kind of pipeline stage `name`.
+    #[must_use]
+    pub fn of_stage(name: &str) -> Self {
+        match name {
+            "$sort" | "$bucketAuto" | "$densify" | "$fill" => Self::Sort,
+            "$group" | "$bucket" | "$sortByCount" => Self::Group,
+            "$setWindowFields" => Self::Window,
+            "$graphLookup" => Self::Graph,
+            _ => Self::Other,
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Sort => 0,
+            Self::Group => 1,
+            Self::Window => 2,
+            Self::Graph => 3,
+            Self::Other => 4,
+        }
+    }
 }
 
 fn global() -> &'static Global {
@@ -86,6 +136,10 @@ fn global() -> &'static Global {
             seq: AtomicU64::new(0),
             total_spills: AtomicU64::new(0),
             total_bytes: AtomicU64::new(0),
+            by_kind: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
+            sorted_keys: AtomicU64::new(0),
+            sorted_bytes: AtomicU64::new(0),
+            disallowed: AtomicU64::new(0),
         }
     })
 }
@@ -223,6 +277,54 @@ pub fn totals() -> (u64, u64) {
     )
 }
 
+/// Counts a command run with `allowDiskUse: false`
+/// (`metrics.query.allowDiskUseFalse`).
+pub fn note_disallowed() {
+    global().disallowed.fetch_add(1, AO::Relaxed);
+}
+
+/// `serverStatus`'s spill counters (M7), in MongoDB 8.0's
+/// `metrics.query` shape: `allowDiskUseFalse`, `group`,
+/// `setWindowFields` and `sort`, plus SprigDB's `graphLookup` and
+/// `sprigSpills` (every spill, including the collection's read).
+#[must_use]
+pub fn metrics_doc() -> Document {
+    let g = global();
+    let n = |a: &AtomicU64| i64::try_from(a.load(AO::Relaxed)).unwrap_or(i64::MAX);
+    let k = |kind: Kind| &g.by_kind[kind.index()];
+    let four = |kind: Kind| {
+        let c = k(kind);
+        bson::doc! {
+            "spilledBytes": n(&c[1]),
+            "spilledDataStorageSize": n(&c[1]),
+            "spilledRecords": n(&c[2]),
+            "spills": n(&c[0]),
+        }
+    };
+    let w = k(Kind::Window);
+    let s = k(Kind::Sort);
+    bson::doc! {
+        "allowDiskUseFalse": n(&g.disallowed),
+        "group": four(Kind::Group),
+        "setWindowFields": {
+            "spilledBytes": n(&w[1]),
+            "spilledRecords": n(&w[2]),
+            "spills": n(&w[0]),
+        },
+        "sort": {
+            "spillToDisk": n(&s[0]),
+            "spillToDiskBytes": n(&s[1]),
+            "totalBytesSorted": n(&g.sorted_bytes),
+            "totalKeysSorted": n(&g.sorted_keys),
+        },
+        "graphLookup": four(Kind::Graph),
+        "sprigSpills": {
+            "spills": n(&g.total_spills),
+            "spilledBytes": n(&g.total_bytes),
+        },
+    }
+}
+
 fn charge(tenant: u64, n: u64) -> Result<(), MongoError> {
     let g = global();
     let (tcap, gcap) = *lock(&g.caps);
@@ -286,6 +388,8 @@ pub struct SpillCtx {
     pub tenant: u64,
     stage: Arc<AtomicUsize>,
     stats: Arc<Mutex<Vec<StageSpill>>>,
+    /// What the running stage is, for the counters by kind (M7).
+    kind: Arc<AtomicUsize>,
 }
 
 impl SpillCtx {
@@ -297,6 +401,7 @@ impl SpillCtx {
             tenant,
             stage: Arc::new(AtomicUsize::new(0)),
             stats: Arc::new(Mutex::new(Vec::new())),
+            kind: Arc::new(AtomicUsize::new(Kind::Other.index())),
         }
     }
 
@@ -333,12 +438,26 @@ pub fn set_stage(i: usize) {
     let _ = CTX.try_with(|c| c.stage.store(i, AO::Relaxed));
 }
 
+/// Marks the kind of stage now running (M7: `serverStatus`'s counters).
+pub fn set_kind(k: Kind) {
+    let _ = CTX.try_with(|c| c.kind.store(k.index(), AO::Relaxed));
+}
+
 fn tenant() -> u64 {
     CTX.try_with(|c| c.tenant).unwrap_or(0)
 }
 
 fn record(bytes: u64, records: u64, storage: u64) {
-    global().total_spills.fetch_add(1, AO::Relaxed);
+    let g = global();
+    g.total_spills.fetch_add(1, AO::Relaxed);
+    let ki = CTX
+        .try_with(|c| c.kind.load(AO::Relaxed))
+        .unwrap_or(Kind::Other.index())
+        .min(KINDS - 1);
+    let c = &g.by_kind[ki];
+    c[0].fetch_add(1, AO::Relaxed);
+    c[1].fetch_add(bytes, AO::Relaxed);
+    c[2].fetch_add(records, AO::Relaxed);
     let _ = CTX.try_with(|c| {
         let i = c.stage.load(AO::Relaxed);
         let mut s = lock(&c.stats);
@@ -357,6 +476,12 @@ fn record(bytes: u64, records: u64, storage: u64) {
         e.records += records;
         e.storage += storage;
     });
+}
+
+/// Counts a finished spill file written outside a builder or a sort (M7:
+/// a window partition's documents).
+pub fn record_file(f: &SpillFile) {
+    record(f.bytes, f.count, f.bytes);
 }
 
 // --- files ----------------------------------------------------------------
@@ -721,7 +846,11 @@ pub fn sort_seq(
     let trim_at = limit.map(|n| n.saturating_mul(2).max(1024));
     for d in input {
         let d = d?;
-        bytes += doc_bytes(&d);
+        let b = doc_bytes(&d);
+        bytes += b;
+        let g = global();
+        g.sorted_keys.fetch_add(1, AO::Relaxed);
+        g.sorted_bytes.fetch_add(b as u64, AO::Relaxed);
         buf.push(d);
         if trim_at.is_some_and(|t| buf.len() >= t) || (limit.is_some() && bytes > budget) {
             sort_buf(&mut buf, &cmp, limit);

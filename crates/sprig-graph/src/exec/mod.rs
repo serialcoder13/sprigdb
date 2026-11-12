@@ -414,6 +414,25 @@ pub fn explain(q: &Query) -> Vec<String> {
 enum Lifted {
     Pattern(PathPattern),
     Subquery(SubqueryKind, Query),
+    /// A list comprehension, quantifier or `reduce` with a pattern
+    /// predicate or subquery inside, which depends on its own variable
+    /// (R8 round 10, LDBC IC10 and IC14).
+    Deep(Expr),
+    /// `startNode(r)` (`true`) or `endNode(r)`: the node, read from the
+    /// store (R8 round 10, LDBC IC14).
+    EndNode(Expr, bool),
+}
+
+/// Whether `e` has a pattern predicate, an expression subquery, or
+/// `startNode()`/`endNode()`, which need the store.
+fn has_deep(e: &Expr) -> bool {
+    let mut found = false;
+    e.walk(&mut |x| {
+        found |= matches!(x, Expr::Pattern(_) | Expr::Subquery(..))
+            || matches!(x, Expr::Func { name, args, .. }
+                if args.len() == 1 && matches!(name.as_str(), "startnode" | "endnode"));
+    });
+    found
 }
 
 /// A procedure's columns, and its rows by input row.
@@ -443,6 +462,23 @@ pub(crate) struct Exec<'a> {
     returning: bool,
     /// The error it met.
     late_error: Option<SprigError>,
+}
+
+/// The variables of `row` that none of `rest` names (R8 round 10): what
+/// the rest of the query part never reads, so rows needn't carry it. A
+/// name counts as used when it appears anywhere in the clauses' syntax
+/// tree (as a variable, a pattern's name, or even a string), and nothing
+/// is dropped before a `*` projection.
+fn dead_vars(row: Option<&Row>, rest: &[Clause]) -> Vec<String> {
+    let Some(row) = row else { return Vec::new() };
+    let text = format!("{rest:?}");
+    if text.contains("star: true") {
+        return Vec::new();
+    }
+    row.keys()
+        .filter(|k| !k.starts_with(' ') && !text.contains(&format!("{k:?}")))
+        .cloned()
+        .collect()
 }
 
 /// Whether duplicates of rows coming out of a `MATCH` can't change the
@@ -494,9 +530,26 @@ impl Exec<'_> {
     }
 
     /// Rough memory of a binding table: 96 bytes a value.
+    /// `graph.max_memory_mb` over `rows`: each row's slots and what its
+    /// values hold ([`crate::value::approx_bytes`]), from a sample of up to
+    /// 64 rows spread over them (R8 round 10, decision G81; before, 96
+    /// bytes a slot, which missed the elements' properties, so one LDBC
+    /// statement could hold a gigabyte).
     pub(crate) fn check_memory(&self, rows: &[Row]) -> Result<()> {
-        let width = rows.first().map_or(0, HashMap::len) + 1;
-        if rows.len().saturating_mul(width).saturating_mul(96) > self.b.max_memory {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let step = rows.len().div_ceil(64);
+        let (mut sampled, mut bytes) = (0usize, 0usize);
+        for r in rows.iter().step_by(step) {
+            sampled += 1;
+            bytes += 48
+                + r.iter()
+                    .map(|(k, v)| 64 + k.len() + crate::value::approx_bytes(v))
+                    .sum::<usize>();
+        }
+        let estimate = (bytes / sampled.max(1)).saturating_mul(rows.len());
+        if estimate > self.b.max_memory {
             return Err(budget_error(
                 "memory",
                 format!("graph.max_memory_mb = {}", self.b.max_memory >> 20),
@@ -590,6 +643,16 @@ impl Exec<'_> {
                 Box::new(self.lift_patterns(a, out)),
                 Box::new(self.lift_patterns(b, out)),
             ),
+            Expr::Func { name, args, .. }
+                if args.len() == 1 && matches!(name.as_str(), "startnode" | "endnode") =>
+            {
+                let s = self.next_slot();
+                out.push((
+                    s.clone(),
+                    Lifted::EndNode(args[0].clone(), name == "startnode"),
+                ));
+                Expr::Slot(s)
+            }
             Expr::Func {
                 name,
                 distinct,
@@ -614,38 +677,256 @@ impl Exec<'_> {
                 else_: else_.as_ref().map(|s| Box::new(self.lift_patterns(s, out))),
             },
             Expr::List(l) => Expr::List(l.iter().map(|a| self.lift_patterns(a, out)).collect()),
+            Expr::ListComp { .. } | Expr::Quantifier { .. } | Expr::Reduce { .. }
+                if has_deep(e) =>
+            {
+                let s = self.next_slot();
+                out.push((s.clone(), Lifted::Deep(e.clone())));
+                Expr::Slot(s)
+            }
             other => other.clone(),
         }
+    }
+
+    /// The values of `e` for each of `rows`, pattern predicates and
+    /// subqueries in it resolved first: a pattern predicate once for all
+    /// rows, a comprehension over them once for all the rows' elements.
+    /// Slots are written into `rows` and removed again.
+    pub(crate) async fn eval_rows(&mut self, e: &Expr, rows: &mut [Row]) -> Result<Vec<Value>> {
+        let mut pats = Vec::new();
+        let lifted = if has_deep(e) {
+            self.lift_patterns(e, &mut pats)
+        } else {
+            e.clone()
+        };
+        for (slot, l) in &pats {
+            let vals = Box::pin(self.lifted_values(l, rows)).await?;
+            for (r, v) in rows.iter_mut().zip(vals) {
+                r.insert(slot.clone(), v);
+            }
+        }
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows.iter_mut() {
+            tokio::task::consume_budget().await;
+            out.push(eval(&lifted, r, self.params)?);
+            for (s, _) in &pats {
+                r.remove(s);
+            }
+        }
+        Ok(out)
+    }
+
+    /// One lifted predicate's or subquery's value for each of `rows`.
+    async fn lifted_values(&mut self, l: &Lifted, rows: &mut [Row]) -> Result<Vec<Value>> {
+        let elements = |rows: &[Row],
+                        lists: Vec<Value>,
+                        var: &str|
+         -> Result<(Vec<Row>, Vec<usize>, Vec<bool>)> {
+            let (mut inner, mut owner, mut null) =
+                (Vec::new(), Vec::new(), vec![false; rows.len()]);
+            for (i, (r, l)) in rows.iter().zip(lists).enumerate() {
+                match l {
+                    Value::Null => null[i] = true,
+                    Value::List(items) => {
+                        for x in items {
+                            let mut ir = r.clone();
+                            ir.insert(var.to_owned(), x);
+                            inner.push(ir);
+                            owner.push(i);
+                        }
+                    }
+                    other => {
+                        return Err(SprigError::new(
+                            SprigCode::GraphPropertyType,
+                            format!("Type mismatch: IN over a {}", other.type_name()),
+                        ));
+                    }
+                }
+            }
+            Ok((inner, owner, null))
+        };
+        Ok(match l {
+            Lifted::Pattern(p) => {
+                let hits = self.pattern_hits(rows, p).await?;
+                (0..rows.len())
+                    .map(|i| Value::Bool(hits.contains(&i)))
+                    .collect()
+            }
+            Lifted::Subquery(k, q) => {
+                let mut v = Vec::with_capacity(rows.len());
+                for r in rows.iter() {
+                    v.push(self.subquery_value(*k, q, r).await?);
+                }
+                v
+            }
+            Lifted::Deep(Expr::ListComp {
+                var,
+                list,
+                pred,
+                map,
+            }) => {
+                let lists = self.eval_rows(list, rows).await?;
+                let (mut inner, owner, null) = elements(rows, lists, var)?;
+                let keep: Vec<bool> = match pred {
+                    Some(p) => {
+                        let mut keep = Vec::with_capacity(inner.len());
+                        for v in self.eval_rows(p, &mut inner).await? {
+                            keep.push(v.truth()? == Some(true));
+                        }
+                        keep
+                    }
+                    None => vec![true; inner.len()],
+                };
+                let (mut kept, mut kept_owner) = (Vec::new(), Vec::new());
+                for ((r, o), k) in inner.into_iter().zip(owner).zip(keep) {
+                    if k {
+                        kept.push(r);
+                        kept_owner.push(o);
+                    }
+                }
+                let vals = match map {
+                    Some(m) => self.eval_rows(m, &mut kept).await?,
+                    None => kept
+                        .iter_mut()
+                        .map(|r| r.remove(var.as_str()).unwrap_or(Value::Null))
+                        .collect(),
+                };
+                let mut out: Vec<Vec<Value>> = vec![Vec::new(); rows.len()];
+                for (o, v) in kept_owner.into_iter().zip(vals) {
+                    out[o].push(v);
+                }
+                out.into_iter()
+                    .zip(null)
+                    .map(|(l, n)| if n { Value::Null } else { Value::List(l) })
+                    .collect()
+            }
+            Lifted::Deep(Expr::Quantifier {
+                kind,
+                var,
+                list,
+                pred,
+            }) => {
+                let lists = self.eval_rows(list, rows).await?;
+                let (mut inner, owner, null) = elements(rows, lists, var)?;
+                let truths = self.eval_rows(pred, &mut inner).await?;
+                let mut per: Vec<Vec<Value>> = vec![Vec::new(); rows.len()];
+                for (o, t) in owner.into_iter().zip(truths) {
+                    per[o].push(t);
+                }
+                // The quantifier over the elements' truths.
+                let mut out = Vec::with_capacity(rows.len());
+                for (ts, n) in per.into_iter().zip(null) {
+                    out.push(if n {
+                        Value::Null
+                    } else {
+                        let q = Expr::Quantifier {
+                            kind: kind.clone(),
+                            var: " q".into(),
+                            list: Box::new(Expr::Lit(Value::List(ts))),
+                            pred: Box::new(Expr::Var(" q".into())),
+                        };
+                        eval(&q, &Row::new(), self.params)?
+                    });
+                }
+                out
+            }
+            Lifted::Deep(Expr::Reduce {
+                acc,
+                init,
+                var,
+                list,
+                expr,
+            }) => {
+                let inits = self.eval_rows(init, rows).await?;
+                let lists = self.eval_rows(list, rows).await?;
+                let mut out = Vec::with_capacity(rows.len());
+                for ((r, a), l) in rows.iter().zip(inits).zip(lists) {
+                    let items = match l {
+                        Value::Null => {
+                            out.push(Value::Null);
+                            continue;
+                        }
+                        Value::List(items) => items,
+                        other => {
+                            return Err(SprigError::new(
+                                SprigCode::GraphPropertyType,
+                                format!("Type mismatch: IN over a {}", other.type_name()),
+                            ));
+                        }
+                    };
+                    let mut a = a;
+                    for x in items {
+                        let mut ir = [r.clone()];
+                        ir[0].insert(acc.clone(), a);
+                        ir[0].insert(var.clone(), x);
+                        a = self
+                            .eval_rows(expr, &mut ir)
+                            .await?
+                            .pop()
+                            .unwrap_or(Value::Null);
+                    }
+                    out.push(a);
+                }
+                out
+            }
+            Lifted::EndNode(arg, start) => {
+                let rels = self.eval_rows(arg, rows).await?;
+                let mut ids: Vec<u64> = Vec::new();
+                for r in &rels {
+                    match r {
+                        Value::Rel(r) => ids.push(if *start { r.src } else { r.dst }),
+                        Value::Null => {}
+                        other => {
+                            return Err(SprigError::new(
+                                SprigCode::GraphPropertyType,
+                                format!(
+                                    "Type mismatch: {}() of a {}",
+                                    if *start { "startNode" } else { "endNode" },
+                                    other.type_name()
+                                ),
+                            ));
+                        }
+                    }
+                }
+                ids.sort_unstable();
+                ids.dedup();
+                let found: HashMap<u64, Arc<Node>> = if ids.is_empty() {
+                    HashMap::new()
+                } else {
+                    self.store
+                        .nodes(&ids)
+                        .await?
+                        .iter()
+                        .map(|n| (n.id, self.node_val(n)))
+                        .collect()
+                };
+                rels.iter()
+                    .map(|r| match r {
+                        Value::Rel(r) => found
+                            .get(&if *start { r.src } else { r.dst })
+                            .map_or(Value::Null, |n| Value::Node(Arc::clone(n))),
+                        _ => Value::Null,
+                    })
+                    .collect()
+            }
+            Lifted::Deep(other) => {
+                let mut v = Vec::with_capacity(rows.len());
+                for r in rows.iter() {
+                    v.push(eval(other, r, self.params)?);
+                }
+                v
+            }
+        })
     }
 
     /// Evaluates a predicate with pattern predicates over `rows`, keeping
     /// the rows where it is true.
     pub(crate) async fn filter(&mut self, rows: Vec<Row>, pred: &Expr) -> Result<Vec<Row>> {
-        let mut pats = Vec::new();
-        let pred = self.lift_patterns(pred, &mut pats);
         let mut rows = rows;
-        for (slot, l) in &pats {
-            match l {
-                Lifted::Pattern(p) => {
-                    let hits = self.pattern_hits(&rows, p).await?;
-                    for (i, r) in rows.iter_mut().enumerate() {
-                        r.insert(slot.clone(), Value::Bool(hits.contains(&i)));
-                    }
-                }
-                Lifted::Subquery(k, q) => {
-                    for r in &mut rows {
-                        let v = self.subquery_value(*k, q, r).await?;
-                        r.insert(slot.clone(), v);
-                    }
-                }
-            }
-        }
+        let vals = self.eval_rows(pred, &mut rows).await?;
         let mut out = Vec::with_capacity(rows.len());
-        for mut r in rows {
-            if eval(&pred, &r, self.params)?.truth()? == Some(true) {
-                for (s, _) in &pats {
-                    r.remove(s);
-                }
+        for (r, v) in rows.into_iter().zip(vals) {
+            if v.truth()? == Some(true) {
                 out.push(r);
             }
         }
@@ -658,27 +939,15 @@ impl Exec<'_> {
         // statement never stalls the gateway's other tasks (its watchdog
         // aborts a runtime stuck for 2 s).
         tokio::task::consume_budget().await;
-        let mut has_pattern = false;
-        e.walk(&mut |x| has_pattern |= matches!(x, Expr::Pattern(_) | Expr::Subquery(..)));
-        if !has_pattern {
+        if !has_deep(e) {
             return eval(e, row, self.params);
         }
-        let mut pats = Vec::new();
-        let lifted = self.lift_patterns(e, &mut pats);
-        let mut r = row.clone();
-        for (slot, l) in &pats {
-            let v = match l {
-                Lifted::Pattern(p) => Value::Bool(
-                    !self
-                        .pattern_hits(std::slice::from_ref(row), p)
-                        .await?
-                        .is_empty(),
-                ),
-                Lifted::Subquery(k, q) => self.subquery_value(*k, q, row).await?,
-            };
-            r.insert(slot.clone(), v);
-        }
-        eval(&lifted, &r, self.params)
+        let mut one = [row.clone()];
+        Ok(self
+            .eval_rows(e, &mut one)
+            .await?
+            .pop()
+            .unwrap_or(Value::Null))
     }
 
     /// The value of `EXISTS { }`, `COUNT { }` or `COLLECT { }` for `row`.
@@ -983,6 +1252,14 @@ impl Exec<'_> {
                     where_,
                 } => {
                     let mult_ok = dup_insensitive(&clauses[i + 1..]);
+                    let dead = dead_vars(rows.first(), &clauses[i..]);
+                    if !dead.is_empty() {
+                        for r in &mut rows {
+                            for d in &dead {
+                                r.remove(d);
+                            }
+                        }
+                    }
                     rows = self
                         .match_clause(rows, patterns, where_.as_ref(), *optional, mult_ok)
                         .await?;
@@ -995,9 +1272,18 @@ impl Exec<'_> {
                     }
                 }
                 Clause::Unwind { expr, alias } => {
+                    // Variables no later clause names are dropped before
+                    // each row is copied once per element (R8 round 10:
+                    // IC9's `WITH collect(f) AS friends UNWIND friends AS
+                    // friend` copied the whole list into every row).
+                    let dead = dead_vars(rows.first(), &clauses[i + 1..]);
                     let mut out = Vec::new();
-                    for r in rows {
-                        match self.eval_full(expr, &r).await? {
+                    for mut r in rows {
+                        let v = self.eval_full(expr, &r).await?;
+                        for d in &dead {
+                            r.remove(d);
+                        }
+                        match v {
                             Value::Null => {}
                             Value::List(l) => {
                                 for x in l {
@@ -1369,12 +1655,28 @@ impl Exec<'_> {
             } else {
                 None
             };
+            // Items with a pattern predicate or subquery, for every row at
+            // once (R8 round 10: IC7's `RETURN ..., not((liker)-[:KNOWS]-
+            // (person))` ran one search per row, thousands of round trips).
+            let mut rows = rows;
+            let mut pre: Vec<Option<std::vec::IntoIter<Value>>> = Vec::with_capacity(items.len());
+            for (e, _) in &items {
+                pre.push(if !lazy && needed.is_none() && has_deep(e) {
+                    Some(self.eval_rows(e, &mut rows).await?.into_iter())
+                } else {
+                    None
+                });
+            }
             'rows: for r in rows {
                 if needed.is_some_and(|n| out.len() >= n) {
                     break;
                 }
                 let mut vals = Vec::with_capacity(items.len());
-                for (e, _) in &items {
+                for (ii, (e, _)) in items.iter().enumerate() {
+                    if let Some(it) = pre[ii].as_mut() {
+                        vals.push(it.next().unwrap_or(Value::Null));
+                        continue;
+                    }
                     match self.eval_full(e, &r).await {
                         Ok(v) => vals.push(v),
                         Err(e) if lazy && is_row_error(&e) => {
@@ -1410,9 +1712,12 @@ impl Exec<'_> {
                     };
                     ks.push(v);
                 }
-                keyed.push((ks, vals, r));
+                keyed.push((ks, keyed.len(), vals, r));
             }
-            keyed.sort_by(|a, b| {
+            // Ties keep their input order (the position is the last key),
+            // so a partial sort gives what the full stable sort gave.
+            let cmp = |a: &(Vec<Value>, usize, Vec<Value>, Row),
+                       b: &(Vec<Value>, usize, Vec<Value>, Row)| {
                 for (i, (_, asc)) in p.order.iter().enumerate() {
                     let o = a.0[i].order(&b.0[i]);
                     let o = if *asc { o } else { o.reverse() };
@@ -1420,9 +1725,27 @@ impl Exec<'_> {
                         return o;
                     }
                 }
-                std::cmp::Ordering::Equal
-            });
-            out = keyed.into_iter().map(|(_, v, r)| (v, r)).collect();
+                a.1.cmp(&b.1)
+            };
+            // ORDER BY ... LIMIT n (R8 round 10, LDBC IC9): only the first
+            // SKIP + LIMIT rows are put in order.
+            let top = self
+                .const_int(p.limit.as_ref(), "LIMIT")?
+                .map(|l| {
+                    self.const_int(p.skip.as_ref(), "SKIP")
+                        .map(|s| s.unwrap_or(0).saturating_add(l))
+                })
+                .transpose()?;
+            match top {
+                Some(0) => keyed.clear(),
+                Some(n) if n < keyed.len() => {
+                    keyed.select_nth_unstable_by(n - 1, cmp);
+                    keyed.truncate(n);
+                    keyed.sort_unstable_by(cmp);
+                }
+                _ => keyed.sort_unstable_by(cmp),
+            }
+            out = keyed.into_iter().map(|(_, _, v, r)| (v, r)).collect();
         }
         let skip = self.const_int(p.skip.as_ref(), "SKIP")?.unwrap_or(0);
         let limit = self.const_int(p.limit.as_ref(), "LIMIT")?;

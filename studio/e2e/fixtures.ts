@@ -41,3 +41,26 @@ export async function typeSql(page: Page, text: string): Promise<void> {
   await page.keyboard.press('Delete');
   await page.keyboard.insertText(text);
 }
+
+/** Pages that live in a section's side panel since the workspace redesign
+ * (decision R1): the section to open first. Activity-bar pages need no entry. */
+const SECTION_OF: Record<string, string> = {
+  'Automatic indexing': 'Performance',
+  Approvals: 'Performance',
+  'Approval policy': 'Performance',
+  Shards: 'Performance',
+  'Users and access': 'Access control',
+  'Roles and policies': 'Access control',
+  Security: 'Access control',
+  Redis: 'Explorer',
+};
+
+/** Opens a Studio page by its name, through its section when it has one. */
+export async function openPage(page: Page, name: string): Promise<void> {
+  const section = SECTION_OF[name];
+  if (section) await page.getByRole('navigation', { name: 'Sections' }).getByRole('link', { name: section, exact: true }).click();
+  const links = section
+    ? page.getByRole('complementary').getByRole('navigation', { name: section })
+    : page.getByRole('navigation', { name: 'Sections' });
+  await links.getByRole('link', { name, exact: true }).click();
+}

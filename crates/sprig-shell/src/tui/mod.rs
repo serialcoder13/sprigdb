@@ -9,7 +9,12 @@ pub mod app;
 pub mod complete;
 pub mod editor;
 pub mod explorer;
+pub mod icons;
+pub mod mascot;
+pub mod palette;
 pub mod results;
+pub mod table;
+pub mod theme;
 
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -44,6 +49,19 @@ use crate::output::Writer;
 use app::{App, DataTab, Effect, Fixed, Msg, TabId};
 
 /// `s` cut to `w` display columns, with `…` when cut.
+#[must_use]
+pub fn clip_lines(s: &str, n: usize) -> String {
+    let total = s.lines().count();
+    let mut out: Vec<&str> = s.lines().take(n).collect();
+    let more = total.saturating_sub(n);
+    let tail = format!("... and {more} more");
+    if more > 0 {
+        out.push(&tail);
+    }
+    out.join("\n")
+}
+
+/// `s` on one line, cut to `w` columns with an ellipsis.
 #[must_use]
 pub fn clip(s: &str, w: usize) -> String {
     let s = s.replace(['\n', '\r', '\t'], " ");
@@ -297,7 +315,7 @@ impl Rt {
                     let d = runner.describe();
                     let db = runner.database.clone();
                     *runners_entry.lock().await = runner;
-                    let _ = tx.send(Msg::TabOpened(DataTab::new(id, lang, d, db)));
+                    let _ = tx.send(Msg::TabOpened(Box::new(DataTab::new(id, lang, d, db))));
                 });
             }
             Effect::CloseTab(id) => {
@@ -373,6 +391,64 @@ impl Rt {
                 let msg = export(app, tab, format);
                 app.status = msg;
             }
+            Effect::LoadLibrary => {
+                let c = self.client.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(Msg::Library(c.library(200).await));
+                });
+            }
+            Effect::LibrarySave(q) => {
+                let c = self.client.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = c
+                        .library_save(&q.name, &q.lang, q.database.as_deref(), &q.text)
+                        .await
+                    {
+                        let _ = tx.send(Msg::Status(format!(
+                            "\"{}\" is saved here; the catalog didn't take it: {e}",
+                            q.name
+                        )));
+                    }
+                });
+            }
+            Effect::LibraryRecord(run) => {
+                let c = self.client.clone();
+                // History is best effort: a failure isn't worth a status line.
+                tokio::spawn(async move {
+                    let _ = c.library_record(&run.body()).await;
+                });
+            }
+            Effect::TableInfo(id, db) => {
+                let c = self.client.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(Msg::TableInfo(id, c.database_catalog(&db).await));
+                });
+            }
+            Effect::TableQuery(id, db, p, sql) => {
+                let (c, caps) = (self.client.clone(), self.caps);
+                tokio::spawn(async move {
+                    let mut s = Collect::default();
+                    let r = c
+                        .query_in(Some(&db), "sql", &sql, None, caps, &mut s)
+                        .await
+                        .map(|()| ResultSet::from_events(&s.0));
+                    let _ = tx.send(Msg::TableRows(id, p, r));
+                });
+            }
+            Effect::TableShards(id) => {
+                let c = self.client.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(Msg::TableShards(id, c.get("/v1/shards").await));
+                });
+            }
+            Effect::TableApply(id, db, stmts) => {
+                let (c, caps) = (self.client.clone(), self.caps);
+                tokio::spawn(async move {
+                    let r = table_apply(&c, &db, &stmts, caps).await;
+                    let _ = tx.send(Msg::TableApplied(id, r));
+                });
+            }
+            Effect::Copy(text) => copy_osc52(&text),
             Effect::InboxRefresh => {
                 let src = InboxSource {
                     client: self.client.clone(),
@@ -403,6 +479,67 @@ impl Rt {
         }
         true
     }
+}
+
+/// Applies a table tab's statements in one transaction: a statement that
+/// names a row and changes none is a conflict, which rolls everything back
+/// and reads those rows as they are now.
+async fn table_apply(
+    c: &DataClient,
+    db: &str,
+    stmts: &[crate::tui::table::ApplyStmt],
+    caps: Caps,
+) -> Result<Vec<crate::tui::table::Conflict>, crate::error::ShellError> {
+    let h = c.begin(Some(db), false).await?;
+    let mut stale = Vec::new();
+    for s in stmts {
+        let mut out = Collect::default();
+        if let Err(e) = c
+            .query_in(Some(db), "sql", &s.sql, Some(&h), caps, &mut out)
+            .await
+        {
+            let _ = c.end(&h, false).await;
+            return Err(e);
+        }
+        let affected = ResultSet::from_events(&out.0)
+            .last()
+            .and_then(|r| r.end.as_ref())
+            .map_or(0, |e| e.affected);
+        if affected == 0
+            && let Some(q) = &s.reread
+        {
+            stale.push((s.row, q.clone()));
+        }
+    }
+    if stale.is_empty() {
+        c.end(&h, true).await?;
+        return Ok(Vec::new());
+    }
+    c.end(&h, false).await?;
+    let mut out = Vec::new();
+    for (row, q) in stale {
+        let mut s = Collect::default();
+        let now = match c.query_in(Some(db), "sql", &q, None, caps, &mut s).await {
+            Ok(()) => ResultSet::from_events(&s.0)
+                .into_iter()
+                .find(|r| !r.columns.is_empty())
+                .and_then(|r| r.rows.into_iter().next()),
+            Err(_) => None,
+        };
+        out.push((row, now));
+    }
+    Ok(out)
+}
+
+/// Puts `text` on the clipboard with OSC 52, which most terminals (and
+/// tmux with `set-clipboard on`) pass to the system clipboard.
+fn copy_osc52(text: &str) {
+    use base64::Engine as _;
+    use std::io::Write as _;
+    let b = base64::engine::general_purpose::STANDARD.encode(text);
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b]52;c;{b}\x07");
+    let _ = out.flush();
 }
 
 /// Writes a tab's shown result to `./sprig-<time>.<ext>`.
@@ -519,6 +656,7 @@ async fn open(
         ctx.profile.confirm.unwrap_or_default(),
         admin.is_some(),
     );
+    app.saved = crate::saved::Saved::load(Some(&ctx.dir), &ctx.name);
     let (tx, mut rx) = mpsc::unbounded_channel();
     let client = runner.client.clone();
     let mut rt = Rt {
@@ -565,7 +703,11 @@ async fn open(
             return ExitCode::from(2);
         }
     };
-    let mut fx = vec![Effect::LoadCatalog, Effect::InboxRefresh];
+    let mut fx = vec![
+        Effect::LoadCatalog,
+        Effect::InboxRefresh,
+        Effect::LoadLibrary,
+    ];
     if let Some(f) = start {
         fx.extend(app.show(f));
     }

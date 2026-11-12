@@ -155,6 +155,28 @@ pub fn eval(e: &Expr, row: &Row, params: &Params) -> Result<Value> {
             }
             Value::List(out)
         }
+        Expr::Reduce {
+            acc,
+            init,
+            var,
+            list,
+            expr,
+        } => {
+            let start = eval(init, row, params)?;
+            let l = match eval(list, row, params)? {
+                Value::Null => return Ok(Value::Null),
+                Value::List(l) => l,
+                other => return Err(type_error(format!("IN over a {}", other.type_name()))),
+            };
+            let mut inner = row.clone();
+            let mut a = start;
+            for x in l {
+                inner.insert(acc.clone(), a);
+                inner.insert(var.clone(), x);
+                a = eval(expr, &inner, params)?;
+            }
+            a
+        }
         Expr::Quantifier {
             kind,
             var,

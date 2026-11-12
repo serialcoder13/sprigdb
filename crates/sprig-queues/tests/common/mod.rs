@@ -109,6 +109,63 @@ pub async fn server_with(settings: QueueSettings) -> Server {
     }
 }
 
+/// An in-process server over `catalog` with `leases` (one gateway's view
+/// of a shared lease table), no relay: two such servers over one catalog
+/// are two gateways whose owners can't reach each other (bugfix-66).
+pub async fn server_on(
+    catalog: Arc<MemCatalog>,
+    leases: Arc<dyn sprig_queues::engine::Leases>,
+    slot: u32,
+) -> Server {
+    let engine = Arc::new(QueueEngine::new(EngineDeps {
+        catalog: Arc::clone(&catalog) as Arc<dyn sprig_queues::engine::MqCatalog>,
+        leases,
+        temps: Arc::new(NoTemps),
+        clock: Arc::new(SystemClock),
+        slot,
+        peers: None,
+        placement: None,
+    }));
+    let svc = Services {
+        identity: Arc::new(TestIdentity),
+        backend: Arc::clone(&engine) as Arc<dyn sprig_proto_amqp::backend::QueueBackend>,
+        replies: DirectReplyTo::new(slot),
+    };
+    let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        loop {
+            let (s, peer) = l.accept().await.unwrap();
+            let svc = svc.clone();
+            tokio::spawn(async move {
+                let info = ConnInfo {
+                    peer,
+                    tls: false,
+                    sni: None,
+                    cert_login: None,
+                };
+                let _ = serve(s, info, &svc, Config::default(), CancellationToken::new()).await;
+            });
+        }
+    });
+    Server {
+        addr,
+        user: "acme.app".into(),
+        pass: "secret".into(),
+        catalog: Some(catalog),
+        engine: Some(engine),
+    }
+}
+
+/// The in-memory catalog [`server_with`] uses (vhost `/` is database `mq`;
+/// `acme.ro` may only read).
+pub fn mem_catalog() -> Arc<MemCatalog> {
+    Arc::new(MemCatalog::new(
+        Arc::new(|_, v| Ok(if v == "/" { "mq".into() } else { v.to_owned() })),
+        Arc::new(|p, perm, _| p.user != "ro" || perm == Perm::Read),
+    ))
+}
+
 /// [`server_with`] the default settings.
 pub async fn server() -> Server {
     server_with(QueueSettings::default()).await

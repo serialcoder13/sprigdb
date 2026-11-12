@@ -405,6 +405,15 @@ impl Mirror {
         self.shared.generation.subscribe()
     }
 
+    /// The current generation (the value [`changes`](Self::changes)
+    /// carries): it is bumped after every change, so anything worked out
+    /// from the cache after reading generation `g` stays right while the
+    /// generation is still `g`.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        *self.shared.generation.borrow()
+    }
+
     /// Waits until the cache reflects revision `rev`: an event at or after
     /// it was applied, or a progress mark reached it.
     pub async fn wait_for(&self, rev: Revision) {

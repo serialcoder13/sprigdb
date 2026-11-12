@@ -48,6 +48,9 @@ pub fn paths(row: &AutoIndexRow) -> Option<Vec<(String, i32)>> {
     doc::is_doc(&def).then(|| doc::paths_of(&def))
 }
 
+/// A document index to register: its row and its paths.
+type Wanted<'a> = (&'a AutoIndexRow, Vec<(String, i32)>);
+
 /// Keeps `doc_indexes` in step with automatic document indexes.
 #[derive(Clone)]
 pub struct DocRegistry {
@@ -74,7 +77,7 @@ impl DocRegistry {
     /// The catalog's.
     #[allow(clippy::too_many_lines)]
     pub async fn reconcile(&self, tenant: TenantId, rows: &[AutoIndexRow]) -> Result<u32> {
-        let wanted: BTreeMap<u64, (&AutoIndexRow, Vec<(String, i32)>)> = rows
+        let wanted: BTreeMap<u64, Wanted<'_>> = rows
             .iter()
             .filter(|r| matches!(r.state, IndexState::Observing | IndexState::Active))
             .filter_map(|r| Some((r.index_id.0, (r, paths(r)?))))

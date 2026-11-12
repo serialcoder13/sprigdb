@@ -104,6 +104,49 @@ pub enum Value {
     Bytes(Vec<u8>),
 }
 
+/// About how many bytes `v` holds (R8 round 10, decision G81): the
+/// statement memory budget counts these. A node, relationship or path is
+/// shared by the rows that hold it, so each holder counts its share
+/// (its size over its reference count).
+#[must_use]
+pub fn approx_bytes(v: &Value) -> usize {
+    fn props(p: &Props) -> usize {
+        p.iter()
+            .map(|(k, v)| 48 + k.len() + approx_bytes(v))
+            .sum::<usize>()
+    }
+    fn node(n: &Node) -> usize {
+        96 + n.labels.iter().map(|l| 24 + l.len()).sum::<usize>() + props(&n.props)
+    }
+    fn rel(r: &Rel) -> usize {
+        96 + r.rtype.len() + props(&r.props)
+    }
+    match v {
+        Value::String(s) => 32 + s.len(),
+        Value::Bytes(b) => 32 + b.len(),
+        // Each element's own slot, then what it holds.
+        Value::List(l) => {
+            32 + l.len() * std::mem::size_of::<Value>() + l.iter().map(approx_bytes).sum::<usize>()
+        }
+        Value::Map(m) => 32 + props(m),
+        Value::Node(n) => node(n) / Arc::strong_count(n).max(1),
+        Value::Rel(r) => rel(r) / Arc::strong_count(r).max(1),
+        Value::Path(p) => {
+            let own = 64
+                + p.nodes
+                    .iter()
+                    .map(|n| node(n) / Arc::strong_count(n).max(1))
+                    .sum::<usize>()
+                + p.rels
+                    .iter()
+                    .map(|r| rel(r) / Arc::strong_count(r).max(1))
+                    .sum::<usize>();
+            own / Arc::strong_count(p).max(1)
+        }
+        _ => 32,
+    }
+}
+
 /// Element id of a node: `n:<graph>:<rk hex>:<id>`.
 #[must_use]
 pub fn node_element_id(graph: u64, rk: u64, id: u64) -> String {

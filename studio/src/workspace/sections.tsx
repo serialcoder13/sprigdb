@@ -8,8 +8,10 @@ import {
   GitFork,
   Send,
   ServerCog,
+  History,
   Settings,
   Shield,
+  Star,
   SquareFunction,
   SquareTerminal,
   Zap,
@@ -39,6 +41,8 @@ export interface Section {
   /** At the bottom of the activity bar. */
   bottom?: boolean;
   operatorOnly?: boolean;
+  /** A section that only switches the side panel (no page of its own). */
+  panel?: 'saved' | 'history';
   testId?: string;
 }
 
@@ -60,6 +64,24 @@ export const SECTIONS: Section[] = [
     to: 'q/',
     links: [],
     owns: (rel) => starts(rel, 'q'),
+  },
+  {
+    id: 'saved',
+    label: 'nav.saved',
+    icon: Star,
+    to: '',
+    links: [],
+    owns: () => false,
+    panel: 'saved',
+  },
+  {
+    id: 'history',
+    label: 'nav.history',
+    icon: History,
+    to: '',
+    links: [],
+    owns: () => false,
+    panel: 'history',
   },
   {
     id: 'messaging',

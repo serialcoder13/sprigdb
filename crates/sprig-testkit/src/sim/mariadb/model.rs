@@ -319,7 +319,8 @@ struct Galera {
     domain: u32,
     seqno: u64,
     gtid_seq: u64,
-    cert: BTreeMap<RowRef, u64>,
+    /// The last writeset to change each row: its seqno and its node.
+    cert: BTreeMap<RowRef, (u64, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -642,8 +643,7 @@ impl Model {
         if self.orphans_run
             && let Some(c) = self.conns.get_mut(&conn)
             && c.alive
-            && c
-                .pending
+            && c.pending
                 .as_ref()
                 .is_some_and(|p| matches!(p.kind, PendingKind::Lock(_)))
         {
@@ -1029,7 +1029,7 @@ impl Model {
                 seq: gal.gtid_seq,
             };
             for (row, _) in &g.writes {
-                gal.cert.insert(row.clone(), gal.seqno);
+                gal.cert.insert(row.clone(), (gal.seqno, server.to_owned()));
             }
             let seqno = gal.seqno;
             let others: Vec<String> = gal.nodes.iter().filter(|n| *n != server).cloned().collect();
@@ -1405,15 +1405,21 @@ impl Model {
             self.rollback_txn(&server, txn);
             return ok();
         }
-        // Galera certification: first committer wins.
+        // Galera certification: first committer wins against writesets
+        // from other nodes. Two transactions on one node are already
+        // ordered by InnoDB's row locks, so a writeset this node committed
+        // never fails a later local one (measured on the dev Galera, 11.8,
+        // `innodb_snapshot_isolation` on: a transaction that wrote first,
+        // then updated a row another local transaction committed meanwhile,
+        // commits).
         if let Some(cluster) = self.servers[&server].galera.clone() {
             let g = &self.galeras[&cluster];
             let base = tx.galera_base.unwrap_or(0);
-            if tx
-                .writes
-                .keys()
-                .any(|r| g.cert.get(r).is_some_and(|s| *s > base))
-            {
+            if tx.writes.keys().any(|r| {
+                g.cert
+                    .get(r)
+                    .is_some_and(|(s, origin)| *s > base && *origin != server)
+            }) {
                 self.note(format!("{server} certification failed for {conn}"));
                 self.rollback_txn(&server, txn);
                 return err(errno::DEADLOCK);

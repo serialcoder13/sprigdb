@@ -91,6 +91,47 @@ fn tail_sampling_keeps_failures_and_slow_roots_only() {
     );
 }
 
+/// S142: a light child (`ChildSpan`) is kept with its root as a
+/// `tracing` child is, under the innermost traced span, with its
+/// attributes; outside a trace there is none.
+#[test]
+fn a_light_child_joins_its_root_trace() {
+    let tracer = Arc::new(Tracer::new(0.0, 10_000));
+    assert!(ChildSpan::start("backend.query").is_none());
+    with_tracer(&tracer, || {
+        assert!(ChildSpan::start("backend.query").is_none());
+        let root = tracing::info_span!(target: TARGET, "gateway.request", protocol = "mongo", error = tracing::field::Empty);
+        let _g = root.enter();
+        let mid = tracing::info_span!(target: TARGET, "doc.step");
+        let m = mid.enter();
+        let mut c = ChildSpan::start("backend.query").unwrap();
+        c.record("cluster", "dc-a-c1");
+        c.record("node", "n1");
+        c.set_error();
+        let ctx = c.context();
+        assert_eq!(Some(ctx.trace_id), current().map(|t| t.trace_id));
+        drop(c);
+        drop(m);
+        root.record("error", true);
+    });
+    let kept = tracer.recent();
+    assert_eq!(kept.len(), 1);
+    let t = &kept[0];
+    assert_eq!(t.spans.len(), 3, "{t:?}");
+    let root = t.root().unwrap();
+    let mid = t.children_of(root.span_id).next().unwrap();
+    assert_eq!(mid.name, "doc.step");
+    let kids: Vec<_> = t.children_of(mid.span_id).collect();
+    assert_eq!(kids.len(), 1);
+    assert_eq!(kids[0].name, "backend.query");
+    assert!(kids[0].error);
+    assert!(
+        kids[0]
+            .attributes
+            .contains(&("cluster".to_owned(), "dc-a-c1".to_owned()))
+    );
+}
+
 #[test]
 fn an_incoming_traceparent_continues_the_trace() {
     let tracer = Arc::new(Tracer::new(0.0, 10_000));

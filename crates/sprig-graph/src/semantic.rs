@@ -746,6 +746,20 @@ fn expr(e: &Expr, s: &Scope) -> Result<()> {
             inner.vars.insert(v.clone(), Kind::Any);
             expr(pred, &inner)
         }
+        Expr::Reduce {
+            acc,
+            init,
+            var: v,
+            list,
+            expr: x,
+        } => {
+            expr(init, s)?;
+            expr(list, s)?;
+            let mut inner = s.clone();
+            inner.vars.insert(acc.clone(), Kind::Any);
+            inner.vars.insert(v.clone(), Kind::Any);
+            expr(x, &inner)
+        }
         Expr::Pattern(p) => {
             // A pattern predicate may not introduce names.
             let mut names: Vec<&String> = p.start.var.iter().collect();

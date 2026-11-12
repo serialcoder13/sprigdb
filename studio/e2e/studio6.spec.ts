@@ -25,7 +25,7 @@ import { expect, test, type APIRequestContext, type Page } from '@playwright/tes
 import AxeBuilder from '@axe-core/playwright';
 import { createServer, type Server } from 'node:http';
 import { Amqp, amqpAddress } from './amqp';
-import { apiToken, LOGIN, PASSWORD, SHOTS, signIn, sql } from './fixtures';
+import { apiToken, LOGIN, PASSWORD, SHOTS, signIn, sql, openPage } from './fixtures';
 
 /** Everything this suite creates, dropped by exact name afterwards. */
 const DB6 = 'studio6_ui';
@@ -451,7 +451,7 @@ test.describe.serial('Studio round 6', () => {
     await sql(request, kid, INH, "INSERT INTO t1 (t2_id, note) VALUES (2, 'kid row')");
 
     await signIn(page);
-    await page.getByRole('link', { name: 'Inheritance' }).click();
+    await openPage(page, 'Inheritance');
     const tables = page.getByTestId('inh-tables');
     await expect(tables).toContainText(`${INH}.t1`);
     await expect(tables.getByRole('row', { name: new RegExp(`^${INH}\\.t1 id`) })).toContainText('declared here');
@@ -478,7 +478,7 @@ test.describe.serial('Studio round 6', () => {
     // The child: the tables come from acme, one level up, and the share is received.
     await signOut(page);
     await signIn(page, KID, PASSWORD);
-    await page.getByRole('link', { name: 'Inheritance' }).click();
+    await openPage(page, 'Inheritance');
     await expect(page.getByTestId('inh-tables').getByRole('row', { name: new RegExp(`^${INH}\\.t1 id`) })).toContainText('inherited from acme (1 level up)');
     await expect(page.getByTestId('inh-shares')).toContainText('received');
     await axe(page, 'inheritance-child');

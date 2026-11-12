@@ -64,17 +64,72 @@ let themesDefined = false;
 function defineThemes(): void {
   if (themesDefined) return;
   themesDefined = true;
+  // The calmer palette of the workspace redesign (decision R5): indigo
+  // keywords, burnt-orange strings, coral numbers, muted comments; every
+  // colour at 4.5:1 or more on its background.
   monaco.editor.defineTheme('sprig-light', {
     base: 'vs',
     inherit: true,
-    rules: [{ token: 'operator.sql', foreground: '57606a' }],
-    colors: {},
+    rules: [
+      { token: 'keyword', foreground: '4c5fd5' },
+      { token: 'string', foreground: '9a4a17' },
+      { token: 'number', foreground: 'b4441c' },
+      { token: 'comment', foreground: '6b7280', fontStyle: 'italic' },
+      { token: 'predefined', foreground: '8250df' },
+      { token: 'predefined.sql', foreground: '8250df' },
+      { token: 'keyword.sql', foreground: '4c5fd5' },
+      { token: 'number.sql', foreground: 'b4441c' },
+      { token: 'string.sql', foreground: '9a4a17' },
+      { token: 'operator.sql', foreground: '57606a' },
+      { token: 'operator', foreground: '57606a' },
+      { token: 'delimiter', foreground: '57606a' },
+      { token: 'delimiter.parenthesis', foreground: '57606a' },
+      { token: 'delimiter.parenthesis.sql', foreground: '57606a' },
+    ],
+    colors: {
+      'editor.background': '#ffffff',
+      'editorLineNumber.foreground': '#9aa1ab',
+      'editorLineNumber.activeForeground': '#1c2026',
+      'editor.selectionBackground': '#dfe3ea',
+      'editorBracketHighlight.foreground1': '#57606a',
+      'editorBracketHighlight.foreground2': '#57606a',
+      'editorBracketHighlight.foreground3': '#57606a',
+      'editorBracketHighlight.foreground4': '#57606a',
+      'editorBracketHighlight.foreground5': '#57606a',
+      'editorBracketHighlight.foreground6': '#57606a',
+    },
   });
   monaco.editor.defineTheme('sprig-dark', {
     base: 'vs-dark',
     inherit: true,
-    rules: [{ token: 'operator.sql', foreground: 'a8b3bf' }],
-    colors: {},
+    rules: [
+      { token: 'keyword', foreground: '8fa4ff' },
+      { token: 'string', foreground: 'f0a36c' },
+      { token: 'number', foreground: 'f08a6a' },
+      { token: 'comment', foreground: '8b929c', fontStyle: 'italic' },
+      { token: 'predefined', foreground: 'c4a7f5' },
+      { token: 'predefined.sql', foreground: 'c4a7f5' },
+      { token: 'keyword.sql', foreground: '8fa4ff' },
+      { token: 'number.sql', foreground: 'f08a6a' },
+      { token: 'string.sql', foreground: 'f0a36c' },
+      { token: 'operator.sql', foreground: 'a8b3bf' },
+      { token: 'operator', foreground: 'a8b3bf' },
+      { token: 'delimiter', foreground: 'a8b3bf' },
+      { token: 'delimiter.parenthesis', foreground: 'a8b3bf' },
+      { token: 'delimiter.parenthesis.sql', foreground: 'a8b3bf' },
+    ],
+    colors: {
+      'editor.background': '#17191d',
+      'editorLineNumber.foreground': '#6f7682',
+      'editorLineNumber.activeForeground': '#e6e8eb',
+      'editor.selectionBackground': '#343a44',
+      'editorBracketHighlight.foreground1': '#a8b3bf',
+      'editorBracketHighlight.foreground2': '#a8b3bf',
+      'editorBracketHighlight.foreground3': '#a8b3bf',
+      'editorBracketHighlight.foreground4': '#a8b3bf',
+      'editorBracketHighlight.foreground5': '#a8b3bf',
+      'editorBracketHighlight.foreground6': '#a8b3bf',
+    },
   });
 }
 
@@ -133,6 +188,8 @@ export default function Monaco({
       ariaLabel: label,
       accessibilitySupport: 'auto',
       tabSize: 2,
+      // Plain brackets: the rainbow colouring fights the calmer palette.
+      bracketPairColorization: { enabled: false },
     });
     ed.current = e;
     e.onDidChangeModelContent(() => change.current(e.getValue()));

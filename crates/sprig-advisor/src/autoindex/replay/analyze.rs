@@ -108,7 +108,14 @@ impl std::error::Error for PlanParseError {}
 /// # Errors
 /// The text isn't JSON or has no `query_block`.
 pub fn parse_plan(json: &str) -> Result<PlanRun, PlanParseError> {
-    let v: Value = serde_json::from_str(json).map_err(|e| PlanParseError(e.to_string()))?;
+    let v: Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        // MariaDB prints a condition's text unescaped, so a JSON path with
+        // a quoted key (`'$."email"'`, the document engine's paths) breaks
+        // its own JSON (S132): mend those lines and try once more.
+        Err(e) => serde_json::from_str(&mend_quotes(json))
+            .map_err(|_| PlanParseError(e.to_string()))?,
+    };
     let qb = v
         .get("query_block")
         .ok_or_else(|| PlanParseError("no query_block".into()))?;
@@ -130,6 +137,35 @@ pub fn parse_plan(json: &str) -> Result<PlanRun, PlanParseError> {
     };
     walk(qb, &mut run);
     Ok(run)
+}
+
+/// Escapes the bare `"` inside one-line string values (`"key": "text",`)
+/// of MariaDB's pretty-printed plan JSON.
+fn mend_quotes(json: &str) -> String {
+    let mut out = String::with_capacity(json.len() + 16);
+    for line in json.lines() {
+        let fixed = (|| {
+            let (head, rest) = line.split_once("\": \"")?;
+            let comma = rest.ends_with(',');
+            let body = rest.strip_suffix(',').unwrap_or(rest).strip_suffix('"')?;
+            if !body.contains('"') {
+                return None;
+            }
+            let mut v = String::with_capacity(body.len() + 8);
+            let mut prev = '\0';
+            for ch in body.chars() {
+                if ch == '"' && prev != '\\' {
+                    v.push('\\');
+                }
+                v.push(ch);
+                prev = ch;
+            }
+            Some(format!("{head}\": \"{v}\"{}", if comma { "," } else { "" }))
+        })();
+        out.push_str(fixed.as_deref().unwrap_or(line));
+        out.push('\n');
+    }
+    out
 }
 
 fn walk(v: &Value, run: &mut PlanRun) {
@@ -232,6 +268,30 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::float_cmp)]
 
     use super::*;
+
+    #[test]
+    fn mends_bare_quotes_in_conditions() {
+        // MariaDB 11.8's own output for a document-engine filter (S132).
+        let json = r#"{
+  "query_block": {
+    "select_id": 1,
+    "r_total_time_ms": 1.5,
+    "nested_loop": [
+      {
+        "table": {
+          "table_name": "orders",
+          "access_type": "ALL",
+          "r_rows": 60000,
+          "attached_condition": "json_value(orders.doc,'$."email"') = 'user5@m6.io'"
+        }
+      }
+    ]
+  }
+}"#;
+        assert!(serde_json::from_str::<Value>(json).is_err());
+        let run = parse_plan(json).unwrap();
+        assert_eq!(run.engine_ms, Some(1.5));
+    }
 
     /// Captured from MariaDB 11.8.9 on the Compose single node, on a
     /// 100,000-row table `t (id PK, a, b, c, d, pad)` and a 2,000-row

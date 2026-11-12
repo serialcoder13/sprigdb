@@ -455,6 +455,53 @@ impl DataClient {
             .await
     }
 
+    /// `Library.Get`: the caller's saved queries and last `history` runs in
+    /// the tenant's catalog (shared with Studio).
+    ///
+    /// # Errors
+    /// The API's error (an older gateway: 404; an accounts-file login: 400).
+    pub async fn library(&self, history: u32) -> Result<Value> {
+        self.get(&format!("/v1/library?history={history}")).await
+    }
+
+    /// `Library.Save`: saves `text` as `name`, replacing a query of that name.
+    ///
+    /// # Errors
+    /// The API's error.
+    pub async fn library_save(
+        &self,
+        name: &str,
+        lang: &str,
+        database: Option<&str>,
+        text: &str,
+    ) -> Result<Value> {
+        let body = json!({"name": name, "language": lang, "database": database, "text": text});
+        self.call(Method::POST, "/v1/library/saved", Some(&body))
+            .await
+    }
+
+    /// `Library.Delete`.
+    ///
+    /// # Errors
+    /// The API's error.
+    pub async fn library_delete(&self, name: &str) -> Result<Value> {
+        self.call(
+            Method::POST,
+            "/v1/library/saved:delete",
+            Some(&json!({"name": name})),
+        )
+        .await
+    }
+
+    /// `Library.Record`: one run, as `sprig` ran it.
+    ///
+    /// # Errors
+    /// The API's error.
+    pub async fn library_record(&self, run: &Value) -> Result<Value> {
+        self.call(Method::POST, "/v1/library/history", Some(run))
+            .await
+    }
+
     /// `Workload.ListFingerprints`.
     ///
     /// # Errors

@@ -125,14 +125,19 @@ pub async fn read(c: &mut Conn, tenant: TenantId) -> Result<Vec<StoredCode>> {
             sql_mode,
         });
     }
-    let views: Vec<(String, String, Option<String>)> = c
-        .exec(
-            "SELECT TABLE_SCHEMA, TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS \
-             WHERE TABLE_SCHEMA LIKE ?",
-            (&like,),
+    // Views and triggers one schema at a time: a LIKE on their schema
+    // reads every table of every tenant on the server (R9, r9scale;
+    // `sprig_catalog::infoschema`).
+    let schemas = sprig_catalog::infoschema::schemas_like(c, &like).await?;
+    let views: Vec<(String, String, Option<String>)> =
+        sprig_catalog::infoschema::read_per_schema(
+            c,
+            "SELECT TABLE_SCHEMA, TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS",
+            "TABLE_SCHEMA",
+            &schemas,
+            "",
         )
-        .await
-        .map_err(|e| db_err("views", &e))?;
+        .await?;
     for (schema, name, text) in views {
         out.push(StoredCode {
             schema,
@@ -143,14 +148,16 @@ pub async fn read(c: &mut Conn, tenant: TenantId) -> Result<Vec<StoredCode>> {
             sql_mode: String::new(),
         });
     }
-    let triggers: Vec<(String, String, String, Option<String>, String)> = c
-        .exec(
+    let triggers: Vec<(String, String, String, Option<String>, String)> =
+        sprig_catalog::infoschema::read_per_schema(
+            c,
             "SELECT TRIGGER_SCHEMA, TRIGGER_NAME, EVENT_OBJECT_TABLE, ACTION_STATEMENT, SQL_MODE \
-             FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA LIKE ?",
-            (&like,),
+             FROM information_schema.TRIGGERS",
+            "EVENT_OBJECT_SCHEMA",
+            &schemas,
+            "",
         )
-        .await
-        .map_err(|e| db_err("triggers", &e))?;
+        .await?;
     for (schema, name, table, text, sql_mode) in triggers {
         out.push(StoredCode {
             schema,

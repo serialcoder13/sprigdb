@@ -34,7 +34,7 @@ use sprig_workload::fingerprint::{Fingerprint, LiteralKind};
 use sprig_workload::recorder::{ExecSummary, ProbePlan};
 use sprig_workload::samples::{SampleContext, SamplePayload};
 use sprig_workload::shape::PredOp;
-use sprig_workload::window::{SampleValue, SampledLiterals};
+use sprig_workload::window::{SampleValue, SampledLiterals, SampledSlot};
 
 use super::sql::SqlSession;
 use crate::workload::{FRONT_RUN, FrontCapture, FrontRun};
@@ -56,7 +56,7 @@ pub struct Started {
     literals: SampledLiterals,
     plan: ProbePlan,
     run: Arc<FrontRun>,
-    started: Instant,
+    at: Instant,
     db: String,
     db_id: DbId,
     session: u64,
@@ -275,21 +275,51 @@ pub async fn start(
             )
         })
         .collect();
-    let text = shape_text(name, body, db, &filter);
     let db_id = cap.table.as_ref().map_or(DbId(0), |t| t.db_id);
-    let (fp, literals) = sprig_workload::fingerprint::mongo::fingerprint(&MongoInput {
-        cmd: name,
+    let object_id = cap.table.as_ref().map(|t| t.object_id);
+    let max_text_bytes = cap.workload.max_text_bytes();
+    // A point find's fingerprint depends only on its key (S147): reused
+    // while the key stays the same; its values are this command's.
+    let pk = point_key(
+        name,
+        body,
+        &filter,
+        &ps,
         db,
+        &coll,
+        &m.table,
         db_id,
-        coll: &coll,
-        table: &m.table,
-        object_id: cap.table.as_ref().map(|t| t.object_id),
-        shape_text: &text,
-        preds: ps,
-        sort,
-        limit,
-        max_text_bytes: cap.workload.max_text_bytes(),
+        object_id,
+        max_text_bytes,
+    );
+    let memo = pk.as_ref().and_then(|k| {
+        sql.point_fp
+            .as_ref()
+            .filter(|(mk, _)| mk == k)
+            .map(|(_, fp)| fp.clone())
     });
+    let (fp, literals) = if let Some(fp) = memo {
+        (fp, point_literals(&ps))
+    } else {
+        let text = shape_text(name, body, db, &filter);
+        let r = sprig_workload::fingerprint::mongo::fingerprint(&MongoInput {
+            cmd: name,
+            db,
+            db_id,
+            coll: &coll,
+            table: &m.table,
+            object_id,
+            shape_text: &text,
+            preds: ps,
+            sort,
+            limit,
+            max_text_bytes,
+        });
+        if let Some(k) = pk {
+            sql.point_fp = Some((k, r.0.clone()));
+        }
+        r
+    };
     let plan = cap.workload.front_plan(tenant, &fp);
     let run = Arc::new(FrontRun {
         probe: plan.examined && !sql.in_txn,
@@ -303,11 +333,93 @@ pub async fn start(
         literals,
         plan,
         run,
-        started: Instant::now(),
+        at: Instant::now(),
         db: db.to_owned(),
         db_id,
         session,
     })
+}
+
+/// What a point find's fingerprint depends on (perf1, S147): a `find` that
+/// the point-read path answers (filter `{_id: <scalar>}`, no sort,
+/// projection, hint or collation), so its shape is the `_id` value's type
+/// and which of `skip`, `limit` and `singleBatch` it carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PointKey {
+    db: String,
+    coll: String,
+    table: String,
+    db_id: DbId,
+    object_id: Option<sprig_common::ids::ObjectId>,
+    max_text_bytes: usize,
+    id_type: u8,
+    value_kind: Option<sprig_workload::fingerprint::LiteralKind>,
+    skip: bool,
+    limit: bool,
+    single_batch: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn point_key(
+    name: &str,
+    body: &Document,
+    filter: &Document,
+    ps: &[MongoPred],
+    db: &str,
+    coll: &str,
+    table: &str,
+    db_id: DbId,
+    object_id: Option<sprig_common::ids::ObjectId>,
+    max_text_bytes: usize,
+) -> Option<PointKey> {
+    if name != "find"
+        || !body
+            .keys()
+            .all(|k| super::commands::POINT_FIND_KEYS.contains(&k.as_str()))
+        || body.get_document("sort").is_ok_and(|d| !d.is_empty())
+        || body.get_document("projection").is_ok_and(|d| !d.is_empty())
+        || body.contains_key("sort") && body.get_document("sort").is_err()
+        || body.contains_key("projection") && body.get_document("projection").is_err()
+        || filter.len() != 1
+    {
+        return None;
+    }
+    let id = filter.get("_id")?;
+    if matches!(id, Bson::Document(_) | Bson::Array(_)) {
+        return None;
+    }
+    // One equality with its value, or none (a value without a sample).
+    let value_kind = match ps {
+        [] => None,
+        [p] if matches!(p.cmp, PredOp::Eq) && p.values.len() == 1 => Some(p.values[0].kind),
+        _ => return None,
+    };
+    Some(PointKey {
+        db: db.to_owned(),
+        coll: coll.to_owned(),
+        table: table.to_owned(),
+        db_id,
+        object_id,
+        max_text_bytes,
+        id_type: id.element_type() as u8,
+        value_kind,
+        skip: body.contains_key("skip"),
+        limit: body.contains_key("limit"),
+        single_batch: body.get_bool("singleBatch").unwrap_or(false),
+    })
+}
+
+/// A point find's sampled values, as the fingerprint gives them.
+fn point_literals(ps: &[MongoPred]) -> SampledLiterals {
+    SampledLiterals {
+        slots: ps
+            .iter()
+            .map(|p| match p.values.first() {
+                Some(v) => SampledSlot::One(v.clone()),
+                None => SampledSlot::List(Vec::new()),
+            })
+            .collect(),
+    }
 }
 
 /// Runs `fut` with the command's statements under its [`FrontRun`].
@@ -359,12 +471,12 @@ fn affected(name: &str, reply: &Document) -> u64 {
 /// Records the command after it ran. `raw_n`: the documents of a reply
 /// sent as raw bytes (a point read).
 pub fn finish(
-    st: Started,
+    st: &Started,
     r: &Result<Document, sprig_proto_mongo::errors::MongoError>,
     raw_n: Option<i64>,
     name: &str,
 ) {
-    let latency_us = u64::try_from(st.started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let latency_us = u64::try_from(st.at.elapsed().as_micros()).unwrap_or(u64::MAX);
     let (error, rows_returned, rows_affected) = match r {
         Ok(d) => (
             false,
@@ -469,6 +581,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::many_single_char_names)]
     fn aggregate_parts() {
         let b = doc! {"aggregate": "c", "pipeline": [{"$match": {"a": 1}}, {"$sort": {"b": -1}}, {"$limit": 3}]};
         let (f, s, l) = parts("aggregate", &b).unwrap();
@@ -482,5 +595,73 @@ mod tests {
             &doc! {},
         );
         assert_eq!(t, r#"{"filter":{"a":{"$eq":"?number"}}}"#);
+    }
+
+    /// S147: point finds with the same key get the same fingerprint when
+    /// computed afresh (so reusing it is exact), and the key changes with
+    /// anything their shape reads; other finds have no key.
+    #[test]
+    fn point_finds_share_a_fingerprint_by_key() {
+        let m = meta(&[]);
+        let fresh = |b: &Document| {
+            let (f, _, limit) = parts("find", b).unwrap();
+            let mut ps = Vec::new();
+            preds(&f, &m, &mut ps);
+            let key = point_key("find", b, &f, &ps, "d", "c", "c", DbId(7), None, 4096);
+            let text = shape_text("find", b, "d", &f);
+            let lits = point_literals(&ps);
+            let (fp, sampled) = sprig_workload::fingerprint::mongo::fingerprint(&MongoInput {
+                cmd: "find",
+                db: "d",
+                db_id: DbId(7),
+                coll: "c",
+                table: "c",
+                object_id: None,
+                shape_text: &text,
+                preds: ps,
+                sort: Vec::new(),
+                limit,
+                max_text_bytes: 4096,
+            });
+            assert_eq!(lits, sampled, "{b}");
+            (key, fp)
+        };
+        let lsid = doc! {"id": bson::Binary { subtype: bson::spec::BinarySubtype::Uuid, bytes: vec![1; 16] }};
+        let (k1, f1) = fresh(
+            &doc! {"find": "c", "filter": {"_id": "user1"}, "limit": 1, "singleBatch": true, "$db": "d", "lsid": lsid.clone()},
+        );
+        let (k2, f2) = fresh(
+            &doc! {"find": "c", "filter": {"_id": "user99"}, "limit": 1, "singleBatch": true, "$db": "d"},
+        );
+        assert!(k1.is_some());
+        assert_eq!(k1, k2);
+        assert_eq!(f1.id, f2.id);
+        assert_eq!(f1.text, f2.text);
+        assert_eq!(f1.literals, f2.literals);
+        assert_eq!(f1.list_slots, f2.list_slots);
+        // Each of these changes the shape, and the key.
+        for b in [
+            doc! {"find": "c", "filter": {"_id": 5}, "limit": 1, "singleBatch": true},
+            doc! {"find": "c", "filter": {"_id": "u"}, "singleBatch": true},
+            doc! {"find": "c", "filter": {"_id": "u"}, "limit": 1},
+            doc! {"find": "c", "filter": {"_id": "u"}, "limit": 1, "singleBatch": true, "skip": 0},
+        ] {
+            let (k, f) = fresh(&b);
+            assert!(k.is_some() && k != k1, "{b}");
+            assert!(f.id != f1.id || f.literals != f1.literals, "{b}");
+        }
+        // No key: not a point find the fast path answers.
+        for b in [
+            doc! {"find": "c", "filter": {"_id": {"$gt": 1}}},
+            doc! {"find": "c", "filter": {"_id": 1, "a": 2}},
+            doc! {"find": "c", "filter": {"_id": 1}, "sort": {"a": 1}},
+            doc! {"find": "c", "filter": {"_id": 1}, "projection": {"a": 1}},
+            doc! {"find": "c", "filter": {"_id": 1}, "hint": {"a": 1}},
+            doc! {"find": "c", "filter": {"_id": 1}, "collation": {"locale": "fr"}},
+            doc! {"find": "c", "filter": {"_id": [1]}},
+            doc! {"find": "c", "filter": {"_id": null}},
+        ] {
+            assert!(fresh(&b).0.is_none(), "{b}");
+        }
     }
 }

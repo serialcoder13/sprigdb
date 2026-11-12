@@ -139,7 +139,22 @@ pub fn ctx_for(
     });
     let allow = match body.get("allowDiskUse") {
         None | Some(Bson::Null) => default,
-        Some(Bson::Boolean(b)) => *b,
+        Some(Bson::Boolean(b)) => {
+            if !*b {
+                sprig_doc::spill::note_disallowed();
+            }
+            *b
+        }
+        // `find` words it differently (MongoDB 8.0).
+        Some(other) if cmd == "find" => {
+            return Err(MongoError::new(
+                code::TYPE_MISMATCH,
+                format!(
+                    "Field 'allowDiskUse' should be a boolean value, but found: {}",
+                    sprig_doc::update::type_name(other)
+                ),
+            ));
+        }
         Some(other) => {
             return Err(MongoError::new(
                 code::TYPE_MISMATCH,

@@ -839,8 +839,8 @@ impl SessionValues {
                 "attrs": self.attrs.clone().unwrap_or(serde_json::Value::Null),
                 "sub": self.subtree.as_deref().cloned().unwrap_or_default(),
                 "man": self.managed.as_deref().cloned().unwrap_or_default(),
-                "subt": self.subtree_table,
-                "mant": self.managed_table,
+                "subt": u8::from(self.subtree_table),
+                "mant": u8::from(self.managed_table),
             }
         });
         v.to_string()
@@ -2574,4 +2574,197 @@ pub fn is_exempt(id: sprig_common::ids::ConnId) -> bool {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .contains(&id.0)
+}
+
+/// The note code of [`definer_default_note`] (chapter 29; RL57's addition,
+/// bugfix-63).
+pub const DEFINER_DEFAULT_NOTE: u16 = 39369;
+
+/// The protected tables a `CREATE PROCEDURE` or `CREATE FUNCTION` text
+/// names when it has no `SQL SECURITY` clause (MariaDB's default is
+/// `DEFINER`, so since RL57 the routine applies its definer's policies,
+/// not its caller's), as `db.table`, in order of first mention; `None`
+/// for any other statement, an explicit clause, or no protected table.
+/// `protected` holds `(db, table)` pairs in lower case; `db` is the
+/// database an unqualified name means (the routine's, else the current).
+#[must_use]
+pub fn definer_default_tables(
+    text: &[u8],
+    lex_opts: &LexOptions,
+    db: Option<&str>,
+    protected: &[(String, String)],
+) -> Option<Vec<String>> {
+    use sprig_sql::lex::{self, TokenKind, ident_value};
+    let toks: Vec<(TokenKind, String)> = lex::lex(text, lex_opts)
+        .ok()?
+        .iter()
+        .filter(|t| !t.kind.is_trivia())
+        .map(|t| {
+            let v = if t.kind.is_ident_like() {
+                String::from_utf8_lossy(&ident_value(t.bytes(text))).into_owned()
+            } else {
+                String::from_utf8_lossy(t.bytes(text)).into_owned()
+            };
+            (t.kind, v)
+        })
+        .collect();
+    let word = |i: usize, w: &str| {
+        toks.get(i)
+            .is_some_and(|(k, v)| *k == TokenKind::Word && v.eq_ignore_ascii_case(w))
+    };
+    if !word(0, "CREATE") {
+        return None;
+    }
+    let kw = toks.iter().position(|(k, v)| {
+        *k == TokenKind::Word
+            && (v.eq_ignore_ascii_case("PROCEDURE") || v.eq_ignore_ascii_case("FUNCTION"))
+    })?;
+    // `CREATE [OR REPLACE] [DEFINER = ...] [AGGREGATE] FUNCTION|PROCEDURE`:
+    // nothing else may come first (a trigger or event body may name a
+    // function).
+    if toks[..kw].iter().any(|(k, v)| {
+        *k == TokenKind::Word
+            && ["TRIGGER", "EVENT", "VIEW", "TABLE"]
+                .iter()
+                .any(|x| v.eq_ignore_ascii_case(x))
+    }) {
+        return None;
+    }
+    if (kw..toks.len()).any(|i| word(i, "SQL") && word(i + 1, "SECURITY")) {
+        return None;
+    }
+    let ident = |i: usize| {
+        toks.get(i)
+            .filter(|(k, _)| k.is_ident_like())
+            .map(|(_, v)| v.to_lowercase())
+    };
+    let dot = |i: usize| toks.get(i).is_some_and(|(_, v)| v == ".");
+    // The routine's own database, when its name is qualified.
+    let own_db = (ident(kw + 1).is_some() && dot(kw + 2))
+        .then(|| ident(kw + 1))
+        .flatten()
+        .or_else(|| db.map(str::to_lowercase));
+    let mut found: Vec<String> = Vec::new();
+    let mut i = kw + 1;
+    while i < toks.len() {
+        let Some(a) = ident(i) else {
+            i += 1;
+            continue;
+        };
+        let (d, t, next) = match ident(i + 2) {
+            Some(b) if dot(i + 1) => (Some(a), b, i + 3),
+            _ => (own_db.clone(), a, i + 1),
+        };
+        if let Some(d) = d
+            && protected.iter().any(|(pd, pt)| *pd == d && *pt == t)
+        {
+            let n = format!("{d}.{t}");
+            if !found.contains(&n) {
+                found.push(n);
+            }
+        }
+        i = next;
+    }
+    (!found.is_empty()).then_some(found)
+}
+
+/// RL57's addition (bugfix-63): a note for a `CREATE PROCEDURE` or
+/// `CREATE FUNCTION` without `SQL SECURITY` over policy-protected tables
+/// of `ts`'s tenant, naming them (see [`definer_default_tables`]).
+#[must_use]
+pub fn definer_default_note(
+    ts: &TenantSession,
+    text: &[u8],
+    lex_opts: &LexOptions,
+    current_db: Option<&str>,
+) -> Option<super::session::LocalWarning> {
+    let cat = ts.catalog()?;
+    let state = RlsState::of(cat)?;
+    let protected: Vec<(String, String)> = state
+        .rows()
+        .security
+        .iter()
+        .filter(|s| s.enabled)
+        .filter_map(|s| {
+            let o = cat.objects.get(s.object_id)?;
+            let d = cat.databases.get(o.db_id)?;
+            Some((d.name.to_lowercase(), o.name.to_lowercase()))
+        })
+        .collect();
+    if protected.is_empty() {
+        return None;
+    }
+    let tables = definer_default_tables(text, lex_opts, current_db, &protected)?;
+    Some(super::session::LocalWarning {
+        level: "Note",
+        code: DEFINER_DEFAULT_NOTE,
+        message: format!(
+            "ER_SPRIG_RLS_DEFINER_DEFAULT: this routine has no SQL SECURITY clause, so it runs \
+             as SQL SECURITY DEFINER and applies its definer's row-level security policies, \
+             not its caller's, to {}; add SQL SECURITY INVOKER to keep the caller's",
+            tables.join(", ")
+        ),
+    })
+}
+
+#[cfg(test)]
+mod definer_default_tests {
+    use super::*;
+
+    fn t(text: &str, db: Option<&str>) -> Option<Vec<String>> {
+        let protected = vec![
+            ("app".to_owned(), "docs".to_owned()),
+            ("other".to_owned(), "secrets".to_owned()),
+        ];
+        definer_default_tables(text.as_bytes(), &LexOptions::mariadb(), db, &protected)
+    }
+
+    #[test]
+    fn routines_without_sql_security_over_protected_tables_are_noted() {
+        assert_eq!(
+            t("CREATE PROCEDURE app.p() SELECT COUNT(*) FROM docs", None),
+            Some(vec!["app.docs".to_owned()])
+        );
+        assert_eq!(
+            t(
+                "CREATE DEFINER=CURRENT_USER FUNCTION f() RETURNS INT READS SQL DATA \
+                 RETURN (SELECT COUNT(*) FROM `Docs` JOIN other.secrets USING (id))",
+                Some("app")
+            ),
+            Some(vec!["app.docs".to_owned(), "other.secrets".to_owned()])
+        );
+        // An explicit clause, either way: no note.
+        assert_eq!(
+            t(
+                "CREATE PROCEDURE app.p() SQL SECURITY DEFINER SELECT * FROM docs",
+                None
+            ),
+            None
+        );
+        assert_eq!(
+            t(
+                "create procedure app.p() sql security invoker select * from docs",
+                None
+            ),
+            None
+        );
+        // No protected table, or another database's table of that name.
+        assert_eq!(
+            t("CREATE PROCEDURE app.p() SELECT * FROM notes", None),
+            None
+        );
+        assert_eq!(
+            t("CREATE PROCEDURE p() SELECT * FROM docs", Some("x")),
+            None
+        );
+        // Not a routine.
+        assert_eq!(t("CREATE VIEW app.v AS SELECT * FROM docs", None), None);
+        assert_eq!(
+            t(
+                "CREATE TRIGGER app.tr BEFORE INSERT ON docs FOR EACH ROW SET @x = 1",
+                None
+            ),
+            None
+        );
+    }
 }

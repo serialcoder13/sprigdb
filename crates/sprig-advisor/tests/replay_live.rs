@@ -830,3 +830,267 @@ async fn estimate_and_canary_validation() {
     assert_verdicts(&results);
     assert!(leftovers.is_empty(), "{leftovers}");
 }
+
+/// The `sprig_auto_*` indexes and `_sprig_p_` columns of `schema`.t on `ep`.
+async fn automatic_on(ep: &NodeEndpoint, schema: &str) -> String {
+    scalar(
+        ep,
+        &format!(
+            "SELECT CONCAT_WS('|', (SELECT GROUP_CONCAT(DISTINCT INDEX_NAME ORDER BY INDEX_NAME) \
+             FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = \
+             't' AND INDEX_NAME LIKE 'sprig\\_auto\\_%'), (SELECT GROUP_CONCAT(COLUMN_NAME ORDER \
+             BY COLUMN_NAME) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '{schema}' AND \
+             TABLE_NAME = 't' AND COLUMN_NAME LIKE '\\_sprig\\_p\\_%'))"
+        ),
+    )
+    .await
+    .unwrap_or_default()
+}
+
+/// bugfix-61: a replica validation cut off mid-way (its future dropped, as
+/// a controller restart drops it) leaves its index on the replica, since
+/// MariaDB finishes the `ALTER` without its client. The next validation of
+/// the same candidate then aborted with `index_exists` for good; now the
+/// leftover (the primary lacks it) is dropped with the binary log off and
+/// the validation runs. The drift reconciler's sweep
+/// (`orphans::drop_leftovers`) drops leftovers too, field columns
+/// included, but never while a validation of this process runs there.
+#[tokio::test]
+async fn replica_validation_after_a_cut_off_one() {
+    use sprig_advisor::autoindex::validate::orphans::{self, NodeKind};
+    let eps = topology_or_skip!("SPRIG_TEST_MARIADB_REPLICATION");
+    let (primary, replicas) = (&eps[0], &eps[1..]);
+    let node = replicas.last().unwrap().clone();
+    let schema = "__sprig_test_bugfix14_orphan";
+    let server_id = scalar(&node, "SELECT @@server_id").await.unwrap();
+    create_fixture(primary, schema).await;
+    wait_caught_up(primary, replicas, schema, true).await;
+    let w = workload(schema, 10);
+    let good = plan(
+        schema,
+        9101,
+        &["a"],
+        FP_A_RANGE,
+        w["a_range"].clone(),
+        &w["other"],
+    );
+    let name = good.index_name();
+
+    // 1. Cut off: drop the validation's future once its index is built
+    // (it is replaying then), as a controller restart drops it.
+    let cut = {
+        let v =
+            ReplicaValidator::new(node.clone(), Arc::new(NoMarker)).with_writer(primary.clone());
+        let p = good.clone();
+        tokio::spawn(async move { v.validate(&p).await })
+    };
+    let started = Instant::now();
+    while !automatic_on(&node, schema).await.contains(&name) {
+        assert!(
+            !cut.is_finished(),
+            "the validation ended before it was cut off"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(120),
+            "no build seen"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    cut.abort();
+    let _ = cut.await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        automatic_on(&node, schema).await.contains(&name),
+        "the cut-off validation left nothing"
+    );
+    eprintln!(
+        "leftover on {}: {} (primary: {:?})",
+        node.node,
+        automatic_on(&node, schema).await,
+        automatic_on(primary, schema).await
+    );
+    assert!(!automatic_on(primary, schema).await.contains(&name));
+
+    // 2. The old behaviour, kept by a validator that doesn't know the
+    // primary: index_exists, for good.
+    let old = ReplicaValidator::new(node.clone(), Arc::new(NoMarker));
+    let r = old.validate(&good).await.unwrap();
+    show("replica, no primary given", &r);
+    assert_eq!(r.verdict.kind, VerdictKind::Aborted);
+    assert!(
+        r.verdict.reason.contains("index_exists"),
+        "{}",
+        r.verdict.reason
+    );
+
+    // 3. The fix: the leftover goes (binary log off), the validation runs.
+    let v = ReplicaValidator::new(node.clone(), Arc::new(NoMarker)).with_writer(primary.clone());
+    let r = v.validate(&good).await.unwrap();
+    show("replica after a cut-off validation", &r);
+    assert!(
+        !r.verdict.reason.contains("index_exists"),
+        "{}",
+        r.verdict.reason
+    );
+    assert_ne!(r.verdict.kind, VerdictKind::Aborted, "{}", r.verdict.reason);
+    assert!(
+        r.node_check
+            .notes
+            .iter()
+            .any(|n| n.contains("cut-off validation dropped first")),
+        "{:?}",
+        r.node_check.notes
+    );
+    assert!(r.node_check.restored, "{:?}", r.node_check.notes);
+    assert_eq!(automatic_on(&node, schema).await, "");
+
+    // 4. The drift reconciler's sweep: an index and a field column only the
+    // replica has (binary log off, as a validation adds them) go; not while
+    // a validation of this process runs on the table.
+    let gtid_before = scalar(&node, "SELECT @@gtid_binlog_pos")
+        .await
+        .unwrap_or_default();
+    {
+        let mut c = conn(&node).await;
+        c.exec("SET SESSION sql_log_bin = 0").await.unwrap();
+        c.exec(&format!(
+            "ALTER TABLE `{schema}`.t ADD COLUMN IF NOT EXISTS _sprig_p_x_00000001 LONGBLOB AS \
+             (pad) VIRTUAL INVISIBLE, ALGORITHM=INSTANT"
+        ))
+        .await
+        .unwrap();
+        c.exec(&format!(
+            "ALTER TABLE `{schema}`.t ADD INDEX sprig_auto_0badf00d (b, c)"
+        ))
+        .await
+        .unwrap();
+        c.close().await;
+    }
+    let target = good.target.clone();
+    let keep_nothing = std::collections::BTreeSet::new();
+    {
+        let _busy = orphans::running(&node.node, &target);
+        let got = orphans::drop_leftovers(
+            &node,
+            primary,
+            std::slice::from_ref(&target),
+            NodeKind::Replica,
+            &keep_nothing,
+        )
+        .await
+        .unwrap();
+        assert!(got.iter().all(orphans::Leftovers::is_empty), "{got:?}");
+        assert!(
+            automatic_on(&node, schema)
+                .await
+                .contains("sprig_auto_0badf00d")
+        );
+    }
+    let got = orphans::drop_leftovers(
+        &node,
+        primary,
+        std::slice::from_ref(&target),
+        NodeKind::Replica,
+        &keep_nothing,
+    )
+    .await
+    .unwrap();
+    eprintln!("drift sweep: {got:?}");
+    assert_eq!(got[0].indexes, vec!["sprig_auto_0badf00d".to_owned()]);
+    assert_eq!(got[0].fields, vec!["_sprig_p_x_00000001".to_owned()]);
+    assert_eq!(automatic_on(&node, schema).await, "");
+    // Nothing reached the binary log from the replica's own server id.
+    let gtid_after = scalar(&node, "SELECT @@gtid_binlog_pos")
+        .await
+        .unwrap_or_default();
+    let own = |pos: &str| {
+        pos.split(',')
+            .filter(|g| g.split('-').nth(1) == Some(server_id.as_str()))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        own(&gtid_before),
+        own(&gtid_after),
+        "{gtid_before} -> {gtid_after}"
+    );
+    drop_fixture(primary, schema).await;
+    wait_caught_up(primary, replicas, schema, true).await;
+}
+
+/// bugfix-61 on Galera: a leftover index on a node that isn't the writer
+/// (as a cut-off RSU validation leaves it) is dropped in RSU with the
+/// binary log off; the node is Synced again and no other node changed.
+#[tokio::test]
+async fn galera_leftover_is_dropped_on_its_node() {
+    use sprig_advisor::autoindex::validate::orphans::{self, NodeKind};
+    let eps = topology_or_skip!("SPRIG_TEST_MARIADB_GALERA");
+    let writer = &eps[0];
+    let node = eps.last().unwrap().clone();
+    let schema = "__sprig_test_bugfix14_orphan_g";
+    create_fixture(writer, schema).await;
+    wait_caught_up(writer, &eps[1..], schema, false).await;
+    {
+        let mut c = conn(&node).await;
+        c.exec("SET SESSION wsrep_OSU_method = 'RSU'")
+            .await
+            .unwrap();
+        c.exec("SET SESSION sql_log_bin = 0").await.unwrap();
+        c.exec(&format!(
+            "ALTER TABLE `{schema}`.t ADD INDEX sprig_auto_0badf00e (a)"
+        ))
+        .await
+        .unwrap();
+        c.exec("SET SESSION wsrep_OSU_method = 'TOI'")
+            .await
+            .unwrap();
+        c.close().await;
+    }
+    for _ in 0..300 {
+        if scalar(&node, "SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME = 'wsrep_local_state_comment'").await.as_deref() == Some("Synced") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        automatic_on(&node, schema)
+            .await
+            .contains("sprig_auto_0badf00e")
+    );
+    for ep in &eps[..eps.len() - 1] {
+        assert_eq!(automatic_on(ep, schema).await, "", "{}", ep.node);
+    }
+    let target = IndexTarget {
+        schema: schema.into(),
+        table: "t".into(),
+        pk: vec!["id".into()],
+    };
+    // A rolling build's name (kept) stays; the leftover goes.
+    let got = orphans::drop_leftovers(
+        &node,
+        writer,
+        std::slice::from_ref(&target),
+        NodeKind::Galera,
+        &std::collections::BTreeSet::from(["sprig_auto_0badf00e".to_owned()]),
+    )
+    .await
+    .unwrap();
+    assert!(got[0].is_empty(), "{got:?}");
+    let got = orphans::drop_leftovers(
+        &node,
+        writer,
+        std::slice::from_ref(&target),
+        NodeKind::Galera,
+        &std::collections::BTreeSet::new(),
+    )
+    .await
+    .unwrap();
+    eprintln!("galera sweep: {got:?}");
+    assert_eq!(got[0].indexes, vec!["sprig_auto_0badf00e".to_owned()]);
+    for ep in &eps {
+        assert_eq!(automatic_on(ep, schema).await, "", "{}", ep.node);
+    }
+    let state = scalar(&node, "SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME = 'wsrep_local_state_comment'").await;
+    assert_eq!(state.as_deref(), Some("Synced"));
+    drop_fixture(writer, schema).await;
+}

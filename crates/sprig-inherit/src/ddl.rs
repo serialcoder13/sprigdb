@@ -1038,17 +1038,15 @@ pub async fn drop_share(
                 }
                 break;
             }
-            Err(e) => match retry.again() {
-                Some(pause) => {
-                    tracing::info!(share = %name, error = %e, "a dropped share's cleanup failed; trying again");
-                    tokio::time::sleep(pause).await;
-                }
-                None => {
+            Err(e) => {
+                let Some(pause) = retry.again() else {
                     metrics::counter!("sprig_inherit_unshare_failures_total").increment(1);
                     tracing::warn!(share = %name, error = %e, attempts = retry.failed(), "share dropped, but its children were not cleaned up");
                     break;
-                }
-            },
+                };
+                tracing::info!(share = %name, error = %e, "a dropped share's cleanup failed; trying again");
+                tokio::time::sleep(pause).await;
+            }
         }
     }
     Ok(Done::default())

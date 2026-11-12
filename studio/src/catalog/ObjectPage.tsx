@@ -6,10 +6,11 @@ import { useSnapshot } from './snapshot';
 import { objects, rows as fetchRows } from '../api/sql';
 import { qualified } from '../lib/sql';
 import { Browse } from '../browse/Browse';
+import { StructureView, type StructureTab } from './Structure';
 import { addTab } from '../editor/tabs';
 import { useNavigate } from 'react-router';
 
-type Tab = 'columns' | 'indexes' | 'ddl' | 'data';
+type Tab = 'columns' | 'indexes' | 'ddl' | 'data' | StructureTab;
 
 /** An object's detail (chapter 44 step 7): columns, indexes with their
  * origin, the definition, and data (step 10). */
@@ -37,7 +38,13 @@ export function ObjectPage() {
     enabled: tab === 'ddl' && !isGraph,
   });
   const graph = isGraph ? snap.data?.objects.find((o) => o.kind === 'graph' && o.name === name) : undefined;
-  const tabs: Tab[] = isTable ? (kind === 'table' ? ['data', 'columns', 'indexes', 'ddl'] : ['data', 'columns', 'ddl']) : isGraph ? [] : ['ddl'];
+  const tabs: Tab[] = isTable
+    ? kind === 'table'
+      ? ['data', 'columns', 'indexes', 'relations', 'triggers', 'policies', 'inheritance', 'shards', 'ddl']
+      : ['data', 'columns', 'policies', 'ddl']
+    : isGraph
+      ? []
+      : ['ddl'];
   return (
     <div className="stack">
       <nav aria-label="Breadcrumb" className="muted">
@@ -68,6 +75,9 @@ export function ObjectPage() {
           </button>
         ))}
       </div>
+      {(tab === 'relations' || tab === 'triggers' || tab === 'policies' || tab === 'inheritance' || tab === 'shards') && (
+        <StructureView tab={tab} db={db} table={name} />
+      )}
       {tab === 'columns' && (
         <table>
           <thead>

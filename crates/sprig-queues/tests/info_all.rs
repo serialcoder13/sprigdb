@@ -94,3 +94,61 @@ async fn every_queue_in_one_call() {
     drop(held);
     conn.close(200, "bye".into()).await.unwrap();
 }
+
+/// bugfix-66 (R9 item 123): when the queue's owner can't answer (here
+/// another gateway holds its lease and there's no relay between them),
+/// `mq_info` reported "0 ready, 1 unacknowledged, 0 consumers" for a
+/// message nobody had taken. Now it asks again, then counts the stored
+/// messages as ready.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn info_when_the_owner_cannot_answer() {
+    use sprig_queues::mem::MemLeases;
+    if common::var("SPRIG_AMQP_ADDR").is_some() {
+        return; // in process only
+    }
+    let catalog = common::mem_catalog();
+    let table = MemLeases::new();
+    let a = common::server_on(Arc::clone(&catalog), Arc::new(table.for_gateway("gw-a")), 1).await;
+    let b = common::server_on(Arc::clone(&catalog), Arc::new(table.for_gateway("gw-b")), 2).await;
+    let conn = lapin(&a).await;
+    let ch = conn.create_channel().await.unwrap();
+    let q = uniq("noanswer");
+    ch.queue_declare(
+        q.as_str().into(),
+        QueueDeclareOptions {
+            durable: true,
+            ..QueueDeclareOptions::default()
+        },
+        FieldTable::default(),
+    )
+    .await
+    .unwrap();
+    ch.confirm_select(lapin::options::ConfirmSelectOptions::default())
+        .await
+        .unwrap();
+    ch.basic_publish(
+        "".into(),
+        q.as_str().into(),
+        BasicPublishOptions::default(),
+        b"one",
+        BasicProperties::default(),
+    )
+    .await
+    .unwrap()
+    .await
+    .unwrap();
+    // On a: its owner answers.
+    let va = a.engine.clone().unwrap().sql_vhost(principal(), "/", 9).await.unwrap();
+    let i = va.info(&q).await.unwrap();
+    assert_eq!((i.ready, i.unacked, i.consumers), (1, 0, 0), "{i:?}");
+    // On b: gw-a holds the owner's lease and b can't reach it.
+    let vb = b.engine.clone().unwrap().sql_vhost(principal(), "/", 9).await.unwrap();
+    let i = vb.info(&q).await.unwrap();
+    eprintln!("mq_info on the gateway whose owner can't answer: {i:?}");
+    assert_eq!(
+        (i.ready, i.unacked, i.consumers),
+        (1, 0, 0),
+        "a message nobody took isn't unacknowledged: {i:?}"
+    );
+    conn.close(200, "bye".into()).await.unwrap();
+}

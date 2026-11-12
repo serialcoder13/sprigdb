@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from 'react';
+import { Mascot } from '../app/Mascot';
 import { NavLink, Navigate, useParams } from 'react-router';
 import { FormattedMessage, useIntl } from 'react-intl';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -521,7 +522,10 @@ export function OpsPage() {
   return (
     <div className="shell">
       <header className="topbar">
-        <span className="brand">SprigDB Studio · operator mode</span>
+        <span className="brand">
+          <Mascot pose="avatar" size={26} />
+          SprigDB Studio · operator mode
+        </span>
         <nav aria-label="Operator">
           {AREAS.map((a) => (
             <NavLink key={a} to={`/ops/${a}`}>

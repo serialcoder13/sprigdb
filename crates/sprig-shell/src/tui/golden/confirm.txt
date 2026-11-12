@@ -1,4 +1,4 @@
- 1 sql shop │ Dashboard │ Admin │ Inbox
+ ❯ 1 sql shop │ ◔ Dashboard │ ◈ Admin │ ⚑ Inbox
 ┌ Explorer ──────────────────┐┌ Editor [sql] ──────────────────────────────────────────────────────┐
 │▾ shop                      ││ 1 DROP TABLE orders;                                               │
 │  ▾ tables 2                ││                                                                    │
@@ -12,9 +12,9 @@
 │       │DROP TABLE orders                                                                 │       │
 │       │                                                                                  │       │
 │       │y: run it    n or Esc: don't                                                      │       │
-│       └──────────────────────────────────────────────────────────────────────────────────┘       │
-│                            ││                                                                    │
-│                            ││                                                                    │
+│       └──────────────────────────────────────────────────────────────────────────────────┘ands   │
+│                            ││       .'  .*.  '.~~.    F5      run the statement at the cursor    │
+│                            ││       '-(_)-(_)-'~~'    F1      all the keys                       │
 │                            ││                                                                    │
 │                            ││                                                                    │
 │                            ││                                                                    │

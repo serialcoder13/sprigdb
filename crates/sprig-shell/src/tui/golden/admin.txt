@@ -1,4 +1,4 @@
- 1 sql shop │ Dashboard │ Admin │ Inbox
+ ❯ 1 sql shop │ ◔ Dashboard │ ◈ Admin │ ⚑ Inbox
 ┌ Admin · sprigctl output · PgUp/PgDn ─────────────────────────────────────────────────────────────┐
 │sprigctl tenant list                                                                              │
 │NAME   STATE   CLUSTER                                                                            │

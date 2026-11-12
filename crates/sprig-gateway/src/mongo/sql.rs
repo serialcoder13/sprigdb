@@ -239,6 +239,12 @@ pub struct SqlSession {
     /// The engine's statements prepared in this session, by text, in
     /// order of preparing (decision S26).
     prepared: Vec<(String, crate::pipeline::StmtRef)>,
+    /// The last point find's fingerprint and its key (perf1, S147;
+    /// `super::workload`).
+    pub(crate) point_fp: Option<(
+        super::workload::PointKey,
+        sprig_workload::fingerprint::Fingerprint,
+    )>,
 }
 
 impl std::fmt::Debug for SqlSession {
@@ -329,6 +335,7 @@ impl SqlSession {
                 .clone()
                 .zip(principal.user_id.map(|u| u.0)),
             prepared: Vec::new(),
+            point_fp: None,
         })
     }
 

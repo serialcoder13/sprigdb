@@ -173,6 +173,15 @@ pub fn run_stage_seq(
         }
         "$bucketAuto" => bucket_auto_seq(seq, stage, arg, lim),
         "$setWindowFields" => window_seq(seq, stage, arg, lim),
+        // M7 (S87): `$densify` sorts on disk.
+        "$densify" => {
+            if let DocSeq::Mem(v) = &seq
+                && size_of(v) <= lim.stage_bytes
+            {
+                return Ok(DocSeq::Mem(run_stage(seq.into_vec()?, stage, lim)?));
+            }
+            super::stages_fill::densify_seq(seq, arg, lim)
+        }
         "$facet" => facet_seq(seq, arg, lim),
         _ => {
             let v =
@@ -432,18 +441,8 @@ fn window_seq(
     });
     let sorted = spill::sort_seq(wrapped, cmp, None, lim.stage_bytes, "$setWindowFields")?;
     let mut out = SeqBuilder::new(lim.stage_bytes);
-    let mut part: Vec<Document> = Vec::new();
-    let mut bytes = 0usize;
+    let mut part = Partition::new(arg, lim.stage_bytes);
     let mut cur: Option<Bson> = None;
-    let flush = |part: Vec<Document>, out: &mut SeqBuilder| -> Result<(), MongoError> {
-        if part.is_empty() {
-            return Ok(());
-        }
-        for d in window::set_window_fields(part, arg, lim)? {
-            out.push(d)?;
-        }
-        Ok(())
-    };
     for w in sorted.into_iter_docs()? {
         let mut w = w?;
         let p = w.remove("p").unwrap_or(Bson::Null);
@@ -455,24 +454,215 @@ fn window_seq(
             .as_ref()
             .is_none_or(|c| compare(c, &p) != Ordering::Equal)
         {
-            flush(std::mem::take(&mut part), &mut out)?;
-            bytes = 0;
+            part.flush(arg, lim, &mut out)?;
             cur = Some(p);
         }
-        bytes += doc_bytes(&d);
-        if bytes > lim.stage_bytes {
+        part.push(d)?;
+    }
+    part.flush(arg, lim, &mut out)?;
+    out.finish()
+}
+
+/// Index of a document in its partition, in the slim copies (M7).
+const SLIM_INDEX: &str = "__sprig_window_i";
+
+/// One `$setWindowFields` partition being collected (M7, decision S85).
+/// It stays in memory while it fits the stage's memory. Past it, with
+/// `allowDiskUse`, its documents go to a spill file and only slim copies
+/// stay in memory: the top-level fields the stage's expressions read
+/// (`partitionBy`, `sortBy`, the outputs), plus the document's index. The
+/// window functions run over the slim copies; their outputs are then set
+/// on the full documents read back in order. A stage that reads whole
+/// documents (`$$ROOT`, `$$CURRENT`, `$getField`, `$meta`) can't be
+/// slimmed: past the limit it answers 146 as before.
+struct Partition {
+    budget: usize,
+    /// The fields the stage reads; `None`: whole documents.
+    fields: Option<std::collections::BTreeSet<String>>,
+    /// The output paths.
+    outputs: Vec<String>,
+    docs: Vec<Document>,
+    bytes: usize,
+    /// Spilled: the full documents on disk, and the slim copies.
+    file: Option<spill::SpillWriter>,
+    slim: Vec<Document>,
+}
+
+impl Partition {
+    fn new(arg: &Bson, budget: usize) -> Self {
+        let mut fields = std::collections::BTreeSet::new();
+        let ok = arg.as_document().is_some_and(|d| {
+            d.iter().all(|(k, v)| match k.as_str() {
+                "sortBy" => v.as_document().is_some_and(|s| {
+                    for f in s.keys() {
+                        fields.insert(top(f));
+                    }
+                    true
+                }),
+                _ => refs(v, &mut fields),
+            })
+        });
+        let outputs = arg
+            .as_document()
+            .and_then(|d| d.get_document("output").ok())
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default();
+        Self {
+            budget,
+            fields: ok.then_some(fields),
+            outputs,
+            docs: Vec::new(),
+            bytes: 0,
+            file: None,
+            slim: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, d: Document) -> Result<(), MongoError> {
+        if let Some(w) = self.file.as_mut() {
+            w.push(&d)?;
+            let s = slim_of(&d, self.fields.as_ref(), self.slim.len());
+            self.bytes += doc_bytes(&s);
+            self.slim.push(s);
+        } else {
+            self.bytes += doc_bytes(&d);
+            self.docs.push(d);
+            if self.bytes > self.budget && spill::allowed() && self.fields.is_some() {
+                let mut w = spill::SpillWriter::create()?;
+                self.bytes = 0;
+                for (i, x) in self.docs.drain(..).enumerate() {
+                    w.push(&x)?;
+                    let s = slim_of(&x, self.fields.as_ref(), i);
+                    self.bytes += doc_bytes(&s);
+                    self.slim.push(s);
+                }
+                self.file = Some(w);
+            }
+        }
+        if self.bytes > self.budget {
             return Err(MongoError::new(
                 code::EXCEEDED_MEMORY_LIMIT,
                 format!(
-                    "$setWindowFields: one partition exceeded the memory limit of {} bytes and a partition can't be spilled (doc.agg_stage_memory_bytes)",
-                    lim.stage_bytes
+                    "$setWindowFields: one partition exceeded the memory limit of {} bytes{} (doc.agg_stage_memory_bytes)",
+                    self.budget,
+                    if self.fields.is_some() {
+                        ""
+                    } else {
+                        ", and a partition whose window functions read whole documents can't be spilled"
+                    }
                 ),
             ));
         }
-        part.push(d);
+        Ok(())
     }
-    flush(part, &mut out)?;
-    out.finish()
+
+    fn flush(
+        &mut self,
+        arg: &Bson,
+        lim: &AggLimits,
+        out: &mut SeqBuilder,
+    ) -> Result<(), MongoError> {
+        self.bytes = 0;
+        let Some(w) = self.file.take() else {
+            if !self.docs.is_empty() {
+                for d in window::set_window_fields(std::mem::take(&mut self.docs), arg, lim)? {
+                    out.push(d)?;
+                }
+            }
+            return Ok(());
+        };
+        let f = w.finish()?;
+        spill::record_file(&f);
+        let n = self.slim.len();
+        let done = window::set_window_fields(std::mem::take(&mut self.slim), arg, lim)?;
+        let mut values: Vec<Option<Vec<Option<Bson>>>> = vec![None; n];
+        for r in done {
+            let i = r
+                .get(SLIM_INDEX)
+                .and_then(as_i64)
+                .and_then(|i| usize::try_from(i).ok())
+                .filter(|i| *i < n)
+                .ok_or_else(|| {
+                    MongoError::new(code::INTERNAL_ERROR, "window partition lost its order")
+                })?;
+            values[i] = Some(
+                self.outputs
+                    .iter()
+                    .map(|p| crate::update::get_path(&r, p).cloned())
+                    .collect(),
+            );
+        }
+        for (i, d) in f.reader()?.enumerate() {
+            let mut d = d?;
+            if let Some(Some(vs)) = values.get_mut(i) {
+                for (p, v) in self.outputs.iter().zip(vs.iter_mut()) {
+                    crate::update::set_path(&mut d, p, v.take().unwrap_or(Bson::Null))?;
+                }
+            }
+            out.push(d)?;
+        }
+        Ok(())
+    }
+}
+
+/// A field path's top-level field.
+fn top(path: &str) -> String {
+    path.split('.').next().unwrap_or(path).to_owned()
+}
+
+/// Adds the top-level fields expression `v` reads to `out`; `false` when
+/// it may read the whole document.
+fn refs(v: &Bson, out: &mut std::collections::BTreeSet<String>) -> bool {
+    match v {
+        Bson::String(s) if s.starts_with("$$") => {
+            let (var, rest) = s[2..]
+                .split_once('.')
+                .map_or((&s[2..], None), |(a, b)| (a, Some(b)));
+            match (var, rest) {
+                ("ROOT" | "CURRENT", None) => false,
+                ("ROOT" | "CURRENT", Some(r)) => {
+                    out.insert(top(r));
+                    true
+                }
+                _ => true,
+            }
+        }
+        Bson::String(s) if s.starts_with('$') => {
+            out.insert(top(&s[1..]));
+            true
+        }
+        Bson::Array(a) => a.iter().all(|x| refs(x, out)),
+        Bson::Document(d) => d.iter().all(|(k, x)| match k.as_str() {
+            "$literal" => true,
+            "$getField" | "$setField" | "$unsetField" | "$meta" => false,
+            "sortBy" => x.as_document().is_some_and(|s| {
+                for f in s.keys() {
+                    out.insert(top(f));
+                }
+                true
+            }),
+            _ => refs(x, out),
+        }),
+        _ => true,
+    }
+}
+
+/// The slim copy of `d`: the fields read, and its index.
+fn slim_of(
+    d: &Document,
+    fields: Option<&std::collections::BTreeSet<String>>,
+    i: usize,
+) -> Document {
+    let mut s = Document::new();
+    if let Some(f) = fields {
+        for (k, v) in d {
+            if f.contains(k) {
+                s.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    s.insert(SLIM_INDEX, i64::try_from(i).unwrap_or(i64::MAX));
+    s
 }
 
 /// `$facet`: each branch over the input read again; the output document

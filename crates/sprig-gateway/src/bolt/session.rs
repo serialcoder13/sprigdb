@@ -1028,7 +1028,7 @@ impl GwSession {
                     let (tx, rx) = mpsc::channel(CHANNEL_ROWS);
                     let layout = Arc::clone(&g.shards);
                     let indexes = g.def.indexes.clone();
-                    tokio::spawn(async move {
+                    tokio::spawn(crate::offload::run_graph_stream(async move {
                         let r = {
                             let mut store =
                                 MariaStore::new(&mut rc, layout, labels, types, dict, ids)
@@ -1040,7 +1040,7 @@ impl GwSession {
                         rc.end().await;
                         let end = r.map(|o| summary(o.stats, None)).map_err(|e| failure(&e));
                         let _ = tx.send(Msg::End(end)).await;
-                    });
+                    }));
                     return Ok(StartOrResult::Stream(rx, g.name));
                 }
                 // A route over a range a mover holds waits for the hold,
@@ -1151,7 +1151,7 @@ impl GwSession {
             let (tx, rx) = mpsc::channel(CHANNEL_ROWS);
             let layout = Arc::clone(&g.shards);
             let indexes = g.def.indexes.clone();
-            tokio::spawn(async move {
+            tokio::spawn(crate::offload::run_graph_stream(async move {
                 let mut touched = Vec::new();
                 let r = {
                     let mut sink = ChanSink { tx: tx.clone() };
@@ -1178,7 +1178,7 @@ impl GwSession {
                 let _ = back_tx.send(conns);
                 let end = r.map(|o| summary(o.stats, None)).map_err(|e| failure(&e));
                 let _ = tx.send(Msg::End(end)).await;
-            });
+            }));
             return Ok(StartOrResult::Stream(rx, g.name));
         }
         let ops = self.graphs.schema_ops(&g);
@@ -1429,13 +1429,12 @@ impl BoltSession for GwSession {
             Arc::clone(s.handle())
         });
         let r = match handle {
-            // Guarded like a MySQL statement (G40, decision bugfix-1): a
-            // heavy statement moves to a blocking thread, and a stalled
-            // runtime names and stops it.
+            // On a blocking thread from its first poll (R8 round 10,
+            // decision G80; before, guarded like a MySQL statement, G40
+            // and decision bugfix-1, which moved it only after 100 ms and
+            // while slots lasted).
             Some(h) => {
-                let threshold = usize::try_from(crate::offload::LARGE_STATEMENT_BYTES.default)
-                    .unwrap_or(usize::MAX);
-                Box::pin(crate::offload::run_for(&h, query.len(), threshold, async {
+                Box::pin(crate::offload::run_graph(async {
                     tokio::select! {
                         r = self.run_inner(query, params, extra) => r,
                         () = h.flags().query_killed() => {

@@ -18,6 +18,11 @@ sprig-operator.workspace = true
 sprig-worker.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+mimalloc = { workspace = true, optional = true }
+
+[features]
+# mimalloc as the global allocator (perf1, S143).
+mimalloc = ["dep:mimalloc"]
 
 [lints]
 workspace = true

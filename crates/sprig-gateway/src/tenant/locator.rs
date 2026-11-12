@@ -329,6 +329,16 @@ impl GatewayLocator {
         Placement::of(&*map?).ok()
     }
 
+    /// The DC `tenant` is followed in and its map mirror's generation
+    /// (perf1, S148): while both stay the same, so does everything the
+    /// mirror says about the tenant's maps.
+    #[must_use]
+    pub fn maps_generation(&self, tenant: TenantId) -> (DcId, u64) {
+        let dc = self.home_of(tenant);
+        let g = self.maps_of(&dc).generation();
+        (dc, g)
+    }
+
     /// Changes whenever a map in the DC `tenant` is followed in changes.
     #[must_use]
     pub fn placement_changes_for(&self, tenant: TenantId) -> watch::Receiver<u64> {

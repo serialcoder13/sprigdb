@@ -1,4 +1,4 @@
- 1 cypher - │ Dashboard │ Admin │ Inbox
+ ❯ 1 cypher - │ ◔ Dashboard │ ◈ Admin │ ⚑ Inbox
 ┌ Explorer ──────────────────┐┌ Editor [cypher] ───────────────────────────────────────────────────┐
 │▾ shop                      ││ 1 SELECT order_id, status                                          │
 │  ▾ tables 2                ││ 2 FROM orders                                                      │

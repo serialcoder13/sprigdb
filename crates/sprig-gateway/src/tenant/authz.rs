@@ -116,6 +116,9 @@ fn engine_for(svc: &TenantServices, cat: &TenantCatalog) -> Option<Arc<dyn Autho
 pub struct AuthzServices {
     per_user: ArcSwapOption<PerUser>,
     applied: Mutex<HashMap<(TenantId, ClusterId), u64>>,
+    /// Per tenant, cluster and backend account: a hash of the account's
+    /// database-level grants this gateway last applied (bugfix-64).
+    db_grants: Mutex<HashMap<(TenantId, ClusterId), HashMap<String, u64>>>,
     /// The snapshot versions and shard placement last compared, per
     /// tenant and cluster, and when.
     checked: Mutex<HashMap<(TenantId, ClusterId), (Checked, std::time::Instant)>>,
@@ -372,6 +375,15 @@ impl AuthzServices {
         for acct in &rep.changed {
             svc.locator.retire_account(acct);
         }
+        // bugfix-64: an account whose database-level grants changed here is
+        // retired even when another gateway's reconcile already applied
+        // them (`rep.changed` is then empty), so this gateway's sessions
+        // pinned to its connections send `USE` again.
+        for acct in db_grants_moved(&mut lock(&self.db_grants), &key, &want) {
+            if !rep.changed.contains(&acct) {
+                svc.locator.retire_account(&acct);
+            }
+        }
         metrics::histogram!("sprig_auth_reconcile_duration_seconds", "cluster" => cluster.to_string())
             .record(started.elapsed().as_secs_f64());
         if rep.statements > 0 {
@@ -385,6 +397,38 @@ impl AuthzServices {
         lock(&self.checked).insert(key, (versions, now()));
         Ok(())
     }
+}
+
+/// The accounts of `want` whose database-level grants (`mysql.db`)
+/// differ from what `seen` last recorded for `key`, and records `want`'s
+/// (bugfix-64). The first call for a key records only.
+fn db_grants_moved(
+    seen: &mut HashMap<(TenantId, ClusterId), HashMap<String, u64>>,
+    key: &(TenantId, ClusterId),
+    want: &sprig_auth::authz::backend::BackendState,
+) -> Vec<String> {
+    let now: HashMap<String, u64> = want
+        .iter()
+        .map(|(acct, grants)| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for (t, set) in grants {
+                if matches!(t, sprig_auth::authz::backend::BackendTarget::Db(_)) {
+                    (t, set).hash(&mut h);
+                }
+            }
+            (acct.clone(), h.finish())
+        })
+        .collect();
+    let moved = match seen.get(key) {
+        Some(before) => now
+            .iter()
+            .filter(|(a, h)| before.get(*a).is_some_and(|b| b != *h))
+            .map(|(a, _)| a.clone())
+            .collect(),
+        None => Vec::new(),
+    };
+    seen.insert(key.clone(), now);
+    moved
 }
 
 /// Where `tenant`'s tables, views and routines named in `names` are on
@@ -409,32 +453,46 @@ async fn placement_on(
         )
     })?;
     let like = format!("t{tenant}\\_d%");
+    let unavailable = |e: String| {
+        SprigError::new(
+            sprig_common::SprigCode::BackendUnavailable,
+            format!("{cluster}: {e}"),
+        )
+    };
     let marks = vec!["?"; names.len()].join(", ");
     let mut params: Vec<mysql_async::Value> = vec![like.clone().into()];
     params.extend(names.iter().map(|n| mysql_async::Value::from(n.as_str())));
-    params.push(like.clone().into());
-    params.extend(names.iter().map(|n| mysql_async::Value::from(n.as_str())));
-    params.push(like.into());
-    let rows: Vec<(String, String, String)> = conn
+    let mut rows: Vec<(String, String, String)> = conn
         .exec(
             format!(
-                "SELECT 'T', TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES \
-                 WHERE TABLE_SCHEMA LIKE ? AND TABLE_NAME IN ({marks}) \
-                 UNION ALL SELECT ROUTINE_TYPE, ROUTINE_SCHEMA, ROUTINE_NAME \
+                "SELECT ROUTINE_TYPE, ROUTINE_SCHEMA, ROUTINE_NAME \
                  FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA LIKE ? \
-                 AND ROUTINE_NAME IN ({marks}) \
-                 UNION ALL SELECT 'S', SCHEMA_NAME, '' FROM information_schema.SCHEMATA \
-                 WHERE SCHEMA_NAME LIKE ?"
+                 AND ROUTINE_NAME IN ({marks})"
             ),
             params,
         )
         .await
-        .map_err(|e| {
-            SprigError::new(
-                sprig_common::SprigCode::BackendUnavailable,
-                format!("{cluster}: {e}"),
-            )
-        })?;
+        .map_err(|e| unavailable(e.to_string()))?;
+    // R9 (r9scale): the schemas from a directory listing, then the tables
+    // one schema at a time; a LIKE on TABLE_SCHEMA lists every table of
+    // every tenant on the server (`sprig_catalog::infoschema`).
+    let schemas = sprig_catalog::infoschema::schemas_like(&mut conn, &like).await?;
+    let in_names = names
+        .iter()
+        .map(|n| sprig_catalog::infoschema::literal(n))
+        .collect::<Vec<_>>()
+        .join(", ");
+    rows.extend(
+        sprig_catalog::infoschema::read_per_schema::<(String, String, String)>(
+            &mut conn,
+            "SELECT 'T', TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES",
+            "TABLE_SCHEMA",
+            &schemas,
+            &format!(" AND TABLE_NAME IN ({in_names})"),
+        )
+        .await?,
+    );
+    rows.extend(schemas.into_iter().map(|s| ("S".to_owned(), s, String::new())));
     let mut here = backend::Placement::default();
     for (kind, schema, name) in rows {
         match kind.as_str() {

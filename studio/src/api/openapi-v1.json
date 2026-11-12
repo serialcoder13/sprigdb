@@ -4528,6 +4528,171 @@
         ]
       }
     },
+    "/v1/library": {
+      "get": {
+        "operationId": "Library.Get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "history",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "The caller's saved queries and last runs (history: how many, 100; at most studio.history_max)",
+        "tags": [
+          "sprig.v1.Library"
+        ]
+      }
+    },
+    "/v1/library/history": {
+      "post": {
+        "operationId": "Library.Record",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Records a run {language, database, text, ok, ms, error, client} (redacted)",
+        "tags": [
+          "sprig.v1.Library"
+        ]
+      }
+    },
+    "/v1/library/history:clear": {
+      "post": {
+        "operationId": "Library.ClearHistory",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Clears the caller's history",
+        "tags": [
+          "sprig.v1.Library"
+        ]
+      }
+    },
+    "/v1/library/saved": {
+      "post": {
+        "operationId": "Library.Save",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Saves {name, language, database, text} (redacted), replacing a query of that name",
+        "tags": [
+          "sprig.v1.Library"
+        ]
+      }
+    },
+    "/v1/library/saved:delete": {
+      "post": {
+        "operationId": "Library.Delete",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Deletes the caller's saved query {name}",
+        "tags": [
+          "sprig.v1.Library"
+        ]
+      }
+    },
     "/v1/policies:testAs": {
       "post": {
         "operationId": "Policies.TestAs",

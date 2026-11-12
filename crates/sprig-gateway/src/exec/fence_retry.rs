@@ -329,9 +329,11 @@ impl PassSession {
                 self.count_request(&req, cx.session);
                 counted = true;
             }
+            let memo = &mut self.placement_memo;
             let watch = self.tenant.as_deref().map(|ts| {
                 let locator = std::sync::Arc::clone(&ts.services().locator);
-                let token = locator.maps_token(ts.tenant);
+                // Kept per map generation (S148).
+                let token = memo.maps_token(&locator, ts.tenant);
                 (locator, ts.tenant, ts.map(), token)
             });
             let in_trx =

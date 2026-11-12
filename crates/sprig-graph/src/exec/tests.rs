@@ -1243,3 +1243,137 @@ async fn unique_keys_carry_the_value_type() {
         Some("sAQL/")
     );
 }
+
+/// R8 round 10 (LDBC IC1, IS7, IC10, IC14): the official queries' forms,
+/// each answer checked against neo4j:5.26.0-community on the same graph.
+#[tokio::test]
+async fn ldbc_forms_answer_as_neo4j_does() {
+    for shards in [1, 4] {
+        let mut s = social(shards).await;
+        let cases: [(&str, &[&str]); 9] = [
+            // IC10: a pattern predicate inside a list comprehension.
+            (
+                "MATCH (a:Person {name: 'Alice'}) MATCH (p:Person) WITH a, p ORDER BY p.name
+                 WITH a, collect(p) AS ps
+                 RETURN size([x IN ps WHERE (x)-[:KNOWS]->(a)]) AS k,
+                        [x IN ps WHERE (x)-[:BOUGHT]->(:Product {name: 'Pen'}) | x.name] AS pen",
+                &["1|[\"Carol\", \"Dave\"]"],
+            ),
+            // IC14: pattern comprehensions, with WHERE and a path variable.
+            (
+                "MATCH (c:Person {name: 'Carol'})
+                 RETURN [(c)-[:BOUGHT]->(p) WHERE p.price > 5 | p.name] AS big,
+                        [path = (c)-[:KNOWS]-() | length(path)] AS lens, size([(c)-->(x) | x]) AS n",
+                &["[\"Desk\"]|[1, 1]|3"],
+            ),
+            // IC14: new variables in the comprehension, found through the
+            // disjunction's equalities with the outer relationship.
+            (
+                "MATCH (x:Person)-[r:KNOWS]->(y)
+                 RETURN x.name AS x, y.name AS y, reduce(w = 0.0, v IN [(a:Person)-[:BOUGHT]->(:Product)<-[:BOUGHT]-(b:Person)
+                   WHERE (a.name = startNode(r).name AND b.name = endNode(r).name)
+                      OR (a.name = endNode(r).name AND b.name = startNode(r).name) | 1.0] | w + v) AS weight
+                 ORDER BY x",
+                &[
+                    "Alice|Bob|0.0",
+                    "Bob|Carol|2.0",
+                    "Carol|Dave|2.0",
+                    "Dave|Alice|0.0",
+                ],
+            ),
+            // IC14's shape: the comprehension inside another, over a path.
+            (
+                "MATCH p = (:Person {name: 'Alice'})-[:KNOWS*3]->(:Person) WITH relationships(p) AS rels
+                 RETURN [r IN rels | reduce(w = 0.0, v IN [(a:Person)-[:BOUGHT]->()<-[:BOUGHT]-(b:Person)
+                   WHERE (a.name = startNode(r).name AND b.name = endNode(r).name)
+                      OR (a.name = endNode(r).name AND b.name = startNode(r).name) | 0.5] | w + v)] AS ws",
+                &["[0.0, 1.0, 1.0]"],
+            ),
+            // Quantifiers with pattern predicates.
+            (
+                "MATCH (a:Person {name: 'Carol'}) MATCH (o:Person) WITH a, collect(o) AS os
+                 RETURN all(x IN os WHERE x = a OR NOT (x)-[:KNOWS]->(a)) AS al,
+                        any(x IN os WHERE (x)-[:KNOWS]->(a)) AS an,
+                        none(x IN os WHERE (x)-[:BOUGHT]->(:Product {name: 'Desk'})) AS no,
+                        single(x IN os WHERE (x)-[:KNOWS]->(a)) AS si",
+                &["false|true|false|true"],
+            ),
+            (
+                "MATCH (p:Person) WHERE p.name <> 'Carol'
+                 RETURN p.name AS n, reduce(s = '', x IN [(p)-[:BOUGHT]->(q) | q.name] | s + x) AS bought
+                 ORDER BY n",
+                &[
+                    "Alice|Lamp",
+                    "Bob|Desk",
+                    "Dave|Pen",
+                    "Eve|",
+                ],
+            ),
+            // IS7 and IC1: Neo4j 5.26's simple CASE compares with `=`, so
+            // `WHEN null` never matches (Neo4j 4.4 matched it; G79).
+            (
+                "RETURN CASE null WHEN null THEN 1 ELSE 2 END AS a, CASE 2 WHEN null THEN 1 WHEN 2 THEN 3 END AS b",
+                &["2|3"],
+            ),
+            // IC10: datetime({epochMillis}) and ({epochSeconds}).
+            (
+                "RETURN toString(datetime({epochMillis: 1289908800123})) AS a,
+                        toString(datetime({epochSeconds: 1289908800, nanosecond: 5})) AS b,
+                        toString(datetime({epochMillis: 1289908800123, timezone: 'Europe/Stockholm'})) AS c,
+                        datetime({epochMillis: 1289908800123}).month AS m,
+                        datetime({epochMillis: 1289908800123}).day AS d,
+                        toString(datetime({epochMillis: -86400000, timezone: '+05:30'})) AS e",
+                &[
+                    "2010-11-16T12:00:00.123Z|2010-11-16T12:00:00.000000005Z|2010-11-16T13:00:00.123+01:00[Europe/Stockholm]|11|16|1969-12-31T05:30:00+05:30",
+                ],
+            ),
+            (
+                "MATCH (n:Person) WHERE n.name = 'Bob' OR n.name = 'Dave' RETURN n.name ORDER BY n.name",
+                &["Bob", "Dave"],
+            ),
+        ];
+        for (text, want) in cases {
+            let o = q(&mut s, text).await;
+            assert_eq!(show(&o), want, "{shards} shards: {text}");
+        }
+        // IC14: shortest paths whose ends are given in the pattern itself
+        // (the same answer as with ends bound by an earlier MATCH).
+        let o = q(
+            &mut s,
+            "MATCH p = allShortestPaths((a:Person {name: 'Alice'})-[:KNOWS*0..]-(c:Person {name: 'Carol'}))
+             RETURN [n IN nodes(p) | n.name] AS ns ORDER BY ns",
+        )
+        .await;
+        assert_eq!(
+            show(&o),
+            [
+                "[\"Alice\", \"Bob\", \"Carol\"]",
+                "[\"Alice\", \"Dave\", \"Carol\"]"
+            ]
+        );
+        // A MATCH after one that found nothing reads nothing (IS7 for a
+        // message that doesn't exist yet scanned every node).
+        let o = q(
+            &mut s,
+            "PROFILE MATCH (m:Nobody {id: 1}) OPTIONAL MATCH (m)-[:KNOWS]->(a)-[r]-(p) RETURN count(*)",
+        )
+        .await;
+        assert_eq!(show(&o), ["0"]);
+        let plan = o.plan.clone().unwrap_or_default().join("\n");
+        assert!(!plan.contains("NodeScan m"), "{plan}");
+        // Neo4j 5.26's refusals.
+        for (text, msg) in [
+            ("RETURN localdatetime({epochMillis: 1})", "epochMillis"),
+            (
+                "RETURN datetime({epochSeconds: 1, epochMillis: 1})",
+                "cannot be selected together",
+            ),
+            ("RETURN datetime({epochMillis: 1.5})", "Cannot construct"),
+        ] {
+            let e = crate::execute(&mut s, text, &Params::new(), &Budgets::default())
+                .await
+                .expect_err(text);
+            assert!(e.message.contains(msg), "{text}: {e}");
+        }
+    }
+}

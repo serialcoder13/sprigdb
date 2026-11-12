@@ -661,6 +661,18 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// A [`CatalogDocs::stored_shapes`] row as read.
+type StoredRow = (
+    String,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Option<i64>,
+    Option<i64>,
+);
+
 /// One MongoDB shape's totals in chapter 12's workload store (S137): every
 /// gateway's flushed counts, kept for the store's retention.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -718,16 +730,8 @@ impl CatalogDocs {
         Ok(rows
             .into_iter()
             .filter_map(|r| {
-                let (text, runs, total_us, max_us, returned, affected, first_ms, last_ms): (
-                    String,
-                    Option<u64>,
-                    Option<u64>,
-                    Option<u64>,
-                    Option<u64>,
-                    Option<u64>,
-                    Option<i64>,
-                    Option<i64>,
-                ) = mysql_async::from_row_opt(r).ok()?;
+                let (text, runs, total_us, max_us, returned, affected, first_ms, last_ms): StoredRow =
+                    mysql_async::from_row_opt(r).ok()?;
                 Some(StoredShape {
                     text,
                     runs: runs.unwrap_or(0),

@@ -904,6 +904,49 @@ impl Tables {
         format!("_sprig_i{}_{k}", d.id)
     }
 
+    /// The virtual column holding property `p`'s typed text, shared by
+    /// the indexes on `p` (R8 round 10): `_sprig_p` and 16 hex digits of
+    /// the name's SHA-256.
+    #[must_use]
+    pub fn property_column(p: &str) -> String {
+        let d = ring::digest::digest(&ring::digest::SHA256, p.as_bytes());
+        let mut s = String::from("_sprig_p");
+        for b in &d.as_ref()[..8] {
+            let _ = write!(s, "{b:02x}");
+        }
+        s
+    }
+
+    /// The SQL of property `p`'s typed text, as [`crate::schema`] says
+    /// (texts over [`crate::schema::MAX_INLINE`] characters hashed); `p`
+    /// was checked for quotes.
+    fn typed_text(p: &str) -> String {
+        let v = format!("JSON_VALUE(props, '$.\"{p}\"')");
+        // G77 (R8 round 9): a value `_types` names (bytes, a temporal
+        // value) is `t<type>:<text>`, as `schema::prop_index_value` says,
+        // so it never equals a plain string's `s<text>`.
+        // G19: an integral float inside the 64-bit range is its integer,
+        // as `schema::numeric_key` says. Plain digits stay as they are
+        // (no detour through a double); MariaDB calls `1e16` an INTEGER,
+        // so both types take the same path. `JSON_VALUE` answers `1` for
+        // `true`.
+        let f = format!("({v} + 0e0)");
+        let num = format!(
+            "CONCAT('n', IF(INSTR({v}, 'e') + INSTR({v}, 'E') + INSTR({v}, '.') = 0, {v}, \
+             IF(FLOOR({f}) = {f} AND ABS({f}) < 9223372036854775807e0, CAST({f} AS SIGNED), {v})))"
+        );
+        let t = format!(
+            "(CASE JSON_TYPE(JSON_EXTRACT(props, '$.\"{p}\"')) \
+             WHEN 'STRING' THEN CONCAT(IFNULL(CONCAT('t', JSON_VALUE(_types, '$.\"{p}\"'), ':'), 's'), {v}) \
+             WHEN 'INTEGER' THEN {num} WHEN 'DOUBLE' THEN {num} \
+             WHEN 'BOOLEAN' THEN IF({v} IN ('1', 'true'), 'btrue', 'bfalse') END)"
+        );
+        format!(
+            "IF(CHAR_LENGTH({t}) <= {max}, {t}, CONCAT('h', SHA2({t}, 256)))",
+            max = crate::schema::MAX_INLINE
+        )
+    }
+
     /// `ALTER TABLE` adding index `d`'s virtual columns and its index
     /// (`UNIQUE` for a constraint); see [`crate::schema`] for the values.
     ///
@@ -929,35 +972,29 @@ impl Tables {
                     ),
                 ));
             }
-            let v = format!("JSON_VALUE(props, '$.\"{p}\"')");
-            // G77 (R8 round 9): a value `_types` names (bytes, a temporal
-            // value) is `t<type>:<text>`, as `schema::prop_index_value`
-            // says, so it never equals a plain string's `s<text>`.
-            let mut cases = format!(
-                "WHEN 'STRING' THEN CONCAT(IFNULL(CONCAT('t', JSON_VALUE(_types, '$.\"{p}\"'), ':'), 's'), {v})"
-            );
-            if d.kind == IndexKind::Range {
-                // G19: an integral float inside the 64-bit range is its
-                // integer, as `schema::numeric_key` says. Plain digits
-                // stay as they are (no detour through a double); MariaDB
-                // calls `1e16` an INTEGER, so both types take the same
-                // path. `JSON_VALUE` answers `1` for `true`.
-                let f = format!("({v} + 0e0)");
-                let num = format!(
-                    "CONCAT('n', IF(INSTR({v}, 'e') + INSTR({v}, 'E') + INSTR({v}, '.') = 0, {v}, \
-                     IF(FLOOR({f}) = {f} AND ABS({f}) < 9223372036854775807e0, CAST({f} AS SIGNED), {v})))"
-                );
-                let _ = write!(
-                    cases,
-                    " WHEN 'INTEGER' THEN {num} WHEN 'DOUBLE' THEN {num} \
-                     WHEN 'BOOLEAN' THEN IF({v} IN ('1', 'true'), 'btrue', 'bfalse')"
-                );
-            }
-            let t = format!("(CASE JSON_TYPE(JSON_EXTRACT(props, '$.\"{p}\"')) {cases} END)");
+            // R8 round 10 (LDBC, MariaDB 1117 at the 20th index): the
+            // typed text of a property is one virtual column per property
+            // (`_sprig_p<hash>`), shared by every index on it; each
+            // index's own column only picks it for its label or type. The
+            // long expression is then in the table definition once per
+            // property, not once per index.
+            let pcol = Self::property_column(p);
+            parts.push(format!(
+                "ADD COLUMN IF NOT EXISTS `{pcol}` VARCHAR({max}) CHARACTER SET utf8mb4 COLLATE utf8mb4_nopad_bin \
+                 AS ({}) VIRTUAL",
+                Self::typed_text(p),
+                max = crate::schema::MAX_INLINE
+            ));
+            // A text index holds strings only: the typed texts that aren't
+            // a number (`n`) or a boolean (`b`).
+            let val = match d.kind {
+                IndexKind::Range => format!("`{pcol}`"),
+                IndexKind::Text => format!("IF(LEFT(`{pcol}`, 1) IN ('n', 'b'), NULL, `{pcol}`)"),
+            };
             let col = Self::index_column(d, k);
             parts.push(format!(
                 "ADD COLUMN IF NOT EXISTS `{col}` VARCHAR({max}) CHARACTER SET utf8mb4 COLLATE utf8mb4_nopad_bin \
-                 AS (IF({cond}, IF(CHAR_LENGTH({t}) <= {max}, {t}, CONCAT('h', SHA2({t}, 256))), NULL)) VIRTUAL",
+                 AS (IF({cond}, {val}, NULL)) VIRTUAL",
                 max = crate::schema::MAX_INLINE
             ));
             cols.push(format!("`{col}`"));

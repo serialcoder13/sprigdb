@@ -1,4 +1,4 @@
- 1 sql shop │ Dashboard │ Admin │ Inbox (2)
+ ❯ 1 sql shop │ ◔ Dashboard │ ◈ Admin │ ⚑ Inbox (2)
 ┌ Approvals (admin) · a approve · w window · i ignore · s snooze · c comment · r refresh ────────────────────┐
 │id           kind           level     state     target                 age   summary                        │
 │t42.17       index_create   table     open      shop.orders            5     Index orders(status, created_at│

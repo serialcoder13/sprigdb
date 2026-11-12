@@ -1807,6 +1807,19 @@ impl PassSession {
         {
             return Ok(Route::Done(self.fail(out, &e).await?));
         }
+        // RL57's addition (bugfix-63): a routine without SQL SECURITY over
+        // policy-protected tables applies its definer's policies; say so.
+        let definer_note = match &stmt {
+            DdlStatement::CreateObject {
+                kind:
+                    sprig_catalog::store::ObjectKind::Procedure
+                    | sprig_catalog::store::ObjectKind::Function,
+                ..
+            } if result.is_ok() => self.tenant.as_deref().and_then(|ts| {
+                crate::tenant::rls::definer_default_note(ts, original, &lex, current.as_deref())
+            }),
+            _ => None,
+        };
         match result {
             Ok(outcome) => {
                 let sinks_version = match (db_drop, outcome.version) {
@@ -1818,7 +1831,7 @@ impl PassSession {
                     // (decision PF6), so the next statement sees what it saw.
                     ts.changed(outcome.version.or(outcome.seen));
                     ts.changed(sinks_version);
-                    if !outcome.notes.is_empty() {
+                    if !outcome.notes.is_empty() || definer_note.is_some() {
                         ts.warnings = Some(
                             outcome
                                 .notes
@@ -1828,6 +1841,7 @@ impl PassSession {
                                     code: n.code,
                                     message: n.message.clone(),
                                 })
+                                .chain(definer_note.clone())
                                 .collect(),
                         );
                     }
@@ -1847,7 +1861,9 @@ impl PassSession {
                 }
                 let mut ok = OkPacket::new(status);
                 ok.affected_rows = outcome.affected_rows;
-                ok.warnings = u16::try_from(outcome.notes.len()).unwrap_or(u16::MAX);
+                ok.warnings =
+                    u16::try_from(outcome.notes.len() + usize::from(definer_note.is_some()))
+                        .unwrap_or(u16::MAX);
                 // R4, decision X36: an `ALTER TABLE`, `CREATE INDEX` or
                 // `DROP INDEX` reports what the backend did, with its
                 // `Records: R  Duplicates: D  Warnings: W` line, as MariaDB

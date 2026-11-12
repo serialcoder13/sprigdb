@@ -436,6 +436,19 @@ pub enum Expr {
         /// The predicate.
         pred: Box<Expr>,
     },
+    /// `reduce(acc = init, var IN list | expr)`.
+    Reduce {
+        /// The accumulator.
+        acc: String,
+        /// Its first value.
+        init: Box<Expr>,
+        /// The variable.
+        var: String,
+        /// The list.
+        list: Box<Expr>,
+        /// The next accumulator value.
+        expr: Box<Expr>,
+    },
     /// A pattern used as a predicate (`(a)-[:R]->(b)`, `exists(...)`,
     /// `EXISTS { pattern }`).
     Pattern(Box<PathPattern>),
@@ -525,6 +538,13 @@ impl Expr {
             Expr::Quantifier { list, pred, .. } => {
                 list.walk(f);
                 pred.walk(f);
+            }
+            Expr::Reduce {
+                init, list, expr, ..
+            } => {
+                init.walk(f);
+                list.walk(f);
+                expr.walk(f);
             }
             Expr::MapProjection(b, items) => {
                 b.walk(f);

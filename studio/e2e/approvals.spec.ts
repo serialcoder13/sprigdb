@@ -119,7 +119,7 @@ test.describe.serial('Approvals inbox (chapter 52)', () => {
     await expect(t.locator('tr', { hasText: 'index.create' })).toContainText('approve');
     await page.getByLabel('My address').fill('acme-app@example.com');
     await page.getByLabel('Delivery').selectOption('digest');
-    await page.getByRole('button', { name: 'Save' }).click();
+    await page.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(page.getByRole('status')).toContainText('Saved');
     await expect(page.getByText('acme-app@example.com')).toBeVisible();
     await axe(page, 'policy');

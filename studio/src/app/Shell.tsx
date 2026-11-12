@@ -15,6 +15,8 @@ import { SECTIONS, resolve, sectionOf, type Section } from '../workspace/section
 import { useRel, WorkspaceTabs } from '../workspace/WorkspaceTabs';
 import { StatusBar } from '../workspace/StatusBar';
 import { CommandPalette } from '../workspace/CommandPalette';
+import { HistoryPanel, SavedPanel } from '../workspace/LibraryPanels';
+import { loadLibrary } from '../workspace/library';
 
 /** Studio's workspace (decision R1, sprigdb-plan/decisions/studio-tui-redesign.md):
  * a title bar, an activity bar of sections, a side panel with the section's
@@ -27,6 +29,12 @@ export function Shell() {
   const firstTab = useTabs((s) => s.tabs[0]?.id ?? 'new');
   const openCount = useOpenCount();
   const [palette, setPalette] = useState(false);
+  // A panel-only section (saved queries, history) chosen in the activity bar,
+  // for the page it was chosen on; navigating elsewhere goes back to the page's section.
+  const [panelOn, setPanelOn] = useState<{ id: string; rel: string } | null>(null);
+  useEffect(() => {
+    if (me) void loadLibrary(me.principal.tenant ?? '-', me.principal.user, me.studio.persist_drafts);
+  }, [me]);
   useEffect(() => {
     const on = () => touch();
     const keys = (e: KeyboardEvent) => {
@@ -44,15 +52,32 @@ export function Shell() {
     };
   }, []);
   const isOperator = !!(me?.platform_roles.includes('operator') || operatorSession());
-  const active = sectionOf(rel);
+  const panelSection = panelOn && panelOn.rel === rel ? SECTIONS.find((s) => s.id === panelOn.id) : undefined;
+  const active = panelSection ?? sectionOf(rel);
   const target = (s: Section) => (s.id === 'query' ? `${base}/q/${firstTab}` : resolve(base, s.to));
   const activityItem = (s: Section) => {
     const label = intl.formatMessage({ id: s.label });
+    if (s.panel) {
+      const on = s.id === active.id;
+      return (
+        <button
+          key={s.id}
+          className={`activity-button${on ? ' on' : ''}`}
+          aria-label={label}
+          title={label}
+          aria-pressed={on}
+          onClick={() => setPanelOn(on ? null : { id: s.id, rel })}
+        >
+          <s.icon size={20} />
+        </button>
+      );
+    }
     return (
       <NavLink
         key={s.id}
         to={target(s)}
         className={s.id === active.id && !s.to.startsWith('/') ? 'on' : undefined}
+        onClick={() => setPanelOn(null)}
         aria-label={label}
         title={label}
         data-testid={s.testId}
@@ -128,7 +153,9 @@ export function Shell() {
           <h2 className="side-title">
             <FormattedMessage id={active.label} />
           </h2>
-          {active.links.length > 0 && (
+          {active.panel === 'saved' && <SavedPanel />}
+          {active.panel === 'history' && <HistoryPanel />}
+          {!active.panel && active.links.length > 0 && (
             <nav className="side-links" aria-label={intl.formatMessage({ id: active.label })}>
               {active.links.map((l) => (
                 <NavLink key={l.to} to={resolve(base, l.to)} end={l.end}>
@@ -142,7 +169,7 @@ export function Shell() {
               ))}
             </nav>
           )}
-          <Explorer />
+          {!active.panel && <Explorer />}
         </aside>
         <section className="workspace">
           <WorkspaceTabs />

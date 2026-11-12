@@ -1213,6 +1213,13 @@ impl<B: TxnBackend> TxnCoordinator<B> {
             let _ = lb.conn.take_redo();
             ctl.push(Ctl::SetTimestamp(None));
         }
+        // The race below must run while the commit row, if L committed, is
+        // still there: the resolver's sweep deletes it once its
+        // participants finished and it is `txn.resolver_min_age_seconds`
+        // old. It was created after this send, so racing only until
+        // `txn.commit_resolve_timeout_ms` after it (kept below min_age)
+        // can't meet a deleted row and record a false abort.
+        let sent = tokio::time::Instant::now();
         let res = lb.conn.control(&ctl).await;
         let decided = match res {
             Ok(()) => {
@@ -1229,7 +1236,7 @@ impl<B: TxnBackend> TxnCoordinator<B> {
             }
             Err(_) => {
                 lb.phase = XaPhase::Done;
-                match self.resolve_unknown(l, dtid).await {
+                match self.resolve_unknown(l, dtid, sent).await {
                     Some(Decision::Commit) => true,
                     Some(_) => {
                         self.abort_all("resolver").await;
@@ -1336,7 +1343,12 @@ impl<B: TxnBackend> TxnCoordinator<B> {
 
     /// The last resource's connection broke during its commit: kill its
     /// old thread, then decide by insert race at its anchor.
-    async fn resolve_unknown(&mut self, l: usize, dtid: Dtid) -> Option<Decision> {
+    async fn resolve_unknown(
+        &mut self,
+        l: usize,
+        dtid: Dtid,
+        sent: tokio::time::Instant,
+    ) -> Option<Decision> {
         let admin = self.admin.clone();
         let (cluster, schema, thread) = {
             let b = &self.branches[l];
@@ -1344,13 +1356,17 @@ impl<B: TxnBackend> TxnCoordinator<B> {
         };
         let me = self.cfg.coordinator_id.clone();
         let tenant = self.tenant;
-        let deadline = tokio::time::Instant::now() + self.cfg.commit_resolve_timeout;
+        // Measured from the commit's send, not from the error (see above).
+        let deadline = sent + self.cfg.commit_resolve_timeout;
         let mut killed = false;
         loop {
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
             if !killed {
                 killed = admin.kill(&cluster, thread).await.is_ok();
             }
-            if killed {
+            if killed && tokio::time::Instant::now() < deadline {
                 let r = decide_by_race(
                     &*admin,
                     None,

@@ -580,10 +580,11 @@ impl Remote {
                     }));
                 }
                 Some(Pending::Info(r)) => {
-                    let _ = r.send(match result {
-                        Ok(Answer::Info(m, c)) => (m, c),
-                        _ => (0, 0),
-                    });
+                    // bugfix-66: no answer is no answer (dropping the
+                    // sender), never a made-up "0 ready, 0 consumers".
+                    if let Ok(Answer::Info(m, c)) = result {
+                        let _ = r.send((m, c));
+                    }
                 }
                 None => {}
             },
@@ -642,9 +643,8 @@ impl Remote {
                 Pending::Count(r) => {
                     let _ = r.send(Err(err.clone()));
                 }
-                Pending::Info(r) => {
-                    let _ = r.send((0, 0));
-                }
+                // bugfix-66: dropped, unanswered.
+                Pending::Info(r) => drop(r),
             }
         }
         for (id, (sink, _)) in self.consumers.drain() {
@@ -888,8 +888,13 @@ impl QueueEngine {
                         Up::Info { req } => {
                             let (tx, rx) = oneshot::channel();
                             waits.push(Box::pin(async move {
-                                let (m, c) = rx.await.unwrap_or((0, 0));
-                                Down::Reply { req, result: Ok(Answer::Info(m, c)) }
+                                // bugfix-66: an owner that didn't answer
+                                // is an error, not "0 ready".
+                                let result = match rx.await {
+                                    Ok((m, c)) => Ok(Answer::Info(m, c)),
+                                    Err(_) => Err(moved("owner stopped")),
+                                };
+                                Down::Reply { req, result }
                             }));
                             Cmd::Info(tx)
                         }

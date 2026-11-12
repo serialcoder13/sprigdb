@@ -4,10 +4,13 @@
 //! runtime in [`crate::tui`] carries out, sending [`Msg`]s back. That keeps
 //! every screen testable with ratatui's `TestBackend`.
 
+use crate::tui::icons::{self, Icon};
+use crate::tui::palette::{self, Action as PalAction, Item as PalItem};
+use crate::tui::theme;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Row, Table, Tabs, Wrap};
 use serde_json::Value;
@@ -18,14 +21,18 @@ use crate::error::ShellError;
 use crate::history::History;
 use crate::inbox::{Inbox, InboxAction};
 use crate::lang::{Class, Lang, classify_sql, destructive, split};
-use crate::model::ResultEvent;
+use crate::model::{ResultEvent, ResultSet};
 use crate::output::Format;
 use crate::profile::Confirm;
 use crate::redact::redact;
+use crate::saved::Saved;
 use crate::tui::complete::{Catalog, complete};
 use crate::tui::editor::Editor;
-use crate::tui::explorer::{Explorer, ExplorerAction};
+use crate::tui::explorer::{self, Explorer, ExplorerAction};
 use crate::tui::results::{Results, View};
+use crate::tui::table::{
+    ApplyStmt, Conflict, Purpose, TableCmd, TableView, col_infos, is_null_key,
+};
 
 /// A data tab's id.
 pub type TabId = u64;
@@ -51,6 +58,10 @@ pub struct DataTab {
     pub in_txn: bool,
     /// When the running statement started (for the status bar).
     pub started: Option<std::time::Instant>,
+    /// The running statements, redacted, for the catalog's history.
+    pub last_run: Option<(String, Lang)>,
+    /// A table tab's view (instead of the editor and results).
+    pub table: Option<Box<TableView>>,
 }
 
 impl DataTab {
@@ -67,6 +78,8 @@ impl DataTab {
             database,
             in_txn: false,
             started: None,
+            last_run: None,
+            table: None,
         }
     }
 }
@@ -106,6 +119,8 @@ pub enum Pending {
     Kill(String, bool),
     /// An inbox action.
     Inbox(InboxAction),
+    /// A table tab's staged changes, in its database.
+    TableApply(TabId, String, Vec<ApplyStmt>),
 }
 
 /// A popup.
@@ -121,6 +136,21 @@ pub enum Dialog {
     Export,
     /// A line of text for an inbox action (days, a window, a comment).
     Input(String, String, InboxAction),
+    /// The command palette: the query typed and the selected row.
+    Palette(String, usize),
+    /// A name for the editor's text (Ctrl-S).
+    SaveAs(String),
+    /// The table view's filter, or a cell's new value.
+    TableInput(TableField, String),
+}
+
+/// What [`Dialog::TableInput`] asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableField {
+    /// The WHERE clause.
+    Filter,
+    /// The selected cell's value.
+    Cell,
 }
 
 /// The completion menu.
@@ -132,6 +162,39 @@ pub struct Completion {
     pub selected: usize,
     /// The typed word's length in characters.
     pub word_len: usize,
+}
+
+/// A finished run, for the catalog's history (`Library.Record`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunRecord {
+    /// The language.
+    pub lang: Lang,
+    /// The database it ran in.
+    pub database: Option<String>,
+    /// The statements, redacted.
+    pub text: String,
+    /// Whether it succeeded.
+    pub ok: bool,
+    /// Milliseconds.
+    pub ms: u64,
+    /// The first error.
+    pub error: Option<String>,
+}
+
+impl RunRecord {
+    /// The request body.
+    #[must_use]
+    pub fn body(&self) -> Value {
+        serde_json::json!({
+            "language": self.lang.name(),
+            "database": self.database,
+            "text": self.text,
+            "ok": self.ok,
+            "ms": self.ms,
+            "error": self.error,
+            "client": "shell",
+        })
+    }
 }
 
 /// Something for the runtime to do.
@@ -161,6 +224,22 @@ pub enum Effect {
     InboxRefresh,
     /// Act on a recommendation.
     InboxAct(InboxAction),
+    /// Read the saved queries and history the tenant's catalog keeps.
+    LoadLibrary,
+    /// Send a saved query to the catalog.
+    LibrarySave(crate::saved::SavedQuery),
+    /// Record a run in the catalog's history.
+    LibraryRecord(RunRecord),
+    /// Read a table tab's database snapshot (its columns and key).
+    TableInfo(TabId, String),
+    /// Run a table tab's query in its database.
+    TableQuery(TabId, String, Purpose, String),
+    /// Read `/v1/shards` for a table tab.
+    TableShards(TabId),
+    /// Apply a table tab's statements in one transaction in its database.
+    TableApply(TabId, String, Vec<ApplyStmt>),
+    /// Put text on the terminal's clipboard (OSC 52).
+    Copy(String),
     /// Quit.
     Quit,
 }
@@ -186,7 +265,7 @@ pub enum Msg {
         in_txn: bool,
     },
     /// A new tab connected.
-    TabOpened(DataTab),
+    TabOpened(Box<DataTab>),
     /// The database list.
     Catalog(Result<Value, ShellError>),
     /// A database's snapshot, streams and sinks.
@@ -197,6 +276,16 @@ pub enum Msg {
     Admin(Vec<String>, Result<Captured, ShellError>),
     /// The inbox.
     Inbox(Result<Value, ShellError>),
+    /// The catalog's library (`GET /v1/library`).
+    Library(Result<Value, ShellError>),
+    /// A table tab's database snapshot.
+    TableInfo(TabId, Result<Value, ShellError>),
+    /// A table tab's query results.
+    TableRows(TabId, Purpose, Result<Vec<ResultSet>, ShellError>),
+    /// `/v1/shards` for a table tab.
+    TableShards(TabId, Result<Value, ShellError>),
+    /// The apply's conflicts (none: committed).
+    TableApplied(TabId, Result<Vec<Conflict>, ShellError>),
     /// A line for the status bar.
     Status(String),
 }
@@ -279,6 +368,8 @@ pub struct App {
     pub catalog: Catalog,
     /// History of the profile.
     pub history: History,
+    /// Saved queries of the profile (in memory until the runtime loads them).
+    pub saved: Saved,
     /// A popup.
     pub dialog: Option<Dialog>,
     /// The completion menu.
@@ -332,6 +423,7 @@ impl App {
             },
             catalog: Catalog::default(),
             history,
+            saved: Saved::default(),
             dialog: None,
             completion: None,
             status: "F1 help · F5 run · Ctrl-C cancel · Ctrl-Q quit".to_owned(),
@@ -402,6 +494,11 @@ impl App {
                 self.dialog = Some(Dialog::Help);
                 return Vec::new();
             }
+            KeyCode::Char('k' | 'p') if ctrl(&k) => {
+                self.dialog = Some(Dialog::Palette(String::new(), 0));
+                self.completion = None;
+                return Vec::new();
+            }
             KeyCode::F(6) => return self.switch(-1),
             KeyCode::F(7) => return self.switch(1),
             KeyCode::Char(c @ '1'..='9') if alt(&k) => {
@@ -457,6 +554,10 @@ impl App {
                         }
                         Pending::Kill(id, q) => vec![Effect::Kill(id, q)],
                         Pending::Inbox(a) => vec![Effect::InboxAct(a)],
+                        Pending::TableApply(id, db, stmts) => {
+                            self.status = format!("applying {} change(s)...", stmts.len());
+                            vec![Effect::TableApply(id, db, stmts)]
+                        }
                     }
                 }
                 KeyCode::Char('n' | 'N') | KeyCode::Esc => {
@@ -503,6 +604,258 @@ impl App {
             Dialog::Help | Dialog::Cell(_) => {
                 self.dialog = None;
                 Vec::new()
+            }
+            Dialog::Palette(q, sel) => self.palette_key(q, *sel, k),
+            Dialog::TableInput(field, text) => self.table_input_key(*field, text, k),
+            Dialog::SaveAs(name) => {
+                let mut name = name.clone();
+                match k.code {
+                    KeyCode::Esc => {
+                        self.dialog = None;
+                        return Vec::new();
+                    }
+                    KeyCode::Enter => {
+                        self.dialog = None;
+                        return self.save_as(&name);
+                    }
+                    KeyCode::Backspace => {
+                        name.pop();
+                    }
+                    KeyCode::Char(c) if !ctrl(&k) => name.push(c),
+                    _ => {}
+                }
+                self.dialog = Some(Dialog::SaveAs(name));
+                Vec::new()
+            }
+        }
+    }
+
+    /// Saves the current tab's text as `name` (Ctrl-S), here and, when it
+    /// keeps them, in the tenant's catalog.
+    fn save_as(&mut self, name: &str) -> Vec<Effect> {
+        let Some(t) = self.tabs.get(self.screen) else {
+            return Vec::new();
+        };
+        let (text, lang, db) = (t.editor.text(), t.lang, t.database.clone());
+        match self.saved.save(name, &text, lang, db.as_deref()) {
+            Ok(Some(q)) => {
+                self.status = format!("saved as \"{}\"", q.name);
+                if self.saved.shared {
+                    vec![Effect::LibrarySave(q)]
+                } else {
+                    Vec::new()
+                }
+            }
+            Ok(None) => {
+                self.status = String::from("nothing to save");
+                Vec::new()
+            }
+            Err(e) => {
+                self.status = format!("not saved: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// The palette's history: this machine's runs, then the catalog's
+    /// (Studio's, other machines') that aren't among them.
+    fn history_items(&self, out: &mut Vec<PalItem>) {
+        let mut seen = std::collections::HashSet::new();
+        let local = self
+            .history
+            .entries
+            .iter()
+            .rev()
+            .take(50)
+            .map(|e| (e.lang.as_str(), e.text.as_str(), ""));
+        let shared = self
+            .saved
+            .shared_history
+            .iter()
+            .take(100)
+            .map(|h| (h.lang.as_str(), h.text.as_str(), h.client.as_str()));
+        for (lang, text, client) in local.chain(shared) {
+            if !seen.insert(text) {
+                continue;
+            }
+            out.push(PalItem {
+                label: format!(
+                    "{} {}",
+                    icons::glyph(Icon::History),
+                    crate::tui::clip(text.lines().next().unwrap_or(""), 60)
+                ),
+                hint: if client.is_empty() || client == "shell" {
+                    format!("history · {lang}")
+                } else {
+                    format!("history · {lang} · {client}")
+                },
+                action: PalAction::Insert(text.to_owned()),
+            });
+        }
+    }
+
+    /// Everything the palette searches: open screens, loaded tables, commands.
+    #[must_use]
+    pub fn palette_items(&self) -> Vec<PalItem> {
+        let mut out = Vec::new();
+        for (i, t) in self.tabs.iter().enumerate() {
+            out.push(PalItem {
+                label: match &t.table {
+                    Some(v) => format!(
+                        "{} {} {}.{}",
+                        i + 1,
+                        icons::glyph(Icon::Table),
+                        v.db,
+                        v.table
+                    ),
+                    None => format!(
+                        "{} {} {}",
+                        i + 1,
+                        t.lang.name(),
+                        t.database.as_deref().unwrap_or("-")
+                    ),
+                },
+                hint: "open tab".to_owned(),
+                action: PalAction::Screen(i),
+            });
+        }
+        for (j, (name, hint)) in [
+            ("Dashboard", "screen"),
+            ("Admin", "screen · sprigctl"),
+            ("Inbox", "screen · approvals"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            out.push(PalItem {
+                label: name.to_owned(),
+                hint: hint.to_owned(),
+                action: PalAction::Screen(self.tabs.len() + j),
+            });
+        }
+        for db in &self.explorer.roots {
+            for group in &db.children {
+                for n in &group.children {
+                    if matches!(n.kind, explorer::Kind::Table | explorer::Kind::View) {
+                        out.push(PalItem {
+                            label: n.label.clone(),
+                            hint: format!(
+                                "{} · {}",
+                                if n.kind == explorer::Kind::View {
+                                    "view"
+                                } else {
+                                    "table"
+                                },
+                                n.db
+                            ),
+                            action: PalAction::OpenTable(
+                                n.db.clone(),
+                                n.label.clone(),
+                                n.kind == explorer::Kind::View,
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        for q in &self.saved.items {
+            out.push(PalItem {
+                label: format!("{} {}", icons::glyph(Icon::Saved), q.name),
+                hint: format!("saved · {}", q.lang),
+                action: PalAction::Insert(q.text.clone()),
+            });
+        }
+        self.history_items(&mut out);
+        for (label, key, action) in [
+            ("New tab", "Ctrl-T", PalAction::NewTab),
+            ("Export the result", "Ctrl-E", PalAction::Export),
+            ("Reload the explorer", "Ctrl-O", PalAction::Reload),
+            ("Keys", "F1", PalAction::Help),
+            ("Quit", "Ctrl-Q", PalAction::Quit),
+        ] {
+            out.push(PalItem {
+                label: label.to_owned(),
+                hint: format!("command · {key}"),
+                action,
+            });
+        }
+        out
+    }
+
+    fn palette_key(&mut self, q: &str, sel: usize, k: KeyEvent) -> Vec<Effect> {
+        let mut q = q.to_owned();
+        let shown = palette::filter(&self.palette_items(), &q, 50);
+        let mut sel = sel.min(shown.len().saturating_sub(1));
+        match k.code {
+            KeyCode::Esc => {
+                self.dialog = None;
+                return Vec::new();
+            }
+            KeyCode::Up => sel = sel.saturating_sub(1),
+            KeyCode::Down => sel = (sel + 1).min(shown.len().saturating_sub(1)),
+            KeyCode::Backspace => {
+                q.pop();
+                sel = 0;
+            }
+            KeyCode::Enter => {
+                self.dialog = None;
+                return match shown.get(sel).map(|i| i.action.clone()) {
+                    Some(a) => self.palette_act(a),
+                    None => Vec::new(),
+                };
+            }
+            KeyCode::Char(c) if !ctrl(&k) => {
+                q.push(c);
+                sel = 0;
+            }
+            _ => {}
+        }
+        self.dialog = Some(Dialog::Palette(q, sel));
+        Vec::new()
+    }
+
+    fn palette_act(&mut self, a: PalAction) -> Vec<Effect> {
+        match a {
+            PalAction::Screen(i) => {
+                self.screen = i.min(self.tabs.len() + FIXED.len() - 1);
+                self.completion = None;
+                self.entered()
+            }
+            PalAction::NewTab => {
+                let lang = self.tabs.get(self.screen).map_or(Lang::Sql, |t| t.lang);
+                self.status = String::from("opening a tab...");
+                vec![Effect::NewTab(lang)]
+            }
+            PalAction::Help => {
+                self.dialog = Some(Dialog::Help);
+                Vec::new()
+            }
+            PalAction::Export => {
+                if self.screen < self.tabs.len() {
+                    self.dialog = Some(Dialog::Export);
+                }
+                Vec::new()
+            }
+            PalAction::Reload => vec![Effect::LoadCatalog],
+            PalAction::OpenTable(db, table, is_view) => self.open_table(&db, &table, is_view),
+            PalAction::Insert(text) => {
+                if self.tabs.get(self.screen).is_none_or(|t| t.table.is_some()) {
+                    let Some(i) = self.tabs.iter().position(|t| t.table.is_none()) else {
+                        self.status = String::from("no query tab: Ctrl-T opens one");
+                        return Vec::new();
+                    };
+                    self.screen = i;
+                }
+                if let Some(t) = self.tabs.get_mut(self.screen) {
+                    t.editor.set_text(&text);
+                    self.focus = Focus::Editor;
+                    self.status = String::from("F5 runs it");
+                }
+                Vec::new()
+            }
+            PalAction::Quit => {
+                self.quit = true;
+                vec![Effect::Quit]
             }
         }
     }
@@ -561,13 +914,241 @@ impl App {
             return Vec::new();
         };
         let shown = redact(stmts.last().map_or("", String::as_str), lang);
+        tab.last_run = Some((
+            stmts
+                .iter()
+                .map(|s| redact(s.trim(), lang))
+                .collect::<Vec<_>>()
+                .join(";\n"),
+            lang,
+        ));
         tab.results.start(shown);
         tab.running = true;
         tab.started = Some(std::time::Instant::now());
         vec![Effect::Run(id, stmts, lang)]
     }
 
+    /// Opens (or shows) a table tab for `db`.`table`.
+    fn open_table(&mut self, db: &str, table: &str, is_view: bool) -> Vec<Effect> {
+        self.focus = Focus::Results;
+        if let Some(i) = self.tabs.iter().position(|t| {
+            t.table
+                .as_ref()
+                .is_some_and(|v| v.db == db && v.table == table)
+        }) {
+            self.screen = i;
+            return Vec::new();
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        let describe = self
+            .tabs
+            .get(self.screen)
+            .map(|t| t.describe.clone())
+            .unwrap_or_default();
+        let mut t = DataTab::new(id, Lang::Sql, describe, Some(db.to_owned()));
+        t.table = Some(Box::new(TableView::new(db, table, is_view)));
+        self.tabs.push(t);
+        self.screen = self.tabs.len() - 1;
+        self.status = format!("{db}.{table}: / filter · e edit · a apply · [ ] tabs");
+        vec![Effect::TableInfo(id, db.to_owned())]
+    }
+
+    fn table_key(&mut self, k: KeyEvent) -> Vec<Effect> {
+        let Some(t) = self.tabs.get_mut(self.screen) else {
+            return Vec::new();
+        };
+        let id = t.id;
+        let Some(v) = t.table.as_mut() else {
+            return Vec::new();
+        };
+        let cmd = v.key(k);
+        self.table_cmd(id, cmd)
+    }
+
+    fn table_view(&mut self, id: TabId) -> Option<&mut TableView> {
+        self.tab_by_id(id).and_then(|t| t.table.as_deref_mut())
+    }
+
+    /// Carries out what a table view asked for.
+    fn table_cmd(&mut self, id: TabId, cmd: TableCmd) -> Vec<Effect> {
+        let Some(db) = self.table_view(id).map(|v| v.db.clone()) else {
+            return Vec::new();
+        };
+        match cmd {
+            TableCmd::None => Vec::new(),
+            TableCmd::Query(p, sql) => vec![Effect::TableQuery(id, db, p, sql)],
+            TableCmd::Shards => vec![Effect::TableShards(id)],
+            TableCmd::EditFilter(cur) => {
+                self.dialog = Some(Dialog::TableInput(TableField::Filter, cur));
+                Vec::new()
+            }
+            TableCmd::EditCell(cur) => {
+                self.dialog = Some(Dialog::TableInput(
+                    TableField::Cell,
+                    cur.unwrap_or_default(),
+                ));
+                Vec::new()
+            }
+            TableCmd::Apply(stmts) => {
+                let shown: Vec<String> = stmts.iter().map(|s| format!("{};", s.sql)).collect();
+                self.dialog = Some(Dialog::Confirm(
+                    format!(
+                        "Apply {} change{} in one transaction?\n\n{}",
+                        stmts.len(),
+                        if stmts.len() == 1 { "" } else { "s" },
+                        crate::tui::clip_lines(&shown.join("\n"), 12)
+                    ),
+                    Pending::TableApply(id, db, stmts),
+                ));
+                Vec::new()
+            }
+            TableCmd::Copy(text, n) => {
+                self.status = format!(
+                    "copied {n} statement{} as SQL to the clipboard",
+                    if n == 1 { "" } else { "s" }
+                );
+                vec![Effect::Copy(text)]
+            }
+            TableCmd::Status(s) => {
+                self.status = s;
+                Vec::new()
+            }
+        }
+    }
+
+    fn table_input_key(&mut self, field: TableField, text: &str, k: KeyEvent) -> Vec<Effect> {
+        let mut text = text.to_owned();
+        let id = self.tabs.get(self.screen).map_or(0, |t| t.id);
+        match k.code {
+            KeyCode::Esc => {
+                self.dialog = None;
+                return Vec::new();
+            }
+            _ if field == TableField::Cell && is_null_key(&k) => {
+                self.dialog = None;
+                if let Some(v) = self.table_view(id) {
+                    let (r, c) = (v.row, v.col);
+                    v.stage(r, c, None);
+                }
+                return Vec::new();
+            }
+            KeyCode::Enter => {
+                self.dialog = None;
+                let cmd = match self.table_view(id) {
+                    None => TableCmd::None,
+                    Some(v) if field == TableField::Filter => v.set_filter(&text),
+                    Some(v) => {
+                        let (r, c) = (v.row, v.col);
+                        v.stage(r, c, Some(text));
+                        TableCmd::None
+                    }
+                };
+                return self.table_cmd(id, cmd);
+            }
+            KeyCode::Backspace => {
+                text.pop();
+            }
+            KeyCode::Char(c) if !ctrl(&k) => text.push(c),
+            _ => {}
+        }
+        self.dialog = Some(Dialog::TableInput(field, text));
+        Vec::new()
+    }
+
+    /// Handles a table tab's message.
+    #[allow(clippy::many_single_char_names)]
+    fn table_msg(&mut self, m: Msg) -> Vec<Effect> {
+        match m {
+            Msg::TableInfo(id, r) => {
+                let Some(v) = self.table_view(id) else {
+                    return Vec::new();
+                };
+                match r {
+                    Ok(snap) => {
+                        v.cols = col_infos(&snap, &v.table.clone());
+                        let cmd = v.reload();
+                        return self.table_cmd(id, cmd);
+                    }
+                    Err(e) => {
+                        v.loading = false;
+                        v.error = Some(e.to_string());
+                    }
+                }
+            }
+            Msg::TableRows(id, p, r) => {
+                let Some(v) = self.table_view(id) else {
+                    return Vec::new();
+                };
+                match (p, r) {
+                    (Purpose::Page, Ok(sets)) => {
+                        let set = sets
+                            .iter()
+                            .find(|s| !s.columns.is_empty())
+                            .cloned()
+                            .unwrap_or_default();
+                        v.set_page(set);
+                    }
+                    (Purpose::Page, Err(e)) => {
+                        v.loading = false;
+                        v.error = Some(e.to_string());
+                    }
+                    (Purpose::Structure(sub), r) => {
+                        let shaped = r.map(|s| v.shape(sub, s)).map_err(|e| e.to_string());
+                        v.other = Some((sub, shaped));
+                    }
+                }
+            }
+            Msg::TableShards(id, r) => {
+                if let Some(v) = self.table_view(id) {
+                    let shaped = r.map(|j| v.shards_set(&j)).map_err(|e| e.to_string());
+                    v.other = Some((crate::tui::table::Sub::Shards, shaped));
+                }
+            }
+            Msg::TableApplied(id, r) => {
+                let Some(v) = self.table_view(id) else {
+                    return Vec::new();
+                };
+                match r {
+                    Ok(c) if c.is_empty() => {
+                        let n = v.pending();
+                        let cmd = v.reload();
+                        self.status =
+                            format!("applied {n} change{}", if n == 1 { "" } else { "s" });
+                        return self.table_cmd(id, cmd);
+                    }
+                    Ok(c) => {
+                        v.conflicts = c;
+                        self.status = v.conflict_note();
+                    }
+                    Err(e) => self.status = format!("nothing applied: {e}"),
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
     fn data_key(&mut self, k: KeyEvent) -> Vec<Effect> {
+        if self
+            .tabs
+            .get(self.screen)
+            .is_some_and(|t| t.table.is_some())
+        {
+            match k.code {
+                KeyCode::F(2) | KeyCode::Esc => {
+                    self.focus = if self.focus == Focus::Explorer {
+                        Focus::Results
+                    } else {
+                        Focus::Explorer
+                    };
+                    return Vec::new();
+                }
+                KeyCode::Char('o') if ctrl(&k) => return vec![Effect::LoadCatalog],
+                _ if self.focus == Focus::Explorer => return self.explorer_key(k),
+                _ => return self.table_key(k),
+            }
+        }
         // Keys for every pane of a data tab.
         match k.code {
             KeyCode::Char('c') if ctrl(&k) => {
@@ -614,6 +1195,10 @@ impl App {
             }
             KeyCode::F(5) => return self.run_at_cursor(),
             KeyCode::Char('r') if ctrl(&k) => return self.run_at_cursor(),
+            KeyCode::Char('s') if ctrl(&k) => {
+                self.dialog = Some(Dialog::SaveAs(String::new()));
+                return Vec::new();
+            }
             KeyCode::Char('e') if ctrl(&k) => {
                 if self
                     .tabs
@@ -787,11 +1372,16 @@ impl App {
                 self.explorer.close();
                 ExplorerAction::None
             }
+            KeyCode::Char('r') => self
+                .explorer
+                .select_sql()
+                .map_or(ExplorerAction::None, ExplorerAction::Run),
             _ => ExplorerAction::None,
         };
         match a {
             ExplorerAction::None => Vec::new(),
             ExplorerAction::Load(db) => vec![Effect::LoadDb(db)],
+            ExplorerAction::Open(db, table, is_view) => self.open_table(&db, &table, is_view),
             ExplorerAction::Insert(s) => {
                 if let Some(t) = self.tab_mut() {
                     t.editor.insert_str(&s);
@@ -800,6 +1390,13 @@ impl App {
                 Vec::new()
             }
             ExplorerAction::Run(sql) => {
+                if self.tab_mut().is_some_and(|t| t.table.is_some()) {
+                    let Some(i) = self.tabs.iter().position(|t| t.table.is_none()) else {
+                        self.status = String::from("no query tab: Ctrl-T opens one");
+                        return Vec::new();
+                    };
+                    self.screen = i;
+                }
                 if let Some(t) = self.tab_mut() {
                     if t.lang != Lang::Sql {
                         t.lang = Lang::Sql;
@@ -1011,6 +1608,7 @@ impl App {
                 in_txn,
             } => {
                 let db_changed;
+                let shared = self.saved.shared;
                 if let Some(t) = self.tab_by_id(tab) {
                     t.running = false;
                     t.started = None;
@@ -1041,15 +1639,34 @@ impl App {
                             if truncated { " (cut at the cap)" } else { "" }
                         ),
                     };
+                    let mut fx = Vec::new();
+                    let cancelled = error
+                        .as_ref()
+                        .is_some_and(|e| e.is(crate::error::ShellCode::Cancelled));
+                    if let Some((text, lang)) = t.last_run.take()
+                        && shared
+                        && !cancelled
+                        && !text.is_empty()
+                    {
+                        fx.push(Effect::LibraryRecord(RunRecord {
+                            lang,
+                            database: t.database.clone(),
+                            text,
+                            ok: error.is_none(),
+                            ms: u64::try_from(elapsed_ms).unwrap_or(u64::MAX),
+                            error: error.as_ref().map(ToString::to_string),
+                        }));
+                    }
                     t.results.error = error;
                     if db_changed {
-                        return vec![Effect::LoadCatalog];
+                        fx.push(Effect::LoadCatalog);
                     }
+                    return fx;
                 }
             }
             Msg::TabOpened(t) => {
                 self.next_id = self.next_id.max(t.id + 1);
-                self.tabs.push(t);
+                self.tabs.push(*t);
                 self.screen = self.tabs.len() - 1;
                 self.status = String::from("new tab");
             }
@@ -1094,7 +1711,7 @@ impl App {
                 self.admin.running = false;
                 self.admin.output.push(Line::styled(
                     format!("sprigctl {}", args.join(" ")),
-                    Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    theme::accent().add_modifier(Modifier::BOLD),
                 ));
                 match r {
                     Ok(c) => {
@@ -1104,19 +1721,18 @@ impl App {
                         for l in c.stderr.lines() {
                             self.admin
                                 .output
-                                .push(Line::styled(l.to_owned(), Style::new().fg(Color::Red)));
+                                .push(Line::styled(l.to_owned(), theme::error()));
                         }
                         if c.code != 0 {
-                            self.admin.output.push(Line::styled(
-                                format!("(exit {})", c.code),
-                                Style::new().fg(Color::Red),
-                            ));
+                            self.admin
+                                .output
+                                .push(Line::styled(format!("(exit {})", c.code), theme::error()));
                         }
                     }
                     Err(e) => self
                         .admin
                         .output
-                        .push(Line::styled(e.to_string(), Style::new().fg(Color::Red))),
+                        .push(Line::styled(e.to_string(), theme::error())),
                 }
                 let keep = 5000;
                 if self.admin.output.len() > keep {
@@ -1125,6 +1741,21 @@ impl App {
                 }
             }
             Msg::Inbox(r) => self.inbox.set(r),
+            // A gateway that can't keep them (older, or an accounts-file
+            // login): the profile's file stays the only copy.
+            Msg::Library(Ok(v)) => {
+                return self
+                    .saved
+                    .adopt(&v)
+                    .into_iter()
+                    .map(Effect::LibrarySave)
+                    .collect();
+            }
+            Msg::Library(Err(_)) => {}
+            m @ (Msg::TableInfo(..)
+            | Msg::TableRows(..)
+            | Msg::TableShards(..)
+            | Msg::TableApplied(..)) => return self.table_msg(m),
             Msg::Status(s) => self.status = s,
         }
         Vec::new()
@@ -1178,31 +1809,49 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, t)| {
+                if let Some(v) = &t.table {
+                    let busy = if v.loading { " …" } else { "" };
+                    let dirty = if v.pending() > 0 { " ●" } else { "" };
+                    return Line::from(format!(
+                        "{} {} {}{dirty}{busy}",
+                        icons::glyph(Icon::Table),
+                        i + 1,
+                        v.table
+                    ));
+                }
                 let db = t.database.as_deref().unwrap_or("-");
                 let busy = if t.running { " …" } else { "" };
-                Line::from(format!("{} {} {db}{busy}", i + 1, t.lang.name()))
+                Line::from(format!(
+                    "{} {} {} {db}{busy}",
+                    icons::glyph(Icon::Query),
+                    i + 1,
+                    t.lang.name()
+                ))
             })
             .collect();
-        titles.push(Line::from("Dashboard"));
-        titles.push(Line::from("Admin"));
+        titles.push(Line::from(format!(
+            "{} Dashboard",
+            icons::glyph(Icon::Dashboard)
+        )));
+        titles.push(Line::from(format!("{} Admin", icons::glyph(Icon::Admin))));
         titles.push(Line::from(match self.inbox.count() {
-            Some(n) if n > 0 => format!("Inbox ({n})"),
-            _ => "Inbox".to_owned(),
+            Some(n) if n > 0 => format!("{} Inbox ({n})", icons::glyph(Icon::Inbox)),
+            _ => format!("{} Inbox", icons::glyph(Icon::Inbox)),
         }));
         f.render_widget(
             Tabs::new(titles)
                 .select(self.screen)
-                .highlight_style(Style::new().fg(Color::Black).bg(Color::Cyan))
-                .divider("│"),
+                .highlight_style(theme::tab_active())
+                .divider(Span::styled("│", theme::border())),
             area,
         );
     }
 
     fn pane(title: String, focused: bool) -> Block<'static> {
         let style = if focused {
-            Style::new().fg(Color::Cyan)
+            theme::focus_border()
         } else {
-            Style::new().fg(Color::DarkGray)
+            theme::border()
         };
         Block::bordered().border_style(style).title(title)
     }
@@ -1228,6 +1877,10 @@ impl App {
         let Some(t) = self.tabs.get_mut(screen) else {
             return;
         };
+        if let Some(v) = t.table.as_deref_mut() {
+            v.draw(f, right, focus != Focus::Explorer);
+            return;
+        }
         let ed_h = (u16::try_from(t.editor.line_count()).unwrap_or(u16::MAX) + 2)
             .clamp(5, (right.height / 2).max(5));
         let [ed_area, res_area] =
@@ -1268,7 +1921,7 @@ impl App {
                     .take(8)
                     .map(|(i, s)| {
                         let st = if i == c.selected {
-                            Style::new().fg(Color::Black).bg(Color::Cyan)
+                            theme::selected()
                         } else {
                             Style::new()
                         };
@@ -1292,7 +1945,7 @@ impl App {
             .enumerate()
             .map(|(i, v)| {
                 let st = if i == self.dash.view {
-                    Style::new().fg(Color::Black).bg(Color::Cyan)
+                    theme::selected()
                 } else {
                     Style::new()
                 };
@@ -1322,8 +1975,7 @@ impl App {
         };
         if let Some(n) = &p.note {
             f.render_widget(
-                Paragraph::new(Line::styled(n.clone(), Style::new().fg(Color::Yellow)))
-                    .wrap(Wrap { trim: true }),
+                Paragraph::new(Line::styled(n.clone(), theme::warn())).wrap(Wrap { trim: true }),
                 note_area,
             );
         }
@@ -1354,7 +2006,7 @@ impl App {
         let rows = p.rows.iter().enumerate().skip(first).take(h).map(|(i, r)| {
             let row = Row::new(r.iter().map(|c| crate::tui::clip(c, 36)));
             if i == self.dash.row {
-                row.style(Style::new().add_modifier(Modifier::REVERSED))
+                row.style(theme::selected())
             } else {
                 row
             }
@@ -1386,7 +2038,7 @@ impl App {
                     } else {
                         "This profile has no admin_url: sprigctl uses its own defaults (127.0.0.1:7480)."
                     },
-                    Style::new().fg(Color::DarkGray),
+                    theme::muted(),
                 ),
             ]
         } else {
@@ -1400,7 +2052,7 @@ impl App {
         };
         let block = Block::bordered()
             .title(title)
-            .border_style(Style::new().fg(Color::Cyan));
+            .border_style(theme::focus_border());
         let inner = block.inner(in_area);
         f.render_widget(
             Paragraph::new(self.admin.input.text()).block(block),
@@ -1420,14 +2072,11 @@ impl App {
         {
             spans.push(Span::styled(
                 format!(" {} ", self.profile),
-                Style::new().fg(Color::Black).bg(Color::Cyan),
+                theme::selected(),
             ));
             spans.push(Span::raw(format!(" {} ", t.describe)));
             if t.in_txn {
-                spans.push(Span::styled(
-                    " TXN ",
-                    Style::new().fg(Color::Black).bg(Color::Yellow),
-                ));
+                spans.push(Span::styled(" TXN ", theme::warn_badge()));
             }
             if let Some(s) = t.started {
                 spans.push(Span::raw(format!(
@@ -1437,29 +2086,20 @@ impl App {
             }
         }
         if let Some(n) = self.inbox.count().filter(|n| *n > 0) {
-            spans.push(Span::styled(
-                format!(" ⚑ {n} to approve "),
-                Style::new().fg(Color::Black).bg(Color::Magenta),
-            ));
+            spans.push(Span::styled(format!(" ⚑ {n} to approve "), theme::badge()));
         }
-        spans.push(Span::styled(
-            format!(" {}", self.status),
-            Style::new().fg(Color::DarkGray),
-        ));
+        spans.push(Span::styled(format!(" {}", self.status), theme::muted()));
         f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
-    #[allow(clippy::many_single_char_names)]
+    #[allow(clippy::many_single_char_names, clippy::too_many_lines)]
     fn draw_dialog(&self, f: &mut Frame<'_>, area: Rect) {
         let Some(d) = &self.dialog else { return };
         let (title, body): (&str, Vec<Line<'_>>) = match d {
             Dialog::Confirm(q, _) => {
                 let mut l: Vec<Line<'_>> = q.lines().map(|s| Line::from(s.to_owned())).collect();
                 l.push(Line::from(""));
-                l.push(Line::styled(
-                    "y: run it    n or Esc: don't",
-                    Style::new().fg(Color::Yellow),
-                ));
+                l.push(Line::styled("y: run it    n or Esc: don't", theme::warn()));
                 (" Confirm ", l)
             }
             Dialog::Help => (" Keys ", help_lines()),
@@ -1473,15 +2113,73 @@ impl App {
                     "c: CSV   j: JSON   n: NDJSON   t: TSV   Esc: cancel",
                 )],
             ),
+            Dialog::Palette(q, sel) => {
+                let shown = palette::filter(&self.palette_items(), q, 14);
+                let mut l = vec![Line::from(vec![
+                    Span::styled("› ", theme::accent()),
+                    Span::raw(q.clone()),
+                    Span::styled("▏", theme::accent()),
+                ])];
+                l.push(Line::from(""));
+                if shown.is_empty() {
+                    l.push(Line::styled("Nothing matches.", theme::muted()));
+                }
+                for (i, it) in shown.iter().enumerate() {
+                    let row = Line::from(vec![
+                        Span::raw(format!("{:<44}", crate::tui::clip(&it.label, 44))),
+                        Span::styled(it.hint.clone(), theme::muted()),
+                    ]);
+                    l.push(if i == *sel {
+                        row.style(theme::selected())
+                    } else {
+                        row
+                    });
+                }
+                (" Search · Enter opens · Esc closes ", l)
+            }
+            Dialog::SaveAs(name) => (
+                " Save the editor's text ",
+                vec![
+                    Line::from(vec![
+                        Span::styled("Name › ", theme::accent()),
+                        Span::raw(name.clone()),
+                    ]),
+                    Line::styled(
+                        "Enter: save (Ctrl-K finds it later)   Esc: cancel",
+                        theme::muted(),
+                    ),
+                ],
+            ),
+            Dialog::TableInput(field, text) => {
+                let (title, prompt, hint) = match field {
+                    TableField::Filter => (
+                        " Filter ",
+                        "WHERE › ",
+                        "Enter: apply (empty clears)   Esc: cancel",
+                    ),
+                    TableField::Cell => (
+                        " New value ",
+                        "› ",
+                        "Enter: stage it   Ctrl-N: NULL   Esc: cancel",
+                    ),
+                };
+                (
+                    title,
+                    vec![
+                        Line::from(vec![
+                            Span::styled(prompt, theme::accent()),
+                            Span::raw(text.clone()),
+                        ]),
+                        Line::styled(hint, theme::muted()),
+                    ],
+                )
+            }
             Dialog::Input(q, text, _) => (
                 " Inbox ",
                 vec![
                     Line::from(q.clone()),
                     Line::from(format!("> {text}")),
-                    Line::styled(
-                        "Enter: send   Esc: cancel",
-                        Style::new().fg(Color::DarkGray),
-                    ),
+                    Line::styled("Enter: send   Esc: cancel", theme::muted()),
                 ],
             ),
         };
@@ -1498,7 +2196,11 @@ impl App {
             Paragraph::new(body).wrap(Wrap { trim: false }).block(
                 Block::bordered()
                     .title(title)
-                    .border_style(Style::new().fg(Color::Yellow)),
+                    .border_style(if matches!(d, Dialog::Confirm(..)) {
+                        theme::warn()
+                    } else {
+                        theme::focus_border()
+                    }),
             ),
             r,
         );
@@ -1525,6 +2227,11 @@ fn help_lines() -> Vec<Line<'static>> {
         "Dashboard     1-6 or Left/Right views, r refresh, k kill, q kill query",
         "Admin         sprigctl commands; Up/Down history",
         "Inbox         a approve, w window, i ignore, s snooze, c comment",
+        "Ctrl-K, Ctrl-P search tabs, tables, saved queries, history, commands",
+        "Ctrl-S        save the editor's text under a name",
+        "Enter, r      (explorer) open a table's view, or run a SELECT on it",
+        "Table view    / filter, = by cell, e edit, o add, d delete, n p page",
+        "              a apply, r reset, y copy as SQL, t take current, [ ] tabs",
         "Ctrl-Q        quit",
     ]
     .into_iter()

@@ -30,3 +30,20 @@ pub trait ValueGuard: Send + Sync + std::fmt::Debug {
     /// Why the value is refused.
     fn check<'a>(&'a self, key: &'a str, value: &'a Value) -> GuardFuture<'a>;
 }
+
+/// Several guards: a value passes when every one passes; the first
+/// refusal is the answer (bugfix-62: `auth.authorizer`'s engine guard and
+/// chapter 18's resolve-window guard on one writer).
+#[derive(Debug, Clone, Default)]
+pub struct AllGuards(pub Vec<std::sync::Arc<dyn ValueGuard>>);
+
+impl ValueGuard for AllGuards {
+    fn check<'a>(&'a self, key: &'a str, value: &'a Value) -> GuardFuture<'a> {
+        Box::pin(async move {
+            for g in &self.0 {
+                g.check(key, value).await?;
+            }
+            Ok(())
+        })
+    }
+}

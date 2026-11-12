@@ -44,6 +44,43 @@ const MAX_WAIT: Duration = Duration::from_secs(10);
 /// writable (RL13).
 pub(super) const PROMOTION_HOLD: Duration = MAX_WAIT;
 
+/// Placement checks a session keeps per map generation (perf1, S148): a
+/// statement whose tenant's map mirror is at the generation the last
+/// check saw skips the work that check did. Every change to a map (a hold,
+/// a cutover, a split, a promotion) bumps the generation, and the home DC
+/// is part of the key.
+#[derive(Debug, Default)]
+pub(super) struct PlacementMemo {
+    /// `follow_tenant` found nothing to wait for and routed to this
+    /// cluster at (home, generation).
+    followed: Option<(sprig_common::ids::DcId, u64, sprig_common::ids::ClusterId)>,
+    /// `maps_token` at (home, generation): its revision sum and held flag.
+    token: Option<(sprig_common::ids::DcId, u64, u64, bool)>,
+}
+
+impl PlacementMemo {
+    /// [`GatewayLocator::maps_token`](crate::tenant::locator::GatewayLocator::maps_token)
+    /// for `tenant`, kept per generation.
+    pub(super) fn maps_token(
+        &mut self,
+        locator: &crate::tenant::locator::GatewayLocator,
+        tenant: sprig_common::ids::TenantId,
+    ) -> (sprig_common::ids::DcId, u64, bool) {
+        let (dc, g) = locator.maps_generation(tenant);
+        if let Some((d, mg, sum, held)) = &self.token
+            && *d == dc
+            && *mg == g
+        {
+            return (dc, *sum, *held);
+        }
+        let t = locator.maps_token(tenant);
+        if t.0 == dc {
+            self.token = Some((dc, g, t.1, t.2));
+        }
+        t
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -79,6 +116,17 @@ impl PassSession {
         };
         let tenant = ts.tenant;
         let locator = ts.services().locator.clone();
+        // S148: nothing changed since the last statement found nothing to
+        // wait for.
+        let (home0, gen0) = locator.maps_generation(tenant);
+        if let Some((d, g, c)) = &self.placement_memo.followed
+            && *d == home0
+            && *g == gen0
+            && *c == self.target.cluster
+        {
+            return Ok(());
+        }
+        self.placement_memo.followed = None;
         let mut changes = locator.placement_changes_for(tenant);
         let started = std::time::Instant::now();
         let mut waited = false;
@@ -148,6 +196,13 @@ impl PassSession {
             if &home != locator.routing().dc() {
                 metrics::counter!("sprig_gateway_remote_home_statements_total", "home_dc" => home.to_string())
                     .increment(1);
+            } else if p.hold.is_none()
+                && home == home0
+                && matches!(locator.followed_role(tenant), Some(MapRole::Home))
+            {
+                // Nothing here depends on the clock or the transaction:
+                // the same maps give the same answer.
+                self.placement_memo.followed = Some((home0, gen0, self.target.cluster.clone()));
             }
             return Ok(());
         }

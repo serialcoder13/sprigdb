@@ -276,6 +276,9 @@ pub struct Shared {
     /// they were resolved in (R5 round 8: resolving them per command was
     /// about 1% of a point read's gateway CPU).
     pub(crate) per_command: std::sync::Mutex<Option<(sprig_settings::watch::Snapshot, PerCommand)>>,
+    /// [`Shared::settings`], kept per settings snapshot (perf1, S145).
+    pub(crate) settings_memo:
+        std::sync::RwLock<Option<(sprig_settings::watch::Snapshot, Arc<MongoSettings>)>>,
 }
 
 /// [`Shared::per_command`]'s values.
@@ -325,13 +328,30 @@ impl Shared {
         self.per_command().large_request_bytes
     }
 
-    /// The settings now.
+    /// The settings now: read again only when the settings snapshot
+    /// changed (perf1, S145: resolving all twelve on every command cost
+    /// about 5% of a point read's gateway CPU).
     #[must_use]
-    pub fn settings(&self) -> MongoSettings {
-        match &self.d.live {
-            Some((l, dc)) => MongoSettings::read(l, dc),
-            None => MongoSettings::default(),
+    pub fn settings(&self) -> Arc<MongoSettings> {
+        let Some((l, dc)) = &self.d.live else {
+            return Arc::new(MongoSettings::default());
+        };
+        let snap = l.snapshot();
+        if let Some((s, v)) = self
+            .settings_memo
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            && Arc::ptr_eq(s, &snap)
+        {
+            return Arc::clone(v);
         }
+        let v = Arc::new(MongoSettings::read(l, dc));
+        *self
+            .settings_memo
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((snap, Arc::clone(&v)));
+        v
     }
 }
 
@@ -419,6 +439,7 @@ impl MongoFrontend {
             conn_ids: std::sync::atomic::AtomicI32::new(1),
             started: std::time::Instant::now(),
             per_command: std::sync::Mutex::new(None),
+            settings_memo: std::sync::RwLock::new(None),
             d,
         });
         let s = Arc::clone(&shared);

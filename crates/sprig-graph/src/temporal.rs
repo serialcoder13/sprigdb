@@ -863,6 +863,9 @@ fn temporal_from_map(kind: &str, m: &BTreeMap<String, Value>) -> Result<Value> {
     if m.len() == 1 && tz.is_some() {
         return Ok(of_kind(kind, &now_in(tz.as_deref())?));
     }
+    if m.contains_key("epochSeconds") || m.contains_key("epochMillis") {
+        return datetime_from_epoch_map(kind, m, tz);
+    }
     Ok(match kind {
         "date" => Value::Date(date_from_map(m)?),
         "localtime" => Value::LocalTime(time_from_map(m)?),
@@ -880,6 +883,95 @@ fn temporal_from_map(kind: &str, m: &BTreeMap<String, Value>) -> Result<Value> {
             Value::DateTime(Box::new(zoned(local, None, tz)?))
         }
     })
+}
+
+/// `datetime({epochSeconds, ...})` and `datetime({epochMillis, ...})`
+/// (R8 round 10, LDBC IC10): the instant, in `timezone` when given (else
+/// UTC); other fields given with it replace that part of the wall clock,
+/// and `millisecond`, `microsecond` or `nanosecond` the whole fraction, as
+/// Neo4j 5.26 does. Only `datetime` takes them; the epoch must be an
+/// integer.
+fn datetime_from_epoch_map(
+    kind: &str,
+    m: &BTreeMap<String, Value>,
+    tz: Option<String>,
+) -> Result<Value> {
+    let which = if m.contains_key("epochSeconds") {
+        "epochSeconds"
+    } else {
+        "epochMillis"
+    };
+    if kind != "datetime" {
+        return Err(unsupported(which));
+    }
+    if m.contains_key("epochSeconds") && m.contains_key("epochMillis") {
+        return Err(bad(
+            "epochMillis cannot be selected together with epochSeconds.",
+        ));
+    }
+    let utc = match (which, m.get(which)) {
+        ("epochSeconds", Some(Value::Int(s))) => DateTime::from_timestamp(*s, 0),
+        (_, Some(Value::Int(ms))) => DateTime::from_timestamp_millis(*ms),
+        (_, v) => {
+            return Err(bad(format!(
+                "Cannot construct date time from: {}",
+                v.filter(|v| !v.is_null())
+                    .map_or("NO_VALUE", Value::type_name)
+            )));
+        }
+    }
+    .ok_or_else(|| bad("epoch out of range"))?
+    .naive_utc();
+    let offset = match &tz {
+        Some(z) => zone_offset_at(z, utc.and_utc().timestamp())?,
+        None => 0,
+    };
+    let mut local = utc + ChronoDur::seconds(i64::from(offset));
+    let has = |k: &str| m.get(k).is_some_and(|v| !v.is_null());
+    if ["year", "month", "day", "hour", "minute", "second"]
+        .iter()
+        .any(|k| has(k))
+        || ["millisecond", "microsecond", "nanosecond"]
+            .iter()
+            .any(|k| has(k))
+    {
+        let d = local.date();
+        let t = local.time();
+        let date = NaiveDate::from_ymd_opt(
+            i32::try_from(int_of(m, "year", i64::from(d.year()))?)
+                .map_err(|_| bad("year out of range"))?,
+            u32_of(m, "month", i64::from(d.month()))?,
+            u32_of(m, "day", i64::from(d.day()))?,
+        )
+        .ok_or_else(|| bad("invalid date"))?;
+        let fraction = if ["millisecond", "microsecond", "nanosecond"]
+            .iter()
+            .any(|k| has(k))
+        {
+            u32::try_from(
+                int_of(m, "millisecond", 0)? * 1_000_000
+                    + int_of(m, "microsecond", 0)? * 1000
+                    + int_of(m, "nanosecond", 0)?,
+            )
+            .map_err(|_| bad("nanoseconds out of range"))?
+        } else {
+            t.nanosecond()
+        };
+        let time = NaiveTime::from_hms_nano_opt(
+            u32_of(m, "hour", i64::from(t.hour()))?,
+            u32_of(m, "minute", i64::from(t.minute()))?,
+            u32_of(m, "second", i64::from(t.second()))?,
+            fraction,
+        )
+        .ok_or_else(|| bad("invalid time"))?;
+        local = date.and_time(time);
+    }
+    let zone = tz.filter(|z| !offset_only(z));
+    Ok(Value::DateTime(Box::new(Zoned {
+        local,
+        offset,
+        zone,
+    })))
 }
 
 fn duration_from_map(m: &BTreeMap<String, Value>) -> Result<Value> {

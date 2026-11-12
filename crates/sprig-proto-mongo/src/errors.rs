@@ -197,6 +197,7 @@ pub fn code_name(code: i32) -> &'static str {
         115 => "CommandNotSupported",
         121 => "DocumentValidationFailure",
         133 => "FailedToSatisfyReadPreference",
+        136 => "CappedPositionLost",
         139 => "JSInterpreterFailure",
         146 => "ExceededMemoryLimit",
         186 => "ClientMetadataCannotBeMutated",

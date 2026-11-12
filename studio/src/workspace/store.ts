@@ -39,8 +39,8 @@ interface WorkspaceState {
 
 export const useWorkspace = create<WorkspaceState>(() => ({ tenant: null, docs: [] }));
 
-/** Starts a fresh workspace when the tenant changes. */
-export function useTenantWorkspace(tenant: string): void {
+/** Starts a fresh workspace when the tenant changes (called from an effect). */
+export function resetForTenant(tenant: string): void {
   if (useWorkspace.getState().tenant !== tenant) useWorkspace.setState({ tenant, docs: [] });
 }
 

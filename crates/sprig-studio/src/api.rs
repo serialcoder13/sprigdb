@@ -90,6 +90,17 @@ fn round4_paths() -> Value {
             None, "JsonReply"), &[p("database"), p("connection")])},
         "/v1/policies:testAs": {"post": op("Policies.TestAs", "sprig.v1.Policies",
             "One read-only statement run as another user of the tenant ({tenant, user, host, database, sql})", None, "JsonReply")},
+        "/v1/library": {"get": with_params(op("Library.Get", "sprig.v1.Library",
+            "The caller's saved queries and last runs (history: how many, 100; at most studio.history_max)", None, "JsonReply"),
+            &[q("history")])},
+        "/v1/library/saved": {"post": op("Library.Save", "sprig.v1.Library",
+            "Saves {name, language, database, text} (redacted), replacing a query of that name", None, "JsonReply")},
+        "/v1/library/saved:delete": {"post": op("Library.Delete", "sprig.v1.Library",
+            "Deletes the caller's saved query {name}", None, "JsonReply")},
+        "/v1/library/history": {"post": op("Library.Record", "sprig.v1.Library",
+            "Records a run {language, database, text, ok, ms, error, client} (redacted)", None, "JsonReply")},
+        "/v1/library/history:clear": {"post": op("Library.ClearHistory", "sprig.v1.Library",
+            "Clears the caller's history", None, "JsonReply")},
     })
 }
 

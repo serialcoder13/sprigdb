@@ -1,4 +1,4 @@
- 1 sql shop │ Dashboard │ Admin │ Inbox
+ ❯ 1 sql shop │ ◔ Dashboard │ ◈ Admin │ ⚑ Inbox
 ┌ Explorer ──────────────────┐┌ Editor [sql] ──────────────────────────────────────────────────────┐
 │▾ shop                      ││ 1 SELECT order_id, status                                          │
 │  ▾ tables 2                ││ 2 FROM orders                                                      │

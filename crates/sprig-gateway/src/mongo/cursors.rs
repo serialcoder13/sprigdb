@@ -40,6 +40,9 @@ pub struct Cursor {
     pub no_timeout: bool,
     /// A change stream's feed (chapter 30 step 9); `plan` is unused.
     pub stream: Option<super::changes::ChangeStream>,
+    /// A tailable `awaitData` cursor (M7): `getMore` waits up to its
+    /// `maxTimeMS` for new documents.
+    pub await_data: bool,
     last_used: Instant,
 }
 
@@ -109,6 +112,7 @@ impl CursorTable {
                     batch_size,
                     no_timeout,
                     stream: None,
+                    await_data: false,
                     last_used: Instant::now(),
                 }))),
             );
@@ -150,6 +154,16 @@ impl CursorTable {
             cur.stream = Some(stream);
         }
         Ok(id)
+    }
+
+    /// Marks cursor `id` as a tailable `awaitData` cursor (M7).
+    pub fn set_await_data(&self, id: i64) {
+        if let Some(c) = self.lock().get(&id).cloned()
+            && let Ok(mut g) = c.try_lock()
+            && let Some(cur) = g.as_mut()
+        {
+            cur.await_data = true;
+        }
     }
 
     /// The cursor `id`, checked against `owner`.

@@ -23,6 +23,7 @@ PrivateTmp=true
 TimeoutStopSec=90s
 LimitNOFILE=1048576
 AmbientCapabilities=CAP_NET_BIND_SERVICE
+Environment=MALLOC_ARENA_MAX=2
 
 [Install]
 WantedBy=multi-user.target

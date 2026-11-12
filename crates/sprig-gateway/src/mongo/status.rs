@@ -314,7 +314,7 @@ pub(crate) fn server_status(c: &Conn, body: &Document) -> Document {
     let up = c.shared.started.elapsed();
     let mut d = doc! {
         "host": c.shared.d.gateway_id.clone(),
-        "version": c.shared.settings().server_version,
+        "version": c.shared.settings().server_version.clone(),
         "process": "mongos",
         "pid": i64::from(std::process::id()),
         "uptime": up.as_secs_f64(),
@@ -329,7 +329,7 @@ pub(crate) fn server_status(c: &Conn, body: &Document) -> Document {
     if want("metrics") {
         d.insert(
             "metrics",
-            doc! {"changeStreams": change_stream_metrics(c), "cursor": {"open": {"total": n(c.shared.cursors.len() as u64)}}},
+            doc! {"changeStreams": change_stream_metrics(c), "cursor": {"open": {"total": n(c.shared.cursors.len() as u64)}}, "query": sprig_doc::spill::metrics_doc()},
         );
     }
     d.insert("ok", 1.0);

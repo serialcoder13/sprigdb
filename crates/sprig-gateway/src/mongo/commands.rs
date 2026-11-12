@@ -300,7 +300,7 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
     match name {
         "ping" => return Ok(doc! {"ok": 1.0}),
         "buildInfo" | "buildinfo" => {
-            let v = c.shared.settings().server_version;
+            let v = c.shared.settings().server_version.clone();
             let parts: Vec<i32> = v.split('.').filter_map(|x| x.parse().ok()).collect();
             return Ok(
                 doc! {"version": v.clone(), "versionArray": [parts.first().copied().unwrap_or(8), parts.get(1).copied().unwrap_or(0), parts.get(2).copied().unwrap_or(0), 0], "gitVersion": "sprigdb", "bits": 64, "maxBsonObjectSize": 16_777_216, "sprig": {"gateway": c.shared.d.gateway_id.clone()}, "ok": 1.0},
@@ -402,6 +402,8 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
             | "dropIndexes"
             | "renameCollection"
             | "collMod"
+            | "convertToCapped"
+            | "cloneCollectionAsCapped"
     ) {
         c.shared.snapshots.close_tenant(owner(c).tenant).await;
     }
@@ -497,6 +499,8 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
                     | "dropIndexes"
                     | "renameCollection"
                     | "listDatabases"
+                    | "convertToCapped"
+                    | "cloneCollectionAsCapped"
             )
         {
             return Err(MongoError::new(
@@ -605,6 +609,37 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
             }
             if name == "create" {
                 return Ok(doc! {"ok": 1.0});
+            }
+        }
+        // M7: as MongoDB 8.0, no writes to capped collections inside
+        // transactions.
+        if matches!(
+            name,
+            "insert" | "update" | "delete" | "findAndModify" | "findandmodify"
+        ) {
+            let ns = Ns {
+                db: db.clone(),
+                coll: coll_of(body, name)?,
+            };
+            let engine = c.shared.engine.clone();
+            if engine
+                .meta(c.sql()?, &ns)
+                .await?
+                .is_some_and(|m| sprig_doc::engine::capped::Cap::of(&m.options).is_some())
+            {
+                // The error aborts the transaction, as in MongoDB.
+                let mut g = entry.lock().await;
+                if let Some(mut s) = g.sql.take() {
+                    let _ = s.exec("ROLLBACK").await;
+                    s.close().await;
+                }
+                g.state = 2;
+                return Err(MongoError::new(
+                    code::OPERATION_NOT_SUPPORTED_IN_TRANSACTION,
+                    format!(
+                        "Collection '{ns}' is a capped collection. Writes in transactions are not allowed on capped collections."
+                    ),
+                ));
             }
         }
         if name == "bulkWrite" {
@@ -750,7 +785,7 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
         i64::try_from(b.into_iter().count()).ok()
     });
     if let Some(st) = wl {
-        super::workload::finish(st, &r, raw_n, name);
+        super::workload::finish(&st, &r, raw_n, name);
     }
     // `$queryStats` (M3, S98).
     if let Ok(d) = &r {
@@ -855,6 +890,150 @@ async fn snapshot_read(
     let mut d = r?;
     super::snapshot::stamp(&mut d, at);
     Ok(d)
+}
+
+/// `find`'s sort, or a `{$natural: ±1}` hint as one (M7).
+fn sort_or_natural_hint(body: &Document) -> Option<Document> {
+    body.get_document("sort")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .or_else(|| {
+            body.get_document("hint")
+                .ok()
+                .filter(|h| h.len() == 1 && h.contains_key("$natural"))
+                .cloned()
+        })
+}
+
+/// `find` with `tailable` (M7, decision S84): MongoDB 8.0's checks, then a
+/// cursor in the capped collection's insertion order that stays open at
+/// the end. A cursor that read no row (an empty collection) closes after
+/// its first batch, as MongoDB's does.
+async fn find_tailable(
+    c: &mut Conn,
+    sql: &mut SqlSession,
+    ns: &Ns,
+    body: &Document,
+    lsid: Option<&[u8]>,
+) -> Result<Document, MongoError> {
+    let tailable = body.get_bool("tailable").unwrap_or(false);
+    let await_data = body.get_bool("awaitData").unwrap_or(false);
+    if !tailable {
+        if await_data {
+            return Err(MongoError::new(
+                code::FAILED_TO_PARSE,
+                "Cannot set 'awaitData' without also setting 'tailable'",
+            ));
+        }
+        // `awaitData: false` alone: a plain find.
+        let mut b = body.clone();
+        b.remove("awaitData");
+        return Box::pin(exec(c, sql, "find", &b, &ns.db, lsid)).await;
+    }
+    if body.get_bool("singleBatch").unwrap_or(false) {
+        return Err(MongoError::new(
+            code::BAD_VALUE,
+            "cannot use tailable option with the 'singleBatch' option",
+        ));
+    }
+    let limit = i64_of(body, "limit").unwrap_or(0);
+    if limit < 0 {
+        return Err(MongoError::new(
+            code::BAD_VALUE,
+            format!("BSON field 'limit' value must be >= 0, actual value '{limit}'"),
+        ));
+    }
+    if let Ok(s) = body.get_document("sort")
+        && !s.is_empty()
+        && sprig_doc::engine::capped::natural_of(Some(s))
+            .ok()
+            .flatten()
+            != Some(1)
+    {
+        return Err(MongoError::new(
+            code::BAD_VALUE,
+            "cannot use tailable option with a sort other than {$natural: 1}",
+        ));
+    }
+    let engine = c.shared.engine.clone();
+    let reply_ns = ns.to_string();
+    if !engine.check_tailable(sql, ns).await? {
+        return Ok(cursor_reply(0, &reply_ns, Vec::new(), true));
+    }
+    let spec = FindSpec {
+        filter: body.get_document("filter").cloned().unwrap_or_default(),
+        sort: None,
+        projection: body.get_document("projection").ok().cloned(),
+        skip: u64::try_from(i64_of(body, "skip").unwrap_or(0).max(0)).unwrap_or(0),
+        limit: limit.unsigned_abs(),
+    };
+    let mut plan = engine.find(sql, ns, spec).await?;
+    plan.make_tailable();
+    let mut first = first_batch(body, 101);
+    if limit != 0 {
+        first = first.min(usize::try_from(limit).unwrap_or(usize::MAX));
+    }
+    let batch = if first == 0 {
+        Vec::new()
+    } else {
+        engine
+            .next_batch(sql, &mut plan, first, BATCH_BYTES)
+            .await?
+    };
+    let open = if first == 0 {
+        engine.count(sql, ns, &doc! {}, 0, 1).await? > 0
+    } else {
+        plan.tail_positioned()
+    };
+    if plan.exhausted || !open {
+        return Ok(cursor_reply(0, &reply_ns, batch, true));
+    }
+    let bs = first_batch(body, 0);
+    let id = c.shared.cursors.open(
+        plan,
+        reply_ns.clone(),
+        owner(c),
+        lsid.map(<[u8]>::to_vec),
+        (bs > 0).then_some(bs),
+        body.get_bool("noCursorTimeout").unwrap_or(false),
+        c.shared.settings().max_cursors,
+    )?;
+    if await_data {
+        c.shared.cursors.set_await_data(id);
+    }
+    Ok(cursor_reply(id, &reply_ns, batch, true))
+}
+
+/// A tailable cursor's next batch (M7): its position checked (136 when
+/// its row is gone), then the rows after it; while there are none, waits
+/// up to `wait` for inserts (signalled on this gateway, polled every
+/// 100 ms for inserts through other gateways).
+async fn tail_batch(
+    engine: &sprig_doc::engine::Engine,
+    sql: &mut SqlSession,
+    plan: &mut sprig_doc::engine::CursorPlan,
+    n: usize,
+    wait: Duration,
+) -> Result<Vec<Document>, MongoError> {
+    let deadline = Instant::now() + wait;
+    let tenant = sprig_doc::engine::SqlRunner::tenant(sql);
+    loop {
+        let probe = plan.tail_probe();
+        engine.check_tail_position(sql, probe).await?;
+        let batch = engine.next_batch(sql, plan, n, BATCH_BYTES).await?;
+        let now = Instant::now();
+        if !batch.is_empty() || plan.exhausted || now >= deadline {
+            return Ok(batch);
+        }
+        let ns = plan.ns().clone();
+        sprig_doc::engine::capped::wait_insert(
+            tenant,
+            &ns,
+            (deadline - now).min(Duration::from_millis(100)),
+        )
+        .await;
+    }
 }
 
 fn cursor_reply(id: i64, ns: &str, batch: Vec<Document>, first: bool) -> Document {
@@ -1037,7 +1216,7 @@ fn first_batch(body: &Document, default: usize) -> usize {
 }
 
 /// The fields a find may carry and still be answered by [`find_point`].
-const POINT_FIND_KEYS: [&str; 18] = [
+pub(super) const POINT_FIND_KEYS: [&str; 18] = [
     "find",
     "filter",
     "$db",
@@ -1247,6 +1426,27 @@ async fn exec(
                 .await?;
             Ok(doc! {"ok": 1.0})
         }
+        // M7: capped collections from existing ones.
+        "convertToCapped" => {
+            let ns = ns_of("convertToCapped")?;
+            engine.convert_to_capped(sql, &ns, body.get("size")).await?;
+            Ok(doc! {"ok": 1.0})
+        }
+        "cloneCollectionAsCapped" => {
+            let from = ns_of("cloneCollectionAsCapped")?;
+            let to = Ns {
+                db: db.to_owned(),
+                coll: body
+                    .get_str("toCollection")
+                    .map_err(|_| bad("cloneCollectionAsCapped needs 'toCollection'"))?
+                    .to_owned(),
+            };
+            sprig_doc::engine::check_coll_name(&to.coll)?;
+            engine
+                .clone_as_capped(sql, &from, &to, body.get("size"))
+                .await?;
+            Ok(doc! {"ok": 1.0})
+        }
         "collMod" => {
             let ns = ns_of("collMod")?;
             let Some(mut m) = engine.meta(sql, &ns).await? else {
@@ -1265,6 +1465,11 @@ async fn exec(
                 };
                 m.options
                     .insert("changeStreamPreAndPostImages", doc! {"enabled": enabled});
+                engine.catalog.save_indexes(sql, &ns, &m).await?;
+            }
+            // M7: `cappedSize` and `cappedMax`.
+            if let Some(o) = sprig_doc::engine::capped::coll_mod(&m.options, body)? {
+                m.options = o;
                 engine.catalog.save_indexes(sql, &ns, &m).await?;
             }
             // Schema validation (M3, decisions S90-S92).
@@ -1299,6 +1504,10 @@ async fn exec(
             let ns = ns_of("find")?;
             let limit = i64_of(body, "limit").unwrap_or(0);
             let single = body.get_bool("singleBatch").unwrap_or(false) || limit < 0;
+            // M7: tailable cursors on capped collections.
+            if body.get_bool("tailable").unwrap_or(false) || body.contains_key("awaitData") {
+                return find_tailable(c, sql, &ns, body, lsid).await;
+            }
             // R5 round 8 (D35): a find by `_id` alone answers from the
             // stored JSON as BSON bytes (`Conn::raw`).
             if find_point(c, sql, &ns, body, limit, single).await? {
@@ -1306,12 +1515,16 @@ async fn exec(
             }
             let spec = FindSpec {
                 filter: body.get_document("filter").cloned().unwrap_or_default(),
-                sort: body.get_document("sort").ok().cloned(),
+                sort: sort_or_natural_hint(body),
                 projection: body.get_document("projection").ok().cloned(),
                 skip: u64::try_from(i64_of(body, "skip").unwrap_or(0).max(0)).unwrap_or(0),
                 limit: limit.unsigned_abs(),
             };
-            let plan = engine.find(sql, &ns, spec).await?;
+            // M7: `allowDiskUse` lets a sort past `doc.max_sort_bytes`
+            // spill (as MongoDB 8.0's find, true by default).
+            let ctx =
+                super::spill::ctx_for(body, "find", owner(c).tenant, c.shared.d.live.as_ref())?;
+            let plan = sprig_doc::spill::scope(ctx, Box::pin(engine.find(sql, &ns, spec))).await?;
             let mut first = first_batch(body, 101);
             if limit != 0 {
                 first = first.min(usize::try_from(limit.unsigned_abs()).unwrap_or(usize::MAX));
@@ -1423,14 +1636,45 @@ async fn exec(
                     doc! {"cursor": {"nextBatch": batch.into_iter().map(Bson::Document).collect::<Vec<_>>(), "postBatchResumeToken": super::changes::token_doc(&token), "id": rid, "ns": ns}, "ok": 1.0},
                 );
             }
+            // MongoDB: only an awaitData cursor's getMore takes a
+            // maxTimeMS (its wait).
+            if body.contains_key("maxTimeMS") && !cursor.await_data {
+                return Err(MongoError::new(
+                    code::BAD_VALUE,
+                    "cannot set maxTimeMS on getMore command for a non-awaitData cursor",
+                ));
+            }
             let n = i64_of(body, "batchSize")
                 .and_then(|n| usize::try_from(n).ok())
                 .filter(|n| *n > 0)
                 .or(cursor.batch_size)
                 .unwrap_or(1_000_000);
-            let batch = engine
-                .next_batch(sql, &mut cursor.plan, n, BATCH_BYTES)
-                .await?;
+            let batch = if cursor.plan.is_tailable() {
+                // M7: a tailable cursor reads on from its position; with
+                // awaitData it waits up to maxTimeMS (1 s by default).
+                let wait = if cursor.await_data {
+                    Duration::from_millis(
+                        i64_of(body, "maxTimeMS")
+                            .and_then(|n| u64::try_from(n).ok())
+                            .filter(|n| *n > 0)
+                            .unwrap_or(1000),
+                    )
+                } else {
+                    Duration::ZERO
+                };
+                match tail_batch(&engine, sql, &mut cursor.plan, n, wait).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        drop(g);
+                        c.shared.cursors.remove(id);
+                        return Err(e);
+                    }
+                }
+            } else {
+                engine
+                    .next_batch(sql, &mut cursor.plan, n, BATCH_BYTES)
+                    .await?
+            };
             let ns = cursor.ns.clone();
             let done = cursor.plan.exhausted;
             drop(g);
@@ -1698,9 +1942,24 @@ async fn exec(
         "dbStats" => Ok(
             doc! {"db": db, "collections": i64::try_from(engine.list_collections(sql, db, &doc! {}, true).await?.len()).unwrap_or(i64::MAX), "objects": 0i64, "dataSize": 0.0, "storageSize": 0.0, "ok": 1.0},
         ),
-        "collStats" => Ok(
-            doc! {"ns": format!("{db}.{}", coll_of(body, "collStats")?), "count": i64::try_from(engine.count(sql, &ns_of("collStats")?, &doc! {}, 0, 0).await?).unwrap_or(i64::MAX), "size": 0i64, "ok": 1.0},
-        ),
+        "collStats" => {
+            let ns = ns_of("collStats")?;
+            let n = |v: u64| i64::try_from(v).unwrap_or(i64::MAX);
+            // M7: a capped collection's size, `max` and `maxSize`.
+            if let Some((_, count, bytes)) = engine.capped_stats(sql, &ns).await? {
+                let o = engine
+                    .meta(sql, &ns)
+                    .await?
+                    .map(|m| m.options)
+                    .unwrap_or_default();
+                return Ok(
+                    doc! {"ns": ns.to_string(), "size": n(bytes), "count": n(count), "storageSize": n(bytes), "capped": true, "max": o.get("max").cloned().unwrap_or(Bson::Int32(0)), "maxSize": o.get("size").cloned().unwrap_or(Bson::Int32(0)), "ok": 1.0},
+                );
+            }
+            Ok(
+                doc! {"ns": ns.to_string(), "count": n(engine.count(sql, &ns, &doc! {}, 0, 0).await?), "size": 0i64, "capped": false, "ok": 1.0},
+            )
+        }
         // Chapter 41 (R7): a logic-layer function exposed to `mongo`.
         "sprigCall" => super::logic::sprig_call(sql, body, db).await,
         // Chapter 29 (R5, RL33): row-level security on collections.

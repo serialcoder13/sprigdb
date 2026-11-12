@@ -30,6 +30,109 @@ pub(super) fn conjuncts(e: &Expr) -> Vec<&Expr> {
     }
 }
 
+/// The `OR`ed parts of a predicate.
+fn disjuncts<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
+    match e {
+        Expr::Binary(BinOp::Or, a, b) => {
+            disjuncts(a, out);
+            disjuncts(b, out);
+        }
+        other => out.push(other),
+    }
+}
+
+/// `v.k` as (`v`, `k`).
+fn prop_side(p: &Expr) -> Option<(&str, &str)> {
+    match p {
+        Expr::Prop(t, k) => match &**t {
+            Expr::Var(v) => Some((v.as_str(), k.as_str())),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `v.k = e` or `e = v.k`, as (`v`, `k`, `e`).
+fn prop_eq(e: &Expr) -> Option<(&str, &str, &Expr)> {
+    let Expr::Binary(BinOp::Eq, a, b) = e else {
+        return None;
+    };
+    match (prop_side(a), prop_side(b)) {
+        (Some((v, k)), _) => Some((v, k, &**b)),
+        (None, Some((v, k))) => Some((v, k, &**a)),
+        (None, None) => None,
+    }
+}
+
+/// The conjuncts the matcher picks start points with (R8 round 10): the
+/// `WHERE`'s own, `e = v.k` turned into `v.k = e`, and the `v.k IN [e1,
+/// e2]` a disjunction implies when each of its branches holds a `v.k =
+/// e` (LDBC IC14's `(a.id = x AND b.id = y) OR (a.id = y AND b.id =
+/// x)`). They only choose and narrow scans; the `WHERE` is still
+/// checked in full.
+pub(super) fn scan_conjuncts(w: &Expr) -> Vec<Expr> {
+    let mut out = Vec::new();
+    for c in conjuncts(w) {
+        match prop_eq(c) {
+            Some((v, k, e)) => out.push(Expr::Binary(
+                BinOp::Eq,
+                Box::new(Expr::Prop(Box::new(Expr::Var(v.to_owned())), k.to_owned())),
+                Box::new(e.clone()),
+            )),
+            None => out.push(c.clone()),
+        }
+        let mut branches = Vec::new();
+        disjuncts(c, &mut branches);
+        if branches.len() < 2 {
+            continue;
+        }
+        let per: Vec<Vec<(&str, &str, &Expr)>> = branches
+            .iter()
+            .map(|b| conjuncts(b).into_iter().filter_map(prop_eq).collect())
+            .collect();
+        let mut done: Vec<(&str, &str)> = Vec::new();
+        for &(v, k, _) in &per[0] {
+            if done.contains(&(v, k)) {
+                continue;
+            }
+            done.push((v, k));
+            let alts: Vec<Expr> = per
+                .iter()
+                .filter_map(|p| p.iter().find(|(v2, k2, _)| *v2 == v && *k2 == k))
+                .map(|(_, _, e)| (*e).clone())
+                .collect();
+            if alts.len() == per.len() {
+                out.push(Expr::Binary(
+                    BinOp::In,
+                    Box::new(Expr::Prop(Box::new(Expr::Var(v.to_owned())), k.to_owned())),
+                    Box::new(Expr::List(alts)),
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// Whether `e` depends only on variables every one of `rows` binds
+/// (and on parameters): one value per incoming row.
+fn row_bound(e: &Expr, rows: &[Row]) -> bool {
+    let Some(first) = rows.first() else {
+        return false;
+    };
+    let mut ok = true;
+    e.walk(&mut |x| match x {
+        Expr::Var(v) => ok &= first.contains_key(v),
+        Expr::Pattern(_)
+        | Expr::Slot(_)
+        | Expr::Subquery(..)
+        | Expr::ListComp { .. }
+        | Expr::Quantifier { .. }
+        | Expr::Reduce { .. } => ok = false,
+        _ => {}
+    });
+    ok
+}
+
 /// Whether `e` uses no variables (constant for the statement).
 fn is_const(e: &Expr) -> bool {
     let mut ok = true;
@@ -65,6 +168,13 @@ impl Exec<'_> {
         optional: bool,
         mult_ok: bool,
     ) -> Result<Vec<Row>> {
+        // No incoming rows, no matches: a `MATCH` after one that found
+        // nothing must not scan for its first node (R8 round 10: IS7's
+        // `OPTIONAL MATCH (m)-...` after an empty `MATCH` read every node
+        // of the graph, 2-6 s and a gigabyte, before answering no rows).
+        if rows.is_empty() {
+            return Ok(rows);
+        }
         let input = rows;
         let mut rows: Vec<Row> = input
             .iter()
@@ -76,9 +186,7 @@ impl Exec<'_> {
                 r
             })
             .collect();
-        let conj: Vec<Expr> = where_
-            .map(|w| conjuncts(w).into_iter().cloned().collect())
-            .unwrap_or_default();
+        let conj: Vec<Expr> = where_.map(scan_conjuncts).unwrap_or_default();
         for (pi, p) in patterns.iter().enumerate() {
             // Types of the other relationship patterns of the clause, for
             // endpoint mode's uniqueness rule.
@@ -91,6 +199,54 @@ impl Exec<'_> {
                 .collect();
             rows = self.match_pattern(rows, p, &conj, mult_ok, &others).await?;
             self.check_rows(rows.len())?;
+            // The WHERE's conjuncts whose variables are all bound now
+            // filter before the next pattern expands every row (R8 round
+            // 10: IC3's `MATCH (friend)<-[:HAS_CREATOR]-(message),
+            // (message)-[:IS_LOCATED_IN]->(country) WHERE <date range on
+            // message>` expanded all 190,000 messages twice). The whole
+            // WHERE is still checked at the end.
+            if pi + 1 < patterns.len()
+                && let Some(w) = where_
+                && let Some(first) = rows.first()
+            {
+                let ready: Vec<&Expr> = conjuncts(w)
+                    .into_iter()
+                    .filter(|c| {
+                        let mut ok = true;
+                        c.walk(&mut |x| match x {
+                            Expr::Var(v) => ok &= first.contains_key(v),
+                            Expr::Pattern(_) | Expr::Subquery(..) => ok = false,
+                            Expr::Func { name, .. }
+                                if matches!(name.as_str(), "startnode" | "endnode") =>
+                            {
+                                ok = false;
+                            }
+                            _ => {}
+                        });
+                        ok
+                    })
+                    .collect();
+                if !ready.is_empty() {
+                    let mut kept = Vec::with_capacity(rows.len());
+                    for r in rows {
+                        let mut keep = true;
+                        for c in &ready {
+                            // A local variable of a comprehension isn't in
+                            // the row: such a conjunct waits for the end.
+                            if let Ok(t) = eval(c, &r, self.params).and_then(|v| v.truth())
+                                && t != Some(true)
+                            {
+                                keep = false;
+                                break;
+                            }
+                        }
+                        if keep {
+                            kept.push(r);
+                        }
+                    }
+                    rows = kept;
+                }
+            }
             self.check_memory(&rows)?;
             if rows.is_empty() {
                 break;
@@ -141,6 +297,9 @@ impl Exec<'_> {
         rows: &[Row],
         p: &PathPattern,
     ) -> Result<HashSet<usize>> {
+        if rows.is_empty() {
+            return Ok(HashSet::new());
+        }
         let tagged: Vec<Row> = rows
             .iter()
             .enumerate()
@@ -242,7 +401,7 @@ impl Exec<'_> {
                 }
                 if let Expr::Prop(t, _) = &**a
                     && matches!(&**t, Expr::Var(x) if x == v)
-                    && is_const(b)
+                    && (is_const(b) || row_bound(b, rows))
                 {
                     s += 80;
                 }
@@ -357,6 +516,9 @@ impl Exec<'_> {
         mult_ok: bool,
         others: &[&RelPat],
     ) -> Result<Vec<Row>> {
+        if rows.is_empty() {
+            return Ok(rows);
+        }
         if pat.kind != PathKind::Normal {
             return self.shortest(rows, pat).await;
         }
@@ -443,6 +605,14 @@ impl Exec<'_> {
                     scan.props_eq.extend(by_key);
                 }
             }
+            // Equalities with values of the incoming rows (`WHERE n.k =
+            // r.x`, or what a disjunction implies): one scan for every
+            // row's values, then each row meets only the nodes its own
+            // value finds (R8 round 10).
+            let mut rows = rows;
+            let join = self
+                .row_pushdown(&pat.start, conj, &mut rows, &mut scan)
+                .await?;
             self.plan.push(format!(
                 "NodeScan {}: {}",
                 pat.start.var.as_deref().unwrap_or("(anonymous)"),
@@ -459,15 +629,40 @@ impl Exec<'_> {
             let found = self.store.scan(&scan).await?;
             self.check_rows(found.len())?;
             let nodes: Vec<Arc<Node>> = found.iter().map(|r| self.node_val(r)).collect();
+            let by_key: Option<(&RowJoin, HashMap<crate::value::Key, Vec<usize>>)> =
+                join.as_ref().map(|j| {
+                    let mut m: HashMap<crate::value::Key, Vec<usize>> = HashMap::new();
+                    for (i, n) in nodes.iter().enumerate() {
+                        if let Some(v) = n.props.get(&j.key) {
+                            m.entry(v.key()).or_default().push(i);
+                        }
+                    }
+                    (j, m)
+                });
+            let all: Vec<usize> = (0..nodes.len()).collect();
             let mut work = 0usize;
-            for r in rows {
+            for (ri, r) in rows.into_iter().enumerate() {
+                let picked: Vec<usize> = match &by_key {
+                    Some((j, m)) => {
+                        let mut v: Vec<usize> = Vec::new();
+                        for x in &j.per_row[ri] {
+                            if let Some(is) = m.get(&x.key()) {
+                                v.extend(is);
+                            }
+                        }
+                        v.sort_unstable();
+                        v.dedup();
+                        v
+                    }
+                    None => all.clone(),
+                };
                 // Long in-gateway loops give the runtime back now and then.
-                work += nodes.len();
+                work += picked.len() + 1;
                 if work > 20_000 {
                     work = 0;
                     tokio::task::yield_now().await;
                 }
-                for n in &nodes {
+                for n in picked.iter().map(|&i| &nodes[i]) {
                     if self.node_ok(&pat.start, n, &r)? {
                         let mut nr = r.clone();
                         if let Some(v) = &pat.start.var {
@@ -552,6 +747,78 @@ impl Exec<'_> {
             out.push(r);
         }
         Ok(out)
+    }
+
+    /// [`scan_conjuncts`] whose values come from the incoming `rows`
+    /// (`n.k = r.x`, `n.k IN r.xs`): every row's values become one more
+    /// pushed-down equality of `scan` (a superset each row rechecks),
+    /// and the first of them joins rows to the nodes found.
+    async fn row_pushdown(
+        &mut self,
+        np: &NodePat,
+        conj: &[Expr],
+        rows: &mut [Row],
+        scan: &mut Scan,
+    ) -> Result<Option<RowJoin>> {
+        let Some(v) = &np.var else {
+            return Ok(None);
+        };
+        if rows.is_empty() || rows.len() > 10_000 {
+            return Ok(None);
+        }
+        let mut join = None;
+        for c in conj {
+            let Expr::Binary(op @ (BinOp::Eq | BinOp::In), a, b) = c else {
+                continue;
+            };
+            let Expr::Prop(t, k) = &**a else { continue };
+            if !matches!(&**t, Expr::Var(x) if x == v) || is_const(b) || !row_bound(b, rows) {
+                continue;
+            }
+            let list = *op == BinOp::In;
+            let per_row: Vec<Vec<Value>> = self
+                .eval_rows(b, rows)
+                .await?
+                .into_iter()
+                .map(|v| match (list, v) {
+                    (_, Value::Null)
+                    | (true, Value::Bool(_) | Value::Int(_) | Value::String(_)) => {
+                        vec![]
+                    }
+                    (true, Value::List(l)) => l.into_iter().filter(|x| !x.is_null()).collect(),
+                    (true, _) => vec![],
+                    (false, x) => vec![x],
+                })
+                .collect();
+            let mut js: Vec<Json> = Vec::new();
+            let mut ok = true;
+            for vals in &per_row {
+                for x in vals {
+                    match scan_json(x) {
+                        Some(jv) => {
+                            if !js.contains(&jv) {
+                                js.push(jv);
+                            }
+                        }
+                        None => ok = false,
+                    }
+                }
+                if !ok {
+                    break;
+                }
+            }
+            if !ok {
+                continue;
+            }
+            scan.props_eq.push((k.clone(), js));
+            if join.is_none() {
+                join = Some(RowJoin {
+                    key: k.clone(),
+                    per_row,
+                });
+            }
+        }
+        Ok(join)
     }
 
     /// Distinct node ids of the current rows.
@@ -1102,6 +1369,48 @@ impl Exec<'_> {
     /// `shortestPath` / `allShortestPaths`: bidirectional breadth-first
     /// search between bound ends, expanding the smaller frontier.
     async fn shortest(&mut self, rows: Vec<Row>, pat: &PathPattern) -> Result<Vec<Row>> {
+        // Ends given in the pattern itself (IC14's `allShortestPaths((a:Person
+        // {id: 1})-[:KNOWS*0..]-(b:Person {id: 2}))`): each is matched
+        // first, as a node pattern of its own (R8 round 10).
+        let unbound = |np: &NodePat, rows: &[Row]| {
+            np.var
+                .as_ref()
+                .is_none_or(|v| rows.first().is_none_or(|r| !r.contains_key(v)))
+        };
+        if let [(_, end)] = pat.steps.as_slice()
+            && (unbound(&pat.start, &rows) || unbound(end, &rows))
+        {
+            let mut p = pat.clone();
+            let mut rows = rows;
+            for (k, np) in [(0, p.start.clone()), (1, end.clone())] {
+                if !unbound(&np, &rows) {
+                    continue;
+                }
+                let mut np = np;
+                let v = np.var.get_or_insert_with(|| format!(" spe{k}")).clone();
+                let one = PathPattern {
+                    var: None,
+                    kind: PathKind::Normal,
+                    start: np.clone(),
+                    steps: vec![],
+                };
+                rows = Box::pin(self.match_pattern(rows, &one, &[], true, &[])).await?;
+                if k == 0 {
+                    p.start.var = Some(v);
+                } else {
+                    p.steps[0].1.var = Some(v);
+                }
+            }
+            let out = Box::pin(self.shortest(rows, &p)).await?;
+            return Ok(out
+                .into_iter()
+                .map(|mut r| {
+                    r.remove(" spe0");
+                    r.remove(" spe1");
+                    r
+                })
+                .collect());
+        }
         let [(rp, end_pat)] = pat.steps.as_slice() else {
             return Err(SprigError::new(
                 SprigCode::GraphSyntax,
@@ -1442,6 +1751,14 @@ fn walk_back(side: &Side, m: u64, limit: usize) -> Vec<(Vec<u64>, Vec<Arc<Rel>>)
 /// A property value as the JSON a pushed-down equality compares with:
 /// only strings, booleans and integers (floats and other types are only
 /// rechecked).
+/// A start node's property matched to values of the incoming rows
+/// ([`Exec::row_pushdown`]): the key, and each row's values (`null`s
+/// match nothing).
+struct RowJoin {
+    key: String,
+    per_row: Vec<Vec<Value>>,
+}
+
 fn scan_json(v: &Value) -> Option<Json> {
     match v {
         Value::String(s) => Some(Json::String(s.clone())),

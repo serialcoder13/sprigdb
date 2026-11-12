@@ -1,13 +1,12 @@
- 1 sql shop │ Dashboard │ Admin │ Inbox
+ ❯ 1 sql shop │ ◔ Dashboard │ ◈ Admin │ ⚑ Inbox
 ┌ Explorer ──────────────────┐┌ Editor [sql] ──────────────────────────────────────────────────────┐
-│▾ shop                      ││ 1 SELECT order_id, status                                          │
-│  ▾ tab┌ Keys ────────────────────────────────────────────────────────────────────────────┐       │
-│    ▸ o│F5, Ctrl-R    run the statement at the cursor                                     │       │
-│      o│Enter         after ';' at the end: run everything typed                          │───────┘
-│  ▸ vie│Alt-Enter     new line                                                            │───────┐
-│  ▸ str│Tab           complete (Up/Down, Enter)                                           │       │
-│▸ hr   │Ctrl-Up/Down  history (secrets are stored redacted)                               │       │
-│       │Ctrl-C        cancel the running statement, else clear                            │       │
+│▾ shop ┌ Keys ────────────────────────────────────────────────────────────────────────────┐       │
+│  ▾ tab│F5, Ctrl-R    run the statement at the cursor                                     │       │
+│    ▸ o│Enter         after ';' at the end: run everything typed                          │       │
+│      o│Alt-Enter     new line                                                            │───────┘
+│  ▸ vie│Tab           complete (Up/Down, Enter)                                           │───────┐
+│  ▸ str│Ctrl-Up/Down  history (secrets are stored redacted)                               │       │
+│▸ hr   │Ctrl-C        cancel the running statement, else clear                            │       │
 │       │F2            focus: explorer, editor, results                                    │       │
 │       │F3            results as grid, JSON tree or graph                                 │       │
 │       │F4            language: sql, redis, cypher, mongo                                 │       │
@@ -15,14 +14,15 @@
 │       │Enter         (results) show a value / fold JSON                                  │       │
 │       │Ctrl-E        export the result: CSV, JSON, NDJSON, TSV                           │       │
 │       │Ctrl-O        reload the explorer                                                 │       │
-│       │Ctrl-T, Ctrl-W  new tab, close tab                                                │       │
-│       │F6, F7, Alt-n previous or next tab, tab n                                         │       │
+│       │Ctrl-T, Ctrl-W  new tab, close tab                                                │ands   │
+│       │F6, F7, Alt-n previous or next tab, tab n                                         │sor    │
 │       │Dashboard     1-6 or Left/Right views, r refresh, k kill, q kill query            │       │
 │       │Admin         sprigctl commands; Up/Down history                                  │       │
 │       │Inbox         a approve, w window, i ignore, s snooze, c comment                  │       │
-│       │Ctrl-Q        quit                                                                │       │
+│       │Ctrl-K, Ctrl-P search tabs, tables, saved queries, history, commands              │       │
+│       │Ctrl-S        save the editor's text under a name                                 │       │
+│       │Enter, r      (explorer) open a table's view, or run a SELECT on it               │       │
+│       │Table view    / filter, = by cell, e edit, o add, d delete, n p page              │       │
 │       └──────────────────────────────────────────────────────────────────────────────────┘       │
-│                            ││                                                                    │
-│                            ││                                                                    │
 └────────────────────────────┘└────────────────────────────────────────────────────────────────────┘
  dev  127.0.0.1:8080 db shop  F1 help · F5 run · Ctrl-C cancel · Ctrl-Q quit

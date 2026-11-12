@@ -689,13 +689,15 @@ async fn query_settings_and_stats() {
     let upd = stats
         .iter()
         .find(|s| {
-            s.get_document("key")
+            let q = s
+                .get_document("key")
                 .unwrap()
                 .get_document("queryShape")
-                .unwrap()
-                .get_str("command")
-                .ok()
-                == Some("update")
+                .unwrap();
+            // This database's update: other tests' updates on the same
+            // gateway are listed too (M7).
+            q.get_str("command").ok() == Some("update")
+                && q.get_document("cmdNs").unwrap().get_str("db").ok() == Some("m3_qs")
         })
         .expect("the update's shape");
     let w = upd

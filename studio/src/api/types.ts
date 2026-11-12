@@ -67,6 +67,7 @@ export interface StudioSettings {
   session_idle_minutes: number;
   session_max_hours: number;
   persist_drafts: boolean;
+  history_max: number;
   max_result_rows: number;
   max_result_mb: number;
   statement_timeout_ms: number;

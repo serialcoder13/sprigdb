@@ -439,6 +439,13 @@ impl Migrator {
         // named lock: the connection is reset when it goes back to its pool,
         // even a catalog pool that keeps its connections as they are.
         conn.reset_connection(true);
+        if let Some(state) = self.up_to_date(conn, schema).await {
+            return Ok(MigrateReport {
+                applied: Vec::new(),
+                blocked: Vec::new(),
+                state,
+            });
+        }
         let lock = lock_name(schema)?;
         let got: Option<Option<i64>> = timed(
             opts.lock_timeout + opts.statement_timeout,
@@ -474,6 +481,42 @@ impl Migrator {
             tracing::warn!(schema, error = %e, "releasing the migration lock failed");
         }
         result
+    }
+
+    /// The catalog's state when every module of this migrator is already
+    /// at its newest format, read with one statement and no
+    /// `information_schema` query or lock; the connection's default
+    /// database is then `schema`, as after a run. `None` (the full run
+    /// decides) when anything is missing, unreadable or behind. Every
+    /// per-tenant loop runs its module's migrations each pass, so at
+    /// 10,000 tenants the full run's lock and its three
+    /// `information_schema` reads came hundreds of times a second (R9,
+    /// r9scale).
+    async fn up_to_date(&self, conn: &mut Conn, schema: &str) -> Option<FormatState> {
+        let raw: Option<Vec<u8>> = conn
+            .exec_first(
+                format!(
+                    "SELECT value FROM {}.settings WHERE scope_kind = 'tenant' AND scope_id = 0 \
+                     AND setting_key = ?",
+                    quote(schema)
+                ),
+                (FORMAT_KEY,),
+            )
+            .await
+            .ok()
+            .flatten();
+        let state: FormatState = serde_json::from_slice(&raw?).ok()?;
+        check_readable(&state, &self.supports()).ok()?;
+        let current = self.modules.iter().all(|m| {
+            state
+                .get(m.name)
+                .is_some_and(|s| s.format >= m.newest())
+        });
+        if !current {
+            return None;
+        }
+        conn.query_drop(format!("USE {}", quote(schema))).await.ok()?;
+        Some(state)
     }
 
     async fn run_locked(

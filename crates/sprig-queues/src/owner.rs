@@ -615,9 +615,9 @@ pub fn fail(c: Cmd, err: &MqError) {
         Cmd::Purge(r) | Cmd::Delete { reply: r, .. } => {
             let _ = r.send(Err(err.clone()));
         }
-        Cmd::Info(r) => {
-            let _ = r.send((0, 0));
-        }
+        // bugfix-66: unanswered (the sender dropped): the caller knows the
+        // owner couldn't say, instead of reading "0 ready, 0 consumers".
+        Cmd::Info(r) => drop(r),
         Cmd::Credit { .. }
         | Cmd::Cancel(_)
         | Cmd::Settle(..)

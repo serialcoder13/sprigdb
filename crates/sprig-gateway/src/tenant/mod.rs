@@ -116,6 +116,23 @@ impl std::fmt::Debug for TenantServices {
     }
 }
 
+/// The tenant settings writer's guards: `auth.authorizer` names an engine
+/// every live gateway knows (chapter 29), and (bugfix-62, Q39)
+/// `txn.commit_resolve_timeout_ms` stays below
+/// `txn.resolver_min_age_seconds`.
+fn settings_guard(live: &LiveSettings, dc: &DcId) -> Arc<dyn sprig_settings::ValueGuard> {
+    Arc::new(sprig_settings::AllGuards(vec![
+        Arc::new(sprig_auth::authz::engine_guard::EngineGuard::new(
+            Arc::clone(&live.stores().global),
+            Arc::clone(&live.stores().dc),
+        )),
+        Arc::new(sprig_txn::settings::ResolveWindowGuard::new(
+            live.clone(),
+            dc.clone(),
+        )),
+    ]))
+}
+
 impl TenantServices {
     /// Builds the services over `live`'s stores (the global tier for the
     /// directory, this DC's tier for shard maps and cluster records),
@@ -215,10 +232,7 @@ impl TenantServices {
             Arc::new(LogDecisions),
             Arc::clone(&clock),
         )
-        .with_guard(Arc::new(sprig_auth::authz::engine_guard::EngineGuard::new(
-            Arc::clone(&live.stores().global),
-            Arc::clone(&live.stores().dc),
-        )));
+        .with_guard(settings_guard(live, &dc));
         let svc = Arc::new(Self {
             cache,
             settings,

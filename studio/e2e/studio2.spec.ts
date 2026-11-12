@@ -7,7 +7,7 @@ import { expect, test, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { execFileSync } from 'node:child_process';
 import { createHmac } from 'node:crypto';
-import { apiToken, SHOTS, signIn, sql, typeSql } from './fixtures';
+import { apiToken, SHOTS, signIn, sql, typeSql, openPage } from './fixtures';
 
 const DB2 = 'studio2_e2e';
 const METRICS = process.env.STUDIO_METRICS ?? '';
@@ -100,7 +100,7 @@ test.describe.serial('Studio round 3', () => {
 
   test('cursors: fetch past the cap, a sliding window, nothing held by a hidden tab', async ({ page }) => {
     await signIn(page);
-    await page.getByRole('link', { name: 'Query' }).click();
+    await openPage(page, 'Query');
     await page.getByTestId('db-select').selectOption(DB2);
     // 506 million rows: the backend is still sending while the cursor waits.
     await typeSql(page, 'SELECT a.id, b.note FROM big a CROSS JOIN big b');
@@ -138,7 +138,7 @@ test.describe.serial('Studio round 3', () => {
 
   test('cursors: paging to the end of a result', async ({ page }) => {
     await signIn(page);
-    await page.getByRole('link', { name: 'Query' }).click();
+    await openPage(page, 'Query');
     await page.getByTestId('db-select').selectOption(DB2);
     await typeSql(page, 'SELECT id, note FROM big ORDER BY id');
     await page.getByRole('button', { name: 'Run', exact: true }).click();
@@ -162,7 +162,7 @@ test.describe.serial('Studio round 3', () => {
     // studio2_shop was sharded by the advisor on studio2's stack (run in
     // target/agent-studio2/tests/shards-setup.sh).
     await signIn(page);
-    await page.getByRole('link', { name: 'Shards' }).click();
+    await openPage(page, 'Shards');
     const g = page.getByTestId('group-customers');
     await expect(g).toBeVisible({ timeout: 15_000 });
     await expect(g.getByTestId('key')).toHaveText('customer_id (numeric)');
@@ -213,7 +213,7 @@ test.describe.serial('Studio round 3', () => {
     try {
       // Enrol from the Security page.
       await signIn(page, `acme.${user}`, 'sprig-dev-mfa');
-      await page.getByRole('link', { name: 'Security' }).click();
+      await openPage(page, 'Security');
       await expect(page.getByTestId('no-factor')).toBeVisible();
       await page.getByRole('button', { name: 'Set up an authenticator app' }).click();
       await expect(page.getByTestId('totp-secret')).toHaveText(/^[A-Z2-7]{32}$/);
@@ -249,7 +249,7 @@ test.describe.serial('Studio round 3', () => {
       await page.getByLabel('Code', { exact: true }).fill(totp(secret));
       await page.getByRole('button', { name: 'Verify' }).click();
       await expect(page.getByTestId('whoami')).toHaveText(`acme.${user}`);
-      await page.getByRole('link', { name: 'Security' }).click();
+      await openPage(page, 'Security');
       await expect(page.getByTestId('amr')).toHaveText('pwd, otp');
       await page.getByRole('button', { name: 'Sign out' }).click();
       // The logout request must finish before navigating, or the cookie stays.
@@ -262,7 +262,7 @@ test.describe.serial('Studio round 3', () => {
       await page.getByLabel('Code', { exact: true }).fill(codes[0]!);
       await page.getByRole('button', { name: 'Verify' }).click();
       await expect(page.getByTestId('whoami')).toHaveText(`acme.${user}`);
-      await page.getByRole('link', { name: 'Security' }).click();
+      await openPage(page, 'Security');
       await expect(page.getByTestId('recovery-left')).toHaveText('9');
       await page.getByRole('button', { name: 'Sign out' }).click();
       // The logout request must finish before navigating, or the cookie stays.

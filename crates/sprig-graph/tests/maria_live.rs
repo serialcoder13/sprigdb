@@ -1062,3 +1062,104 @@ async fn compare_gated(live: &Live, mem: &mut MemStore, qs: &[&str], gate: bool,
         assert_eq!(a, want, "{label}: {q}");
     }
 }
+
+/// R8 round 10 (the official LDBC run's 20th index failed with MariaDB
+/// 1117, "Table definition is too large"): forty indexes on one node
+/// table, on the same few properties of many labels, plus a text index
+/// and a uniqueness constraint, all created and all used.
+#[tokio::test]
+async fn many_indexes_fit_one_table() {
+    use sprig_graph::ast::{Entity, IndexKind};
+    let Some(live) = setup("r8ten_live_ix", 1).await else {
+        eprintln!("skipped: SPRIG_TEST_MARIADB_SINGLE is not set");
+        return;
+    };
+    let mut c = live.pool.get_conn().await.expect("conn");
+    let mut defs = Vec::new();
+    for i in 0..40u32 {
+        let name = format!("L{i}");
+        let label = live.dict.create(true, &name).await.expect("label");
+        let (prop, kind, unique) = match i {
+            0 => ("email", IndexKind::Range, true),
+            1 => ("name", IndexKind::Text, false),
+            _ if i % 3 == 0 => ("creationDate", IndexKind::Range, false),
+            _ if i % 3 == 1 => ("name", IndexKind::Range, false),
+            _ => ("id", IndexKind::Range, false),
+        };
+        let def = IndexDef {
+            id: 100 + i,
+            name: format!("ix_{name}_{prop}"),
+            unique,
+            kind,
+            entity: Entity::Node,
+            token: name.clone(),
+            token_id: label,
+            props: vec![prop.into()],
+            state: "online".into(),
+        };
+        for sh in &live.layout.shards {
+            c.query_drop(sh.tables.index_ddl(&def).expect("ddl"))
+                .await
+                .unwrap_or_else(|e| panic!("index {i} ({name}.{prop}): {e}"));
+        }
+        defs.push(def);
+    }
+    drop(c);
+    *live.indexes.lock().expect("lock") = defs;
+    live.run(
+        "CREATE (:L0 {email: 'a@x', id: 1}), (:L1 {name: 'Ann'}), (:L1 {name: 7}),
+                (:L2 {id: 5, name: 'x'}), (:L2 {id: 6}), (:L3 {creationDate: 1289908800123}),
+                (:L4 {name: 'Bo'}), (:L38 {id: 5}), (:L39 {creationDate: 3})",
+    )
+    .await;
+    for (text, want) in [
+        ("MATCH (n:L2 {id: 5}) RETURN n.name", vec!["x"]),
+        ("MATCH (n:L38) WHERE n.id = 5 RETURN count(n)", vec!["1"]),
+        (
+            "MATCH (n:L3) WHERE n.creationDate = 1289908800123 RETURN count(n)",
+            vec!["1"],
+        ),
+        ("MATCH (n:L4 {name: 'Bo'}) RETURN count(n)", vec!["1"]),
+        ("MATCH (n:L1 {name: 'Ann'}) RETURN count(n)", vec!["1"]),
+        ("MATCH (n:L0 {email: 'a@x'}) RETURN n.id", vec!["1"]),
+    ] {
+        assert_eq!(show(&live.run(text).await), want, "{text}");
+    }
+    // The constraint holds; the text index holds strings only.
+    let e = live
+        .run_with("CREATE (:L0 {email: 'a@x'})", &Budgets::default())
+        .await
+        .expect_err("duplicate");
+    assert!(
+        matches!(e.kind, sprig_common::ErrorKind::Backend { errno: 1062, .. }),
+        "{e}"
+    );
+    let mut c = live.pool.get_conn().await.expect("conn");
+    let sh = &live.layout.shards[0];
+    let texts: Vec<Option<String>> = c
+        .query(format!(
+            "SELECT `_sprig_i101_0` FROM {} WHERE JSON_CONTAINS(labels, '{}') ORDER BY id",
+            sh.tables.nodes,
+            live.indexes.lock().expect("lock")[1].token_id
+        ))
+        .await
+        .expect("text column");
+    assert_eq!(texts, [Some("sAnn".to_owned()), None]);
+    let n: Option<u64> = c
+        .query_first(format!(
+            "SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = '{}' \
+             AND TABLE_NAME = '{}' AND INDEX_NAME LIKE '\\_sprig\\_i%'",
+            sh.schema,
+            sh.tables
+                .nodes
+                .rsplit('.')
+                .next()
+                .unwrap_or_default()
+                .trim_matches('`')
+        ))
+        .await
+        .expect("statistics");
+    drop(c);
+    assert_eq!(n, Some(40), "indexes on the node table");
+    live.cleanup().await;
+}

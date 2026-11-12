@@ -10,6 +10,7 @@ import { operatorSession } from '../ops/ops';
 import { Database, Eye, LogOut, Moon, Search, Share2, SquareFunction, SquareTerminal, Table2 } from '../icons';
 import { SECTIONS, resolve } from './sections';
 import { useWorkspace } from './store';
+import { DOC_ICON } from './WorkspaceTabs';
 import type { MessageId } from '../i18n/en';
 
 interface Item {
@@ -45,6 +46,11 @@ const THEMES: Theme[] = ['system', 'light', 'dark', 'contrast'];
 /** The command palette (decision R1): Ctrl+K or Ctrl+P, one search over pages,
  * open tabs, databases, the objects of databases already loaded, and commands. */
 export function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void }) {
+  // Mounted only while open, so each opening starts empty.
+  return open ? <PaletteBody onClose={onClose} /> : null;
+}
+
+function PaletteBody({ onClose }: { onClose: () => void }) {
   const intl = useIntl();
   const navigate = useNavigate();
   const qc = useQueryClient();
@@ -59,19 +65,15 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
   const t = (id: MessageId) => intl.formatMessage({ id });
 
   useEffect(() => {
-    if (open) {
-      setQ('');
-      setSel(0);
-      setTimeout(() => input.current?.focus(), 0);
-    }
-  }, [open]);
+    input.current?.focus();
+  }, []);
 
   const items = useMemo<Item[]>(() => {
     const go = (to: string) => () => void navigate(to);
     const out: Item[] = [];
     const isOperator = !!(me?.platform_roles.includes('operator') || operatorSession());
     for (const s of SECTIONS) {
-      if (s.operatorOnly && !isOperator) continue;
+      if ((s.operatorOnly && !isOperator) || s.panel) continue;
       out.push({ id: `s:${s.id}`, label: t(s.label), hint: t('palette.kind.page'), icon: s.icon, run: go(resolve(base, s.to)) });
       for (const l of s.links) {
         if (l.to === s.to && l.label === s.label) continue;
@@ -79,7 +81,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
       }
     }
     for (const d of docs) {
-      out.push({ id: `d:${d.rel}`, label: d.title, hint: t('palette.kind.tab'), icon: SquareTerminal, run: go(d.rel ? `${base}/${d.rel}` : base) });
+      out.push({ id: `d:${d.rel}`, label: d.title, hint: t('palette.kind.tab'), icon: DOC_ICON[d.kind], run: go(d.rel ? `${base}/${d.rel}` : base) });
     }
     for (const db of dbs.data ?? []) {
       const dbPath = `${base}/db/${encodeURIComponent(db)}`;
@@ -113,7 +115,7 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
     out.push({ id: 'c:out', label: t('palette.cmd.signOut'), hint: t('palette.kind.command'), icon: LogOut, run: () => void logout() });
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [base, dbs.data, docs, me, open]);
+  }, [base, dbs.data, docs, me]);
 
   const shown = useMemo(() => {
     const scored = items
@@ -123,7 +125,6 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
     return scored.slice(0, 50).map((x) => x.it);
   }, [items, q]);
 
-  if (!open) return null;
   const pick = (it: Item | undefined) => {
     if (!it) return;
     onClose();

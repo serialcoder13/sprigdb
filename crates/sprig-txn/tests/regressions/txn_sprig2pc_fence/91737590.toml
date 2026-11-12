@@ -1,0 +1,6 @@
+suite = "txn_sprig2pc_fence"
+seed = 91737590
+failure = 'cluster g1: redo rows left after recovery: [RedoBranch { schema: "t1_d1_g1_s3", dtid: TxnId(18446744073709551637), gtrid: Gtrid { tenant: TenantId(1), dtid: TxnId(18446744073709551637), start_ms: 1767225600782, home: AnchorRef { db: DbId(1), group: GroupId(1), hash_point: 3458764513820540928 } }, age_seconds: 91, statements: 1, mark: None }]'
+
+[plan]
+faults = []

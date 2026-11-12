@@ -34,7 +34,7 @@ sprig-proto-mongo = { path = "../sprig-proto-mongo" }
 sprig-geo = { path = "../sprig-geo" }
 # Heavy steps off the runtime's workers, and the active collation as a
 # task-local value (R5 round 4).
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"] }
 # Logs writes that fail validation under `validationAction: warn` (M3).
 tracing.workspace = true
 # Canonical decomposition for collations (MIT or Apache-2.0; already in

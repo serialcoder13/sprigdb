@@ -1,0 +1,6 @@
+suite = "txn_sprig2pc_fence"
+seed = 90541785
+failure = """isolation: LOST UPDATE: txn 100 (Some(TxnId(36893488147419103315)), client got Some(Committed)) committed its append to hot row 1000001 on g2, but the row's final value "0,13,17,22,25,26,46,50,53,56,67,66,73,74,81,93,101,103,110,111,117,120,124,127,140,146,149,151,153,154,158,161,165,173,189,192,198,203,213,218,219,226,227,229,234,238,243,250,252,257,264,277,280,283,286,285,290,291,300" lacks it (a later write overwrote it, or it was replayed over one)"""
+
+[plan]
+faults = []

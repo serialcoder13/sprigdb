@@ -1,0 +1,28 @@
+ ❯ 1 sql shop │ ◔ Dashboard │ ◈ Admin │ ⚑ Inbox
+┌ Explorer ──────────────────┐┌ Editor [sql] ──────────────────────────────────────────────────────┐
+│▾ shop                      ││ 1 SELECT order_id, status                                          │
+│  ▾ tables 2                ││ 2 FROM orders                                                      │
+│    ▸ orders ~3 rows        ││ 3 WHERE status = 'paid';                                           │
+│      order_items           │└────────────────────────────────────────────────────────────────────┘
+│  ▸ views 1                 │┌ Results [grid] ────────────────────────────────────────────────────┐
+│  ▸ streams 1               ││                                                                    │
+│▸ hr                        ││                                                                    │
+│                            ││                                                                    │
+│       ┌ Search · Enter opens · Esc closes ───────────────────────────────────────────────┐       │
+│       │› ord▏                                                                            │       │
+│       │                                                                                  │       │
+│       │orders                                      table · shop                          │       │
+│       │order_items                                 table · shop                          │       │
+│       │Dashboard                                   screen                                │       │
+│       └──────────────────────────────────────────────────────────────────────────────────┘ands   │
+│                            ││       .'  .*.  '.~~.    F5      run the statement at the cursor    │
+│                            ││       '-(_)-(_)-'~~'    F1      all the keys                       │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+│                            ││                                                                    │
+└────────────────────────────┘└────────────────────────────────────────────────────────────────────┘
+ dev  127.0.0.1:8080 db shop  F1 help · F5 run · Ctrl-C cancel · Ctrl-Q quit

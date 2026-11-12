@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 # The internal service of node_rebuild (chapter 25): backup streams in and out.
 axum.workspace = true
 futures.workspace = true
@@ -22,6 +23,9 @@ sprig-cluster.workspace = true
 sprig-common.workspace = true
 sprig-meta.workspace = true
 sprig-provision.workspace = true
+# Sprig 2PC's relay fence (chapter 18, decision Q36).
+sprig-txn.workspace = true
+mysql_async.workspace = true
 tokio = { workspace = true, features = ["process", "io-util"] }
 # Mutual TLS on the internal service (chapter 25, RC2).
 tokio-rustls.workspace = true

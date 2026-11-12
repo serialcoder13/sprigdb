@@ -56,7 +56,7 @@ pub use etcd::{
     SettingsWriter, Warning, normalize_change, show_bounds, show_value,
 };
 pub use explain::{ExplainStep, Explanation, StepOutcome, explain_layered};
-pub use guard::{GuardFuture, ValueGuard};
+pub use guard::{AllGuards, GuardFuture, ValueGuard};
 #[doc(hidden)]
 pub use linkme;
 pub use registry::{AnySetting, Apply, HardBounds, Registry, Scopes, Setting};

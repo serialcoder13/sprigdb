@@ -13,7 +13,7 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Paragraph, Row, Table, Wrap};
 use serde_json::{Map, Value, json};
@@ -448,7 +448,7 @@ impl Inbox {
         f.render_widget(block, area);
         if let Some(n) = &self.note {
             f.render_widget(
-                Paragraph::new(Line::styled(n.clone(), Style::new().fg(Color::Yellow)))
+                Paragraph::new(Line::styled(n.clone(), crate::tui::theme::warn()))
                     .wrap(Wrap { trim: true }),
                 inner,
             );
@@ -478,7 +478,7 @@ impl Inbox {
             ];
             let r = Row::new(cells);
             if i == self.row {
-                r.style(Style::new().add_modifier(Modifier::REVERSED))
+                r.style(crate::tui::theme::selected())
             } else {
                 r
             }
@@ -503,7 +503,7 @@ impl Inbox {
         };
         let mut lines = vec![Line::styled(
             format!("Action: {}", field(v, &["action.text", "action"])),
-            Style::new().fg(Color::Cyan),
+            crate::tui::theme::selected(),
         )];
         let auto = field(v, &["auto_apply_at"]);
         if !auto.is_empty() {

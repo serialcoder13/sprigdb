@@ -693,7 +693,8 @@ impl Walker<'_, '_> {
 
     /// Fails for a reserved object name.
     fn check_object(&self, tok: usize, kind: ObjectKind, db: Option<&str>, creating: bool) -> R {
-        if self.ctx.internal || (!creating && kind == ObjectKind::Table && self.rls_subtree_view(tok))
+        if self.ctx.internal
+            || (!creating && kind == ObjectKind::Table && self.rls_subtree_view(tok))
         {
             return Ok(());
         }
