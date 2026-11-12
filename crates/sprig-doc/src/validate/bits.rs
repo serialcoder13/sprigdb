@@ -121,7 +121,9 @@ impl Bits {
             other => {
                 return Err(MongoError::new(
                     code::BAD_VALUE,
-                    format!("{op} takes an Array, a number, or a BinData but received: {op}: {other}"),
+                    format!(
+                        "{op} takes an Array, a number, or a BinData but received: {op}: {other}"
+                    ),
                 ));
             }
         }
@@ -140,10 +142,12 @@ impl Bits {
                         .is_some_and(|byte| (byte >> (p % 8)) & 1 == 1)
                 })
             }
-            Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_) | Bson::Decimal128(_) => match whole(v) {
-                Some(n) => Box::new(move |p| if p >= 63 { n < 0 } else { (n >> p) & 1 == 1 }),
-                None => return false,
-            },
+            Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_) | Bson::Decimal128(_) => {
+                match whole(v) {
+                    Some(n) => Box::new(move |p| if p >= 63 { n < 0 } else { (n >> p) & 1 == 1 }),
+                    None => return false,
+                }
+            }
             _ => return false,
         };
         let ps = &self.positions;
@@ -165,8 +169,11 @@ mod tests {
         let b = Bits::parse("$bitsAllSet", &Bson::Int32(0b101)).unwrap();
         assert!(b.matches(&Bson::Int32(0b1101)));
         assert!(!b.matches(&Bson::Int32(0b1001)));
-        let b = Bits::parse("$bitsAnySet", &Bson::Array(vec![Bson::Int32(1), Bson::Int32(70)]))
-            .unwrap();
+        let b = Bits::parse(
+            "$bitsAnySet",
+            &Bson::Array(vec![Bson::Int32(1), Bson::Int32(70)]),
+        )
+        .unwrap();
         assert!(b.matches(&Bson::Int64(-1)));
         assert!(!b.matches(&Bson::Int64(1)));
         assert!(!b.matches(&Bson::String("x".into())));

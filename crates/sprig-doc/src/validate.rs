@@ -209,9 +209,7 @@ impl Rules {
             pred: parse_validator(v)?,
             level,
             action,
-            prepared: options
-                .get_bool(PREPARED)
-                .unwrap_or(false),
+            prepared: options.get_bool(PREPARED).unwrap_or(false),
         }))
     }
 
@@ -340,11 +338,18 @@ pub const PREPARED: &str = "prepareConstraintValidationLevel";
 #[allow(clippy::needless_pass_by_value)]
 fn prefixed(cmd: &str, e: MongoError) -> MongoError {
     if e.code == code::TYPE_MISMATCH && e.message.starts_with("BSON field") {
-        return MongoError::new(e.code, e.message.replacen("BSON field '", &format!("BSON field '{cmd}."), 1));
+        return MongoError::new(
+            e.code,
+            e.message
+                .replacen("BSON field '", &format!("BSON field '{cmd}."), 1),
+        );
     }
     MongoError::new(
         e.code,
-        format!("Parsing of collection validator failed :: caused by :: {}", e.message),
+        format!(
+            "Parsing of collection validator failed :: caused by :: {}",
+            e.message
+        ),
     )
 }
 
@@ -472,7 +477,10 @@ pub async fn coll_mod(
             Action::ErrorAndLog => "errorAndLog",
         },
     );
-    if level != Level::Constraint && body.contains_key("validationLevel") && !body.contains_key(PREPARED) {
+    if level != Level::Constraint
+        && body.contains_key("validationLevel")
+        && !body.contains_key(PREPARED)
+    {
         opts.remove(PREPARED);
     }
     // Raising the level to `constraint`: every document must pass.
@@ -663,7 +671,9 @@ fn explain_clause(c: &Clause<'_>, d: &Document, inv: bool) -> Document {
                 .map(|x| x.as_document().cloned().unwrap_or_default())
                 .collect();
             let kids2 = kids.clone();
-            explain_logic(op, &kids, d, inv, move |i, inv| explain_doc(&kids2[i], d, inv))
+            explain_logic(op, &kids, d, inv, move |i, inv| {
+                explain_doc(&kids2[i], d, inv)
+            })
         }
         Clause::Expr(e) => {
             let r = crate::agg::eval(e, &Vars::new(d, bson::DateTime::now()));
@@ -846,7 +856,12 @@ fn explain_leaf(
         }
         _ => &[],
     };
-    if !inv && !expected.is_empty() && !vals.iter().any(|v| expected.contains(&schema::type_alias(v))) {
+    if !inv
+        && !expected.is_empty()
+        && !vals
+            .iter()
+            .any(|v| expected.contains(&schema::type_alias(v)))
+    {
         out.insert("reason", "type did not match");
         put_types(&mut out);
         out.insert("expectedTypes", expected.to_vec());
@@ -874,6 +889,40 @@ mod tests {
         assert_eq!(l.len(), 1);
         let e = explain(&doc! {"a": 1}, &doc! {"_id": 1, "a": [2, 3]});
         assert!(e.contains_key("consideredValues"));
+    }
+
+    /// The cost of a check (run with `--ignored --nocapture`).
+    #[test]
+    #[ignore = "timing, not a check"]
+    fn cost_of_a_check() {
+        let r = Rules::of(&doc! {"validator": {"$jsonSchema": {
+        "bsonType": "object", "required": ["name", "qty", "tags"],
+        "properties": {
+            "name": {"bsonType": "string", "maxLength": 64},
+            "qty": {"bsonType": "int", "minimum": 0},
+            "price": {"bsonType": ["double", "decimal"]},
+            "tags": {"bsonType": "array", "items": {"bsonType": "string"}},
+            "status": {"enum": ["new", "paid", "sent"]},
+        }}}})
+        .unwrap()
+        .unwrap();
+        let d = doc! {"_id": 1, "name": "widget", "qty": 5, "price": 2.5, "tags": ["a", "b", "c"],
+        "status": "paid", "x1": 1, "x2": "two", "x3": [1, 2], "x4": {"y": 1}};
+        let n = 20_000u32;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            assert!(r.check_insert("d.c", &d).is_ok());
+        }
+        let ok = t.elapsed() / n;
+        let bad = doc! {"_id": 2, "name": 5, "qty": -1, "tags": [1]};
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            assert!(r.check_insert("d.c", &bad).is_err());
+        }
+        eprintln!(
+            "check: {ok:?} per valid document, {:?} per refused one (with errInfo)",
+            t.elapsed() / n
+        );
     }
 
     #[test]

@@ -123,11 +123,9 @@ pub fn filter_shape(f: &Document) -> Document {
 pub fn expr_shape(v: &Bson) -> Bson {
     match v {
         Bson::String(s) if s.starts_with('$') => v.clone(),
-        Bson::Document(d) => Bson::Document(
-            d.iter()
-                .map(|(k, x)| (k.clone(), expr_shape(x)))
-                .collect(),
-        ),
+        Bson::Document(d) => {
+            Bson::Document(d.iter().map(|(k, x)| (k.clone(), expr_shape(x))).collect())
+        }
         Bson::Array(a) => Bson::Array(a.iter().map(expr_shape).collect()),
         other => placeholder(other),
     }
@@ -220,7 +218,10 @@ pub fn shape(name: &str, body: &Document, db: &str) -> Option<Document> {
                 d.insert("filter", Document::new());
             }
             for k in ["sort", "projection"] {
-                if let Some(v) = body.get(k).filter(|v| v.as_document().is_some_and(|x| !x.is_empty())) {
+                if let Some(v) = body
+                    .get(k)
+                    .filter(|v| v.as_document().is_some_and(|x| !x.is_empty()))
+                {
                     d.insert(k, spec_shape(v));
                 }
             }
@@ -264,7 +265,11 @@ pub fn shape(name: &str, body: &Document, db: &str) -> Option<Document> {
         }
         "insert" => {}
         "update" | "delete" => {
-            let key = if name == "update" { "updates" } else { "deletes" };
+            let key = if name == "update" {
+                "updates"
+            } else {
+                "deletes"
+            };
             let list: Vec<Bson> = body
                 .get_array(key)
                 .map(|a| {
@@ -315,10 +320,12 @@ fn digest(d: &Document) -> [u8; 32] {
 #[must_use]
 pub fn shape_hash(shape: &Document) -> String {
     use std::fmt::Write as _;
-    digest(shape).iter().fold(String::with_capacity(64), |mut out, b| {
-        let _ = write!(out, "{b:02X}");
-        out
-    })
+    digest(shape)
+        .iter()
+        .fold(String::with_capacity(64), |mut out, b| {
+            let _ = write!(out, "{b:02X}");
+            out
+        })
 }
 
 /// A `$queryStats` key's hash (`keyHash`): base64 of its SHA-256.
@@ -339,8 +346,18 @@ mod tests {
 
     #[test]
     fn filters_lose_their_values() {
-        let a = shape("find", &doc! {"find": "c", "filter": {"a": 5, "b": {"$gt": 1}}, "limit": 3}, "d").unwrap();
-        let b = shape("find", &doc! {"find": "c", "filter": {"a": 7, "b": {"$gt": 9}}, "limit": 1}, "d").unwrap();
+        let a = shape(
+            "find",
+            &doc! {"find": "c", "filter": {"a": 5, "b": {"$gt": 1}}, "limit": 3},
+            "d",
+        )
+        .unwrap();
+        let b = shape(
+            "find",
+            &doc! {"find": "c", "filter": {"a": 7, "b": {"$gt": 9}}, "limit": 1},
+            "d",
+        )
+        .unwrap();
         assert_eq!(shape_hash(&a), shape_hash(&b));
         assert_eq!(
             a.get_document("filter").unwrap(),

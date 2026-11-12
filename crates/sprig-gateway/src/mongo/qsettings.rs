@@ -6,7 +6,7 @@
 //! commands and `metrics.writes`).
 //!
 //! Shapes come from [`sprig_doc::qshape`]. Settings are kept per tenant in
-//! the shape's database (hidden table `__sprig_query_settings`) and read
+//! the shape's database (hidden table `__sprig_doc_query_settings`) and read
 //! through a two-second cache per gateway (S97). Statistics are kept per
 //! gateway and tenant in memory (S98).
 //!
@@ -30,7 +30,7 @@ use sprig_proto_mongo::errors::{MongoError, code};
 /// 411 `QueryRejectedBySettings`.
 pub const QUERY_REJECTED_BY_SETTINGS: i32 = 411;
 /// The table that keeps a database's query settings.
-pub const TABLE: &str = "__sprig_query_settings";
+pub const TABLE: &str = "__sprig_doc_query_settings";
 /// How long a gateway trusts its copy of a database's settings.
 const CACHE_TTL: Duration = Duration::from_secs(2);
 /// Shapes kept per tenant by `$queryStats` (the oldest go first).
@@ -101,9 +101,16 @@ struct Stat {
     last_seen: bson::DateTime,
 }
 
+/// A database's settings as read at an instant.
+type Cached = (Instant, Arc<Vec<Entry>>);
+
+/// What a settings command names: database, hash, representative query,
+/// shape.
+type Target = (Option<String>, String, Option<Document>, Option<Document>);
+
 #[derive(Default)]
 struct State {
-    settings: HashMap<(u64, String), (Instant, Arc<Vec<Entry>>)>,
+    settings: HashMap<(u64, String), Cached>,
     stats: HashMap<u64, HashMap<String, Stat>>,
     cursors: HashMap<(u64, i64), String>,
 }
@@ -111,7 +118,9 @@ struct State {
 static STATE: LazyLock<Mutex<State>> = LazyLock::new(Mutex::default);
 
 fn state() -> std::sync::MutexGuard<'static, State> {
-    STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn bad(msg: impl Into<String>) -> MongoError {
@@ -173,8 +182,12 @@ async fn load(sql: &mut dyn SqlRunner, tenant: u64, db: &str) -> Arc<Vec<Entry>>
             .map(|r| Entry {
                 hash: text(r[0].as_ref()),
                 settings: from_json(&text(r[1].as_ref())).unwrap_or_default(),
-                representative: r[2].as_ref().and_then(|b| from_json(&String::from_utf8_lossy(b))),
-                shape: r[3].as_ref().and_then(|b| from_json(&String::from_utf8_lossy(b))),
+                representative: r[2]
+                    .as_ref()
+                    .and_then(|b| from_json(&String::from_utf8_lossy(b))),
+                shape: r[3]
+                    .as_ref()
+                    .and_then(|b| from_json(&String::from_utf8_lossy(b))),
             })
             .collect(),
         // No table (1146) or no database (1049): no settings.
@@ -193,7 +206,7 @@ fn forget(tenant: u64, db: &str) {
 
 /// The query a `setQuerySettings`/`removeQuerySettings` names: its
 /// database, shape, hash and representative query, or a hash alone.
-fn target(v: &Bson) -> Result<(Option<String>, String, Option<Document>, Option<Document>), MongoError> {
+fn target(v: &Bson) -> Result<Target, MongoError> {
     match v {
         Bson::String(h) if qshape::is_hash(h) => Ok((None, h.to_ascii_uppercase(), None, None)),
         Bson::String(_) => Err(bad("the query shape hash must be 64 hexadecimal digits")),
@@ -210,13 +223,22 @@ fn target(v: &Bson) -> Result<(Option<String>, String, Option<Document>, Option<
                 ));
             }
             sprig_doc::filter::parse(
-                &q.get_document(if name == "distinct" { "query" } else { "filter" })
-                    .cloned()
-                    .unwrap_or_default(),
+                &q.get_document(if name == "distinct" {
+                    "query"
+                } else {
+                    "filter"
+                })
+                .cloned()
+                .unwrap_or_default(),
             )?;
             let shape = qshape::shape(&name, q, &db)
                 .ok_or_else(|| bad("the representative query has no collection"))?;
-            Ok((Some(db), qshape::shape_hash(&shape), Some(q.clone()), Some(shape)))
+            Ok((
+                Some(db),
+                qshape::shape_hash(&shape),
+                Some(q.clone()),
+                Some(shape),
+            ))
         }
         _ => Err(MongoError::new(
             code::TYPE_MISMATCH,
@@ -230,7 +252,10 @@ fn check_settings(s: &Document) -> Result<(), MongoError> {
         match k.as_str() {
             "reject" => {
                 if !matches!(v, Bson::Boolean(_)) {
-                    return Err(MongoError::new(code::TYPE_MISMATCH, "'reject' must be a boolean"));
+                    return Err(MongoError::new(
+                        code::TYPE_MISMATCH,
+                        "'reject' must be a boolean",
+                    ));
                 }
             }
             "queryFramework" => {
@@ -262,7 +287,10 @@ fn check_settings(s: &Document) -> Result<(), MongoError> {
             }
             "queryKnobs" => {
                 let Bson::Document(d) = v else {
-                    return Err(MongoError::new(code::TYPE_MISMATCH, "'queryKnobs' must be an object"));
+                    return Err(MongoError::new(
+                        code::TYPE_MISMATCH,
+                        "'queryKnobs' must be an object",
+                    ));
                 };
                 if let Some(k) = d.keys().next() {
                     return Err(MongoError::new(
@@ -321,7 +349,9 @@ pub async fn command(
             format!("{name} may only be run against the admin database."),
         ));
     }
-    let arg = body.get(name).ok_or_else(|| bad(format!("{name} needs a query")))?;
+    let arg = body
+        .get(name)
+        .ok_or_else(|| bad(format!("{name} needs a query")))?;
     let (qdb, hash, rep, shape) = target(arg)?;
     // A hash alone names settings already kept in some database.
     let qdb = match qdb {
@@ -340,7 +370,12 @@ pub async fn command(
         .cloned();
     if name == "removeQuerySettings" {
         if existing.is_some() {
-            let q = format!("DELETE FROM {}.{} WHERE hash = {}", ident(&qdb), ident(TABLE), lit(&hash));
+            let q = format!(
+                "DELETE FROM {}.{} WHERE hash = {}",
+                ident(&qdb),
+                ident(TABLE),
+                lit(&hash)
+            );
             sql.exec(&q).await.map_err(|e| mongo_error(&e))?;
             forget(tenant, &qdb);
         }
@@ -357,7 +392,10 @@ pub async fn command(
     }
     check_settings(new)?;
     // New fields replace old ones; the rest are kept (MongoDB merges).
-    let mut merged = existing.as_ref().map(|e| e.settings.clone()).unwrap_or_default();
+    let mut merged = existing
+        .as_ref()
+        .map(|e| e.settings.clone())
+        .unwrap_or_default();
     for (k, v) in new {
         merged.insert(k.clone(), v.clone());
     }
@@ -377,7 +415,10 @@ pub async fn command(
         ident(TABLE)
     );
     sql.exec(&ddl).await.map_err(|e| mongo_error(&e))?;
-    let opt = |d: &Option<Document>| d.as_ref().map_or_else(|| "NULL".to_owned(), |d| lit(&to_json(d)));
+    let opt = |d: &Option<Document>| {
+        d.as_ref()
+            .map_or_else(|| "NULL".to_owned(), |d| lit(&to_json(d)))
+    };
     let q = format!(
         "REPLACE INTO {}.{} (hash, settings, representative, shape) VALUES ({}, {}, {}, {})",
         ident(&qdb),
@@ -590,7 +631,11 @@ fn count_of(reply: &Document) -> i64 {
     reply
         .get_document("cursor")
         .ok()
-        .and_then(|c| c.get_array("firstBatch").or_else(|_| c.get_array("nextBatch")).ok())
+        .and_then(|c| {
+            c.get_array("firstBatch")
+                .or_else(|_| c.get_array("nextBatch"))
+                .ok()
+        })
         .map_or_else(
             || {
                 reply
@@ -608,7 +653,9 @@ const RATE_LIMIT: u32 = 1000;
 static WINDOW: LazyLock<Mutex<(Instant, u32)>> = LazyLock::new(|| Mutex::new((Instant::now(), 0)));
 
 fn admit() -> bool {
-    let mut w = WINDOW.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut w = WINDOW
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if w.0.elapsed() >= Duration::from_secs(1) {
         *w = (Instant::now(), 0);
     }
@@ -618,7 +665,7 @@ fn admit() -> bool {
 
 /// Records one run of a command for `$queryStats`; `raw_n`: the documents
 /// of a reply sent as raw bytes.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn record(
     tenant: u64,
     name: &str,
@@ -658,8 +705,10 @@ pub fn record(
         // `$queryStats` and other admin pipelines are left out.
         return;
     }
-    if !matches!(name, "find" | "aggregate" | "distinct" | "count" | "insert" | "update" | "delete")
-        || !admit()
+    if !matches!(
+        name,
+        "find" | "aggregate" | "distinct" | "count" | "insert" | "update" | "delete"
+    ) || !admit()
     {
         return;
     }
@@ -676,8 +725,15 @@ pub fn record(
     let n = raw_n.unwrap_or_else(|| count_of(reply));
     let writes = match name {
         "insert" | "update" | "delete" => {
-            let g = |k: &str| reply.get(k).and_then(sprig_doc::filter::as_i64).unwrap_or(0);
-            let ups = reply.get_array("upserted").map_or(0, |a| i64::try_from(a.len()).unwrap_or(0));
+            let g = |k: &str| {
+                reply
+                    .get(k)
+                    .and_then(sprig_doc::filter::as_i64)
+                    .unwrap_or(0)
+            };
+            let ups = reply
+                .get_array("upserted")
+                .map_or(0, |a| i64::try_from(a.len()).unwrap_or(0));
             Some(match name {
                 "insert" => [0, 0, 0, g("n"), 0],
                 "update" => [g("n") - ups, g("nModified"), ups, 0, 0],
@@ -700,7 +756,8 @@ pub fn record(
         }
     }
     let map = st.stats.entry(tenant).or_default();
-    if !map.contains_key(&kh) && map.len() >= MAX_SHAPES
+    if !map.contains_key(&kh)
+        && map.len() >= MAX_SHAPES
         && let Some(old) = map
             .values()
             .min_by_key(|s| s.last_seen.timestamp_millis())
@@ -753,8 +810,26 @@ mod tests {
     fn stats_accumulate() {
         let body = doc! {"find": "c", "filter": {"a": 1}};
         let reply = doc! {"cursor": {"firstBatch": [{"a": 1}], "id": 0i64, "ns": "d.c"}, "ok": 1.0};
-        record(7, "find", &body, "d", None, Duration::from_micros(10), &reply, None);
-        record(7, "find", &doc! {"find": "c", "filter": {"a": 2}}, "d", None, Duration::from_micros(30), &reply, None);
+        record(
+            7,
+            "find",
+            &body,
+            "d",
+            None,
+            Duration::from_micros(10),
+            &reply,
+            None,
+        );
+        record(
+            7,
+            "find",
+            &doc! {"find": "c", "filter": {"a": 2}},
+            "d",
+            None,
+            Duration::from_micros(30),
+            &reply,
+            None,
+        );
         let st = state();
         let m = st.stats.get(&7).unwrap();
         assert_eq!(m.len(), 1);

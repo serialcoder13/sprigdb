@@ -287,8 +287,7 @@ fn eq_unordered(a: &Bson, b: &Bson) -> bool {
     match (a, b) {
         (Bson::Document(x), Bson::Document(y)) => {
             x.len() == y.len()
-                && x
-                    .iter()
+                && x.iter()
                     .all(|(k, v)| y.get(k).is_some_and(|w| eq_unordered(v, w)))
         }
         (Bson::Array(x), Bson::Array(y)) => {
@@ -322,12 +321,35 @@ impl Schema {
         let mut s = Self::default();
         for k in d.keys() {
             match k.as_str() {
-                "bsonType" | "type" | "pattern" | "maxLength" | "minLength" | "multipleOf"
-                | "maximum" | "minimum" | "exclusiveMaximum" | "exclusiveMinimum"
-                | "minItems" | "maxItems" | "uniqueItems" | "items" | "additionalItems"
-                | "properties" | "additionalProperties" | "patternProperties" | "required"
-                | "minProperties" | "maxProperties" | "dependencies" | "allOf" | "anyOf"
-                | "oneOf" | "not" | "enum" | "title" | "description" => {}
+                "bsonType"
+                | "type"
+                | "pattern"
+                | "maxLength"
+                | "minLength"
+                | "multipleOf"
+                | "maximum"
+                | "minimum"
+                | "exclusiveMaximum"
+                | "exclusiveMinimum"
+                | "minItems"
+                | "maxItems"
+                | "uniqueItems"
+                | "items"
+                | "additionalItems"
+                | "properties"
+                | "additionalProperties"
+                | "patternProperties"
+                | "required"
+                | "minProperties"
+                | "maxProperties"
+                | "dependencies"
+                | "allOf"
+                | "anyOf"
+                | "oneOf"
+                | "not"
+                | "enum"
+                | "title"
+                | "description" => {}
                 "$ref" | "$schema" | "default" | "definitions" | "format" | "id" => {
                     return Err(failed_to_parse(format!(
                         "$jsonSchema keyword '{k}' is not currently supported"
@@ -336,7 +358,9 @@ impl Schema {
                 "encrypt" | "encryptMetadata" => {
                     return Err(MongoError::new(
                         code::SPRIG_DOC_FEATURE_UNSUPPORTED,
-                        format!("$jsonSchema keyword '{k}' (Queryable Encryption) is not supported in this release"),
+                        format!(
+                            "$jsonSchema keyword '{k}' (Queryable Encryption) is not supported in this release"
+                        ),
                     ));
                 }
                 other => {
@@ -399,10 +423,12 @@ impl Schema {
             }
         }
         if let Some(v) = d.get("maxLength") {
-            s.kws.push(Kw::MaxLength(v.clone(), count_arg("maxLength", v)?));
+            s.kws
+                .push(Kw::MaxLength(v.clone(), count_arg("maxLength", v)?));
         }
         if let Some(v) = d.get("minLength") {
-            s.kws.push(Kw::MinLength(v.clone(), count_arg("minLength", v)?));
+            s.kws
+                .push(Kw::MinLength(v.clone(), count_arg("minLength", v)?));
         }
         // Numbers.
         let num = |kw: &str| -> Result<Option<Bson>, MongoError> {
@@ -448,10 +474,12 @@ impl Schema {
         }
         // Arrays.
         if let Some(v) = d.get("minItems") {
-            s.kws.push(Kw::MinItems(v.clone(), count_arg("minItems", v)?));
+            s.kws
+                .push(Kw::MinItems(v.clone(), count_arg("minItems", v)?));
         }
         if let Some(v) = d.get("maxItems") {
-            s.kws.push(Kw::MaxItems(v.clone(), count_arg("maxItems", v)?));
+            s.kws
+                .push(Kw::MaxItems(v.clone(), count_arg("maxItems", v)?));
         }
         match d.get("uniqueItems") {
             None | Some(Bson::Boolean(false)) => {}
@@ -636,9 +664,7 @@ impl Schema {
         }
         if let Some(v) = d.get("enum") {
             let Bson::Array(a) = v else {
-                return Err(type_mismatch(
-                    "$jsonSchema keyword 'enum' must be an array",
-                ));
+                return Err(type_mismatch("$jsonSchema keyword 'enum' must be an array"));
             };
             if a.is_empty() {
                 return Err(failed_to_parse(
@@ -720,7 +746,9 @@ impl Schema {
                     if let Bson::String(s) = v
                         && !re.re.is_match(s)
                     {
-                        fail!(doc! {"operatorName": "pattern", "specifiedAs": {"pattern": re.pattern.clone()}, "reason": "regular expression did not match", "consideredValue": v.clone()});
+                        fail!(
+                            doc! {"operatorName": "pattern", "specifiedAs": {"pattern": re.pattern.clone()}, "reason": "regular expression did not match", "consideredValue": v.clone()}
+                        );
                     }
                 }
                 Kw::MaxLength(spec, n) | Kw::MinLength(spec, n) => {
@@ -732,13 +760,17 @@ impl Schema {
                             ("minLength", len < *n)
                         };
                         if bad {
-                            fail!(doc! {"operatorName": name, "specifiedAs": {name: spec.clone()}, "reason": "specified string length was not satisfied", "consideredValue": v.clone()});
+                            fail!(
+                                doc! {"operatorName": name, "specifiedAs": {name: spec.clone()}, "reason": "specified string length was not satisfied", "consideredValue": v.clone()}
+                            );
                         }
                     }
                 }
                 Kw::MultipleOf(m) => {
                     if is_number(v) && !multiple_of(v, m) {
-                        fail!(doc! {"operatorName": "multipleOf", "specifiedAs": {"multipleOf": m.clone()}, "reason": "considered value is not a multiple of the specified value", "consideredValue": v.clone()});
+                        fail!(
+                            doc! {"operatorName": "multipleOf", "specifiedAs": {"multipleOf": m.clone()}, "reason": "considered value is not a multiple of the specified value", "consideredValue": v.clone()}
+                        );
                     }
                 }
                 Kw::Maximum(m, ex) | Kw::Minimum(m, ex) => {
@@ -766,7 +798,9 @@ impl Schema {
                                     e.clone(),
                                 );
                             }
-                            fail!(doc! {"operatorName": name, "specifiedAs": spec, "reason": "comparison failed", "consideredValue": v.clone()});
+                            fail!(
+                                doc! {"operatorName": name, "specifiedAs": spec, "reason": "comparison failed", "consideredValue": v.clone()}
+                            );
                         }
                     }
                 }
@@ -779,16 +813,20 @@ impl Schema {
                             ("maxItems", len > *n)
                         };
                         if bad {
-                            fail!(doc! {"operatorName": name, "specifiedAs": {name: spec.clone()}, "reason": "array did not match specified length", "consideredValue": v.clone(), "numberOfItems": i32::try_from(len).unwrap_or(i32::MAX)});
+                            fail!(
+                                doc! {"operatorName": name, "specifiedAs": {name: spec.clone()}, "reason": "array did not match specified length", "consideredValue": v.clone(), "numberOfItems": i32::try_from(len).unwrap_or(i32::MAX)}
+                            );
                         }
                     }
                 }
                 Kw::UniqueItems => {
                     if let Bson::Array(a) = v
-                        && let Some(dup) = (1..a.len())
-                            .find(|j| a[..*j].iter().any(|x| eq_unordered(x, &a[*j])))
+                        && let Some(dup) =
+                            (1..a.len()).find(|j| a[..*j].iter().any(|x| eq_unordered(x, &a[*j])))
                     {
-                        fail!(doc! {"operatorName": "uniqueItems", "specifiedAs": {"uniqueItems": true}, "reason": "found a duplicate item", "consideredValue": v.clone(), "duplicatedValue": a[dup].clone()});
+                        fail!(
+                            doc! {"operatorName": "uniqueItems", "specifiedAs": {"uniqueItems": true}, "reason": "found a duplicate item", "consideredValue": v.clone(), "duplicatedValue": a[dup].clone()}
+                        );
                     }
                 }
                 Kw::Items(s) => {
@@ -828,16 +866,15 @@ impl Schema {
                     if let Bson::Array(a) = v
                         && a.len() > *n
                     {
-                        fail!(doc! {"operatorName": "additionalItems", "specifiedAs": {"additionalItems": false}, "reason": "found additional items", "additionalItems": a[*n..].to_vec()});
+                        fail!(
+                            doc! {"operatorName": "additionalItems", "specifiedAs": {"additionalItems": false}, "reason": "found additional items", "additionalItems": a[*n..].to_vec()}
+                        );
                     }
                 }
                 Kw::AdditionalItems(n, s) => {
                     if let Bson::Array(a) = v
-                        && let Some((i, e)) = a
-                            .iter()
-                            .enumerate()
-                            .skip(*n)
-                            .find(|(_, e)| !s.matches(e))
+                        && let Some((i, e)) =
+                            a.iter().enumerate().skip(*n).find(|(_, e)| !s.matches(e))
                     {
                         let mut d = doc! {"operatorName": "additionalItems"};
                         s.annotate(&mut d);
@@ -868,7 +905,9 @@ impl Schema {
                             }
                         }
                         if !props.is_empty() {
-                            fail!(doc! {"operatorName": "properties", "propertiesNotSatisfied": props});
+                            fail!(
+                                doc! {"operatorName": "properties", "propertiesNotSatisfied": props}
+                            );
                         }
                     }
                 }
@@ -880,7 +919,9 @@ impl Schema {
                             .cloned()
                             .collect();
                         if !extra.is_empty() {
-                            fail!(doc! {"operatorName": "additionalProperties", "specifiedAs": {"additionalProperties": false}, "additionalProperties": extra});
+                            fail!(
+                                doc! {"operatorName": "additionalProperties", "specifiedAs": {"additionalProperties": false}, "additionalProperties": extra}
+                            );
                         }
                     }
                 }
@@ -928,10 +969,14 @@ impl Schema {
                 }
                 Kw::Required(spec, names) => {
                     if let Bson::Document(o) = v {
-                        let missing: Vec<&String> =
-                            names.iter().filter(|n| !o.contains_key(n.as_str())).collect();
+                        let missing: Vec<&String> = names
+                            .iter()
+                            .filter(|n| !o.contains_key(n.as_str()))
+                            .collect();
                         if !missing.is_empty() {
-                            fail!(doc! {"operatorName": "required", "specifiedAs": {"required": spec.clone()}, "missingProperties": missing});
+                            fail!(
+                                doc! {"operatorName": "required", "specifiedAs": {"required": spec.clone()}, "missingProperties": missing}
+                            );
                         }
                     }
                 }
@@ -944,7 +989,9 @@ impl Schema {
                             ("maxProperties", len > *n)
                         };
                         if bad {
-                            fail!(doc! {"operatorName": name, "specifiedAs": {name: spec.clone()}, "reason": "specified number of properties was not satisfied", "numberOfProperties": i32::try_from(len).unwrap_or(i32::MAX)});
+                            fail!(
+                                doc! {"operatorName": name, "specifiedAs": {name: spec.clone()}, "reason": "specified number of properties was not satisfied", "numberOfProperties": i32::try_from(len).unwrap_or(i32::MAX)}
+                            );
                         }
                     }
                 }
@@ -983,7 +1030,9 @@ impl Schema {
                             }
                         }
                         if !deps.is_empty() {
-                            fail!(doc! {"operatorName": "dependencies", "failingDependencies": deps});
+                            fail!(
+                                doc! {"operatorName": "dependencies", "failingDependencies": deps}
+                            );
                         }
                     }
                 }
@@ -1008,7 +1057,9 @@ impl Schema {
                     }
                     let bad = if all { !failed.is_empty() } else { !any };
                     if bad {
-                        fail!(doc! {"operatorName": if all {"allOf"} else {"anyOf"}, "schemasNotSatisfied": failed});
+                        fail!(
+                            doc! {"operatorName": if all {"allOf"} else {"anyOf"}, "schemasNotSatisfied": failed}
+                        );
                     }
                 }
                 Kw::OneOf(list) => {
@@ -1019,7 +1070,9 @@ impl Schema {
                         .map(|(i, _)| i)
                         .collect();
                     if ok.len() > 1 {
-                        fail!(doc! {"operatorName": "oneOf", "reason": "more than one subschema matched", "matchingSchemaIndexes": ok.iter().map(|i| i32::try_from(*i).unwrap_or(i32::MAX)).collect::<Vec<_>>()});
+                        fail!(
+                            doc! {"operatorName": "oneOf", "reason": "more than one subschema matched", "matchingSchemaIndexes": ok.iter().map(|i| i32::try_from(*i).unwrap_or(i32::MAX)).collect::<Vec<_>>()}
+                        );
                     } else if ok.is_empty() {
                         let failed: Vec<Document> = if detail {
                             list.iter()
@@ -1048,7 +1101,9 @@ impl Schema {
                 }
                 Kw::Enum(spec, list) => {
                     if !list.iter().any(|x| eq_unordered(x, v)) {
-                        fail!(doc! {"operatorName": "enum", "specifiedAs": {"enum": spec.clone()}, "reason": "value was not found in enum", "consideredValue": v.clone()});
+                        fail!(
+                            doc! {"operatorName": "enum", "specifiedAs": {"enum": spec.clone()}, "reason": "value was not found in enum", "consideredValue": v.clone()}
+                        );
                     }
                 }
                 Kw::Type {
@@ -1061,7 +1116,9 @@ impl Schema {
                     // document is an "object" for both keywords.
                     let _ = json;
                     if !type_ok(set, v) {
-                        fail!(doc! {"operatorName": *name, "specifiedAs": {*name: spec.clone()}, "reason": "type did not match", "consideredValue": v.clone(), "consideredType": type_alias(v)});
+                        fail!(
+                            doc! {"operatorName": *name, "specifiedAs": {*name: spec.clone()}, "reason": "type did not match", "consideredValue": v.clone(), "consideredType": type_alias(v)}
+                        );
                     }
                 }
             }

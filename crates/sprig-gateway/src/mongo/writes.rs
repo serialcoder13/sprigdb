@@ -159,7 +159,11 @@ pub async fn run(
     // `bypassDocumentValidation` (M3, decision S90): the engine skips the
     // collections' validators for this command's writes.
     let bypass = body.get_bool("bypassDocumentValidation").unwrap_or(false);
-    sprig_doc::validate::bypass(bypass, run_writes(engine, sql, name, body, db, done)).await
+    sprig_doc::validate::bypass(
+        bypass,
+        Box::pin(run_writes(engine, sql, name, body, db, done)),
+    )
+    .await
 }
 
 async fn run_writes(

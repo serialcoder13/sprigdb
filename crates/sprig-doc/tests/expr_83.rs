@@ -459,6 +459,28 @@ fn concat_arrays_and_set_union_in_group() {
         ok(Bson::Document(doc! {"$setUnion": [[1, 2], [2, 3]]})),
         Bson::Array(vec![1.into(), 2.into(), 3.into()])
     );
+    let lim = AggLimits {
+        stage_bytes: 1 << 20,
+        now: DateTime::now(),
+    };
+    let docs = vec![
+        doc! {"_id": 1, "k": "a", "t": [1, 2]},
+        doc! {"_id": 2, "k": "a", "t": [2, 3]},
+        doc! {"_id": 3, "k": "b", "t": []},
+    ];
+    let mut out = agg::run_stage(
+        docs,
+        &doc! {"$group": {"_id": "$k", "all": {"$concatArrays": "$t"}, "set": {"$setUnion": "$t"}}},
+        &lim,
+    )
+    .unwrap();
+    agg::sort_docs(&mut out, &vec![("_id".to_owned(), 1)]);
+    assert_eq!(
+        out[0].get_array("all").unwrap(),
+        &vec![Bson::Int32(1), 2.into(), 2.into(), 3.into()]
+    );
+    assert_eq!(out[0].get_array("set").unwrap().len(), 3);
+    assert_eq!(out[1].get_array("all").unwrap(), &Vec::<Bson>::new());
 }
 
 /// The cost of the correctly rounded trigonometric functions (decision
@@ -508,14 +530,20 @@ fn trig_within_one_ulp_of_libm() {
         .enumerate()
         .map(|(i, x)| doc! {"_id": i32::try_from(i).unwrap(), "x": *x})
         .collect();
-    let ulps = |a: f64, b: f64| (a.to_bits() as i64 - b.to_bits() as i64).unsigned_abs();
+    let ulps = |a: f64, b: f64| {
+        a.to_bits()
+            .cast_signed()
+            .wrapping_sub(b.to_bits().cast_signed())
+            .unsigned_abs()
+    };
     for (op, f) in [
         ("$sin", f64::sin as fn(f64) -> f64),
         ("$cos", f64::cos),
         ("$tan", f64::tan),
         ("$atan", f64::atan),
     ] {
-        let out = agg::run_stage(docs.clone(), &doc! {"$project": {"r": {op: "$x"}}}, &lim).unwrap();
+        let out =
+            agg::run_stage(docs.clone(), &doc! {"$project": {"r": {op: "$x"}}}, &lim).unwrap();
         for (d, x) in out.iter().zip(&xs) {
             // macOS's tan is several units off for large arguments (its
             // answer for -758253.37 is 5 units from the true value).
@@ -536,7 +564,8 @@ fn trig_within_one_ulp_of_libm() {
         })
         .collect();
     for (op, f) in [("$asin", f64::asin as fn(f64) -> f64), ("$acos", f64::acos)] {
-        let out = agg::run_stage(small.clone(), &doc! {"$project": {"r": {op: "$x"}}}, &lim).unwrap();
+        let out =
+            agg::run_stage(small.clone(), &doc! {"$project": {"r": {op: "$x"}}}, &lim).unwrap();
         for (d, s) in out.iter().zip(&small) {
             let x = s.get_f64("x").unwrap();
             let r = d.get_f64("r").unwrap();

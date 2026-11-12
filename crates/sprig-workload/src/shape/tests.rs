@@ -72,7 +72,7 @@ fn chapter_example_shape() {
     let json = s.to_json();
     assert_eq!(
         json,
-        r#"{"v":1,"type":"select","tables":[{"alias":"o","object_id":1201,"db":"shop","table":"orders","db_id":1},{"alias":"c","object_id":1188,"db":"shop","table":"customers","db_id":1}],"predicates":[{"t":"o","col":"customer_id","op":"eq","args":[0]},{"t":"o","col":"status","op":"in","list":true,"args":[1]},{"t":"o","col":"created_at","op":"range","lo":true,"hi":false,"args":[2]},{"t":"o","col":"email","op":"unsargable","why":"function:LOWER"}],"joins":[{"l":["c","id"],"r":["o","customer_id"],"op":"eq","kind":"inner"}],"order_by":[{"t":"o","col":"created_at","dir":"desc"}],"group_by":[],"select":{"c":["name"],"o":["id","total"]},"limit":true,"writes":null,"or_groups":0,"limit_arg":4}"#
+        r#"{"v":2,"type":"select","tables":[{"alias":"o","object_id":1201,"db":"shop","table":"orders","db_id":1},{"alias":"c","object_id":1188,"db":"shop","table":"customers","db_id":1}],"predicates":[{"t":"o","col":"customer_id","op":"eq","args":[0]},{"t":"o","col":"status","op":"in","list":true,"args":[1]},{"t":"o","col":"created_at","op":"range","lo":true,"hi":false,"args":[2]},{"t":"o","col":"email","op":"unsargable","why":"function:LOWER"}],"joins":[{"l":["c","id"],"r":["o","customer_id"],"op":"eq","kind":"inner"}],"order_by":[{"t":"o","col":"created_at","dir":"desc"}],"group_by":[],"select":{"c":["name"],"o":["id","total"]},"limit":true,"writes":null,"or_groups":0,"limit_arg":4}"#
     );
     assert_eq!(Shape::from_json(&json).unwrap(), s);
 }

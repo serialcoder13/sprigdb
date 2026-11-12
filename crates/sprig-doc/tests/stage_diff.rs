@@ -16,7 +16,14 @@
 //! mismatch; `SPRIG_STAGE_DIFF_ONLY=<prefix>` runs only the cases whose
 //! names start with the prefix.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stderr)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stderr,
+    clippy::too_many_lines
+)]
+
+use std::fmt::Write as _;
 
 use bson::{Bson, DateTime, Document};
 use sprig_doc::agg::{self, AggLimits, GraphSpec};
@@ -121,9 +128,10 @@ fn stages_match_mongodb_8_0() {
                     }
                     for (i, (x, y)) in g.iter().zip(w).enumerate() {
                         if !same(x, y) {
-                            detail.push_str(&format!(
+                            let _ = write!(
+                                detail,
                                 "#{i} want {y:?}\n      #{i} got  {x:?}\n      "
-                            ));
+                            );
                             break;
                         }
                     }

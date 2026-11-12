@@ -455,3 +455,77 @@ async fn maintain_migrates_rolls_up_and_retains_through_a_locator() {
     })
     .await;
 }
+
+/// Decision X34: a fingerprint row recorded before R6 round 6 (shape
+/// version 1, `json_path` without `func` and `cmp`) is rewritten with this
+/// build's shape the next time a gateway records the statement; a row of
+/// the current or a newer version is left alone.
+#[tokio::test]
+async fn an_old_shape_version_row_is_rewritten() {
+    with_schema("x34", |mut conn, schema| async move {
+        let t = WorkloadTables::new(&schema);
+        let (fp, n) = new_fp("SELECT k FROM db0 WHERE JSON_VALUE(v, '$.email') = 'a@b.c'");
+        assert!(!fp.shape.all_unsargable(), "{}", fp.shape.to_json());
+        // The row as a build before R6 round 6 wrote it.
+        let mut old: serde_json::Value = serde_json::from_str(&fp.shape.to_json()).unwrap();
+        old["v"] = 1.into();
+        for p in old["predicates"].as_array_mut().unwrap() {
+            let p = p.as_object_mut().unwrap();
+            assert_eq!(p["op"], "json_path");
+            p.remove("func");
+            p.remove("cmp");
+        }
+        t.insert_fingerprints(&mut conn, std::slice::from_ref(&n))
+            .await
+            .unwrap();
+        let fps = format!("{}.workload_fingerprints", quote(&schema));
+        conn.exec_drop(
+            format!("UPDATE {fps} SET shape = ?, shape_version = 1, flags = 'static'"),
+            (old.to_string(),),
+        )
+        .await
+        .unwrap();
+        let before = t.fingerprints(&mut conn, &[fp.id]).await.unwrap();
+        assert!(before[0].shape.all_unsargable(), "the old row: no field column");
+        // The statement is seen again: the row is rewritten (2 affected).
+        assert_eq!(
+            t.insert_fingerprints(&mut conn, std::slice::from_ref(&n))
+                .await
+                .unwrap(),
+            2
+        );
+        let after = t.fingerprints(&mut conn, &[fp.id]).await.unwrap();
+        assert_eq!(*after[0].shape, *fp.shape);
+        assert!(after[0].shape.predicates[0].op.is_field_sargable());
+        assert_eq!(after[0].first_seen, before[0].first_seen);
+        assert_eq!(after[0].flags, "static", "flags are kept");
+        let v: u16 = conn
+            .query_first(format!("SELECT shape_version FROM {fps}"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(v, SHAPE_VERSION);
+        // Same version: nothing changes.
+        assert_eq!(
+            t.insert_fingerprints(&mut conn, std::slice::from_ref(&n))
+                .await
+                .unwrap(),
+            0
+        );
+        // A newer build's row isn't taken back.
+        conn.query_drop(format!(
+            "UPDATE {fps} SET shape = '{{}}', shape_version = {}",
+            SHAPE_VERSION + 1
+        ))
+        .await
+        .unwrap();
+        assert_eq!(t.insert_fingerprints(&mut conn, &[n]).await.unwrap(), 0);
+        let s: String = conn
+            .query_first(format!("SELECT shape FROM {fps}"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(s, "{}");
+    })
+    .await;
+}

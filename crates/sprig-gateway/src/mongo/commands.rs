@@ -678,8 +678,11 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
             _ => {
                 // MongoDB 9.0's per-operation memory limit (M3, S100).
                 let mem = c.shared.settings().max_operation_memory_bytes;
-                sprig_doc::opmem::scope(mem, exec(c, &mut s, name, body, &db, lsid.as_deref()))
-                    .await
+                sprig_doc::opmem::scope(
+                    mem,
+                    Box::pin(exec(c, &mut s, name, body, &db, lsid.as_deref())),
+                )
+                .await
             }
         };
         // Concurrent first writes to a new database: another session
@@ -709,8 +712,8 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
     if let Ok(d) = &r {
         // A point read answers with raw bytes (`Conn::raw`): count them.
         let raw_n = c.raw.as_ref().and_then(|raw| {
-            let cur = raw.get_document("cursor").ok().flatten()?;
-            let b = cur.get_array("firstBatch").ok().flatten()?;
+            let cur = raw.get_document("cursor").ok()?;
+            let b = cur.get_array("firstBatch").ok()?;
             i64::try_from(b.into_iter().count()).ok()
         });
         super::qsettings::record(
@@ -1185,7 +1188,8 @@ async fn exec(
             }
             // Schema validation (M3, decisions S90-S92).
             if let Some(o) =
-                sprig_doc::validate::coll_mod(&engine, sql, &ns, &m.options, body).await?
+                Box::pin(sprig_doc::validate::coll_mod(&engine, sql, &ns, &m.options, body))
+                    .await?
             {
                 m.options = o;
                 engine.catalog.save_indexes(sql, &ns, &m).await?;
@@ -1410,6 +1414,7 @@ async fn exec(
             // M4 (decision S110): `$where` is refused in aggregation.
             if let Ok(p) = body.get_array("pipeline") {
                 sprig_doc::serverjs::check_pipeline(p)?;
+                sprig_doc::engine::fusion::check_nested(p)?;
             }
             if let Some(st) = pipeline
                 .first()
@@ -1434,13 +1439,13 @@ async fn exec(
             {
                 // `$querySettings` and `$queryStats` (M3), then the
                 // in-gateway stages.
-                let mut docs = super::qsettings::stage_docs(
+                let mut docs = Box::pin(super::qsettings::stage_docs(
                     &engine,
                     sql,
                     owner(c).tenant,
                     db,
                     &pipeline[0],
-                )
+                ))
                 .await?;
                 let lim = sprig_doc::agg::AggLimits {
                     stage_bytes: engine.cfg.agg_stage_bytes,
@@ -1498,7 +1503,7 @@ async fn exec(
                 // `$out`/`$merge` with `bypassDocumentValidation` (M3).
                 sprig_doc::validate::bypass(
                     body.get_bool("bypassDocumentValidation").unwrap_or(false),
-                    engine.aggregate(sql, &ns, &pipeline),
+                    Box::pin(engine.aggregate(sql, &ns, &pipeline)),
                 )
                 .await?
             };
@@ -1585,7 +1590,7 @@ async fn exec(
         n if super::search::handles(n) => super::search::command(&engine, sql, n, body, db).await,
         // Query settings (M3, decisions S96-S99).
         n if super::qsettings::handles(n) => {
-            super::qsettings::command(&engine, sql, owner(c).tenant, n, body, db).await
+            Box::pin(super::qsettings::command(&engine, sql, owner(c).tenant, n, body, db)).await
         }
         other => Err(MongoError::new(
             code::COMMAND_NOT_FOUND,

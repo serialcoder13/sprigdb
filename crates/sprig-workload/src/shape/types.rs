@@ -19,7 +19,12 @@ use sprig_common::ids::{DbId, ObjectId};
 
 /// The version of the shape format, stored in `shape_version` and in the
 /// JSON as `"v"`.
-pub const SHAPE_VERSION: u16 = 1;
+///
+/// 2 (decision X34): `json_path` predicates carry `func` and `cmp` (R6
+/// round 6, decision K3). Version 1 rows are rewritten when a gateway
+/// sees their statement again
+/// ([`WorkloadTables::insert_fingerprints`](crate::store::WorkloadTables::insert_fingerprints)).
+pub const SHAPE_VERSION: u16 = 2;
 
 /// What a statement does with which columns: the predicates, joins, order,
 /// grouping and selected columns that automatic indexing designs indexes

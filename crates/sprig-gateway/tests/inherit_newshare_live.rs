@@ -19,8 +19,11 @@
 //!    With `SPRIG_TEST_NEWSHARE_GRANDCHILD` (a child of the child), the
 //!    grandchild's overrides of records that came from the parent become
 //!    its own too; with `SPRIG_TEST_NEWSHARE_BACKEND` (`host:port` of the
-//!    cluster, root password in `SPRIG_TEST_NEWSHARE_BACKEND_PASSWORD`) the
-//!    test also checks the view is gone.
+//!    cluster, root password in `SPRIG_TEST_NEWSHARE_BACKEND_PASSWORD`, and
+//!    `SPRIG_TEST_NEWSHARE_BACKEND_SCHEMAS`, a `LIKE` pattern of the
+//!    deployment's physical schemas such as `t59306%`, none of whose other
+//!    databases may share anything while it runs) the test also checks the
+//!    view is gone.
 //!
 //! ```sh
 //! SPRIG_TEST_NEWSHARE_GATEWAY=127.0.0.1:58306 \
@@ -279,11 +282,14 @@ fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The share views left in the physical schemas of logical database `db`
-/// on the backend, when `SPRIG_TEST_NEWSHARE_BACKEND` names it.
-async fn share_views(db: &str) -> Option<Vec<String>> {
+/// The share views in the physical schemas matching
+/// `SPRIG_TEST_NEWSHARE_BACKEND_SCHEMAS` on the backend, when
+/// `SPRIG_TEST_NEWSHARE_BACKEND` names it (physical schema names don't
+/// carry the logical database's).
+async fn share_views() -> Option<Vec<String>> {
     let addr = std::env::var("SPRIG_TEST_NEWSHARE_BACKEND").ok()?;
     let pw = std::env::var("SPRIG_TEST_NEWSHARE_BACKEND_PASSWORD").ok()?;
+    let like = std::env::var("SPRIG_TEST_NEWSHARE_BACKEND_SCHEMAS").ok()?;
     let (host, port) = addr.rsplit_once(':').unwrap();
     let mut b = Conn::new(
         OptsBuilder::default()
@@ -297,7 +303,8 @@ async fn share_views(db: &str) -> Option<Vec<String>> {
     let v: Vec<(String, String)> = b
         .query(format!(
             "SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.VIEWS WHERE TABLE_NAME \
-             LIKE '\\_\\_sprig\\_share\\_%' AND TABLE_SCHEMA LIKE '%{db}'"
+             LIKE '\\_\\_sprig\\_share\\_%' AND TABLE_SCHEMA LIKE '{}'",
+            like.replace('\'', "")
         ))
         .await
         .unwrap();
@@ -345,8 +352,10 @@ async fn a_dropped_share_leaves_the_childs_overrides_as_its_own_rows() {
         );
         g = Some(gc);
     }
-    if let Some(v) = share_views(&db).await {
-        assert!(!v.is_empty(), "no share view before the drop");
+    if let Some(v) = share_views().await {
+        // The child's of the parent's share, and the grandchild's of the
+        // child's.
+        assert_eq!(v.len(), 1 + usize::from(gk.is_some()), "{v:?}");
         println!("share views before the drop: {v:?}");
     }
 
@@ -365,7 +374,7 @@ async fn a_dropped_share_leaves_the_childs_overrides_as_its_own_rows() {
             pairs(&[("1", "gk ovr 1"), ("2", "gk ovr 2"), ("10", "kid own")])
         );
     }
-    if let Some(v) = share_views(&db).await {
+    if let Some(v) = share_views().await {
         println!("share views after the drop: {v:?}");
         // The child's own share to the grandchild keeps its view; the
         // dropped share's view is gone.
@@ -380,8 +389,10 @@ async fn a_dropped_share_leaves_the_childs_overrides_as_its_own_rows() {
 
     ok(&mut p, &format!("DROP DATABASE {db}")).await;
     if let Some(mut gc) = g {
-        ok(&mut gc, &format!("DROP DATABASE IF EXISTS {db}")).await;
+        // The child's share first: a tenant can't drop a database it
+        // inherits (39897).
         ok(&mut c, &format!("DROP SHARE {db}_k")).await;
+        ok(&mut gc, &format!("DROP DATABASE IF EXISTS {db}")).await;
     }
     ok(&mut c, &format!("DROP DATABASE {db}")).await;
 }

@@ -633,11 +633,15 @@ fn map_filter_reduce(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoErr
         }
     };
     let idx = |i: usize| Bson::Int32(i32::try_from(i).unwrap_or(i32::MAX));
+    // One copy of the variables for the whole array (they hold `$$ROOT`),
+    // its element and index variables replaced per element.
+    let mut v2 = vars.clone();
     match op {
         "$map" => {
             let mut out = Vec::with_capacity(arr.len());
             for (i, e) in arr.into_iter().enumerate() {
-                let v2 = vars.with(&name, e).with(&idx_name, idx(i));
+                v2.vars.insert(name.clone(), e);
+                v2.vars.insert(idx_name.clone(), idx(i));
                 let r = eval(body, &v2)?;
                 out.push(if is_missing(&r) { Bson::Null } else { r });
             }
@@ -673,7 +677,8 @@ fn map_filter_reduce(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoErr
                 if limit.is_some_and(|l| out.len() >= l) {
                     break;
                 }
-                let v2 = vars.with(&name, e.clone()).with(&idx_name, idx(i));
+                v2.vars.insert(name.clone(), e.clone());
+                v2.vars.insert(idx_name.clone(), idx(i));
                 if value_truthy(&eval(body, &v2)?) {
                     out.push(e);
                 }
@@ -683,10 +688,9 @@ fn map_filter_reduce(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoErr
         _ => {
             let mut acc = eval(d.get("initialValue").unwrap_or(&Bson::Null), vars)?;
             for (i, e) in arr.into_iter().enumerate() {
-                let v2 = vars
-                    .with("this", e)
-                    .with("value", acc)
-                    .with(&idx_name, idx(i));
+                v2.vars.insert("this".to_owned(), e);
+                v2.vars.insert("value".to_owned(), acc);
+                v2.vars.insert(idx_name.clone(), idx(i));
                 acc = eval(body, &v2)?;
             }
             Ok(acc)

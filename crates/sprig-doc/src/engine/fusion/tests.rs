@@ -115,7 +115,7 @@ fn rrf_weights_and_details_match_mongodb() {
         det,
         &doc! {"value": 0.015_625, "description": RRF_DESCRIPTION, "details": [
             {"inputPipelineName": "p1", "rank": 4, "weight": 1.0, "details": []},
-            {"inputPipelineName": "p2", "rank": 0, "weight": 2},
+            {"inputPipelineName": "p2", "rank": 0, "weight": 2.0},
         ]}
     );
 }
@@ -401,4 +401,19 @@ fn errors_match_mongodb() {
         sc(bson!({"input": {"pipelines": {"p": [{"$search": {}}]}}})),
         40_414
     );
+}
+
+#[test]
+fn refused_in_sub_pipelines() {
+    let rf = bson!({"$rankFusion": {"input": {"pipelines": {"p": [{"$sort": {"a": 1}}]}}}});
+    let lookup = bson!({"$lookup": {"from": "r", "pipeline": [rf.clone()], "as": "x"}});
+    let union = bson!({"$unionWith": {"coll": "r", "pipeline": [rf.clone()]}});
+    assert_eq!(
+        check_nested(&[bson!({"$limit": 1}), lookup])
+            .unwrap_err()
+            .code,
+        11_178_500
+    );
+    assert_eq!(check_nested(&[union]).unwrap_err().code, 11_178_500);
+    assert!(check_nested(&[rf]).is_ok());
 }

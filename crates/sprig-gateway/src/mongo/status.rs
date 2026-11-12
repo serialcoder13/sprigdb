@@ -205,7 +205,9 @@ pub(crate) fn change_stream_ops(c: &Conn) -> Vec<Document> {
             "tailable": true,
             "awaitData": true,
             "noCursorTimeout": cur.no_timeout,
-            "changeStreams": {"optime": {"ts": ts, "t": -1i64}},
+            // No position before the stream's first event or progress
+            // token (its token then has no cluster time).
+            "changeStreams": if clamp == 0 { doc! {} } else { doc! {"optime": {"ts": ts, "t": -1i64}} },
         };
         if let Some(t) = opened.get(&id) {
             let ago = i64::try_from(t.elapsed().as_millis()).unwrap_or(0);

@@ -14,7 +14,15 @@
 //! mismatch; `SPRIG_VALIDATE_DIFF_ONLY=<prefix>` runs only the cases whose
 //! names start with the prefix.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stderr)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stderr,
+    clippy::float_cmp,
+    clippy::cast_possible_truncation,
+    clippy::match_same_arms,
+    clippy::too_many_lines
+)]
 
 use bson::{Bson, Document};
 use sprig_doc::filter;
@@ -27,8 +35,7 @@ fn same(a: &Bson, b: &Bson) -> bool {
         }
         (Bson::Document(x), Bson::Document(y)) => {
             x.len() == y.len()
-                && x
-                    .iter()
+                && x.iter()
                     .zip(y.iter())
                     .all(|((ka, va), (kb, vb))| ka == kb && same(va, vb))
         }

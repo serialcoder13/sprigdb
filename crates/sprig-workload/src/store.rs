@@ -291,6 +291,16 @@ pub struct WorkloadTables {
 }
 
 /// The stats columns after the key, in table order.
+/// `insert_fingerprints`' update of a row recorded with an older shape
+/// version (decision X34). MariaDB assigns left to right, so
+/// `shape_version` goes last: the conditions before it read the stored
+/// version.
+const REWRITE_OLD_SHAPE: &str = "\
+    stmt_type = IF(shape_version < VALUES(shape_version), VALUES(stmt_type), stmt_type), \
+    shape = IF(shape_version < VALUES(shape_version), VALUES(shape), shape), \
+    object_ids = IF(shape_version < VALUES(shape_version), VALUES(object_ids), object_ids), \
+    shape_version = GREATEST(shape_version, VALUES(shape_version))";
+
 const STAT_COLS: &str = "exec_count, error_count, total_us, max_us, latency_hist, \
     rows_returned, rows_affected, examined_samples, rows_examined, returned_sampled, \
     shards_sum, shards_max, scatter_count, cross_cluster, in_list_max, scan_runs, scan_sessions";
@@ -372,7 +382,14 @@ impl WorkloadTables {
     // --- the flusher's writes --------------------------------------------
 
     /// First sightings: `INSERT IGNORE INTO workload_fingerprints`, 500
-    /// rows per statement. Returns the rows inserted.
+    /// rows per statement. A row already there whose `shape_version` is
+    /// older than [`SHAPE_VERSION`] gets this build's shape, `object_ids`
+    /// and `stmt_type` (decision X34: a fingerprint first recorded before
+    /// R6 round 6 gains its `JSON_PATH` predicates' `func` and `cmp`, so
+    /// automatic indexing can propose field columns for it). Rows of the
+    /// same or a newer version, and `first_seen`, `last_seen` and `flags`,
+    /// are left alone. Returns the affected-row count: 1 per row inserted,
+    /// 2 per row rewritten.
     ///
     /// # Errors
     /// The catalog's errors.
@@ -386,7 +403,7 @@ impl WorkloadTables {
             let sql = format!(
                 "INSERT IGNORE INTO {} (fingerprint_id, kind, front_end, caller_fn_id, db_id, \
                  stmt_type, normalized_text, shape, object_ids, shape_version, flags, first_seen, \
-                 last_seen) VALUES {}",
+                 last_seen) VALUES {} ON DUPLICATE KEY UPDATE {REWRITE_OLD_SHAPE}",
                 self.fps,
                 vec![format!("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {AT_US}, {AT_US})"); chunk.len()]
                     .join(", ")

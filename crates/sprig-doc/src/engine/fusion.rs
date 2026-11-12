@@ -98,7 +98,7 @@ pub struct Spec {
     pub kind: Kind,
     /// The input pipelines, in the specification's order.
     pub pipelines: Vec<(String, Vec<Document>)>,
-    /// Each pipeline's weight, as given (a double 1 when not).
+    /// Each pipeline's weight, as a double (1 when not given).
     pub weights: Vec<Bson>,
     /// `$scoreFusion`'s normalization.
     pub norm: Norm,
@@ -409,7 +409,8 @@ pub fn parse(kind: Kind, arg: &Bson) -> Result<Spec, MongoError> {
                                 ),
                             ));
                         }
-                        weights[i] = v.clone();
+                        // MongoDB reports every weight as a double.
+                        weights[i] = Bson::Double(n);
                     } else {
                         let best = pipelines
                             .iter()
@@ -728,6 +729,34 @@ fn bind_var(e: &Bson, name: &str, v: &Bson) -> Bson {
         Bson::Array(a) => Bson::Array(a.iter().map(|x| bind_var(x, name, v)).collect()),
         other => other.clone(),
     }
+}
+
+/// `$rankFusion` or `$scoreFusion` inside a `$lookup` or `$unionWith`
+/// sub-pipeline: MongoDB refuses both there.
+///
+/// # Errors
+/// 11178500.
+pub fn check_nested(stages: &[Bson]) -> Result<(), MongoError> {
+    fn walk(stages: &[Bson], nested: bool) -> Result<(), MongoError> {
+        for s in stages {
+            let Some((name, arg)) = s.as_document().and_then(|d| d.iter().next()) else {
+                continue;
+            };
+            if nested && matches!(name.as_str(), "$rankFusion" | "$scoreFusion") {
+                return Err(e(
+                    11_178_500,
+                    format!("{name} is not allowed within a sub-pipeline"),
+                ));
+            }
+            if matches!(name.as_str(), "$lookup" | "$unionWith")
+                && let Some(Bson::Array(p)) = arg.as_document().and_then(|d| d.get("pipeline"))
+            {
+                walk(p, true)?;
+            }
+        }
+        Ok(())
+    }
+    walk(stages, false)
 }
 
 /// The `$score` stage (MongoDB 8.2) in an input pipeline: `score` is an

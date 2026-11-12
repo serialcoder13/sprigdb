@@ -861,4 +861,99 @@ mod tests {
         assert!(ignore_through_view(sql, "s1", "orders", "i", Some("s1")).is_none());
         assert!(ignore_through_view(sql, "s2", "__sprig_ke_db0", "i", Some("s1")).is_none());
     }
+
+    /// Decision X34: a fingerprint stored before R6 round 6 (shape version
+    /// 1, `json_path` without `func` and `cmp`) gets no field column; once
+    /// a gateway sees the statement again, the store rewrites the row, and
+    /// the shape read back gets the candidate. The store part runs against
+    /// `SPRIG_TEST_MARIADB_SINGLE` (skipped without it).
+    #[tokio::test]
+    async fn an_old_fingerprint_row_gets_a_field_column_once_rewritten() {
+        use mysql_async::prelude::Queryable;
+        use sprig_common::ids::{DbId, TenantId};
+        use sprig_workload::fingerprint::{FpFlags, FpKind, FrontEnd};
+        use sprig_workload::recorder::{FpMeta, NewFingerprint};
+        use sprig_workload::store::WorkloadTables;
+
+        const OLD_EMAIL_EQ: &str =
+            r#"{"t":"db0","col":"v","op":"json_path","path":"$.email","args":[0]}"#;
+        let old = by_field(OLD_EMAIL_EQ);
+        assert_eq!(old.version, 1);
+        assert!(old.all_unsargable());
+        assert!(field_candidates(&input(old), "db0", KEYS, &key_stats()).is_empty());
+
+        let Some(url) = std::env::var("SPRIG_TEST_MARIADB_SINGLE")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+        else {
+            eprintln!("skipped the store part: set SPRIG_TEST_MARIADB_SINGLE to run it");
+            return;
+        };
+        let opts = mysql_async::Opts::from_url(&url).unwrap();
+        let mut conn = mysql_async::Conn::new(opts).await.unwrap();
+        let schema = format!("__sprig_test_x34_{}", std::process::id());
+        let q = sprig_common::names::quote(&schema);
+        conn.query_drop(format!("CREATE DATABASE {q}"))
+            .await
+            .unwrap();
+        sprig_workload::flush::migrate(&mut conn, &schema, "test")
+            .await
+            .unwrap();
+        let t = WorkloadTables::new(&schema);
+        let id = sprig_common::ids::Fingerprint(0x0034);
+        let n = NewFingerprint {
+            tenant: TenantId(1),
+            meta: Arc::new(FpMeta {
+                id,
+                kind: FpKind::Sql,
+                text: Arc::from("SELECT k FROM db0 WHERE JSON_VALUE(v, ?) = ?"),
+                shape: Arc::new(Shape {
+                    version: sprig_workload::shape::SHAPE_VERSION,
+                    ..by_field(EMAIL_EQ)
+                }),
+                front_end: FrontEnd::Mysql,
+                caller: None,
+                db_id: DbId(1),
+                flags: FpFlags::default(),
+            }),
+            first_seen: std::time::SystemTime::now(),
+        };
+        t.insert_fingerprints(&mut conn, std::slice::from_ref(&n))
+            .await
+            .unwrap();
+        // The row as a build before R6 round 6 left it.
+        let stored_old = by_field(OLD_EMAIL_EQ).to_json();
+        conn.exec_drop(
+            format!("UPDATE {q}.workload_fingerprints SET shape = ?, shape_version = 1"),
+            (stored_old,),
+        )
+        .await
+        .unwrap();
+        let before = t.fingerprints(&mut conn, &[id]).await.unwrap();
+        let none = field_candidates(
+            &input((*before[0].shape).clone()),
+            "db0",
+            KEYS,
+            &key_stats(),
+        );
+        // A gateway records the statement again (its first sighting since
+        // it started on this build).
+        let rewritten = t.insert_fingerprints(&mut conn, &[n]).await.unwrap();
+        let after = t.fingerprints(&mut conn, &[id]).await.unwrap();
+        conn.query_drop(format!("DROP DATABASE {q}")).await.unwrap();
+        assert!(none.is_empty(), "{none:?}");
+        assert_eq!(rewritten, 2);
+        let c = field_candidates(
+            &input((*after[0].shape).clone()),
+            "db0",
+            KEYS,
+            &key_stats(),
+        );
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].def.kind, IndexKind::FieldColumn);
+        assert_eq!(
+            fields_of(&c[0].def),
+            vec![(field_column("$.email"), "$.email".to_owned())]
+        );
+    }
 }

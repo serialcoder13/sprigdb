@@ -64,7 +64,22 @@ pub(crate) fn scope_for(
     body: &Document,
 ) -> impl std::future::Future<Output = Option<Arc<Scope>>> + Send + 'static {
     // Nothing of the connection is held across the await (it isn't Sync).
-    let wanted = name == "getMore" || sprig_doc::serverjs::mentions_js(body);
+    // Only commands that carry filters, pipelines or updates are scanned
+    // (an insert's documents never hold code).
+    let wanted = name == "getMore"
+        || (matches!(
+            name,
+            "find"
+                | "aggregate"
+                | "count"
+                | "distinct"
+                | "findAndModify"
+                | "findandmodify"
+                | "update"
+                | "delete"
+                | "bulkWrite"
+                | "explain"
+        ) && sprig_doc::serverjs::mentions_js(body));
     let tenants = c.shared.d.tenants.clone();
     let tenant = c.sql.as_ref().map(|s| s.tenant()).filter(|t| *t != 0);
     async move {

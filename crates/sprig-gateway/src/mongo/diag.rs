@@ -52,7 +52,7 @@ pub(super) fn first_docs(
                     "$currentOp must be run against the 'admin' database with {aggregate: 1}",
                 ));
             }
-            Ok(Some(current_op(c, arg, body)?))
+            Ok(Some(current_op(c, arg, body, lsid.as_deref())?))
         }
         "$listSessions" => {
             if db != "config" || coll != "system.sessions" {
@@ -67,7 +67,13 @@ pub(super) fn first_docs(
     }
 }
 
-fn current_op(c: &Conn, arg: &Bson, body: &Document) -> Result<Vec<Document>, MongoError> {
+#[allow(clippy::too_many_lines)]
+fn current_op(
+    c: &Conn,
+    arg: &Bson,
+    body: &Document,
+    lsid: Option<&[u8]>,
+) -> Result<Vec<Document>, MongoError> {
     let Bson::Document(spec) = arg else {
         return Err(MongoError::new(
             code::TYPE_MISMATCH,
@@ -92,7 +98,7 @@ fn current_op(c: &Conn, arg: &Bson, body: &Document) -> Result<Vec<Document>, Mo
     }
     let idle = spec.get_bool("idleConnections").unwrap_or(false);
     let who = owner(c);
-    let own = c.sql.as_ref().map(|s| s.session_id());
+    let own = c.sql.as_ref().map(super::sql::SqlSession::session_id);
     let now = DateTime::now();
     let mut out = Vec::new();
     for r in c.shared.d.sessions.list() {
@@ -135,12 +141,20 @@ fn current_op(c: &Conn, arg: &Bson, body: &Document) -> Result<Vec<Document>, Mo
                 doc! {"user": who.user.clone(), "db": "admin"},
             )],
         );
+        d.insert("isFromUserConnection", true);
         d.insert("threaded", true);
         d.insert("opid", id);
         if active {
             d.insert("secs_running", micros / 1_000_000);
             d.insert("microsecs_running", micros);
             d.insert("op", if mine { "command" } else { "query" });
+            if mine && let Some(l) = lsid {
+                d.insert(
+                    "lsid",
+                    doc! {"id": bson::Binary { subtype: bson::spec::BinarySubtype::Uuid, bytes: l.to_vec() }},
+                );
+            }
+            d.insert("redacted", false);
             d.insert(
                 "ns",
                 r.db.clone()
@@ -155,6 +169,7 @@ fn current_op(c: &Conn, arg: &Bson, body: &Document) -> Result<Vec<Document>, Mo
                 },
             );
             d.insert("numYields", 0i32);
+            d.insert("numInterruptChecks", 0i32);
             d.insert("locks", Document::new());
             d.insert("waitingForLock", false);
             d.insert("lockStats", Document::new());

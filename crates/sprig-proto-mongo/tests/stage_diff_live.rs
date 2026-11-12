@@ -142,6 +142,9 @@ async fn stage_corpus_through_the_gateway() {
     assert!(fails.is_empty(), "{}", fails.join("\n"));
 }
 
+/// A stage's name and its first document's field names (or error code).
+type Shape = (String, Result<Vec<String>, i32>);
+
 /// The top-level field names of a stage's first output document.
 async fn first_keys(
     db: &Database,
@@ -181,7 +184,7 @@ async fn diagnostic_stages_have_mongodb_shapes() {
     if let Some(r) = uri("SPRIG_TEST_MONGO_REF_URI") {
         targets.push(("mongo", Client::with_uri_str(&r).await.unwrap()));
     }
-    let mut shapes: Vec<Vec<(String, Result<Vec<String>, i32>)>> = Vec::new();
+    let mut shapes: Vec<Vec<Shape>> = Vec::new();
     for (who, client) in &targets {
         let db = client.database("m2_diag_live");
         let _ = db.drop().await;
