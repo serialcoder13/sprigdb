@@ -316,6 +316,10 @@ impl PassSession {
         // co-located with this shard, else its first shard, else its
         // database's schema.
         let table_schema = |d: &str, t: &str, here: &str| -> Option<String> {
+            // RL58: the subtree view is the cluster's own.
+            if d.eq_ignore_ascii_case(sprig_sql::rls::subtree::SYS_SCHEMA) {
+                return Some(sprig_sql::rls::subtree::SYS_SCHEMA.to_owned());
+            }
             let tmpl = ts.schema_of(Some(d))?;
             let shards = layout
                 .as_ref()

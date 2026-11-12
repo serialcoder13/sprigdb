@@ -1,5 +1,5 @@
-import { useEffect } from 'react';
-import { NavLink, Outlet, useParams } from 'react-router';
+import { useEffect, useState } from 'react';
+import { NavLink, Outlet } from 'react-router';
 import { FormattedMessage, useIntl } from 'react-intl';
 import { logout, stopImpersonating, touch, useSession } from '../auth/session';
 import { IdleDialog } from '../auth/IdleDialog';
@@ -9,24 +9,65 @@ import { setTheme, currentTheme, type Theme } from './theme';
 import { useTabs } from '../editor/tabs';
 import { useOpenCount } from '../approvals/InboxPage';
 import { operatorSession } from '../ops/ops';
+import { Mascot } from './Mascot';
+import { Command, LogOut, Search } from '../icons';
+import { SECTIONS, resolve, sectionOf, type Section } from '../workspace/sections';
+import { useRel, WorkspaceTabs } from '../workspace/WorkspaceTabs';
+import { StatusBar } from '../workspace/StatusBar';
+import { CommandPalette } from '../workspace/CommandPalette';
 
+/** Studio's workspace (decision R1, sprigdb-plan/decisions/studio-tui-redesign.md):
+ * a title bar, an activity bar of sections, a side panel with the section's
+ * pages and the database tree, tabs for everything open, and a status bar. */
 export function Shell() {
-  const { tenant = '' } = useParams();
   const me = useSession((s) => s.me);
   const imp = useSession((s) => s.impersonating);
   const intl = useIntl();
+  const { base, rel } = useRel();
   const firstTab = useTabs((s) => s.tabs[0]?.id ?? 'new');
+  const openCount = useOpenCount();
+  const [palette, setPalette] = useState(false);
   useEffect(() => {
     const on = () => touch();
-    window.addEventListener('keydown', on);
+    const keys = (e: KeyboardEvent) => {
+      touch();
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === 'k' || e.key === 'p')) {
+        e.preventDefault();
+        setPalette((p) => !p);
+      }
+    };
+    window.addEventListener('keydown', keys);
     window.addEventListener('pointerdown', on);
     return () => {
-      window.removeEventListener('keydown', on);
+      window.removeEventListener('keydown', keys);
       window.removeEventListener('pointerdown', on);
     };
   }, []);
-  const base = `/t/${encodeURIComponent(tenant)}`;
-  const openCount = useOpenCount();
+  const isOperator = !!(me?.platform_roles.includes('operator') || operatorSession());
+  const active = sectionOf(rel);
+  const target = (s: Section) => (s.id === 'query' ? `${base}/q/${firstTab}` : resolve(base, s.to));
+  const activityItem = (s: Section) => {
+    const label = intl.formatMessage({ id: s.label });
+    return (
+      <NavLink
+        key={s.id}
+        to={target(s)}
+        className={s.id === active.id && !s.to.startsWith('/') ? 'on' : undefined}
+        aria-label={label}
+        title={label}
+        data-testid={s.testId}
+        aria-current={s.id === active.id && !s.to.startsWith('/') ? 'page' : undefined}
+      >
+        <s.icon size={20} />
+        {s.id === 'performance' && openCount > 0 && (
+          <span className="activity-badge" data-testid="inbox-badge" aria-label={`${openCount} waiting`}>
+            {openCount}
+          </span>
+        )}
+      </NavLink>
+    );
+  };
+  const visible = SECTIONS.filter((s) => !s.operatorOnly || isOperator);
   return (
     <div className="shell">
       <a className="skip" href="#content">
@@ -43,63 +84,19 @@ export function Shell() {
           </button>
         </div>
       )}
-      <header className="topbar">
-        <span className="brand">SprigDB Studio</span>
-        <nav aria-label="Main">
-          <NavLink to={base} end>
-            <FormattedMessage id="nav.explorer" />
-          </NavLink>
-          <NavLink to={`${base}/q/${firstTab}`}>
-            <FormattedMessage id="nav.query" />
-          </NavLink>
-          <NavLink to={`${base}/redis`}>
-            <FormattedMessage id="nav.redis" />
-          </NavLink>
-          <NavLink to={`${base}/logic`}>
-            <FormattedMessage id="nav.logic" />
-          </NavLink>
-          <NavLink to={`${base}/messaging`}>
-            <FormattedMessage id="nav.messaging" />
-          </NavLink>
-          <NavLink to={`${base}/inheritance`}>
-            <FormattedMessage id="nav.inheritance" />
-          </NavLink>
-          <NavLink to={`${base}/indexing`}>
-            <FormattedMessage id="nav.indexing" />
-          </NavLink>
-          <NavLink to={`${base}/inbox`} end>
-            <FormattedMessage id="nav.inbox" />
-            {openCount > 0 && (
-              <span className="badge" data-testid="inbox-badge" aria-label={`${openCount} waiting`}>
-                {openCount}
-              </span>
-            )}
-          </NavLink>
-          <NavLink to={`${base}/inbox/policy`}>
-            <FormattedMessage id="nav.policy" />
-          </NavLink>
-          <NavLink to={`${base}/shards`}>
-            <FormattedMessage id="nav.shards" />
-          </NavLink>
-          <NavLink to={`${base}/security`}>
-            <FormattedMessage id="nav.security" />
-          </NavLink>
-          {(me?.platform_roles.includes('operator') || operatorSession()) && (
-            <NavLink to="/ops/clusters" data-testid="nav-operator">
-              <FormattedMessage id="nav.operator" />
-            </NavLink>
-          )}
-          <NavLink to={`${base}/settings`}>
-            <FormattedMessage id="nav.settings" />
-          </NavLink>
-          <NavLink to={`${base}/policies`}>
-            <FormattedMessage id="nav.policies" />
-          </NavLink>
-          <NavLink to={`${base}/access/users`}>
-            <FormattedMessage id="nav.access" />
-          </NavLink>
-        </nav>
+      <header className="titlebar">
+        <span className="brand">
+          <Mascot pose="avatar" size={26} />
+          <FormattedMessage id="app.name" />
+        </span>
         <TenantSwitcher />
+        <button className="search-button" onClick={() => setPalette(true)} aria-keyshortcuts="Control+K">
+          <Search size={14} />
+          <span className="search-text">{intl.formatMessage({ id: 'palette.open' })}</span>
+          <kbd>
+            <Command size={11} /> K
+          </kbd>
+        </button>
         <label className="row">
           <span className="visually-hidden">{intl.formatMessage({ id: 'theme.label' })}</span>
           <select
@@ -116,18 +113,46 @@ export function Shell() {
         <span className="muted" data-testid="whoami">
           {me?.principal.login}
         </span>
-        <button onClick={() => void logout()}>
+        <button onClick={() => void logout()} className="signout">
+          <LogOut size={14} />
           <FormattedMessage id="session.signOut" />
         </button>
       </header>
       <div className="body">
-        <aside className="sidebar" aria-label="Explorer">
+        <nav className="activity" aria-label={intl.formatMessage({ id: 'nav.sections' })}>
+          {visible.filter((s) => !s.bottom).map(activityItem)}
+          <span className="grow" />
+          {visible.filter((s) => s.bottom).map(activityItem)}
+        </nav>
+        <aside className="sidebar" aria-label={intl.formatMessage({ id: active.label })}>
+          <h2 className="side-title">
+            <FormattedMessage id={active.label} />
+          </h2>
+          {active.links.length > 0 && (
+            <nav className="side-links" aria-label={intl.formatMessage({ id: active.label })}>
+              {active.links.map((l) => (
+                <NavLink key={l.to} to={resolve(base, l.to)} end={l.end}>
+                  <FormattedMessage id={l.label} />
+                  {l.badge && openCount > 0 && (
+                    <span className="badge" aria-hidden="true">
+                      {openCount}
+                    </span>
+                  )}
+                </NavLink>
+              ))}
+            </nav>
+          )}
           <Explorer />
         </aside>
-        <main className="main" id="content" tabIndex={-1}>
-          <Outlet />
-        </main>
+        <section className="workspace">
+          <WorkspaceTabs />
+          <main className="main" id="content" tabIndex={-1}>
+            <Outlet />
+          </main>
+        </section>
       </div>
+      <StatusBar />
+      <CommandPalette open={palette} onClose={() => setPalette(false)} />
       <IdleDialog />
     </div>
   );

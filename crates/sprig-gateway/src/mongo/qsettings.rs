@@ -463,6 +463,7 @@ pub async fn stage_docs(
     tenant: u64,
     db: &str,
     stage: &Document,
+    stored: Vec<super::catalog::StoredShape>,
 ) -> Result<Vec<Document>, MongoError> {
     if db != "admin" {
         let n = stage.keys().next().cloned().unwrap_or_default();
@@ -492,11 +493,22 @@ pub async fn stage_docs(
     }
     let now = bson::DateTime::now();
     let st = state();
-    let Some(map) = st.stats.get(&tenant) else {
-        return Ok(Vec::new());
-    };
+    let empty = HashMap::new();
+    let map = st.stats.get(&tenant).unwrap_or(&empty);
     let mut list: Vec<&Stat> = map.values().collect();
     list.sort_by_key(|s| s.first_seen.timestamp_millis());
+    let mine: std::collections::HashSet<&str> =
+        list.iter().map(|s| s.shape_hash.as_str()).collect();
+    // Shapes this gateway hasn't run since it started: the store's
+    // totals over every gateway (S137).
+    let from_store: Vec<Document> = stored
+        .iter()
+        .filter_map(|x| stored_entry(x, now))
+        .filter(|d| {
+            d.get_str("queryShapeHash")
+                .is_ok_and(|h| !mine.contains(h))
+        })
+        .collect();
     Ok(list
         .into_iter()
         .map(|s| {
@@ -529,7 +541,58 @@ pub async fn stage_docs(
                 "asOf": now,
             }
         })
+        .chain(from_store)
         .collect())
+}
+
+/// A `$queryStats` entry from the workload store (S137): its key without
+/// the driver's `client` (the store doesn't keep it), the counts of every
+/// gateway, `sprigSource: "workloadStore"`. `None` for a text that isn't a
+/// MongoDB shape.
+fn stored_entry(x: &super::catalog::StoredShape, now: bson::DateTime) -> Option<Document> {
+    let (cmd, rest) = x.text.split_once(' ')?;
+    let (ns, json) = rest.split_once(' ')?;
+    let (db, coll) = ns.split_once('.')?;
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let Bson::Document(body) = Bson::try_from(v).ok()? else {
+        return None;
+    };
+    let mut shape = doc! {"cmdNs": {"db": db, "coll": coll}, "command": cmd};
+    for (k, v) in body {
+        shape.insert(k, v);
+    }
+    let key = doc! {"queryShape": shape.clone(), "collectionType": "collection"};
+    let n = |v: u64| i64::try_from(v).unwrap_or(i64::MAX);
+    let mut metrics = doc! {
+        "execCount": n(x.runs),
+        "totalExecMicros": {"sum": n(x.total_us), "max": n(x.max_us)},
+        "docsReturned": {"sum": n(x.returned)},
+    };
+    match cmd {
+        "update" | "findAndModify" => {
+            metrics.insert("writes", doc! {"nModified": {"sum": n(x.affected)}});
+        }
+        "delete" => {
+            metrics.insert("writes", doc! {"nDeleted": {"sum": n(x.affected)}});
+        }
+        _ => {}
+    }
+    metrics.insert(
+        "firstSeenTimestamp",
+        bson::DateTime::from_millis(x.first_ms),
+    );
+    metrics.insert(
+        "latestSeenTimestamp",
+        bson::DateTime::from_millis(x.last_ms),
+    );
+    Some(doc! {
+        "key": key.clone(),
+        "keyHash": qshape::key_hash(&key),
+        "queryShapeHash": qshape::shape_hash(&shape),
+        "metrics": metrics,
+        "asOf": now,
+        "sprigSource": "workloadStore",
+    })
 }
 
 /// What the settings of a query ask for, once it passed `reject`.
@@ -893,6 +956,30 @@ pub fn record(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stored_shapes_become_entries() {
+        let x = super::super::catalog::StoredShape {
+            text: r#"find shop.orders {"filter":{"email":{"$eq":"?string"}}}"#.into(),
+            runs: 7,
+            total_us: 700,
+            max_us: 300,
+            returned: 7,
+            affected: 0,
+            first_ms: 1,
+            last_ms: 2,
+        };
+        let e = stored_entry(&x, bson::DateTime::now()).unwrap();
+        let mem = qshape::shape(
+            "find",
+            &doc! {"find": "orders", "filter": {"email": "a@b"}},
+            "shop",
+        )
+        .unwrap();
+        assert_eq!(e.get_str("queryShapeHash").unwrap(), qshape::shape_hash(&mem));
+        assert_eq!(e.get_document("metrics").unwrap().get_i64("execCount").unwrap(), 7);
+        assert!(stored_entry(&super::super::catalog::StoredShape { text: "x".into(), ..x }, bson::DateTime::now()).is_none());
+    }
 
     #[test]
     fn settings_are_checked() {

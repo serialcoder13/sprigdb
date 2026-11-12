@@ -11,10 +11,11 @@
 //! user index once it is registered in `doc_indexes` with origin `auto`.
 //!
 //! ```text
-//! paths := equalities (=, $in, null) by path, then the sort, then one
-//!          range: MongoDB's equality-sort-range rule, at most MAX_PATHS
+//! paths := equalities (=, $in, null) by path, then one range, at most
+//!          MAX_PATHS (no sort: the engine reads in _id order and sorts in
+//!          the gateway)
 //! each path p := the pair of field columns of chapter 31
-//!          (_sprig_p_<slug>_c, _n, _s), descending for a descending sort
+//!          (_sprig_p_<slug>_c, _n, _s)
 //! definition := field_column(c1, n1, s1, c2, ...); options doc.<i> = path
 //! ```
 //!
@@ -27,8 +28,8 @@
 //! **Replay.** A MongoDB sample is the condition values by slot, not SQL.
 //! [`replay_sql`] writes the statement the engine sends once the index
 //! is registered: `SELECT _id FROM <db>.<table> WHERE` the candidate's
-//! paths compared on their field columns (class and value), `LIMIT 101`
-//! (the engine's first batch). Conditions on paths the candidate doesn't
+//! paths compared on their field columns (class and value), `ORDER BY _id
+//! LIMIT 1000` (the engine's batch read). Conditions on paths the candidate doesn't
 //! hold are left out; a fingerprint none of whose paths it holds isn't
 //! replayed (the engine wouldn't use the index for it). The replay's A
 //! side (`IGNORE INDEX`) reads the same columns without the index, which
@@ -40,7 +41,7 @@ use std::fmt::Write as _;
 use sprig_common::ids::ObjectId;
 use sprig_workload::fingerprint::LiteralKind;
 use sprig_workload::fingerprint::mongo::{DOC_COLUMN, FUNC_MULTIKEY, FUNC_SCALAR};
-use sprig_workload::shape::{PredOp, Shape, SortDir};
+use sprig_workload::shape::{PredOp, Shape};
 use sprig_workload::window::{SampleValue, SampledLiterals, SampledSlot};
 
 use super::candidates::{FpInput, MODEL_READ_FACTOR};
@@ -56,8 +57,9 @@ pub const OPTION: &str = "doc.";
 /// The most paths one candidate holds: three pairs are 1,947 key bytes
 /// (1 + 8 + 640 each), under `InnoDB`'s 3,072.
 pub const MAX_PATHS: usize = 3;
-/// Rows the engine's first batch asks for.
-pub const FIRST_BATCH: u32 = 101;
+/// Rows the engine's reads of a collection ask for at a time (its
+/// `_id`-ordered batches).
+pub const FIRST_BATCH: u32 = 1000;
 
 /// Whether `stats` describe a collection table (chapter 31: `_id`, `doc`,
 /// `_types`, `_v`).
@@ -209,26 +211,9 @@ pub fn candidates(
         .take(MAX_PATHS)
         .map(|p| (p.to_owned(), 1, PartSource::Eq))
         .collect();
-    // Equality, sort, range (MongoDB's rule): a sort the index gives
-    // spares the engine's in-memory sort.
-    for o in f
-        .shape
-        .order_by
-        .iter()
-        .filter(|o| o.column.table.as_deref() == Some(alias))
-    {
-        if paths.len() >= MAX_PATHS || paths.iter().any(|(p, ..)| *p == o.column.col) {
-            break;
-        }
-        if o.column.col == "_id" {
-            break;
-        }
-        paths.push((
-            o.column.col.clone(),
-            if o.dir == SortDir::Desc { -1 } else { 1 },
-            PartSource::Order,
-        ));
-    }
+    // Equalities, then one range. Not the sort (MongoDB's equality-sort-
+    // range rule): the engine reads the collection in `_id` order and
+    // sorts in the gateway, so an index's order would serve nothing (S131).
     if paths.len() < MAX_PATHS
         && let Some(r) = range
             .into_iter()
@@ -236,9 +221,7 @@ pub fn candidates(
     {
         paths.push((r.to_owned(), 1, PartSource::Range));
     }
-    if paths.iter().all(|(_, _, s)| *s == PartSource::Order) {
-        // A sort alone: the engine's sort over a full read is what it
-        // already does; nothing to filter by.
+    if paths.is_empty() {
         return Vec::new();
     }
     let def = definition(
@@ -384,20 +367,7 @@ pub fn replay_sql(shape: &Shape, sample: &SampledLiterals, def: &IndexDef) -> Op
         quote(&t.table),
         conds.join(" AND ")
     );
-    let order: Vec<String> = shape
-        .order_by
-        .iter()
-        .filter(|o| held.iter().any(|h| *h == o.column.col))
-        .flat_map(|o| {
-            let (c, n, s) = sprig_doc::meta::columns(&o.column.col);
-            let d = if o.dir == SortDir::Desc { " DESC" } else { "" };
-            [c, n, s].map(|x| format!("{}{d}", quote(&x)))
-        })
-        .collect();
-    if !order.is_empty() {
-        let _ = write!(sql, " ORDER BY {}", order.join(", "));
-    }
-    let _ = write!(sql, " LIMIT {FIRST_BATCH}");
+    let _ = write!(sql, " ORDER BY `_id` LIMIT {FIRST_BATCH}");
     Some(sql)
 }
 
@@ -503,14 +473,10 @@ mod tests {
         assert!(is_doc(d));
         assert_eq!(
             paths_of(d),
-            vec![
-                ("status".to_owned(), 1),
-                ("createdAt".to_owned(), -1),
-                ("qty".to_owned(), 1)
-            ]
+            vec![("status".to_owned(), 1), ("qty".to_owned(), 1)]
         );
-        assert_eq!(d.parts.len(), 9);
-        assert_eq!(columns_of(d).len(), 9);
+        assert_eq!(d.parts.len(), 6);
+        assert_eq!(columns_of(d).len(), 6);
         assert!(
             add_fields_clause(d)
                 .unwrap()
@@ -530,8 +496,10 @@ mod tests {
             "{sql}"
         );
         assert!(sql.contains(">= 5)"), "{sql}");
-        assert!(sql.contains(" DESC"), "{sql}");
-        assert!(sql.ends_with("LIMIT 101"), "{sql}");
+        assert!(sql.ends_with("ORDER BY `_id` LIMIT 1000"), "{sql}");
+        // A descending path in a definition keeps its direction.
+        let d2 = definition(ObjectId(77), &[("a".into(), -1)]);
+        assert_eq!(paths_of(&d2), vec![("a".to_owned(), -1)]);
     }
 
     #[test]

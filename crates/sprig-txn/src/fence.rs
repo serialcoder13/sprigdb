@@ -465,7 +465,7 @@ impl<L: RelayLinks> RelayFence<L> {
                     && (h.since.elapsed() >= min_age || !self.links.backend_alive(h.thread))
             });
             if let Some(h) = lost {
-                tracing::warn!(cluster = %self.cluster, %tenant, thread = h.thread, dtid = %h.dtid,
+                tracing::warn!(cluster = %self.cluster, %tenant, thread = h.thread, dtid = %h.dtid, schema = %h.schema,
                     "relay fence: a holder is lost (too old, or its connection ended); fencing the tenant");
                 t.fenced = true;
                 newly += 1;

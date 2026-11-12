@@ -661,7 +661,87 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// One MongoDB shape's totals in chapter 12's workload store (S137): every
+/// gateway's flushed counts, kept for the store's retention.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredShape {
+    /// The fingerprint's text: `<command> <db>.<collection> <shape JSON>`.
+    pub text: String,
+    /// Runs.
+    pub runs: u64,
+    /// Total time, microseconds.
+    pub total_us: u64,
+    /// Longest run, microseconds.
+    pub max_us: u64,
+    /// Documents returned.
+    pub returned: u64,
+    /// Documents changed (writes).
+    pub affected: u64,
+    /// First and last seen, ms since the epoch.
+    pub first_ms: i64,
+    /// Last seen.
+    pub last_ms: i64,
+}
+
 impl CatalogDocs {
+    /// The tenant's MongoDB shapes in the workload store (S137), with
+    /// their totals over every row the store keeps; a tenant whose
+    /// workload tables don't exist yet has none.
+    ///
+    /// # Errors
+    /// The catalog's.
+    pub async fn stored_shapes(&self, tenant: TenantId) -> Result<Vec<StoredShape>> {
+        let ep = self.svc.locator.reader(tenant).await?;
+        let mut conn = ep.pool.get_conn().await.map_err(map_err)?;
+        let schema = ep.store.schema();
+        let rows: std::result::Result<Vec<Row>, _> = conn
+            .query(format!(
+                "SELECT f.normalized_text, CAST(SUM(s.exec_count) AS UNSIGNED), \
+                 CAST(SUM(s.total_us) AS UNSIGNED), MAX(s.max_us), \
+                 CAST(SUM(s.rows_returned) AS UNSIGNED), CAST(SUM(s.rows_affected) AS UNSIGNED), \
+                 CAST(UNIX_TIMESTAMP(MIN(f.first_seen)) * 1000 AS SIGNED), \
+                 CAST(UNIX_TIMESTAMP(MAX(f.last_seen)) * 1000 AS SIGNED) \
+                 FROM {} f JOIN {} s ON s.fingerprint_id = f.fingerprint_id \
+                 WHERE f.kind = 'mongo' AND NOT FIND_IN_SET('truncated', f.flags) \
+                 AND NOT FIND_IN_SET('other', f.flags) \
+                 GROUP BY f.fingerprint_id, f.normalized_text",
+                t(schema, "workload_fingerprints"),
+                t(schema, "workload_stats")
+            ))
+            .await;
+        let rows = match rows {
+            Ok(r) => r,
+            // No workload tables yet.
+            Err(mysql_async::Error::Server(e)) if e.code == 1146 => return Ok(Vec::new()),
+            Err(e) => return Err(map_err(e)),
+        };
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let (text, runs, total_us, max_us, returned, affected, first_ms, last_ms): (
+                    String,
+                    Option<u64>,
+                    Option<u64>,
+                    Option<u64>,
+                    Option<u64>,
+                    Option<u64>,
+                    Option<i64>,
+                    Option<i64>,
+                ) = mysql_async::from_row_opt(r).ok()?;
+                Some(StoredShape {
+                    text,
+                    runs: runs.unwrap_or(0),
+                    total_us: total_us.unwrap_or(0),
+                    max_us: max_us.unwrap_or(0),
+                    returned: returned.unwrap_or(0),
+                    affected: affected.unwrap_or(0),
+                    first_ms: first_ms.unwrap_or(0),
+                    last_ms: last_ms.unwrap_or(0),
+                })
+            })
+            .collect())
+    }
+
     /// Over the tenant services.
     #[must_use]
     pub fn new(svc: Arc<TenantServices>) -> Self {

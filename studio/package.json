@@ -28,6 +28,7 @@
     "acorn": "8.19.0",
     "cytoscape": "3.34.4",
     "echarts": "6.1.0",
+    "lucide-react": "1.62.0",
     "monaco-editor": "0.56.0",
     "qrcode": "1.5.4",
     "react": "19.3.1",

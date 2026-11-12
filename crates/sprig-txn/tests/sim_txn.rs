@@ -38,6 +38,24 @@
 //! lost and drops aborted ones. The invariants above hold, and no redo
 //! row is left after recovery.
 //!
+//! The relay fence (decision Q36, chapter 18 "The relay fence"): the same
+//! Sprig 2PC world with an agent per Galera writer node (`g1a`, `g2a`,
+//! `g3a`) whose relay carries every gateway connection to that node and
+//! runs `sprig_txn::fence::RelayFence`, a second gateway `gw2` writing the
+//! same hot rows, and statements that keep running after their client
+//! went away (MariaDB's behaviour, `Model::set_orphans_run`). Hot rows are
+//! read-modify-write list appends, so a held branch replayed over another
+//! transaction's later write loses that write, which invariant 7 sees:
+//!
+//! 7. Isolation: every hot row's final list holds each committed append
+//!    exactly once and nothing else.
+//! 8. Read your writes (decision Q37): after `COMMIT` answered OK, the
+//!    session's next read of each cluster it wrote sees its row.
+//!
+//! The `#[ignore]`d tests run without the fence, and with reads that skip
+//! settling the session's phase-2 stragglers: they fail, which shows what
+//! the fence and the settling fix.
+//!
 //! `SPRIG_SIM_SEEDS=10000 cargo test -p sprig-txn --test sim_txn` runs
 //! the milestone's 10,000 seeds; CI runs the default.
 
@@ -45,7 +63,8 @@
     clippy::unwrap_used,
     clippy::too_many_lines,
     clippy::missing_panics_doc,
-    clippy::many_single_char_names
+    clippy::many_single_char_names,
+    clippy::struct_excessive_bools
 )]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -56,9 +75,12 @@ use std::time::Duration;
 use sprig_common::ids::{ClusterId, DbId, GroupId, ShardId, TenantId, TxnId};
 use sprig_common::time::Clock;
 use sprig_testkit::faults::Node;
-use sprig_testkit::sim::mariadb::{ConnId, Outcome, ServerConfig, SimConn, SimMariaDb, Stmt};
-use sprig_testkit::sim::{FaultPlan, NodeCtx, Sim, SimRng, World};
+use sprig_testkit::sim::mariadb::{
+    CLIENT_TIMEOUT, ConnId, Outcome, ServerConfig, SimConn, SimMariaDb, Stmt,
+};
+use sprig_testkit::sim::{FaultPlan, NodeCtx, Sim, SimNet, SimRng, World};
 use sprig_txn::decision::{decode_participants, encode_participants};
+use sprig_txn::fence::{Admission, ClientGone, FENCED_ERRNO, RelayFence, RelayLinks};
 use sprig_txn::xid::{hex, unhex};
 use sprig_txn::{
     AnchorRef, BeginOptions, BranchConn, ClusterAdmin, ClusterCaps, Ctl, DbError, DbResult,
@@ -95,6 +117,15 @@ struct Stats {
     sprig_2pc: AtomicU64,
     redo_replays: AtomicU64,
     redo_drops: AtomicU64,
+    agent_replays: AtomicU64,
+    agent_drops: AtomicU64,
+    fences: AtomicU64,
+    fence_ended: AtomicU64,
+    fence_refused: AtomicU64,
+    stragglers: AtomicU64,
+    ryw_reads: AtomicU64,
+    settle_refused: AtomicU64,
+    appends: AtomicU64,
 }
 
 static STATS: std::sync::LazyLock<Stats> = std::sync::LazyLock::new(Stats::default);
@@ -207,6 +238,271 @@ fn decode_row(dtid: Dtid, v: &str, now_ms: u64) -> Option<DecisionRow> {
 struct Env {
     db: SimMariaDb,
     origin: tokio::time::Instant,
+    /// The relay of each cluster's writer node, on relay-fenced clusters.
+    relays: Vec<Option<Arc<SimRelay>>>,
+}
+
+impl Env {
+    fn relay(&self, c: &ClusterId) -> Option<&Arc<SimRelay>> {
+        let i = CLUSTERS.iter().position(|d| d.id == c.as_str())?;
+        self.relays[i].as_ref()
+    }
+}
+
+// ----------------------------------------------------------------------
+// The node agent's relay (decision Q36).
+
+/// One relayed connection, as the agent holds it.
+struct Link {
+    conn: Arc<SimConn>,
+    /// Its client (the gateway) is still connected.
+    client: bool,
+}
+
+/// The relay's side of `RelayLinks`: its connections to the local node.
+struct SimLinks {
+    db: SimMariaDb,
+    agent: Node,
+    idx: usize,
+    conns: Mutex<BTreeMap<u64, Link>>,
+}
+
+#[async_trait::async_trait]
+impl RelayLinks for SimLinks {
+    async fn end(&self, thread: u64) -> bool {
+        let d = &CLUSTERS[self.idx];
+        // KILL as sprig_ctl, on the node; then both sides close.
+        if let Ok(c) = self.db.connect(&self.agent, d.writer, None, d.schema).await {
+            let _ = c.exec(&Stmt::KillConnection(ConnId(thread))).await;
+        }
+        let link = self.conns.lock().unwrap().remove(&thread);
+        drop(link);
+        let until = tokio::time::Instant::now() + sprig_txn::fence::END_WAIT;
+        loop {
+            if !self.db.with_model(|m, _| m.is_alive(ConnId(thread))) {
+                return true;
+            }
+            if tokio::time::Instant::now() >= until {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn backend_alive(&self, thread: u64) -> bool {
+        self.db.with_model(|m, _| m.is_alive(ConnId(thread)))
+    }
+}
+
+#[derive(Clone)]
+struct RelayLive {
+    inc: u64,
+    fence: Arc<RelayFence<SimLinks>>,
+    links: Arc<SimLinks>,
+}
+
+/// A Galera writer node's agent relay: every gateway connection to the
+/// node passes it, so it dies with the agent.
+struct SimRelay {
+    idx: usize,
+    agent: Node,
+    db: SimMariaDb,
+    net: SimNet,
+    world: World,
+    live: Mutex<Option<RelayLive>>,
+}
+
+/// A gateway's connection through a relay.
+struct RelayedConn {
+    relay: Arc<SimRelay>,
+    inc: u64,
+    thread: u64,
+    gw: Node,
+}
+
+impl Drop for RelayedConn {
+    fn drop(&mut self) {
+        self.relay.client_gone(self.inc, self.thread, &self.gw);
+    }
+}
+
+/// Clears an agent incarnation's relay when it stops (a crash): every
+/// relayed connection closes with it.
+struct LiveGuard {
+    relay: Arc<SimRelay>,
+    inc: u64,
+}
+
+impl Drop for LiveGuard {
+    fn drop(&mut self) {
+        let gone = {
+            let mut l = self.relay.live.lock().unwrap();
+            if l.as_ref().is_some_and(|x| x.inc == self.inc) {
+                l.take()
+            } else {
+                None
+            }
+        };
+        if let Some(l) = gone {
+            let st = l.fence.stats();
+            STATS.fences.fetch_add(st.fenced, Ordering::Relaxed);
+            STATS.fence_ended.fetch_add(st.ended, Ordering::Relaxed);
+            let conns = std::mem::take(&mut *l.links.conns.lock().unwrap());
+            drop(conns);
+        }
+    }
+}
+
+impl SimRelay {
+    fn current(&self) -> Option<RelayLive> {
+        self.live.lock().unwrap().clone()
+    }
+
+    fn lost(started: tokio::time::Instant) -> impl std::future::Future<Output = ()> {
+        tokio::time::sleep(CLIENT_TIMEOUT.saturating_sub(started.elapsed()))
+    }
+
+    async fn open(self: &Arc<Self>, gw: &Node) -> DbResult<RelayedConn> {
+        let started = tokio::time::Instant::now();
+        if self.net.transit(gw, &self.agent).await.is_err() {
+            Self::lost(started).await;
+            return Err(DbError::lost("relay unreachable"));
+        }
+        let Some(l) = self.current() else {
+            return Err(DbError::lost("connection refused: the agent is down"));
+        };
+        if l.fence.admit(TENANT) == Admission::Fenced {
+            bump(&STATS.fence_refused);
+            return Err(DbError::new(FENCED_ERRNO, "fenced"));
+        }
+        let d = &CLUSTERS[self.idx];
+        let conn = self
+            .db
+            .connect(&self.agent, d.writer, None, d.schema)
+            .await
+            .map_err(|e| DbError::new(e, "connect"))?;
+        let thread = conn.id().0;
+        if self.current().is_none_or(|x| x.inc != l.inc) {
+            return Err(DbError::lost("the agent restarted"));
+        }
+        if !l.fence.opened(TENANT, thread) {
+            bump(&STATS.fence_refused);
+            return Err(DbError::new(FENCED_ERRNO, "fenced"));
+        }
+        l.links.conns.lock().unwrap().insert(
+            thread,
+            Link {
+                conn: Arc::new(conn),
+                client: true,
+            },
+        );
+        let rc = RelayedConn {
+            relay: self.clone(),
+            inc: l.inc,
+            thread,
+            gw: gw.clone(),
+        };
+        if self.net.transit(&self.agent, gw).await.is_err() {
+            drop(rc);
+            Self::lost(started).await;
+            return Err(DbError::lost("relay unreachable"));
+        }
+        Ok(rc)
+    }
+
+    async fn exec(&self, rc: &RelayedConn, s: &Stmt) -> Outcome {
+        let started = tokio::time::Instant::now();
+        if self.net.transit(&rc.gw, &self.agent).await.is_err() {
+            Self::lost(started).await;
+            return Outcome::Err(2013);
+        }
+        let conn = match self.current() {
+            Some(l) if l.inc == rc.inc => l
+                .links
+                .conns
+                .lock()
+                .unwrap()
+                .get(&rc.thread)
+                .filter(|x| x.client)
+                .map(|x| x.conn.clone()),
+            _ => None,
+        };
+        // The relay died or ended the connection: reset.
+        let Some(conn) = conn else {
+            return Outcome::Err(2013);
+        };
+        let o = conn.exec(s).await;
+        drop(conn);
+        let alive = self.current().is_some_and(|l| {
+            l.inc == rc.inc
+                && l.links
+                    .conns
+                    .lock()
+                    .unwrap()
+                    .get(&rc.thread)
+                    .is_some_and(|x| x.client)
+        });
+        if !alive {
+            return Outcome::Err(2013);
+        }
+        if self.net.transit(&self.agent, &rc.gw).await.is_err() {
+            Self::lost(started).await;
+            return Outcome::Err(2013);
+        }
+        o
+    }
+
+    /// The gateway's side closed (its process ended, or it dropped the
+    /// connection): the relay hears at once when the link is up, else
+    /// after a keepalive period.
+    fn client_gone(self: &Arc<Self>, inc: u64, thread: u64, gw: &Node) {
+        if self.net.reachable(gw, &self.agent) {
+            self.deliver_gone(inc, thread);
+        } else {
+            let me = self.clone();
+            self.world.spawn("relay keepalive", async move {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                me.deliver_gone(inc, thread);
+            });
+        }
+    }
+
+    fn deliver_gone(&self, inc: u64, thread: u64) {
+        let Some(l) = self.current() else { return };
+        if l.inc != inc {
+            return;
+        }
+        match l.fence.client_gone(TENANT, thread) {
+            ClientGone::Close => {
+                let link = l.links.conns.lock().unwrap().remove(&thread);
+                drop(link);
+            }
+            ClientGone::Keep => {
+                if let Some(x) = l.links.conns.lock().unwrap().get_mut(&thread) {
+                    x.client = false;
+                }
+            }
+        }
+    }
+
+    /// A call from a gateway to the agent (its admin's held-branch calls).
+    async fn call<T>(
+        &self,
+        gw: &Node,
+        f: impl std::future::Future<Output = DbResult<T>>,
+    ) -> DbResult<T> {
+        let started = tokio::time::Instant::now();
+        if self.net.transit(gw, &self.agent).await.is_err() {
+            Self::lost(started).await;
+            return Err(DbError::lost("agent unreachable"));
+        }
+        let r = f.await;
+        if self.net.transit(&self.agent, gw).await.is_err() {
+            Self::lost(started).await;
+            return Err(DbError::lost("agent unreachable"));
+        }
+        r
+    }
 }
 
 impl Env {
@@ -219,9 +515,32 @@ fn err(o: &Outcome) -> Option<DbError> {
     o.errno().map(|e| DbError::new(e, format!("error {e}")))
 }
 
+/// A gateway's backend connection: straight to the server, or through
+/// the node agent's relay.
+enum Wire {
+    Direct(SimConn),
+    Relayed(RelayedConn),
+}
+
+impl Wire {
+    async fn exec(&self, s: &Stmt) -> Outcome {
+        match self {
+            Self::Direct(c) => c.exec(s).await,
+            Self::Relayed(r) => r.relay.exec(r, s).await,
+        }
+    }
+
+    fn thread(&self) -> u64 {
+        match self {
+            Self::Direct(c) => c.id().0,
+            Self::Relayed(r) => r.thread,
+        }
+    }
+}
+
 /// A branch on a model connection.
 struct SimBranch {
-    conn: SimConn,
+    conn: Wire,
     env: Arc<Env>,
     schema: &'static str,
     /// Sprig 2PC: the writes recorded for a held branch.
@@ -274,7 +593,7 @@ impl SimBranch {
 #[async_trait::async_trait]
 impl BranchConn for SimBranch {
     fn thread_id(&self) -> u64 {
-        self.conn.id().0
+        self.conn.thread()
     }
 
     fn start_redo(&mut self, _timestamp_us: u64) -> bool {
@@ -334,6 +653,35 @@ impl BranchConn for SimBranch {
 struct SimAdmin {
     env: Arc<Env>,
     from: Node,
+    /// A gateway's admin: held-branch calls on relay-fenced clusters go to
+    /// the node's agent.
+    via_relay: bool,
+}
+
+impl SimAdmin {
+    fn new(env: Arc<Env>, from: Node) -> Self {
+        Self {
+            env,
+            from,
+            via_relay: false,
+        }
+    }
+
+    fn relay(&self, cluster: &ClusterId) -> Option<Arc<SimRelay>> {
+        if self.via_relay {
+            self.env.relay(cluster).cloned()
+        } else {
+            None
+        }
+    }
+
+    fn is_agent(&self) -> bool {
+        self.env
+            .relays
+            .iter()
+            .flatten()
+            .any(|r| r.agent == self.from)
+    }
 }
 
 impl SimAdmin {
@@ -681,12 +1029,64 @@ impl ClusterAdmin for SimAdmin {
         }
         if self.from.as_str() == "ctl" {
             bump(&STATS.redo_replays);
+        } else if self.is_agent() {
+            bump(&STATS.agent_replays);
         }
         Ok(sprig_txn::Replay::Applied)
     }
 
+    async fn insert_redo_held(
+        &self,
+        cluster: &ClusterId,
+        schema: &str,
+        dtid: Dtid,
+        gtrid: &sprig_txn::Gtrid,
+        stmts: &[sprig_txn::RedoStmt],
+        holder: u64,
+    ) -> DbResult<()> {
+        if let Some(r) = self.relay(cluster) {
+            let Some(l) = r.current() else {
+                return Err(DbError::lost("the agent is down"));
+            };
+            return r
+                .call(
+                    &self.from,
+                    l.fence.prepare(TENANT, holder, schema, dtid, gtrid, stmts),
+                )
+                .await;
+        }
+        self.insert_redo(cluster, schema, dtid, gtrid, stmts).await
+    }
+
+    async fn abandon_held(
+        &self,
+        cluster: &ClusterId,
+        _schema: &str,
+        dtid: Dtid,
+        holder: u64,
+    ) -> DbResult<()> {
+        if let Some(r) = self.relay(cluster) {
+            let Some(l) = r.current() else {
+                return Err(DbError::lost("the agent is down"));
+            };
+            return r
+                .call(&self.from, async move {
+                    l.fence.abandon(dtid, holder);
+                    Ok(())
+                })
+                .await;
+        }
+        Ok(())
+    }
+
     async fn delete_redo(&self, cluster: &ClusterId, schema: &str, dtid: Dtid) -> DbResult<()> {
         assert_eq!(schema, def(cluster).schema);
+        if let Some(r) = self.relay(cluster) {
+            let Some(l) = r.current() else {
+                return Err(DbError::lost("the agent is down"));
+            };
+            return r.call(&self.from, l.fence.finished(schema, dtid)).await;
+        }
         for t in [REDO, REDO_MARK] {
             self.one(
                 cluster,
@@ -699,6 +1099,8 @@ impl ClusterAdmin for SimAdmin {
         }
         if self.from.as_str() == "ctl" {
             bump(&STATS.redo_drops);
+        } else if self.is_agent() {
+            bump(&STATS.agent_drops);
         }
         Ok(())
     }
@@ -722,12 +1124,17 @@ impl TxnBackend for SimBackend {
 
     async fn checkout(&self, cluster: &ClusterId) -> DbResult<SimBranch> {
         let d = def(cluster);
-        let conn = self
-            .env
-            .db
-            .connect(&self.from, d.writer, None, d.schema)
-            .await
-            .map_err(|e| DbError::new(e, "connect"))?;
+        let conn = if let Some(r) = self.env.relay(cluster) {
+            Wire::Relayed(r.open(&self.from).await?)
+        } else {
+            Wire::Direct(
+                self.env
+                    .db
+                    .connect(&self.from, d.writer, None, d.schema)
+                    .await
+                    .map_err(|e| DbError::new(e, "connect"))?,
+            )
+        };
         Ok(SimBranch {
             conn,
             env: self.env.clone(),
@@ -738,6 +1145,10 @@ impl TxnBackend for SimBackend {
 
     fn admin(&self) -> Arc<dyn ClusterAdmin> {
         self.admin.clone()
+    }
+
+    fn relay_fenced(&self, cluster: &ClusterId) -> bool {
+        self.env.relay(cluster).is_some()
     }
 }
 
@@ -797,12 +1208,16 @@ struct Entry {
     clusters: Vec<usize>,
     dtid: Option<Dtid>,
     result: Option<Res>,
+    /// Hot rows it appended to (cluster, key), read-modify-write.
+    hot: Vec<(usize, i64)>,
 }
 
 #[derive(Default)]
 struct Log {
     next: AtomicU64,
     txns: Mutex<BTreeMap<i64, Entry>>,
+    /// Reads after an OK commit that missed the session's own row.
+    ryw_misses: Mutex<Vec<String>>,
 }
 
 impl Log {
@@ -825,6 +1240,16 @@ impl Log {
     fn finish(&self, tag: i64, r: Res) {
         self.txns.lock().unwrap().get_mut(&tag).unwrap().result = Some(r);
     }
+
+    fn hot(&self, tag: i64, cluster: usize, key: i64) {
+        self.txns
+            .lock()
+            .unwrap()
+            .get_mut(&tag)
+            .unwrap()
+            .hot
+            .push((cluster, key));
+    }
 }
 
 #[derive(Clone)]
@@ -835,6 +1260,16 @@ struct Scenario {
     all_galera: bool,
     crash: Option<(Point, u32)>,
     hot: f64,
+    /// Hot rows are read-modify-write list appends (invariant 7).
+    rmw: bool,
+    /// After an OK commit, read the row back on each cluster: `Some(true)`
+    /// through the coordinator (which settles stragglers first),
+    /// `Some(false)` on a plain connection that doesn't (invariant 8).
+    ryw: Option<bool>,
+    /// Galera writer nodes' agents relay every connection (decision Q36).
+    fence: bool,
+    /// A second gateway writes the same rows.
+    gw2: bool,
 }
 
 impl Scenario {
@@ -873,7 +1308,23 @@ impl Scenario {
             all_galera: false,
             crash,
             hot: if rng.chance(0.5) { 0.4 } else { 0.0 },
+            rmw: false,
+            ryw: None,
+            fence: false,
+            gw2: false,
         }
+    }
+
+    /// Sprig 2PC with read-modify-write hot rows, a second gateway, and
+    /// statements that outlive their client; `fence` puts the relays in.
+    fn isolation(rng: &SimRng, fence: bool, ryw: Option<bool>) -> Self {
+        let mut sc = Self::sprig(rng);
+        sc.hot = if rng.chance(0.8) { 0.6 } else { 0.3 };
+        sc.rmw = true;
+        sc.ryw = ryw;
+        sc.fence = fence;
+        sc.gw2 = true;
+        sc
     }
 
     fn clusters(&self) -> Vec<usize> {
@@ -893,6 +1344,80 @@ fn code_of(e: &sprig_common::SprigError) -> u16 {
     e.protocol().mysql_errno
 }
 
+/// Reads the row of `tag` on cluster `i` after its commit: `Some(seen)`,
+/// or `None` when the read itself failed.
+async fn read_back(
+    txn: &mut TxnCoordinator<SimBackend>,
+    backend: &SimBackend,
+    settled: bool,
+    i: usize,
+    tag: i64,
+) -> Option<bool> {
+    let get = Stmt::Get {
+        t: T.to_owned(),
+        k: tag,
+    };
+    let seen = |o: Outcome| match o {
+        Outcome::Ok { rows, .. } => Some(
+            rows.first()
+                .and_then(|r| r.get(1).cloned().flatten())
+                .is_some(),
+        ),
+        Outcome::Err(_) => None,
+    };
+    if !settled {
+        // A plain connection, as a read outside the coordinator was before
+        // decision Q37.
+        let d = &CLUSTERS[i];
+        let c = backend
+            .env
+            .db
+            .connect(&backend.from, d.writer, None, d.schema)
+            .await
+            .ok()?;
+        return seen(c.exec(&get).await);
+    }
+    txn.begin(BeginOptions::default()).unwrap();
+    let r = match txn.branch(&cid(i), &shard_ref(i), Intent::Read).await {
+        Ok(b) => seen(b.conn_mut().exec(&get).await),
+        Err(e) => {
+            if code_of(&e) == 39449 {
+                bump(&STATS.settle_refused);
+            }
+            None
+        }
+    };
+    if txn.in_txn() {
+        let _ = txn.commit().await;
+    }
+    r
+}
+
+/// A hot row's read-modify-write append: read it locked, write it back
+/// with `tag` added.
+async fn append(b: &mut SimBranch, key: i64, tag: i64) -> Option<DbError> {
+    let o = b
+        .exec(&Stmt::GetForUpdate {
+            t: T.to_owned(),
+            k: key,
+        })
+        .await;
+    let v = match o {
+        Outcome::Ok { rows, .. } => rows
+            .first()
+            .and_then(|r| r.get(1).cloned().flatten())
+            .unwrap_or_default(),
+        Outcome::Err(e) => return Some(DbError::new(e, format!("error {e}"))),
+    };
+    err(&b
+        .exec(&Stmt::Update {
+            t: T.to_owned(),
+            k: key,
+            v: format!("{v},{tag}"),
+        })
+        .await)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn session(
     world: World,
@@ -904,7 +1429,7 @@ async fn session(
     sc: Scenario,
     cfg: TxnConfig,
 ) {
-    let mut txn = TxnCoordinator::new(backend, dtids, TENANT, cfg);
+    let mut txn = TxnCoordinator::new(backend.clone(), dtids, TENANT, cfg);
     txn.set_hooks(hooks);
     txn.set_clock(clock);
     let rng = world.rng();
@@ -930,12 +1455,18 @@ async fn session(
                 k: tag,
                 v: tag.to_string(),
             }];
+            let mut rmw = None;
             if rng.chance(sc.hot) {
-                stmts.push(Stmt::Update {
-                    t: T.to_owned(),
-                    k: HOT + i64::try_from(rng.below(2)).unwrap(),
-                    v: tag.to_string(),
-                });
+                let key = HOT + i64::try_from(rng.below(2)).unwrap();
+                if sc.rmw {
+                    rmw = Some(key);
+                } else {
+                    stmts.push(Stmt::Update {
+                        t: T.to_owned(),
+                        k: key,
+                        v: tag.to_string(),
+                    });
+                }
             }
             let mut failed = None;
             for s in stmts {
@@ -943,6 +1474,13 @@ async fn session(
                     failed = Some(e);
                     break;
                 }
+            }
+            if failed.is_none()
+                && let Some(key) = rmw
+            {
+                log.hot(tag, i, key);
+                bump(&STATS.appends);
+                failed = append(b.conn_mut(), key, tag).await;
             }
             if let Some(e) = failed {
                 result = Some(match txn.statement_failed(&c, &e).await {
@@ -962,6 +1500,11 @@ async fn session(
             log.set_dtid(tag, txn.dtid());
             let r = match txn.commit().await {
                 Ok(o) => {
+                    if o.stragglers > 0 {
+                        STATS
+                            .stragglers
+                            .fetch_add(o.stragglers as u64, Ordering::Relaxed);
+                    }
                     match o.mode {
                         sprig_txn::TxnMode::Xa2pc => bump(&STATS.xa_2pc),
                         sprig_txn::TxnMode::Sprig2pc => bump(&STATS.sprig_2pc),
@@ -972,7 +1515,20 @@ async fn session(
                 }
                 Err(e) => Res::Failed(code_of(&e)),
             };
+            let ok = r == Res::Committed;
             log.finish(tag, r);
+            if ok && let Some(settled) = sc.ryw {
+                for &i in &pool {
+                    bump(&STATS.ryw_reads);
+                    if read_back(&mut txn, &backend, settled, i, tag).await == Some(false) {
+                        log.ryw_misses.lock().unwrap().push(format!(
+                            "txn {tag}: committed (client got OK), but the session's next read \
+                             of cluster {} missed its row",
+                            CLUSTERS[i].id
+                        ));
+                    }
+                }
+            }
         }
         world.sleep(Duration::from_millis(rng.range(1..200))).await;
     }
@@ -1020,21 +1576,106 @@ async fn setup(env: &Env) {
     }
 }
 
-async fn run(world: World, plan: FaultPlan, sprig: bool) -> Result<(), String> {
+/// Which world a test runs.
+#[derive(Debug, Clone, Copy)]
+enum Kind {
+    /// XA and best effort (R1).
+    Xa,
+    /// Sprig 2PC, as built in R3 (no relay).
+    Sprig,
+    /// Sprig 2PC with read-modify-write hot rows, a second gateway and
+    /// orphaned statements; `fence`: the relays (decision Q36); `ryw`:
+    /// read each row back after an OK commit (decision Q37).
+    Isolation { fence: bool, ryw: Option<bool> },
+}
+
+const GALERA: [usize; 3] = [2, 3, 4];
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_gateway(
+    world: &World,
+    gw: &Node,
+    env: &Arc<Env>,
+    log: &Arc<Log>,
+    sc: &Scenario,
+    hooks: &Arc<CrashHooks>,
+    dtid_base: u64,
+) {
+    let (env, log, sc, hooks) = (env.clone(), log.clone(), sc.clone(), hooks.clone());
+    world.spawn_node(gw, move |ctx: NodeCtx| {
+        let (env, log, sc, hooks) = (env.clone(), log.clone(), sc.clone(), hooks.clone());
+        async move {
+            let admin = Arc::new(SimAdmin {
+                env: env.clone(),
+                from: ctx.node.clone(),
+                via_relay: sc.fence,
+            });
+            let backend = Arc::new(SimBackend {
+                env,
+                from: ctx.node.clone(),
+                admin,
+            });
+            let dtids = Arc::new(DtidGen::new(dtid_base + ctx.incarnation + 1));
+            let cfg = TxnConfig {
+                policy: sc.policy,
+                tenant_all_xa: sc.all_xa,
+                distributed_lock_wait_timeout_s: 2,
+                coordinator_id: format!("{}-{}", ctx.node.as_str(), ctx.incarnation),
+                ..TxnConfig::default()
+            };
+            let clock: Arc<dyn Clock> = ctx.clock();
+            let s = (0..2).map(|_| {
+                session(
+                    ctx.world.clone(),
+                    backend.clone(),
+                    dtids.clone(),
+                    clock.clone(),
+                    log.clone(),
+                    hooks.clone(),
+                    sc.clone(),
+                    cfg.clone(),
+                )
+            });
+            futures::future::join_all(s).await;
+        }
+    });
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run(world: World, plan: FaultPlan, kind: Kind) -> Result<(), String> {
     let db = model(&world);
+    let sc = match kind {
+        Kind::Xa => Scenario::random(world.rng()),
+        Kind::Sprig => Scenario::sprig(world.rng()),
+        Kind::Isolation { fence, ryw } => Scenario::isolation(world.rng(), fence, ryw),
+    };
+    if sc.rmw {
+        // MariaDB runs a statement on after its client went away.
+        db.with_model(|m, _| m.set_orphans_run(true));
+    }
+    let relays: Vec<Option<Arc<SimRelay>>> = (0..CLUSTERS.len())
+        .map(|i| {
+            (sc.fence && GALERA.contains(&i)).then(|| {
+                Arc::new(SimRelay {
+                    idx: i,
+                    agent: Node::from(format!("{}a", CLUSTERS[i].id).as_str()),
+                    db: db.clone(),
+                    net: world.net().clone(),
+                    world: world.clone(),
+                    live: Mutex::new(None),
+                })
+            })
+        })
+        .collect();
     let env = Arc::new(Env {
         db: db.clone(),
         origin: tokio::time::Instant::now(),
+        relays,
     });
     setup(&env).await;
-    let sc = if sprig {
-        Scenario::sprig(world.rng())
-    } else {
-        Scenario::random(world.rng())
-    };
     world.record(format!(
-        "scenario policy={:?} all_xa={} crash={:?} hot={}",
-        sc.policy, sc.all_xa, sc.crash, sc.hot
+        "scenario policy={:?} all_xa={} crash={:?} hot={} rmw={} ryw={:?} fence={} gw2={}",
+        sc.policy, sc.all_xa, sc.crash, sc.hot, sc.rmw, sc.ryw, sc.fence, sc.gw2
     ));
     let locator = Arc::new(StaticLocator::new());
     for i in 0..CLUSTERS.len() {
@@ -1058,55 +1699,74 @@ async fn run(world: World, plan: FaultPlan, sprig: bool) -> Result<(), String> {
         abort_retention: Duration::from_secs(3600),
         id: "resolver".into(),
     };
-    {
-        let (env, log, sc, hooks) = (env.clone(), log.clone(), sc.clone(), hooks.clone());
-        world.spawn_node(&gw, move |ctx: NodeCtx| {
-            let (env, log, sc, hooks) = (env.clone(), log.clone(), sc.clone(), hooks.clone());
+    // The agents first: the relays admit nobody until their start-up
+    // recovery is done.
+    for r in env.relays.iter().flatten() {
+        let (env, locator, rcfg, relay) = (env.clone(), locator.clone(), rcfg.clone(), r.clone());
+        world.spawn_node(&r.agent.clone(), move |ctx: NodeCtx| {
+            let (env, locator, rcfg, relay) =
+                (env.clone(), locator.clone(), rcfg.clone(), relay.clone());
             async move {
-                let admin = Arc::new(SimAdmin {
-                    env: env.clone(),
-                    from: ctx.node.clone(),
+                let links = Arc::new(SimLinks {
+                    db: env.db.clone(),
+                    agent: ctx.node.clone(),
+                    idx: relay.idx,
+                    conns: Mutex::new(BTreeMap::new()),
                 });
-                let backend = Arc::new(SimBackend {
-                    env,
-                    from: ctx.node.clone(),
+                let admin = Arc::new(SimAdmin::new(env.clone(), ctx.node.clone()));
+                let fence = Arc::new(RelayFence::new(
+                    cid(relay.idx),
+                    links.clone(),
                     admin,
+                    locator,
+                    ResolverConfig {
+                        id: format!("agent-{}", ctx.node.as_str()),
+                        ..rcfg
+                    },
+                ));
+                let inc = ctx.incarnation;
+                *relay.live.lock().unwrap() = Some(RelayLive {
+                    inc,
+                    fence: fence.clone(),
+                    links,
                 });
-                let dtids = Arc::new(DtidGen::new(ctx.incarnation + 1));
-                let cfg = TxnConfig {
-                    policy: sc.policy,
-                    tenant_all_xa: sc.all_xa,
-                    distributed_lock_wait_timeout_s: 2,
-                    coordinator_id: format!("gw-{}", ctx.incarnation),
-                    ..TxnConfig::default()
+                let _guard = LiveGuard {
+                    relay: relay.clone(),
+                    inc,
                 };
-                let clock: Arc<dyn Clock> = ctx.clock();
-                let s = (0..2).map(|_| {
-                    session(
-                        ctx.world.clone(),
-                        backend.clone(),
-                        dtids.clone(),
-                        clock.clone(),
-                        log.clone(),
-                        hooks.clone(),
-                        sc.clone(),
-                        cfg.clone(),
-                    )
-                });
-                futures::future::join_all(s).await;
+                while fence.start().await.is_err() {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                fence.run(sprig_common::CancellationToken::new()).await;
             }
         });
     }
+    spawn_gateway(&world, &gw, &env, &log, &sc, &hooks, 0);
+    if sc.gw2 {
+        let quiet = Arc::new(CrashHooks {
+            world: world.clone(),
+            gw: Node::from("gw2"),
+            target: None,
+            seen: Mutex::new(HashMap::new()),
+            fired: AtomicBool::new(false),
+            restart_after: Duration::ZERO,
+        });
+        spawn_gateway(&world, &Node::from("gw2"), &env, &log, &sc, &quiet, 1 << 20);
+    }
     {
         let (env, locator, rcfg) = (env.clone(), locator.clone(), rcfg.clone());
+        let fenced: Vec<ClusterId> = GALERA
+            .iter()
+            .filter(|&&i| env.relays[i].is_some())
+            .map(|&i| cid(i))
+            .collect();
         world.spawn_node(&ctl, move |ctx: NodeCtx| {
-            let (env, locator, rcfg) = (env.clone(), locator.clone(), rcfg.clone());
+            let (env, locator, rcfg, fenced) =
+                (env.clone(), locator.clone(), rcfg.clone(), fenced.clone());
             async move {
-                let admin = Arc::new(SimAdmin {
-                    env,
-                    from: ctx.node.clone(),
-                });
+                let admin = Arc::new(SimAdmin::new(env, ctx.node.clone()));
                 let r = Resolver::new(admin, locator, rcfg);
+                r.set_fenced(fenced);
                 let all: Vec<ClusterId> = (0..CLUSTERS.len()).map(cid).collect();
                 r.run(move || all.clone(), sprig_common::CancellationToken::new())
                     .await;
@@ -1122,7 +1782,72 @@ async fn run(world: World, plan: FaultPlan, sprig: bool) -> Result<(), String> {
     world.sleep(Duration::from_secs(45)).await;
     world.heal_all().await;
     world.sleep(rcfg.min_age + rcfg.interval * 6).await;
-    check(&world, &env, &log, &sc).await
+    let r = check(&world, &env, &log, &sc).await;
+    // Break the relays' reference cycles (relay -> fence -> admin -> env).
+    for rl in env.relays.iter().flatten() {
+        if let Some(l) = rl.live.lock().unwrap().take() {
+            let st = l.fence.stats();
+            STATS.fences.fetch_add(st.fenced, Ordering::Relaxed);
+            STATS.fence_ended.fetch_add(st.ended, Ordering::Relaxed);
+            l.links.conns.lock().unwrap().clear();
+        }
+    }
+    r
+}
+
+/// Invariant 7: every hot row's final list holds each committed append
+/// exactly once, and nothing else.
+fn check_isolation(
+    env: &Arc<Env>,
+    txns: &BTreeMap<i64, Entry>,
+    present: &[BTreeSet<i64>],
+) -> Result<(), String> {
+    for (i, d) in CLUSTERS.iter().enumerate() {
+        let rows = env.db.with_model(|m, _| m.rows(d.writer, d.schema, T));
+        for key in [HOT, HOT + 1] {
+            let v = rows
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default();
+            let mut seen: BTreeMap<i64, usize> = BTreeMap::new();
+            for t in v.split(',').skip(1) {
+                let tag: i64 = t
+                    .parse()
+                    .map_err(|_| format!("isolation: hot row {key} on {}: {v:?}", d.id))?;
+                *seen.entry(tag).or_default() += 1;
+            }
+            for (tag, n) in &seen {
+                if *n > 1 {
+                    return Err(format!(
+                        "isolation: txn {tag}'s append to hot row {key} on {} applied {n} times",
+                        d.id
+                    ));
+                }
+                if !present[i].contains(tag) {
+                    return Err(format!(
+                        "isolation: hot row {key} on {} holds txn {tag}'s append, but txn {tag} \
+                         didn't commit there",
+                        d.id
+                    ));
+                }
+            }
+            for (tag, e) in txns {
+                if present[i].contains(tag)
+                    && e.hot.contains(&(i, key))
+                    && !seen.contains_key(tag)
+                {
+                    return Err(format!(
+                        "isolation: LOST UPDATE: txn {tag} ({:?}, client got {:?}) committed its \
+                         append to hot row {key} on {}, but the row's final value {v:?} lacks it \
+                         (a later write overwrote it, or it was replayed over one)",
+                        e.dtid, e.result, d.id
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn check(world: &World, env: &Arc<Env>, log: &Log, sc: &Scenario) -> Result<(), String> {
@@ -1151,6 +1876,7 @@ async fn check(world: &World, env: &Arc<Env>, log: &Log, sc: &Scenario) -> Resul
                     clusters: e.clusters.clone(),
                     dtid: e.dtid,
                     result: e.result.clone(),
+                    hot: e.hot.clone(),
                 },
             )
         })
@@ -1209,12 +1935,15 @@ async fn check(world: &World, env: &Arc<Env>, log: &Log, sc: &Scenario) -> Resul
             ));
         }
     }
+    if sc.rmw {
+        check_isolation(env, &txns, &present)?;
+    }
+    if let Some(m) = log.ryw_misses.lock().unwrap().first() {
+        return Err(format!("read-your-writes: {m}"));
+    }
     // No redo row left: every held branch was finished or replayed.
     for d in &CLUSTERS {
-        let a = SimAdmin {
-            env: env.clone(),
-            from: Node::from("checker"),
-        };
+        let a = SimAdmin::new(env.clone(), Node::from("checker"));
         let left: Vec<sprig_txn::RedoBranch> = a
             .redo_branches(&ClusterId::new(d.id).unwrap())
             .await
@@ -1231,10 +1960,7 @@ async fn check(world: &World, env: &Arc<Env>, log: &Log, sc: &Scenario) -> Resul
     }
     // Nothing prepared.
     for d in &CLUSTERS {
-        let a = SimAdmin {
-            env: env.clone(),
-            from: Node::from("checker"),
-        };
+        let a = SimAdmin::new(env.clone(), Node::from("checker"));
         let left = a
             .xa_recover(&ClusterId::new(d.id).unwrap())
             .await
@@ -1249,10 +1975,7 @@ async fn check(world: &World, env: &Arc<Env>, log: &Log, sc: &Scenario) -> Resul
     // Decision rows.
     let mut rows: BTreeMap<Dtid, Vec<(usize, DecisionRow)>> = BTreeMap::new();
     for (i, d) in CLUSTERS.iter().enumerate() {
-        let a = SimAdmin {
-            env: env.clone(),
-            from: Node::from("checker"),
-        };
+        let a = SimAdmin::new(env.clone(), Node::from("checker"));
         for (_, r) in a
             .decision_rows(&ClusterId::new(d.id).unwrap())
             .await
@@ -1322,7 +2045,7 @@ fn xa_transactions_survive_coordinator_and_participant_crashes() {
                 let n = rng.index(6);
                 FaultPlan::random(rng, &nodes, HORIZON, n)
             },
-            |w, plan| async move { run(w, plan, false).await.map_err(Into::into) },
+            |w, plan| async move { run(w, plan, Kind::Xa).await.map_err(Into::into) },
         );
     print_totals("xa");
 }
@@ -1344,9 +2067,97 @@ fn sprig_2pc_survives_coordinator_and_participant_crashes_on_galera() {
                 let n = rng.index(6);
                 FaultPlan::random(rng, &nodes, HORIZON, n)
             },
-            |w, plan| async move { run(w, plan, true).await.map_err(Into::into) },
+            |w, plan| async move { run(w, plan, Kind::Sprig).await.map_err(Into::into) },
         );
     print_totals("sprig_2pc");
+}
+
+const FENCED_NODES: [&str; 11] = [
+    "gw", "gw2", "ctl", "a1", "b1", "b2", "g1n1", "g2n1", "g3n1", "g1a", "g2a",
+];
+
+fn isolation_plan(rng: &SimRng) -> FaultPlan {
+    let mut nodes: Vec<Node> = FENCED_NODES.into_iter().map(Node::from).collect();
+    nodes.push(Node::from("g3a"));
+    let n = rng.index(6);
+    FaultPlan::random(rng, &nodes, HORIZON, n)
+}
+
+/// Decisions Q28 and Q36: with the relay fence, a held branch's rows stay
+/// out of reach from its holder's loss until it is recovered: no write
+/// is lost to a replay, under gateway crashes at every coordinator step,
+/// a second gateway on the same rows, agent and node kills, pauses,
+/// partitions and slow links. Decision Q37 too: after an OK commit the
+/// session's next read sees its rows.
+#[test]
+fn sprig_2pc_relay_fence_keeps_held_rows_isolated() {
+    Sim::new("txn_sprig2pc_fence")
+        .seeds(200)
+        .max_time(Duration::from_secs(3600))
+        .run_with_faults(isolation_plan, |w, plan| async move {
+            run(
+                w,
+                plan,
+                Kind::Isolation {
+                    fence: true,
+                    ryw: Some(true),
+                },
+            )
+            .await
+            .map_err(Into::into)
+        });
+    print_totals("sprig_2pc_fence");
+}
+
+/// The same world without the relay fence (Sprig 2PC as built in R3,
+/// decision Q12's window): a held branch whose gateway died is replayed
+/// after another transaction already changed its rows, and that
+/// transaction's committed append is lost. Run with `--ignored` to see
+/// the simulation catch it.
+#[test]
+#[ignore = "shows the window the relay fence closes (decision Q12)"]
+#[should_panic(expected = "isolation")]
+fn without_the_relay_fence_a_replay_overwrites_a_later_write() {
+    Sim::new("txn_sprig2pc_nofence")
+        .seeds(200)
+        .max_time(Duration::from_secs(3600))
+        .run_with_faults(isolation_plan, |w, plan| async move {
+            run(
+                w,
+                plan,
+                Kind::Isolation {
+                    fence: false,
+                    ryw: None,
+                },
+            )
+            .await
+            .map_err(Into::into)
+        });
+}
+
+/// Without settling the session's phase-2 stragglers (a read on a plain
+/// connection, as reads outside the coordinator were before decision
+/// Q37), a read right after an OK commit misses the session's own row
+/// when phase 2 outran `txn.phase2_wait_ms`. Run with `--ignored`.
+#[test]
+#[ignore = "shows the window decision Q37 closes (Q30)"]
+#[should_panic(expected = "read-your-writes")]
+fn without_settling_a_straggler_the_next_read_misses_it() {
+    Sim::new("txn_sprig2pc_nosettle")
+        .seeds(200)
+        .max_time(Duration::from_secs(3600))
+        .run_with_faults(isolation_plan, |w, plan| async move {
+            run(
+                w,
+                plan,
+                Kind::Isolation {
+                    fence: false,
+                    ryw: Some(false),
+                },
+            )
+            .await
+            .map_err(Into::into)
+        });
 }
 
 fn print_totals(what: &str) {
@@ -1357,7 +2168,10 @@ fn print_totals(what: &str) {
          runs {} (determinism reruns included), txns {}, committed {} \
          (xa_2pc {}, sprig_2pc {}, best_effort {}), rejected 39440 {}, rolled back {}, outcome unknown \
          39441 {}, partial 39442 {}, no answer (gateway crashed) {}; gateway crashes at a \
-         coordinator step {}; resolver XA COMMIT {}, XA ROLLBACK {}, redo replays {}, redo drops {}",
+         coordinator step {}; resolver XA COMMIT {}, XA ROLLBACK {}, redo replays {}, redo drops {}; \
+         relay fence: tenants fenced {}, connections ended {}, connections refused {}, agent \
+         replays {}, agent drops {}; hot-row appends {}; phase-2 stragglers {}, read-backs {}, \
+         settles refused (39449) {}",
         g(&s.runs),
         g(&s.txns),
         g(&s.committed),
@@ -1374,5 +2188,14 @@ fn print_totals(what: &str) {
         g(&s.resolver_rollbacks),
         g(&s.redo_replays),
         g(&s.redo_drops),
+        g(&s.fences),
+        g(&s.fence_ended),
+        g(&s.fence_refused),
+        g(&s.agent_replays),
+        g(&s.agent_drops),
+        g(&s.appends),
+        g(&s.stragglers),
+        g(&s.ryw_reads),
+        g(&s.settle_refused),
     );
 }

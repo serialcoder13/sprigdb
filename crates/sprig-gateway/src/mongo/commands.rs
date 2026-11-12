@@ -1527,12 +1527,23 @@ async fn exec(
             {
                 // `$querySettings` and `$queryStats` (M3), then the
                 // in-gateway stages.
+                // `$queryStats` adds the workload store's shapes (S137).
+                let stored = match (&c.shared.docs, pipeline[0].contains_key("$queryStats")) {
+                    (Some(d), true) => {
+                        let d = Arc::clone(d);
+                        d.stored_shapes(sprig_common::ids::TenantId(owner(c).tenant))
+                            .await
+                            .unwrap_or_default()
+                    }
+                    _ => Vec::new(),
+                };
                 let mut docs = Box::pin(super::qsettings::stage_docs(
                     &engine,
                     sql,
                     owner(c).tenant,
                     db,
                     &pipeline[0],
+                    stored,
                 ))
                 .await?;
                 let lim = sprig_doc::agg::AggLimits {

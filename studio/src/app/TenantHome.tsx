@@ -1,4 +1,6 @@
 import { Link, useParams } from 'react-router';
+import { useIntl } from 'react-intl';
+import { Mascot } from './Mascot';
 import { useSession } from '../auth/session';
 import { useDatabases } from '../catalog/snapshot';
 
@@ -7,11 +9,23 @@ export function TenantHome() {
   const { tenant = '' } = useParams();
   const me = useSession((s) => s.me);
   const dbs = useDatabases();
+  const intl = useIntl();
   if (!me) return null;
   const home = me.principal.tenant === tenant;
   return (
     <div className="stack">
-      <h1 style={{ margin: 0 }}>{tenant}</h1>
+      <div className="welcome-hero">
+        <Mascot pose="waving" size={150} />
+        <div>
+          <h1>{intl.formatMessage({ id: 'welcome.title' }, { user: me.principal.login })}</h1>
+          <p className="muted" style={{ margin: 0 }}>
+            {intl.formatMessage({ id: 'welcome.lead' })}
+          </p>
+          <p className="muted" style={{ margin: '4px 0 0' }}>
+            {tenant}
+          </p>
+        </div>
+      </div>
       {!home && (
         <p className="banner">
           You administer this tenant from {me.principal.tenant}. Its settings and accounts are open to you; data views use your home

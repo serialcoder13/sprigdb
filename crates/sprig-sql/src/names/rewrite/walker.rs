@@ -579,6 +579,11 @@ impl Walker<'_, '_> {
 
     /// Maps database `name`, spelled by token `tok`.
     fn map_schema(&mut self, tok: usize, name: &str, object: Option<usize>) -> R<Option<String>> {
+        // Chapter 29 (RL58): row-level security's subtree view stays as
+        // written (it returns only the session tenant's own rows).
+        if object.is_some_and(|o| self.rls_subtree_view(o)) {
+            return Ok(None);
+        }
         let range = self.t[tok].range();
         if let Some(schema) = SystemSchema::parse(name) {
             let object = object.map(|o| self.value(o));
@@ -688,7 +693,8 @@ impl Walker<'_, '_> {
 
     /// Fails for a reserved object name.
     fn check_object(&self, tok: usize, kind: ObjectKind, db: Option<&str>, creating: bool) -> R {
-        if self.ctx.internal {
+        if self.ctx.internal || (!creating && kind == ObjectKind::Table && self.rls_subtree_view(tok))
+        {
             return Ok(());
         }
         let raw = ident_value(self.bytes(tok));
@@ -704,6 +710,19 @@ impl Walker<'_, '_> {
             db: db.or(self.current.as_deref()).map(str::to_owned),
             name: name.into_owned(),
         })
+    }
+
+    /// Whether token `tok` is `__sprig_subtree_v` qualified by
+    /// `__sprig_sys`: the only `__sprig_sys` object a statement may name,
+    /// which row-level security's rewrite puts in for subtrees above
+    /// `rls.inline_subtree_max` (chapter 29, RL58).
+    fn rls_subtree_view(&self, tok: usize) -> bool {
+        tok >= 2
+            && self.ident(tok)
+            && self.punct(tok - 1, b'.')
+            && self.ident(tok - 2)
+            && ident_value(self.bytes(tok)).eq_ignore_ascii_case(b"__sprig_subtree_v")
+            && ident_value(self.bytes(tok - 2)).eq_ignore_ascii_case(b"__sprig_sys")
     }
 
     /// Fails for a reserved column name.

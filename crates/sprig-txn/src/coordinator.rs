@@ -531,7 +531,10 @@ impl<B: TxnBackend> TxnCoordinator<B> {
         // A branch of an earlier commit on this cluster may still be in
         // phase 2: finish it first, so this transaction sees its rows
         // (decision Q37).
-        self.settle(cluster).await?;
+        // Boxed: settling is rare, and keeps `branch`'s future small.
+        if self.has_straggler(cluster) {
+            Box::pin(self.settle(cluster)).await?;
+        }
         let caps = self.backend.caps(cluster);
         if intent == Intent::Write
             && !caps.xa

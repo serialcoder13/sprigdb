@@ -205,10 +205,6 @@ struct Conn {
     alive: bool,
     last_gtid: Option<Gtid>,
     poisoned: Option<u16>,
-    /// The client went away while a statement waited for a lock, and the
-    /// model runs orphaned statements on ([`Model::set_orphans_run`]): the
-    /// statement still runs when the lock frees, then the connection ends.
-    orphan: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -386,6 +382,10 @@ pub struct Model {
     completed: Vec<ConnId>,
     log: Vec<String>,
     orphans_run: bool,
+    /// Connections whose client went away while a statement waited for a
+    /// lock ([`Model::set_orphans_run`]): the statement still runs when the
+    /// lock frees, then the connection ends.
+    orphans: BTreeSet<ConnId>,
 }
 
 impl fmt::Debug for Model {
@@ -429,6 +429,7 @@ impl Model {
             completed: Vec::new(),
             log: Vec::new(),
             orphans_run: false,
+            orphans: BTreeSet::new(),
         }
     }
 
@@ -573,14 +574,12 @@ impl Model {
     }
 
     fn finish(&mut self, conn: ConnId, o: Outcome) {
-        let mut orphan = false;
         if let Some(c) = self.conns.get_mut(&conn) {
             c.pending = None;
-            orphan = c.orphan;
             c.done = Some(o);
             self.completed.push(conn);
         }
-        if orphan {
+        if self.orphans.remove(&conn) {
             // Its client is gone: the server reads EOF next and ends the
             // connection.
             self.drop_conn(conn, None);
@@ -631,7 +630,6 @@ impl Model {
                 alive: true,
                 last_gtid: None,
                 poisoned: None,
-                orphan: false,
             },
         );
         Ok(id)
@@ -649,7 +647,7 @@ impl Model {
                 .as_ref()
                 .is_some_and(|p| matches!(p.kind, PendingKind::Lock(_)))
         {
-            c.orphan = true;
+            self.orphans.insert(conn);
             self.note(format!(
                 "{conn} disconnected while waiting for a lock: the statement runs on"
             ));
@@ -659,6 +657,7 @@ impl Model {
     }
 
     fn drop_conn(&mut self, conn: ConnId, pending_err: Option<u16>) {
+        self.orphans.remove(&conn);
         let Some(c) = self.conns.get_mut(&conn) else {
             return;
         };

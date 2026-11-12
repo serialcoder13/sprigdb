@@ -127,3 +127,25 @@ fn account_functions_in_table_definitions_fail() {
         assert!(rewrite(sql.as_bytes(), &ctx).is_ok(), "{sql}");
     }
 }
+
+#[test]
+fn only_the_rls_subtree_view_of_sprig_sys_passes() {
+    // Chapter 29 (RL58): the rewrite's subtree subquery stays as written;
+    // every other `__sprig_sys` name is still unknown.
+    let m = MemoryNameMap::new(TenantId(1)).with_db(1, "d", 1, 1);
+    let ctx = RewriteCtx::new(&m, Persona::MySql84);
+    let sql = "SELECT a FROM d.t WHERE (`t`.org IN (SELECT `descendant` FROM `__sprig_sys`.`__sprig_subtree_v`))";
+    let out = rewrite(sql.as_bytes(), &ctx).unwrap();
+    let text = String::from_utf8(apply_edits(sql.as_bytes(), &out.edits)).unwrap();
+    assert!(
+        text.ends_with("FROM `__sprig_sys`.`__sprig_subtree_v`))") && !text.contains("FROM d.t"),
+        "{text}"
+    );
+    for bad in [
+        "SELECT * FROM __sprig_sys.__sprig_names_v",
+        "SELECT * FROM __sprig_sys.__sprig_subtree",
+        "SELECT * FROM d.__sprig_subtree_v",
+    ] {
+        assert!(rewrite(bad.as_bytes(), &ctx).is_err(), "{bad}");
+    }
+}

@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router';
 import { FormattedMessage, useIntl } from 'react-intl';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSession } from '../auth/session';
-import { addTab, closeTab, loadTabs, updateTab, useTabs, type Tab } from './tabs';
+import { loadTabs, updateTab, useTabs, type Tab } from './tabs';
 import { graphsOf, invalidateCatalog, useDatabases, useSnapshot } from '../catalog/snapshot';
 import { classify, needsConfirmation, splitStatements, statementAt, type Statement } from '../lib/sql';
 import { runStatement, type RunHandle } from './runner';
@@ -352,30 +352,9 @@ export function QueryPage() {
   };
 
   if (!tab) return <p className="muted">…</p>;
-  const base = `/t/${encodeURIComponent(tenant)}/q/`;
   const busy = phase === 'streaming' || phase === 'checking';
   return (
     <div className="stack" style={{ blockSize: '100%' }}>
-      <div className="tabs" role="toolbar" aria-label="Editor tabs">
-        {tabs.map((t) => (
-          <span key={t.id} className="row" style={{ gap: 0 }}>
-            <button aria-pressed={t.id === tab.id} onClick={() => void navigate(base + t.id)}>
-              {t.title}
-            </button>
-            {tabs.length > 1 && (
-              <button
-                aria-label={`${intl.formatMessage({ id: 'query.closeTab' })} ${t.title}`}
-                onClick={() => void navigate(base + closeTab(t.id))}
-              >
-                ×
-              </button>
-            )}
-          </span>
-        ))}
-        <button aria-label={intl.formatMessage({ id: 'query.newTab' })} onClick={() => void navigate(base + addTab().id)}>
-          +
-        </button>
-      </div>
       <div className="row">
         <label className="row">
           <FormattedMessage id="query.language" />
