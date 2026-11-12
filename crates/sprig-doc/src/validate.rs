@@ -806,7 +806,7 @@ fn explain_leaf(
         out.insert("reason", "field was missing");
         return out;
     }
-    let whole = matches!(op, "$size" | "$all" | "$elemMatch");
+    let whole = matches!(op, "$size" | "$all" | "$elemMatch") || vs.positional;
     if matches!(op, "$size" | "$elemMatch") && !vs.leaves.iter().any(|v| v.as_array().is_some()) {
         let v = vs.leaves[0];
         out.insert("reason", "type did not match");

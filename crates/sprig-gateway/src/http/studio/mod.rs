@@ -243,7 +243,16 @@ impl StudioState {
                 .map_err(|e| std::io::Error::other(e.message))
                 .and_then(|()| std::fs::read_to_string(p))
             {
-                Ok(t) if !t.trim().is_empty() => Some(t.trim().to_owned()),
+                Ok(t) if !t.trim().is_empty() => {
+                    // Decision ST73: the older operator mode is deprecated.
+                    tracing::warn!(
+                        path = %p.display(),
+                        "Studio's older operator mode ([gateway] operator_token_file with \
+                         studio.operator_logins) is deprecated and will be removed in the release \
+                         after Phase 1: sign operators in as named operators (chapter 14) instead"
+                    );
+                    Some(t.trim().to_owned())
+                }
                 Ok(_) => None,
                 Err(e) => {
                     tracing::warn!(error = %e, path = %p.display(), "operator token not loaded");

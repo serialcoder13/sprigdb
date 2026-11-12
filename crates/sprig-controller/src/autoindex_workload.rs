@@ -191,13 +191,15 @@ pub fn bind_text(
         Some(db) => Some(map.physical(db, Purpose::Session).ok()?.single()?.to_string()),
         None => None,
     };
-    let ctx = RewriteCtx::new(map, Persona::MariaDb)
+    let mut ctx = RewriteCtx::new(map, Persona::MariaDb)
         .lex(lex_for(None))
         .current_db(logical);
+    // The engine's field columns are reserved names (`_sprig_p_`).
+    ctx.internal = true;
     let sql = match rewrite(sql.as_bytes(), &ctx) {
         Ok(r) => r.sql_lossy(),
         Err(e) => {
-            tracing::debug!(fingerprint = %fp, sample = s.sample_id, errno = e.errno(),
+            tracing::info!(fingerprint = %fp, sample = s.sample_id, errno = e.errno(),
                 "a MongoDB sample's names didn't map; skipped");
             return None;
         }

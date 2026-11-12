@@ -296,14 +296,21 @@ fn quote(id: &str) -> String {
 fn eq_text(path: &str, v: &SampleValue) -> Option<String> {
     let (class, string) = class_of(v)?;
     let (c, n, s) = sprig_doc::meta::columns(path);
-    let col = if string { s } else { n };
+    let col = if string { s } else { n.clone() };
     let val = if v.kind == LiteralKind::Bool {
         bool_number(v)
     } else {
         v.text.clone()
     };
+    // A string-rendered value has 0 in the number column: saying so lets
+    // the index seek on all three parts, as the engine's own SQL does.
+    let zero = if string {
+        format!(" AND {} = 0", quote(&n))
+    } else {
+        String::new()
+    };
     Some(format!(
-        "({} = {class} AND {} = {})",
+        "({} = {class}{zero} AND {} = {})",
         quote(&c),
         quote(&col),
         String::from_utf8_lossy(&val)
@@ -345,8 +352,13 @@ pub fn replay_sql(shape: &Shape, sample: &SampledLiterals, def: &IndexDef) -> Op
                 let (class, string) = class_of(v)?;
                 let col = if string { &s } else { &n };
                 let op = if *lo { ">=" } else { "<=" };
+                let zero = if string && class != 100 {
+                    format!(" AND {} = 0", quote(&n))
+                } else {
+                    String::new()
+                };
                 format!(
-                    "({} = {class} AND {} {op} {})",
+                    "({} = {class}{zero} AND {} {op} {})",
                     quote(&c),
                     quote(col),
                     String::from_utf8_lossy(&v.text)
@@ -495,7 +507,11 @@ mod tests {
         let sql = replay_sql(&f.shape, &lits, d).unwrap();
         let (sc, _, ss) = sprig_doc::meta::columns("status");
         assert!(sql.starts_with("SELECT `_id` FROM `shop`.`orders` WHERE "), "{sql}");
-        assert!(sql.contains(&format!("(`{sc}` = 40 AND `{ss}` = 'open')")), "{sql}");
+        let (_, sn, _) = sprig_doc::meta::columns("status");
+        assert!(
+            sql.contains(&format!("(`{sc}` = 40 AND `{sn}` = 0 AND `{ss}` = 'open')")),
+            "{sql}"
+        );
         assert!(sql.contains(">= 5)"), "{sql}");
         assert!(sql.contains(" DESC"), "{sql}");
         assert!(sql.ends_with("LIMIT 101"), "{sql}");

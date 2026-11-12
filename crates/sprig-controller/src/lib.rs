@@ -58,6 +58,7 @@ pub mod admin;
 // Chapter 52: approvals and recommendations for every automatic decision.
 pub mod approvals;
 pub mod autoindex_admin;
+pub mod autoindex_doc;
 pub mod autoindex_env;
 pub mod autoindex_loop;
 pub mod autoindex_validate;
@@ -376,6 +377,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
             mover: None,
             marker,
             decisions: Arc::new(sprig_advisor::autoindex::store::LogDecisions),
+            docs: Some(Arc::new(autoindex_doc::DocRegistry::new(versioner.clone()))),
         },
         Directory::new(Arc::clone(&stores.global)),
         dc.clone(),

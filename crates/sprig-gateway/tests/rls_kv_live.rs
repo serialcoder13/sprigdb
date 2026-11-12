@@ -162,7 +162,8 @@ async fn raw(addr: &str, user: &str, pw: &str) -> mysql_async::Conn {
         .tcp_port(port.parse().unwrap())
         .user(Some(user))
         .pass(Some(pw))
-        .prefer_socket(false);
+        .prefer_socket(false)
+        .ssl_opts(mysql_async::SslOpts::default().with_danger_accept_invalid_certs(true));
     mysql_async::Conn::new(opts).await.unwrap()
 }
 
@@ -524,11 +525,11 @@ async fn row_level_security_on_kv_and_vectors() {
     if let Ok(http) = std::env::var("SPRIG_TEST_RLS_HTTP") {
         let mut sa = sse_open(&http, "rlsk_alice", PW).await;
         let mut sb = sse_open(&http, "app", "sprig-dev-app").await;
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         for k in ["rlsk_alice:h", "rlsk_bob:h"] {
             cmd(&mut ar, &["HSET", k, "f3", "c"]).await.unwrap();
         }
-        let (ta, tb) = tokio::join!(sse_read(&mut sa, 6), sse_read(&mut sb, 6));
+        let (ta, tb) = tokio::join!(sse_read(&mut sa, 8), sse_read(&mut sb, 8));
         let objs = |t: &[serde_json::Value]| -> Vec<String> {
             t.iter()
                 .filter(|e| e["op"] != "heartbeat")

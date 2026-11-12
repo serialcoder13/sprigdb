@@ -8,9 +8,11 @@
 //! - [`inject`]: the statement rewrite that puts every protected table's
 //!   predicate into the statement before it is planned and routed.
 
+pub mod definer;
 pub mod expr;
 pub mod inject;
 pub mod stmt;
+pub mod subtree;
 pub(crate) mod text;
 pub mod triggers;
 pub mod views;

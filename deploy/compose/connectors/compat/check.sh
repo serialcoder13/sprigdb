@@ -99,8 +99,20 @@ c_mysql_json_index() { admin "$(corpus mysql_json_index)"; }
 # of a multi-column unique index, KILL QUERY of the session's own
 # statement, stored programs' character sets; 3306 only).
 c_mysql_ddl_answers() { admin "$(corpus mysql_ddl_answers)"; }
+# R4 round 7 (decision X36): ALTER TABLE's OK info line (-vv prints it),
+# SHOW PROCEDURE/FUNCTION STATUS's Language column (column names kept),
+# SHOW CREATE TRIGGER's backquoted head (3306 only). Times and the
+# definer (root on the reference, the tenant's user through the gateway)
+# are normalized.
+c_mysql_show_answers() {
+  base_args "$SPRIG_USER" "$SPRIG_PASSWORD"
+  sed "s/@DB@/$DB/g" "$(corpus mysql_show_answers)" | mysql "${ARGS[@]}" -vv --column-names 2>&1 |
+    grep -v 'Using a password' | normalize |
+    sed -E -e 's/[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?/(time)/g' \
+      -e 's/\t[^\t@]+@%\t/\t(user)\t/' -e 's/DEFINER=`[^`]*`@`%`/DEFINER=(user)/'
+}
 
-CHECKS=${SPRIG_COMPAT_CHECKS:-"sql_mode max_execution_time errors show_index show_grants roles gis stored_mode group_by int_meta mysql_compat mysql_ddl session_status perf_schema mysql_stored mysql_json_index mysql_ddl_answers"}
+CHECKS=${SPRIG_COMPAT_CHECKS:-"sql_mode max_execution_time errors show_index show_grants roles gis stored_mode group_by int_meta mysql_compat mysql_ddl session_status perf_schema mysql_stored mysql_json_index mysql_ddl_answers mysql_show_answers"}
 for check in $CHECKS; do
   if [[ $check == gis && $SPRIG_PERSONA != mysql ]]; then
     emit gis n/a "MySQL's SRID 4326 semantics are the MySQL persona's only"
@@ -116,6 +128,10 @@ for check in $CHECKS; do
   fi
   if [[ $check == mysql_ddl_answers && $SPRIG_PERSONA != mysql ]]; then
     emit mysql_ddl_answers n/a "MySQL's DDL answers are 3306's; 3307 keeps MariaDB's"
+    continue
+  fi
+  if [[ $check == mysql_show_answers && $SPRIG_PERSONA != mysql ]]; then
+    emit mysql_show_answers n/a "MySQL's info lines, Language column and trigger heads are 3306's"
     continue
   fi
   if [[ $check == perf_schema && $SPRIG_PERSONA != mysql ]]; then

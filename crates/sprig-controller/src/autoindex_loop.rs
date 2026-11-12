@@ -236,6 +236,10 @@ pub struct AutoIndexHooks {
     pub marker: Arc<dyn NodeMarker>,
     /// Decisions.
     pub decisions: Arc<dyn DecisionLog>,
+    /// Chapter 31's `doc_indexes` rows of automatic document indexes
+    /// (S133); `None` registers none (tests, controllers that don't change
+    /// tenant catalogs).
+    pub docs: Option<Arc<crate::autoindex_doc::DocRegistry>>,
 }
 
 impl fmt::Debug for AutoIndexHooks {
@@ -333,6 +337,9 @@ pub struct Memory {
     pub last_drift: Option<SystemTime>,
     /// The last pass over user and migrated indexes.
     pub last_user: Option<SystemTime>,
+    /// The last pass saw an automatic document index (S133): the next one
+    /// reconciles `doc_indexes` even when none is left.
+    pub docs_seen: bool,
 }
 
 /// What one pass did.
@@ -443,6 +450,18 @@ async fn pass(
     let mut states = vec![IndexState::Validating, IndexState::RollingOut];
     states.extend(SERVING);
     let rows = store.indexes_in(&mut q, &states).await?;
+    // Automatic document indexes in chapter 31's catalog (S133).
+    if let Some(d) = &hooks.docs {
+        let any = rows
+            .iter()
+            .any(|r| crate::autoindex_doc::paths(r).is_some());
+        if any || memory.docs_seen {
+            match d.reconcile(tenant, &rows).await {
+                Ok(_) => memory.docs_seen = any,
+                Err(e) => rep.errors.push(format!("doc_indexes: {e}")),
+            }
+        }
+    }
     let objects: BTreeSet<ObjectId> = rows
         .iter()
         .map(|r| r.object)

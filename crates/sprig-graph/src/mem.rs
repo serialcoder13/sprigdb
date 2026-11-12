@@ -415,7 +415,8 @@ impl GraphStore for MemStore {
     }
 
     async fn update_edge(&mut self, row: &EdgeRow) -> Result<()> {
-        if let Some(e) = self.violates(row.id, &[], Some(row.rtype), &row.props, row.types.as_ref()) {
+        if let Some(e) = self.violates(row.id, &[], Some(row.rtype), &row.props, row.types.as_ref())
+        {
             return Err(e);
         }
         self.edges.insert(row.id, row.clone());

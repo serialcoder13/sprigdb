@@ -1041,7 +1041,10 @@ mod tests {
             r.get(),
             (5, Some("Records: 5  Duplicates: 1  Warnings: 2".into()))
         );
-        assert_eq!(parse_records(b"Rows matched: 1  Changed: 1  Warnings: 0"), None);
+        assert_eq!(
+            parse_records(b"Rows matched: 1  Changed: 1  Warnings: 0"),
+            None
+        );
     }
 
     fn create(kind: ObjectKind) -> Effect {

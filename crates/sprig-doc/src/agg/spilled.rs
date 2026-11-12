@@ -57,7 +57,7 @@ pub fn run_stage_seq(
             .and_then(|n| n.get("$limit"))
             .and_then(as_i64)
             .is_some_and(|n| n > 0);
-    if !spill::allowed() && !top_k {
+    if !spill::allowed() && !top_k && seq.is_mem() {
         return Ok(DocSeq::Mem(run_stage(seq.into_vec()?, stage, lim)?));
     }
     let doc_arg = || {
@@ -337,12 +337,15 @@ fn bucket_auto_seq(
     }
     let sp = stages_bucket::parse_auto(arg)?;
     let mut vals: Vec<Bson> = Vec::new();
+    // Pass 1: by value (stable), the values kept to place the buckets.
     let sorted = {
+        let mut i = 0i64;
         let wrapped = seq.into_iter_docs()?.map(|d| {
             let d = d?;
             let v = sp.value(&d, lim)?;
             vals.push(v.clone());
-            Ok(doc! {"v": v, "d": d})
+            i += 1;
+            Ok(doc! {"v": v, "i": i, "d": d})
         });
         let cmp: Cmp = Arc::new(|a: &Document, b: &Document| {
             compare(
@@ -353,9 +356,31 @@ fn bucket_auto_seq(
         spill::sort_seq(wrapped, cmp, None, lim.stage_bytes, "$bucketAuto")?
     };
     vals.sort_by(compare);
-    let mut it = sorted.into_iter_docs()?;
+    let plan = sp.plan(&vals);
+    drop(vals);
+    // Pass 2: each document tagged with its bucket, then sorted by bucket
+    // and input order, as MongoDB 8.0 accumulates a bucket.
+    let mut pos = 0usize;
+    let mut bucket = 0usize;
+    let ends: Vec<usize> = plan.iter().map(|(_, b, _, _)| *b).collect();
+    let tagged = sorted.into_iter_docs()?.map(|w| {
+        let mut w = w?;
+        while bucket + 1 < ends.len() && pos >= ends[bucket] {
+            bucket += 1;
+        }
+        pos += 1;
+        w.remove("v");
+        w.insert("b", i64::try_from(bucket).unwrap_or(i64::MAX));
+        Ok(w)
+    });
+    let by_bucket: Cmp = Arc::new(|a: &Document, b: &Document| {
+        (a.get_i64("b").unwrap_or(0), a.get_i64("i").unwrap_or(0))
+            .cmp(&(b.get_i64("b").unwrap_or(0), b.get_i64("i").unwrap_or(0)))
+    });
+    let grouped = spill::sort_seq(tagged, by_bucket, None, lim.stage_bytes, "$bucketAuto")?;
+    let mut it = grouped.into_iter_docs()?;
     let mut out = Vec::new();
-    for (a, b, min, max) in sp.plan(&vals) {
+    for (a, b, min, max) in plan {
         let ds = (&mut it).take(b - a).map(|w| {
             w.map(|mut w| match w.remove("d") {
                 Some(Bson::Document(d)) => d,

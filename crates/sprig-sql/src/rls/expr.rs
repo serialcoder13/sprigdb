@@ -899,6 +899,12 @@ pub struct LiteralBinder<'a> {
     pub subtree: Option<&'a [u64]>,
     /// Tenants the user administers, if known.
     pub managed: Option<&'a [u64]>,
+    /// The subtree is read from `__sprig_sys.__sprig_subtree_v` instead of
+    /// [`Self::subtree`] (above `rls.inline_subtree_max`; RL58).
+    pub subtree_table: bool,
+    /// Likewise for [`Self::managed`] (an administrator's managed tenants
+    /// are its subtree).
+    pub managed_table: bool,
     /// `NO_BACKSLASH_ESCAPES`.
     pub no_backslash_escapes: bool,
 }
@@ -932,11 +938,18 @@ impl Binder for LiteralBinder<'_> {
     }
 
     fn membership(&self, func: &str) -> Result<(String, String), SprigError> {
-        let ids = match func {
-            "SPRIG_TENANT_IN_SUBTREE" => self.subtree,
-            _ => self.managed,
+        let (ids, table) = match func {
+            "SPRIG_TENANT_IN_SUBTREE" => (self.subtree, self.subtree_table),
+            _ => (self.managed, self.managed_table),
+        };
+        if table {
+            return Ok((
+                "(".to_owned(),
+                format!(" IN ({}))", super::subtree::subquery()),
+            ));
         }
-        .ok_or_else(|| invalid(format!("{func}() isn't available on this gateway yet")))?;
+        let ids =
+            ids.ok_or_else(|| invalid(format!("{func}() isn't available on this gateway yet")))?;
         Ok(("(".to_owned(), format!(" IN ({}))", id_list(ids))))
     }
 }
@@ -1091,6 +1104,8 @@ mod tests {
             attr: &none,
             subtree: Some(&[42, 43]),
             managed: None,
+            subtree_table: false,
+            managed_table: false,
             no_backslash_escapes: false,
         };
         let r = |s: &str| render(s, &lexo(), "t", "`t`", &b);
@@ -1103,5 +1118,17 @@ mod tests {
             "(`t`.org IN (42, 43)) AND `t`.u = 'alice@%'"
         );
         assert!(r("SPRIG_TENANT_MANAGED(org)").is_err());
+        // RL58: above rls.inline_subtree_max, the subtree table.
+        let t = LiteralBinder {
+            subtree: None,
+            subtree_table: true,
+            managed: Some(&[]),
+            ..b
+        };
+        assert_eq!(
+            render("SPRIG_TENANT_IN_SUBTREE(org) OR SPRIG_TENANT_MANAGED(org)", &lexo(), "t", "`t`", &t)
+                .unwrap(),
+            "(`t`.org IN (SELECT `descendant` FROM `__sprig_sys`.`__sprig_subtree_v`)) OR (`t`.org IN (NULL))"
+        );
     }
 }

@@ -139,9 +139,7 @@ pub(crate) fn stream_error(e: &sprig_proto_mongo::errors::MongoError) {
         280 => "error.nonRetriable.changeStreamFatalError",
         286 => "error.nonRetriable.changeStreamHistoryLost",
         11602 => "error.retriable.interruptedDueToReplStateChange",
-        c if RETRIABLE.contains(&c)
-            || e.labels.contains(&"ResumableChangeStreamError") =>
-        {
+        c if RETRIABLE.contains(&c) || e.labels.contains(&"ResumableChangeStreamError") => {
             "error.retriable.other"
         }
         _ => "error.nonRetriable.other",

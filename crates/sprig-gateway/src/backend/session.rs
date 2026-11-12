@@ -939,6 +939,16 @@ impl BackendSession {
                 self.pending_capture.push(v.clone());
             }
         }
+        // Chapter 29 (RL57): a failed statement (an interrupted one too)
+        // may have left a definer routine's context in `@sprig_rls`; it is
+        // sent again before the connection's next statement.
+        if cur.error.is_some()
+            && self.vars.user_vars.get("sprig_rls").is_some_and(|v| {
+                matches!(v, super::state::VarValue::Text(t) if t.windows(5).any(|w| w == b"\"d\":{"))
+            })
+        {
+            cur.lease.conn().applied.user_vars.remove("sprig_rls");
+        }
 
         let route = cur.route;
         if dirty_after_use(

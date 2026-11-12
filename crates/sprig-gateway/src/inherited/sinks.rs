@@ -1207,7 +1207,100 @@ pub(crate) async fn drop_member_sink(
     )
     .await?;
     drop_unused_connections(&mut host, run_as, &sink.connections).await?;
+    drop_instance_rows(svc, t, sink.id.0).await?;
     Ok(true)
+}
+
+/// Deletes member `t`'s `inherited_instances` row of its sink `sink`, which
+/// the sweep just dropped (bugfix-56: the sweep left the row behind).
+///
+/// # Errors
+/// The catalog's.
+pub(crate) async fn drop_instance_rows(
+    svc: &Arc<TenantServices>,
+    t: TenantId,
+    sink: u64,
+) -> Result<usize> {
+    let ep = svc.locator.writer(t).await?;
+    let mut conn = ep.pool.get_conn().await.map_err(cat_err)?;
+    let store = MsgStore::new(ep.store.schema());
+    if !store.migrated(&mut conn).await? {
+        return Ok(0);
+    }
+    let mut n = 0;
+    for i in store.instances(&mut conn).await? {
+        let of_sink = i
+            .physical
+            .as_ref()
+            .and_then(|p| p.get("sink"))
+            .and_then(Value::as_u64)
+            == Some(sink);
+        if i.kind == DefKind::Sink && of_sink {
+            store.delete_instance(&mut conn, i.def).await?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+/// Member `t`'s instance rows of sink definitions its chain no longer
+/// has (bugfix-56): rows of sinks dropped before bugfix-52, whose member
+/// had detached, and rows a failed drop left. The definitions' keys.
+///
+/// # Errors
+/// The catalog's.
+pub(crate) async fn stale_instance_rows(
+    svc: &Arc<TenantServices>,
+    t: TenantId,
+) -> Result<Vec<DefKey>> {
+    let ep = svc.locator.writer(t).await?;
+    let mut conn = ep.pool.get_conn().await.map_err(cat_err)?;
+    let store = MsgStore::new(ep.store.schema());
+    if !store.migrated(&mut conn).await? {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<DefKey> = store
+        .instances(&mut conn)
+        .await?
+        .into_iter()
+        .filter(|i| i.kind == DefKind::Sink)
+        .map(|i| i.def)
+        .collect();
+    drop(conn);
+    if rows.is_empty() {
+        return Ok(rows);
+    }
+    let cat = catalog(svc, t).await?;
+    let chain = super::chain(svc, &cat).await?;
+    Ok(rows
+        .into_iter()
+        .filter(|k| {
+            !chain.levels.iter().any(|l| {
+                l.tenant == k.tenant
+                    && l.state.as_ref().is_some_and(|st| {
+                        st.defs
+                            .values()
+                            .any(|d| d.key() == *k && d.kind == DefKind::Sink)
+                    })
+            })
+        })
+        .collect())
+}
+
+/// Deletes member `t`'s instance row of definition `k`.
+///
+/// # Errors
+/// The catalog's.
+pub(crate) async fn delete_instance_row(
+    svc: &Arc<TenantServices>,
+    t: TenantId,
+    k: DefKey,
+) -> Result<()> {
+    let ep = svc.locator.writer(t).await?;
+    let mut conn = ep.pool.get_conn().await.map_err(cat_err)?;
+    MsgStore::new(ep.store.schema())
+        .delete_instance(&mut conn, k)
+        .await
 }
 
 /// Drops the member's connections among `used` (a dropped sink's) that

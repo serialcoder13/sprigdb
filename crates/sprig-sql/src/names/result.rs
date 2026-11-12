@@ -484,8 +484,13 @@ impl ResultMapper {
 
     fn definition(&mut self, text: &str, ctx: &OutputCtx<'_>) -> String {
         let text = stored::restore_str(text);
-        // Stored code pointed at row-level security's policy views reads
-        // as written (chapter 29, RL20).
+        // A definer routine's wrapper (chapter 29, RL57) and stored code
+        // pointed at row-level security's policy views read as written
+        // (RL20).
+        let text = match crate::rls::definer::unwrap(&text) {
+            std::borrow::Cow::Owned(o) => std::borrow::Cow::Owned(o),
+            std::borrow::Cow::Borrowed(_) => text,
+        };
         let text = match crate::rls::views::unswap(&text) {
             std::borrow::Cow::Owned(o) => std::borrow::Cow::Owned(o),
             std::borrow::Cow::Borrowed(_) => text,

@@ -603,6 +603,14 @@ async fn test_connection_write() {
     ok(&mut c, &format!("DROP DATABASE {db}")).await;
 }
 
+/// A gRPC request with an `authorization` header.
+fn authed<T>(m: T, auth: &str) -> tonic::Request<T> {
+    let mut r = tonic::Request::new(m);
+    r.metadata_mut()
+        .insert("authorization", auth.parse().unwrap());
+    r
+}
+
 /// The gRPC forms (R9 closers, item 117): `sprig.v1.Sinks.Test` and
 /// `sprig.v1.Connections.Test` answer the statements' rows, as the caller.
 /// Needs `SPRIG_TEST_SINKTEST_HTTP` (the gateway's HTTP listener, h2c) and
@@ -666,12 +674,6 @@ async fn grpc_test_calls_answer_the_statements_rows() {
         "Basic {}",
         base64::engine::general_purpose::STANDARD.encode(format!("{user}:sprig-dev-app"))
     );
-    let req = |m| {
-        let mut r = tonic::Request::new(m);
-        r.metadata_mut()
-            .insert("authorization", auth.parse().unwrap());
-        r
-    };
     let cells = |r: &TestReply| -> Vec<Vec<Option<String>>> {
         use prost_types::value::Kind;
         r.rows
@@ -689,11 +691,14 @@ async fn grpc_test_calls_answer_the_statements_rows() {
     };
     // Sinks.Test: sample 0 means 10, the statement's default here.
     let got = SinksClient::new(ch.clone())
-        .test(req(SinkTestRequest {
-            database: db.clone(),
-            sink: "s".into(),
-            sample: 0,
-        }))
+        .test(authed(
+            SinkTestRequest {
+                database: db.clone(),
+                sink: "s".into(),
+                sample: 0,
+            },
+            &auth,
+        ))
         .await
         .unwrap()
         .into_inner();
@@ -701,34 +706,56 @@ async fn grpc_test_calls_answer_the_statements_rows() {
     assert_eq!(cells(&got), want);
     assert!(!got.columns.is_empty());
     let e = SinksClient::new(ch.clone())
-        .test(req(SinkTestRequest {
-            database: db.clone(),
-            sink: "s".into(),
-            sample: 5000,
-        }))
+        .test(authed(
+            SinkTestRequest {
+                database: db.clone(),
+                sink: "s".into(),
+                sample: 5000,
+            },
+            &auth,
+        ))
         .await
         .unwrap_err();
     assert_eq!(e.code(), tonic::Code::InvalidArgument, "{e:?}");
     // Connections.Test: the same steps as the statement.
     let want = ok(&mut c, &format!("TEST CONNECTION {db}.hook")).await;
     let got = ConnectionsClient::new(ch.clone())
-        .test(req(ConnectionTestRequest {
-            database: db.clone(),
-            connection: "hook".into(),
-            ..Default::default()
-        }))
+        .test(authed(
+            ConnectionTestRequest {
+                database: db.clone(),
+                connection: "hook".into(),
+                ..Default::default()
+            },
+            &auth,
+        ))
         .await
         .unwrap()
         .into_inner();
     println!("Connections.Test: {:?} {:?}", got.columns, cells(&got));
-    assert_eq!(cells(&got), want);
+    // Each step's time differs between the two runs.
+    let timed = got.columns.iter().position(|c| c == "Elapsed ms");
+    let untimed = |rows: Vec<Vec<Option<String>>>| -> Vec<Vec<Option<String>>> {
+        rows.into_iter()
+            .map(|mut r| {
+                if let Some(i) = timed.filter(|i| *i < r.len()) {
+                    r.remove(i);
+                }
+                r
+            })
+            .collect()
+    };
+    assert!(!want.is_empty());
+    assert_eq!(untimed(cells(&got)), untimed(want));
     // As the caller: an unknown connection is the statement's error.
     let e = ConnectionsClient::new(ch)
-        .test(req(ConnectionTestRequest {
-            database: db.clone(),
-            connection: "nope".into(),
-            ..Default::default()
-        }))
+        .test(authed(
+            ConnectionTestRequest {
+                database: db.clone(),
+                connection: "nope".into(),
+                ..Default::default()
+            },
+            &auth,
+        ))
         .await
         .unwrap_err();
     println!("unknown connection: {e:?}");

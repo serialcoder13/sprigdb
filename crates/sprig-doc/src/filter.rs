@@ -534,6 +534,9 @@ pub struct Values<'a> {
     pub leaves: Vec<&'a Bson>,
     /// Some branch of the path was missing.
     pub missing: bool,
+    /// A leaf was named by position (`"a.0"`): MongoDB takes it whole,
+    /// arrays included (S136).
+    pub positional: bool,
 }
 
 /// Collects the values at `path` in `doc`.
@@ -567,7 +570,16 @@ fn walk<'a>(v: &'a Bson, rest: &[&str], out: &mut Values<'a>) {
             if let Ok(i) = rest[0].parse::<usize>()
                 && let Some(x) = a.get(i)
             {
-                walk(x, &rest[1..], out);
+                if rest.len() == 1 {
+                    // A positional path's last part (`"a.0"`) names the
+                    // element itself: MongoDB compares an array there
+                    // whole, without trying its elements (S93, S136).
+                    out.leaves.push(x);
+                    out.vals.push(x);
+                    out.positional = true;
+                } else {
+                    walk(x, &rest[1..], out);
+                }
                 any = true;
             }
             for e in a {
@@ -684,6 +696,7 @@ impl FieldOp {
                             vals: vec![e],
                             leaves: vec![e],
                             missing: false,
+                            positional: false,
                         };
                         // An array element that is itself an array is
                         // compared whole.

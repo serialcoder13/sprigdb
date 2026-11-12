@@ -24,6 +24,14 @@
 //! The two passes keep a sink whose definition a snapshot a moment behind
 //! doesn't show yet. Every gateway sweeps; a drop another gateway made
 //! first is a no-op (`DROP SINK IF EXISTS`).
+//!
+//! **Instance rows** (bugfix-56). Dropping an orphan also deletes its
+//! `inherited_instances` row. Rows whose definition is gone but whose
+//! sink went earlier (dropped by this sweep before bugfix-56, or by a
+//! member's own `DROP SINK`) are found the same way, seen twice and
+//! deleted: in the tenants of the sink index on every pass, and in every
+//! child tenant of the directory on a gateway's first two passes (the rows
+//! older sweeps left; new ones aren't left any more).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -78,6 +86,119 @@ impl Sightings {
 fn sightings() -> &'static Mutex<Sightings> {
     static S: OnceLock<Mutex<Sightings>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(Sightings::default()))
+}
+
+/// Stale instance rows seen: (member, `def_tenant.def_object`, "row").
+fn row_sightings() -> &'static Mutex<Sightings> {
+    static S: OnceLock<Mutex<Sightings>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(Sightings::default()))
+}
+
+/// Passes that still scan every child tenant for stale rows.
+static FULL_ROW_PASSES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(2);
+
+/// Every child tenant in the directory (`tenants/<id>` with an ancestor).
+async fn child_tenants(svc: &Arc<TenantServices>) -> Result<BTreeSet<u64>> {
+    use sprig_meta::{ListOpts, Record};
+    let prefix = svc.global.tier().key("tenants/")?;
+    let mut out = BTreeSet::new();
+    let mut opts = ListOpts::default();
+    loop {
+        let page = svc.global.list(&prefix, opts.clone()).await?;
+        for kv in &page.kvs {
+            if let Ok(r) = Record::<super::DirEntry>::decode(&kv.value)
+                && let [.., _, me] = r.body.path_ids().as_slice()
+            {
+                out.insert(*me);
+            }
+        }
+        if !page.more {
+            break;
+        }
+        opts.at = Some(page.revision);
+        opts.after = page.kvs.last().map(|kv| kv.key.clone());
+    }
+    Ok(out)
+}
+
+/// This pass's stale instance rows (module docs), in `tenants`.
+async fn find_rows(svc: &Arc<TenantServices>, tenants: &BTreeSet<u64>) -> HashSet<SinkKey> {
+    let mut out = HashSet::new();
+    for t in tenants {
+        match super::sinks::stale_instance_rows(svc, TenantId(*t)).await {
+            Ok(keys) => {
+                for k in keys {
+                    out.insert((*t, format!("{}.{}", k.tenant.0, k.object), "row".to_owned()));
+                }
+            }
+            Err(e) => tracing::debug!(tenant = t, error = %e, "instance rows not checked"),
+        }
+    }
+    out
+}
+
+/// Deletes the stale instance rows seen twice; returns how many.
+async fn sweep_rows(svc: &Arc<TenantServices>, confirm: Duration) -> Result<usize> {
+    let mut tenants: BTreeSet<u64> = sprig_sinks::meta::index_list(&svc.locator.dc_store())
+        .await?
+        .iter()
+        .map(|i| i.tenant)
+        .collect();
+    let full = FULL_ROW_PASSES
+        .fetch_update(
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+            |n| n.checked_sub(1),
+        )
+        .is_ok();
+    if full {
+        tenants.extend(child_tenants(svc).await?);
+    }
+    let seen = find_rows(svc, &tenants).await;
+    let due = {
+        let mut s = row_sightings().lock().unwrap_or_else(PoisonError::into_inner);
+        // A partial pass forgets nothing it didn't look at.
+        if !full {
+            let others: Vec<SinkKey> =
+                s.0.keys().filter(|k| !tenants.contains(&k.0)).cloned().collect();
+            let mut keep = seen.clone();
+            keep.extend(others);
+            s.observe(&keep, Instant::now(), confirm.max(CONFIRM_MIN))
+                .into_iter()
+                .filter(|k| seen.contains(k))
+                .collect::<Vec<_>>()
+        } else {
+            s.observe(&seen, Instant::now(), confirm.max(CONFIRM_MIN))
+        }
+    };
+    let mut n = 0;
+    for k in due {
+        let (t, def, _) = &k;
+        let Some((dt, dobj)) = def
+            .split_once('.')
+            .and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?)))
+        else {
+            continue;
+        };
+        let key = sprig_inherit::msg::DefKey {
+            tenant: TenantId(dt),
+            object: dobj,
+        };
+        match super::sinks::delete_instance_row(svc, TenantId(*t), key).await {
+            Ok(()) => {
+                tracing::info!(tenant = t, def = %key, "stale inherited sink instance row deleted: its definition is gone");
+                n += 1;
+                row_sightings()
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .forget(&k);
+            }
+            Err(e) => {
+                tracing::warn!(tenant = t, def = %key, error = %e, "stale inherited sink instance row not deleted; tried again next pass");
+            }
+        }
+    }
+    Ok(n)
 }
 
 /// `cat`'s `sprig_inherited` account, if it has one.
@@ -170,6 +291,14 @@ pub async fn sweep(svc: &Arc<TenantServices>, confirm: Duration) -> Result<Vec<S
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .forget(&k);
+    }
+    match sweep_rows(svc, confirm).await {
+        Ok(n) if n > 0 => {
+            metrics::counter!("sprig_inherit_drops_total", "how" => "stale_instance_row")
+                .increment(n as u64);
+        }
+        Ok(_) => {}
+        Err(e) => tracing::debug!(error = %e, "stale inherited sink instance rows not swept"),
     }
     Ok(dropped)
 }

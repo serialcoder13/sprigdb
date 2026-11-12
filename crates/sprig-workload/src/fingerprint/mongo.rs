@@ -358,7 +358,9 @@ mod tests {
         assert_eq!(f.shape.order_by[0].dir, SortDir::Desc);
         assert!(f.shape.limit);
         assert!(!f.shape.predicates[0].op.is_sargable());
-        assert!(!f.shape.predicates[0].op.is_field_sargable());
+        assert!(f.shape.predicates[0].op.is_field_sargable());
+        assert!(!f.shape.predicates[2].op.is_field_sargable());
+        assert!(!f.shape.all_unsargable());
     }
 
     #[test]

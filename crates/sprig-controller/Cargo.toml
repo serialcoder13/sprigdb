@@ -10,6 +10,10 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+# Automatic document indexes' doc_indexes rows (S133): their BSON key
+# pattern and chapter 31's field-column slugs.
+bson = "=2.15.0"
+sprig-doc = { path = "../sprig-doc" }
 axum.workspace = true
 futures.workspace = true
 gethostname.workspace = true

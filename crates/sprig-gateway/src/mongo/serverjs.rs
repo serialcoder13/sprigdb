@@ -84,9 +84,7 @@ pub(crate) fn scope_for(
     let tenant = c.sql.as_ref().map(SqlRunner::tenant).filter(|t| *t != 0);
     // The command's maxTimeMS bounds its code too (bugfix-57); a getMore's
     // is its wait for a tailable cursor, not a time limit.
-    let max_time_ms = (name != "getMore")
-        .then(|| max_time_ms(body))
-        .flatten();
+    let max_time_ms = (name != "getMore").then(|| max_time_ms(body)).flatten();
     async move {
         if !wanted {
             return None;

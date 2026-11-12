@@ -1187,20 +1187,22 @@ impl Engine {
                 ident(table),
             ),
             Some(k) => format!(
-                "SELECT _id, doc, _types{} FROM {}.{} WHERE ({}) AND _id {} {} ORDER BY _id{} LIMIT {n}",
+                "SELECT _id, doc, _types{} FROM {}.{}{} WHERE ({}) AND _id {} {} ORDER BY _id{} LIMIT {n}",
                 if with_v { ", _v" } else { "" },
                 ident(&ns.db),
                 ident(table),
+                crate::hint::clause(),
                 sqlp.sql,
                 if desc { "<" } else { ">" },
                 bin_lit(k),
                 if desc { " DESC" } else { "" }
             ),
             None => format!(
-                "SELECT _id, doc, _types{} FROM {}.{} WHERE {} ORDER BY _id{} LIMIT {n}",
+                "SELECT _id, doc, _types{} FROM {}.{}{} WHERE {} ORDER BY _id{} LIMIT {n}",
                 if with_v { ", _v" } else { "" },
                 ident(&ns.db),
                 ident(table),
+                crate::hint::clause(),
                 sqlp.sql,
                 if desc { " DESC" } else { "" }
             ),
@@ -1392,9 +1394,10 @@ impl Engine {
         let sqlp = translate(&pred, gm.as_ref().unwrap_or(&m));
         let total = if sqlp.exact {
             let q = format!(
-                "SELECT COUNT(*) FROM {}.{} WHERE {}",
+                "SELECT COUNT(*) FROM {}.{}{} WHERE {}",
                 ident(&ns.db),
                 ident(&m.table),
+                crate::hint::clause(),
                 sqlp.sql
             );
             let rows = sql.query(&q).await.map_err(|e| mongo_error(&e))?;
@@ -2346,8 +2349,10 @@ impl Engine {
                     crate::usage::note(sql.tenant(), &ns.db, &ns.coll, &m, &leading, None);
                     let gm = self.geo_sides(sql, ns, &m, &pred).await?;
                     let sqlp = translate(&pred, gm.as_ref().unwrap_or(&m));
-                    if spill::allowed() {
-                        // M5: the read itself spills past the stage limit.
+                    if spill::in_scope() {
+                        // M5 (S75): the read itself goes to disk past the
+                        // stage limit, as MongoDB streams it; blocking
+                        // stages still answer 292 without `allowDiskUse`.
                         self.scan_seq(sql, ns, &m.table, &pred, &sqlp).await?
                     } else {
                         DocSeq::Mem(
@@ -2373,7 +2378,7 @@ impl Engine {
             // M5: `$lookup` and `$graphLookup` over a spilled input, or
             // with `allowDiskUse`, run a batch of input documents at a
             // time into a builder that spills.
-            if matches!(name, "$lookup" | "$graphLookup") && (spill::allowed() || !seq.is_mem()) {
+            if matches!(name, "$lookup" | "$graphLookup") && (spill::in_scope() || !seq.is_mem()) {
                 let batch = if name == "$lookup" { 500 } else { 100 };
                 let mut out = SeqBuilder::new(self.cfg.agg_stage_bytes);
                 let mut it = seq.into_iter_docs()?;

@@ -809,7 +809,8 @@ impl<'c> MariaStore<'c> {
         let live = match d.entity {
             Entity::Node => self.lock_nodes(&[o0], true).await?.into_iter().any(|n| {
                 n.labels.contains(&d.token_id)
-                    && crate::schema::claim_key(d, &n.props, n.types.as_ref()).as_deref() == Some(key)
+                    && crate::schema::claim_key(d, &n.props, n.types.as_ref()).as_deref()
+                        == Some(key)
             }),
             Entity::Relationship => {
                 let j = self.layout.index_of(rk0);
@@ -823,7 +824,8 @@ impl<'c> MariaStore<'c> {
                     .map(|mut r| edge_at(&mut r, 0))
                     .any(|e| {
                         e.rtype == d.token_id
-                            && crate::schema::claim_key(d, &e.props, e.types.as_ref()).as_deref() == Some(key)
+                            && crate::schema::claim_key(d, &e.props, e.types.as_ref()).as_deref()
+                                == Some(key)
                     })
             }
         };
@@ -1459,9 +1461,7 @@ impl GraphStore for MariaStore<'_> {
             // The row as the transaction sees it (the caller locked it).
             let old = self.lock_nodes(&[row.id], true).await?;
             for d in &defs {
-                let was = old
-                    .first()
-                    .and_then(|o| Self::node_key(d, o));
+                let was = old.first().and_then(|o| Self::node_key(d, o));
                 let now = Self::node_key(d, row);
                 if was == now {
                     continue;
@@ -1547,9 +1547,7 @@ impl GraphStore for MariaStore<'_> {
         if !defs.is_empty() {
             let old = self.edges_on(&[(row.id, row.src_rk)]).await?;
             for d in &defs {
-                let was = old
-                    .first()
-                    .and_then(|o| Self::edge_key(d, o));
+                let was = old.first().and_then(|o| Self::edge_key(d, o));
                 let now = Self::edge_key(d, row);
                 if was == now {
                     continue;

@@ -1,0 +1,25 @@
+-- R4 round 7 (decision X36): MySQL's ALTER TABLE OK info line, SHOW
+-- PROCEDURE and FUNCTION STATUS's Language column, and SHOW CREATE
+-- TRIGGER's head as MySQL rebuilds it (backquoted names). Run with -vv.
+DROP TABLE IF EXISTS c_x7_t, c_x7_t2;
+DROP PROCEDURE IF EXISTS c_x7_p;
+DROP FUNCTION IF EXISTS c_x7_f;
+CREATE TABLE c_x7_t (id int PRIMARY KEY, a int);
+INSERT INTO c_x7_t VALUES (1, 1), (2, 2);
+ALTER TABLE c_x7_t ADD COLUMN b int;
+ALTER TABLE c_x7_t ADD INDEX k (a);
+ALTER TABLE c_x7_t MODIFY b bigint;
+CREATE INDEX k2 ON c_x7_t (b);
+DROP INDEX k2 ON c_x7_t;
+ALTER TABLE c_x7_t RENAME TO c_x7_t2;
+ALTER TABLE c_x7_t2 RENAME TO c_x7_t;
+CREATE PROCEDURE c_x7_p() SELECT 1;
+CREATE FUNCTION c_x7_f() RETURNS int DETERMINISTIC RETURN 1;
+SHOW PROCEDURE STATUS WHERE Db = DATABASE();
+SHOW FUNCTION STATUS WHERE Db = DATABASE();
+create trigger c_x7_tr before insert on @DB@.c_x7_t for each row set NEW.a = NEW.a + 1;
+SHOW CREATE TRIGGER c_x7_tr;
+DROP TRIGGER c_x7_tr;
+DROP FUNCTION c_x7_f;
+DROP PROCEDURE c_x7_p;
+DROP TABLE c_x7_t;

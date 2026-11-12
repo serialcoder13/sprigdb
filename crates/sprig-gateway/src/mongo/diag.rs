@@ -43,6 +43,7 @@ pub(super) fn first_docs(
     body: &Document,
     first: Option<&Document>,
     lsid: Option<Vec<u8>>,
+    process: Option<bool>,
 ) -> Result<Option<Vec<Document>>, MongoError> {
     let Some((name, arg)) = first.and_then(|s| s.iter().next()) else {
         return Ok(None);
@@ -55,7 +56,7 @@ pub(super) fn first_docs(
                     "$currentOp must be run against the 'admin' database with {aggregate: 1}",
                 ));
             }
-            Ok(Some(current_op(c, arg, body, lsid.as_deref())?))
+            Ok(Some(current_op(c, arg, body, lsid.as_deref(), process)?))
         }
         "$listSessions" => {
             if db != "config" || coll != "system.sessions" {
@@ -76,6 +77,7 @@ fn current_op(
     arg: &Bson,
     body: &Document,
     lsid: Option<&[u8]>,
+    process: Option<bool>,
 ) -> Result<Vec<Document>, MongoError> {
     let Bson::Document(spec) = arg else {
         return Err(MongoError::new(
@@ -103,12 +105,7 @@ fn current_op(
     let who = owner(c);
     // M5 (S78): every user's sessions need `PROCESS` on the tenant.
     let all_users = spec.get_bool("allUsers").unwrap_or(false);
-    if all_users
-        && c.sql
-            .as_ref()
-            .and_then(|s| s.holds_tenant_privilege(sprig_auth::authz::Action::Process))
-            != Some(true)
-    {
+    if all_users && process != Some(true) {
         return Err(MongoError::new(
             code::UNAUTHORIZED,
             format!(

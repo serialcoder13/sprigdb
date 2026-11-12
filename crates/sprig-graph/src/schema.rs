@@ -199,7 +199,12 @@ pub fn index_value(j: &Json, kind: IndexKind) -> Option<String> {
 /// index columns [`crate::catalog::Tables::index_ddl`] adds compute the
 /// same text in MariaDB.
 #[must_use]
-pub fn prop_index_value(props: &Json, types: Option<&Json>, p: &str, kind: IndexKind) -> Option<String> {
+pub fn prop_index_value(
+    props: &Json,
+    types: Option<&Json>,
+    p: &str,
+    kind: IndexKind,
+) -> Option<String> {
     let j = props.get(p)?;
     if let Json::String(s) = j
         && let Some(t) = types.and_then(|t| t.get(p)).and_then(Json::as_str)

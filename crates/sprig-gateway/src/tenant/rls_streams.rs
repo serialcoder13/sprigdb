@@ -345,6 +345,7 @@ pub async fn record_filter(
             .ok_or_else(|| SprigError::internal("a protected table the resolver can't find"))?;
         r.predicate(key, &[sprig_sql::rls::Cmd::Select], qual)?
     };
+    let (columns, predicate) = decode_binary(columns, predicate, qual);
     let opaque: Vec<String> = columns
         .iter()
         .filter(|c| c.opaque)
@@ -359,9 +360,65 @@ pub async fn record_filter(
         predicate
     };
     Ok(Some(sprig_streams::read::RecordFilter {
-        columns: json_table_columns(columns),
+        columns: json_table_columns(&columns),
         predicate,
     }))
+}
+
+/// Binary string columns (`BINARY`, `VARBINARY`, the `BLOB`s) that
+/// `predicate` reads, decoded from the image's base64 rather than hiding
+/// the record (RLS round 6, decision RL56: a key-value namespace's key
+/// `k` is `VARBINARY`, so key policies would otherwise hide every change
+/// of a namespace): each is read from the image as text and every
+/// reference `qual.c` in the predicate becomes `FROM_BASE64(qual.c)`.
+/// Bit, spatial and vector columns stay opaque.
+fn decode_binary(
+    columns: &[FilterColumn],
+    mut predicate: String,
+    qual: &str,
+) -> (Vec<FilterColumn>, String) {
+    let read = columns_read(&predicate, qual);
+    let mut out = columns.to_vec();
+    for c in &mut out {
+        if c.opaque && c.plain.is_some() && read.contains(&c.name.to_lowercase()) {
+            c.opaque = false;
+            c.ty = "longtext CHARACTER SET ascii".to_owned();
+            predicate = map_column(&predicate, qual, &c.name, |r| format!("FROM_BASE64({r})"));
+        }
+    }
+    (out, predicate)
+}
+
+/// `rendered` with each reference `qual.name` (bare or quoted, any case)
+/// replaced by `with(reference)`.
+fn map_column(rendered: &str, qual: &str, name: &str, with: impl Fn(&str) -> String) -> String {
+    let q = format!("{qual}.");
+    let mut out = String::with_capacity(rendered.len() + 16);
+    let mut rest = rendered;
+    while let Some(at) = rest.find(&q) {
+        let after = &rest[at + q.len()..];
+        let (col, len) = if let Some(r) = after.strip_prefix('`') {
+            let c = r.split('`').next().unwrap_or_default();
+            (c.to_owned(), c.len() + 2)
+        } else {
+            let c: String = after
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
+                .collect();
+            let n = c.len();
+            (c, n)
+        };
+        out.push_str(&rest[..at]);
+        let reference = &rest[at..at + q.len() + len];
+        if col.eq_ignore_ascii_case(name) {
+            out.push_str(&with(reference));
+        } else {
+            out.push_str(reference);
+        }
+        rest = &rest[at + q.len() + len..];
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -422,5 +479,22 @@ mod tests {
             json_table_columns(&cols),
             "`owner` varchar(64) PATH '$.\"owner\"', `b` longtext PATH '$.__sprig_none'"
         );
+        // RL56: a binary column the predicate reads is decoded from base64.
+        let (c2, p2) = decode_binary(
+            &cols,
+            "(`__sprig_ci`.b LIKE 'a:%') AND (`__sprig_ci`.`B` <> `__sprig_ci`.bx)".to_owned(),
+            "`__sprig_ci`",
+        );
+        assert_eq!(
+            p2,
+            "(FROM_BASE64(`__sprig_ci`.b) LIKE 'a:%') AND (FROM_BASE64(`__sprig_ci`.`B`) <> `__sprig_ci`.bx)"
+        );
+        assert_eq!(
+            json_table_columns(&c2),
+            "`owner` varchar(64) PATH '$.\"owner\"', `b` longtext CHARACTER SET ascii PATH '$.\"b\"'"
+        );
+        // Not read: stays opaque.
+        let (c3, _) = decode_binary(&cols, "`__sprig_ci`.owner = 'x'".to_owned(), "`__sprig_ci`");
+        assert!(c3[1].opaque);
     }
 }

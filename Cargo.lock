@@ -5765,6 +5765,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "axum",
+ "bson",
  "futures",
  "gethostname",
  "http-body-util",
@@ -5785,6 +5786,7 @@ dependencies = [
  "sprig-catalog",
  "sprig-cluster",
  "sprig-common",
+ "sprig-doc",
  "sprig-feed",
  "sprig-inherit",
  "sprig-logic",

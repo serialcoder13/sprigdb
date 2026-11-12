@@ -959,12 +959,7 @@ mod tests {
         conn.query_drop(format!("DROP DATABASE {q}")).await.unwrap();
         assert!(none.is_empty(), "{none:?}");
         assert_eq!(rewritten, 2);
-        let c = field_candidates(
-            &input((*after[0].shape).clone()),
-            "db0",
-            KEYS,
-            &key_stats(),
-        );
+        let c = field_candidates(&input((*after[0].shape).clone()), "db0", KEYS, &key_stats());
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].def.kind, IndexKind::FieldColumn);
         assert_eq!(

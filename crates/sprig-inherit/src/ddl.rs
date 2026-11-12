@@ -1016,20 +1016,39 @@ pub async fn drop_share(
     let mut c = root_change(ctx);
     c.drop_shares.push(sh.id);
     r.commit(&c).await?;
-    // The share is gone: its children's overrides become their own rows
-    // and its views go. A failure leaves them as before (hidden, the view
-    // unused), so the statement still succeeds.
-    match crate::unshare::after_drop(ctx, r, &carried).await {
-        Ok(u) if u.views + u.orphaned > 0 => tracing::info!(
-            share = %name,
-            views = u.views,
-            orphaned = u.orphaned,
-            "share dropped: the children's overrides are their own rows"
-        ),
-        Ok(_) => {}
-        Err(e) => {
-            metrics::counter!("sprig_inherit_unshare_failures_total").increment(1);
-            tracing::warn!(share = %name, error = %e, "share dropped, but its children were not cleaned up");
+    // The share is gone: its children's overrides become their own rows,
+    // their hides, views and copies go. Every step can run again, so a
+    // failure runs the cleanup again (bugfix-55); one that keeps failing
+    // leaves them as before (hidden, the view unused), and the statement
+    // still succeeds.
+    let mut retry = crate::unshare::Retry::default();
+    loop {
+        match crate::unshare::after_drop(ctx, r, &carried).await {
+            Ok(u) => {
+                if u.views + u.orphaned + u.unhidden + u.copies > 0 {
+                    tracing::info!(
+                        share = %name,
+                        views = u.views,
+                        orphaned = u.orphaned,
+                        unhidden = u.unhidden,
+                        copies = u.copies,
+                        attempts = retry.failed() + 1,
+                        "share dropped: the children's overrides are their own rows"
+                    );
+                }
+                break;
+            }
+            Err(e) => match retry.again() {
+                Some(pause) => {
+                    tracing::info!(share = %name, error = %e, "a dropped share's cleanup failed; trying again");
+                    tokio::time::sleep(pause).await;
+                }
+                None => {
+                    metrics::counter!("sprig_inherit_unshare_failures_total").increment(1);
+                    tracing::warn!(share = %name, error = %e, attempts = retry.failed(), "share dropped, but its children were not cleaned up");
+                    break;
+                }
+            },
         }
     }
     Ok(Done::default())

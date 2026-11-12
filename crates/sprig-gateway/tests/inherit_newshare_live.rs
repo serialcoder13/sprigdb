@@ -396,3 +396,115 @@ async fn a_dropped_share_leaves_the_childs_overrides_as_its_own_rows() {
     }
     ok(&mut c, &format!("DROP DATABASE {db}")).await;
 }
+
+/// The materialized copies (`__sprig_ih_<object>`, not the state table)
+/// in the physical schemas matching `SPRIG_TEST_NEWSHARE_BACKEND_SCHEMAS`,
+/// as [`share_views`] reads the views.
+async fn copy_tables() -> Option<Vec<String>> {
+    let addr = std::env::var("SPRIG_TEST_NEWSHARE_BACKEND").ok()?;
+    let pw = std::env::var("SPRIG_TEST_NEWSHARE_BACKEND_PASSWORD").ok()?;
+    let like = std::env::var("SPRIG_TEST_NEWSHARE_BACKEND_SCHEMAS").ok()?;
+    let (host, port) = addr.rsplit_once(':').unwrap();
+    let mut b = Conn::new(
+        OptsBuilder::default()
+            .ip_or_hostname(host)
+            .tcp_port(port.parse().unwrap())
+            .user(Some("root"))
+            .pass(Some(pw)),
+    )
+    .await
+    .expect("backend login");
+    let v: Vec<(String, String)> = b
+        .query(format!(
+            "SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.TABLES WHERE TABLE_NAME \
+             LIKE '\\_\\_sprig\\_ih\\_%' AND TABLE_NAME <> '__sprig_ih_state' AND TABLE_SCHEMA \
+             LIKE '{}'",
+            like.replace('\'', "")
+        ))
+        .await
+        .unwrap();
+    drop(b);
+    Some(v.into_iter().map(|(s, t)| format!("{s}.{t}")).collect())
+}
+
+/// Waits (20 s at most) until the child's `t1` holds `want`.
+async fn rows_become(c: &mut Conn, db: &str, want: &[(&str, &str)]) -> Vec<(String, String)> {
+    let want = pairs(want);
+    let mut last = Vec::new();
+    for _ in 0..80 {
+        if let Ok(r) = sql(c, &format!("SELECT id, v FROM {db}.t1 ORDER BY id")).await {
+            last = r
+                .into_iter()
+                .map(|r| (r[0].clone().unwrap(), r[1].clone().unwrap_or_default()))
+                .collect();
+            if last == want {
+                return last;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    last
+}
+
+/// bugfix-55 (bugfix-51's leftovers), on a materialized share: when the
+/// parent drops the share, the child's hides go with it (a share made
+/// again shows the record the child had hidden under the old one), and
+/// the copy the child read the parent's rows from leaves its schema at
+/// once (with `SPRIG_TEST_NEWSHARE_BACKEND*`, as for
+/// `a_dropped_share_leaves_the_childs_overrides_as_its_own_rows`).
+/// Before, the hide rows stayed (record 2 stayed hidden under the new
+/// share) and the copy table stayed, emptied by the worker.
+#[tokio::test]
+async fn a_dropped_share_takes_the_childs_hides_and_copy_with_it() {
+    let Some(e) = env() else {
+        eprintln!("SPRIG_TEST_NEWSHARE_* not set; skipped");
+        return;
+    };
+    let db = format!("bf13dh{}", suffix());
+    let mut p = conn(&e.addr, &e.parent).await;
+    let mut c = conn(&e.addr, &e.child).await;
+    for x in [&mut p, &mut c] {
+        ok(x, "SPRIG SET inherit.merge = 'materialized'").await;
+    }
+    share(&mut p, &db).await;
+    ok(&mut c, &format!("USE {db}")).await;
+    let seen = rows_become(&mut c, &db, &[("1", "parent one"), ("2", "parent two")]).await;
+    assert_eq!(seen, pairs(&[("1", "parent one"), ("2", "parent two")]));
+    // The child hides the parent's record 2.
+    ok(&mut c, "DELETE FROM t1 WHERE id = 2").await;
+    assert_eq!(rows_of(&mut c, &db).await, pairs(&[("1", "parent one")]));
+    let copies_before = copy_tables().await;
+    if let Some(v) = &copies_before {
+        println!("copies before the drop: {v:?}");
+        assert!(!v.is_empty(), "no copy table: the share isn't materialized");
+    }
+
+    ok(&mut p, &format!("USE {db}")).await;
+    ok(&mut p, &format!("DROP SHARE {db}_s")).await;
+    assert_eq!(rows_of(&mut c, &db).await, pairs(&[]));
+    if let Some(v) = copy_tables().await {
+        println!("copies after the drop: {v:?}");
+        assert!(v.is_empty(), "the copy stayed: {v:?}");
+    }
+
+    // A new share of the table: the old share's hide is gone with it.
+    ok(
+        &mut p,
+        &format!("CREATE SHARE {db}_s ON t1 TO ALL CHILDREN"),
+    )
+    .await;
+    let seen = rows_become(&mut c, &db, &[("1", "parent one"), ("2", "parent two")]).await;
+    println!("the child under the new share: {seen:?}");
+    assert_eq!(
+        seen,
+        pairs(&[("1", "parent one"), ("2", "parent two")]),
+        "record 2 stayed hidden from the dropped share"
+    );
+
+    ok(&mut p, &format!("DROP SHARE {db}_s")).await;
+    ok(&mut p, &format!("DROP DATABASE {db}")).await;
+    ok(&mut c, &format!("DROP DATABASE IF EXISTS {db}")).await;
+    for x in [&mut p, &mut c] {
+        ok(x, "SPRIG RESET inherit.merge").await;
+    }
+}

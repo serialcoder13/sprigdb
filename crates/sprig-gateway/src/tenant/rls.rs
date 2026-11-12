@@ -750,6 +750,11 @@ pub struct SessionValues {
     pub subtree: Option<Arc<Vec<u64>>>,
     /// `SPRIG_TENANT_MANAGED`: the tenants the user administers.
     pub managed: Option<Arc<Vec<u64>>>,
+    /// The subtree is above `rls.inline_subtree_max`: it is read from
+    /// `__sprig_sys.__sprig_subtree_v` (RL58).
+    pub subtree_table: bool,
+    /// Likewise the managed tenants (an administrator's subtree).
+    pub managed_table: bool,
 }
 
 impl SessionValues {
@@ -782,6 +787,8 @@ impl SessionValues {
             },
             subtree: None,
             managed: None,
+            subtree_table: false,
+            managed_table: false,
         }
     }
 
@@ -832,6 +839,8 @@ impl SessionValues {
                 "attrs": self.attrs.clone().unwrap_or(serde_json::Value::Null),
                 "sub": self.subtree.as_deref().cloned().unwrap_or_default(),
                 "man": self.managed.as_deref().cloned().unwrap_or_default(),
+                "subt": self.subtree_table,
+                "mant": self.managed_table,
             }
         });
         v.to_string()
@@ -973,6 +982,8 @@ impl<'a> Resolve<'a> {
             attr: &attr,
             subtree: self.values.subtree.as_deref().map(Vec::as_slice),
             managed: self.values.managed.as_deref().map(Vec::as_slice),
+            subtree_table: self.values.subtree_table,
+            managed_table: self.values.managed_table,
             no_backslash_escapes: nbe,
         };
         let sim = simulated();
@@ -1136,6 +1147,108 @@ pub fn policy_reads(cat: &TenantCatalog, objects: &[ObjectId], lex: &LexOptions)
     out
 }
 
+/// What this process last wrote to `__sprig_sys.__sprig_subtree`, by
+/// (tenant, cluster): a hash of the subtree (RL58).
+type SubtreeApplied = std::sync::Mutex<HashMap<(u64, String), u64>>;
+
+fn subtree_applied() -> &'static SubtreeApplied {
+    static C: std::sync::OnceLock<SubtreeApplied> = std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Brings tenant `tenant`'s rows of `__sprig_sys.__sprig_subtree` on
+/// `cluster` to `tree` (RL58), when they differ from what this process
+/// last wrote: creates the table and its `PUBLIC` view if needed, then
+/// deletes the rows no longer in the tree and inserts the new ones, in one
+/// transaction. Idempotent, so gateways may sync the same tenant at once.
+///
+/// # Errors
+/// The cluster's.
+pub async fn subtree_sync(
+    svc: &super::TenantServices,
+    tenant: u64,
+    tree: &[u64],
+    cluster: &sprig_common::ids::ClusterId,
+) -> Result<()> {
+    use mysql_async::prelude::Queryable;
+    use std::hash::{Hash, Hasher};
+    let h = {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        tree.hash(&mut h);
+        h.finish()
+    };
+    let key = (tenant, cluster.to_string());
+    if subtree_applied()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
+        == Some(&h)
+    {
+        return Ok(());
+    }
+    let pool = svc.locator.ctl_pool(cluster).await?;
+    let mut c = pool.get_conn().await.map_err(|e| {
+        SprigError::new(
+            SprigCode::BackendUnavailable,
+            format!("sprig_ctl on {cluster}: {e}"),
+        )
+    })?;
+    let fail = |e: mysql_async::Error| {
+        SprigError::new(
+            SprigCode::BackendUnavailable,
+            format!("tenant subtree on {cluster}: {e}"),
+        )
+    };
+    for q in sprig_sql::rls::subtree::setup_sql() {
+        c.query_drop(q).await.map_err(fail)?;
+    }
+    let t = format!(
+        "`{}`.`{}`",
+        sprig_sql::rls::subtree::SYS_SCHEMA,
+        sprig_sql::rls::subtree::TABLE
+    );
+    let have: Vec<u64> = c
+        .exec(
+            format!("SELECT `descendant` FROM {t} WHERE `ancestor` = ?"),
+            (tenant,),
+        )
+        .await
+        .map_err(fail)?;
+    let have: std::collections::BTreeSet<u64> = have.into_iter().collect();
+    let want: std::collections::BTreeSet<u64> = tree.iter().copied().collect();
+    let gone: Vec<u64> = have.difference(&want).copied().collect();
+    let new: Vec<u64> = want.difference(&have).copied().collect();
+    let mut tx = c
+        .start_transaction(mysql_async::TxOpts::default())
+        .await
+        .map_err(fail)?;
+    for chunk in gone.chunks(1000) {
+        let ids: Vec<String> = chunk.iter().map(u64::to_string).collect();
+        tx.query_drop(format!(
+            "DELETE FROM {t} WHERE `ancestor` = {tenant} AND `descendant` IN ({})",
+            ids.join(", ")
+        ))
+        .await
+        .map_err(fail)?;
+    }
+    for chunk in new.chunks(1000) {
+        let rows: Vec<String> = chunk.iter().map(|d| format!("({tenant}, {d})")).collect();
+        tx.query_drop(format!(
+            "INSERT IGNORE INTO {t} (`ancestor`, `descendant`) VALUES {}",
+            rows.join(", ")
+        ))
+        .await
+        .map_err(fail)?;
+    }
+    tx.commit().await.map_err(fail)?;
+    tracing::info!(tenant, %cluster, tenants = tree.len(), added = new.len(), removed = gone.len(), "tenant subtree written for row-level security");
+    subtree_applied()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key, h);
+    Ok(())
+}
+
 /// Subtrees by root tenant, with when they were read.
 type SubtreeCache = std::sync::Mutex<HashMap<u64, (std::time::Instant, Arc<Vec<u64>>)>>;
 
@@ -1237,14 +1350,30 @@ pub async fn bind_tree(
         &cat.setting_ctx(&svc.dc),
         Some(&cat.settings),
     );
-    if tree.len() as u64 > max {
-        return Err(sprig_sql::rls::unsupported(&format!(
-            "a subtree of {} tenants (rls.inline_subtree_max is {max})",
-            tree.len()
-        )));
-    }
     let p = super::authz::privileges(ts, cat);
     let admin = p.unrestricted() || p.allows(Action::TenantAdmin, Target::Tenant);
+    if tree.len() as u64 > max {
+        // RL58: the subtree goes to `__sprig_sys.__sprig_subtree` on the
+        // tenant's clusters, and the statement reads it there.
+        let clusters = crate::exec::router::placement_digest(svc, cat)
+            .map(|p| p.1)
+            .unwrap_or_default();
+        if clusters.is_empty() {
+            return Err(sprig_sql::rls::unsupported(&format!(
+                "a subtree of {} tenants (rls.inline_subtree_max is {max}) before the tenant's \
+                 clusters are known",
+                tree.len()
+            )));
+        }
+        for c in &clusters {
+            subtree_sync(svc, ts.tenant.0, &tree, c).await?;
+        }
+        values.subtree = None;
+        values.subtree_table = true;
+        values.managed_table = admin;
+        values.managed = (!admin).then(|| Arc::new(Vec::new()));
+        return Ok(());
+    }
     values.managed = Some(if admin {
         Arc::clone(&tree)
     } else {
@@ -1496,6 +1625,127 @@ pub fn elements_of(tenant: u64, object: u64) -> Option<ElementViews> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(&(tenant, object))
         .cloned()
+}
+
+/// Accounts (`t42_u7`) defining wrapped definer routines (RLS round 6,
+/// decision RL57), by tenant: the catalog version they were last looked up
+/// at, and the accounts (those repoint wrapped since are added at once).
+type Definers = std::sync::Mutex<HashMap<u64, (u64, std::collections::BTreeSet<String>)>>;
+
+fn definers() -> &'static Definers {
+    static V: std::sync::OnceLock<Definers> = std::sync::OnceLock::new();
+    V.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Notes that `account` defines a wrapped definer routine of `tenant`.
+pub fn definer_note(tenant: u64, account: &str) {
+    definers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(tenant)
+        .or_insert((0, std::collections::BTreeSet::new()))
+        .1
+        .insert(account.to_owned());
+}
+
+/// The accounts defining `tenant`'s wrapped definer routines, looked up
+/// on `cluster` once per catalog version `version` (RL57).
+///
+/// # Errors
+/// The cluster's.
+pub async fn definers_of(
+    svc: &super::TenantServices,
+    tenant: u64,
+    version: u64,
+    cluster: &sprig_common::ids::ClusterId,
+) -> Result<std::collections::BTreeSet<String>> {
+    use mysql_async::prelude::Queryable;
+    if let Some((v, set)) = definers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&tenant)
+        && *v == version
+    {
+        return Ok(set.clone());
+    }
+    let pool = svc.locator.ctl_pool(cluster).await?;
+    let mut conn = pool.get_conn().await.map_err(|e| {
+        SprigError::new(
+            SprigCode::BackendUnavailable,
+            format!("sprig_ctl on {cluster}: {e}"),
+        )
+    })?;
+    let like = format!("t{tenant}\\_d%");
+    let found: Vec<String> = conn
+        .exec(
+            "SELECT DISTINCT SUBSTRING_INDEX(DEFINER, '@', 1) FROM information_schema.ROUTINES \
+             WHERE ROUTINE_SCHEMA LIKE ? AND SECURITY_TYPE = 'DEFINER' \
+             AND ROUTINE_DEFINITION LIKE '%sprig:rls-definer(%'",
+            (like.as_str(),),
+        )
+        .await
+        .map_err(|e| SprigError::new(SprigCode::BackendUnavailable, format!("{cluster}: {e}")))?;
+    drop(conn);
+    let mut g = definers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let e = g
+        .entry(tenant)
+        .or_insert((0, std::collections::BTreeSet::new()));
+    e.0 = version;
+    e.1.extend(found);
+    Ok(e.1.clone())
+}
+
+/// The `@sprig_rls` contexts of `accounts` (RL57), as the session's `"d"`:
+/// each definer's policies at the catalog's auth version, compiled with its
+/// default roles (chapter 29: a `SECURITY DEFINER` function runs with its
+/// definer's default roles), with its name, ids, attributes and space;
+/// claims are absent and the subtree sets empty (as for worker-run code,
+/// RL42). Accounts of other tenants or of gone users are left out (their
+/// routines keep the caller's context).
+#[must_use]
+pub fn definer_contexts(
+    cat: &TenantCatalog,
+    accounts: &std::collections::BTreeSet<String>,
+) -> Option<serde_json::Value> {
+    use sprig_auth::authz::CompiledPrivileges;
+    let (Some(state), Some(auth)) = (AuthzState::of(cat), TenantAuth::of(cat)) else {
+        return None;
+    };
+    let prefix = format!("t{}_u", cat.tenant);
+    let mut d = serde_json::Map::new();
+    for a in accounts {
+        let Some(uid) = a.strip_prefix(&prefix).and_then(|x| x.parse::<u32>().ok()) else {
+            continue;
+        };
+        let u = sprig_common::ids::UserId(uid);
+        let Some(row) = auth.user(u).map(|x| x.row.clone()) else {
+            continue;
+        };
+        let c = CompiledPrivileges::compile(state, u, &state.default_roles(u));
+        let r = sprig_auth::authz::rls::compile(cat, &c, u);
+        d.insert(
+            a.clone(),
+            serde_json::json!({
+                "b": u8::from(r.bypass || c.everything),
+                "x": r.exempt.iter().map(|o| o.0).collect::<Vec<_>>(),
+                "p": r.policy_ids,
+                "s": {
+                    "user": format!("{}@{}", row.name, row.host),
+                    "uid": uid,
+                    "tid": cat.tenant.0,
+                    "htid": cat.tenant.0,
+                    "space": (row.home_space_id != 0).then_some(row.home_space_id),
+                    "claims": serde_json::Value::Null,
+                    "attrs": row.attributes.clone().unwrap_or(serde_json::Value::Null),
+                    "sub": Vec::<u64>::new(),
+                    "man": Vec::<u64>::new(),
+                }
+            }),
+        );
+    }
+    (!d.is_empty()).then_some(serde_json::Value::Object(d))
 }
 
 /// `rls.backend_enforcement` at database `db`: `views`, `triggers` or

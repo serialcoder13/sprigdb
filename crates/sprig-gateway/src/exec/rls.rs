@@ -841,6 +841,33 @@ impl PassSession {
         } else {
             values.context(&rls)
         };
+        // RL57: the contexts of wrapped definer routines' definers, which
+        // those routines switch to while they run.
+        let accounts = match crate::tenant::rls::definers_of(
+            &Arc::clone(ts.services()),
+            ts.tenant.0,
+            cat.version,
+            &self.target.cluster,
+        )
+        .await
+        {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!(error = %e, "definer routines' definers not read");
+                std::collections::BTreeSet::new()
+            }
+        };
+        let context = match crate::tenant::rls::definer_contexts(&cat, &accounts) {
+            Some(d) => {
+                let mut v: serde_json::Value =
+                    serde_json::from_str(&context).unwrap_or(serde_json::Value::Null);
+                if let Some(o) = v.as_object_mut() {
+                    o.insert("d".to_owned(), d);
+                }
+                v.to_string()
+            }
+            None => context,
+        };
         // Policy views (RL18): the bound tables' views replace them in
         // every statement sent, internal exempt sessions included (their
         // context's bypass lets the view show every row).
@@ -1392,6 +1419,7 @@ impl PassSession {
                         no_view: &no_view,
                     },
                     &db_of,
+                    tenant,
                 )
                 .await;
                 if let Err(e) = r {
@@ -1478,6 +1506,7 @@ async fn repoint_one(
     c: &crate::tenant::rls::TaintedCode,
     v: &CodeViews<'_>,
     db_of: &(dyn Fn(&str) -> Option<u32> + Sync),
+    tenant: u64,
 ) -> Result<()> {
     let (kind, col, mode_col, cs_col, coll_col) = match c.kind {
         ObjectKind::View => ("VIEW", 1, None, 2, 3),
@@ -1515,8 +1544,23 @@ async fn repoint_one(
         no_backslash_escapes: up.contains("NO_BACKSLASH_ESCAPES"),
         ..LexOptions::mariadb()
     };
-    let new = swap_code(&text, lex, schema, v, db_of)?;
-    let Some(new) = new else {
+    // RL57: a definer routine is wrapped to run under its definer's
+    // policies; its text as written is the starting point every time.
+    let base = sprig_sql::rls::definer::unwrap(&text);
+    let swapped = swap_code(&base, lex, schema, v, db_of)?;
+    let new = if matches!(c.kind, ObjectKind::Procedure | ObjectKind::Function) {
+        let from = swapped.as_deref().unwrap_or(&base);
+        match sprig_sql::rls::definer::wrap(from, &lex)? {
+            Some(w) => {
+                crate::tenant::rls::definer_note(tenant, &w.account);
+                Some(w.text)
+            }
+            None => swapped,
+        }
+    } else {
+        swapped
+    };
+    let Some(new) = new.filter(|n| *n != text) else {
         return Ok(());
     };
     let new = or_replace(&new).ok_or_else(|| unsupported("stored code text"))?;

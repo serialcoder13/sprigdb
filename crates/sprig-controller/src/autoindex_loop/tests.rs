@@ -309,6 +309,7 @@ async fn one_tenant_from_candidate_to_drop() {
             mover: None,
             marker: Arc::new(NoMarker),
             decisions: Arc::new(LogDecisions),
+            docs: None,
         };
         let slots = LocalSlots::new();
         let cadence = Cadence::default();
@@ -512,6 +513,7 @@ mod budgets {
             mover: None,
             marker: Arc::new(NoMarker),
             decisions: Arc::new(LogDecisions),
+            docs: None,
         }
     }
 
@@ -705,6 +707,7 @@ async fn a_stuck_pass_gives_up_at_its_limit() {
         mover: None,
         marker: Arc::new(NoMarker),
         decisions: Arc::new(LogDecisions),
+            docs: None,
     };
     let cadence = Cadence {
         pass_limit: Duration::from_secs(600),

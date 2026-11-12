@@ -379,9 +379,9 @@ impl<'a> IntMetaSink<'a> {
             });
         }
         if let Some(at) = language {
-            let mut cols = after.to_vec();
-            cols.insert(at, language_column(&after[at - 1]));
-            return Some(cols);
+            let mut with_language = after.to_vec();
+            with_language.insert(at, language_column(&after[at - 1]));
+            return Some(with_language);
         }
         fixed
     }

@@ -660,7 +660,15 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
             return Err(e);
         }
     };
-    if let Some(ms) = applied.max_time_ms
+    // The command's own `maxTimeMS` (S134) and 9.0's per-shape one: the
+    // smaller bounds every statement; past its own, the command answers
+    // 50 even when its statements finished.
+    let own_max = super::qsettings::own_max_time(name, body);
+    let max_time_ms = match (applied.max_time_ms, own_max) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    if let Some(ms) = max_time_ms
         && let Err(e) = super::qsettings::set_max_time(&mut s, ms).await
     {
         c.sql = Some(s);
@@ -706,11 +714,20 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
         }
     })
     .await;
-    let r = if applied.max_time_ms.is_some() {
+    let r = if max_time_ms.is_some() {
         super::qsettings::reset_max_time(&mut s).await;
         r.map_err(super::qsettings::map_timeout)
     } else {
         r
+    };
+    let r = match (r, own_max) {
+        (Ok(_), Some(ms)) if started.elapsed() > Duration::from_millis(ms.unsigned_abs()) => {
+            Err(MongoError::new(
+                code::MAX_TIME_MS_EXPIRED,
+                "operation exceeded time limit",
+            ))
+        }
+        (r, _) => r,
     };
     c.sql = Some(s);
     // A point read answers with raw bytes (`Conn::raw`): count them.
@@ -1483,6 +1500,8 @@ async fn exec(
                 body,
                 pipeline.first(),
                 lsid.map(<[u8]>::to_vec),
+                // M5 (S78): `allUsers` needs `PROCESS`.
+                sql.holds_tenant_privilege(sprig_auth::authz::Action::Process),
             )? {
                 // `$currentOp` and `$listSessions` (M2), then the
                 // in-gateway stages.

@@ -408,7 +408,9 @@ impl PredOp {
                 cmp: Some(c),
                 ..
             } => {
-                f == "JSON_VALUE"
+                // A MongoDB condition on a path without arrays (S130)
+                // is served by a document index's field columns.
+                (f == "JSON_VALUE" || f == crate::fingerprint::mongo::FUNC_SCALAR)
                     && matches!(
                         **c,
                         Self::Eq | Self::In { .. } | Self::Range { .. } | Self::IsNull

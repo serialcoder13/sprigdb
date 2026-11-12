@@ -7,6 +7,8 @@
 //! `IF NOT EXISTS`, the table's schema, or `FOLLOWS`/`PRECEDES`; the
 //! `DEFINER` clause and the body stay as they are.
 
+use std::fmt::Write as _;
+
 /// One word of the head: a backquoted or bare identifier, or a keyword.
 struct Word<'a> {
     /// The text, without quotes (a backquoted name's doubled backquotes
@@ -97,82 +99,82 @@ pub fn mysql_trigger_statement(text: &str) -> Option<String> {
     let mut at = create.end;
     let mut definer = None;
     let trig_end = loop {
-        let w = word(text, at)?;
-        if is_kw(&w, "TRIGGER") {
-            break w.end;
+        let tok = word(text, at)?;
+        if is_kw(&tok, "TRIGGER") {
+            break tok.end;
         }
-        if definer.is_none() && w.raw.len() >= 7 && w.raw[..7].eq_ignore_ascii_case("DEFINER") {
+        if definer.is_none() && tok.raw.len() >= 7 && tok.raw[..7].eq_ignore_ascii_case("DEFINER") {
             // The clause runs to the next whitespace outside quotes.
-            let b = text.as_bytes();
-            let mut i = at;
-            while b[i].is_ascii_whitespace() {
-                i += 1;
+            let bytes = text.as_bytes();
+            let mut pos = at;
+            while bytes[pos].is_ascii_whitespace() {
+                pos += 1;
             }
-            let from = i;
-            let mut q: Option<u8> = None;
-            while i < b.len() {
-                match (q, b[i]) {
-                    (None, c) if c.is_ascii_whitespace() => break,
-                    (None, c @ (b'`' | b'\'' | b'"')) => q = Some(c),
-                    (Some(c), d) if c == d => q = None,
+            let from = pos;
+            let mut open: Option<u8> = None;
+            while pos < bytes.len() {
+                match (open, bytes[pos]) {
+                    (None, ch) if ch.is_ascii_whitespace() => break,
+                    (None, ch @ (b'`' | b'\'' | b'"')) => open = Some(ch),
+                    (Some(quote_ch), ch) if quote_ch == ch => open = None,
                     _ => {}
                 }
-                i += 1;
+                pos += 1;
             }
-            definer = Some(text[from..i].to_owned());
-            at = i;
+            definer = Some(text[from..pos].to_owned());
+            at = pos;
             continue;
         }
         return None;
     };
-    let mut w = word(text, trig_end)?;
-    if is_kw(&w, "IF") {
-        let not = word(text, w.end)?;
+    let mut named = word(text, trig_end)?;
+    if is_kw(&named, "IF") {
+        let not = word(text, named.end)?;
         let exists = word(text, not.end)?;
         if !is_kw(&not, "NOT") || !is_kw(&exists, "EXISTS") {
             return None;
         }
-        w = word(text, exists.end)?;
+        named = word(text, exists.end)?;
     }
-    let name = w.text;
-    let timing = word(text, w.end)?;
+    let name = named.text;
+    let timing = word(text, named.end)?;
     let event = word(text, timing.end)?;
     let on = word(text, event.end)?;
     if !["BEFORE", "AFTER"].iter().any(|k| is_kw(&timing, k))
-        || !["INSERT", "UPDATE", "DELETE"].iter().any(|k| is_kw(&event, k))
+        || !["INSERT", "UPDATE", "DELETE"]
+            .iter()
+            .any(|k| is_kw(&event, k))
         || !is_kw(&on, "ON")
     {
         return None;
     }
     let table = word(text, on.end)?;
-    let (f, e, r) = {
-        let f = word(text, table.end)?;
-        let e = word(text, f.end)?;
-        let r = word(text, e.end)?;
-        (f, e, r)
-    };
-    if !is_kw(&f, "FOR") || !is_kw(&e, "EACH") || !is_kw(&r, "ROW") {
+    let for_kw = word(text, table.end)?;
+    let each_kw = word(text, for_kw.end)?;
+    let row_kw = word(text, each_kw.end)?;
+    if !is_kw(&for_kw, "FOR") || !is_kw(&each_kw, "EACH") || !is_kw(&row_kw, "ROW") {
         return None;
     }
-    let mut body_at = r.end;
-    if let Some(o) = word(text, body_at)
-        && (is_kw(&o, "FOLLOWS") || is_kw(&o, "PRECEDES"))
+    let mut body_at = row_kw.end;
+    if let Some(order) = word(text, body_at)
+        && (is_kw(&order, "FOLLOWS") || is_kw(&order, "PRECEDES"))
     {
-        body_at = word(text, o.end)?.end;
+        body_at = word(text, order.end)?.end;
     }
     let body = text[body_at..].trim_start();
     let mut out = String::from("CREATE ");
-    if let Some(d) = definer {
-        out.push_str(&d);
+    if let Some(def) = definer {
+        out.push_str(&def);
         out.push(' ');
     }
-    out.push_str(&format!(
+    let _ = write!(
+        out,
         "TRIGGER {} {} {} ON {} FOR EACH ROW {body}",
         quote(&name),
         timing.raw.to_ascii_uppercase(),
         event.raw.to_ascii_uppercase(),
         quote(&table.text),
-    ));
+    );
     Some(out)
 }
 

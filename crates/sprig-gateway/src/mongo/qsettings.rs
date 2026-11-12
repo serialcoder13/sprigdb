@@ -599,6 +599,22 @@ pub async fn before(
     })
 }
 
+/// A command's own `maxTimeMS` (S134): `find`, `aggregate`, `count`,
+/// `distinct`, `update`, `delete` and `findAndModify`; 0 or absent is no
+/// limit, as in MongoDB.
+#[must_use]
+pub fn own_max_time(name: &str, body: &Document) -> Option<i64> {
+    if !matches!(
+        name,
+        "find" | "aggregate" | "count" | "distinct" | "update" | "delete" | "findAndModify"
+    ) {
+        return None;
+    }
+    body.get("maxTimeMS")
+        .and_then(sprig_doc::filter::as_i64)
+        .filter(|n| *n > 0)
+}
+
 /// Sets MariaDB's `max_statement_time` for 9.0's per-shape `maxTimeMS`.
 ///
 /// # Errors
