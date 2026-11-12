@@ -131,7 +131,11 @@ async fn share_with(p: &mut Conn, db: &str, opts: &str) {
         "INSERT INTO t1 VALUES (1, 'parent one'), (2, 'parent two')",
     )
     .await;
-    ok(p, &format!("CREATE SHARE {db}_s ON t1 TO ALL CHILDREN {opts}")).await;
+    ok(
+        p,
+        &format!("CREATE SHARE {db}_s ON t1 TO ALL CHILDREN {opts}"),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -324,7 +328,11 @@ async fn a_dropped_share_leaves_the_childs_overrides_as_its_own_rows() {
     );
     let mut g = None;
     if let Some(gk) = &gk {
-        ok(&mut c, &format!("CREATE SHARE {db}_k ON t1 TO ALL CHILDREN")).await;
+        ok(
+            &mut c,
+            &format!("CREATE SHARE {db}_k ON t1 TO ALL CHILDREN"),
+        )
+        .await;
         let mut gc = conn(&e.addr, gk).await;
         ok(&mut gc, &format!("USE {db}")).await;
         // The grandchild overrides the parent's record 2 (through the

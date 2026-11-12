@@ -884,7 +884,10 @@ mod tests {
             &lim(),
         )
         .unwrap();
-        assert_eq!(out, vec![doc! {"_id": 1, "c": [1, 2, 2, 3], "u": [1, 2, 3]}]);
+        assert_eq!(
+            out,
+            vec![doc! {"_id": 1, "c": [1, 2, 2, 3], "u": [1, 2, 3]}]
+        );
         let e = run_stage(
             vec![doc! {"g": 1, "a": 5}],
             &doc! {"$group": {"_id": "$g", "c": {"$concatArrays": "$a"}}},

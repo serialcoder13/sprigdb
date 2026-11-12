@@ -1280,7 +1280,8 @@ pub async fn unindexed_members(
             let mut conn = ep.pool.get_conn().await.map_err(cat_err)?;
             let store = MsgStore::new(ep.store.schema());
             Ok::<bool, SprigError>(
-                store.migrated(&mut conn).await? && store.instance(&mut conn, s.key()).await?.is_some(),
+                store.migrated(&mut conn).await?
+                    && store.instance(&mut conn, s.key()).await?.is_some(),
             )
         }
         .await;

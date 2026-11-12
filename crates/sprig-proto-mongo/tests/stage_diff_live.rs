@@ -143,7 +143,11 @@ async fn stage_corpus_through_the_gateway() {
 }
 
 /// The top-level field names of a stage's first output document.
-async fn first_keys(db: &Database, coll: Option<&str>, stage: Document) -> Result<Vec<String>, i32> {
+async fn first_keys(
+    db: &Database,
+    coll: Option<&str>,
+    stage: Document,
+) -> Result<Vec<String>, i32> {
     let docs: Vec<Document> = match coll {
         Some(c) => db
             .collection::<Document>(c)
@@ -182,9 +186,13 @@ async fn diagnostic_stages_have_mongodb_shapes() {
         let db = client.database("m2_diag_live");
         let _ = db.drop().await;
         let c = db.collection::<Document>("items");
-        c.insert_many((0..20).map(|i| doc! {"_id": i, "k": i % 3}).collect::<Vec<_>>())
-            .await
-            .unwrap();
+        c.insert_many(
+            (0..20)
+                .map(|i| doc! {"_id": i, "k": i % 3})
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
         c.create_index(mongodb::IndexModel::builder().keys(doc! {"k": 1}).build())
             .await
             .unwrap();
@@ -196,15 +204,30 @@ async fn diagnostic_stages_have_mongodb_shapes() {
             "collStats",
             first_keys(&db, Some("items"), doc! {"$collStats": {"storageStats": {}, "count": {}, "latencyStats": {}, "queryExecStats": {}}}).await,
         );
-        one("indexStats", first_keys(&db, Some("items"), doc! {"$indexStats": {}}).await);
-        one("planCacheStats", first_keys(&db, Some("items"), doc! {"$planCacheStats": {}}).await);
-        one("currentOp", first_keys(&admin, None, doc! {"$currentOp": {}}).await);
+        one(
+            "indexStats",
+            first_keys(&db, Some("items"), doc! {"$indexStats": {}}).await,
+        );
+        one(
+            "planCacheStats",
+            first_keys(&db, Some("items"), doc! {"$planCacheStats": {}}).await,
+        );
+        one(
+            "currentOp",
+            first_keys(&admin, None, doc! {"$currentOp": {}}).await,
+        );
         one(
             "currentOp.idle",
             first_keys(&admin, None, doc! {"$currentOp": {"idleConnections": true}}).await,
         );
-        one("currentOp.notAdmin", first_keys(&db, None, doc! {"$currentOp": {}}).await);
-        one("currentOp.bad", first_keys(&admin, None, doc! {"$currentOp": {"foo": 1}}).await);
+        one(
+            "currentOp.notAdmin",
+            first_keys(&db, None, doc! {"$currentOp": {}}).await,
+        );
+        one(
+            "currentOp.bad",
+            first_keys(&admin, None, doc! {"$currentOp": {"foo": 1}}).await,
+        );
         one(
             "listSessions.wrongNs",
             first_keys(&db, Some("items"), doc! {"$listSessions": {}}).await,
@@ -218,7 +241,10 @@ async fn diagnostic_stages_have_mongodb_shapes() {
                 .map(|_| Vec::new())
                 .map_err(|e| code_of(&e)),
         );
-        one("indexStats.dbLevel", first_keys(&db, None, doc! {"$indexStats": {}}).await);
+        one(
+            "indexStats.dbLevel",
+            first_keys(&db, None, doc! {"$indexStats": {}}).await,
+        );
         db.drop().await.unwrap();
         eprintln!("{who}: {s:?}");
         shapes.push(s);
@@ -235,9 +261,34 @@ async fn diagnostic_stages_have_mongodb_shapes() {
             assert!(keys.iter().any(|k| k == f), "{name} lacks {f}: {keys:?}");
         }
     };
-    has("collStats", &["ns", "host", "localTime", "latencyStats", "storageStats", "count", "queryExecStats"]);
+    has(
+        "collStats",
+        &[
+            "ns",
+            "host",
+            "localTime",
+            "latencyStats",
+            "storageStats",
+            "count",
+            "queryExecStats",
+        ],
+    );
     has("indexStats", &["name", "key", "host", "accesses", "spec"]);
-    has("currentOp", &["type", "host", "desc", "connectionId", "client", "active", "opid", "op", "ns", "command"]);
+    has(
+        "currentOp",
+        &[
+            "type",
+            "host",
+            "desc",
+            "connectionId",
+            "client",
+            "active",
+            "opid",
+            "op",
+            "ns",
+            "command",
+        ],
+    );
     // Errors match the reference's codes where it is given.
     if let Some(m) = shapes.get(1) {
         for ((n, a), (_, b)) in sprig.iter().zip(m) {
@@ -246,10 +297,7 @@ async fn diagnostic_stages_have_mongodb_shapes() {
             }
             assert_eq!(a.is_ok(), b.is_ok(), "{n}: {a:?} vs MongoDB {b:?}");
             if let (Ok(x), Ok(y)) = (a, b) {
-                let missing: Vec<&String> = y
-                    .iter()
-                    .filter(|k| !x.contains(k))
-                    .collect();
+                let missing: Vec<&String> = y.iter().filter(|k| !x.contains(k)).collect();
                 eprintln!("{n}: fields MongoDB has that SprigDB doesn't: {missing:?}");
             }
         }
