@@ -1,0 +1,10 @@
+# bugfix-50: a branch prepared before a kill fence was committed by its own
+# coordinator between the fence and the post-fence drain; the drain found
+# nothing to do and G from the fence missed the commit (a lost
+# acknowledged write). Fixed by reading G after the drain, always.
+suite = "mover-xa"
+seed = 620149929
+failure = 'invariant 1: b.100004 is None on the owner, the last acknowledged write was Some("xa-4")'
+
+[plan]
+faults = []

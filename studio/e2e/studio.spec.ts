@@ -176,7 +176,8 @@ test.describe.serial('Studio R0', () => {
     await signIn(page);
     await page.getByRole('link', { name: 'Automatic indexing' }).click();
     await expect(page.getByRole('heading', { name: 'Automatic indexing' })).toBeVisible();
-    await expect(page.getByText(/None\.|sprig_auto_|controller/)).toBeVisible({ timeout: 20_000 });
+    // Several sprig_auto_ indexes once the e2e setup raised recommendations.
+    await expect(page.getByText(/None\.|sprig_auto_|controller/).first()).toBeVisible({ timeout: 20_000 });
     await axe(page, 'indexing');
     await shot(page, 'indexing');
     await page.getByRole('tab', { name: 'Recommendations' }).click();

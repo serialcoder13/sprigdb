@@ -45,6 +45,8 @@ spec:
           args:
             - --name=$(POD_NAME)
             - --data-dir=/var/lib/etcd
+            - --auto-compaction-mode={{ .Values.etcd.autoCompaction.mode }}
+            - --auto-compaction-retention={{ .Values.etcd.autoCompaction.retention }}
             - --listen-client-urls={{ $s := ternary "https" "http" .Values.tls.enabled }}{{ $s }}://0.0.0.0:2379
             - --advertise-client-urls={{ $s }}://$(POD_NAME).sprigdb-etcd-dc.{{ .Release.Namespace }}.svc:2379
             - --listen-peer-urls={{ $s }}://0.0.0.0:2380

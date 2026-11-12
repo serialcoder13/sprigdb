@@ -1,0 +1,3 @@
+// Known differences from MongoDB 8.0.34 (M3). One case name per line, then why.
+q#580  "a.0" where a[0] is an array: MongoDB compares the array whole; the shared matcher (filter::values_at) also tries its elements, so SprigDB accepts the document.
+q#584  "a.0" over an array of documents: MongoDB reports "field was missing" while SprigDB considers a[0]; both refuse the document.

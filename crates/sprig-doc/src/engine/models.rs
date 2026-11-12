@@ -318,6 +318,8 @@ fn filter_paths(p: &Pred, out: &mut Vec<String>) {
         }
         Pred::Field { path, .. } => out.push(path.clone()),
         Pred::Expr(_) => out.push("$expr".into()),
+        Pred::JsonSchema(_) => out.push("$jsonSchema".into()),
+        Pred::Where(_) => out.push("$where".into()),
         Pred::True => {}
     }
 }

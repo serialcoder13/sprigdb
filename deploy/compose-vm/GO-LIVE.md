@@ -42,6 +42,7 @@ What to have ready before the first install on real VMs, in the order you need i
 - [ ] **A target off the VMs:** a mounted disk or share, or `host:path` over SSH (`SPRIG_BACKUP_COPY_TO`). An object-store bucket works through a mount (s3fs, rclone mount, or the cloud's file gateway).
 - [ ] **A schedule:** `./sprig-vm.sh backup` hourly from cron or a systemd timer on the VM whose MariaDB is the primary (any VM's node can be backed up; the primary's is the newest).
 - [ ] **Retention** on the target (the bundle prunes only its own copies on the VM).
+- [ ] **etcd defrag:** `./sprig-vm.sh etcd-defrag` daily from cron or a systemd timer on one VM (etcd compacts itself every hour; defrag gives the freed space back).
 - [ ] **A restore drill** before real data arrives: restore the newest backup onto a spare VM and check a tenant's tables.
 
 ## 7. Monitoring

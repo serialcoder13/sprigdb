@@ -19,6 +19,8 @@
 //! aggregate([{$searchMeta: {...}}]): one document: count and facets
 //! ```
 
+pub mod sensitive;
+
 use std::collections::HashMap;
 use std::fmt::Debug;
 
@@ -289,14 +291,31 @@ impl Engine {
         sql: &mut dyn SqlRunner,
         ns: &Ns,
         m: &CollMeta,
-        text: Document,
+        mut text: Document,
         rest: &Document,
     ) -> Result<Vec<Document>, MongoError> {
-        let h = self
-            .text_hook()?
-            .hits(sql, ns, TextCall::Text(text))
-            .await?;
-        self.hit_docs(sql, ns, m, &h, rest).await
+        // `$caseSensitive` and `$diacriticSensitive` (M3, decision S101):
+        // the index matches without case and diacritics, then the matches
+        // are filtered as MongoDB does.
+        let case = matches!(text.remove("$caseSensitive"), Some(Bson::Boolean(true)));
+        let diacritics = matches!(text.remove("$diacriticSensitive"), Some(Bson::Boolean(true)));
+        let search = text.get_str("$search").unwrap_or_default().to_owned();
+        let hook = self.text_hook()?;
+        let h = hook.hits(sql, ns, TextCall::Text(text)).await?;
+        let mut docs = self.hit_docs(sql, ns, m, &h, rest).await?;
+        if case || diacritics {
+            let fields: Vec<String> = hook
+                .list(sql, ns)
+                .await?
+                .into_iter()
+                .find(|i| i.kind == TextKind::Text)
+                .and_then(|i| i.spec.get_document("weights").ok().cloned())
+                .map(|w| w.keys().cloned().collect())
+                .unwrap_or_else(|| vec!["$**".to_owned()]);
+            let q = sensitive::Query::parse(&search, case, diacritics);
+            docs.retain(|d| q.matches(&sensitive::texts(d, &fields)));
+        }
+        Ok(docs)
     }
 
     /// MongoDB's `explain` of a search (decision S25): `find` with

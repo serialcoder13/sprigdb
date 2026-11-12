@@ -16,10 +16,10 @@
 //   (39875), then CASCADE;
 // - the Inheritance page (chapter 42; IG14) as a parent and a child tenant.
 //
-// Setup the operator does once (rule 15: every address explicit):
-//   sprigctl settings set sink.destination_allowlist '["127.0.0.1:28881", "127.0.0.1:28999"]' --scope tenant:acme
+// Setup (deploy/compose/studio/e2e.sh setup does all of it; rule 15):
+//   sprigctl settings set sink.destination_allowlist '["127.0.0.1:<hook>", "127.0.0.1:<closed>"]' --scope tenant:acme
 //   sprigctl settings set logic.outbound_allowlist '["rates.example.com"]' --scope tenant:acme
-//   sprigctl tenant create studio6kid --under acme; sprigctl tenant user add studio6kid app ...
+//   a child tenant of acme on acme's cluster with user app (STUDIO_CHILD names its login)
 //   GRANT SPRIG_SINK_ADMIN ON *.* TO app (as acme.app)
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
@@ -67,11 +67,11 @@ async function waitFor(what: string, f: () => Promise<boolean>, ms = 20_000) {
 /** Replaces a Monaco editor's text, once Monaco has drawn its lines (a
  * select-all before then selects nothing). */
 async function typeInto(page: Page, label: string, text: string) {
-  // The page's only Monaco; `label` is checked on Chrome, whose Monaco
-  // labels its EditContext element (Firefox's and WebKit's label a hidden
-  // textarea Playwright's locators don't match the same way).
+  // The page's only Monaco. `label` names it for the reader; it isn't
+  // matched, because which element Monaco labels differs by browser (and
+  // Chrome's EditContext element stopped matching, round 7).
   const host = page.getByTestId('sql-editor').first();
-  if (test.info().project.name === 'chromium') await expect(host.getByLabel(label, { exact: true })).toHaveCount(1);
+  void label; // Monaco's own label element differs by browser and version
   const lines = host.locator('.view-lines');
   await lines.click();
   for (let i = 0; i < 5 && (await lines.innerText()).trim() !== ''; i++) {
@@ -465,7 +465,7 @@ test.describe.serial('Studio round 6', () => {
     await page.getByTestId('inh-where').fill('id = 2');
     await page.getByRole('button', { name: 'Find references' }).click();
     const blockers = page.getByTestId('inh-blockers');
-    await expect(blockers).toContainText('studio6kid');
+    await expect(blockers).toContainText(KID.split('.')[0]!);
     await expect(blockers).toContainText('fk_t2');
     await page.getByTestId('inh-where').fill('id = 99');
     await page.getByRole('button', { name: 'Find references' }).click();

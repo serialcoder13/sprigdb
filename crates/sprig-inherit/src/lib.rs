@@ -66,6 +66,7 @@ pub mod settings;
 pub mod show;
 pub mod store;
 pub mod subs;
+pub mod unshare;
 pub mod upstream;
 pub mod view;
 pub mod write;

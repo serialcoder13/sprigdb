@@ -10,6 +10,15 @@ etcd:
   replicas: 3
   storage: 20Gi
   image: quay.io/coreos/etcd:v3.6.5
+  # Keep the last hour of revisions. Without auto-compaction etcd keeps
+  # every revision and its database grows (about 0.7 MB/h in the M0.7 soak).
+  autoCompaction: {mode: periodic, retention: 1h}
+  # Defragments every member of the DC tier, one at a time, to return the
+  # space compaction frees (sprigdb-etcd-defrag CronJob). With etcd auth on
+  # (deploy/etcd/roles.sh), defrag needs etcd's root user: clientSecret
+  # names a TLS secret (tls.crt, tls.key) whose certificate's CN is root.
+  # Empty: the DC tier's own certificate (enough while auth is off).
+  defrag: {enabled: true, schedule: "17 3 * * *", clientSecret: ""}
 controller:
   replicas: 3
   globalCandidate: true

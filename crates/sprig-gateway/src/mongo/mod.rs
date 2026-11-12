@@ -27,13 +27,18 @@ pub mod changes;
 pub mod commands;
 pub mod conn;
 pub mod cursors;
+/// `$currentOp` and `$listSessions` (M2).
+pub mod diag;
 pub mod explain;
 pub mod failpoint;
 pub mod logic;
 pub mod publish;
+pub mod qsettings;
 pub mod retry;
 pub mod rls;
 pub mod search;
+/// Server-side JavaScript (M4).
+pub mod serverjs;
 pub mod snapshot;
 pub mod sql;
 pub mod txn;
@@ -123,6 +128,20 @@ key!(
     TXN_LIFETIME_SECONDS: u64 = "mongo.txn_lifetime_seconds", 60, HardBounds::range(1, 86_400),
     "Transaction lifetime limit"
 );
+key!(
+    /// `mongo.max_open_transactions`: open multi-document transactions per
+    /// gateway (MongoDB 9.0's `maxConcurrentMultiDocumentTransactions`);
+    /// past it, `startTransaction` gets 509 `TooManyOpenTransactions` (M3).
+    MAX_OPEN_TRANSACTIONS: u64 = "mongo.max_open_transactions", 10_000, HardBounds::range(1, 1_000_000),
+    "Open multi-document transactions per gateway"
+);
+key!(
+    /// `mongo.max_operation_memory_bytes`: memory one command's in-gateway
+    /// stages may hold (MongoDB 9.0's per-operation limit); past it, 146
+    /// `ExceededMemoryLimit` (M3, decision S100). 0 turns it off.
+    MAX_OPERATION_MEMORY_BYTES: u64 = "mongo.max_operation_memory_bytes", 1_073_741_824, HardBounds::range(0, 1_099_511_627_776),
+    "Memory one MongoDB command may hold in the gateway"
+);
 
 /// The values a connection reads.
 #[derive(Debug, Clone)]
@@ -146,6 +165,10 @@ pub struct MongoSettings {
     pub session_record_retention_minutes: u64,
     /// `mongo.write_conflict_retries`.
     pub write_conflict_retries: u32,
+    /// `mongo.max_open_transactions`.
+    pub max_open_transactions: usize,
+    /// `mongo.max_operation_memory_bytes`.
+    pub max_operation_memory_bytes: usize,
 }
 
 impl MongoSettings {
@@ -169,6 +192,12 @@ impl MongoSettings {
                 .max(live.get(&SESSION_TIMEOUT_MINUTES, &cx) + 1),
             write_conflict_retries: u32::try_from(live.get(&WRITE_CONFLICT_RETRIES, &cx))
                 .unwrap_or(5),
+            max_open_transactions: usize::try_from(live.get(&MAX_OPEN_TRANSACTIONS, &cx))
+                .unwrap_or(10_000),
+            max_operation_memory_bytes: usize::try_from(
+                live.get(&MAX_OPERATION_MEMORY_BYTES, &cx),
+            )
+            .unwrap_or(1 << 30),
         }
     }
 }
@@ -189,6 +218,8 @@ impl Default for MongoSettings {
             txn_lifetime: Duration::from_secs(60),
             session_record_retention_minutes: 35,
             write_conflict_retries: 5,
+            max_open_transactions: 10_000,
+            max_operation_memory_bytes: 1 << 30,
         }
     }
 }

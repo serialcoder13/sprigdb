@@ -400,3 +400,24 @@ async fn set_subscription(
 fn _act_is_serde(a: &Act) -> String {
     a.name().to_owned()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_gateway_claim_leaves_the_query_it_rode_on() {
+        let uri: Uri = "/admin/v1/recommendations:policy?db=shop&tenant=acme&caller=%7B%7D"
+            .parse()
+            .unwrap_or_default();
+        let c: CallerQ = query(&uri).unwrap_or_default();
+        assert_eq!(c.caller.as_deref(), Some("{}"));
+        let rest = without_caller(&uri).unwrap_or_default();
+        assert_eq!(rest.query(), Some("db=shop&tenant=acme"));
+        let q: SettingContextQuery = query(&rest).unwrap_or_default();
+        assert_eq!(
+            (q.tenant.as_deref(), q.db.as_deref()),
+            (Some("acme"), Some("shop"))
+        );
+    }
+}

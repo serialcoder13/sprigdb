@@ -88,6 +88,23 @@ impl TxnTable {
         }
     }
 
+    /// Open transactions other than session `except`'s (M3: 9.0's
+    /// `TooManyOpenTransactions`); an entry in use counts as open.
+    async fn open_count(&self, except: &[u8]) -> usize {
+        let entries: Vec<Arc<tokio::sync::Mutex<TxnEntry>>> = self
+            .map
+            .lock()
+            .await
+            .iter()
+            .filter(|(k, _)| k.as_slice() != except)
+            .map(|(_, v)| Arc::clone(v))
+            .collect();
+        entries
+            .iter()
+            .filter(|e| e.try_lock().map_or(true, |g| g.state == 0))
+            .count()
+    }
+
     async fn get(&self, lsid: &[u8]) -> Option<Arc<tokio::sync::Mutex<TxnEntry>>> {
         self.map.lock().await.get(lsid).cloned()
     }
@@ -248,7 +265,18 @@ pub async fn run(c: &mut Conn, name: &str, body: &Document) -> Result<Document, 
     // The command's collation (chapter 31): every comparison it makes.
     // Writes carry theirs per statement (`writes`).
     let coll = sprig_doc::collation::Collation::of(body)?;
-    Box::pin(sprig_doc::collation::scope(coll, run_inner(c, name, body))).await
+    // Server-side JavaScript (M4, decision S110): its scope, and the
+    // first error its code met, which the command answers with.
+    let js = super::serverjs::scope_for(c, name, body).await;
+    let r = Box::pin(sprig_doc::serverjs::scope(
+        js.clone(),
+        sprig_doc::collation::scope(coll, run_inner(c, name, body)),
+    ))
+    .await;
+    match js.and_then(|s| s.take_error()) {
+        Some(e) => Err(e),
+        None => r,
+    }
 }
 
 async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document, MongoError> {
@@ -497,6 +525,18 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
                     ));
                 }
             }
+            // MongoDB 9.0's limit on open transactions (M3).
+            let limit = c.shared.settings().max_open_transactions;
+            if c.shared.txns.open_count(&l).await >= limit {
+                metrics::counter!("sprig_mongo_transactions_total", "outcome" => "refused")
+                    .increment(1);
+                return Err(MongoError::new(
+                    code::TOO_MANY_OPEN_TRANSACTIONS,
+                    format!(
+                        "Too many open transactions: this gateway holds {limit} (mongo.max_open_transactions)"
+                    ),
+                ));
+            }
             let p = c
                 .principal
                 .clone()
@@ -618,6 +658,23 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
         .sql
         .take()
         .ok_or_else(|| MongoError::new(code::INTERNAL_ERROR, "no session"))?;
+    // Query settings (M3, S96-S99): a rejected shape stops here; a
+    // per-shape maxTimeMS bounds the command's statements.
+    let tenant = owner(c).tenant;
+    let applied = match super::qsettings::before(&mut s, tenant, name, body, &db).await {
+        Ok(a) => a,
+        Err(e) => {
+            c.sql = Some(s);
+            return Err(e);
+        }
+    };
+    if let Some(ms) = applied.max_time_ms
+        && let Err(e) = super::qsettings::set_max_time(&mut s, ms).await
+    {
+        c.sql = Some(s);
+        return Err(e);
+    }
+    let started = Instant::now();
     // Retryable writes (chapter 30 step 7): the writes and their record
     // in one MariaDB transaction.
     let mut tries = 0u64;
@@ -626,7 +683,12 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
             (Some(l), Some(n)) if super::retry::applies(name, body) => {
                 super::retry::run(c, &mut s, name, body, &db, l, n).await
             }
-            _ => exec(c, &mut s, name, body, &db, lsid.as_deref()).await,
+            _ => {
+                // MongoDB 9.0's per-operation memory limit (M3, S100).
+                let mem = c.shared.settings().max_operation_memory_bytes;
+                sprig_doc::opmem::scope(mem, exec(c, &mut s, name, body, &db, lsid.as_deref()))
+                    .await
+            }
         };
         // Concurrent first writes to a new database: another session
         // created it a moment ago, and this one's names may not show it
@@ -644,7 +706,25 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
             _ => break r,
         }
     };
+    let r = if applied.max_time_ms.is_some() {
+        super::qsettings::reset_max_time(&mut s).await;
+        r.map_err(super::qsettings::map_timeout)
+    } else {
+        r
+    };
     c.sql = Some(s);
+    // `$queryStats` (M3, S98).
+    if let Ok(d) = &r {
+        super::qsettings::record(
+            tenant,
+            name,
+            body,
+            &db,
+            c.client_meta.as_ref(),
+            started.elapsed(),
+            d,
+        );
+    }
     r
 }
 
@@ -1104,6 +1184,13 @@ async fn exec(
                     .insert("changeStreamPreAndPostImages", doc! {"enabled": enabled});
                 engine.catalog.save_indexes(sql, &ns, &m).await?;
             }
+            // Schema validation (M3, decisions S90-S92).
+            if let Some(o) =
+                sprig_doc::validate::coll_mod(&engine, sql, &ns, &m.options, body).await?
+            {
+                m.options = o;
+                engine.catalog.save_indexes(sql, &ns, &m).await?;
+            }
             // A metadata-only table comment, so change streams with
             // `showExpandedEvents` see a `modify` event, as MongoDB's do.
             let mark = format!(
@@ -1321,6 +1408,10 @@ async fn exec(
                 }
             };
             let pipeline = docs_of(body, "pipeline");
+            // M4 (decision S110): `$where` is refused in aggregation.
+            if let Ok(p) = body.get_array("pipeline") {
+                sprig_doc::serverjs::check_pipeline(p)?;
+            }
             if let Some(st) = pipeline
                 .first()
                 .and_then(|s| s.get_document("$changeStream").ok())
@@ -1338,6 +1429,47 @@ async fn exec(
                 coll: coll.clone(),
             };
             let docs = if coll.is_empty()
+                && pipeline
+                    .first()
+                    .is_some_and(super::qsettings::handles_stage)
+            {
+                // `$querySettings` and `$queryStats` (M3), then the
+                // in-gateway stages.
+                let mut docs = super::qsettings::stage_docs(
+                    &engine,
+                    sql,
+                    owner(c).tenant,
+                    db,
+                    &pipeline[0],
+                )
+                .await?;
+                let lim = sprig_doc::agg::AggLimits {
+                    stage_bytes: engine.cfg.agg_stage_bytes,
+                    now: bson::DateTime::now(),
+                };
+                for st in &pipeline[1..] {
+                    docs = sprig_doc::agg::run_stage(docs, st, &lim)?;
+                }
+                docs
+            } else if let Some(mut docs) = super::diag::first_docs(
+                c,
+                db,
+                &coll,
+                body,
+                pipeline.first(),
+                lsid.map(<[u8]>::to_vec),
+            )? {
+                // `$currentOp` and `$listSessions` (M2), then the
+                // in-gateway stages.
+                let lim = sprig_doc::agg::AggLimits {
+                    stage_bytes: engine.cfg.agg_stage_bytes,
+                    now: bson::DateTime::now(),
+                };
+                for st in &pipeline[1..] {
+                    docs = sprig_doc::agg::run_stage(docs, st, &lim)?;
+                }
+                docs
+            } else if coll.is_empty()
                 && pipeline
                     .first()
                     .is_some_and(|s| s.contains_key("$listLocalSessions"))
@@ -1364,7 +1496,12 @@ async fn exec(
                 }
                 docs
             } else {
-                engine.aggregate(sql, &ns, &pipeline).await?
+                // `$out`/`$merge` with `bypassDocumentValidation` (M3).
+                sprig_doc::validate::bypass(
+                    body.get_bool("bypassDocumentValidation").unwrap_or(false),
+                    engine.aggregate(sql, &ns, &pipeline),
+                )
+                .await?
             };
             let plan = sprig_doc::engine::CursorPlan::from_docs(ns.clone(), docs);
             open_cursor(
@@ -1447,6 +1584,10 @@ async fn exec(
         n if super::rls::handles(n) => super::rls::command(&engine, sql, n, body, db).await,
         // Chapter 34 (R6 round 3): Atlas's vector search index commands.
         n if super::search::handles(n) => super::search::command(&engine, sql, n, body, db).await,
+        // Query settings (M3, decisions S96-S99).
+        n if super::qsettings::handles(n) => {
+            super::qsettings::command(&engine, sql, owner(c).tenant, n, body, db).await
+        }
         other => Err(MongoError::new(
             code::COMMAND_NOT_FOUND,
             format!("no such command: '{other}'"),

@@ -108,6 +108,34 @@ groups:
         annotations:
           summary: An etcd database is above 80% of its quota
           runbook: chapter 47 runbook 7
+      # bugfix-53 (the M0.7 soak: etcd without auto-compaction grew about
+      # 0.7 MB/h). SprigDB's metadata is small; these fire long before the
+      # quota. Every etcd SprigDB ships runs --auto-compaction-mode=periodic
+      # --auto-compaction-retention=1h and a periodic defrag.
+      - alert: EtcdDbLarge
+        expr: etcd_mvcc_db_total_size_in_bytes > 512 * 1024 * 1024
+        for: 30m
+        labels: { severity: ticket }
+        annotations:
+          summary: An etcd database is above 512 MiB (auto-compaction or defrag not running, or keys leak)
+          runbook: chapter 47 runbook 7
+      - alert: EtcdDbFragmented
+        expr: |
+          etcd_mvcc_db_total_size_in_bytes > 128 * 1024 * 1024
+          and
+          etcd_mvcc_db_total_size_in_use_in_bytes / etcd_mvcc_db_total_size_in_bytes < 0.5
+        for: 2h
+        labels: { severity: ticket }
+        annotations:
+          summary: Half of an etcd database is free space (the periodic defrag isn't running)
+          runbook: chapter 47 runbook 7
+      - alert: EtcdDbGrowing
+        expr: delta(etcd_mvcc_db_total_size_in_use_in_bytes[6h]) > 16 * 1024 * 1024
+        for: 6h
+        labels: { severity: ticket }
+        annotations:
+          summary: An etcd database's live data keeps growing (auto-compaction off, or keys leak)
+          runbook: chapter 47 runbook 7
       - alert: BackupMissed
         expr: time() - max by (cluster) (sprig_backup_last_success_timestamp_seconds{kind="full"}) > 26 * 3600
         labels: { severity: page }

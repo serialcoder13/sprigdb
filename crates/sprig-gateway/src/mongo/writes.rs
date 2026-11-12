@@ -156,6 +156,20 @@ pub async fn run(
     db: &str,
     done: &StmtResults,
 ) -> Result<Outcome, MongoError> {
+    // `bypassDocumentValidation` (M3, decision S90): the engine skips the
+    // collections' validators for this command's writes.
+    let bypass = body.get_bool("bypassDocumentValidation").unwrap_or(false);
+    sprig_doc::validate::bypass(bypass, run_writes(engine, sql, name, body, db, done)).await
+}
+
+async fn run_writes(
+    engine: &Engine,
+    sql: &mut dyn SqlRunner,
+    name: &str,
+    body: &Document,
+    db: &str,
+    done: &StmtResults,
+) -> Result<Outcome, MongoError> {
     if name == "bulkWrite" {
         return bulk_write(engine, sql, body, done).await;
     }
@@ -417,7 +431,22 @@ async fn find_and_modify(
                 &docs_of(body, "arrayFilters"),
                 sort,
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                // MongoDB 8.0's wording for a findAndModify refused by the
+                // collection's validator.
+                if e.code == sprig_doc::validate::DOCUMENT_VALIDATION_FAILURE {
+                    MongoError {
+                        message: format!(
+                            "Plan executor error during findAndModify :: caused by :: {}",
+                            e.message
+                        ),
+                        ..e
+                    }
+                } else {
+                    e
+                }
+            })?;
         let new = body.get_bool("new").unwrap_or(false);
         let mut leo = doc! {"n": i32::from(o.matched > 0 || o.upserted.is_some()), "updatedExisting": o.matched > 0};
         if let Some(id) = &o.upserted {

@@ -136,6 +136,9 @@ pub mod code {
     pub const TRANSACTION_TOO_OLD: i32 = 225;
     pub const OPERATION_NOT_SUPPORTED_IN_TRANSACTION: i32 = 263;
     pub const QUERY_EXCEEDED_MEMORY_LIMIT: i32 = 292;
+    pub const EXCEEDED_MEMORY_LIMIT: i32 = 146;
+    pub const QUERY_REJECTED_BY_SETTINGS: i32 = 411;
+    pub const TOO_MANY_OPEN_TRANSACTIONS: i32 = 509;
     pub const API_STRICT_ERROR: i32 = 323;
     pub const NOT_WRITABLE_PRIMARY: i32 = 10107;
     pub const BSON_OBJECT_TOO_LARGE: i32 = 10334;
@@ -159,6 +162,7 @@ pub fn code_name(code: i32) -> &'static str {
         4 => "NoSuchKey",
         6 => "HostUnreachable",
         7 => "HostNotFound",
+        8 => "UnknownError",
         9 => "FailedToParse",
         11 => "UserNotFound",
         13 => "Unauthorized",
@@ -193,6 +197,8 @@ pub fn code_name(code: i32) -> &'static str {
         115 => "CommandNotSupported",
         121 => "DocumentValidationFailure",
         133 => "FailedToSatisfyReadPreference",
+        139 => "JSInterpreterFailure",
+        146 => "ExceededMemoryLimit",
         186 => "ClientMetadataCannotBeMutated",
         189 => "PrimarySteppedDown",
         225 => "TransactionTooOld",
@@ -203,6 +209,8 @@ pub fn code_name(code: i32) -> &'static str {
         263 => "OperationNotSupportedInTransaction",
         292 => "QueryExceededMemoryLimitNoDiskUseAllowed",
         323 => "APIStrictError",
+        411 => "QueryRejectedBySettings",
+        509 => "TooManyOpenTransactions",
         9001 => "SocketException",
         10107 => "NotWritablePrimary",
         10334 => "BSONObjectTooLarge",

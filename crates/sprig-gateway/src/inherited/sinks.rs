@@ -1186,13 +1186,14 @@ pub(crate) async fn drop_member_sink(
     let Some(db_id) = host.db_id(db) else {
         return Ok(false);
     };
-    if host
+    let Some(sink) = host
         .state()
         .sink(db_id, name)
-        .is_none_or(|d| d.owner_user_id != run_as.0)
-    {
+        .filter(|d| d.owner_user_id == run_as.0)
+        .cloned()
+    else {
         return Ok(false);
-    }
+    };
     sprig_sinks::sql::handle_stmt(
         sg::Stmt::DropSink {
             name: sg::QName {
@@ -1205,7 +1206,93 @@ pub(crate) async fn drop_member_sink(
         &mut host,
     )
     .await?;
+    drop_unused_connections(&mut host, run_as, &sink.connections).await?;
     Ok(true)
+}
+
+/// Drops the member's connections among `used` (a dropped sink's) that
+/// `run_as` owns and no sink of the member uses any more (bugfix-52: an
+/// orphaned instance's connections stayed behind).
+async fn drop_unused_connections(
+    host: &mut DeployHost,
+    run_as: UserId,
+    used: &[sprig_sinks::model::ConnRef],
+) -> Result<()> {
+    for c in used {
+        let sprig_sinks::model::ConnRef::Tenant { id, .. } = c else {
+            continue;
+        };
+        let st = host.state();
+        let Some(cd) = st.connections.values().find(|d| d.id == *id) else {
+            continue;
+        };
+        if cd.owner_user_id != run_as.0 || !st.users_of(cd.id).is_empty() {
+            continue;
+        }
+        let Some(db) = host.db_name(cd.db_id) else {
+            continue;
+        };
+        sprig_sinks::sql::handle_stmt(
+            sg::Stmt::DropConnection {
+                name: sg::QName {
+                    db: Some(db),
+                    name: cd.name.clone(),
+                },
+                if_exists: true,
+            },
+            host,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Members holding an instance of sink definition `s` that the source's
+/// instance index doesn't list (bugfix-52): `ALTER INHERITED STREAM ...
+/// DETACH` removes the member's source instance from `inherit-instances/`,
+/// but the member keeps its sink instance. Found through this DC's sink
+/// index: tenants below the declarer, not in `known`, whose catalog holds
+/// an instance row of `s`.
+///
+/// # Errors
+/// The DC tier's (listing the sink index).
+pub async fn unindexed_members(
+    svc: &Arc<TenantServices>,
+    s: &Definition,
+    known: &[TenantId],
+) -> Result<Vec<TenantId>> {
+    let declarer = s.key().tenant;
+    let index = sprig_sinks::meta::index_list(&svc.locator.dc_store()).await?;
+    let tenants: std::collections::BTreeSet<u64> = index.iter().map(|i| i.tenant).collect();
+    let mut out = Vec::new();
+    for t in tenants.into_iter().map(TenantId) {
+        if t == declarer || known.contains(&t) {
+            continue;
+        }
+        let Some(e) = super::dir_entry(svc, t).await? else {
+            continue;
+        };
+        if !e.path_ids().contains(&declarer.0) {
+            continue;
+        }
+        let r = async {
+            let ep = svc.locator.writer(t).await?;
+            let mut conn = ep.pool.get_conn().await.map_err(cat_err)?;
+            let store = MsgStore::new(ep.store.schema());
+            Ok::<bool, SprigError>(
+                store.migrated(&mut conn).await? && store.instance(&mut conn, s.key()).await?.is_some(),
+            )
+        }
+        .await;
+        match r {
+            Ok(true) => out.push(t),
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(tenant = %t, def = %s.key(), error = %e, "a member's sink instance couldn't be looked up");
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The members holding an instance of sink definition `s` (those with an

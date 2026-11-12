@@ -10,6 +10,12 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+# MongoDB's server-side JavaScript (`mongo`, decision S110): documents
+# cross as BSON; `BinData` as base64; `hex_md5` (all MIT or Apache-2.0,
+# already in the lockfile through sprig-doc).
+base64.workspace = true
+bson = "=2.15.0"
+md-5 = "0.10.6"
 futures.workspace = true
 # Chapter 41's native KIRun runtime: Modlix's open-source `kirun` crate (MIT).
 kirun.workspace = true

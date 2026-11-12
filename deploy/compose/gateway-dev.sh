@@ -297,9 +297,7 @@ stop() {
     say "$name stopped"
 }
 
-# SPRIG_CTL_TOKEN_FILE: the Admin API credential once the controller has an
-# admin token or named operators (deploy/compose/studio/e2e.sh sets it).
-ctl() { "$bin/sprigctl" --endpoint "$admin" ${SPRIG_CTL_TOKEN_FILE:+--token-file "$SPRIG_CTL_TOKEN_FILE"} "$@"; }
+ctl() { "$bin/sprigctl" --endpoint "$admin" "$@"; }
 
 # --- dev certificates ---------------------------------------------------------
 

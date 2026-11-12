@@ -142,3 +142,43 @@ tests:
             exp_annotations:
               summary: An automatic loop is undoing its own decisions
               runbook: chapter 47 runbook 11
+
+  # bugfix-53: etcd database size. etcd-1 is large and mostly free space;
+  # etcd-2 grows 4 MiB an hour (69,905 bytes a minute) without compaction;
+  # etcd-3 is small and steady (no alert).
+  - interval: 1m
+    input_series:
+      - series: 'etcd_mvcc_db_total_size_in_bytes{instance="etcd-1"}'
+        values: '629145600x1200'
+      - series: 'etcd_mvcc_db_total_size_in_use_in_bytes{instance="etcd-1"}'
+        values: '104857600x1200'
+      - series: 'etcd_mvcc_db_total_size_in_bytes{instance="etcd-2"}'
+        values: '20971520+69905x1200'
+      - series: 'etcd_mvcc_db_total_size_in_use_in_bytes{instance="etcd-2"}'
+        values: '20971520+69905x1200'
+      - series: 'etcd_mvcc_db_total_size_in_bytes{instance="etcd-3"}'
+        values: '33554432x1200'
+      - series: 'etcd_mvcc_db_total_size_in_use_in_bytes{instance="etcd-3"}'
+        values: '30000000x1200'
+    alert_rule_test:
+      - eval_time: 3h
+        alertname: EtcdDbLarge
+        exp_alerts:
+          - exp_labels: { severity: ticket, instance: etcd-1 }
+            exp_annotations:
+              summary: An etcd database is above 512 MiB (auto-compaction or defrag not running, or keys leak)
+              runbook: chapter 47 runbook 7
+      - eval_time: 3h
+        alertname: EtcdDbFragmented
+        exp_alerts:
+          - exp_labels: { severity: ticket, instance: etcd-1 }
+            exp_annotations:
+              summary: Half of an etcd database is free space (the periodic defrag isn't running)
+              runbook: chapter 47 runbook 7
+      - eval_time: 14h
+        alertname: EtcdDbGrowing
+        exp_alerts:
+          - exp_labels: { severity: ticket, instance: etcd-2 }
+            exp_annotations:
+              summary: An etcd database's live data keeps growing (auto-compaction off, or keys leak)
+              runbook: chapter 47 runbook 7

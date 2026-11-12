@@ -1011,9 +1011,27 @@ pub async fn drop_share(
             return Err(alter_denied(&db, &o.table));
         }
     }
+    // The children it served, read before the drop (bugfix-44).
+    let carried = crate::unshare::carried(ctx, &sh);
     let mut c = root_change(ctx);
     c.drop_shares.push(sh.id);
     r.commit(&c).await?;
+    // The share is gone: its children's overrides become their own rows
+    // and its views go. A failure leaves them as before (hidden, the view
+    // unused), so the statement still succeeds.
+    match crate::unshare::after_drop(ctx, r, &carried).await {
+        Ok(u) if u.views + u.orphaned > 0 => tracing::info!(
+            share = %name,
+            views = u.views,
+            orphaned = u.orphaned,
+            "share dropped: the children's overrides are their own rows"
+        ),
+        Ok(_) => {}
+        Err(e) => {
+            metrics::counter!("sprig_inherit_unshare_failures_total").increment(1);
+            tracing::warn!(share = %name, error = %e, "share dropped, but its children were not cleaned up");
+        }
+    }
     Ok(Done::default())
 }
 

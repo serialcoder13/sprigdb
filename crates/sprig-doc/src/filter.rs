@@ -131,6 +131,9 @@ pub enum FieldOp {
     /// `$geoWithin`, `$geoIntersects`, `$near`, `$nearSphere` (chapter
     /// 36, R6 round 3).
     Geo(Box<crate::geo::GeoOp>),
+    /// `$bitsAllSet`, `$bitsAnySet`, `$bitsAllClear`, `$bitsAnyClear`
+    /// (M3, decision S95).
+    Bits(crate::validate::bits::Bits),
 }
 
 /// An `$in` element.
@@ -171,6 +174,10 @@ pub enum Pred {
     },
     /// `$expr`, evaluated by the aggregation evaluator.
     Expr(Bson),
+    /// `$jsonSchema` (M3, decision S90), on the whole document.
+    JsonSchema(std::sync::Arc<crate::validate::schema::Schema>),
+    /// `$where` (M4, decision S110): server-side JavaScript per document.
+    Where(crate::serverjs::Where),
     /// Always true (`{}`, `$comment`).
     True,
 }
@@ -210,8 +217,36 @@ pub fn parse(filter: &Document) -> Result<Pred, MongoError> {
                     });
                 }
                 "expr" => all.push(Pred::Expr(v.clone())),
+                "jsonSchema" => {
+                    let Bson::Document(d) = v else {
+                        return Err(MongoError::new(
+                            code::TYPE_MISMATCH,
+                            "$jsonSchema must be an object",
+                        ));
+                    };
+                    all.push(Pred::JsonSchema(std::sync::Arc::new(
+                        crate::validate::schema::Schema::parse_root(d)?,
+                    )));
+                }
                 "comment" => {}
-                "where" | "text" | "jsonSchema" | "geoWithin" | "near" | "sampleRate" => {
+                // MongoDB rewrites `$sampleRate: r` as `$expr: {$lt: [{$rand:
+                // {}}, r]}` (M3, for M1's list); always rechecked.
+                "sampleRate" => {
+                    let r = match v {
+                        Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_) | Bson::Decimal128(_) => {
+                            crate::validate::schema::as_number(v)
+                        }
+                        _ => None,
+                    };
+                    let Some(r) = r.filter(|r| (0.0..=1.0).contains(r)) else {
+                        return Err(bad("numeric argument to $sampleRate must be in [0, 1]"));
+                    };
+                    all.push(Pred::Expr(Bson::Document(
+                        bson::doc! {"$lt": [{"$rand": {}}, r]},
+                    )));
+                }
+                "where" => all.push(Pred::Where(crate::serverjs::Where::parse(v)?)),
+                "text" | "geoWithin" | "near" => {
                     return Err(MongoError::new(
                         code::SPRIG_DOC_FEATURE_UNSUPPORTED,
                         format!("${op} is not supported in this release"),
@@ -320,6 +355,9 @@ fn parse_ops(d: &Document) -> Result<Vec<FieldOp>, MongoError> {
                         k.starts_with('$')
                             && !matches!(k.as_str(), "$and" | "$or" | "$nor" | "$expr")
                     });
+                if e.contains_key("$where") {
+                    return Err(bad("$where can only be applied to the top-level document"));
+                }
                 FieldOp::ElemMatch(Box::new(if ops_only {
                     ElemMatch::Ops(parse_ops(e)?)
                 } else {
@@ -370,8 +408,11 @@ fn parse_ops(d: &Document) -> Result<Vec<FieldOp>, MongoError> {
             {
                 continue;
             }
-            "$where" | "$text" | "$bitsAllSet" | "$bitsAnySet" | "$bitsAllClear"
-            | "$bitsAnyClear" => {
+            "$bitsAllSet" | "$bitsAnySet" | "$bitsAllClear" | "$bitsAnyClear" => {
+                FieldOp::Bits(crate::validate::bits::Bits::parse(k, v)?)
+            }
+            "$where" => return Err(bad("$where cannot be applied to a field")),
+            "$text" => {
                 return Err(MongoError::new(
                     code::SPRIG_DOC_FEATURE_UNSUPPORTED,
                     format!("{k} is not supported in this release"),
@@ -664,6 +705,7 @@ impl FieldOp {
                 n.is_some_and(|n| n.wrapping_rem(*d) == *r)
             }),
             Self::Geo(g) => g.eval(&vs.leaves),
+            Self::Bits(b) => vs.vals.iter().any(|v| b.matches(v)),
         }
     }
 }
@@ -698,6 +740,8 @@ impl Pred {
             Self::Nor(k) => !k.iter().any(|p| p.matches_with(doc, cx)),
             Self::Field { path, op } => op.eval(&values_at(doc, path), cx, doc),
             Self::Expr(e) => cx.truthy(e, doc).unwrap_or(false),
+            Self::JsonSchema(s) => s.matches_doc(doc),
+            Self::Where(w) => w.matches(doc),
         }
     }
 

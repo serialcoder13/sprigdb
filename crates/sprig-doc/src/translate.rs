@@ -115,7 +115,7 @@ pub fn translate(p: &Pred, m: &CollMeta) -> SqlPred {
             negate(&inner)
         }
         Pred::Field { path, op } => field(path, op, m),
-        Pred::Expr(_) => SqlPred::t(),
+        Pred::Expr(_) | Pred::JsonSchema(_) | Pred::Where(_) => SqlPred::t(),
     }
 }
 
@@ -257,7 +257,9 @@ fn field(path: &str, op: &FieldOp, m: &CollMeta) -> SqlPred {
                 .collect();
             negate(&translate(&Pred::And(kids), m))
         }
-        FieldOp::Type(_) | FieldOp::ElemMatch(_) | FieldOp::Mod(..) => SqlPred::t(),
+        FieldOp::Type(_) | FieldOp::ElemMatch(_) | FieldOp::Mod(..) | FieldOp::Bits(_) => {
+            SqlPred::t()
+        }
         // Chapter 36 (R6 round 3): a box on a `2dsphere` index's columns.
         FieldOp::Geo(g) => SqlPred::sup(crate::geo::prefilter(path, g, m)),
     }

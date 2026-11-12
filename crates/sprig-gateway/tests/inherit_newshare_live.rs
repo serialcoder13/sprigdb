@@ -12,6 +12,15 @@
 //!    child keeps its database of that name with its own rows (Kiran's
 //!    `inherit.parent_delete = keep`): it reads and writes them, the
 //!    parent's records are gone from it, and it can drop the database.
+//! 3. bugfix-51 (the lead's choice on bugfix-44): when the parent drops a
+//!    share, the child's overrides of the parent's records become the
+//!    child's own rows, visible as written (before, they were hidden), and
+//!    the share view `__sprig_share_<id>` leaves the child's schema at once.
+//!    With `SPRIG_TEST_NEWSHARE_GRANDCHILD` (a child of the child), the
+//!    grandchild's overrides of records that came from the parent become
+//!    its own too; with `SPRIG_TEST_NEWSHARE_BACKEND` (`host:port` of the
+//!    cluster, root password in `SPRIG_TEST_NEWSHARE_BACKEND_PASSWORD`) the
+//!    test also checks the view is gone.
 //!
 //! ```sh
 //! SPRIG_TEST_NEWSHARE_GATEWAY=127.0.0.1:58306 \
@@ -104,6 +113,11 @@ fn suffix() -> u128 {
 /// The parent makes database `db` with an inheritable `t1` and shares it
 /// to all its children.
 async fn share(p: &mut Conn, db: &str) {
+    share_with(p, db, "").await;
+}
+
+/// [`share`], with `opts` after the share's target (`WITH RESHARE`).
+async fn share_with(p: &mut Conn, db: &str, opts: &str) {
     ok(p, &format!("CREATE DATABASE {db}")).await;
     ok(
         p,
@@ -117,7 +131,7 @@ async fn share(p: &mut Conn, db: &str) {
         "INSERT INTO t1 VALUES (1, 'parent one'), (2, 'parent two')",
     )
     .await;
-    ok(p, &format!("CREATE SHARE {db}_s ON t1 TO ALL CHILDREN")).await;
+    ok(p, &format!("CREATE SHARE {db}_s ON t1 TO ALL CHILDREN {opts}")).await;
 }
 
 #[tokio::test]
@@ -244,4 +258,122 @@ async fn a_child_keeps_its_rows_when_the_parent_drops_a_shared_database() {
         .filter_map(|r| r[0].clone())
         .collect();
     assert!(!dbs.contains(&db), "{dbs:?}");
+}
+
+/// `SELECT id, v FROM <db>.t1 ORDER BY id` as `(id, v)` text pairs.
+async fn rows_of(c: &mut Conn, db: &str) -> Vec<(String, String)> {
+    ok(c, &format!("SELECT id, v FROM {db}.t1 ORDER BY id"))
+        .await
+        .into_iter()
+        .map(|r| (r[0].clone().unwrap(), r[1].clone().unwrap_or_default()))
+        .collect()
+}
+
+fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+    v.iter()
+        .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))
+        .collect()
+}
+
+/// The share views left in the physical schemas of logical database `db`
+/// on the backend, when `SPRIG_TEST_NEWSHARE_BACKEND` names it.
+async fn share_views(db: &str) -> Option<Vec<String>> {
+    let addr = std::env::var("SPRIG_TEST_NEWSHARE_BACKEND").ok()?;
+    let pw = std::env::var("SPRIG_TEST_NEWSHARE_BACKEND_PASSWORD").ok()?;
+    let (host, port) = addr.rsplit_once(':').unwrap();
+    let mut b = Conn::new(
+        OptsBuilder::default()
+            .ip_or_hostname(host)
+            .tcp_port(port.parse().unwrap())
+            .user(Some("root"))
+            .pass(Some(pw)),
+    )
+    .await
+    .expect("backend login");
+    let v: Vec<(String, String)> = b
+        .query(format!(
+            "SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.VIEWS WHERE TABLE_NAME \
+             LIKE '\\_\\_sprig\\_share\\_%' AND TABLE_SCHEMA LIKE '%{db}'"
+        ))
+        .await
+        .unwrap();
+    drop(b);
+    Some(v.into_iter().map(|(s, t)| format!("{s}.{t}")).collect())
+}
+
+#[tokio::test]
+async fn a_dropped_share_leaves_the_childs_overrides_as_its_own_rows() {
+    let Some(e) = env() else {
+        eprintln!("SPRIG_TEST_NEWSHARE_* not set; skipped");
+        return;
+    };
+    let gk = std::env::var("SPRIG_TEST_NEWSHARE_GRANDCHILD")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let db = format!("bf12ds{}", suffix());
+    let mut p = conn(&e.addr, &e.parent).await;
+    share_with(&mut p, &db, if gk.is_some() { "WITH RESHARE" } else { "" }).await;
+    let mut c = conn(&e.addr, &e.child).await;
+    ok(&mut c, &format!("USE {db}")).await;
+    // The child overrides the parent's record 1 and adds record 10.
+    ok(&mut c, "UPDATE t1 SET v = 'kid ovr' WHERE id = 1").await;
+    ok(&mut c, "INSERT INTO t1 VALUES (10, 'kid own')").await;
+    assert_eq!(
+        rows_of(&mut c, &db).await,
+        pairs(&[("1", "kid ovr"), ("2", "parent two"), ("10", "kid own")])
+    );
+    let mut g = None;
+    if let Some(gk) = &gk {
+        ok(&mut c, &format!("CREATE SHARE {db}_k ON t1 TO ALL CHILDREN")).await;
+        let mut gc = conn(&e.addr, gk).await;
+        ok(&mut gc, &format!("USE {db}")).await;
+        // The grandchild overrides the parent's record 2 (through the
+        // child) and the child's override of record 1.
+        ok(&mut gc, "UPDATE t1 SET v = 'gk ovr 2' WHERE id = 2").await;
+        ok(&mut gc, "UPDATE t1 SET v = 'gk ovr 1' WHERE id = 1").await;
+        assert_eq!(
+            rows_of(&mut gc, &db).await,
+            pairs(&[("1", "gk ovr 1"), ("2", "gk ovr 2"), ("10", "kid own")])
+        );
+        g = Some(gc);
+    }
+    if let Some(v) = share_views(&db).await {
+        assert!(!v.is_empty(), "no share view before the drop");
+        println!("share views before the drop: {v:?}");
+    }
+
+    ok(&mut p, &format!("USE {db}")).await;
+    ok(&mut p, &format!("DROP SHARE {db}_s")).await;
+
+    // The child's override stays, as written; the parent's record 2 goes.
+    let after = rows_of(&mut c, &db).await;
+    println!("the child after the drop: {after:?}");
+    assert_eq!(after, pairs(&[("1", "kid ovr"), ("10", "kid own")]));
+    if let Some(gc) = g.as_mut() {
+        let after = rows_of(gc, &db).await;
+        println!("the grandchild after the drop: {after:?}");
+        assert_eq!(
+            after,
+            pairs(&[("1", "gk ovr 1"), ("2", "gk ovr 2"), ("10", "kid own")])
+        );
+    }
+    if let Some(v) = share_views(&db).await {
+        println!("share views after the drop: {v:?}");
+        // The child's own share to the grandchild keeps its view; the
+        // dropped share's view is gone.
+        assert_eq!(v.len(), usize::from(gk.is_some()), "{v:?}");
+    }
+    // The row is the child's own: it updates and deletes as one.
+    ok(&mut c, "UPDATE t1 SET v = 'kid changed' WHERE id = 1").await;
+    assert_eq!(
+        rows_of(&mut c, &db).await,
+        pairs(&[("1", "kid changed"), ("10", "kid own")])
+    );
+
+    ok(&mut p, &format!("DROP DATABASE {db}")).await;
+    if let Some(mut gc) = g {
+        ok(&mut gc, &format!("DROP DATABASE IF EXISTS {db}")).await;
+        ok(&mut c, &format!("DROP SHARE {db}_k")).await;
+    }
+    ok(&mut c, &format!("DROP DATABASE {db}")).await;
 }

@@ -516,7 +516,14 @@ impl PassSession {
             .filter(|(_, p)| !p)
             .map(|(c, _)| c.clone())
             .collect();
-        let members = crate::inherited::sinks::members_of(svc, &chain, d).await?;
+        let mut members = crate::inherited::sinks::members_of(svc, &chain, d).await?;
+        // Members that detached their source instance keep their sink
+        // instance; the source's index no longer lists them (bugfix-52).
+        let detached = crate::inherited::sinks::unindexed_members(svc, d, &members).await?;
+        if !detached.is_empty() {
+            tracing::info!(def = %d.key(), members = ?detached, "dropping detached members' sink instances too");
+        }
+        members.extend(detached);
         let mut n = 0;
         for t in members {
             if inherited::dir_entry(svc, t).await?.is_none() {

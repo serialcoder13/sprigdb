@@ -80,7 +80,8 @@ measure() {
 up() {
     docker run -d --name r9-10k-etcd -m 4g -p "127.0.0.1:$ETCD_PORT:2379" quay.io/coreos/etcd:v3.6.5 \
         etcd --name=e0 --data-dir=/etcd-data --listen-client-urls=http://0.0.0.0:2379 \
-        --advertise-client-urls="http://127.0.0.1:$ETCD_PORT" --quota-backend-bytes=8589934592
+        --advertise-client-urls="http://127.0.0.1:$ETCD_PORT" --quota-backend-bytes=8589934592 \
+        --auto-compaction-mode=periodic --auto-compaction-retention=1h
     docker run -d --name r9-10k-mariadb -m 40g -p "127.0.0.1:$NODE_PORT:3306" \
         -e MARIADB_ROOT_PASSWORD="$ROOT_PW" --ulimit nofile=1048576:1048576 mariadb:11.4 \
         --innodb-buffer-pool-size=16G --table-definition-cache=450000 --table-open-cache=200000 \

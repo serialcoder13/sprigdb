@@ -31,10 +31,18 @@ pub mod heavy;
 pub mod json;
 pub mod keyenc;
 pub mod meta;
+/// MongoDB 9.0's per-operation memory limit (M3).
+pub mod opmem;
 pub mod policy;
+/// MongoDB query shapes for query settings and `$queryStats` (M3).
+pub mod qshape;
+/// Server-side JavaScript: `$where`, `$function`, `$accumulator` (M4).
+pub mod serverjs;
 pub mod sessions;
 pub mod sql;
 /// `$text`, `$search` and `$searchMeta` (chapter 39, R5 round 5).
 pub mod text;
 pub mod translate;
 pub mod update;
+/// Schema validation, `$jsonSchema` and the `$bits*` operators (M3).
+pub mod validate;

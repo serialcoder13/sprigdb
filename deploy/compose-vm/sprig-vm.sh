@@ -16,6 +16,7 @@
 #   ./sprig-vm.sh verify-backup <ts> [dir]   check a backup's checksums (no key needed)
 #   ./sprig-vm.sh restore <ts> [dir]    stop, put a backup back (from backups/ or dir/<ts>), start
 #   ./sprig-vm.sh etcd-rejoin           replace this VM's etcd member (lost disk, or after a restore)
+#   ./sprig-vm.sh etcd-defrag           defragment every etcd member, one at a time (daily from cron)
 #   ./sprig-vm.sh upgrade <image>       backup, then roll this VM's controller, worker, agent, gateway to <image>
 #   ./sprig-vm.sh rollback              roll back to the image before the last upgrade
 #   ./sprig-vm.sh rotate-certs          new server and process certificates from the same CA, live
@@ -945,6 +946,14 @@ monitoring_config() {
     say "config/prometheus-targets.json: every VM's gateway, controller, worker and agent"
 }
 
+# bugfix-53: auto-compaction (compose.yaml) frees etcd's old revisions;
+# defrag gives that space back to the disk and the quota. etcdctl goes
+# through the members in order, so only one pauses at a time.
+etcd_defrag() {
+    etcdctl_all --command-timeout=120s defrag
+    etcdctl_all endpoint status -w table
+}
+
 cmd=${1:-}
 shift || true
 case $cmd in
@@ -959,6 +968,7 @@ backup) backup "$@" ;;
 verify-backup) verify_backup "$@" ;;
 restore) restore "$@" ;;
 etcd-rejoin) etcd_rejoin ;;
+etcd-defrag) etcd_defrag ;;
 upgrade) upgrade "$@" ;;
 rollback) rollback ;;
 rotate-certs) rotate_certs ;;

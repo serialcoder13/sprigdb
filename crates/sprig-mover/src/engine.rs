@@ -1520,19 +1520,16 @@ impl Engine {
             // 3b. Again, now that no session can prepare a new branch: a
             // branch prepared after 2b (one that touched none of the
             // fenced tables, or any branch under a fence that doesn't wait
-            // for locks) must not commit after G. When this drain finished
-            // something, G moves past its commits.
-            let mut g = fenced.pos.clone();
-            if self
-                .drain_prepared(reserve_at, "after the fence")
-                .await?
-                .finished_any()
-            {
-                g = self.env.source.binlog_pos().await?;
-            }
+            // for locks) must not commit after G. G is read after this
+            // drain, always: a branch still prepared at the fence can be
+            // committed by its own coordinator or by the controller's
+            // resolver loop between the fence and the drain, and the drain
+            // then finds nothing to do; G from the fence would miss that
+            // commit, a lost acknowledged write (bugfix-50).
+            self.drain_prepared(reserve_at, "after the fence").await?;
             let fenced = crate::io::Fenced {
                 receipt: fenced.receipt,
-                pos: g,
+                pos: self.env.source.binlog_pos().await?,
             };
             // 4-5. Apply up to G.
             if !self

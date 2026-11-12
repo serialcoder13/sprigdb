@@ -34,6 +34,10 @@
 #     once named operators are in use); and one operator per browser,
 #     studio-e2e-chromium, -firefox and -webkit, for e2e/operators.spec.ts.
 #
+# teardown, then `SPRIGCTL_TOKEN_FILE=<state>/studio-secrets/operator.token
+# gateway-dev.sh down`: after the switch to named operators sprigctl needs
+# that token to delete the tenants.
+#
 # run: forgets the browser operators' second factors (their first sign-in
 # enrols one), then runs Playwright with every address the specs need. With
 # no spec named, the whole suite on Chromium (the installed Google Chrome),
@@ -116,7 +120,10 @@ restart() {
             extra+=(SPRIGDB_GATEWAY_OPERATOR_TOKEN_FILE="$PWD/$secrets/admin.token")
         fi
     fi
-    env ${extra[@]+"${extra[@]}"} SPRIG_CTL_TOKEN_FILE="$(token_file)" deploy/compose/gateway-dev.sh restart
+    local t
+    t=$(token_file)
+    [[ -n $t ]] && extra+=(SPRIGCTL_TOKEN_FILE="$PWD/$t")
+    env ${extra[@]+"${extra[@]}"} deploy/compose/gateway-dev.sh restart
     for _ in $(seq 1 60); do curl -fsS -o /dev/null "http://127.0.0.1:$http_port/studio/" && return 0; sleep 1; done
     say "the gateway's HTTP listener isn't answering on 127.0.0.1:$http_port"
     return 1
@@ -161,7 +168,8 @@ setup() {
     sql "GRANT SPRIG_SINK_ADMIN ON *.* TO app"
     # 3. The child tenant (rule 8a: deleted by name in teardown).
     if ! ctl tenant list 2>/dev/null | grep -qw "$kid"; then
-        ctl tenant create "$kid" --under acme
+        # On acme's cluster: shares to a child need both on one cluster.
+        ctl tenant create "$kid" --under acme --cluster dc-a-c1
         echo "$kid" >>"$secrets/tenants"
     fi
     ctl tenant user add "$kid" app --password sprig-dev-app --native --if-not-exists
@@ -193,7 +201,8 @@ setup() {
     fi
     open_index() { mysql -h127.0.0.1 -P"$mysql_port" -uacme.app -psprig-dev-app --ssl-mode=REQUIRED -N -e "SHOW SPRIG RECOMMENDATIONS FOR TABLE approvals_shop.parts" 2>/dev/null | awk '$2 ~ /^index\./ && ($4 == "open" || $4 == "snoozed" || $4 == "ignored")' | wc -l | tr -d ' '; }
     local raise=false
-    [[ $(open_index) -lt 2 ]] && raise=true
+    # (Live items only: a run snoozes them, and the spec reopens them.)
+    [[ $(open_index) -lt 1 ]] && raise=true
     # Slow lookups on parts.sku: once the fingerprint is watched (its p95
     # above workload.watch_p95_ms), its runs are probed for the advisor.
     lookups() { for i in $(seq 1 20); do sql "SELECT COUNT(*), MAX(note) FROM approvals_shop.parts WHERE sku = $((i % 500))" >/dev/null; done; }
@@ -212,7 +221,7 @@ setup() {
     fi
     if $raise; then
         say "waiting for index recommendations in approvals_shop (about 2 minutes)"
-        for _ in $(seq 1 72); do [[ $(open_index) -ge 2 ]] && break; lookups; sleep 10; done
+        for _ in $(seq 1 72); do [[ $(open_index) -ge 1 ]] && break; lookups; sleep 10; done
         [[ $(open_index) -ge 1 ]] || { say "no index recommendation in approvals_shop after 12 minutes"; exit 1; }
     fi
     # 7. Named operators.
@@ -261,11 +270,11 @@ run)
 teardown)
     # The child tenant (by its exact name), the operators and their tokens.
     if [[ -s $secrets/tenants ]]; then
-        while read -r t; do [[ -n $t ]] && ctl tenant delete "$t" --reason "Studio e2e teardown" || true; done <"$secrets/tenants"
+        while read -r t; do [[ -n $t ]] && ctl tenant delete "$t" || true; done <"$secrets/tenants"
         rm -f "$secrets/tenants"
     fi
     for name in "${ops[@]}"; do ctl operator disable "$name" --reason "Studio e2e teardown" >/dev/null 2>&1 || true; done
-    say "child tenant deleted and browser operators disabled; gateway-dev.sh down (with SPRIG_CTL_TOKEN_FILE=$(token_file)) deletes the rest"
+    say "child tenant deleted and browser operators disabled; SPRIGCTL_TOKEN_FILE=$PWD/$(token_file) deploy/compose/gateway-dev.sh down deletes the rest"
     ;;
 *)
     echo "usage: $0 setup | run [specs] | restart | teardown" >&2

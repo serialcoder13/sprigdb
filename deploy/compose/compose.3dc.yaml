@@ -106,6 +106,10 @@ services:
       - etcd
       - --name=mum1-etcd
       - --data-dir=/etcd-data
+      # Keep only the last hour of revisions (as deploy/compose-vm): without it
+      # etcd's database grows with every write (about 0.7 MB/h in the M0.7 soak).
+      - --auto-compaction-mode=periodic
+      - --auto-compaction-retention=1h
       - --listen-client-urls=http://0.0.0.0:2379
       - --advertise-client-urls=http://mum1-etcd:2379
       - --listen-peer-urls=http://0.0.0.0:2380
@@ -124,6 +128,10 @@ services:
       - etcd
       - --name=etcd-g-mum1
       - --data-dir=/etcd-data
+      # Keep only the last hour of revisions (as deploy/compose-vm): without it
+      # etcd's database grows with every write (about 0.7 MB/h in the M0.7 soak).
+      - --auto-compaction-mode=periodic
+      - --auto-compaction-retention=1h
       - --listen-client-urls=http://0.0.0.0:2379
       - --advertise-client-urls=http://etcd-g-mum1:2379
       - --listen-peer-urls=http://0.0.0.0:2380
@@ -184,6 +192,10 @@ services:
       - etcd
       - --name=fra1-etcd
       - --data-dir=/etcd-data
+      # Keep only the last hour of revisions (as deploy/compose-vm): without it
+      # etcd's database grows with every write (about 0.7 MB/h in the M0.7 soak).
+      - --auto-compaction-mode=periodic
+      - --auto-compaction-retention=1h
       - --listen-client-urls=http://0.0.0.0:2379
       - --advertise-client-urls=http://fra1-etcd:2379
       - --listen-peer-urls=http://0.0.0.0:2380
@@ -199,6 +211,10 @@ services:
       - etcd
       - --name=etcd-g-fra1
       - --data-dir=/etcd-data
+      # Keep only the last hour of revisions (as deploy/compose-vm): without it
+      # etcd's database grows with every write (about 0.7 MB/h in the M0.7 soak).
+      - --auto-compaction-mode=periodic
+      - --auto-compaction-retention=1h
       - --listen-client-urls=http://0.0.0.0:2379
       - --advertise-client-urls=http://etcd-g-fra1:2379
       - --listen-peer-urls=http://0.0.0.0:2380
@@ -276,6 +292,10 @@ services:
       - etcd
       - --name=iad1-etcd
       - --data-dir=/etcd-data
+      # Keep only the last hour of revisions (as deploy/compose-vm): without it
+      # etcd's database grows with every write (about 0.7 MB/h in the M0.7 soak).
+      - --auto-compaction-mode=periodic
+      - --auto-compaction-retention=1h
       - --listen-client-urls=http://0.0.0.0:2379
       - --advertise-client-urls=http://iad1-etcd:2379
       - --listen-peer-urls=http://0.0.0.0:2380
@@ -291,6 +311,10 @@ services:
       - etcd
       - --name=etcd-g-iad1
       - --data-dir=/etcd-data
+      # Keep only the last hour of revisions (as deploy/compose-vm): without it
+      # etcd's database grows with every write (about 0.7 MB/h in the M0.7 soak).
+      - --auto-compaction-mode=periodic
+      - --auto-compaction-retention=1h
       - --listen-client-urls=http://0.0.0.0:2379
       - --advertise-client-urls=http://etcd-g-iad1:2379
       - --listen-peer-urls=http://0.0.0.0:2380

@@ -164,6 +164,11 @@ pub async fn ensure(ctx: &Ctx<'_>, run: &mut dyn Runner, r: &Resolved) -> Result
         let sql = create_sql(&lineage, j, &r.db_name, &table, &up, ctx.lctn)?;
         let mut h = std::collections::hash_map::DefaultHasher::new();
         sql.hash(&mut h);
+        // The parent's catalog version too: a parent's `DROP SHARE` drops
+        // the view on every child (bugfix-44), and share ids are reused
+        // (`MAX + 1`), so a view this gateway made for a dropped share of
+        // the same id and text must be made again.
+        lineage[j - 1].version.hash(&mut h);
         let sig = h.finish();
         let key = (lineage[j].tenant.0, up.share.id);
         let known = cache().lock().map_or(None, |c| c.get(&key).copied());

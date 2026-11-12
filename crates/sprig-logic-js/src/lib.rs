@@ -17,7 +17,9 @@
 //! - [`bridge`]: the `db` interface the host implements (the gateway runs
 //!   each statement through the caller's own tenant session), and the
 //!   checking and binding of statements;
-//! - [`outbound`]: `logic.outbound_allowlist` and the HTTP client.
+//! - [`outbound`]: `logic.outbound_allowlist` and the HTTP client;
+//! - [`mongo`]: MongoDB's server-side JavaScript (`$where`, `$function`,
+//!   `$accumulator`) on the same QuickJS, one runtime per operation.
 //!
 //! Not yet: per-tenant isolate caches (each JavaScript and Lua call gets
 //! a fresh runtime; KIRun runs on the caller's task, cooperatively),
@@ -41,6 +43,7 @@ pub mod js;
 pub mod kirun;
 pub mod lua;
 pub mod messaging;
+pub mod mongo;
 pub mod outbound;
 pub mod program;
 

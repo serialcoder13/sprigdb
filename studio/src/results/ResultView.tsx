@@ -44,7 +44,11 @@ export function ResultView({
   const b0 = item.buffer;
   const graphable = !!b0 && (lang === 'cypher' || lang === 'gql') && hasGraph(b0.rowCount, b0.columns.length, (r, c) => b0.cell(r, c));
   const tree = !!b0 && lang === 'mongo';
-  const [mode, setMode] = useState<'grid' | 'chart' | 'graph' | 'tree'>(() => (graphable ? 'graph' : tree ? 'tree' : 'grid'));
+  // The view the user picked, else the one the result suits. Worked out on
+  // every render: rows stream in after the first one, so a graph found
+  // later still opens as a graph (round 7, ST73).
+  const [picked, setMode] = useState<'grid' | 'chart' | 'graph' | 'tree' | null>(null);
+  const mode = picked ?? (graphable ? 'graph' : tree ? 'tree' : 'grid');
   const [exportError, setExportError] = useState<string | null>(null);
   const b = item.buffer;
   const pager = useRef<{ p: Pager; untrack: () => void } | null>(null);

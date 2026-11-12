@@ -1,8 +1,9 @@
 # Settings for pnpm (Studio is one package, not a workspace of several).
 # Only versions published at least 14 days ago are installed (supply chain;
 # chapter 44 "Security notes"), no dependency runs install scripts, and the
-# store lives under target/ so nothing is installed outside the repository.
+# store lives under target/ so nothing is installed outside the repository
+# (target/studio-pnpm-store, no agent's own directory: those get cleaned).
 minimumReleaseAge: 20160
 onlyBuiltDependencies: []
-storeDir: ../target/agent-studio0/pnpm-store
+storeDir: ../target/studio-pnpm-store
 strictPeerDependencies: false

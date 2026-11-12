@@ -6,3 +6,12 @@
     state: restarted
   loop: "{{ sprigdb_roles | map('replace', 'db', 'agent') | map('replace', 'etcd', 'etcd-dc') | list }}"
   throttle: 1
+
+- name: Restart etcd
+  ansible.builtin.systemd_service:
+    name: "sprigdb-etcd-{{ item }}.service"
+    state: restarted
+  loop: [dc, global]
+  # A host without a global voter has no sprigdb-etcd-global unit.
+  failed_when: false
+  throttle: 1

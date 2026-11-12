@@ -130,6 +130,7 @@ up() {
         docker run -d --name "$container" --memory 256m -p 127.0.0.1:18379:2379 \
             quay.io/coreos/etcd:v3.6.5 etcd --name=bl --data-dir=/tmp/etcd-data \
             --listen-client-urls=http://0.0.0.0:2379 --advertise-client-urls=http://127.0.0.1:18379 \
+            --auto-compaction-mode=periodic --auto-compaction-retention=1h \
             >/dev/null
         for _ in $(seq 1 60); do
             curl -fsS -o /dev/null "$etcd/version" 2>/dev/null && break

@@ -695,14 +695,8 @@ impl TextSearch for DocSearch {
                         ),
                     )));
                 }
-                if arg.get_bool("$caseSensitive").unwrap_or(false)
-                    || arg.get_bool("$diacriticSensitive").unwrap_or(false)
-                {
-                    return Err(mongo(&SprigError::new(
-                        SprigCode::SearchUnsupported,
-                        "$caseSensitive and $diacriticSensitive need an analyzer that keeps case or diacritics",
-                    )));
-                }
+                // `$caseSensitive` and `$diacriticSensitive` are applied by
+                // the engine after the search (M3, decision S101).
                 let hits = self
                     .search(
                         t,

@@ -43,6 +43,8 @@ sprig-approvals.workspace = true
 sprig-balancer.workspace = true
 # Logic declarations (chapter 41, R7).
 sprig-logic = { path = "../sprig-logic" }
+# MongoDB's server-side JavaScript (M4): `sprig_logic_js::mongo`.
+sprig-logic-js.workspace = true
 sprig-catalog.workspace = true
 sprig-cluster.workspace = true
 sprig-common.workspace = true

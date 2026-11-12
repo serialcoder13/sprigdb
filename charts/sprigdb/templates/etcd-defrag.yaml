@@ -1,0 +1,55 @@
+{{- /* Defragments every etcd member this chart runs, one at a time (etcdctl
+     goes through --endpoints in order), so the space auto-compaction frees
+     goes back to the disk and etcd's quota (bugfix-53). The etcd image has
+     no shell: etcdctl runs directly. The pod carries the chart's labels,
+     which the etcd NetworkPolicy lets in. */}}
+{{- if .Values.etcd.defrag.enabled }}
+{{- $s := ternary "https" "http" .Values.tls.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: sprigdb-etcd-defrag
+  labels: {{- include "sprigdb.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.etcd.defrag.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/component: etcd-defrag
+            {{- include "sprigdb.labels" . | nindent 12 }}
+        spec:
+          automountServiceAccountToken: false
+          restartPolicy: OnFailure
+          containers:
+            - name: defrag
+              image: {{ .Values.etcd.image }}
+              command: ["/usr/local/bin/etcdctl"]
+              args:
+                - --endpoints={{- range $i, $_ := until (int .Values.etcd.replicas) -}}{{ if $i }},{{ end }}{{ $s }}://sprigdb-etcd-dc-{{ $i }}.sprigdb-etcd-dc.{{ $.Release.Namespace }}.svc:2379{{- end }}{{ if .Values.global.voter.enabled }},{{ $s }}://sprigdb-etcd-global.{{ .Release.Namespace }}.svc:2379{{ end }}
+                - --command-timeout=120s
+                {{- if .Values.tls.enabled }}
+                - --cacert=/etc/etcd/ca/ca.crt
+                - --cert=/etc/etcd/tls/tls.crt
+                - --key=/etc/etcd/tls/tls.key
+                {{- end }}
+                - defrag
+              {{- if .Values.tls.enabled }}
+              volumeMounts:
+                - {name: tls, mountPath: /etc/etcd/tls, readOnly: true}
+                - {name: ca, mountPath: /etc/etcd/ca, readOnly: true}
+              {{- end }}
+          {{- if .Values.tls.enabled }}
+          volumes:
+            - name: tls
+              secret: {secretName: {{ .Values.etcd.defrag.clientSecret | default "sprigdb-etcd-dc-tls" }}}
+            - name: ca
+              configMap: {name: {{ .Values.tls.bundleConfigMap }}}
+          {{- end }}
+{{- end }}

@@ -1,0 +1,29 @@
+// Known differences from MongoDB 8.0.34 in cases.json, one per line: the
+// case name, then why. Each one is a decision recorded in
+// sprigdb-plan/decisions/r5-interim.md (S33 onwards).
+//
+// 8.1–8.3 features SprigDB enables while MongoDB 8.0 refuses them (S35):
+convert#1395 8.3 $toString of arrays
+convert#1403 8.3 $toString of objects
+convert#1450 8.3 $toString of timestamps
+convert#1473 8.3 $toString of regexes
+convert#1481 8.3 $toString of MinKey
+convert.short#1619 8.3 $toString of objects
+convert.args#1519 8.3 string to array
+convert.args#1521 8.1 numbers to binData
+convert.args#1529 8.3 $convert base
+// $addToSet's order is unspecified; MongoDB's follows its hash table (S37):
+group#1739 $addToSet order
+// MongoDB's decimal library is one unit off in the 34th digit here; SprigDB
+// is correctly rounded (S36):
+math.log#74 log2(100) decimal
+trig#226 sinh(0.5) decimal
+trig#250 tanh(0.5) decimal
+trig#286 atanh(0.5) decimal
+// glibc's hyperbolic functions are one unit off in the last place here;
+// SprigDB uses the platform's (S36):
+trig#223 sinh(2)
+trig#232 sinh(-2)
+trig#284 atanh(0.5)
+trig#285 atanh(-0.75)
+trig#319 atanh(0.5)

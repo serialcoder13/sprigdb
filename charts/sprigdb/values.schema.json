@@ -28,7 +28,9 @@
       "properties": {
         "replicas": {"type": "integer", "enum": [1, 3, 5]},
         "storage": {"type": "string"},
-        "image": {"type": "string"}
+        "image": {"type": "string"},
+        "autoCompaction": {"type": "object", "properties": {"mode": {"type": "string", "enum": ["periodic", "revision"]}, "retention": {"type": "string"}}},
+        "defrag": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "schedule": {"type": "string"}, "clientSecret": {"type": "string"}}}
       }
     },
     "controller": {

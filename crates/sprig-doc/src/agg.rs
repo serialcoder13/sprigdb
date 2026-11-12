@@ -20,6 +20,25 @@ use crate::filter::{self, ExprEval, as_i64, truthy};
 use crate::keyenc::{compare, equal};
 use crate::update::{arith, get_path, type_name};
 
+// The expressions added in M1 (12 Nov 2026): dates, strings, arrays and
+// sets, arithmetic, types, and 8.1–8.3's additions.
+mod expr_array;
+mod expr_common;
+mod expr_date;
+mod expr_decimal;
+mod expr_math;
+mod expr_string;
+mod expr_type;
+
+// M2 (12 Nov 2026): accumulators, window functions and stages.
+mod accum;
+mod accum_num;
+mod stages_bucket;
+mod stages_fill;
+mod stages_misc;
+mod window;
+pub use stages_misc::{GraphSearch, GraphSpec, db_level_error, documents, graph_lookup_in_memory};
+
 fn bad(msg: impl Into<String>) -> MongoError {
     MongoError::new(code::BAD_VALUE, msg)
 }
@@ -175,6 +194,9 @@ fn evals(arg: &Bson, vars: &Vars) -> Result<Vec<Bson>, MongoError> {
 
 #[allow(clippy::too_many_lines)]
 fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
+    if let Some(r) = expr_common::dispatch(op, arg, vars) {
+        return r;
+    }
     let cmp2 = |vars: &Vars| -> Result<Ordering, MongoError> {
         let v = evals(arg, vars)?;
         if v.len() != 2 {
@@ -187,6 +209,8 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
     };
     Ok(match op {
         "$literal" => arg.clone(),
+        // Server-side JavaScript (M4, decision S110).
+        "$function" => crate::serverjs::function(arg, vars)?,
         // A uniform double in [0, 1) (R5 round 4).
         "$rand" => {
             use std::hash::{BuildHasher, Hasher};
@@ -1544,7 +1568,8 @@ fn size_of(docs: &[Document]) -> usize {
 }
 
 fn over(lim: &AggLimits, docs: &[Document], stage: &str) -> Result<(), MongoError> {
-    if size_of(docs) > lim.stage_bytes {
+    let n = size_of(docs);
+    if n > lim.stage_bytes {
         return Err(MongoError::new(
             code::QUERY_EXCEEDED_MEMORY_LIMIT,
             format!(
@@ -1553,7 +1578,8 @@ fn over(lim: &AggLimits, docs: &[Document], stage: &str) -> Result<(), MongoErro
             ),
         ));
     }
-    Ok(())
+    // MongoDB 9.0's per-operation limit (M3).
+    crate::opmem::check(n, stage)
 }
 
 /// Runs one in-gateway stage over `docs`.
@@ -1695,9 +1721,9 @@ pub fn run_stage(
                 ]
             }
         }
-        "$group" => group(&docs, doc_arg()?, lim)?,
+        "$group" => accum::group(&docs, doc_arg()?, lim)?,
         "$sortByCount" => {
-            let g = group(&docs, &doc! {"_id": arg.clone(), "count": {"$sum": 1}}, lim)?;
+            let g = accum::group(&docs, &doc! {"_id": arg.clone(), "count": {"$sum": 1}}, lim)?;
             let mut g = g;
             sort_docs(&mut g, &vec![("count".to_owned(), -1)]);
             g
@@ -1784,6 +1810,19 @@ pub fn run_stage(
             }
             vec![out]
         }
+        "$setWindowFields" => window::set_window_fields(docs, arg, lim)?,
+        "$bucket" => stages_bucket::bucket(&docs, arg, lim)?,
+        "$bucketAuto" => stages_bucket::bucket_auto(&docs, arg, lim)?,
+        "$densify" => stages_fill::densify(docs, arg, lim)?,
+        "$fill" => stages_fill::fill(docs, arg, lim)?,
+        "$redact" => stages_misc::redact(docs, arg, lim)?,
+        "$documents" | "$collStats" | "$indexStats" | "$planCacheStats" | "$currentOp"
+        | "$listSessions" | "$listLocalSessions" | "$listClusterCatalog" => {
+            return Err(loc(
+                40602,
+                format!("{name} is only valid as the first stage in a pipeline"),
+            ));
+        }
         other => {
             return Err(MongoError::new(
                 if matches!(
@@ -1791,22 +1830,11 @@ pub fn run_stage(
                     "$out"
                         | "$merge"
                         | "$graphLookup"
-                        | "$setWindowFields"
-                        | "$densify"
-                        | "$fill"
                         | "$geoNear"
                         | "$search"
                         | "$searchMeta"
                         | "$vectorSearch"
                         | "$changeStream"
-                        | "$collStats"
-                        | "$indexStats"
-                        | "$planCacheStats"
-                        | "$currentOp"
-                        | "$listSessions"
-                        | "$bucket"
-                        | "$bucketAuto"
-                        | "$redact"
                 ) {
                     code::SPRIG_DOC_FEATURE_UNSUPPORTED
                 } else {
@@ -1818,89 +1846,6 @@ pub fn run_stage(
             ));
         }
     })
-}
-
-fn group(docs: &[Document], spec: &Document, lim: &AggLimits) -> Result<Vec<Document>, MongoError> {
-    let id_expr = spec
-        .get("_id")
-        .ok_or_else(|| loc(15955, "a group specification must include an _id"))?;
-    let mut accs: Vec<(String, String, Bson)> = Vec::new();
-    for (k, v) in spec {
-        if k == "_id" {
-            continue;
-        }
-        let Bson::Document(d) = v else {
-            return Err(loc(
-                40234,
-                format!("The field '{k}' must be an accumulator object"),
-            ));
-        };
-        let Some((op, e)) = d.iter().next() else {
-            return Err(loc(
-                40234,
-                format!("The field '{k}' must be an accumulator object"),
-            ));
-        };
-        if !matches!(
-            op.as_str(),
-            "$sum"
-                | "$avg"
-                | "$min"
-                | "$max"
-                | "$first"
-                | "$last"
-                | "$push"
-                | "$addToSet"
-                | "$count"
-        ) {
-            return Err(loc(15952, format!("unknown group operator '{op}'")));
-        }
-        accs.push((k.clone(), op.clone(), e.clone()));
-    }
-    let mut keys: Vec<(Vec<u8>, Bson)> = Vec::new();
-    let mut groups: HashMap<Vec<u8>, Vec<Acc>> = HashMap::new();
-    let mut bytes = 0usize;
-    for d in docs {
-        let vars = Vars::new(d, lim.now);
-        let mut id = eval(id_expr, &vars)?;
-        if missing(&id) {
-            id = Bson::Null;
-        }
-        let k = crate::keyenc::key(&id);
-        let entry = groups.entry(k.clone()).or_insert_with(|| {
-            keys.push((k, id.clone()));
-            accs.iter().map(|(_, op, _)| Acc::new(op)).collect()
-        });
-        for (i, (_, op, e)) in accs.iter().enumerate() {
-            let v = if op == "$count" {
-                Bson::Null
-            } else {
-                eval(e, &vars)?
-            };
-            if matches!(op.as_str(), "$push" | "$addToSet") {
-                bytes += bson::to_vec(&doc! {"v": v.clone()}).map_or(0, |b| b.len());
-                if bytes > lim.stage_bytes {
-                    return Err(MongoError::new(
-                        code::QUERY_EXCEEDED_MEMORY_LIMIT,
-                        "$group exceeded memory limit (doc.agg_stage_memory_bytes)",
-                    ));
-                }
-            }
-            entry[i].add(v)?;
-        }
-    }
-    Ok(keys
-        .into_iter()
-        .map(|(k, id)| {
-            let mut out = doc! {"_id": id};
-            if let Some(a) = groups.get(&k) {
-                for (i, (name, _, _)) in accs.iter().enumerate() {
-                    out.insert(name.clone(), a[i].result());
-                }
-            }
-            out
-        })
-        .collect())
 }
 
 /// Runs an update pipeline on one document.

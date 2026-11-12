@@ -580,6 +580,8 @@ impl Engine {
                 ));
             }
         }
+        // Schema validation (M3, decision S90).
+        crate::validate::check_create(&options)?;
         self.ensure_db(sql, &ns.db).await?;
         let table = meta::table_name(&ns.coll);
         sql.exec(&meta::create_table_sql(&ns.db, &table))
@@ -792,11 +794,23 @@ impl Engine {
         let mut m = self.meta_or_create(sql, ns).await?;
         let mut rows: Vec<Rendered> = Vec::new();
         let mut paths = BTreeSet::new();
+        // Schema validation (M3, decision S90).
+        let rules = crate::validate::Rules::of(&m.options)?;
+        let ns_text = ns.to_string();
         for (i, mut d) in docs.into_iter().enumerate() {
             if !d.contains_key("_id") {
                 let mut n = doc! {"_id": ObjectId::new()};
                 n.extend(d);
                 d = n;
+            }
+            if let Some(r) = &rules
+                && let Err(e) = r.check_insert(&ns_text, &d)
+            {
+                rows.push((i, Err(e)));
+                if ordered {
+                    break;
+                }
+                continue;
             }
             let id = d.get("_id").cloned().unwrap_or(Bson::Null);
             let r = json::to_stored(&d, &self.opts());
@@ -1437,6 +1451,8 @@ impl Engine {
         };
         let gm = self.geo_sides(sql, ns, &m, &pred).await?;
         let sqlp = translate(&pred, gm.as_ref().unwrap_or(&m));
+        // Schema validation (M3, decision S90).
+        let rules = crate::validate::Rules::of(&m.options)?;
         let now = now_date();
         let cx = ApplyCx {
             query: &pred,
@@ -1462,7 +1478,7 @@ impl Engine {
         for (old, v) in targets {
             out.matched += 1;
             let (changed, new_doc, old_doc) = self
-                .update_one_rmw(sql, ns, &mut m, old, v, &spec, &cx, &pred)
+                .update_one_rmw(sql, ns, &mut m, old, v, &spec, &cx, &pred, rules.as_ref())
                 .await?;
             if changed {
                 out.modified += 1;
@@ -1571,6 +1587,7 @@ impl Engine {
         spec: &UpdateSpec,
         cx: &ApplyCx<'_>,
         pred: &Pred,
+        rules: Option<&crate::validate::Rules>,
     ) -> Result<(bool, Option<Document>, Option<Document>), MongoError> {
         let id = first.get("_id").cloned().unwrap_or(Bson::Null);
         let key = json::id_key(&id)?;
@@ -1619,6 +1636,9 @@ impl Engine {
             let changed = update::apply(&mut new, spec, cx)?;
             if !changed {
                 return Ok((false, Some(new), Some(old)));
+            }
+            if let Some(r) = rules {
+                r.check_update(&ns.to_string(), &old, &new)?;
             }
             let s = json::to_stored(&new, &self.opts())?;
             // A document's BSON is at most 13 times its stored JSON (a
@@ -2129,6 +2149,27 @@ impl Engine {
         } else {
             Box::pin(self.first_stage(sql, ns, pipeline)).await?
         };
+        // M2: `aggregate: 1` starts with `$documents`; other stages need a
+        // collection (73).
+        let first = match (first, pipeline.first()) {
+            (None, Some(s0)) if ns.coll.is_empty() => {
+                let (name, arg) = s0.iter().next().map_or(("", &Bson::Null), |(k, v)| (k.as_str(), v));
+                if name == "$documents" {
+                    Some(agg::documents(arg, &lim)?)
+                } else if let Some(e) = agg::db_level_error(name) {
+                    return Err(e);
+                } else {
+                    None
+                }
+            }
+            (f, _) => f,
+        };
+        // M2: `$collStats`, `$indexStats`, `$planCacheStats`,
+        // `$listClusterCatalog` (engine/diag.rs).
+        let first = match first {
+            Some(f) => Some(f),
+            None => Box::pin(self.diag_stage(sql, ns, pipeline)).await?,
+        };
         let mut stages = if first.is_some() {
             &pipeline[1..]
         } else {
@@ -2193,6 +2234,10 @@ impl Engine {
         for s in stages {
             let name = s.keys().next().map_or("", String::as_str);
             docs = match name {
+                "$graphLookup" => {
+                    self.graph_lookup(sql, ns, docs, s.get("$graphLookup").unwrap_or(&Bson::Null), &lim)
+                        .await?
+                }
                 "$lookup" => {
                     self.lookup(
                         sql,
@@ -2265,7 +2310,14 @@ impl Engine {
                         coll: target,
                     };
                     if name == "$out" {
+                        // An existing target keeps its options (its
+                        // validator, M3) and the documents are checked
+                        // against them, as in MongoDB.
+                        let kept = self.meta(sql, &tns).await?.map(|m| m.options);
                         self.drop(sql, &tns).await?;
+                        if let Some(o) = kept.filter(|o| !o.is_empty()) {
+                            self.create(sql, &tns, o, false).await?;
+                        }
                         let (_, errs) = self.insert(sql, &tns, docs, true).await?;
                         if let Some((_, e)) = errs.into_iter().next() {
                             return Err(e);
@@ -2620,6 +2672,13 @@ fn dup_error(e: &SqlError, id: &Bson) -> MongoError {
 
 #[cfg(test)]
 mod tests;
+
+/// `$graphLookup` (M2).
+mod graph;
+
+/// `$collStats`, `$indexStats`, `$planCacheStats`, `$listClusterCatalog`
+/// (M2).
+mod diag;
 
 /// `$near`, `$geoNear`, `2dsphere` columns, search indexes and
 /// `$vectorSearch` (chapters 34 and 36, R6 round 3).
