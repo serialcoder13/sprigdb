@@ -30,11 +30,16 @@ fn family(v: &Bson) -> &'static str {
 fn default_output() -> Vec<(String, AccSpec)> {
     vec![(
         "count".to_owned(),
-        AccSpec::parse("$sum", &Bson::Int32(1), accum::Ctx::Group).unwrap_or_else(|_| unreachable!()),
+        AccSpec::parse("$sum", &Bson::Int32(1), accum::Ctx::Group)
+            .unwrap_or_else(|_| unreachable!()),
     )]
 }
 
-fn output_of(spec: Option<&Bson>, stage: &str, code_obj: i32) -> Result<Vec<(String, AccSpec)>, MongoError> {
+fn output_of(
+    spec: Option<&Bson>,
+    stage: &str,
+    code_obj: i32,
+) -> Result<Vec<(String, AccSpec)>, MongoError> {
     match spec {
         None => Ok(default_output()),
         Some(Bson::Document(o)) => accum::parse_fields(o, false),
@@ -54,7 +59,11 @@ fn output_of(spec: Option<&Bson>, stage: &str, code_obj: i32) -> Result<Vec<(Str
 /// # Errors
 /// 40192–40202 for the specification; 40066 for a value outside every
 /// bucket without `default`; the accumulators'.
-pub(crate) fn bucket(docs: &[Document], arg: &Bson, lim: &AggLimits) -> Result<Vec<Document>, MongoError> {
+pub(crate) fn bucket(
+    docs: &[Document],
+    arg: &Bson,
+    lim: &AggLimits,
+) -> Result<Vec<Document>, MongoError> {
     let Bson::Document(d) = arg else {
         return Err(err(
             40201,
@@ -138,7 +147,8 @@ pub(crate) fn bucket(docs: &[Document], arg: &Bson, lim: &AggLimits) -> Result<V
         ));
     }
     let accs = output_of(d.get("output"), "$bucket", 40196)?;
-    let mut js = crate::serverjs::GroupJs::parse(d.get_document("output").unwrap_or(&Document::new()))?;
+    let mut js =
+        crate::serverjs::GroupJs::parse(d.get_document("output").unwrap_or(&Document::new()))?;
     let mut keys = Vec::with_capacity(docs.len());
     for doc in docs {
         let v = eval(gb, &Vars::new(doc, lim.now))?;
@@ -159,8 +169,20 @@ pub(crate) fn bucket(docs: &[Document], arg: &Bson, lim: &AggLimits) -> Result<V
             }
         });
     }
-    let mut out = accum::group_by(docs, keys, &accs, lim, "$bucket", (!js.is_empty()).then_some(&mut js))?;
-    out.sort_by(|x, y| compare(x.get("_id").unwrap_or(&Bson::Null), y.get("_id").unwrap_or(&Bson::Null)));
+    let mut out = accum::group_by(
+        docs,
+        keys,
+        &accs,
+        lim,
+        "$bucket",
+        (!js.is_empty()).then_some(&mut js),
+    )?;
+    out.sort_by(|x, y| {
+        compare(
+            x.get("_id").unwrap_or(&Bson::Null),
+            y.get("_id").unwrap_or(&Bson::Null),
+        )
+    });
     Ok(out)
 }
 
@@ -170,13 +192,9 @@ pub(crate) fn bucket(docs: &[Document], arg: &Bson, lim: &AggLimits) -> Result<V
 // reference server one step at a time: its R40 has no 3.35, and its R80
 // is every other value of the standard series, from 1.03).
 
-const R5: &[u16] = &[
-    100, 160, 250, 400, 630,
-];
+const R5: &[u16] = &[100, 160, 250, 400, 630];
 
-const R10: &[u16] = &[
-    100, 125, 160, 200, 250, 315, 400, 500, 630, 800,
-];
+const R10: &[u16] = &[100, 125, 160, 200, 250, 315, 400, 500, 630, 800];
 
 const R20: &[u16] = &[
     100, 112, 125, 140, 160, 180, 200, 224, 250, 280, 315, 355, 400, 450, 500, 560, 630, 710, 800,
@@ -195,17 +213,11 @@ const R80: &[u16] = &[
     925, 975,
 ];
 
-const S125: &[u16] = &[
-    100, 200, 500,
-];
+const S125: &[u16] = &[100, 200, 500];
 
-const E6: &[u16] = &[
-    100, 150, 220, 330, 470, 680,
-];
+const E6: &[u16] = &[100, 150, 220, 330, 470, 680];
 
-const E12: &[u16] = &[
-    100, 120, 150, 180, 220, 270, 330, 390, 470, 560, 680, 820,
-];
+const E12: &[u16] = &[100, 120, 150, 180, 220, 270, 330, 390, 470, 560, 680, 820];
 
 const E24: &[u16] = &[
     100, 110, 120, 130, 150, 160, 180, 200, 220, 240, 270, 300, 330, 360, 390, 430, 470, 510, 560,
@@ -376,7 +388,10 @@ pub(crate) fn bucket_auto(
     };
     for k in d.keys() {
         if !matches!(k.as_str(), "groupBy" | "buckets" | "output" | "granularity") {
-            return Err(err(40245, format!("Unrecognized option to $bucketAuto: {k}")));
+            return Err(err(
+                40245,
+                format!("Unrecognized option to $bucketAuto: {k}"),
+            ));
         }
     }
     let (Some(gb), Some(nb)) = (d.get("groupBy"), d.get("buckets")) else {
@@ -416,7 +431,9 @@ pub(crate) fn bucket_auto(
     if nbuckets <= 0 {
         return Err(err(
             40243,
-            format!("The $bucketAuto 'buckets' field must be greater than 0, but found: {nbuckets}"),
+            format!(
+                "The $bucketAuto 'buckets' field must be greater than 0, but found: {nbuckets}"
+            ),
         ));
     }
     let gran = match d.get("granularity") {
@@ -468,7 +485,11 @@ pub(crate) fn bucket_auto(
     if n == 0 {
         return Ok(Vec::new());
     }
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     let size = ((n as f64 / f64::from(nbuckets)).round() as usize).max(1);
     // Buckets as index ranges with their min and max.
     let mut buckets: Vec<(usize, usize, Bson, Bson)> = Vec::new();
@@ -515,7 +536,14 @@ pub(crate) fn bucket_auto(
         let ds: Vec<Document> = vals[a..b].iter().map(|(_, k)| docs[*k].clone()).collect();
         let keys = vec![Bson::Null; ds.len()];
         let mut js = crate::serverjs::GroupJs::parse(&js_spec)?;
-        let mut g = accum::group_by(&ds, keys, &accs, lim, "$bucketAuto", (!js.is_empty()).then_some(&mut js))?;
+        let mut g = accum::group_by(
+            &ds,
+            keys,
+            &accs,
+            lim,
+            "$bucketAuto",
+            (!js.is_empty()).then_some(&mut js),
+        )?;
         if let Some(mut first) = g.pop() {
             first.insert("_id", doc! {"min": min, "max": max});
             out.push(first);

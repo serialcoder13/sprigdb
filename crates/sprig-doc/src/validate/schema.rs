@@ -488,10 +488,10 @@ impl Schema {
             }
         }
         match (d.get("additionalItems"), tuple) {
-            (None, _) => {}
             // Without a tuple of items, `additionalItems` has no effect.
-            (Some(Bson::Boolean(_) | Bson::Document(_)), None) => {}
-            (Some(Bson::Boolean(true)), Some(_)) => {}
+            (None, _)
+            | (Some(Bson::Boolean(_) | Bson::Document(_)), None)
+            | (Some(Bson::Boolean(true)), Some(_)) => {}
             (Some(Bson::Boolean(false)), Some(n)) => s.kws.push(Kw::AdditionalItemsFalse(n)),
             (Some(Bson::Document(a)), Some(n)) => {
                 s.kws

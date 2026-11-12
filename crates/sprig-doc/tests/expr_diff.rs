@@ -13,7 +13,12 @@
 //! mismatch, error messages included; `SPRIG_EXPR_DIFF_ONLY=<prefix>`
 //! runs only the cases whose names start with the prefix.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stderr)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::print_stderr,
+    clippy::too_many_lines
+)]
 
 use bson::{Bson, DateTime, Document, doc};
 use sprig_doc::agg::{self, AggLimits};

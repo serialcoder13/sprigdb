@@ -13,7 +13,13 @@ fn op() -> u64 {
     OP.fetch_add(1, Ordering::Relaxed)
 }
 
-fn run_in(op: u64, src: &str, this: Option<&Document>, args: &[Bson], as_bool: bool) -> Result<Bson, Failure> {
+fn run_in(
+    op: u64,
+    src: &str,
+    this: Option<&Document>,
+    args: &[Bson],
+    as_bool: bool,
+) -> Result<Bson, Failure> {
     call(&Call {
         op,
         src,
@@ -69,19 +75,41 @@ fn values_in() {
     assert_eq!(
         r,
         bson!([
-            "object", "number", "object", "true", "5f0000000000000000000001",
-            "ObjectId(\"5f0000000000000000000001\")", "NumberLong(5)", "NumberDecimal(\"1.5\")",
-            "true", "6", "null", "{\"$numberLong\":\"5\"}", "{\"$oid\":\"5f0000000000000000000001\"}"
+            "object",
+            "number",
+            "object",
+            "true",
+            "5f0000000000000000000001",
+            "ObjectId(\"5f0000000000000000000001\")",
+            "NumberLong(5)",
+            "NumberDecimal(\"1.5\")",
+            "true",
+            "6",
+            "null",
+            "{\"$numberLong\":\"5\"}",
+            "{\"$oid\":\"5f0000000000000000000001\"}"
         ])
     );
 }
 
 #[test]
 fn values_out() {
-    assert_eq!(f("function () { return 1 }", &[]).unwrap(), Bson::Double(1.0));
-    assert_eq!(f("function () { return undefined }", &[]).unwrap(), Bson::Null);
-    assert_eq!(f("function () { return NumberLong(3) }", &[]).unwrap(), Bson::Int64(3));
-    assert_eq!(f("function () { return NumberInt(3) }", &[]).unwrap(), Bson::Int32(3));
+    assert_eq!(
+        f("function () { return 1 }", &[]).unwrap(),
+        Bson::Double(1.0)
+    );
+    assert_eq!(
+        f("function () { return undefined }", &[]).unwrap(),
+        Bson::Null
+    );
+    assert_eq!(
+        f("function () { return NumberLong(3) }", &[]).unwrap(),
+        Bson::Int64(3)
+    );
+    assert_eq!(
+        f("function () { return NumberInt(3) }", &[]).unwrap(),
+        Bson::Int32(3)
+    );
     assert_eq!(
         f("function () { return NumberDecimal('2.5') }", &[]).unwrap(),
         Bson::Decimal128("2.5".parse().unwrap())
@@ -96,49 +124,97 @@ fn values_out() {
     );
     assert_eq!(
         f("function () { return Timestamp(5, 2) }", &[]).unwrap(),
-        Bson::Timestamp(bson::Timestamp { time: 5, increment: 2 })
+        Bson::Timestamp(bson::Timestamp {
+            time: 5,
+            increment: 2
+        })
     );
-    assert_eq!(f("function () { return MinKey }", &[]).unwrap(), Bson::MinKey);
-    assert_eq!(f("function () { return MaxKey() }", &[]).unwrap(), Bson::MaxKey);
     assert_eq!(
-        f("function () { return {x: undefined, y: [undefined, 's']} }", &[]).unwrap(),
+        f("function () { return MinKey }", &[]).unwrap(),
+        Bson::MinKey
+    );
+    assert_eq!(
+        f("function () { return MaxKey() }", &[]).unwrap(),
+        Bson::MaxKey
+    );
+    assert_eq!(
+        f(
+            "function () { return {x: undefined, y: [undefined, 's']} }",
+            &[]
+        )
+        .unwrap(),
         bson!({"x": null, "y": [null, "s"]})
     );
     assert_eq!(
         f("function () { return hex_md5('abc') }", &[]).unwrap(),
         Bson::String("900150983cd24fb0d6963f7d28e17f72".into())
     );
-    assert_eq!(f("function () { return Object.bsonsize({a: 1}) }", &[]).unwrap(), Bson::Double(16.0));
+    assert_eq!(
+        f("function () { return Object.bsonsize({a: 1}) }", &[]).unwrap(),
+        Bson::Double(16.0)
+    );
     assert_eq!(f("1 + 2", &[]).unwrap(), Bson::Double(3.0));
     assert_eq!(f("return 7", &[]).unwrap(), Bson::Double(7.0));
-    assert!(matches!(f("(a) => a * 3", &[]).unwrap(), Bson::JavaScriptCode(_)));
-    assert_eq!(f("function () { return 5n }", &[]), Err(Failure::Error(2, "unable to get type".into())));
+    assert!(matches!(
+        f("(a) => a * 3", &[]).unwrap(),
+        Bson::JavaScriptCode(_)
+    ));
+    assert_eq!(
+        f("function () { return 5n }", &[]),
+        Err(Failure::Error(2, "unable to get type".into()))
+    );
 }
 
 #[test]
 fn int_fields_of_documents_stay_int() {
     let sub = bson!({"q": 1, "r": 2.0});
-    assert_eq!(f("function (s) { return s }", &[sub.clone()]).unwrap(), sub);
     assert_eq!(
-        f("function (s) { s.z = 2; s.q = 7; return s }", &[sub.clone()]).unwrap(),
+        f("function (s) { return s }", std::slice::from_ref(&sub)).unwrap(),
+        sub
+    );
+    assert_eq!(
+        f(
+            "function (s) { s.z = 2; s.q = 7; return s }",
+            std::slice::from_ref(&sub)
+        )
+        .unwrap(),
         bson!({"q": 7, "r": 2.0, "z": 2.0})
     );
     assert_eq!(
-        f("function (s) { s.q = 7.5; return s }", &[sub.clone()]).unwrap(),
+        f(
+            "function (s) { s.q = 7.5; return s }",
+            std::slice::from_ref(&sub)
+        )
+        .unwrap(),
         bson!({"q": 7.5, "r": 2.0})
     );
     // A copy or an array doesn't keep them.
-    assert_eq!(f("function (s) { return {q: s.q} }", &[sub]).unwrap(), bson!({"q": 1.0}));
-    assert_eq!(f("function (a) { return a }", &[bson!([1, 2])]).unwrap(), bson!([1.0, 2.0]));
+    assert_eq!(
+        f("function (s) { return {q: s.q} }", &[sub]).unwrap(),
+        bson!({"q": 1.0})
+    );
+    assert_eq!(
+        f("function (a) { return a }", &[bson!([1, 2])]).unwrap(),
+        bson!([1.0, 2.0])
+    );
 }
 
 #[test]
 fn errors_as_mongodb_reports_them() {
     let e = |src: &str| f(src, &[]).unwrap_err();
-    assert!(matches!(e("function () { throw new Error('boom') }"), Failure::Error(139, m) if m.starts_with("Error: boom :\n@:")));
-    assert_eq!(e("function () { throw 'x' }"), Failure::Error(8, "uncaught exception: x".into()));
-    assert!(matches!(e("function () { throw {a: 1} }"), Failure::Error(139, m) if m == "uncaught exception: [object Object]"));
-    assert!(matches!(e("function () { return undefinedVar }"), Failure::Error(139, m) if m.starts_with("ReferenceError: ")));
+    assert!(
+        matches!(e("function () { throw new Error('boom') }"), Failure::Error(139, m) if m.starts_with("Error: boom :\n@:"))
+    );
+    assert_eq!(
+        e("function () { throw 'x' }"),
+        Failure::Error(8, "uncaught exception: x".into())
+    );
+    assert!(
+        matches!(e("function () { throw {a: 1} }"), Failure::Error(139, m) if m == "uncaught exception: [object Object]")
+    );
+    assert!(
+        matches!(e("function () { return undefinedVar }"), Failure::Error(139, m) if m.starts_with("ReferenceError: "))
+    );
     assert!(matches!(e("function ( {"), Failure::Error(139, m) if m.starts_with("SyntaxError: ")));
     assert!(matches!(e("this.a >"), Failure::Error(139, m) if m.starts_with("SyntaxError: ")));
 }
@@ -157,7 +233,10 @@ fn globals_last_for_the_operation_only() {
     let src = "function () { if (typeof gx === 'undefined') { gx = 0 } gx++; return gx }";
     assert_eq!(run_in(o, src, None, &[], false).unwrap(), Bson::Double(1.0));
     assert_eq!(run_in(o, src, None, &[], false).unwrap(), Bson::Double(2.0));
-    assert_eq!(run_in(op(), src, None, &[], false).unwrap(), Bson::Double(1.0));
+    assert_eq!(
+        run_in(op(), src, None, &[], false).unwrap(),
+        Bson::Double(1.0)
+    );
 }
 
 #[test]
@@ -196,6 +275,9 @@ fn deadline_and_memory() {
     });
     assert_eq!(r, Err(Failure::Error(139, "Out of memory".into())));
     // The thread's next operation works.
-    assert_eq!(f("function () { return 2 }", &[]).unwrap(), Bson::Double(2.0));
+    assert_eq!(
+        f("function () { return 2 }", &[]).unwrap(),
+        Bson::Double(2.0)
+    );
     reset_thread();
 }

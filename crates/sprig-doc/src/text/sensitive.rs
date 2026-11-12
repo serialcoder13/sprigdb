@@ -40,7 +40,7 @@ impl Query {
         let mut chars = search.chars().peekable();
         let mut word = String::new();
         let mut neg = false;
-        let mut push = |w: &mut String, neg: &mut bool, terms: &mut Vec<String>| {
+        let push = |w: &mut String, neg: &mut bool, terms: &mut Vec<String>| {
             if !w.is_empty() && !*neg {
                 terms.push(fold(w, case, diacritics));
             }

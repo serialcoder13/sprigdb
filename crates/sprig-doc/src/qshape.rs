@@ -314,7 +314,11 @@ fn digest(d: &Document) -> [u8; 32] {
 /// digits.
 #[must_use]
 pub fn shape_hash(shape: &Document) -> String {
-    digest(shape).iter().map(|b| format!("{b:02X}")).collect()
+    use std::fmt::Write as _;
+    digest(shape).iter().fold(String::with_capacity(64), |mut out, b| {
+        let _ = write!(out, "{b:02X}");
+        out
+    })
 }
 
 /// A `$queryStats` key's hash (`keyHash`): base64 of its SHA-256.

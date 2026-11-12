@@ -310,8 +310,7 @@ impl Engine {
                 .into_iter()
                 .find(|i| i.kind == TextKind::Text)
                 .and_then(|i| i.spec.get_document("weights").ok().cloned())
-                .map(|w| w.keys().cloned().collect())
-                .unwrap_or_else(|| vec!["$**".to_owned()]);
+                .map_or_else(|| vec!["$**".to_owned()], |w| w.keys().cloned().collect());
             let q = sensitive::Query::parse(&search, case, diacritics);
             docs.retain(|d| q.matches(&sensitive::texts(d, &fields)));
         }

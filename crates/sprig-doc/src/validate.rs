@@ -337,6 +337,7 @@ pub fn check_options(options: &Document) -> Result<(), MongoError> {
 /// collection (decision S92).
 pub const PREPARED: &str = "prepareConstraintValidationLevel";
 
+#[allow(clippy::needless_pass_by_value)]
 fn prefixed(cmd: &str, e: MongoError) -> MongoError {
     if e.code == code::TYPE_MISMATCH && e.message.starts_with("BSON field") {
         return MongoError::new(e.code, e.message.replacen("BSON field '", &format!("BSON field '{cmd}."), 1));
@@ -509,6 +510,7 @@ pub async fn coll_mod(
 // --- errInfo for query-operator validators ---------------------------------
 
 /// One clause of a filter, as MongoDB's parser splits it.
+#[allow(clippy::large_enum_variant)]
 enum Clause<'a> {
     /// `$and`, `$or`, `$nor` with their sub-filters.
     Logic(&'a str, &'a [Bson]),

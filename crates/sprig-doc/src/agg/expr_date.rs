@@ -565,7 +565,6 @@ const MONTHS: [&str; 12] = [
     "december",
 ];
 
-
 /// US zone abbreviations timelib knows, with their offsets (seconds).
 const ABBREVIATIONS: [(&str, i64); 8] = [
     ("est", -5 * 3600),
@@ -579,7 +578,13 @@ const ABBREVIATIONS: [(&str, i64); 8] = [
 ];
 
 const WEEKDAYS: [&str; 7] = [
-    "sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
+    "sunday",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
 ];
 
 /// A cursor over a free-form date string.
@@ -628,7 +633,9 @@ impl Cur<'_> {
 fn month_of(w: &str) -> Option<i64> {
     MONTHS
         .iter()
-        .position(|n| *n == w || (w.len() == 3 && n.starts_with(w)) || (w == "sept" && *n == "september"))
+        .position(|n| {
+            *n == w || (w.len() == 3 && n.starts_with(w)) || (w == "sept" && *n == "september")
+        })
         .map(|p| i64::try_from(p).unwrap_or(0) + 1)
 }
 
@@ -640,11 +647,18 @@ fn month_of(w: &str) -> Option<i64> {
 /// Zone names (`America/New_York`) are refused, as MongoDB refuses them.
 fn parse_free(s: &str) -> Result<Parsed, MongoError> {
     let bad = |why: &str| parse_err(s, why);
-    let mut c = Cur { s, b: s.as_bytes(), i: 0 };
+    let mut c = Cur {
+        s,
+        b: s.as_bytes(),
+        i: 0,
+    };
     let (y, m, d, days_override);
     if c.peek().is_some_and(|x| x.is_ascii_alphabetic()) {
         let mut w = c.word();
-        if WEEKDAYS.iter().any(|n| *n == w || (w.len() == 3 && n.starts_with(&w))) {
+        if WEEKDAYS
+            .iter()
+            .any(|n| *n == w || (w.len() == 3 && n.starts_with(&w)))
+        {
             c.eat(b',');
             c.spaces();
             if c.peek().is_some_and(|x| x.is_ascii_digit()) {
@@ -674,8 +688,9 @@ fn parse_free(s: &str) -> Result<Parsed, MongoError> {
             }
         } else {
             // `Feb 8 2017`, `February 8, 2017`.
-            let mm = month_of(&w)
-                .ok_or_else(|| bad("passing a time zone identifier as part of the string is not allowed"))?;
+            let mm = month_of(&w).ok_or_else(|| {
+                bad("passing a time zone identifier as part of the string is not allowed")
+            })?;
             c.spaces();
             let (dd, dn) = c.digits();
             if dn == 0 || dn > 2 {
@@ -773,12 +788,10 @@ fn parse_free(s: &str) -> Result<Parsed, MongoError> {
                 }
                 sec = ss;
                 if c.eat(b'.') || c.eat(b',') {
-                    let start = c.i;
                     let (frac, fl) = c.digits();
                     if fl == 0 {
                         return Err(bad("Unexpected character"));
                     }
-                    let _ = start;
                     ms = if fl >= 3 {
                         let t = &s[c.i - fl..c.i - fl + 3];
                         t.parse().unwrap_or(0)
@@ -833,15 +846,12 @@ fn parse_free(s: &str) -> Result<Parsed, MongoError> {
     if c.i != c.b.len() {
         return Err(bad("Trailing data"));
     }
-    let days = match days_override {
-        Some(dd) => {
-            check_civil(s, 2000, 1, 1, h, mi, sec)?;
-            dd
-        }
-        None => {
-            check_civil(s, y, m, d, h, mi, sec)?;
-            days_from_civil(y, m, d)
-        }
+    let days = if let Some(dd) = days_override {
+        check_civil(s, 2000, 1, 1, h, mi, sec)?;
+        dd
+    } else {
+        check_civil(s, y, m, d, h, mi, sec)?;
+        days_from_civil(y, m, d)
     };
     Ok(Parsed {
         local: days * DAY + h * 3_600_000 + mi * 60_000 + sec * 1000 + ms,

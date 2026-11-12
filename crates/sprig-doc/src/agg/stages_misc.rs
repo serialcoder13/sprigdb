@@ -38,11 +38,8 @@ fn redact_doc(
         Bson::String(s) if s == "descend" => {
             let mut out = Document::new();
             for (k, v) in cur {
-                match redact_val(root, v, e, lim)? {
-                    Some(x) => {
-                        out.insert(k.clone(), x);
-                    }
-                    None => {}
+                if let Some(x) = redact_val(root, v, e, lim)? {
+                    out.insert(k.clone(), x);
                 }
             }
             Ok(Some(out))
@@ -51,13 +48,22 @@ fn redact_doc(
             17053,
             format!(
                 "$redact's expression should not return anything aside from the variables $$KEEP, $$DESCEND, and $$PRUNE, but returned {}",
-                if missing(&other) { "MISSING".to_owned() } else { other.to_string() }
+                if missing(&other) {
+                    "MISSING".to_owned()
+                } else {
+                    other.to_string()
+                }
             ),
         )),
     }
 }
 
-fn redact_val(root: &Document, v: &Bson, e: &Bson, lim: &AggLimits) -> Result<Option<Bson>, MongoError> {
+fn redact_val(
+    root: &Document,
+    v: &Bson,
+    e: &Bson,
+    lim: &AggLimits,
+) -> Result<Option<Bson>, MongoError> {
     Ok(match v {
         Bson::Document(d) => redact_doc(root, d, e, lim)?.map(Bson::Document),
         Bson::Array(a) => {
@@ -77,7 +83,11 @@ fn redact_val(root: &Document, v: &Bson, e: &Bson, lim: &AggLimits) -> Result<Op
 ///
 /// # Errors
 /// 17053 for a result other than `$$KEEP`, `$$DESCEND` or `$$PRUNE`.
-pub(crate) fn redact(docs: Vec<Document>, e: &Bson, lim: &AggLimits) -> Result<Vec<Document>, MongoError> {
+pub(crate) fn redact(
+    docs: Vec<Document>,
+    e: &Bson,
+    lim: &AggLimits,
+) -> Result<Vec<Document>, MongoError> {
     let mut out = Vec::with_capacity(docs.len());
     for d in docs {
         if let Some(x) = redact_doc(&d, &d, e, lim)? {
@@ -201,7 +211,10 @@ impl GraphSpec {
                     let Bson::String(s) = v else {
                         return Err(err(
                             40103,
-                            format!("expected string as argument for {k}, found: {}", type_name(v)),
+                            format!(
+                                "expected string as argument for {k}, found: {}",
+                                type_name(v)
+                            ),
                         ));
                     };
                     path_ok(k, s)?;
@@ -231,7 +244,10 @@ impl GraphSpec {
                     o => {
                         return Err(err(
                             40185,
-                            format!("restrictSearchWithMatch must be an object, found {}", type_name(o)),
+                            format!(
+                                "restrictSearchWithMatch must be an object, found {}",
+                                type_name(o)
+                            ),
                         ));
                     }
                 },
@@ -283,7 +299,9 @@ impl GraphSpec {
     /// restriction.
     #[must_use]
     pub fn level_filter(&self, values: &[Bson]) -> Document {
-        let mut conds = vec![Bson::Document(doc! {self.to_field.clone(): {"$in": values.to_vec()}})];
+        let mut conds = vec![Bson::Document(
+            doc! {self.to_field.clone(): {"$in": values.to_vec()}},
+        )];
         if let Some(r) = &self.restrict {
             conds.push(Bson::Document(r.clone()));
         }

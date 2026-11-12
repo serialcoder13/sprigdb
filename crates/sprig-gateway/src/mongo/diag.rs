@@ -22,7 +22,10 @@ use super::conn::Conn;
 use crate::frontend::Protocol;
 
 fn unknown(stage: &str, k: &str) -> MongoError {
-    MongoError::new(40415, format!("BSON field '{stage}.{k}' is an unknown field."))
+    MongoError::new(
+        40415,
+        format!("BSON field '{stage}.{k}' is an unknown field."),
+    )
 }
 
 /// The documents of a gateway-run first stage, or `None` for other
@@ -78,7 +81,9 @@ fn current_op(c: &Conn, arg: &Bson, body: &Document) -> Result<Vec<Document>, Mo
                 if !matches!(v, Bson::Boolean(_)) {
                     return Err(MongoError::new(
                         code::FAILED_TO_PARSE,
-                        format!("The '{k}' parameter of the $currentOp stage must be a boolean value, but found: {v}"),
+                        format!(
+                            "The '{k}' parameter of the $currentOp stage must be a boolean value, but found: {v}"
+                        ),
                     ));
                 }
             }
@@ -91,10 +96,12 @@ fn current_op(c: &Conn, arg: &Bson, body: &Document) -> Result<Vec<Document>, Mo
     let now = DateTime::now();
     let mut out = Vec::new();
     for r in c.shared.d.sessions.list() {
-        if r.tenant.map_or(0, |t| t.0) != who.tenant || r.user.as_deref() != Some(who.user.as_str()) {
+        if r.tenant.map_or(0, |t| t.0) != who.tenant || r.user.as_deref() != Some(who.user.as_str())
+        {
             continue;
         }
-        let mine = Some(r.id) == own;
+        // The caller's own row: its SQL session, or its client address.
+        let mine = Some(r.id) == own || r.host == c.peer;
         let active = mine || r.command != "Sleep";
         if !active && !idle {
             continue;
@@ -110,7 +117,10 @@ fn current_op(c: &Conn, arg: &Bson, body: &Document) -> Result<Vec<Document>, Mo
         };
         if mine && let Some(m) = &c.client_meta {
             d.insert("clientMetadata", m.clone());
-            if let Ok(a) = m.get_document("application").and_then(|a| a.get_str("name")) {
+            if let Ok(a) = m
+                .get_document("application")
+                .and_then(|a| a.get_str("name"))
+            {
                 d.insert("appName", a);
             }
         }
@@ -119,14 +129,23 @@ fn current_op(c: &Conn, arg: &Bson, body: &Document) -> Result<Vec<Document>, Mo
             "currentOpTime",
             sprig_doc::json::iso_from_ms(now.timestamp_millis()).unwrap_or_default(),
         );
-        d.insert("effectiveUsers", vec![Bson::Document(doc! {"user": who.user.clone(), "db": "admin"})]);
+        d.insert(
+            "effectiveUsers",
+            vec![Bson::Document(
+                doc! {"user": who.user.clone(), "db": "admin"},
+            )],
+        );
         d.insert("threaded", true);
         d.insert("opid", id);
         if active {
             d.insert("secs_running", micros / 1_000_000);
             d.insert("microsecs_running", micros);
             d.insert("op", if mine { "command" } else { "query" });
-            d.insert("ns", r.db.clone().map_or_else(String::new, |db| format!("{db}.$cmd")));
+            d.insert(
+                "ns",
+                r.db.clone()
+                    .map_or_else(String::new, |db| format!("{db}.$cmd")),
+            );
             d.insert(
                 "command",
                 if mine {
@@ -163,6 +182,11 @@ fn current_op(c: &Conn, arg: &Bson, body: &Document) -> Result<Vec<Document>, Mo
             },
         );
         out.push(d);
+    }
+    // Idle change-stream cursors with their position (M4, 9.0's
+    // `cursor.changeStreams.optime`).
+    if spec.get_bool("idleCursors").unwrap_or(false) {
+        out.extend(super::status::change_stream_ops(c));
     }
     Ok(out)
 }

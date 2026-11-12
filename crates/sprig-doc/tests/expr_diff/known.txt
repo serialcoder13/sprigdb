@@ -27,3 +27,7 @@ trig#232 sinh(-2)
 trig#284 atanh(0.5)
 trig#285 atanh(-0.75)
 trig#319 atanh(0.5)
+// MongoDB checks binData literals of subtypes 4 and 5 for 16 bytes when it
+// parses an expression (error 9); SprigDB doesn't (S38):
+shape.convert#2893 MD5 literal of 3 bytes
+shape.convert#2894 MD5 literal of 3 bytes

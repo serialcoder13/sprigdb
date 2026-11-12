@@ -382,7 +382,7 @@ fn bin_to_string(b: &Binary, format: Option<&str>) -> Result<String, MongoError>
     let fmt = format.unwrap_or(if st == 4 { "uuid" } else { "base64" });
     Ok(match fmt {
         "base64" => base64::engine::general_purpose::STANDARD.encode(&b.bytes),
-        "base64url" => base64::engine::general_purpose::URL_SAFE.encode(&b.bytes),
+        "base64url" => base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&b.bytes),
         "hex" => hex_upper(&b.bytes),
         "utf8" => String::from_utf8(b.bytes.clone())
             .map_err(|_| conv_fail("Failed to convert binData to a UTF-8 string"))?,
@@ -718,7 +718,7 @@ fn convert(arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
             Bson::String(s) => {
                 if !matches!(s.as_str(), "base64" | "base64url" | "utf8" | "hex" | "uuid") {
                     return Err(err(
-                        4_341_117,
+                        4_341_125,
                         format!("Invalid 'format' argument for $convert: {s}"),
                     ));
                 }

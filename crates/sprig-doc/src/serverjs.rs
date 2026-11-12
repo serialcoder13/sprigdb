@@ -262,8 +262,7 @@ impl Where {
     /// 6108304 when server-side JavaScript is off.
     pub fn parse(v: &Bson) -> Result<Self, MongoError> {
         let src = match v {
-            Bson::String(s) => s.clone(),
-            Bson::JavaScriptCode(s) => s.clone(),
+            Bson::String(s) | Bson::JavaScriptCode(s) => s.clone(),
             Bson::JavaScriptCodeWithScope(_) => {
                 return Err(MongoError::new(
                     4_649_201,

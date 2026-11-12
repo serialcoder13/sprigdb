@@ -139,7 +139,9 @@ impl CursorTable {
             Vec::new(),
         );
         plan.exhausted = false;
-        let id = self.open(plan, ns, owner, lsid, batch_size, false, max_per_tenant)?;
+        let id = self.open(plan, ns.clone(), owner, lsid, batch_size, false, max_per_tenant)?;
+        // M4 (S116): change-stream metrics.
+        super::status::stream_opened(id, &ns);
         if let Some(c) = self.lock().get(&id).cloned()
             && let Ok(mut g) = c.try_lock()
             && let Some(cur) = g.as_mut()
@@ -193,6 +195,7 @@ impl CursorTable {
     pub fn remove(&self, id: i64) -> bool {
         let mut m = self.lock();
         let had = m.remove(&id).is_some();
+        super::status::cursor_closed(id);
         metrics::gauge!("sprig_mongo_cursors_open", "kind" => "find")
             .set(f64::from(u32::try_from(m.len()).unwrap_or(u32::MAX)));
         had
@@ -229,6 +232,18 @@ impl CursorTable {
                 .is_none_or(|cur| cur.lsid.as_deref() != Some(lsid)),
             Err(_) => true,
         });
+    }
+
+    /// The open cursors' ids (M4: change-stream metrics).
+    #[must_use]
+    pub fn ids(&self) -> Vec<i64> {
+        self.lock().keys().copied().collect()
+    }
+
+    /// The open cursors (M4: `currentOp`'s change streams).
+    #[must_use]
+    pub fn entries(&self) -> Vec<(i64, Arc<tokio::sync::Mutex<Option<Cursor>>>)> {
+        self.lock().iter().map(|(k, v)| (*k, Arc::clone(v))).collect()
     }
 
     /// Open cursors.

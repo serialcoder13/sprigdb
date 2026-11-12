@@ -24,7 +24,10 @@ fn err(c: i32, msg: impl Into<String>) -> MongoError {
 }
 
 fn missing_field(f: &str) -> MongoError {
-    err(40414, format!("BSON field '{f}' is missing but a required field"))
+    err(
+        40414,
+        format!("BSON field '{f}' is missing but a required field"),
+    )
 }
 
 fn field_path_ok(f: &str) -> Result<(), MongoError> {
@@ -39,6 +42,7 @@ fn field_path_ok(f: &str) -> Result<(), MongoError> {
     Ok(())
 }
 
+#[allow(clippy::large_enum_variant)]
 enum Bounds {
     Full,
     Partition,
@@ -62,7 +66,10 @@ fn parse_densify(arg: &Bson) -> Result<Densify, MongoError> {
     };
     for k in d.keys() {
         if !matches!(k.as_str(), "field" | "partitionByFields" | "range") {
-            return Err(err(40415, format!("BSON field '$densify.{k}' is an unknown field.")));
+            return Err(err(
+                40415,
+                format!("BSON field '$densify.{k}' is an unknown field."),
+            ));
         }
     }
     let field = match d.get("field") {
@@ -71,7 +78,10 @@ fn parse_densify(arg: &Bson) -> Result<Densify, MongoError> {
         Some(v) => {
             return Err(err(
                 code::TYPE_MISMATCH,
-                format!("BSON field '$densify.field' is the wrong type '{}', expected type 'string'", type_name(v)),
+                format!(
+                    "BSON field '$densify.field' is the wrong type '{}', expected type 'string'",
+                    type_name(v)
+                ),
             ));
         }
     };
@@ -81,11 +91,19 @@ fn parse_densify(arg: &Bson) -> Result<Densify, MongoError> {
     };
     for k in r.keys() {
         if !matches!(k.as_str(), "step" | "bounds" | "unit") {
-            return Err(err(40415, format!("BSON field '$densify.range.{k}' is an unknown field.")));
+            return Err(err(
+                40415,
+                format!("BSON field '$densify.range.{k}' is an unknown field."),
+            ));
         }
     }
-    let step = r.get("step").cloned().ok_or_else(|| missing_field("$densify.range.step"))?;
-    let bounds = r.get("bounds").ok_or_else(|| missing_field("$densify.range.bounds"))?;
+    let step = r
+        .get("step")
+        .cloned()
+        .ok_or_else(|| missing_field("$densify.range.step"))?;
+    let bounds = r
+        .get("bounds")
+        .ok_or_else(|| missing_field("$densify.range.bounds"))?;
     if !is_num(&step) || compare(&step, &Bson::Int32(0)) != Ordering::Greater {
         return Err(err(
             5_733_401,
@@ -101,12 +119,16 @@ fn parse_densify(arg: &Bson) -> Result<Densify, MongoError> {
         Bson::String(s) if s == "full" => Bounds::Full,
         Bson::String(s) if s == "partition" => Bounds::Partition,
         Bson::String(_) => {
-            return Err(err(5_946_802, "Bounds string must either be 'full' or 'partition'"));
+            return Err(err(
+                5_946_802,
+                "Bounds string must either be 'full' or 'partition'",
+            ));
         }
         Bson::Array(a)
             if a.len() == 2
                 && ((is_num(&a[0]) && is_num(&a[1]))
-                    || (matches!(a[0], Bson::DateTime(_)) && matches!(a[1], Bson::DateTime(_))))
+                    || (matches!(a[0], Bson::DateTime(_))
+                        && matches!(a[1], Bson::DateTime(_))))
                 && compare(&a[0], &a[1]) != Ordering::Greater =>
         {
             if matches!(a[0], Bson::DateTime(_)) != unit.is_some() {
@@ -133,13 +155,22 @@ fn parse_densify(arg: &Bson) -> Result<Densify, MongoError> {
                     field_path_ok(s)?;
                     Ok(s.clone())
                 }
-                _ => Err(err(code::TYPE_MISMATCH, "partitionByFields must be strings")),
+                _ => Err(err(
+                    code::TYPE_MISMATCH,
+                    "partitionByFields must be strings",
+                )),
             })
             .collect::<Result<_, _>>()?,
-        Some(_) => return Err(err(code::TYPE_MISMATCH, "partitionByFields must be an array")),
+        Some(_) => {
+            return Err(err(
+                code::TYPE_MISMATCH,
+                "partitionByFields must be an array",
+            ));
+        }
     };
     for p in &parts {
-        if p == &field || field.starts_with(&format!("{p}.")) || p.starts_with(&format!("{field}.")) {
+        if p == &field || field.starts_with(&format!("{p}.")) || p.starts_with(&format!("{field}."))
+        {
             return Err(err(
                 8_993_000,
                 "partitionByFields cannot include field that is being densified",
@@ -164,7 +195,8 @@ impl Densify {
         match (v, &self.unit) {
             (Bson::DateTime(t), Some(u)) => {
                 let amt = super::accum_num::integral(&self.step)?;
-                date_add(t.timestamp_millis(), amt, u).map(|ms| Bson::DateTime(DateTime::from_millis(ms)))
+                date_add(t.timestamp_millis(), amt, u)
+                    .map(|ms| Bson::DateTime(DateTime::from_millis(ms)))
             }
             _ => varith(v, &self.step, '+'),
         }
@@ -225,7 +257,11 @@ struct PState {
 /// # Errors
 /// MongoDB 8.0's parse and run-time errors.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn densify(docs: Vec<Document>, arg: &Bson, lim: &AggLimits) -> Result<Vec<Document>, MongoError> {
+pub(crate) fn densify(
+    docs: Vec<Document>,
+    arg: &Bson,
+    lim: &AggLimits,
+) -> Result<Vec<Document>, MongoError> {
     let spec = parse_densify(arg)?;
     super::over(lim, &docs, "$densify")?;
     let val = |d: &Document| get_path(d, &spec.field).cloned().unwrap_or(Bson::Null);
@@ -250,7 +286,11 @@ pub(crate) fn densify(docs: Vec<Document>, arg: &Bson, lim: &AggLimits) -> Resul
         compare(&val(&a.1), &val(&b.1))
     });
     let (gmin, gmax) = {
-        let vs: Vec<Bson> = items.iter().map(|x| val(&x.1)).filter(|v| !matches!(v, Bson::Null)).collect();
+        let vs: Vec<Bson> = items
+            .iter()
+            .map(|x| val(&x.1))
+            .filter(|v| !matches!(v, Bson::Null))
+            .collect();
         (vs.first().cloned(), vs.last().cloned())
     };
     let (lo, hi, hi_inclusive) = match &spec.bounds {
@@ -271,16 +311,15 @@ pub(crate) fn densify(docs: Vec<Document>, arg: &Bson, lim: &AggLimits) -> Resul
             out.push(d);
             continue;
         }
-        let si = match states.iter().position(|s| s.part == p) {
-            Some(i) => i,
-            None => {
-                states.push(PState {
-                    part: p.clone(),
-                    cur: None,
-                    pending: false,
-                });
-                states.len() - 1
-            }
+        let si = if let Some(i) = states.iter().position(|s| s.part == p) {
+            i
+        } else {
+            states.push(PState {
+                part: p.clone(),
+                cur: None,
+                pending: false,
+            });
+            states.len() - 1
         };
         let st = &mut states[si];
         // Outside explicit bounds: passed through.
@@ -294,7 +333,7 @@ pub(crate) fn densify(docs: Vec<Document>, arg: &Bson, lim: &AggLimits) -> Resul
             match &spec.bounds {
                 Bounds::Partition => st.cur = Some(v.clone()),
                 Bounds::Full => {
-                    st.cur = lo.clone();
+                    st.cur.clone_from(&lo);
                     if compare(&v, lo.as_ref().unwrap_or(&v)) != Ordering::Equal {
                         st.pending = true;
                         out.push(d);
@@ -316,10 +355,7 @@ pub(crate) fn densify(docs: Vec<Document>, arg: &Bson, lim: &AggLimits) -> Resul
             }
             out.push(spec.make(&st.part, &c)?);
             if out.len() > limit.max(1_000_000) {
-                return Err(err(
-                    5_897_900,
-                    "Generated too many documents in $densify",
-                ));
+                return Err(err(5_897_900, "Generated too many documents in $densify"));
             }
             st.cur = spec.next(&c);
         }
@@ -352,20 +388,36 @@ pub(crate) fn densify(docs: Vec<Document>, arg: &Bson, lim: &AggLimits) -> Resul
 ///
 /// # Errors
 /// MongoDB 8.0's parse errors; those of the stages it becomes.
-pub(crate) fn fill(docs: Vec<Document>, arg: &Bson, lim: &AggLimits) -> Result<Vec<Document>, MongoError> {
+pub(crate) fn fill(
+    docs: Vec<Document>,
+    arg: &Bson,
+    lim: &AggLimits,
+) -> Result<Vec<Document>, MongoError> {
     let Bson::Document(d) = arg else {
-        return Err(err(code::TYPE_MISMATCH, "the $fill stage specification must be an object"));
+        return Err(err(
+            code::TYPE_MISMATCH,
+            "the $fill stage specification must be an object",
+        ));
     };
     for k in d.keys() {
-        if !matches!(k.as_str(), "sortBy" | "partitionBy" | "partitionByFields" | "output") {
-            return Err(err(40415, format!("BSON field '$fill.{k}' is an unknown field.")));
+        if !matches!(
+            k.as_str(),
+            "sortBy" | "partitionBy" | "partitionByFields" | "output"
+        ) {
+            return Err(err(
+                40415,
+                format!("BSON field '$fill.{k}' is an unknown field."),
+            ));
         }
     }
     let Some(out) = d.get("output") else {
         return Err(missing_field("$fill.output"));
     };
     let Bson::Document(out) = out else {
-        return Err(err(code::TYPE_MISMATCH, "BSON field '$fill.output' must be an object"));
+        return Err(err(
+            code::TYPE_MISMATCH,
+            "BSON field '$fill.output' must be an object",
+        ));
     };
     if d.contains_key("partitionBy") && d.contains_key("partitionByFields") {
         return Err(err(
@@ -377,7 +429,10 @@ pub(crate) fn fill(docs: Vec<Document>, arg: &Bson, lim: &AggLimits) -> Result<V
     let mut values = Document::new();
     for (f, spec) in out {
         let Bson::Document(s) = spec else {
-            return Err(err(code::TYPE_MISMATCH, format!("Each fill output must be an object, found {f}")));
+            return Err(err(
+                code::TYPE_MISMATCH,
+                format!("Each fill output must be an object, found {f}"),
+            ));
         };
         let (m, v) = (s.get("method"), s.get("value"));
         if (m.is_some() && v.is_some()) || s.len() > 1 {

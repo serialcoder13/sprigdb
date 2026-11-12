@@ -2170,6 +2170,14 @@ impl Engine {
             Some(f) => Some(f),
             None => Box::pin(self.diag_stage(sql, ns, pipeline)).await?,
         };
+        // M4: `$rankFusion` and `$scoreFusion` (engine/fusion.rs).
+        let first = match first {
+            Some(f) => Some(f),
+            None if !ns.coll.is_empty() => {
+                Box::pin(self.fusion_stage(sql, ns, pipeline, &lim)).await?
+            }
+            None => None,
+        };
         let mut stages = if first.is_some() {
             &pipeline[1..]
         } else {
@@ -2679,6 +2687,8 @@ mod graph;
 /// `$collStats`, `$indexStats`, `$planCacheStats`, `$listClusterCatalog`
 /// (M2).
 mod diag;
+/// `$rankFusion` and `$scoreFusion` (M4).
+pub mod fusion;
 
 /// `$near`, `$geoNear`, `2dsphere` columns, search indexes and
 /// `$vectorSearch` (chapters 34 and 36, R6 round 3).

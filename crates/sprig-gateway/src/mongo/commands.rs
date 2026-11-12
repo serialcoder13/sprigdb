@@ -306,13 +306,8 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
                 doc! {"version": v.clone(), "versionArray": [parts.first().copied().unwrap_or(8), parts.get(1).copied().unwrap_or(0), parts.get(2).copied().unwrap_or(0), 0], "gitVersion": "sprigdb", "bits": 64, "maxBsonObjectSize": 16_777_216, "sprig": {"gateway": c.shared.d.gateway_id.clone()}, "ok": 1.0},
             );
         }
-        "connectionStatus" => {
-            let p = c.principal.as_ref();
-            let users: Vec<Document> = p.map(|p| doc! {"user": format!("{}.{}", p.tenant_name.clone().unwrap_or_default(), p.user), "db": "admin"}).into_iter().collect();
-            return Ok(
-                doc! {"authInfo": {"authenticatedUsers": users, "authenticatedUserRoles": []}, "ok": 1.0},
-            );
-        }
+        // M4 (S116): with MongoDB 8.1's `authInfo.UUID`.
+        "connectionStatus" => return Ok(super::status::connection_status(c)),
         "getParameter" => {
             let mut d = Document::new();
             if body.contains_key("featureCompatibilityVersion")
@@ -328,11 +323,8 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
                 doc! {"system": {"hostname": c.shared.d.gateway_id.clone()}, "os": {}, "extra": {}, "ok": 1.0},
             );
         }
-        "serverStatus" => {
-            return Ok(
-                doc! {"host": c.shared.d.gateway_id.clone(), "version": c.shared.settings().server_version, "process": "mongos", "uptime": c.shared.started.elapsed().as_secs_f64(), "localTime": bson::DateTime::now(), "connections": {"current": 1}, "ok": 1.0},
-            );
-        }
+        // M4 (S116): `none: 1` and change-stream metrics.
+        "serverStatus" => return Ok(super::status::server_status(c, body)),
         "whatsmyuri" => return Ok(doc! {"you": c.peer.to_string(), "ok": 1.0}),
         "getLog" => return Ok(doc! {"totalLinesWritten": 0, "log": [], "ok": 1.0}),
         "getCmdLineOpts" => return Ok(doc! {"argv": [], "parsed": {}, "ok": 1.0}),
@@ -715,6 +707,12 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
     c.sql = Some(s);
     // `$queryStats` (M3, S98).
     if let Ok(d) = &r {
+        // A point read answers with raw bytes (`Conn::raw`): count them.
+        let raw_n = c.raw.as_ref().and_then(|raw| {
+            let cur = raw.get_document("cursor").ok().flatten()?;
+            let b = cur.get_array("firstBatch").ok().flatten()?;
+            i64::try_from(b.into_iter().count()).ok()
+        });
         super::qsettings::record(
             tenant,
             name,
@@ -723,6 +721,7 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
             c.client_meta.as_ref(),
             started.elapsed(),
             d,
+            raw_n,
         );
     }
     r

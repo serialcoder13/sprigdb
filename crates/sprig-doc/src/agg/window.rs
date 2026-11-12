@@ -46,11 +46,27 @@ enum Window {
 enum Func {
     Acc(AccSpec),
     Rank(u8),
-    Shift { output: Bson, by: i64, default: Bson },
-    Derivative { input: Bson, unit: Option<String> },
-    Integral { input: Bson, unit: Option<String> },
-    Ema { input: Bson, alpha: Dec },
-    Cov { pair: Bson, samp: bool },
+    Shift {
+        output: Bson,
+        by: i64,
+        default: Bson,
+    },
+    Derivative {
+        input: Bson,
+        unit: Option<String>,
+    },
+    Integral {
+        input: Bson,
+        unit: Option<String>,
+    },
+    Ema {
+        input: Bson,
+        alpha: Dec,
+    },
+    Cov {
+        pair: Bson,
+        samp: bool,
+    },
     LinearFill(Bson),
     Locf(Bson),
 }
@@ -170,7 +186,10 @@ fn bound_order(a: &Bound, b: &Bound) -> bool {
     };
     match (a, b) {
         (Bound::Unbounded, _) | (_, Bound::Unbounded) => true,
-        _ => compare(&num(a).unwrap_or(Bson::Null), &num(b).unwrap_or(Bson::Null)) != Ordering::Greater,
+        _ => {
+            compare(&num(a).unwrap_or(Bson::Null), &num(b).unwrap_or(Bson::Null))
+                != Ordering::Greater
+        }
     }
 }
 
@@ -191,7 +210,9 @@ fn parse_window(v: &Bson) -> Result<Window, MongoError> {
     if w.is_empty() {
         return Ok(Window::Docs(Bound::Unbounded, Bound::Unbounded));
     }
-    if w.keys().any(|k| !matches!(k.as_str(), "documents" | "range" | "unit")) {
+    if w.keys()
+        .any(|k| !matches!(k.as_str(), "documents" | "range" | "unit"))
+    {
         return Err(e9(only));
     }
     if w.contains_key("documents") && w.contains_key("range") {
@@ -263,7 +284,9 @@ fn is_const(e: &Bson) -> bool {
     match e {
         Bson::String(s) => !s.starts_with('$') || s == "$$NOW",
         Bson::Array(a) => a.iter().all(is_const),
-        Bson::Document(d) => d.keys().next().is_some_and(|k| k == "$literal") || d.values().all(is_const),
+        Bson::Document(d) => {
+            d.keys().next().is_some_and(|k| k == "$literal") || d.values().all(is_const)
+        }
         _ => true,
     }
 }
@@ -321,13 +344,17 @@ fn parse_func(
                 .ok_or_else(|| e9("$shift requires an 'output' expression."))?;
             let by = match d.get("by") {
                 Some(b) if is_num(b) => accum_num::integral(b).ok_or_else(|| {
-                    e9(format!("'$shift:by' field must be an integer, but found  by: {b}"))
+                    e9(format!(
+                        "'$shift:by' field must be an integer, but found  by: {b}"
+                    ))
                 })?,
                 _ => return Err(e9("$shift requires 'by' as an integer value.")),
             };
             let default = match d.get("default") {
                 Some(x) if !is_const(x) => {
-                    return Err(e9("'$shift:default' expression must yield a constant value."));
+                    return Err(e9(
+                        "'$shift:default' expression must yield a constant value.",
+                    ));
                 }
                 Some(x) => x.clone(),
                 None => Bson::Null,
@@ -340,7 +367,11 @@ fn parse_func(
             if sort.is_none() {
                 return Err(e9("'$shift' requires a sortBy"));
             }
-            Func::Shift { output, by, default }
+            Func::Shift {
+                output,
+                by,
+                default,
+            }
         }
         "$derivative" | "$integral" => {
             let d = obj_arg(op, arg)?;
@@ -351,7 +382,12 @@ fn parse_func(
             let unit = match d.get("unit") {
                 None => None,
                 Some(Bson::String(u)) if UNITS.contains(&u.as_str()) => Some(u.clone()),
-                Some(u) => return Err(err(code::BAD_VALUE, format!("unknown time unit value: {u}"))),
+                Some(u) => {
+                    return Err(err(
+                        code::BAD_VALUE,
+                        format!("unknown time unit value: {u}"),
+                    ));
+                }
             };
             if let Some(u) = &unit
                 && unit_ms(u).is_none()
@@ -383,7 +419,9 @@ fn parse_func(
         }
         "$expMovingAvg" => {
             let Bson::Document(d) = arg else {
-                return Err(e9("$expMovingAvg must have exactly one argument that is an object"));
+                return Err(e9(
+                    "$expMovingAvg must have exactly one argument that is an object",
+                ));
             };
             let two = "$expMovingAvg sub object must have exactly two fields: An 'input' field, and either an 'N' field or an 'alpha' field";
             if d.len() != 2 || !d.contains_key("input") {
@@ -497,7 +535,9 @@ fn parse(arg: &Bson) -> Result<Spec, MongoError> {
         if name.starts_with('$') || name.is_empty() || name.split('.').any(str::is_empty) {
             return Err(err(
                 16410,
-                format!("FieldPath field names may not start with '$'. Consider using $getField or $setField for a field path with '.' or '$'. :: caused by :: {name}"),
+                format!(
+                    "FieldPath field names may not start with '$'. Consider using $getField or $setField for a field path with '.' or '$'. :: caused by :: {name}"
+                ),
             ));
         }
         let Bson::Document(fd) = f else {
@@ -514,7 +554,9 @@ fn parse(arg: &Bson) -> Result<Spec, MongoError> {
                 }
                 func = Some((k, v));
             } else {
-                return Err(e9(format!("Window function found an unknown argument: {k}")));
+                return Err(e9(format!(
+                    "Window function found an unknown argument: {k}"
+                )));
             }
         }
         let Some((op, a)) = func else {
@@ -651,7 +693,10 @@ fn windows(
                 if a > b || n == 0 {
                     None
                 } else {
-                    Some((usize::try_from(a).unwrap_or(0), usize::try_from(b).unwrap_or(0)))
+                    Some((
+                        usize::try_from(a).unwrap_or(0),
+                        usize::try_from(b).unwrap_or(0),
+                    ))
                 }
             })
             .collect()),
@@ -709,7 +754,9 @@ fn windows(
                     let hiv = shift(v, hi);
                     let inside = |x: &Bson| {
                         lov.as_ref().is_none_or(|l| compare(x, l) != Ordering::Less)
-                            && hiv.as_ref().is_none_or(|h| compare(x, h) != Ordering::Greater)
+                            && hiv
+                                .as_ref()
+                                .is_none_or(|h| compare(x, h) != Ordering::Greater)
                     };
                     let mut a = None;
                     let mut b = None;
@@ -832,7 +879,11 @@ fn run_output(
             }
             Ok(out)
         }
-        Func::Shift { output, by, default } => {
+        Func::Shift {
+            output,
+            by,
+            default,
+        } => {
             let empty = Document::new();
             let dv = eval(default, &Vars::new(&empty, lim.now))?;
             let mut out = Vec::with_capacity(n);
@@ -936,7 +987,11 @@ fn run_output(
                     None => x,
                     Some(p) => x.mul(alpha).add(&p.mul(&one_minus)),
                 };
-                last = if dec { v.to_bson() } else { Bson::Double(v.to_f64()) };
+                last = if dec {
+                    v.to_bson()
+                } else {
+                    Bson::Double(v.to_f64())
+                };
                 prev = Some(v);
                 out.push(last.clone());
             }
@@ -1005,7 +1060,11 @@ fn run_output(
                     let dx = varith(&xv[b], &xv[a], '-').unwrap_or(Bson::Null);
                     let off = varith(&xv[k], &xv[a], '-').unwrap_or(Bson::Null);
                     let slope = varith(&dy, &dx, '/').unwrap_or(Bson::Null);
-                    let v = varith(&ys[a], &varith(&off, &slope, '*').unwrap_or(Bson::Null), '+');
+                    let v = varith(
+                        &ys[a],
+                        &varith(&off, &slope, '*').unwrap_or(Bson::Null),
+                        '+',
+                    );
                     out[k] = v.unwrap_or(Bson::Null);
                 }
             }

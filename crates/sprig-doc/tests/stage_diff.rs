@@ -24,11 +24,12 @@ use sprig_proto_mongo::errors::MongoError;
 
 fn same(a: &Bson, b: &Bson) -> bool {
     match (a, b) {
-        (Bson::Double(x), Bson::Double(y)) => x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan()),
+        (Bson::Double(x), Bson::Double(y)) => {
+            x.to_bits() == y.to_bits() || (x.is_nan() && y.is_nan())
+        }
         (Bson::Document(x), Bson::Document(y)) => {
             x.len() == y.len()
-                && x
-                    .iter()
+                && x.iter()
                     .zip(y.iter())
                     .all(|((ka, va), (kb, vb))| ka == kb && same(va, vb))
         }
@@ -120,7 +121,9 @@ fn stages_match_mongodb_8_0() {
                     }
                     for (i, (x, y)) in g.iter().zip(w).enumerate() {
                         if !same(x, y) {
-                            detail.push_str(&format!("#{i} want {y:?}\n      #{i} got  {x:?}\n      "));
+                            detail.push_str(&format!(
+                                "#{i} want {y:?}\n      #{i} got  {x:?}\n      "
+                            ));
                             break;
                         }
                     }
@@ -152,7 +155,10 @@ fn stages_match_mongodb_8_0() {
             ),
             (Ok(Err((code, msg))), _) => (
                 false,
-                format!("want {}\n      got  error {code} {msg}", expect.get("ok").unwrap()),
+                format!(
+                    "want {}\n      got  error {code} {msg}",
+                    expect.get("ok").unwrap()
+                ),
             ),
         };
         if ok {

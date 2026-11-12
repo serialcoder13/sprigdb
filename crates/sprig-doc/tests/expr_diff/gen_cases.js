@@ -447,6 +447,70 @@ for (const str of ["2017-02-08 12:10:40", "2017-02-08T12:10", "2017-02-08T12", "
   add("date.free", { $toDate: str });
 }
 
+// --- batch 4: argument shapes and older operators the new modules answer --------
+const T5 = DT("2021-03-14T06:30:15.250Z");
+for (const op of ["$year", "$month", "$dayOfMonth", "$dayOfYear", "$dayOfWeek", "$millisecond", "$isoWeekYear"]) {
+  add("shape.parts", { [op]: [T5, T5] });
+  add("shape.parts", { [op]: [] });
+  add("shape.parts", { [op]: { date: T5, timezone: "Pacific/Chatham" } });
+  add("shape.parts", { [op]: { $dateFromParts: { year: 2020, month: 2, day: 29 } } });
+}
+for (const f of ["%b %B", "%Y%m%d", "%H%%%M", "%", "%Y-%", "abc", ""]) {
+  add("shape.toString", { $dateToString: { date: T5, format: f } });
+  add("shape.toString", { $dateToString: { date: T5, format: f, timezone: "+05:30" } });
+}
+add("shape.toString", { $dateToString: { date: T5, timezone: null } });
+add("shape.toString", { $dateToString: { date: T5, format: null } });
+add("shape.toString", { $dateToString: { date: "$missing", onNull: "$missing" } });
+add("shape.toString", { $dateToString: { format: "%Y" } });
+add("shape.toString", { $dateToString: { date: T5, x: 1 } });
+add("shape.toString", { $dateToString: "x" });
+for (const spec of [
+  { input: [1, 2], as: "x", in: "$$x", extra: 1 }, { as: "x", in: 1 }, { input: [1] }, "x", { input: [1], as: "x" },
+  { input: [[1, 2], [3]], in: { $size: "$$this" } }, { input: [1, 2], in: "$$nope" }, { input: [1, 2], as: "this", in: "$$this" },
+  { input: { $range: [0, 3] }, in: { $multiply: ["$$this", "$$this"] } }, { input: [1, "$missing", 3], in: "$$this" },
+  { input: [1, 2, 3], in: "$missingField" },
+]) add("shape.map", { $map: spec });
+for (const spec of [
+  { input: [1, 2], cond: true, limit: null }, { input: [1, 2], cond: true, limit: D(1.0) }, { input: [1, 2], cond: true, limit: D(1.5) },
+  { input: [1, 2], cond: true, limit: "a" }, { input: [1, 2], cond: true, limit: -1 }, { input: [1, 2], cond: true, limit: L(1) },
+  { input: [1, 2] }, { cond: true }, { input: [1, 2], cond: true, z: 1 }, { input: null, cond: true },
+  { input: [1, null, 0, "", [], false], cond: "$$this" }, { input: [1, 2, 3], as: "n", cond: { $gte: ["$$n", 2] } },
+]) add("shape.filter", { $filter: spec });
+for (const spec of [
+  { input: [1, 2], initialValue: [], in: { $concatArrays: ["$$value", ["$$this"]] } }, { input: [1, 2], in: 1 },
+  { input: [1, 2], initialValue: 0 }, { initialValue: 0, in: 1 }, { input: [], initialValue: "x", in: 1 },
+  { input: "$missing", initialValue: 0, in: 1 }, { input: [1], initialValue: 0, in: 1, q: 1 },
+  { input: [{ a: 1 }, { a: 2 }], initialValue: { s: 0 }, in: { s: { $add: ["$$value.s", "$$this.a"] } } },
+]) add("shape.reduce", { $reduce: spec });
+for (const spec of [
+  { input: "abc", regex: "(" }, { input: "abc", regex: "[" }, { input: "aaa", regex: "a*" }, { input: "abcabc", regex: "(?<x>b)(c)" },
+  { input: "AbC", regex: /b/, options: "i" }, { input: "line1\nline2", regex: "^line\\d$", options: "m" }, { input: "a", regex: "a", options: 5 },
+  { input: "a", regex: "a", options: null }, { input: "ab", regex: "(a)|(b)" }, { input: "x", regex: /x/, options: "" },
+]) {
+  add("shape.regex", { $regexFindAll: spec });
+  add("shape.regex", { $regexMatch: spec });
+}
+for (const s2 of [
+  { input: BinData(0, "AQID"), to: "string", format: "base64url" }, { input: BinData(0, "+/8="), to: "string", format: "base64url" },
+  { input: "-_8", to: { type: "binData", subtype: 0 }, format: "base64url" }, { input: "0a0B", to: "binData", format: "hex" },
+  { input: "0a0", to: "binData", format: "hex", onError: "E" }, { input: "héllo", to: "binData", format: "utf8" },
+  { input: BinData(0, "/w=="), to: "string", format: "utf8", onError: "E" }, { input: BinData(0, "AQID"), to: "string", format: "uuid", onError: "E" },
+  { input: BinData(5, "AQID"), to: "binData" }, { input: BinData(5, "AQID"), to: { type: "binData", subtype: 5 } },
+  { input: "AQID", to: "binData", format: "bogus" }, { input: 5, to: "string", format: "hex" },
+  { input: "5ab9cbfa31c2ab715d42129z", to: "objectId", onError: "E" }, { input: "5AB9CBFA31C2AB715D42129E", to: "objectId" },
+  { input: true, to: { type: "bool" } }, { input: 1, to: { type: 8 } }, { input: 1, to: { type: "int", subtype: 1 } },
+]) add("shape.convert", { $convert: s2 });
+for (const v of ["867dee52-c331-484e-92d1-c56479b8e67e", "867dee52c331484e92d1c56479b8e67e", "{867dee52-c331-484e-92d1-c56479b8e67e}", null, 5]) {
+  add("shape.toUUID", { $toUUID: v });
+}
+for (const a of [[[1, 2, 3], 1, 0, 3], [[1, 2, 3], 3, L(1)], [[], 1], [[null, "$missing"], null], [[[1, 2]], [1, 2]], [[{ a: 1 }], { a: 1.0 }]]) {
+  add("shape.indexOfArray", { $indexOfArray: a });
+}
+for (const a of [[0, 100, 25], [100, 0, -25], [I(-2147483648), I(-2147483646)], [0, 5, L(2)], [0, 5, DEC("2")], [L("2147483647"), L("2147483647")]]) {
+  add("shape.range", { $range: a });
+}
+
 // --- run them -----------------------------------------------------------------------
 const out = [];
 for (const c of cases) {

@@ -39,6 +39,8 @@ pub mod rls;
 pub mod search;
 /// Server-side JavaScript (M4).
 pub mod serverjs;
+/// `serverStatus`, `connectionStatus` and change-stream reporting (M4).
+pub mod status;
 pub mod snapshot;
 pub mod sql;
 pub mod txn;

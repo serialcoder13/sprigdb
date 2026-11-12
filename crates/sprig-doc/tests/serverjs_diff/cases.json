@@ -1,0 +1,11651 @@
+[
+ {
+  "name": "where#0",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "this.a > 2"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#1",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "this.a < 2"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "1"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#2",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "obj.a == 5"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "2"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#3",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "function () { return this.a == 3 }"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "3"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#4",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": {
+    "$code": "this.s.length > 1"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "4"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#5",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "var x = 2; this.a > x"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#6",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "return this.a === 1"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "1"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#7",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "this.l == 7"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "2"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#8",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "this.l > 4"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#9",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "this.d < 0"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "2"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#10",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "this.arr.length > 0"
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "139"
+   },
+   "errmsg": "Executor error during find command: m4diff.w :: caused by :: TypeError: can't access property \"length\", this.arr is undefined :\n@:1:15\n"
+  }
+ },
+ {
+  "name": "where#11",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "Array.isArray(this.arr) && this.arr.indexOf(3) >= 0"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "3"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#12",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "this.sub && this.sub.q == 2"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "2"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#13",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "this.dt instanceof Date && this.dt.getUTCFullYear() == 2020"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "1"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#14",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "this.o && this.o.str == '5f0000000000000000000001'"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "3"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#15",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "this.o instanceof ObjectId"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "3"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#16",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "typeof this.l == 'object'"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#17",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "this.s"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "4"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#18",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "''"
+  },
+  "expect": {
+   "ok": []
+  }
+ },
+ {
+  "name": "where#19",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "5"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    },
+    {
+     "$numberInt": "4"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#20",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "function () {}"
+  },
+  "expect": {
+   "ok": []
+  }
+ },
+ {
+  "name": "where#21",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "return {}"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    },
+    {
+     "$numberInt": "4"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#22",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "this.a = 100; return true"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    },
+    {
+     "$numberInt": "4"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#23",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "s": "yy",
+   "$where": "this.a > 0"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "2"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#24",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$or": [
+    {
+     "a": {
+      "$numberInt": "1"
+     }
+    },
+    {
+     "$where": "this.a == 5"
+    }
+   ]
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#25",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$nor": [
+    {
+     "$where": "this.a == 5"
+    }
+   ]
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "3"
+    },
+    {
+     "$numberInt": "4"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#26",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$and": [
+    {
+     "$where": "this.a > 0"
+    },
+    {
+     "$where": "this.a < 4"
+    }
+   ]
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#27",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "this.a == undefined"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "4"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#28",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "this.missing === undefined"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    },
+    {
+     "$numberInt": "4"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#29",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "tojson(this.sub) == '{ \"q\" : 1 }'"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "1"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#30",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "isNumber(this.a)"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#31",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "Object.keys(this).length > 6"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#32",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "JSON.stringify(this.l) == '{\"$numberLong\":\"5\"}'"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "1"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#33",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "hex_md5(this.s) == '9dd4e461268c8034f5c8564e155c67a6'"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "1"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#34",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "NumberLong(this.l).toString() == 'NumberLong(7)'"
+  },
+  "expect": {
+   "ok": [
+    {
+     "$numberInt": "2"
+    }
+   ]
+  }
+ },
+ {
+  "name": "where#35",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "this.a >"
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "139"
+   },
+   "errmsg": "SyntaxError: expected expression, got end of script"
+  }
+ },
+ {
+  "name": "where#36",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "throw new Error('boom')"
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "139"
+   },
+   "errmsg": "Executor error during find command: m4diff.w :: caused by :: Error: boom :\n@:1:21\n"
+  }
+ },
+ {
+  "name": "where#37",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "throw 'x'"
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "8"
+   },
+   "errmsg": "Executor error during find command: m4diff.w :: caused by :: uncaught exception: x"
+  }
+ },
+ {
+  "name": "where#38",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "null.x"
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "139"
+   },
+   "errmsg": "Executor error during find command: m4diff.w :: caused by :: TypeError: can't access property \"x\" of null :\n@:1:15\n"
+  }
+ },
+ {
+  "name": "where#39",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "undefinedVar > 1"
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "139"
+   },
+   "errmsg": "Executor error during find command: m4diff.w :: caused by :: ReferenceError: undefinedVar is not defined :\n@:1:15\n"
+  }
+ },
+ {
+  "name": "where#40",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": {
+    "$numberInt": "5"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "2"
+   },
+   "errmsg": "$where got bad type"
+  }
+ },
+ {
+  "name": "where#41",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": {
+    "$code": "this.a == q",
+    "$scope": {
+     "q": {
+      "$numberInt": "1"
+     }
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "4649201"
+   },
+   "errmsg": "$where no longer supports deprecated BSON type CodeWScope"
+  }
+ },
+ {
+  "name": "where#42",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "a": {
+    "$where": "true"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "2"
+   },
+   "errmsg": "$where cannot be applied to a field"
+  }
+ },
+ {
+  "name": "where#43",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "arr": {
+    "$elemMatch": {
+     "$where": "true"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "2"
+   },
+   "errmsg": "$where can only be applied to the top-level document"
+  }
+ },
+ {
+  "name": "where#44",
+  "kind": "where",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "a": {
+     "$numberInt": "1"
+    },
+    "s": "x",
+    "l": {
+     "$numberLong": "5"
+    },
+    "d": {
+     "$numberDouble": "1.5"
+    },
+    "arr": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "sub": {
+     "q": {
+      "$numberInt": "1"
+     }
+    },
+    "dt": {
+     "$date": {
+      "$numberLong": "1577836800000"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "a": {
+     "$numberInt": "5"
+    },
+    "s": "yy",
+    "l": {
+     "$numberLong": "7"
+    },
+    "d": {
+     "$numberDouble": "-2.0"
+    },
+    "arr": [],
+    "sub": {
+     "q": {
+      "$numberInt": "2"
+     }
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "a": {
+     "$numberInt": "3"
+    },
+    "s": "",
+    "l": {
+     "$numberLong": "0"
+    },
+    "arr": [
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "o": {
+     "$oid": "5f0000000000000000000001"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "s": "zzz",
+    "d": {
+     "$numberDouble": "0.0"
+    }
+   }
+  ],
+  "filter": {
+   "$where": "function ( {"
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "139"
+   },
+   "errmsg": "SyntaxError: expected property name, got ')' :\n@:1:14\n"
+  }
+ },
+ {
+  "name": "fn#45",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (a) { return a * 2 }",
+    "args": [
+     "$a"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberDouble": "6.0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#46",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (a) { return a }",
+    "args": [
+     "$a"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberDouble": "3.0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#47",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (b) { return b }",
+    "args": [
+     "$b"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberDouble": "2.5"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#48",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (l) { return l }",
+    "args": [
+     "$l"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberLong": "9"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#49",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (l) { return l + 1 }",
+    "args": [
+     "$l"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberDouble": "10.0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#50",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (s) { return s.toUpperCase() }",
+    "args": [
+     "$s"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "ABC"
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#51",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (arr) { return arr.map(function (x) { return x * x }) }",
+    "args": [
+     "$arr"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "$numberDouble": "1.0"
+      },
+      {
+       "$numberDouble": "4.0"
+      },
+      {
+       "$numberDouble": "9.0"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#52",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (arr) { return arr }",
+    "args": [
+     "$arr"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "$numberDouble": "1.0"
+      },
+      {
+       "$numberDouble": "2.0"
+      },
+      {
+       "$numberDouble": "3.0"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#53",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (sub) { return sub }",
+    "args": [
+     "$sub"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "q": {
+       "$numberInt": "1"
+      },
+      "r": "t"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#54",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (sub) { sub.z = 2; return sub }",
+    "args": [
+     "$sub"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "q": {
+       "$numberInt": "1"
+      },
+      "r": "t",
+      "z": {
+       "$numberDouble": "2.0"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#55",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (sub) { sub.q = 7; return sub }",
+    "args": [
+     "$sub"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "q": {
+       "$numberInt": "7"
+      },
+      "r": "t"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#56",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (sub) { sub.q = 7.5; return sub }",
+    "args": [
+     "$sub"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "q": {
+       "$numberDouble": "7.5"
+      },
+      "r": "t"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#57",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (sub) { return {q: sub.q} }",
+    "args": [
+     "$sub"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "q": {
+       "$numberDouble": "1.0"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#58",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (dt) { return dt }",
+    "args": [
+     "$dt"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$date": {
+       "$numberLong": "1577836800000"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#59",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (dt) { return dt.getTime() }",
+    "args": [
+     "$dt"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberDouble": "1577836800000.0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#60",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (dt) { return new Date(dt.getTime() + 86400000) }",
+    "args": [
+     "$dt"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$date": {
+       "$numberLong": "1577923200000"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#61",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (o) { return o }",
+    "args": [
+     "$o"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$oid": "5f0000000000000000000001"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#62",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (o) { return o.str }",
+    "args": [
+     "$o"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "5f0000000000000000000001"
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#63",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (o) { return o.getTimestamp() }",
+    "args": [
+     "$o"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$date": {
+       "$numberLong": "1593835520000"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#64",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (dec) { return dec }",
+    "args": [
+     "$dec"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberDecimal": "1.5"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#65",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (dec) { return dec.toString() }",
+    "args": [
+     "$dec"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "NumberDecimal(\"1.5\")"
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#66",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (n, m) { return [n, m, typeof m] }",
+    "args": [
+     "$n",
+     "$missing"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      null,
+      null,
+      "object"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#67",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (t) { return !t }",
+    "args": [
+     "$t"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": false
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#68",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return NumberInt(7) }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberInt": "7"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#69",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return NumberLong('9007199254740993') }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberLong": "9007199254740993"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#70",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return NumberDecimal('2.50') }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberDecimal": "2.50"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#71",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return Timestamp(5, 2) }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$timestamp": {
+       "t": 5,
+       "i": 2
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#72",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return MinKey }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$minKey": 1
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#73",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return MaxKey() }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$maxKey": 1
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#74",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return BinData(0, 'AQID') }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$binary": {
+       "base64": "AQID",
+       "subType": "00"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#75",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return [undefined, null, 1] }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      null,
+      null,
+      {
+       "$numberDouble": "1.0"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#76",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return {x: undefined, y: 'v'} }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "x": null,
+      "y": "v"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#77",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return new Date(NaN) }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$date": {
+       "$numberLong": "0"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#78",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return -0 }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberDouble": "-0.0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#79",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return 2147483648 }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberDouble": "2147483648.0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#80",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return 1e300 * 10 }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberDouble": "1e+301"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#81",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return 0 / 0 }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberDouble": "NaN"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#82",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return 'str' }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "str"
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#83",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return true }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": true
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#84",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return undefined }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": null
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#85",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "1 + 2",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberDouble": "3.0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#86",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "return 7",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberDouble": "7.0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#87",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "  function (a) { return a * 3 };  ",
+    "args": [
+     "$a"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberDouble": "9.0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#88",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": {
+     "$code": "function (a) { return a * 4 }"
+    },
+    "args": [
+     "$a"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberDouble": "12.0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#89",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (a) { return a }",
+    "args": {
+     "$literal": [
+      {
+       "$numberInt": "1"
+      }
+     ]
+    },
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberDouble": "1.0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#90",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return arguments.length }",
+    "args": [
+     "$a",
+     "$b",
+     "$s"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberDouble": "3.0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#91",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return typeof db }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "undefined"
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#92",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return Object.bsonsize({a: 1}) }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberDouble": "16.0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#93",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return hex_md5('abc') }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "900150983cd24fb0d6963f7d28e17f72"
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#94",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return tojson([1, 'x']) }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "[ 1, \"x\" ]"
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#95",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return isNumber('1') }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": false
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#96",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function (a, b) { return Math.max(a, b) }",
+    "args": [
+     "$a",
+     "$b"
+    ],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberDouble": "3.0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#97",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$add": [
+    {
+     "$function": {
+      "body": "function (a) { return a }",
+      "args": [
+       "$a"
+      ],
+      "lang": "js"
+     }
+    },
+    {
+     "$numberInt": "1"
+    }
+   ]
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberDouble": "4.0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#98",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$type": {
+    "$function": {
+     "body": "function (a) { return a }",
+     "args": [
+      "$a"
+     ],
+     "lang": "js"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "double"
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#99",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$type": {
+    "$function": {
+     "body": "function () { return NumberInt(1) }",
+     "args": [],
+     "lang": "js"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "int"
+    }
+   ]
+  }
+ },
+ {
+  "name": "fn#100",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { throw new Error('boom') }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "139"
+   },
+   "errmsg": "PlanExecutor error during aggregation :: caused by :: Error: boom :\n@:1:22\n"
+  }
+ },
+ {
+  "name": "fn#101",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { throw new TypeError('bad') }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "139"
+   },
+   "errmsg": "PlanExecutor error during aggregation :: caused by :: TypeError: bad :\n@:1:22\n"
+  }
+ },
+ {
+  "name": "fn#102",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { throw 'x' }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "8"
+   },
+   "errmsg": "PlanExecutor error during aggregation :: caused by :: uncaught exception: x"
+  }
+ },
+ {
+  "name": "fn#103",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { throw {a: 1} }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "139"
+   },
+   "errmsg": "PlanExecutor error during aggregation :: caused by :: uncaught exception: [object Object] :\nundefined"
+  }
+ },
+ {
+  "name": "fn#104",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return undefinedVar }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "139"
+   },
+   "errmsg": "PlanExecutor error during aggregation :: caused by :: ReferenceError: undefinedVar is not defined :\n@:1:16\n"
+  }
+ },
+ {
+  "name": "fn#105",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function ( {",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "139"
+   },
+   "errmsg": "PlanExecutor error during aggregation :: caused by :: SyntaxError: expected property name, got ')' :\n@:1:14\n"
+  }
+ },
+ {
+  "name": "fn#106",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return 5n }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "2"
+   },
+   "errmsg": "PlanExecutor error during aggregation :: caused by :: unable to get type"
+  }
+ },
+ {
+  "name": "fn#107",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () { return Symbol('x') }",
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "2"
+   },
+   "errmsg": "PlanExecutor error during aggregation :: caused by :: unable to get type"
+  }
+ },
+ {
+  "name": "fn#108",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": "function () { return 1 }"
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "31260"
+   },
+   "errmsg": "$function requires an object as an argument, found: string"
+  }
+ },
+ {
+  "name": "fn#109",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "31261"
+   },
+   "errmsg": "The body function must be specified."
+  }
+ },
+ {
+  "name": "fn#110",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () {}",
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "31263"
+   },
+   "errmsg": "The args field must be specified."
+  }
+ },
+ {
+  "name": "fn#111",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () {}",
+    "args": []
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "31418"
+   },
+   "errmsg": "The lang field must be specified."
+  }
+ },
+ {
+  "name": "fn#112",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () {}",
+    "args": [],
+    "lang": "py"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "31419"
+   },
+   "errmsg": "Currently the only supported language specifier is 'js'."
+  }
+ },
+ {
+  "name": "fn#113",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": {
+     "$numberInt": "5"
+    },
+    "args": [],
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "31262"
+   },
+   "errmsg": "The body function must evaluate to type string or code"
+  }
+ },
+ {
+  "name": "fn#114",
+  "kind": "expr",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   },
+   "a": {
+    "$numberInt": "3"
+   },
+   "b": {
+    "$numberDouble": "2.5"
+   },
+   "l": {
+    "$numberLong": "9"
+   },
+   "s": "abc",
+   "arr": [
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "2"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ],
+   "sub": {
+    "q": {
+     "$numberInt": "1"
+    },
+    "r": "t"
+   },
+   "dt": {
+    "$date": {
+     "$numberLong": "1577836800000"
+    }
+   },
+   "o": {
+    "$oid": "5f0000000000000000000001"
+   },
+   "dec": {
+    "$numberDecimal": "1.5"
+   },
+   "n": null,
+   "t": true
+  },
+  "expr": {
+   "$function": {
+    "body": "function () {}",
+    "args": "$a",
+    "lang": "js"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "31266"
+   },
+   "errmsg": "PlanExecutor error during aggregation :: caused by :: The args field must be of type array"
+  }
+ },
+ {
+  "name": "acc#115",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function () { return {c: 0, s: 0} }",
+     "accumulate": "function (st, v) { return {c: st.c + 1, s: st.s + (v || 0)} }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a, b) { return {c: a.c + b.c, s: a.s + b.s} }",
+     "finalize": "function (st) { return st.s / st.c }"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "_id": "a",
+     "r": {
+      "$numberDouble": "1.5"
+     }
+    },
+    {
+     "_id": "b",
+     "r": {
+      "$numberDouble": "2.5"
+     }
+    },
+    {
+     "_id": "c",
+     "r": {
+      "$numberDouble": "2.5"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "acc#116",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function () { return {c: 0, s: 0} }",
+     "accumulate": "function (st, v) { return {c: st.c + 1, s: st.s + (v || 0)} }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a, b) { return {c: a.c + b.c, s: a.s + b.s} }"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "_id": "a",
+     "r": {
+      "c": {
+       "$numberDouble": "2.0"
+      },
+      "s": {
+       "$numberDouble": "3.0"
+      }
+     }
+    },
+    {
+     "_id": "b",
+     "r": {
+      "c": {
+       "$numberDouble": "2.0"
+      },
+      "s": {
+       "$numberDouble": "5.0"
+      }
+     }
+    },
+    {
+     "_id": "c",
+     "r": {
+      "c": {
+       "$numberDouble": "1.0"
+      },
+      "s": {
+       "$numberDouble": "2.5"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "acc#117",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": null,
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function () { return {c: 0, s: 0} }",
+     "accumulate": "function (st, v) { return {c: st.c + 1, s: st.s + (v || 0)} }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a, b) { return {c: a.c + b.c, s: a.s + b.s} }"
+    }
+   },
+   "n": {
+    "$sum": {
+     "$numberInt": "1"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "_id": null,
+     "r": {
+      "c": {
+       "$numberDouble": "5.0"
+      },
+      "s": {
+       "$numberDouble": "10.5"
+      }
+     },
+     "n": {
+      "$numberInt": "5"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "acc#118",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "n": {
+    "$sum": {
+     "$numberInt": "1"
+    }
+   },
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function () { return 0 }",
+     "accumulate": "function (st) { return st + 1 }",
+     "accumulateArgs": [],
+     "merge": "function (a, b) { return a + b }"
+    }
+   },
+   "m": {
+    "$max": "$v"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "_id": "a",
+     "n": {
+      "$numberInt": "2"
+     },
+     "r": {
+      "$numberDouble": "2.0"
+     },
+     "m": {
+      "$numberInt": "2"
+     }
+    },
+    {
+     "_id": "b",
+     "n": {
+      "$numberInt": "2"
+     },
+     "r": {
+      "$numberDouble": "2.0"
+     },
+     "m": {
+      "$numberInt": "5"
+     }
+    },
+    {
+     "_id": "c",
+     "n": {
+      "$numberInt": "1"
+     },
+     "r": {
+      "$numberDouble": "1.0"
+     },
+     "m": {
+      "$numberDouble": "2.5"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "acc#119",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": {
+    "k": "$k"
+   },
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function (k) { return [k] }",
+     "initArgs": [
+      "$k"
+     ],
+     "accumulate": "function (st, v) { st.push(v); return st }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a, b) { return a.concat(b) }"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "_id": {
+      "k": "a"
+     },
+     "r": [
+      "a",
+      {
+       "$numberDouble": "1.0"
+      },
+      {
+       "$numberDouble": "2.0"
+      }
+     ]
+    },
+    {
+     "_id": {
+      "k": "b"
+     },
+     "r": [
+      "b",
+      {
+       "$numberDouble": "5.0"
+      },
+      null
+     ]
+    },
+    {
+     "_id": {
+      "k": "c"
+     },
+     "r": [
+      "c",
+      {
+       "$numberDouble": "2.5"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "acc#120",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function (k) { return [k] }",
+     "initArgs": [
+      "$k"
+     ],
+     "accumulate": "function (st, v) { st.push(v); return st }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a, b) { return a.concat(b) }"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "_id": "a",
+     "r": [
+      null,
+      {
+       "$numberDouble": "1.0"
+      },
+      {
+       "$numberDouble": "2.0"
+      }
+     ]
+    },
+    {
+     "_id": "b",
+     "r": [
+      null,
+      {
+       "$numberDouble": "5.0"
+      },
+      null
+     ]
+    },
+    {
+     "_id": "c",
+     "r": [
+      null,
+      {
+       "$numberDouble": "2.5"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "acc#121",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function (k) { return [k] }",
+     "initArgs": [
+      "$$ROOT"
+     ],
+     "accumulate": "function (st) { return st }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a) { return a }"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "_id": "a",
+     "r": [
+      {}
+     ]
+    },
+    {
+     "_id": "b",
+     "r": [
+      {}
+     ]
+    },
+    {
+     "_id": "c",
+     "r": [
+      {}
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "acc#122",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function (a, b) { return a + b }",
+     "initArgs": [
+      {
+       "$numberInt": "1"
+      },
+      {
+       "$numberInt": "2"
+      }
+     ],
+     "accumulate": "function (st, v) { return st + 1 }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a, b) { return a + b }"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "_id": "a",
+     "r": {
+      "$numberDouble": "5.0"
+     }
+    },
+    {
+     "_id": "b",
+     "r": {
+      "$numberDouble": "5.0"
+     }
+    },
+    {
+     "_id": "c",
+     "r": {
+      "$numberDouble": "4.0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "acc#123",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function () { return [] }",
+     "accumulate": "function (st, a, b) { st.push(typeof a + typeof b); return st }",
+     "accumulateArgs": [
+      "$v",
+      "$nope"
+     ],
+     "merge": "function (a, b) { return a.concat(b) }"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "_id": "a",
+     "r": [
+      "numberobject",
+      "numberobject"
+     ]
+    },
+    {
+     "_id": "b",
+     "r": [
+      "numberobject",
+      "objectobject"
+     ]
+    },
+    {
+     "_id": "c",
+     "r": [
+      "numberobject"
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "acc#124",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function () { return {m: new Date(0), n: NumberLong(1)} }",
+     "accumulate": "function (st) { return {m: st.m, n: st.n, t: typeof st.n, d: st.m instanceof Date} }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a) { return a }"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "_id": "a",
+     "r": {
+      "m": {
+       "$date": {
+        "$numberLong": "0"
+       }
+      },
+      "n": {
+       "$numberLong": "1"
+      },
+      "t": "object",
+      "d": true
+     }
+    },
+    {
+     "_id": "b",
+     "r": {
+      "m": {
+       "$date": {
+        "$numberLong": "0"
+       }
+      },
+      "n": {
+       "$numberLong": "1"
+      },
+      "t": "object",
+      "d": true
+     }
+    },
+    {
+     "_id": "c",
+     "r": {
+      "m": {
+       "$date": {
+        "$numberLong": "0"
+       }
+      },
+      "n": {
+       "$numberLong": "1"
+      },
+      "t": "object",
+      "d": true
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "acc#125",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function () { return 0 }",
+     "accumulate": "function (st, v) { return st + 1 }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a, b) { return a + b }",
+     "finalize": "function (s) {}"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "_id": "a",
+     "r": null
+    },
+    {
+     "_id": "b",
+     "r": null
+    },
+    {
+     "_id": "c",
+     "r": null
+    }
+   ]
+  }
+ },
+ {
+  "name": "acc#126",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "1 + 1",
+     "accumulate": "function (st) { return st + 1 }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a, b) { return a + b }"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "_id": "a",
+     "r": {
+      "$numberDouble": "4.0"
+     }
+    },
+    {
+     "_id": "b",
+     "r": {
+      "$numberDouble": "4.0"
+     }
+    },
+    {
+     "_id": "c",
+     "r": {
+      "$numberDouble": "3.0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "acc#127",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "init": "function () { return 0 }",
+     "accumulate": "function (st) { return st + 1 }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a, b) { return a + b }"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "_id": "a",
+     "r": {
+      "$numberDouble": "2.0"
+     }
+    },
+    {
+     "_id": "b",
+     "r": {
+      "$numberDouble": "2.0"
+     }
+    },
+    {
+     "_id": "c",
+     "r": {
+      "$numberDouble": "1.0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "acc#128",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function () { return {} }",
+     "accumulate": "function (st, v) { st[String(v)] = 1; return st }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a) { return a }"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "_id": "a",
+     "r": {
+      "1": {
+       "$numberDouble": "1.0"
+      },
+      "2": {
+       "$numberDouble": "1.0"
+      }
+     }
+    },
+    {
+     "_id": "b",
+     "r": {
+      "5": {
+       "$numberDouble": "1.0"
+      },
+      "null": {
+       "$numberDouble": "1.0"
+      }
+     }
+    },
+    {
+     "_id": "c",
+     "r": {
+      "2.5": {
+       "$numberDouble": "1.0"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "acc#129",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function () { return '' }",
+     "accumulate": "function (st, id) { return st + id }",
+     "accumulateArgs": [
+      {
+       "$toString": "$_id"
+      }
+     ],
+     "merge": "function (a, b) { return a + b }"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "_id": "a",
+     "r": "12"
+    },
+    {
+     "_id": "b",
+     "r": "34"
+    },
+    {
+     "_id": "c",
+     "r": "5"
+    }
+   ]
+  }
+ },
+ {
+  "name": "acc#130",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function () { return null }",
+     "accumulate": "function (st, v) { return st === null || v > st ? v : st }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a, b) { return a }"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "_id": "a",
+     "r": {
+      "$numberDouble": "2.0"
+     }
+    },
+    {
+     "_id": "b",
+     "r": {
+      "$numberDouble": "5.0"
+     }
+    },
+    {
+     "_id": "c",
+     "r": {
+      "$numberDouble": "2.5"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "acc#131",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function () { return {c: 0, s: 0} }",
+     "accumulate": "function (st, v) { return {c: st.c + 1, s: st.s + (v || 0)} }",
+     "accumulateArgs": "$v",
+     "merge": "function (a, b) { return {c: a.c + b.c, s: a.s + b.s} }"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "4544712"
+   },
+   "errmsg": "PlanExecutor error during aggregation :: caused by :: $accumulator accumulateArgs must evaluate to an array: 1"
+  }
+ },
+ {
+  "name": "acc#132",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function () { return {c: 0, s: 0} }",
+     "accumulate": "function (st, v) { return {c: st.c + 1, s: st.s + (v || 0)} }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a, b) { return {c: a.c + b.c, s: a.s + b.s} }",
+     "initArgs": "$k"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "4544711"
+   },
+   "errmsg": "PlanExecutor error during aggregation :: caused by :: $accumulator initArgs must evaluate to an array: MISSING"
+  }
+ },
+ {
+  "name": "acc#133",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function () { return {c: 0, s: 0} }",
+     "accumulate": "function (st, v) { return {c: st.c + 1, s: st.s + (v || 0)} }",
+     "accumulateArgs": [
+      "$v"
+     ]
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "4544709"
+   },
+   "errmsg": "$accumulator missing required argument 'merge'"
+  }
+ },
+ {
+  "name": "acc#134",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "accumulate": "function (st, v) { return {c: st.c + 1, s: st.s + (v || 0)} }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a, b) { return {c: a.c + b.c, s: a.s + b.s} }"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "4544707"
+   },
+   "errmsg": "$accumulator missing required argument 'init'"
+  }
+ },
+ {
+  "name": "acc#135",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function () { return {c: 0, s: 0} }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a, b) { return {c: a.c + b.c, s: a.s + b.s} }"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "4544708"
+   },
+   "errmsg": "$accumulator missing required argument 'accumulate'"
+  }
+ },
+ {
+  "name": "acc#136",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function () { return {c: 0, s: 0} }",
+     "accumulate": "function (st, v) { return {c: st.c + 1, s: st.s + (v || 0)} }",
+     "merge": "function (a, b) { return {c: a.c + b.c, s: a.s + b.s} }"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "4544710"
+   },
+   "errmsg": "$accumulator missing required argument 'accumulateArgs'"
+  }
+ },
+ {
+  "name": "acc#137",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "python",
+     "init": "function () { return {c: 0, s: 0} }",
+     "accumulate": "function (st, v) { return {c: st.c + 1, s: st.s + (v || 0)} }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a, b) { return {c: a.c + b.c, s: a.s + b.s} }"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "4544705"
+   },
+   "errmsg": "$accumulator only supports lang: 'js'"
+  }
+ },
+ {
+  "name": "acc#138",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": {
+      "$numberInt": "1"
+     },
+     "init": "function () { return {c: 0, s: 0} }",
+     "accumulate": "function (st, v) { return {c: st.c + 1, s: st.s + (v || 0)} }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a, b) { return {c: a.c + b.c, s: a.s + b.s} }"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "4544704"
+   },
+   "errmsg": "$accumulator lang must be a string; found: int"
+  }
+ },
+ {
+  "name": "acc#139",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function () { return {c: 0, s: 0} }",
+     "accumulate": "function (st, v) { return {c: st.c + 1, s: st.s + (v || 0)} }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a, b) { return {c: a.c + b.c, s: a.s + b.s} }",
+     "foo": {
+      "$numberInt": "1"
+     }
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "4544706"
+   },
+   "errmsg": "$accumulator got an unexpected field: foo"
+  }
+ },
+ {
+  "name": "acc#140",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": {
+      "$numberInt": "5"
+     },
+     "accumulate": "function (st, v) { return {c: st.c + 1, s: st.s + (v || 0)} }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a, b) { return {c: a.c + b.c, s: a.s + b.s} }"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "4544702"
+   },
+   "errmsg": "$accumulator 'init' must be a String or Code"
+  }
+ },
+ {
+  "name": "acc#141",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function () { return {c: 0, s: 0} }",
+     "accumulate": "function (st, v) { return {c: st.c + 1, s: st.s + (v || 0)} }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a, b) { return {c: a.c + b.c, s: a.s + b.s} }",
+     "finalize": {
+      "$numberInt": "5"
+     }
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "4544702"
+   },
+   "errmsg": "$accumulator 'finalize' must be a String or Code"
+  }
+ },
+ {
+  "name": "acc#142",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "$numberInt": "1"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "4544703"
+   },
+   "errmsg": "$accumulator expects an object as an argument; found: int"
+  }
+ },
+ {
+  "name": "acc#143",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function () { return {c: 0, s: 0} }",
+     "accumulate": "function () { throw 'nope' }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a, b) { return {c: a.c + b.c, s: a.s + b.s} }"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "8"
+   },
+   "errmsg": "PlanExecutor error during aggregation :: caused by :: uncaught exception: nope"
+  }
+ },
+ {
+  "name": "acc#144",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function () { return {c: 0, s: 0} }",
+     "accumulate": "function () { throw new Error('nope') }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a, b) { return {c: a.c + b.c, s: a.s + b.s} }"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "139"
+   },
+   "errmsg": "PlanExecutor error during aggregation :: caused by :: Error: nope :\n@:1:22\n@:1:185\n"
+  }
+ },
+ {
+  "name": "acc#145",
+  "kind": "group",
+  "docs": [
+   {
+    "_id": {
+     "$numberInt": "1"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "1"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "2"
+    },
+    "k": "a",
+    "v": {
+     "$numberInt": "2"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "3"
+    },
+    "k": "b",
+    "v": {
+     "$numberInt": "5"
+    }
+   },
+   {
+    "_id": {
+     "$numberInt": "4"
+    },
+    "k": "b"
+   },
+   {
+    "_id": {
+     "$numberInt": "5"
+    },
+    "k": "c",
+    "v": {
+     "$numberDouble": "2.5"
+    }
+   }
+  ],
+  "group": {
+   "_id": "$k",
+   "r": {
+    "$accumulator": {
+     "lang": "js",
+     "init": "function ( {",
+     "accumulate": "function (st, v) { return {c: st.c + 1, s: st.s + (v || 0)} }",
+     "accumulateArgs": [
+      "$v"
+     ],
+     "merge": "function (a, b) { return {c: a.c + b.c, s: a.s + b.s} }"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "139"
+   },
+   "errmsg": "PlanExecutor error during aggregation :: caused by :: SyntaxError: expected property name, got ')' :\n@:1:14\n"
+  }
+ }
+]

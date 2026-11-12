@@ -58,13 +58,30 @@ impl Runner for Qjs {
 
 /// The scope of command `name`, or `None` (no JavaScript in it, or
 /// `mongo.server_js` off).
-pub(crate) async fn scope_for(c: &Conn, name: &str, body: &Document) -> Option<Arc<Scope>> {
-    if name != "getMore" && !sprig_doc::serverjs::mentions_js(body) {
-        return None;
+pub(crate) fn scope_for(
+    c: &Conn,
+    name: &str,
+    body: &Document,
+) -> impl std::future::Future<Output = Option<Arc<Scope>>> + Send + 'static {
+    // Nothing of the connection is held across the await (it isn't Sync).
+    let wanted = name == "getMore" || sprig_doc::serverjs::mentions_js(body);
+    let tenants = c.shared.d.tenants.clone();
+    let tenant = c.sql.as_ref().map(|s| s.tenant()).filter(|t| *t != 0);
+    async move {
+        if !wanted {
+            return None;
+        }
+        resolve(tenants, tenant).await
     }
+}
+
+async fn resolve(
+    tenants: Option<Arc<crate::tenant::TenantServices>>,
+    tenant: Option<u64>,
+) -> Option<Arc<Scope>> {
     let mut limits = sprig_logic_js::Limits::default();
-    if let Some(svc) = &c.shared.d.tenants {
-        let tenant = c.sql.as_ref().map(|s| s.tenant()).filter(|t| *t != 0)?;
+    if let Some(svc) = &tenants {
+        let tenant = tenant?;
         let cat = svc
             .cache
             .get(TenantId(tenant), Freshness::Cached { min_version: 0 })

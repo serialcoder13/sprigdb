@@ -12,7 +12,10 @@ use super::{Engine, Ns, SqlRunner, mongo_error, text};
 use crate::sql::{ident, str_lit};
 
 fn unknown(stage: &str, k: &str) -> MongoError {
-    MongoError::new(40415, format!("BSON field '{stage}.{k}' is an unknown field."))
+    MongoError::new(
+        40415,
+        format!("BSON field '{stage}.{k}' is an unknown field."),
+    )
 }
 
 fn obj<'a>(stage: &str, arg: &'a Bson) -> Result<&'a Document, MongoError> {
@@ -129,10 +132,15 @@ impl Engine {
             if spec.contains_key("storageStats") || spec.contains_key("count") {
                 return Err(MongoError::new(
                     code::NAMESPACE_NOT_FOUND,
-                    format!("Unable to retrieve storageStats in $collStats stage :: caused by :: Collection [{}.{}] not found.", ns.db, ns.coll),
+                    format!(
+                        "Unable to retrieve storageStats in $collStats stage :: caused by :: Collection [{}.{}] not found.",
+                        ns.db, ns.coll
+                    ),
                 ));
             }
-            return Ok(vec![doc! {"ns": format!("{}.{}", ns.db, ns.coll), "host": "sprigdb", "localTime": DateTime::now()}]);
+            return Ok(vec![
+                doc! {"ns": format!("{}.{}", ns.db, ns.coll), "host": "sprigdb", "localTime": DateTime::now()},
+            ]);
         };
         let (count, bytes, data_len, index_len) = self.table_sizes(sql, ns, &m.table).await?;
         let mut out = doc! {
@@ -143,7 +151,8 @@ impl Engine {
         if let Ok(l) = spec.get_document("latencyStats") {
             // Per-collection latencies aren't kept (chapter 12 keeps them
             // per statement fingerprint): zeros, MongoDB's shape.
-            let z = || doc! {"latency": 0i64, "ops": 0i64, "queryableEncryptionLatencyMicros": 0i64};
+            let z =
+                || doc! {"latency": 0i64, "ops": 0i64, "queryableEncryptionLatencyMicros": 0i64};
             let mut ls = doc! {"reads": z(), "writes": z(), "commands": z(), "transactions": z()};
             if l.get_bool("histograms").unwrap_or(false) {
                 for k in ["reads", "writes", "commands", "transactions"] {
@@ -155,7 +164,11 @@ impl Engine {
             out.insert("latencyStats", ls);
         }
         if let Ok(s) = spec.get_document("storageStats") {
-            let scale = s.get("scale").and_then(crate::filter::as_i64).unwrap_or(1).max(1);
+            let scale = s
+                .get("scale")
+                .and_then(crate::filter::as_i64)
+                .unwrap_or(1)
+                .max(1);
             let indexes = self.list_indexes(sql, ns).await?.unwrap_or_default();
             let names: Vec<String> = indexes
                 .iter()
@@ -204,7 +217,11 @@ impl Engine {
         Ok(vec![out])
     }
 
-    async fn index_stats(&self, sql: &mut dyn SqlRunner, ns: &Ns) -> Result<Vec<Document>, MongoError> {
+    async fn index_stats(
+        &self,
+        sql: &mut dyn SqlRunner,
+        ns: &Ns,
+    ) -> Result<Vec<Document>, MongoError> {
         let Some(list) = self.list_indexes(sql, ns).await? else {
             return Ok(Vec::new());
         };

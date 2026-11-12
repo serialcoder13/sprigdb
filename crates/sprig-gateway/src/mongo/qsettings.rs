@@ -616,7 +616,9 @@ fn admit() -> bool {
     w.1 <= RATE_LIMIT
 }
 
-/// Records one run of a command for `$queryStats`.
+/// Records one run of a command for `$queryStats`; `raw_n`: the documents
+/// of a reply sent as raw bytes.
+#[allow(clippy::too_many_arguments)]
 pub fn record(
     tenant: u64,
     name: &str,
@@ -625,6 +627,7 @@ pub fn record(
     client: Option<&Document>,
     elapsed: Duration,
     reply: &Document,
+    raw_n: Option<i64>,
 ) {
     let micros = i64::try_from(elapsed.as_micros()).unwrap_or(i64::MAX);
     if name == "getMore" {
@@ -670,7 +673,7 @@ pub fn record(
     key.insert("collectionType", "collection");
     let kh = qshape::key_hash(&key);
     let now = bson::DateTime::now();
-    let n = count_of(reply);
+    let n = raw_n.unwrap_or_else(|| count_of(reply));
     let writes = match name {
         "insert" | "update" | "delete" => {
             let g = |k: &str| reply.get(k).and_then(sprig_doc::filter::as_i64).unwrap_or(0);
@@ -750,8 +753,8 @@ mod tests {
     fn stats_accumulate() {
         let body = doc! {"find": "c", "filter": {"a": 1}};
         let reply = doc! {"cursor": {"firstBatch": [{"a": 1}], "id": 0i64, "ns": "d.c"}, "ok": 1.0};
-        record(7, "find", &body, "d", None, Duration::from_micros(10), &reply);
-        record(7, "find", &doc! {"find": "c", "filter": {"a": 2}}, "d", None, Duration::from_micros(30), &reply);
+        record(7, "find", &body, "d", None, Duration::from_micros(10), &reply, None);
+        record(7, "find", &doc! {"find": "c", "filter": {"a": 2}}, "d", None, Duration::from_micros(30), &reply, None);
         let st = state();
         let m = st.stats.get(&7).unwrap();
         assert_eq!(m.len(), 1);

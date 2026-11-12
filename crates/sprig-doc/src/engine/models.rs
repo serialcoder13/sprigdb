@@ -156,6 +156,22 @@ pub fn meta_value(arg: &Bson, root: Option<&Bson>) -> Bson {
         (Some("vectorSearchScore" | "textScore" | "searchScore"), Some(Bson::Document(d))) => {
             d.get(SCORE_FIELD).cloned().unwrap_or(Bson::Null)
         }
+        // M4 (decisions S114, S115): the fused score of `$rankFusion` and
+        // `$scoreFusion`, else a search's own score (MongoDB 8.x's
+        // unified `score`).
+        (Some("score"), Some(Bson::Document(d))) => d
+            .get(super::fusion::FUSION_SCORE)
+            .or_else(|| d.get(SCORE_FIELD))
+            .cloned()
+            .unwrap_or(Bson::Null),
+        (Some("scoreDetails"), Some(Bson::Document(d))) => d
+            .get(super::fusion::FUSION_DETAILS)
+            .cloned()
+            .unwrap_or(Bson::Null),
+        // MongoDB 8.3: the root document's `_id` of a search result.
+        (Some("searchRootDocumentId"), Some(Bson::Document(d))) if d.contains_key(SCORE_FIELD) => {
+            d.get("_id").cloned().unwrap_or(Bson::Null)
+        }
         (Some("searchHighlights"), Some(Bson::Document(d))) => d
             .get(crate::text::HIGHLIGHT_FIELD)
             .cloned()
@@ -168,6 +184,8 @@ pub fn meta_value(arg: &Bson, root: Option<&Bson>) -> Bson {
 pub fn strip_scores(docs: &mut [Document]) {
     for d in docs {
         d.remove(SCORE_FIELD);
+        d.remove(super::fusion::FUSION_SCORE);
+        d.remove(super::fusion::FUSION_DETAILS);
     }
 }
 

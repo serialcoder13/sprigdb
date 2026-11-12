@@ -22,8 +22,7 @@ fn same(a: &Bson, b: &Bson) -> bool {
         }
         (Bson::Document(x), Bson::Document(y)) => {
             x.len() == y.len()
-                && x
-                    .iter()
+                && x.iter()
                     .zip(y.iter())
                     .all(|((ka, va), (kb, vb))| ka == kb && same(va, vb))
         }
@@ -64,7 +63,10 @@ async fn expressions_through_the_gateway() {
         .filter_map(|l| l.split_whitespace().next().map(str::to_owned))
         .collect();
     let only = std::env::var("SPRIG_EXPR_DIFF_ONLY").unwrap_or_default();
-    let db = Client::with_uri_str(&uri).await.unwrap().database("m1_expr");
+    let db = Client::with_uri_str(&uri)
+        .await
+        .unwrap()
+        .database("m1_expr");
     db.drop().await.unwrap();
     // One collection for the single-document cases, keyed by case number;
     // one per `$group` case.

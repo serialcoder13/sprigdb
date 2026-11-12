@@ -1,4 +1,8 @@
-#![allow(clippy::unwrap_used)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::needless_pass_by_value,
+    clippy::unnecessary_wraps
+)]
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,11 +35,18 @@ impl Runner for Qjs {
 }
 
 fn on(wall_ms: u64) -> Option<Arc<Scope>> {
-    Some(Scope::new(Arc::new(Qjs), Duration::from_millis(wall_ms), 32 << 20))
+    Some(Scope::new(
+        Arc::new(Qjs),
+        Duration::from_millis(wall_ms),
+        32 << 20,
+    ))
 }
 
 fn docs() -> Vec<Document> {
-    vec![doc! {"_id": 1, "a": 1, "s": "x"}, doc! {"_id": 2, "a": 5, "s": "yy"}]
+    vec![
+        doc! {"_id": 1, "a": 1, "s": "x"},
+        doc! {"_id": 2, "a": 5, "s": "yy"},
+    ]
 }
 
 fn ids(filter: Document) -> Result<Vec<i32>, MongoError> {
@@ -57,10 +68,20 @@ fn ids(filter: Document) -> Result<Vec<i32>, MongoError> {
 #[test]
 fn where_matches() {
     assert_eq!(ids(doc! {"$where": "this.a > 2"}).unwrap(), [2]);
-    assert_eq!(ids(doc! {"$where": Bson::JavaScriptCode("function () { return this.a < 2 }".into())}).unwrap(), [1]);
+    assert_eq!(
+        ids(doc! {"$where": Bson::JavaScriptCode("function () { return this.a < 2 }".into())})
+            .unwrap(),
+        [1]
+    );
     assert_eq!(ids(doc! {"s": "yy", "$where": "this.a > 0"}).unwrap(), [2]);
-    assert_eq!(ids(doc! {"$or": [{"a": 1}, {"$where": "obj.a == 5"}]}).unwrap(), [1, 2]);
-    assert_eq!(ids(doc! {"$nor": [{"$where": "this.a == 5"}]}).unwrap(), [1]);
+    assert_eq!(
+        ids(doc! {"$or": [{"a": 1}, {"$where": "obj.a == 5"}]}).unwrap(),
+        [1, 2]
+    );
+    assert_eq!(
+        ids(doc! {"$nor": [{"$where": "this.a == 5"}]}).unwrap(),
+        [1]
+    );
 }
 
 #[test]
@@ -70,17 +91,28 @@ fn where_errors() {
     assert!(e.message.starts_with("Error: boom"), "{}", e.message);
     assert_eq!(ids(doc! {"$where": "throw 'x'"}).unwrap_err().code, 8);
     assert_eq!(ids(doc! {"$where": 5}).unwrap_err().code, 2);
-    assert_eq!(ids(doc! {"a": {"$where": "true"}}).unwrap_err().message, "$where cannot be applied to a field");
     assert_eq!(
-        ids(doc! {"x": {"$elemMatch": {"$where": "true"}}}).unwrap_err().message,
+        ids(doc! {"a": {"$where": "true"}}).unwrap_err().message,
+        "$where cannot be applied to a field"
+    );
+    assert_eq!(
+        ids(doc! {"x": {"$elemMatch": {"$where": "true"}}})
+            .unwrap_err()
+            .message,
         "$where can only be applied to the top-level document"
     );
     let s = on(100);
-    let p = sync_scope(s.clone(), || filter::parse(&doc! {"$where": "while (true) {}"})).unwrap();
+    let p = sync_scope(s.clone(), || {
+        filter::parse(&doc! {"$where": "while (true) {}"})
+    })
+    .unwrap();
     sync_scope(s.clone(), || assert!(!p.matches(&doc! {"a": 1})));
     assert_eq!(s.unwrap().take_error().unwrap().code, 50);
     // Off: MongoDB's error for `security.javascriptEnabled: false`.
-    assert_eq!(filter::parse(&doc! {"$where": "true"}).unwrap_err().code, 6_108_304);
+    assert_eq!(
+        filter::parse(&doc! {"$where": "true"}).unwrap_err().code,
+        6_108_304
+    );
 }
 
 #[test]
@@ -88,31 +120,62 @@ fn where_is_refused_in_aggregation() {
     let p = |s: Document| check_pipeline(&[Bson::Document(s)]).map_err(|e| e.message);
     assert!(p(doc! {"$match": {"$where": "true"}}).is_err());
     assert!(p(doc! {"$match": {"$and": [{"$where": "true"}]}}).is_err());
-    assert!(p(doc! {"$lookup": {"from": "c", "pipeline": [{"$match": {"$where": "true"}}], "as": "x"}}).is_err());
+    assert!(
+        p(doc! {"$lookup": {"from": "c", "pipeline": [{"$match": {"$where": "true"}}], "as": "x"}})
+            .is_err()
+    );
     assert!(p(doc! {"$facet": {"a": [{"$match": {"$where": "true"}}]}}).is_err());
     assert!(p(doc! {"$match": {"a": 1}}).is_ok());
 }
 
 fn fun(spec: Bson) -> Result<Bson, MongoError> {
     let d = doc! {"a": 3, "sub": {"q": 1}};
-    sync_scope(on(5000), || eval(&bson!({"$function": spec}), &Vars::new(&d, bson::DateTime::now())))
+    sync_scope(on(5000), || {
+        eval(
+            &bson!({"$function": spec}),
+            &Vars::new(&d, bson::DateTime::now()),
+        )
+    })
 }
 
 #[test]
 fn function_calls() {
-    assert_eq!(fun(bson!({"body": "function (a) { return a * 2 }", "args": ["$a"], "lang": "js"})).unwrap(), Bson::Double(6.0));
-    assert_eq!(fun(bson!({"body": "function (s) { return s }", "args": ["$sub"], "lang": "js"})).unwrap(), bson!({"q": 1}));
-    assert_eq!(fun(bson!({"body": "1 + 2", "args": [], "lang": "js"})).unwrap(), Bson::Double(3.0));
-    assert_eq!(fun(bson!({"body": "function (a) { return a }", "args": {"$literal": [1]}, "lang": "js"})).unwrap(), Bson::Double(1.0));
+    assert_eq!(
+        fun(bson!({"body": "function (a) { return a * 2 }", "args": ["$a"], "lang": "js"}))
+            .unwrap(),
+        Bson::Double(6.0)
+    );
+    assert_eq!(
+        fun(bson!({"body": "function (s) { return s }", "args": ["$sub"], "lang": "js"})).unwrap(),
+        bson!({"q": 1})
+    );
+    assert_eq!(
+        fun(bson!({"body": "1 + 2", "args": [], "lang": "js"})).unwrap(),
+        Bson::Double(3.0)
+    );
+    assert_eq!(
+        fun(bson!({"body": "function (a) { return a }", "args": {"$literal": [1]}, "lang": "js"}))
+            .unwrap(),
+        Bson::Double(1.0)
+    );
     let code = |spec: Bson| fun(spec).unwrap_err().code;
     assert_eq!(code(bson!("function () {}")), 31260);
     assert_eq!(code(bson!({"args": [], "lang": "js"})), 31261);
     assert_eq!(code(bson!({"body": 5, "args": [], "lang": "js"})), 31262);
     assert_eq!(code(bson!({"body": "function () {}", "lang": "js"})), 31263);
-    assert_eq!(code(bson!({"body": "function () {}", "args": "$a", "lang": "js"})), 31266);
+    assert_eq!(
+        code(bson!({"body": "function () {}", "args": "$a", "lang": "js"})),
+        31266
+    );
     assert_eq!(code(bson!({"body": "function () {}", "args": []})), 31418);
-    assert_eq!(code(bson!({"body": "function () {}", "args": [], "lang": "py"})), 31419);
-    assert_eq!(code(bson!({"body": "function () { return x.y }", "args": [], "lang": "js"})), 139);
+    assert_eq!(
+        code(bson!({"body": "function () {}", "args": [], "lang": "py"})),
+        31419
+    );
+    assert_eq!(
+        code(bson!({"body": "function () { return x.y }", "args": [], "lang": "js"})),
+        139
+    );
     // Off.
     let d = Document::new();
     let off = eval(
@@ -146,8 +209,15 @@ fn group(spec: Document, id_expr: &str) -> Result<Vec<Document>, MongoError> {
         let mut keys: Vec<(Vec<u8>, Bson)> = Vec::new();
         for r in &rows {
             let vars = Vars::new(r, bson::DateTime::now());
-            let id = eval(&Bson::String(if id_expr == "{k}" { "$k" } else { id_expr }.into()), &vars)?;
-            let id = if id_expr.starts_with('{') { bson!({"k": id}) } else { id };
+            let id = eval(
+                &Bson::String(if id_expr == "{k}" { "$k" } else { id_expr }.into()),
+                &vars,
+            )?;
+            let id = if id_expr.starts_with('{') {
+                bson!({"k": id})
+            } else {
+                id
+            };
             let k = crate::keyenc::key(&id);
             if !keys.iter().any(|(x, _)| *x == k) {
                 keys.push((k.clone(), id.clone()));
@@ -180,12 +250,21 @@ fn acc(extra: Document) -> Document {
 
 #[test]
 fn accumulator_groups() {
-    let r = group(acc(doc! {"finalize": "function (st) { return st.s / st.c }"}), "$k").unwrap();
-    assert_eq!(r, [doc! {"_id": "a", "s": 1.5}, doc! {"_id": "b", "s": 2.5}]);
+    let r = group(
+        acc(doc! {"finalize": "function (st) { return st.s / st.c }"}),
+        "$k",
+    )
+    .unwrap();
+    assert_eq!(
+        r,
+        [doc! {"_id": "a", "s": 1.5}, doc! {"_id": "b", "s": 2.5}]
+    );
     let r = group(acc(doc! {}), "$k").unwrap();
     assert_eq!(r[0], doc! {"_id": "a", "s": {"c": 2.0, "s": 3.0}});
     // initArgs are evaluated against the `_id` document.
-    let mut spec = acc(doc! {"init": "function (k) { return [k] }", "initArgs": ["$k"], "accumulate": "function (st, v) { st.push(v); return st }"});
+    let mut spec = acc(
+        doc! {"init": "function (k) { return [k] }", "initArgs": ["$k"], "accumulate": "function (st, v) { st.push(v); return st }"},
+    );
     let r = group(spec.clone(), "{k}").unwrap();
     assert_eq!(r[1], doc! {"_id": {"k": "b"}, "s": ["b", 5.0, null]});
     let r = group(spec.clone(), "$k").unwrap();
@@ -201,7 +280,11 @@ fn accumulator_groups() {
     assert_eq!(code(doc! {"accumulate": "function () { throw 'nope' }"}), 8);
     let missing = |k: &str| {
         let mut s = acc(doc! {});
-        s.get_document_mut("s").unwrap().get_document_mut("$accumulator").unwrap().remove(k);
+        s.get_document_mut("s")
+            .unwrap()
+            .get_document_mut("$accumulator")
+            .unwrap()
+            .remove(k);
         GroupJs::parse(&s).unwrap_err().code
     };
     assert_eq!(missing("init"), 4_544_707);
@@ -213,7 +296,11 @@ fn accumulator_groups() {
 
 #[test]
 fn mentions() {
-    assert!(mentions_js(&doc! {"find": "c", "filter": {"$and": [{"$where": "1"}]}}));
-    assert!(mentions_js(&doc! {"pipeline": [{"$group": {"_id": 1, "x": {"$accumulator": {}}}}]}));
+    assert!(mentions_js(
+        &doc! {"find": "c", "filter": {"$and": [{"$where": "1"}]}}
+    ));
+    assert!(mentions_js(
+        &doc! {"pipeline": [{"$group": {"_id": 1, "x": {"$accumulator": {}}}}]}
+    ));
     assert!(!mentions_js(&doc! {"find": "c", "filter": {"a": "$where"}}));
 }

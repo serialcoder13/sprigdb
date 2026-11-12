@@ -198,19 +198,28 @@ fn fresh(op: u64, memory_bytes: usize) -> Result<Cached, Failure> {
     })
 }
 
-/// `hex_md5` and `Object.bsonsize`.
+/// `hex_md5` and `Object.bsonsize` (rquickjs passes the arguments
+/// owned).
+#[allow(clippy::needless_pass_by_value)]
 fn host_fn<'js>(ctx: Ctx<'js>, op: String, v: Value<'js>) -> rquickjs::Result<Value<'js>> {
     match op.as_str() {
         "md5" => {
             use md5::Digest as _;
-            let s: String = v.as_string().and_then(|s| s.to_string().ok()).unwrap_or_default();
+            let s: String = v
+                .as_string()
+                .and_then(|s| s.to_string().ok())
+                .unwrap_or_default();
             let d = md5::Md5::digest(s.as_bytes());
-            let hex: String = d.iter().map(|b| format!("{b:02x}")).collect();
+            let hex = d.iter().fold(String::new(), |mut h, b| {
+                use std::fmt::Write as _;
+                let _ = write!(h, "{b:02x}");
+                h
+            });
             rquickjs::String::from_str(ctx, &hex).map(rquickjs::String::into_value)
         }
         "bsonsize" => {
             let mut origins = Vec::new();
-            let n = match from_js(&ctx, &v, None, 0, &mut origins, 0) {
+            let n = match from_js(&v, None, 0, &mut origins, 0) {
                 Ok(Bson::Document(d)) => bson::to_vec(&d).map_or(0, |b| b.len()),
                 _ => 0,
             };
@@ -277,11 +286,10 @@ fn run(k: &mut Cached, c: &Call<'_>) -> Result<Bson, Failure> {
     let cx = k.cx.clone();
     cx.with(|ctx| -> Result<Bson, Failure> {
         let f = compile(&ctx, k, c.src)?;
-        let mk = k
-            .mk
-            .clone()
-            .restore(&ctx)
-            .map_err(|e| Failure::Error(JS_FAILURE, e.to_string()))?;
+        let mk =
+            k.mk.clone()
+                .restore(&ctx)
+                .map_err(|e| Failure::Error(JS_FAILURE, e.to_string()))?;
         let gen_ = k.calls;
         let mut args = Args::new(ctx.clone(), c.args.len());
         let this = match c.this {
@@ -306,7 +314,7 @@ fn run(k: &mut Cached, c: &Call<'_>) -> Result<Bson, Failure> {
         if c.as_bool {
             return Ok(Bson::Boolean(truthy(&r)));
         }
-        from_js(&ctx, &r, None, 0, &mut k.origins, gen_)
+        from_js(&r, None, 0, &mut k.origins, gen_)
     })
 }
 
@@ -401,9 +409,11 @@ fn to_js<'js>(
         Bson::Double(d) => Value::new_float(ctx.clone(), *d),
         Bson::Int32(i) => Value::new_int(ctx.clone(), *i),
         Bson::Int64(i) => make("long")?.call((i.to_string(),))?,
-        Bson::String(s) => rquickjs::String::from_str(ctx.clone(), s)?.into_value(),
+        Bson::String(s) | Bson::Symbol(s) => {
+            rquickjs::String::from_str(ctx.clone(), s)?.into_value()
+        }
         Bson::Boolean(b) => Value::new_bool(ctx.clone(), *b),
-        Bson::Null => Value::new_null(ctx.clone()),
+        Bson::Null | Bson::DbPointer(_) => Value::new_null(ctx.clone()),
         Bson::Undefined => Value::new_undefined(ctx.clone()),
         Bson::Array(a) => {
             let arr = Array::new(ctx.clone())?;
@@ -453,14 +463,11 @@ fn to_js<'js>(
         Bson::JavaScriptCodeWithScope(c) => make("code")?.call((c.code.clone(),))?,
         Bson::MinKey => mk.get("minkey")?,
         Bson::MaxKey => mk.get("maxkey")?,
-        Bson::Symbol(s) => rquickjs::String::from_str(ctx.clone(), s)?.into_value(),
-        Bson::DbPointer(_) => Value::new_null(ctx.clone()),
     })
 }
 
 /// JavaScript to BSON.
 fn from_js(
-    ctx: &Ctx<'_>,
     v: &Value<'_>,
     orig: Option<&Bson>,
     depth: usize,
@@ -516,7 +523,7 @@ fn from_js(
     if let Some(a) = v.as_array() {
         let mut out = Vec::with_capacity(a.len());
         for x in a.iter::<Value<'_>>() {
-            out.push(from_js(ctx, &x.map_err(err)?, None, depth + 1, origins, gen_)?);
+            out.push(from_js(&x.map_err(err)?, None, depth + 1, origins, gen_)?);
         }
         return Ok(Bson::Array(out));
     }
@@ -535,14 +542,16 @@ fn from_js(
     for p in o.props::<String, Value<'_>>() {
         let (key, x) = p.map_err(err)?;
         let prev = src.as_ref().and_then(|d| d.get(&key));
-        out.insert(key, from_js(ctx, &x, prev, depth + 1, origins, gen_)?);
+        out.insert(key, from_js(&x, prev, depth + 1, origins, gen_)?);
     }
     Ok(Bson::Document(out))
 }
 
 /// A shell-typed value back to BSON.
 fn typed(o: &Object<'_>, bt: &str) -> rquickjs::Result<Bson> {
-    let s = |k: &str| -> rquickjs::Result<String> { o.get::<_, rquickjs::Coerced<String>>(k).map(|c| c.0) };
+    let s = |k: &str| -> rquickjs::Result<String> {
+        o.get::<_, rquickjs::Coerced<String>>(k).map(|c| c.0)
+    };
     Ok(match bt {
         "oid" => bson::oid::ObjectId::parse_str(s("str")?)
             .map(Bson::ObjectId)

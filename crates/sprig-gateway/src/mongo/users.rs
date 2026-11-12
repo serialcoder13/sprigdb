@@ -238,6 +238,32 @@ async fn users_info(w: &Who, body: &Document, db: &str) -> Result<Document, Mong
         _ => None,
     };
     let show_privs = body.get_bool("showPrivileges").unwrap_or(false);
+    // MongoDB 9.0's `authenticatedMechanism` picks the authorization
+    // backend to ask; SprigDB has one, so a known mechanism changes
+    // nothing (M4, decision S116).
+    match body.get("authenticatedMechanism") {
+        None | Some(Bson::Null) => {}
+        Some(Bson::String(m))
+            if matches!(
+                m.as_str(),
+                "SCRAM-SHA-256" | "SCRAM-SHA-1" | "PLAIN" | "MONGODB-X509" | "MONGODB-OIDC" | "GSSAPI" | "MONGODB-AWS"
+            ) => {}
+        Some(Bson::String(m)) => {
+            return Err(MongoError::new(
+                code::BAD_VALUE,
+                format!("Unknown authentication mechanism '{m}'"),
+            ));
+        }
+        Some(v) => {
+            return Err(MongoError::new(
+                code::TYPE_MISMATCH,
+                format!(
+                    "BSON field 'usersInfo.authenticatedMechanism' is the wrong type '{}', expected type 'string'",
+                    sprig_doc::update::type_name(v)
+                ),
+            ));
+        }
+    }
     let mut out = Vec::new();
     if let Some(a) = auth {
         let mut users: Vec<_> = a.users().filter(|u| u.row.host == "%").collect();

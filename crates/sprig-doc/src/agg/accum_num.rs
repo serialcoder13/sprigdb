@@ -330,7 +330,10 @@ fn round(neg: bool, coef: BigUint, exp: i32, sticky: bool) -> Dec {
         };
     }
     let (keep, rest) = if drop >= digits.len() {
-        (String::new(), format!("{}{digits}", "0".repeat(drop - digits.len())))
+        (
+            String::new(),
+            format!("{}{digits}", "0".repeat(drop - digits.len())),
+        )
     } else {
         (
             digits[..digits.len() - drop].to_owned(),
@@ -347,7 +350,9 @@ fn round(neg: bool, coef: BigUint, exp: i32, sticky: bool) -> Dec {
     let up = match first.cmp(&b'5') {
         Ordering::Greater => true,
         Ordering::Less => false,
-        Ordering::Equal => tail_nonzero || keep.as_bytes().last().is_some_and(|d| (d - b'0') % 2 == 1),
+        Ordering::Equal => {
+            tail_nonzero || keep.as_bytes().last().is_some_and(|d| (d - b'0') % 2 == 1)
+        }
     };
     let mut exp = exp + i32::try_from(drop).unwrap_or(0);
     if up {
@@ -402,7 +407,6 @@ impl DoubleDouble {
             self.add_double(high as f64);
         }
     }
-
 
     pub(crate) fn to_dec(self) -> Dec {
         if self.special != 0.0 || self.special.is_nan() {
@@ -510,7 +514,8 @@ impl Summer {
                 {
                     return Bson::Int32(i);
                 }
-                i64::try_from(self.ints).map_or_else(|_| Bson::Double(self.kahan.get()), Bson::Int64)
+                i64::try_from(self.ints)
+                    .map_or_else(|_| Bson::Double(self.kahan.get()), Bson::Int64)
             }
         }
     }

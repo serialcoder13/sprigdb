@@ -15,7 +15,13 @@ fn eval_in(expr: Bson, d: Document) -> Result<Bson, i32> {
         now: DateTime::now(),
     };
     agg::run_stage(vec![d], &doc! {"$replaceWith": {"r": expr}}, &lim)
-        .map(|mut out| out.pop().unwrap().get("r").cloned().unwrap_or(Bson::Undefined))
+        .map(|mut out| {
+            out.pop()
+                .unwrap()
+                .get("r")
+                .cloned()
+                .unwrap_or(Bson::Undefined)
+        })
         .map_err(|e| e.code)
 }
 
@@ -31,7 +37,9 @@ fn bin(st: u8, b64: &str) -> Bson {
     use base64::Engine as _;
     Bson::Binary(Binary {
         subtype: BinarySubtype::from(st),
-        bytes: base64::engine::general_purpose::STANDARD.decode(b64).unwrap(),
+        bytes: base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap(),
     })
 }
 
@@ -48,11 +56,15 @@ fn hexbin(h: &str) -> Bson {
 #[test]
 fn subtype() {
     assert_eq!(
-        ok(Bson::Document(doc! {"$subtype": {"$literal": bin(0, "gf1UcxdHTJ2HQ/EGQrO7mQ==")}})),
+        ok(Bson::Document(
+            doc! {"$subtype": {"$literal": bin(0, "gf1UcxdHTJ2HQ/EGQrO7mQ==")}}
+        )),
         Bson::Int32(0)
     );
     assert_eq!(
-        ok(Bson::Document(doc! {"$subtype": {"$literal": bin(4, "gf1UcxdHTJ2HQ/EGQrO7mQ==")}})),
+        ok(Bson::Document(
+            doc! {"$subtype": {"$literal": bin(4, "gf1UcxdHTJ2HQ/EGQrO7mQ==")}}
+        )),
         Bson::Int32(4)
     );
     assert_eq!(ok(Bson::Document(doc! {"$subtype": null})), Bson::Null);
@@ -101,8 +113,18 @@ fn hash_and_hex_hash() {
         )),
         Bson::Null
     );
-    assert!(eval(Bson::Document(doc! {"$hash": {"input": 5, "algorithm": "md5"}})).is_err());
-    assert!(eval(Bson::Document(doc! {"$hash": {"input": "a", "algorithm": "sha1"}})).is_err());
+    assert!(
+        eval(Bson::Document(
+            doc! {"$hash": {"input": 5, "algorithm": "md5"}}
+        ))
+        .is_err()
+    );
+    assert!(
+        eval(Bson::Document(
+            doc! {"$hash": {"input": "a", "algorithm": "sha1"}}
+        ))
+        .is_err()
+    );
 }
 
 #[test]
@@ -111,7 +133,10 @@ fn create_object_id_and_current_date() {
     let b = ok(Bson::Document(doc! {"$createObjectId": {}}));
     assert!(matches!(a, Bson::ObjectId(_)));
     assert_ne!(a, b);
-    assert_eq!(eval(Bson::Document(doc! {"$createObjectId": {"a": 1}})), Err(9));
+    assert_eq!(
+        eval(Bson::Document(doc! {"$createObjectId": {"a": 1}})),
+        Err(9)
+    );
     assert_eq!(eval(Bson::Document(doc! {"$createObjectId": 1})), Err(9));
     let before = DateTime::now().timestamp_millis();
     let Bson::DateTime(d) = ok(Bson::Document(doc! {"$currentDate": {}})) else {
@@ -131,7 +156,9 @@ fn ejson_round_trip() {
         "released": DateTime::from_millis(1_279_238_400_000),
         "cast": ["a", "b"],
     };
-    let canon = ok(Bson::Document(doc! {"$serializeEJSON": {"input": "$$ROOT"}}));
+    let canon = ok(Bson::Document(
+        doc! {"$serializeEJSON": {"input": "$$ROOT"}},
+    ));
     let canon_in = eval_in(
         Bson::Document(doc! {"$serializeEJSON": {"input": "$$ROOT"}}),
         d.clone(),
@@ -139,8 +166,14 @@ fn ejson_round_trip() {
     .unwrap();
     assert!(matches!(canon, Bson::Document(_)));
     let c = canon_in.as_document().unwrap();
-    assert_eq!(c.get_document("_id").unwrap(), &doc! {"$oid": "573a1398f29313caabcea974"});
-    assert_eq!(c.get_document("year").unwrap(), &doc! {"$numberInt": "2010"});
+    assert_eq!(
+        c.get_document("_id").unwrap(),
+        &doc! {"$oid": "573a1398f29313caabcea974"}
+    );
+    assert_eq!(
+        c.get_document("year").unwrap(),
+        &doc! {"$numberInt": "2010"}
+    );
     assert_eq!(c.get_document("big").unwrap(), &doc! {"$numberLong": "42"});
     assert_eq!(
         c.get_document("released").unwrap(),
@@ -159,7 +192,9 @@ fn ejson_round_trip() {
     );
     // And back.
     let back = eval_in(
-        Bson::Document(doc! {"$deserializeEJSON": {"input": {"$serializeEJSON": {"input": "$$ROOT"}}}}),
+        Bson::Document(
+            doc! {"$deserializeEJSON": {"input": {"$serializeEJSON": {"input": "$$ROOT"}}}},
+        ),
         d.clone(),
     )
     .unwrap();
@@ -173,7 +208,10 @@ fn ejson_round_trip() {
         back_relaxed.as_document().unwrap().get("released"),
         d.get("released")
     );
-    assert_eq!(ok(Bson::Document(doc! {"$serializeEJSON": {"input": null}})), Bson::Null);
+    assert_eq!(
+        ok(Bson::Document(doc! {"$serializeEJSON": {"input": null}})),
+        Bson::Null
+    );
     assert_eq!(
         ok(Bson::Document(
             doc! {"$deserializeEJSON": {"input": {"$literal": {"x": {"$numberLong": "zz"}}}, "onError": "bad"}}
@@ -182,9 +220,11 @@ fn ejson_round_trip() {
     );
     // A JSON string parsed with $convert, then deserialized (the
     // documentation's example).
-    let movie = ok(Bson::Document(doc! {"$deserializeEJSON": {"input": {"$convert": {
+    let movie = ok(Bson::Document(
+        doc! {"$deserializeEJSON": {"input": {"$convert": {
         "input": "{\"_id\":{\"$oid\":\"507f1f77bcf86cd799439011\"},\"title\":\"The Matrix\",\"year\":{\"$numberInt\":\"1999\"},\"rating\":{\"$numberDouble\":\"8.7\"}}",
-        "to": "object"}}}}));
+        "to": "object"}}}},
+    ));
     assert_eq!(
         movie,
         Bson::Document(doc! {
@@ -198,7 +238,9 @@ fn ejson_round_trip() {
 fn to_string_of_any_type() {
     let s = |e: Bson| ok(Bson::Document(doc! {"$toString": e}));
     assert_eq!(
-        s(Bson::Document(doc! {"$literal": {"pizza": {"type": "cheese"}}})),
+        s(Bson::Document(
+            doc! {"$literal": {"pizza": {"type": "cheese"}}}
+        )),
         Bson::String("{\"pizza\":{\"type\":\"cheese\"}}".into())
     );
     assert_eq!(
@@ -229,24 +271,48 @@ fn to_string_of_any_type() {
 #[test]
 fn convert_base_and_json() {
     let c = |d: Document| eval(Bson::Document(doc! {"$convert": d}));
-    assert_eq!(c(doc! {"input": "ff", "to": "int", "base": 16}), Ok(Bson::Int32(255)));
-    assert_eq!(c(doc! {"input": "777", "to": "long", "base": 8}), Ok(Bson::Int64(511)));
-    assert_eq!(c(doc! {"input": "101", "to": "double", "base": 2}), Ok(Bson::Double(5.0)));
-    assert_eq!(c(doc! {"input": 255, "to": "string", "base": 16}), Ok(Bson::String("FF".into())));
-    assert_eq!(c(doc! {"input": 5, "to": "string", "base": 2}), Ok(Bson::String("101".into())));
+    assert_eq!(
+        c(doc! {"input": "ff", "to": "int", "base": 16}),
+        Ok(Bson::Int32(255))
+    );
+    assert_eq!(
+        c(doc! {"input": "777", "to": "long", "base": 8}),
+        Ok(Bson::Int64(511))
+    );
+    assert_eq!(
+        c(doc! {"input": "101", "to": "double", "base": 2}),
+        Ok(Bson::Double(5.0))
+    );
+    assert_eq!(
+        c(doc! {"input": 255, "to": "string", "base": 16}),
+        Ok(Bson::String("FF".into()))
+    );
+    assert_eq!(
+        c(doc! {"input": 5, "to": "string", "base": 2}),
+        Ok(Bson::String("101".into()))
+    );
     assert_eq!(
         c(doc! {"input": 10.5, "to": "string", "base": 2, "onError": "invalid"}),
         Ok(Bson::String("invalid".into()))
     );
-    assert_eq!(c(doc! {"input": "0x1A", "to": "int", "base": 16, "onError": "E"}), Ok(Bson::String("E".into())));
+    assert_eq!(
+        c(doc! {"input": "0x1A", "to": "int", "base": 16, "onError": "E"}),
+        Ok(Bson::String("E".into()))
+    );
     assert_eq!(c(doc! {"input": "12", "to": "int", "base": 3}), Err(9));
-    assert_eq!(c(doc! {"input": "12", "to": "int", "base": null}), Ok(Bson::Int32(12)));
+    assert_eq!(
+        c(doc! {"input": "12", "to": "int", "base": null}),
+        Ok(Bson::Int32(12))
+    );
     // Strings to arrays and objects.
     assert_eq!(
         c(doc! {"input": "[1, 2, 3]", "to": "array"}),
         Ok(Bson::Array(vec![1.into(), 2.into(), 3.into()]))
     );
-    assert_eq!(c(doc! {"input": "[]", "to": "array"}), Ok(Bson::Array(vec![])));
+    assert_eq!(
+        c(doc! {"input": "[]", "to": "array"}),
+        Ok(Bson::Array(vec![]))
+    );
     assert_eq!(c(doc! {"input": "{}", "to": "array"}), Err(241));
     assert_eq!(c(doc! {"input": 123, "to": "array"}), Err(241));
     assert_eq!(c(doc! {"input": "123", "to": "array"}), Err(241));
@@ -266,13 +332,18 @@ fn convert_base_and_json() {
         c(doc! {"input": "{\"foo\": 4294967296}", "to": "object"}),
         Ok(Bson::Document(doc! {"foo": 4_294_967_296_i64}))
     );
-    assert_eq!(c(doc! {"input": "{\"nam\\u0000e\": \"foo\"}", "to": "object"}), Err(241));
+    assert_eq!(
+        c(doc! {"input": "{\"nam\\u0000e\": \"foo\"}", "to": "object"}),
+        Err(241)
+    );
     assert_eq!(
         ok(Bson::Document(doc! {"$toArray": "[\"a\", \"b\"]"})),
         Bson::Array(vec!["a".into(), "b".into()])
     );
     assert_eq!(
-        ok(Bson::Document(doc! {"$toObject": "{\"z\": {\"y\": [true, null]}}"})),
+        ok(Bson::Document(
+            doc! {"$toObject": "{\"z\": {\"y\": [true, null]}}"}
+        )),
         Bson::Document(doc! {"z": {"y": [true, null]}})
     );
 }
@@ -281,13 +352,22 @@ fn convert_base_and_json() {
 fn convert_bindata_and_numbers() {
     let c = |d: Document| eval(Bson::Document(doc! {"$convert": d}));
     // Numbers to binData (8.1), the documentation's examples.
-    assert_eq!(c(doc! {"input": 42_i64, "to": "binData"}), Ok(bin(0, "KgAAAAAAAAA=")));
+    assert_eq!(
+        c(doc! {"input": 42_i64, "to": "binData"}),
+        Ok(bin(0, "KgAAAAAAAAA="))
+    );
     assert_eq!(
         c(doc! {"input": 42_i64, "to": "binData", "byteOrder": "big"}),
         Ok(bin(0, "AAAAAAAAACo="))
     );
-    assert_eq!(c(doc! {"input": 42.0, "to": "binData"}), Ok(bin(0, "AAAAAAAARUA=")));
-    assert_eq!(c(doc! {"input": 42, "to": "binData"}), Ok(bin(0, "KgAAAA==")));
+    assert_eq!(
+        c(doc! {"input": 42.0, "to": "binData"}),
+        Ok(bin(0, "AAAAAAAARUA="))
+    );
+    assert_eq!(
+        c(doc! {"input": 42, "to": "binData"}),
+        Ok(bin(0, "KgAAAA=="))
+    );
     // And back.
     assert_eq!(
         c(doc! {"input": {"$literal": hexbin("00100000")}, "to": "int", "byteOrder": "big"}),
@@ -310,7 +390,10 @@ fn convert_bindata_and_numbers() {
         Err(241)
     );
     // Objects to binData (9.0): their BSON bytes.
-    assert_eq!(c(doc! {"input": {"$literal": {}}, "to": "binData"}), Ok(bin(0, "BQAAAAA=")));
+    assert_eq!(
+        c(doc! {"input": {"$literal": {}}, "to": "binData"}),
+        Ok(bin(0, "BQAAAAA="))
+    );
     assert_eq!(
         c(doc! {"input": {"$literal": {"a": "a"}}, "to": {"type": 5, "subtype": 128}}),
         Ok(bin(128, "DgAAAAJhAAIAAABhAAA="))
@@ -332,11 +415,15 @@ fn array_index_variables() {
         ])
     );
     assert_eq!(
-        ok(Bson::Document(doc! {"$map": {"input": ["a", "b"], "in": "$$IDX"}})),
+        ok(Bson::Document(
+            doc! {"$map": {"input": ["a", "b"], "in": "$$IDX"}}
+        )),
         Bson::Array(vec![0.into(), 1.into()])
     );
     assert_eq!(
-        ok(Bson::Document(doc! {"$filter": {"input": [5, 6, 7, 8], "cond": {"$eq": [{"$mod": ["$$IDX", 2]}, 1]}}})),
+        ok(Bson::Document(
+            doc! {"$filter": {"input": [5, 6, 7, 8], "cond": {"$eq": [{"$mod": ["$$IDX", 2]}, 1]}}}
+        )),
         Bson::Array(vec![6.into(), 8.into()])
     );
     assert_eq!(
@@ -348,9 +435,11 @@ fn array_index_variables() {
     );
     // Nested: the inner $map's IDX shadows the outer one.
     assert_eq!(
-        ok(Bson::Document(doc! {"$map": {"input": [[1, 2], [3]], "arrayIndexAs": "o", "in": {
-            "$map": {"input": "$$this", "in": {"$add": [{"$multiply": ["$$o", 10]}, "$$IDX"]}}
-        }}})),
+        ok(Bson::Document(
+            doc! {"$map": {"input": [[1, 2], [3]], "arrayIndexAs": "o", "in": {
+                "$map": {"input": "$$this", "in": {"$add": [{"$multiply": ["$$o", 10]}, "$$IDX"]}}
+            }}}
+        )),
         Bson::Array(vec![
             Bson::Array(vec![0.into(), 1.into()]),
             Bson::Array(vec![10.into()]),
@@ -392,5 +481,66 @@ fn trig_cost() {
             "{op}: {:.1} µs per document",
             t.elapsed().as_secs_f64() * 1e6 / 10_000.0
         );
+    }
+}
+
+/// The correctly rounded trigonometry (S36) stays within one unit in the
+/// last place of the platform's functions, over a spread of arguments.
+#[test]
+fn trig_within_one_ulp_of_libm() {
+    let lim = AggLimits {
+        stage_bytes: 1 << 30,
+        now: DateTime::now(),
+    };
+    let mut seed: u64 = 7;
+    let mut xs = Vec::new();
+    for _ in 0..2000 {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        #[allow(clippy::cast_precision_loss)]
+        let u = (seed >> 11) as f64 / (1u64 << 53) as f64;
+        let e = (seed % 40) as i32 - 30;
+        xs.push((u * 2.0 - 1.0) * 10f64.powi(e));
+    }
+    let docs: Vec<Document> = xs
+        .iter()
+        .enumerate()
+        .map(|(i, x)| doc! {"_id": i32::try_from(i).unwrap(), "x": *x})
+        .collect();
+    let ulps = |a: f64, b: f64| (a.to_bits() as i64 - b.to_bits() as i64).unsigned_abs();
+    for (op, f) in [
+        ("$sin", f64::sin as fn(f64) -> f64),
+        ("$cos", f64::cos),
+        ("$tan", f64::tan),
+        ("$atan", f64::atan),
+    ] {
+        let out = agg::run_stage(docs.clone(), &doc! {"$project": {"r": {op: "$x"}}}, &lim).unwrap();
+        for (d, x) in out.iter().zip(&xs) {
+            // macOS's tan is several units off for large arguments (its
+            // answer for -758253.37 is 5 units from the true value).
+            if op == "$tan" && x.abs() > 100.0 {
+                continue;
+            }
+            let r = d.get_f64("r").unwrap();
+            assert!(ulps(r, f(*x)) <= 1, "{op}({x:e}) = {r:e}, libm {:e}", f(*x));
+        }
+    }
+    let small: Vec<Document> = docs
+        .iter()
+        .zip(&xs)
+        .map(|(d, x)| {
+            let mut d = d.clone();
+            d.insert("x", x.clamp(-1.0, 1.0));
+            d
+        })
+        .collect();
+    for (op, f) in [("$asin", f64::asin as fn(f64) -> f64), ("$acos", f64::acos)] {
+        let out = agg::run_stage(small.clone(), &doc! {"$project": {"r": {op: "$x"}}}, &lim).unwrap();
+        for (d, s) in out.iter().zip(&small) {
+            let x = s.get_f64("x").unwrap();
+            let r = d.get_f64("r").unwrap();
+            assert!(ulps(r, f(x)) <= 1, "{op}({x:e}) = {r:e}, libm {:e}", f(x));
+        }
     }
 }

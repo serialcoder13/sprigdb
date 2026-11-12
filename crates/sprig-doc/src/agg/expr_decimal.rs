@@ -15,16 +15,63 @@ use bson::Decimal128;
 use num_bigint::BigInt;
 use num_traits::{One, Signed, Zero};
 
-/// Working decimal places.
+/// Working precision: values are fixed point scaled by 2^bits, with
+/// about 90 decimal places for decimals and 40 for the doubles of
+/// [`f64_trig`] (enough to round a double correctly). A binary scale makes
+/// the rescaling after each product a shift.
 const P: u32 = 90;
+const P_LOW: u32 = 40;
+const BITS: u32 = 300;
+const BITS_LOW: u32 = 136;
+
+thread_local! {
+    static LOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn low() -> bool {
+    LOW.with(std::cell::Cell::get)
+}
+
+/// Runs `f` at the lower precision.
+fn at_low_precision<T>(f: impl FnOnce() -> T) -> T {
+    LOW.with(|l| l.set(true));
+    let r = f();
+    LOW.with(|l| l.set(false));
+    r
+}
+
+/// Decimal places worth of the scale.
+fn prec() -> u32 {
+    if low() { P_LOW } else { P }
+}
+
+fn bits() -> u32 {
+    if low() { BITS_LOW } else { BITS }
+}
 
 fn ten_pow(n: u32) -> BigInt {
     BigInt::from(10u8).pow(n)
 }
 
+/// A constant at each precision.
+struct Both(OnceLock<BigInt>, OnceLock<BigInt>);
+
+impl Both {
+    const fn new() -> Self {
+        Self(OnceLock::new(), OnceLock::new())
+    }
+    fn get(&'static self, f: impl FnOnce() -> BigInt) -> &'static BigInt {
+        if low() {
+            self.1.get_or_init(f)
+        } else {
+            self.0.get_or_init(f)
+        }
+    }
+}
+
 fn s() -> &'static BigInt {
-    static S: OnceLock<BigInt> = OnceLock::new();
-    S.get_or_init(|| ten_pow(P))
+    static S: Both = Both::new();
+    S.get(|| BigInt::one() << usize::try_from(bits()).unwrap_or(0))
 }
 
 /// A finite decimal: `coef × 10^exp`.
@@ -67,19 +114,24 @@ pub(super) fn exact(d: &Dec) -> Decimal128 {
     to_decimal(d.coef.is_negative(), &d.coef, d.exp)
 }
 
-/// Fixed point (scaled by 10^P) of a decimal.
+/// Fixed point (scaled by 2^bits) of a decimal.
 pub(super) fn fixed(d: &Dec) -> BigInt {
-    let shift = i64::from(P) + d.exp;
-    if shift >= 0 {
-        &d.coef * ten_pow(u32::try_from(shift).unwrap_or(0))
+    if d.exp >= 0 {
+        (&d.coef * ten_pow(u32::try_from(d.exp).unwrap_or(0)))
+            << usize::try_from(bits()).unwrap_or(0)
     } else {
-        let p = u32::try_from(-shift).unwrap_or(u32::MAX);
+        let p = u32::try_from(-d.exp).unwrap_or(u32::MAX);
         if p > 7000 {
             BigInt::zero()
         } else {
-            &d.coef / ten_pow(p)
+            (&d.coef << usize::try_from(bits()).unwrap_or(0)) / ten_pow(p)
         }
     }
+}
+
+/// A fixed-point value as an integer scaled by 10^prec.
+fn to_decimal_scale(x: &BigInt) -> BigInt {
+    (x * ten_pow(prec())) >> usize::try_from(bits()).unwrap_or(0)
 }
 
 /// Rounds `coef × 10^exp` half-even to at most 34 digits.
@@ -137,28 +189,28 @@ pub(super) fn round34(x: &BigInt) -> Dec {
             exp: 0,
         };
     }
-    round_coef(x, -i64::from(P), true)
+    round_coef(&to_decimal_scale(x), -i64::from(prec()), true)
 }
 
 fn mul(a: &BigInt, b: &BigInt) -> BigInt {
-    a * b / s()
+    (a * b) >> usize::try_from(bits()).unwrap_or(0)
 }
 
 fn div(a: &BigInt, b: &BigInt) -> BigInt {
-    a * s() / b
+    (a << usize::try_from(bits()).unwrap_or(0)) / b
 }
 
 fn ln2() -> &'static BigInt {
-    static L: OnceLock<BigInt> = OnceLock::new();
-    L.get_or_init(|| {
+    static L: Both = Both::new();
+    L.get(|| {
         let two = s() * 2u8;
         ln_reduced(&two)
     })
 }
 
 fn ln10() -> &'static BigInt {
-    static L: OnceLock<BigInt> = OnceLock::new();
-    L.get_or_init(|| ln(&(s() * 10u8)))
+    static L: Both = Both::new();
+    L.get(|| ln(&(s() * 10u8)))
 }
 
 /// `2 atanh((m − 1)/(m + 1))` = `ln m`, for m near 1.
@@ -242,8 +294,8 @@ fn atan_series(x: &BigInt) -> BigInt {
 }
 
 pub(super) fn pi() -> &'static BigInt {
-    static PI: OnceLock<BigInt> = OnceLock::new();
-    PI.get_or_init(|| {
+    static PI: Both = Both::new();
+    PI.get(|| {
         // Machin: π = 16 atan(1/5) − 4 atan(1/239).
         let a = atan_series(&(s() / 5u8));
         let b = atan_series(&(s() / 239u8));
@@ -418,7 +470,7 @@ pub(super) fn log_base(d: &Dec, base: u8) -> Decimal128 {
     };
     let back: BigInt = &rounded * s();
     let gap: BigInt = &v - &back;
-    if gap.abs() < ten_pow(P - 60) {
+    if gap.abs() < (s() >> 200usize) {
         return exact(&Dec {
             coef: rounded,
             exp: 0,
@@ -527,16 +579,27 @@ fn fixed_from_f64(x: f64) -> BigInt {
 
 /// The double nearest a fixed-point value.
 fn f64_from_fixed(v: &BigInt) -> f64 {
-    format!("{v}e-{P}").parse().unwrap_or(f64::NAN)
+    format!("{}e-{}", to_decimal_scale(v), prec())
+        .parse()
+        .unwrap_or(f64::NAN)
 }
 
 /// Correctly rounded `sin`, `cos`, `tan`, `asin`, `acos` and `atan` of a
 /// finite double in the function's domain, as glibc (MongoDB's libm on
 /// Linux) gives them; the platform's libm can be a unit off.
 pub(super) fn f64_trig(op: &str, x: f64) -> f64 {
-    // Tiny arguments: the result rounds to x (or 1 for cos).
-    if x.abs() < 1e-9 {
-        return if op == "$cos" { 1.0 } else if op == "$acos" { std::f64::consts::FRAC_PI_2 } else { x };
+    // Large arguments need π to more places to reduce exactly.
+    if x.abs() < 1e15 {
+        at_low_precision(|| f64_trig_at(op, x))
+    } else {
+        f64_trig_at(op, x)
+    }
+}
+
+fn f64_trig_at(op: &str, x: f64) -> f64 {
+    // Tiny arguments: the result rounds to x (to 1 for cos).
+    if x.abs() < 1e-9 && op != "$acos" {
+        return if op == "$cos" { 1.0 } else { x };
     }
     let fx = fixed_from_f64(x);
     let one = s();
@@ -563,6 +626,10 @@ pub(super) fn f64_trig(op: &str, x: f64) -> f64 {
 
 /// Correctly rounded `atan2` of finite doubles.
 pub(super) fn f64_atan2(y: f64, x: f64) -> f64 {
+    at_low_precision(|| f64_atan2_at(y, x))
+}
+
+fn f64_atan2_at(y: f64, x: f64) -> f64 {
     if !(y.is_finite() && x.is_finite()) || x == 0.0 || y == 0.0 {
         return y.atan2(x);
     }

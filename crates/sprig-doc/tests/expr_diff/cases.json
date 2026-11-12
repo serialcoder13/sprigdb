@@ -72429,5 +72429,3679 @@
     }
    ]
   }
+ },
+ {
+  "name": "shape.parts#2786",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$year": [
+    {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    }
+   ]
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "40536"
+   },
+   "errmsg": "$year accepts exactly one argument if given an array, but was given 2"
+  }
+ },
+ {
+  "name": "shape.parts#2787",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$year": []
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "40536"
+   },
+   "errmsg": "$year accepts exactly one argument if given an array, but was given 0"
+  }
+ },
+ {
+  "name": "shape.parts#2788",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$year": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "timezone": "Pacific/Chatham"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberInt": "2021"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.parts#2789",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$year": {
+    "$dateFromParts": {
+     "year": {
+      "$numberInt": "2020"
+     },
+     "month": {
+      "$numberInt": "2"
+     },
+     "day": {
+      "$numberInt": "29"
+     }
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberInt": "2020"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.parts#2790",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$month": [
+    {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    }
+   ]
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "40536"
+   },
+   "errmsg": "$month accepts exactly one argument if given an array, but was given 2"
+  }
+ },
+ {
+  "name": "shape.parts#2791",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$month": []
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "40536"
+   },
+   "errmsg": "$month accepts exactly one argument if given an array, but was given 0"
+  }
+ },
+ {
+  "name": "shape.parts#2792",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$month": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "timezone": "Pacific/Chatham"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberInt": "3"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.parts#2793",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$month": {
+    "$dateFromParts": {
+     "year": {
+      "$numberInt": "2020"
+     },
+     "month": {
+      "$numberInt": "2"
+     },
+     "day": {
+      "$numberInt": "29"
+     }
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberInt": "2"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.parts#2794",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dayOfMonth": [
+    {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    }
+   ]
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "40536"
+   },
+   "errmsg": "$dayOfMonth accepts exactly one argument if given an array, but was given 2"
+  }
+ },
+ {
+  "name": "shape.parts#2795",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dayOfMonth": []
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "40536"
+   },
+   "errmsg": "$dayOfMonth accepts exactly one argument if given an array, but was given 0"
+  }
+ },
+ {
+  "name": "shape.parts#2796",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dayOfMonth": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "timezone": "Pacific/Chatham"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberInt": "14"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.parts#2797",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dayOfMonth": {
+    "$dateFromParts": {
+     "year": {
+      "$numberInt": "2020"
+     },
+     "month": {
+      "$numberInt": "2"
+     },
+     "day": {
+      "$numberInt": "29"
+     }
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberInt": "29"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.parts#2798",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dayOfYear": [
+    {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    }
+   ]
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "40536"
+   },
+   "errmsg": "$dayOfYear accepts exactly one argument if given an array, but was given 2"
+  }
+ },
+ {
+  "name": "shape.parts#2799",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dayOfYear": []
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "40536"
+   },
+   "errmsg": "$dayOfYear accepts exactly one argument if given an array, but was given 0"
+  }
+ },
+ {
+  "name": "shape.parts#2800",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dayOfYear": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "timezone": "Pacific/Chatham"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberInt": "73"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.parts#2801",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dayOfYear": {
+    "$dateFromParts": {
+     "year": {
+      "$numberInt": "2020"
+     },
+     "month": {
+      "$numberInt": "2"
+     },
+     "day": {
+      "$numberInt": "29"
+     }
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberInt": "60"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.parts#2802",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dayOfWeek": [
+    {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    }
+   ]
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "40536"
+   },
+   "errmsg": "$dayOfWeek accepts exactly one argument if given an array, but was given 2"
+  }
+ },
+ {
+  "name": "shape.parts#2803",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dayOfWeek": []
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "40536"
+   },
+   "errmsg": "$dayOfWeek accepts exactly one argument if given an array, but was given 0"
+  }
+ },
+ {
+  "name": "shape.parts#2804",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dayOfWeek": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "timezone": "Pacific/Chatham"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberInt": "1"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.parts#2805",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dayOfWeek": {
+    "$dateFromParts": {
+     "year": {
+      "$numberInt": "2020"
+     },
+     "month": {
+      "$numberInt": "2"
+     },
+     "day": {
+      "$numberInt": "29"
+     }
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberInt": "7"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.parts#2806",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$millisecond": [
+    {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    }
+   ]
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "40536"
+   },
+   "errmsg": "$millisecond accepts exactly one argument if given an array, but was given 2"
+  }
+ },
+ {
+  "name": "shape.parts#2807",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$millisecond": []
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "40536"
+   },
+   "errmsg": "$millisecond accepts exactly one argument if given an array, but was given 0"
+  }
+ },
+ {
+  "name": "shape.parts#2808",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$millisecond": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "timezone": "Pacific/Chatham"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberInt": "250"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.parts#2809",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$millisecond": {
+    "$dateFromParts": {
+     "year": {
+      "$numberInt": "2020"
+     },
+     "month": {
+      "$numberInt": "2"
+     },
+     "day": {
+      "$numberInt": "29"
+     }
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberInt": "0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.parts#2810",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$isoWeekYear": [
+    {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    }
+   ]
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "40536"
+   },
+   "errmsg": "$isoWeekYear accepts exactly one argument if given an array, but was given 2"
+  }
+ },
+ {
+  "name": "shape.parts#2811",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$isoWeekYear": []
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "40536"
+   },
+   "errmsg": "$isoWeekYear accepts exactly one argument if given an array, but was given 0"
+  }
+ },
+ {
+  "name": "shape.parts#2812",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$isoWeekYear": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "timezone": "Pacific/Chatham"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberLong": "2021"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.parts#2813",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$isoWeekYear": {
+    "$dateFromParts": {
+     "year": {
+      "$numberInt": "2020"
+     },
+     "month": {
+      "$numberInt": "2"
+     },
+     "day": {
+      "$numberInt": "29"
+     }
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberLong": "2020"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.toString#2814",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dateToString": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "format": "%b %B"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "Mar March"
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.toString#2815",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dateToString": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "format": "%b %B",
+    "timezone": "+05:30"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "Mar March"
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.toString#2816",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dateToString": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "format": "%Y%m%d"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "20210314"
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.toString#2817",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dateToString": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "format": "%Y%m%d",
+    "timezone": "+05:30"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "20210314"
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.toString#2818",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dateToString": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "format": "%H%%%M"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "06%30"
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.toString#2819",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dateToString": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "format": "%H%%%M",
+    "timezone": "+05:30"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "12%00"
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.toString#2820",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dateToString": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "format": "%"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "18535"
+   },
+   "errmsg": "Failed to optimize pipeline :: caused by :: Unmatched '%' at end of format string"
+  }
+ },
+ {
+  "name": "shape.toString#2821",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dateToString": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "format": "%",
+    "timezone": "+05:30"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "18535"
+   },
+   "errmsg": "Failed to optimize pipeline :: caused by :: Unmatched '%' at end of format string"
+  }
+ },
+ {
+  "name": "shape.toString#2822",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dateToString": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "format": "%Y-%"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "18535"
+   },
+   "errmsg": "Failed to optimize pipeline :: caused by :: Unmatched '%' at end of format string"
+  }
+ },
+ {
+  "name": "shape.toString#2823",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dateToString": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "format": "%Y-%",
+    "timezone": "+05:30"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "18535"
+   },
+   "errmsg": "Failed to optimize pipeline :: caused by :: Unmatched '%' at end of format string"
+  }
+ },
+ {
+  "name": "shape.toString#2824",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dateToString": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "format": "abc"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "abc"
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.toString#2825",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dateToString": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "format": "abc",
+    "timezone": "+05:30"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "abc"
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.toString#2826",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dateToString": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "format": ""
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": ""
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.toString#2827",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dateToString": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "format": "",
+    "timezone": "+05:30"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": ""
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.toString#2828",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dateToString": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "timezone": null
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": null
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.toString#2829",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dateToString": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "format": null
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": null
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.toString#2830",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dateToString": {
+    "date": "$missing",
+    "onNull": "$missing"
+   }
+  },
+  "expect": {
+   "ok": [
+    {}
+   ]
+  }
+ },
+ {
+  "name": "shape.toString#2831",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dateToString": {
+    "format": "%Y"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "18628"
+   },
+   "errmsg": "Missing 'date' parameter to $dateToString"
+  }
+ },
+ {
+  "name": "shape.toString#2832",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dateToString": {
+    "date": {
+     "$date": {
+      "$numberLong": "1615703415250"
+     }
+    },
+    "x": {
+     "$numberInt": "1"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "18534"
+   },
+   "errmsg": "Unrecognized argument to $dateToString: x"
+  }
+ },
+ {
+  "name": "shape.toString#2833",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$dateToString": "x"
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "18629"
+   },
+   "errmsg": "$dateToString only supports an object as its argument"
+  }
+ },
+ {
+  "name": "shape.map#2834",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$map": {
+    "input": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "as": "x",
+    "in": "$$x",
+    "extra": {
+     "$numberInt": "1"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "16879"
+   },
+   "errmsg": "Unrecognized parameter to $map: extra"
+  }
+ },
+ {
+  "name": "shape.map#2835",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$map": {
+    "as": "x",
+    "in": {
+     "$numberInt": "1"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "16880"
+   },
+   "errmsg": "Missing 'input' parameter to $map"
+  }
+ },
+ {
+  "name": "shape.map#2836",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$map": {
+    "input": [
+     {
+      "$numberInt": "1"
+     }
+    ]
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "16882"
+   },
+   "errmsg": "Missing 'in' parameter to $map"
+  }
+ },
+ {
+  "name": "shape.map#2837",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$map": "x"
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "16878"
+   },
+   "errmsg": "$map only supports an object as its argument"
+  }
+ },
+ {
+  "name": "shape.map#2838",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$map": {
+    "input": [
+     {
+      "$numberInt": "1"
+     }
+    ],
+    "as": "x"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "16882"
+   },
+   "errmsg": "Missing 'in' parameter to $map"
+  }
+ },
+ {
+  "name": "shape.map#2839",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$map": {
+    "input": [
+     [
+      {
+       "$numberInt": "1"
+      },
+      {
+       "$numberInt": "2"
+      }
+     ],
+     [
+      {
+       "$numberInt": "3"
+      }
+     ]
+    ],
+    "in": {
+     "$size": "$$this"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "$numberInt": "2"
+      },
+      {
+       "$numberInt": "1"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.map#2840",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$map": {
+    "input": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "in": "$$nope"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "17276"
+   },
+   "errmsg": "Use of undefined variable: nope"
+  }
+ },
+ {
+  "name": "shape.map#2841",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$map": {
+    "input": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "as": "this",
+    "in": "$$this"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "$numberInt": "1"
+      },
+      {
+       "$numberInt": "2"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.map#2842",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$map": {
+    "input": {
+     "$range": [
+      {
+       "$numberInt": "0"
+      },
+      {
+       "$numberInt": "3"
+      }
+     ]
+    },
+    "in": {
+     "$multiply": [
+      "$$this",
+      "$$this"
+     ]
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "$numberInt": "0"
+      },
+      {
+       "$numberInt": "1"
+      },
+      {
+       "$numberInt": "4"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.map#2843",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$map": {
+    "input": [
+     {
+      "$numberInt": "1"
+     },
+     "$missing",
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "in": "$$this"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "$numberInt": "1"
+      },
+      null,
+      {
+       "$numberInt": "3"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.map#2844",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$map": {
+    "input": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     },
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "in": "$missingField"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      null,
+      null,
+      null
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.filter#2845",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$filter": {
+    "input": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "cond": true,
+    "limit": null
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "$numberInt": "1"
+      },
+      {
+       "$numberInt": "2"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.filter#2846",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$filter": {
+    "input": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "cond": true,
+    "limit": {
+     "$numberDouble": "1.0"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "$numberInt": "1"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.filter#2847",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$filter": {
+    "input": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "cond": true,
+    "limit": {
+     "$numberDouble": "1.5"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "327391"
+   },
+   "errmsg": "PlanExecutor error during aggregation :: caused by :: $filter: limit must be represented as a 32-bit integral value: 1.5"
+  }
+ },
+ {
+  "name": "shape.filter#2848",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$filter": {
+    "input": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "cond": true,
+    "limit": "a"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "327391"
+   },
+   "errmsg": "PlanExecutor error during aggregation :: caused by :: $filter: limit must be represented as a 32-bit integral value: \"a\""
+  }
+ },
+ {
+  "name": "shape.filter#2849",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$filter": {
+    "input": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "cond": true,
+    "limit": {
+     "$numberInt": "-1"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "327392"
+   },
+   "errmsg": "PlanExecutor error during aggregation :: caused by :: $filter: limit must be greater than 0: -1"
+  }
+ },
+ {
+  "name": "shape.filter#2850",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$filter": {
+    "input": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "cond": true,
+    "limit": {
+     "$numberLong": "1"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "$numberInt": "1"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.filter#2851",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$filter": {
+    "input": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ]
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "28650"
+   },
+   "errmsg": "Missing 'cond' parameter to $filter"
+  }
+ },
+ {
+  "name": "shape.filter#2852",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$filter": {
+    "cond": true
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "28648"
+   },
+   "errmsg": "Missing 'input' parameter to $filter"
+  }
+ },
+ {
+  "name": "shape.filter#2853",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$filter": {
+    "input": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "cond": true,
+    "z": {
+     "$numberInt": "1"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "28647"
+   },
+   "errmsg": "Unrecognized parameter to $filter: z"
+  }
+ },
+ {
+  "name": "shape.filter#2854",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$filter": {
+    "input": null,
+    "cond": true
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": null
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.filter#2855",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$filter": {
+    "input": [
+     {
+      "$numberInt": "1"
+     },
+     null,
+     {
+      "$numberInt": "0"
+     },
+     "",
+     [],
+     false
+    ],
+    "cond": "$$this"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "$numberInt": "1"
+      },
+      "",
+      []
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.filter#2856",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$filter": {
+    "input": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     },
+     {
+      "$numberInt": "3"
+     }
+    ],
+    "as": "n",
+    "cond": {
+     "$gte": [
+      "$$n",
+      {
+       "$numberInt": "2"
+      }
+     ]
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "$numberInt": "2"
+      },
+      {
+       "$numberInt": "3"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.reduce#2857",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$reduce": {
+    "input": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "initialValue": [],
+    "in": {
+     "$concatArrays": [
+      "$$value",
+      [
+       "$$this"
+      ]
+     ]
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "$numberInt": "1"
+      },
+      {
+       "$numberInt": "2"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.reduce#2858",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$reduce": {
+    "input": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "in": {
+     "$numberInt": "1"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "40078"
+   },
+   "errmsg": "$reduce requires 'initialValue' to be specified"
+  }
+ },
+ {
+  "name": "shape.reduce#2859",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$reduce": {
+    "input": [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ],
+    "initialValue": {
+     "$numberInt": "0"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "40079"
+   },
+   "errmsg": "$reduce requires 'in' to be specified"
+  }
+ },
+ {
+  "name": "shape.reduce#2860",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$reduce": {
+    "initialValue": {
+     "$numberInt": "0"
+    },
+    "in": {
+     "$numberInt": "1"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "40077"
+   },
+   "errmsg": "$reduce requires 'input' to be specified"
+  }
+ },
+ {
+  "name": "shape.reduce#2861",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$reduce": {
+    "input": [],
+    "initialValue": "x",
+    "in": {
+     "$numberInt": "1"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "x"
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.reduce#2862",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$reduce": {
+    "input": "$missing",
+    "initialValue": {
+     "$numberInt": "0"
+    },
+    "in": {
+     "$numberInt": "1"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": null
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.reduce#2863",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$reduce": {
+    "input": [
+     {
+      "$numberInt": "1"
+     }
+    ],
+    "initialValue": {
+     "$numberInt": "0"
+    },
+    "in": {
+     "$numberInt": "1"
+    },
+    "q": {
+     "$numberInt": "1"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "40076"
+   },
+   "errmsg": "$reduce found an unknown argument: q"
+  }
+ },
+ {
+  "name": "shape.reduce#2864",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$reduce": {
+    "input": [
+     {
+      "a": {
+       "$numberInt": "1"
+      }
+     },
+     {
+      "a": {
+       "$numberInt": "2"
+      }
+     }
+    ],
+    "initialValue": {
+     "s": {
+      "$numberInt": "0"
+     }
+    },
+    "in": {
+     "s": {
+      "$add": [
+       "$$value.s",
+       "$$this.a"
+      ]
+     }
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "s": {
+       "$numberInt": "3"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.regex#2865",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$regexFindAll": {
+    "input": "abc",
+    "regex": "("
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "51111"
+   },
+   "errmsg": "Failed to optimize pipeline :: caused by :: Invalid Regex in $regexFindAll: missing closing parenthesis"
+  }
+ },
+ {
+  "name": "shape.regex#2866",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$regexMatch": {
+    "input": "abc",
+    "regex": "("
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "51111"
+   },
+   "errmsg": "Failed to optimize pipeline :: caused by :: Invalid Regex in $regexMatch: missing closing parenthesis"
+  }
+ },
+ {
+  "name": "shape.regex#2867",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$regexFindAll": {
+    "input": "abc",
+    "regex": "["
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "51111"
+   },
+   "errmsg": "Failed to optimize pipeline :: caused by :: Invalid Regex in $regexFindAll: missing terminating ] for character class"
+  }
+ },
+ {
+  "name": "shape.regex#2868",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$regexMatch": {
+    "input": "abc",
+    "regex": "["
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "51111"
+   },
+   "errmsg": "Failed to optimize pipeline :: caused by :: Invalid Regex in $regexMatch: missing terminating ] for character class"
+  }
+ },
+ {
+  "name": "shape.regex#2869",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$regexFindAll": {
+    "input": "aaa",
+    "regex": "a*"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "match": "aaa",
+       "idx": {
+        "$numberInt": "0"
+       },
+       "captures": []
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.regex#2870",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$regexMatch": {
+    "input": "aaa",
+    "regex": "a*"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": true
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.regex#2871",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$regexFindAll": {
+    "input": "abcabc",
+    "regex": "(?<x>b)(c)"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "match": "bc",
+       "idx": {
+        "$numberInt": "1"
+       },
+       "captures": [
+        "b",
+        "c"
+       ]
+      },
+      {
+       "match": "bc",
+       "idx": {
+        "$numberInt": "4"
+       },
+       "captures": [
+        "b",
+        "c"
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.regex#2872",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$regexMatch": {
+    "input": "abcabc",
+    "regex": "(?<x>b)(c)"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": true
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.regex#2873",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$regexFindAll": {
+    "input": "AbC",
+    "regex": {
+     "$regularExpression": {
+      "pattern": "b",
+      "options": ""
+     }
+    },
+    "options": "i"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "match": "b",
+       "idx": {
+        "$numberInt": "1"
+       },
+       "captures": []
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.regex#2874",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$regexMatch": {
+    "input": "AbC",
+    "regex": {
+     "$regularExpression": {
+      "pattern": "b",
+      "options": ""
+     }
+    },
+    "options": "i"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": true
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.regex#2875",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$regexFindAll": {
+    "input": "line1\nline2",
+    "regex": "^line\\d$",
+    "options": "m"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "match": "line1",
+       "idx": {
+        "$numberInt": "0"
+       },
+       "captures": []
+      },
+      {
+       "match": "line2",
+       "idx": {
+        "$numberInt": "6"
+       },
+       "captures": []
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.regex#2876",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$regexMatch": {
+    "input": "line1\nline2",
+    "regex": "^line\\d$",
+    "options": "m"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": true
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.regex#2877",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$regexFindAll": {
+    "input": "a",
+    "regex": "a",
+    "options": {
+     "$numberInt": "5"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "51106"
+   },
+   "errmsg": "Failed to optimize pipeline :: caused by :: $regexFindAll needs 'options' to be of type string"
+  }
+ },
+ {
+  "name": "shape.regex#2878",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$regexMatch": {
+    "input": "a",
+    "regex": "a",
+    "options": {
+     "$numberInt": "5"
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "51106"
+   },
+   "errmsg": "Failed to optimize pipeline :: caused by :: $regexMatch needs 'options' to be of type string"
+  }
+ },
+ {
+  "name": "shape.regex#2879",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$regexFindAll": {
+    "input": "a",
+    "regex": "a",
+    "options": null
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "match": "a",
+       "idx": {
+        "$numberInt": "0"
+       },
+       "captures": []
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.regex#2880",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$regexMatch": {
+    "input": "a",
+    "regex": "a",
+    "options": null
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": true
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.regex#2881",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$regexFindAll": {
+    "input": "ab",
+    "regex": "(a)|(b)"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "match": "a",
+       "idx": {
+        "$numberInt": "0"
+       },
+       "captures": [
+        "a",
+        null
+       ]
+      },
+      {
+       "match": "b",
+       "idx": {
+        "$numberInt": "1"
+       },
+       "captures": [
+        null,
+        "b"
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.regex#2882",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$regexMatch": {
+    "input": "ab",
+    "regex": "(a)|(b)"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": true
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.regex#2883",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$regexFindAll": {
+    "input": "x",
+    "regex": {
+     "$regularExpression": {
+      "pattern": "x",
+      "options": ""
+     }
+    },
+    "options": ""
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "match": "x",
+       "idx": {
+        "$numberInt": "0"
+       },
+       "captures": []
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.regex#2884",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$regexMatch": {
+    "input": "x",
+    "regex": {
+     "$regularExpression": {
+      "pattern": "x",
+      "options": ""
+     }
+    },
+    "options": ""
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": true
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.convert#2885",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$convert": {
+    "input": {
+     "$binary": {
+      "base64": "AQID",
+      "subType": "00"
+     }
+    },
+    "to": "string",
+    "format": "base64url"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "AQID"
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.convert#2886",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$convert": {
+    "input": {
+     "$binary": {
+      "base64": "+/8=",
+      "subType": "00"
+     }
+    },
+    "to": "string",
+    "format": "base64url"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "-_8"
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.convert#2887",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$convert": {
+    "input": "-_8",
+    "to": {
+     "type": "binData",
+     "subtype": {
+      "$numberInt": "0"
+     }
+    },
+    "format": "base64url"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$binary": {
+       "base64": "+/8=",
+       "subType": "00"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.convert#2888",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$convert": {
+    "input": "0a0B",
+    "to": "binData",
+    "format": "hex"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$binary": {
+       "base64": "Cgs=",
+       "subType": "00"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.convert#2889",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$convert": {
+    "input": "0a0",
+    "to": "binData",
+    "format": "hex",
+    "onError": "E"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "E"
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.convert#2890",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$convert": {
+    "input": "héllo",
+    "to": "binData",
+    "format": "utf8"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$binary": {
+       "base64": "aMOpbGxv",
+       "subType": "00"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.convert#2891",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$convert": {
+    "input": {
+     "$binary": {
+      "base64": "/w==",
+      "subType": "00"
+     }
+    },
+    "to": "string",
+    "format": "utf8",
+    "onError": "E"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "E"
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.convert#2892",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$convert": {
+    "input": {
+     "$binary": {
+      "base64": "AQID",
+      "subType": "00"
+     }
+    },
+    "to": "string",
+    "format": "uuid",
+    "onError": "E"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "E"
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.convert#2893",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$convert": {
+    "input": {
+     "$binary": {
+      "base64": "AQID",
+      "subType": "05"
+     }
+    },
+    "to": "binData"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "9"
+   },
+   "errmsg": "BinData subtype 5 requires exactly 16 bytes as an expression literal"
+  }
+ },
+ {
+  "name": "shape.convert#2894",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$convert": {
+    "input": {
+     "$binary": {
+      "base64": "AQID",
+      "subType": "05"
+     }
+    },
+    "to": {
+     "type": "binData",
+     "subtype": {
+      "$numberInt": "5"
+     }
+    }
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "9"
+   },
+   "errmsg": "BinData subtype 5 requires exactly 16 bytes as an expression literal"
+  }
+ },
+ {
+  "name": "shape.convert#2895",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$convert": {
+    "input": "AQID",
+    "to": "binData",
+    "format": "bogus"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "4341125"
+   },
+   "errmsg": "Failed to optimize pipeline :: caused by :: Invalid 'format' argument for $convert: bogus"
+  }
+ },
+ {
+  "name": "shape.convert#2896",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$convert": {
+    "input": {
+     "$numberInt": "5"
+    },
+    "to": "string",
+    "format": "hex"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "5"
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.convert#2897",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$convert": {
+    "input": "5ab9cbfa31c2ab715d42129z",
+    "to": "objectId",
+    "onError": "E"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": "E"
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.convert#2898",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$convert": {
+    "input": "5AB9CBFA31C2AB715D42129E",
+    "to": "objectId"
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$oid": "5ab9cbfa31c2ab715d42129e"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.convert#2899",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$convert": {
+    "input": true,
+    "to": {
+     "type": "bool"
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": true
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.convert#2900",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$convert": {
+    "input": {
+     "$numberInt": "1"
+    },
+    "to": {
+     "type": {
+      "$numberInt": "8"
+     }
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": true
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.convert#2901",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$convert": {
+    "input": {
+     "$numberInt": "1"
+    },
+    "to": {
+     "type": "int",
+     "subtype": {
+      "$numberInt": "1"
+     }
+    }
+   }
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberInt": "1"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.toUUID#2902",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$toUUID": "867dee52-c331-484e-92d1-c56479b8e67e"
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$binary": {
+       "base64": "hn3uUsMxSE6S0cVkebjmfg==",
+       "subType": "04"
+      }
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.toUUID#2903",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$toUUID": "867dee52c331484e92d1c56479b8e67e"
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "241"
+   },
+   "errmsg": "Failed to optimize pipeline :: caused by :: Failed to parse BinData '867dee52c331484e92d1c56479b8e67e' in $convert with no onError value: Invalid UUID string: 867dee52c331484e92d1c56479b8e67e"
+  }
+ },
+ {
+  "name": "shape.toUUID#2904",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$toUUID": "{867dee52-c331-484e-92d1-c56479b8e67e}"
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "241"
+   },
+   "errmsg": "Failed to optimize pipeline :: caused by :: Failed to parse BinData '{867dee52-c331-484e-92d1-c56479b8e67e}' in $convert with no onError value: Invalid UUID string: {867dee52-c331-484e-92d1-c56479b8e67e}"
+  }
+ },
+ {
+  "name": "shape.toUUID#2905",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$toUUID": null
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": null
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.toUUID#2906",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$toUUID": {
+    "$numberInt": "5"
+   }
+  },
+  "expect": {
+   "code": {
+    "$numberInt": "241"
+   },
+   "errmsg": "Failed to optimize pipeline :: caused by :: Unsupported conversion from int to binData in $convert with no onError value"
+  }
+ },
+ {
+  "name": "shape.indexOfArray#2907",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$indexOfArray": [
+    [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     },
+     {
+      "$numberInt": "3"
+     }
+    ],
+    {
+     "$numberInt": "1"
+    },
+    {
+     "$numberInt": "0"
+    },
+    {
+     "$numberInt": "3"
+    }
+   ]
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberInt": "0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.indexOfArray#2908",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$indexOfArray": [
+    [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     },
+     {
+      "$numberInt": "3"
+     }
+    ],
+    {
+     "$numberInt": "3"
+    },
+    {
+     "$numberLong": "1"
+    }
+   ]
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberInt": "2"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.indexOfArray#2909",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$indexOfArray": [
+    [],
+    {
+     "$numberInt": "1"
+    }
+   ]
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberInt": "-1"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.indexOfArray#2910",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$indexOfArray": [
+    [
+     null,
+     "$missing"
+    ],
+    null
+   ]
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberInt": "0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.indexOfArray#2911",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$indexOfArray": [
+    [
+     [
+      {
+       "$numberInt": "1"
+      },
+      {
+       "$numberInt": "2"
+      }
+     ]
+    ],
+    [
+     {
+      "$numberInt": "1"
+     },
+     {
+      "$numberInt": "2"
+     }
+    ]
+   ]
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberInt": "0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.indexOfArray#2912",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$indexOfArray": [
+    [
+     {
+      "a": {
+       "$numberInt": "1"
+      }
+     }
+    ],
+    {
+     "a": {
+      "$numberInt": "1"
+     }
+    }
+   ]
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": {
+      "$numberInt": "0"
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.range#2913",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$range": [
+    {
+     "$numberInt": "0"
+    },
+    {
+     "$numberInt": "100"
+    },
+    {
+     "$numberInt": "25"
+    }
+   ]
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "$numberInt": "0"
+      },
+      {
+       "$numberInt": "25"
+      },
+      {
+       "$numberInt": "50"
+      },
+      {
+       "$numberInt": "75"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.range#2914",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$range": [
+    {
+     "$numberInt": "100"
+    },
+    {
+     "$numberInt": "0"
+    },
+    {
+     "$numberInt": "-25"
+    }
+   ]
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "$numberInt": "100"
+      },
+      {
+       "$numberInt": "75"
+      },
+      {
+       "$numberInt": "50"
+      },
+      {
+       "$numberInt": "25"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.range#2915",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$range": [
+    {
+     "$numberInt": "-2147483648"
+    },
+    {
+     "$numberInt": "-2147483646"
+    }
+   ]
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "$numberInt": "-2147483648"
+      },
+      {
+       "$numberInt": "-2147483647"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.range#2916",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$range": [
+    {
+     "$numberInt": "0"
+    },
+    {
+     "$numberInt": "5"
+    },
+    {
+     "$numberLong": "2"
+    }
+   ]
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "$numberInt": "0"
+      },
+      {
+       "$numberInt": "2"
+      },
+      {
+       "$numberInt": "4"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.range#2917",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$range": [
+    {
+     "$numberInt": "0"
+    },
+    {
+     "$numberInt": "5"
+    },
+    {
+     "$numberDecimal": "2"
+    }
+   ]
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": [
+      {
+       "$numberInt": "0"
+      },
+      {
+       "$numberInt": "2"
+      },
+      {
+       "$numberInt": "4"
+      }
+     ]
+    }
+   ]
+  }
+ },
+ {
+  "name": "shape.range#2918",
+  "doc": {
+   "_id": {
+    "$numberInt": "1"
+   }
+  },
+  "expr": {
+   "$range": [
+    {
+     "$numberLong": "2147483647"
+    },
+    {
+     "$numberLong": "2147483647"
+    }
+   ]
+  },
+  "expect": {
+   "ok": [
+    {
+     "r": []
+    }
+   ]
+  }
  }
 ]

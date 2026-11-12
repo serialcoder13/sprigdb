@@ -121,8 +121,15 @@ fn show(v: &Bson) -> String {
 pub(crate) fn n_of(v: &Bson) -> Result<usize, MongoError> {
     let Some(n) = accum_num::integral(v) else {
         return Err(err(
-            if accum_num::is_num(v) { 5_787_903 } else { 5_787_902 },
-            format!("Value for 'n' must be of integral type, but found {}", show(v)),
+            if accum_num::is_num(v) {
+                5_787_903
+            } else {
+                5_787_902
+            },
+            format!(
+                "Value for 'n' must be of integral type, but found {}",
+                show(v)
+            ),
         ));
     };
     if n <= 0 {
@@ -170,10 +177,7 @@ impl AccSpec {
                         "sortBy" => sort = Some(v),
                         "output" => output = Some(v.clone()),
                         _ => {
-                            return Err(err(
-                                5_788_002,
-                                format!("Unknown argument to {op} '{k}'"),
-                            ));
+                            return Err(err(5_788_002, format!("Unknown argument to {op} '{k}'")));
                         }
                     }
                 }
@@ -482,7 +486,11 @@ impl AccState<'_> {
                 x if missing(x) => {}
                 x => {
                     return Err(err(
-                        if self.spec.kind == Kind::ConcatArrays { 28664 } else { 17044 },
+                        if self.spec.kind == Kind::ConcatArrays {
+                            28664
+                        } else {
+                            17044
+                        },
                         format!(
                             "{} only supports arrays, not {}",
                             self.spec.op,
@@ -494,9 +502,9 @@ impl AccState<'_> {
             Kind::StdDevPop | Kind::StdDevSamp if self.narrow => {
                 if is_num_v(v) {
                     let d = accum_num::Dec::from_bson(v).unwrap_or(accum_num::Dec::Nan);
-                    let (s, q, nonfinite) = self.dsums.get_or_insert_with(|| {
-                        (accum_num::Dec::zero(), accum_num::Dec::zero(), 0)
-                    });
+                    let (s, q, nonfinite) = self
+                        .dsums
+                        .get_or_insert_with(|| (accum_num::Dec::zero(), accum_num::Dec::zero(), 0));
                     if matches!(d, accum_num::Dec::Fin { .. }) {
                         *q = q.add(&d.mul(&d));
                         *s = s.add(&d);
@@ -596,14 +604,21 @@ impl AccState<'_> {
                 v.sort_by(compare);
                 Bson::Array(v)
             }
-            Kind::Push | Kind::AddToSet | Kind::ConcatArrays | Kind::SetUnion | Kind::FirstN | Kind::LastN => {
-                Bson::Array(self.list.iter().cloned().collect())
-            }
+            Kind::Push
+            | Kind::AddToSet
+            | Kind::ConcatArrays
+            | Kind::SetUnion
+            | Kind::FirstN
+            | Kind::LastN => Bson::Array(self.list.iter().cloned().collect()),
             Kind::Count => i32::try_from(self.count).map_or(Bson::Int64(self.count), Bson::Int32),
             Kind::MergeObjects => Bson::Document(self.merged.clone()),
             Kind::StdDevPop | Kind::StdDevSamp if self.narrow => {
                 let c = self.welford.0;
-                let adj = if self.spec.kind == Kind::StdDevSamp { c - 1 } else { c };
+                let adj = if self.spec.kind == Kind::StdDevSamp {
+                    c - 1
+                } else {
+                    c
+                };
                 match &self.dsums {
                     Some((_, _, nf)) if *nf > 0 => Bson::Double(f64::NAN),
                     Some((s, q, _)) if adj > 0 => {
@@ -613,14 +628,22 @@ impl AccState<'_> {
                             .div(&accum_num::Dec::from_i128(i128::from(adj)));
                         let f = var.to_f64();
                         // A single value (or equal values): MongoDB answers 0.
-                        if f == 0.0 { Bson::Int32(0) } else { Bson::Double(f.sqrt()) }
+                        if f == 0.0 {
+                            Bson::Int32(0)
+                        } else {
+                            Bson::Double(f.sqrt())
+                        }
                     }
                     _ => Bson::Null,
                 }
             }
             Kind::StdDevPop | Kind::StdDevSamp => {
                 let (c, _, m2) = self.welford;
-                let adj = if self.spec.kind == Kind::StdDevSamp { c - 1 } else { c };
+                let adj = if self.spec.kind == Kind::StdDevSamp {
+                    c - 1
+                } else {
+                    c
+                };
                 if adj <= 0 {
                     Bson::Null
                 } else {
@@ -663,7 +686,11 @@ impl AccState<'_> {
                     }
                     #[allow(clippy::cast_precision_loss)]
                     let rank = (p * v.len() as f64).ceil();
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        clippy::cast_possible_wrap
+                    )]
                     let i = ((rank as i64) - 1).clamp(0, v.len() as i64 - 1) as usize;
                     Bson::Double(v[i])
                 };
@@ -691,7 +718,10 @@ pub(crate) fn parse_fields(
             continue;
         }
         if k.contains('.') {
-            return Err(err(40235, format!("The field name '{k}' cannot contain '.'")));
+            return Err(err(
+                40235,
+                format!("The field name '{k}' cannot contain '.'"),
+            ));
         }
         if k.starts_with('$') {
             return Err(err(
@@ -756,7 +786,9 @@ pub(crate) fn group_by(
             order.push(k.clone());
             groups.insert(k.clone(), G { id, states });
         }
-        let Some(g) = groups.get_mut(&k) else { continue };
+        let Some(g) = groups.get_mut(&k) else {
+            continue;
+        };
         let vars = Vars::new(d, lim.now);
         for (i, (_, a)) in accs.iter().enumerate() {
             let it = a.item(d, &vars)?;
@@ -813,5 +845,59 @@ pub(crate) fn group(
         let id = eval(id_expr, &Vars::new(d, lim.now))?;
         keys.push(if missing(&id) { Bson::Null } else { id });
     }
-    group_by(docs, keys, &accs, lim, "$group", (!js.is_empty()).then_some(&mut js))
+    group_by(
+        docs,
+        keys,
+        &accs,
+        lim,
+        "$group",
+        (!js.is_empty()).then_some(&mut js),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use bson::{Bson, DateTime, doc};
+
+    use super::super::{AggLimits, run_stage};
+
+    fn lim() -> AggLimits {
+        AggLimits {
+            stage_bytes: 1 << 20,
+            now: DateTime::now(),
+        }
+    }
+
+    /// MongoDB 8.1's `$concatArrays` and `$setUnion` accumulators, and
+    /// 8.3's `$mergeObjects` window function (the 8.0 reference refuses
+    /// them, so the corpus can't check them).
+    #[test]
+    fn newer_accumulators() {
+        let docs = vec![
+            doc! {"_id": 1, "g": 1, "a": [1, 2], "o": {"x": 1}},
+            doc! {"_id": 2, "g": 1, "a": [2, 3], "o": {"y": 2}},
+            doc! {"_id": 3, "g": 1, "o": {"x": 3}},
+        ];
+        let out = run_stage(
+            docs.clone(),
+            &doc! {"$group": {"_id": "$g", "c": {"$concatArrays": "$a"}, "u": {"$setUnion": "$a"}}},
+            &lim(),
+        )
+        .unwrap();
+        assert_eq!(out, vec![doc! {"_id": 1, "c": [1, 2, 2, 3], "u": [1, 2, 3]}]);
+        let e = run_stage(
+            vec![doc! {"g": 1, "a": 5}],
+            &doc! {"$group": {"_id": "$g", "c": {"$concatArrays": "$a"}}},
+            &lim(),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, 28664);
+        let w = run_stage(
+            docs,
+            &doc! {"$setWindowFields": {"sortBy": {"_id": 1}, "output": {"m": {"$mergeObjects": "$o", "window": {"documents": ["unbounded", "current"]}}}}},
+            &lim(),
+        )
+        .unwrap();
+        assert_eq!(w[2].get("m"), Some(&Bson::Document(doc! {"x": 3, "y": 2})));
+    }
 }
