@@ -60,23 +60,52 @@ enum RoleCommand {
     Agent,
     /// The Kubernetes operator (chapter 27).
     Operator,
+    /// Prints every setting this binary knows as JSON, for the generated
+    /// settings reference (`docs/reference/settings.md`); not a role.
+    #[command(hide = true)]
+    DocsSettings,
 }
 
-impl From<RoleCommand> for Role {
-    fn from(r: RoleCommand) -> Self {
-        match r {
-            RoleCommand::Gateway => Role::Gateway,
-            RoleCommand::Controller => Role::Controller,
-            RoleCommand::Worker => Role::Worker,
-            RoleCommand::Agent => Role::Agent,
-            RoleCommand::Operator => Role::Operator,
+impl RoleCommand {
+    /// The role to run; `None` for the commands that aren't roles.
+    fn role(self) -> Option<Role> {
+        match self {
+            RoleCommand::Gateway => Some(Role::Gateway),
+            RoleCommand::Controller => Some(Role::Controller),
+            RoleCommand::Worker => Some(Role::Worker),
+            RoleCommand::Agent => Some(Role::Agent),
+            RoleCommand::Operator => Some(Role::Operator),
+            RoleCommand::DocsSettings => None,
+        }
+    }
+}
+
+/// `sprigdb docs-settings`: the settings registry as this binary links it.
+fn docs_settings() -> ExitCode {
+    let docs = match sprig_settings::Registry::global() {
+        Ok(reg) => sprig_docs::reference::settings_from_registry(reg),
+        Err(e) => {
+            eprintln!("sprigdb docs-settings: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match serde_json::to_string_pretty(&docs) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("sprigdb docs-settings: {e}");
+            ExitCode::FAILURE
         }
     }
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let role = Role::from(cli.role);
+    let Some(role) = cli.role.role() else {
+        return docs_settings();
+    };
     let config = match load_config(cli.config.as_deref()) {
         Ok(c) => c,
         Err(e) => {
@@ -287,7 +316,7 @@ mod tests {
     fn cli_is_well_formed() {
         Cli::command().debug_assert();
         let cli = Cli::try_parse_from(["sprigdb", "--config", "x.toml", "worker"]).unwrap();
-        assert_eq!(Role::from(cli.role), Role::Worker);
+        assert_eq!(cli.role.role(), Some(Role::Worker));
         assert!(Cli::try_parse_from(["sprigdb", "router"]).is_err());
     }
 }

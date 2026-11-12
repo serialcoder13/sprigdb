@@ -13,9 +13,12 @@ clap.workspace = true
 sprig-agent.workspace = true
 sprig-common.workspace = true
 sprig-controller.workspace = true
+sprig-docs = { path = "../sprig-docs" }
 sprig-gateway.workspace = true
 sprig-operator.workspace = true
+sprig-settings.workspace = true
 sprig-worker.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 mimalloc = { workspace = true, optional = true }

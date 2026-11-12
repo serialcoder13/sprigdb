@@ -23,6 +23,9 @@ concurrency:
 
 jobs:
   build:
+    # Pages needs a public repository (or GitHub Pro); until then the
+    # workflow skips instead of failing on deploy.
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

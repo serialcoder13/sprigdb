@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::metrics_scan::Metric;
 
@@ -20,15 +20,57 @@ fn front(title: &str, audience: &[&str], source: &str) -> String {
     )
 }
 
-/// Markdown table cell text: pipes escaped, newlines flattened.
+/// Markdown table cell text: design-book references removed, pipes
+/// escaped, newlines flattened.
 fn cell(s: &str) -> String {
-    s.replace('|', "\\|").replace('\n', " ")
+    public(s).replace('|', "\\|").replace('\n', " ")
+}
+
+/// `s` without references to the design book's chapters, which are not
+/// published: "(chapter 52)", "(chapter 51, …)", "Chapter 52's ", "chapter 13's ".
+#[must_use]
+pub fn public(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while !rest.is_empty() {
+        let lower = rest.to_ascii_lowercase();
+        // "(chapter N…)": drop the parenthesis and the space before it.
+        if lower.starts_with("(chapter ")
+            && rest[9..].starts_with(|c: char| c.is_ascii_digit())
+            && let Some(end) = rest.find(')')
+        {
+            while out.ends_with(' ') {
+                out.pop();
+            }
+            rest = &rest[end + 1..];
+            continue;
+        }
+        // "Chapter N's ": drop it.
+        if lower.starts_with("chapter ") {
+            let digits = rest[8..].bytes().take_while(u8::is_ascii_digit).count();
+            if digits > 0 && rest[8 + digits..].starts_with("'s ") {
+                rest = &rest[8 + digits + 3..];
+                continue;
+            }
+        }
+        let c = rest.chars().next().unwrap_or(' ');
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    let mut out = out.trim().to_owned();
+    if let Some(f) = out.get(..1)
+        && f.chars().all(|c| c.is_ascii_lowercase())
+        && s.trim_start().to_ascii_lowercase().starts_with("chapter ")
+    {
+        out.replace_range(..1, &f.to_ascii_uppercase());
+    }
+    out
 }
 
 // ---- settings ----
 
 /// One setting, as the registry declares it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SettingDoc {
     /// `component.name`.
     pub key: String,
@@ -46,6 +88,70 @@ pub struct SettingDoc {
     pub operator_only: bool,
     /// The one-line description.
     pub doc: String,
+}
+
+fn scope_names(s: sprig_settings::Scopes) -> Vec<String> {
+    ["object", "database", "tenant", "cluster", "dc", "global"]
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| s.0 & (1 << i) != 0)
+        .map(|(_, n)| (*n).to_owned())
+        .collect()
+}
+
+fn bound(x: f64) -> String {
+    if x.fract() == 0.0 && x.abs() < 1e15 {
+        format!("{x:.0}")
+    } else {
+        x.to_string()
+    }
+}
+
+/// Every setting in `reg`, as documented. The `sprigdb` binary prints this
+/// (`sprigdb docs-settings`), so the page lists exactly the keys the server
+/// knows: a generator linking the crates itself can miss registrations the
+/// linker drops.
+#[must_use]
+pub fn settings_from_registry(reg: &sprig_settings::Registry) -> Vec<SettingDoc> {
+    use sprig_settings::{Apply, Value, ValueKind};
+    reg.iter()
+        .map(|s| {
+            let h = s.hard();
+            let bounds = match (h.min, h.max, h.allowed) {
+                (_, _, Some(a)) => a.join(", "),
+                (Some(lo), Some(hi), None) => format!("{} to {}", bound(lo), bound(hi)),
+                (Some(lo), None, None) => format!("at least {}", bound(lo)),
+                (None, Some(hi), None) => format!("at most {}", bound(hi)),
+                (None, None, None) => String::new(),
+            };
+            SettingDoc {
+                key: s.key().to_owned(),
+                kind: match s.kind() {
+                    ValueKind::Bool => "bool",
+                    ValueKind::Int => "int",
+                    ValueKind::Float => "float",
+                    ValueKind::Str => "text",
+                }
+                .to_owned(),
+                default: match s.default_value() {
+                    Value::Bool(b) => b.to_string(),
+                    Value::Int(i) => i.to_string(),
+                    Value::Float(f) => f.to_string(),
+                    Value::Str(t) => t,
+                },
+                scopes: scope_names(s.scopes()),
+                bounds,
+                apply: match s.apply() {
+                    Apply::Live => "live",
+                    Apply::NewSessions => "new sessions",
+                    Apply::Rebind => "rebind",
+                }
+                .to_owned(),
+                operator_only: s.operator_only(),
+                doc: s.doc().to_owned(),
+            }
+        })
+        .collect()
 }
 
 /// `docs/reference/settings.md`.
@@ -407,6 +513,24 @@ mod tests {
         assert!(page.contains(
             "| 39992 | `ER_SPRIG_AI_BUDGET_EXCEEDED`<br>`SprigAiBudgetExceeded` | HY000 | no | 429 | ResourceExhausted | The daily budget is used up. **Do:** Wait, or raise it. |"
         ));
+    }
+
+    #[test]
+    fn chapter_references_are_removed() {
+        assert_eq!(
+            public("Chapter 52's approvals inbox: recommendations"),
+            "Approvals inbox: recommendations"
+        );
+        assert_eq!(
+            public("auto, approve (chapter 52), recommend"),
+            "auto, approve, recommend"
+        );
+        assert_eq!(
+            public("a webhook connection (chapter 51, sinks) that gets"),
+            "a webhook connection that gets"
+        );
+        assert_eq!(public("the chapter on this"), "the chapter on this");
+        assert_eq!(public("p95 → 40 ms"), "p95 → 40 ms");
     }
 
     #[test]

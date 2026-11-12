@@ -5882,6 +5882,8 @@ name = "sprig-docs"
 version = "0.0.1"
 dependencies = [
  "serde",
+ "serde_json",
+ "sprig-settings",
  "toml",
 ]
 
@@ -5890,14 +5892,9 @@ name = "sprig-docs-gen"
 version = "0.0.1"
 dependencies = [
  "serde_json",
- "sprig-agent",
  "sprig-common",
- "sprig-controller",
  "sprig-docs",
  "sprig-gateway",
- "sprig-operator",
- "sprig-settings",
- "sprig-worker",
 ]
 
 [[package]]
@@ -6814,11 +6811,14 @@ version = "0.0.1"
 dependencies = [
  "clap",
  "mimalloc",
+ "serde_json",
  "sprig-agent",
  "sprig-common",
  "sprig-controller",
+ "sprig-docs",
  "sprig-gateway",
  "sprig-operator",
+ "sprig-settings",
  "sprig-worker",
  "tokio",
  "tracing",
