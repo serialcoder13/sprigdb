@@ -25,7 +25,9 @@ use bson::spec::BinarySubtype;
 use bson::{Binary, Bson, Document, doc};
 use sprig_proto_mongo::errors::{MongoError, code};
 
-use super::{AggLimits, accum, cmp_docs, loc, parse_sort, run_stage, size_of, stages_bucket, window};
+use super::{
+    AggLimits, accum, cmp_docs, loc, parse_sort, run_stage, size_of, stages_bucket, window,
+};
 use crate::filter::as_i64;
 use crate::keyenc::compare;
 use crate::spill::{self, Cmp, DocSeq, SeqBuilder, doc_bytes};
@@ -173,7 +175,8 @@ pub fn run_stage_seq(
         "$setWindowFields" => window_seq(seq, stage, arg, lim),
         "$facet" => facet_seq(seq, arg, lim),
         _ => {
-            let v = seq.into_vec_within(lim.stage_bytes, || accum::over_error(name, lim.stage_bytes))?;
+            let v =
+                seq.into_vec_within(lim.stage_bytes, || accum::over_error(name, lim.stage_bytes))?;
             Ok(DocSeq::Mem(run_stage(v, stage, lim)?))
         }
     }
@@ -448,7 +451,10 @@ fn window_seq(
             Some(Bson::Document(d)) => d,
             _ => Document::new(),
         };
-        if cur.as_ref().is_none_or(|c| compare(c, &p) != Ordering::Equal) {
+        if cur
+            .as_ref()
+            .is_none_or(|c| compare(c, &p) != Ordering::Equal)
+        {
             flush(std::mem::take(&mut part), &mut out)?;
             bytes = 0;
             cur = Some(p);
@@ -540,7 +546,12 @@ mod tests {
 
     /// Runs `pipeline` over `docs` in memory (no limit) and spilled
     /// (`bytes` per stage): the same documents.
-    async fn same(pipeline: Vec<Document>, n: i64, bytes: usize, sort_out: bool) -> (Vec<Document>, Vec<spill::StageSpill>) {
+    async fn same(
+        pipeline: Vec<Document>,
+        n: i64,
+        bytes: usize,
+        sort_out: bool,
+    ) -> (Vec<Document>, Vec<spill::StageSpill>) {
         let big = lim(usize::MAX);
         let mut want = DocSeq::Mem(docs(n));
         for (i, s) in pipeline.iter().enumerate() {
@@ -571,10 +582,16 @@ mod tests {
 
     #[tokio::test]
     async fn spilled_stages_match_memory() {
-        let _g = spill::serial();
+        let _g = spill::serial().await;
         let (_, st) = same(vec![doc! {"$sort": {"v": -1, "g": 1}}], 3000, 20_000, false).await;
         assert!(st[0].spills > 1);
-        same(vec![doc! {"$sort": {"v": 1}}, doc! {"$limit": 25}], 3000, 2_000, false).await;
+        same(
+            vec![doc! {"$sort": {"v": 1}}, doc! {"$limit": 25}],
+            3000,
+            2_000,
+            false,
+        )
+        .await;
         let (_, st) = same(
             vec![doc! {"$group": {"_id": "$g", "n": {"$sum": 1}, "all": {"$push": "$_id"}, "f": {"$first": "$v"}, "a": {"$avg": "$v"}, "top": {"$topN": {"n": 2, "sortBy": {"v": -1}, "output": "$_id"}}}}],
             3000,
@@ -622,7 +639,7 @@ mod tests {
 
     #[tokio::test]
     async fn without_allow_disk_use_group_and_sort_give_292() {
-        let _g = spill::serial();
+        let _g = spill::serial().await;
         for p in [
             doc! {"$group": {"_id": "$_id", "a": {"$push": "$s"}}},
             doc! {"$sort": {"g": 1}},
@@ -648,7 +665,7 @@ mod tests {
 
     #[tokio::test]
     async fn facet_output_is_limited() {
-        let _g = spill::serial();
+        let _g = spill::serial().await;
         let r = spill::scope(SpillCtx::new(true, 44), async {
             run_stage_seq(
                 DocSeq::Mem(docs(3000)),

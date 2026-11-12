@@ -707,7 +707,7 @@ async fn a_stuck_pass_gives_up_at_its_limit() {
         mover: None,
         marker: Arc::new(NoMarker),
         decisions: Arc::new(LogDecisions),
-            docs: None,
+        docs: None,
     };
     let cadence = Cadence {
         pass_limit: Duration::from_secs(600),

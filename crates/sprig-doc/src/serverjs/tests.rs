@@ -227,7 +227,12 @@ fn max_time_ms_bounds_javascript() {
     assert_eq!(s.take_error().unwrap().code, 50);
     // Without maxTimeMS the budget still decides (11601 for $function).
     let r = sync_scope(
-        Some(Scope::with_max_time(Arc::new(Qjs), Duration::from_millis(100), 32 << 20, None)),
+        Some(Scope::with_max_time(
+            Arc::new(Qjs),
+            Duration::from_millis(100),
+            32 << 20,
+            None,
+        )),
         || {
             eval(
                 &bson!({"$function": {"body": "function () { while (true) {} }", "args": [], "lang": "js"}}),

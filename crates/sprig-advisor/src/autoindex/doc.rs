@@ -44,7 +44,9 @@ use sprig_workload::shape::{PredOp, Shape, SortDir};
 use sprig_workload::window::{SampleValue, SampledLiterals, SampledSlot};
 
 use super::candidates::{FpInput, MODEL_READ_FACTOR};
-use super::model::{Candidate, Evidence, IndexDef, IndexKind, IndexOptions, KeyPart, PartSource, Role};
+use super::model::{
+    Candidate, Evidence, IndexDef, IndexKind, IndexOptions, KeyPart, PartSource, Role,
+};
 use super::stats::TableStats;
 
 /// The note that marks a document candidate.
@@ -154,9 +156,9 @@ pub fn definition(object: ObjectId, paths: &[(String, i32)]) -> IndexDef {
 /// Whether the shape filters on a path crossing an array of `alias`.
 #[must_use]
 pub fn has_multikey(shape: &Shape, alias: &str) -> bool {
-    shape.predicates_on(alias).any(|p| {
-        matches!(&p.op, PredOp::JsonPath { func: Some(f), .. } if f == FUNC_MULTIKEY)
-    })
+    shape
+        .predicates_on(alias)
+        .any(|p| matches!(&p.op, PredOp::JsonPath { func: Some(f), .. } if f == FUNC_MULTIKEY))
 }
 
 fn scalar_conditions<'a>(
@@ -179,7 +181,12 @@ fn scalar_conditions<'a>(
 /// docs). Nothing when it filters on `_id` by equality (the primary key
 /// serves it) or on no scalar path.
 #[must_use]
-pub fn candidates(f: &FpInput, alias: &str, object: ObjectId, stats: &TableStats) -> Vec<Candidate> {
+pub fn candidates(
+    f: &FpInput,
+    alias: &str,
+    object: ObjectId,
+    stats: &TableStats,
+) -> Vec<Candidate> {
     if !is_collection_table(stats) {
         return Vec::new();
     }
@@ -473,7 +480,10 @@ mod tests {
             vec![
                 MongoPred {
                     path: "qty".into(),
-                    cmp: PredOp::Range { lo: true, hi: false },
+                    cmp: PredOp::Range {
+                        lo: true,
+                        hi: false,
+                    },
                     multikey: false,
                     values: vec![number("5")],
                 },
@@ -501,12 +511,19 @@ mod tests {
         );
         assert_eq!(d.parts.len(), 9);
         assert_eq!(columns_of(d).len(), 9);
-        assert!(add_fields_clause(d).unwrap().contains("ADD COLUMN IF NOT EXISTS"));
+        assert!(
+            add_fields_clause(d)
+                .unwrap()
+                .contains("ADD COLUMN IF NOT EXISTS")
+        );
         assert!(has_multikey(&f.shape, "orders"));
         assert!(d.name().starts_with("sprig_auto_"));
         let sql = replay_sql(&f.shape, &lits, d).unwrap();
         let (sc, _, ss) = sprig_doc::meta::columns("status");
-        assert!(sql.starts_with("SELECT `_id` FROM `shop`.`orders` WHERE "), "{sql}");
+        assert!(
+            sql.starts_with("SELECT `_id` FROM `shop`.`orders` WHERE "),
+            "{sql}"
+        );
         let (_, sn, _) = sprig_doc::meta::columns("status");
         assert!(
             sql.contains(&format!("(`{sc}` = 40 AND `{sn}` = 0 AND `{ss}` = 'open')")),

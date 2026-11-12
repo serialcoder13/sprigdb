@@ -543,6 +543,15 @@ sprig_codes! {
     /// A held branch (Sprig 2PC, chapter 18) ran a statement that doesn't
     /// replay to the same result; the transaction is rolled back.
     HeldBranchStatement = 39446, "ER_SPRIG_HELD_BRANCH_STATEMENT", "SprigHeldBranchStatement", SQLSTATE_GENERAL, false;
+    /// Sprig 2PC's relay fence (chapter 18, decision Q36): the agent's
+    /// relay refuses the tenant's connections to this node while it
+    /// recovers a held branch whose holder was lost; retry.
+    HeldBranchFenced = 39448, "ER_SPRIG_HELD_BRANCH_FENCED", "SprigHeldBranchFenced", SQLSTATE_CONNECTION, true;
+    /// A branch of the session's last distributed commit is still being
+    /// finished on this cluster (phase 2 outran `txn.phase2_wait_ms`, and
+    /// settling it took longer than `txn.commit_resolve_timeout_ms`); the
+    /// statement didn't run, retry it (chapter 18, decision Q37).
+    Phase2Pending = 39449, "ER_SPRIG_PHASE2_PENDING", "SprigPhase2Pending", SQLSTATE_RETRY, true;
     /// A tenant move between data centers can't start: the tenant is
     /// pinned, not active, already homed in the target, already moving,
     /// or the target has no cluster for it (chapter 24).
@@ -1204,7 +1213,9 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::SinkDeliveryFailed
         | SprigCode::SinkPlatformSecretUnavailable
         | SprigCode::StudioNotBuilt
-        | SprigCode::NotifyFailed => (Code::Unavailable, 503),
+        | SprigCode::NotifyFailed
+        | SprigCode::HeldBranchFenced
+        | SprigCode::Phase2Pending => (Code::Unavailable, 503),
         SprigCode::CatalogConflict
         | SprigCode::TenantTreeBusy
         | SprigCode::TxnHandleUnknown

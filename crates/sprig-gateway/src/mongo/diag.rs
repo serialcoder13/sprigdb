@@ -71,6 +71,28 @@ pub(super) fn first_docs(
     }
 }
 
+/// Whether the caller holds `PROCESS` on the tenant, asked only for
+/// `$currentOp` with `allUsers` (M5, S78). A session that hasn't run a
+/// statement yet has no catalog installed: one `SELECT 1` installs it.
+pub(super) async fn process_privilege(
+    sql: &mut super::sql::SqlSession,
+    first: Option<&Document>,
+) -> Option<bool> {
+    let asks = first
+        .and_then(|s| s.get_document("$currentOp").ok())
+        .is_some_and(|o| o.get_bool("allUsers").unwrap_or(false));
+    if !asks {
+        return None;
+    }
+    let p = sprig_auth::authz::Action::Process;
+    if let Some(v) = sql.holds_tenant_privilege(p) {
+        return Some(v);
+    }
+    use sprig_doc::engine::SqlRunner as _;
+    let _ = sql.query("SELECT 1").await;
+    sql.holds_tenant_privilege(p)
+}
+
 #[allow(clippy::too_many_lines)]
 fn current_op(
     c: &Conn,

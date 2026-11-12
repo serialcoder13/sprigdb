@@ -585,8 +585,7 @@ impl AutoSpec {
         let mut prev_max: Option<Bson> = None;
         while i < n {
             let start = i;
-            let last_bucket =
-                buckets.len() + 1 == usize::try_from(nbuckets).unwrap_or(usize::MAX);
+            let last_bucket = buckets.len() + 1 == usize::try_from(nbuckets).unwrap_or(usize::MAX);
             let mut end = if last_bucket { n } else { (i + size).min(n) };
             if gran.is_none() {
                 while end < n && compare(&vals[end], &vals[end - 1]) == Ordering::Equal {

@@ -25,8 +25,11 @@
 //! The controller runs the resolver on the DC leader
 //! (`sprig-controller::txn_resolver`) with [`MapLocator`].
 //!
-//! Not yet (later build steps): Sprig 2PC's agent relay fence (the gateway
-//! holds the branches itself), client XA rewriting,
+//! - [`fence`]: Sprig 2PC's relay fence (decision Q36), run by the writer
+//!   node's agent: a held branch's lost holder fences its tenant until the
+//!   branch is recovered.
+//!
+//! Not yet (later build steps): client XA rewriting,
 //! eager consistent-snapshot branches, SERIALIZABLE autocommit reads,
 //! waiting for mover holds before prepare, the mover draining prepared
 //! branches before a fence, and `sprigctl txn`.
@@ -34,6 +37,7 @@
 pub mod backend;
 pub mod coordinator;
 pub mod decision;
+pub mod fence;
 pub mod indoubt;
 pub mod locate;
 pub mod lookup;

@@ -742,6 +742,26 @@ impl Maintainer {
                     ))
                     .await
                     .map_err(exec_err)?;
+                    // The table too, once no copy of the object is left
+                    // in it (bugfix-55: it stayed, empty, for ever).
+                    let left: Option<u64> = c
+                        .query_first(format!(
+                            "SELECT COUNT(*) FROM {}.{} WHERE object_id = {}",
+                            q(s),
+                            q(STATE_TABLE),
+                            k.object.0
+                        ))
+                        .await
+                        .map_err(exec_err)?;
+                    if left == Some(0) {
+                        c.query_drop(format!(
+                            "DROP TABLE IF EXISTS {}.{}",
+                            q(s),
+                            q(&copy_table(k.object))
+                        ))
+                        .await
+                        .map_err(exec_err)?;
+                    }
                 }
             }
         }

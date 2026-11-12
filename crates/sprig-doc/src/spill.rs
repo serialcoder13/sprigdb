@@ -796,9 +796,7 @@ impl Iterator for Merge {
         for (i, h) in self.heads.iter().enumerate() {
             let Some(h) = h else { continue };
             best = match best {
-                Some(b)
-                    if (self.cmp)(h, self.heads[b].as_ref().unwrap_or(h)) != Ordering::Less =>
-                {
+                Some(b) if (self.cmp)(h, self.heads[b].as_ref().unwrap_or(h)) != Ordering::Less => {
                     Some(b)
                 }
                 _ => Some(i),
@@ -819,9 +817,9 @@ impl Iterator for Merge {
 
 /// Tests that spill share the caps and counters: one at a time.
 #[cfg(test)]
-pub(crate) fn serial() -> std::sync::MutexGuard<'static, ()> {
-    static M: Mutex<()> = Mutex::new(());
-    lock(&M)
+pub(crate) async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
+    static M: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    M.lock().await
 }
 
 #[cfg(test)]
@@ -840,7 +838,7 @@ mod tests {
 
     #[tokio::test]
     async fn sorts_through_runs_stably_and_deletes_the_files() {
-        let _g = serial();
+        let _g = serial().await;
         let ctx = SpillCtx::new(true, 7);
         let c2 = ctx.clone();
         scope(ctx, async move {
@@ -853,7 +851,9 @@ mod tests {
             assert_eq!(out.len(), 5000);
             for w in out.windows(2) {
                 let (a, b) = (w[0].get_i64("v").unwrap(), w[1].get_i64("v").unwrap());
-                assert!(a < b || (a == b && w[0].get_i64("i").unwrap() < w[1].get_i64("i").unwrap()));
+                assert!(
+                    a < b || (a == b && w[0].get_i64("i").unwrap() < w[1].get_i64("i").unwrap())
+                );
             }
             assert_eq!(usage(Some(7)).2, 0, "files are gone with the merge");
         })
@@ -865,7 +865,7 @@ mod tests {
 
     #[tokio::test]
     async fn without_allow_disk_use_a_large_sort_is_292() {
-        let _g = serial();
+        let _g = serial().await;
         let r = scope(SpillCtx::new(false, 8), async {
             let input = (0..5000i64).map(|i| Ok(doc! {"v": i}));
             sort_seq(input, by_v(), None, 20_000, "$sort")
@@ -876,7 +876,7 @@ mod tests {
 
     #[tokio::test]
     async fn sort_with_a_limit_keeps_the_top() {
-        let _g = serial();
+        let _g = serial().await;
         let out = scope(SpillCtx::new(true, 9), async {
             let input = (0..50_000i64).rev().map(|i| Ok(doc! {"v": i}));
             sort_seq(input, by_v(), Some(3), 20_000, "$sort")
@@ -891,7 +891,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_tenant_cap_is_14031() {
-        let _g = serial();
+        let _g = serial().await;
         set_caps(10_000, 0);
         let r = scope(SpillCtx::new(true, 10), async {
             let mut b = SeqBuilder::new(1000);

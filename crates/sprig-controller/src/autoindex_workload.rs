@@ -188,7 +188,12 @@ pub fn bind_text(
     let c = &s.payload.context;
     let logical = c.database.as_deref();
     let physical = match logical {
-        Some(db) => Some(map.physical(db, Purpose::Session).ok()?.single()?.to_string()),
+        Some(db) => Some(
+            map.physical(db, Purpose::Session)
+                .ok()?
+                .single()?
+                .to_string(),
+        ),
         None => None,
     };
     let mut ctx = RewriteCtx::new(map, Persona::MariaDb)
@@ -259,8 +264,11 @@ pub async fn statements(
             };
             let opened = t.open_samples(&mut conn, keyring, tenant, *fp, max).await?;
             out.extend(opened.iter().filter_map(|s| {
-                let sql =
-                    sprig_advisor::autoindex::doc::replay_sql(&row.shape, &s.payload.literals, def)?;
+                let sql = sprig_advisor::autoindex::doc::replay_sql(
+                    &row.shape,
+                    &s.payload.literals,
+                    def,
+                )?;
                 bind_text(map, *fp, &sql, *role, s)
             }));
             continue;

@@ -28,6 +28,8 @@
 //! wider than before. [`unwrap`] gives the text as written back, for
 //! `SHOW CREATE`.
 
+#![allow(clippy::many_single_char_names)] // token indexes: t, n, k, m, i, j
+
 use std::borrow::Cow;
 
 use sprig_common::SprigError;
@@ -179,10 +181,7 @@ pub fn wrap(text: &str, lex_opts: &LexOptions) -> Result<Option<Wrapped>, SprigE
     let mut invoker = false;
     loop {
         match word(&t, k).as_str() {
-            "COMMENT" => k += 2,
-            "LANGUAGE" | "CONTAINS" => k += 2,
-            "NO" => k += 2,
-            "NOT" => k += 2,
+            "COMMENT" | "LANGUAGE" | "CONTAINS" | "NO" | "NOT" => k += 2,
             "DETERMINISTIC" => k += 1,
             "READS" | "MODIFIES" => k += 3,
             "SQL" if t.word(k + 1, "SECURITY") => {
@@ -241,12 +240,7 @@ pub fn wrap(text: &str, lex_opts: &LexOptions) -> Result<Option<Wrapped>, SprigE
         }
     }
     body.push_str(&text[at..body_end.max(at)]);
-    let out = format!(
-        "{}{}{body}{}",
-        &text[..body_start],
-        head(&account),
-        tail()
-    );
+    let out = format!("{}{}{body}{}", &text[..body_start], head(&account), tail());
     Ok(Some(Wrapped { text: out, account }))
 }
 
@@ -292,7 +286,9 @@ pub fn unwrap(text: &str) -> Cow<'_, str> {
     }
     out.push_str(body);
     let after = &text[close + BODY_CLOSE.len()..];
-    let rest = after.strip_prefix(&tail()[BODY_CLOSE.len()..]).unwrap_or(after);
+    let rest = after
+        .strip_prefix(&tail()[BODY_CLOSE.len()..])
+        .unwrap_or(after);
     out.push_str(rest);
     Cow::Owned(out)
 }
@@ -313,7 +309,10 @@ mod tests {
             "{}",
             w.text
         );
-        assert!(w.text.contains("JSON_EXTRACT(@sprig_rls, '$.d.\"t42_u7\"')"));
+        assert!(
+            w.text
+                .contains("JSON_EXTRACT(@sprig_rls, '$.d.\"t42_u7\"')")
+        );
         assert!(w.text.ends_with(
             "/*sprig:rls-definer(*/BEGIN SELECT COUNT(*) FROM `__sprig_rls_docs` AS `docs`; END/*)sprig:rls-definer*/; SET @sprig_rls = `__sprig_rls_saved`; END"
         ));
@@ -341,12 +340,19 @@ mod tests {
         // A single-statement body.
         let g = "CREATE DEFINER=`t42_u9`@`%` FUNCTION `g`() RETURNS int(11) DETERMINISTIC RETURN (SELECT COUNT(*) FROM t)";
         let w = wrap(g, &LexOptions::mariadb()).unwrap().unwrap();
-        assert!(w.text.contains("SET `__sprig_rls_r` = (SELECT COUNT(*) FROM t); SET @sprig_rls"));
+        assert!(
+            w.text
+                .contains("SET `__sprig_rls_r` = (SELECT COUNT(*) FROM t); SET @sprig_rls")
+        );
         assert_eq!(unwrap(&w.text), g);
         assert!(is_wrapped(&w.text) && !is_wrapped(g));
         // `RETURNS` with a type named like a characteristic start.
         let h = "CREATE DEFINER=`t42_u9`@`%` FUNCTION `h`() RETURNS int(11)\nNO SQL\nRETURN 1";
         let w = wrap(h, &LexOptions::mariadb()).unwrap().unwrap();
-        assert!(w.text.contains("DECLARE `__sprig_rls_r` int(11);"), "{}", w.text);
+        assert!(
+            w.text.contains("DECLARE `__sprig_rls_r` int(11);"),
+            "{}",
+            w.text
+        );
     }
 }

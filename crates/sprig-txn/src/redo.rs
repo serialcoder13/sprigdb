@@ -167,6 +167,27 @@ pub struct RedoBranch {
     pub mark: Option<RedoMark>,
 }
 
+/// Where one held branch's redo stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedoState {
+    /// No rows: finished and cleaned up (or never written).
+    Gone,
+    /// Statement rows without a marker: the branch isn't finished.
+    Unfinished,
+    /// The holder committed (`done`).
+    Done,
+    /// A replay applied it (`replayed`).
+    Replayed,
+}
+
+impl RedoState {
+    /// The branch's outcome is in: its rows are there, or it never will be.
+    #[must_use]
+    pub fn finished(self) -> bool {
+        self != Self::Unfinished
+    }
+}
+
 /// What a replay did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Replay {

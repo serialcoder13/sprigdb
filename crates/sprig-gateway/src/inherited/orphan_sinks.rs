@@ -121,9 +121,14 @@ async fn child_tenants(svc: &Arc<TenantServices>) -> Result<BTreeSet<u64>> {
     Ok(out)
 }
 
-/// This pass's stale instance rows (module docs), in `tenants`.
-async fn find_rows(svc: &Arc<TenantServices>, tenants: &BTreeSet<u64>) -> HashSet<SinkKey> {
+/// This pass's stale instance rows (module docs) in `tenants`, and the
+/// tenants that couldn't be checked.
+async fn find_rows(
+    svc: &Arc<TenantServices>,
+    tenants: &BTreeSet<u64>,
+) -> (HashSet<SinkKey>, BTreeSet<u64>) {
     let mut out = HashSet::new();
+    let mut failed = BTreeSet::new();
     for t in tenants {
         match super::sinks::stale_instance_rows(svc, TenantId(*t)).await {
             Ok(keys) => {
@@ -131,10 +136,13 @@ async fn find_rows(svc: &Arc<TenantServices>, tenants: &BTreeSet<u64>) -> HashSe
                     out.insert((*t, format!("{}.{}", k.tenant.0, k.object), "row".to_owned()));
                 }
             }
-            Err(e) => tracing::debug!(tenant = t, error = %e, "instance rows not checked"),
+            Err(e) => {
+                tracing::debug!(tenant = t, error = %e, "instance rows not checked");
+                failed.insert(*t);
+            }
         }
     }
-    out
+    (out, failed)
 }
 
 /// Deletes the stale instance rows seen twice; returns how many.
@@ -154,22 +162,33 @@ async fn sweep_rows(svc: &Arc<TenantServices>, confirm: Duration) -> Result<usiz
     if full {
         tenants.extend(child_tenants(svc).await?);
     }
-    let seen = find_rows(svc, &tenants).await;
+    // Tenants with a row seen before are looked at again, so a row is
+    // confirmed by a second look at its own tenant.
+    tenants.extend(
+        row_sightings()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .0
+            .keys()
+            .map(|k| k.0),
+    );
+    let (mut seen, failed) = find_rows(svc, &tenants).await;
     let due = {
-        let mut s = row_sightings().lock().unwrap_or_else(PoisonError::into_inner);
-        // A partial pass forgets nothing it didn't look at.
-        if !full {
-            let others: Vec<SinkKey> =
-                s.0.keys().filter(|k| !tenants.contains(&k.0)).cloned().collect();
-            let mut keep = seen.clone();
-            keep.extend(others);
-            s.observe(&keep, Instant::now(), confirm.max(CONFIRM_MIN))
-                .into_iter()
-                .filter(|k| seen.contains(k))
-                .collect::<Vec<_>>()
-        } else {
-            s.observe(&seen, Instant::now(), confirm.max(CONFIRM_MIN))
-        }
+        let mut s = row_sightings()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // A tenant that couldn't be checked keeps its sightings, and
+        // nothing of it is deleted this pass.
+        let kept: Vec<SinkKey> =
+            s.0.keys()
+                .filter(|k| failed.contains(&k.0))
+                .cloned()
+                .collect();
+        seen.extend(kept);
+        s.observe(&seen, Instant::now(), confirm.max(CONFIRM_MIN))
+            .into_iter()
+            .filter(|k| !failed.contains(&k.0))
+            .collect::<Vec<_>>()
     };
     let mut n = 0;
     for k in due {

@@ -980,7 +980,14 @@ impl Engine {
             return Ok(CursorPlan::from_docs(ns.clone(), Vec::new()));
         };
         // M5 (S80): `$indexStats.accesses`.
-        crate::usage::note(sql.tenant(), &ns.db, &ns.coll, &m, &spec.filter, spec.sort.as_ref());
+        crate::usage::note(
+            sql.tenant(),
+            &ns.db,
+            &ns.coll,
+            &m,
+            &spec.filter,
+            spec.sort.as_ref(),
+        );
         // Chapter 36 (R6 round 3): `$near` sorts by distance.
         models::check_near(&pred, true)?;
         if let Some((path, near)) = models::near_of(&pred) {
@@ -1940,11 +1947,7 @@ impl Engine {
                     ),
                 ));
             }
-            if let Some(ex) = m
-                .indexes
-                .iter()
-                .find(|i| i.key == pattern && !i.is_auto())
-            {
+            if let Some(ex) = m.indexes.iter().find(|i| i.key == pattern && !i.is_auto()) {
                 return Err(MongoError::new(
                     code::INDEX_OPTIONS_CONFLICT,
                     format!("Index already exists with a different name: {}", ex.name),
@@ -2383,10 +2386,9 @@ impl Engine {
                 let mut out = SeqBuilder::new(self.cfg.agg_stage_bytes);
                 let mut it = seq.into_iter_docs()?;
                 loop {
-                    let chunk: Vec<Document> =
-                        crate::heavy::run(crate::heavy::HEAVY_DOCS, || {
-                            (&mut it).take(batch).collect::<Result<_, MongoError>>()
-                        })?;
+                    let chunk: Vec<Document> = crate::heavy::run(crate::heavy::HEAVY_DOCS, || {
+                        (&mut it).take(batch).collect::<Result<_, MongoError>>()
+                    })?;
                     if chunk.is_empty() {
                         break;
                     }
@@ -2433,9 +2435,7 @@ impl Engine {
                     _ => crate::heavy::HEAVY_DOCS,
                 };
                 // A large set leaves the worker thread (heavy::HEAVY_DOCS).
-                seq = crate::heavy::run(n, || {
-                    agg::run_stage_seq(seq, s, stages.get(j + 1), &lim)
-                })?;
+                seq = crate::heavy::run(n, || agg::run_stage_seq(seq, s, stages.get(j + 1), &lim))?;
                 continue;
             }
             if name == "$unionWith" && !seq.is_mem() {

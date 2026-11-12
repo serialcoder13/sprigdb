@@ -205,6 +205,10 @@ struct Conn {
     alive: bool,
     last_gtid: Option<Gtid>,
     poisoned: Option<u16>,
+    /// The client went away while a statement waited for a lock, and the
+    /// model runs orphaned statements on ([`Model::set_orphans_run`]): the
+    /// statement still runs when the lock frees, then the connection ends.
+    orphan: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -381,6 +385,7 @@ pub struct Model {
     rng: SimRng,
     completed: Vec<ConnId>,
     log: Vec<String>,
+    orphans_run: bool,
 }
 
 impl fmt::Debug for Model {
@@ -423,6 +428,7 @@ impl Model {
             rng: SimRng::new(seed),
             completed: Vec::new(),
             log: Vec::new(),
+            orphans_run: false,
         }
     }
 
@@ -434,6 +440,23 @@ impl Model {
     /// Sets the one-way delay between servers.
     pub fn set_delay(&mut self, f: Delay) {
         self.delay = f;
+    }
+
+    /// Whether a statement waiting for a row lock keeps running after its
+    /// client goes away, as MariaDB's does: the server notices the closed
+    /// socket only when it next reads from it, so the statement runs once
+    /// the lock frees (an autocommit write commits), and only then does
+    /// the connection end and roll back what is left open. Off by default
+    /// (the waiting statement is dropped with the connection), which is
+    /// kinder than MariaDB; the Sprig 2PC fence simulation turns it on.
+    pub fn set_orphans_run(&mut self, on: bool) {
+        self.orphans_run = on;
+    }
+
+    /// Whether `conn` is still open on its server.
+    #[must_use]
+    pub fn is_alive(&self, conn: ConnId) -> bool {
+        self.conns.get(&conn).is_some_and(|c| c.alive)
     }
 
     /// Adds a standalone server (a primary or a single node).
@@ -550,10 +573,17 @@ impl Model {
     }
 
     fn finish(&mut self, conn: ConnId, o: Outcome) {
+        let mut orphan = false;
         if let Some(c) = self.conns.get_mut(&conn) {
             c.pending = None;
+            orphan = c.orphan;
             c.done = Some(o);
             self.completed.push(conn);
+        }
+        if orphan {
+            // Its client is gone: the server reads EOF next and ends the
+            // connection.
+            self.drop_conn(conn, None);
         }
     }
 
@@ -601,6 +631,7 @@ impl Model {
                 alive: true,
                 last_gtid: None,
                 poisoned: None,
+                orphan: false,
             },
         );
         Ok(id)
@@ -610,6 +641,20 @@ impl Model {
     /// branch stays (detached).
     pub fn disconnect(&mut self, conn: ConnId, now: Duration) {
         self.advance(now);
+        if self.orphans_run
+            && let Some(c) = self.conns.get_mut(&conn)
+            && c.alive
+            && c
+                .pending
+                .as_ref()
+                .is_some_and(|p| matches!(p.kind, PendingKind::Lock(_)))
+        {
+            c.orphan = true;
+            self.note(format!(
+                "{conn} disconnected while waiting for a lock: the statement runs on"
+            ));
+            return;
+        }
         self.drop_conn(conn, None);
     }
 

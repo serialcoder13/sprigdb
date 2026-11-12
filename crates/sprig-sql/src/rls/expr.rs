@@ -1126,8 +1126,14 @@ mod tests {
             ..b
         };
         assert_eq!(
-            render("SPRIG_TENANT_IN_SUBTREE(org) OR SPRIG_TENANT_MANAGED(org)", &lexo(), "t", "`t`", &t)
-                .unwrap(),
+            render(
+                "SPRIG_TENANT_IN_SUBTREE(org) OR SPRIG_TENANT_MANAGED(org)",
+                &lexo(),
+                "t",
+                "`t`",
+                &t
+            )
+            .unwrap(),
             "(`t`.org IN (SELECT `descendant` FROM `__sprig_sys`.`__sprig_subtree_v`)) OR (`t`.org IN (NULL))"
         );
     }

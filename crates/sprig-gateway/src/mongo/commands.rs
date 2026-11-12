@@ -674,45 +674,61 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
         c.sql = Some(s);
         return Err(e);
     }
+    // Index hints (S135): the command's `hint`, else query settings'
+    // first usable `indexHints` entry, as MariaDB's FORCE INDEX.
+    let engine = c.shared.engine.clone();
+    let hint = match hint_for(&engine, &mut s, name, body, &db, &applied).await {
+        Ok(h) => h,
+        Err(e) => {
+            if max_time_ms.is_some() {
+                super::qsettings::reset_max_time(&mut s).await;
+            }
+            c.sql = Some(s);
+            return Err(e);
+        }
+    };
     // Chapter 12's workload store (`Fingerprinter::mongo`, S130).
     let wl = super::workload::start(&c.shared.engine, &mut s, tenant, name, body, &db).await;
     let started = Instant::now();
     // Retryable writes (chapter 30 step 7): the writes and their record
     // in one MariaDB transaction.
     let mut tries = 0u64;
-    let r = super::workload::scoped(wl.as_ref(), async {
-        loop {
-            let r = match (&lsid, txn_number) {
-                (Some(l), Some(n)) if super::retry::applies(name, body) => {
-                    super::retry::run(c, &mut s, name, body, &db, l, n).await
+    let r = super::workload::scoped(
+        wl.as_ref(),
+        sprig_doc::hint::scope(hint, async {
+            loop {
+                let r = match (&lsid, txn_number) {
+                    (Some(l), Some(n)) if super::retry::applies(name, body) => {
+                        super::retry::run(c, &mut s, name, body, &db, l, n).await
+                    }
+                    _ => {
+                        // MongoDB 9.0's per-operation memory limit (M3, S99).
+                        let mem = c.shared.settings().max_operation_memory_bytes;
+                        sprig_doc::opmem::scope(
+                            mem,
+                            Box::pin(exec(c, &mut s, name, body, &db, lsid.as_deref())),
+                        )
+                        .await
+                    }
+                };
+                // Concurrent first writes to a new database: another session
+                // created it a moment ago, and this one's names may not show it
+                // yet (chapter 07's name map follows the catalog's watch).
+                match &r {
+                    Err(e)
+                        if e.code == code::NAMESPACE_NOT_FOUND
+                            && e.message.contains("Unknown database")
+                            && super::writes::is_write(name)
+                            && tries < 8 =>
+                    {
+                        tries += 1;
+                        tokio::time::sleep(Duration::from_millis(50 * tries)).await;
+                    }
+                    _ => break r,
                 }
-                _ => {
-                    // MongoDB 9.0's per-operation memory limit (M3, S99).
-                    let mem = c.shared.settings().max_operation_memory_bytes;
-                    sprig_doc::opmem::scope(
-                        mem,
-                        Box::pin(exec(c, &mut s, name, body, &db, lsid.as_deref())),
-                    )
-                    .await
-                }
-            };
-            // Concurrent first writes to a new database: another session
-            // created it a moment ago, and this one's names may not show it
-            // yet (chapter 07's name map follows the catalog's watch).
-            match &r {
-                Err(e)
-                    if e.code == code::NAMESPACE_NOT_FOUND
-                        && e.message.contains("Unknown database")
-                        && super::writes::is_write(name)
-                        && tries < 8 =>
-                {
-                    tries += 1;
-                    tokio::time::sleep(Duration::from_millis(50 * tries)).await;
-                }
-                _ => break r,
             }
-        }
-    })
+        }),
+    )
     .await;
     let r = if max_time_ms.is_some() {
         super::qsettings::reset_max_time(&mut s).await;
@@ -721,12 +737,9 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
         r
     };
     let r = match (r, own_max) {
-        (Ok(_), Some(ms)) if started.elapsed() > Duration::from_millis(ms.unsigned_abs()) => {
-            Err(MongoError::new(
-                code::MAX_TIME_MS_EXPIRED,
-                "operation exceeded time limit",
-            ))
-        }
+        (Ok(_), Some(ms)) if started.elapsed() > Duration::from_millis(ms.unsigned_abs()) => Err(
+            MongoError::new(code::MAX_TIME_MS_EXPIRED, "operation exceeded time limit"),
+        ),
         (r, _) => r,
     };
     c.sql = Some(s);
@@ -755,6 +768,42 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
     // `$collStats.latencyStats` (M5, S79).
     super::diag::record_latency(tenant, name, body, &db, started.elapsed());
     r
+}
+
+/// The MariaDB index a command is hinted onto (S135): its own `hint`
+/// (`find`, `count`, `distinct`, `aggregate`; an unknown index fails with
+/// 2), else the first of query settings' `indexHints` that exists.
+async fn hint_for(
+    engine: &sprig_doc::engine::Engine,
+    s: &mut super::sql::SqlSession,
+    name: &str,
+    body: &Document,
+    db: &str,
+    applied: &super::qsettings::Applied,
+) -> Result<Option<String>, MongoError> {
+    if !matches!(name, "find" | "count" | "distinct" | "aggregate") {
+        return Ok(None);
+    }
+    let Ok(coll) = body.get_str(name) else {
+        return Ok(None);
+    };
+    let ns = Ns {
+        db: db.to_owned(),
+        coll: coll.to_owned(),
+    };
+    if let Some(h) = body.get("hint").filter(|h| match h {
+        Bson::String(x) => !x.is_empty(),
+        Bson::Document(d) => !d.is_empty(),
+        _ => true,
+    }) {
+        return super::qsettings::hint_index(engine, s, &ns, h).await;
+    }
+    for h in &applied.index_hints {
+        if let Ok(i) = super::qsettings::hint_index(engine, s, &ns, h).await {
+            return Ok(i);
+        }
+    }
+    Ok(None)
 }
 
 /// A read at a snapshot (`snapshot`): on the snapshot's own executor
@@ -1470,6 +1519,7 @@ async fn exec(
                 coll: coll.clone(),
             };
             let mut spilled = None;
+            let process = super::diag::process_privilege(sql, pipeline.first()).await;
             let docs = if coll.is_empty()
                 && pipeline
                     .first()
@@ -1501,7 +1551,7 @@ async fn exec(
                 pipeline.first(),
                 lsid.map(<[u8]>::to_vec),
                 // M5 (S78): `allUsers` needs `PROCESS`.
-                sql.holds_tenant_privilege(sprig_auth::authz::Action::Process),
+                process,
             )? {
                 // `$currentOp` and `$listSessions` (M2), then the
                 // in-gateway stages.

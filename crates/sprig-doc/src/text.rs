@@ -298,7 +298,10 @@ impl Engine {
         // the index matches without case and diacritics, then the matches
         // are filtered as MongoDB does.
         let case = matches!(text.remove("$caseSensitive"), Some(Bson::Boolean(true)));
-        let diacritics = matches!(text.remove("$diacriticSensitive"), Some(Bson::Boolean(true)));
+        let diacritics = matches!(
+            text.remove("$diacriticSensitive"),
+            Some(Bson::Boolean(true))
+        );
         let search = text.get_str("$search").unwrap_or_default().to_owned();
         let hook = self.text_hook()?;
         let h = hook.hits(sql, ns, TextCall::Text(text)).await?;

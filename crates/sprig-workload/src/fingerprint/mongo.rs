@@ -22,7 +22,7 @@
 //! - **literals** fill one slot per condition, in order: one value, an
 //!   `$in` list, or nothing (`null`). A sample keeps the values as
 //!   [`SampleValue`]s whose kind is the BSON class (number, string, bool,
-//!   date as `Temporal`, ObjectId as `Hex`) and whose text is a SQL
+//!   date as `Temporal`, `ObjectId` as `Hex`) and whose text is a SQL
 //!   literal, so the validation replay can bind them.
 
 use std::sync::Arc;
@@ -117,6 +117,7 @@ pub fn stmt_type(cmd: &str) -> StmtType {
 /// `Fingerprinter::mongo` (module docs): the fingerprint of one command,
 /// and this run's values by slot (for a sample).
 #[must_use]
+#[allow(clippy::too_many_lines)] // one shape, field by field
 pub fn fingerprint(input: &MongoInput<'_>) -> (Fingerprint, SampledLiterals) {
     let full = format!(
         "{} {}.{} {}",
@@ -236,7 +237,7 @@ pub fn number(text: &str) -> SampleValue {
 }
 
 /// A sampled string, as a quoted SQL literal of `kind` (`String`, `Hex`
-/// for an ObjectId's hex, `Temporal` for a date's ISO text).
+/// for an `ObjectId`'s hex, `Temporal` for a date's ISO text).
 #[must_use]
 pub fn quoted(kind: LiteralKind, s: &str) -> SampleValue {
     let mut t = Vec::with_capacity(s.len() + 2);
@@ -268,11 +269,11 @@ pub fn boolean(b: bool) -> SampleValue {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unwrap_used, clippy::many_single_char_names)]
 
     use super::*;
 
-    fn input<'a>(shape: &'a str, v: i64) -> MongoInput<'a> {
+    fn input(shape: &str, v: i64) -> MongoInput<'_> {
         MongoInput {
             cmd: "find",
             db: "shop",

@@ -537,6 +537,8 @@ pub async fn stage_docs(
 pub struct Applied {
     /// 9.0's per-shape `maxTimeMS`.
     pub max_time_ms: Option<i64>,
+    /// `indexHints`' allowed indexes for the command's namespace (S135).
+    pub index_hints: Vec<Bson>,
 }
 
 /// Looks up the settings of a `find`, `aggregate` or `distinct` (stored,
@@ -591,12 +593,91 @@ pub async fn before(
             "Query rejected by admin query settings",
         ));
     }
+    let coll = body.get_str(name).unwrap_or_default();
     Ok(Applied {
+        index_hints: allowed_indexes(settings.get("indexHints"), db, coll),
         max_time_ms: settings
             .get("maxTimeMS")
             .and_then(sprig_doc::filter::as_i64)
             .filter(|n| *n > 0),
     })
+}
+
+/// `indexHints`' allowed indexes for `db.coll`: one `{ns, allowedIndexes}`
+/// or a list of them; an entry without `ns` applies to every namespace.
+fn allowed_indexes(v: Option<&Bson>, db: &str, coll: &str) -> Vec<Bson> {
+    let entries: Vec<&Document> = match v {
+        Some(Bson::Document(d)) => vec![d],
+        Some(Bson::Array(a)) => a.iter().filter_map(Bson::as_document).collect(),
+        _ => return Vec::new(),
+    };
+    entries
+        .into_iter()
+        .filter(|e| {
+            e.get_document("ns").map_or(true, |ns| {
+                ns.get_str("db").is_ok_and(|d| d == db)
+                    && ns.get_str("coll").is_ok_and(|c| c == coll)
+            })
+        })
+        .filter_map(|e| e.get_array("allowedIndexes").ok())
+        .flat_map(|a| a.iter().cloned())
+        .collect()
+}
+
+/// The MariaDB index a hint names on `ns` (S135): an index name or key
+/// pattern, `_id_` the primary key; `$natural` none. `Err` with
+/// MongoDB's 2 `BadValue` for an index that doesn't exist.
+///
+/// # Errors
+/// 2 for an unknown index; SQL errors.
+pub async fn hint_index(
+    engine: &Engine,
+    sql: &mut dyn SqlRunner,
+    ns: &sprig_doc::engine::Ns,
+    hint: &Bson,
+) -> Result<Option<String>, MongoError> {
+    let bad = || {
+        MongoError::new(
+            code::BAD_VALUE,
+            "hint provided does not correspond to an existing index",
+        )
+    };
+    if let Bson::Document(k) = hint
+        && k.contains_key("$natural")
+    {
+        return Ok(None);
+    }
+    let Some(m) = engine.meta(sql, ns).await? else {
+        return Ok(None);
+    };
+    let primary = match hint {
+        Bson::String(n) => n == "_id_",
+        Bson::Document(k) => k.len() == 1 && k.contains_key("_id"),
+        _ => return Err(bad()),
+    };
+    if primary {
+        return Ok(Some("PRIMARY".to_owned()));
+    }
+    let found = m.indexes.iter().find(|i| match hint {
+        Bson::String(n) => i.name == *n,
+        Bson::Document(k) => {
+            i.key_doc() == *k || {
+                let pat: Vec<(String, i32)> = k
+                    .iter()
+                    .map(|(p, v)| {
+                        let d = sprig_doc::filter::as_i64(v).unwrap_or(1);
+                        (p.clone(), if d < 0 { -1 } else { 1 })
+                    })
+                    .collect();
+                i.key == pat
+            }
+        }
+        _ => false,
+    });
+    found
+        .filter(|i| !sprig_doc::geo::is_2dsphere(i))
+        .map(|i| Some(i.mariadb_name()))
+        .ok_or_else(bad)
 }
 
 /// A command's own `maxTimeMS` (S134): `find`, `aggregate`, `count`,

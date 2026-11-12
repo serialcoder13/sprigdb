@@ -1287,7 +1287,9 @@ pub(crate) async fn stale_instance_rows(
         .collect())
 }
 
-/// Deletes member `t`'s instance row of definition `k`.
+/// Deletes member `t`'s instance row of definition `k`, with the
+/// connections the row lists that its `sprig_inherited` owns and no sink
+/// of the member uses (the sweeps before bugfix-52 left them too).
 ///
 /// # Errors
 /// The catalog's.
@@ -1298,9 +1300,48 @@ pub(crate) async fn delete_instance_row(
 ) -> Result<()> {
     let ep = svc.locator.writer(t).await?;
     let mut conn = ep.pool.get_conn().await.map_err(cat_err)?;
-    MsgStore::new(ep.store.schema())
-        .delete_instance(&mut conn, k)
-        .await
+    let store = MsgStore::new(ep.store.schema());
+    let Some(row) = store.instance(&mut conn, k).await? else {
+        return Ok(());
+    };
+    drop(conn);
+    let ids: Vec<u64> = row
+        .physical
+        .as_ref()
+        .and_then(|p| p.get("connections"))
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_u64).collect())
+        .unwrap_or_default();
+    let spec: SinkSpec = serde_json::from_value(row.definition.clone()).unwrap_or_default();
+    let cat = catalog(svc, t).await?;
+    let run_as = sprig_auth::cache::TenantAuth::of(&cat).and_then(|a| {
+        a.accounts(super::RUN_AS_USER)
+            .first()
+            .map(|u| u.row.user_id)
+    });
+    if let Some(run_as) = run_as
+        && !ids.is_empty()
+        && !spec.db.is_empty()
+    {
+        // Best effort: the row goes even when its database has.
+        let used: Vec<sprig_sinks::model::ConnRef> = ids
+            .into_iter()
+            .map(|id| sprig_sinks::model::ConnRef::Tenant {
+                id: sprig_sinks::model::ConnectionId(id),
+                name: String::new(),
+            })
+            .collect();
+        let r = async {
+            let mut host = DeployHost::new(svc, t, run_as, &spec.db).await?;
+            drop_unused_connections(&mut host, run_as, &used).await
+        }
+        .await;
+        if let Err(e) = r {
+            tracing::warn!(tenant = %t, def = %k, error = %e, "a stale sink instance's connections were not dropped");
+        }
+    }
+    let mut conn = ep.pool.get_conn().await.map_err(cat_err)?;
+    store.delete_instance(&mut conn, k).await
 }
 
 /// Drops the member's connections among `used` (a dropped sink's) that

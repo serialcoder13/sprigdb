@@ -369,6 +369,25 @@ fn time(t: SystemTime) -> String {
     rfc3339(t)
 }
 
+/// The columns shown for a definition: a document index's field paths
+/// (`email`, `createdAt desc`, S131) rather than its field columns; each
+/// part otherwise.
+#[must_use]
+pub fn columns_text(d: &sprig_advisor::autoindex::store::Definition) -> Vec<String> {
+    let def = d.on(
+        sprig_common::ids::ObjectId(0),
+        sprig_advisor::autoindex::model::IndexKind::FieldColumn,
+    );
+    let paths = sprig_advisor::autoindex::doc::paths_of(&def);
+    if paths.is_empty() {
+        return d.parts.iter().map(part_text).collect();
+    }
+    paths
+        .into_iter()
+        .map(|(p, dir)| if dir < 0 { format!("{p} desc") } else { p })
+        .collect()
+}
+
 /// A key part as `col`, `col(12)`, `col desc`.
 #[must_use]
 pub fn part_text(p: &KeyPart) -> String {
@@ -453,7 +472,7 @@ pub fn index_view(r: &AutoIndexRow, names: &ObjectNames, cand: Option<&Candidate
         name: r.name.clone(),
         model: r.model.to_string(),
         kind: r.kind.to_string(),
-        columns: r.definition.parts.iter().map(part_text).collect(),
+        columns: columns_text(&r.definition),
         ddl,
         state: r.state.to_string(),
         prior_state: r.prior_state.map(|s| s.to_string()),
@@ -659,7 +678,7 @@ pub fn candidate_view(c: &CandidateRow, names: &ObjectNames) -> CandidateView {
         run_id: c.run_id,
         db,
         table,
-        columns: c.definition.parts.iter().map(part_text).collect(),
+        columns: columns_text(&c.definition),
         part_sources: c
             .evidence
             .parts

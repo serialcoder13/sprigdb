@@ -9,10 +9,15 @@
 //! decision row in its own transaction (the commit point), and phase 2
 //! commits the prepared branches.
 
-use std::sync::Arc;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
-use futures::future::join_all;
+use futures::StreamExt;
+use futures::future::{BoxFuture, join_all};
+use futures::stream::FuturesUnordered;
 use sprig_common::ids::{ClusterId, DbId, GroupId, ShardId, TenantId};
 use sprig_common::time::{Clock, SystemClock};
 use sprig_common::{Result, SprigCode, SprigError};
@@ -256,6 +261,40 @@ pub struct TxnCoordinator<B: TxnBackend> {
     last_resource: Option<usize>,
     best_effort: bool,
     savepoints: Vec<SpMark>,
+    /// Branches of earlier commits whose phase 2 outran
+    /// `txn.phase2_wait_ms` (decision Q37): settled before the session
+    /// next uses their cluster.
+    stragglers: Vec<Straggler<B::Conn>>,
+}
+
+/// A prepared branch's phase 2, still running after `COMMIT` answered.
+struct Phase2Fut<C> {
+    cluster: ClusterId,
+    fut: BoxFuture<'static, (bool, Branch<C>)>,
+}
+
+impl<C> Future for Phase2Fut<C> {
+    type Output = (bool, Branch<C>);
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.fut.as_mut().poll(cx)
+    }
+}
+
+enum StragglerState<C> {
+    /// Its phase 2 is still running (on its own connection); the mutex
+    /// only keeps the coordinator `Sync` (it is reached through `&mut`).
+    Running(Mutex<Phase2Fut<C>>),
+    /// Its phase 2 failed: finish it through the admin.
+    Failed(Branch<C>),
+}
+
+/// A branch committed by decision whose phase 2 isn't known finished.
+struct Straggler<C> {
+    cluster: ClusterId,
+    dtid: Option<Dtid>,
+    gtrid: Gtrid,
+    state: StragglerState<C>,
 }
 
 impl<B: TxnBackend> std::fmt::Debug for TxnCoordinator<B> {
@@ -333,6 +372,7 @@ impl<B: TxnBackend> TxnCoordinator<B> {
             last_resource: None,
             best_effort: false,
             savepoints: Vec::new(),
+            stragglers: Vec::new(),
         }
     }
 
@@ -488,6 +528,10 @@ impl<B: TxnBackend> TxnCoordinator<B> {
             }
             return Ok(&mut self.branches[i]);
         }
+        // A branch of an earlier commit on this cluster may still be in
+        // phase 2: finish it first, so this transaction sees its rows
+        // (decision Q37).
+        self.settle(cluster).await?;
         let caps = self.backend.caps(cluster);
         if intent == Intent::Write
             && !caps.xa
@@ -1218,15 +1262,19 @@ impl<B: TxnBackend> TxnCoordinator<B> {
                 Err(e) => partial = Some((b.cluster.clone(), e)),
             }
         }
-        // Phase 2.
+        // Phase 2. It takes the prepared branches out of the transaction,
+        // so read what the answer needs first.
+        let held = prepared
+            .iter()
+            .any(|&i| self.branches[i].kind == BranchKind::Held);
+        let committed: Vec<String> = writers
+            .iter()
+            .filter(|&&i| !extra.contains(&i) || extra_done.contains(&i))
+            .map(|&i| self.branches[i].cluster.to_string())
+            .collect();
         let stragglers = self.phase2(&prepared).await;
         if let Some((c, e)) = partial {
             metrics::counter!("sprig_txn_partial_commits_total").increment(1);
-            let committed: Vec<String> = writers
-                .iter()
-                .filter(|&&i| !extra.contains(&i) || extra_done.contains(&i))
-                .map(|&i| self.branches[i].cluster.to_string())
-                .collect();
             return Err(SprigError::new(
                 SprigCode::PartialCommit,
                 format!(
@@ -1236,9 +1284,6 @@ impl<B: TxnBackend> TxnCoordinator<B> {
                 ),
             ));
         }
-        let held = prepared
-            .iter()
-            .any(|&i| self.branches[i].kind == BranchKind::Held);
         Ok(CommitOutcome {
             mode: if self.best_effort {
                 TxnMode::BestEffort
@@ -1327,45 +1372,236 @@ impl<B: TxnBackend> TxnCoordinator<B> {
         }
     }
 
-    /// Phase 2: `XA COMMIT` every prepared branch, waiting at most
-    /// `txn.phase2_wait_ms`. Returns the stragglers left to the resolver.
+    /// Phase 2: `XA COMMIT` every prepared branch (a held branch: its
+    /// marker and `COMMIT`), waiting at most `txn.phase2_wait_ms`. The
+    /// branches leave the transaction (commit resets it next). A branch
+    /// not finished by then stays with the session as a straggler
+    /// (decision Q37): its phase 2 goes on, and the session settles it
+    /// before it next uses that cluster ([`Self::settle`]). Returns how
+    /// many are left.
     async fn phase2(&mut self, prepared: &[usize]) -> usize {
         let admin = self.admin.clone();
         let hooks = self.hooks.clone();
         let dtid = self.dtid;
         let gtrid = self.gtrid(dtid.unwrap_or(sprig_common::ids::TxnId(0)));
         let wait = self.cfg.phase2_wait;
-        let futs = self
-            .branches
-            .iter_mut()
-            .enumerate()
-            .filter(|(i, _)| prepared.contains(i))
-            .map(|(_, b)| {
-                let admin = admin.clone();
-                let hooks = hooks.clone();
-                async move {
-                    let ok = finish_prepared(&*admin, b, true, dtid, &gtrid).await;
+        let mut idx = prepared.to_vec();
+        idx.sort_unstable();
+        idx.dedup();
+        let mut running: FuturesUnordered<Phase2Fut<B::Conn>> = FuturesUnordered::new();
+        for &i in idx.iter().rev() {
+            let mut b = self.branches.remove(i);
+            let admin = admin.clone();
+            let hooks = hooks.clone();
+            let cluster = b.cluster.clone();
+            running.push(Phase2Fut {
+                cluster,
+                fut: Box::pin(async move {
+                    let ok = finish_prepared(&*admin, &mut b, true, dtid, &gtrid).await;
                     if ok && let Some(h) = &hooks {
                         h.at(dtid, Point::Phase2Branch).await;
                     }
-                    ok
-                }
+                    (ok, b)
+                }),
             });
-        let stragglers = match tokio::time::timeout(wait, join_all(futs)).await {
-            Ok(done) => done.iter().filter(|ok| !**ok).count(),
-            Err(_) => prepared.len(),
-        };
-        if stragglers > 0 {
-            // The client gets OK before these branches commit: until the
-            // resolver finishes them, the session's next read may not see
-            // their rows (chapter 18, "Isolation and anomalies").
-            metrics::counter!("sprig_txn_phase2_stragglers_total").increment(stragglers as u64);
+        }
+        // The removed branches shifted the others: nothing indexes them
+        // after phase 2 but the reset that follows.
+        self.last_resource = None;
+        let deadline = tokio::time::Instant::now() + wait;
+        let mut left = 0usize;
+        loop {
+            match tokio::time::timeout_at(deadline, running.next()).await {
+                Ok(Some((true, _done))) => {}
+                Ok(Some((false, b))) => {
+                    left += 1;
+                    self.stragglers.push(Straggler {
+                        cluster: b.cluster.clone(),
+                        dtid,
+                        gtrid,
+                        state: StragglerState::Failed(b),
+                    });
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    for f in running {
+                        left += 1;
+                        self.stragglers.push(Straggler {
+                            cluster: f.cluster.clone(),
+                            dtid,
+                            gtrid,
+                            state: StragglerState::Running(Mutex::new(f)),
+                        });
+                    }
+                    break;
+                }
+            }
+        }
+        if left > 0 {
+            // The client gets OK before these branches commit; the session
+            // settles them before it reads their clusters again. Other
+            // sessions may not see their rows until then (chapter 18,
+            // "Isolation and anomalies").
+            metrics::counter!("sprig_txn_phase2_stragglers_total").increment(left as u64);
             tracing::warn!(
-                stragglers,
-                "phase 2 outran txn.phase2_wait_ms; the resolver finishes the rest"
+                stragglers = left,
+                "phase 2 outran txn.phase2_wait_ms; the session settles the rest before it uses \
+                 their clusters again"
             );
         }
-        stragglers
+        left
+    }
+
+    /// Branches of this session's earlier commits still in phase 2.
+    #[must_use]
+    pub fn stragglers(&self) -> usize {
+        self.stragglers.len()
+    }
+
+    /// Whether a branch of an earlier commit on `cluster` is still in
+    /// phase 2 ([`Self::settle`] finishes it).
+    #[must_use]
+    pub fn has_straggler(&self, cluster: &ClusterId) -> bool {
+        self.stragglers.iter().any(|s| &s.cluster == cluster)
+    }
+
+    /// Finishes this session's phase-2 stragglers on `cluster` (decision
+    /// Q37), so what the session runs there next sees their rows: a
+    /// running phase 2 is awaited; a failed one is finished through the
+    /// admin (`XA COMMIT` after killing the old thread; a held branch is
+    /// replayed, or, on a relay-fenced cluster, recovered by the agent).
+    /// Waits at most `txn.commit_resolve_timeout_ms`.
+    ///
+    /// # Errors
+    /// 39449 when a straggler is still unfinished then; the statement
+    /// shouldn't run (retry it).
+    pub async fn settle(&mut self, cluster: &ClusterId) -> Result<()> {
+        if !self.has_straggler(cluster) {
+            return Ok(());
+        }
+        let deadline = tokio::time::Instant::now() + self.cfg.commit_resolve_timeout;
+        let mut keep = Vec::new();
+        for s in std::mem::take(&mut self.stragglers) {
+            if &s.cluster != cluster {
+                keep.push(s);
+                continue;
+            }
+            if let Some(s) = self.settle_one(s, deadline).await {
+                keep.push(s);
+            }
+        }
+        let left = keep.iter().filter(|s| &s.cluster == cluster).count();
+        self.stragglers = keep;
+        if left > 0 {
+            return Err(SprigError::new(
+                SprigCode::Phase2Pending,
+                format!(
+                    "a branch of this session's last distributed commit is still being finished on \
+                     cluster {cluster}; retry the statement"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// One straggler: `None` once it is finished.
+    async fn settle_one(
+        &self,
+        mut s: Straggler<B::Conn>,
+        deadline: tokio::time::Instant,
+    ) -> Option<Straggler<B::Conn>> {
+        if let StragglerState::Running(f) = &mut s.state {
+            let f = f.get_mut().unwrap_or_else(PoisonError::into_inner);
+            match tokio::time::timeout_at(deadline, f).await {
+                Ok((true, _done)) => return None,
+                Ok((false, b)) => s.state = StragglerState::Failed(b),
+                Err(_) => return Some(s),
+            }
+        }
+        let StragglerState::Failed(b) = &s.state else {
+            return Some(s);
+        };
+        if self
+            .finish_through_admin(b, s.dtid, &s.gtrid, deadline)
+            .await
+        {
+            None
+        } else {
+            Some(s)
+        }
+    }
+
+    /// Commits a branch whose own phase 2 failed, through the admin; the
+    /// decision is commit. Returns whether it is known finished by
+    /// `deadline`.
+    async fn finish_through_admin(
+        &self,
+        b: &Branch<B::Conn>,
+        dtid: Option<Dtid>,
+        gtrid: &Gtrid,
+        deadline: tokio::time::Instant,
+    ) -> bool {
+        let _ = gtrid;
+        let admin = &*self.admin;
+        let fenced = self.backend.relay_fenced(&b.cluster);
+        let mut asked = false;
+        loop {
+            match (b.kind, &b.xid, dtid) {
+                (BranchKind::Xa, Some(x), _) => {
+                    let _ = admin.kill(&b.cluster, b.thread_id).await;
+                    match admin.xa_finish(&b.cluster, x, true).await {
+                        Ok(()) => return true,
+                        Err(e) if e.errno == errno::XAER_NOTA => {
+                            if let Ok(list) = admin.xa_recover(&b.cluster).await
+                                && !list.contains(x)
+                            {
+                                return true;
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+                (BranchKind::Held, _, Some(dtid)) => {
+                    match admin.redo_state(&b.cluster, &b.anchor.schema, dtid).await {
+                        Ok(st) if st.finished() => return true,
+                        Ok(_) if fenced => {
+                            // The agent recovers it inside its fence.
+                            if !asked {
+                                asked = admin
+                                    .abandon_held(&b.cluster, &b.anchor.schema, dtid, b.thread_id)
+                                    .await
+                                    .is_ok();
+                            }
+                        }
+                        Ok(_) => {
+                            // End the old holder, then replay: the decision
+                            // is commit, and the marker keeps it exactly once.
+                            let _ = admin.kill(&b.cluster, b.thread_id).await;
+                            match admin.replay_redo(&b.cluster, &b.anchor.schema, dtid).await {
+                                Ok(crate::redo::Replay::Applied | crate::redo::Replay::Gone) => {
+                                    return true;
+                                }
+                                Ok(crate::redo::Replay::Hazard(why)) => {
+                                    metrics::counter!("sprig_txn_redo_replays_total", "result" => "hazard")
+                                        .increment(1);
+                                    tracing::error!(cluster = %b.cluster, %dtid, %why,
+                                        "a committed held branch can't be replayed exactly; its redo \
+                                         rows stay for an operator");
+                                    return true;
+                                }
+                                Err(_) => {}
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
+                _ => return true,
+            }
+            if tokio::time::Instant::now() + Duration::from_millis(100) > deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// Best effort with no XA writer (chapter 18, "Best effort and
@@ -1524,7 +1760,14 @@ async fn prepare_one<C: BranchConn>(
             return Ok(());
         }
         return admin
-            .insert_redo(&b.cluster, &b.anchor.schema, dtid, gtrid, &stmts)
+            .insert_redo_held(
+                &b.cluster,
+                &b.anchor.schema,
+                dtid,
+                gtrid,
+                &stmts,
+                b.thread_id,
+            )
             .await;
     }
     let x = b.xid.clone().expect("prepared branches are XA or held");
@@ -1569,13 +1812,18 @@ async fn finish_held<C: BranchConn>(
                 true
             }
             Err(e) => {
-                tracing::warn!(cluster = %b.cluster, schema = %b.anchor.schema, errno = e.errno, error = %e.message, "a held branch's phase 2 failed; the resolver replays it");
+                tracing::warn!(cluster = %b.cluster, schema = %b.anchor.schema, errno = e.errno, error = %e.message, "a held branch's phase 2 failed; it is replayed");
                 if !e.is_lost() {
                     let _ = b
                         .conn
                         .control(&[Ctl::Rollback, Ctl::SetTimestamp(None)])
                         .await;
                 }
+                // On a relay-fenced cluster the agent fences the tenant and
+                // recovers the branch now (a no-op elsewhere).
+                let _ = admin
+                    .abandon_held(&b.cluster, &b.anchor.schema, dtid, b.thread_id)
+                    .await;
                 false
             }
         }

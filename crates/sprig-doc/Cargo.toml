@@ -47,7 +47,7 @@ sprig-logic-js.workspace = true
 # The live test of the generated SQL, straight on MariaDB.
 mysql_async.workspace = true
 proptest.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 
 [lints]
 workspace = true

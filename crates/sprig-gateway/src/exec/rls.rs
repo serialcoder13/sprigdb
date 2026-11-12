@@ -469,8 +469,22 @@ impl PassSession {
             conns: HashMap::new(),
             locator: Arc::clone(&svc.locator),
         };
+        // RL58: policies with subtree functions read
+        // `__sprig_sys.__sprig_subtree_v` in MariaDB; a view naming it can't
+        // be created before it exists.
+        let subtree = tp.iter().any(|p| {
+            [p.using, p.check]
+                .into_iter()
+                .flatten()
+                .any(|e| e.to_ascii_uppercase().contains("SPRIG_TENANT_"))
+        });
         for (schema, stmts) in &plan {
             let s = shards.session(schema).await?;
+            if subtree {
+                for q in sprig_sql::rls::subtree::setup_sql() {
+                    s.exec(&q).await?;
+                }
+            }
             // The trigger texts are unqualified (see `TriggerSpec`).
             s.exec(&format!("USE {}", sprig_sql::rls::quote(schema)))
                 .await?;

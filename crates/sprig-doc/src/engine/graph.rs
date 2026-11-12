@@ -52,7 +52,8 @@ impl Engine {
                     break;
                 }
                 if let [(i, f)] = active.as_slice() {
-                    let level = Box::pin(self.aggregate(sql, &fns, &[doc! {"$match": f.clone()}])).await?;
+                    let level =
+                        Box::pin(self.aggregate(sql, &fns, &[doc! {"$match": f.clone()}])).await?;
                     searches[*i].absorb(level)?;
                     continue;
                 }

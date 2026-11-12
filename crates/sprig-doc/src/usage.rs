@@ -133,7 +133,9 @@ pub fn index_accesses(tenant: u64, db: &str, coll: &str, index: &str) -> (i64, D
     let t = tables();
     t.idx
         .get(&(tenant, db.to_owned(), coll.to_owned(), index.to_owned()))
-        .map_or((0, since()), |(n, s)| (i64::try_from(*n).unwrap_or(i64::MAX), *s))
+        .map_or((0, since()), |(n, s)| {
+            (i64::try_from(*n).unwrap_or(i64::MAX), *s)
+        })
 }
 
 /// Forgets a dropped collection's counters (or one index's).
@@ -184,13 +186,22 @@ pub fn planned_index<'m>(
     let keys: Vec<(&str, Vec<&str>)> = m
         .indexes
         .iter()
-        .map(|ix| (ix.name.as_str(), ix.key.iter().map(|(p, _)| p.as_str()).collect()))
+        .map(|ix| {
+            (
+                ix.name.as_str(),
+                ix.key.iter().map(|(p, _)| p.as_str()).collect(),
+            )
+        })
         .collect();
     pick(&keys, filter, sort).map(|i| keys[i].0)
 }
 
 /// [`planned_index`] over `(name, key paths)`.
-fn pick(indexes: &[(&str, Vec<&str>)], filter: &Document, sort: Option<&Document>) -> Option<usize> {
+fn pick(
+    indexes: &[(&str, Vec<&str>)],
+    filter: &Document,
+    sort: Option<&Document>,
+) -> Option<usize> {
     let mut fields = Vec::new();
     constrained(filter, &mut fields);
     let mut best: Option<(usize, usize)> = None;
@@ -213,7 +224,14 @@ fn pick(indexes: &[(&str, Vec<&str>)], filter: &Document, sort: Option<&Document
 }
 
 /// Notes the planned index of a read or write.
-pub fn note(tenant: u64, db: &str, coll: &str, m: &CollMeta, filter: &Document, sort: Option<&Document>) {
+pub fn note(
+    tenant: u64,
+    db: &str,
+    coll: &str,
+    m: &CollMeta,
+    filter: &Document,
+    sort: Option<&Document>,
+) {
     if let Some(ix) = planned_index(m, filter, sort) {
         record_index(tenant, db, coll, ix);
     }
@@ -234,19 +252,26 @@ mod tests {
         assert_eq!(r.get_i64("latency").unwrap(), 1003);
         let h = r.get_array("histogram").unwrap();
         assert_eq!(h.len(), 2);
-        assert_eq!(
-            h[1].as_document().unwrap().get_i64("micros").unwrap(),
-            512
-        );
+        assert_eq!(h[1].as_document().unwrap().get_i64("micros").unwrap(), 512);
         assert_eq!(s.get_document("writes").unwrap().get_i64("ops").unwrap(), 1);
         forget(77, "d", "c", None);
-        assert_eq!(latency_stats(77, "d", "c", false).get_document("reads").unwrap().get_i64("ops").unwrap(), 0);
+        assert_eq!(
+            latency_stats(77, "d", "c", false)
+                .get_document("reads")
+                .unwrap()
+                .get_i64("ops")
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
     fn the_planned_index_has_the_longest_constrained_prefix() {
-        let ix: Vec<(&str, Vec<&str>)> =
-            vec![("_id_", vec!["_id"]), ("a_1", vec!["a"]), ("a_1_b_1", vec!["a", "b"])];
+        let ix: Vec<(&str, Vec<&str>)> = vec![
+            ("_id_", vec!["_id"]),
+            ("a_1", vec!["a"]),
+            ("a_1_b_1", vec!["a", "b"]),
+        ];
         let name = |f: Document, s: Option<Document>| pick(&ix, &f, s.as_ref()).map(|i| ix[i].0);
         assert_eq!(name(doc! {"a": 1, "b": {"$gt": 2}}, None), Some("a_1_b_1"));
         assert_eq!(name(doc! {"$and": [{"a": 1}]}, None), Some("a_1"));

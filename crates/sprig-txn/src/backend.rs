@@ -273,6 +273,17 @@ pub trait TxnBackend: Send + Sync + 'static {
 
     /// Out-of-band operations.
     fn admin(&self) -> Arc<dyn ClusterAdmin>;
+
+    /// Sprig 2PC's relay fence (decision Q36): the tenant's connections to
+    /// `cluster` pass through the writer node's agent relay, which keeps a
+    /// held branch's connection open when its gateway goes away and fences
+    /// the tenant until the branch is recovered. The coordinator then lets
+    /// the agent finish a held branch it gave up on, instead of replaying
+    /// it itself. Off by default.
+    fn relay_fenced(&self, cluster: &ClusterId) -> bool {
+        let _ = cluster;
+        false
+    }
 }
 
 /// Out-of-band, autocommit operations on a cluster's writer. The
@@ -335,6 +346,60 @@ pub trait ClusterAdmin: Send + Sync {
     ) -> DbResult<()> {
         let _ = (cluster, schema, dtid, gtrid, stmts);
         Err(DbError::new(1235, "this backend keeps no redo"))
+    }
+
+    /// [`Self::insert_redo`] for a held branch whose connection is backend
+    /// thread `holder`. On a relay-fenced cluster (decision Q36) this goes
+    /// to the writer node's agent, which registers the holder before it
+    /// writes the rows, so the holder's loss from then on fences the
+    /// tenant until the rows are recovered. Elsewhere it is
+    /// [`Self::insert_redo`].
+    async fn insert_redo_held(
+        &self,
+        cluster: &ClusterId,
+        schema: &str,
+        dtid: Dtid,
+        gtrid: &crate::xid::Gtrid,
+        stmts: &[crate::redo::RedoStmt],
+        holder: u64,
+    ) -> DbResult<()> {
+        let _ = holder;
+        self.insert_redo(cluster, schema, dtid, gtrid, stmts).await
+    }
+
+    /// Where a held branch's redo stands (decision Q37: a session settles
+    /// its own phase-2 stragglers before it reads the cluster again).
+    async fn redo_state(
+        &self,
+        cluster: &ClusterId,
+        schema: &str,
+        dtid: Dtid,
+    ) -> DbResult<crate::redo::RedoState> {
+        let all = self.redo_branches(cluster).await?;
+        Ok(all
+            .iter()
+            .find(|b| b.dtid == dtid && b.schema == schema)
+            .map_or(crate::redo::RedoState::Gone, |b| match b.mark {
+                Some(crate::redo::RedoMark::Done) => crate::redo::RedoState::Done,
+                Some(crate::redo::RedoMark::Replayed) => crate::redo::RedoState::Replayed,
+                None => crate::redo::RedoState::Unfinished,
+            }))
+    }
+
+    /// The coordinator gave up finishing a held branch (its phase 2
+    /// failed). On a relay-fenced cluster the agent then treats the holder
+    /// as lost: it fences the tenant, ends the holder and recovers the
+    /// branch at once. Elsewhere nothing happens (the resolver, or the
+    /// session's next statement, replays it).
+    async fn abandon_held(
+        &self,
+        cluster: &ClusterId,
+        schema: &str,
+        dtid: Dtid,
+        holder: u64,
+    ) -> DbResult<()> {
+        let _ = (cluster, schema, dtid, holder);
+        Ok(())
     }
 
     /// Sprig 2PC (R3): makes sure `schema` has its redo table before a

@@ -990,7 +990,12 @@ pub fn narrow(
         }
     }
     let view_of = |o: &ObjectId, lower: &str| {
-        policy_view(names.get(&(*o, lower.to_owned())).map_or(lower, String::as_str), *o)
+        policy_view(
+            names
+                .get(&(*o, lower.to_owned()))
+                .map_or(lower, String::as_str),
+            *o,
+        )
     };
     let db_of = |schema: &str| -> Option<DbId> {
         let rest = schema.strip_prefix(&format!("t{tenant}_d"))?;
@@ -1535,10 +1540,14 @@ mod tests {
         );
         physical.extend(element_views.iter().map(|n| (s.clone(), (*n).to_owned())));
         // u2 defines the views: it keeps reading the tables.
-        let defs = ["__sprig_rls_db0", "__sprig_rls___sprig_ke_db0", "__sprig_rls___sprig_kz_db0"]
-            .iter()
-            .map(|v| ("t42_u2".to_owned(), (*v).to_owned()))
-            .collect();
+        let defs = [
+            "__sprig_rls_db0",
+            "__sprig_rls___sprig_ke_db0",
+            "__sprig_rls___sprig_kz_db0",
+        ]
+        .iter()
+        .map(|v| ("t42_u2".to_owned(), (*v).to_owned()))
+        .collect();
         narrow(&mut want, &cat, &bound, &physical, &defs);
         let u1 = &want["t42_u1"];
         assert_eq!(db_row_for(u1, &s), Some(all.minus(sel)));

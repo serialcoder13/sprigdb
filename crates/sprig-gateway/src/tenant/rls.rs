@@ -1355,9 +1355,12 @@ pub async fn bind_tree(
     if tree.len() as u64 > max {
         // RL58: the subtree goes to `__sprig_sys.__sprig_subtree` on the
         // tenant's clusters, and the statement reads it there.
-        let clusters = crate::exec::router::placement_digest(svc, cat)
+        let mut clusters = crate::exec::router::placement_digest(svc, cat)
             .map(|p| p.1)
             .unwrap_or_default();
+        if !clusters.contains(&ts.principal.backend.cluster) {
+            clusters.push(ts.principal.backend.cluster.clone());
+        }
         if clusters.is_empty() {
             return Err(sprig_sql::rls::unsupported(&format!(
                 "a subtree of {} tenants (rls.inline_subtree_max is {max}) before the tenant's \

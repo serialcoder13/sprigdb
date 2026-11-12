@@ -438,7 +438,9 @@ impl Field<'_> {
             }
             Bson::Boolean(b) => SqlPred::exact(format!("{c} = 90 AND {n} = {}", u8::from(*b))),
             Bson::Null | Bson::Undefined => SqlPred::exact(format!("{c} = 20")),
-            Bson::ObjectId(o) => SqlPred::exact(format!("{c} = 80 AND {n} = 0 AND {s} = '{}'", o.to_hex())),
+            Bson::ObjectId(o) => {
+                SqlPred::exact(format!("{c} = 80 AND {n} = 0 AND {s} = '{}'", o.to_hex()))
+            }
             Bson::DateTime(d) => match iso_from_ms(d.timestamp_millis()) {
                 Some(iso) => SqlPred::exact(format!("{c} = 100 AND {n} = 0 AND {s} = '{iso}'")),
                 None => SqlPred::sup(format!("{c} = 100")),
@@ -488,7 +490,11 @@ impl Field<'_> {
                         SqlPred::exact(format!("{c} = 40 AND {n} = 0 AND {s} {o} {}", str_lit(st)))
                     } else {
                         let left: String = st.chars().take(S_CHARS).collect();
-                        SqlPred::sup(format!("{c} = 40 AND {n} = 0 AND {s} {} {}", incl(o), str_lit(&left)))
+                        SqlPred::sup(format!(
+                            "{c} = 40 AND {n} = 0 AND {s} {} {}",
+                            incl(o),
+                            str_lit(&left)
+                        ))
                     }
                 }
                 Bson::ObjectId(x) => {

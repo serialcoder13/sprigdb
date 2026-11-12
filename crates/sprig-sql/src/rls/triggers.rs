@@ -321,7 +321,10 @@ impl TriggerSpec<'_> {
         };
         let mut views = vec![view(super::views::view_name(from, self.object), false)];
         if columns.iter().any(|(_, inv)| *inv) {
-            views.push(view(super::views::hidden_view_name(from, self.object), true));
+            views.push(view(
+                super::views::hidden_view_name(from, self.object),
+                true,
+            ));
         } else {
             views.push(format!(
                 "DROP VIEW IF EXISTS {}",
@@ -569,7 +572,10 @@ mod tests {
             physical: &physical,
         };
         let [ke, kz] = kv_element_tables("db0");
-        assert_eq!((ke.as_str(), kz.as_str()), ("__sprig_ke_db0", "__sprig_kz_db0"));
+        assert_eq!(
+            (ke.as_str(), kz.as_str()),
+            ("__sprig_ke_db0", "__sprig_kz_db0")
+        );
         let cols = [
             ("k".to_owned(), false),
             ("e".to_owned(), false),
@@ -604,7 +610,9 @@ mod tests {
             "{}",
             v[1]
         );
-        assert!(super::super::views::is_policy_view("__sprig_rls___sprig_kz_db0"));
+        assert!(super::super::views::is_policy_view(
+            "__sprig_rls___sprig_kz_db0"
+        ));
         assert_eq!(
             super::super::views::unswap("FROM `__sprig_rls___sprig_kz_db0` AS `__sprig_kz_db0` x"),
             "FROM `__sprig_kz_db0` x"

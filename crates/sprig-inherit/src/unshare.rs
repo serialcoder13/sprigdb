@@ -194,8 +194,7 @@ pub async fn after_drop(
                 // Below a cut child: the levels from that child down.
                 let above: Vec<&TreeTable> =
                     t.ancestors[i..].iter().filter_map(|a| at.get(a)).collect();
-                let lost =
-                    lost_keys(r, t.tenant, &table, &key, &above, c, ctx.lctn, "ovr").await?;
+                let lost = lost_keys(r, t.tenant, &table, &key, &above, c, ctx.lctn, "ovr").await?;
                 for part in lost.chunks(CHUNK) {
                     out.orphaned += orphan(r, t.tenant, &table, &key, Some(part)).await?;
                 }
@@ -229,15 +228,13 @@ async fn table_of(
     let Some(d) = cat.database(&database_key(&c.db, lctn)) else {
         return Ok(None);
     };
-    Ok(st
-        .object_named(d.db_id, &c.table, lctn)
-        .map(|o| {
-            (
-                format!("{}.{}", q(&t.schema), q(&o.table)),
-                o.key.clone(),
-                o.object_id,
-            )
-        }))
+    Ok(st.object_named(d.db_id, &c.table, lctn).map(|o| {
+        (
+            format!("{}.{}", q(&t.schema), q(&o.table)),
+            o.key.clone(),
+            o.object_id,
+        )
+    }))
 }
 
 /// Removes tenant `t`'s hide rows (root space): all of them, or those of
@@ -333,7 +330,8 @@ async fn drop_copy(r: &mut dyn Runner, t: TenantId, schema: &str, object: Object
         .await?;
         return Ok(0);
     }
-    r.ctl_query(t, &format!("DROP TABLE IF EXISTS {copy}")).await?;
+    r.ctl_query(t, &format!("DROP TABLE IF EXISTS {copy}"))
+        .await?;
     Ok(1)
 }
 

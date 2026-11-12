@@ -169,9 +169,6 @@ fn meta_survives_project_and_replace_root() {
         assert_eq!(out[0].get("s"), Some(&Bson::Double(0.5)), "{stage}");
         assert_eq!(out[0].get("t"), Some(&Bson::Double(0.75)), "{stage}");
     }
-    let out = run(
-        docs,
-        vec![doc! {"$group": {"_id": "$a"}}, meta],
-    );
+    let out = run(docs, vec![doc! {"$group": {"_id": "$a"}}, meta]);
     assert_eq!(out[0].get("s"), Some(&Bson::Null));
 }

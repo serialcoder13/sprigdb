@@ -161,7 +161,11 @@ async fn inserts_write_each_level() {
          'vehicle', '/asset/vehicle/')"
     );
     assert_eq!(f.log.last().unwrap(), "RELEASE SAVEPOINT sprig_types");
-    assert!(!f.log.iter().any(|l| l.contains("innodb_snapshot_isolation")));
+    assert!(
+        !f.log
+            .iter()
+            .any(|l| l.contains("innodb_snapshot_isolation"))
+    );
 }
 
 /// bugfix-54 (T17's leftover): inside a client's transaction on a session
@@ -222,7 +226,11 @@ async fn nested_plans_turn_snapshot_isolation_off() {
     run("INSERT INTO vehicle VALUES (9, 'V', 4, 'VIN')", &mut f)
         .await
         .unwrap();
-    assert!(!f.log.iter().any(|l| l.contains("innodb_snapshot_isolation")));
+    assert!(
+        !f.log
+            .iter()
+            .any(|l| l.contains("innodb_snapshot_isolation"))
+    );
 }
 
 #[tokio::test]

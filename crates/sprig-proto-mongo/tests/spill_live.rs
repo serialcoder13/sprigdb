@@ -25,7 +25,9 @@
     clippy::print_stderr,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
-    clippy::cast_precision_loss
+    clippy::cast_precision_loss,
+    clippy::many_single_char_names,
+    clippy::cast_sign_loss
 )]
 
 use std::time::Instant;
@@ -95,7 +97,9 @@ async fn fill(db: &Database, n: i64) {
             .await
             .unwrap();
     }
-    let small: Vec<Document> = (0..13).map(|i| doc! {"_id": i, "name": format!("h{i}")}).collect();
+    let small: Vec<Document> = (0..13)
+        .map(|i| doc! {"_id": i, "name": format!("h{i}")})
+        .collect();
     db.collection::<Document>("small")
         .insert_many(small)
         .await
@@ -117,7 +121,11 @@ fn pipelines() -> Vec<(&'static str, Vec<Document>, bool)> {
     // (name, pipeline, MongoDB answers 292 without allowDiskUse)
     vec![
         ("sort", vec![doc! {"$sort": {"v": 1, "_id": 1}}], true),
-        ("sort_limit", vec![doc! {"$sort": {"f": -1}}, doc! {"$limit": 50}], false),
+        (
+            "sort_limit",
+            vec![doc! {"$sort": {"f": -1}}, doc! {"$limit": 50}],
+            false,
+        ),
         (
             "group",
             vec![
@@ -145,7 +153,9 @@ fn pipelines() -> Vec<(&'static str, Vec<Document>, bool)> {
         ),
         (
             "bucket_auto",
-            vec![doc! {"$bucketAuto": {"groupBy": "$v", "buckets": 7, "output": {"n": {"$sum": 1}, "ids": {"$push": "$_id"}}}}],
+            vec![
+                doc! {"$bucketAuto": {"groupBy": "$v", "buckets": 7, "output": {"n": {"$sum": 1}, "ids": {"$push": "$_id"}}}},
+            ],
             false,
         ),
         (
@@ -162,12 +172,17 @@ fn pipelines() -> Vec<(&'static str, Vec<Document>, bool)> {
         ),
         (
             "sort_by_count",
-            vec![doc! {"$sortByCount": "$h"}, doc! {"$sort": {"count": -1, "_id": 1}}],
+            vec![
+                doc! {"$sortByCount": "$h"},
+                doc! {"$sort": {"count": -1, "_id": 1}},
+            ],
             false,
         ),
         (
             "bucket",
-            vec![doc! {"$bucket": {"groupBy": "$v", "boundaries": [0, 100, 500, 900], "default": "other", "output": {"n": {"$sum": 1}, "mx": {"$max": "$f"}, "ids": {"$push": "$_id"}}}}],
+            vec![
+                doc! {"$bucket": {"groupBy": "$v", "boundaries": [0, 100, 500, 900], "default": "other", "output": {"n": {"$sum": 1}, "mx": {"$max": "$f"}, "ids": {"$push": "$_id"}}}},
+            ],
             false,
         ),
         (
@@ -211,7 +226,8 @@ fn pipelines() -> Vec<(&'static str, Vec<Document>, bool)> {
 
 #[tokio::test]
 async fn spill_matches_mongodb() {
-    let (Some(gw), Some(rf)) = (var("SPRIG_TEST_MONGO_URI"), var("SPRIG_TEST_MONGO_REF_URI")) else {
+    let (Some(gw), Some(rf)) = (var("SPRIG_TEST_MONGO_URI"), var("SPRIG_TEST_MONGO_REF_URI"))
+    else {
         eprintln!("SPRIG_TEST_MONGO_URI / SPRIG_TEST_MONGO_REF_URI not set: skipped");
         return;
     };
@@ -265,8 +281,16 @@ async fn spill_matches_mongodb() {
         } else {
             bad += 1;
             if let (Ok(a), Ok(b)) = (&want, &got) {
-                let i = a.iter().zip(b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
-                eprintln!("  first difference at {i}:\n    mongodb {:?}\n    sprigdb {:?}", a.get(i), b.get(i));
+                let i = a
+                    .iter()
+                    .zip(b)
+                    .position(|(x, y)| x != y)
+                    .unwrap_or(a.len().min(b.len()));
+                eprintln!(
+                    "  first difference at {i}:\n    mongodb {:?}\n    sprigdb {:?}",
+                    a.get(i),
+                    b.get(i)
+                );
             }
         }
         eprintln!(
@@ -280,7 +304,10 @@ async fn spill_matches_mongodb() {
         let got = agg(&gdb, &p, false).await;
         let codes = (want.as_ref().err().copied(), got.as_ref().err().copied());
         if refuses {
-            eprintln!("  allowDiskUse false: mongodb {:?}, sprigdb {:?}", codes.0, codes.1);
+            eprintln!(
+                "  allowDiskUse false: mongodb {:?}, sprigdb {:?}",
+                codes.0, codes.1
+            );
             assert_eq!(codes.1, Some(292), "{name} without allowDiskUse");
         }
         // MongoDB 8.0's `$bucketAuto` limit is a fixed 100 MB (no
@@ -289,7 +316,10 @@ async fn spill_matches_mongodb() {
             ok += 1;
         } else {
             bad += 1;
-            eprintln!("  allowDiskUse false DIFFERENT: mongodb {:?}, sprigdb {:?}", codes.0, codes.1);
+            eprintln!(
+                "  allowDiskUse false DIFFERENT: mongodb {:?}, sprigdb {:?}",
+                codes.0, codes.1
+            );
         }
     }
     // Explain reports the spills (MongoDB 8.2's names).
@@ -308,7 +338,13 @@ async fn spill_matches_mongodb() {
         .run_command(doc! {"explain": {"aggregate": "c", "pipeline": [{"$group": {"_id": "$g", "ids": {"$push": "$s"}}}, {"$project": {"_id": 1}}], "cursor": {}}, "verbosity": "executionStats"})
         .await
         .unwrap();
-    eprintln!("mongodb explain (group): {}", rex.get("stages").or_else(|| rex.get("executionStats")).cloned().unwrap_or(Bson::Null));
+    eprintln!(
+        "mongodb explain (group): {}",
+        rex.get("stages")
+            .or_else(|| rex.get("executionStats"))
+            .cloned()
+            .unwrap_or(Bson::Null)
+    );
     eprintln!("spill differential: {ok} same, {bad} different");
     let _ = gdb.drop().await;
     let _ = rdb.drop().await;
@@ -367,7 +403,9 @@ async fn spill_files_go_away() {
         .unwrap();
     assert_eq!(files(&dir), 0, "killCursors deletes the files");
     // Read to the end: none after.
-    let all = agg(&db, &[doc! {"$sort": {"v": -1, "_id": 1}}], true).await.unwrap();
+    let all = agg(&db, &[doc! {"$sort": {"v": -1, "_id": 1}}], true)
+        .await
+        .unwrap();
     assert_eq!(all.len(), 8000);
     assert_eq!(files(&dir), 0, "an exhausted cursor deletes the files");
     // A command that fails after spilling: none after.
@@ -414,7 +452,11 @@ async fn group_over_100_mb() {
                 .unwrap();
         }
     }
-    eprintln!("inserted {n} documents of about 2.5 KB ({} MB) in {:?}", n * 2540 / 1_000_000, t.elapsed());
+    eprintln!(
+        "inserted {n} documents of about 2.5 KB ({} MB) in {:?}",
+        n * 2540 / 1_000_000,
+        t.elapsed()
+    );
     let p = vec![
         doc! {"$group": {"_id": "$k", "docs": {"$push": "$$ROOT"}}},
         doc! {"$project": {"n": {"$size": "$docs"}, "first": {"$first": "$docs._id"}}},
@@ -426,7 +468,11 @@ async fn group_over_100_mb() {
     assert_eq!(e, 292);
     let t = Instant::now();
     let out = agg(&db, &p, true).await.unwrap();
-    eprintln!("allowDiskUse true: {} groups in {:?}", out.len(), t.elapsed());
+    eprintln!(
+        "allowDiskUse true: {} groups in {:?}",
+        out.len(),
+        t.elapsed()
+    );
     assert_eq!(out.len(), 1000);
     for (i, d) in out.iter().enumerate() {
         assert_eq!(d.get_i64("_id").unwrap(), i as i64);
@@ -434,7 +480,11 @@ async fn group_over_100_mb() {
         assert_eq!(d.get_i64("first").unwrap(), i as i64);
     }
     // The default (no allowDiskUse) spills too, as MongoDB 6.0+.
-    let cur = db.collection::<Document>("c").aggregate(p.clone()).await.unwrap();
+    let cur = db
+        .collection::<Document>("c")
+        .aggregate(p.clone())
+        .await
+        .unwrap();
     let v: Vec<Document> = cur.try_collect().await.unwrap();
     assert_eq!(v.len(), 1000);
     let _ = db.drop().await;

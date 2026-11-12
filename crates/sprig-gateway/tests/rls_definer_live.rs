@@ -143,15 +143,15 @@ async fn definer_routines_apply_their_definers_policies() {
         || format!("{got:?}"),
     );
     let mine = n(&mut a, "SELECT COUNT(*) FROM docs").await;
-    ck.ok("after the call: alice's own rows again", mine == Ok(1), || {
-        format!("{mine:?}")
-    });
-    let got = call(&mut a, "CALL inv_docs()").await;
     ck.ok(
-        "invoker procedure: the caller's rows",
-        got == Ok(1),
-        || format!("{got:?}"),
+        "after the call: alice's own rows again",
+        mine == Ok(1),
+        || format!("{mine:?}"),
     );
+    let got = call(&mut a, "CALL inv_docs()").await;
+    ck.ok("invoker procedure: the caller's rows", got == Ok(1), || {
+        format!("{got:?}")
+    });
     let got = pair(&mut a, "SELECT total(), (SELECT COUNT(*) FROM docs)").await;
     ck.ok(
         "definer function: the definer's rows, the rest of the statement the caller's",
@@ -167,9 +167,11 @@ async fn definer_routines_apply_their_definers_policies() {
         || format!("{e:?}"),
     );
     let mine = n(&mut a, "SELECT COUNT(*) FROM docs").await;
-    ck.ok("after a failed call: alice's own rows", mine == Ok(1), || {
-        format!("{mine:?}")
-    });
+    ck.ok(
+        "after a failed call: alice's own rows",
+        mine == Ok(1),
+        || format!("{mine:?}"),
+    );
     // Alice's own definer function, called by the administrator: alice's
     // rows (PostgreSQL's SECURITY DEFINER).
     let r = a
@@ -331,12 +333,16 @@ async fn large_subtrees_read_the_subtree_table() {
         let r = admin.query_drop(&q).await;
         ck.ok(&format!("setup: {q}"), r.is_ok(), || format!("{r:?}"));
     }
-    let mut a = mysql_async::Conn::new(opts("rlst_alice", PW)).await.unwrap();
+    let mut a = mysql_async::Conn::new(opts("rlst_alice", PW))
+        .await
+        .unwrap();
     let q = format!("SELECT id FROM {SDB}.orgs ORDER BY id");
     let got = ids(&mut a, &q).await;
-    ck.ok("inlined subtree: own and child rows", got == Ok(vec![1, 2]), || {
-        format!("{got:?}")
-    });
+    ck.ok(
+        "inlined subtree: own and child rows",
+        got == Ok(vec![1, 2]),
+        || format!("{got:?}"),
+    );
     // Above the inline limit (the tree has 2 tenants).
     setting(&ctl, "rls.inline_subtree_max", Some("1"), &scope);
     // The setting is live; give it a few seconds to reach the gateway.
@@ -347,10 +353,16 @@ async fn large_subtrees_read_the_subtree_table() {
         got == Ok(vec![1, 2]),
         || format!("{got:?}"),
     );
-    let got = ids(&mut a, &format!("SELECT COUNT(*) FROM {SDB}.orgs WHERE org = 99")).await;
-    ck.ok("other tenants' rows stay hidden", got == Ok(vec![0]), || {
-        format!("{got:?}")
-    });
+    let got = ids(
+        &mut a,
+        &format!("SELECT COUNT(*) FROM {SDB}.orgs WHERE org = 99"),
+    )
+    .await;
+    ck.ok(
+        "other tenants' rows stay hidden",
+        got == Ok(vec![0]),
+        || format!("{got:?}"),
+    );
     let got = ids(&mut admin, &format!("SELECT COUNT(*) FROM {SDB}.orgs")).await;
     ck.ok("the manager reads every row", got == Ok(vec![3]), || {
         format!("{got:?}")
@@ -372,7 +384,9 @@ async fn large_subtrees_read_the_subtree_table() {
                 .prefer_socket(false)
                 .ssl_opts(mysql_async::SslOpts::default().with_danger_accept_invalid_certs(true))
         };
-        let mut root = mysql_async::Conn::new(raw("root".into(), root_pw)).await.unwrap();
+        let mut root = mysql_async::Conn::new(raw("root".into(), root_pw))
+            .await
+            .unwrap();
         let uid: u64 = root
             .query_first(format!(
                 "SELECT MAX(user_id) FROM t{tid}_sprig.users WHERE name = 'rlst_alice'"
@@ -419,7 +433,9 @@ async fn large_subtrees_read_the_subtree_table() {
                   "sub": [], "subt": true}
         })
         .to_string();
-        b.query_drop(format!("SET @sprig_rls = '{ctx}'")).await.unwrap();
+        b.query_drop(format!("SET @sprig_rls = '{ctx}'"))
+            .await
+            .unwrap();
         let mut seen = Vec::new();
         for s in &schemas {
             seen.extend(

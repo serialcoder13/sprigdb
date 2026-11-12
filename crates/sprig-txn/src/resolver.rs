@@ -71,6 +71,9 @@ pub struct RedoReport {
     pub hazards: usize,
     /// Not decided yet.
     pub unresolved: usize,
+    /// The cluster's redo rows were left alone: its agents' relay fence
+    /// recovers them (decision Q36).
+    pub fenced: bool,
 }
 
 /// What a drain did.
@@ -101,6 +104,10 @@ pub struct Resolver {
     locator: Arc<dyn AnchorLocator>,
     cfg: RwLock<ResolverConfig>,
     first_seen: Mutex<HashMap<(ClusterId, Xid), Instant>>,
+    /// Clusters whose tenants' connections pass the agents' relay fence
+    /// (decision Q36): their redo rows are the agents' to recover, inside
+    /// the fence, so [`Resolver::scan_redo`] leaves them alone.
+    fenced: RwLock<std::collections::BTreeSet<ClusterId>>,
 }
 
 impl std::fmt::Debug for Resolver {
@@ -131,7 +138,54 @@ impl Resolver {
             locator,
             cfg: RwLock::new(cfg),
             first_seen: Mutex::new(HashMap::new()),
+            fenced: RwLock::new(std::collections::BTreeSet::new()),
         }
+    }
+
+    /// Names the clusters whose redo rows the agents' relay fence recovers
+    /// (decision Q36); [`Resolver::scan_redo`] skips them. Replaces the
+    /// previous set.
+    pub fn set_fenced(&self, clusters: impl IntoIterator<Item = ClusterId>) {
+        *self.fenced.write().unwrap_or_else(PoisonError::into_inner) =
+            clusters.into_iter().collect();
+    }
+
+    fn is_fenced(&self, cluster: &ClusterId) -> bool {
+        self.fenced
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(cluster)
+    }
+
+    /// Recovers held branches on `cluster` now, whatever their age: a
+    /// committed branch is replayed, an aborted one dropped (the same
+    /// steps as [`Resolver::scan_redo`]). `tenant` limits it to one
+    /// tenant. The relay fence runs this for a tenant whose connections it
+    /// has fenced, and for every tenant before its relay opens; nothing
+    /// else may write those rows meanwhile.
+    ///
+    /// # Errors
+    /// 39100 when the redo rows can't be read.
+    pub async fn recover_held(
+        &self,
+        cluster: &ClusterId,
+        tenant: Option<TenantId>,
+    ) -> Result<RedoReport> {
+        let held = self.admin.redo_branches(cluster).await.map_err(|e| {
+            SprigError::new(
+                SprigCode::ClusterUnavailable,
+                format!("redo rows on {cluster}: {e}"),
+            )
+        })?;
+        let mut r = RedoReport::default();
+        for b in held
+            .iter()
+            .filter(|b| tenant.is_none_or(|t| b.gtrid.tenant == t))
+        {
+            r.listed += 1;
+            self.finish_redo(cluster, b, &mut r).await;
+        }
+        Ok(r)
     }
 
     /// The configuration now.
@@ -350,6 +404,12 @@ impl Resolver {
     /// # Errors
     /// 39100 when the rows can't be listed.
     pub async fn scan_redo(&self, cluster: &ClusterId) -> Result<RedoReport> {
+        if self.is_fenced(cluster) {
+            return Ok(RedoReport {
+                fenced: true,
+                ..RedoReport::default()
+            });
+        }
         let held = self.admin.redo_branches(cluster).await.map_err(|e| {
             SprigError::new(
                 SprigCode::ClusterUnavailable,

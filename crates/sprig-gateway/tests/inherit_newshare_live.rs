@@ -463,28 +463,59 @@ async fn a_dropped_share_takes_the_childs_hides_and_copy_with_it() {
     let db = format!("bf13dh{}", suffix());
     let mut p = conn(&e.addr, &e.parent).await;
     let mut c = conn(&e.addr, &e.child).await;
-    for x in [&mut p, &mut c] {
+    // The share's mode is its space's `inherit.merge` (as groups_live sets
+    // it).
+    for (x, t) in [(&mut p, &e.parent), (&mut c, &e.child)] {
+        ok(x, &format!("USE SPACE `{t}`")).await;
         ok(x, "SPRIG SET inherit.merge = 'materialized'").await;
     }
+    // Copies other databases of the deployment hold (none share while
+    // this runs, as for the share views).
+    let others: Option<std::collections::BTreeSet<String>> =
+        copy_tables().await.map(|v| v.into_iter().collect());
     share(&mut p, &db).await;
     ok(&mut c, &format!("USE {db}")).await;
     let seen = rows_become(&mut c, &db, &[("1", "parent one"), ("2", "parent two")]).await;
     assert_eq!(seen, pairs(&[("1", "parent one"), ("2", "parent two")]));
+    // The share's copy (the worker seeds it).
+    let mine = |v: Vec<String>, others: &std::collections::BTreeSet<String>| -> Vec<String> {
+        v.into_iter().filter(|t| !others.contains(t)).collect()
+    };
+    if let Some(o) = &others {
+        let mut copy = Vec::new();
+        for _ in 0..80 {
+            copy = mine(copy_tables().await.unwrap(), o);
+            if !copy.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        println!("the share's copy: {copy:?}");
+        assert!(
+            !copy.is_empty(),
+            "no copy table: the share isn't materialized"
+        );
+    }
     // The child hides the parent's record 2.
     ok(&mut c, "DELETE FROM t1 WHERE id = 2").await;
     assert_eq!(rows_of(&mut c, &db).await, pairs(&[("1", "parent one")]));
-    let copies_before = copy_tables().await;
-    if let Some(v) = &copies_before {
-        println!("copies before the drop: {v:?}");
-        assert!(!v.is_empty(), "no copy table: the share isn't materialized");
-    }
 
     ok(&mut p, &format!("USE {db}")).await;
     ok(&mut p, &format!("DROP SHARE {db}_s")).await;
     assert_eq!(rows_of(&mut c, &db).await, pairs(&[]));
-    if let Some(v) = copy_tables().await {
-        println!("copies after the drop: {v:?}");
-        assert!(v.is_empty(), "the copy stayed: {v:?}");
+    if let Some(o) = &others {
+        // Gone at once, or within the worker's next refresh (2 s) when it
+        // was seeding at the moment of the drop.
+        let mut left = Vec::new();
+        for _ in 0..40 {
+            left = mine(copy_tables().await.unwrap(), o);
+            if left.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        println!("the share's copy 10 s after the drop at most: {left:?}");
+        assert!(left.is_empty(), "the copy stayed: {left:?}");
     }
 
     // A new share of the table: the old share's hide is gone with it.
@@ -504,7 +535,8 @@ async fn a_dropped_share_takes_the_childs_hides_and_copy_with_it() {
     ok(&mut p, &format!("DROP SHARE {db}_s")).await;
     ok(&mut p, &format!("DROP DATABASE {db}")).await;
     ok(&mut c, &format!("DROP DATABASE IF EXISTS {db}")).await;
-    for x in [&mut p, &mut c] {
+    for (x, t) in [(&mut p, &e.parent), (&mut c, &e.child)] {
+        ok(x, &format!("USE SPACE `{t}`")).await;
         ok(x, "SPRIG RESET inherit.merge").await;
     }
 }

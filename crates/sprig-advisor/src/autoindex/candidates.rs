@@ -535,11 +535,12 @@ impl Generator {
             if super::doc::is_collection_table(stats) {
                 let cands = super::doc::candidates(f, &t.alias, object, stats);
                 if cands.is_empty() {
-                    out.skipped.push(skip(if super::doc::has_multikey(&f.shape, &t.alias) {
-                        "doc_multikey"
-                    } else {
-                        "no_doc_path"
-                    }));
+                    out.skipped
+                        .push(skip(if super::doc::has_multikey(&f.shape, &t.alias) {
+                            "doc_multikey"
+                        } else {
+                            "no_doc_path"
+                        }));
                 }
                 out.candidates.extend(cands);
                 continue;
