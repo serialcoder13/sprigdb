@@ -1,0 +1,25 @@
+[package]
+name = "sprig-docs-gen"
+description = "Writes and checks SprigDB's generated reference docs (docs/reference/, chapter 55)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Linked with the same role crates as the `sprigdb` binary, so the settings
+# registry holds every key the server has.
+[dependencies]
+serde_json.workspace = true
+sprig-agent.workspace = true
+sprig-common.workspace = true
+sprig-controller.workspace = true
+sprig-docs = { path = "../sprig-docs" }
+sprig-gateway.workspace = true
+sprig-operator.workspace = true
+sprig-settings.workspace = true
+sprig-worker.workspace = true
+
+[lints]
+workspace = true

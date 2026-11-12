@@ -1,0 +1,1168 @@
+# What each SprigDB error means and what to do about it. Merged into
+# docs/reference/errors.md by `cargo run -p sprig-docs-gen`. Keyed by the
+# MySQL name. `meaning` was seeded from the design notes; add `what_to_do`
+# as guides are written.
+
+[ER_SPRIG_RESERVED_NAME]
+meaning = "Creating an object with a reserved name."
+
+[ER_SPRIG_NAME_REWRITE_UNSUPPORTED]
+meaning = "A name the rewriter can't map safely."
+
+[ER_SPRIG_METADATA_TOO_LARGE]
+meaning = "A SprigDB `information_schema` view would inline more than `names.local_view_max_rows` rows (10,000); narrow by schema or table."
+
+[ER_SPRIG_CATALOG_UNAVAILABLE]
+meaning = "Catalog writer or global tier unreachable."
+
+[ER_SPRIG_CATALOG_CONFLICT]
+meaning = "Catalog row or migration lock busy."
+
+[ER_SPRIG_TENANT_NOT_READY]
+meaning = "No directory entry, or catalog not migrated."
+
+[ER_SPRIG_CATALOG_FORMAT_TOO_NEW]
+meaning = "Catalog format newer than the binary reads."
+
+[ER_SPRIG_CLUSTER_FENCE_FAILED]
+meaning = "A fence could not complete and was rolled back."
+
+[ER_SPRIG_CLUSTER_NOT_FOUND]
+meaning = "No such cluster."
+
+[ER_SPRIG_CLUSTER_EXISTS]
+meaning = "A cluster of that name exists in the DC."
+
+[ER_SPRIG_CLUSTER_STATE_INVALID]
+meaning = "Command doesn't apply in the cluster's state."
+
+[ER_SPRIG_BINLOG_CORRUPT]
+meaning = "An event fails its checksum or can't be decoded."
+
+[ER_SPRIG_BINLOG_DISCONNECTED]
+meaning = "The binlog dump connection dropped (retryable)."
+
+[ER_SPRIG_BINLOG_UNSUPPORTED]
+meaning = "The source needs a binlog feature the reader lacks."
+
+[ER_SPRIG_PLACEMENT_UNAVAILABLE]
+meaning = "No cluster can take the placement, such as a new tenant's catalog (no active cluster, or the `--cluster` asked for isn't one)."
+
+[ER_SPRIG_JOB_NOT_FOUND]
+meaning = "No mover job by that id in the DC."
+
+[ER_SPRIG_SHARD_LOCKED]
+meaning = "Another job holds the shard (R0: the tenant)."
+
+[ER_SPRIG_JOB_STATE_INVALID]
+meaning = "The job's state doesn't allow the request, such as cancelling after the commit."
+
+[ER_SPRIG_JOB_LEASE_LOST]
+meaning = "The worker lost the job (lease ended, or a newer owner's token)."
+
+[ER_SPRIG_MOVE_SOURCE_DIVERGED]
+meaning = "The source no longer has the job's position (purged, lossy failover, incident); the copy restarts."
+
+[ER_SPRIG_MOVE_CUTOVER_ABORTED]
+meaning = "A cutover attempt was aborted; the source stayed authoritative."
+
+[ER_SPRIG_MOVE_VERIFY_FAILED]
+meaning = "Target still differs after `mover.verify_max_repairs` repairs."
+
+[ER_SPRIG_MOVE_UNSUPPORTED]
+meaning = "Statement-based DML, a table without a primary key, or DDL on a copy-and-swap table."
+
+[ER_SPRIG_AUTO_INDEX_NOT_FOUND]
+meaning = "No automatic index or recommendation by that id or name in the tenant."
+
+[ER_SPRIG_AUTO_INDEX_STATE_INVALID]
+meaning = "The index's state doesn't allow the action (approve a non-recommendation, drop a pinned index), or another loop changed it meanwhile."
+
+[ER_SPRIG_SINK_NOT_FOUND]
+meaning = "Unknown sink or connection."
+
+[ER_SPRIG_SINK_EXISTS]
+meaning = "Name in use."
+
+[ER_SPRIG_SINK_PRIVILEGE]
+meaning = "Creating or altering sinks or connections without `SPRIG_SINK_ADMIN`, naming a connection without `USAGE`, or a fan-in sink without `SPRIG_FAN_IN`."
+
+[ER_SPRIG_SINK_DESTINATION_NOT_ALLOWED]
+meaning = "Host not on `sink.destination_allowlist`, or a private, loopback or link-local address not listed literally."
+
+[ER_SPRIG_SINK_RESIDENCY]
+meaning = "The destination's tags don't satisfy the tenant's residency policy, or it has none while the tenant is pinned."
+
+[ER_SPRIG_SINK_CONNECTION_IN_USE]
+meaning = "Dropping a connection that sinks use."
+
+[ER_SPRIG_SINK_CREDENTIALS_INVALID]
+meaning = "A credential the connection type doesn't take, or one it needs is missing."
+
+[ER_SPRIG_SINK_EXACTLY_ONCE_UNSUPPORTED]
+meaning = "`EXACTLY ONCE` for a source and target that can't give it."
+
+[ER_SPRIG_SINK_OPTION_INVALID]
+meaning = "Unknown or invalid option, template or column list."
+
+[ER_SPRIG_SINK_TRANSFORM_INVALID]
+meaning = "The transform writes data, calls out, or isn't deterministic under `EXACTLY ONCE`."
+
+[ER_SPRIG_SINK_SCRIPT_FAILED]
+meaning = "A script raised an error or returned a malformed result (recorded per batch)."
+
+[ER_SPRIG_SINK_DELIVERY_FAILED]
+meaning = "The destination refused or failed; the message carries its status or error code."
+
+[ER_SPRIG_SINK_PAUSED]
+meaning = "The sink paused itself after `sink.pause_after_minutes` of failures."
+
+[ER_SPRIG_SINK_SOURCE_LOST]
+meaning = "The position fell behind the source's retention or the feed reset."
+
+[ER_SPRIG_SINK_SCHEMA_MISMATCH]
+meaning = "The destination table or file schema doesn't fit the records under the schema policy."
+
+[ER_SPRIG_SINK_RECORD_TOO_LARGE]
+meaning = "A record alone exceeds what the destination accepts."
+
+[ER_SPRIG_SINK_QUOTA]
+meaning = "Over `sink.max_per_tenant` or a throughput quota."
+
+[ER_SPRIG_SINK_FENCED]
+meaning = "A task's epoch moved on; the old worker stops (internal)."
+
+[ER_SPRIG_SINK_PLATFORM_IDENTITY_DENIED]
+meaning = "Instance metadata, web identity or role assumption without the operator's permission."
+
+[ER_SPRIG_SINK_OWNER_PRIVILEGE_LOST]
+meaning = "The owner can no longer read the source; the sink pauses."
+
+[ER_SPRIG_SINK_DISABLED]
+meaning = "`sink.enabled` is off, or the target kind isn't in `sink.allowed_kinds`."
+
+[ER_SPRIG_SINK_FORMAT_UNSUPPORTED]
+meaning = "A format or compression the target or source can't produce."
+
+[ER_SPRIG_SINK_STATE]
+meaning = "An operation the sink's state doesn't allow (resume while dropping)."
+
+[ER_SPRIG_SINK_PLATFORM_CONNECTION_NOT_GRANTED]
+meaning = "Naming a platform connection the tenant isn't granted, or one whose grant was revoked (the sink pauses)."
+
+[ER_SPRIG_SINK_PLATFORM_SECRET_UNAVAILABLE]
+meaning = "A worker can't read a platform connection's secret file (alert to operators)."
+
+[ER_SPRIG_SINK_SCRIPT_READ_ONLY]
+meaning = "A script's `db` handle was given anything but a read."
+
+[ER_SPRIG_INHERIT_INSTANCE_QUOTA]
+meaning = "Over `inherit.max_definitions_per_tenant` in the declaring tenant, or `inherit.max_instances_per_tenant` in a member."
+
+[ER_SPRIG_INHERIT_CONFIG_MISSING]
+meaning = "An inherited connection's `REQUIRED` option or credential isn't set for this member; the sink instance waits (state reason, not a publish error)."
+
+[ER_SPRIG_INHERIT_RUN_AS_PRIVILEGE]
+meaning = "The member's `sprig_inherited` principal lacks a privilege the definition's `GRANTS` asks for (a member administrator revoked it); the trigger or sink instance is blocked."
+
+[ER_SPRIG_INHERIT_RESIDENCY]
+meaning = "A fan-in read would carry a member's records where its residency policy forbids; under `residency.cross_tenant_messaging_strict`, a cross-tenant publish would store a message where it forbids."
+
+[ER_SPRIG_INHERIT_BROADCAST_LIMIT]
+meaning = "A broadcast over `inherit.broadcast_max_bytes`, `inherit.broadcasts_per_hour` or `inherit.broadcast_max_members`."
+
+[ER_SPRIG_INHERIT_OUTBOX_PENDING]
+meaning = "`DROP DATABASE` of a database whose cross-tenant outbox still holds committed messages after `inherit.outbox_drain_seconds`; the text names the count (retryable)."
+
+[ER_SPRIG_MQ_NOT_FOUND]
+meaning = "404, amqp:not-found."
+
+[ER_SPRIG_MQ_PRECONDITION]
+meaning = "406."
+
+[ER_SPRIG_MQ_RESOURCE_LOCKED]
+meaning = "405."
+
+[ER_SPRIG_MQ_ACCESS_REFUSED]
+meaning = "403, amqp:unauthorized-access."
+
+[ER_SPRIG_MQ_NOT_IMPLEMENTED]
+meaning = "540, amqp:not-implemented."
+
+[ER_SPRIG_MQ_UNROUTABLE]
+meaning = "312 (return)."
+
+[ER_SPRIG_MQ_QUEUE_FULL]
+meaning = "Nack, rejected."
+
+[ER_SPRIG_MQ_MESSAGE_TOO_LARGE]
+meaning = "406, amqp:message-size-exceeded."
+
+[ER_SPRIG_MQ_ALREADY_SETTLED]
+meaning = "Ack in a transaction of a message already settled or lost to a lease expiry; the transaction rolls back."
+
+[ER_SPRIG_MQ_DELIVERY_TOKEN_INVALID]
+meaning = "Malformed or forged delivery token."
+
+[ER_SPRIG_MQ_OWNER_MOVED]
+meaning = "Owner changed during a call (retryable, 40001)."
+
+[ER_SPRIG_MQ_CONFIRM_TIMEOUT]
+meaning = "Nack."
+
+[ER_SPRIG_MQ_CONSUMER_TIMEOUT]
+meaning = "406, cancel."
+
+[ER_SPRIG_MQ_TXN_NEEDS_XA]
+meaning = "Ack in a transaction would add a non-XA cluster under reject."
+
+[ER_SPRIG_MQ_DELAY_OUT_OF_RANGE]
+meaning = "406."
+
+[ER_SPRIG_MQ_RESIDENCY]
+meaning = "403."
+
+[ER_SPRIG_MQ_QUOTA]
+meaning = "Connection.blocked."
+
+[ER_SPRIG_MQ_VHOST_LIMIT]
+meaning = "406, 530."
+
+[ER_SPRIG_AMQP_FRAME_ERROR]
+meaning = "501, 502, 503, 504, 505."
+
+[ER_SPRIG_AMQP_SASL_FAILED]
+meaning = "403, amqp:unauthorized-access."
+
+[ER_SPRIG_AMQP_PROTOCOL_HEADER]
+meaning = "Header, close."
+
+[ER_SPRIG_AMQP_CHANNEL_LIMIT]
+meaning = "530."
+
+[ER_SPRIG_AMQP10_LINK_REFUSED]
+meaning = "Amqp:not-found, amqp:invalid-field."
+
+[ER_SPRIG_AMQP10_UNSUPPORTED]
+meaning = "Amqp:not-implemented."
+
+[ER_SPRIG_MQ_STREAM_OFFSET]
+meaning = "406."
+
+[ER_SPRIG_MQ_DIRECT_REPLY_TO]
+meaning = "406."
+
+[ER_SPRIG_MQ_MGMT_UNSUPPORTED]
+meaning = "HTTP 501."
+
+[ER_SPRIG_MQ_DEAD_LETTER_CYCLE]
+meaning = "Message dropped in a dead-letter cycle (logged)."
+
+[ER_SPRIG_LOGIN_RATE_LIMITED]
+meaning = "More than `auth.ip_failures_per_minute` failed logins from the address on this gateway; refused before the greeting for `auth.ip_block_seconds`."
+
+[ER_SPRIG_AUTH_UNAVAILABLE]
+meaning = "Directory or catalog unreadable during login, or hashing slot wait over 2 s."
+
+[ER_SPRIG_REMOTE_ACCESS_DENIED]
+meaning = "A pinned tenant's login arrived outside its allowed DCs with `residency.deny_remote_access` on."
+
+[ER_SPRIG_TENANT_SUSPENDED]
+meaning = "The tenant (or an ancestor) is suspended; reported after the credentials verify."
+
+[ER_SPRIG_MFA_REQUIRED]
+meaning = "A second factor is required: impersonation by an administrator `auth.mfa_required` covers, without one in the session; wire logins under `auth.mfa_wire_logins = token_only`."
+
+[ER_SPRIG_IMPERSONATION_DENIED]
+meaning = "Impersonation refused: not an administrator over the user's tenant, the user administers the caller's tenant, `auth.impersonation` off, no reason, too long, or from an impersonation session."
+
+[ER_SPRIG_SESSION_REVOKED]
+meaning = "The session's account was dropped or locked (or lost the password method) while connected; sent at the next safe point, then the connection closes (`auth.close_sessions_on_revoke`)."
+
+[ER_SPRIG_OPERATOR_LOGIN_REQUIRED]
+meaning = "Named operators are in use: the bootstrap token, the legacy DC-operator token or no credential is refused; log in."
+
+[ER_SPRIG_OPERATOR_MFA_REQUIRED]
+meaning = "An operator login needs a TOTP or recovery code."
+
+[ER_SPRIG_OPERATOR_LOGIN_FAILED]
+meaning = "Unknown operator, wrong password or code, disabled or locked (one message)."
+
+[ER_SPRIG_OPERATOR_FORBIDDEN]
+meaning = "The operator's role, DC or token scopes don't cover the call."
+
+[ER_SPRIG_OPERATOR_EXISTS]
+meaning = "An operator of that name exists."
+
+[ER_SPRIG_OPERATOR_NOT_FOUND]
+meaning = "No operator or operator token by that name or id."
+
+[ER_SPRIG_OPERATOR_TOKEN_EXPIRED]
+meaning = "The operator token is expired or revoked, or its owner disabled; log in again."
+
+[ER_SPRIG_AUTH_PROPAGATION_PENDING]
+meaning = "Warning: the change holds in the gateway; MariaDB's grants (or other data centers) haven't applied it yet."
+
+[ER_SPRIG_ROLE_ACTIVATION_TIMEOUT]
+meaning = "Combined role not ready."
+
+[ER_SPRIG_TOO_MANY_ROLE_SETS]
+meaning = "Too many active-role sets."
+
+[ER_SPRIG_GRANT_TARGET_MISMATCH]
+meaning = "Role cycle; wrong resource kind."
+
+[ER_SPRIG_REDIS_ACL_UNSUPPORTED]
+meaning = "Redis rule SprigDB can't represent."
+
+[ER_SPRIG_GRANT_OUTSIDE_SUBTREE]
+meaning = "Grant up or sideways the tree."
+
+[ER_SPRIG_TENANT_NOT_IN_SUBTREE]
+meaning = "USE TENANT or management outside the subtree."
+
+[ER_SPRIG_TENANT_EXISTS]
+meaning = "Tenant name taken by another tenant (the `tenant-names/` guard)."
+
+[ER_SPRIG_TENANT_MOVE_BLOCKED]
+meaning = "Move would strand foreign grants or shares."
+
+[ER_SPRIG_TENANT_HAS_CHILDREN]
+meaning = "Delete of a tenant that has children (`child_count` > 0); delete them first."
+
+[ER_SPRIG_RLS_CHECK_FAILED]
+meaning = "A new row version fails a row-level security policy's `WITH CHECK`, or an upsert's or `REPLACE`'s conflicting row fails `USING`; raised by MariaDB's triggers."
+
+[ER_SPRIG_RLS_POLICY_INVALID]
+meaning = "A policy expression is non-deterministic, reads a variable or parameter, names an internal object or system schema, calls a stored or unknown function, or uses a session function not available yet."
+
+[ER_SPRIG_RLS_POLICY_CYCLE]
+meaning = "Policy subqueries form a cycle."
+
+[ER_SPRIG_RLS_UNSUPPORTED]
+meaning = "A statement can't be policed exactly (`LOAD DATA ... REPLACE`, `HANDLER`, `EXPLAIN`, views and stored code over protected tables, statements that don't parse), writes before MariaDB's checks are deployed, or the authorization engine returns a row filter the gateway can't inject yet."
+
+[ER_SPRIG_DEFINER_REFUSED]
+meaning = "A stored program wasn't recorded with the session's backend account as its definer; the gateway dropped it again."
+
+[ER_SPRIG_AUTHORIZER_UNKNOWN_TO_GATEWAYS]
+meaning = "A change of `auth.authorizer` names an engine some live gateway doesn't list in its registration record; the message names the gateways and their DCs; upgrade them first."
+
+[ER_SPRIG_RLS_DEFINER_DEFAULT]
+meaning = "Note-level warning: a `CREATE PROCEDURE` or `CREATE FUNCTION` without `SQL SECURITY` names policy-protected tables, so it runs as `DEFINER` and applies its definer's policies; the message names the tables."
+
+[ER_SPRIG_UNSUPPORTED_KEY_TYPE]
+meaning = "A key part has a type that cannot be a key."
+
+[ER_SPRIG_UNSUPPORTED_KEY_COLLATION]
+meaning = "A string key uses an unsupported collation."
+
+[ER_SPRIG_STALE_EPOCH]
+meaning = "An internal request names an older epoch."
+
+[ER_SPRIG_SHARD_MAP_UNAVAILABLE]
+meaning = "No cached map, etcd unreachable (08S01)."
+
+[ER_SPRIG_KEY_CHANGE_TOO_LARGE]
+meaning = "A key update would move too many rows."
+
+[ER_SPRIG_KEY_VALUE_UNROUTABLE]
+meaning = "A key value can't be normalized (string not valid in or convertible to the key's character set, unparsable number); the router scatters it."
+
+[ER_SPRIG_PIN_CONFLICT]
+meaning = "A pin contradicts another pin or a key rule (a column type a key can't use, a `COLOCATE` cycle, a co-located table whose columns don't match the group's key, a parent pinned `UNSHARDED` or `REFERENCE`)."
+
+[ER_SPRIG_PIN_NEEDS_REKEY]
+meaning = "In R1, a pin that would change the key or group of a table whose group has already split."
+
+[ER_SPRIG_STATEMENT_NOT_DISTRIBUTABLE]
+meaning = "HY000."
+
+[ER_SPRIG_PLAN_LIMIT_EXCEEDED]
+meaning = "HY000."
+
+[ER_SPRIG_ROUTER_MEMORY_LIMIT]
+meaning = "HY000."
+
+[ER_SPRIG_SHARD_UNAVAILABLE]
+meaning = "HY000."
+
+[ER_SPRIG_SHARD_MAP_CHANGED]
+meaning = "40001."
+
+[ER_SPRIG_EXPLAIN_NOTE]
+meaning = "HY000."
+
+[ER_SPRIG_CROSS_CLUSTER_WRITE_REJECTED]
+meaning = "HY000."
+
+[ER_SPRIG_COMMIT_OUTCOME_UNKNOWN]
+meaning = "08S01."
+
+[ER_SPRIG_PARTIAL_COMMIT]
+meaning = "HY000."
+
+[ER_SPRIG_DTX_ROLLED_BACK]
+meaning = "40001."
+
+[ER_SPRIG_TOO_MANY_BRANCHES]
+meaning = "HY000."
+
+[ER_SPRIG_XA_NOT_SUPPORTED]
+meaning = "HY000."
+
+[ER_SPRIG_HELD_BRANCH_STATEMENT]
+meaning = "R3: a held branch (Sprig 2PC) ran a statement that doesn't replay to the same result (`UUID()`, unseeded `RAND()`, `SYSDATE()`, a variable, `LIMIT` without `ORDER BY` in DML, a binary-protocol write, ...); raised at `COMMIT`, the transaction is rolled back."
+
+[ER_SPRIG_TXN_NOT_IN_DOUBT]
+meaning = "No branch of the named distributed transaction is prepared on the data center's clusters (`sprigctl txn show`, `resolve`)."
+
+[ER_SPRIG_HELD_BRANCH_FENCED]
+meaning = "R3: the node agent's relay refuses the tenant's connections to this node while it recovers a held branch whose holder was lost (Sprig 2PC's relay fence), or while it starts; retry."
+
+[ER_SPRIG_PHASE2_PENDING]
+meaning = "R3: a branch of the session's last distributed commit is still being finished on the cluster the statement needs (phase 2 outran `txn.phase2_wait_ms`, and settling it took longer than `txn.commit_resolve_timeout_ms`); the statement didn't run, retry it."
+
+[ER_SPRIG_ID_BLOCK_UNAVAILABLE]
+meaning = "No ID block: catalog unreachable and cached blocks used up."
+
+[ER_SPRIG_LOOKUP_UNAVAILABLE]
+meaning = "A lookup shard is unreachable for a claim."
+
+[ER_SPRIG_FK_ACTION_NOT_DISTRIBUTED]
+meaning = "A cascading foreign-key action across groups the gateway can't apply: deeper than 15 levels, or a cascaded statement the router can't plan; the statement is rolled back; from 11 November 2026 also `ON DELETE CASCADE`, `SET NULL` or `SET DEFAULT` on a foreign key of an inheritable table."
+
+[ER_SPRIG_ID_VALUE_RESERVED]
+meaning = "An explicit `AUTO_INCREMENT` value lies in an ID block another gateway still holds; use a higher value, leave the column out, or retry after the block's lease."
+
+[ER_SPRIG_SHARD_BUSY]
+meaning = "A split, merge or move job already holds the shard."
+
+[ER_SPRIG_SPLIT_NOT_ALLOWED]
+meaning = "The group isn't active, the range is a single hash, or the split or merge doesn't fit the shard map."
+
+[ER_SPRIG_SHARDED_TENANT_MOVE]
+meaning = "A whole-tenant move (to another cluster or DC) of a tenant with table groups: R1 moves its shards one at a time instead."
+
+[ER_SPRIG_DDL_FAILED]
+meaning = "A change that removes data ran on some shards and failed on the next; it is finished in the background."
+
+[ER_SPRIG_DDL_UNSUPPORTED]
+meaning = "A schema change that can't be distributed across shards in R1."
+
+[ER_SPRIG_DDL_SHARD_DRIFT]
+meaning = "A table's shards disagree on its definition before a change; nothing changed."
+
+[ER_SPRIG_META_UNAVAILABLE]
+meaning = "DC tier has no quorum."
+
+[ER_SPRIG_DC_FENCED]
+meaning = "The tenant's home DC holds no valid DC lease (its permit lapsed or was refused); writes are refused, reads continue."
+
+[ER_SPRIG_SESSION_MOVED]
+meaning = "The tenant moved to another DC while the session held temporary tables, locks or XA; reconnect."
+
+[ER_SPRIG_NOT_LEADER]
+meaning = "Leader lost its session or token; retry against the new leader."
+
+[ER_SPRIG_FAILOVER_REFUSED]
+meaning = "A manual failover can't run: the old home is healthy, the target isn't allowed or lacks a unit, or possible loss wasn't accepted."
+
+[ER_SPRIG_RESIDENCY_INVALID]
+meaning = "A residency policy doesn't parse; the message names where."
+
+[ER_SPRIG_RESIDENCY_UNSATISFIABLE]
+meaning = "A residency policy allows no active DC within the ancestors' sets, its plan can't comply (a pin outside, no eligible cluster), a child is created outside its parent's set, or a change-feed subscription is registered in a DC the tenant's residency excludes."
+
+[ER_SPRIG_TENANT_DEPTH_EXCEEDED]
+meaning = "A create or move would put a tenant deeper than `tenant.max_depth`."
+
+[ER_SPRIG_TENANT_TREE_BUSY]
+meaning = "A tree operation on a subtree with an open move (`tree_lock`)."
+
+[ER_SPRIG_FAILOVER_BLOCKED]
+meaning = "A cluster failover stopped before promoting: loss estimate over the RPO, diverging replicas, the most advanced replica unable to apply its relay log, writer not confirmed down, or `failover.mode` manual."
+
+[ER_SPRIG_PROVISION_NO_HOSTS]
+meaning = "A VM cluster can't be created (too few free hosts in the DC), or a Kubernetes pool is at `maxClusters`."
+
+[ER_SPRIG_NO_DC_CAPACITY]
+meaning = "No data center a new tenant's residency allows is active with a placeable cluster and a fresh `dc-load` record."
+
+[ER_SPRIG_RECOVERY_FENCED]
+meaning = "A write reached a copy that stays fenced after an outage; retry after re-routing."
+
+[ER_SPRIG_ADMISSION_BACKOFF]
+meaning = "A returning DC admits new connections in steps; retry after the 1-5 s delay in the message."
+
+[ER_SPRIG_TENANT_MOVE_REFUSED]
+meaning = "A move between DCs can't start: pinned, not active, already there, another move open, no active cluster in the target, or asked outside the home DC."
+
+[ER_SPRIG_TRANSLATE_LIMIT]
+meaning = "Lateral apply too large."
+
+[ER_SPRIG_CLAUSE_IGNORED]
+meaning = "ENCRYPTION, AUTOEXTEND_SIZE, SECONDARY_ENGINE."
+
+[ER_SPRIG_CURSOR_LIMIT]
+meaning = "MongoDB `SprigCursorLimit`: a new cursor past `mongo.max_cursors_per_tenant` or the cursor memory budget."
+
+[ER_SPRIG_DOC_ID_TOO_LONG]
+meaning = "MongoDB `SprigDocIdTooLong`: the encoded `_id` is over 1024 bytes."
+
+[ER_SPRIG_DOC_FEATURE_UNSUPPORTED]
+meaning = "MongoDB `SprigDocFeatureUnsupported`: `$where`, `mapReduce`, capped and time-series collections, and features not in this release."
+
+[ER_SPRIG_PATH_PUBLISH_TIMEOUT]
+meaning = "MongoDB `SprigPathPublishTimeout`: not every gateway confirmed a new array path within `doc.path_publish_timeout_ms`; nothing of the write committed (retryable)."
+
+[ER_SPRIG_DOC_TOO_DEEP]
+meaning = "MongoDB `SprigDocTooDeep`: a document nested deeper than MariaDB's JSON limit (32 levels)."
+
+[ER_SPRIG_TYPE_NOT_FOUND]
+meaning = "Unknown type."
+
+[ER_SPRIG_TYPE_MULTIPLE_INHERITANCE]
+meaning = "Two parents."
+
+[ER_SPRIG_TYPE_FIELD_CONFLICT]
+meaning = "Field clashes with an inherited one."
+
+[ER_SPRIG_TYPE_ABSTRACT]
+meaning = "Insert of an abstract type."
+
+[ER_SPRIG_TYPE_MISMATCH]
+meaning = "Upsert meets an unrelated type."
+
+[ER_SPRIG_TYPE_COLUMN_READ_ONLY]
+meaning = "Write to a type or path column."
+
+[ER_SPRIG_TYPE_KEY_UPDATE]
+meaning = "Key update on a typed or hierarchical row."
+
+[ER_SPRIG_TYPE_HAS_DEPENDENTS]
+meaning = "Drop without CASCADE."
+
+[ER_SPRIG_TYPE_PATH_TOO_LONG]
+meaning = "Path over 255 characters."
+
+[ER_SPRIG_TYPE_VALIDATION_FAILED]
+meaning = "Schema failure (MongoDB: 121)."
+
+[ER_SPRIG_TYPE_UNSUPPORTED]
+meaning = "A non-goal."
+
+[ER_SPRIG_HIERARCHY_CYCLE]
+meaning = "Move under own descendant."
+
+[ER_SPRIG_HIERARCHY_PARENT_NOT_FOUND]
+meaning = "Missing parent."
+
+[ER_SPRIG_HIERARCHY_TOO_DEEP]
+meaning = "Depth or path length."
+
+[ER_SPRIG_HIERARCHY_HAS_CHILDREN]
+meaning = "Delete under RESTRICT."
+
+[ER_SPRIG_SUBTREE_TOO_LARGE]
+meaning = "Over hierarchy.max_move_rows."
+
+[ER_SPRIG_HIERARCHY_BACKFILL_FAILED]
+meaning = "Orphans or cycles."
+
+[ER_SPRIG_TYPE_DISCRIMINATOR_MISMATCH]
+meaning = "A discriminator value contradicts the subtype written to, or another subtype already declares it."
+
+[ER_SPRIG_KV_NAMESPACE_NOT_FOUND]
+meaning = "NOT_FOUND."
+
+[ER_SPRIG_KV_VERSION_MISMATCH]
+meaning = "FAILED_PRECONDITION, with the current version."
+
+[ER_SPRIG_KV_KEY_EXISTS]
+meaning = "ALREADY_EXISTS."
+
+[ER_SPRIG_KV_INVALID_KEY]
+meaning = "INVALID_ARGUMENT."
+
+[ER_SPRIG_KV_VALUE_INVALID]
+meaning = "INVALID_ARGUMENT (size, codec, schema)."
+
+[ER_SPRIG_KV_TARGET_EXISTS]
+meaning = "ALREADY_EXISTS."
+
+[ER_SPRIG_KV_SUBTREE_TOO_LARGE]
+meaning = "FAILED_PRECONDITION."
+
+[ER_SPRIG_KV_TXN_TOO_LARGE]
+meaning = "INVALID_ARGUMENT."
+
+[ER_SPRIG_KV_FILTER_UNSUPPORTED]
+meaning = "INVALID_ARGUMENT."
+
+[ER_SPRIG_KV_SQL_READ_ONLY]
+meaning = "FAILED_PRECONDITION."
+
+[ER_SPRIG_KV_WRONG_TYPE]
+meaning = "FAILED_PRECONDITION; Redis `WRONGTYPE`."
+
+[ER_SPRIG_KV_ELEMENT_TOO_LONG]
+meaning = "INVALID_ARGUMENT: a field or member over 2024 bytes."
+
+[ER_SPRIG_DIM_MODEL_NOT_FOUND]
+meaning = "Unknown model."
+
+[ER_SPRIG_DIM_UNKNOWN_MEMBER]
+meaning = "Unknown measure, dimension or level."
+
+[ER_SPRIG_DIM_INVALID_MODEL]
+meaning = "Missing table, column or key; transaction-precise versioning."
+
+[ER_SPRIG_DIM_TOO_MANY_GROUPS]
+meaning = "Over analytics.max_groups."
+
+[ER_SPRIG_DIM_NOT_DECOMPOSABLE]
+meaning = "Needs DataFusion before R3."
+
+[ER_SPRIG_DIM_TZ_UNAVAILABLE]
+meaning = "Named zone without time zone tables."
+
+[ER_SPRIG_DIM_VERSIONED_TRUNCATE]
+meaning = "TRUNCATE of a versioned dimension."
+
+[ER_SPRIG_DIM_HISTORY_PURGED]
+meaning = "As_of older than kept history."
+
+[ER_SPRIG_GEO_INVALID]
+meaning = "Bad geometry or coordinates on non-MySQL APIs; the MySQL persona uses MySQL's own errors."
+
+[ER_SPRIG_GEO_SRID_UNSUPPORTED]
+meaning = "A geographic SRID other than 4326."
+
+[ER_SPRIG_GEO_UNSUPPORTED_EXPRESSION]
+meaning = "A geodesic expression the gateway can't evaluate exactly."
+
+[ER_SPRIG_GEO_TOO_COMPLEX]
+meaning = "Over geo.max_vertices."
+
+[ER_SPRIG_RATE_LIMITED]
+meaning = "RESOURCE_EXHAUSTED."
+
+[ER_SPRIG_TXN_HANDLE_UNKNOWN]
+meaning = "ABORTED."
+
+[ER_SPRIG_TXN_HANDLE_EXPIRED]
+meaning = "ABORTED."
+
+[ER_SPRIG_TXN_HANDLE_FORBIDDEN]
+meaning = "PERMISSION_DENIED."
+
+[ER_SPRIG_PAGE_TOKEN_INVALID]
+meaning = "INVALID_ARGUMENT."
+
+[ER_SPRIG_RESULT_TOO_LARGE]
+meaning = "FAILED_PRECONDITION."
+
+[ER_SPRIG_TENANT_AMBIGUOUS]
+meaning = "UNAUTHENTICATED."
+
+[ER_SPRIG_REQUEST_TOO_LARGE]
+meaning = "INVALID_ARGUMENT."
+
+[ER_SPRIG_FORWARD_FAILED]
+meaning = "UNAVAILABLE."
+
+[ER_SPRIG_FUNCTION_NOT_EXPOSED]
+meaning = "NOT_FOUND."
+
+[ER_SPRIG_STREAM_SLOW_CONSUMER]
+meaning = "RESOURCE_EXHAUSTED."
+
+[ER_SPRIG_TRANSPORT_UNSUPPORTED]
+meaning = "FAILED_PRECONDITION."
+
+[ER_SPRIG_ADMIN_REQUEST_INVALID]
+meaning = "Malformed admin API request."
+
+[ER_SPRIG_ADMIN_UNAUTHENTICATED]
+meaning = "Admin API call without valid credentials."
+
+[ER_SPRIG_QUERY_LANGUAGE_INVALID]
+meaning = "`Sql.Query`'s `language` unknown, or another language than SQL with a transaction handle, `multi_statements` or a refused command."
+
+[ER_SPRIG_LANGUAGE_STATEMENT_FAILED]
+meaning = "A Cypher, GQL or MongoDB statement failed with an error that has no SprigDB or MySQL number."
+
+[ER_SPRIG_FEED_HISTORY_LOST]
+meaning = "Start older than all history (286)."
+
+[ER_SPRIG_FEED_BAD_RESUME_TOKEN]
+meaning = "Malformed or another tenant's (260)."
+
+[ER_SPRIG_FEED_SOURCE_UNSUPPORTED]
+meaning = "Binlog settings fail the requirements."
+
+[ER_SPRIG_FEED_STALLED]
+meaning = "Scope stalled feed.stall_seconds (6, resumable)."
+
+[ER_SPRIG_FEED_SUBSCRIPTION_EXISTS]
+meaning = "Name in use."
+
+[ER_SPRIG_FEED_SUBSCRIPTION_NOT_FOUND]
+meaning = "Unknown subscription."
+
+[ER_SPRIG_FEED_CONSUMER_TOO_SLOW]
+meaning = "Edge buffer overflowed."
+
+[ER_SPRIG_FEED_RESIDENCY]
+meaning = "Tenant's data may not be served here."
+
+[ER_SPRIG_FEED_SNAPSHOT_REQUIRED]
+meaning = "Internal consumer behind all history."
+
+[ER_SPRIG_FEED_TOO_MANY_READERS]
+meaning = "No catch-up slot (retryable)."
+
+[ER_SPRIG_FEED_STATEMENT_EVENT]
+meaning = "Statement-format DML in a shard schema."
+
+[ER_SPRIG_FEED_INVALIDATED]
+meaning = "Watched object dropped or renamed."
+
+[ER_SPRIG_FEED_DIVERGED]
+meaning = "Failover lost delivered transactions (280)."
+
+[ER_SPRIG_FEED_HANDOFF_PENDING]
+meaning = "The map moved but no handoff record exists yet (retryable)."
+
+[ER_SPRIG_SEARCH_INDEX_NOT_FOUND]
+meaning = "Unknown index name."
+
+[ER_SPRIG_SEARCH_NO_INDEX_FOR_MATCH]
+meaning = "No search index covers the MATCH columns."
+
+[ER_SPRIG_SEARCH_QUERY_SYNTAX]
+meaning = "Query string or operator malformed."
+
+[ER_SPRIG_SEARCH_UNSUPPORTED]
+meaning = "WITH QUERY EXPANSION, embeddedDocuments, ..."
+
+[ER_SPRIG_SEARCH_INDEX_NOT_READY]
+meaning = "Index still building."
+
+[ER_SPRIG_SEARCH_UNAVAILABLE]
+meaning = "No ready copy of a partition (retryable)."
+
+[ER_SPRIG_SEARCH_WAIT_TIMEOUT]
+meaning = "Consistency target not reached (retryable)."
+
+[ER_SPRIG_SEARCH_WINDOW_EXCEEDED]
+meaning = "Results beyond search.max_window."
+
+[ER_SPRIG_SEARCH_ANALYZER_UNKNOWN]
+meaning = "Analyzer or language not defined."
+
+[ER_SPRIG_SEARCH_FIELD_TYPE]
+meaning = "Field type can't take that kind."
+
+[ER_SPRIG_SEARCH_INDEX_LIMIT]
+meaning = "Over search.max_indexes_per_object."
+
+[ER_SPRIG_SEARCH_NO_PLACEMENT]
+meaning = "No eligible worker in allowed DCs."
+
+[ER_SPRIG_SEARCH_STALE_IN_TXN]
+meaning = "Warning: search in a transaction that wrote the object."
+
+[ER_SPRIG_REDIS_UNSUPPORTED]
+meaning = "SPRIG: a Redis 7.2 command not in this release."
+
+[ER_SPRIG_REDIS_LUA_UNSUPPORTED]
+meaning = "SPRIG: a Lua feature not offered (SCRIPT DEBUG, bytecode)."
+
+[ER_SPRIG_REDIS_RESTRICTED]
+meaning = "SPRIG: administrative command not offered."
+
+[ER_SPRIG_REDIS_TLS_REQUIRED]
+meaning = "SPRIG, then close."
+
+[ER_SPRIG_REDIS_MULTI_TOO_LARGE]
+meaning = "EXECABORT past redis.max_multi_commands."
+
+[ER_SPRIG_REDIS_TOO_MANY_BLOCKED]
+meaning = "SPRIG past redis.max_blocked_per_tenant."
+
+[ER_SPRIG_REDIS_SHARD_BUSY]
+meaning = "TRYAGAIN: cutover hold expired or retries spent."
+
+[ER_SPRIG_REDIS_CROSS_SHARD_TOO_LARGE]
+meaning = "SPRIG past redis.max_cross_shard_elements."
+
+[ER_SPRIG_REDIS_PUBSUB_UNAVAILABLE]
+meaning = "SPRIG: no hub reachable."
+
+[ER_SPRIG_REDIS_OUTPUT_BUFFER_LIMIT]
+meaning = "Logged; the client is closed, as Redis does."
+
+[ER_SPRIG_REDIS_LUA_BUDGET_EXCEEDED]
+meaning = "SPRIG: time or memory budget; rolled back."
+
+[ER_SPRIG_REDIS_LUA_UNDECLARED_KEY]
+meaning = "SPRIG: redis.call on a key not in KEYS."
+
+[ER_SPRIG_LOGIC_NOT_FOUND]
+meaning = "Unknown function, version or binding."
+
+[ER_SPRIG_LOGIC_SYNTAX]
+meaning = "Parse or type error at deploy, with line and column."
+
+[ER_SPRIG_LOGIC_UNSUPPORTED]
+meaning = "Runs in no tier (procedural SQL across shards)."
+
+[ER_SPRIG_LOGIC_VALIDATION_FAILED]
+meaning = "A validation rejected the write; MongoDB 121."
+
+[ER_SPRIG_LOGIC_BUDGET_EXCEEDED]
+meaning = "Message names the budget."
+
+[ER_SPRIG_LOGIC_USER_ERROR]
+meaning = "Code threw an error."
+
+[ER_SPRIG_LOGIC_RUNTIME_ERROR]
+meaning = "Type error, NaN or Infinity, overflow, sqlOne with many rows."
+
+[ER_SPRIG_LOGIC_OUTBOUND_DENIED]
+meaning = "Host not on the allowlist."
+
+[ER_SPRIG_LOGIC_TIER_UNAVAILABLE]
+meaning = "SPRIG_TIER = 'mariadb' but placement refuses."
+
+[ER_SPRIG_LOGIC_VERSION_CONFLICT]
+meaning = "Concurrent deploys of one module."
+
+[ER_SPRIG_LOGIC_ROLLOUT_BLOCKED]
+meaning = "Differential test or soak failed; a candidate that can't be staged."
+
+[ER_SPRIG_LOGIC_ENGINE_BUSY]
+meaning = "Engine queue full; retryable."
+
+[ER_SPRIG_LOGIC_CALL_DEPTH]
+meaning = "Nesting past logic.max_call_depth."
+
+[ER_SPRIG_LOGIC_SCHEDULE_INVALID]
+meaning = "Bad cron text or time zone."
+
+[ER_SPRIG_LOGIC_SIGNATURE_MISMATCH]
+meaning = "Arguments don't match the signature."
+
+[ER_SPRIG_LOGIC_IN_USE]
+meaning = "Drop of a function a binding, schedule or column uses."
+
+[ER_SPRIG_LOGIC_ENGINE_UNAVAILABLE]
+meaning = "The version was placed in the engine tier and this caller can't reach it (a gateway without the fallback runtime, `SQL SECURITY DEFINER` code, or `SELECT f(...)` with arguments that aren't constants)."
+
+[ER_SPRIG_LOGIC_TRIGGER_POSITION_MOVED]
+meaning = "A trigger on a stream found its consumer group already past the record (another run committed it); retryable, the run is skipped."
+
+[ER_SPRIG_SPACE_NOT_FOUND]
+meaning = "Unknown space."
+
+[ER_SPRIG_SPACE_EXISTS]
+meaning = "Duplicate name."
+
+[ER_SPRIG_SPACE_HAS_CHILDREN]
+meaning = "Drop of a space with children or layer rows, without CASCADE."
+
+[ER_SPRIG_SPACE_DEPTH_EXCEEDED]
+meaning = "A space deeper than tenant.max_depth, or a share chain longer than inherit.max_depth."
+
+[ER_SPRIG_SPACE_ACCESS_DENIED]
+meaning = "The session may not act in that space."
+
+[ER_SPRIG_NOT_INHERITABLE]
+meaning = "Share or reset on an ordinary object."
+
+[ER_SPRIG_INHERIT_KEY_UPDATE]
+meaning = "Changing a record's identity key."
+
+[ER_SPRIG_SHARE_NOT_FOUND]
+meaning = "Unknown share."
+
+[ER_SPRIG_SHARE_FILTER_INVALID]
+meaning = "Filter not deterministic, has a subquery, or names unshared fields."
+
+[ER_SPRIG_SHARE_RESIDENCY_CONFLICT]
+meaning = "No merge mode respects both residency policies."
+
+[ER_SPRIG_SHARE_NOT_RESHARABLE]
+meaning = "Re-share without WITH RESHARE."
+
+[ER_SPRIG_INHERIT_STATEMENT_UNSUPPORTED]
+meaning = "TRUNCATE, LOAD DATA ... REPLACE, REPLACE INTO from a child space; in R6 also the forms \"As built\" lists."
+
+[ER_SPRIG_INHERIT_SCHEMA_MISMATCH]
+meaning = "A child tenant's object diverges from its source."
+
+[ER_SPRIG_INHERIT_COPY_STALE]
+meaning = "Note-level warning: a materialized copy lags beyond inherit.copy_stale_seconds."
+
+[ER_SPRIG_INHERIT_FEDERATED_UNAVAILABLE]
+meaning = "A federated parent's cluster can't be reached within inherit.federated_timeout_ms."
+
+[ER_SPRIG_INHERITED_OBJECT_IN_USE]
+meaning = "A destructive schema change on an inheritable object that a share still reaches; from R9 also a change to a `FOR EACH TENANT` definition that isn't additive while instances exist."
+
+[ER_SPRIG_INHERIT_TARGET_TENANT]
+meaning = "A publish to an inherited object names no target where one is needed, or a tenant that isn't a member, or one the publisher isn't a proper ancestor of."
+
+[ER_SPRIG_INHERIT_NOT_OVERRIDABLE]
+meaning = "A member changes what only the definition decides (partitions, key, queue type, exchange type), drops an instance, or creates a local object with an inherited name; from 11 November 2026 also a child dropping, renaming or destructively altering a table it inherits, and a parent adding a column or group table a descendant already has (Q3)."
+
+[ER_SPRIG_INHERIT_DEFINITION_DROPPING]
+meaning = "A publish into a definition, or an instance, that is being dropped or has left its scope."
+
+[ER_SPRIG_INHERIT_INSTANCE_UNAVAILABLE]
+meaning = "An instance couldn't be created or reached in time (retryable, SQLSTATE `40001`)."
+
+[ER_SPRIG_GRAPH_SYNTAX]
+meaning = "Neo.ClientError.Statement.SyntaxError."
+
+[ER_SPRIG_GRAPH_UNSUPPORTED]
+meaning = "SprigUnsupported; names the feature."
+
+[ER_SPRIG_GRAPH_NOT_FOUND]
+meaning = "Neo.ClientError.Database.DatabaseNotFound."
+
+[ER_SPRIG_GRAPH_BUDGET_EXCEEDED]
+meaning = "SprigBudgetExceeded: hops, frontier, rows, time or memory."
+
+[ER_SPRIG_GRAPH_READ_ONLY_SOURCE]
+meaning = "SprigReadOnlySource."
+
+[ER_SPRIG_GRAPH_ID_NOT_ROUTABLE]
+meaning = "SprigIdNotRoutable: use elementId()."
+
+[ER_SPRIG_GRAPH_NODE_HAS_RELATIONSHIPS]
+meaning = "Neo.ClientError.Schema.ConstraintValidationFailed."
+
+[ER_SPRIG_GRAPH_DETACH_TOO_LARGE]
+meaning = "SprigDetachTooLarge."
+
+[ER_SPRIG_GRAPH_DEFINITION_INVALID]
+meaning = "SQL: bad keys, references or labels."
+
+[ER_SPRIG_GRAPH_PROPERTY_TYPE]
+meaning = "Neo.ClientError.Statement.TypeError."
+
+[ER_SPRIG_GRAPH_PLUGIN_FAILED]
+meaning = "Internal; the call falls back."
+
+[ER_SPRIG_GRAPH_ALGO_FAILED]
+meaning = "SprigAlgoFailed."
+
+[ER_SPRIG_BOLT_VERSION_UNSUPPORTED]
+meaning = "Handshake reply 00 00 00 00; logged."
+
+[ER_SPRIG_BOLT_TLS_REQUIRED]
+meaning = "Closed before the handshake."
+
+[ER_SPRIG_BOLT_PROTOCOL]
+meaning = "Neo.ClientError.Request.Invalid."
+
+[ER_SPRIG_BOLT_AUTH_SCHEME]
+meaning = "Neo.ClientError.Security.Unauthorized."
+
+[ER_SPRIG_BOLT_IMPERSONATION]
+meaning = "Neo.ClientError.Security.Forbidden."
+
+[ER_SPRIG_BOLT_BOOKMARK_INVALID]
+meaning = "Neo.ClientError.Transaction.InvalidBookmark."
+
+[ER_SPRIG_BOLT_RESULT_BUFFER_LIMIT]
+meaning = "SprigResultBufferLimit."
+
+[ER_SPRIG_STUDIO_DISABLED]
+meaning = "Off, or not on this listener (404)."
+
+[ER_SPRIG_STUDIO_INSECURE_TRANSPORT]
+meaning = "Plain-HTTP login from a non-loopback client (403)."
+
+[ER_SPRIG_STUDIO_ORIGIN_REJECTED]
+meaning = "Cookie request from another site (403)."
+
+[ER_SPRIG_STUDIO_CSRF_HEADER_MISSING]
+meaning = "No X-Sprig-CSRF (403)."
+
+[ER_SPRIG_STUDIO_SESSION_IDLE]
+meaning = "Idle too long (401)."
+
+[ER_SPRIG_STUDIO_SESSION_EXPIRED]
+meaning = "Session too old (401)."
+
+[ER_SPRIG_STUDIO_OPERATOR_MFA_REQUIRED]
+meaning = "Operator mode without a second factor (403)."
+
+[ER_SPRIG_STUDIO_OPERATOR_CERT_REQUIRED]
+meaning = "Operator mode without a client certificate (403)."
+
+[ER_SPRIG_STUDIO_OPERATOR_MODE_DISABLED]
+meaning = "Operator mode off (403)."
+
+[ER_SPRIG_STUDIO_EXPORT_TICKET_INVALID]
+meaning = "Ticket bad, expired or its session ended (401)."
+
+[ER_SPRIG_STUDIO_VIEW_AS_DENIED]
+meaning = "Tester not allowed for this user (403)."
+
+[ER_SPRIG_STUDIO_VIEW_AS_NOT_READ_ONLY]
+meaning = "Tested statement may write (400)."
+
+[ER_SPRIG_STUDIO_NOT_BUILT]
+meaning = "Binary built without Studio (503)."
+
+[ER_SPRIG_STUDIO_VERSION_MISMATCH]
+meaning = "Studio needs a newer API (409)."
+
+[ER_SPRIG_STUDIO_CURSOR_UNKNOWN]
+meaning = "No open cursor has this name, or it is another user's (404)."
+
+[ER_SPRIG_STUDIO_CURSOR_EXPIRED]
+meaning = "The cursor was idle past `studio.cursor_idle_seconds` and closed; open it again (409)."
+
+[ER_SPRIG_STREAM_NOT_FOUND]
+meaning = "Unknown stream or topic."
+
+[ER_SPRIG_STREAM_APPEND_ONLY]
+meaning = "UPDATE or DELETE on a stream; produce to a change topic."
+
+[ER_SPRIG_STREAM_EXISTS]
+meaning = "Name in use."
+
+[ER_SPRIG_STREAM_PARTITIONS_DECREASE]
+meaning = "Partitions can only grow."
+
+[ER_SPRIG_STREAM_RECORD_TOO_LARGE]
+meaning = "Above stream.max_message_bytes."
+
+[ER_SPRIG_STREAM_KEY_NOT_ATTACHED]
+meaning = "Event key doesn't determine the attached group's distribution key."
+
+[ER_SPRIG_STREAM_SEQUENCING_TIMEOUT]
+meaning = "Offset not assigned within stream.produce_wait_ms (retryable)."
+
+[ER_SPRIG_STREAM_OFFSET_OUT_OF_RANGE]
+meaning = "Offset below the log start or above the high watermark."
+
+[ER_SPRIG_STREAM_TRUNCATED]
+meaning = "A failover lost records a consumer had seen (leader epoch moved)."
+
+[ER_SPRIG_STREAM_RESIDENCY]
+meaning = "Read from a data center the stream may not serve; under `residency.cross_tenant_messaging_strict`, a publish from a pinned tenant into another tenant's stream outside its allowed data centers."
+
+[ER_SPRIG_KAFKA_ACKS_ZERO]
+meaning = "Acks=0: SprigDB always acknowledges after commit."
+
+[ER_SPRIG_KAFKA_TRANSACTIONS_UNSUPPORTED]
+meaning = "Transactional.id set."
+
+[ER_SPRIG_KAFKA_UNSUPPORTED_API]
+meaning = "An API or version not listed above."
+
+[ER_SPRIG_KAFKA_SASL_FAILED]
+meaning = "Authentication failed (also Kafka's SASL_AUTHENTICATION_FAILED)."
+
+[ER_SPRIG_KAFKA_NOT_COORDINATOR]
+meaning = "Group moved to another gateway (Kafka NOT_COORDINATOR, retryable)."
+
+[ER_SPRIG_STREAM_COMPACT_NEEDS_KEY]
+meaning = "A record without a key on a compacted stream."
+
+[ER_SPRIG_KAFKA_QUOTA]
+meaning = "Over a tenant quota; the response carries throttle_time_ms."
+
+[ER_SPRIG_STREAM_ORIGIN_KEY]
+meaning = "A descendant's publish into an ancestor's stream with a key other than its own tenant name, under `stream.descendant_key = origin`."
+
+[ER_SPRIG_STREAM_OFFSET_TXN_UNSUPPORTED]
+meaning = "`sprig.commit_offset` inside a transaction whose connection is on another cluster than the tenant's catalog."
+
+[ER_SPRIG_AUDIT_UNAVAILABLE]
+meaning = "The audit spool is at `audit.spool_max_mb`: admin API mutations and account statements fail closed."
+
+[ER_SPRIG_IMPORT_VERIFY_FAILED]
+meaning = "A tenant import's checksums, grants or settings differ from its export."
+
+[ER_SPRIG_RECOMMENDATION_NOT_FOUND]
+meaning = "No recommendation with that id."
+
+[ER_SPRIG_RECOMMENDATION_STATE]
+meaning = "The action doesn't apply in the recommendation's state."
+
+[ER_SPRIG_APPROVAL_DENIED]
+meaning = "The caller may not act at the recommendation's level."
+
+[ER_SPRIG_RECOMMENDATION_STALE]
+meaning = "Re-validation failed before applying; the recommendation is expired."
+
+[ER_SPRIG_APPROVAL_WINDOW_INVALID]
+meaning = "An approval window that is empty, past or longer than 30 days."
+
+[ER_SPRIG_APPROVAL_POLICY_INVALID]
+meaning = "A timer or kind list that doesn't parse, or `failover.mode = approve` below the global scope."
+
+[ER_SPRIG_NOTIFY_FAILED]
+meaning = "A test email or webhook failed."
+
+[ER_SPRIG_SHELL_PROFILE_INVALID]
+meaning = "`sprig`: the profiles file is unreadable or invalid, or names no such profile."
+
+[ER_SPRIG_SHELL_SECRET_UNAVAILABLE]
+meaning = "`sprig`: the OS keychain is unusable, or `secrets.toml` is readable by others."
+
+[ER_SPRIG_SHELL_CONFIRMATION_REQUIRED]
+meaning = "`sprig`: a destructive statement in CLI mode without `--yes`."
+
+[ER_SPRIG_SHELL_LANGUAGE_UNSUPPORTED]
+meaning = "`sprig`: the language can't be sent over the chosen transport."
+
+[ER_SPRIG_SHELL_SPRIGCTL_MISSING]
+meaning = "`sprig admin` found no `sprigctl` beside it or on the PATH."
+
+[ER_SPRIG_SHELL_PARSE]
+meaning = "`sprig`: input the shell can't split or parse."
+
+[ER_SPRIG_SHELL_CANCELLED]
+meaning = "`sprig`: the user cancelled the statement."
+
+[ER_SPRIG_SHELL_UNREACHABLE]
+meaning = "`sprig`: the gateway or native endpoint can't be reached."
+
+[ER_SPRIG_SHELL_INSECURE_TRANSPORT]
+meaning = "`sprig`: a password login over plain HTTP to another host, refused before sending."
+
+[ER_SPRIG_DOCS_UNAVAILABLE]
+meaning = "The docs pack isn't loaded or failed verification."
+
+[ER_SPRIG_AI_NOT_CONFIGURED]
+meaning = "No provider or model is configured for the role."
+
+[ER_SPRIG_AI_DISABLED]
+meaning = "`ai.enabled` (or `ai.functions.enabled`, `ai.mcp.enabled`) is off for the tenant."
+
+[ER_SPRIG_AI_BUDGET_EXCEEDED]
+meaning = "The tenant's or user's daily token budget is used up."
+
+[ER_SPRIG_AI_PROVIDER_ERROR]
+meaning = "The AI provider failed or timed out."
+
+[ER_SPRIG_AI_REFUSED]
+meaning = "The model declined the request."
+
+[ER_SPRIG_AI_EGRESS_DENIED]
+meaning = "The request would send row data and `ai.share_data` is off."
+
+[ER_SPRIG_AI_TOOL_DENIED]
+meaning = "A tool outside the role, or an invalid tool input, was refused."
+
+[ER_SPRIG_EMBEDDING_FAILED]
+meaning = "An embedded column or retrieval index can't be filled (dimension, model)."
