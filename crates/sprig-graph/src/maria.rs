@@ -809,7 +809,7 @@ impl<'c> MariaStore<'c> {
         let live = match d.entity {
             Entity::Node => self.lock_nodes(&[o0], true).await?.into_iter().any(|n| {
                 n.labels.contains(&d.token_id)
-                    && crate::schema::claim_key(d, &n.props).as_deref() == Some(key)
+                    && crate::schema::claim_key(d, &n.props, n.types.as_ref()).as_deref() == Some(key)
             }),
             Entity::Relationship => {
                 let j = self.layout.index_of(rk0);
@@ -823,7 +823,7 @@ impl<'c> MariaStore<'c> {
                     .map(|mut r| edge_at(&mut r, 0))
                     .any(|e| {
                         e.rtype == d.token_id
-                            && crate::schema::claim_key(d, &e.props).as_deref() == Some(key)
+                            && crate::schema::claim_key(d, &e.props, e.types.as_ref()).as_deref() == Some(key)
                     })
             }
         };
@@ -868,18 +868,18 @@ impl<'c> MariaStore<'c> {
 
     /// The claim key of a node under `d`, if it has the label and every
     /// property.
-    fn node_key(d: &IndexDef, labels: &[u32], props: &Json) -> Option<Vec<u8>> {
-        if labels.contains(&d.token_id) {
-            crate::schema::claim_key(d, props)
+    fn node_key(d: &IndexDef, n: &NodeRow) -> Option<Vec<u8>> {
+        if n.labels.contains(&d.token_id) {
+            crate::schema::claim_key(d, &n.props, n.types.as_ref())
         } else {
             None
         }
     }
 
     /// The claim key of a relationship under `d`.
-    fn edge_key(d: &IndexDef, rtype: u32, props: &Json) -> Option<Vec<u8>> {
-        if rtype == d.token_id {
-            crate::schema::claim_key(d, props)
+    fn edge_key(d: &IndexDef, e: &EdgeRow) -> Option<Vec<u8>> {
+        if e.rtype == d.token_id {
+            crate::schema::claim_key(d, &e.props, e.types.as_ref())
         } else {
             None
         }
@@ -1310,7 +1310,7 @@ impl GraphStore for MariaStore<'_> {
         }
         for d in self.unique_defs(Entity::Node) {
             for r in rows {
-                if let Some(k) = Self::node_key(&d, &r.labels, &r.props) {
+                if let Some(k) = Self::node_key(&d, r) {
                     self.claim(&d, &k, "Node", r.id, r.rk).await?;
                 }
             }
@@ -1372,7 +1372,7 @@ impl GraphStore for MariaStore<'_> {
         }
         for d in self.unique_defs(Entity::Relationship) {
             for r in rows {
-                if let Some(k) = Self::edge_key(&d, r.rtype, &r.props) {
+                if let Some(k) = Self::edge_key(&d, r) {
                     self.claim(&d, &k, "Relationship", r.id, r.src_rk).await?;
                 }
             }
@@ -1461,8 +1461,8 @@ impl GraphStore for MariaStore<'_> {
             for d in &defs {
                 let was = old
                     .first()
-                    .and_then(|o| Self::node_key(d, &o.labels, &o.props));
-                let now = Self::node_key(d, &row.labels, &row.props);
+                    .and_then(|o| Self::node_key(d, o));
+                let now = Self::node_key(d, row);
                 if was == now {
                     continue;
                 }
@@ -1549,8 +1549,8 @@ impl GraphStore for MariaStore<'_> {
             for d in &defs {
                 let was = old
                     .first()
-                    .and_then(|o| Self::edge_key(d, o.rtype, &o.props));
-                let now = Self::edge_key(d, row.rtype, &row.props);
+                    .and_then(|o| Self::edge_key(d, o));
+                let now = Self::edge_key(d, row);
                 if was == now {
                     continue;
                 }
@@ -1600,7 +1600,7 @@ impl GraphStore for MariaStore<'_> {
             let keys: Vec<(u64, u64)> = edges.iter().map(|e| (e.id, e.src_rk)).collect();
             for e in self.edges_on(&keys).await? {
                 for d in &defs {
-                    if let Some(k) = Self::edge_key(d, e.rtype, &e.props) {
+                    if let Some(k) = Self::edge_key(d, &e) {
                         self.release(d, &k, e.id).await?;
                     }
                 }
@@ -1646,7 +1646,7 @@ impl GraphStore for MariaStore<'_> {
         if !defs.is_empty() && !ids.is_empty() {
             for o in self.lock_nodes(ids, true).await? {
                 for d in &defs {
-                    if let Some(k) = Self::node_key(d, &o.labels, &o.props) {
+                    if let Some(k) = Self::node_key(d, &o) {
                         self.release(d, &k, o.id).await?;
                     }
                 }

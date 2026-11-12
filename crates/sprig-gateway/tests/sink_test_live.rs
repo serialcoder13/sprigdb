@@ -602,3 +602,133 @@ async fn test_connection_write() {
     }
     ok(&mut c, &format!("DROP DATABASE {db}")).await;
 }
+
+/// The gRPC forms (R9 closers, item 117): `sprig.v1.Sinks.Test` and
+/// `sprig.v1.Connections.Test` answer the statements' rows, as the caller.
+/// Needs `SPRIG_TEST_SINKTEST_HTTP` (the gateway's HTTP listener, h2c) and
+/// `SPRIG_TEST_SINKTEST_CLOSED` (an allowed address nothing listens on).
+#[tokio::test]
+async fn grpc_test_calls_answer_the_statements_rows() {
+    use base64::Engine as _;
+    use sprig_api::proto::v1::connections_client::ConnectionsClient;
+    use sprig_api::proto::v1::sinks_client::SinksClient;
+    use sprig_api::proto::v1::{ConnectionTestRequest, SinkTestRequest, TestReply};
+    let (Some(addr), Some(http), Some(closed)) = (
+        skip::var(GATEWAY),
+        var("SPRIG_TEST_SINKTEST_HTTP"),
+        var("SPRIG_TEST_SINKTEST_CLOSED"),
+    ) else {
+        eprintln!(
+            "skipped: needs {GATEWAY}, SPRIG_TEST_SINKTEST_HTTP and SPRIG_TEST_SINKTEST_CLOSED"
+        );
+        return;
+    };
+    let tenant = var("SPRIG_TEST_SINKTEST_TENANT").unwrap_or_else(|| "r9tqc".into());
+    let user = format!("{tenant}.app");
+    let mut c = conn(&addr, &user, "sprig-dev-app").await;
+    let db = run_id();
+    ok(&mut c, &format!("CREATE DATABASE {db}")).await;
+    ok(&mut c, &format!("USE {db}")).await;
+    ok(
+        &mut c,
+        &format!("CREATE CONNECTION hook TYPE WEBHOOK WITH (url = 'http://{closed}/in')"),
+    )
+    .await;
+    ok(&mut c, "CREATE STREAM ev PARTITIONS 1").await;
+    ok(&mut c, "CREATE SINK s FROM STREAM ev TO WEBHOOK CONNECTION hook").await;
+    ok(&mut c, "ALTER SINK s PAUSE").await;
+    for i in 0..3 {
+        ok(
+            &mut c,
+            &format!("INSERT INTO ev (key, value) VALUES ('k{i}', JSON_OBJECT('n', {i}))"),
+        )
+        .await;
+    }
+    let mut want = Vec::new();
+    for _ in 0..40 {
+        want = ok(&mut c, "TEST SINK s WITH SAMPLE 10").await;
+        if want.len() >= 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(want.len(), 3);
+    let ch = tonic::transport::Endpoint::from_shared(format!("http://{http}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let auth = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(format!("{user}:sprig-dev-app"))
+    );
+    let req = |m| {
+        let mut r = tonic::Request::new(m);
+        r.metadata_mut()
+            .insert("authorization", auth.parse().unwrap());
+        r
+    };
+    let cells = |r: &TestReply| -> Vec<Vec<Option<String>>> {
+        use prost_types::value::Kind;
+        r.rows
+            .iter()
+            .map(|l| {
+                l.values
+                    .iter()
+                    .map(|v| match &v.kind {
+                        Some(Kind::StringValue(s)) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .collect()
+    };
+    // Sinks.Test: sample 0 means 10, the statement's default here.
+    let got = SinksClient::new(ch.clone())
+        .test(req(SinkTestRequest {
+            database: db.clone(),
+            sink: "s".into(),
+            sample: 0,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    println!("Sinks.Test: {:?}", got.columns);
+    assert_eq!(cells(&got), want);
+    assert!(!got.columns.is_empty());
+    let e = SinksClient::new(ch.clone())
+        .test(req(SinkTestRequest {
+            database: db.clone(),
+            sink: "s".into(),
+            sample: 5000,
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), tonic::Code::InvalidArgument, "{e:?}");
+    // Connections.Test: the same steps as the statement.
+    let want = ok(&mut c, &format!("TEST CONNECTION {db}.hook")).await;
+    let got = ConnectionsClient::new(ch.clone())
+        .test(req(ConnectionTestRequest {
+            database: db.clone(),
+            connection: "hook".into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    println!("Connections.Test: {:?} {:?}", got.columns, cells(&got));
+    assert_eq!(cells(&got), want);
+    // As the caller: an unknown connection is the statement's error.
+    let e = ConnectionsClient::new(ch)
+        .test(req(ConnectionTestRequest {
+            database: db.clone(),
+            connection: "nope".into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+    println!("unknown connection: {e:?}");
+    assert_ne!(e.code(), tonic::Code::Ok);
+    ok(&mut c, &format!("DROP SINK {db}.s")).await;
+    ok(&mut c, &format!("DROP DATABASE {db}")).await;
+}

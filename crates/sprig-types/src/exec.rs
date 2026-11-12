@@ -137,6 +137,22 @@ pub trait Runner: Send {
     fn set_physical(&mut self, on: bool) {
         let _ = on;
     }
+
+    /// Whether the session's `innodb_snapshot_isolation` is on (MariaDB
+    /// 11.8's default; the MySQL persona turns it off, decision D9). Asked
+    /// only by a plan inside a client's transaction ([`Txn::begin`]).
+    ///
+    /// # Errors
+    /// The backend's.
+    async fn snapshot_isolation(&mut self) -> Result<bool> {
+        let rows = self.query(SNAPSHOT_ISOLATION_READ).await?;
+        Ok(rows
+            .rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(Option::as_deref)
+            .is_some_and(|v| matches!(v, b"1" | b"ON" | b"on")))
+    }
 }
 
 /// The savepoint a plan inside a client's transaction uses.
@@ -145,6 +161,16 @@ pub const SAVEPOINT: &str = "sprig_types";
 /// The isolation of a plan's own transaction ([`Txn`]), for the next
 /// transaction only.
 pub const PLAN_ISOLATION: &str = "SET TRANSACTION ISOLATION LEVEL READ COMMITTED";
+
+/// Reads the session's `innodb_snapshot_isolation`.
+pub const SNAPSHOT_ISOLATION_READ: &str = "SELECT @@session.innodb_snapshot_isolation";
+
+/// Turns the snapshot-isolation check off for a plan inside a client's
+/// transaction ([`Txn`], bugfix-54).
+pub const SNAPSHOT_ISOLATION_OFF: &str = "SET SESSION innodb_snapshot_isolation = OFF";
+
+/// Turns it back on after the plan.
+pub const SNAPSHOT_ISOLATION_ON: &str = "SET SESSION innodb_snapshot_isolation = ON";
 
 /// A plan's transaction: `BEGIN ... COMMIT` in autocommit mode, a
 /// savepoint inside the client's transaction.
@@ -156,9 +182,20 @@ pub const PLAN_ISOLATION: &str = "SET TRANSACTION ISOLATION LEVEL READ COMMITTED
 /// `innodb_snapshot_isolation` then fails the plan's later writes with
 /// 1020 when another session (a parent tenant, the copy worker) changed
 /// those rows in between (decision T17).
+///
+/// Inside the client's transaction the isolation can't change, and a
+/// retry can't help: MariaDB's 1020 rolls back the whole transaction (the
+/// savepoint is gone with it), and a statement retried in the same
+/// transaction reads from the same snapshot. So when the session has the
+/// check on, the bracket turns it off for the plan's statements
+/// ([`SNAPSHOT_ISOLATION_OFF`]) and on again after them: the plan's writes
+/// then act on the latest committed rows, as a single MariaDB statement
+/// that opened no snapshot does (bugfix-54).
 #[derive(Debug)]
 pub struct Txn {
     nested: bool,
+    /// The check was on and is off for the plan.
+    snapshot_off: bool,
 }
 
 impl Txn {
@@ -168,13 +205,26 @@ impl Txn {
     /// The backend's.
     pub async fn begin(r: &mut dyn Runner) -> Result<Self> {
         let nested = r.in_transaction();
+        let mut snapshot_off = false;
         if nested {
-            r.exec(&format!("SAVEPOINT {SAVEPOINT}")).await?;
+            if r.snapshot_isolation().await? {
+                r.exec(SNAPSHOT_ISOLATION_OFF).await?;
+                snapshot_off = true;
+            }
+            if let Err(e) = r.exec(&format!("SAVEPOINT {SAVEPOINT}")).await {
+                if snapshot_off {
+                    restore_snapshot(r).await;
+                }
+                return Err(e);
+            }
         } else {
             r.exec(PLAN_ISOLATION).await?;
             r.exec("BEGIN").await?;
         }
-        Ok(Self { nested })
+        Ok(Self {
+            nested,
+            snapshot_off,
+        })
     }
 
     /// Closes the bracket: commits on `Ok`, rolls back on `Err` (and
@@ -183,14 +233,14 @@ impl Txn {
     /// # Errors
     /// `result`'s error, or the commit's.
     pub async fn end<T>(self, r: &mut dyn Runner, result: Result<T>) -> Result<T> {
-        match result {
+        let out = match result {
             Ok(v) => {
-                if self.nested {
-                    r.exec(&format!("RELEASE SAVEPOINT {SAVEPOINT}")).await?;
+                let close = if self.nested {
+                    r.exec(&format!("RELEASE SAVEPOINT {SAVEPOINT}")).await
                 } else {
-                    r.exec("COMMIT").await?;
-                }
-                Ok(v)
+                    r.exec("COMMIT").await
+                };
+                close.map(|_| v)
             }
             Err(e) => {
                 let undo = if self.nested {
@@ -203,7 +253,18 @@ impl Txn {
                 }
                 Err(e)
             }
+        };
+        if self.snapshot_off {
+            restore_snapshot(r).await;
         }
+        out
+    }
+}
+
+/// Turns the snapshot-isolation check on again after a plan ([`Txn`]).
+async fn restore_snapshot(r: &mut dyn Runner) {
+    if let Err(e) = r.exec(SNAPSHOT_ISOLATION_ON).await {
+        tracing::warn!(error = %e, "innodb_snapshot_isolation not restored after a plan");
     }
 }
 
@@ -253,6 +314,9 @@ pub(crate) mod fake {
         pub(crate) ids: Vec<(String, u64)>,
         /// [`super::PLAN_ISOLATION`]s seen (not logged).
         pub(crate) plan_isolation: usize,
+        /// The session's `innodb_snapshot_isolation` (asked inside a
+        /// client transaction only; not logged).
+        pub(crate) snapshot_isolation: bool,
     }
 
     #[async_trait::async_trait]
@@ -277,6 +341,9 @@ pub(crate) mod fake {
         }
         fn found_rows(&self) -> bool {
             false
+        }
+        async fn snapshot_isolation(&mut self) -> Result<bool> {
+            Ok(self.snapshot_isolation)
         }
         async fn object_id(
             &mut self,

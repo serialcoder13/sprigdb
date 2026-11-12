@@ -592,6 +592,49 @@ fn parse(arg: &Bson) -> Result<Spec, MongoError> {
     })
 }
 
+/// The stage's partition key of each document and its `sortBy`, for
+/// the spilling version (M5): it sorts by these on disk, then runs
+/// [`set_window_fields`] one partition at a time.
+pub(crate) struct Order {
+    partition: Option<Bson>,
+    /// `sortBy`.
+    pub(crate) sort: SortSpec,
+}
+
+impl Order {
+    /// Parses the stage (every error the stage would give at parse).
+    ///
+    /// # Errors
+    /// MongoDB 8.0's parse errors.
+    pub(crate) fn parse(arg: &Bson) -> Result<Self, MongoError> {
+        let spec = parse(arg)?;
+        Ok(Self {
+            partition: spec.partition,
+            sort: spec.sort.unwrap_or_default(),
+        })
+    }
+
+    /// The partition key of `d`.
+    ///
+    /// # Errors
+    /// 14 for an array; the expression's.
+    pub(crate) fn key(&self, d: &Document, lim: &AggLimits) -> Result<Bson, MongoError> {
+        Ok(match &self.partition {
+            None => Bson::Null,
+            Some(p) => {
+                let v = eval(p, &Vars::new(d, lim.now))?;
+                if let Bson::Array(_) = v {
+                    return Err(err(
+                        code::TYPE_MISMATCH,
+                        "An expression used to partition cannot evaluate to value of type array",
+                    ));
+                }
+                if missing(&v) { Bson::Null } else { v }
+            }
+        })
+    }
+}
+
 /// `$setWindowFields`.
 ///
 /// # Errors

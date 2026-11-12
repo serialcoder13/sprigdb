@@ -218,6 +218,40 @@ async fn auth_state(w: &Who) -> Result<std::sync::Arc<sprig_catalog::TenantCatal
         .map_err(|e| MongoError::new(code::INTERNAL_ERROR, e.message))
 }
 
+/// MongoDB 9.0's `usersInfo.authenticatedMechanism` picks the
+/// authorization backend to ask; SprigDB has one, so a known mechanism
+/// changes nothing (M4, decision S116).
+fn check_mechanism(body: &Document) -> Result<(), MongoError> {
+    match body.get("authenticatedMechanism") {
+        None | Some(Bson::Null) => Ok(()),
+        Some(Bson::String(m))
+            if matches!(
+                m.as_str(),
+                "SCRAM-SHA-256"
+                    | "SCRAM-SHA-1"
+                    | "PLAIN"
+                    | "MONGODB-X509"
+                    | "MONGODB-OIDC"
+                    | "GSSAPI"
+                    | "MONGODB-AWS"
+            ) =>
+        {
+            Ok(())
+        }
+        Some(Bson::String(m)) => Err(MongoError::new(
+            code::BAD_VALUE,
+            format!("Unknown authentication mechanism '{m}'"),
+        )),
+        Some(v) => Err(MongoError::new(
+            code::TYPE_MISMATCH,
+            format!(
+                "BSON field 'usersInfo.authenticatedMechanism' is the wrong type '{}', expected type 'string'",
+                sprig_doc::update::type_name(v)
+            ),
+        )),
+    }
+}
+
 /// `usersInfo` entries: every user, or those named.
 async fn users_info(w: &Who, body: &Document, db: &str) -> Result<Document, MongoError> {
     let cat = auth_state(w).await?;
@@ -238,32 +272,7 @@ async fn users_info(w: &Who, body: &Document, db: &str) -> Result<Document, Mong
         _ => None,
     };
     let show_privs = body.get_bool("showPrivileges").unwrap_or(false);
-    // MongoDB 9.0's `authenticatedMechanism` picks the authorization
-    // backend to ask; SprigDB has one, so a known mechanism changes
-    // nothing (M4, decision S116).
-    match body.get("authenticatedMechanism") {
-        None | Some(Bson::Null) => {}
-        Some(Bson::String(m))
-            if matches!(
-                m.as_str(),
-                "SCRAM-SHA-256" | "SCRAM-SHA-1" | "PLAIN" | "MONGODB-X509" | "MONGODB-OIDC" | "GSSAPI" | "MONGODB-AWS"
-            ) => {}
-        Some(Bson::String(m)) => {
-            return Err(MongoError::new(
-                code::BAD_VALUE,
-                format!("Unknown authentication mechanism '{m}'"),
-            ));
-        }
-        Some(v) => {
-            return Err(MongoError::new(
-                code::TYPE_MISMATCH,
-                format!(
-                    "BSON field 'usersInfo.authenticatedMechanism' is the wrong type '{}', expected type 'string'",
-                    sprig_doc::update::type_name(v)
-                ),
-            ));
-        }
-    }
+    check_mechanism(body)?;
     let mut out = Vec::new();
     if let Some(a) = auth {
         let mut users: Vec<_> = a.users().filter(|u| u.row.host == "%").collect();

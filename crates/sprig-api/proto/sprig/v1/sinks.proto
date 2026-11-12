@@ -1,0 +1,56 @@
+// sprig.v1: dry runs of sinks and connections (chapter 51, "Testing
+// connections and sinks"; chapter 37). Each call runs the statement Studio
+// would run, as the caller, and answers its rows.
+//
+// The REST forms are Studio's routes (chapter 44's additions to the data
+// API, not this file's annotations): POST
+// /v1/databases/{database}/sinks/{sink}:test with {"sample": n}, and POST
+// /v1/databases/{database}/connections/{connection}:test with
+// {"platform", "write", "to"}. Both answer {columns, rows}.
+syntax = "proto3";
+
+package sprig.v1;
+
+import "google/protobuf/struct.proto";
+
+// Sinks.
+service Sinks {
+  // A saved sink's dry run: TEST SINK db.sink WITH SAMPLE n. Reads a few
+  // records with the caller's rights, runs the filter, projection,
+  // transform and formatting, and returns the payloads without sending
+  // them.
+  rpc Test(SinkTestRequest) returns (TestReply);
+}
+
+// Connections.
+service Connections {
+  // A saved connection's checks: TEST [PLATFORM] CONNECTION [db.]name
+  // [WRITE [TO 'to']]. Connects, authenticates and checks what it can;
+  // each step is a row.
+  rpc Test(ConnectionTestRequest) returns (TestReply);
+}
+
+message SinkTestRequest {
+  string database = 1;
+  string sink = 2;
+  // Records to read, 1 to 1000; 0 means 10.
+  uint32 sample = 3;
+}
+
+message ConnectionTestRequest {
+  // The database of a tenant connection; ignored with platform.
+  string database = 1;
+  string connection = 2;
+  // A platform connection (TEST PLATFORM CONNECTION name).
+  bool platform = 3;
+  // Also write a test record (WRITE).
+  bool write = 4;
+  // With write: the table, topic, key or path to write to (TO 'to').
+  string to = 5;
+}
+
+message TestReply {
+  repeated string columns = 1;
+  // One list per row; a NULL is a null value.
+  repeated google.protobuf.ListValue rows = 2;
+}

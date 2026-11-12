@@ -396,6 +396,21 @@ enum PlanKind {
         done: bool,
     },
     Buffer(VecDeque<Document>),
+    /// An aggregation's result on disk (M5): read as the cursor goes, its
+    /// spill files deleted when the plan is dropped.
+    Spilled(SpilledDocs),
+}
+
+/// A spilled result and the document read ahead (to tell the last batch).
+struct SpilledDocs {
+    it: crate::spill::DocIter,
+    ahead: Option<Document>,
+}
+
+impl std::fmt::Debug for SpilledDocs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SpilledDocs")
+    }
 }
 
 /// A resumable plan, held by the cursor between batches.
@@ -436,6 +451,28 @@ impl CursorPlan {
         }
     }
 
+    /// A plan over an aggregation's result, in memory or spilled (M5).
+    ///
+    /// # Errors
+    /// The first read of a spilled result.
+    pub fn from_seq(ns: Ns, seq: crate::spill::DocSeq) -> Result<Self, MongoError> {
+        let mut it = match seq {
+            crate::spill::DocSeq::Mem(v) => return Ok(Self::from_docs(ns, v)),
+            other => other.into_iter_docs()?,
+        };
+        let ahead = it.next().transpose()?;
+        Ok(Self {
+            ns,
+            table: String::new(),
+            pred: Pred::True,
+            projection: None,
+            remaining: None,
+            exhausted: ahead.is_none(),
+            kind: PlanKind::Spilled(SpilledDocs { it, ahead }),
+            collation: None,
+        })
+    }
+
     /// Bytes held in the buffer (for the cursor memory budget).
     #[must_use]
     pub fn buffered_bytes(&self) -> usize {
@@ -445,6 +482,7 @@ impl CursorPlan {
                 .map(|d| bson::to_vec(d).map_or(0, |v| v.len()))
                 .sum(),
             PlanKind::Keyset { .. } => 0,
+            PlanKind::Spilled(s) => s.ahead.as_ref().map_or(0, crate::spill::doc_bytes),
         }
     }
 }
@@ -1233,6 +1271,24 @@ impl Engine {
                     }
                 }
                 if b.is_empty() {
+                    plan.exhausted = true;
+                }
+            }
+            PlanKind::Spilled(sp) => {
+                let sp: &mut SpilledDocs = sp;
+                crate::heavy::run(crate::heavy::HEAVY_DOCS, || -> Result<(), MongoError> {
+                    while out.len() < want {
+                        let Some(d) = sp.ahead.take() else { break };
+                        bytes += crate::spill::doc_bytes(&d);
+                        out.push(d);
+                        sp.ahead = sp.it.next().transpose()?;
+                        if bytes >= max_bytes {
+                            break;
+                        }
+                    }
+                    Ok(())
+                })?;
+                if sp.ahead.is_none() {
                     plan.exhausted = true;
                 }
             }
@@ -2137,6 +2193,24 @@ impl Engine {
         ns: &Ns,
         pipeline: &[Document],
     ) -> Result<Vec<Document>, MongoError> {
+        let seq = Box::pin(self.aggregate_seq(sql, ns, pipeline)).await?;
+        crate::heavy::run(crate::heavy::HEAVY_DOCS, || seq.into_vec())
+    }
+
+    /// [`Self::aggregate`], with a result that may be on disk (M5): with
+    /// `allowDiskUse` ([`crate::spill::scope`]) the collection's read and
+    /// the stages spill past `doc.agg_stage_memory_bytes`.
+    ///
+    /// # Errors
+    /// Stage errors; SQL errors; 14031 past a spill cap.
+    #[allow(clippy::too_many_lines)]
+    pub async fn aggregate_seq(
+        &self,
+        sql: &mut dyn SqlRunner,
+        ns: &Ns,
+        pipeline: &[Document],
+    ) -> Result<crate::spill::DocSeq, MongoError> {
+        use crate::spill::{self, DocSeq, SeqBuilder};
         let now = now_date();
         let lim = AggLimits {
             stage_bytes: self.cfg.agg_stage_bytes,
@@ -2153,7 +2227,10 @@ impl Engine {
         // collection (73).
         let first = match (first, pipeline.first()) {
             (None, Some(s0)) if ns.coll.is_empty() => {
-                let (name, arg) = s0.iter().next().map_or(("", &Bson::Null), |(k, v)| (k.as_str(), v));
+                let (name, arg) = s0
+                    .iter()
+                    .next()
+                    .map_or(("", &Bson::Null), |(k, v)| (k.as_str(), v));
                 if name == "$documents" {
                     Some(agg::documents(arg, &lim)?)
                 } else if let Some(e) = agg::db_level_error(name) {
@@ -2215,10 +2292,10 @@ impl Engine {
         } else {
             doc! {"$and": conds}
         };
-        let mut docs = if let Some(d) = first {
-            d
+        let mut seq = if let Some(d) = first {
+            DocSeq::Mem(d)
         } else if ns.coll.is_empty() {
-            Vec::new()
+            DocSeq::Mem(Vec::new())
         } else {
             let pred = filter::parse(&leading)?;
             models::check_near(&pred, false)?;
@@ -2226,25 +2303,131 @@ impl Engine {
                 Some(m) => {
                     let gm = self.geo_sides(sql, ns, &m, &pred).await?;
                     let sqlp = translate(&pred, gm.as_ref().unwrap_or(&m));
-                    self.scan(
-                        sql,
-                        ns,
-                        &m.table,
-                        &pred,
-                        &sqlp,
-                        self.cfg.agg_stage_bytes.saturating_mul(4),
-                    )
-                    .await?
+                    if spill::allowed() {
+                        // M5: the read itself spills past the stage limit.
+                        self.scan_seq(sql, ns, &m.table, &pred, &sqlp).await?
+                    } else {
+                        DocSeq::Mem(
+                            self.scan(
+                                sql,
+                                ns,
+                                &m.table,
+                                &pred,
+                                &sqlp,
+                                self.cfg.agg_stage_bytes.saturating_mul(4),
+                            )
+                            .await?,
+                        )
+                    }
                 }
-                None => Vec::new(),
+                None => DocSeq::Mem(Vec::new()),
             }
         };
-        for s in stages {
+        let base = pipeline.len() - stages.len();
+        for (j, s) in stages.iter().enumerate() {
+            spill::set_stage(base + j);
             let name = s.keys().next().map_or("", String::as_str);
+            // M5: `$lookup` and `$graphLookup` over a spilled input, or
+            // with `allowDiskUse`, run a batch of input documents at a
+            // time into a builder that spills.
+            if matches!(name, "$lookup" | "$graphLookup") && (spill::allowed() || !seq.is_mem()) {
+                let batch = if name == "$lookup" { 500 } else { 100 };
+                let mut out = SeqBuilder::new(self.cfg.agg_stage_bytes);
+                let mut it = seq.into_iter_docs()?;
+                loop {
+                    let chunk: Vec<Document> =
+                        crate::heavy::run(crate::heavy::HEAVY_DOCS, || {
+                            (&mut it).take(batch).collect::<Result<_, MongoError>>()
+                        })?;
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    let res = if name == "$lookup" {
+                        self.lookup(
+                            sql,
+                            ns,
+                            chunk,
+                            s.get_document("$lookup").map_err(|_| {
+                                MongoError::new(
+                                    code::FAILED_TO_PARSE,
+                                    "the $lookup specification must be an Object",
+                                )
+                            })?,
+                            &lim,
+                        )
+                        .await?
+                    } else {
+                        self.graph_lookup(
+                            sql,
+                            ns,
+                            chunk,
+                            s.get("$graphLookup").unwrap_or(&Bson::Null),
+                            &lim,
+                        )
+                        .await?
+                    };
+                    crate::heavy::run(res.len(), || -> Result<(), MongoError> {
+                        for d in res {
+                            out.push(d)?;
+                        }
+                        Ok(())
+                    })?;
+                }
+                seq = crate::heavy::run(crate::heavy::HEAVY_DOCS, || out.finish())?;
+                continue;
+            }
+            if !matches!(
+                name,
+                "$graphLookup" | "$lookup" | "$unionWith" | "$out" | "$merge"
+            ) {
+                let n = match &seq {
+                    DocSeq::Mem(v) => v.len(),
+                    _ => crate::heavy::HEAVY_DOCS,
+                };
+                // A large set leaves the worker thread (heavy::HEAVY_DOCS).
+                seq = crate::heavy::run(n, || {
+                    agg::run_stage_seq(seq, s, stages.get(j + 1), &lim)
+                })?;
+                continue;
+            }
+            if name == "$unionWith" && !seq.is_mem() {
+                let (coll, pipe) = match s.get("$unionWith") {
+                    Some(Bson::String(c)) => (c.clone(), Vec::new()),
+                    Some(Bson::Document(d)) => (
+                        d.get_str("coll").unwrap_or("").to_owned(),
+                        d.get_array("pipeline")
+                            .map(|a| a.iter().filter_map(|x| x.as_document().cloned()).collect())
+                            .unwrap_or_default(),
+                    ),
+                    _ => return Err(MongoError::new(code::FAILED_TO_PARSE, "bad $unionWith")),
+                };
+                let other = Box::pin(self.aggregate_seq(
+                    sql,
+                    &Ns {
+                        db: ns.db.clone(),
+                        coll,
+                    },
+                    &pipe,
+                ))
+                .await?;
+                seq = DocSeq::Stream(Box::new(
+                    seq.into_iter_docs()?.chain(other.into_iter_docs()?),
+                ));
+                continue;
+            }
+            // `$out` and `$merge` write every document; a spilled input
+            // is read back here (decision S75).
+            let mut docs = crate::heavy::run(crate::heavy::HEAVY_DOCS, || seq.into_vec())?;
             docs = match name {
                 "$graphLookup" => {
-                    self.graph_lookup(sql, ns, docs, s.get("$graphLookup").unwrap_or(&Bson::Null), &lim)
-                        .await?
+                    self.graph_lookup(
+                        sql,
+                        ns,
+                        docs,
+                        s.get("$graphLookup").unwrap_or(&Bson::Null),
+                        &lim,
+                    )
+                    .await?
                 }
                 "$lookup" => {
                     self.lookup(
@@ -2339,10 +2522,62 @@ impl Engine {
                 // A large set leaves the worker thread (heavy::HEAVY_DOCS).
                 _ => crate::heavy::run(docs.len(), || agg::run_stage(docs, s, &lim))?,
             };
+            seq = DocSeq::Mem(docs);
         }
-        models::strip_scores(&mut docs);
-        crate::text::strip(&mut docs);
-        Ok(docs)
+        Ok(match seq {
+            DocSeq::Mem(mut docs) => {
+                models::strip_scores(&mut docs);
+                crate::text::strip(&mut docs);
+                DocSeq::Mem(docs)
+            }
+            other => DocSeq::Stream(Box::new(other.into_iter_docs()?.map(|d| {
+                let mut one = vec![d?];
+                models::strip_scores(&mut one);
+                crate::text::strip(&mut one);
+                Ok(one.pop().unwrap_or_default())
+            }))),
+        })
+    }
+
+    /// [`Self::scan`] into a builder that spills past
+    /// `doc.agg_stage_memory_bytes` (M5).
+    async fn scan_seq(
+        &self,
+        sql: &mut dyn SqlRunner,
+        ns: &Ns,
+        table: &str,
+        pred: &Pred,
+        sqlp: &SqlPred,
+    ) -> Result<crate::spill::DocSeq, MongoError> {
+        let mut out = crate::spill::SeqBuilder::new(self.cfg.agg_stage_bytes);
+        let mut last: Option<Vec<u8>> = None;
+        let cx = AggExpr { now: now_date() };
+        loop {
+            let rows = self
+                .read_chunk(
+                    sql,
+                    ns,
+                    table,
+                    sqlp,
+                    last.as_deref(),
+                    false,
+                    self.cfg.chunk_rows,
+                )
+                .await?;
+            let n = rows.len();
+            crate::heavy::run(n, || -> Result<(), MongoError> {
+                for (k, d) in rows {
+                    last = Some(k);
+                    if pred.matches_with(&d, &cx) {
+                        out.push(d)?;
+                    }
+                }
+                Ok(())
+            })?;
+            if n < self.cfg.chunk_rows {
+                return crate::heavy::run(crate::heavy::HEAVY_DOCS, || out.finish());
+            }
+        }
     }
 
     /// `find` with `$text` (chapter 39): the scored matches, sorted,

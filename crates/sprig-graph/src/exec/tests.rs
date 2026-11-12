@@ -1142,3 +1142,104 @@ async fn temporal_functions_take_other_temporal_values() {
         .is_err()
     );
 }
+
+/// R8 round 9 (decision G76), as Neo4j 5.26 answers: a batched `CALL`
+/// after a write of the same query is a syntax error; writes after it
+/// are allowed, and a failure there leaves the committed batches.
+#[tokio::test]
+async fn call_in_transactions_after_a_write_is_refused() {
+    for bad in [
+        "CREATE (:Outer) WITH 1 AS one UNWIND [1] AS i CALL (i) { CREATE (:B) } IN TRANSACTIONS RETURN 1",
+        "MERGE (x:M) WITH x UNWIND [1] AS i CALL (i) { CREATE (:B) } IN TRANSACTIONS RETURN 1",
+        "CALL { CREATE (:Q) } UNWIND [1] AS i CALL (i) { CREATE (:B) } IN TRANSACTIONS RETURN 1",
+        "MATCH (n) SET n.x = 1 WITH count(*) AS c UNWIND [1] AS i CALL (i) { CREATE (:B) } IN TRANSACTIONS RETURN 1",
+        "MATCH (n) FOREACH (x IN [1] | SET n.y = x) WITH count(*) AS c UNWIND [1] AS i CALL (i) { CREATE (:B) } IN TRANSACTIONS",
+    ] {
+        let e = crate::parser::parse(bad).expect_err(bad);
+        assert_eq!(e.code(), Some(SprigCode::GraphSyntax), "{bad}");
+        assert!(
+            e.message
+                .contains("CALL { ... } IN TRANSACTIONS after a write clause is not supported"),
+            "{bad}: {e}"
+        );
+    }
+    // Reads before, a second batched CALL after one, and writes after.
+    for ok in [
+        "MATCH (n) WITH count(n) AS c UNWIND [1] AS i CALL (i) { CREATE (:B) } IN TRANSACTIONS RETURN 1",
+        "UNWIND [1] AS i CALL (i) { CREATE (:B) } IN TRANSACTIONS WITH i UNWIND [2] AS j CALL (j) { CREATE (:C) } IN TRANSACTIONS RETURN 1",
+        "UNWIND [1] AS i CALL (i) { CREATE (:B) } IN TRANSACTIONS CREATE (:After) RETURN 1",
+        "CREATE (:A) RETURN 1 UNION UNWIND [1] AS i CALL (i) { CREATE (:B) } IN TRANSACTIONS RETURN 1",
+    ] {
+        crate::parser::parse(ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
+    }
+    for shards in [1, 4] {
+        let mut s = MemStore::new(shards);
+        let o = q(
+            &mut s,
+            "UNWIND [1, 2, 3] AS i CALL (i) { CREATE (:B {i: i}) } IN TRANSACTIONS OF 1 ROWS CREATE (:After {i: i}) RETURN count(*)",
+        )
+        .await;
+        assert_eq!(show(&o), ["3"]);
+        let o = q(&mut s, "MATCH (n) RETURN count(*)").await;
+        assert_eq!(show(&o), ["6"]);
+        q(&mut s, "MATCH (n) DETACH DELETE n").await;
+        let e = crate::execute(
+            &mut s,
+            "UNWIND [1, 0, 2] AS i CALL (i) { CREATE (:B {i: i}) } IN TRANSACTIONS OF 1 ROWS CREATE (:After {i: 10 / i}) RETURN count(*)",
+            &Params::new(),
+            &Budgets::default(),
+        )
+        .await
+        .expect_err("division by zero");
+        assert!(e.message.ends_with("/ by zero"), "{e}");
+        // The batches stay. (The writes after them roll back with the
+        // statement in the gateway's store, checked against Neo4j in
+        // `bolt_live`; this test store has no statement rollback.)
+        let o = q(&mut s, "MATCH (b:B) RETURN count(*)").await;
+        assert_eq!(show(&o), ["3"]);
+    }
+}
+
+/// R8 round 9 (decision G77): a uniqueness key carries the value's
+/// type, so a string equal to a byte array's base64 (or to a date's ISO
+/// text) is another key, as in Neo4j 5.26.
+#[tokio::test]
+async fn unique_keys_carry_the_value_type() {
+    for shards in [1, 4] {
+        let mut s = MemStore::new(shards);
+        q(&mut s, "CREATE CONSTRAINT FOR (n:U) REQUIRE n.k IS UNIQUE").await;
+        let b = Value::Bytes(vec![1, 2, 255]);
+        qp(&mut s, "CREATE (:U {k: $b})", &[("b", b.clone())]).await;
+        q(&mut s, "CREATE (:U {k: 'AQL/'})").await;
+        q(&mut s, "CREATE (:U {k: date('2024-01-02')})").await;
+        q(&mut s, "CREATE (:U {k: '2024-01-02'})").await;
+        let o = q(&mut s, "MATCH (n:U) RETURN count(*)").await;
+        assert_eq!(show(&o), ["4"]);
+        for (text, p) in [
+            ("CREATE (:U {k: $b})", vec![("b", b.clone())]),
+            ("CREATE (:U {k: 'AQL/'})", vec![]),
+            ("CREATE (:U {k: date('2024-01-02')})", vec![]),
+        ] {
+            let params: Params = p.into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
+            let e = crate::execute(&mut s, text, &params, &Budgets::default())
+                .await
+                .expect_err(text);
+            assert!(e.message.contains("already exists"), "{text}: {e}");
+        }
+    }
+    let (props, types) = crate::value::props_to_json(
+        &[("k".to_owned(), Value::Bytes(vec![1, 2, 255]))]
+            .into_iter()
+            .collect(),
+    );
+    let kind = crate::ast::IndexKind::Range;
+    assert_eq!(
+        crate::schema::prop_index_value(&props, types.as_ref(), "k", kind).as_deref(),
+        Some("tbytes:AQL/")
+    );
+    assert_eq!(
+        crate::schema::prop_index_value(&serde_json::json!({"k": "AQL/"}), None, "k", kind)
+            .as_deref(),
+        Some("sAQL/")
+    );
+}

@@ -676,7 +676,7 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
                 super::retry::run(c, &mut s, name, body, &db, l, n).await
             }
             _ => {
-                // MongoDB 9.0's per-operation memory limit (M3, S100).
+                // MongoDB 9.0's per-operation memory limit (M3, S99).
                 let mem = c.shared.settings().max_operation_memory_bytes;
                 sprig_doc::opmem::scope(
                     mem,
@@ -1187,9 +1187,10 @@ async fn exec(
                 engine.catalog.save_indexes(sql, &ns, &m).await?;
             }
             // Schema validation (M3, decisions S90-S92).
-            if let Some(o) =
-                Box::pin(sprig_doc::validate::coll_mod(&engine, sql, &ns, &m.options, body))
-                    .await?
+            if let Some(o) = Box::pin(sprig_doc::validate::coll_mod(
+                &engine, sql, &ns, &m.options, body,
+            ))
+            .await?
             {
                 m.options = o;
                 engine.catalog.save_indexes(sql, &ns, &m).await?;
@@ -1590,7 +1591,15 @@ async fn exec(
         n if super::search::handles(n) => super::search::command(&engine, sql, n, body, db).await,
         // Query settings (M3, decisions S96-S99).
         n if super::qsettings::handles(n) => {
-            Box::pin(super::qsettings::command(&engine, sql, owner(c).tenant, n, body, db)).await
+            Box::pin(super::qsettings::command(
+                &engine,
+                sql,
+                owner(c).tenant,
+                n,
+                body,
+                db,
+            ))
+            .await
         }
         other => Err(MongoError::new(
             code::COMMAND_NOT_FOUND,

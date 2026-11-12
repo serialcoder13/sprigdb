@@ -366,6 +366,29 @@ impl Runner for GwRunner<'_, '_, '_> {
         self.cx.proto.caps.contains(Caps::FOUND_ROWS)
     }
 
+    async fn snapshot_isolation(&mut self) -> Result<bool> {
+        // The session's own value when it (or its persona, D9) set one;
+        // else the server's (bugfix-54).
+        let known = self.sess.bs.as_ref().and_then(|b| {
+            b.vars()
+                .vars
+                .get("innodb_snapshot_isolation")
+                .map(|v| v.eq_ignore_ascii_case("ON") || v == "1")
+        });
+        if let Some(on) = known {
+            return Ok(on);
+        }
+        let rows = self
+            .query(sprig_types::exec::SNAPSHOT_ISOLATION_READ)
+            .await?;
+        Ok(rows
+            .rows
+            .first()
+            .and_then(|r| r.first())
+            .and_then(Option::as_deref)
+            .is_some_and(|v| v == b"1" || v.eq_ignore_ascii_case(b"ON")))
+    }
+
     async fn object_id(
         &mut self,
         db: Option<&str>,

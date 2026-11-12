@@ -139,9 +139,10 @@ impl CursorTable {
             Vec::new(),
         );
         plan.exhausted = false;
-        let id = self.open(plan, ns.clone(), owner, lsid, batch_size, false, max_per_tenant)?;
         // M4 (S116): change-stream metrics.
-        super::status::stream_opened(id, &ns);
+        let scope = super::status::stream_scope(&ns);
+        let id = self.open(plan, ns, owner, lsid, batch_size, false, max_per_tenant)?;
+        super::status::stream_opened(id, scope);
         if let Some(c) = self.lock().get(&id).cloned()
             && let Ok(mut g) = c.try_lock()
             && let Some(cur) = g.as_mut()
@@ -243,7 +244,10 @@ impl CursorTable {
     /// The open cursors (M4: `currentOp`'s change streams).
     #[must_use]
     pub fn entries(&self) -> Vec<(i64, Arc<tokio::sync::Mutex<Option<Cursor>>>)> {
-        self.lock().iter().map(|(k, v)| (*k, Arc::clone(v))).collect()
+        self.lock()
+            .iter()
+            .map(|(k, v)| (*k, Arc::clone(v)))
+            .collect()
     }
 
     /// Open cursors.

@@ -858,6 +858,11 @@ impl RlsStore {
 /// (`sprig_sql::rls::views::CTX_FUNCTION`).
 pub const CTX_FUNCTION: &str = "__sprig_rls_ctx";
 
+/// The prefixes of a key-value namespace's element tables
+/// (`sprig_sql::rls::triggers::KV_ELEMENT_PREFIXES`): their policy views
+/// apply the key table's policies (decision RL55).
+pub const KV_ELEMENT_PREFIXES: [&str; 2] = ["__sprig_ke_", "__sprig_kz_"];
+
 /// The policy view of table `table` (object `object`;
 /// `sprig_sql::rls::views::view_name`): an updatable view of the rows the
 /// session's `SELECT` policies show.
@@ -965,17 +970,28 @@ pub fn narrow(
     let select = ActionSet::of(&[Action::Select]);
     let tenant = cat.tenant;
     // Protected tables with a view, per database: (object, name lower).
+    // A key-value namespace's element tables (`__sprig_ke_<t>`,
+    // `__sprig_kz_<t>`) count as the key table's, under their own names
+    // and views (RLS round 6, decision RL55); where they don't exist they
+    // match no relation.
     let mut protected: HashMap<DbId, Vec<(ObjectId, String)>> = HashMap::new();
-    let mut names: HashMap<ObjectId, String> = HashMap::new();
+    let mut names: HashMap<(ObjectId, String), String> = HashMap::new();
     for s in state.security.values().filter(|s| s.enabled) {
         if let Some(o) = cat.objects.get(s.object_id) {
-            protected
-                .entry(o.db_id)
-                .or_default()
-                .push((s.object_id, o.name.to_lowercase()));
-            names.insert(s.object_id, o.name.clone());
+            let spelled = std::iter::once(o.name.clone())
+                .chain(KV_ELEMENT_PREFIXES.iter().map(|p| format!("{p}{}", o.name)));
+            for n in spelled {
+                protected
+                    .entry(o.db_id)
+                    .or_default()
+                    .push((s.object_id, n.to_lowercase()));
+                names.insert((s.object_id, n.to_lowercase()), n);
+            }
         }
     }
+    let view_of = |o: &ObjectId, lower: &str| {
+        policy_view(names.get(&(*o, lower.to_owned())).map_or(lower, String::as_str), *o)
+    };
     let db_of = |schema: &str| -> Option<DbId> {
         let rest = schema.strip_prefix(&format!("t{tenant}_d"))?;
         let end = rest.find('_')?;
@@ -1003,8 +1019,8 @@ pub fn narrow(
             let binds: Vec<&(ObjectId, String)> = tables
                 .iter()
                 .filter(|(o, _)| mine.contains(o))
-                .filter(|(o, _)| {
-                    let v = policy_view(names.get(o).map_or("", String::as_str), *o).to_lowercase();
+                .filter(|(o, n)| {
+                    let v = view_of(o, n).to_lowercase();
                     !definers.contains(&(acct.clone(), v))
                 })
                 .collect();
@@ -1014,8 +1030,8 @@ pub fn narrow(
             let eff = db_row_for(grants, &first).unwrap_or_default();
             // Only where some binding table's view exists: until then the
             // gateway's rewrite alone filters reads.
-            let any_view = binds.iter().any(|(o, _)| {
-                let v = policy_view(names.get(o).map_or("", String::as_str), *o);
+            let any_view = binds.iter().any(|(o, n)| {
+                let v = view_of(o, n);
                 in_db
                     .values()
                     .any(|rels| rels.iter().any(|r| r.eq_ignore_ascii_case(&v)))
@@ -1089,7 +1105,7 @@ pub fn narrow(
                     let hview = policy_view_hidden(&spelled_name, *object);
                     let hkey =
                         has(&hview).then(|| BackendTarget::Table(schema.clone(), hview.clone()));
-                    if binds.iter().any(|(o, _)| o == object) {
+                    if binds.iter().any(|(o, n)| o == object && n == name) {
                         let refs = ActionSet::of(&[Action::References]);
                         let e = grants.entry(tkey.clone()).or_default();
                         *e = e.minus(select).union(refs);
@@ -1337,7 +1353,7 @@ mod tests {
                         created_by: None,
                         changed_version: 1,
                     }],
-                    objects: vec![obj(10, "Docs"), obj(11, "notes")],
+                    objects: vec![obj(10, "Docs"), obj(11, "notes"), obj(12, "db0")],
                     settings: Vec::new(),
                 },
                 ext: vec![(MODULE, Arc::new(rls) as Arc<dyn ExtState>)],
@@ -1453,6 +1469,88 @@ mod tests {
         narrow(&mut want3, &cat, &bound, &physical[..3], &defs);
         assert_eq!(want3, before3);
         assert_eq!(want2, before);
+    }
+
+    #[test]
+    fn bound_accounts_read_key_value_elements_through_their_views() {
+        // RL55: a protected key-value namespace's element tables lose
+        // SELECT for bound accounts, their views get it.
+        use super::super::backend::{BackendState, BackendTarget, db_row_for};
+        use super::super::privilege::ActionSet;
+        let cat = catalog_with(&[12]);
+        let all = ActionSet::of(&[
+            Action::Select,
+            Action::Insert,
+            Action::Update,
+            Action::Delete,
+        ]);
+        let tenant_row = BackendTarget::Db("t42\\_d%".into());
+        let mut want = BackendState::new();
+        for u in ["t42_u1", "t42_u2"] {
+            want.entry(u.into())
+                .or_default()
+                .insert(tenant_row.clone(), all);
+        }
+        let bound: HashMap<String, Vec<ObjectId>> = [
+            ("t42_u1".to_owned(), vec![ObjectId(12)]),
+            ("t42_u2".to_owned(), vec![ObjectId(12)]),
+        ]
+        .into_iter()
+        .collect();
+        let s = "t42_d1_g0_s1".to_owned();
+        let mut physical: Vec<(String, String)> = [
+            "db0",
+            "__sprig_ke_db0",
+            "__sprig_kz_db0",
+            "notes",
+            "__sprig_rls_db0",
+            "__sprig_rlsh_db0",
+            CTX_FUNCTION,
+        ]
+        .iter()
+        .map(|n| (s.clone(), (*n).to_owned()))
+        .collect();
+        let element_views = [
+            "__sprig_rls___sprig_ke_db0",
+            "__sprig_rlsh___sprig_ke_db0",
+            "__sprig_rls___sprig_kz_db0",
+            "__sprig_rlsh___sprig_kz_db0",
+        ];
+        // Before the element views exist: the element tables stay readable
+        // (the gateway's rewrite filters them, RL35).
+        let mut before = want.clone();
+        narrow(
+            &mut before,
+            &cat,
+            &bound,
+            &physical,
+            &std::collections::HashSet::new(),
+        );
+        let sel = ActionSet::of(&[Action::Select]);
+        let refs = ActionSet::of(&[Action::References]);
+        let t = |s: &str, n: &str| BackendTarget::Table(s.into(), n.into());
+        assert_eq!(
+            before["t42_u1"].get(&t(&s, "__sprig_ke_db0")).copied(),
+            Some(sel)
+        );
+        physical.extend(element_views.iter().map(|n| (s.clone(), (*n).to_owned())));
+        // u2 defines the views: it keeps reading the tables.
+        let defs = ["__sprig_rls_db0", "__sprig_rls___sprig_ke_db0", "__sprig_rls___sprig_kz_db0"]
+            .iter()
+            .map(|v| ("t42_u2".to_owned(), (*v).to_owned()))
+            .collect();
+        narrow(&mut want, &cat, &bound, &physical, &defs);
+        let u1 = &want["t42_u1"];
+        assert_eq!(db_row_for(u1, &s), Some(all.minus(sel)));
+        for e in ["db0", "__sprig_ke_db0", "__sprig_kz_db0"] {
+            assert_eq!(u1.get(&t(&s, e)).copied(), Some(refs), "{e}");
+        }
+        for v in element_views {
+            assert_eq!(u1.get(&t(&s, v)).copied(), Some(all), "{v}");
+        }
+        assert_eq!(u1.get(&t(&s, "notes")).copied(), Some(sel));
+        assert_eq!(want["t42_u2"].get(&tenant_row).copied(), Some(all));
+        assert!(!want["t42_u2"].contains_key(&t(&s, "__sprig_ke_db0")));
     }
 
     #[test]

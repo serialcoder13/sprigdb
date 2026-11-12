@@ -346,7 +346,7 @@ pub fn has_writes(q: &Query) -> bool {
     q.parts.iter().any(|p| clauses_write(&p.clauses))
 }
 
-fn clauses_write(cs: &[Clause]) -> bool {
+pub(crate) fn clauses_write(cs: &[Clause]) -> bool {
     cs.iter().any(|c| match c {
         Clause::Create(_)
         | Clause::Merge { .. }

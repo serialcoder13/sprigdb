@@ -411,6 +411,10 @@ impl sprig_types::Runner for InhRunner<'_, '_, '_> {
         self.gw.found_rows()
     }
 
+    async fn snapshot_isolation(&mut self) -> Result<bool> {
+        self.gw.snapshot_isolation().await
+    }
+
     async fn object_id(
         &mut self,
         db: Option<&str>,

@@ -39,6 +39,8 @@ pub mod qshape;
 /// Server-side JavaScript: `$where`, `$function`, `$accumulator` (M4).
 pub mod serverjs;
 pub mod sessions;
+/// Spilling to disk: `allowDiskUse` (M5).
+pub mod spill;
 pub mod sql;
 /// `$text`, `$search` and `$searchMeta` (chapter 39, R5 round 5).
 pub mod text;

@@ -18,6 +18,9 @@
 //!   `DELETE` of something that isn't an element or path.
 //! - **Patterns as values** (`RETURN (a)-->()`, `size((a)-->())`) are
 //!   `UnexpectedSyntax`: Cypher 5 allows them only as predicates.
+//! - **`CALL { } IN TRANSACTIONS` after a write** (`CREATE`, `MERGE`,
+//!   `SET`, `REMOVE`, `DELETE`, `FOREACH`, or a subquery that writes) in
+//!   the same query is refused, with Neo4j 5.26's message.
 //!
 //! The checks are conservative: a variable whose kind isn't known from
 //! the text (a parameter, a function result, a subquery's column) never
@@ -105,7 +108,21 @@ fn is_element(k: Kind) -> bool {
 }
 
 fn check_clauses(clauses: &[Clause], s: &mut Scope) -> Result<()> {
-    for c in clauses {
+    for (i, c) in clauses.iter().enumerate() {
+        // R8 round 9 (decision G76): as Neo4j 5.26, a batched `CALL` may
+        // not follow a write of the same query (those writes would belong
+        // to no batch). An earlier batched `CALL` committed its own.
+        let batched = |c: &Clause| matches!(c, Clause::Subquery { batch: Some(_), .. });
+        if batched(c)
+            && clauses[..i]
+                .iter()
+                .any(|p| !batched(p) && crate::exec::clauses_write(std::slice::from_ref(p)))
+        {
+            return Err(SprigError::new(
+                SprigCode::GraphSyntax,
+                "[Neo.ClientError.Statement.SyntaxError] CALL { ... } IN TRANSACTIONS after a write clause is not supported",
+            ));
+        }
         check_clause(c, s)?;
     }
     Ok(())

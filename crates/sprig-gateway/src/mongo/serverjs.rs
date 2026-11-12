@@ -15,7 +15,7 @@ use std::sync::Arc;
 use bson::{Bson, Document};
 use sprig_catalog::Freshness;
 use sprig_common::ids::TenantId;
-use sprig_doc::engine::SqlRunner as _;
+use sprig_doc::engine::SqlRunner;
 use sprig_doc::serverjs::{JsCall, JsFailure, Runner, Scope};
 use sprig_settings::{Apply, HardBounds, Scopes, Setting};
 
@@ -81,7 +81,7 @@ pub(crate) fn scope_for(
                 | "explain"
         ) && sprig_doc::serverjs::mentions_js(body));
     let tenants = c.shared.d.tenants.clone();
-    let tenant = c.sql.as_ref().map(|s| s.tenant()).filter(|t| *t != 0);
+    let tenant = c.sql.as_ref().map(SqlRunner::tenant).filter(|t| *t != 0);
     async move {
         if !wanted {
             return None;

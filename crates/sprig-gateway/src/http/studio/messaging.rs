@@ -117,6 +117,25 @@ async fn test_route(
     name: &str,
     body: &Value,
 ) -> Result<Response<Body>, SprigError> {
+    let (columns, rows) = run_test(core, caller, db, kind, name, body).await?;
+    Ok(json_response(
+        200,
+        &json!({"columns": columns, "rows": rows}),
+    ))
+}
+
+/// `Sinks.Test` (`kind` `"sinks"`) or `Connections.Test`
+/// (`"connections"`) as the caller: the columns and rows, for the REST
+/// route above and the gRPC services (`sprig.v1.Sinks`,
+/// `sprig.v1.Connections`).
+pub(crate) async fn run_test(
+    core: &Arc<Core>,
+    caller: &Caller,
+    db: &str,
+    kind: &str,
+    name: &str,
+    body: &Value,
+) -> Result<(Vec<String>, Vec<Vec<Option<String>>>), SprigError> {
     let sql = test_statement(db, kind, name, body)?;
     let r = run_sql(core, caller, db, sql).await?;
     let columns: Vec<String> = r
@@ -125,11 +144,7 @@ async fn test_route(
         .find(|x| !x.columns.is_empty())
         .map(|x| x.columns.iter().map(|c| c.name.clone()).collect())
         .unwrap_or_default();
-    let rows = rows_of(&r);
-    Ok(json_response(
-        200,
-        &json!({"columns": columns, "rows": rows}),
-    ))
+    Ok((columns, rows_of(&r)))
 }
 
 fn decode(seg: &str) -> String {

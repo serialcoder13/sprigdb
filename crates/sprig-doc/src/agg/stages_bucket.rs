@@ -64,6 +64,48 @@ pub(crate) fn bucket(
     arg: &Bson,
     lim: &AggLimits,
 ) -> Result<Vec<Document>, MongoError> {
+    let sp = parse_bucket(arg)?;
+    let mut js = crate::serverjs::GroupJs::parse(&sp.js_spec)?;
+    let mut keys = Vec::with_capacity(docs.len());
+    for doc in docs {
+        keys.push(sp.key(doc, lim)?);
+    }
+    let mut out = accum::group_by(
+        docs,
+        keys,
+        &sp.accs,
+        lim,
+        "$bucket",
+        (!js.is_empty()).then_some(&mut js),
+    )?;
+    sort_by_id(&mut out);
+    Ok(out)
+}
+
+/// Sorts `$bucket` output by `_id`.
+pub(crate) fn sort_by_id(out: &mut [Document]) {
+    out.sort_by(|x, y| {
+        compare(
+            x.get("_id").unwrap_or(&Bson::Null),
+            y.get("_id").unwrap_or(&Bson::Null),
+        )
+    });
+}
+
+/// A parsed `$bucket` (split out for the spilling version, M5).
+pub(crate) struct BucketSpec {
+    gb: Bson,
+    b: Vec<Bson>,
+    default: Option<Bson>,
+    pub(crate) accs: Vec<(String, AccSpec)>,
+    pub(crate) js_spec: Document,
+}
+
+/// Parses `$bucket`.
+///
+/// # Errors
+/// 40192–40202.
+pub(crate) fn parse_bucket(arg: &Bson) -> Result<BucketSpec, MongoError> {
     let Bson::Document(d) = arg else {
         return Err(err(
             40201,
@@ -147,43 +189,38 @@ pub(crate) fn bucket(
         ));
     }
     let accs = output_of(d.get("output"), "$bucket", 40196)?;
-    let mut js =
-        crate::serverjs::GroupJs::parse(d.get_document("output").unwrap_or(&Document::new()))?;
-    let mut keys = Vec::with_capacity(docs.len());
-    for doc in docs {
-        let v = eval(gb, &Vars::new(doc, lim.now))?;
+    Ok(BucketSpec {
+        gb: gb.clone(),
+        b: b.clone(),
+        default: default.cloned(),
+        accs,
+        js_spec: d.get_document("output").cloned().unwrap_or_default(),
+    })
+}
+
+impl BucketSpec {
+    /// The bucket (its lower boundary, or the default) of `doc`.
+    ///
+    /// # Errors
+    /// 40066 outside every bucket without `default`; the expression's.
+    pub(crate) fn key(&self, doc: &Document, lim: &AggLimits) -> Result<Bson, MongoError> {
+        let b = &self.b;
+        let v = eval(&self.gb, &Vars::new(doc, lim.now))?;
         let pos = b.windows(2).position(|w| {
             !missing(&v)
                 && family(&v) == family(&w[0])
                 && compare(&v, &w[0]) != Ordering::Less
                 && compare(&v, &w[1]) == Ordering::Less
         });
-        keys.push(match (pos, default) {
-            (Some(i), _) => b[i].clone(),
-            (None, Some(dv)) => dv.clone(),
-            (None, None) => {
-                return Err(err(
-                    40066,
-                    "$switch could not find a matching branch for an input, and no default was specified.",
-                ));
-            }
-        });
+        match (pos, &self.default) {
+            (Some(i), _) => Ok(b[i].clone()),
+            (None, Some(dv)) => Ok(dv.clone()),
+            (None, None) => Err(err(
+                40066,
+                "$switch could not find a matching branch for an input, and no default was specified.",
+            )),
+        }
     }
-    let mut out = accum::group_by(
-        docs,
-        keys,
-        &accs,
-        lim,
-        "$bucket",
-        (!js.is_empty()).then_some(&mut js),
-    )?;
-    out.sort_by(|x, y| {
-        compare(
-            x.get("_id").unwrap_or(&Bson::Null),
-            y.get("_id").unwrap_or(&Bson::Null),
-        )
-    });
-    Ok(out)
 }
 
 // --- granularity ---------------------------------------------------------------------
@@ -377,6 +414,39 @@ pub(crate) fn bucket_auto(
     arg: &Bson,
     lim: &AggLimits,
 ) -> Result<Vec<Document>, MongoError> {
+    let sp = parse_auto(arg)?;
+    // Each document's value, sorted (stably).
+    let mut vals: Vec<(Bson, usize)> = Vec::with_capacity(docs.len());
+    for (i, doc) in docs.iter().enumerate() {
+        vals.push((sp.value(doc, lim)?, i));
+    }
+    super::over(lim, docs, "$bucketAuto")?;
+    vals.sort_by(|a, b| compare(&a.0, &b.0));
+    let sorted: Vec<Bson> = vals.iter().map(|(v, _)| v.clone()).collect();
+    let mut out = Vec::new();
+    for (a, b, min, max) in sp.plan(&sorted) {
+        let ds = vals[a..b].iter().map(|(_, k)| Ok(docs[*k].clone()));
+        if let Some(d) = sp.bucket(ds, min, max, lim)? {
+            out.push(d);
+        }
+    }
+    Ok(out)
+}
+
+/// A parsed `$bucketAuto` (split out for the spilling version, M5).
+pub(crate) struct AutoSpec {
+    gb: Bson,
+    nbuckets: i32,
+    gran: Option<Rounder>,
+    accs: Vec<(String, AccSpec)>,
+    js_spec: Document,
+}
+
+/// Parses `$bucketAuto`.
+///
+/// # Errors
+/// 40239–40261 and the accumulators'.
+pub(crate) fn parse_auto(arg: &Bson) -> Result<AutoSpec, MongoError> {
     let Bson::Document(d) = arg else {
         return Err(err(
             40240,
@@ -453,12 +523,24 @@ pub(crate) fn bucket_auto(
     };
     let accs = output_of(d.get("output"), "$bucketAuto", 40244)?;
     let js_spec = d.get_document("output").cloned().unwrap_or_default();
-    // Each document's value, sorted (stably).
-    let mut vals: Vec<(Bson, usize)> = Vec::with_capacity(docs.len());
-    for (i, doc) in docs.iter().enumerate() {
-        let v = eval(gb, &Vars::new(doc, lim.now))?;
+    Ok(AutoSpec {
+        gb: gb.clone(),
+        nbuckets,
+        gran,
+        accs,
+        js_spec,
+    })
+}
+
+impl AutoSpec {
+    /// The `groupBy` value of `doc`.
+    ///
+    /// # Errors
+    /// 40258 and 40260 with a granularity; the expression's.
+    pub(crate) fn value(&self, doc: &Document, lim: &AggLimits) -> Result<Bson, MongoError> {
+        let v = eval(&self.gb, &Vars::new(doc, lim.now))?;
         let v = if missing(&v) { Bson::Null } else { v };
-        if gran.is_some() {
+        if self.gran.is_some() {
             if !is_num(&v) {
                 return Err(err(
                     40258,
@@ -477,77 +559,91 @@ pub(crate) fn bucket_auto(
                 ));
             }
         }
-        vals.push((v, i));
+        Ok(v)
     }
-    super::over(lim, docs, "$bucketAuto")?;
-    vals.sort_by(|a, b| compare(&a.0, &b.0));
-    let n = vals.len();
-    if n == 0 {
-        return Ok(Vec::new());
-    }
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
-    let size = ((n as f64 / f64::from(nbuckets)).round() as usize).max(1);
-    // Buckets as index ranges with their min and max.
-    let mut buckets: Vec<(usize, usize, Bson, Bson)> = Vec::new();
-    let mut i = 0;
-    let mut prev_max: Option<Bson> = None;
-    while i < n {
-        let start = i;
-        let last_bucket = buckets.len() + 1 == usize::try_from(nbuckets).unwrap_or(usize::MAX);
-        let mut end = if last_bucket { n } else { (i + size).min(n) };
-        if gran.is_none() {
-            while end < n && compare(&vals[end].0, &vals[end - 1].0) == Ordering::Equal {
-                end += 1;
-            }
+
+    /// Buckets over the sorted values: index ranges with their bounds.
+    pub(crate) fn plan(&self, vals: &[Bson]) -> Vec<(usize, usize, Bson, Bson)> {
+        let (nbuckets, gran) = (self.nbuckets, &self.gran);
+        let n = vals.len();
+        if n == 0 {
+            return Vec::new();
         }
-        let mut max = if end < n {
-            vals[end].0.clone()
-        } else {
-            vals[n - 1].0.clone()
-        };
-        if let Some(r) = &gran {
-            let mut boundary = r.round(&vals[end - 1].0, true);
-            while end < n && compare(&vals[end].0, &boundary) == Ordering::Less {
-                end += 1;
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
+        let size = ((n as f64 / f64::from(nbuckets)).round() as usize).max(1);
+        // Buckets as index ranges with their min and max.
+        let mut buckets: Vec<(usize, usize, Bson, Bson)> = Vec::new();
+        let mut i = 0;
+        let mut prev_max: Option<Bson> = None;
+        while i < n {
+            let start = i;
+            let last_bucket =
+                buckets.len() + 1 == usize::try_from(nbuckets).unwrap_or(usize::MAX);
+            let mut end = if last_bucket { n } else { (i + size).min(n) };
+            if gran.is_none() {
+                while end < n && compare(&vals[end], &vals[end - 1]) == Ordering::Equal {
+                    end += 1;
+                }
             }
-            if accum_num::to_f64(&vals[end - 1].0) == Some(0.0)
-                && accum_num::to_f64(&boundary) == Some(0.0)
-                && end < n
-            {
-                boundary = r.round(&vals[end].0, false);
+            let mut max = if end < n {
+                vals[end].clone()
+            } else {
+                vals[n - 1].clone()
+            };
+            if let Some(r) = gran {
+                let mut boundary = r.round(&vals[end - 1], true);
+                while end < n && compare(&vals[end], &boundary) == Ordering::Less {
+                    end += 1;
+                }
+                if accum_num::to_f64(&vals[end - 1]) == Some(0.0)
+                    && accum_num::to_f64(&boundary) == Some(0.0)
+                    && end < n
+                {
+                    boundary = r.round(&vals[end], false);
+                }
+                max = boundary;
             }
-            max = boundary;
+            let min = match (gran, prev_max.take()) {
+                (Some(_), Some(p)) => p,
+                (Some(r), None) => r.round(&vals[start], false),
+                (None, _) => vals[start].clone(),
+            };
+            prev_max = Some(max.clone());
+            buckets.push((start, end, min, max));
+            i = end;
         }
-        let min = match (&gran, prev_max.take()) {
-            (Some(_), Some(p)) => p,
-            (Some(r), None) => r.round(&vals[start].0, false),
-            (None, _) => vals[start].0.clone(),
-        };
-        prev_max = Some(max.clone());
-        buckets.push((start, end, min, max));
-        i = end;
+        buckets
     }
-    let mut out = Vec::with_capacity(buckets.len());
-    for (a, b, min, max) in buckets {
-        let ds: Vec<Document> = vals[a..b].iter().map(|(_, k)| docs[*k].clone()).collect();
-        let keys = vec![Bson::Null; ds.len()];
-        let mut js = crate::serverjs::GroupJs::parse(&js_spec)?;
-        let mut g = accum::group_by(
-            &ds,
-            keys,
-            &accs,
+
+    /// One bucket's output document from its documents.
+    ///
+    /// # Errors
+    /// The accumulators'.
+    pub(crate) fn bucket(
+        &self,
+        ds: impl Iterator<Item = Result<Document, MongoError>>,
+        min: Bson,
+        max: Bson,
+        lim: &AggLimits,
+    ) -> Result<Option<Document>, MongoError> {
+        let mut js = crate::serverjs::GroupJs::parse(&self.js_spec)?;
+        let mut g = accum::Grouper::new(
+            &self.accs,
             lim,
             "$bucketAuto",
             (!js.is_empty()).then_some(&mut js),
-        )?;
-        if let Some(mut first) = g.pop() {
-            first.insert("_id", doc! {"min": min, "max": max});
-            out.push(first);
+        );
+        for d in ds {
+            g.push(&d?, Bson::Null)?;
         }
+        let mut out = g.finish()?;
+        Ok(out.pop().map(|mut first| {
+            first.insert("_id", doc! {"min": min, "max": max});
+            first
+        }))
     }
-    Ok(out)
 }

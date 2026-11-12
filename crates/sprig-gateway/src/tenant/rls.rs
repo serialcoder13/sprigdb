@@ -864,14 +864,15 @@ pub struct Resolve<'a> {
     pub keys: RefCell<Vec<ObjectId>>,
     /// Keys that are a key-value namespace's element or sorted-set table
     /// (`__sprig_ke_<ns>`, `__sprig_kz_<ns>`), filtered by the namespace's
-    /// key policies (decision RL35).
-    elements: RefCell<HashSet<usize>>,
+    /// key policies (decisions RL35, RL55), with the key table's database
+    /// as written and its name.
+    elements: RefCell<HashMap<usize, (String, String)>>,
     cache: RefCell<HashMap<(usize, Vec<Cmd>, String), String>>,
 }
 
 /// The prefixes of a key-value namespace's element and sorted-set tables
 /// (chapter 33).
-const KV_ELEMENT_PREFIXES: [&str; 2] = ["__sprig_ke_", "__sprig_kz_"];
+const KV_ELEMENT_PREFIXES: [&str; 2] = sprig_sql::rls::triggers::KV_ELEMENT_PREFIXES;
 
 /// `rendered` (a policy predicate rendered with qualifier `` `__sprig_kq` ``)
 /// with `qual` in its place, when it reads no column but the key `k`: an
@@ -935,7 +936,7 @@ impl<'a> Resolve<'a> {
             names,
             tainted,
             keys: RefCell::new(Vec::new()),
-            elements: RefCell::new(HashSet::new()),
+            elements: RefCell::new(HashMap::new()),
             cache: RefCell::new(HashMap::new()),
         }
     }
@@ -1055,7 +1056,9 @@ impl Resolver for Resolve<'_> {
             let mut keys = self.keys.borrow_mut();
             keys.push(obj.object_id);
             let i = keys.len() - 1;
-            self.elements.borrow_mut().insert(i);
+            self.elements
+                .borrow_mut()
+                .insert(i, (d.to_owned(), obj.name.clone()));
             return Some(i);
         }
         let mut keys = self.keys.borrow_mut();
@@ -1087,10 +1090,20 @@ impl Resolver for Resolve<'_> {
                 Cmd::Update => cmd::UPDATE,
                 Cmd::Delete => cmd::DELETE,
             };
-            if self.elements.borrow().contains(&key) {
-                // RL35: key policies only; another column hides elements.
+            if let Some((db, key_table)) = self.elements.borrow().get(&key) {
+                // RL35: a policy reading only the key filters the element
+                // row itself. RL55: any other reads the element's key row
+                // (its primary key) and applies the key table's policies
+                // there.
                 let r = self.render_one(&t, bit, "`__sprig_kq`", &name)?;
-                parts.push(key_only(&r, qual).unwrap_or_else(|| "FALSE".to_owned()));
+                parts.push(key_only(&r, qual).unwrap_or_else(|| {
+                    format!(
+                        "EXISTS (SELECT 1 FROM {}.{} AS `__sprig_kq` WHERE `__sprig_kq`.`k` = \
+                         {qual}.`k` AND ({r}))",
+                        sprig_sql::rls::quote(db),
+                        sprig_sql::rls::quote(key_table),
+                    )
+                }));
                 continue;
             }
             parts.push(self.render_one(&t, bit, qual, &name)?);
@@ -1451,6 +1464,40 @@ pub fn hidden_of(tenant: u64, object: u64) -> Option<Arc<Vec<String>>> {
         .cloned()
 }
 
+/// Key-value element tables with policy views (RLS round 6, decision
+/// RL55), by (tenant, key table's object): each element table's name and
+/// its invisible columns (lower case), as the last check of the key
+/// table's shards found them.
+type Elements = std::sync::Mutex<HashMap<(u64, u64), ElementViews>>;
+
+/// [`elements_of`]: (element table, its invisible columns).
+pub type ElementViews = Arc<Vec<(String, Vec<String>)>>;
+
+fn elements() -> &'static Elements {
+    static V: std::sync::OnceLock<Elements> = std::sync::OnceLock::new();
+    V.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Records key table `object`'s element tables that have policy views
+/// (none: an empty list, so [`elements_of`] tells a table checked from
+/// one not checked yet).
+pub fn elements_set(tenant: u64, object: u64, tables: Vec<(String, Vec<String>)>) {
+    elements()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert((tenant, object), Arc::new(tables));
+}
+
+/// Key table `object`'s element tables with policy views (see
+/// [`elements_set`]); `None` until a check of its shards on this gateway.
+pub fn elements_of(tenant: u64, object: u64) -> Option<ElementViews> {
+    elements()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&(tenant, object))
+        .cloned()
+}
+
 /// `rls.backend_enforcement` at database `db`: `views`, `triggers` or
 /// `off`.
 #[must_use]
@@ -1584,6 +1631,27 @@ pub fn view_swap(
             .entry(o.db_id.0)
             .or_default()
             .insert(o.name.to_lowercase(), view);
+        // RL55: a key-value namespace's element tables read their own
+        // policy views, which apply the key table's policies.
+        for (e, cols) in elements_of(ts.tenant.0, t.object.0)
+            .iter()
+            .flat_map(|x| x.iter())
+        {
+            let ev = sprig_sql::rls::views::view_name(e, t.object.0);
+            if !cols.is_empty() {
+                v.hidden.insert(
+                    ev.clone(),
+                    (
+                        sprig_sql::rls::views::hidden_view_name(e, t.object.0),
+                        cols.clone(),
+                    ),
+                );
+            }
+            v.tables
+                .entry(o.db_id.0)
+                .or_default()
+                .insert(e.to_lowercase(), ev);
+        }
     }
     if v.tables.is_empty() {
         return None;

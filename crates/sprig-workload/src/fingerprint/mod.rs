@@ -32,6 +32,7 @@
 mod cache;
 pub mod compound;
 mod keywords;
+pub mod mongo;
 mod normalize;
 
 use std::ops::Range;

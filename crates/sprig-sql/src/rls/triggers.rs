@@ -267,6 +267,31 @@ impl TriggerSpec<'_> {
         let ctx = format!("{}()", quote(super::views::CTX_FUNCTION));
         let qual = quote(self.table);
         let ok = self.combination(1, Clause::Using, &qual, &ctx)?;
+        let views = self.views_over(definer, self.table, columns, &ok, &ctx);
+        Ok(ViewStatements {
+            function: format!(
+                "CREATE OR REPLACE DEFINER = {definer} FUNCTION {f}() RETURNS LONGTEXT \
+                 CHARSET utf8mb4 COLLATE utf8mb4_bin NOT DETERMINISTIC NO SQL \
+                 SQL SECURITY DEFINER RETURN @{CONTEXT_VAR}",
+                f = quote(super::views::CTX_FUNCTION),
+            ),
+            views,
+        })
+    }
+
+    /// The two policy views of `from` (this table, or one of its
+    /// key-value element tables) keeping the rows where `ok` (or the
+    /// guard) holds: the visible columns' view, then the all-columns view
+    /// or its `DROP` (RL28).
+    fn views_over(
+        &self,
+        definer: &str,
+        from: &str,
+        columns: &[(String, bool)],
+        ok: &str,
+        ctx: &str,
+    ) -> Vec<String> {
+        let qual = quote(from);
         let list = |all: bool| -> String {
             let v: Vec<String> = columns
                 .iter()
@@ -285,34 +310,63 @@ impl TriggerSpec<'_> {
                  VIEW {v} AS SELECT {cols} FROM {qual} WHERE COALESCE({guard} OR {ok}, FALSE)",
                 v = quote(&name),
                 cols = list(all),
-                guard = self.guard(&ctx),
+                guard = self.guard(ctx),
             )
         };
-        let mut views = vec![view(
-            super::views::view_name(self.table, self.object),
-            false,
-        )];
+        let mut views = vec![view(super::views::view_name(from, self.object), false)];
         if columns.iter().any(|(_, inv)| *inv) {
-            views.push(view(
-                super::views::hidden_view_name(self.table, self.object),
-                true,
-            ));
+            views.push(view(super::views::hidden_view_name(from, self.object), true));
         } else {
             views.push(format!(
                 "DROP VIEW IF EXISTS {}",
-                quote(&super::views::hidden_view_name(self.table, self.object))
+                quote(&super::views::hidden_view_name(from, self.object))
             ));
         }
-        Ok(ViewStatements {
-            function: format!(
-                "CREATE OR REPLACE DEFINER = {definer} FUNCTION {f}() RETURNS LONGTEXT \
-                 CHARSET utf8mb4 COLLATE utf8mb4_bin NOT DETERMINISTIC NO SQL \
-                 SQL SECURITY DEFINER RETURN @{CONTEXT_VAR}",
-                f = quote(super::views::CTX_FUNCTION),
-            ),
-            views,
-        })
+        views
     }
+
+    /// The policy views of key-value element table `element` (chapter
+    /// 33's `__sprig_ke_<ns>` or `__sprig_kz_<ns>` next to this key table;
+    /// RLS round 6, decision RL55), to run after `USE` of
+    /// [`TriggerSpec::schema`] once the context function is there: an
+    /// element row shows when its key's row passes the key table's
+    /// `SELECT` policies, read through a correlated `EXISTS` on the key
+    /// table's primary key, so policies on any key-table column (a value,
+    /// the type) apply to the structure's elements too. `columns` as in
+    /// [`TriggerSpec::view_statements`], for the element table.
+    ///
+    /// # Errors
+    /// 39364 if a stored expression can't be rendered.
+    pub fn element_view_statements(
+        &self,
+        definer: &str,
+        element: &str,
+        columns: &[(String, bool)],
+    ) -> Result<Vec<String>, SprigError> {
+        let ctx = format!("{}()", quote(super::views::CTX_FUNCTION));
+        let kq = quote(KEY_ALIAS);
+        let ok = self.combination(1, Clause::Using, &kq, &ctx)?;
+        let ok = format!(
+            "EXISTS (SELECT 1 FROM {t} AS {kq} WHERE {kq}.`k` = {e}.`k` AND {ok})",
+            t = quote(self.table),
+            e = quote(element),
+        );
+        Ok(self.views_over(definer, element, columns, &ok, &ctx))
+    }
+}
+
+/// The key table's alias inside a key-value element policy (the views'
+/// `EXISTS`, and the gateway's rewrite of element tables).
+pub const KEY_ALIAS: &str = "__sprig_kq";
+
+/// The prefixes of a key-value namespace's element and sorted-set tables
+/// (chapter 33): the namespace's key table name follows.
+pub const KV_ELEMENT_PREFIXES: [&str; 2] = ["__sprig_ke_", "__sprig_kz_"];
+
+/// The element tables of key-value key table `table`, by name.
+#[must_use]
+pub fn kv_element_tables(table: &str) -> [String; 2] {
+    KV_ELEMENT_PREFIXES.map(|p| format!("{p}{table}"))
 }
 
 impl TriggerSpec<'_> {
@@ -483,6 +537,71 @@ mod tests {
         assert_eq!(
             drops("s", 9)[2],
             "DROP TRIGGER IF EXISTS `s`.`__sprig_rls_bd_9`"
+        );
+    }
+
+    #[test]
+    fn element_views_follow_the_key_tables_policies() {
+        // RL55: a policy on the key table's value column reaches the
+        // namespace's elements through the key row.
+        let pols = [TriggerPolicy {
+            id: 5,
+            restrictive: false,
+            commands: 1,
+            using: Some("k LIKE 'alice:%' OR v = 'shared'"),
+            check: None,
+        }];
+        let physical = |s: &str| Ok(s.to_owned());
+        let spec = TriggerSpec {
+            schema: "t42_d3_g1_s1",
+            table: "db0",
+            object: 81,
+            tenant: 42,
+            definer: "`t42_u7`@`%`",
+            policies: &pols,
+            lex: LexOptions::mariadb(),
+            physical: &physical,
+        };
+        let [ke, kz] = kv_element_tables("db0");
+        assert_eq!((ke.as_str(), kz.as_str()), ("__sprig_ke_db0", "__sprig_kz_db0"));
+        let cols = [
+            ("k".to_owned(), false),
+            ("e".to_owned(), false),
+            ("_sprig_dk".to_owned(), true),
+        ];
+        let v = spec
+            .element_view_statements("`t42_u7`@`%`", &ke, &cols)
+            .unwrap();
+        assert_eq!(v.len(), 2);
+        assert!(
+            v[0].starts_with(
+                "CREATE OR REPLACE ALGORITHM = MERGE DEFINER = `t42_u7`@`%` SQL SECURITY DEFINER \
+                 VIEW `__sprig_rls___sprig_ke_db0` AS SELECT `__sprig_ke_db0`.`k`, \
+                 `__sprig_ke_db0`.`e` FROM `__sprig_ke_db0` WHERE COALESCE((`__sprig_rls_ctx`() IS NULL"
+            ),
+            "{}",
+            v[0]
+        );
+        assert!(
+            v[0].contains(
+                "OR EXISTS (SELECT 1 FROM `db0` AS `__sprig_kq` WHERE `__sprig_kq`.`k` = \
+                 `__sprig_ke_db0`.`k` AND ((JSON_CONTAINS(`__sprig_rls_ctx`(), '5', '$.p') AND \
+                 (`__sprig_kq`.k LIKE 'alice:%' OR `__sprig_kq`.v = 'shared')))), FALSE)"
+            ),
+            "{}",
+            v[0]
+        );
+        // The guard names the key table's object: exempt sessions see all.
+        assert!(v[0].contains("JSON_CONTAINS(`__sprig_rls_ctx`(), '81', '$.x')"));
+        assert!(
+            v[1].contains("VIEW `__sprig_rlsh___sprig_ke_db0` AS SELECT `__sprig_ke_db0`.`k`, `__sprig_ke_db0`.`e`, `__sprig_ke_db0`.`_sprig_dk` FROM"),
+            "{}",
+            v[1]
+        );
+        assert!(super::super::views::is_policy_view("__sprig_rls___sprig_kz_db0"));
+        assert_eq!(
+            super::super::views::unswap("FROM `__sprig_rls___sprig_kz_db0` AS `__sprig_kz_db0` x"),
+            "FROM `__sprig_kz_db0` x"
         );
     }
 }

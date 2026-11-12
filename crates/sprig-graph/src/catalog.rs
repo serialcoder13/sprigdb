@@ -930,7 +930,12 @@ impl Tables {
                 ));
             }
             let v = format!("JSON_VALUE(props, '$.\"{p}\"')");
-            let mut cases = format!("WHEN 'STRING' THEN CONCAT('s', {v})");
+            // G77 (R8 round 9): a value `_types` names (bytes, a temporal
+            // value) is `t<type>:<text>`, as `schema::prop_index_value`
+            // says, so it never equals a plain string's `s<text>`.
+            let mut cases = format!(
+                "WHEN 'STRING' THEN CONCAT(IFNULL(CONCAT('t', JSON_VALUE(_types, '$.\"{p}\"'), ':'), 's'), {v})"
+            );
             if d.kind == IndexKind::Range {
                 // G19: an integral float inside the 64-bit range is its
                 // integer, as `schema::numeric_key` says. Plain digits

@@ -1350,7 +1350,23 @@ async fn typed_tables_in_groups() {
 /// updates them: no statement may fail with 1020.
 #[tokio::test]
 async fn concurrent_parent_writes_never_1020() {
-    let Some(eps) = endpoints("concurrent_parent_writes_never_1020") else {
+    race_never_1020("concurrent_parent_writes_never_1020", false).await;
+}
+
+/// bugfix-54 (T17's leftover): the same race with `b`'s writes inside its
+/// own transactions, two statements each, so the second plan writes from
+/// the snapshot the first one's read opened. A plan inside a client's
+/// transaction can't run at READ COMMITTED, and a retry can't help: on
+/// the MariaDB persona the 1020 had already rolled back the client's whole
+/// transaction. No statement may fail with 1020, and every transaction
+/// commits.
+#[tokio::test]
+async fn concurrent_parent_writes_in_transactions_never_1020() {
+    race_never_1020("concurrent_parent_writes_in_transactions_never_1020", true).await;
+}
+
+async fn race_never_1020(test: &str, in_txn: bool) {
+    let Some(eps) = endpoints(test) else {
         return;
     };
     let t = tenants();
@@ -1362,8 +1378,12 @@ async fn concurrent_parent_writes_never_1020() {
         .unwrap_or(6);
     for (pi, ep) in eps.iter().enumerate() {
         let p = if pi == 0 { "my" } else { "ma" };
-        let db = format!("ig_race_{p}_{}", if mat { "mat" } else { "rt" });
-        let s1 = format!("igr{p}{}", u8::from(mat));
+        let db = format!(
+            "ig_race{}_{p}_{}",
+            if in_txn { "tx" } else { "" },
+            if mat { "mat" } else { "rt" }
+        );
+        let s1 = format!("igr{}{p}{}", if in_txn { "t" } else { "" }, u8::from(mat));
         let mut c = Vec::new();
         for name in &t[..2] {
             c.push(conn(ep, name).await);
@@ -1417,14 +1437,38 @@ async fn concurrent_parent_writes_never_1020() {
         let child = async move {
             let mut n = 0u64;
             let mut errs: BTreeMap<u16, u64> = BTreeMap::new();
-            while Instant::now() < stop {
+            let stmt = |n: u64| {
                 let k = n % 3 + 1;
-                let sql = match n % 4 {
+                match n % 4 {
                     0 | 1 => format!("UPDATE r SET note = 'b{n}' WHERE id = {k}"),
                     2 => format!("DELETE FROM r WHERE id = {k}"),
                     _ => format!("SPRIG RESET r WHERE id = {k}"),
-                };
-                match try_exec(&mut b, &sql).await {
+                }
+            };
+            while Instant::now() < stop {
+                if in_txn {
+                    // Two plans in one transaction; on the first error the
+                    // transaction is over (MariaDB's 1020 rolls it back).
+                    exec(&mut b, "START TRANSACTION").await;
+                    let mut failed = false;
+                    for _ in 0..2 {
+                        if let Err(e) = try_exec(&mut b, &stmt(n)).await {
+                            *errs.entry(e).or_default() += 1;
+                            failed = true;
+                        }
+                        n += 1;
+                        if failed {
+                            break;
+                        }
+                    }
+                    if failed {
+                        exec(&mut b, "ROLLBACK").await;
+                    } else if let Err(e) = try_exec(&mut b, "COMMIT").await {
+                        *errs.entry(e).or_default() += 1;
+                    }
+                    continue;
+                }
+                match try_exec(&mut b, &stmt(n)).await {
                     Ok(_) => {}
                     Err(e) => *errs.entry(e).or_default() += 1,
                 }
@@ -1434,7 +1478,8 @@ async fn concurrent_parent_writes_never_1020() {
         };
         let ((a, na, ea), (b, nb, eb)) = tokio::join!(parent, child);
         eprintln!(
-            "{p}/{mode}: {na} parent updates (errors {ea:?}), {nb} child writes (errors {eb:?})"
+            "{p}/{mode}{}: {na} parent updates (errors {ea:?}), {nb} child writes (errors {eb:?})",
+            if in_txn { " in transactions" } else { "" }
         );
         assert!(
             !ea.contains_key(&1020) && !eb.contains_key(&1020),

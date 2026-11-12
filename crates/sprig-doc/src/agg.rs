@@ -37,6 +37,9 @@ mod stages_bucket;
 mod stages_fill;
 mod stages_misc;
 mod window;
+// M5 (12 Nov 2026): the stages over sequences that may be on disk.
+mod spilled;
+pub use spilled::{run_stage_seq, run_stages_seq};
 pub use stages_misc::{GraphSearch, GraphSpec, db_level_error, documents, graph_lookup_in_memory};
 
 fn bad(msg: impl Into<String>) -> MongoError {
@@ -1816,8 +1819,14 @@ pub fn run_stage(
         "$densify" => stages_fill::densify(docs, arg, lim)?,
         "$fill" => stages_fill::fill(docs, arg, lim)?,
         "$redact" => stages_misc::redact(docs, arg, lim)?,
-        "$documents" | "$collStats" | "$indexStats" | "$planCacheStats" | "$currentOp"
-        | "$listSessions" | "$listLocalSessions" | "$listClusterCatalog" => {
+        "$documents"
+        | "$collStats"
+        | "$indexStats"
+        | "$planCacheStats"
+        | "$currentOp"
+        | "$listSessions"
+        | "$listLocalSessions"
+        | "$listClusterCatalog" => {
             return Err(loc(
                 40602,
                 format!("{name} is only valid as the first stage in a pipeline"),

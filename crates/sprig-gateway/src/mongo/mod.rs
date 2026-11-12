@@ -39,10 +39,10 @@ pub mod rls;
 pub mod search;
 /// Server-side JavaScript (M4).
 pub mod serverjs;
-/// `serverStatus`, `connectionStatus` and change-stream reporting (M4).
-pub mod status;
 pub mod snapshot;
 pub mod sql;
+/// `serverStatus`, `connectionStatus` and change-stream reporting (M4).
+pub mod status;
 pub mod txn;
 pub mod users;
 pub mod writes;
@@ -140,7 +140,7 @@ key!(
 key!(
     /// `mongo.max_operation_memory_bytes`: memory one command's in-gateway
     /// stages may hold (MongoDB 9.0's per-operation limit); past it, 146
-    /// `ExceededMemoryLimit` (M3, decision S100). 0 turns it off.
+    /// `ExceededMemoryLimit` (M3, decision S99). 0 turns it off.
     MAX_OPERATION_MEMORY_BYTES: u64 = "mongo.max_operation_memory_bytes", 1_073_741_824, HardBounds::range(0, 1_099_511_627_776),
     "Memory one MongoDB command may hold in the gateway"
 );
@@ -196,10 +196,8 @@ impl MongoSettings {
                 .unwrap_or(5),
             max_open_transactions: usize::try_from(live.get(&MAX_OPEN_TRANSACTIONS, &cx))
                 .unwrap_or(10_000),
-            max_operation_memory_bytes: usize::try_from(
-                live.get(&MAX_OPERATION_MEMORY_BYTES, &cx),
-            )
-            .unwrap_or(1 << 30),
+            max_operation_memory_bytes: usize::try_from(live.get(&MAX_OPERATION_MEMORY_BYTES, &cx))
+                .unwrap_or(1 << 30),
         }
     }
 }

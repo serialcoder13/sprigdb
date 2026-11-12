@@ -29,17 +29,22 @@ fn open_at() -> std::sync::MutexGuard<'static, HashMap<i64, Instant>> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
-/// A change-stream cursor `id` opened on `ns` (`db.coll`, `db.$cmd...`
-/// for a database, `admin.$cmd...` for the cluster).
-pub(crate) fn stream_opened(id: i64, ns: &str) {
-    OPENED.fetch_add(1, Ordering::Relaxed);
+/// The scope of a change stream on `ns` (`db.coll`, `db.$cmd...` for a
+/// database, `admin.$cmd...` for the cluster): 0 cluster, 1 database, 2
+/// collection.
+pub(crate) fn stream_scope(ns: &str) -> usize {
     let (db, coll) = ns.split_once('.').unwrap_or((ns, ""));
-    let scope = if coll.is_empty() || coll.starts_with("$cmd") {
+    if coll.is_empty() || coll.starts_with("$cmd") {
         usize::from(db != "admin")
     } else {
         2
-    };
-    SCOPE[scope].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// A change-stream cursor `id` opened, of [`stream_scope`] `scope`.
+pub(crate) fn stream_opened(id: i64, scope: usize) {
+    OPENED.fetch_add(1, Ordering::Relaxed);
+    SCOPE[scope.min(2)].fetch_add(1, Ordering::Relaxed);
     open_at().insert(id, Instant::now());
 }
 

@@ -1673,27 +1673,29 @@ impl GatewayGraphs {
             loop {
                 let sql = if node {
                     format!(
-                        "SELECT id, _sprig_rk, labels, props FROM {} WHERE id > {after} \
+                        "SELECT id, _sprig_rk, labels, props, _types FROM {} WHERE id > {after} \
                          AND `{col}` IS NOT NULL ORDER BY id LIMIT 1000",
                         sh.tables.nodes
                     )
                 } else {
                     format!(
-                        "SELECT id, _sprig_rk, CAST(type AS CHAR), props FROM {} WHERE id > {after} \
+                        "SELECT id, _sprig_rk, CAST(type AS CHAR), props, _types FROM {} WHERE id > {after} \
                          AND `{col}` IS NOT NULL ORDER BY id LIMIT 1000",
                         sh.tables.edges
                     )
                 };
-                let rows: Vec<(u64, u64, String, String)> = conn(self, &mut conns, &sh.cluster)
+                let rows: Vec<(u64, u64, String, String, Option<String>)> = conn(self, &mut conns, &sh.cluster)
                     .await?
                     .query(sql)
                     .await
                     .map_err(backend_error)?;
                 let Some(last) = rows.last() else { break };
                 after = last.0;
-                for (id, rk, tok, props) in rows {
+                for (id, rk, tok, props, types) in rows {
                     let props: serde_json::Value =
                         serde_json::from_str(&props).unwrap_or(serde_json::Value::Null);
+                    let types: Option<serde_json::Value> =
+                        types.and_then(|t| serde_json::from_str(&t).ok());
                     let has = if node {
                         serde_json::from_str::<Vec<u32>>(&tok)
                             .unwrap_or_default()
@@ -1701,7 +1703,7 @@ impl GatewayGraphs {
                     } else {
                         tok.parse::<u32>().ok() == Some(d.token_id)
                     };
-                    let Some(key) = has.then(|| claim_key(d, &props)).flatten() else {
+                    let Some(key) = has.then(|| claim_key(d, &props, types.as_ref())).flatten() else {
                         continue;
                     };
                     let h = claim_rk(d.id, &key);
@@ -1734,11 +1736,11 @@ impl GatewayGraphs {
                     // Another element holds the key: a duplicate if it is
                     // live with the same key, else an orphan to take over.
                     let os = &layout.shards[layout.index_of(ork)];
-                    let other: Option<(String, String)> = if node {
+                    let other: Option<(String, String, Option<String>)> = if node {
                         conn(self, &mut conns, &os.cluster)
                             .await?
                             .query_first(format!(
-                                "SELECT CAST(labels AS CHAR), props FROM {} WHERE id = {o}",
+                                "SELECT CAST(labels AS CHAR), props, _types FROM {} WHERE id = {o}",
                                 os.tables.nodes
                             ))
                             .await
@@ -1747,15 +1749,17 @@ impl GatewayGraphs {
                         conn(self, &mut conns, &os.cluster)
                             .await?
                             .query_first(format!(
-                                "SELECT CAST(type AS CHAR), props FROM {} WHERE id = {o}",
+                                "SELECT CAST(type AS CHAR), props, _types FROM {} WHERE id = {o}",
                                 os.tables.edges
                             ))
                             .await
                             .map_err(backend_error)?
                     };
-                    let live = other.is_some_and(|(t, p)| {
+                    let live = other.is_some_and(|(t, p, ty)| {
                         let p: serde_json::Value =
                             serde_json::from_str(&p).unwrap_or(serde_json::Value::Null);
+                        let ty: Option<serde_json::Value> =
+                            ty.and_then(|t| serde_json::from_str(&t).ok());
                         let has = if node {
                             serde_json::from_str::<Vec<u32>>(&t)
                                 .unwrap_or_default()
@@ -1763,7 +1767,7 @@ impl GatewayGraphs {
                         } else {
                             t.parse::<u32>().ok() == Some(d.token_id)
                         };
-                        has && claim_key(d, &p).as_deref() == Some(key.as_slice())
+                        has && claim_key(d, &p, ty.as_ref()).as_deref() == Some(key.as_slice())
                     });
                     if live {
                         return Err(SprigError::backend(

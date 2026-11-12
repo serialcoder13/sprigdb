@@ -353,6 +353,11 @@ impl PassSession {
         };
         let mut columns: HashMap<String, Vec<(String, bool)>> = HashMap::new();
         let mut hidden: Vec<String> = Vec::new();
+        // RL55: a key-value namespace's element tables next to it, each
+        // with its columns, per shard.
+        let mut element_cols: HashMap<String, Vec<(String, Vec<(String, bool)>)>> =
+            HashMap::new();
+        let mut element_hidden: Vec<(String, Vec<String>)> = Vec::new();
         for (schema, _) in &list {
             let s = probe.session(schema).await?;
             let cols = table_columns(s, schema, &obj.name).await?;
@@ -363,6 +368,31 @@ impl PassSession {
                 }
             }
             columns.insert(schema.clone(), cols);
+            for e in sprig_sql::rls::triggers::kv_element_tables(&obj.name) {
+                let ec = table_columns(s, schema, &e).await?;
+                if ec.is_empty() {
+                    continue;
+                }
+                let inv: Vec<String> = ec
+                    .iter()
+                    .filter(|(_, i)| *i)
+                    .map(|(c, _)| c.to_lowercase())
+                    .collect();
+                match element_hidden.iter_mut().find(|(n, _)| *n == e) {
+                    Some((_, h)) => {
+                        for c in inv {
+                            if !h.contains(&c) {
+                                h.push(c);
+                            }
+                        }
+                    }
+                    None => element_hidden.push((e.clone(), inv)),
+                }
+                element_cols
+                    .entry(schema.clone())
+                    .or_default()
+                    .push((e, ec));
+            }
         }
         drop(probe);
         crate::tenant::rls::hidden_set(tenant.0, object.0, hidden);
@@ -377,6 +407,7 @@ impl PassSession {
                 d.push(sprig_sql::rls::views::hidden_view_drop(
                     schema, &obj.name, object.0,
                 ));
+                d.extend(element_view_drops(schema, &obj.name, object.0));
                 plan.push((schema.clone(), d));
                 continue;
             }
@@ -413,6 +444,11 @@ impl PassSession {
                     definer_account
                 ));
                 stmts.extend(v.views);
+                // RL55: the element tables' views, after the context
+                // function.
+                for (e, ec) in element_cols.get(schema).map(Vec::as_slice).unwrap_or_default() {
+                    stmts.extend(spec.element_view_statements(&definer, e, ec)?);
+                }
             } else {
                 stmts.push(sprig_sql::rls::views::view_drop(
                     schema, &obj.name, object.0,
@@ -420,6 +456,7 @@ impl PassSession {
                 stmts.push(sprig_sql::rls::views::hidden_view_drop(
                     schema, &obj.name, object.0,
                 ));
+                stmts.extend(element_view_drops(schema, &obj.name, object.0));
             }
             plan.push((schema.clone(), stmts));
         }
@@ -442,6 +479,15 @@ impl PassSession {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
+        crate::tenant::rls::elements_set(
+            tenant.0,
+            object.0,
+            if views && sec.enabled {
+                element_hidden
+            } else {
+                Vec::new()
+            },
+        );
         // Record the deployed version (another auth change).
         let mut change = svc
             .catalog
@@ -539,6 +585,18 @@ impl PassSession {
         let triggers = enforcement != "off" && sec.enabled;
         let view = sprig_sql::rls::views::view_name(&obj.name, object.0);
         let hview = sprig_sql::rls::views::hidden_view_name(&obj.name, object.0);
+        // RL55: a key-value namespace's element tables and their views.
+        let element_tables = sprig_sql::rls::triggers::kv_element_tables(&obj.name);
+        let element_views: Vec<(String, String)> = element_tables
+            .iter()
+            .map(|e| {
+                (
+                    sprig_sql::rls::views::view_name(e, object.0),
+                    sprig_sql::rls::views::hidden_view_name(e, object.0),
+                )
+            })
+            .collect();
+        let mut element_hidden: Vec<(String, Vec<String>)> = Vec::new();
         let mut hidden: Vec<String> = Vec::new();
         let mut shards = super::logic_bound::CtlShards {
             list: list.clone(),
@@ -561,10 +619,25 @@ impl PassSession {
                     s = q(schema),
                 )
             };
+            // Then, per element table (RL55): its visible, all and
+            // invisible columns, and its two views' columns.
+            let mut extra = String::new();
+            for (e, (ev, ehv)) in element_tables.iter().zip(&element_views) {
+                for c in [
+                    cols(e, " AND EXTRA NOT LIKE '%INVISIBLE%'"),
+                    cols(e, ""),
+                    cols(e, " AND EXTRA LIKE '%INVISIBLE%'"),
+                    cols(ev, ""),
+                    cols(ehv, ""),
+                ] {
+                    extra.push_str(", ");
+                    extra.push_str(&c);
+                }
+            }
             let rows = s
                 .rows(&format!(
                     "SELECT (SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = {s} \
-                     AND TRIGGER_NAME IN ({}, {}, {})), {}, {}, {}, {}, {}",
+                     AND TRIGGER_NAME IN ({}, {}, {})), {}, {}, {}, {}, {}{extra}",
                     q(&names[0]),
                     q(&names[1]),
                     q(&names[2]),
@@ -604,6 +677,43 @@ impl PassSession {
                 // Views off (RL30): views left from before must go.
                 cell(4).is_none() && cell(5).is_none()
             };
+            // RL55: an element table here has its views when the key table
+            // does; views of element tables that aren't here must go.
+            let mut elements_ok = true;
+            for (j, e) in element_tables.iter().enumerate() {
+                let b = 6 + j * 5;
+                let (ev, eall, einv) = (cell(b), cell(b + 1), cell(b + 2));
+                let (vv, hv) = (cell(b + 3), cell(b + 4));
+                let ok = if views && ev.is_some() {
+                    vv == ev
+                        && if einv.is_some() {
+                            hv == eall
+                        } else {
+                            hv.is_none()
+                        }
+                } else {
+                    vv.is_none() && hv.is_none()
+                };
+                elements_ok &= ok;
+                if views && ev.is_some() {
+                    let inv: Vec<String> = einv
+                        .iter()
+                        .flat_map(|v| v.split('\n'))
+                        .map(str::to_lowercase)
+                        .collect();
+                    match element_hidden.iter_mut().find(|(n, _)| n == e) {
+                        Some((_, h)) => {
+                            for c in inv {
+                                if !h.contains(&c) {
+                                    h.push(c);
+                                }
+                            }
+                        }
+                        None => element_hidden.push((e.clone(), inv)),
+                    }
+                }
+            }
+            let views_ok = views_ok && elements_ok;
             if !triggers_ok || !views_ok {
                 complete = false;
                 break;
@@ -620,13 +730,15 @@ impl PassSession {
             clusters.push(c.as_str());
             let s = shards.session(schema).await?;
             let q = |x: &str| sprig_sql::rls::sql_string(x, false);
+            let mut names_in = format!("{}, {}", q(&view), q(&hview));
+            for (ev, ehv) in &element_views {
+                names_in.push_str(&format!(", {}, {}", q(ev), q(ehv)));
+            }
             let stale = s
                 .rows(&format!(
                     "SELECT TABLE_SCHEMA, TABLE_NAME FROM information_schema.VIEWS \
-                     WHERE TABLE_SCHEMA LIKE {} AND TABLE_NAME IN ({}, {})",
+                     WHERE TABLE_SCHEMA LIKE {} AND TABLE_NAME IN ({names_in})",
                     q(&format!("t{}\\_d{}\\_%", ts.tenant.0, obj.db_id.0)),
-                    q(&view),
-                    q(&hview),
                 ))
                 .await?;
             for r in stale {
@@ -649,6 +761,9 @@ impl PassSession {
         }
         drop(shards);
         crate::tenant::rls::hidden_set(ts.tenant.0, object.0, hidden);
+        if complete {
+            crate::tenant::rls::elements_set(ts.tenant.0, object.0, element_hidden);
+        }
         if !complete {
             tracing::info!(
                 object = object.0,
@@ -1032,6 +1147,20 @@ impl PassSession {
     }
 }
 
+/// `DROP VIEW IF EXISTS` for the policy views of key table `table`'s
+/// key-value element tables in `schema` (RL55).
+fn element_view_drops(schema: &str, table: &str, object: u64) -> Vec<String> {
+    sprig_sql::rls::triggers::kv_element_tables(table)
+        .iter()
+        .flat_map(|e| {
+            [
+                sprig_sql::rls::views::view_drop(schema, e, object),
+                sprig_sql::rls::views::hidden_view_drop(schema, e, object),
+            ]
+        })
+        .collect()
+}
+
 /// Table `table`'s columns in `schema`, in order, `true` for invisible
 /// ones (what the policy views name, RL28).
 async fn table_columns(
@@ -1134,10 +1263,30 @@ impl PassSession {
         use std::hash::{Hash, Hasher};
         let mut safe = std::collections::HashSet::new();
         let own_cluster = self.target.cluster.clone();
-        let Some(ts) = self.tenant.as_deref() else {
+        let Some(state) = RlsState::of(cat) else {
             return safe;
         };
-        let Some(state) = RlsState::of(cat) else {
+        // RL55: which key-value element tables have policy views is known
+        // after a check of each protected table's shards on this gateway
+        // (the key-value layer's SQL views read element tables).
+        let unknown: Vec<ObjectId> = match self.tenant.as_deref() {
+            Some(ts) => state
+                .rows()
+                .security
+                .iter()
+                .filter(|x| x.enabled && x.checks_version > 0)
+                .filter(|x| crate::tenant::rls::views_on(ts.services(), cat, x.object_id))
+                .filter(|x| crate::tenant::rls::elements_of(ts.tenant.0, x.object_id.0).is_none())
+                .map(|x| x.object_id)
+                .collect(),
+            None => return safe,
+        };
+        for o in unknown {
+            if let Err(e) = Box::pin(self.ensure_checks(o)).await {
+                tracing::warn!(object = o.0, error = %e, "row-level security policy view not verified");
+            }
+        }
+        let Some(ts) = self.tenant.as_deref() else {
             return safe;
         };
         let svc = Arc::clone(ts.services());
@@ -1164,6 +1313,22 @@ impl PassSession {
                     );
                 }
                 views.insert(k, view);
+                for (e, cols) in crate::tenant::rls::elements_of(tenant, sec.object_id.0)
+                    .iter()
+                    .flat_map(|x| x.iter())
+                {
+                    let ev = sprig_sql::rls::views::view_name(e, sec.object_id.0);
+                    if !cols.is_empty() {
+                        hidden.insert(
+                            ev.clone(),
+                            (
+                                sprig_sql::rls::views::hidden_view_name(e, sec.object_id.0),
+                                cols.clone(),
+                            ),
+                        );
+                    }
+                    views.insert((o.db_id.0, e.to_lowercase()), ev);
+                }
             } else {
                 no_view.insert(k);
             }

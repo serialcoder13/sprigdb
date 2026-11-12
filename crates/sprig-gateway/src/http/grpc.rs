@@ -1,5 +1,6 @@
 //! The gRPC services on 8080 (h2c) and 8443 (ALPN h2): `sprig.v1.Sql`,
-//! `sprig.v1.Transactions`, every `sprig.admin.v1` service (`Operators`
+//! `sprig.v1.Transactions`, `sprig.v1.Sinks` and `Connections` (their
+//! `Test` calls, R9), every `sprig.admin.v1` service (`Operators`
 //! too: sign-in and tokens relay to the controller, whose guard decides) and
 //! `grpc.health.v1.Health` (chapter 37 steps 2, 4 and 6).
 //!
@@ -847,6 +848,74 @@ admin_service!(OperatorsSvc, operators_server::Operators, OperatorsServer, "Oper
     revoke_token: NameRequest => "RevokeToken",
 });
 
+/// `sprig.v1.Sinks.Test` and `sprig.v1.Connections.Test` (chapter 51,
+/// R9 closers): the statements the REST routes run, as the caller.
+struct SinksSvc(Arc<Core>);
+
+/// The columns and rows of a test as the reply; a `NULL` cell is a null.
+fn test_reply(
+    (columns, rows): (Vec<String>, Vec<Vec<Option<String>>>),
+) -> sprig_api::proto::v1::TestReply {
+    use prost_types::value::Kind;
+    let cell = |c: Option<String>| prost_types::Value {
+        kind: Some(c.map_or(Kind::NullValue(0), Kind::StringValue)),
+    };
+    sprig_api::proto::v1::TestReply {
+        columns,
+        rows: rows
+            .into_iter()
+            .map(|r| prost_types::ListValue {
+                values: r.into_iter().map(cell).collect(),
+            })
+            .collect(),
+    }
+}
+
+#[tonic::async_trait]
+impl sprig_api::proto::v1::sinks_server::Sinks for SinksSvc {
+    async fn test(
+        &self,
+        req: Request<sprig_api::proto::v1::SinkTestRequest>,
+    ) -> GrpcResult<sprig_api::proto::v1::TestReply> {
+        metrics::counter!("sprig_api_requests_total", "service" => "sprig.v1.Sinks", "method" => "Test", "protocol" => "grpc").increment(1);
+        let c = caller(&self.0, &req).await?;
+        let r = req.get_ref();
+        let sample = if r.sample == 0 { 10 } else { r.sample };
+        let body = serde_json::json!({ "sample": sample });
+        super::studio::messaging::run_test(&self.0, &c, &r.database, "sinks", &r.sink, &body)
+            .await
+            .map(|x| Response::new(test_reply(x)))
+            .map_err(|e| st(&e))
+    }
+}
+
+#[tonic::async_trait]
+impl sprig_api::proto::v1::connections_server::Connections for SinksSvc {
+    async fn test(
+        &self,
+        req: Request<sprig_api::proto::v1::ConnectionTestRequest>,
+    ) -> GrpcResult<sprig_api::proto::v1::TestReply> {
+        metrics::counter!("sprig_api_requests_total", "service" => "sprig.v1.Connections", "method" => "Test", "protocol" => "grpc").increment(1);
+        let c = caller(&self.0, &req).await?;
+        let r = req.get_ref();
+        let mut body = serde_json::json!({ "platform": r.platform, "write": r.write });
+        if r.write && !r.to.is_empty() {
+            body["to"] = serde_json::Value::from(r.to.clone());
+        }
+        super::studio::messaging::run_test(
+            &self.0,
+            &c,
+            &r.database,
+            "connections",
+            &r.connection,
+            &body,
+        )
+        .await
+        .map(|x| Response::new(test_reply(x)))
+        .map_err(|e| st(&e))
+    }
+}
+
 #[derive(Clone)]
 struct HealthSvc(Arc<Core>);
 
@@ -973,6 +1042,12 @@ pub fn routes(core: &Arc<Core>) -> tonic::service::Routes {
         .add_service(sprig_api::proto::v1::changes_server::ChangesServer::new(
             ChangesSvc(c()),
         ))
+        .add_service(sprig_api::proto::v1::sinks_server::SinksServer::new(
+            SinksSvc(c()),
+        ))
+        .add_service(
+            sprig_api::proto::v1::connections_server::ConnectionsServer::new(SinksSvc(c())),
+        )
         .add_service(HealthServer::new(HealthSvc(c())))
         .add_service(ClustersServer::new(ClustersSvc(c())))
         .add_service(DataCentersServer::new(DcsSvc(c())))
@@ -992,4 +1067,26 @@ pub fn routes(core: &Arc<Core>) -> tonic::service::Routes {
             sprig_api::proto::admin::operators_server::OperatorsServer::new(OperatorsSvc(c())),
         )
         .prepare()
+}
+
+#[cfg(test)]
+mod tests {
+    use prost_types::value::Kind;
+
+    /// `Sinks.Test` and `Connections.Test`'s reply: the columns, and each
+    /// row's cells with `NULL` as a null value.
+    #[test]
+    fn a_test_reply_keeps_nulls() {
+        let r = super::test_reply((
+            vec!["step".into(), "detail".into()],
+            vec![vec![Some("request".into()), None]],
+        ));
+        assert_eq!(r.columns, ["step", "detail"]);
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(
+            r.rows[0].values[0].kind,
+            Some(Kind::StringValue("request".into()))
+        );
+        assert_eq!(r.rows[0].values[1].kind, Some(Kind::NullValue(0)));
+    }
 }

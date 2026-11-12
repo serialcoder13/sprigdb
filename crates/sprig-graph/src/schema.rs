@@ -191,6 +191,25 @@ pub fn index_value(j: &Json, kind: IndexKind) -> Option<String> {
     Some(fit(t))
 }
 
+/// The typed text of property `p` of a stored element (`props` and its
+/// `_types`): [`index_value`], except that a value `_types` names (a byte
+/// array or a temporal value, both stored as text) is `t<type>:<text>`
+/// rather than `s<text>`, so a string equal to a byte array's base64 or
+/// to a date's ISO text is another key (R8 round 9, decision G77). The
+/// index columns [`crate::catalog::Tables::index_ddl`] adds compute the
+/// same text in MariaDB.
+#[must_use]
+pub fn prop_index_value(props: &Json, types: Option<&Json>, p: &str, kind: IndexKind) -> Option<String> {
+    let j = props.get(p)?;
+    if let Json::String(s) = j
+        && let Some(t) = types.and_then(|t| t.get(p)).and_then(Json::as_str)
+        && t != "float"
+    {
+        return Some(fit(format!("t{t}:{s}")));
+    }
+    index_value(j, kind)
+}
+
 /// Exclusive bound of the floats [`numeric_key`] writes as integers:
 /// 2^63, which `9223372036854775807e0` also rounds to in MariaDB.
 const INT_FLOAT_BOUND: f64 = 9_223_372_036_854_775_808.0;
@@ -225,17 +244,18 @@ pub fn numeric_key(n: &serde_json::Number) -> String {
 /// Longest claim key kept as is; longer ones become `H` + their SHA-256.
 pub const MAX_CLAIM: usize = 512;
 
-/// The claim key of an element's `props` under uniqueness constraint `d`
-/// (decision G41: the cross-shard claim table): the index texts of its
-/// properties joined by `0x1f`, or `None` when a property is missing or
-/// of a type the constraint doesn't index (then nothing is claimed, as
-/// Neo4j checks uniqueness only when every property is present). The
-/// caller checks the label or type.
+/// The claim key of an element's `props` (with its `_types`) under
+/// uniqueness constraint `d` (decision G41: the cross-shard claim table):
+/// the typed index texts of its properties ([`prop_index_value`]) joined
+/// by `0x1f`, or `None` when a property is missing or of a type the
+/// constraint doesn't index (then nothing is claimed, as Neo4j checks
+/// uniqueness only when every property is present). The caller checks the
+/// label or type.
 #[must_use]
-pub fn claim_key(d: &IndexDef, props: &Json) -> Option<Vec<u8>> {
+pub fn claim_key(d: &IndexDef, props: &Json, types: Option<&Json>) -> Option<Vec<u8>> {
     let mut k = Vec::new();
     for (i, p) in d.props.iter().enumerate() {
-        let t = index_value(props.get(p)?, d.kind)?;
+        let t = prop_index_value(props, types, p, d.kind)?;
         if i > 0 {
             k.push(0x1f);
         }

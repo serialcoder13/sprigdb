@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use sprig_common::Result;
 
 use crate::ast::{Dir, Entity, Schema};
-use crate::schema::{index_value, plan_create, plan_drop};
+use crate::schema::{plan_create, plan_drop, prop_index_value};
 use crate::store::{
     EdgeKey, EdgeRow, GraphStore, IdKind, IndexDef, NodeRow, Reach, Scan, SchemaCounts, StoreStats,
 };
@@ -37,12 +37,16 @@ pub struct MemStore {
     batch_base: Option<Box<MemStore>>,
 }
 
-/// The unique key of `props` under `d`: `None` if a property is missing
-/// or of a type the index doesn't hold.
-fn unique_key(d: &IndexDef, props: &serde_json::Value) -> Option<Vec<String>> {
+/// The unique key of `props` (with its `_types`) under `d`: `None` if a
+/// property is missing or of a type the index doesn't hold.
+fn unique_key(
+    d: &IndexDef,
+    props: &serde_json::Value,
+    types: Option<&serde_json::Value>,
+) -> Option<Vec<String>> {
     d.props
         .iter()
-        .map(|p| props.get(p).and_then(|v| index_value(v, d.kind)))
+        .map(|p| prop_index_value(props, types, p, d.kind))
         .collect()
 }
 
@@ -114,6 +118,7 @@ impl MemStore {
         labels: &[u32],
         rtype: Option<u32>,
         props: &serde_json::Value,
+        types: Option<&serde_json::Value>,
     ) -> Option<sprig_common::SprigError> {
         for d in self.indexes.iter().filter(|d| d.unique) {
             let applies = match (d.entity, rtype) {
@@ -124,19 +129,19 @@ impl MemStore {
             if !applies {
                 continue;
             }
-            let Some(k) = unique_key(d, props) else {
+            let Some(k) = unique_key(d, props, types) else {
                 continue;
             };
             let clash = match rtype {
                 None => self.nodes.values().any(|n| {
                     n.id != id
                         && n.labels.contains(&d.token_id)
-                        && unique_key(d, &n.props).as_ref() == Some(&k)
+                        && unique_key(d, &n.props, n.types.as_ref()).as_ref() == Some(&k)
                 }),
                 Some(_) => self.edges.values().any(|e| {
                     e.id != id
                         && e.rtype == d.token_id
-                        && unique_key(d, &e.props).as_ref() == Some(&k)
+                        && unique_key(d, &e.props, e.types.as_ref()).as_ref() == Some(&k)
                 }),
             };
             if clash {
@@ -383,7 +388,7 @@ impl GraphStore for MemStore {
 
     async fn insert_nodes(&mut self, rows: &[NodeRow]) -> Result<()> {
         for r in rows {
-            if let Some(e) = self.violates(r.id, &r.labels, None, &r.props) {
+            if let Some(e) = self.violates(r.id, &r.labels, None, &r.props, r.types.as_ref()) {
                 return Err(e);
             }
             self.nodes.insert(r.id, r.clone());
@@ -393,7 +398,7 @@ impl GraphStore for MemStore {
 
     async fn insert_edges(&mut self, rows: &[EdgeRow]) -> Result<()> {
         for r in rows {
-            if let Some(e) = self.violates(r.id, &[], Some(r.rtype), &r.props) {
+            if let Some(e) = self.violates(r.id, &[], Some(r.rtype), &r.props, r.types.as_ref()) {
                 return Err(e);
             }
             self.edges.insert(r.id, r.clone());
@@ -402,7 +407,7 @@ impl GraphStore for MemStore {
     }
 
     async fn update_node(&mut self, row: &NodeRow, _old: &[u32]) -> Result<()> {
-        if let Some(e) = self.violates(row.id, &row.labels, None, &row.props) {
+        if let Some(e) = self.violates(row.id, &row.labels, None, &row.props, row.types.as_ref()) {
             return Err(e);
         }
         self.nodes.insert(row.id, row.clone());
@@ -410,7 +415,7 @@ impl GraphStore for MemStore {
     }
 
     async fn update_edge(&mut self, row: &EdgeRow) -> Result<()> {
-        if let Some(e) = self.violates(row.id, &[], Some(row.rtype), &row.props) {
+        if let Some(e) = self.violates(row.id, &[], Some(row.rtype), &row.props, row.types.as_ref()) {
             return Err(e);
         }
         self.edges.insert(row.id, row.clone());
@@ -453,13 +458,13 @@ impl GraphStore for MemStore {
                     .nodes
                     .values()
                     .filter(|n| n.labels.contains(&d.token_id))
-                    .filter_map(|n| unique_key(&d, &n.props))
+                    .filter_map(|n| unique_key(&d, &n.props, n.types.as_ref()))
                     .collect(),
                 Entity::Relationship => self
                     .edges
                     .values()
                     .filter(|e| e.rtype == d.token_id)
-                    .filter_map(|e| unique_key(&d, &e.props))
+                    .filter_map(|e| unique_key(&d, &e.props, e.types.as_ref()))
                     .collect(),
             };
             if keys.into_iter().any(|k| !seen.insert(k)) {

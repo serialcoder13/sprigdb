@@ -756,6 +756,126 @@ pub(crate) fn parse_fields(
     Ok(out)
 }
 
+/// Bytes a group costs besides its list-like accumulators (decision
+/// S72): its key, and a fixed share per accumulator, as MongoDB counts a
+/// group's memory.
+const GROUP_OVERHEAD: usize = 64;
+
+/// A streaming `$group` (M5, decision S72): documents go in one at a
+/// time with their group key; [`Grouper::finish`] gives the groups in
+/// first-seen order. Memory is the keys plus the accumulators' state,
+/// checked against `doc.agg_stage_memory_bytes` after every document.
+pub(crate) struct Grouper<'a, 'j> {
+    accs: &'a [(String, AccSpec)],
+    lim: &'a AggLimits,
+    stage: &'a str,
+    js: Option<&'j mut crate::serverjs::GroupJs>,
+    order: Vec<Vec<u8>>,
+    groups: HashMap<Vec<u8>, (Bson, Vec<AccState<'a>>)>,
+    bytes: usize,
+    /// One group at a time (a spilled `$group`'s merge): past the limit
+    /// is 146, as MongoDB's accumulators that can't spill answer.
+    pub(crate) single: bool,
+}
+
+impl<'a, 'j> Grouper<'a, 'j> {
+    pub(crate) fn new(
+        accs: &'a [(String, AccSpec)],
+        lim: &'a AggLimits,
+        stage: &'a str,
+        js: Option<&'j mut crate::serverjs::GroupJs>,
+    ) -> Self {
+        Self {
+            accs,
+            lim,
+            stage,
+            js,
+            order: Vec::new(),
+            groups: HashMap::new(),
+            bytes: 0,
+            single: false,
+        }
+    }
+
+    /// Adds `d` to the group `id`.
+    ///
+    /// # Errors
+    /// The accumulators'; 292 past `doc.agg_stage_memory_bytes` (146 when
+    /// [`Self::single`]); 146 past the operation's limit.
+    pub(crate) fn push(&mut self, d: &Document, id: Bson) -> Result<(), MongoError> {
+        let k = crate::keyenc::key(&id);
+        if !self.groups.contains_key(&k) {
+            let mut states = Vec::with_capacity(self.accs.len());
+            for (_, a) in self.accs {
+                states.push(a.state(a.n_for(Some(&id), self.lim)?));
+            }
+            self.bytes += k.len() + GROUP_OVERHEAD * self.accs.len().max(1);
+            self.order.push(k.clone());
+            self.groups.insert(k.clone(), (id, states));
+        }
+        let Some((gid, states)) = self.groups.get_mut(&k) else {
+            return Ok(());
+        };
+        let vars = Vars::new(d, self.lim.now);
+        for (i, (_, a)) in self.accs.iter().enumerate() {
+            let it = a.item(d, &vars)?;
+            let before = states[i].bytes;
+            states[i].add(&it)?;
+            self.bytes = (self.bytes + states[i].bytes).saturating_sub(before);
+        }
+        if let Some(j) = self.js.as_deref_mut() {
+            j.add(&k, gid, &vars)?;
+        }
+        if self.bytes > self.lim.stage_bytes {
+            return Err(if self.single {
+                MongoError::new(
+                    code::EXCEEDED_MEMORY_LIMIT,
+                    format!(
+                        "{} used too much memory for one group and cannot spill to disk. Memory limit: {} bytes (doc.agg_stage_memory_bytes)",
+                        self.stage, self.lim.stage_bytes
+                    ),
+                )
+            } else {
+                over_error(self.stage, self.lim.stage_bytes)
+            });
+        }
+        // MongoDB 9.0's per-operation limit (M3).
+        crate::opmem::check(self.bytes, self.stage)
+    }
+
+    /// The groups, in first-seen order.
+    ///
+    /// # Errors
+    /// The accumulators' results'.
+    pub(crate) fn finish(mut self) -> Result<Vec<Document>, MongoError> {
+        let mut out = Vec::with_capacity(self.order.len());
+        for k in std::mem::take(&mut self.order) {
+            let Some((id, states)) = self.groups.remove(&k) else {
+                continue;
+            };
+            let mut d = doc! {"_id": id};
+            for (i, (name, _)) in self.accs.iter().enumerate() {
+                d.insert(name.clone(), states[i].result()?);
+            }
+            if let Some(j) = self.js.as_deref() {
+                j.finish(&k, &mut d)?;
+            }
+            out.push(d);
+        }
+        Ok(out)
+    }
+}
+
+/// MongoDB's 292 for a `$group`-like stage past its limit.
+pub(crate) fn over_error(stage: &str, limit: usize) -> MongoError {
+    MongoError::new(
+        code::QUERY_EXCEEDED_MEMORY_LIMIT,
+        format!(
+            "Exceeded memory limit for {stage}, but didn't allow external spilling; pass allowDiskUse:true to opt in (doc.agg_stage_memory_bytes: {limit} bytes)"
+        ),
+    )
+}
+
 /// Groups `docs` by `keys` (one per document) and accumulates: the groups
 /// in first-seen order, each `{_id: key, field: value...}`.
 ///
@@ -767,63 +887,22 @@ pub(crate) fn group_by(
     accs: &[(String, AccSpec)],
     lim: &AggLimits,
     stage: &str,
-    mut js: Option<&mut crate::serverjs::GroupJs>,
+    js: Option<&mut crate::serverjs::GroupJs>,
 ) -> Result<Vec<Document>, MongoError> {
-    struct G<'a> {
-        id: Bson,
-        states: Vec<AccState<'a>>,
-    }
-    let mut order: Vec<Vec<u8>> = Vec::new();
-    let mut groups: HashMap<Vec<u8>, G<'_>> = HashMap::new();
-    let mut bytes = 0usize;
+    let mut g = Grouper::new(accs, lim, stage, js);
     for (d, id) in docs.iter().zip(keys) {
-        let k = crate::keyenc::key(&id);
-        if !groups.contains_key(&k) {
-            let mut states = Vec::with_capacity(accs.len());
-            for (_, a) in accs {
-                states.push(a.state(a.n_for(Some(&id), lim)?));
-            }
-            order.push(k.clone());
-            groups.insert(k.clone(), G { id, states });
-        }
-        let Some(g) = groups.get_mut(&k) else {
-            continue;
-        };
-        let vars = Vars::new(d, lim.now);
-        for (i, (_, a)) in accs.iter().enumerate() {
-            let it = a.item(d, &vars)?;
-            let before = g.states[i].bytes;
-            g.states[i].add(&it)?;
-            bytes = (bytes + g.states[i].bytes).saturating_sub(before);
-        }
-        if let Some(j) = js.as_deref_mut() {
-            j.add(&k, &g.id, &vars)?;
-        }
-        if bytes > lim.stage_bytes {
-            return Err(MongoError::new(
-                code::QUERY_EXCEEDED_MEMORY_LIMIT,
-                format!(
-                    "{stage} exceeded memory limit of {} bytes (doc.agg_stage_memory_bytes)",
-                    lim.stage_bytes
-                ),
-            ));
-        }
-        // MongoDB 9.0's per-operation limit (M3).
-        crate::opmem::check(bytes, stage)?;
+        g.push(d, id)?;
     }
-    let mut out = Vec::with_capacity(order.len());
-    for k in order {
-        let Some(g) = groups.remove(&k) else { continue };
-        let mut d = doc! {"_id": g.id};
-        for (i, (name, _)) in accs.iter().enumerate() {
-            d.insert(name.clone(), g.states[i].result()?);
-        }
-        if let Some(j) = js.as_deref() {
-            j.finish(&k, &mut d)?;
-        }
-        out.push(d);
-    }
-    Ok(out)
+    g.finish()
+}
+
+/// A `$group`'s `_id` of `d`: null for missing.
+///
+/// # Errors
+/// The expression's.
+pub(crate) fn group_key(id_expr: &Bson, d: &Document, lim: &AggLimits) -> Result<Bson, MongoError> {
+    let id = eval(id_expr, &Vars::new(d, lim.now))?;
+    Ok(if missing(&id) { Bson::Null } else { id })
 }
 
 /// `$group`.
@@ -842,8 +921,7 @@ pub(crate) fn group(
     let mut js = crate::serverjs::GroupJs::parse(spec)?;
     let mut keys = Vec::with_capacity(docs.len());
     for d in docs {
-        let id = eval(id_expr, &Vars::new(d, lim.now))?;
-        keys.push(if missing(&id) { Bson::Null } else { id });
+        keys.push(group_key(id_expr, d, lim)?);
     }
     group_by(
         docs,

@@ -949,6 +949,106 @@ async fn round_eight_against_neo4j() {
     eprintln!("round eight: {same} statements identical to Neo4j 5.26 over Bolt 5.8");
 }
 
+/// R8 round 9 against Neo4j 5.26 (decisions G76 and G77): a batched
+/// `CALL` after a write is Neo4j's syntax error; writes after one roll
+/// back on a later failure while its batches stay; a uniqueness key
+/// carries the value's type (a string equal to a byte array's base64, or
+/// to a date's text, is another key). Every answer, and every failure
+/// code, is compared with the reference's.
+#[tokio::test]
+async fn round_nine_against_neo4j() {
+    let (Some(addr), Some(user), Some(pw), Some(neo), Some(neo_pw), Some(diff_db)) = (
+        env("SPRIG_TEST_BOLT_ADDR"),
+        env("SPRIG_TEST_BOLT_USER"),
+        env("SPRIG_TEST_BOLT_PASSWORD"),
+        env("SPRIG_TEST_NEO4J_ADDR"),
+        env("SPRIG_TEST_NEO4J_PASSWORD"),
+        env("SPRIG_TEST_BOLT_DIFF_DB"),
+    ) else {
+        eprintln!(
+            "skipped: SPRIG_TEST_BOLT_*, SPRIG_TEST_NEO4J_* and SPRIG_TEST_BOLT_DIFF_DB not set"
+        );
+        return;
+    };
+    let db = vec![("db", PackValue::String(diff_db.clone()))];
+    let mut g = connect_58(&addr, &user, &pw).await;
+    let mut n = connect_58(&neo, "neo4j", &neo_pw).await;
+    fresh(&mut g, &db).await;
+    fresh(&mut n, &[]).await;
+    let _ = run_pull(&mut g, "DROP CONSTRAINT r9_u IF EXISTS", vec![], &db).await;
+    let _ = run_pull(&mut n, "DROP CONSTRAINT r9_u IF EXISTS", vec![], &[]).await;
+    let bytes = || vec![("b", PackValue::Bytes(vec![1, 2, 255]))];
+    let cases: &[(&str, bool)] = &[
+        // G76: refused after a write, nothing written.
+        (
+            "CREATE (:Outer) WITH 1 AS one UNWIND [1] AS i CALL (i) { CREATE (:B9) } IN TRANSACTIONS RETURN 1",
+            false,
+        ),
+        (
+            "MATCH (n) SET n.r9 = 1 WITH count(*) AS c UNWIND [1] AS i CALL (i) { CREATE (:B9) } IN TRANSACTIONS RETURN 1",
+            false,
+        ),
+        (
+            "CALL { CREATE (:Q9) } UNWIND [1] AS i CALL (i) { CREATE (:B9) } IN TRANSACTIONS RETURN 1",
+            false,
+        ),
+        (
+            "OPTIONAL MATCH (o:Outer) OPTIONAL MATCH (q:Q9) OPTIONAL MATCH (b:B9) RETURN count(o), count(q), count(b)",
+            false,
+        ),
+        // Writes after the batches: committed at the end ...
+        (
+            "UNWIND [1, 2, 3] AS i CALL (i) { CREATE (:B9 {i: i}) } IN TRANSACTIONS OF 1 ROWS CREATE (:After9 {i: i}) RETURN count(*) AS c",
+            false,
+        ),
+        (
+            "MATCH (x) WHERE x:B9 OR x:After9 RETURN labels(x)[0] AS l, count(*) AS c ORDER BY l",
+            false,
+        ),
+        ("MATCH (x) WHERE x:B9 OR x:After9 DETACH DELETE x", false),
+        // ... and rolled back when the statement fails after the batches.
+        (
+            "UNWIND [1, 0, 2] AS i CALL (i) { CREATE (:B9 {i: i}) } IN TRANSACTIONS OF 1 ROWS CREATE (:After9 {i: 10 / i}) RETURN count(*) AS c",
+            false,
+        ),
+        (
+            "OPTIONAL MATCH (b:B9) WITH count(b) AS b OPTIONAL MATCH (a:After9) RETURN b, count(a) AS a",
+            false,
+        ),
+        // A second batched CALL after one is allowed.
+        (
+            "UNWIND [1] AS i CALL (i) { CREATE (:B9) } IN TRANSACTIONS WITH i UNWIND [2] AS j CALL (j) { CREATE (:C9) } IN TRANSACTIONS RETURN count(*) AS c",
+            false,
+        ),
+        // G77: the value's type is part of the uniqueness key.
+        (
+            "CREATE CONSTRAINT r9_u FOR (x:U9) REQUIRE x.k IS UNIQUE",
+            false,
+        ),
+        ("CREATE (x:U9 {k: $b}) RETURN x.k AS k", true),
+        ("CREATE (x:U9 {k: 'AQL/'}) RETURN x.k AS k", false),
+        ("CREATE (x:U9 {k: date('2024-01-02')}) RETURN x.k AS k", false),
+        ("CREATE (x:U9 {k: '2024-01-02'}) RETURN x.k AS k", false),
+        ("CREATE (x:U9 {k: $b}) RETURN x.k AS k", true),
+        ("CREATE (x:U9 {k: 'AQL/'}) RETURN x.k AS k", false),
+        ("CREATE (x:U9 {k: date('2024-01-02')}) RETURN x.k AS k", false),
+        ("MATCH (x:U9) RETURN count(*) AS c", false),
+        ("MATCH (x:U9) WHERE x.k = $b RETURN count(*) AS c", true),
+        ("DROP CONSTRAINT r9_u", false),
+        ("MATCH (n) DETACH DELETE n", false),
+    ];
+    let mut same = 0;
+    for (q, with_bytes) in cases {
+        let p = if *with_bytes { bytes() } else { vec![] };
+        let a = run_pull(&mut g, q, p.clone(), &db).await;
+        let b = run_pull(&mut n, q, p, &[]).await;
+        eprintln!("{q}\n  sprig: {a:?}\n  neo4j: {b:?}");
+        assert_eq!(a, b, "{q}");
+        same += 1;
+    }
+    eprintln!("round nine: {same} statements identical to Neo4j 5.26 over Bolt 5.8");
+}
+
 /// Pulls everything of an open result with `PULL {n}` batches: (records,
 /// batches, the last summary).
 async fn pull_all(c: &mut Client, n: i64, qid: i64) -> (usize, usize, PackValue) {

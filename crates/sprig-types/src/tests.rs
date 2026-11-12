@@ -161,6 +161,68 @@ async fn inserts_write_each_level() {
          'vehicle', '/asset/vehicle/')"
     );
     assert_eq!(f.log.last().unwrap(), "RELEASE SAVEPOINT sprig_types");
+    assert!(!f.log.iter().any(|l| l.contains("innodb_snapshot_isolation")));
+}
+
+/// bugfix-54 (T17's leftover): inside a client's transaction on a session
+/// with MariaDB's snapshot-isolation check on, the plan runs with the check
+/// off and turns it on again, whether the plan succeeds or fails. A 1020
+/// would roll back the client's whole transaction, savepoint included.
+#[tokio::test]
+async fn nested_plans_turn_snapshot_isolation_off() {
+    let mut f = Fake {
+        in_txn: true,
+        snapshot_isolation: true,
+        ..Fake::default()
+    };
+    run("INSERT INTO vehicle VALUES (9, 'V', 4, 'VIN')", &mut f)
+        .await
+        .unwrap();
+    assert_eq!(f.log[0], "SET SESSION innodb_snapshot_isolation = OFF");
+    assert_eq!(f.log[1], "SAVEPOINT sprig_types");
+    assert_eq!(f.log[f.log.len() - 2], "RELEASE SAVEPOINT sprig_types");
+    assert_eq!(
+        f.log.last().unwrap(),
+        "SET SESSION innodb_snapshot_isolation = ON"
+    );
+    // A failing plan: rolled back to the savepoint, and the check is on
+    // again.
+    let mut f = Fake {
+        in_txn: true,
+        snapshot_isolation: true,
+        ..Fake::default()
+    };
+    let tx = crate::exec::Txn::begin(&mut f).await.unwrap();
+    let e = tx
+        .end::<()>(
+            &mut f,
+            Err(sprig_common::SprigError::standard(
+                1062,
+                *b"23000",
+                "Duplicate entry",
+            )),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e.protocol().mysql_errno, 1062);
+    assert_eq!(
+        f.log,
+        [
+            "SET SESSION innodb_snapshot_isolation = OFF",
+            "SAVEPOINT sprig_types",
+            "ROLLBACK TO SAVEPOINT sprig_types",
+            "SET SESSION innodb_snapshot_isolation = ON",
+        ]
+    );
+    // Autocommit plans don't touch it (they run at READ COMMITTED).
+    let mut f = Fake {
+        snapshot_isolation: true,
+        ..Fake::default()
+    };
+    run("INSERT INTO vehicle VALUES (9, 'V', 4, 'VIN')", &mut f)
+        .await
+        .unwrap();
+    assert!(!f.log.iter().any(|l| l.contains("innodb_snapshot_isolation")));
 }
 
 #[tokio::test]

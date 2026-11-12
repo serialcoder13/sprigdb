@@ -128,10 +128,8 @@ fn stages_match_mongodb_8_0() {
                     }
                     for (i, (x, y)) in g.iter().zip(w).enumerate() {
                         if !same(x, y) {
-                            let _ = write!(
-                                detail,
-                                "#{i} want {y:?}\n      #{i} got  {x:?}\n      "
-                            );
+                            let _ =
+                                write!(detail, "#{i} want {y:?}\n      #{i} got  {x:?}\n      ");
                             break;
                         }
                     }
