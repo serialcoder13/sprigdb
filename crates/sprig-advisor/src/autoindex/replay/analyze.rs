@@ -113,8 +113,9 @@ pub fn parse_plan(json: &str) -> Result<PlanRun, PlanParseError> {
         // MariaDB prints a condition's text unescaped, so a JSON path with
         // a quoted key (`'$."email"'`, the document engine's paths) breaks
         // its own JSON (S132): mend those lines and try once more.
-        Err(e) => serde_json::from_str(&mend_quotes(json))
-            .map_err(|_| PlanParseError(e.to_string()))?,
+        Err(e) => {
+            serde_json::from_str(&mend_quotes(json)).map_err(|_| PlanParseError(e.to_string()))?
+        }
     };
     let qb = v
         .get("query_block")

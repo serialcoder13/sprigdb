@@ -492,7 +492,11 @@ async fn placement_on(
         )
         .await?,
     );
-    rows.extend(schemas.into_iter().map(|s| ("S".to_owned(), s, String::new())));
+    rows.extend(
+        schemas
+            .into_iter()
+            .map(|s| ("S".to_owned(), s, String::new())),
+    );
     let mut here = backend::Placement::default();
     for (kind, schema, name) in rows {
         match kind.as_str() {
