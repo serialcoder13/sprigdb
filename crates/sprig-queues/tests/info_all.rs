@@ -138,11 +138,23 @@ async fn info_when_the_owner_cannot_answer() {
     .await
     .unwrap();
     // On a: its owner answers.
-    let va = a.engine.clone().unwrap().sql_vhost(principal(), "/", 9).await.unwrap();
+    let va = a
+        .engine
+        .clone()
+        .unwrap()
+        .sql_vhost(principal(), "/", 9)
+        .await
+        .unwrap();
     let i = va.info(&q).await.unwrap();
     assert_eq!((i.ready, i.unacked, i.consumers), (1, 0, 0), "{i:?}");
     // On b: gw-a holds the owner's lease and b can't reach it.
-    let vb = b.engine.clone().unwrap().sql_vhost(principal(), "/", 9).await.unwrap();
+    let vb = b
+        .engine
+        .clone()
+        .unwrap()
+        .sql_vhost(principal(), "/", 9)
+        .await
+        .unwrap();
     let i = vb.info(&q).await.unwrap();
     eprintln!("mq_info on the gateway whose owner can't answer: {i:?}");
     assert_eq!(

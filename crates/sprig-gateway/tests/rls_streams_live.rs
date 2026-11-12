@@ -18,8 +18,8 @@
 //! export SPRIG_TEST_RLS_HTTP=127.0.0.1:37080
 //! export SPRIG_TEST_RLS_HOOK_PORT=37881   # on sink.destination_allowlist
 //! export SPRIG_TEST_RLS_TENANT=acme
-//! # tenant settings: logic.trigger_max_attempts 2,
-//! # logic.trigger_retry_initial_ms 100, logic.trigger_retry_max_ms 2000
+//! # tenant setting: sink.destination_allowlist ["127.0.0.1:<hook port>"]
+//! # (the test sets the tenant's trigger retry settings, and resets them)
 //! cargo test -p sprig-gateway --test rls_streams_live -- --nocapture
 //! ```
 
@@ -39,6 +39,13 @@ use mysql_async::prelude::Queryable;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const PW: &str = "Rlss-suite-pw-1";
+
+/// The tenant's trigger retry settings while the test runs (bugfix-65).
+const TRIGGER_RETRY: [(&str, u32); 3] = [
+    ("logic.trigger_max_attempts", 2),
+    ("logic.trigger_retry_initial_ms", 100),
+    ("logic.trigger_retry_max_ms", 2000),
+];
 const DB: &str = "rlss_suite";
 
 struct Checks {
@@ -294,6 +301,15 @@ async fn row_level_security_on_streamed_rows() {
         let _ = run(&mut admin, &format!("DROP USER IF EXISTS '{u}'@'%'")).await;
     }
     must(&mut admin, &format!("CREATE DATABASE {DB}")).await;
+    // Check 5's dead letter needs the trigger to give up within the 60 s
+    // the check waits: 2 attempts, 100 ms apart. With the defaults (10
+    // attempts, from 1 s doubling to 300 s) the record is still being
+    // retried then (bugfix-65). Workers read these at tenant scope (a
+    // database's value isn't read), so the test sets the tenant's, as
+    // its header used to ask the deployment to, and resets them at the end.
+    for (k, v) in TRIGGER_RETRY {
+        must(&mut admin, &format!("ALTER TENANT SPRIG SET ({k} = {v})")).await;
+    }
     must(
         &mut admin,
         &format!(
@@ -363,6 +379,9 @@ async fn row_level_security_on_streamed_rows() {
     .await;
     must(&mut admin, "GRANT BYPASS RLS ON *.* TO 'rlss_writer'@'%'").await;
     must(&mut admin, "GRANT SPRIG_SINK_ADMIN ON *.* TO 'app'@'%'").await;
+    // A global privilege applies to the grantee's next connection, as in
+    // MySQL (bugfix-65): the connections are made with it.
+    let mut admin = admin_conn(&sql_addr).await;
     must(
         &mut admin,
         &format!(
@@ -923,6 +942,9 @@ async fn row_level_security_on_streamed_rows() {
     );
 
     // Cleanup.
+    for (k, _) in TRIGGER_RETRY {
+        let _ = run(&mut admin, &format!("ALTER TENANT SPRIG RESET ({k})")).await;
+    }
     for s in [
         format!("DROP TRIGGER {DB}.t_mgr"),
         format!("DROP TRIGGER {DB}.a_mgr"),

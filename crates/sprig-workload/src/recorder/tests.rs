@@ -116,6 +116,18 @@ fn memory_cap_evicts_coldest_and_starts_new_parts() {
         ..RecorderConfig::default()
     };
     let (r, c, f) = setup(cfg);
+    // Start at the beginning of a bucket, so the whole run (about 440 s)
+    // stays in one bucket whatever the real time is: the test failed when
+    // the run crossed a bucket's end.
+    let bucket_ms = u64::from(RecorderConfig::default().bucket_minutes) * 60_000;
+    let now_ms = u64::try_from(
+        Clock::wall(&*c)
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    c.advance(Duration::from_millis(bucket_ms - now_ms % bucket_ms));
     let first = fp(&f, 1, "SELECT first FROM t");
     r.record(TenantId(1), &first, &ex(10));
     for i in 0..400 {
@@ -129,15 +141,19 @@ fn memory_cap_evicts_coldest_and_starts_new_parts() {
     // The coldest (first) entry was evicted into the outbox ...
     assert!(r.stats(TenantId(1), first.id).is_none());
     let closed = r.drain_closed();
-    let row = closed.iter().find(|x| x.fingerprint == first.id);
-    if let Some(row) = row {
+    let bucket = closed.first().map(|x| x.bucket_start);
+    if let Some(row) = closed.iter().find(|x| x.fingerprint == first.id) {
         assert_eq!(row.part, 0);
+        assert_eq!(Some(row.bucket_start), bucket);
     }
     // ... and starts part 1 when it returns in the same bucket.
     r.record(TenantId(1), &first, &ex(10));
     let snap = r.snapshot();
     let back = snap.iter().find(|x| x.fingerprint == first.id).unwrap();
-    assert!(back.part >= 1 || back.bucket_start != closed.first().map_or(0, |c| c.bucket_start));
+    assert_eq!(back.part, 1);
+    if let Some(b) = bucket {
+        assert_eq!(back.bucket_start, b);
+    }
 }
 
 #[test]

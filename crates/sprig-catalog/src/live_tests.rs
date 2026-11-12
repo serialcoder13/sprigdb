@@ -354,7 +354,20 @@ async fn live_migrations_are_idempotent_concurrent_and_recorded() {
             lock_timeout: Duration::from_secs(1),
             ..MigrateOpts::default()
         };
-        let e = Migrator::new(&[])
+        // R9 (r9scale): a run with nothing to apply reads the format and
+        // returns without the lock.
+        let r = Migrator::new(&[])
+            .unwrap()
+            .run(&mut conn, &schema, &opts)
+            .await
+            .unwrap();
+        assert!(r.applied.is_empty() && r.blocked.is_empty(), "{r:?}");
+        assert_eq!(r.state[CORE].format, 1);
+        let pending = Module {
+            name: "test_ext",
+            migrations: EXT,
+        };
+        let e = Migrator::new(&[pending])
             .unwrap()
             .run(&mut conn, &schema, &opts)
             .await

@@ -138,6 +138,14 @@ pub trait MqCatalog: Send + Sync + 'static {
 /// some then reached the queue ahead of rows committed before them.
 pub const FALLBACK_WHILE_FEED_RUNS_MS: u64 = 30_000;
 
+/// How often a vhost's forwarder looks at its stores while there is work.
+pub const POLL_MS: u64 = 200;
+
+/// The longest a vhost's forwarder sleeps when its stores had nothing to
+/// forward (R9, r9scale): `queue.forward_fallback_ms`'s default, so the
+/// polling fallback is no later than it was.
+pub const IDLE_POLL_MAX_MS: u64 = 2_000;
+
 /// What [`Leases::acquire`] found.
 #[derive(Debug, Clone)]
 pub enum Acquired {
@@ -946,15 +954,30 @@ impl VShared {
         let mut next_try = 0i64;
         let mut next_purge = 0i64;
         let mut durable: Option<Arc<dyn MsgStore>> = None;
+        // R9 (r9scale): how long the loop sleeps. A vhost stays open on a
+        // gateway once used, and every lease holder read its outbox and its
+        // delayed messages five times a second: at 10,000 members, tens of
+        // thousands of statements a second for nothing. With nothing to do
+        // the sleep doubles up to IDLE_POLL_MAX_MS, never past the next
+        // delayed message's due time; a wake-up or a pass that moved rows
+        // goes back to POLL_MS.
+        let mut sleep_ms = POLL_MS;
         loop {
             let woken = tokio::select! {
                 () = self.stop.cancelled() => break,
                 () = self.wake.notified() => true,
-                () = tokio::time::sleep(Duration::from_millis(200)) => false,
+                () = tokio::time::sleep(Duration::from_millis(sleep_ms)) => false,
             };
             let now = deps.clock.now_ms();
             let mem: Arc<dyn MsgStore> = Arc::clone(&self.mem) as Arc<dyn MsgStore>;
-            while self.forward_store(&mem, now, true, None).await > 0 {}
+            let mut moved = 0;
+            loop {
+                let n = self.forward_store(&mem, now, true, None).await;
+                if n == 0 {
+                    break;
+                }
+                moved += n;
+            }
             if lease.as_ref().is_some_and(CancellationToken::is_cancelled) {
                 lease = None;
             }
@@ -970,6 +993,7 @@ impl VShared {
             // at once: the fast path. The lease holder may forward the
             // same rows; the message ids make the second time a no-op.
             if lease.is_none() && !woken {
+                sleep_ms = POLL_MS;
                 continue;
             }
             // A store a shard move left behind is opened again where the
@@ -986,7 +1010,13 @@ impl VShared {
                             i64::try_from(qs.forward_fallback_ms).unwrap_or(i64::MAX),
                         ))
                     });
-                while self.forward_store(s, now, release, before).await > 0 {}
+                loop {
+                    let n = self.forward_store(s, now, release, before).await;
+                    if n == 0 {
+                        break;
+                    }
+                    moved += n;
+                }
                 // The lease holder trims the forward ledger: rows whose
                 // outbox row is gone, older than the longest a forward
                 // that read the row before its delete may still run.
@@ -998,6 +1028,18 @@ impl VShared {
                         Err(e) => tracing::debug!(error = %e, "forward ledger trim failed"),
                     }
                 }
+                sleep_ms = if woken || moved > 0 {
+                    POLL_MS
+                } else {
+                    let mut next = (sleep_ms * 2).min(IDLE_POLL_MAX_MS);
+                    for st in [s, &mem] {
+                        if let Ok(Some(due)) = st.next_due().await {
+                            let until = u64::try_from(due.saturating_sub(now)).unwrap_or(0);
+                            next = next.min(until.max(POLL_MS));
+                        }
+                    }
+                    next
+                };
             }
         }
         if lease.is_some() {

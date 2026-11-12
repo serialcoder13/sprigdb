@@ -536,14 +536,17 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .set_placement(Arc::clone(&balancer) as Arc<dyn write_load::HotClusters>);
     let tenants = Arc::new(TenantService::new(
         Arc::clone(&stores.dc),
-        locator,
+        locator.clone(),
         Arc::clone(&tree),
         // Chapter 14's verifier tables and chapter 13's automatic-indexing
         // tables with the core catalog.
         // Chapter 11's decision log too.
-        Arc::new(balancer_loop::WithDecisions(autoindex_loop::WithAutoIndex(
-            users::AuthHooks,
-        ))),
+        // R9 (r9scale): a member below FOR EACH TENANT messaging
+        // definitions gets their catalog modules at creation.
+        Arc::new(inherit_loop::WithMessagingModules::new(
+            balancer_loop::WithDecisions(autoindex_loop::WithAutoIndex(users::AuthHooks)),
+            locator.clone(),
+        )),
         Arc::clone(&clock),
         Some(settings.live.clone()),
     )?);

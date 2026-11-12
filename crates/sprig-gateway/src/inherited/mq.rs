@@ -226,10 +226,12 @@ pub async fn ensure_vhost(
     let db_name = defs[0].db_name.clone();
     let started = std::time::Instant::now();
     let ep = svc.locator.writer(t).await?;
-    // R9 (r9scale): the member's database and the catalog's `inherit_msg`
-    // and `mq` modules at once, in one migration run (they were three
-    // steps one after another on a member's first publish).
-    let modules = async {
+    // R9 (r9scale): the catalog's `inherit_msg` and `mq` modules in one
+    // migration run (two runs before), then the member's database. Not at
+    // the same time: a catalog load that starts before a module's tables
+    // exist fails with 1412 when it reads them (seen when they ran
+    // together).
+    {
         let mut c = ep.pool.get_conn().await.map_err(cat_err)?;
         sprig_catalog::Migrator::new(&[
             sprig_inherit::msg::store::MSG_MODULE,
@@ -241,12 +243,8 @@ pub async fn ensure_vhost(
             &sprig_catalog::migrate::MigrateOpts::default(),
         )
         .await?;
-        Ok::<_, SprigError>(())
-    };
-    let (cat, ()) = tokio::try_join!(
-        super::streams::ensure_database(svc, t, &db_name),
-        modules
-    )?;
+    }
+    let cat = super::streams::ensure_database(svc, t, &db_name).await?;
     let prepared_ms = started.elapsed().as_millis();
     let lc = super::streams::lctn(svc, &cat);
     let row = cat

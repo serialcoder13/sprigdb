@@ -5815,6 +5815,7 @@ dependencies = [
  "sprig-mover",
  "sprig-proto-mysql",
  "sprig-provision",
+ "sprig-queues",
  "sprig-residency",
  "sprig-settings",
  "sprig-shard",

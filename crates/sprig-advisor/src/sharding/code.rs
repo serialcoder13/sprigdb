@@ -129,15 +129,14 @@ pub async fn read(c: &mut Conn, tenant: TenantId) -> Result<Vec<StoredCode>> {
     // reads every table of every tenant on the server (R9, r9scale;
     // `sprig_catalog::infoschema`).
     let schemas = sprig_catalog::infoschema::schemas_like(c, &like).await?;
-    let views: Vec<(String, String, Option<String>)> =
-        sprig_catalog::infoschema::read_per_schema(
-            c,
-            "SELECT TABLE_SCHEMA, TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS",
-            "TABLE_SCHEMA",
-            &schemas,
-            "",
-        )
-        .await?;
+    let views: Vec<(String, String, Option<String>)> = sprig_catalog::infoschema::read_per_schema(
+        c,
+        "SELECT TABLE_SCHEMA, TABLE_NAME, VIEW_DEFINITION FROM information_schema.VIEWS",
+        "TABLE_SCHEMA",
+        &schemas,
+        "",
+    )
+    .await?;
     for (schema, name, text) in views {
         out.push(StoredCode {
             schema,

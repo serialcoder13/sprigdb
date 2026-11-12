@@ -422,10 +422,7 @@ impl MqCatalog for GatewayMq {
         // R9 (r9fwd): the tenant's feed-driven outbox forwarder, registered
         // while the tables are made (r9scale); both before the store is
         // used.
-        let (made, ()) = tokio::join!(
-            s.ensure(),
-            crate::outbox_feed::subscribe(&self.svc, tenant)
-        );
+        let (made, ()) = tokio::join!(s.ensure(), crate::outbox_feed::subscribe(&self.svc, tenant));
         made.map_err(unavailable)?;
         lock(&self.maria).insert((v.tenant, v.db_id), Arc::clone(&s));
         let s: Arc<dyn MsgStore> = s;

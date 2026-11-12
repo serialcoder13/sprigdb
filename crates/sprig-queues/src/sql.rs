@@ -747,22 +747,20 @@ impl SqlVhost {
             .stored(q.id)
             .await
             .map_err(|err| MqError::new(MqCode::OwnerMoved, err.to_string()))?;
-        Ok(match answer {
-            Some((ready, consumers)) => QueueInfo {
+        if let Some((ready, consumers)) = answer {
+            return Ok(QueueInfo {
                 ready: u64::from(ready),
                 consumers: u64::from(consumers),
                 unacked: stored.saturating_sub(u64::from(ready)),
-            },
-            None => {
-                tracing::warn!(queue = %q.name, vhost = %self.v.r.name, stored,
-                    "mq_info: the queue's owner didn't answer; counting every stored message as ready");
-                metrics::counter!("sprig_queue_info_unanswered_total").increment(1);
-                QueueInfo {
-                    ready: stored,
-                    consumers: 0,
-                    unacked: 0,
-                }
-            }
+            });
+        }
+        tracing::warn!(queue = %q.name, vhost = %self.v.r.name, stored,
+            "mq_info: the queue's owner didn't answer; counting every stored message as ready");
+        metrics::counter!("sprig_queue_info_unanswered_total").increment(1);
+        Ok(QueueInfo {
+            ready: stored,
+            consumers: 0,
+            unacked: 0,
         })
     }
 

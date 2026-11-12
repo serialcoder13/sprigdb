@@ -43,6 +43,9 @@ sprig-logic = { path = "../sprig-logic" }
 sprig-inherit = { path = "../sprig-inherit" }
 # Chapter 45: the stream sequencer jobs (R9).
 sprig-streams = { path = "../sprig-streams" }
+# Chapter 50 (R9, r9scale): the `mq` catalog module a member under a
+# FOR EACH TENANT exchange or queue gets at creation.
+sprig-queues = { path = "../sprig-queues" }
 # Chapter 51 (R9): the sink index the sinks loop reads.
 sprig-sinks = { path = "../sprig-sinks" }
 sprig-meta.workspace = true

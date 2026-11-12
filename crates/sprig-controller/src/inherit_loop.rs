@@ -152,3 +152,118 @@ mod tests {
         assert_eq!(wanted(&subs), vec![1, 9]);
     }
 }
+
+/// Bootstrap hooks (R9, r9scale) that give a tenant created under an
+/// ancestor declaring `FOR EACH TENANT` streams, exchanges, queues or
+/// bindings the catalog modules its instances will need, with the rest of
+/// its catalog: `inherit_msg`, `mq` for the AMQP kinds, `streams` for
+/// streams. A member's first publish made these tables (about 15
+/// `CREATE TABLE`s) on its path before; at 10,000 tenants that was most
+/// of a first queue publish. The instances themselves stay lazy (chapter
+/// 42): only empty catalog tables are made here, and only below a
+/// declarer. Reading an ancestor's definitions or migrating fails
+/// nothing: the first publish migrates as before.
+#[derive(Clone)]
+pub struct WithMessagingModules<H> {
+    inner: H,
+    locator: crate::catalogs::ShardMapLocator,
+}
+
+impl<H> WithMessagingModules<H> {
+    /// `inner`'s hooks, plus the modules above.
+    pub fn new(inner: H, locator: crate::catalogs::ShardMapLocator) -> Self {
+        Self { inner, locator }
+    }
+
+    /// The kinds of active messaging definitions `tenant`'s ancestors
+    /// declare (any scope; a member out of a definition's scope gets
+    /// empty tables).
+    async fn ancestor_kinds(&self, tenant: &crate::tree::DirectoryEntry) -> HashSet<String> {
+        use mysql_async::prelude::Queryable;
+        let mut kinds = HashSet::new();
+        let ancestors = tenant
+            .path
+            .split('/')
+            .filter_map(|s| s.parse::<u64>().ok())
+            .filter(|id| *id != tenant.tenant_id.0);
+        for a in ancestors {
+            let a = sprig_common::ids::TenantId(a);
+            let Ok(Some(cluster)) = self.locator.cluster_of(a).await else {
+                continue;
+            };
+            let Ok(pool) = self.locator.pools().writer(&cluster).await else {
+                continue;
+            };
+            let Ok(mut c) = pool.get_conn().await else {
+                continue;
+            };
+            // No `inherited_defs` table (1146): nothing declared there.
+            let found: Vec<String> = c
+                .query(format!(
+                    "SELECT DISTINCT CAST(kind AS CHAR) FROM {}.inherited_defs WHERE state = 'active' \
+                     AND kind IN ('stream', 'exchange', 'queue', 'binding')",
+                    sprig_common::names::quote(&self.locator.schema(a))
+                ))
+                .await
+                .unwrap_or_default();
+            kinds.extend(found);
+        }
+        kinds
+    }
+}
+
+#[async_trait::async_trait]
+impl<H: crate::tenants::BootstrapHooks> crate::tenants::BootstrapHooks for WithMessagingModules<H> {
+    fn modules(&self) -> Vec<sprig_catalog::Module> {
+        self.inner.modules()
+    }
+
+    async fn catalog_ready(
+        &self,
+        tenant: &crate::tree::DirectoryEntry,
+        catalog: &sprig_catalog::CatalogEndpoint,
+    ) -> Result<()> {
+        self.inner.catalog_ready(tenant, catalog).await?;
+        let kinds = self.ancestor_kinds(tenant).await;
+        if kinds.is_empty() {
+            return Ok(());
+        }
+        let mut modules = vec![sprig_inherit::msg::store::MSG_MODULE];
+        if ["exchange", "queue", "binding"]
+            .iter()
+            .any(|k| kinds.contains(*k))
+        {
+            modules.push(sprig_queues::catalog::MQ_MODULE);
+        }
+        if kinds.contains("stream") {
+            modules.push(sprig_streams::store::STREAMS_MODULE);
+        }
+        let opts = sprig_catalog::migrate::MigrateOpts {
+            applied_by: "controller:inherit".to_owned(),
+            ..sprig_catalog::migrate::MigrateOpts::default()
+        };
+        let run = async {
+            let mut c = catalog.pool.get_conn().await.map_err(|e| {
+                sprig_common::SprigError::new(
+                    sprig_common::SprigCode::CatalogUnavailable,
+                    format!("catalog: {e}"),
+                )
+            })?;
+            sprig_catalog::Migrator::new(&modules)?
+                .run(&mut c, catalog.store.schema(), &opts)
+                .await
+        };
+        if let Err(e) = run.await {
+            tracing::warn!(tenant = %tenant.tenant_id, error = %e, "messaging catalog modules not made at creation; the first publish makes them");
+        }
+        Ok(())
+    }
+
+    async fn dropping(
+        &self,
+        tenant: &crate::tree::DirectoryEntry,
+        catalog: Option<&sprig_catalog::CatalogEndpoint>,
+    ) -> Result<()> {
+        self.inner.dropping(tenant, catalog).await
+    }
+}

@@ -40,7 +40,10 @@ pub async fn schemas_like(conn: &mut Conn, like: &str) -> Result<Vec<String>> {
         .query(format!("SHOW DATABASES LIKE {}", literal(like)))
         .await
         .map_err(|e| {
-            SprigError::new(SprigCode::BackendUnavailable, format!("SHOW DATABASES: {e}"))
+            SprigError::new(
+                SprigCode::BackendUnavailable,
+                format!("SHOW DATABASES: {e}"),
+            )
         })?;
     names.sort();
     Ok(names)
@@ -122,7 +125,12 @@ mod tests {
     #[test]
     fn long_lists_split_and_literals_escape() {
         let s: Vec<String> = (0..250).map(|i| format!("t1_d{i}_g1_s1")).collect();
-        let q = per_schema("SELECT 1 FROM information_schema.TABLES", "TABLE_SCHEMA", &s, " AND TABLE_NAME = 'a'");
+        let q = per_schema(
+            "SELECT 1 FROM information_schema.TABLES",
+            "TABLE_SCHEMA",
+            &s,
+            " AND TABLE_NAME = 'a'",
+        );
         assert_eq!(q.len(), 3);
         assert_eq!(q[0].matches("UNION ALL").count(), BRANCHES - 1);
         assert!(q[2].ends_with("TABLE_SCHEMA = 't1_d249_g1_s1' AND TABLE_NAME = 'a'"));

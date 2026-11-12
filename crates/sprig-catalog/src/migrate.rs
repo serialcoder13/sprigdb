@@ -507,15 +507,16 @@ impl Migrator {
             .flatten();
         let state: FormatState = serde_json::from_slice(&raw?).ok()?;
         check_readable(&state, &self.supports()).ok()?;
-        let current = self.modules.iter().all(|m| {
-            state
-                .get(m.name)
-                .is_some_and(|s| s.format >= m.newest())
-        });
+        let current = self
+            .modules
+            .iter()
+            .all(|m| state.get(m.name).is_some_and(|s| s.format >= m.newest()));
         if !current {
             return None;
         }
-        conn.query_drop(format!("USE {}", quote(schema))).await.ok()?;
+        conn.query_drop(format!("USE {}", quote(schema)))
+            .await
+            .ok()?;
         Some(state)
     }
 

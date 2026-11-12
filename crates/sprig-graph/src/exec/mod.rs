@@ -423,6 +423,37 @@ enum Lifted {
     EndNode(Expr, bool),
 }
 
+/// A pattern comprehension's parts, as the parser writes it (one `MATCH`
+/// and a `RETURN` of one item named ` pc`): its patterns, `WHERE` and map.
+fn comprehension(q: &Query) -> Option<(&[PathPattern], Option<&Expr>, &Expr)> {
+    let [part] = q.parts.as_slice() else {
+        return None;
+    };
+    let [
+        Clause::Match {
+            optional: false,
+            patterns,
+            where_,
+        },
+        Clause::Return(p),
+    ] = part.clauses.as_slice()
+    else {
+        return None;
+    };
+    let [(map, name)] = p.items.as_slice() else {
+        return None;
+    };
+    (name == " pc"
+        && !p.distinct
+        && !p.star
+        && p.order.is_empty()
+        && p.skip.is_none()
+        && p.limit.is_none()
+        && p.where_.is_none()
+        && q.union_all.is_empty())
+    .then_some((patterns.as_slice(), where_.as_ref(), map))
+}
+
 /// Whether `e` has a pattern predicate, an expression subquery, or
 /// `startNode()`/`endNode()`, which need the store.
 fn has_deep(e: &Expr) -> bool {
@@ -751,6 +782,42 @@ impl Exec<'_> {
                 (0..rows.len())
                     .map(|i| Value::Bool(hits.contains(&i)))
                     .collect()
+            }
+            Lifted::Subquery(SubqueryKind::Collect, q) if comprehension(q).is_some() => {
+                // A pattern comprehension for every row at once (R8 round
+                // 10, IC14): one match over all rows, each tagged, then
+                // the map expression and the results grouped back.
+                let Some((patterns, where_, map)) = comprehension(q) else {
+                    return Ok(Vec::new());
+                };
+                let mut tagged: Vec<Row> = rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        let mut t: Row = r
+                            .iter()
+                            .filter(|(k, _)| !k.starts_with(' '))
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        t.insert(" pcrow".into(), Value::Int(i64::try_from(i).unwrap_or(0)));
+                        t
+                    })
+                    .collect();
+                if tagged.is_empty() {
+                    return Ok(Vec::new());
+                }
+                tagged =
+                    Box::pin(self.match_clause(tagged, patterns, where_, false, false)).await?;
+                let vals = self.eval_rows(map, &mut tagged).await?;
+                let mut out: Vec<Vec<Value>> = vec![Vec::new(); rows.len()];
+                for (r, v) in tagged.iter().zip(vals) {
+                    if let Some(Value::Int(i)) = r.get(" pcrow")
+                        && let Some(o) = usize::try_from(*i).ok().and_then(|i| out.get_mut(i))
+                    {
+                        o.push(v);
+                    }
+                }
+                out.into_iter().map(Value::List).collect()
             }
             Lifted::Subquery(k, q) => {
                 let mut v = Vec::with_capacity(rows.len());
