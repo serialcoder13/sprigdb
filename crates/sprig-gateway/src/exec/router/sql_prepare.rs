@@ -147,9 +147,9 @@ fn src_of(src: &[u8], toks: &[Token], lex: &LexOptions) -> Option<Src> {
         [t] if t.kind == TokenKind::String => {
             string_value(t.bytes(src), lex.no_backslash_escapes).map(Lit::Str)
         }
-        [t] if t.kind == TokenKind::Number => {
-            Some(Lit::Number(String::from_utf8_lossy(t.bytes(src)).into_owned()))
-        }
+        [t] if t.kind == TokenKind::Number => Some(Lit::Number(
+            String::from_utf8_lossy(t.bytes(src)).into_owned(),
+        )),
         [t] if word(src, t, "NULL") => Some(Lit::Null),
         _ => None,
     };
@@ -463,7 +463,10 @@ impl PassSession {
                 ));
             }
         }
-        Ok(out.into_iter().map(|p| p.unwrap_or(ParamLit::Null)).collect())
+        Ok(out
+            .into_iter()
+            .map(|p| p.unwrap_or(ParamLit::Null))
+            .collect())
     }
 
     /// The text `PREPARE` or `EXECUTE IMMEDIATE` names: a string literal
@@ -819,19 +822,28 @@ mod tests {
                 ],
             )
             .as_deref(),
-            Some("SELECT * FROM t WHERE a = 5 AND b IN (_utf8mb4 X'6162', NULL) AND c = '?' -- ?\n")
+            Some(
+                "SELECT * FROM t WHERE a = 5 AND b IN (_utf8mb4 X'6162', NULL) AND c = '?' -- ?\n"
+            )
         );
         // Counts must agree.
         assert_eq!(r("SELECT ?", &[]), None);
         assert_eq!(r("SELECT 1", &[ParamLit::Int(1)]), None);
         // Tokens stay apart.
         assert_eq!(
-            r("SELECT a-? FROM t WHERE b=?AND c", &[ParamLit::Int(-5), ParamLit::Int(2)]).as_deref(),
+            r(
+                "SELECT a-? FROM t WHERE b=?AND c",
+                &[ParamLit::Int(-5), ParamLit::Int(2)]
+            )
+            .as_deref(),
             Some("SELECT a- -5 FROM t WHERE b=2 AND c")
         );
         assert_eq!(
-            r("INSERT INTO t VALUES (?, ?)", &[ParamLit::Int(1), ParamLit::Raw("1.50".into())])
-                .as_deref(),
+            r(
+                "INSERT INTO t VALUES (?, ?)",
+                &[ParamLit::Int(1), ParamLit::Raw("1.50".into())]
+            )
+            .as_deref(),
             Some("INSERT INTO t VALUES (1, 1.50)")
         );
     }
@@ -840,10 +852,7 @@ mod tests {
     fn a_bare_placeholder_in_the_select_list_keeps_its_name() {
         let one = [ParamLit::Int(7)];
         let two = [ParamLit::Int(7), ParamLit::Int(8)];
-        assert_eq!(
-            r("SELECT ?", &one).as_deref(),
-            Some("SELECT 7 AS `?`")
-        );
+        assert_eq!(r("SELECT ?", &one).as_deref(), Some("SELECT 7 AS `?`"));
         assert_eq!(
             r("SELECT ?, ? FROM t", &two).as_deref(),
             Some("SELECT 7 AS `?`, 8 AS `?` FROM t")
@@ -906,15 +915,29 @@ mod tests {
             }
         );
         assert_eq!(
-            value_param(ct::LONG_BLOB, Some(b"\x00\x01"), Some(b"0001"), Some(b"binary")),
+            value_param(
+                ct::LONG_BLOB,
+                Some(b"\x00\x01"),
+                Some(b"0001"),
+                Some(b"binary")
+            ),
             ParamLit::Bytes(vec![0, 1])
         );
-        assert_eq!(lit_param(&Lit::Number("1e3".into()), "utf8mb4"), ParamLit::Raw("1e3".into()));
-        assert_eq!(lit_param(&Lit::Number("12".into()), "utf8mb4"), ParamLit::Int(12));
+        assert_eq!(
+            lit_param(&Lit::Number("1e3".into()), "utf8mb4"),
+            ParamLit::Raw("1e3".into())
+        );
+        assert_eq!(
+            lit_param(&Lit::Number("12".into()), "utf8mb4"),
+            ParamLit::Int(12)
+        );
     }
 
     #[test]
     fn counts_placeholders_outside_strings_and_comments() {
-        assert_eq!(param_count(b"SELECT ?, '?', `?` /* ? */ FROM t WHERE a = ?", &lx()), 2);
+        assert_eq!(
+            param_count(b"SELECT ?, '?', `?` /* ? */ FROM t WHERE a = ?", &lx()),
+            2
+        );
     }
 }

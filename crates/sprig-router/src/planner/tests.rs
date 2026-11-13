@@ -863,8 +863,14 @@ fn sql_level_executions_route_as_their_text() {
     };
     let tpl = "SELECT * FROM orders WHERE cid = ?";
     for (params, literal) in [
-        (vec![ParamLit::Int(42)], "SELECT * FROM orders WHERE cid = 42"),
-        (vec![ParamLit::Int(-17)], "SELECT * FROM orders WHERE cid = -17"),
+        (
+            vec![ParamLit::Int(42)],
+            "SELECT * FROM orders WHERE cid = 42",
+        ),
+        (
+            vec![ParamLit::Int(-17)],
+            "SELECT * FROM orders WHERE cid = -17",
+        ),
         (vec![s(b"42")], "SELECT * FROM orders WHERE cid = '42'"),
         (
             vec![ParamLit::Raw("42".into())],

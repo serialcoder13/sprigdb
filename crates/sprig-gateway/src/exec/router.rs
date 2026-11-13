@@ -1105,10 +1105,8 @@ impl PassSession {
     ) -> Result<Step> {
         // SQL-level `PREPARE`, `EXECUTE` and `DEALLOCATE` (bugfix prepfix):
         // the gateway holds them for tenants with shards.
-        if let Some(step) = Box::pin(
-            self.sql_prepared(cx, &sql, original, more, format, &mapper, map, out),
-        )
-        .await?
+        if let Some(step) =
+            Box::pin(self.sql_prepared(cx, &sql, original, more, format, &mapper, map, out)).await?
         {
             return Ok(step);
         }

@@ -4936,13 +4936,21 @@ fn sql_ps_steps() -> Vec<(String, Cmp, &'static str)> {
         "",
     );
     add("PREPARE p9 FROM @q", Bag, "");
-    add("EXECUTE p9 USING 3", Bag, "SELECT pid, pname, price FROM products");
+    add(
+        "EXECUTE p9 USING 3",
+        Bag,
+        "SELECT pid, pname, price FROM products",
+    );
     add(
         "PREPARE p10 FROM CONCAT('SELECT COUNT(*) FROM customers WHERE cid ', '< ?')",
         Bag,
         "",
     );
-    add("EXECUTE p10 USING @c2", Bag, "SELECT COUNT(*) FROM customers");
+    add(
+        "EXECUTE p10 USING @c2",
+        Bag,
+        "SELECT COUNT(*) FROM customers",
+    );
     add(
         "EXECUTE IMMEDIATE 'SELECT MIN(cid), MAX(cid) FROM customers WHERE cid < ?' USING @c2",
         Bag,
@@ -4963,7 +4971,11 @@ fn sql_ps_steps() -> Vec<(String, Cmp, &'static str)> {
         "",
     );
     add("EXECUTE d1", Bag, "");
-    add("PREPARE d2 FROM 'INSERT INTO ps_ddl VALUES (?, ?)'", Bag, "");
+    add(
+        "PREPARE d2 FROM 'INSERT INTO ps_ddl VALUES (?, ?)'",
+        Bag,
+        "",
+    );
     add("EXECUTE d2 USING 1, @s", Bag, "");
     add("EXECUTE d2 USING 2, NULL", Bag, "");
     add("SELECT * FROM ps_ddl ORDER BY a", Ordered, "");
@@ -5053,7 +5065,11 @@ async fn sql_ps_phase(sut: &mut Conn, reference: &mut Conn, tally: &mut Tally) -
                 same += 1;
                 refusals += 1;
             }
-            (Outcome::Ok(_), Outcome::Rows(..) | Outcome::Ok(_), Outcome::Rows(..) | Outcome::Ok(_)) => {
+            (
+                Outcome::Ok(_),
+                Outcome::Rows(..) | Outcome::Ok(_),
+                Outcome::Rows(..) | Outcome::Ok(_),
+            ) => {
                 same += 1;
             }
             _ => tally.mismatches.push(format!(
