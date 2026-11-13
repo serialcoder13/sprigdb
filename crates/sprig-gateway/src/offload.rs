@@ -355,7 +355,7 @@ pub fn on_stall(stuck: Duration, min_poll: Duration) -> usize {
     if stopped == 0 {
         tracing::error!(
             ?stuck,
-            "the gateway's runtime was stuck (chapter 25 watchdog); no statement to stop"
+            "the gateway's runtime was stuck (the stall watchdog fired); no statement to stop"
         );
     }
     metrics::counter!("sprig_gateway_stall_kills_total").increment(stopped as u64);

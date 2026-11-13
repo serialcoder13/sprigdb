@@ -664,6 +664,8 @@ where
                 live.clone(),
                 live.stores().dc_id().clone(),
             )),
+            // listener.tenant_sni_suffixes is a list of DNS suffixes.
+            Arc::new(sprig_auth::sni::SniSuffixGuard),
         ]));
         let etcd = SettingsWriter::new(registry, live.stores().clone(), Arc::clone(&clock))
             .with_guard(Arc::clone(&guard));

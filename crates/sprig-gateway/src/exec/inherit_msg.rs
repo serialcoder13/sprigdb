@@ -420,8 +420,8 @@ impl PassSession {
                         .await
                         .map(Some),
                     Some((k, _)) => Err(not_built(&format!(
-                        "FOR EACH TENANT on a {} (chapter 42; streams, exchanges, queues, \
-                         bindings and triggers are built)",
+                        "FOR EACH TENANT on a {} (it works on streams, exchanges, queues, \
+                         bindings and triggers)",
                         k.as_str()
                     ))),
                     None => Err(SprigError::standard(

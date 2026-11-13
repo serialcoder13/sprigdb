@@ -50,7 +50,7 @@ pub static MODE: Setting<Cow<'static, str>> = Setting {
     apply: Apply::Live,
     operator_only: true,
     owner: 25,
-    doc: "auto, approve (global scope only, chapter 52) or manual (the dry run)",
+    doc: "auto, approve (held for approval; global scope only) or manual (the dry run)",
 };
 sprig_settings::register!(MODE);
 

@@ -78,8 +78,12 @@ pub struct UserOptions {
     pub lock: Option<bool>,
     /// `PASSWORD EXPIRE` (and `PASSWORD EXPIRE NEVER` as `Some(false)`).
     pub expire: Option<bool>,
-    /// `REQUIRE NONE | SSL | X509`.
+    /// `REQUIRE NONE | SSL | X509` (`X509` also for `SUBJECT` and
+    /// `ISSUER`).
     pub require: Option<RequireTls>,
+    /// `REQUIRE SUBJECT '..' [AND] ISSUER '..'`: `(subject, issuer)`, set
+    /// whenever `require` is (`(None, None)` clears them).
+    pub require_dn: (Option<String>, Option<String>),
     /// `DEFAULT ROLE ...` of `CREATE USER` (MySQL).
     pub default_roles: Vec<AccountRef>,
     /// `DISCARD OLD PASSWORD`.
@@ -94,6 +98,11 @@ pub struct UserOptions {
     /// the `mysql` schema (a tenant-wide `UPDATE` here) instead of
     /// `CREATE USER` (bugfix-26).
     pub set_password: bool,
+    /// `ATTRIBUTE '{json}'` (an object merged into the user's attributes,
+    /// a `null` value removing its key, as MySQL 8.4) or `COMMENT 'text'`
+    /// (`{"comment": text}`): what `SPRIG_USER_ATTR()` reads (chapter 29;
+    /// decision bugfix-interim). JSON text of an object.
+    pub attribute: Option<String>,
 }
 
 /// What `GRANT` and `REVOKE` act on.

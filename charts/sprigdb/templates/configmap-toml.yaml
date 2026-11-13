@@ -1,5 +1,5 @@
-{{- /* sprigdb.toml per role (chapter 27): the small process file; everything
-     else is live settings. */ -}}
+{{- /* sprigdb.toml per role: the small process file; everything else is
+     live settings. */ -}}
 {{- range $role := list "controller" "gateway" "worker" "agent" }}
 ---
 apiVersion: v1
@@ -32,8 +32,18 @@ data:
     global_candidate = {{ $.Values.controller.globalCandidate }}
     bootstrap = {{ $.Values.controller.bootstrap | default false }}
     admin_addr = "0.0.0.0:7480"
-    # Permits, peer pings and observations (chapter 25) on the book's port;
-    # each pod publishes its own IP (SPRIGDB_CONTROLLER_INTERNAL_ADVERTISE).
+    # The Admin API: {{ include "sprigdb.adminScheme" $ }}.
+    {{- if $.Values.tls.enabled }}
+    {{- if ($.Values.controller.adminApi | default dict).tlsSecret }}
+    admin_tls_cert = "/etc/sprigdb/admin-tls/tls.crt"
+    admin_tls_key = "/etc/sprigdb/admin-tls/tls.key"
+    {{- else }}
+    admin_tls_cert = "/etc/sprigdb/tls/tls.crt"
+    admin_tls_key = "/etc/sprigdb/tls/tls.key"
+    {{- end }}
+    {{- end }}
+    # Permits, peer pings and observations between controllers; each pod
+    # publishes its own IP (SPRIGDB_CONTROLLER_INTERNAL_ADVERTISE).
     internal_addr = "0.0.0.0:7400"
     admin_token_file = "/etc/sprigdb/admin/token"
     {{- end }}

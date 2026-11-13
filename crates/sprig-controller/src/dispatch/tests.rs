@@ -939,3 +939,104 @@ fn keys_for_skips_progress_of_running_jobs() {
     assert_eq!(d.keys_for(&gone), vec![Pass]);
     assert!(JobGc.keys_for(&gone).is_empty());
 }
+
+/// Chapter 14's suspension (decision bugfix-interim): a suspended tenant's
+/// sink tasks and triggers wait queued, running ones are cancelled, a due
+/// schedule run is skipped; the tenants below it wait too; housekeeping
+/// and other tenants' jobs go on; after resume the held jobs run.
+#[test]
+fn a_suspended_tenants_consumers_wait() {
+    paused().block_on(async {
+        let (_s, stores, clock) = mem("dc-a");
+        let l = lead(&stores, &clock).await;
+        let _w = worker(
+            &stores,
+            &clock,
+            "w1",
+            "z1",
+            &[(JobClass::Other, 8), (JobClass::Consumer, CONSUMER_SLOTS)],
+        )
+        .await;
+        let (cx, _stop) = cx_for(&stores, &clock, Some(l.clone()), ControlSettings::default());
+        let put = |id: u64, path: &str, suspended: bool| {
+            let g = stores.global.clone();
+            let path = path.to_owned();
+            async move {
+                let key = g.tier().key(&format!("tenants/{id}")).unwrap();
+                let value = serde_json::to_vec(
+                    &json!({"v": 1, "tenant_id": id, "path": path, "suspended": suspended}),
+                )
+                .unwrap();
+                g.txn(sprig_meta::Txn {
+                    then: vec![sprig_meta::Op::Put {
+                        key,
+                        value,
+                        lease: None,
+                    }],
+                    ..sprig_meta::Txn::default()
+                })
+                .await
+                .unwrap();
+            }
+        };
+        put(7, "/7/", false).await;
+        put(8, "/7/8/", false).await;
+        put(9, "/9/", false).await;
+        let sink = |t: u64| {
+            let mut j = job(
+                sprig_sinks::meta::JOB_KIND,
+                JobClass::Consumer,
+                None,
+                &[],
+                0,
+                "sinks",
+            );
+            j.spec = json!({"tenant": t, "sink": 1, "task": 0});
+            j
+        };
+        // Running before the suspension.
+        let running = submit(&l, &*clock, sink(7)).await.unwrap();
+        dispatch_pass(&cx).await.unwrap();
+        assert_eq!(state(&*stores.dc, running).await.0, JobState::Assigned);
+        put(7, "/7/", true).await;
+        let held = submit(&l, &*clock, sink(8)).await.unwrap();
+        let other = submit(&l, &*clock, sink(9)).await.unwrap();
+        let mut run = job(
+            sprig_logic::schedule::JOB_KIND,
+            JobClass::Other,
+            None,
+            &[],
+            0,
+            "logic",
+        );
+        run.spec = json!({"tenant": 7, "run": "r1"});
+        let run = submit(&l, &*clock, run).await.unwrap();
+        let house = submit(
+            &l,
+            &*clock,
+            job("kv_sweep", JobClass::Other, Some(7), &[], 0, "kv"),
+        )
+        .await
+        .unwrap();
+        let r = dispatch_pass(&cx).await.unwrap();
+        assert_eq!(state(&*stores.dc, running).await.0, JobState::Cancelled);
+        assert_eq!(state(&*stores.dc, run).await.0, JobState::Cancelled);
+        assert_eq!(
+            state(&*stores.dc, held).await.0,
+            JobState::Queued,
+            "below a suspended tenant"
+        );
+        assert_eq!(state(&*stores.dc, other).await.0, JobState::Assigned);
+        assert_eq!(
+            state(&*stores.dc, house).await.0,
+            JobState::Assigned,
+            "housekeeping goes on"
+        );
+        assert_eq!(r.held_suspended, vec![held]);
+        assert!(r.cancelled_suspended.contains(&running) && r.cancelled_suspended.contains(&run));
+        // Resumed: the held job runs.
+        put(7, "/7/", false).await;
+        dispatch_pass(&cx).await.unwrap();
+        assert_eq!(state(&*stores.dc, held).await.0, JobState::Assigned);
+    });
+}

@@ -666,7 +666,7 @@ impl GlobalFailover {
                 }
                 DcFailoverGate::Hold(why) => {
                     if f.tenants[i].reason.as_deref() != Some(why.as_str()) {
-                        tracing::warn!(tenant = t.tenant_id, dc = %x, why, "promotion held (chapter 52)");
+                        tracing::warn!(tenant = t.tenant_id, dc = %x, why, "promotion held for approval");
                     }
                     lock(&self.held).insert(key, now);
                     f.tenants[i].reason = Some(why);

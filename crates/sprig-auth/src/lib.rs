@@ -69,6 +69,7 @@ pub mod ratelimit;
 pub mod revoke;
 pub mod scram;
 pub mod settings;
+pub mod sni;
 pub mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;

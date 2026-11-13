@@ -1,5 +1,4 @@
-{{- /* cert-manager Certificates from the DC's intermediate CA (chapter 27,
-     "Security notes"). */}}
+{{- /* cert-manager Certificates from the DC's intermediate CA. */}}
 {{- if .Values.tls.enabled }}
 {{- $roles := dict "controller" "720h" "worker" "720h" "operator" "720h" "etcd-dc" "2160h" "etcd-global" "2160h" "gateway" "24h" }}
 {{- range $role, $life := $roles }}
@@ -24,6 +23,10 @@ spec:
     - sprigdb-{{ $role }}
     - sprigdb-{{ $role }}.{{ $.Release.Namespace }}.svc
     - "*.sprigdb-{{ $role }}.{{ $.Release.Namespace }}.svc"
+    {{- if eq $role "controller" }}
+    # Each controller's registered Admin address (controller.yaml).
+    - "*.sprigdb-controller-pods.{{ $.Release.Namespace }}.svc"
+    {{- end }}
   issuerRef: {{- toYaml $.Values.tls.issuerRef | nindent 4 }}
 {{- end }}
 {{- end }}

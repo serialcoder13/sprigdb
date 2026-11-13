@@ -130,6 +130,20 @@ service Tenants {
       delete: "/admin/v1/tenants/{name}"
     };
   }
+  // Chapter 14, "Suspension": logins in the subtree fail with 39303, open
+  // sessions close, background work waits. The body is {"reason": "..."}.
+  rpc SuspendTenant(NameRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      post: "/admin/v1/tenants/{name}:suspend"
+      body: "*"
+    };
+  }
+  rpc ResumeTenant(NameRequest) returns (JsonReply) {
+    option (google.api.http) = {
+      post: "/admin/v1/tenants/{name}:resume"
+      body: "*"
+    };
+  }
 }
 
 // Tenant users (interim, chapter 14).

@@ -34,6 +34,7 @@ mod fk_ddl;
 pub(super) mod graph;
 mod ids;
 pub(crate) mod layout;
+mod sql_prepare;
 mod txn;
 mod write_forms;
 
@@ -229,6 +230,9 @@ pub(crate) struct RouterState {
     /// statement's rows past the inline limit, on the session's own
     /// connection; dropped before the next routed statement.
     graph_tmp: Vec<String>,
+    /// SQL-level prepared statements the gateway holds, by folded name
+    /// (bugfix prepfix, [`sql_prepare`]).
+    sql_ps: HashMap<String, sql_prepare::Held>,
 }
 
 impl std::fmt::Debug for RouterState {
@@ -283,6 +287,7 @@ impl RouterState {
     /// `COM_RESET_CONNECTION`: rolls back and forgets the other clusters'
     /// session state.
     pub(crate) async fn reset(&mut self) {
+        self.sql_ps.clear();
         self.close().await;
     }
 
@@ -1098,6 +1103,15 @@ impl PassSession {
         map: &dyn NameMap,
         out: &mut dyn ResultSink,
     ) -> Result<Step> {
+        // SQL-level `PREPARE`, `EXECUTE` and `DEALLOCATE` (bugfix prepfix):
+        // the gateway holds them for tenants with shards.
+        if let Some(step) = Box::pin(
+            self.sql_prepared(cx, &sql, original, more, format, &mapper, map, out),
+        )
+        .await?
+        {
+            return Ok(step);
+        }
         // R8 round 6: `GRAPH_TABLE` placeholders get their rows (or the
         // statement its EXPLAIN) before the router plans it.
         let sql =

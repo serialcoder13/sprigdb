@@ -15,9 +15,28 @@ pub const GENERATED: &str =
 
 fn front(title: &str, audience: &[&str], source: &str) -> String {
     format!(
-        "---\ntitle: {title}\naudience: [{}]\ngenerated: true\nsource: {source}\n---\n\n{GENERATED}\n\n",
-        audience.join(", ")
+        "---\ntitle: {}\naudience: [{}]\ngenerated: true\nsource: {}\n---\n\n{GENERATED}\n\n",
+        yaml_scalar(title),
+        audience.join(", "),
+        yaml_scalar(source)
     )
+}
+
+/// `s` as a YAML scalar: plain when YAML reads it back unchanged, else
+/// double-quoted (a value can't start with a backtick, for example).
+fn yaml_scalar(s: &str) -> String {
+    let plain = s
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '/' || c == '.')
+        && !s.contains(": ")
+        && !s.contains(" #")
+        && !s.ends_with(':');
+    if plain {
+        s.to_owned()
+    } else {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
 }
 
 /// Markdown table cell text: design-book references removed, pipes
@@ -45,8 +64,12 @@ pub fn public(s: &str) -> String {
             rest = &rest[end + 1..];
             continue;
         }
-        // ", chapter N" inside a longer parenthesis or list: drop it.
-        if lower.starts_with(", chapter ") {
+        // ", chapter N", ": chapter N", "; chapter N" inside a longer
+        // parenthesis or list: drop it.
+        if lower.starts_with(", chapter ")
+            || lower.starts_with(": chapter ")
+            || lower.starts_with("; chapter ")
+        {
             let digits = rest[10..].bytes().take_while(u8::is_ascii_digit).count();
             if digits > 0 {
                 rest = &rest[10 + digits..];
@@ -174,8 +197,8 @@ pub fn settings_page(settings: &[SettingDoc]) -> String {
         "Every setting SprigDB declares, with its default, the scopes that may set it, hard \
          bounds and when a change applies. Settings resolve from the most specific scope: \
          object, database, tenant and its ancestors, cluster, data center, global, then the \
-         built-in default. Read and change them with `SHOW SETTINGS`, `SET SETTING` and \
-         `sprigctl settings`.\n\n",
+         built-in default. Read them with `SHOW SPRIG SETTINGS`, change them with \
+         `ALTER TENANT|DATABASE|TABLE … SPRIG SET (key = value)` or `sprigctl settings`.\n\n",
     );
     let mut groups: BTreeMap<&str, Vec<&SettingDoc>> = BTreeMap::new();
     for s in settings {
@@ -455,12 +478,23 @@ pub fn cli_page(tool: &str, intro: &str, commands: &[CommandHelp]) -> String {
     out.push_str("\n\n");
     for c in commands {
         let depth = c.path.split(' ').count().clamp(1, 4);
+        // Help texts cite the design book in places; keep the indentation
+        // and drop those references.
+        let help: Vec<String> = c
+            .help
+            .trim_end()
+            .lines()
+            .map(|l| {
+                let indent = l.len() - l.trim_start().len();
+                format!("{}{}", &l[..indent], public(l.trim_start()))
+            })
+            .collect();
         let _ = writeln!(
             out,
             "{} `{}`\n\n```text\n{}\n```\n",
             "#".repeat(depth + 1),
             c.path,
-            c.help.trim_end()
+            help.join("\n")
         );
     }
     out
@@ -538,6 +572,10 @@ mod tests {
             "a webhook connection that gets"
         );
         assert_eq!(public("the chapter on this"), "the chapter on this");
+        assert_eq!(
+            public("Users of a tenant (interim, until CREATE USER: chapter 29)"),
+            "Users of a tenant (interim, until CREATE USER)"
+        );
         assert_eq!(
             public("auto, approve (global scope only, chapter 52) or manual"),
             "auto, approve (global scope only) or manual"

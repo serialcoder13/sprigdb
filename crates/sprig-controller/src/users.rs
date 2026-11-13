@@ -14,6 +14,8 @@
 //! authenticated operator; this endpoint trusts the Admin API token, like
 //! every R0 Admin API call (decision N5).
 
+mod suspend;
+
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -24,6 +26,8 @@ use sprig_catalog::{CatalogLocator, MariaCatalog, Migrator, Module};
 use sprig_common::ids::{TenantId, UserId};
 use sprig_common::time::Clock;
 use sprig_common::{Result, SprigCode, SprigError};
+
+pub use suspend::{MAX_REASON, SuspendTenantRequest, SuspendTenantResponse};
 
 use crate::tenants::BootstrapHooks;
 use crate::tree::{Directory, TenantState};
@@ -125,6 +129,30 @@ pub trait UserAdmin: Send + Sync {
     ) -> Result<ImportAccountsResponse> {
         Err(crate::admin::invalid(
             "this controller doesn't import accounts",
+        ))
+    }
+
+    /// Suspends a tenant and its subtree (chapter 14, "Suspension").
+    ///
+    /// # Errors
+    /// As [`TenantUsers::suspend`].
+    async fn suspend(
+        &self,
+        _tenant: &str,
+        _req: SuspendTenantRequest,
+    ) -> Result<SuspendTenantResponse> {
+        Err(crate::admin::invalid(
+            "this controller doesn't suspend tenants",
+        ))
+    }
+
+    /// Resumes a suspended tenant.
+    ///
+    /// # Errors
+    /// As [`TenantUsers::resume`].
+    async fn resume(&self, _tenant: &str) -> Result<SuspendTenantResponse> {
+        Err(crate::admin::invalid(
+            "this controller doesn't suspend tenants",
         ))
     }
 }
@@ -338,5 +366,17 @@ impl UserAdmin for TenantUsers {
         accounts: PortableAccounts,
     ) -> Result<ImportAccountsResponse> {
         TenantUsers::import_accounts(self, tenant, accounts).await
+    }
+
+    async fn suspend(
+        &self,
+        tenant: &str,
+        req: SuspendTenantRequest,
+    ) -> Result<SuspendTenantResponse> {
+        TenantUsers::suspend(self, tenant, req).await
+    }
+
+    async fn resume(&self, tenant: &str) -> Result<SuspendTenantResponse> {
+        TenantUsers::resume(self, tenant).await
     }
 }

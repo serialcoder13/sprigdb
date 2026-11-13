@@ -436,7 +436,9 @@ impl AgentFence {
             }),
             Box::new(move || {
                 fence_blocking(&ep2);
-                tracing::error!("the agent's runtime is stuck: aborting (chapter 25 watchdog)");
+                tracing::error!(
+                    "the agent's runtime is stuck: aborting (the stall watchdog fired)"
+                );
                 std::process::abort();
             }),
         );

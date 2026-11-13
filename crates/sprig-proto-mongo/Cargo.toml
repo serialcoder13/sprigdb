@@ -21,6 +21,8 @@ subtle.workspace = true
 flate2.workspace = true
 snap.workspace = true
 zstd.workspace = true
+# SprigDB's error registry: the numbers and codeNames of its own codes.
+sprig-common.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util"] }
 

@@ -135,7 +135,7 @@ pub(crate) fn group() -> Command {
                     Arg::new("off")
                         .long("off")
                         .action(ArgAction::SetTrue)
-                        .help("Unpin instead (chapter 13's `freeze --off`)"),
+                        .help("Unpin instead (the same as `unpin`)"),
                 ),
         )
         .subcommand(write_cmd(
@@ -291,7 +291,7 @@ pub(crate) async fn explain(
         Some((cmd @ ("decision" | "placement"), sub)) => {
             return crate::placement::run(c, cmd, sub, out).await;
         }
-        _ => return Err(Failed("not implemented yet".into())),
+        _ => return Err(Failed("not available in this version".into())),
     };
     let fp = sub
         .get_one::<String>("fingerprint")

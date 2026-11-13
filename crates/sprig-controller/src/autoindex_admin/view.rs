@@ -754,7 +754,7 @@ pub fn reason_text(code: &str) -> String {
         "no_probes" => "no rows-examined probes yet; it is watched from now on".to_owned(),
         "exists" => format!("an automatic index with this definition already exists ({arg})"),
         "leading_wildcard" => "its only filter is LIKE '%...', which a B-tree can't serve (a \
-                               search index can: chapter 39)"
+                               search index can)"
             .to_owned(),
         _ => code.to_owned(),
     }
@@ -936,8 +936,8 @@ pub fn route_text(p: &ObjectPolicy) -> String {
                                                     exists, then stop at recommended"
             .into(),
         Mode::Recommend => "recommend: stop at recommended without validating".into(),
-        Mode::Approve => "approve: stop at recommended and wait in the approvals inbox \
-                          (chapter 52); an approval rolls it out"
+        Mode::Approve => "approve: stop at recommended and wait in the approvals inbox; \
+                          an approval rolls it out"
             .into(),
     }
 }
@@ -1198,7 +1198,7 @@ pub fn plan_action(r: &AutoIndexRow, a: Action) -> Plan {
     match a {
         Action::Approve => match s {
             S::Recommended if r.kind.is_advice() => refuse(&format!(
-                "{} advice is applied by hand (chapter 13); approving it isn't supported in R0",
+                "{} advice is applied by hand; approving it isn't supported in this release",
                 r.kind
             )),
             S::Recommended => Plan::Move {

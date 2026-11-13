@@ -29,6 +29,8 @@ use super::store::{
 #[derive(Debug, Clone, Default)]
 pub struct AuthzState {
     migrated: bool,
+    /// The module's format in the catalog (0: unknown or none).
+    format: u32,
     rows: Arc<AuthzRows>,
     privs: HashMap<Grantee, Vec<usize>>,
     edges: HashMap<Grantee, Vec<EdgeRow>>,
@@ -76,6 +78,7 @@ impl AuthzState {
             .collect();
         Self {
             migrated: true,
+            format: super::store::AUTHZ_FORMAT,
             rows: Arc::new(rows),
             privs,
             edges,
@@ -95,6 +98,20 @@ impl AuthzState {
     #[must_use]
     pub fn is_migrated(&self) -> bool {
         self.migrated
+    }
+
+    /// Whether the catalog is at the module's latest format (format 2's
+    /// data step gives `WATCH` where `SELECT` was granted).
+    #[must_use]
+    pub fn is_current(&self) -> bool {
+        self.migrated && self.format >= super::store::AUTHZ_FORMAT
+    }
+
+    /// The same state with the catalog's format.
+    #[must_use]
+    pub fn with_format(mut self, format: u32) -> Self {
+        self.format = format;
+        self
     }
 
     /// All rows.
@@ -209,7 +226,8 @@ impl CatalogExtension for AuthzExtension {
             return Ok(Arc::new(AuthzState::unmigrated()));
         }
         let rows = store.load(conn).await?;
-        Ok(Arc::new(AuthzState::new(rows)))
+        let format = store.format(conn).await?;
+        Ok(Arc::new(AuthzState::new(rows).with_format(format)))
     }
 }
 

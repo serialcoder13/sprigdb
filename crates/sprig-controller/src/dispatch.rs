@@ -725,6 +725,84 @@ pub struct PassReport {
     pub rate_limited: Vec<JobId>,
     /// The earliest `not_before_ms` still in the future.
     pub next_not_before_ms: Option<u64>,
+    /// Queued jobs held because their tenant is suspended.
+    pub held_suspended: Vec<JobId>,
+    /// Jobs of a suspended tenant cancelled (running consumers, due
+    /// schedule runs); their loops submit them again, held, until resume.
+    pub cancelled_suspended: Vec<JobId>,
+}
+
+/// Job kinds that wait while their tenant is suspended (chapter 14,
+/// "Suspension"; decision bugfix-interim): work that runs the tenant's own
+/// code or sends its data out. Housekeeping (moves, index builds, search
+/// copies, key-value and TTL sweeps, stream sequencers, outbox forwarders,
+/// change exchanges) goes on, so the data stays as the tenant left it.
+pub const PAUSED_WHILE_SUSPENDED: &[&str] = &[
+    sprig_sinks::meta::JOB_KIND,
+    crate::logic_loop::TRIGGER_KIND,
+    sprig_logic::messages::STREAM_JOB_KIND,
+    sprig_logic::messages::QUEUE_JOB_KIND,
+    sprig_logic::schedule::JOB_KIND,
+];
+
+/// The tenant a job works for: its `tenant_id`, or `spec.tenant` (logic
+/// and sink jobs carry it there).
+fn tenant_of(job: &Job) -> Option<u64> {
+    job.tenant_id
+        .map(|t| t.0)
+        .or_else(|| job.spec["tenant"].as_u64())
+}
+
+/// Which of `tenants` are suspended, themselves or through an ancestor on
+/// their directory path. A tenant whose entry can't be read counts as not
+/// suspended: a read error never stops work.
+async fn suspended_tenants(
+    global: &dyn MetaStore,
+    tenants: impl IntoIterator<Item = u64>,
+) -> HashSet<u64> {
+    #[derive(Serialize, Deserialize)]
+    struct Entry {
+        #[serde(default)]
+        suspended: bool,
+        #[serde(default)]
+        path: String,
+    }
+    impl Versioned for Entry {
+        const V: u32 = 1;
+    }
+    async fn entry(global: &dyn MetaStore, id: u64) -> Option<Entry> {
+        let key = global.tier().key(&format!("tenants/{id}")).ok()?;
+        let kv = global.get(&key, Consistency::Serializable).await.ok()??;
+        Record::<Entry>::decode(&kv.value).ok().map(|r| r.body)
+    }
+    let mut seen: HashMap<u64, (bool, String)> = HashMap::new();
+    let mut out = HashSet::new();
+    for t in tenants.into_iter().collect::<HashSet<_>>() {
+        if let std::collections::hash_map::Entry::Vacant(v) = seen.entry(t) {
+            let e = entry(global, t).await;
+            v.insert(e.map_or((false, String::new()), |e| (e.suspended, e.path)));
+        }
+        let (own, path) = seen.get(&t).cloned().unwrap_or_default();
+        if own {
+            out.insert(t);
+            continue;
+        }
+        for anc in path
+            .split('/')
+            .filter_map(|p| p.parse::<u64>().ok())
+            .filter(|a| *a != t)
+        {
+            if let std::collections::hash_map::Entry::Vacant(v) = seen.entry(anc) {
+                let e = entry(global, anc).await;
+                v.insert(e.map_or((false, String::new()), |e| (e.suspended, e.path)));
+            }
+            if seen.get(&anc).is_some_and(|e| e.0) {
+                out.insert(t);
+                break;
+            }
+        }
+    }
+    out
 }
 
 #[async_trait::async_trait]
@@ -905,6 +983,39 @@ pub async fn dispatch_pass(cx: &LoopCx) -> Result<PassReport> {
         }
     }
 
+    // 2b. Chapter 14's suspension: a suspended tenant's paused kinds
+    //     wait. Running and assigned ones are cancelled (their workers stop
+    //     at the next progress write) and their loops submit them again;
+    //     queued ones stay queued; a due schedule run is skipped.
+    let paused_kind = |j: &Job| PAUSED_WHILE_SUSPENDED.contains(&j.kind.as_str());
+    let suspended = suspended_tenants(
+        &*cx.global,
+        jobs.iter()
+            .map(StoredJob::job)
+            .filter(|j| paused_kind(j) && !j.state.is_final())
+            .filter_map(tenant_of),
+    )
+    .await;
+    if !suspended.is_empty() {
+        for j in &jobs {
+            let job = j.job();
+            if !paused_kind(job)
+                || job.state.is_final()
+                || !tenant_of(job).is_some_and(|t| suspended.contains(&t))
+            {
+                continue;
+            }
+            let skip_run = job.kind == sprig_logic::schedule::JOB_KIND;
+            if (job.state != JobState::Queued || skip_run)
+                && cancel(l, cx.clock.as_ref(), job.job_id).await?
+            {
+                tracing::info!(job = %job.job_id, kind = %job.kind, tenant = ?tenant_of(job),
+                    "job of a suspended tenant cancelled");
+                report.cancelled_suspended.push(job.job_id);
+            }
+        }
+    }
+
     // What the jobs in flight hold, and each tenant's starts in the last hour.
     let mut held = Held::default();
     let mut starts: HashMap<TenantId, u32> = HashMap::new();
@@ -933,6 +1044,13 @@ pub async fn dispatch_pass(cx: &LoopCx) -> Result<PassReport> {
     });
     for i in queued {
         let job = jobs[i].job().clone();
+        if paused_kind(&job) && tenant_of(&job).is_some_and(|t| suspended.contains(&t)) {
+            // Cancelled in 2b (a due schedule run): not held.
+            if !report.cancelled_suspended.contains(&job.job_id) {
+                report.held_suspended.push(job.job_id);
+            }
+            continue;
+        }
         if job.not_before_ms > now {
             report.next_not_before_ms = Some(
                 report

@@ -279,6 +279,12 @@ impl SqlSession {
         self.exec.holds_tenant_privilege(action)
     }
 
+    /// The client's known data center (chapter 24, `appName`'s `~dc`):
+    /// this session's statements count as traffic from it.
+    pub fn set_client_dc(&mut self, dc: Option<sprig_common::ids::DcId>) {
+        self.session.client_dc = dc;
+    }
+
     /// The gateway session's id (chapter 29: internal exemptions).
     #[must_use]
     pub fn session_id(&self) -> sprig_common::ids::ConnId {

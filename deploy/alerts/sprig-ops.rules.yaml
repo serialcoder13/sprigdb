@@ -1,5 +1,4 @@
-# SprigDB operational alerts (chapter 47, "SLOs and burn-rate alerts" and
-# "Runbooks"): replication lag, stuck data movement, metadata propagation,
+# SprigDB operational alerts: replication lag, stuck data movement, metadata propagation,
 # the audit pipeline, certificates, etcd, cluster health and thrashing.
 # Tested with `promtool test rules` (deploy/alerts/test.sh).
 groups:
@@ -11,21 +10,21 @@ groups:
         labels: { severity: ticket }
         annotations:
           summary: A replica is more than 30 s behind; reads leave it
-          runbook: chapter 06 read routing; chapter 47 runbook 3
+          runbook: "Reads already avoid this replica. Check the replica's replication threads and errors (SHOW REPLICA STATUS), its disk and network, and long transactions on the writer; sprigctl cluster show <cluster> lists each node's lag"
       - alert: SprigReplicaLagCritical
         expr: max by (cluster, node) (sprig_backend_replica_lag_seconds) > 300
         for: 5m
         labels: { severity: page }
         annotations:
           summary: A replica is more than 5 minutes behind
-          runbook: chapter 47 runbook 3
+          runbook: "Check the replica's replication threads and errors (SHOW REPLICA STATUS), its disk and network, and long transactions on the writer; sprigctl cluster show <cluster> lists each node's lag; if it can't catch up, rebuild it with sprigctl cluster rebuild"
       - alert: SprigClusterNoWriter
         expr: max by (cluster) (sprig_cluster_health_state) == 2
         for: 1m
         labels: { severity: page }
         annotations:
           summary: A cluster has no writer
-          runbook: chapter 47 runbooks 1 and 2
+          runbook: "sprigctl cluster show <cluster> gives the reason. Primary and replicas: SprigDB promotes a replica unless failover is blocked (data-loss limit or manual mode). Galera: quorum is lost; restore nodes, or bootstrap the node with the highest seqno only once the others are certainly down"
 
   - name: sprig-movement
     rules:
@@ -46,14 +45,14 @@ groups:
         labels: { severity: page }
         annotations:
           summary: Data movement is stuck
-          runbook: chapter 47 runbook 4
+          runbook: "sprigctl job list and sprigctl job show <id> show the job and its phase; check the source's binlog retention, the target's disk and the worker's logs; sprigctl job cancel <id> gives a job up before its cutover"
       - alert: SprigMetaPropagationSlow
         expr: max(sprig_meta_cache_staleness_seconds) > 2
         for: 5m
         labels: { severity: ticket, slo: metadata }
         annotations:
           summary: Metadata caches are more than 2 s stale
-          runbook: chapter 23
+          runbook: "Gateways see metadata changes late: check etcd latency and leader changes (EtcdNoLeader) and the gateways' connections to etcd"
 
   - name: sprig-audit
     rules:
@@ -63,20 +62,20 @@ groups:
         labels: { severity: ticket }
         annotations:
           summary: The audit spool is over half full; the sink is behind
-          runbook: chapter 47, The audit pipeline
+          runbook: "The audit sink is behind. Check the audit sink in [audit] and that it accepts events; events wait in the spool (audit.spool_max_mb) until it does"
       - alert: AuditUnavailable
         expr: max by (instance) (sprig_audit_spool_bytes / sprig_audit_spool_max_bytes) >= 1
         for: 1m
         labels: { severity: page }
         annotations:
           summary: The audit spool is full; admin and account changes fail with 39970
-          runbook: chapter 47, The audit pipeline
+          runbook: "Admin and account changes fail until the spool drains. Check the audit sink in [audit] and that it accepts events; events wait in the spool (audit.spool_max_mb) until it does"
       - alert: AuditEventsDropped
         expr: sum by (instance) (increase(sprig_audit_dropped_total[5m])) > 0
         labels: { severity: page }
         annotations:
           summary: Audit events were dropped
-          runbook: chapter 47, The audit pipeline
+          runbook: "Audit events were lost. Check the audit sink in [audit] and that it accepts events; events wait in the spool (audit.spool_max_mb) until it does; raise audit.spool_max_mb if the sink is only slow"
 
   - name: sprig-platform
     rules:
@@ -86,30 +85,30 @@ groups:
         labels: { severity: ticket }
         annotations:
           summary: A listener certificate expires within 14 days
-          runbook: chapter 04, certificates reload without a restart
+          runbook: "Replace the listener's certificate and key files; the gateway reloads them without a restart (Compose VMs: ./sprig-vm.sh rotate-certs)"
       - alert: CertificateExpiringSoon
         expr: min by (instance, bundle) (sprig_gateway_cert_expiry_seconds) < 3 * 86400
         for: 10m
         labels: { severity: page }
         annotations:
           summary: A listener certificate expires within 3 days
-          runbook: chapter 04, certificates reload without a restart
+          runbook: "Replace the listener's certificate and key files; the gateway reloads them without a restart (Compose VMs: ./sprig-vm.sh rotate-certs)"
       - alert: EtcdNoLeader
         expr: etcd_server_has_leader == 0
         for: 1m
         labels: { severity: page }
         annotations:
           summary: An etcd member has no leader
-          runbook: chapter 47 runbook 6
+          runbook: "etcd lost quorum: restart or replace members; never force a new etcd cluster while a majority might still be alive"
       - alert: EtcdDbNearQuota
         expr: etcd_mvcc_db_total_size_in_bytes / etcd_server_quota_backend_bytes > 0.8
         for: 10m
         labels: { severity: ticket }
         annotations:
           summary: An etcd database is above 80% of its quota
-          runbook: chapter 47 runbook 7
-      # bugfix-53 (the M0.7 soak: etcd without auto-compaction grew about
-      # 0.7 MB/h). SprigDB's metadata is small; these fire long before the
+          runbook: "Compact and defragment one member at a time (etcdctl defrag; the chart's etcd-defrag CronJob or ./sprig-vm.sh etcd-defrag), run etcdctl alarm disarm after NOSPACE, and check that auto-compaction is on"
+      # etcd without auto-compaction grows (about 0.7 MB/h in a long test).
+      # SprigDB's metadata is small; these fire long before the
       # quota. Every etcd SprigDB ships runs --auto-compaction-mode=periodic
       # --auto-compaction-retention=1h and a periodic defrag.
       - alert: EtcdDbLarge
@@ -118,7 +117,7 @@ groups:
         labels: { severity: ticket }
         annotations:
           summary: An etcd database is above 512 MiB (auto-compaction or defrag not running, or keys leak)
-          runbook: chapter 47 runbook 7
+          runbook: "Compact and defragment one member at a time (etcdctl defrag; the chart's etcd-defrag CronJob or ./sprig-vm.sh etcd-defrag), run etcdctl alarm disarm after NOSPACE, and check that auto-compaction is on"
       - alert: EtcdDbFragmented
         expr: |
           etcd_mvcc_db_total_size_in_bytes > 128 * 1024 * 1024
@@ -128,35 +127,35 @@ groups:
         labels: { severity: ticket }
         annotations:
           summary: Half of an etcd database is free space (the periodic defrag isn't running)
-          runbook: chapter 47 runbook 7
+          runbook: "Compact and defragment one member at a time (etcdctl defrag; the chart's etcd-defrag CronJob or ./sprig-vm.sh etcd-defrag), run etcdctl alarm disarm after NOSPACE, and check that auto-compaction is on"
       - alert: EtcdDbGrowing
         expr: delta(etcd_mvcc_db_total_size_in_use_in_bytes[6h]) > 16 * 1024 * 1024
         for: 6h
         labels: { severity: ticket }
         annotations:
           summary: An etcd database's live data keeps growing (auto-compaction off, or keys leak)
-          runbook: chapter 47 runbook 7
+          runbook: "Compact and defragment one member at a time (etcdctl defrag; the chart's etcd-defrag CronJob or ./sprig-vm.sh etcd-defrag), run etcdctl alarm disarm after NOSPACE, and check that auto-compaction is on"
       - alert: BackupMissed
         expr: time() - max by (cluster) (sprig_backup_last_success_timestamp_seconds{kind="full"}) > 26 * 3600
         labels: { severity: page }
         annotations:
           summary: A cluster has no full backup younger than 26 hours
-          runbook: chapter 47, Backups (R2)
+          runbook: "VM bundle: check the backup schedule (cron or timer running ./sprig-vm.sh backup) and the newest backup's logs under backups/; a backup records itself only when it completes. Kubernetes: find the SprigCluster whose status.clusterId is this cluster (kubectl get sprigclusters -o wide), then its PhysicalBackup <name>-backup and the newest backup Job's logs; the leading operator exports each cluster's newest successful backup Job"
       - alert: SprigTracesDropped
         expr: sum by (instance) (increase(sprig_telemetry_spans_dropped_total[15m])) > 1000
         labels: { severity: ticket }
         annotations:
           summary: Trace spans are being dropped (collector down or too slow)
-          runbook: chapter 47, Failure handling
+          runbook: "The trace collector is down or too slow: check telemetry.otlp_endpoint and the collector"
 
   - name: sprig-thrash
     rules:
+      # The balancer counts the moves it undoes. DC migrations and
+      # split/merge don't count theirs yet, so they can't be alerted on.
       - alert: SprigThrashing
         expr: |
           increase(sprig_balancer_moves_reverted_total[6h]) > 0
-          or increase(sprig_controller_dc_moves_reverted_total[24h]) > 0
-          or increase(sprig_balancer_split_merge_flaps_total[24h]) > 0
         labels: { severity: ticket }
         annotations:
           summary: An automatic loop is undoing its own decisions
-          runbook: chapter 47 runbook 11
+          runbook: "sprigctl explain decision shows the reverted actions and their evidence; set the loop to recommend or off at the narrowest scope (for example balancer.mode) until its inputs settle"

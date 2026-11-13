@@ -87,7 +87,7 @@ pub static MODE: Setting<Cow<'static, str>> = Setting {
     apply: Apply::Live,
     operator_only: true,
     owner: 24,
-    doc: "auto, approve (chapter 52), recommend (dry run) or off",
+    doc: "auto, approve (held for approval), recommend (dry run) or off",
 };
 sprig_settings::register!(MODE);
 
@@ -679,7 +679,7 @@ impl MigrationDecider {
                 m.clock(),
                 tenant,
                 &best,
-                "the tenant moves there (chapter 24)",
+                "the tenant moves there",
             )
             .await?;
             self.record(

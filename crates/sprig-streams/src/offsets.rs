@@ -74,7 +74,7 @@ pub fn procedure_sql(schema: &str) -> String {
          IN p_offset BIGINT UNSIGNED, IN p_epoch INT UNSIGNED, IN p_meta VARCHAR(1024),\n\
          IN p_expect BIGINT)\n\
          MODIFIES SQL DATA SQL SECURITY DEFINER\n\
-         COMMENT 'SprigDB: chapter 45 commit_offset inside the caller''s transaction'\n\
+         COMMENT 'SprigDB: commit_offset inside the caller''s transaction'\n\
          BEGIN\n\
            IF p_expect IS NULL OR p_expect < 0 THEN\n\
              INSERT INTO {t} (group_name, stream_id, partition_no, offset_no, leader_epoch,\n\
@@ -109,7 +109,7 @@ pub fn procedure_fan_in_sql(schema: &str) -> String {
          IN p_group VARCHAR(255), IN p_instance BIGINT UNSIGNED, IN p_stream BIGINT UNSIGNED,\n\
          IN p_partition INT UNSIGNED, IN p_offset BIGINT UNSIGNED, IN p_expect BIGINT)\n\
          MODIFIES SQL DATA SQL SECURITY DEFINER\n\
-         COMMENT 'SprigDB: chapter 45 fan-in positions inside the caller''s transaction'\n\
+         COMMENT 'SprigDB: fan-in positions inside the caller''s transaction'\n\
          BEGIN\n\
            IF p_expect IS NULL OR p_expect < 0 THEN\n\
              INSERT INTO {t} (group_name, instance_tenant_id, stream_id, partition_no,\n\

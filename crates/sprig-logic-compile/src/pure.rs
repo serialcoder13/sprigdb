@@ -17,7 +17,8 @@
 //!   constant, and more than 64 paths: not expressible (an error naming why)
 //! computed(f, args)  = CASE WHEN path₁ THEN value₁ ... END   (output's one field)
 //! reject_check(f, …) = OR of the conditions of the paths raising `reject`
-//!                      (one static message), when no path throws
+//!                      (one static message; JavaScript's `sprig.reject`,
+//!                      error 39863, counts as one), when no path throws
 //! ```
 //!
 //! Every built-in used here is deterministic, as both places require.
@@ -581,19 +582,27 @@ pub fn reject_check(
     let mut conds = Vec::new();
     let mut message: Option<String> = None;
     for path in &p.paths {
-        match &path.end {
-            End::Event(name, fields) if name == "reject" => {
-                let m = fields
+        let rejected = match &path.end {
+            End::Event(name, fields) if name == "reject" => Some(
+                fields
                     .iter()
                     .find(|(n, _)| n == "message")
-                    .map_or_else(|| str_lit("rejected"), |(_, v)| v.text.clone());
-                let lit = static_text(&m).ok_or("a message that isn't constant")?;
-                match &message {
-                    Some(x) if *x != lit => return Err("more than one message".into()),
-                    _ => message = Some(lit),
-                }
-                conds.push(path.condition());
+                    .map_or_else(|| str_lit("rejected"), |(_, v)| v.text.clone()),
+            ),
+            // JavaScript's `sprig.reject(message)` (R7, jsbind).
+            End::Throw(39863, m) => Some(m.text.clone()),
+            _ => None,
+        };
+        if let Some(m) = rejected {
+            let lit = static_text(&m).ok_or("a message that isn't constant")?;
+            match &message {
+                Some(x) if *x != lit => return Err("more than one message".into()),
+                _ => message = Some(lit),
             }
+            conds.push(path.condition());
+            continue;
+        }
+        match &path.end {
             End::Throw(code, _) => return Err(format!("a path raises error {code}")),
             End::Event(..) | End::Nothing => {}
         }

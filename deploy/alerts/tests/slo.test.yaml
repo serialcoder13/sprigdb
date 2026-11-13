@@ -20,7 +20,7 @@ tests:
           - exp_labels: { severity: page, slo: availability, dc: dc-a }
             exp_annotations:
               summary: The availability error budget is burning fast
-              runbook: chapter 47 runbook 8
+              runbook: "Find the failing statements by result and DC (dashboard Fleet or DC); check admission and pool waits, backend errors and certificate alerts; scale or drain gateways, or follow the cluster runbook in the operations guide"
       # Over an hour the 3-day window burns too (ticket).
       - eval_time: 70m
         alertname: SprigAvailabilitySlowBurn
@@ -28,7 +28,7 @@ tests:
           - exp_labels: { severity: ticket, slo: availability, dc: dc-a }
             exp_annotations:
               summary: The availability error budget is burning
-              runbook: chapter 47 runbook 8
+              runbook: "Find the failing statements by result and DC (dashboard Fleet or DC); check admission and pool waits, backend errors and certificate alerts; scale or drain gateways, or follow the cluster runbook in the operations guide"
 
   # Healthy: under one failure in 10,000 (below 0.05%); client errors
   # don't count.
@@ -70,7 +70,7 @@ tests:
           - exp_labels: { severity: page, slo: overhead, dc: dc-a }
             exp_annotations:
               summary: Gateway overhead above 2 ms is burning its budget fast
-              runbook: chapter 47 runbook 8
+              runbook: "Find the failing statements by result and DC (dashboard Fleet or DC); check admission and pool waits, backend errors and certificate alerts; scale or drain gateways, or follow the cluster runbook in the operations guide"
 
   # p99 statement latency between 1 s and 2.5 s for half an hour.
   - interval: 1m
@@ -90,4 +90,4 @@ tests:
           - exp_labels: { severity: ticket, slo: latency, dc: dc-a }
             exp_annotations:
               summary: Statement p99 latency above 1 s for 10 minutes
-              runbook: chapter 47 runbook 8
+              runbook: "Find the failing statements by result and DC (dashboard Fleet or DC); check admission and pool waits, backend errors and certificate alerts; scale or drain gateways, or follow the cluster runbook in the operations guide"

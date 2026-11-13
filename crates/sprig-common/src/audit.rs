@@ -712,6 +712,159 @@ impl AuditSink for DirSink {
     }
 }
 
+/// `audit.retention_days` as the process resolves it (global and DC
+/// scope): 0 until set, and no retention pass deletes anything then.
+static RETENTION_DAYS: AtomicU64 = AtomicU64::new(0);
+
+/// Sets the retention the process's [`DirSink`] pass keeps
+/// (`sprig-settings::ops` applies `audit.retention_days` here, live).
+pub fn set_retention_days(days: u64) {
+    RETENTION_DAYS.store(days, Ordering::Relaxed);
+}
+
+/// The retention the pass keeps now; 0 when unset.
+#[must_use]
+pub fn retention_days() -> u64 {
+    RETENTION_DAYS.load(Ordering::Relaxed)
+}
+
+/// Day directories a retention pass removes at most before it yields.
+pub const RETENTION_BATCH: usize = 100;
+
+/// How often the retention pass runs, and how soon it runs again after a
+/// full batch.
+pub const RETENTION_PERIOD: Duration = Duration::from_secs(3600);
+const RETENTION_AGAIN: Duration = Duration::from_secs(10);
+
+/// What one retention pass removed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PruneReport {
+    /// Day directories removed, as `<stream>/<day>`.
+    pub removed: Vec<String>,
+    /// The pass stopped at its batch limit: more are due.
+    pub more: bool,
+}
+
+impl DirSink {
+    /// The retention pass (chapter 47, `audit.retention_days`; decision
+    /// bugfix-interim): removes the day directories
+    /// `audit/<stream>/<YYYY-MM-DD>` under `root` older than `days_for`
+    /// the stream (by name, `platform` or `tenant-<id>`; `None` keeps the
+    /// stream), oldest first, at most `max` of them; `now_ms` is today.
+    /// A day is removed only once all of it is past retention (the cutoff
+    /// is today minus the days, so a record is kept at least that long).
+    ///
+    /// # Errors
+    /// 39970 if the directory can't be read; a removal that fails is
+    /// logged and skipped.
+    pub fn prune(
+        root: &Path,
+        now_ms: u64,
+        days_for: &dyn Fn(&str) -> Option<u64>,
+        max: usize,
+    ) -> Result<PruneReport> {
+        let mut report = PruneReport::default();
+        let base = root.join("audit");
+        if !base.exists() {
+            return Ok(report);
+        }
+        let mut due: Vec<(String, String, PathBuf)> = Vec::new();
+        for st in fs::read_dir(&base).map_err(|e| io_error("can't read", &base, e))? {
+            let st = st.map_err(|e| io_error("can't read", &base, e))?;
+            let stream = st.file_name().to_string_lossy().into_owned();
+            let Some(days) = days_for(&stream).filter(|d| *d > 0) else {
+                continue;
+            };
+            let cutoff = civil_date(now_ms.saturating_sub(days.saturating_mul(86_400_000)));
+            let dir = st.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            for d in fs::read_dir(&dir).map_err(|e| io_error("can't read", &dir, e))? {
+                let d = d.map_err(|e| io_error("can't read", &dir, e))?;
+                let day = d.file_name().to_string_lossy().into_owned();
+                let is_day = day.len() == 10
+                    && day.bytes().enumerate().all(|(i, b)| {
+                        if i == 4 || i == 7 {
+                            b == b'-'
+                        } else {
+                            b.is_ascii_digit()
+                        }
+                    });
+                if is_day && day < cutoff && d.path().is_dir() {
+                    due.push((day, stream.clone(), d.path()));
+                }
+            }
+        }
+        due.sort();
+        for (day, stream, path) in due {
+            if report.removed.len() >= max {
+                report.more = true;
+                break;
+            }
+            match fs::remove_dir_all(&path) {
+                Ok(()) => report.removed.push(format!("{stream}/{day}")),
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "audit retention: can't remove");
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    /// Runs [`prune`](Self::prune) under this sink's root every
+    /// [`RETENTION_PERIOD`] (and again soon while a batch was full), with
+    /// [`retention_days`] for every stream, until `stop`. Each pass is one
+    /// blocking task of at most [`RETENTION_BATCH`] removals, so the pass
+    /// never competes with the sink's writes for long.
+    #[must_use]
+    pub fn spawn_retention(&self, stop: CancellationToken) -> tokio::task::JoinHandle<()> {
+        let root = self.root.clone();
+        tokio::spawn(async move {
+            // The first pass a minute after start, off the startup path.
+            let mut wait = Duration::from_secs(60);
+            loop {
+                tokio::select! {
+                    () = stop.cancelled() => return,
+                    () = tokio::time::sleep(wait) => {}
+                }
+                wait = RETENTION_PERIOD;
+                let days = retention_days();
+                if days == 0 {
+                    continue;
+                }
+                let root = root.clone();
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+                let r = tokio::task::spawn_blocking(move || {
+                    Self::prune(&root, now, &|_| Some(days), RETENTION_BATCH)
+                })
+                .await;
+                match r {
+                    Ok(Ok(rep)) => {
+                        if !rep.removed.is_empty() {
+                            metrics::counter!("sprig_audit_retention_removed_total")
+                                .increment(rep.removed.len() as u64);
+                            tracing::info!(
+                                removed = rep.removed.len(),
+                                days,
+                                more = rep.more,
+                                "audit retention removed old days"
+                            );
+                        }
+                        if rep.more {
+                            wait = RETENTION_AGAIN;
+                        }
+                    }
+                    Ok(Err(e)) => tracing::warn!(error = %e, "audit retention pass failed"),
+                    Err(e) => tracing::warn!(error = %e, "audit retention pass panicked"),
+                }
+            }
+        })
+    }
+}
+
 /// Keeps records in memory, deduplicated on `(instance, seq)`; can be
 /// made to fail. For tests.
 #[derive(Debug)]

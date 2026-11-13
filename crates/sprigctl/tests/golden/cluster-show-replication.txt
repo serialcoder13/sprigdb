@@ -22,4 +22,4 @@ profile:      v3
   enforce_json_schema   yes
   compiled_logic        yes
 gaps:         none
-tuning:       no plan yet (server tuning is chapter 09 step 10)
+tuning:       no plan (automatic server tuning isn't offered in this release)

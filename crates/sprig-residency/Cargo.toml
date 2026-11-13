@@ -1,6 +1,6 @@
 [package]
 name = "sprig-residency"
-description = "SprigDB: residency policies over DC tags (chapter 26), shared by the controller, workers and gateways"
+description = "SprigDB: residency policies over DC tags, shared by the controller, workers and gateways"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

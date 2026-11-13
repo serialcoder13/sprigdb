@@ -49,7 +49,7 @@ pub static MODE: Setting<Cow<'static, str>> = Setting {
     apply: Apply::Live,
     operator_only: true,
     owner: 11,
-    doc: "auto, approve (chapter 52), recommend, dry_run or off",
+    doc: "auto, approve (held for approval), recommend, dry_run or off",
 };
 sprig_settings::register!(MODE);
 
@@ -62,7 +62,7 @@ pub static PROVISION_MODE: Setting<Cow<'static, str>> = Setting {
     apply: Apply::Live,
     operator_only: true,
     owner: 11,
-    doc: "recommend or auto (R2): who acts on add_cluster and add_replica",
+    doc: "recommend or auto: who acts on add_cluster and add_replica",
 };
 sprig_settings::register!(PROVISION_MODE);
 

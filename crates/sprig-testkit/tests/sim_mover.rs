@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use sprig_testkit::sim::Sim;
 use sprig_testkit::sim::mover::{
-    run_idle_move, run_move, run_move_streams, run_move_triggers, run_move_xa,
+    run_idle_move, run_move, run_move_streams, run_move_streams_shared, run_move_triggers,
+    run_move_xa,
     run_move_xa_no_drain, xa,
 };
 
@@ -56,6 +57,18 @@ fn a_stream_sequencer_keeps_every_change_once_in_order_across_moves() {
         .seeds(100)
         .max_time(Duration::from_secs(3600))
         .run(|w| async move { run_move_streams(w).await.map_err(Into::into) });
+}
+
+/// The same, with the sequencer reading through the shared per-cluster
+/// reader (R9, r9feed): its subscription is detached when its tiny buffer
+/// fills, comes back through the ring or a catch-up dump, and follows the
+/// move to the target's hub. Nothing lost, duplicated or reordered.
+#[test]
+fn a_stream_sequencer_on_the_shared_reader_keeps_every_change_once_in_order() {
+    Sim::new("mover-streams-shared")
+        .seeds(100)
+        .max_time(Duration::from_secs(3600))
+        .run(|w| async move { run_move_streams_shared(w).await.map_err(Into::into) });
 }
 
 /// A coordinator prepares distributed-transaction branches on the source

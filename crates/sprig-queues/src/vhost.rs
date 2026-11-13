@@ -518,7 +518,7 @@ impl Vhost for ConnVhost {
             }
             Some(QType::Stream) => {
                 return Err(MqError::not_implemented(
-                    "stream queues are not served by the queue engine yet (chapter 50 step 17)",
+                    "stream queues are not served by the queue engine yet",
                 ));
             }
             None => {

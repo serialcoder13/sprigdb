@@ -1,5 +1,5 @@
 # promtool test rules: replication lag, stuck data movement, the audit
-# pipeline, certificates, etcd and thrashing.
+# pipeline, certificates, etcd, backups and thrashing.
 rule_files:
   - ../sprig-ops.rules.yaml
 evaluation_interval: 1m
@@ -17,7 +17,7 @@ tests:
           - exp_labels: { severity: ticket, cluster: dc-a-c2, node: n2 }
             exp_annotations:
               summary: A replica is more than 30 s behind; reads leave it
-              runbook: chapter 06 read routing; chapter 47 runbook 3
+              runbook: "Reads already avoid this replica. Check the replica's replication threads and errors (SHOW REPLICA STATUS), its disk and network, and long transactions on the writer; sprigctl cluster show <cluster> lists each node's lag"
       - eval_time: 10m
         alertname: SprigReplicaLagCritical
         exp_alerts: []
@@ -33,7 +33,7 @@ tests:
           - exp_labels: { severity: page, cluster: dc-a-c2, node: n2 }
             exp_annotations:
               summary: A replica is more than 5 minutes behind
-              runbook: chapter 47 runbook 3
+              runbook: "Check the replica's replication threads and errors (SHOW REPLICA STATUS), its disk and network, and long transactions on the writer; sprigctl cluster show <cluster> lists each node's lag; if it can't catch up, rebuild it with sprigctl cluster rebuild"
 
   # A move in catch-up whose lag stays above 10 minutes.
   - interval: 1m
@@ -50,7 +50,7 @@ tests:
           - exp_labels: { severity: page }
             exp_annotations:
               summary: Data movement is stuck
-              runbook: chapter 47 runbook 4
+              runbook: "sprigctl job list and sprigctl job show <id> show the job and its phase; check the source's binlog retention, the target's disk and the worker's logs; sprigctl job cancel <id> gives a job up before its cutover"
 
   # A running move that copied and applied nothing for an hour.
   - interval: 1m
@@ -66,7 +66,7 @@ tests:
           - exp_labels: { severity: page }
             exp_annotations:
               summary: Data movement is stuck
-              runbook: chapter 47 runbook 4
+              runbook: "sprigctl job list and sprigctl job show <id> show the job and its phase; check the source's binlog retention, the target's disk and the worker's logs; sprigctl job cancel <id> gives a job up before its cutover"
 
   # The same move making progress: quiet.
   - interval: 1m
@@ -97,7 +97,7 @@ tests:
           - exp_labels: { severity: ticket, instance: gw-1 }
             exp_annotations:
               summary: The audit spool is over half full; the sink is behind
-              runbook: chapter 47, The audit pipeline
+              runbook: "The audit sink is behind. Check the audit sink in [audit] and that it accepts events; events wait in the spool (audit.spool_max_mb) until it does"
       - eval_time: 20m
         alertname: AuditUnavailable
         exp_alerts: []
@@ -107,7 +107,7 @@ tests:
           - exp_labels: { severity: page, instance: gw-2 }
             exp_annotations:
               summary: Audit events were dropped
-              runbook: chapter 47, The audit pipeline
+              runbook: "Audit events were lost. Check the audit sink in [audit] and that it accepts events; events wait in the spool (audit.spool_max_mb) until it does; raise audit.spool_max_mb if the sink is only slow"
 
   - interval: 1m
     input_series:
@@ -124,7 +124,7 @@ tests:
           - exp_labels: { severity: ticket, instance: gw-1, bundle: default }
             exp_annotations:
               summary: A listener certificate expires within 14 days
-              runbook: chapter 04, certificates reload without a restart
+              runbook: "Replace the listener's certificate and key files; the gateway reloads them without a restart (Compose VMs: ./sprig-vm.sh rotate-certs)"
       - eval_time: 70m
         alertname: CertificateExpiringSoon
         exp_alerts: []
@@ -134,16 +134,16 @@ tests:
           - exp_labels: { severity: page, instance: etcd-1 }
             exp_annotations:
               summary: An etcd member has no leader
-              runbook: chapter 47 runbook 6
+              runbook: "etcd lost quorum: restart or replace members; never force a new etcd cluster while a majority might still be alive"
       - eval_time: 4m
         alertname: SprigThrashing
         exp_alerts:
           - exp_labels: { severity: ticket, instance: ctl-1, after_recovery: "false" }
             exp_annotations:
               summary: An automatic loop is undoing its own decisions
-              runbook: chapter 47 runbook 11
+              runbook: "sprigctl explain decision shows the reverted actions and their evidence; set the loop to recommend or off at the narrowest scope (for example balancer.mode) until its inputs settle"
 
-  # bugfix-53: etcd database size. etcd-1 is large and mostly free space;
+  # etcd database size. etcd-1 is large and mostly free space;
   # etcd-2 grows 4 MiB an hour (69,905 bytes a minute) without compaction;
   # etcd-3 is small and steady (no alert).
   - interval: 1m
@@ -167,18 +167,38 @@ tests:
           - exp_labels: { severity: ticket, instance: etcd-1 }
             exp_annotations:
               summary: An etcd database is above 512 MiB (auto-compaction or defrag not running, or keys leak)
-              runbook: chapter 47 runbook 7
+              runbook: "Compact and defragment one member at a time (etcdctl defrag; the chart's etcd-defrag CronJob or ./sprig-vm.sh etcd-defrag), run etcdctl alarm disarm after NOSPACE, and check that auto-compaction is on"
       - eval_time: 3h
         alertname: EtcdDbFragmented
         exp_alerts:
           - exp_labels: { severity: ticket, instance: etcd-1 }
             exp_annotations:
               summary: Half of an etcd database is free space (the periodic defrag isn't running)
-              runbook: chapter 47 runbook 7
+              runbook: "Compact and defragment one member at a time (etcdctl defrag; the chart's etcd-defrag CronJob or ./sprig-vm.sh etcd-defrag), run etcdctl alarm disarm after NOSPACE, and check that auto-compaction is on"
       - eval_time: 14h
         alertname: EtcdDbGrowing
         exp_alerts:
           - exp_labels: { severity: ticket, instance: etcd-2 }
             exp_annotations:
               summary: An etcd database's live data keeps growing (auto-compaction off, or keys leak)
-              runbook: chapter 47 runbook 7
+              runbook: "Compact and defragment one member at a time (etcdctl defrag; the chart's etcd-defrag CronJob or ./sprig-vm.sh etcd-defrag), run etcdctl alarm disarm after NOSPACE, and check that auto-compaction is on"
+
+  # Backups: c1's newest full backup finished at time 0 (27 hours before
+  # the evaluation); c2's at 25 hours, 2 hours before it.
+  - interval: 1h
+    input_series:
+      - series: 'sprig_backup_last_success_timestamp_seconds{cluster="dc-a-c1",kind="full",instance="ctl-1"}'
+        values: '0x30'
+      - series: 'sprig_backup_last_success_timestamp_seconds{cluster="dc-a-c2",kind="full",instance="ctl-1"}'
+        values: '90000x30'
+    alert_rule_test:
+      - eval_time: 27h
+        alertname: BackupMissed
+        exp_alerts:
+          - exp_labels: { severity: page, cluster: dc-a-c1 }
+            exp_annotations:
+              summary: A cluster has no full backup younger than 26 hours
+              runbook: "VM bundle: check the backup schedule (cron or timer running ./sprig-vm.sh backup) and the newest backup's logs under backups/; a backup records itself only when it completes. Kubernetes: find the SprigCluster whose status.clusterId is this cluster (kubectl get sprigclusters -o wide), then its PhysicalBackup <name>-backup and the newest backup Job's logs; the leading operator exports each cluster's newest successful backup Job"
+      - eval_time: 20h
+        alertname: BackupMissed
+        exp_alerts: []

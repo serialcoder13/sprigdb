@@ -43,7 +43,7 @@ fn reason() -> Arg {
 /// `sprigctl recommendations`.
 pub(crate) fn group() -> Command {
     Command::new("recommendations")
-        .about("Recommendations held for approval, and their policies (chapter 52)")
+        .about("Recommendations held for approval, and their policies")
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(

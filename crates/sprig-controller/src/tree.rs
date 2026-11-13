@@ -36,9 +36,14 @@
 //!   create, until bootstrap records the catalog's shard map (interim
 //!   placement until chapter 11's, M0.6).
 //!
+//! Suspension ([`Directory::set_suspended`], `sprigctl tenant suspend` and
+//! `resume`): the entry's `suspended` flag with its reason and time; logins
+//! in the subtree refuse with 39303, and the suspension's auth change
+//! closes open sessions (`sprig-controller::users`).
+//!
 //! Not yet: `MoveTenantTree` and `tree-moves/` (with the rest of step 16),
-//! `suspended` handling beyond refusing children, and the path index in
-//! the controllers' mirrors (the `tree_settings` loop scans its mirror).
+//! and the path index in the controllers' mirrors (the `tree_settings`
+//! loop scans its mirror).
 
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -142,6 +147,13 @@ pub struct DirectoryEntry {
     /// Set by an administrator: logins fail for the whole subtree.
     #[serde(default)]
     pub suspended: bool,
+    /// Why, as the administrator gave it (`sprigctl tenant suspend
+    /// --reason`), while `suspended`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspended_reason: Option<String>,
+    /// When it was suspended, RFC 3339 UTC, while `suspended`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspended_at: Option<String>,
     /// The `move_id` of an open subtree move.
     #[serde(default)]
     pub tree_lock: Option<String>,
@@ -226,24 +238,20 @@ impl StoredEntry {
     }
 }
 
-/// Checks a tenant name: a lowercase DNS label (it appears in TLS SNI),
-/// starting with a letter.
+/// Checks a tenant name with the one rule logins use too
+/// ([`sprig_common::names::is_tenant_name`]): a lowercase DNS label of 2
+/// to 63 characters (it appears in TLS SNI), starting with a letter and not
+/// ending with a hyphen.
 ///
 /// # Errors
 /// 39792 for a name that isn't one.
 pub fn validate_name(name: &str) -> Result<()> {
-    let ok = (1..=63).contains(&name.len())
-        && name.starts_with(|c: char| c.is_ascii_lowercase())
-        && !name.ends_with('-')
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-    if ok {
+    if sprig_common::names::is_tenant_name(name) {
         Ok(())
     } else {
         Err(invalid(format!(
-            "tenant name {name:?}: a lowercase DNS label of 1-63 letters, digits and hyphens, \
-             starting with a letter"
+            "tenant name {name:?}: a lowercase DNS label of 2-63 letters, digits and hyphens, \
+             starting with a letter and not ending with a hyphen"
         )))
     }
 }
@@ -352,6 +360,8 @@ fn new_entry(
         depth,
         child_count: 0,
         suspended: false,
+        suspended_reason: None,
+        suspended_at: None,
         tree_lock: None,
         placement_hint: req.placement_hint.clone(),
         created_at: rfc3339(now),
@@ -750,6 +760,62 @@ impl Directory {
             SprigCode::MetaUnavailable,
             format!("tenant {id}'s directory entry kept changing; try again"),
         ))
+    }
+
+    /// The live entries of `id`'s subtree below it (descendants, by their
+    /// paths), in id order.
+    ///
+    /// # Errors
+    /// The store's errors.
+    pub async fn descendants(&self, id: TenantId) -> Result<Vec<StoredEntry>> {
+        Ok(self
+            .list()
+            .await?
+            .into_iter()
+            .filter(|e| e.body().tenant_id != id && e.body().path_contains(id))
+            .collect())
+    }
+
+    /// Suspends (`Some(reason)`) or resumes (`None`) tenant `id`: its
+    /// entry's `suspended` flag, with the reason and the time (chapter 23;
+    /// chapter 29's `ALTER TENANT ... SUSPEND | RESUME`). Logins in the
+    /// whole subtree read the flag on the entry or any ancestor.
+    ///
+    /// # Errors
+    /// 39072 for a missing entry, or one `deleting`; the store's errors.
+    pub async fn set_suspended(
+        &self,
+        id: TenantId,
+        reason: Option<&str>,
+        now: SystemTime,
+    ) -> Result<StoredEntry> {
+        self.update(id, |e| {
+            if e.state == TenantState::Deleting {
+                return Err(SprigError::new(
+                    SprigCode::TenantNotReady,
+                    format!("tenant {} is being deleted", e.name),
+                ));
+            }
+            if let Some(r) = reason {
+                if e.suspended && e.suspended_reason.as_deref() == Some(r) {
+                    return Ok(false);
+                }
+                if !e.suspended {
+                    e.suspended_at = Some(rfc3339(now));
+                }
+                e.suspended = true;
+                e.suspended_reason = Some(r.to_owned());
+            } else {
+                if !e.suspended {
+                    return Ok(false);
+                }
+                e.suspended = false;
+                e.suspended_reason = None;
+                e.suspended_at = None;
+            }
+            Ok(true)
+        })
+        .await
     }
 
     /// Chapter 23's `delete_tenant`: the entry becomes `deleting` and the

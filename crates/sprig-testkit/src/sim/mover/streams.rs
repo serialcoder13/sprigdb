@@ -26,7 +26,8 @@ use sprig_binlog::GtidPos;
 use sprig_common::ids::{DbId, ObjectId};
 use sprig_common::{CancellationToken, Result};
 use sprig_feed::names::StaticResolver;
-use sprig_feed::{MetaPlacement, StartAt, TailOptions, TenantTail};
+use sprig_feed::shared::{Kept, SharedFeed, SharedOpts};
+use sprig_feed::{Clusters, MetaPlacement, StartAt, TailOptions, TenantTail};
 use sprig_meta::Tier;
 use sprig_streams::envelope::ChangeCtx;
 use sprig_streams::memlog::{Fault, MemLog};
@@ -57,10 +58,30 @@ pub(super) struct StreamRun {
 }
 
 struct SimFeed {
-    clusters: Arc<SimClusters>,
+    clusters: Arc<dyn Clusters>,
     placement: Arc<MetaPlacement>,
     names: Arc<StaticResolver>,
     opts: TailOptions,
+    /// A slow consumer: stalls drawn from this (the shared variant), so
+    /// its subscription's buffer fills while the hub reads on.
+    slow: Option<crate::sim::rng::SimRng>,
+}
+
+/// A tail whose reader stalls now and then.
+struct Slow {
+    tail: TenantTail,
+    rng: crate::sim::rng::SimRng,
+}
+
+#[async_trait]
+impl FeedSource for Slow {
+    async fn next(&mut self) -> Result<sprig_feed::FeedItem> {
+        if self.rng.chance(0.03) {
+            tokio::time::sleep(self.rng.duration(Duration::from_millis(100), Duration::from_secs(2)))
+                .await;
+        }
+        self.tail.next().await
+    }
 }
 
 #[async_trait]
@@ -82,7 +103,13 @@ impl FeedOpener for SimFeed {
             self.opts.clone(),
         )
         .await?;
-        Ok(Box::new(tail))
+        match &self.slow {
+            Some(r) => Ok(Box::new(Slow {
+                tail,
+                rng: r.fork(),
+            })),
+            None => Ok(Box::new(tail)),
+        }
     }
 }
 
@@ -118,12 +145,33 @@ fn lock(r: &Arc<Mutex<StreamRun>>) -> std::sync::MutexGuard<'_, StreamRun> {
     r.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// A worker process's shared reader over the clusters' binlog models, with
+/// buffers and a ring small enough that the sequencer's subscription is
+/// detached, returns through the ring, and needs catch-up dumps.
+fn shared_view(clusters: &Arc<SimClusters>) -> Arc<dyn Clusters> {
+    let feed = SharedFeed::new(
+        Arc::clone(clusters) as Arc<dyn Clusters>,
+        SharedOpts {
+            sub_channel: 2,
+            ring_groups: 6,
+            ring_bytes: 1 << 20,
+            max_catchup: 1,
+            gather: Duration::from_millis(200),
+            max_backlog: 4,
+        },
+    );
+    feed.view(Kept::All)
+}
+
 /// The sequencers: one at a time, killed at random, sometimes overlapped
-/// by a new one, until the log's position reaches the goal.
+/// by a new one, until the log's position reaches the goal. With `shared`
+/// they read through a shared reader, a new one for each worker that
+/// starts after a kill (a process's hubs die with it).
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(super) async fn sequencer_worker(
     world: World,
     clusters: Arc<SimClusters>,
+    shared: bool,
     tier: Tier,
     faults: bool,
     goal: Goal,
@@ -132,8 +180,8 @@ pub(super) async fn sequencer_worker(
     stop: CancellationToken,
 ) {
     let node = Node::from("stream-worker");
-    let feed = Arc::new(SimFeed {
-        placement: Arc::new(MetaPlacement::new(world.etcd().client(&node, tier))),
+    let make_feed = |c: Arc<dyn Clusters>| SimFeed {
+        placement: Arc::new(MetaPlacement::new(world.etcd().client(&node, tier.clone()))),
         names: Arc::new(
             StaticResolver::new()
                 .database(TENANT, DbId(1), "shop")
@@ -141,15 +189,24 @@ pub(super) async fn sequencer_worker(
                 .object(TENANT, DbId(1), "b", 12)
                 .object(TENANT, DbId(1), "c", 13),
         ),
-        clusters: clusters.clone(),
+        clusters: c,
+        slow: shared.then(|| world.rng().fork()),
         opts: TailOptions {
             progress_every: Duration::from_millis(500),
             handoff_poll: Duration::from_millis(300),
             ..TailOptions::default()
         },
-    });
+    };
+    let fresh = || -> Arc<dyn Clusters> {
+        if shared {
+            shared_view(&clusters)
+        } else {
+            clusters.clone()
+        }
+    };
+    let mut feed = Arc::new(make_feed(fresh()));
     let rng = world.rng().fork();
-    let make = || Sequencer {
+    let make = |feed: &Arc<SimFeed>| Sequencer {
         filter: Filter::Changes {
             db: DbId(1),
             object: ObjectId(11),
@@ -179,7 +236,7 @@ pub(super) async fn sequencer_worker(
             break;
         }
         let cancel = CancellationToken::new();
-        let seq = make();
+        let seq = make(&feed);
         let c2 = cancel.clone();
         let mut task = tokio::spawn(async move { seq.run(&c2).await });
         let kill_in = (faults && rng.chance(0.8))
@@ -217,6 +274,8 @@ pub(super) async fn sequencer_worker(
                         let _ = (&mut task).await;
                         lock(&run).kills += 1;
                         world.record("stream sequencer killed");
+                        // The worker process died: its shared reader too.
+                        feed = Arc::new(make_feed(fresh()));
                     }
                     break true;
                 }

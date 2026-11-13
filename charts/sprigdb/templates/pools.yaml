@@ -1,4 +1,4 @@
-{{- /* One SprigClusterPool per values.pools (chapter 27). */}}
+{{- /* One SprigClusterPool per values.pools. */}}
 {{- range .Values.pools }}
 ---
 apiVersion: sprigdb.io/v1alpha1

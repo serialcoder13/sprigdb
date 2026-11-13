@@ -1198,6 +1198,50 @@ pub mod tenants_client {
                 .insert(GrpcMethod::new("sprig.admin.v1.Tenants", "DeleteTenant"));
             self.inner.unary(req, path, codec).await
         }
+        /// Chapter 14, "Suspension": logins in the subtree fail with 39303, open
+        /// sessions close, background work waits. The body is {"reason": "..."}.
+        pub async fn suspend_tenant(
+            &mut self,
+            request: impl tonic::IntoRequest<super::NameRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.admin.v1.Tenants/SuspendTenant",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.admin.v1.Tenants", "SuspendTenant"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn resume_tenant(
+            &mut self,
+            request: impl tonic::IntoRequest<super::NameRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status> {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sprig.admin.v1.Tenants/ResumeTenant",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("sprig.admin.v1.Tenants", "ResumeTenant"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -1226,6 +1270,16 @@ pub mod tenants_server {
             request: tonic::Request<super::NameRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
         async fn delete_tenant(
+            &self,
+            request: tonic::Request<super::NameRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
+        /// Chapter 14, "Suspension": logins in the subtree fail with 39303, open
+        /// sessions close, background work waits. The body is {"reason": "..."}.
+        async fn suspend_tenant(
+            &self,
+            request: tonic::Request<super::NameRequest>,
+        ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
+        async fn resume_tenant(
             &self,
             request: tonic::Request<super::NameRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
@@ -1464,6 +1518,92 @@ pub mod tenants_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = DeleteTenantSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.admin.v1.Tenants/SuspendTenant" => {
+                    #[allow(non_camel_case_types)]
+                    struct SuspendTenantSvc<T: Tenants>(pub Arc<T>);
+                    impl<T: Tenants> tonic::server::UnaryService<super::NameRequest>
+                    for SuspendTenantSvc<T> {
+                        type Response = super::JsonReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::NameRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Tenants>::suspend_tenant(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SuspendTenantSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sprig.admin.v1.Tenants/ResumeTenant" => {
+                    #[allow(non_camel_case_types)]
+                    struct ResumeTenantSvc<T: Tenants>(pub Arc<T>);
+                    impl<T: Tenants> tonic::server::UnaryService<super::NameRequest>
+                    for ResumeTenantSvc<T> {
+                        type Response = super::JsonReply;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::NameRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Tenants>::resume_tenant(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ResumeTenantSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

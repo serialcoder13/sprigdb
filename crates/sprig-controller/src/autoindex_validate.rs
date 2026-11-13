@@ -75,7 +75,7 @@ pub struct LogMarker;
 #[async_trait::async_trait]
 impl NodeMarker for LogMarker {
     async fn mark_validating(&self, node: &NodeId) -> Result<()> {
-        tracing::info!(%node, "auto_index: node validating (R0: not taken out of routing)");
+        tracing::info!(%node, "auto_index: node validating (it stays in routing)");
         Ok(())
     }
     async fn unmark(&self, node: &NodeId) -> Result<()> {

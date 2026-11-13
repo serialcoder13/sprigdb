@@ -398,7 +398,7 @@ async fn run(
             )
             .await?;
             ran.gateway
-                .push("recheck each document against the filter (decision D4)".into());
+                .push("recheck each document against the filter".into());
             if let Some(s) = &sort
                 && !id_sort(s)
             {

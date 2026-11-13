@@ -41,6 +41,15 @@ fn account(a: &AccountRef, role: bool, persona: Persona) -> String {
     }
 }
 
+/// `names` with the extension `WATCH` after the static names, when `set`
+/// holds it and isn't `ALL PRIVILEGES` (database level; chapter 29).
+fn with_watch(mut names: Vec<&'static str>, set: ActionSet) -> Vec<&'static str> {
+    if set.has(Action::Watch) && names != ["ALL PRIVILEGES"] {
+        names.push("WATCH");
+    }
+    names
+}
+
 fn with_option(set: ActionSet) -> &'static str {
     if set.has(Action::GrantOption) {
         " WITH GRANT OPTION"
@@ -242,7 +251,10 @@ fn render_one(
     }
     // db.*
     for (db, set) in &dbs {
-        let names = render_static(*set, Level::Database, ObjectType::Table);
+        let names = with_watch(
+            render_static(*set, Level::Database, ObjectType::Table),
+            *set,
+        );
         if names.is_empty() && !set.has(Action::GrantOption) {
             continue;
         }
@@ -260,7 +272,10 @@ fn render_one(
     }
     // Partial revokes, after the database grants (MySQL 8.4's order).
     for (db, set) in &restricted {
-        let names = render_static(*set, Level::Database, ObjectType::Table);
+        let names = with_watch(
+            render_static(*set, Level::Database, ObjectType::Table),
+            *set,
+        );
         if !names.is_empty() {
             out.push(format!(
                 "REVOKE {} ON {}.* FROM {to}",
@@ -298,6 +313,7 @@ fn render_one(
             Action::ShowView,
             Action::AlterRoutine,
             Action::Trigger,
+            Action::Watch,
         ] {
             if set.has(a) && !all_table {
                 parts.push(a.command().to_owned());

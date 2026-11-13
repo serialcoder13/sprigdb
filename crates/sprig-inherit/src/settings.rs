@@ -33,7 +33,7 @@ pub static MERGE: Setting<Cow<'static, str>> = Setting {
     apply: Apply::Live,
     operator_only: false,
     owner: 42,
-    doc: "auto, read_through, materialized or federated (R6 builds read_through)",
+    doc: "auto, read_through, materialized or federated (federated isn't offered in this release)",
 };
 sprig_settings::register!(MERGE);
 

@@ -25,8 +25,13 @@
 //!   (`limits.tenant_memory_mb`) and the user (a quarter of the tenant's). A
 //!   charge succeeds only if all three have room; otherwise 39003.
 //!
-//! **As built.** The tenant-scoped keys resolve at the process scopes (dc,
-//! global) in R0. Chapter 04 grants by deficit round robin across tenants;
+//! **As built.** The `limits.*` keys resolve for the session's tenant
+//! (tenant, its ancestors, dc, global) from the tenant's cached catalog
+//! settings, memoized per tenant until either the etcd snapshot or the
+//! tenant's settings snapshot changes; a tenant whose catalog isn't cached
+//! (and the limiter in tests) gets the dc and global values. The gateway
+//! keys (`gateway.max_connections`, `gateway.memory_limit_mb`) stay at dc
+//! and global. Chapter 04 grants by deficit round robin across tenants;
 //! with a separate cap per tenant there is no shared pool to divide, so each
 //! tenant's queue is served on its own (round robin across tenants returns
 //! with a gateway-wide statement cap). Memory is charged for HTTP results
@@ -41,7 +46,9 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use sprig_common::ids::{DcId, TenantId};
 use sprig_common::{Result, SprigCode, SprigError};
-use sprig_settings::{Apply, HardBounds, LiveSettings, Scopes, Setting, SettingCtx};
+use sprig_settings::{
+    Apply, HardBounds, LiveSettings, Scopes, Setting, SettingCtx, SettingValue, TenantSettings,
+};
 use tokio::sync::oneshot;
 
 use crate::pipeline::{
@@ -195,6 +202,10 @@ impl Default for Limits {
     }
 }
 
+/// A tenant's settings snapshot as the catalog cache holds it now, without
+/// loading (`None`: not cached here).
+pub type TenantSettingsLookup = Arc<dyn Fn(TenantId) -> Option<Arc<TenantSettings>> + Send + Sync>;
+
 /// Where the limits come from.
 #[derive(Clone)]
 pub enum LimitSource {
@@ -206,6 +217,9 @@ pub enum LimitSource {
         live: LiveSettings,
         /// The DC.
         dc: DcId,
+        /// The tenants' settings, for the tenant-scoped `limits.*` keys
+        /// (`None`: dc and global only).
+        tenants: Option<TenantSettingsLookup>,
     },
 }
 
@@ -226,6 +240,31 @@ impl LimitSource {
         match self {
             Self::Fixed(l) => *l,
             Self::Live { live, .. } => self.current_in(&live.snapshot()),
+        }
+    }
+
+    /// The limits in `snap` for `tenant`'s settings `ts` (fixed values
+    /// ignore both): the `limits.*` keys at tenant scope, the gateway keys
+    /// at dc and global.
+    fn current_for(&self, snap: &sprig_settings::watch::Snapshot, ts: &TenantSettings) -> Limits {
+        let Self::Live { dc, .. } = self else {
+            return self.current_in(snap);
+        };
+        let base = self.current_in(snap);
+        let ctx = ts.ctx(dc);
+        let get = |k: &Setting<u64>| {
+            ts.resolve(snap, k.key, &ctx)
+                .ok()
+                .and_then(|r| u64::from_value(&r.value))
+                .unwrap_or(k.default)
+        };
+        Limits {
+            tenant_connections: us(get(&TENANT_CONNECTIONS)),
+            tenant_active: us(get(&TENANT_ACTIVE_STATEMENTS)),
+            user_active: us(get(&USER_ACTIVE_STATEMENTS)),
+            tenant_memory: mb(get(&TENANT_MEMORY_MB)),
+            queue_timeout: Duration::from_millis(get(&QUEUE_TIMEOUT_MS)),
+            ..base
         }
     }
 
@@ -251,6 +290,12 @@ impl LimitSource {
 }
 
 type Key = Option<TenantId>;
+
+/// A tenant's resolved limits, with the snapshots they came from.
+type TenantMemo = (sprig_settings::watch::Snapshot, Arc<TenantSettings>, Limits);
+
+/// Tenants whose limits are memoized at most; past it the memo starts over.
+const TENANT_MEMO_MAX: usize = 4096;
 
 struct Waiter {
     id: u64,
@@ -288,6 +333,8 @@ pub struct Limiter {
     /// (decision PF7): every statement asks, and resolving seven keys each
     /// time was 4% of a point select's gateway CPU.
     memo: Mutex<Option<(sprig_settings::watch::Snapshot, Limits)>>,
+    /// The same per tenant, for the tenant-scoped keys.
+    tenant_memo: Mutex<HashMap<TenantId, TenantMemo>>,
     connections: AtomicUsize,
     memory: AtomicUsize,
     state: Mutex<State>,
@@ -403,6 +450,7 @@ impl Limiter {
         Arc::new(Self {
             source,
             memo: Mutex::new(None),
+            tenant_memo: Mutex::new(HashMap::new()),
             connections: AtomicUsize::new(0),
             memory: AtomicUsize::new(0),
             state: Mutex::new(State::default()),
@@ -437,6 +485,43 @@ impl Limiter {
         l
     }
 
+    /// The limits in force now for `tenant`: its tenant-scoped values when
+    /// its catalog is cached here, else [`limits`](Self::limits).
+    #[must_use]
+    pub fn limits_for(&self, tenant: Key) -> Limits {
+        let (
+            LimitSource::Live {
+                live,
+                tenants: Some(lookup),
+                ..
+            },
+            Some(t),
+        ) = (&self.source, tenant)
+        else {
+            return self.limits();
+        };
+        let Some(ts) = lookup(t) else {
+            return self.limits();
+        };
+        let snap = live.snapshot();
+        let mut memo = self
+            .tenant_memo
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some((s, m, l)) = memo.get(&t)
+            && Arc::ptr_eq(s, &snap)
+            && Arc::ptr_eq(m, &ts)
+        {
+            return *l;
+        }
+        let l = self.source.current_for(&snap, &ts);
+        if memo.len() >= TENANT_MEMO_MAX && !memo.contains_key(&t) {
+            memo.clear();
+        }
+        memo.insert(t, (snap, ts, l));
+        l
+    }
+
     /// Client connections now.
     #[must_use]
     pub fn connections(&self) -> usize {
@@ -460,7 +545,7 @@ impl Limiter {
     /// # Errors
     /// 39001 at `limits.tenant_connections`.
     pub fn attach(self: &Arc<Self>, tenant: Key) -> Result<Attached> {
-        let max = self.limits().tenant_connections;
+        let max = self.limits_for(tenant).tenant_connections;
         let mut st = self.lock();
         let t = st.tenants.entry(tenant).or_default();
         if t.conns >= max {
@@ -490,7 +575,7 @@ impl Limiter {
         user: &str,
         high: bool,
     ) -> Result<ActivePermit> {
-        let l = self.limits();
+        let l = self.limits_for(tenant);
         let (rx, id) = {
             let mut st = self.lock();
             let next = st.next_waiter;
@@ -557,7 +642,7 @@ impl Limiter {
 
     /// A statement ended: free its slot and grant waiters.
     fn release(&self, tenant: Key, user: &str) {
-        let l = self.limits();
+        let l = self.limits_for(tenant);
         let mut st = self.lock();
         if let Some(t) = st.tenants.get_mut(&tenant) {
             t.active = t.active.saturating_sub(1);
@@ -606,7 +691,7 @@ impl Limiter {
     }
 
     fn take(&self, tenant: Key, user: &str, bytes: usize) -> Result<()> {
-        let l = self.limits();
+        let l = self.limits_for(tenant);
         let full = |what: &str| {
             SprigError::new(
                 SprigCode::MemoryLimit,
@@ -756,6 +841,10 @@ impl SessionExec for LimitedSession {
 
     fn holds_tenant_privilege(&self, action: sprig_auth::authz::Action) -> Option<bool> {
         self.inner.holds_tenant_privilege(action)
+    }
+
+    fn set_claims(&mut self, claims: Option<std::sync::Arc<serde_json::Value>>) {
+        self.inner.set_claims(claims);
     }
 }
 

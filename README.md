@@ -76,9 +76,12 @@ These credentials are for local development only. Never reuse them.
 
 ## Documentation
 
-- **[Guides](docs/guides/)**: getting started, compatibility, sharding, automatic indexing, approvals, streams and queues, operations.
+- **[Concepts](docs/concepts/)**: what SprigDB is and how it works: tenants, clusters, shards, automatic indexing, approvals.
+- **[Get started](docs/get-started/)** and **[Connect](docs/connect/)**: run it, then connect with MySQL, MongoDB, Redis, Bolt, Kafka, AMQP or REST.
+- **[SQL](docs/sql/)**, **[Data models](docs/data-models/)**, **[Performance](docs/performance/)**, **[Security](docs/security/)**: using it.
+- **[Operate](docs/operate/)**, **[Tools](docs/tools/)**, **[Troubleshooting](docs/troubleshooting/)**: running it.
 - **[Reference](docs/reference/)**: every setting, error code, metric, REST route and command. These pages are generated from the code, so they always match this release.
-- **[Developing SprigDB](docs/guides/development.md)**: building from source, the local environments, running a single role, the tests.
+- **[Developing SprigDB](docs/operate/development.md)**: building from source, the local environments, running a single role, the tests.
 
 The same pages are published as a website, with search and a PDF download, from [`site/`](site/).
 
@@ -95,7 +98,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-See [Developing SprigDB](docs/guides/development.md) for everything else.
+See [Developing SprigDB](docs/operate/development.md) for everything else.
 
 ## Licence
 

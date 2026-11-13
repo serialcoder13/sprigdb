@@ -848,3 +848,85 @@ async fn live_scram_verifiers_migration_and_backfill() {
     })
     .await;
 }
+
+/// Decision bugfix-interim (P1 of 13 Nov): `CREATE USER` on a catalog
+/// left at `auth` format 2 failed with 1265 (its `verifiers.mechanism`
+/// lacks `scram_sha_512`, which every new password stores). The gateway
+/// now runs [`crate::authz::migrate`] once per process and tenant; after
+/// it, creating a user works on a fresh catalog and on one upgraded from
+/// format 2, and running it again on a current catalog changes nothing (no
+/// auth change).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_create_user_on_fresh_and_upgraded_catalogs() {
+    use sprig_catalog::Migrator;
+    use sprig_catalog::migrate::MigrateOpts;
+
+    with_catalog(
+        "create user, fresh and upgraded",
+        |pool, schema, t| async move {
+            with_global(|g| async move {
+                // Fresh: every format from the start.
+                seed_directory(&*g, t).await;
+                let cat = catalog(&pool, &schema, t, &g);
+                let loc = locator(&pool, &schema, t);
+                assert!(crate::authz::migrate(&*loc, &cat, t).await.unwrap() > 0);
+                assert_eq!(
+                    crate::authz::migrate(&*loc, &cat, t).await.unwrap(),
+                    0,
+                    "a current catalog: no auth change"
+                );
+                admin::create_user(&cat, t, &NewUser::new("fresh", b"pw-1"), &SystemClock)
+                    .await
+                    .unwrap();
+
+                // Upgraded: a catalog at auth format 2, as the dev stack's t1.
+                let old = format!("{schema}_f2");
+                let t2 = TenantId(t.0 + 500);
+                seed_directory(&*g, t2).await;
+                let r = async {
+                    let mut conn = pool.get_conn().await.unwrap();
+                    let f2 = sprig_catalog::Module {
+                        name: crate::store::MODULE,
+                        migrations: &crate::store::AUTH_MIGRATIONS[..2],
+                    };
+                    Migrator::new(&[f2])
+                        .unwrap()
+                        .run(&mut conn, &old, &MigrateOpts::default())
+                        .await
+                        .unwrap();
+                    drop(conn);
+                    let cat2 = catalog(&pool, &old, t2, &g);
+                    let loc2 = locator(&pool, &old, t2);
+                    let before = admin::create_user(
+                        &cat2,
+                        t2,
+                        &NewUser::new("before", b"pw-1"),
+                        &SystemClock,
+                    )
+                    .await;
+                    crate::authz::migrate(&*loc2, &cat2, t2).await.unwrap();
+                    let after = admin::create_user(
+                        &cat2,
+                        t2,
+                        &NewUser::new("after", b"pw-1"),
+                        &SystemClock,
+                    )
+                    .await;
+                    (before, after)
+                }
+                .await;
+                let mut conn = pool.get_conn().await.unwrap();
+                conn.query_drop(format!("DROP DATABASE IF EXISTS {}", quote(&old)))
+                    .await
+                    .unwrap();
+                drop(conn);
+                let (before, after) = r;
+                let e = before.expect_err("format 2 can't store a scram_sha_512 verifier");
+                println!("CREATE USER on auth format 2 before the migration: {e}");
+                after.unwrap();
+            })
+            .await;
+        },
+    )
+    .await;
+}

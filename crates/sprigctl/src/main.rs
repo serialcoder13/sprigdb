@@ -38,7 +38,7 @@
 //! - `sprigctl txn list|show|resolve` (chapter 18): in-doubt distributed
 //!   transactions; see [`txn`].
 //!
-//! Every other command group parses and prints "not implemented yet",
+//! Every other command group is hidden, and prints "not available in this version",
 //! exiting with status 1.
 //!
 //! The Admin API is served by the DC's controllers on
@@ -73,6 +73,8 @@ mod settings;
 mod sharding;
 mod sink;
 mod space;
+// Chapter 14's tenant suspension (bugfix-interim).
+mod suspend;
 mod txn;
 
 use std::io::{BufRead, IsTerminal, Write};
@@ -91,8 +93,8 @@ use sprig_controller::users::{CreateUserRequest, CreateUserResponse};
 use crate::client::{AdminClient, CallError, DEFAULT_ENDPOINT};
 use crate::cluster::RegisterFlags;
 
-/// Command groups not implemented yet, and their subcommands (writing
-/// guide, 5.10).
+/// Command groups not available in this version, and their subcommands:
+/// hidden from help (writing guide, 5.10).
 const GROUPS: &[(&str, &str, &[&str])] = &[
     ("feed", "Change feeds", &["list", "show", "lag"]),
     (
@@ -145,7 +147,7 @@ fn tenant_group() -> Command {
         )
         .subcommand(
             Command::new("user")
-                .about("Users of a tenant (interim, until CREATE USER: chapter 29)")
+                .about("A tenant's users, created by an operator (inside the tenant, CREATE USER does the same)")
                 .subcommand_required(true)
                 .arg_required_else_help(true)
                 .subcommand(
@@ -196,6 +198,7 @@ fn tenant_group() -> Command {
                 ),
         );
     g = placement::add_pin_cmds(g);
+    g = suspend::add_cmds(g);
     // Chapter 24's moves between DCs and traffic (crate::dcmove).
     g = g
         .subcommand(dcmove::move_command())
@@ -291,7 +294,7 @@ fn cluster_group() -> Command {
         .arg_required_else_help(true)
         .subcommand(
             Command::new("register")
-                .about("Precheck and register an external cluster (chapter 27)")
+                .about("Check an existing MariaDB cluster and register it with SprigDB")
                 .arg(Arg::new("name").help("A name unique in the DC"))
                 .arg(
                     Arg::new("file")
@@ -323,7 +326,7 @@ fn cluster_group() -> Command {
                     Arg::new("memory-gb")
                         .long("memory-gb")
                         .value_parser(clap::value_parser!(u64))
-                        .help("Server memory, GB (for tuning)"),
+                        .help("Server memory, GB (recorded; not used yet)"),
                 )
                 .arg(
                     Arg::new("storage-gb")
@@ -515,8 +518,11 @@ fn cli() -> Command {
         .subcommand(operator::operator_group())
         .subcommand(operator::token_group());
     for &(group, about, subs) in GROUPS {
+        // Not available in this version: hidden from help, and running one
+        // says so and exits non-zero.
         let mut g = Command::new(group)
             .about(about)
+            .hide(true)
             .subcommand_required(true)
             .arg_required_else_help(true);
         for &sub in subs {
@@ -526,7 +532,7 @@ fn cli() -> Command {
                         .num_args(0..)
                         .trailing_var_arg(true)
                         .allow_hyphen_values(true)
-                        .help("Arguments (not parsed yet)"),
+                        .help("Arguments"),
                 ),
             );
         }
@@ -568,7 +574,7 @@ fn main() -> ExitCode {
         _ => false,
     };
     if !implemented {
-        eprintln!("sprigctl {group} {name}: not implemented yet");
+        eprintln!("sprigctl {group} {name}: not available in this version");
         return ExitCode::FAILURE;
     }
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -1049,6 +1055,10 @@ async fn run_tenant(
     match cmd {
         "pin" | "unpin" => {
             placement::run_pin(c, cmd, sub, out).await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        "suspend" | "resume" => {
+            suspend::run(c, cmd, sub, m.get_flag("dry-run"), out).await?;
             Ok(ExitCode::SUCCESS)
         }
         "failover" | "standby" => {

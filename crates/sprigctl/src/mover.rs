@@ -82,7 +82,7 @@ pub(crate) fn shard_group() -> Command {
                     Arg::new("pin")
                         .long("pin")
                         .action(ArgAction::SetTrue)
-                        .help("Then pin the tenant to the target (chapter 11)"),
+                        .help("Then pin the tenant to the target"),
                 ),
         )
 }
@@ -237,7 +237,11 @@ pub(crate) async fn run(
                 .await?;
             print(out, &j, show_text);
         }
-        _ => return Err(Failed(format!("{group} {cmd}: not implemented yet"))),
+        _ => {
+            return Err(Failed(format!(
+                "{group} {cmd}: not available in this version"
+            )));
+        }
     }
     Ok(())
 }

@@ -130,7 +130,8 @@ struct Inner {
     rng: SystemRandom,
     gateway_id: u32,
     clock: Arc<dyn Clock>,
-    settings: CaptureSettings,
+    /// Live: replaced when a `workload.*` key changes.
+    settings: arc_swap::ArcSwap<CaptureSettings>,
     /// Weights of writes inside compound statements not yet counted as a
     /// run, by tenant and fingerprint (decision A4).
     compound_weights: std::sync::Mutex<std::collections::HashMap<(TenantId, u64), f64>>,
@@ -186,7 +187,7 @@ impl GatewayWorkload {
             rng: SystemRandom::new(),
             gateway_id,
             clock,
-            settings,
+            settings: arc_swap::ArcSwap::from_pointee(settings),
             compound_weights: std::sync::Mutex::new(std::collections::HashMap::new()),
         }))
     }
@@ -206,7 +207,27 @@ impl GatewayWorkload {
     /// `workload.max_text_bytes`.
     #[must_use]
     pub fn max_text_bytes(&self) -> usize {
-        self.0.settings.max_text_bytes
+        self.0.settings.load().max_text_bytes
+    }
+
+    /// The capture settings now.
+    #[must_use]
+    pub fn capture_settings(&self) -> CaptureSettings {
+        **self.0.settings.load()
+    }
+
+    /// Replaces the capture settings and the recorder's and sample
+    /// outbox's (the `workload.*` keys apply live).
+    pub fn reconfigure(
+        &self,
+        recorder: sprig_workload::recorder::RecorderConfig,
+        capture: CaptureSettings,
+    ) {
+        self.0.outbox.set_per_bucket(recorder.samples_per_bucket);
+        self.0.recorder.set_config(recorder);
+        if **self.0.settings.load() != capture {
+            self.0.settings.store(Arc::new(capture));
+        }
     }
 
     /// This process's gateway id.
@@ -244,7 +265,7 @@ impl GatewayWorkload {
             rows_examined: ex.examined,
             rows_returned: ex.rows_returned.max(ex.rows_affected),
             expires_at: wall
-                + Duration::from_secs(u64::from(w.settings.sample_retention_days) * 86_400),
+                + Duration::from_secs(u64::from(w.settings.load().sample_retention_days) * 86_400),
         };
         match seal(&*w.keyring, &w.rng, tenant, fp.id, &payload, meta) {
             Ok(sealed) => {
@@ -464,7 +485,7 @@ impl SessionCapture {
 
         if let Some(s) = done.sample.filter(|_| p.plan.capture_params && !done.error) {
             let mut literals = SampledLiterals::from_execution(s.text, &p.fp, s.params);
-            cap_lists(&mut literals, w.settings.max_in_list_values);
+            cap_lists(&mut literals, w.settings.load().max_in_list_values);
             let payload = SamplePayload {
                 literals,
                 context: s.context,
@@ -476,7 +497,9 @@ impl SessionCapture {
                 rows_examined: done.examined,
                 rows_returned: done.rows_returned.max(done.rows_affected),
                 expires_at: wall
-                    + Duration::from_secs(u64::from(w.settings.sample_retention_days) * 86_400),
+                    + Duration::from_secs(
+                        u64::from(w.settings.load().sample_retention_days) * 86_400,
+                    ),
             };
             match seal(&*w.keyring, &w.rng, tenant, p.fp.id, &payload, meta) {
                 Ok(sealed) => {
@@ -731,17 +754,7 @@ pub fn start(
         Arc::new(sprig_workload::keyring::NoKeys)
     };
     let dc = config.node.dc.clone();
-    let get_u32 = |s: &sprig_settings::Setting<u32>| live.get(s, &SettingCtx::process(&dc));
-    let cfg = ws::recorder_config(
-        get_u32,
-        |s| live.get(s, &SettingCtx::process(&dc)),
-        |s| live.get(s, &SettingCtx::process(&dc)),
-    );
-    let capture = CaptureSettings {
-        max_text_bytes: usize::try_from(get_u32(&ws::MAX_TEXT_BYTES)).unwrap_or(4096),
-        max_in_list_values: usize::try_from(get_u32(&ws::MAX_IN_LIST_VALUES)).unwrap_or(1000),
-        sample_retention_days: get_u32(&ws::SAMPLE_RETENTION_DAYS),
-    };
+    let (cfg, capture) = settings_now(live, &dc);
     let started = clock.wall();
     let gw = gateway_id(&config.node.id(), started);
     let salt = u64::from(gw) << 32
@@ -774,8 +787,47 @@ pub fn start(
         recorder, outbox, target, gw, clock, settings,
     ));
     tracing::info!(gateway_id = gw, "workload capture on");
+    // The recorder's keys apply live: a change to any `workload.*` key
+    // rebuilds the recorder's and the capture's settings.
+    let mut changes = live.subscribe(&["workload.*"]);
+    let (wlive, wl2, wstop) = (live.clone(), wl.clone(), shutdown.clone());
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = wstop.cancelled() => return,
+                r = changes.changed() => {
+                    if r.is_err() {
+                        return;
+                    }
+                    let (cfg, capture) = settings_now(&wlive, &dc);
+                    wl2.reconfigure(cfg, capture);
+                    tracing::info!("workload capture settings changed");
+                }
+            }
+        }
+    });
     let task = tokio::spawn(flusher.run(shutdown));
     Ok((Arc::new(wl), Some(task)))
+}
+
+/// The recorder's and the capture's settings at this DC's process scopes
+/// now.
+fn settings_now(
+    live: &sprig_settings::LiveSettings,
+    dc: &sprig_common::ids::DcId,
+) -> (sprig_workload::recorder::RecorderConfig, CaptureSettings) {
+    use sprig_settings::SettingCtx;
+    use sprig_workload::settings as ws;
+    let snap = live.snapshot();
+    let ctx = SettingCtx::process(dc);
+    let get_u32 = |s: &sprig_settings::Setting<u32>| snap.get(s, &ctx);
+    let cfg = ws::recorder_config(get_u32, |s| snap.get(s, &ctx), |s| snap.get(s, &ctx));
+    let capture = CaptureSettings {
+        max_text_bytes: usize::try_from(get_u32(&ws::MAX_TEXT_BYTES)).unwrap_or(4096),
+        max_in_list_values: usize::try_from(get_u32(&ws::MAX_IN_LIST_VALUES)).unwrap_or(1000),
+        sample_retention_days: get_u32(&ws::SAMPLE_RETENTION_DAYS),
+    };
+    (cfg, capture)
 }
 
 #[cfg(test)]

@@ -43,6 +43,7 @@ pub fn request(
         client_ip: peer.ip(),
         tls: tls.is_some(),
         client_cert: tls.is_some_and(|t| t.client_cert),
+        client_dn: tls.and_then(|t| t.client_dn.clone()),
         can_handle_expired_password: client_caps.contains(Caps::CAN_HANDLE_EXPIRED_PASSWORDS),
     }
 }

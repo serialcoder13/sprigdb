@@ -1062,6 +1062,9 @@ impl Copy {
             Self::spawn_reader(t, c, tx.clone(), reader_stop.clone());
         }
         let _reader = reader_stop.clone().drop_guard();
+        // This copy's part of `sprig_search_index_lag_seconds`, dropped
+        // when it stops following.
+        let lag = LagReport::new();
         // Each key's last applied clamp, and each cluster's clamp so far.
         let mut newest: HashMap<Key, u64> = HashMap::new();
         let mut frontier: BTreeMap<ClusterId, u64> = BTreeMap::new();
@@ -1176,6 +1179,9 @@ impl Copy {
                 if boundary && self.applied.borrow().pos != pos {
                     self.mark(&pos);
                 }
+                if boundary {
+                    lag.report(&frontier);
+                }
                 since = Instant::now();
                 continue;
             }
@@ -1188,10 +1194,77 @@ impl Copy {
                 || (boundary && (since.elapsed() >= interval || waiting || early))
             {
                 self.commit(&pos).await?;
+                lag.report(&frontier);
                 pending = 0;
                 since = Instant::now();
             }
         }
+    }
+}
+
+/// `sprig_search_index_lag_seconds` (`cluster`): how far the searchable
+/// state of the copies on this process trails each cluster's feed, the
+/// wall clock minus the clamp (commit time) a copy last made searchable,
+/// the largest over the copies reading the cluster. Each copy reports
+/// after a commit, or when a feed boundary leaves nothing to commit.
+struct LagReport {
+    id: u64,
+}
+
+/// Each cluster's lag per copy (by [`LagReport::id`]), in seconds.
+type Lags = HashMap<ClusterId, HashMap<u64, f64>>;
+
+fn lags() -> std::sync::MutexGuard<'static, Lags> {
+    static LAGS: std::sync::OnceLock<std::sync::Mutex<Lags>> = std::sync::OnceLock::new();
+    LAGS.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Seconds from a feed clamp (seconds in the high 32 bits) to `now`.
+#[allow(clippy::cast_precision_loss)]
+fn clamp_lag(clamp: u64, now: std::time::SystemTime) -> f64 {
+    let now_ms = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    let at_ms = u128::from(clamp >> 32) * 1000;
+    now_ms.saturating_sub(at_ms) as f64 / 1000.0
+}
+
+impl LagReport {
+    fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            id: NEXT.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
+    fn report(&self, frontier: &BTreeMap<ClusterId, u64>) {
+        let now = std::time::SystemTime::now();
+        let mut all = lags();
+        for (c, clamp) in frontier {
+            if *clamp == 0 {
+                continue;
+            }
+            let per = all.entry(c.clone()).or_default();
+            per.insert(self.id, clamp_lag(*clamp, now));
+            let max = per.values().copied().fold(0.0, f64::max);
+            metrics::gauge!("sprig_search_index_lag_seconds", "cluster" => c.to_string()).set(max);
+        }
+    }
+}
+
+impl Drop for LagReport {
+    fn drop(&mut self) {
+        let mut all = lags();
+        for (c, per) in all.iter_mut() {
+            if per.remove(&self.id).is_some() {
+                let max = per.values().copied().fold(0.0, f64::max);
+                metrics::gauge!("sprig_search_index_lag_seconds", "cluster" => c.to_string())
+                    .set(max);
+            }
+        }
+        all.retain(|_, per| !per.is_empty());
     }
 }
 
@@ -1211,6 +1284,36 @@ mod tests {
         assert!(a.reached(&[(c1.clone(), "0-1-9,7-1-3".parse().unwrap())]));
         // A cluster it doesn't read yet isn't reached.
         assert!(!a.reached(&[(c2, "0-2-1".parse().unwrap())]));
+    }
+
+    #[test]
+    fn lag_is_wall_clock_minus_the_clamp() {
+        let now = std::time::UNIX_EPOCH + Duration::from_millis(1_000_500);
+        assert!((clamp_lag(990 << 32 | 7, now) - 10.5).abs() < 1e-9);
+        // A clamp ahead of this clock (skew) is no lag.
+        assert!(clamp_lag(2000 << 32, now).abs() < 1e-9);
+        let c = ClusterId::new("dc-a-c9").unwrap();
+        let (a, b) = (LagReport::new(), LagReport::new());
+        let at = |secs_ago: u64| {
+            let n = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            BTreeMap::from([(c.clone(), (n - secs_ago) << 32)])
+        };
+        a.report(&at(100));
+        b.report(&at(5));
+        let max = |c: &ClusterId| {
+            lags()
+                .get(c)
+                .map(|p| p.values().copied().fold(0.0, f64::max))
+        };
+        assert!(max(&c).unwrap() >= 100.0);
+        drop(a);
+        let m = max(&c).unwrap();
+        assert!((5.0..100.0).contains(&m), "{m}");
+        drop(b);
+        assert!(max(&c).is_none());
     }
 
     #[test]

@@ -50,7 +50,7 @@ pub static MODE: Setting<Cow<'static, str>> = Setting {
     apply: Apply::Live,
     operator_only: true,
     owner: 20,
-    doc: "Automatic split, merge and move: on, approve (chapter 52), recommend (log only) or off",
+    doc: "Automatic split, merge and move: on, approve (held for approval), recommend (log only) or off",
 };
 sprig_settings::register!(MODE);
 

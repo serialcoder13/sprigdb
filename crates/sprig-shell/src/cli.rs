@@ -197,7 +197,7 @@ pub fn command() -> Command {
         )
         .subcommand(
             Command::new("stream")
-                .about("Event streams (chapter 45)")
+                .about("Event streams")
                 .subcommand_required(true)
                 .subcommand(
                     Command::new("publish")
@@ -232,7 +232,7 @@ pub fn command() -> Command {
         )
         .subcommand(
             Command::new("queue")
-                .about("Queues (chapter 50)")
+                .about("Queues")
                 .subcommand_required(true)
                 .subcommand(
                     Command::new("publish")

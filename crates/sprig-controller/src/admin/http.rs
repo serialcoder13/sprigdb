@@ -616,8 +616,17 @@ async fn tenant_method(
         }
         Some((t, "pin")) => respond(app.svc.pin_tenant_dc(t, true).await),
         Some((t, "unpin")) => respond(app.svc.pin_tenant_dc(t, false).await),
+        // Chapter 14's suspension (crate::users::suspend).
+        Some((t, "suspend")) => {
+            let r = async {
+                let req: crate::users::SuspendTenantRequest = parse_required(&body)?;
+                app.svc.suspend_tenant(t, req).await
+            };
+            respond(r.await)
+        }
+        Some((t, "resume")) => respond(app.svc.resume_tenant(t).await),
         _ => error_response(&invalid(format!(
-            "POST /admin/v1/tenants/{name}: expected {{name}}:move, :failover, :standby, :residency, :pin or :unpin"
+            "POST /admin/v1/tenants/{name}: expected {{name}}:move, :failover, :standby, :residency, :pin, :unpin, :suspend or :resume"
         ))),
     }
 }

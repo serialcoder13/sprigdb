@@ -91,6 +91,15 @@ pub enum Stmt {
     },
     /// `ALTER TABLE t DROP SPRIG INHERITABLE`.
     DropInheritable(Name),
+    /// `ALTER TABLE t SPRIG RECONCILE HIERARCHY ...`: chapter 32's plans
+    /// telling this layer of a structural change ([`crate::hier`]); a type
+    /// plan's statement only.
+    Reconcile {
+        /// The table.
+        table: Name,
+        /// What changed.
+        change: sprig_types::HierChange,
+    },
     /// `CREATE SHARE`.
     CreateShare {
         /// The share's name.
@@ -714,6 +723,38 @@ fn alter(t: &Toks<'_>) -> Result<Stmt, SprigError> {
     if t.is(next, "DROP") && t.is(next + 1, "SPRIG") && t.is(next + 2, "INHERITABLE") {
         return Ok(Stmt::DropInheritable(table));
     }
+    if t.is(next, "SPRIG") && t.is(next + 1, "RECONCILE") && t.is(next + 2, "HIERARCHY") {
+        let usage = "ALTER TABLE t SPRIG RECONCILE HIERARCHY LOCK | ADDED | CHANGED (k, ...) | \
+                     DELETED (k, ...)";
+        let w = next + 3;
+        let keys = |open: usize| -> Result<Vec<String>, SprigError> {
+            let close = t.close_of(open).filter(|c| *c + 1 == t.len() && t.punct(open, b'('));
+            let close = close.ok_or_else(|| syntax(usage))?;
+            let mut out = Vec::new();
+            let mut a = open + 1;
+            while a < close {
+                let b = t.until(a, |i| t.punct(i, b',') || i == close).min(close);
+                if b == a {
+                    return Err(syntax(usage));
+                }
+                out.push(t.text(a, b - 1));
+                a = b + 1;
+            }
+            Ok(out)
+        };
+        let change = if t.is(w, "LOCK") && w + 1 == t.len() {
+            sprig_types::HierChange::Lock
+        } else if t.is(w, "ADDED") && w + 1 == t.len() {
+            sprig_types::HierChange::Added
+        } else if t.is(w, "CHANGED") {
+            sprig_types::HierChange::Changed(keys(w + 1)?)
+        } else if t.is(w, "DELETED") {
+            sprig_types::HierChange::Deleted(keys(w + 1)?)
+        } else {
+            return Err(syntax(usage));
+        };
+        return Ok(Stmt::Reconcile { table, change });
+    }
     Ok(Stmt::AlterTable(table))
 }
 
@@ -794,7 +835,8 @@ pub fn is_extension(sql: &[u8], lex_opts: &LexOptions) -> bool {
             2
         };
         if let Some((_, next)) = t.name(i) {
-            return (t.is(next, "SPRIG") && t.is(next + 1, "INHERITABLE"))
+            return (t.is(next, "SPRIG")
+                && (t.is(next + 1, "INHERITABLE") || t.is(next + 1, "RECONCILE")))
                 || (t.is(next, "DROP")
                     && t.is(next + 1, "SPRIG")
                     && t.is(next + 2, "INHERITABLE"));

@@ -33,6 +33,10 @@ pub(crate) struct LocalEnv<'a> {
     pub(crate) status: StatusFlags,
     /// Other gateways, for `KILL` of their sessions.
     pub(crate) peers: Option<&'a crate::peer::Peers>,
+    /// The session holds `CONNECTION_ADMIN` (chapter 29, tenant-scoped):
+    /// it may kill other users' sessions of its tenant, as MySQL 8.4
+    /// allows with `CONNECTION_ADMIN` (or the old `SUPER`).
+    pub(crate) connection_admin: bool,
 }
 
 impl std::fmt::Debug for LocalEnv<'_> {
@@ -103,9 +107,10 @@ async fn variables(
     synthesized(&cols, &[row], env.status, sink).await
 }
 
-/// `KILL [CONNECTION | QUERY] id`. Until chapter 29's privileges, a
-/// session may kill only sessions of its own user (MySQL's rule without
-/// `CONNECTION_ADMIN`).
+/// `KILL [CONNECTION | QUERY] id`. A session may kill sessions of its own
+/// user; with `CONNECTION_ADMIN` (chapter 29, decision bugfix-interim) any
+/// session of its tenant, never another tenant's (MySQL's rule, scoped to
+/// the tenant).
 async fn kill(
     id: ConnId,
     query_only: bool,
@@ -128,6 +133,13 @@ async fn kill(
         if crate::session::slot_of(id) != env.sessions.slot()
             && let (Some(peers), Some(user)) = (env.peers, user.as_deref())
         {
+            // An empty user asks the owner for any user of the tenant
+            // (`CONNECTION_ADMIN`); a tenant is required for it there.
+            let user = if env.connection_admin && tenant.is_some() {
+                ""
+            } else {
+                user
+            };
             return match peers.kill(id, query_only, tenant, user).await {
                 Ok(crate::peer::KillOutcome::Done) => sink.ok(OkPacket::new(env.status)).await,
                 Ok(crate::peer::KillOutcome::NotOwner) => sink.error(&not_owner()).await,
@@ -141,7 +153,9 @@ async fn kill(
         return sink.error(&unknown()).await;
     };
     let row = target.process_row(env.sessions.clock().now());
-    if row.user.is_none() || row.user != user || row.tenant != tenant {
+    let same_user = row.user.is_some() && row.user == user;
+    let admin = env.connection_admin && tenant.is_some() && row.user.is_some();
+    if row.tenant != tenant || !(same_user || admin) {
         return sink.error(&not_owner()).await;
     }
     // The session's own statement (R4 round 6, gaps row 78): `KILL

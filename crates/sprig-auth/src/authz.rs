@@ -68,10 +68,15 @@ pub async fn migrate(
     let mut conn = ep.pool.get_conn().await.map_err(|e| {
         SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable").with_source(e)
     })?;
-    Migrator::new(&[AUTH_MODULE, AUTHZ_MODULE])?
+    let report = Migrator::new(&[AUTH_MODULE, AUTHZ_MODULE])?
         .run(&mut conn, ep.store.schema(), &MigrateOpts::default())
         .await?;
     drop(conn);
+    if report.applied.is_empty() {
+        // Already current (the migrator's fast path): no auth change, so
+        // checking every tenant once per process reloads nothing.
+        return Ok(0);
+    }
     let c = catalog
         .change_with(tenant, VersionKind::Auth, ChangeOpts::default())
         .await?;

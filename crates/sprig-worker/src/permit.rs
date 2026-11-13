@@ -46,7 +46,7 @@ pub fn keep(
         stall,
         Box::new(move || h2.force_fence()),
         Box::new(|| {
-            tracing::error!("the worker's runtime is stuck: aborting (chapter 25 watchdog)");
+            tracing::error!("the worker's runtime is stuck: aborting (the stall watchdog fired)");
             std::process::abort();
         }),
     );

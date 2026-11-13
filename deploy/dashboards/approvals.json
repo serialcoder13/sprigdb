@@ -1,7 +1,7 @@
 {
   "uid": "sprig-approvals",
   "title": "SprigDB approvals",
-  "description": "Chapter 52: recommendations waiting for approval, decisions, escalations, auto-applies, applied changes and notifications.",
+  "description": "Recommendations waiting for approval, decisions, escalations, auto-applies, applied changes and notifications.",
   "tags": [
     "sprigdb"
   ],

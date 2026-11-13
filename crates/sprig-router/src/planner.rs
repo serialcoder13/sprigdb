@@ -94,6 +94,16 @@ pub fn plan(sql: &str, cx: &PlanCtx<'_>) -> Plan {
             p => Plan::Explain(Box::new(p)),
         };
     }
+    // `EXPLAIN [EXTENDED|PARTITIONS|FORMAT=x] s`, `DESCRIBE s` and
+    // MariaDB's `ANALYZE [FORMAT=JSON] s` (the MySQL persona's rewrites
+    // of `EXPLAIN s` and `EXPLAIN ANALYZE s`): plan `s`, then explain one
+    // of its targets with the head as the client (or the persona) wrote it.
+    if let Some(e) = split_explain(sql) {
+        return match plan(e.inner, cx) {
+            Plan::NotRouted => Plan::NotRouted,
+            p => explain_of(&e, p, cx).unwrap_or_else(Plan::Reject),
+        };
+    }
     // sqlparser doesn't read MariaDB's `LOCK IN SHARE MODE` (and MariaDB
     // 11.8 rejects `FOR SHARE`): plan without it, then put it back on
     // every SELECT the plan sends.
@@ -202,7 +212,23 @@ pub fn parse_template(sql: &str, topo: &dyn Topology) -> R<Option<Template>> {
         return Ok(None);
     }
     let (body, lock) = split_share_lock(sql);
-    let stmt = parse(body)?;
+    let stmt = match split_explain(body) {
+        // sqlparser doesn't read MariaDB's `EXPLAIN EXTENDED` or `ANALYZE
+        // s`: parse the head as `EXPLAIN` padded to its length, so the
+        // spans still point into `body` (`plan_stmt` takes the head from
+        // `body`).
+        // (Line breaks stay, so the lines do too.)
+        Some(e) if e.head.len() >= 7 && !e.head[..7].contains('\n') => {
+            let lead = body.len() - body.trim_start().len();
+            let mut masked = String::with_capacity(body.len());
+            masked.push_str(&body[..lead]);
+            masked.push_str("EXPLAIN");
+            masked.extend(e.head[7..].chars().map(|c| if c == '\n' { c } else { ' ' }));
+            masked.push_str(&body[lead + e.head.len()..]);
+            parse(&masked)?
+        }
+        _ => parse(body)?,
+    };
     let mut n = 0usize;
     let _ = visit_expressions(&stmt, |e| {
         if let Expr::Value(v) = e
@@ -545,45 +571,21 @@ fn plan_stmt(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> {
             plan_update_delete(stmt, src, cx).map(|p| lookups::via_lookup(stmt, p, cx))
         }
         Statement::Explain { statement, .. } => {
-            // Plain EXPLAIN: one shard's plan (chapter 17, "EXPLAIN").
+            // Plain EXPLAIN: one shard's plan (chapter 17, "EXPLAIN"),
+            // reached from a prepared statement's template; the head as
+            // the template wrote it.
             let inner = statement.to_string();
+            let e = split_explain(src.text).map_or(
+                Explain {
+                    head: "EXPLAIN",
+                    inner: &inner,
+                    analyze: false,
+                },
+                |e| Explain { inner: &inner, ..e },
+            );
             match plan_text(&inner, cx)? {
                 Plan::NotRouted => Ok(Plan::NotRouted),
-                Plan::Pass(t) => Ok(Plan::Pass(Target {
-                    sql: format!("EXPLAIN {}", t.sql),
-                    ..t
-                })),
-                Plan::Read(r) => first_explain(&r.targets),
-                Plan::Write(w) => first_explain(&w.targets),
-                Plan::LookupJoin(j) => first_explain(&j.outer.targets),
-                Plan::ViaLookup(v) => match &v.plan {
-                    Plan::Read(r) => first_explain(&r.targets),
-                    Plan::Write(w) => first_explain(&w.targets),
-                    _ => reject(Reason::Unsupported, "no target to explain"),
-                },
-                Plan::ViaParent(_) => reject(
-                    Reason::Unsupported,
-                    "EXPLAIN of an INSERT whose rows follow their parents",
-                ),
-                // The values aren't taken for an EXPLAIN: the plan with
-                // the first rows' placeholder values 1, 2, …
-                Plan::NeedIds(f) => match f.finish(1, 1, cx) {
-                    Plan::Pass(t) => Ok(Plan::Pass(Target {
-                        sql: format!("EXPLAIN {}", t.sql),
-                        ..t
-                    })),
-                    Plan::Write(w) => first_explain(&w.targets),
-                    p @ Plan::Reject(_) => Ok(p),
-                    _ => reject(
-                        Reason::Unsupported,
-                        "EXPLAIN of an INSERT whose rows follow their parents",
-                    ),
-                },
-                // Plain EXPLAIN of a gathered read: refused as before.
-                Plan::Gather(g) => Ok(Plan::Reject(g.fallback.clone())),
-                // Never planned from text (the gateway plans graph calls).
-                Plan::Graph(_) => reject(Reason::Unsupported, "plain EXPLAIN of GRAPH_TABLE"),
-                p @ (Plan::Reject(_) | Plan::Explain(_)) => Ok(p),
+                p => explain_of(&e, p, cx),
             }
         }
         _ => {
@@ -603,14 +605,152 @@ fn plan_stmt(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> {
     }
 }
 
-fn first_explain(targets: &[Target]) -> R<Plan> {
-    let Some(t) = targets.first() else {
-        return reject(Reason::Unsupported, "no target to explain");
+/// An `EXPLAIN` of a statement, split at the statement.
+#[derive(Debug, Clone, Copy)]
+struct Explain<'s> {
+    /// `EXPLAIN`, `EXPLAIN EXTENDED`, `EXPLAIN FORMAT=JSON`, `DESCRIBE`,
+    /// `ANALYZE FORMAT=JSON`, … as written.
+    head: &'s str,
+    /// The statement explained.
+    inner: &'s str,
+    /// The head runs the statement (`ANALYZE`, `EXPLAIN ANALYZE`).
+    analyze: bool,
+}
+
+/// `EXPLAIN|DESCRIBE|DESC [EXTENDED|PARTITIONS|ANALYZE|FORMAT[=]x]… s`
+/// or MariaDB's `ANALYZE [FORMAT[=]x] s`, where `s` is a statement
+/// `EXPLAIN` describes; `None` for anything else (`DESCRIBE tbl`,
+/// `ANALYZE TABLE t`, `EXPLAIN FORMAT=SPRIG s`).
+fn split_explain(sql: &str) -> Option<Explain<'_>> {
+    const STMTS: &[&str] = &[
+        "SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "REPLACE", "VALUES",
+    ];
+    let t = sql.trim_start();
+    let b = t.as_bytes();
+    let word_end = |at: usize| {
+        b[at..]
+            .iter()
+            .position(|c| !(c.is_ascii_alphanumeric() || *c == b'_'))
+            .map_or(b.len(), |n| at + n)
     };
-    Ok(Plan::Pass(Target {
-        sql: format!("EXPLAIN {}", t.sql),
-        ..t.clone()
-    }))
+    let skip_ws = |at: usize| {
+        b[at..]
+            .iter()
+            .position(|c| !c.is_ascii_whitespace())
+            .map_or(b.len(), |n| at + n)
+    };
+    let first_end = word_end(0);
+    let first = &t[..first_end];
+    let analyze_stmt = first.eq_ignore_ascii_case("ANALYZE");
+    if !(analyze_stmt
+        || ["EXPLAIN", "DESCRIBE", "DESC"]
+            .iter()
+            .any(|w| first.eq_ignore_ascii_case(w)))
+    {
+        return None;
+    }
+    let mut analyze = analyze_stmt;
+    let mut head_end = first_end;
+    let mut at = skip_ws(first_end);
+    loop {
+        let end = word_end(at);
+        let w = &t[at..end];
+        if w.eq_ignore_ascii_case("FORMAT") {
+            let mut v = skip_ws(end);
+            v = skip_ws(v + usize::from(b.get(v) == Some(&b'=')));
+            let v_end = word_end(v);
+            let fmt = &t[v..v_end];
+            if fmt.is_empty() || fmt.eq_ignore_ascii_case("SPRIG") {
+                return None;
+            }
+            head_end = v_end;
+        } else if !analyze_stmt
+            && ["EXTENDED", "PARTITIONS", "ANALYZE"]
+                .iter()
+                .any(|o| w.eq_ignore_ascii_case(o))
+        {
+            analyze |= w.eq_ignore_ascii_case("ANALYZE");
+            head_end = end;
+        } else {
+            break;
+        }
+        at = skip_ws(head_end);
+    }
+    let end = word_end(at);
+    let stmt = t[at..].starts_with('(')
+        || (end > at && STMTS.iter().any(|w| t[at..end].eq_ignore_ascii_case(w)));
+    stmt.then_some(Explain {
+        head: &t[..head_end],
+        inner: &t[at..],
+        analyze,
+    })
+}
+
+/// An `EXPLAIN` of `inner` (the plan of `e.inner`): one target's plan,
+/// with `e`'s head.
+fn explain_of(e: &Explain<'_>, inner: Plan, cx: &PlanCtx<'_>) -> R<Plan> {
+    let one = |t: &Target| {
+        Plan::Pass(Target {
+            sql: format!("{} {}", e.head, t.sql),
+            ..t.clone()
+        })
+    };
+    let first = |targets: &[Target]| match targets.first() {
+        Some(t) => Ok(one(t)),
+        None => reject(Reason::Unsupported, "no target to explain"),
+    };
+    // `ANALYZE` runs the statement: a write would run on one shard, past
+    // the router's write path (IDs, lookups, change notes).
+    if e.analyze && !is_read(e.inner) {
+        return reject(
+            Reason::Unsupported,
+            "EXPLAIN ANALYZE of a write on a sharded table",
+        );
+    }
+    match inner {
+        Plan::NotRouted => Ok(Plan::NotRouted),
+        Plan::Pass(t) => Ok(one(&t)),
+        Plan::Read(r) => first(&r.targets),
+        Plan::Write(w) => first(&w.targets),
+        Plan::LookupJoin(j) => first(&j.outer.targets),
+        Plan::ViaLookup(v) => match &v.plan {
+            Plan::Read(r) => first(&r.targets),
+            Plan::Write(w) => first(&w.targets),
+            _ => reject(Reason::Unsupported, "no target to explain"),
+        },
+        Plan::ViaParent(_) => reject(
+            Reason::Unsupported,
+            "EXPLAIN of an INSERT whose rows follow their parents",
+        ),
+        // The values aren't taken for an EXPLAIN: the plan with the first
+        // rows' placeholder values 1, 2, …
+        Plan::NeedIds(f) => match f.finish(1, 1, cx) {
+            Plan::Pass(t) => Ok(one(&t)),
+            Plan::Write(w) => first(&w.targets),
+            p @ Plan::Reject(_) => Ok(p),
+            _ => reject(
+                Reason::Unsupported,
+                "EXPLAIN of an INSERT whose rows follow their parents",
+            ),
+        },
+        // Plain EXPLAIN of a gathered read: refused as before.
+        Plan::Gather(g) => Ok(Plan::Reject(g.fallback.clone())),
+        // Never planned from text (the gateway plans graph calls).
+        Plan::Graph(_) => reject(Reason::Unsupported, "plain EXPLAIN of GRAPH_TABLE"),
+        p @ (Plan::Reject(_) | Plan::Explain(_)) => Ok(p),
+    }
+}
+
+/// Whether `sql` starts as a read (`SELECT`, `WITH`, `VALUES`, `(`).
+fn is_read(sql: &str) -> bool {
+    let t = sql.trim_start().trim_start_matches('(').trim_start();
+    let end = t
+        .bytes()
+        .position(|c| !c.is_ascii_alphabetic())
+        .unwrap_or(t.len());
+    ["SELECT", "WITH", "VALUES"]
+        .iter()
+        .any(|w| t[..end].eq_ignore_ascii_case(w))
 }
 
 /// Chapter 17 ("Prepared statements", H9): the text a `COM_STMT_PREPARE`
@@ -3331,13 +3471,13 @@ fn route_value(v: &Expr, entry: &TableEntry, class: KeyClass, zero_generates: bo
     {
         return reject(
             Reason::AutoIncrement,
-            "a NULL key (ID blocks come with chapter 19)",
+            "a NULL key (a generated key value can't be routed)",
         );
     }
     if matches!(v, Expr::Identifier(i) if i.value.eq_ignore_ascii_case("DEFAULT")) {
         return reject(
             Reason::AutoIncrement,
-            "a DEFAULT key (ID blocks come with chapter 19)",
+            "a DEFAULT key (a generated key value can't be routed)",
         );
     }
     let kv = key_literal(v, class)

@@ -4,6 +4,14 @@
 //! [`sprig_streams::runtime::run_job`]; this module gives it the worker's
 //! catalogs, shard pools (as `sprig_ctl`, on the tenant's cluster now) and
 //! the tenant's feed.
+//!
+//! **One dump per cluster (R9, r9feed).** Every sequencer's feed reads
+//! through the worker's shared reader ([`sprig_feed::shared`]): an event
+//! stream's tail through the view of the stream outboxes
+//! (`__sprig_eo_*`), a change topic's through the view that keeps its
+//! tenant whole. However many stream instances a cluster holds, the worker
+//! opens one binlog dump on it (plus at most four short catch-up dumps for
+//! instances far behind).
 
 use std::sync::Arc;
 
@@ -16,13 +24,14 @@ use sprig_common::{Result, SprigCode, SprigError};
 use sprig_controller::catalogs::{ClusterPools, ShardMapLocator};
 use sprig_controller::dispatch::JobClass;
 use sprig_feed::names::{CatalogPools, CatalogResolver};
+use sprig_feed::shared::{Kept, SharedFeed};
 use sprig_feed::{Clusters, MetaPlacement, StartAt, TailOptions, TenantTail};
 use sprig_meta::MetaStore;
 use sprig_streams::StreamId;
 use sprig_streams::runtime::{JOB_KIND, JobEnd, JobEnv, Report, run_job};
 use sprig_streams::sequencer::{FeedOpener, FeedSource, Start};
 
-use crate::logic::{LogicEnv, RegistryClusters};
+use crate::logic::LogicEnv;
 use crate::runtime::{JobCtx, JobHandler};
 
 /// What the sequencers share.
@@ -31,7 +40,10 @@ pub struct StreamsEnv {
     dc: Arc<dyn MetaStore>,
     pools: Arc<dyn ClusterPools>,
     locator: Arc<ShardMapLocator>,
-    clusters: Arc<RegistryClusters>,
+    /// The shared reader's view of the stream outboxes (event streams).
+    outboxes: Arc<dyn Clusters>,
+    /// The shared reader's view keeping a tenant whole (change topics).
+    whole: Arc<dyn Clusters>,
     /// The worker's live settings (global `stream.*`).
     settings: crate::settings::WorkerSettings,
 }
@@ -43,14 +55,16 @@ impl std::fmt::Debug for StreamsEnv {
 }
 
 impl StreamsEnv {
-    /// The logic jobs' catalogs, pools and feeds.
+    /// The logic jobs' catalogs and pools, and views of the worker's
+    /// shared reader `feed`.
     #[must_use]
-    pub fn from_logic(env: &LogicEnv) -> Self {
+    pub fn from_logic(env: &LogicEnv, feed: &Arc<SharedFeed>) -> Self {
         Self {
             dc: Arc::clone(&env.dc),
             pools: Arc::clone(&env.pools),
             locator: Arc::clone(&env.locator),
-            clusters: Arc::clone(&env.clusters),
+            outboxes: feed.view(Kept::Tables(vec![OUTBOXES.to_owned()].into())),
+            whole: feed.view(Kept::All),
             settings: env.settings.clone(),
         }
     }
@@ -64,6 +78,9 @@ impl CatalogPools for Catalogs {
         Ok(self.0.writer(tenant).await?.pool)
     }
 }
+
+/// The stream outboxes, as a shared-reader table pattern.
+pub const OUTBOXES: &str = "__sprig_eo_*";
 
 /// The tenant's feed, keeping the stream's outbox.
 struct Feeds {
@@ -82,10 +99,22 @@ impl FeedOpener for Feeds {
                 pos: pos.clone(),
             },
         };
+        // An event stream keeps its outbox only; a change topic reads the
+        // tenant's tables and DDL.
+        let outboxes_only = !self.keep.is_empty()
+            && self
+                .keep
+                .iter()
+                .all(|k| k.starts_with(sprig_streams::model::OUTBOX_PREFIX));
+        let clusters = if outboxes_only {
+            Arc::clone(&self.env.outboxes)
+        } else {
+            Arc::clone(&self.env.whole)
+        };
         let tail = TenantTail::start(
             self.tenant,
             at,
-            Arc::clone(&self.env.clusters) as Arc<dyn Clusters>,
+            clusters,
             Arc::new(MetaPlacement::new(Arc::clone(&self.env.dc))),
             Arc::new(CatalogResolver::new(Arc::new(Catalogs(Arc::clone(
                 &self.env.locator,

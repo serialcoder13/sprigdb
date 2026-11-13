@@ -21,4 +21,4 @@ profile:      v3
   compiled_logic        yes
 gaps:
   - node n1: require_secure_transport is OFF: SET GLOBAL require_secure_transport = ON
-tuning:       no plan yet (server tuning is chapter 09 step 10)
+tuning:       no plan (automatic server tuning isn't offered in this release)

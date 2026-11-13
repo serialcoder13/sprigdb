@@ -3,6 +3,16 @@
   "title": "SprigDB chart values",
   "type": "object",
   "required": ["dc", "deploymentId", "image"],
+  "$defs": {
+    "listener": {
+      "type": "object",
+      "properties": {"enabled": {"type": "boolean"}, "port": {"type": "integer", "minimum": 1, "maximum": 65535}}
+    },
+    "clientCertMode": {
+      "description": "listener.<name>.client_cert: off, optional or required (false, a bare YAML off, means off)",
+      "anyOf": [{"enum": ["off", "optional", "required"]}, {"const": false}]
+    }
+  },
   "properties": {
     "dc": {
       "type": "object",
@@ -35,7 +45,12 @@
     },
     "controller": {
       "type": "object",
-      "properties": {"replicas": {"type": "integer", "minimum": 1}, "globalCandidate": {"type": "boolean"}, "bootstrap": {"type": "boolean"}}
+      "properties": {
+        "replicas": {"type": "integer", "minimum": 1},
+        "globalCandidate": {"type": "boolean"},
+        "bootstrap": {"type": "boolean"},
+        "adminApi": {"type": "object", "properties": {"tlsSecret": {"type": "string"}, "allowPlain": {"type": "boolean"}}}
+      }
     },
     "gateway": {
       "type": "object",
@@ -48,7 +63,59 @@
             "targetCPUUtilizationPercentage": {"type": "integer", "minimum": 1, "maximum": 100}
           }
         },
-        "service": {"type": "object", "properties": {"type": {"enum": ["LoadBalancer", "NodePort", "ClusterIP"]}}}
+        "service": {"type": "object", "properties": {"type": {"enum": ["LoadBalancer", "NodePort", "ClusterIP"]}}},
+        "clientTls": {
+          "type": "object",
+          "properties": {
+            "secretName": {"type": "string"},
+            "mountPath": {"type": "string", "pattern": "^/"},
+            "clientCert": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "default": {"$ref": "#/$defs/clientCertMode"},
+                "listeners": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "mysql": {"$ref": "#/$defs/clientCertMode"},
+                    "mariadb": {"$ref": "#/$defs/clientCertMode"},
+                    "http": {"$ref": "#/$defs/clientCertMode"},
+                    "https": {"$ref": "#/$defs/clientCertMode"},
+                    "mongo": {"$ref": "#/$defs/clientCertMode"},
+                    "redis": {"$ref": "#/$defs/clientCertMode"},
+                    "bolt": {"$ref": "#/$defs/clientCertMode"},
+                    "kafka": {"$ref": "#/$defs/clientCertMode"},
+                    "amqp": {"$ref": "#/$defs/clientCertMode"},
+                    "amqps": {"$ref": "#/$defs/clientCertMode"}
+                  }
+                }
+              }
+            },
+            "clientCa": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "secretName": {"type": "string"},
+                "configMap": {"type": "string"},
+                "key": {"type": "string", "minLength": 1},
+                "mountPath": {"type": "string", "pattern": "^/"}
+              }
+            }
+          }
+        },
+        "listeners": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mongo": {"$ref": "#/$defs/listener"},
+            "redis": {"$ref": "#/$defs/listener"},
+            "bolt": {"$ref": "#/$defs/listener"},
+            "kafka": {"$ref": "#/$defs/listener"},
+            "amqp": {"$ref": "#/$defs/listener"},
+            "amqps": {"$ref": "#/$defs/listener"}
+          }
+        }
       }
     },
     "worker": {"type": "object", "properties": {"replicas": {"type": "integer", "minimum": 0}}},

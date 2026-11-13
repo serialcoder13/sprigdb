@@ -372,7 +372,7 @@ impl TopologyDriver for GaleraDriver {
 
     async fn fence_cluster(&self, reason: FenceReason) -> Result<()> {
         Err(capability(format!(
-            "self-fencing ({reason:?}) needs a managed cluster (R2)"
+            "self-fencing ({reason:?}) needs a managed cluster"
         )))
     }
 

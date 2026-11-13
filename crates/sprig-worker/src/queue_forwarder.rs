@@ -68,7 +68,7 @@ use sprig_controller::catalogs::ShardMapLocator;
 use sprig_controller::dispatch::JobClass;
 use sprig_feed::PlacementView;
 use sprig_feed::names::{CatalogPools, CatalogResolver};
-use sprig_feed::shared::SharedClusters;
+use sprig_feed::shared::{Kept, SharedClusters, SharedFeed};
 use sprig_feed::subs::{Subscription, Subscriptions};
 use sprig_feed::{
     ChangeEvent, Clusters, FeedItem, MetaPlacement, Op, ResumeToken, StartAt, TailOptions,
@@ -143,11 +143,18 @@ impl JobHandler for QueueForwarder {
     }
 }
 
-/// The worker's shared reader for the forwarder: one dump per cluster,
+/// A shared reader of its own for the forwarder: one dump per cluster,
 /// rows of the two outboxes only.
 #[must_use]
 pub fn shared_reader(clusters: Arc<dyn Clusters>) -> Arc<SharedClusters> {
     Arc::new(SharedClusters::new(clusters, &[QO, XO]))
+}
+
+/// The forwarder's view of the worker's shared reader (R9, r9feed): the
+/// same dump as the stream sequencers', rows of the two outboxes.
+#[must_use]
+pub fn shared_view(feed: &Arc<SharedFeed>) -> Arc<SharedClusters> {
+    feed.view(Kept::Tables(vec![QO.to_owned(), XO.to_owned()].into()))
 }
 
 /// How often the cluster job looks for tenants.

@@ -28,7 +28,7 @@ use crate::{Failed, Output, print};
 /// `sprigctl tenant residency`.
 pub(crate) fn residency_command() -> Command {
     Command::new("residency")
-        .about("Show or set a tenant's data residency (chapter 26)")
+        .about("Show or set a tenant's data residency")
         .arg(Arg::new("name").required(true).help("The tenant"))
         .arg(
             Arg::new("policy")

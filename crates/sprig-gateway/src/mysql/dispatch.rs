@@ -863,6 +863,10 @@ impl CommandLoop {
             hostname: &self.shared.cfg.hostname,
             status: self.status,
             peers: self.ctx.peers.as_deref(),
+            connection_admin: self
+                .exec
+                .holds_tenant_privilege(sprig_auth::authz::Action::ConnectionAdmin)
+                .unwrap_or(false),
         };
         let mut sink = WireSink::new(&mut self.framed, self.proto.persona, self.proto.caps);
         super::answer::answer(&l, &self.session, &env, &mut sink).await?;

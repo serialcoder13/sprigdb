@@ -641,6 +641,27 @@ impl Outbound for MockOutbound {
     }
 }
 
+/// The names a JavaScript validation or after-commit trigger takes when
+/// it is a body alone (as `sprig_logic_compile::js::compile_with` binds
+/// them).
+pub const JS_ROW_NAMES: [&str; 4] = ["row", "old", "op", "ctx"];
+
+/// The engine's signature of a JavaScript validation or after-commit
+/// trigger: its default export's parameters by name, or [`JS_ROW_NAMES`]
+/// for a body alone; [`trigger_args`] fills them by name.
+#[must_use]
+pub fn js_row_sig(source: &str) -> sprig_logic_js::ScriptSig {
+    let names = sprig_logic_compile::js::entry_params(source)
+        .unwrap_or_else(|| JS_ROW_NAMES.iter().map(|n| (*n).to_owned()).collect());
+    sprig_logic_js::ScriptSig {
+        params: names
+            .into_iter()
+            .map(|n| (n, sprig_logic_js::ParamTy::Json))
+            .collect(),
+        scalar: false,
+    }
+}
+
 /// The arguments a trigger or validation body gets in a test run.
 ///
 /// - Triggers on streams and queues: as the trigger's job gives them
@@ -648,8 +669,12 @@ impl Outbound for MockOutbound {
 /// - Validations and after-commit triggers written in KIRun: parameters
 ///   bound by name (chapter 41, decision V2): a column gets `row`'s
 ///   value, `old_<column>` `old`'s, `op` the operation.
-/// - The same in JavaScript or Lua: one argument, `ctx`, with `trigger
-///   {op, before, after}`, `row` and `old`.
+/// - The same in Lua: one argument, `ctx`, with `trigger {op, before,
+///   after}`, `row` and `old`.
+/// - The same in JavaScript, by the parameters' names `params` (see
+///   [`js_row_sig`]): `row` the row, `old` the old row, `ctx`
+///   that `ctx`, `op`, a column or `old_<column>` as for KIRun; a
+///   function of `ctx` alone gets `ctx`.
 #[must_use]
 pub fn trigger_args(
     req: &TestRun,
@@ -681,7 +706,8 @@ pub fn trigger_args(
     ctx["trigger"] = json!({"op": op, "before": old, "after": row});
     ctx["row"] = row.clone();
     ctx["old"] = old.clone();
-    if runtime != "kirun" {
+    let js_names = runtime == "javascript" && kirun_params.iter().any(|p| p != "ctx");
+    if runtime != "kirun" && !js_names {
         return (vec![ctx.clone()], ctx);
     }
     let field = |v: &Value, k: &str| -> Value {
@@ -697,7 +723,13 @@ pub fn trigger_args(
         .iter()
         .map(|p| {
             let l = p.to_ascii_lowercase();
-            if l == "op" {
+            if js_names && l == "row" {
+                row.clone()
+            } else if js_names && l == "old" {
+                old.clone()
+            } else if js_names && l == "ctx" {
+                ctx.clone()
+            } else if l == "op" {
                 Value::String(op.clone())
             } else if let Some(c) = l.strip_prefix("old_") {
                 field(&old, c)
@@ -933,12 +965,18 @@ impl Loaded {
     /// 39861 for source the runtime refuses; 39876 for a runtime the
     /// engine tier lacks.
     pub fn program(&self) -> Result<sprig_logic_js::Program> {
-        sprig_logic_js::Program::new(
-            &self.runtime,
-            &self.name,
-            &self.source,
-            crate::invoke::script_sig(&self.signature),
-        )
+        // A JavaScript validation or after-commit trigger is compiled
+        // (jsbind): its recorded parameters are the columns it reads, but
+        // its code takes the row by name (`row`, `old`, `ctx`, ...).
+        let sig = if self.runtime == "javascript"
+            && matches!(self.kind.as_str(), "validation" | "trigger")
+            && self.tier == "mariadb"
+        {
+            js_row_sig(&self.source)
+        } else {
+            crate::invoke::script_sig(&self.signature)
+        };
+        sprig_logic_js::Program::new(&self.runtime, &self.name, &self.source, sig)
     }
 }
 
@@ -1020,6 +1058,13 @@ pub fn draft(
     // Triggers and validations in JavaScript or Lua take one argument,
     // `ctx`, as their jobs call them.
     let sig = if matches!(
+        d.kind,
+        crate::declare::Kind::Trigger | crate::declare::Kind::Validation
+    ) && d.runtime == sprig_logic_compile::Runtime::Javascript
+        && d.source.is_none()
+    {
+        js_row_sig(&d.body)
+    } else if matches!(
         d.kind,
         crate::declare::Kind::Trigger | crate::declare::Kind::Validation
     ) {
@@ -1187,6 +1232,23 @@ mod tests {
         let (args, _) = trigger_args(&req, "javascript", &[], &json!({}));
         assert_eq!(args.len(), 1);
         assert_eq!(args[0]["trigger"]["after"]["status"], "paid");
+        // JavaScript by name (jsbind): the book's (row, old), and a body.
+        let names = |src: &str| -> Vec<String> {
+            js_row_sig(src).params.into_iter().map(|(n, _)| n).collect()
+        };
+        let p = names("export default function (row, old, op) {}");
+        assert_eq!(p, ["row", "old", "op"]);
+        let (args, _) = trigger_args(&req, "javascript", &p, &json!({}));
+        assert_eq!(args[0]["status"], "paid");
+        assert_eq!(args[2], json!("update"));
+        let p = names("if (old && old.qty > row.qty) sprig.reject('x');");
+        assert_eq!(p, JS_ROW_NAMES);
+        let (args, _) = trigger_args(&req, "javascript", &p, &json!({}));
+        assert_eq!(args[3]["trigger"]["op"], "update");
+        let p = names("export default function (ctx) {}");
+        let (args, _) = trigger_args(&req, "javascript", &p, &json!({}));
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0]["trigger"]["op"], "update");
         let req = TestRun {
             record: Some(json!({"key": "k", "value": "{}"})),
             ..TestRun::default()

@@ -106,13 +106,10 @@ pub(crate) fn frame(v: Value) -> Frame {
 
 /// `-SPRIG <NAME> <code> <message>` for a SprigDB code.
 fn sprig_error(code: u16, message: &str) -> Frame {
-    let name = SprigCode::ALL
-        .iter()
-        .find(|c| c.number() == code)
-        .map_or("ERROR", |c| {
-            c.name().strip_prefix("ER_SPRIG_").unwrap_or(c.name())
-        });
-    sprig_redis::reply::sprig(name, code, message)
+    match SprigCode::from_number(code) {
+        Some(c) => sprig_redis::reply::sprig(c, message),
+        None => Frame::error(format!("SPRIG ERROR {code} {message}")),
+    }
 }
 
 /// A failed call as Redis shows it.

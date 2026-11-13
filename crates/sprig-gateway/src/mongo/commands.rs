@@ -359,7 +359,7 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
         "mapReduce" | "eval" | "$eval" | "geoNear" | "shardCollection" | "enableSharding" => {
             if matches!(name, "shardCollection" | "enableSharding") {
                 return Ok(
-                    doc! {"ok": 1.0, "note": "recorded as a hint only: SprigDB shards collections itself (chapter 16)"},
+                    doc! {"ok": 1.0, "note": "recorded as a hint only: SprigDB shards collections itself"},
                 );
             }
             return Err(MongoError::new(
@@ -548,6 +548,7 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
                 64 * 1024 * 1024,
             )
             .map_err(|e| MongoError::new(code::INTERNAL_ERROR, e.message))?;
+            s.set_client_dc(c.client_dc.clone());
             let snapshot = body
                 .get_document("readConcern")
                 .ok()
@@ -869,6 +870,7 @@ async fn snapshot_read(
             64 * 1024 * 1024,
         )
         .map_err(|e| MongoError::new(code::INTERNAL_ERROR, e.message))?;
+        s.set_client_dc(c.client_dc.clone());
         if let Err(e) = s
             .exec("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY")
             .await
@@ -1145,9 +1147,23 @@ async fn open_change_stream(
             return Err(sprig_doc::engine::mongo_error(&e));
         }
     }
+    let visibility = sql.row_policy_docs();
+    // Chapters 29 and 38: a stream needs WATCH (MongoDB's `changeStream`)
+    // on what it watches, besides `find`; a database or deployment stream
+    // leaves out the collections without it (their events are hidden).
+    if let (Some(v), Some((_, t))) = (&visibility, &coll_spec)
+        && v.unwatched.contains(&(db.to_lowercase(), t.to_lowercase()))
+    {
+        return Err(MongoError::new(
+            code::UNAUTHORIZED,
+            format!(
+                "not authorized on {db} to execute command {{ aggregate: \"{coll}\", pipeline: [ {{ $changeStream: {{}} }} ] }}: \
+                 WATCH (changeStream) is required"
+            ),
+        ));
+    }
     // Chapter 29 (RL34): a collection whose binding policies have no
     // MongoDB form (written in SQL) can't be evaluated per event.
-    let visibility = sql.row_policy_docs();
     if let (Some(v), Some((_, t))) = (&visibility, &coll_spec)
         && matches!(
             v.tables.get(&(db.to_lowercase(), t.to_lowercase())),
@@ -1467,6 +1483,13 @@ async fn exec(
                     .insert("changeStreamPreAndPostImages", doc! {"enabled": enabled});
                 engine.catalog.save_indexes(sql, &ns, &m).await?;
             }
+            // TTL (wireup): `index: {name | keyPattern, expireAfterSeconds}`;
+            // the worker's next pass uses the new value.
+            let mut reply = doc! {};
+            if let Some(ix) = body.get("index") {
+                reply = sprig_doc::engine::ttl::coll_mod_index(&mut m, &ns, ix)?;
+                engine.catalog.save_indexes(sql, &ns, &m).await?;
+            }
             // M7: `cappedSize` and `cappedMax`.
             if let Some(o) = sprig_doc::engine::capped::coll_mod(&m.options, body)? {
                 m.options = o;
@@ -1492,7 +1515,8 @@ async fn exec(
             if let Err(e) = sql.exec(&mark).await {
                 tracing::debug!(error = %e.message, "collMod's table comment not set");
             }
-            Ok(doc! {"ok": 1.0})
+            reply.insert("ok", 1.0);
+            Ok(reply)
         }
         "insert" | "update" | "delete" | "findAndModify" | "findandmodify" | "bulkWrite" => {
             let done = sprig_doc::sessions::StmtResults::new();

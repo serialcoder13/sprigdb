@@ -127,6 +127,7 @@ impl Identity for AmqpIdentity {
                 client_ip: c.peer.ip(),
                 tls: c.tls,
                 client_cert: c.cert_login.is_some(),
+                client_dn: None,
                 can_handle_expired_password: false,
             })
             .await;

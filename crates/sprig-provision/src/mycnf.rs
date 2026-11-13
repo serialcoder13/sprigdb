@@ -198,7 +198,7 @@ pub fn render(n: &NodeSettings) -> String {
     };
     // A header the agent and the tests recognise.
     let mut out = String::from(
-        "# Written by SprigDB (chapter 27): the baseline a node starts with.\n\
+        "# Written by SprigDB: the baseline a node starts with.\n\
          # Live values are set with SET GLOBAL by the controller and survive\n\
          # restarts without editing this file.\n[mariadbd]\n",
     );

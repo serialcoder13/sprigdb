@@ -5,6 +5,7 @@
 //! `codeName` `Sprig<Name>`.
 
 use bson::{Document, doc};
+use sprig_common::SprigCode;
 
 /// A command error: code, message, and labels.
 #[derive(Debug, Clone, PartialEq)]
@@ -101,6 +102,8 @@ impl std::error::Error for MongoError {}
 /// Codes used by the front end and the document engine.
 pub mod code {
     #![allow(missing_docs)]
+    use sprig_common::SprigCode;
+
     pub const INTERNAL_ERROR: i32 = 1;
     pub const BAD_VALUE: i32 = 2;
     pub const NO_SUCH_KEY: i32 = 4;
@@ -144,11 +147,18 @@ pub mod code {
     pub const BSON_OBJECT_TOO_LARGE: i32 = 10334;
     pub const DUPLICATE_KEY: i32 = 11000;
     pub const CLIENT_METADATA_CANNOT_BE_MUTATED: i32 = 186;
-    pub const SPRIG_CURSOR_LIMIT: i32 = 39630;
-    pub const SPRIG_DOC_ID_TOO_LONG: i32 = 39660;
-    pub const SPRIG_DOC_FEATURE_UNSUPPORTED: i32 = 39662;
-    pub const SPRIG_PATH_PUBLISH_TIMEOUT: i32 = 39664;
-    pub const SPRIG_DOC_TOO_DEEP: i32 = 39665;
+    // SprigDB's own codes come from the registry (`SprigCode`).
+    pub const SPRIG_CURSOR_LIMIT: i32 = sprig(SprigCode::CursorLimit);
+    pub const SPRIG_DOC_ID_TOO_LONG: i32 = sprig(SprigCode::DocIdTooLong);
+    pub const SPRIG_DOC_FEATURE_UNSUPPORTED: i32 = sprig(SprigCode::DocFeatureUnsupported);
+    pub const SPRIG_PATH_PUBLISH_TIMEOUT: i32 = sprig(SprigCode::PathPublishTimeout);
+    pub const SPRIG_DOC_TOO_DEEP: i32 = sprig(SprigCode::DocTooDeep);
+
+    /// A registry code as a MongoDB code.
+    #[must_use]
+    pub const fn sprig(c: SprigCode) -> i32 {
+        c.number() as i32
+    }
 }
 
 /// The `codeName` of `code`; `Location<code>` for codes without a name,
@@ -221,18 +231,11 @@ pub fn code_name(code: i32) -> &'static str {
         11602 => "InterruptedDueToReplStateChange",
         13435 => "NotPrimaryNoSecondaryOk",
         13436 => "NotPrimaryOrSecondary",
-        39630 => "SprigCursorLimit",
-        39660 => "SprigDocIdTooLong",
-        39662 => "SprigDocFeatureUnsupported",
-        39663 => "SprigShardKeyArray",
-        39664 => "SprigPathPublishTimeout",
-        39665 => "SprigDocTooDeep",
-        39666 => "SprigPacketTooSmall",
-        39667 => "SprigDocInvalid",
-        39668 => "SprigDocIdImmutable",
-        39080 => "SprigSettingOutOfBounds",
-        39081 => "SprigSettingUnknown",
-        39082 => "SprigSettingScopeNotAllowed",
+        // SprigDB's own codes: their codeName from the registry.
+        39000..=39999 => u16::try_from(code)
+            .ok()
+            .and_then(SprigCode::from_number)
+            .map_or("Location", SprigCode::mongo_code_name),
         _ => "Location",
     }
 }

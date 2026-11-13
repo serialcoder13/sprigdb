@@ -50,11 +50,14 @@ fn code(e: &SprigError) -> u16 {
 
 #[test]
 fn names_are_dns_labels() {
-    for ok in ["acme", "a", "pune-2", &"x".repeat(63)] {
+    for ok in ["acme", "ab", "pune-2", &"x".repeat(63)] {
         assert!(validate_name(ok).is_ok(), "{ok}");
     }
     for bad in [
         "",
+        // One letter: logins need two (decision bugfix-interim), so the
+        // same rule refuses it here.
+        "a",
         "Acme",
         "2acme",
         "acme-",
@@ -151,7 +154,7 @@ async fn parents_are_checked_and_names_are_unique() {
     );
     assert_eq!(
         code(
-            &d.create(&new("x", Some(TenantId(99))), 64, now())
+            &d.create(&new("xx", Some(TenantId(99))), 64, now())
                 .await
                 .unwrap_err()
         ),
@@ -173,7 +176,11 @@ async fn parents_are_checked_and_names_are_unique() {
     .await
     .unwrap();
     assert_eq!(
-        code(&d.create(&new("y", Some(rid)), 64, now()).await.unwrap_err()),
+        code(
+            &d.create(&new("yy", Some(rid)), 64, now())
+                .await
+                .unwrap_err()
+        ),
         39303
     );
     d.update(rid, |e| {
@@ -184,11 +191,15 @@ async fn parents_are_checked_and_names_are_unique() {
     .await
     .unwrap();
     assert_eq!(
-        code(&d.create(&new("y", Some(rid)), 64, now()).await.unwrap_err()),
+        code(
+            &d.create(&new("yy", Some(rid)), 64, now())
+                .await
+                .unwrap_err()
+        ),
         39509
     );
     // Ids are never reused: a failed create took none.
-    let z = d.create(&new("z", None), 64, now()).await.unwrap();
+    let z = d.create(&new("zz", None), 64, now()).await.unwrap();
     assert_eq!(z.body().tenant_id, TenantId(3));
 }
 
@@ -280,17 +291,17 @@ async fn ids_come_from_the_deployments_range() {
     let d = dir();
     let range = IdRange { min: 500, max: 501 };
     let a = d
-        .create_in(&new("a", None), 64, range, now())
+        .create_in(&new("aa", None), 64, range, now())
         .await
         .unwrap();
     assert_eq!(a.body().tenant_id, TenantId(500));
     let b = d
-        .create_in(&new("b", None), 64, range, now())
+        .create_in(&new("bb", None), 64, range, now())
         .await
         .unwrap();
     assert_eq!(b.body().tenant_id, TenantId(501));
     let e = d
-        .create_in(&new("c", None), 64, range, now())
+        .create_in(&new("cc", None), 64, range, now())
         .await
         .unwrap_err();
     assert_eq!(code(&e), 39080, "{e}");
@@ -298,17 +309,50 @@ async fn ids_come_from_the_deployments_range() {
         e.message.contains("500..=501") && e.message.contains("502"),
         "{e}"
     );
-    assert!(d.by_name("c").await.unwrap().is_none(), "nothing written");
+    assert!(d.by_name("cc").await.unwrap().is_none(), "nothing written");
     // A wider range continues from the counter.
     let c = d
-        .create_in(&new("c", None), 64, IdRange { min: 500, max: 600 }, now())
+        .create_in(&new("cc", None), 64, IdRange { min: 500, max: 600 }, now())
         .await
         .unwrap();
     assert_eq!(c.body().tenant_id, TenantId(502));
     let e = d
-        .create_in(&new("e", None), 64, IdRange { min: 9, max: 8 }, now())
+        .create_in(&new("ee", None), 64, IdRange { min: 9, max: 8 }, now())
         .await
         .unwrap_err();
     assert_eq!(code(&e), 39080, "{e}");
     assert!(IdRange::ALL.contains(1) && !IdRange::ALL.contains(0));
+}
+
+#[tokio::test]
+async fn suspend_and_resume_set_the_flag_with_its_reason() {
+    let d = dir();
+    let root = d.create(&new("root", None), 64, now()).await.unwrap();
+    let rid = root.body().tenant_id;
+    activate(&d, rid).await;
+    let child = d.create(&new("child", Some(rid)), 64, now()).await.unwrap();
+    let cid = child.body().tenant_id;
+    activate(&d, cid).await;
+    let s = d.set_suspended(rid, Some("unpaid"), now()).await.unwrap();
+    let b = s.body();
+    assert!(b.suspended);
+    assert_eq!(b.suspended_reason.as_deref(), Some("unpaid"));
+    assert_eq!(b.suspended_at.as_deref(), Some("2025-11-08T00:00:00Z"));
+    // Again with the same reason: unchanged (same revision).
+    let again = d.set_suspended(rid, Some("unpaid"), now()).await.unwrap();
+    assert_eq!(again.mod_revision, s.mod_revision);
+    let below = d.descendants(rid).await.unwrap();
+    assert_eq!(
+        below.iter().map(|e| e.body().tenant_id).collect::<Vec<_>>(),
+        vec![cid]
+    );
+    let r = d.set_suspended(rid, None, now()).await.unwrap();
+    assert!(!r.body().suspended);
+    assert!(r.body().suspended_reason.is_none() && r.body().suspended_at.is_none());
+    // A tenant being deleted can't be suspended.
+    d.mark_deleting(cid).await.unwrap();
+    assert_eq!(
+        code(&d.set_suspended(cid, Some("x"), now()).await.unwrap_err()),
+        39072
+    );
 }

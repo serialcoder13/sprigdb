@@ -222,6 +222,13 @@ pub struct TenantView {
     /// The cluster holding the catalog, once placed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cluster: Option<ClusterId>,
+    /// Suspended by an administrator (its own flag; an ancestor's covers
+    /// it too).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub suspended: bool,
+    /// Why, while suspended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspended_reason: Option<String>,
     /// Ancestors' names, root first (`show` only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ancestry: Vec<String>,

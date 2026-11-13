@@ -146,7 +146,7 @@ export function RedisPage() {
           </datalist>
         </label>
         <span id="kv-ns-hint" className="muted">
-          Redis database n is namespace db{'<n>'} in database redis unless mapped (chapter 40). A namespace is created on first use.
+          Redis database n is namespace db{'<n>'} in database redis unless mapped. A namespace is created on first use.
         </span>
       </div>
       <div className="kv-layout">

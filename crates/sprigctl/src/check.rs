@@ -43,7 +43,7 @@ use crate::{Failed, Output, print};
 /// `sprigctl check`.
 pub(crate) fn group() -> Command {
     Command::new("check")
-        .about("Operational checks (chapter 47)")
+        .about("Operational checks")
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(

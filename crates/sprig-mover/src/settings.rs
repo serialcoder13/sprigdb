@@ -164,7 +164,7 @@ key! {
 key! {
     /// `mover.server_id_base`.
     SERVER_ID_BASE: u64 = "mover.server_id_base", DC_GLOBAL, 4_000_000_000, 1_000_000, 4_199_999_000,
-    "First binlog client server id, R0 only (from R1 the feed allocates)"
+    "First binlog client server id of the mover's jobs (a job adds an offset from its id)"
 }
 
 /// `mover.verify_mode`.

@@ -1,5 +1,5 @@
 # SprigDB SLOs: recording rules and multi-window burn-rate alerts
-# (chapter 47, "SLOs and burn-rate alerts"; Google SRE workbook, chapter 5).
+# (multi-window burn rates as in the Google SRE workbook, chapter 5).
 #
 #   Availability, per DC   1 - (sprig + backend) / all statements   99.95% / 30 days
 #   Gateway overhead       share of statements under 2 ms           99%
@@ -76,7 +76,7 @@ groups:
         labels: { severity: page, slo: availability }
         annotations:
           summary: The availability error budget is burning fast
-          runbook: chapter 47 runbook 8
+          runbook: "Find the failing statements by result and DC (dashboard Fleet or DC); check admission and pool waits, backend errors and certificate alerts; scale or drain gateways, or follow the cluster runbook in the operations guide"
       - alert: SprigAvailabilitySlowBurn
         expr: |
           sprig:availability_errors:ratio_rate3d > 0.0005
@@ -85,7 +85,7 @@ groups:
         labels: { severity: ticket, slo: availability }
         annotations:
           summary: The availability error budget is burning
-          runbook: chapter 47 runbook 8
+          runbook: "Find the failing statements by result and DC (dashboard Fleet or DC); check admission and pool waits, backend errors and certificate alerts; scale or drain gateways, or follow the cluster runbook in the operations guide"
       - alert: SprigOverheadFastBurn
         expr: |
           (sprig:overhead_slow:ratio_rate1h > 14.4 * 0.01
@@ -97,7 +97,7 @@ groups:
         labels: { severity: page, slo: overhead }
         annotations:
           summary: Gateway overhead above 2 ms is burning its budget fast
-          runbook: chapter 47 runbook 8
+          runbook: "Find the failing statements by result and DC (dashboard Fleet or DC); check admission and pool waits, backend errors and certificate alerts; scale or drain gateways, or follow the cluster runbook in the operations guide"
       - alert: SprigOverheadSlowBurn
         expr: |
           sprig:overhead_slow:ratio_rate3d > 0.01
@@ -106,11 +106,11 @@ groups:
         labels: { severity: ticket, slo: overhead }
         annotations:
           summary: Gateway overhead above 2 ms is burning its budget
-          runbook: chapter 47 runbook 8
+          runbook: "Find the failing statements by result and DC (dashboard Fleet or DC); check admission and pool waits, backend errors and certificate alerts; scale or drain gateways, or follow the cluster runbook in the operations guide"
       - alert: SprigQueryLatencyHigh
         expr: sprig:query_duration_seconds:p99_rate5m > 1
         for: 10m
         labels: { severity: ticket, slo: latency }
         annotations:
           summary: Statement p99 latency above 1 s for 10 minutes
-          runbook: chapter 47 runbook 8
+          runbook: "Find the failing statements by result and DC (dashboard Fleet or DC); check admission and pool waits, backend errors and certificate alerts; scale or drain gateways, or follow the cluster runbook in the operations guide"

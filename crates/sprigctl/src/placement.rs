@@ -131,7 +131,7 @@ async fn dc_pin(c: &AdminClient, name: &str, op: &str) {
         )
         .await;
     if let Err(e) = r {
-        eprintln!("note: the DC {op} (chapter 24) didn't apply: {e}");
+        eprintln!("note: the DC {op} didn't apply: {e}");
     }
 }
 

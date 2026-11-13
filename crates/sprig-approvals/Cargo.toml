@@ -1,6 +1,6 @@
 [package]
 name = "sprig-approvals"
-description = "SprigDB: Approvals and recommendations for every automatic decision (chapter 52)"
+description = "SprigDB: Approvals and recommendations for every automatic decision"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

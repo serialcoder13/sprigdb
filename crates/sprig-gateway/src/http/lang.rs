@@ -549,6 +549,7 @@ impl SqlEngine {
             compressors: Vec::new(),
             sql: None,
             dc: None,
+            client_dc: None,
             restore: false,
             hello_done: true,
             close_now: false,

@@ -298,9 +298,16 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     // the one executor.
     // Admission (chapter 04 step 7) in front of everything, so a statement
     // waiting for a slot holds no backend connection.
+    // Chapter 04: the `limits.*` keys per tenant, from its cached catalog.
     let limiter = limits::Limiter::new(limits::LimitSource::Live {
         live: live.clone(),
         dc: dc.clone(),
+        tenants: tenants.as_ref().map(|t| {
+            let cache = t.cache.clone();
+            let lookup: limits::TenantSettingsLookup =
+                Arc::new(move |id| cache.cached(id).map(|c| Arc::clone(&c.settings)));
+            lookup
+        }),
     });
     // Chapter 47's SLIs and root trace span outermost, so admission waits
     // count in statement latency.
@@ -828,7 +835,7 @@ fn logins(
             };
             // Chapter 29: per-user backend accounts, when configured.
             tenants.authz.configure(resolver.per_user());
-            let catalogs = CatalogLogins::new(
+            let catalogs = Arc::new(CatalogLogins::new(
                 Arc::new(MetaTenants::new(
                     Arc::clone(&tenants.global),
                     sprig_auth::account::META_TENANTS_TTL,
@@ -839,20 +846,70 @@ fn logins(
                     tenants.settings.clone(),
                     tenants.dc.clone(),
                 )),
+            ));
+            // Chapter 14: tenant endpoints by TLS SNI, live.
+            let sni = follow_sni_suffixes(
+                Arc::clone(&catalogs),
+                live.clone(),
+                tenants.dc.clone(),
+                ctx.shutdown.clone(),
             );
             tracing::info!("logins from tenant catalogs (login_mode = catalog)");
             // Chapter 14: failure counters and temporary locks in the
             // tenants' catalogs, audit events in the log (target
             // sprig_audit) until chapter 47's pipeline.
             let state = sprig_auth::policy::CatalogLoginState::new(tenants.catalog.clone());
-            let svc = LoginService::new(LoginSource::Catalog(Arc::new(catalogs)), fast_cache)
+            let svc = LoginService::new(LoginSource::Catalog(catalogs), fast_cache)
                 .with_clock(clock)
                 .with_login_state(Arc::new(state))
                 .with_audit(audit)
                 .with_handoff(handoff);
-            Ok((Arc::new(svc), Some(tenants), Vec::new()))
+            Ok((Arc::new(svc), Some(tenants), vec![sni]))
         }
     }
+}
+
+/// Applies `listener.tenant_sni_suffixes` to `logins` now and after every
+/// change (chapter 14, "Finding the tenant"), until `shutdown`. A value
+/// that isn't a list of DNS suffixes (only possible when it was written
+/// around the controller's check) keeps the old list and raises
+/// `SettingNotApplied`.
+fn follow_sni_suffixes(
+    logins: Arc<sprig_auth::CatalogLogins>,
+    live: LiveSettings,
+    dc: sprig_common::ids::DcId,
+    shutdown: sprig_common::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    use sprig_auth::sni::{TENANT_SNI_SUFFIXES, parse};
+    let apply = move |live: &LiveSettings| {
+        let raw = live.get(
+            &TENANT_SNI_SUFFIXES,
+            &sprig_settings::SettingCtx::process(&dc),
+        );
+        match parse(&raw) {
+            Ok(list) => {
+                if *logins.sni_suffixes() != list {
+                    tracing::info!(suffixes = ?list, "tenant endpoints by SNI changed");
+                }
+                logins.set_sni_suffixes(list);
+            }
+            Err(e) => sprig_settings::not_applied(
+                "listener.tenant_sni_suffixes",
+                &format!("{raw:?}: {e}"),
+            ),
+        }
+    };
+    let mut rx = live.watch(&TENANT_SNI_SUFFIXES);
+    apply(&live);
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                r = rx.changed() => if r.is_err() { return; },
+            }
+            apply(&live);
+        }
+    })
 }
 
 /// How often the gateway re-reads etcd's member list.

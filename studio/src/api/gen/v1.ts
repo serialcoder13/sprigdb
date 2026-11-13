@@ -1176,7 +1176,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Chapter 52's approvals inbox: recommendations the caller may see (filters kind, state, level, all, db, table) */
+        /** The approvals inbox: recommendations the caller may see (filters kind, state, level, all, db, table) */
         get: operations["Recommendations.ListRecommendations"];
         put?: never;
         post?: never;

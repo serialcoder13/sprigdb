@@ -257,6 +257,7 @@ impl HttpAuth {
                 client_ip: req.client_ip,
                 tls: req.tls,
                 client_cert: false,
+                client_dn: None,
                 can_handle_expired_password: false,
             })
             .await;

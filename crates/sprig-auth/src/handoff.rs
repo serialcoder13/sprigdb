@@ -127,6 +127,7 @@ impl HandoffStart {
             client_ip: self.client_ip,
             tls: self.tls,
             client_cert: self.client_cert,
+            client_dn: None,
             can_handle_expired_password: self.can_handle_expired_password,
         }
     }
@@ -516,7 +517,7 @@ impl LoginService {
                     let c = Arc::clone(c);
                     relay = relay.with_rebackend(Arc::new(move |p: &Principal| c.local_backend(p)));
                 }
-                ResidentLogin::Relay(relay)
+                ResidentLogin::Relay(Box::new(relay))
             }
         }
     }
@@ -558,7 +559,7 @@ pub enum ResidentLogin {
     /// Decided here.
     Local(Box<MysqlLogin>),
     /// Relayed to an allowed DC.
-    Relay(RelayLogin),
+    Relay(Box<RelayLogin>),
     /// Refused: 39302.
     Deny(DenyLogin),
 }

@@ -1,6 +1,6 @@
 {{- /* Defragments every etcd member this chart runs, one at a time (etcdctl
      goes through --endpoints in order), so the space auto-compaction frees
-     goes back to the disk and etcd's quota (bugfix-53). The etcd image has
+     goes back to the disk and etcd's quota. The etcd image has
      no shell: etcdctl runs directly. The pod carries the chart's labels,
      which the etcd NetworkPolicy lets in. */}}
 {{- if .Values.etcd.defrag.enabled }}

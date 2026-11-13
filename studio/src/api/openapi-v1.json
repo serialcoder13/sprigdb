@@ -4749,7 +4749,7 @@
             "description": "An error"
           }
         },
-        "summary": "Chapter 52's approvals inbox: recommendations the caller may see (filters kind, state, level, all, db, table)",
+        "summary": "The approvals inbox: recommendations the caller may see (filters kind, state, level, all, db, table)",
         "tags": [
           "sprig.admin.v1.Recommendations"
         ]

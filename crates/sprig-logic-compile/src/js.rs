@@ -10,7 +10,9 @@
 //! The two forms of a body are QuickJS's: a module whose default export
 //! is the function (`import { db, sprig } from 'sprig:db'` is the only
 //! import), or the function's body alone with the parameters in scope by
-//! name (MySQL 9). Parameter types come from the declaration.
+//! name (MySQL 9). Parameter types come from the declaration; a
+//! validation's or after-commit trigger's come from its table, and its
+//! code sees the row by name ([`compile_with`]).
 //!
 //! What compiles, and how it keeps JavaScript's meaning:
 //!
@@ -33,7 +35,9 @@
 //!   array literal of arguments, as a declaration's initializer or a
 //!   statement; a `sqlOne` row's columns, an `exec`'s `affected`; the
 //!   columns of each row of `for (const r of db.sql(...))`;
-//! - `Math.abs floor ceil round sqrt pow max min`; `length`,
+//! - `Math.abs floor ceil round sqrt pow max min` (`Math.random`,
+//!   `Date.now` and other non-deterministic calls are the reason
+//!   `js.nondeterministic`, which computed columns refuse); `length`,
 //!   `toUpperCase`, `toLowerCase`, `includes`, `startsWith`, `endsWith`,
 //!   `indexOf` on non-null text; `String(x)`;
 //! - `return {fields}`, `return sprig.event(name, {fields})`,
@@ -81,6 +85,21 @@ pub struct Signature {
     pub params: Vec<(String, Ty)>,
     /// `RETURNS t`: the result is `output {value}`.
     pub returns: Option<Ty>,
+    /// Validations and after-commit triggers: the table whose row the code
+    /// sees. `params` and `returns` are then unused: the code's own
+    /// parameters bind by name (see [`compile_with`]).
+    pub row: Option<String>,
+}
+
+impl Signature {
+    /// The signature of a validation or after-commit trigger on `table`.
+    #[must_use]
+    pub fn row_of(table: &str) -> Self {
+        Self {
+            row: Some(table.to_ascii_lowercase()),
+            ..Self::default()
+        }
+    }
 }
 
 /// JavaScript without its declaration's signature: always the engine
@@ -92,6 +111,44 @@ pub fn compile(_source: &str) -> Compiled {
         "source",
         "JavaScript compiles only with its declaration's parameter types",
     ))
+}
+
+/// The names of a module's default-export function's parameters, in
+/// order; `None` for a body alone, or source that doesn't parse. Test runs
+/// of validations and triggers bind their arguments by these names, as
+/// [`compile_with`] does.
+#[must_use]
+pub fn entry_params(source: &str) -> Option<Vec<String>> {
+    let alloc = Allocator::default();
+    let parsed = Parser::new(&alloc, source, SourceType::mjs())
+        .with_options(ParseOptions {
+            allow_return_outside_function: true,
+            ..ParseOptions::default()
+        })
+        .parse();
+    if !parsed.errors.is_empty() {
+        return None;
+    }
+    parsed.program.body.iter().find_map(|s| {
+        let Statement::ExportDefaultDeclaration(d) = s else {
+            return None;
+        };
+        let ps = match &d.declaration {
+            ExportDefaultDeclarationKind::FunctionDeclaration(f)
+            | ExportDefaultDeclarationKind::FunctionExpression(f) => &f.params,
+            ExportDefaultDeclarationKind::ArrowFunctionExpression(a) => &a.params,
+            _ => return None,
+        };
+        Some(
+            ps.items
+                .iter()
+                .map(|p| match &p.pattern {
+                    BindingPattern::BindingIdentifier(b) => b.name.as_str().to_owned(),
+                    _ => String::new(),
+                })
+                .collect(),
+        )
+    })
 }
 
 fn refused(r: Reason) -> Compiled {
@@ -106,8 +163,28 @@ fn refused(r: Reason) -> Compiled {
 /// against the shard schema's columns `cat`. A source outside the subset
 /// gives reasons (the engine tier), not an error.
 ///
+/// **Validations and after-commit triggers** (`sig.row` names the table)
+/// see the written row as chapter 41's worked example 1 writes it, or as a
+/// test run gives it, or as KIRun's parameters do (decision V2):
+///
+/// ```text
+/// export default function (row, old) { ... }       row.c, old.c
+/// export default function (ctx) { ... }            ctx.trigger.after.c, .before.c, .op
+/// export default function (qty, old_qty, op) {...} columns, old_<column>, op by name
+/// a body alone                                     row, old, op and ctx in scope
+/// ```
+///
+/// `row` (also `ctx.trigger.after`, `ctx.row`) is the row after the write,
+/// the deleted row for a `DELETE`; `old` (`ctx.trigger.before`, `ctx.old`) the row
+/// before it, `null` for an `INSERT`, so reading a column of it there
+/// throws JavaScript's `TypeError` unless the code tests it first. The IR's
+/// parameters are the columns the code reads, `c` and `old_c`, and `op`
+/// when it tests `old`: [`crate::Function`]'s parameters, which the
+/// enforcement binds to `NEW.c`, `OLD.c` and the operation by name.
+///
 /// # Errors
-/// 39874 when embedded SQL and its arguments disagree.
+/// 39874 when embedded SQL and its arguments disagree, or a validation's
+/// or trigger's parameter names nothing it can bind.
 pub fn compile_with(
     name: &str,
     source: &str,
@@ -179,6 +256,18 @@ enum Var {
     },
     /// `db` or `sprig` from `sprig:db` (or the globals).
     Module(&'static str),
+    /// A validation's or trigger's row: after the write (`found` is
+    /// `None`: always there) or before it (`found` says whether there is
+    /// one).
+    Image {
+        old: bool,
+        found: Option<LocalId>,
+    },
+    /// A validation's or trigger's `ctx`: only `ctx.trigger.*` compiles.
+    Ctx,
+    /// A validation's or trigger's scalar: a column, `old_<column>` or
+    /// `op`, made a parameter when first read.
+    Field(String),
 }
 
 /// A fact key: a parameter or a local (a row's `found`).
@@ -243,6 +332,11 @@ struct L<'s, 'c> {
     decls: BTreeMap<LocalId, u32>,
     /// An error that isn't a reason (39874).
     fatal: Option<sprig_common::SprigError>,
+    /// Validations and triggers: the table, and the local saying whether
+    /// the row before the write exists (set from `op` once it is read).
+    table: Option<String>,
+    old_found: Option<LocalId>,
+    old_used: std::cell::Cell<bool>,
 }
 
 /// Whether control can't continue after the lowered statements.
@@ -266,16 +360,21 @@ impl<'s, 'c> L<'s, 'c> {
             name: name.to_owned(),
             ..Function::default()
         };
-        f.params = sig
-            .params
-            .iter()
-            .map(|(n, t)| Param {
-                name: n.clone(),
-                ty: *t,
-                min: None,
-                max: None,
-            })
-            .collect();
+        // A validation's or trigger's parameters are the columns it reads,
+        // added as they are read.
+        if sig.row.is_none() {
+            f.params = sig
+                .params
+                .iter()
+                .map(|(n, t)| Param {
+                    name: n.clone(),
+                    ty: *t,
+                    min: None,
+                    max: None,
+                })
+                .collect();
+        }
+        let old_found = sig.row.as_ref().map(|_| f.local("old_found", Ty::Bool));
         L {
             src,
             sig,
@@ -294,6 +393,9 @@ impl<'s, 'c> L<'s, 'c> {
             tmp: 0,
             decls: BTreeMap::new(),
             fatal: None,
+            table: sig.row.clone(),
+            old_found,
+            old_used: std::cell::Cell::new(false),
         }
     }
 
@@ -312,6 +414,29 @@ impl<'s, 'c> L<'s, 'c> {
     }
 
     fn finish(mut self) -> (Function, Vec<Reason>, Vec<Reason>) {
+        if let (Some(found), true) = (self.old_found, self.old_used.get()) {
+            // `old` is there for an update and a delete, not an insert.
+            if self.column_ty("op").is_some() {
+                self.reasons.push(Reason::new(
+                    "js.old",
+                    "source",
+                    "the table has a column named op, so old can't tell an insert from an \
+                     update; read old_<column> parameters instead",
+                ));
+            }
+            let op = self.param_named("op", Ty::Str);
+            self.f.body.insert(
+                0,
+                Stmt::Assign(
+                    found,
+                    Expr::bin(
+                        BinOp::Ne,
+                        Expr::Param(op),
+                        Expr::Lit(Literal::Str("insert".to_owned())),
+                    ),
+                ),
+            );
+        }
         if self.sig.returns.is_some() {
             let ty = self.sig.returns.unwrap_or(Ty::Json);
             self.events[0].1 = vec![("value".to_owned(), ty)];
@@ -345,9 +470,140 @@ impl<'s, 'c> L<'s, 'c> {
         match v {
             Var::Param(i) => Some(Key::P(*i)),
             Var::Local(l) => Some(Key::L(*l)),
-            Var::Row { found, .. } => Some(Key::L(*found)),
+            Var::Row { found, .. }
+            | Var::Image {
+                found: Some(found), ..
+            } => Some(Key::L(*found)),
             _ => None,
         }
+    }
+
+    // -- validations and triggers: the row ------------------------------------
+
+    /// The type of the bound table's column `c`.
+    fn column_ty(&self, c: &str) -> Option<Ty> {
+        let t = self.table.as_deref()?;
+        self.cat.column(t, &c.to_ascii_lowercase())
+    }
+
+    /// The type of a scalar a validation or trigger can bind: a column,
+    /// `old_<column>`, or `op`.
+    fn field_ty(&self, name: &str) -> Option<Ty> {
+        let n = name.to_ascii_lowercase();
+        if let Some(t) = self.column_ty(&n) {
+            return Some(t);
+        }
+        if let Some(c) = n.strip_prefix("old_")
+            && let Some(t) = self.column_ty(c)
+        {
+            return Some(t);
+        }
+        (n == "op").then_some(Ty::Str)
+    }
+
+    /// The parameter `name`, added on first use.
+    fn param_named(&mut self, name: &str, ty: Ty) -> u16 {
+        let n = name.to_ascii_lowercase();
+        if let Some(i) = self.f.params.iter().position(|p| p.name == n) {
+            return u16::try_from(i).unwrap_or(u16::MAX);
+        }
+        self.f.params.push(Param {
+            name: n,
+            ty,
+            min: None,
+            max: None,
+        });
+        u16::try_from(self.f.params.len() - 1).unwrap_or(u16::MAX)
+    }
+
+    /// A scalar field's value (see [`Var::Field`]).
+    fn field_val(&mut self, name: &str, span: Span) -> R<V> {
+        let Some(ty) = self.field_ty(name) else {
+            return self.stop("js.unknown_name", span, format!("unknown name {name}"));
+        };
+        let i = self.param_named(name, ty);
+        Ok(V {
+            e: Expr::Param(i),
+            ty,
+            nn: name.eq_ignore_ascii_case("op") || self.facts.contains(&Key::P(i)),
+        })
+    }
+
+    /// Which row `e` names: `Some(false)` for the row after the write,
+    /// `Some(true)` for the row before it.
+    fn image_of(&self, e: &Expression<'_>) -> Option<bool> {
+        match strip_parens(e) {
+            Expression::Identifier(id) => match self.lookup(id.name.as_str()) {
+                Some(Var::Image { old, .. }) => Some(old),
+                _ => None,
+            },
+            Expression::StaticMemberExpression(m) if self.ctx_trigger(&m.object) => {
+                match m.property.name.as_str() {
+                    "after" => Some(false),
+                    "before" => Some(true),
+                    _ => None,
+                }
+            }
+            // A test run's `ctx.row` and `ctx.old`.
+            Expression::StaticMemberExpression(m)
+                if matches!(strip_parens(&m.object), Expression::Identifier(id)
+                    if matches!(self.lookup(id.name.as_str()), Some(Var::Ctx))) =>
+            {
+                match m.property.name.as_str() {
+                    "row" => Some(false),
+                    "old" => Some(true),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether `e` is `ctx.trigger`.
+    fn ctx_trigger(&self, e: &Expression<'_>) -> bool {
+        match strip_parens(e) {
+            Expression::StaticMemberExpression(m) if m.property.name.as_str() == "trigger" => {
+                matches!(strip_parens(&m.object), Expression::Identifier(id)
+                    if matches!(self.lookup(id.name.as_str()), Some(Var::Ctx)))
+            }
+            _ => false,
+        }
+    }
+
+    /// The local saying whether the row before the write exists.
+    fn old_flag(&self) -> Option<LocalId> {
+        self.old_used.set(true);
+        self.old_found
+    }
+
+    /// Column `col` of a validation's or trigger's row.
+    fn image_col(&mut self, old: bool, col: &str, span: Span) -> R<V> {
+        let Some(ty) = self.column_ty(col) else {
+            let t = self.table.clone().unwrap_or_default();
+            return self.stop("js.member", span, format!("{t} has no column {col}"));
+        };
+        if !old {
+            return self.field_val(col, span);
+        }
+        let Some(found) = self.old_flag() else {
+            return self.stop("js.member", span, format!("reading .{col} here"));
+        };
+        if !self.facts.contains(&Key::L(found)) {
+            if self.cond > 0 {
+                return self.stop(
+                    "js.null_row",
+                    span,
+                    "old may be null here (it is null for an insert)",
+                );
+            }
+            self.guards.push((found, col.to_owned()));
+        }
+        let i = self.param_named(&format!("old_{col}"), ty);
+        Ok(V {
+            e: Expr::Param(i),
+            ty,
+            nn: false,
+        })
     }
 
     fn scoped<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
@@ -370,9 +626,13 @@ impl<'s, 'c> L<'s, 'c> {
             )
         });
         if !module {
-            for (i, (n, _)) in self.sig.params.iter().enumerate() {
-                let n = n.clone();
-                self.bind(&n, Var::Param(u16::try_from(i).unwrap_or(u16::MAX)));
+            if self.table.is_some() {
+                self.bind_row_names();
+            } else {
+                for (i, (n, _)) in self.sig.params.iter().enumerate() {
+                    let n = n.clone();
+                    self.bind(&n, Var::Param(u16::try_from(i).unwrap_or(u16::MAX)));
+                }
             }
             self.bind("db", Var::Module("db"));
             self.bind("sprig", Var::Module("sprig"));
@@ -459,7 +719,69 @@ impl<'s, 'c> L<'s, 'c> {
         self.f.body = self.close(body);
     }
 
+    /// A validation's or trigger's body alone: `row`, `old`, `op` and
+    /// `ctx` are in scope.
+    fn bind_row_names(&mut self) {
+        self.bind(
+            "row",
+            Var::Image {
+                old: false,
+                found: None,
+            },
+        );
+        let found = self.old_found;
+        self.bind("old", Var::Image { old: true, found });
+        self.bind("op", Var::Field("op".to_owned()));
+        self.bind("ctx", Var::Ctx);
+    }
+
+    /// A validation's or trigger's parameters, bound by name (see
+    /// [`compile_with`]).
+    fn row_params(&mut self, ps: &FormalParameters<'_>) -> R<()> {
+        if let Some(r) = &ps.rest {
+            return self.stop("js.params", r.span, "a rest parameter");
+        }
+        for p in &ps.items {
+            let BindingPattern::BindingIdentifier(b) = &p.pattern else {
+                return self.stop("js.params", p.span, "parameters must be plain names");
+            };
+            if p.initializer.is_some() {
+                return self.stop("js.params", p.span, "parameters must be plain names");
+            }
+            let n = b.name.as_str();
+            let var = match n {
+                "row" => Var::Image {
+                    old: false,
+                    found: None,
+                },
+                "old" => Var::Image {
+                    old: true,
+                    found: self.old_found,
+                },
+                "ctx" => Var::Ctx,
+                _ if self.field_ty(n).is_some() => Var::Field(n.to_owned()),
+                _ => {
+                    let t = self.table.clone().unwrap_or_default();
+                    self.fatal = Some(sprig_common::SprigError::new(
+                        sprig_common::SprigCode::LogicSignatureMismatch,
+                        format!(
+                            "{}: parameter {n} names nothing of {t} (use row, old, ctx, op, \
+                             a column or old_<column>)",
+                            self.at(p.span)
+                        ),
+                    ));
+                    return Err(Stop);
+                }
+            };
+            self.bind(n, var);
+        }
+        Ok(())
+    }
+
     fn params(&mut self, ps: &FormalParameters<'_>, span: Span) -> R<()> {
+        if self.table.is_some() {
+            return self.row_params(ps);
+        }
         if ps.rest.is_some() || ps.items.len() != self.sig.params.len() {
             return self.stop(
                 "js.params",
@@ -883,7 +1205,10 @@ impl<'s, 'c> L<'s, 'c> {
             .iter()
             .flatten()
             .filter_map(|(_, v)| match v {
-                Var::Row { found, .. } => Some(*found),
+                Var::Row { found, .. }
+                | Var::Image {
+                    found: Some(found), ..
+                } => Some(*found),
                 _ => None,
             })
             .collect();
@@ -1299,8 +1624,12 @@ impl<'s, 'c> L<'s, 'c> {
         };
         let base: &'static str = match self.lookup(obj.name.as_str()) {
             Some(Var::Module(m)) => m,
+            Some(Var::Ctx) => "ctx",
             None => match obj.name.as_str() {
                 "Math" => "Math",
+                // QuickJS's globals, in a module too.
+                "db" => "db",
+                "sprig" => "sprig",
                 "ctx" => "ctx",
                 "console" => "console",
                 "JSON" => "JSON",
@@ -1502,12 +1831,36 @@ impl L<'_, '_> {
         if let Some(found) = self.row_of(e) {
             return Ok(Expr::Local(found));
         }
+        // `a && b`, `a || b` as conditions: only their truth matters, so
+        // a row (`old && old.qty > 0`) may be an operand (jsbind).
+        if let Expression::LogicalExpression(l) = strip_parens(e)
+            && l.operator != LogicalOperator::Coalesce
+        {
+            let and = l.operator == LogicalOperator::And;
+            let a = self.test(&l.left)?;
+            let facts = self.facts_if(&l.left, and);
+            let saved = self.facts.clone();
+            self.facts.extend(facts);
+            self.cond += 1;
+            let b = self.test(&l.right);
+            self.cond -= 1;
+            self.facts = saved;
+            let b = b?;
+            return Ok(if and {
+                Expr::Cond(Box::new(a), Box::new(b), Box::new(Expr::bool(false)))
+            } else {
+                Expr::Cond(Box::new(a), Box::new(Expr::bool(true)), Box::new(b))
+            });
+        }
         let v = self.val(e)?;
         self.truthy(v, e.span())
     }
 
     /// The `found` flag when `e` names a `db.sqlOne` row.
     fn row_of(&self, e: &Expression<'_>) -> Option<LocalId> {
+        if self.image_of(e) == Some(true) {
+            return self.old_flag();
+        }
         match strip_parens(e) {
             Expression::Identifier(id) => match self.lookup(id.name.as_str()) {
                 Some(Var::Row { found, .. }) => Some(found),
@@ -1605,11 +1958,24 @@ impl L<'_, '_> {
                     && let Some(k) = self.lookup(id.name.as_str()).as_ref().and_then(Self::key)
                 {
                     s.insert(k);
+                } else if null
+                    && not_null_when == truth
+                    && self.image_of(x) == Some(true)
+                    && let Some(f) = self.old_found
+                {
+                    s.insert(Key::L(f));
                 }
             }
             Expression::Identifier(id) if truth => {
                 if let Some(k) = self.lookup(id.name.as_str()).as_ref().and_then(Self::key) {
                     s.insert(k);
+                }
+            }
+            x @ Expression::StaticMemberExpression(_)
+                if truth && self.image_of(x) == Some(true) =>
+            {
+                if let Some(f) = self.old_found {
+                    s.insert(Key::L(f));
                 }
             }
             _ => {}
@@ -1689,8 +2055,14 @@ impl L<'_, '_> {
                         ty: Ty::Json,
                         nn: true,
                     }),
+                    Some(Var::Field(f)) => self.field_val(&f, id.span),
                     Some(
-                        Var::Row { .. } | Var::Exec { .. } | Var::Elem { .. } | Var::Module(_),
+                        Var::Row { .. }
+                        | Var::Exec { .. }
+                        | Var::Elem { .. }
+                        | Var::Module(_)
+                        | Var::Image { .. }
+                        | Var::Ctx,
                     ) => self.stop(
                         "js.value",
                         id.span,
@@ -1702,6 +2074,12 @@ impl L<'_, '_> {
             }
             Expression::StaticMemberExpression(m) => {
                 let prop = m.property.name.as_str();
+                if let Some(old) = self.image_of(&m.object) {
+                    return self.image_col(old, prop, m.span);
+                }
+                if prop == "op" && self.ctx_trigger(&m.object) {
+                    return self.field_val("op", m.span);
+                }
                 if let Expression::Identifier(obj) = strip_parens(&m.object)
                     && let Some(var) = self.lookup(obj.name.as_str())
                 {
@@ -1914,6 +2292,18 @@ impl L<'_, '_> {
                 })
             }
             Expression::CallExpression(c) => self.call(c),
+            Expression::NewExpression(n)
+                if n.arguments.is_empty()
+                    && matches!(strip_parens(&n.callee), Expression::Identifier(id)
+                        if id.name.as_str() == "Date" && self.lookup("Date").is_none()) =>
+            {
+                self.stop(
+                    "js.nondeterministic",
+                    n.span,
+                    "new Date() gives a different value on each call: it runs in the engine \
+                     tier, and a computed column, validation or trigger can't use it",
+                )
+            }
             Expression::ChainExpression(c) => {
                 self.stop("js.optional_chain", c.span, "optional chaining")
             }
@@ -1925,7 +2315,38 @@ impl L<'_, '_> {
         }
     }
 
+    /// `Math.random()`, `Date.now()`, `Date()`, `performance.now()`,
+    /// `crypto.*()`: a different value on each call.
+    fn nondeterministic(&self, callee: &Expression<'_>) -> Option<String> {
+        let global = |n: &str| self.lookup(n).is_none();
+        match strip_parens(callee) {
+            Expression::Identifier(id) if id.name.as_str() == "Date" && global("Date") => {
+                Some("Date()".to_owned())
+            }
+            Expression::StaticMemberExpression(m) => {
+                let Expression::Identifier(obj) = strip_parens(&m.object) else {
+                    return None;
+                };
+                let (o, p) = (obj.name.as_str(), m.property.name.as_str());
+                let hit = matches!((o, p), ("Math", "random") | ("Date" | "performance", "now"))
+                    || o == "crypto";
+                (hit && global(o)).then(|| format!("{o}.{p}()"))
+            }
+            _ => None,
+        }
+    }
+
     fn call(&mut self, c: &oxc_ast::ast::CallExpression<'_>) -> R<V> {
+        if let Some(what) = self.nondeterministic(&c.callee) {
+            return self.stop(
+                "js.nondeterministic",
+                c.span,
+                format!(
+                    "{what} gives a different value on each call: it runs in the engine tier, \
+                     and a computed column, validation or trigger can't use it"
+                ),
+            );
+        }
         let mut args = Vec::new();
         for a in &c.arguments {
             let Some(x) = a.as_expression() else {

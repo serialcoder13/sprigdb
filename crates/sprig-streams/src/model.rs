@@ -265,10 +265,13 @@ impl StreamDef {
     }
 }
 
+/// The prefix of every stream outbox's name.
+pub const OUTBOX_PREFIX: &str = "__sprig_eo_";
+
 /// `__sprig_eo_<id>`.
 #[must_use]
 pub fn outbox_table(id: StreamId) -> String {
-    format!("__sprig_eo_{}", id.0)
+    format!("{OUTBOX_PREFIX}{}", id.0)
 }
 
 /// `__sprig_sl_<id>`.

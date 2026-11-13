@@ -402,8 +402,8 @@ impl ShardingLoop {
             .map_err(|e| db_err("table groups", &e))?;
         if n.unwrap_or(0) > 0 {
             return Err(not_allowed(format!(
-                "tenant {tenant} already has table groups: the advisor's later runs and \
-                 re-keys arrive in R3"
+                "tenant {tenant} already has table groups: the advisor designs only a tenant's \
+                 first groups; change existing ones with `sprigctl shard rekey`"
             )));
         }
         Ok(())

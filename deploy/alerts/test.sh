@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Checks and unit-tests the alert rules (chapter 47): `promtool check rules`
-# and `promtool test rules`, from the prom/prometheus image unless promtool
-# is installed.
+# Checks and unit-tests the alert rules: every metric they read is exported
+# (check-metrics.py), then `promtool check rules` and `promtool test rules`,
+# from the prom/prometheus image unless promtool is installed.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
+python3 check-metrics.py
 if command -v promtool >/dev/null; then
     promtool check rules ./*.rules.yaml
     promtool test rules tests/*.test.yaml

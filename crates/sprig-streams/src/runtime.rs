@@ -466,7 +466,18 @@ pub async fn run_job(
                     "duplicates": stats.duplicates.load(Ordering::Relaxed),
                     "batches": stats.batches.load(Ordering::Relaxed),
                     "items": stats.items.load(Ordering::Relaxed),
+                    "lag_ms": stats.lag_ms.load(Ordering::Relaxed),
                 });
+                // Lag per instance (R9, r9feed): one series per stream
+                // sequencer on this worker.
+                #[allow(clippy::cast_precision_loss)]
+                let lag = stats.lag_ms.load(Ordering::Relaxed) as f64 / 1000.0;
+                metrics::gauge!(
+                    "sprig_stream_sequencer_lag_seconds",
+                    "tenant" => tenant.to_string(),
+                    "stream" => id.0.to_string()
+                )
+                .set(lag);
                 if !report.progress(p).await {
                     stop.cancel();
                 }
@@ -499,6 +510,12 @@ pub async fn run_job(
         }
     };
     tracing::info!(%tenant, stream = id.0, ?end, "stream sequencer stopped");
+    metrics::gauge!(
+        "sprig_stream_sequencer_lag_seconds",
+        "tenant" => tenant.to_string(),
+        "stream" => id.0.to_string()
+    )
+    .set(0.0);
     Ok(match end {
         RunEnd::Stopped if gone => JobEnd::Gone,
         RunEnd::Stopped => JobEnd::Stopped,

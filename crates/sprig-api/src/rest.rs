@@ -392,6 +392,20 @@ pub static ROUTES: &[Route] = &[
         "NameRequest"
     ),
     r!(
+        "sprig.admin.v1.Tenants",
+        "SuspendTenant",
+        "POST",
+        "/admin/v1/tenants/{name}:suspend",
+        "NameRequest"
+    ),
+    r!(
+        "sprig.admin.v1.Tenants",
+        "ResumeTenant",
+        "POST",
+        "/admin/v1/tenants/{name}:resume",
+        "NameRequest"
+    ),
+    r!(
         "sprig.admin.v1.Users",
         "CreateUser",
         "POST",

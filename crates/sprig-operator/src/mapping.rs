@@ -169,7 +169,7 @@ pub const CONFIG_MAP: ApiResource = ApiResource {
 #[must_use]
 pub fn domain_config_map(sc: &SprigCluster, domain: Option<u32>) -> Value {
     let mut cnf = String::from(
-        "# Written by the SprigDB operator: the cluster number is the GTID domain (chapter 27).\n[mariadb]\n",
+        "# Written by the SprigDB operator: the cluster number is the GTID domain.\n[mariadb]\n",
     );
     if let Some(d) = domain {
         let _ = writeln!(cnf, "gtid_domain_id = {d}");

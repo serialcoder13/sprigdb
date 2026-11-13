@@ -1162,7 +1162,7 @@ fn create_sink(p: &mut P<'_>) -> Result<Stmt> {
     if p.kws(&["FOR", "EACH", "TENANT"]) {
         return Err(err(
             SprigCode::SinkOptionInvalid,
-            "FOR EACH TENANT sinks are not built yet (chapter 51, build step 20)",
+            "FOR EACH TENANT sinks are created in a tenant's session",
         ));
     }
     p.need_kw("FROM")?;

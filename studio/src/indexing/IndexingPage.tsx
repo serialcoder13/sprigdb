@@ -7,6 +7,9 @@ import { errorText } from '../api/errors';
 import { useSession } from '../auth/session';
 import type { Privileges } from '../api/types';
 
+/** A frozen index (the backend's `frozen`; older builds said `pinned`). */
+const frozen = (state: string) => state === 'frozen' || state === 'pinned';
+
 /** chapter 13's IndexView, as the controller returns it. */
 interface IndexView {
   index_id: number;
@@ -111,7 +114,7 @@ export function IndexingPage() {
     <div className="stack">
       <h1 style={{ margin: 0 }}>Automatic indexing</h1>
       <p className="muted">
-        Statements run from Studio are not meant to cause indexes (chapter 13, <code>auto_index.include_studio</code>).
+        Statements run from Studio are not meant to cause indexes (<code>auto_index.include_studio</code>).
       </p>
       <div className="tabs" role="tablist">
         {tab('indexes', 'Indexes')}
@@ -207,10 +210,10 @@ export function IndexingPage() {
                             <button onClick={() => void act(ix, 'reject')}>Dismiss</button>
                           </>
                         )}
-                        {can && ix.state !== 'pinned' && ix.state !== 'recommended' && ix.state !== 'dropped' && (
+                        {can && !frozen(ix.state) && ix.state !== 'recommended' && ix.state !== 'dropped' && (
                           <button onClick={() => void act(ix, 'pin')}>Freeze</button>
                         )}
-                        {can && ix.state === 'pinned' && <button onClick={() => void act(ix, 'unpin')}>Unfreeze</button>}
+                        {can && frozen(ix.state) && <button onClick={() => void act(ix, 'unpin')}>Unfreeze</button>}
                         {!can && <span className="muted">view only</span>}
                       </td>
                     </tr>

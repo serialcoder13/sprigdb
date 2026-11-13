@@ -89,6 +89,61 @@ fn target_name(t: &[Token], sql: &[u8], i: &mut usize) -> Option<String> {
     (!global).then_some(name)
 }
 
+/// Whether `sql` is a `SET` statement with a server-wide assignment:
+/// `GLOBAL`, `PERSIST` or `PERSIST_ONLY` before a variable, or
+/// `@@global.`, `@@persist.` or `@@persist_only.` (chapter 28,
+/// "Server-wide assignments"). Such an assignment needs
+/// `SYSTEM_VARIABLES_ADMIN` (chapter 29, decision bugfix-interim).
+#[must_use]
+pub fn sets_global(sql: &[u8], opts: &LexOptions) -> bool {
+    let has = |n: &[u8]| sql.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n));
+    if !has(b"global") && !has(b"persist") {
+        return false;
+    }
+    let Ok(tokens) = lex::lex(sql, opts) else {
+        return false;
+    };
+    let t = sig(&tokens);
+    let Some(first) = t.first() else {
+        return false;
+    };
+    if first.kind != TokenKind::Word || !first.bytes(sql).eq_ignore_ascii_case(b"SET") {
+        return false;
+    }
+    // `SET` then assignments separated by top-level commas: the scope word
+    // or the system variable starts each one.
+    let mut depth = 0_i32;
+    let mut starts = true;
+    for tk in &t[1..] {
+        let b = tk.bytes(sql);
+        if starts {
+            let lower = String::from_utf8_lossy(b).to_ascii_lowercase();
+            match tk.kind {
+                TokenKind::Word
+                    if matches!(lower.as_str(), "global" | "persist" | "persist_only") =>
+                {
+                    return true;
+                }
+                TokenKind::SysVar => {
+                    let n = lower.trim_start_matches("@@");
+                    if n.starts_with("global.") || n.starts_with("persist") {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+            starts = false;
+        }
+        match (tk.kind, b) {
+            (TokenKind::Punct, b"(") => depth += 1,
+            (TokenKind::Punct, b")") => depth -= 1,
+            (TokenKind::Punct, b",") if depth == 0 => starts = true,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Rewrites a `SET` statement's assignments of `sql_mode` and
 /// `max_execution_time` for the MySQL persona (see the module
 /// documentation). `None` when the statement isn't such a `SET` or has
@@ -327,6 +382,22 @@ pub fn rewrite_hints(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn global_assignments_are_found() {
+        let g = |s: &str| sets_global(s.as_bytes(), &LexOptions::mysql84());
+        assert!(g("SET GLOBAL max_connections = 10"));
+        assert!(g("set persist sql_mode = ''"));
+        assert!(g("SET PERSIST_ONLY wait_timeout = 5"));
+        assert!(g("SET @@global.time_zone = '+00:00'"));
+        assert!(g("SET @@GLOBAL.wait_timeout = 5"));
+        assert!(g("SET sql_mode = '', GLOBAL wait_timeout = 5"));
+        assert!(!g("SET SESSION wait_timeout = 5"));
+        assert!(!g("SET @@session.sql_mode = 'global'"));
+        assert!(!g("SET @global = 1"));
+        assert!(!g("SET x = CONCAT('a', 'global')"));
+        assert!(!g("SELECT @@global.wait_timeout"));
+    }
 
     fn set(s: &str) -> Option<SetRewrite> {
         rewrite_set(s.as_bytes(), &LexOptions::mysql84())

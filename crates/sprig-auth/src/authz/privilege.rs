@@ -355,8 +355,10 @@ pub const ALL_TENANT: ActionSet = ActionSet(
         & !Action::FanIn.bit(),
 );
 
-/// Actions grantable at the database level (MySQL's `db` table).
+/// Actions grantable at the database level (MySQL's `db` table, and the
+/// extension `WATCH`, chapter 29: `GRANT WATCH ON shop.* TO ...`).
 pub const DATABASE_ACTIONS: ActionSet = ActionSet::of(&[
+    Action::Watch,
     Action::Select,
     Action::Insert,
     Action::Update,
@@ -378,8 +380,10 @@ pub const DATABASE_ACTIONS: ActionSet = ActionSet::of(&[
     Action::Trigger,
 ]);
 
-/// Actions grantable on a table or view (MySQL's `tables_priv`).
+/// Actions grantable on a table or view (MySQL's `tables_priv`, and the
+/// extension `WATCH`: `GRANT WATCH ON shop.orders TO 'auditor'`).
 pub const TABLE_ACTIONS: ActionSet = ActionSet::of(&[
+    Action::Watch,
     Action::Select,
     Action::Insert,
     Action::Update,
@@ -580,7 +584,12 @@ pub fn render_static(set: ActionSet, level: Level, object: ObjectType) -> Vec<&'
                 .filter(|a| a.is_dynamic())
                 .fold(0, |b, a| b | a.bit()),
     );
-    if !statics.is_empty() && set.contains(statics) {
+    // Below the tenant level `ALL` includes the extension `WATCH`, which
+    // SHOW GRANTS prints with the static names there: a set without it
+    // isn't `ALL PRIVILEGES` (the tenant level prints it on the dynamic
+    // line instead).
+    let watch_ok = level == Level::Tenant || !all.has(Action::Watch) || set.has(Action::Watch);
+    if !statics.is_empty() && set.contains(statics) && watch_ok {
         return vec!["ALL PRIVILEGES"];
     }
     ORDER

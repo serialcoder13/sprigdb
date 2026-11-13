@@ -37,6 +37,18 @@ jobs:
           node-version: 24
           cache: pnpm
           cache-dependency-path: site/pnpm-lock.yaml
+      # The docs PDF (docs/pdf/build-pdf.sh), linked from the site.
+      - uses: pandoc/actions/setup@v1
+        with:
+          version: 3.9
+      - uses: typst-community/setup-typst@v4
+        with:
+          typst-version: 0.15.1
+      - name: Build the docs PDF
+        run: |
+          docs/pdf/build-pdf.sh
+          mkdir -p site/public
+          cp docs/pdf/build/SprigDB-Docs.pdf site/public/SprigDB-Docs.pdf
       - name: Build the site
         working-directory: site
         run: |

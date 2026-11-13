@@ -1,5 +1,5 @@
 {{- /* The operator: the only role with Kubernetes RBAC, limited to this
-     namespace; two replicas elect through a Lease (chapter 27). */}}
+     namespace; two replicas elect through a Lease. */}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -29,11 +29,16 @@ rules:
   - apiGroups: [""]
     resources: [persistentvolumeclaims]
     verbs: [list, delete]
-  # The failover watch reads the primary pod's readiness (r2opfix).
+  # mariadb-operator's backup Jobs: the leader exports each cluster's
+  # newest successful backup (sprig_backup_last_success_timestamp_seconds).
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [list]
+  # The failover watch reads the primary pod's readiness.
   - apiGroups: [""]
     resources: [pods]
     verbs: [get]
-  # Each cluster's domain ConfigMap, mounted into its pods (r2opfix).
+  # Each cluster's domain ConfigMap, mounted into its pods.
   - apiGroups: [""]
     resources: [configmaps]
     verbs: [get, create, patch, delete]
@@ -70,8 +75,7 @@ spec:
     spec:
       serviceAccountName: sprigdb-operator
       # Kubernetes' service-link variables (SPRIGDB_CONTROLLER_PORT=tcp://...)
-      # read as SPRIGDB_<SECTION>_<KEY> configuration and stop the process
-      # (found by r2close's helm install).
+      # read as SPRIGDB_<SECTION>_<KEY> configuration and stop the process.
       enableServiceLinks: false
       {{- include "sprigdb.podSecurity" . | nindent 6 }}
       containers:
@@ -83,7 +87,7 @@ spec:
             - name: POD_NAME
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
             - {name: SPRIGDB_NODE_DC, value: {{ .Values.dc.id | quote }}}
-            - {name: SPRIG_OPERATOR_CONTROLLER_ADMIN, value: {{ .Values.operator.controllerAdmin | default (printf "http://sprigdb-controller.%s.svc:7480" .Release.Namespace) | quote }}}
+            - {name: SPRIG_OPERATOR_CONTROLLER_ADMIN, value: {{ .Values.operator.controllerAdmin | default (include "sprigdb.adminEndpoint" .) | quote }}}
             - {name: SPRIG_OPERATOR_NODE_SERVICE_TYPE, value: {{ .Values.nodeServices.type | quote }}}
             {{- with .Values.nodeServices.nodePortHost }}
             - {name: SPRIG_OPERATOR_NODE_PORT_HOST, value: {{ . | quote }}}
@@ -92,6 +96,7 @@ spec:
             - {name: SPRIG_OPERATOR_SERVER_CERT_ISSUER, value: {{ .Values.tls.issuerRef.name | quote }}}
             - {name: SPRIG_OPERATOR_CLIENT_CERT_ISSUER, value: {{ .Values.tls.issuerRef.name | quote }}}
             - {name: SPRIG_OPERATOR_MARIADB_CA_FILE, value: /etc/sprigdb/ca/ca.crt}
+            - {name: SPRIG_OPERATOR_CONTROLLER_CA_FILE, value: /etc/sprigdb/ca/ca.crt}
             {{- end }}
             - {name: SPRIG_OPERATOR_READY_TIMEOUT_SECONDS, value: {{ .Values.operator.readyTimeoutSeconds | quote }}}
             {{- if .Values.operator.agentSidecar }}
@@ -110,3 +115,16 @@ spec:
             {{- include "sprigdb.tlsMounts" . | nindent 12 }}
       volumes:
         {{- include "sprigdb.tlsVolumes" (dict "root" . "role" "controller" "secret" "sprigdb-operator-tls") | nindent 8 }}
+---
+# The operators' telemetry, for the ServiceMonitor: the leader exports the
+# backup gauge the BackupMissed alert reads.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sprigdb-operator-telemetry
+  labels: {{- include "sprigdb.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector: {app.kubernetes.io/component: operator}
+  ports:
+    - {name: telemetry, port: 9180}

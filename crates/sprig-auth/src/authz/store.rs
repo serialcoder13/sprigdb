@@ -104,13 +104,34 @@ const GRANT_EXISTING: &str = "INSERT IGNORE INTO privileges
   SELECT 0, 'user', user_id, 'tenant', 4026531839, UTC_TIMESTAMP(3)
   FROM users WHERE state = 'active'";
 
+/// The data step of format 2 (decision bugfix-interim, WATCH): change
+/// streams need `WATCH` from now on (chapters 29 and 38), so every grant
+/// that held `SELECT` before gets `WATCH` at the same level, and every
+/// partial revoke that cut `SELECT` cuts `WATCH` too. Nothing that worked
+/// stops working; grants made after it follow the design. Column grants
+/// have no `WATCH`. Idempotent: a row holding it is left alone.
+const WATCH_FROM_SELECT: &str = "UPDATE privileges SET actions = actions | 262144
+  WHERE level IN ('tenant', 'database', 'object') AND (actions & 1) = 1
+    AND (actions & 262144) = 0";
+
+/// The module's latest format.
+pub const AUTHZ_FORMAT: u32 = 2;
+
 /// The module's migrations.
-pub static AUTHZ_MIGRATIONS: &[Migration] = &[Migration {
-    format: 1,
-    phase: Phase::Expand,
-    name: "roles, role_edges and privileges; existing users keep everything",
-    statements: &[DDL_ROLES, DDL_ROLE_EDGES, DDL_PRIVILEGES, GRANT_EXISTING],
-}];
+pub static AUTHZ_MIGRATIONS: &[Migration] = &[
+    Migration {
+        format: 1,
+        phase: Phase::Expand,
+        name: "roles, role_edges and privileges; existing users keep everything",
+        statements: &[DDL_ROLES, DDL_ROLE_EDGES, DDL_PRIVILEGES, GRANT_EXISTING],
+    },
+    Migration {
+        format: 2,
+        phase: Phase::Expand,
+        name: "WATCH wherever SELECT was granted (change streams need WATCH)",
+        statements: &[WATCH_FROM_SELECT],
+    },
+];
 
 /// The `authz` module, for [`Migrator::new`](sprig_catalog::Migrator::new).
 /// It needs chapter 14's `auth` module first (format 1 reads `users`).
@@ -403,6 +424,31 @@ impl AuthzStore {
             .await
             .map_err(map_err)?;
         Ok(n.unwrap_or(0) > 0)
+    }
+
+    /// The module's format in the catalog's migration record (0 without
+    /// one).
+    ///
+    /// # Errors
+    /// 39070 or a backend error.
+    pub async fn format<Q: Queryable + Send>(&self, q: &mut Q) -> Result<u32> {
+        let v: Option<Vec<u8>> = q
+            .exec_first(
+                format!(
+                    "SELECT value FROM {}.settings WHERE scope_kind = 'tenant' AND scope_id = 0 \
+                     AND setting_key = ?",
+                    quote(&self.schema)
+                ),
+                (sprig_catalog::migrate::migration_key(MODULE),),
+            )
+            .await
+            .map_err(map_err)?;
+        Ok(
+            v.and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+                .and_then(|j| j.get("format").and_then(serde_json::Value::as_u64))
+                .and_then(|f| u32::try_from(f).ok())
+                .unwrap_or(0),
+        )
     }
 
     /// Every row the gateway uses: SQL roles, this tenant's role edges and

@@ -153,7 +153,19 @@ pub static AUTH_MIGRATIONS: &[Migration] = &[
         name: "user_factors",
         statements: &[crate::mfa::DDL_USER_FACTORS],
     },
+    Migration {
+        format: 6,
+        phase: Phase::Expand,
+        name: "users.require_subject and users.require_issuer",
+        statements: &[ALTER_USERS_REQUIRE_DN],
+    },
 ];
+
+/// `REQUIRE SUBJECT` and `REQUIRE ISSUER` (wireup, 13 Nov): the client
+/// certificate's subject and issuer, in MySQL's `/C=../O=../CN=..` form.
+pub const ALTER_USERS_REQUIRE_DN: &str = "ALTER TABLE users \
+  ADD COLUMN IF NOT EXISTS require_subject VARCHAR(1024) NULL, \
+  ADD COLUMN IF NOT EXISTS require_issuer VARCHAR(1024) NULL";
 
 /// Format 3: `scram_sha_512` joins `verifiers.mechanism` (chapter 14,
 /// "SCRAM verifiers"). A new last `ENUM` member: MariaDB changes only the
@@ -458,6 +470,11 @@ pub struct UserRow {
     pub created_at: SystemTime,
     /// The auth version of the last change to the row or its verifiers.
     pub changed_version: u64,
+    /// `REQUIRE SUBJECT '...'`: the verified client certificate's subject
+    /// must be exactly this (`/C=../CN=..`).
+    pub require_subject: Option<String>,
+    /// `REQUIRE ISSUER '...'`: its issuer must be exactly this.
+    pub require_issuer: Option<String>,
 }
 
 impl UserRow {
@@ -497,6 +514,8 @@ impl UserRow {
             state: UserState::Active,
             created_at,
             changed_version,
+            require_subject: None,
+            require_issuer: None,
         }
     }
 
@@ -635,6 +654,16 @@ const USER_COLS: &str = "user_id, name, host, kind, auth_methods, plugin, mongo_
     max_connections_per_hour, max_user_connections, attributes, source, created_by_tenant, \
     state, TIMESTAMPDIFF(MICROSECOND, '1970-01-01', created_at), changed_version";
 
+/// [`USER_COLS`] and format 6's `REQUIRE SUBJECT` and `ISSUER` columns.
+const USER_COLS_DN: &str = "require_subject, require_issuer";
+/// The same for a catalog still before format 6.
+const USER_COLS_NO_DN: &str = "NULL, NULL";
+
+/// MariaDB's 1054 (unknown column): a catalog before format 6.
+fn unknown_column(e: &mysql_async::Error) -> bool {
+    matches!(e, mysql_async::Error::Server(s) if s.code == 1054)
+}
+
 const VERIFIER_COLS: &str = "verifier_id, user_id, mechanism, slot, login_form, auth_string, \
     salt, iterations, stored_key, server_key, generation, \
     TIMESTAMPDIFF(MICROSECOND, '1970-01-01', created_at)";
@@ -717,7 +746,34 @@ impl AuthStore {
         );
         let mut p = vec![Value::from(r.user_id.0)];
         p.extend(user_values(r));
-        exec(q, sql, p).await
+        exec(q, sql, p).await?;
+        self.set_dn(q, r).await
+    }
+
+    /// Writes `r`'s `REQUIRE SUBJECT` and `ISSUER` (format 6's columns).
+    /// A catalog before format 6 takes a user without them; one with
+    /// them must be migrated first ([`migrate_dn`]).
+    async fn set_dn<Q: Queryable + Send>(&self, q: &mut Q, r: &UserRow) -> Result<()> {
+        let sql = format!(
+            "UPDATE {} SET require_subject = ?, require_issuer = ? WHERE user_id = ?",
+            self.users
+        );
+        let p = (
+            r.require_subject.clone(),
+            r.require_issuer.clone(),
+            r.user_id.0,
+        );
+        match q.exec_drop(sql, p).await {
+            Ok(()) => Ok(()),
+            Err(e)
+                if unknown_column(&e)
+                    && r.require_subject.is_none()
+                    && r.require_issuer.is_none() =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(map_err(e)),
+        }
     }
 
     /// Rewrites every column of the user `r.user_id`. Returns whether the
@@ -741,6 +797,7 @@ impl AuthStore {
         let mut p = user_values(r);
         p.push(Value::from(r.user_id.0));
         exec(q, sql, p).await?;
+        self.set_dn(q, r).await?;
         self.exists(q, r.user_id).await
     }
 
@@ -788,13 +845,14 @@ impl AuthStore {
         q: &mut Q,
         id: UserId,
     ) -> Result<Option<UserRow>> {
-        let rows: Vec<Row> = q
-            .exec(
-                format!("SELECT {USER_COLS} FROM {} WHERE user_id = ?", self.users),
-                (id.0,),
+        let users = &self.users;
+        let rows = select_users(q, |dn| {
+            (
+                format!("SELECT {USER_COLS}, {dn} FROM {users} WHERE user_id = ?"),
+                Params::from((id.0,)),
             )
-            .await
-            .map_err(map_err)?;
+        })
+        .await?;
         rows.into_iter().next().map(user_row).transpose()
     }
 
@@ -809,16 +867,14 @@ impl AuthStore {
         name: &str,
         host: &str,
     ) -> Result<Option<UserRow>> {
-        let rows: Vec<Row> = q
-            .exec(
-                format!(
-                    "SELECT {USER_COLS} FROM {} WHERE live_name = ? AND host = ?",
-                    self.users
-                ),
-                (name, host),
+        let users = &self.users;
+        let rows = select_users(q, |dn| {
+            (
+                format!("SELECT {USER_COLS}, {dn} FROM {users} WHERE live_name = ? AND host = ?"),
+                Params::from((name, host)),
             )
-            .await
-            .map_err(map_err)?;
+        })
+        .await?;
         rows.into_iter().next().map(user_row).transpose()
     }
 
@@ -832,26 +888,20 @@ impl AuthStore {
         q: &mut Q,
         since: Option<u64>,
     ) -> Result<Vec<UserRow>> {
-        let rows: Vec<Row> = match since {
-            Some(v) => {
-                q.exec(
-                    format!(
-                        "SELECT {USER_COLS} FROM {} WHERE changed_version > ? ORDER BY user_id",
-                        self.users
-                    ),
-                    (v,),
-                )
-                .await
-            }
-            None => {
-                q.query(format!(
-                    "SELECT {USER_COLS} FROM {} ORDER BY user_id",
-                    self.users
-                ))
-                .await
-            }
-        }
-        .map_err(map_err)?;
+        let users = &self.users;
+        let rows = select_users(q, |dn| match since {
+            Some(v) => (
+                format!(
+                    "SELECT {USER_COLS}, {dn} FROM {users} WHERE changed_version > ? ORDER BY user_id"
+                ),
+                Params::from((v,)),
+            ),
+            None => (
+                format!("SELECT {USER_COLS}, {dn} FROM {users} ORDER BY user_id"),
+                Params::Empty,
+            ),
+        })
+        .await?;
         rows.into_iter().map(user_row).collect()
     }
 
@@ -1218,6 +1268,39 @@ pub(crate) fn opt_at(some: bool) -> &'static str {
     if some { AT } else { "?" }
 }
 
+/// Runs the user select `stmt` builds, with format 6's columns, or with
+/// `NULL`s in their place on a catalog before format 6 (1054).
+async fn select_users<Q: Queryable + Send>(
+    q: &mut Q,
+    stmt: impl Fn(&str) -> (String, Params),
+) -> Result<Vec<Row>> {
+    let (sql, p) = stmt(USER_COLS_DN);
+    match q.exec(sql, p).await {
+        Ok(rows) => Ok(rows),
+        Err(e) if unknown_column(&e) => {
+            let (sql, p) = stmt(USER_COLS_NO_DN);
+            q.exec(sql, p).await.map_err(map_err)
+        }
+        Err(e) => Err(map_err(e)),
+    }
+}
+
+/// Brings `schema`'s auth module to format 6 before a user gets `REQUIRE
+/// SUBJECT` or `ISSUER` (outside any change: the migration is DDL).
+///
+/// # Errors
+/// The migrator's.
+pub async fn migrate_dn(conn: &mut mysql_async::Conn, schema: &str) -> Result<()> {
+    sprig_catalog::Migrator::new(&[AUTH_MODULE])?
+        .run(
+            conn,
+            schema,
+            &sprig_catalog::migrate::MigrateOpts::default(),
+        )
+        .await?;
+    Ok(())
+}
+
 /// The parameters of every user column but `user_id`, in `insert_user`'s
 /// order.
 fn user_values(r: &UserRow) -> Vec<Value> {
@@ -1297,6 +1380,10 @@ fn user_row(mut r: Row) -> Result<UserRow> {
         state: UserState::parse(&text(&mut r, 25, "state")?)?,
         created_at: time(&mut r, 26, "created_at")?,
         changed_version: col(&mut r, 27, "changed_version")?,
+        require_subject: col::<Option<Vec<u8>>>(&mut r, 28, "require_subject")?
+            .map(|b| String::from_utf8_lossy(&b).into_owned()),
+        require_issuer: col::<Option<Vec<u8>>>(&mut r, 29, "require_issuer")?
+            .map(|b| String::from_utf8_lossy(&b).into_owned()),
     })
 }
 

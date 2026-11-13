@@ -1,8 +1,7 @@
-{{- /* The gateways' per-user backend accounts (chapter 29): every gateway
+{{- /* The gateways' per-user backend accounts: every gateway
      derives each user's MariaDB password from this one secret, so they
      must share it. Generated once, kept across upgrades and uninstalls
-     (found missing by r2close's helm install: logins then failed with
-     "no backend account configured"). */}}
+     (without it, logins fail with "no backend account configured"). */}}
 {{- $old := lookup "v1" "Secret" .Release.Namespace "sprigdb-gateway-backends" }}
 apiVersion: v1
 kind: Secret

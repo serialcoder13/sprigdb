@@ -609,6 +609,12 @@ impl PassSession {
         if !sandbox && let Some(req) = sprig_logic::invoke::FunctionCall::parse(text) {
             return self.tenant_function_call(cx, req, more, format, out).await;
         }
+        // Chapter 41: `EXPLAIN FUNCTION | PROCEDURE [db.]name`.
+        if !sandbox
+            && let Some(e) = sprig_logic::placement::parse_explain(&String::from_utf8_lossy(text))
+        {
+            return Box::pin(self.tenant_logic_explain(cx, e, more, format, out)).await;
+        }
         // Chapter 41: `Logic.TestRun` and `TEST FUNCTION ...` (R7 follow-ups).
         if !sandbox && let Some(req) = sprig_logic::testrun::parse_statement(text) {
             return self.tenant_test_run(cx, req, more, format, out).await;
@@ -1077,6 +1083,60 @@ impl PassSession {
         } else {
             text
         };
+        // Chapters 28 and 29 (decision bugfix-interim): a server-wide
+        // assignment (`SET GLOBAL`, `PERSIST`, `@@global.`) needs
+        // `SYSTEM_VARIABLES_ADMIN`, as on MySQL 8.4, and is never sent to
+        // MariaDB, where it would change the server for every tenant. With
+        // the privilege it is still refused: the allow-list's tenant
+        // defaults (`compat.global.<variable>`) aren't built.
+        // Chapter 29 (decision bugfix-interim): a `DEFINER` naming another
+        // account needs `SET_ANY_DEFINER` (MariaDB's `SET USER`), as on
+        // MySQL 8.4. With it the definer still becomes the creator (chapter
+        // 29, R7 step 16), so naming one never borrows its grants.
+        if let Some(p) = self.tenant.as_deref().map(|ts| ts.principal.clone()) {
+            let others: Vec<_> = crate::tenant::ddl::named_definers(text, lex)
+                .into_iter()
+                .filter(|(u, h)| *u != p.user || !h.eq_ignore_ascii_case(&p.host))
+                .collect();
+            if !others.is_empty()
+                && !crate::pipeline::SessionExec::holds_tenant_privilege(
+                    &*self,
+                    sprig_auth::authz::Action::SetAnyDefiner,
+                )
+                .unwrap_or(false)
+            {
+                let e = SprigError::standard(
+                    1227,
+                    *b"42000",
+                    "Access denied; you need (at least one of) the SUPER or SET_ANY_DEFINER \
+                     privilege(s) for this operation",
+                );
+                return self.fail(out, &e).await;
+            }
+        }
+        if sprig_sql::compat::setvar::sets_global(text, &lex) {
+            let admin = crate::pipeline::SessionExec::holds_tenant_privilege(
+                &*self,
+                sprig_auth::authz::Action::SystemVariablesAdmin,
+            )
+            .unwrap_or(false);
+            let e = if admin {
+                SprigError::standard(
+                    1227,
+                    *b"42000",
+                    "Access denied; GLOBAL and PERSIST assignments are server-wide, and a \
+                     tenant's own defaults for them aren't supported yet",
+                )
+            } else {
+                SprigError::standard(
+                    1227,
+                    *b"42000",
+                    "Access denied; you need (at least one of) the SUPER or \
+                     SYSTEM_VARIABLES_ADMIN privilege(s) for this operation",
+                )
+            };
+            return self.fail(out, &e).await;
+        }
         let text: &Bytes = if self.persona == Persona::MySql84 {
             match sprig_sql::compat::setvar::rewrite_set(text, &lex) {
                 None => text,

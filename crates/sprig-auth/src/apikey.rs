@@ -174,12 +174,7 @@ pub fn parse_key(s: &str) -> Option<PresentedKey> {
     let rest = s.strip_prefix("sprig_")?;
     let (tenant, rest) = rest.split_once('_')?;
     let (key_id, secret) = rest.split_once('_')?;
-    let tenant_ok = !tenant.is_empty()
-        && tenant.len() <= 63
-        && tenant.as_bytes()[0].is_ascii_lowercase()
-        && tenant
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    let tenant_ok = sprig_common::names::is_tenant_name(tenant);
     let id_ok = key_id.len() == KEY_ID_LEN && key_id.bytes().all(|b| BASE32.contains(&b));
     let secret_ok = secret.len() == SECRET_LEN * 2 && secret.bytes().all(|b| b.is_ascii_hexdigit());
     (tenant_ok && id_ok && secret_ok).then(|| PresentedKey {

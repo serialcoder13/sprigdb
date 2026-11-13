@@ -1,4 +1,6 @@
-{{- /* Initial global and dc settings, applied once (chapter 27). */}}
+{{- /* Initial global and dc settings, the gateway's optional listeners,
+     its certificate and client-certificate checks, applied after each
+     install and upgrade. */}}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -14,29 +16,61 @@ spec:
       restartPolicy: OnFailure
       automountServiceAccountToken: false
       # Kubernetes' service-link variables (SPRIGDB_CONTROLLER_PORT=tcp://...)
-      # read as SPRIGDB_<SECTION>_<KEY> configuration and stop the process
-      # (found by r2close's helm install).
+      # read as SPRIGDB_<SECTION>_<KEY> configuration and stop the process.
       enableServiceLinks: false
       volumes:
         - name: admin-token
           secret: {secretName: sprigdb-admin-token}
+        {{- if .Values.tls.enabled }}
+        - name: ca-bundle
+          configMap: {name: {{ .Values.tls.bundleConfigMap }}}
+        {{- end }}
       containers:
         - name: settings
           image: {{ include "sprigdb.image" . }}
           command: ["/bin/sh", "-c"]
           env:
             - {name: SPRIGCTL_TOKEN_FILE, value: /etc/sprigdb/admin/token}
+            {{- if .Values.tls.enabled }}
+            - {name: SPRIGCTL_CA_FILE, value: /etc/sprigdb/ca/ca.crt}
+            {{- end }}
           volumeMounts:
             - {name: admin-token, mountPath: /etc/sprigdb/admin, readOnly: true}
+            {{- if .Values.tls.enabled }}
+            - {name: ca-bundle, mountPath: /etc/sprigdb/ca, readOnly: true}
+            {{- end }}
           args:
             - |
               set -e
-              E=http://sprigdb-controller.{{ .Release.Namespace }}.svc:7480
+              E={{ include "sprigdb.adminEndpoint" . }}
               # The controller may still be starting: the Job retries.
               sprigctl --endpoint "$E" dc list > /dev/null
               sprigctl --endpoint "$E" dc register {{ .Values.dc.id }} --tags '{{ range $k, $v := .Values.dc.tags }}{{ $k }}={{ $v }},{{ end }}' || true
               {{- range $k, $v := .Values.settings.global }}
               sprigctl --endpoint "$E" settings set {{ $k }} {{ $v | quote }} --scope global --reason helm
+              {{- end }}
+              {{- range $name := splitList "," (include "sprigdb.optionalListeners" .) }}
+              {{- $l := get ($.Values.gateway.listeners | default dict) $name | default dict }}
+              sprigctl --endpoint "$E" settings set listener.{{ $name }}.enabled {{ $l.enabled | default false | quote }} --scope dc:{{ $.Values.dc.id }} --reason helm
+              {{- if $l.enabled }}
+              sprigctl --endpoint "$E" settings set listener.{{ $name }}.bind "0.0.0.0:{{ $l.port }}" --scope dc:{{ $.Values.dc.id }} --reason helm
+              {{- end }}
+              {{- end }}
+              {{- with (.Values.gateway.clientTls | default dict) }}
+              {{- if .secretName }}
+              sprigctl --endpoint "$E" settings set tls.bundles.default.cert_path "{{ .mountPath | default "/etc/sprigdb/client-tls" }}/tls.crt" --scope dc:{{ $.Values.dc.id }} --reason helm
+              sprigctl --endpoint "$E" settings set tls.bundles.default.key_path "{{ .mountPath | default "/etc/sprigdb/client-tls" }}/tls.key" --scope dc:{{ $.Values.dc.id }} --reason helm
+              {{- end }}
+              {{- end }}
+              {{- $caPath := include "sprigdb.clientCaPath" . }}
+              {{- if and (include "sprigdb.anyClientCert" .) (not $caPath) }}
+              {{- fail "gateway.clientTls.clientCert asks for client certificates: name the CA that signs them in gateway.clientTls.clientCa (secretName or configMap)" }}
+              {{- end }}
+              {{- if $caPath }}
+              sprigctl --endpoint "$E" settings set tls.bundles.default.client_ca_path "{{ $caPath }}" --scope dc:{{ $.Values.dc.id }} --reason helm
+              {{- end }}
+              {{- range $name := splitList "," (include "sprigdb.allListeners" .) }}
+              sprigctl --endpoint "$E" settings set listener.{{ $name }}.client_cert {{ include "sprigdb.clientCert" (dict "root" $ "name" $name) }} --scope dc:{{ $.Values.dc.id }} --reason helm
               {{- end }}
               {{- range $k, $v := .Values.settings.dc }}
               sprigctl --endpoint "$E" settings set {{ $k }} {{ $v | quote }} --scope dc:{{ $.Values.dc.id }} --reason helm

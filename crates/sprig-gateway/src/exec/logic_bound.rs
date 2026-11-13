@@ -557,21 +557,13 @@ impl PassSession {
                 )
             })?;
             let source = store.source(&mut conn, module.module_id, v).await?;
-            let runtime = sprig_logic::compiler::Runtime::parse(&module.runtime)
-                .unwrap_or(sprig_logic::compiler::Runtime::Kirun);
-            let compiled = sprig_logic::compiler::compile(
-                runtime,
-                &source,
-                &sprig_logic::compiler::StaticColumns::new(),
-                &sprig_logic::compiler::Options::default(),
-            )?;
-            let f = compiled.ir.ok_or_else(|| {
-                SprigError::new(
-                    SprigCode::LogicUnsupported,
-                    format!("{} has no compiled form", module.name),
-                )
-            })?;
-            let expr = enforce::computed_expr(&f, &call)?;
+            // The version's signature: JavaScript compiles only with its
+            // declared parameter types (jsbind).
+            let (sig, _) = store
+                .version_signature(&mut conn, module.module_id, v)
+                .await?;
+            let expr =
+                service::computed_column(&module.name, &module.runtime, &source, &sig, &call)?;
             Ok(enforce::rewrite_computed(&sql, &call, &expr))
         }
         .await;

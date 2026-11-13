@@ -28,7 +28,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 use sqlparser::ast::{AssignmentTarget, Delete, FromTable, Insert, Update};
 
 use crate::Ctx;
-use crate::exec::{Done, Rows, Runner, Txn, unsupported};
+use crate::exec::{Done, HierChange, Rows, Runner, Txn, unsupported};
 use crate::grammar::{AddHierarchy, Name};
 use crate::model::{HierState, HierarchyDef, KeyClass, OnDelete, upper};
 use crate::rewrite::{hex_lit, key_literal, segment, segment_sql};
@@ -77,7 +77,7 @@ pub async fn fill_paths(h: &HierarchyDef, db: Option<&str>, r: &mut dyn Runner) 
     let k = quote(&h.key);
     let p = quote(&h.parent);
     let mut filled = r
-        .exec(&format!(
+        .exec_paths(&format!(
             "UPDATE {t} SET {HPATH} = CONCAT('/', {seg}, '/'), {HDEPTH} = 0, {RK} = {k} \
              WHERE {HPATH} IS NULL AND {p} IS NULL",
             seg = segment_sql(&k, h.key_class)
@@ -86,7 +86,7 @@ pub async fn fill_paths(h: &HierarchyDef, db: Option<&str>, r: &mut dyn Runner) 
         .affected_rows;
     for _ in 0..=h.max_depth {
         let n = r
-            .exec(&format!(
+            .exec_paths(&format!(
                 "UPDATE {t} AS `c` JOIN {t} AS `p` ON `c`.{p} = `p`.{k} \
                  SET `c`.{HPATH} = CONCAT(`p`.{HPATH}, {seg}, '/'), \
                  `c`.{HDEPTH} = `p`.{HDEPTH} + 1, `c`.{RK} = `p`.{RK} \
@@ -103,6 +103,95 @@ pub async fn fill_paths(h: &HierarchyDef, db: Option<&str>, r: &mut dyn Runner) 
         }
     }
     Ok(filled)
+}
+
+/// A row the keyed fill gives a path: its key, path, depth and top key.
+type Filled = (Vec<u8>, Vec<u8>, i64, Vec<u8>);
+
+/// [`fill_paths`] for an inheritable table (decision T22, piece 1): chapter
+/// 42 refuses a multi-table `UPDATE`, so each level is read with a join,
+/// computed here and written with one single-table `UPDATE` per batch.
+/// Returns the keys given a path, as SQL literals.
+///
+/// # Errors
+/// A statement's error.
+pub async fn fill_paths_keyed(
+    h: &HierarchyDef,
+    db: Option<&str>,
+    r: &mut dyn Runner,
+    nbe: bool,
+    batch: usize,
+) -> Result<Vec<String>> {
+    let t = table_sql(db, &h.table);
+    let k = quote(&h.key);
+    let p = quote(&h.parent);
+    let mut out = Vec::new();
+    let tops = r
+        .query_paths(&format!(
+            "SELECT {k} FROM {t} WHERE {HPATH} IS NULL AND {p} IS NULL"
+        ))
+        .await?;
+    let mut level: Vec<Filled> = (0..tops.rows.len())
+        .filter_map(|i| {
+            let key = val(&tops, i, 0)?;
+            let path = format!("/{}/", segment(&key, h.key_class)).into_bytes();
+            Some((key.clone(), path, 0, key))
+        })
+        .collect();
+    for _ in 0..=(u32::from(h.max_depth) + 1) {
+        if level.is_empty() {
+            break;
+        }
+        for chunk in level.chunks(batch.max(1)) {
+            let keys: Vec<String> = chunk
+                .iter()
+                .map(|(key, ..)| key_literal(key, h.key_class, nbe))
+                .collect();
+            let case = |f: &dyn Fn(&Filled) -> String| {
+                let arms: Vec<String> = chunk
+                    .iter()
+                    .zip(&keys)
+                    .map(|(row, lit)| format!("WHEN {lit} THEN {}", f(row)))
+                    .collect();
+                format!("CASE {k} {} END", arms.join(" "))
+            };
+            r.exec_paths(&format!(
+                "UPDATE {t} SET {HPATH} = {}, {HDEPTH} = {}, {RK} = {} WHERE {k} IN ({}) AND \
+                 {HPATH} IS NULL",
+                case(&|row| hex_lit(&row.1)),
+                case(&|row| row.2.to_string()),
+                case(&|row| key_literal(&row.3, h.key_class, nbe)),
+                keys.join(", ")
+            ))
+            .await?;
+            out.extend(keys);
+        }
+        let next = r
+            .query_paths(&format!(
+                "SELECT `c`.{k}, `p`.{HPATH}, `p`.{HDEPTH}, `p`.{RK} FROM {t} AS `c` JOIN {t} AS \
+                 `p` ON `c`.{p} = `p`.{k} WHERE `c`.{HPATH} IS NULL AND `p`.{HPATH} IS NOT NULL \
+                 AND `p`.{HDEPTH} < {max}",
+                max = h.max_depth
+            ))
+            .await?;
+        level = (0..next.rows.len())
+            .filter_map(|i| {
+                let key = val(&next, i, 0)?;
+                let mut path = val(&next, i, 1)?;
+                path.extend_from_slice(segment(&key, h.key_class).as_bytes());
+                path.push(b'/');
+                (path.len() <= MAX_PATH_BYTES).then_some(())?;
+                Some((key, path, num(&next, i, 2)? + 1, val(&next, i, 3)?))
+            })
+            .collect();
+    }
+    Ok(out)
+}
+
+/// Whether `table`'s hierarchy is inheritable (chapter 42): its plans then
+/// fill paths with [`fill_paths_keyed`] and tell the inheritance layer.
+async fn inheritable(r: &mut dyn Runner, db: Option<&str>, table: &str) -> Result<bool> {
+    r.tree_inheritable(db, table).await
 }
 
 /// The first row without a path, if any, as an error.
@@ -173,11 +262,25 @@ pub async fn insert(
             "ON DUPLICATE KEY UPDATE of a hierarchy's key or parent is not supported yet",
         ));
     }
+    let inh = inheritable(r, db, &h.table).await?;
+    let nbe = ctx.lex.no_backslash_escapes;
     let tx = Txn::begin(r).await?;
     let result: Result<Done> = async {
+        if inh {
+            r.hierarchy_changed(db, &h.table, &HierChange::Lock).await?;
+        }
         let done = r.exec(sql).await?;
-        fill_paths(h, db, r).await?;
-        check_paths(h, db, r, ctx.lex.no_backslash_escapes).await?;
+        if inh {
+            let keys = fill_paths_keyed(h, db, r, nbe, ctx.limits.write_batch_rows).await?;
+            check_paths(h, db, r, nbe).await?;
+            if !keys.is_empty() {
+                r.hierarchy_changed(db, &h.table, &HierChange::Changed(keys))
+                    .await?;
+            }
+        } else {
+            fill_paths(h, db, r).await?;
+            check_paths(h, db, r, nbe).await?;
+        }
         Ok(done)
     }
     .await;
@@ -244,10 +347,15 @@ pub async fn update(
         step_a.push_str(&format!(" LIMIT {l}"));
     }
     step_a.push_str(" FOR UPDATE");
+    let inh = inheritable(r, db, &h.table).await?;
     let tx = Txn::begin(r).await?;
     let result: Result<Done> = async {
+        if inh {
+            r.hierarchy_changed(db, &h.table, &HierChange::Lock).await?;
+        }
         let found = r.query(&step_a).await?;
         let done = r.exec(sql).await?;
+        let mut moved = Vec::new();
         for i in 0..found.rows.len() {
             let old = val(&found, i, 1);
             let new = val(&found, i, 2);
@@ -256,6 +364,11 @@ pub async fn update(
             }
             let node = val(&found, i, 0).unwrap_or_default();
             move_subtree(h, db, &node, new.as_deref(), ctx, r, nbe).await?;
+            moved.push(key_literal(&node, h.key_class, nbe));
+        }
+        if inh && !moved.is_empty() {
+            r.hierarchy_changed(db, &h.table, &HierChange::Changed(moved))
+                .await?;
         }
         Ok(done)
     }
@@ -289,7 +402,11 @@ pub async fn move_subtree(
         .await?;
     let Some(old) = val(&n, 0, 0) else {
         // A row without a path: the fill below gives it one.
-        fill_paths(h, db, r).await?;
+        if inheritable(r, db, &h.table).await? {
+            fill_paths_keyed(h, db, r, nbe, ctx.limits.write_batch_rows).await?;
+        } else {
+            fill_paths(h, db, r).await?;
+        }
         return check_paths(h, db, r, nbe).await;
     };
     let n_depth = num(&n, 0, 1).unwrap_or(0);
@@ -347,7 +464,7 @@ pub async fn move_subtree(
         hex_lit(&upper(&old))
     );
     let size = r
-        .query(&format!(
+        .query_paths(&format!(
             "SELECT COUNT(*), MAX({HDEPTH}), MAX(LENGTH({HPATH})) FROM {t} WHERE {range}"
         ))
         .await?;
@@ -377,7 +494,7 @@ pub async fn move_subtree(
             ),
         ));
     }
-    r.exec(&format!(
+    r.exec_paths(&format!(
         "UPDATE {t} SET {HPATH} = CONCAT({np}, SUBSTRING({HPATH}, {len})), \
          {HDEPTH} = {HDEPTH} + ({delta}), {RK} = {rk} WHERE {range}",
         np = hex_lit(&new_path),
@@ -428,8 +545,12 @@ pub async fn delete(
     step_a.push_str(" FOR UPDATE");
     let batch = ctx.limits.write_batch_rows.max(1);
     let max_move = ctx.limits.max_move_rows;
+    let inh = inheritable(r, db, &h.table).await?;
     let tx = Txn::begin(r).await?;
     let result: Result<u64> = async {
+        if inh {
+            r.hierarchy_changed(db, &h.table, &HierChange::Lock).await?;
+        }
         let found = r.query(&step_a).await?;
         let keys: Vec<String> = (0..found.rows.len())
             .map(|i| key_literal(&val(&found, i, 0).unwrap_or_default(), h.key_class, nbe))
@@ -437,6 +558,13 @@ pub async fn delete(
         let paths: Vec<Vec<u8>> = (0..found.rows.len())
             .filter_map(|i| val(&found, i, 1))
             .collect();
+        // An inheritable table's cascade deletes the subtrees first, so
+        // the spaces below are checked once every row is gone (decision
+        // T22, piece 4).
+        let mut gone = Vec::new();
+        if inh && h.on_delete == OnDelete::Cascade {
+            gone = cascade_first(h, db, &paths, batch, max_move, r, nbe).await?;
+        }
         let mut n = 0;
         for chunk in keys.chunks(batch) {
             n += r
@@ -447,7 +575,12 @@ pub async fn delete(
                 .await?
                 .affected_rows;
         }
-        for chunk in paths.chunks(batch) {
+        let checked = if gone.is_empty() && !(inh && h.on_delete == OnDelete::Cascade) {
+            paths.as_slice()
+        } else {
+            &[]
+        };
+        for chunk in checked.chunks(batch) {
             let under: Vec<String> = chunk
                 .iter()
                 .map(|p| {
@@ -498,6 +631,12 @@ pub async fn delete(
                 }
             }
         }
+        if inh && !keys.is_empty() {
+            let mut all = keys.clone();
+            all.extend(gone);
+            r.hierarchy_changed(db, &h.table, &HierChange::Deleted(all))
+                .await?;
+        }
         Ok(n)
     }
     .await;
@@ -508,6 +647,55 @@ pub async fn delete(
         affected_rows: n,
         ..Done::default()
     }))
+}
+
+/// The subtrees under `paths`, deleted deepest first; their keys.
+async fn cascade_first(
+    h: &HierarchyDef,
+    db: Option<&str>,
+    paths: &[Vec<u8>],
+    batch: usize,
+    max_move: u64,
+    r: &mut dyn Runner,
+    nbe: bool,
+) -> Result<Vec<String>> {
+    let t = table_sql(db, &h.table);
+    let k = quote(&h.key);
+    let mut gone = Vec::new();
+    for chunk in paths.chunks(batch) {
+        let under: Vec<String> = chunk
+            .iter()
+            .map(|p| {
+                format!(
+                    "({HPATH} > {} AND {HPATH} < {})",
+                    hex_lit(p),
+                    hex_lit(&upper(p))
+                )
+            })
+            .collect();
+        let cond = under.join(" OR ");
+        let rows = r
+            .query(&format!("SELECT {k} FROM {t} WHERE {cond}"))
+            .await?;
+        let c = rows.rows.len() as u64 + gone.len() as u64;
+        if c > max_move {
+            return Err(SprigError::new(
+                SprigCode::SubtreeTooLarge,
+                format!("The cascade deletes {c} rows, over hierarchy.max_move_rows ({max_move})"),
+            ));
+        }
+        if rows.rows.is_empty() {
+            continue;
+        }
+        gone.extend(
+            (0..rows.rows.len()).map(|i| key_literal(&val(&rows, i, 0).unwrap_or_default(), h.key_class, nbe)),
+        );
+        r.exec(&format!(
+            "DELETE FROM {t} WHERE {cond} ORDER BY {HDEPTH} DESC"
+        ))
+        .await?;
+    }
+    Ok(gone)
 }
 
 /// `ALTER TABLE t ADD HIERARCHY (parent) ...`: the columns, the catalog
@@ -597,7 +785,20 @@ pub async fn add(ah: &AddHierarchy, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result
         ..TypesChange::default()
     })
     .await?;
-    let filled = fill_paths(&h, db, r).await?;
+    let inh = inheritable(r, db, &ah.table.name).await?;
+    let filled = if inh {
+        fill_paths_keyed(
+            &h,
+            db,
+            r,
+            ctx.lex.no_backslash_escapes,
+            ctx.limits.write_batch_rows,
+        )
+        .await?
+        .len() as u64
+    } else {
+        fill_paths(&h, db, r).await?
+    };
     metrics::counter!("sprig_hierarchy_backfill_rows_total").increment(filled);
     let k = quote(&h.key);
     let orphans = r
@@ -631,6 +832,21 @@ pub async fn add(ah: &AddHierarchy, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result
                 keys.join(", ")
             ),
         ));
+    }
+    // The spaces below get their own paths (decision T22): a cycle or a
+    // missing parent there fails the declaration as one here does.
+    if inh
+        && let Err(e) = r
+            .hierarchy_changed(db, &ah.table.name, &HierChange::Added)
+            .await
+    {
+        drop_columns(&t, r).await?;
+        r.commit_types(&TypesChange {
+            delete_hierarchies: vec![h.object_id],
+            ..TypesChange::default()
+        })
+        .await?;
+        return Err(e);
     }
     h.state = HierState::Active;
     r.commit_types(&TypesChange {

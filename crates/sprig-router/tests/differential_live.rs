@@ -33,10 +33,12 @@
 //! export SPRIG_TEST_R1_TENANT_ID=<the tenant's id> SPRIG_TEST_R1_DB=r1f_db
 //! export SPRIG_TEST_R1_CLUSTERS=dc-a-c1=127.0.0.1:13301,dc-a-c2=127.0.0.1:13311
 //! export SPRIG_TEST_ETCD=http://127.0.0.1:2379 SPRIG_TEST_R1_DC=dc-a
+//! export SPRIG_TEST_R1_REFERENCE=127.0.0.1:13331   # optional: the reference's own server
 //! cargo test -p sprig-router --test differential_live -- --nocapture --test-threads 1
 //! ```
 //!
-//! The first cluster holds the tenant's catalog and the reference database.
+//! The first cluster holds the tenant's catalog, and the reference database
+//! unless `SPRIG_TEST_R1_REFERENCE` names a server of its own.
 //! Without `SPRIG_TEST_R1_GATEWAY` the test reports what it needs and
 //! passes.
 
@@ -115,6 +117,12 @@ impl Env {
     }
     fn reference_db(&self) -> String {
         format!("r1finish_diff_{}", self.tenant)
+    }
+    /// The root endpoint of the unsharded reference MariaDB: its own server
+    /// when `SPRIG_TEST_R1_REFERENCE` names one (chapter 46's "one unsharded
+    /// MariaDB"), else the first cluster.
+    fn reference_addr(&self) -> String {
+        env("SPRIG_TEST_R1_REFERENCE").unwrap_or_else(|| self.cluster(0).1.clone())
     }
     fn cluster(&self, i: usize) -> &(ClusterId, String) {
         &self.clusters[i % self.clusters.len()]
@@ -561,7 +569,7 @@ async fn setup(e: &Env, sut: &mut Conn) -> World {
         }
     }
     {
-        let mut c = root(e, 0, None).await;
+        let mut c = connect(&e.reference_addr(), "root", &e.root_password, None).await;
         let r = e.reference_db();
         c.query_drop(format!("DROP DATABASE IF EXISTS `{r}`"))
             .await
@@ -806,7 +814,7 @@ async fn teardown(e: &Env, w: &World, sut: &mut Conn) {
             .await
             .unwrap();
     }
-    let mut c = root(e, 0, None).await;
+    let mut c = connect(&e.reference_addr(), "root", &e.root_password, None).await;
     c.query_drop(format!("DROP DATABASE IF EXISTS `{}`", e.reference_db()))
         .await
         .unwrap();
@@ -2619,7 +2627,11 @@ fn fold_str(s: &str) -> String {
             'ñ' => 'n',
             c => c,
         })
-        .collect()
+        .collect::<String>()
+        // `ß` equals `ss` under utf8mb4_uca1400_ai_ci (the reference's
+        // connection collation) and utf8mb4_0900_ai_ci (the MySQL persona's):
+        // a group, DISTINCT, MIN or MAX may show either spelling.
+        .replace('ß', "ss")
 }
 
 fn fold(o: &Outcome) -> Outcome {
@@ -2690,6 +2702,28 @@ impl Tally {
             };
             let _ = writeln!(m, "  sut:       {}", show(sut));
             let _ = writeln!(m, "  reference: {}", show(reference));
+            // The rows only one side has (as multisets), so a long result
+            // shows where it differs, not just its first rows.
+            if let (Outcome::Rows(_, a), Outcome::Rows(_, b)) = (sut, reference) {
+                let mut rest: Vec<&Vec<Option<String>>> = b.iter().collect();
+                let mut only_sut = Vec::new();
+                for r in a {
+                    match rest.iter().position(|x| *x == r) {
+                        Some(i) => {
+                            rest.swap_remove(i);
+                        }
+                        None => only_sut.push(r),
+                    }
+                }
+                let _ = writeln!(
+                    m,
+                    "  only in sut ({}): {:?}\n  only in reference ({}): {:?}",
+                    only_sut.len(),
+                    only_sut.iter().take(10).collect::<Vec<_>>(),
+                    rest.len(),
+                    rest.iter().take(10).collect::<Vec<_>>()
+                );
+            }
             self.mismatches.push(m);
         }
     }
@@ -4110,6 +4144,12 @@ async fn kill_branch(e: &Env, sut: &mut Conn, tally: &mut Tally, shards: &[Sh]) 
             .map(|n| n.trim().to_owned()),
     );
     let mut threads: Vec<u64> = Vec::new();
+    // InnoDB serves INFORMATION_SCHEMA.INNODB_TRX from a cache it refreshes
+    // at most every 100 ms, server-wide: another session's read just before
+    // (another suite run on the same server) can hide the branch and show a
+    // connection that has since finished, which then gets killed instead.
+    // Waiting longer than that makes the snapshot postdate the UPDATE.
+    tokio::time::sleep(Duration::from_millis(300)).await;
     for node in &nodes {
         let mut c2 = connect(node, "root", &e.root_password, None).await;
         let found: Vec<u64> = c2
@@ -4799,6 +4839,370 @@ async fn two_gateways(e: &Env, w: &World, second: &str, tally: &mut Tally) {
         .unwrap();
 }
 
+/// bugfix prepfix: SQL-level prepared statements (`PREPARE`, `EXECUTE …
+/// USING`, `EXECUTE IMMEDIATE`, `DEALLOCATE`), which the gateway holds for
+/// a tenant with shards and runs as the client's own statement at each
+/// `EXECUTE`. Every step runs on both sides; `(sql, mode, inner)`, where
+/// `inner` is the text an `EXECUTE` runs (for the comparison's folding).
+fn sql_ps_steps() -> Vec<(String, Cmp, &'static str)> {
+    use Cmp::{Bag, Ordered};
+    let mut v: Vec<(String, Cmp, &'static str)> = Vec::new();
+    let mut add = |s: &str, m: Cmp, inner: &'static str| v.push((s.to_owned(), m, inner));
+    add(
+        "SET @c = 7, @c2 = 42, @neg = -17, @s = 'north', @t = 'Tools', @amt = 10.5, @o = 90001",
+        Bag,
+        "",
+    );
+    // One shard, then a variable changed between executions.
+    let p1 = "SELECT cid, name, score, rating, created FROM customers WHERE cid = ?";
+    add(&format!("PREPARE p1 FROM '{p1}'"), Bag, "");
+    for e in [
+        "EXECUTE p1 USING @c",
+        "EXECUTE p1 USING @neg",
+        "SET @c = 42",
+        "EXECUTE p1 USING @c",
+        "EXECUTE p1 USING 5",
+        "EXECUTE p1 USING '9'",
+        "EXECUTE p1 USING NULL",
+        "SET @c = 7",
+    ] {
+        add(e, Bag, p1);
+    }
+    // Scatters and several shards.
+    let p2 = "SELECT region, COUNT(*), SUM(score) FROM customers WHERE cid > ? GROUP BY region";
+    add(&format!("PREPARE p2 FROM '{p2}'"), Bag, "");
+    add("EXECUTE p2 USING @c", Bag, p2);
+    add("EXECUTE p2 USING -1000", Bag, p2);
+    let p3 = "SELECT cid, name FROM customers WHERE cid IN (?, ?, ?) ORDER BY cid";
+    add(&format!("PREPARE p3 FROM '{p3}'"), Bag, "");
+    add("EXECUTE p3 USING @c, @c2, @neg", Ordered, p3);
+    // The string-keyed group.
+    let p4 = "SELECT tag, cnt FROM tags WHERE tag = ?";
+    add(&format!("PREPARE p4 FROM '{p4}'"), Bag, "");
+    add("EXECUTE p4 USING @s", Bag, p4);
+    add("EXECUTE p4 USING @t", Bag, p4);
+    // A reference table, alone and joined.
+    let p5 =
+        "SELECT c.cid, k.cname FROM customers c JOIN countries k ON k.code = c.cc WHERE c.cid = ?";
+    add(&format!("PREPARE p5 FROM '{p5}'"), Bag, "");
+    add("EXECUTE p5 USING @c2", Bag, p5);
+    let p6 = "SELECT code, cname FROM countries WHERE code = ?";
+    add(&format!("PREPARE p6 FROM '{p6}'"), Bag, "");
+    add("EXECUTE p6 USING 'de'", Bag, p6);
+    // An unsharded table, and no table at all.
+    let p7 = "SELECT id, note FROM ps_plain WHERE id >= ? ORDER BY id";
+    add(&format!("PREPARE p7 FROM '{p7}'"), Ordered, "");
+    add("EXECUTE p7 USING 3", Ordered, p7);
+    let p8 = "SELECT ?, ? AS y, CONCAT(?, ''!''), ? + 1";
+    add(&format!("PREPARE p8 FROM '{p8}'"), Bag, "");
+    add("EXECUTE p8 USING @c, @s, @s, @amt", Bag, p8);
+    // Writes: one shard, several shards, then a full comparison.
+    let w1 = "INSERT INTO orders (oid, cid, pid, amount, qty, note) VALUES (?, ?, NULL, ?, ?, ?)";
+    add(&format!("PREPARE w1 FROM '{w1}'"), Bag, "");
+    add("EXECUTE w1 USING @o, @c, @amt, 2, 'ps'", Bag, w1);
+    add("EXECUTE w1 USING 90002, @neg, 1.25, 3, 'ps'", Bag, w1);
+    add("EXECUTE w1 USING 90003, @c2, @amt, 4, 'ps'", Bag, w1);
+    let w2 = "UPDATE orders SET qty = qty + ? WHERE note = ?";
+    add(&format!("PREPARE w2 FROM '{w2}'"), Bag, "");
+    add("EXECUTE w2 USING 10, 'ps'", Bag, w2);
+    add(
+        "SELECT cid, oid, qty, amount FROM orders WHERE note = 'ps' ORDER BY cid, oid",
+        Ordered,
+        "",
+    );
+    let w3 = "DELETE FROM orders WHERE oid = ? AND cid = ?";
+    add(&format!("PREPARE w3 FROM '{w3}'"), Bag, "");
+    add("EXECUTE w3 USING 90002, @neg", Bag, w3);
+    // In a transaction, rolled back.
+    add("BEGIN", Bag, "");
+    add("EXECUTE w1 USING 90004, @c, 1, 1, 'tx'", Bag, w1);
+    add("EXECUTE w2 USING 5, 'ps'", Bag, w2);
+    add(
+        "SELECT cid, oid, qty FROM orders WHERE note IN ('ps', 'tx') ORDER BY cid, oid",
+        Ordered,
+        "",
+    );
+    add("ROLLBACK", Bag, "");
+    add("EXECUTE w3 USING @o, @c", Bag, w3);
+    add("EXECUTE w3 USING 90003, @c2", Bag, w3);
+    // Re-PREPARE of a name, from a variable, from an expression, and
+    // EXECUTE IMMEDIATE.
+    let p1b = "SELECT COUNT(*), SUM(amount) FROM orders WHERE cid = ?";
+    add(&format!("PREPARE p1 FROM '{p1b}'"), Bag, "");
+    add("EXECUTE p1 USING @c", Bag, p1b);
+    add(
+        "SET @q = 'SELECT pid, pname, price FROM products WHERE pid = ?'",
+        Bag,
+        "",
+    );
+    add("PREPARE p9 FROM @q", Bag, "");
+    add("EXECUTE p9 USING 3", Bag, "SELECT pid, pname, price FROM products");
+    add(
+        "PREPARE p10 FROM CONCAT('SELECT COUNT(*) FROM customers WHERE cid ', '< ?')",
+        Bag,
+        "",
+    );
+    add("EXECUTE p10 USING @c2", Bag, "SELECT COUNT(*) FROM customers");
+    add(
+        "EXECUTE IMMEDIATE 'SELECT MIN(cid), MAX(cid) FROM customers WHERE cid < ?' USING @c2",
+        Bag,
+        "MIN(",
+    );
+    add("EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM tags'", Bag, "");
+    // A session variable changed between executions.
+    let v1 = "SELECT SUM(score) / ? FROM customers WHERE cid > ?";
+    add(&format!("PREPARE v1 FROM '{v1}'"), Bag, "");
+    add("EXECUTE v1 USING 7, 0", Bag, v1);
+    add("SET SESSION div_precision_increment = 9", Bag, "");
+    add("EXECUTE v1 USING 7, 0", Bag, v1);
+    add("SET SESSION div_precision_increment = 4", Bag, "");
+    // DDL inside PREPARE.
+    add(
+        "PREPARE d1 FROM 'CREATE TABLE ps_ddl (a INT NOT NULL PRIMARY KEY, b VARCHAR(10))'",
+        Bag,
+        "",
+    );
+    add("EXECUTE d1", Bag, "");
+    add("PREPARE d2 FROM 'INSERT INTO ps_ddl VALUES (?, ?)'", Bag, "");
+    add("EXECUTE d2 USING 1, @s", Bag, "");
+    add("EXECUTE d2 USING 2, NULL", Bag, "");
+    add("SELECT * FROM ps_ddl ORDER BY a", Ordered, "");
+    add("PREPARE d3 FROM 'DROP TABLE ps_ddl'", Bag, "");
+    add("EXECUTE d3", Bag, "");
+    add("EXECUTE d3", Bag, "");
+    // DEALLOCATE, and the errors MariaDB gives.
+    add("DEALLOCATE PREPARE p9", Bag, "");
+    add("EXECUTE p9 USING 3", Bag, "");
+    add("DROP PREPARE p8", Bag, "");
+    add("EXECUTE p8 USING 1, 2, 3, 4", Bag, "");
+    add("DEALLOCATE PREPARE p8", Bag, "");
+    add("EXECUTE p1 USING 1, 2", Bag, "");
+    add("EXECUTE p1", Bag, "");
+    add("PREPARE p11 FROM 'SELECT * FROM ps_no_such_table'", Bag, "");
+    add("EXECUTE p11", Bag, "");
+    // A failed PREPARE drops the name's old statement.
+    add("PREPARE p1 FROM 'SELEC 1'", Bag, "");
+    add("EXECUTE p1 USING @c", Bag, "");
+    v
+}
+
+/// [`sql_ps_steps`] on both sides. A 39420 from the gateway is a failure
+/// here: these statements all run as text. Returns a summary line.
+async fn sql_ps_phase(sut: &mut Conn, reference: &mut Conn, tally: &mut Tally) -> String {
+    for c in [&mut *sut, &mut *reference] {
+        c.query_drop("DROP TABLE IF EXISTS ps_plain").await.unwrap();
+        c.query_drop("DROP TABLE IF EXISTS ps_ddl").await.unwrap();
+        c.query_drop(
+            "CREATE TABLE ps_plain (id INT NOT NULL PRIMARY KEY, note VARCHAR(20)) DEFAULT CHARSET utf8mb4",
+        )
+        .await
+        .unwrap();
+        c.query_drop("INSERT INTO ps_plain VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, NULL)")
+            .await
+            .unwrap();
+    }
+    let before = tally.compared;
+    let mut errors = 0usize;
+    for (s, mode, inner) in sql_ps_steps() {
+        let a = run(sut, &s).await;
+        let b = run(reference, &s).await;
+        if matches!(b, Outcome::Err(..)) {
+            errors += 1;
+        }
+        if let Outcome::Err(39420, m) = &a {
+            tally.compared += 1;
+            tally
+                .mismatches
+                .push(format!("SQL PREPARE REFUSED {s} [{inner}]: {m}"));
+            continue;
+        }
+        tally.check(&format!("{s} /* {inner} */"), mode, &a, &b);
+    }
+    compare_full(
+        sut,
+        reference,
+        tally,
+        "after SQL-level prepared writes",
+        "orders",
+    )
+    .await;
+    // Refused only as the statement itself is (39420 with its reason):
+    // a multi-shard UPDATE with LIMIT, and a variable assigned across
+    // shards. Where the router runs the text, the EXECUTE must run too.
+    let refused = [
+        (
+            "PREPARE r1 FROM 'UPDATE orders SET qty = qty WHERE note = ? LIMIT 1'",
+            "EXECUTE r1 USING 'a'",
+            "UPDATE orders SET qty = qty WHERE note = 'a' LIMIT 1",
+        ),
+        (
+            "PREPARE r2 FROM 'SELECT @x := cid FROM customers WHERE cid > ?'",
+            "EXECUTE r2 USING 0",
+            "SELECT @x := cid FROM customers WHERE cid > 0",
+        ),
+    ];
+    let mut same = 0usize;
+    let mut refusals = 0usize;
+    for (prep, exec, text) in refused {
+        let p = run(sut, prep).await;
+        let x = run(sut, exec).await;
+        let t = run(sut, text).await;
+        tally.compared += 1;
+        match (&p, &x, &t) {
+            (Outcome::Ok(_), Outcome::Err(39420, ma), Outcome::Err(39420, mb)) if ma == mb => {
+                same += 1;
+                refusals += 1;
+            }
+            (Outcome::Ok(_), Outcome::Rows(..) | Outcome::Ok(_), Outcome::Rows(..) | Outcome::Ok(_)) => {
+                same += 1;
+            }
+            _ => tally.mismatches.push(format!(
+                "SQL PREPARE refusal {prep}: prepare {p:?}, execute {x:?}, the text {t:?}"
+            )),
+        }
+    }
+    for c in [&mut *sut, &mut *reference] {
+        c.query_drop("DROP TABLE IF EXISTS ps_plain").await.unwrap();
+    }
+    format!(
+        "sql prepare: {} steps compared ({errors} errors on both sides, as MariaDB gives them); \
+         {same} of 2 statements the router may refuse answered as their text ({refusals} refused)",
+        tally.compared - before
+    )
+}
+
+/// Statements prepared before a shard move and executed after it
+/// ([`sql_ps_after_move`]): each execution is planned on the maps of the
+/// moment, so none goes stale.
+const PS_KEPT: &[(&str, &str)] = &[
+    ("k1", "SELECT cid, name, score FROM customers WHERE cid = ?"),
+    (
+        "k2",
+        "SELECT COUNT(*), SUM(score) FROM customers WHERE cid BETWEEN ? AND ?",
+    ),
+    (
+        "k3",
+        "SELECT o.cid, o.oid, o.amount FROM orders o WHERE o.cid = ? ORDER BY o.oid",
+    ),
+];
+
+async fn sql_ps_before_move(sut: &mut Conn, reference: &mut Conn, tally: &mut Tally) {
+    for (n, t) in PS_KEPT {
+        let s = format!("PREPARE {n} FROM '{t}'");
+        let a = run(sut, &s).await;
+        let b = run(reference, &s).await;
+        tally.check(&s, Cmp::Bag, &a, &b);
+    }
+}
+
+async fn sql_ps_after_move(sut: &mut Conn, reference: &mut Conn, tally: &mut Tally) -> String {
+    let before = tally.compared;
+    let mut refused = 0usize;
+    for cid in (1..=120i64).map(|c| if c % 17 == 0 { -c } else { c }) {
+        for s in [
+            format!("EXECUTE k1 USING {cid}"),
+            format!("EXECUTE k3 USING {cid}"),
+        ] {
+            let a = run(sut, &s).await;
+            let b = run(reference, &s).await;
+            if matches!(a, Outcome::Err(39420, _)) {
+                refused += 1;
+                tally.mismatches.push(format!("AFTER THE MOVE {s}: {a:?}"));
+            }
+            tally.check(&s, Cmp::Ordered, &a, &b);
+        }
+    }
+    let s = "EXECUTE k2 USING -1000, 1000";
+    let a = run(sut, s).await;
+    let b = run(reference, s).await;
+    tally.check(s, Cmp::Bag, &a, &b);
+    for (n, _) in PS_KEPT {
+        let s = format!("DEALLOCATE PREPARE {n}");
+        let a = run(sut, &s).await;
+        let b = run(reference, &s).await;
+        tally.check(&s, Cmp::Bag, &a, &b);
+    }
+    format!(
+        "sql prepare after the move: {} executions compared, {refused} refused",
+        tally.compared - before
+    )
+}
+
+/// The SQL-level prepared-statement phases alone (bugfix prepfix): the
+/// steps, then statements prepared before a split of group 901 run after
+/// it. Same environment as [`differential_against_one_unsharded_mariadb`].
+#[tokio::test]
+async fn sql_prepared_against_one_unsharded_mariadb() {
+    let Some(e) = Env::load() else {
+        eprintln!(
+            "differential_live: set SPRIG_TEST_R1_GATEWAY, SPRIG_TEST_R1_TENANT_ID, SPRIG_TEST_R1_CLUSTERS and SPRIG_TEST_ETCD to run"
+        );
+        return;
+    };
+    let seed_value: u64 = env("SPRIG_TEST_R1_SEED")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4242);
+    let mut sut = connect(&e.gateway, &e.user, &e.password, Some(&e.db)).await;
+    let mut w = setup(&e, &mut sut).await;
+    let mut reference = connect(
+        &e.reference_addr(),
+        "root",
+        &e.root_password,
+        Some(&e.reference_db()),
+    )
+    .await;
+    for c in [&mut sut, &mut reference] {
+        c.query_drop("SET NAMES utf8mb4").await.unwrap();
+    }
+    let mut r = Rng(seed_value);
+    let mut tally = Tally::default();
+    for s in seed(&mut r) {
+        let a = run(&mut sut, &s).await;
+        let b = run(&mut reference, &s).await;
+        tally.check(&s, Cmp::Bag, &a, &b);
+    }
+    // Binary-protocol prepares, unchanged by this path.
+    let before = tally.compared;
+    for (s, p, mode) in prepared(&mut r) {
+        let a = run_exec(&mut sut, s, p.clone()).await;
+        let b = run_exec(&mut reference, s, p).await;
+        tally.check(s, mode, &a, &b);
+    }
+    println!(
+        "binary-protocol prepares: {} compared",
+        tally.compared - before
+    );
+    let line = sql_ps_phase(&mut sut, &mut reference, &mut tally).await;
+    println!("{line}");
+    sql_ps_before_move(&mut sut, &mut reference, &mut tally).await;
+    let reads = connect(&e.gateway, &e.user, &e.password, Some(&e.db)).await;
+    let (_, split_errors, _) = split(&e, &mut w, reads, 0, 200, None).await;
+    for m in &split_errors {
+        tally.mismatches.push(format!("READ DURING SPLIT {m}"));
+    }
+    let after = sql_ps_after_move(&mut sut, &mut reference, &mut tally).await;
+    println!("{after}");
+    println!(
+        "sql prepared: {} compared, {} skipped, {} mismatches",
+        tally.compared,
+        tally.skipped,
+        tally.mismatches.len()
+    );
+    for m in &tally.mismatches {
+        println!("{m}");
+    }
+    if env("SPRIG_TEST_R1_KEEP").is_none() {
+        teardown(&e, &w, &mut sut).await;
+    }
+    drop(sut);
+    // The SQL-level phases count a 39420 as a mismatch themselves.
+    assert!(
+        tally.mismatches.is_empty(),
+        "{} mismatches",
+        tally.mismatches.len()
+    );
+}
+
 #[tokio::test]
 async fn differential_against_one_unsharded_mariadb() {
     let Some(e) = Env::load() else {
@@ -4813,7 +5217,7 @@ async fn differential_against_one_unsharded_mariadb() {
     let mut sut = connect(&e.gateway, &e.user, &e.password, Some(&e.db)).await;
     let mut w = setup(&e, &mut sut).await;
     let mut reference = connect(
-        &e.cluster(0).1,
+        &e.reference_addr(),
         "root",
         &e.root_password,
         Some(&e.reference_db()),
@@ -4892,6 +5296,9 @@ async fn differential_against_one_unsharded_mariadb() {
         )
         .await;
     }
+    // bugfix prepfix: SQL-level PREPARE / EXECUTE.
+    let sql_ps_line = sql_ps_phase(&mut sut, &mut reference, &mut tally).await;
+    println!("{sql_ps_line}");
     let prepared_done = tally.compared;
     for (s, table) in dml(&mut r) {
         let a = run(&mut sut, &s).await;
@@ -4949,6 +5356,7 @@ async fn differential_against_one_unsharded_mariadb() {
     )
     .await;
     let txn_done = tally.compared;
+    sql_ps_before_move(&mut sut, &mut reference, &mut tally).await;
     // The map changes mid-run: a split onto the other cluster.
     let reads = connect(&e.gateway, &e.user, &e.password, Some(&e.db)).await;
     // The first split holds long enough for reads to wait it out; the
@@ -4994,6 +5402,8 @@ async fn differential_against_one_unsharded_mariadb() {
         let b = run_exec(&mut reference, s, p).await;
         tally.check(s, mode, &a, &b);
     }
+    let sql_ps_after = sql_ps_after_move(&mut sut, &mut reference, &mut tally).await;
+    println!("{sql_ps_after}");
     let mut r3_after = R3Stats::default();
     r3_reads(
         &mut sut,
@@ -5303,7 +5713,7 @@ async fn analytics_against_one_unsharded_mariadb() {
     let mut sut = connect(&e.gateway, &e.user, &e.password, Some(&e.db)).await;
     let w = setup(&e, &mut sut).await;
     let mut reference = connect(
-        &e.cluster(0).1,
+        &e.reference_addr(),
         "root",
         &e.root_password,
         Some(&e.reference_db()),

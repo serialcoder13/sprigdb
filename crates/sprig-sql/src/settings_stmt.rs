@@ -405,7 +405,7 @@ impl<'a> Parser<'a> {
         }
         if self.is_word("FUNCTION") {
             return Err(unsupported(
-                "ALTER FUNCTION ... SPRIG SET (logic functions arrive in R7)",
+                "ALTER FUNCTION ... SPRIG SET (settings on logic functions aren't offered in this release)",
             ));
         }
         Err(self.err())

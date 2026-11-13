@@ -50,6 +50,11 @@ pub trait SqlRunner: Send {
     /// RLS round 5, RL51). The gateway's runner prefixes each write
     /// statement with chapter 38's comment `o=k`; by default nothing.
     fn notified(&mut self, _on: bool) {}
+    /// The client's data center hint (chapter 24: the text after the last
+    /// `~` of a Redis `CLIENT SETNAME` name; `None` clears it). The
+    /// gateway's runner counts the session's statements as traffic from
+    /// that DC; by default nothing.
+    fn client_dc(&mut self, _raw: Option<&str>) {}
 }
 
 /// `X'...'`, or `''` for empty bytes.

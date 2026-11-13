@@ -76,7 +76,7 @@ sprigctl tenant settings acme [--all]                # the tenant's own rows; --
 
 ## Register clusters
 
-`sprigctl cluster register` prechecks a cluster (TLS, grants, the binlog settings the mover and the change feed need, account creation, a short binlog read as `sprig_repl`, the capability profile) and registers it as `active`, or refuses it with 39511 and every missing item. A binlog `sprig_repl` can't read (no `REPLICATION SLAVE`, a server that refuses plain-text connections: the binlog reader has no TLS yet and speaks only `mysql_native_password`) doesn't block registration: the feed and the mover show as `unsupported`, with the fix among the advisories. Credentials are never stored in etcd: the record names them by reference (`file:<path>` or `env:<name>`), and a credentials file holds a `[sprig_ctl]` and a `[sprig_repl]` table. For the Compose servers, which have self-signed certificates and no system accounts, use root:
+`sprigctl cluster register` prechecks a cluster (TLS, grants, the binlog settings the mover and the change feed need, account creation, a short binlog read as `sprig_repl`, the capability profile) and registers it as `active`, or refuses it with 39511 and every missing item. A binlog `sprig_repl` can't read (no `REPLICATION SLAVE`, or a binlog checksum or format the reader doesn't know; the reader speaks TLS but only `mysql_native_password`) doesn't block registration: the feed and the mover show as `unsupported`, with the fix among the advisories. Credentials are never stored in etcd: the record names them by reference (`file:<path>` or `env:<name>`), and a credentials file holds a `[sprig_ctl]` and a `[sprig_repl]` table. For the Compose servers, which have self-signed certificates and no system accounts, use root:
 
 ```sh
 cat > /tmp/sprig-dev-creds.toml <<'TOML'
@@ -134,29 +134,32 @@ MariaDB 11.8 is the default; use `MARIADB_IMAGE=mariadb:12.3 docker compose ...`
 
 ## Run the gateway locally
 
-`deploy/compose/gateway-dev.sh` runs a controller and a gateway on the host against the Compose stack, so real MySQL and MariaDB clients can log in and run statements on a registered cluster. It needs the stack (`docker compose --profile all up -d --wait`), `curl`, `jq` and `openssl`.
+`deploy/compose/gateway-dev.sh` runs a controller, a worker and a gateway on the host against the Compose stack, so real MySQL and MariaDB clients can log in and run statements on a registered cluster. It needs the stack (`docker compose --profile all up -d --wait`), `curl`, `jq` and `openssl`.
 
 ```sh
-deploy/compose/gateway-dev.sh up        # build, start the controller, register clusters, set listeners, start the gateway
+deploy/compose/gateway-dev.sh up        # build, start the controller, register clusters, set listeners, start the worker and the gateway
 deploy/compose/gateway-dev.sh status
+deploy/compose/gateway-dev.sh restart   # restart the processes, keeping tenants
 deploy/compose/gateway-dev.sh tls required   # or optional / off; applies live
-deploy/compose/gateway-dev.sh down      # stop both and remove what up wrote to etcd
+deploy/compose/gateway-dev.sh down      # stop them and remove what up wrote to etcd
 ```
 
-`up` builds `sprigdb` and `sprigctl`, starts a controller with `sprigdb.dev.toml` (Admin API on 127.0.0.1:7480, bootstrapping the deployment if etcd is empty), registers `dc-a-single`, `dc-a-repl` and `dc-a-galera` as `dc-a-c1`, `dc-a-c2` and `dc-a-c3` (the ids `gateway-accounts.dev.toml` names; it stops if they would differ), writes the listener settings to etcd at dc scope, and starts the gateway with `sprigdb.gateway.dev.toml`, waiting for `/readyz` on 9190. Re-running it leaves running processes alone; after a code change run `down` and `up`. `SPRIG_GATEWAY_PROFILE=release up` builds and runs release binaries (for latency and sysbench numbers); `CARGO_TARGET_DIR` picks the target directory. Processes, logs and what `up` created are in `deploy/compose/.gateway-dev/`, the development CA and server certificate (made once with `openssl`, git-ignored) in `deploy/compose/gateway-certs/`.
+`up` builds `sprigdb` and `sprigctl`, starts a controller with `sprigdb.dev.toml` (Admin API on 127.0.0.1:7480, bootstrapping the deployment if etcd is empty), registers `dc-a-single`, `dc-a-repl` and `dc-a-galera` as `dc-a-c1`, `dc-a-c2` and `dc-a-c3`, writes the listener settings to etcd at dc scope, starts a worker (readiness on 9185), and starts the gateway with `sprigdb.gateway.dev.toml`, waiting for `/readyz` on 9190.
+
+The gateway has two login modes, chosen with `SPRIG_GATEWAY_LOGIN_MODE`. In `catalog` mode (the default), `up` creates the tenants `acme` and `globex` on `dc-a-c1`, each with the user `app`: log in as `acme.app` or `globex.app`, and `down` deletes them. In `accounts_file` mode, the logins of `gateway-accounts.dev.toml` (`app`, `app_repl` and `app_galera`) reach the three raw clusters with names unchanged; this mode needs the cluster ids above, and `up` stops if they would differ. Re-running it leaves running processes alone; after a code change run `down` and `up`. `SPRIG_GATEWAY_PROFILE=release up` builds and runs release binaries (for latency and sysbench numbers); `CARGO_TARGET_DIR` picks the target directory. Processes, logs and what `up` created are in `deploy/compose/.gateway-dev/`, the development CA and server certificate (made once with `openssl`, git-ignored) in `deploy/compose/gateway-certs/`.
 
 | Listener | Address | Logins (password `sprig-dev-app`) |
 |---|---|---|
-| MySQL persona | 127.0.0.1:13306 | `app` → `dc-a-c1` (single), `app_repl` → `dc-a-c2` (primary + replicas), `app_galera` → `dc-a-c3` (Galera) |
+| MySQL persona | 127.0.0.1:13306 | `catalog` mode: `acme.app`, `globex.app`. `accounts_file` mode: `app` → `dc-a-c1` (single), `app_repl` → `dc-a-c2` (primary + replicas), `app_galera` → `dc-a-c3` (Galera) |
 | MariaDB persona | 127.0.0.1:13307 | the same |
 
 TLS is `optional` on both (`SPRIG_GATEWAY_TLS=required up` for the gateway's own default). A first `caching_sha2_password` login over plaintext needs TLS once (no RSA key exchange); after a TLS login the account's fast-auth entry lets plaintext logins through.
 
 ```sh
-mysql -h 127.0.0.1 -P 13306 -u app -psprig-dev-app --ssl-mode=VERIFY_IDENTITY --ssl-ca=deploy/compose/gateway-certs/ca.pem
-mysql -h 127.0.0.1 -P 13306 -u app -psprig-dev-app --ssl-mode=DISABLED
+mysql -h 127.0.0.1 -P 13306 -u acme.app -psprig-dev-app --ssl-mode=VERIFY_IDENTITY --ssl-ca=deploy/compose/gateway-certs/ca.pem
+mysql -h 127.0.0.1 -P 13306 -u acme.app -psprig-dev-app --ssl-mode=DISABLED
 docker run --rm -v "$PWD/deploy/compose/gateway-certs/ca.pem:/ca.pem:ro" mariadb:11.8 \
-    mariadb -h host.docker.internal -P 13307 -u app -psprig-dev-app --ssl-ca=/ca.pem -e 'SELECT @@version_comment'
+    mariadb -h host.docker.internal -P 13307 -u acme.app -psprig-dev-app --ssl-ca=/ca.pem -e 'SELECT @@version_comment'
 ```
 
 On Docker Desktop a container reaches the host as `host.docker.internal` (the certificate names it); `--network host` with 127.0.0.1 works only where host networking is enabled. The MariaDB 11.8 client verifies the server certificate by default, so give it `--ssl-ca`, or `--disable-ssl-verify-server-cert`, or `--skip-ssl`.

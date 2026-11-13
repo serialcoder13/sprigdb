@@ -492,7 +492,8 @@ struct Reservoir {
 /// Per-gateway reservoirs of sealed samples, `workload.samples_per_bucket`
 /// per (tenant, fingerprint) per bucket (module docs).
 pub struct SampleOutbox {
-    per_bucket: usize,
+    /// `workload.samples_per_bucket`, live ([`SampleOutbox::set_per_bucket`]).
+    per_bucket: std::sync::atomic::AtomicUsize,
     salt: u64,
     map: Mutex<HashMap<(TenantId, u64), Reservoir>>,
     /// Slots of finished buckets not written yet.
@@ -503,7 +504,7 @@ pub struct SampleOutbox {
 impl std::fmt::Debug for SampleOutbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SampleOutbox")
-            .field("per_bucket", &self.per_bucket)
+            .field("per_bucket", &self.per_bucket())
             .finish_non_exhaustive()
     }
 }
@@ -527,7 +528,9 @@ impl SampleOutbox {
     #[must_use]
     pub fn new(per_bucket: u32, salt: u64) -> Self {
         Self {
-            per_bucket: usize::try_from(per_bucket).unwrap_or(3),
+            per_bucket: std::sync::atomic::AtomicUsize::new(
+                usize::try_from(per_bucket).unwrap_or(3),
+            ),
             salt,
             map: Mutex::new(HashMap::new()),
             leftover: Mutex::new(Vec::new()),
@@ -535,10 +538,26 @@ impl SampleOutbox {
         }
     }
 
+    /// Samples kept per fingerprint and bucket.
+    #[must_use]
+    pub fn per_bucket(&self) -> usize {
+        self.per_bucket.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Changes the samples kept per fingerprint and bucket (from the next
+    /// offer; reservoirs already over it keep what they hold).
+    pub fn set_per_bucket(&self, per_bucket: u32) {
+        self.per_bucket.store(
+            usize::try_from(per_bucket).unwrap_or(3),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
     /// Offers a sealed sample of `bucket` (start, in seconds since the
     /// epoch): kept by reservoir sampling. Returns whether it was kept.
     pub fn offer(&self, tenant: TenantId, bucket: u64, mut sample: SealedSample) -> bool {
-        if self.per_bucket == 0 {
+        let per_bucket = self.per_bucket();
+        if per_bucket == 0 {
             return false;
         }
         let mut map = lock(&self.map);
@@ -560,7 +579,7 @@ impl SampleOutbox {
             r.seen = 0;
         }
         r.seen += 1;
-        let idx = if r.slots.len() < self.per_bucket {
+        let idx = if r.slots.len() < per_bucket {
             r.slots.len()
         } else {
             let roll = crate::recorder::mix(
@@ -569,7 +588,7 @@ impl SampleOutbox {
                     ^ self.salt,
             );
             let j = usize::try_from(roll % r.seen).unwrap_or(usize::MAX);
-            if j >= self.per_bucket {
+            if j >= per_bucket {
                 return false;
             }
             j

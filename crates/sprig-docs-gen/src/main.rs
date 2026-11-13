@@ -166,7 +166,10 @@ fn command_help(bin: &Path, tool: &str) -> Result<Vec<CommandHelp>, String> {
     let mut queue: Vec<Vec<String>> = vec![Vec::new()];
     while let Some(args) = queue.pop() {
         let text = help(bin, &args)?;
-        let mut subs: Vec<Vec<String>> = subcommands(&text)
+        // `sprig admin …` passes every `sprigctl` command through; its
+        // subcommands are documented once, on the sprigctl page.
+        let leaf = tool == "sprig" && args.first().is_some_and(|a| a == "admin");
+        let mut subs: Vec<Vec<String>> = if leaf { Vec::new() } else { subcommands(&text) }
             .into_iter()
             .map(|s| {
                 let mut a = args.clone();

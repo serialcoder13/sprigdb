@@ -99,6 +99,7 @@ pub fn apply_live(live: &LiveSettings, dc: &DcId) -> Registration {
         slow_ms: live.get(&TRACE_SLOW_MS, &ctx),
         otlp: live.get(&OTLP_ENDPOINT, &ctx).into_owned(),
         spool_mb: live.get(&AUDIT_SPOOL_MAX_MB, &ctx),
+        retention_days: live.get(&AUDIT_RETENTION_DAYS, &ctx),
         tenant_rps: live.get(&TENANT_SERIES_MIN_RPS, &ctx),
     }
     .apply();
@@ -110,6 +111,7 @@ pub fn apply_live(live: &LiveSettings, dc: &DcId) -> Registration {
             slow_ms: m.get(&TRACE_SLOW_MS, &ctx),
             otlp: m.get(&OTLP_ENDPOINT, &ctx).into_owned(),
             spool_mb: m.get(&AUDIT_SPOOL_MAX_MB, &ctx),
+            retention_days: m.get(&AUDIT_RETENTION_DAYS, &ctx),
             tenant_rps: m.get(&TENANT_SERIES_MIN_RPS, &ctx),
         }
         .apply();
@@ -124,6 +126,9 @@ struct Values {
     slow_ms: u64,
     otlp: String,
     spool_mb: u64,
+    /// `audit.retention_days` at global and DC scope, for the sink's
+    /// retention pass.
+    retention_days: u64,
     tenant_rps: u64,
 }
 
@@ -137,5 +142,6 @@ impl Values {
         if let Some(p) = audit::global() {
             p.set_max_spool_mb(self.spool_mb);
         }
+        audit::set_retention_days(self.retention_days);
     }
 }

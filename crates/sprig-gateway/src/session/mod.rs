@@ -134,6 +134,9 @@ pub enum CloseReason {
     Revoked,
     /// A distributed `COMMIT`'s outcome is unknown (chapter 18): 39441.
     OutcomeUnknown,
+    /// The session's tenant (or an ancestor) was suspended (chapter 14,
+    /// "Suspension"; `auth.close_sessions_on_revoke`): 39306.
+    Suspended,
 }
 
 impl CloseReason {
@@ -156,6 +159,10 @@ impl CloseReason {
                 SprigCode::CommitOutcomeUnknown,
                 "the last COMMIT's outcome is unknown; this connection is closed",
             ),
+            CloseReason::Suspended => SprigError::new(
+                SprigCode::SessionRevoked,
+                "this session was closed: its tenant was suspended",
+            ),
         }
     }
 
@@ -165,6 +172,7 @@ impl CloseReason {
             CloseReason::ListenerRetired => 2,
             CloseReason::Revoked => 3,
             CloseReason::OutcomeUnknown => 4,
+            CloseReason::Suspended => 5,
         }
     }
 
@@ -174,6 +182,7 @@ impl CloseReason {
             2 => Some(CloseReason::ListenerRetired),
             3 => Some(CloseReason::Revoked),
             4 => Some(CloseReason::OutcomeUnknown),
+            5 => Some(CloseReason::Suspended),
             _ => None,
         }
     }

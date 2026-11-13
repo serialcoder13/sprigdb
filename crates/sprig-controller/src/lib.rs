@@ -63,6 +63,8 @@ pub mod autoindex_env;
 pub mod autoindex_loop;
 pub mod autoindex_validate;
 pub mod autoindex_workload;
+// The BackupMissed alert's gauge, from the backup tools' records.
+pub mod backups;
 pub mod balancer_loop;
 pub mod catalog_reconciler;
 pub mod catalogs;
@@ -103,6 +105,8 @@ pub mod search_loop;
 pub mod queue_forwarder_loop;
 // Chapter 33 (R6): the key-value sweeper job.
 pub mod kv_sweep_loop;
+// Chapter 31 (wireup): the TTL monitor job.
+pub mod doc_ttl_loop;
 // Chapter 51 (R9): sink tasks.
 pub mod sinks_loop;
 pub mod tenant_scopes;
@@ -601,6 +605,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
             settings.live.clone(),
             dc.clone(),
         )))))
+        .with_loop(Loop::new(doc_ttl_loop::DocTtlLoop))
         .with_loop(Loop::new(sinks_loop::SinksLoop::default()))
         // Chapter 52: escalation, auto-apply, appliers, expiry, gauges.
         .with_loop(Loop::new(
@@ -724,6 +729,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .local_addr()
         .map_err(|e| SprigError::internal("admin listener address").with_source(e))?;
     let reg_store = Arc::clone(&stores.dc);
+    let _backups = backups::spawn(Arc::clone(&reg_store), ctx.shutdown.clone());
     let svc = Arc::new(
         AdminService::new(stores, monitor, rt.status(), Arc::clone(&clock))
             .with_tenants(tenants)

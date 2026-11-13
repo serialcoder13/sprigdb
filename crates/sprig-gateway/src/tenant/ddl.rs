@@ -381,6 +381,79 @@ fn bq(s: &str) -> String {
 /// comments) replaced by `with`, and how many there were. `CURRENT_USER`,
 /// `CURRENT_USER()`, `CURRENT_ROLE`, a role and `'u'@'h'` in any quoting
 /// are accounts.
+/// The accounts a `CREATE` or `ALTER` statement names in `DEFINER =`
+/// clauses, other than `CURRENT_USER` and `CURRENT_ROLE`, as `(user,
+/// host)` without quotes (host `%` when not given).
+pub(crate) fn named_definers(sql: &[u8], lex: LexOptions) -> Vec<(String, String)> {
+    let has = |n: &[u8]| sql.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n));
+    if !has(b"definer") {
+        return Vec::new();
+    }
+    let Ok(tokens) = sprig_sql::lex::lex(sql, &lex) else {
+        return Vec::new();
+    };
+    let toks: Vec<_> = tokens.iter().filter(|tk| !tk.kind.is_trivia()).collect();
+    let starts = toks.first().is_some_and(|first| {
+        first.kind == TokenKind::Word
+            && (first.bytes(sql).eq_ignore_ascii_case(b"CREATE")
+                || first.bytes(sql).eq_ignore_ascii_case(b"ALTER"))
+    });
+    if !starts {
+        return Vec::new();
+    }
+    let unquote = |bytes: &[u8]| -> String {
+        let raw = String::from_utf8_lossy(bytes);
+        let text = raw.trim_start_matches('@');
+        let quote = text
+            .chars()
+            .next()
+            .filter(|ch| matches!(ch, '`' | '\'' | '"'));
+        match quote {
+            Some(ch) if text.len() >= 2 && text.ends_with(ch) => {
+                let one = ch.to_string();
+                text[1..text.len() - 1].replace(&format!("{one}{one}"), &one)
+            }
+            _ => text.to_owned(),
+        }
+    };
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 2 < toks.len() {
+        let is_definer = toks[i].kind == TokenKind::Word
+            && toks[i].bytes(sql).eq_ignore_ascii_case(b"DEFINER")
+            && toks[i + 1].bytes(sql) == b"=";
+        if !is_definer {
+            i += 1;
+            continue;
+        }
+        let user = toks[i + 2];
+        if user.kind == TokenKind::Word
+            && (user.bytes(sql).eq_ignore_ascii_case(b"CURRENT_USER")
+                || user.bytes(sql).eq_ignore_ascii_case(b"CURRENT_ROLE"))
+        {
+            i += 3;
+            continue;
+        }
+        if !matches!(
+            user.kind,
+            TokenKind::Word | TokenKind::QuotedIdent | TokenKind::String
+        ) {
+            i += 1;
+            continue;
+        }
+        let host = match toks.get(i + 3) {
+            Some(host) if host.kind == TokenKind::UserVar => unquote(host.bytes(sql)),
+            Some(at) if at.bytes(sql) == b"@" => toks
+                .get(i + 4)
+                .map_or_else(|| "%".to_owned(), |host| unquote(host.bytes(sql))),
+            _ => "%".to_owned(),
+        };
+        out.push((unquote(user.bytes(sql)), host));
+        i += 3;
+    }
+    out
+}
+
 pub(crate) fn replace_definers(sql: &[u8], lex: LexOptions, with: &[u8]) -> (Vec<u8>, usize) {
     let Ok(tokens) = sprig_sql::lex::lex(sql, &lex) else {
         return (sql.to_vec(), 0);

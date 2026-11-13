@@ -186,9 +186,9 @@ fn int(i: i64) -> SettingChange {
 #[tokio::test]
 async fn a_b_c_nearest_level_wins_also_for_later_changes() {
     let env = Env::new();
-    let a = env.tenant("a", None).await;
-    let b = env.tenant("b", Some(a)).await;
-    let c = env.tenant("c", Some(b)).await;
+    let a = env.tenant("aa", None).await;
+    let b = env.tenant("bb", Some(a)).await;
+    let c = env.tenant("cc", Some(b)).await;
     let (lm, fa, mfa) = (LOCK_MINUTES.key, ATTEMPTS.key, MFA.key);
     env.set(a, lm, int(30)).await;
     env.set(a, fa, int(5)).await;
@@ -273,9 +273,9 @@ async fn a_b_c_nearest_level_wins_also_for_later_changes() {
 #[tokio::test]
 async fn a_moved_subtree_drops_its_old_ancestors_rows() {
     let env = Env::new();
-    let a = env.tenant("a", None).await;
-    let b = env.tenant("b", Some(a)).await;
-    let c = env.tenant("c", Some(b)).await;
+    let a = env.tenant("aa", None).await;
+    let b = env.tenant("bb", Some(a)).await;
+    let c = env.tenant("cc", Some(b)).await;
     env.set(a, LOCK_MINUTES.key, int(30)).await;
     env.set(b, LOCK_MINUTES.key, int(10)).await;
     env.sync(c).await;
@@ -307,8 +307,8 @@ async fn a_moved_subtree_drops_its_old_ancestors_rows() {
 #[tokio::test]
 async fn a_gap_at_an_ancestor_is_settled_before_copying() {
     let env = Env::new();
-    let a = env.tenant("a", None).await;
-    let b = env.tenant("b", Some(a)).await;
+    let a = env.tenant("aa", None).await;
+    let b = env.tenant("bb", Some(a)).await;
     env.set(a, LOCK_MINUTES.key, int(30)).await;
     env.sync(b).await;
     // A tenant-scope change at a allocated its version and crashed before
@@ -338,8 +338,8 @@ async fn a_gap_at_an_ancestor_is_settled_before_copying() {
 #[tokio::test]
 async fn unsupported_ancestry_modes_block_instead_of_copying() {
     let env = Env::new();
-    let a = env.tenant("a", None).await;
-    let b = env.tenant("b", Some(a)).await;
+    let a = env.tenant("aa", None).await;
+    let b = env.tenant("bb", Some(a)).await;
     env.set(
         a,
         ANCESTRY_MODE.key,
@@ -381,9 +381,9 @@ fn event(store: &MemStore, dir: &Directory, e: &StoredEntry) -> MetaEvent {
 #[tokio::test]
 async fn only_settings_path_and_parent_changes_fan_out() {
     let env = Env::new();
-    let a = env.tenant("a", None).await;
-    let b = env.tenant("b", Some(a)).await;
-    let c = env.tenant("c", Some(b)).await;
+    let a = env.tenant("aa", None).await;
+    let b = env.tenant("bb", Some(a)).await;
+    let c = env.tenant("cc", Some(b)).await;
     let other = env.tenant("other", None).await;
     let lp = TreeSettings::new(Arc::clone(&env.sync), dc(), None).unwrap();
     lp.ready().await;
@@ -441,9 +441,9 @@ async fn only_settings_path_and_parent_changes_fan_out() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_loop_copies_an_ancestors_change_within_seconds() {
     let env = Env::new();
-    let a = env.tenant("a", None).await;
-    let b = env.tenant("b", Some(a)).await;
-    let c = env.tenant("c", Some(b)).await;
+    let a = env.tenant("aa", None).await;
+    let b = env.tenant("bb", Some(a)).await;
+    let c = env.tenant("cc", Some(b)).await;
     let stores = Stores {
         dc: Arc::new(env.store.clone()),
         global: Arc::clone(env.dir.store()),

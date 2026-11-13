@@ -263,6 +263,14 @@ impl SessionTable {
         })
     }
 
+    /// Marks `close_at_safe_point` on every session of `tenant` (chapter
+    /// 14, "Suspension"). Returns how many.
+    pub fn close_tenant(&self, tenant: TenantId) -> usize {
+        self.mark(CloseReason::Suspended, |h| {
+            h.activity().tenant == Some(tenant)
+        })
+    }
+
     /// Marks `close_at_safe_point` on every session (chapter 04, "Drain"
     /// step 3). Returns how many.
     pub fn close_all_at_safe_point(&self) -> usize {

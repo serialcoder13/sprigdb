@@ -6,4 +6,3 @@ scopes:         global, dc, cluster, tenant, database, object
 hard bounds:    min 1, max 64
 applies:        live (next read)
 who may set it: operators, and tenants within bounds
-owner:          chapter 13

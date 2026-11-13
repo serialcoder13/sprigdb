@@ -247,7 +247,9 @@ pub fn build_spec(
                 )));
             }
             if map.ranges[i].cluster != map.ranges[j].cluster {
-                return Err(not_allowed("R1 merges neighbours on one cluster"));
+                return Err(not_allowed(
+                    "only neighbours on one cluster can be merged (move one first)",
+                ));
             }
             let c = &map.ranges[i].cluster;
             JobSpec::reshard(

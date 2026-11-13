@@ -1,49 +1,65 @@
-//! The shared per-cluster reader for internal tables (chapter 38, "The
-//! cluster reader"; chapter 50, "Publishing inside a database transaction";
-//! R9, r9cluster).
+//! The shared per-cluster reader (chapter 38, "The cluster reader";
+//! chapter 50, "Publishing inside a database transaction"; R9, r9cluster
+//! and r9feed).
 //!
-//! [`SharedClusters`] is a [`Clusters`] whose [`Clusters::open`] does not
-//! start a binlog dump per tenant: every tenant's source on a cluster is a
-//! subscription to one **hub**, which reads that cluster's binlog once
-//! ([`Clusters::open_tables`]) keeping only rows of a few internal tables
-//! (the queue forwarder's `__sprig_qo` and `__sprig_xo`), and splits each
-//! committed group by tenant. [`crate::TenantTail`] runs on top unchanged:
+//! A [`SharedFeed`] holds one **hub** per cluster. A hub reads that
+//! cluster's binlog once ([`Clusters::open_scope`]) and splits each
+//! committed group by tenant. Its consumers see it through **views**
+//! ([`SharedFeed::view`]), each a [`Clusters`] whose [`Clusters::open`]
+//! subscribes a tenant to the hub instead of starting a dump. A view keeps
+//! either some internal tables of every tenant ([`Kept::Tables`]: the
+//! queue forwarder's outboxes, the stream sequencers' `__sprig_eo_*`), or
+//! everything of the tenants it serves ([`Kept::All`]: change topics), as a
+//! dump of their own would. [`crate::TenantTail`] runs on top unchanged:
 //! moves, resume tokens, XA branches and applier filtering work as with a
 //! dump of its own.
 //!
 //! ```text
-//! hub(cluster), one task while it has subscribers:
-//!   read the cluster's binlog after its position, internal tables only
-//!   each committed group: rows split by the tenant of their schema; an
-//!     XA commit or rollback goes to the tenants its prepare had rows for
-//!   each tenant with rows: to each of its subscriptions that started
-//!     before the group (backpressure: the hub waits for a full channel)
+//! hub(cluster), one task while it has subscriptions:
+//!   dump scope: the views' tables, plus the tenants some Kept::All
+//!     subscription keeps whole; a wider scope reopens the dump at the
+//!     hub's position
+//!   each committed group: split by tenant (an XA commit or rollback goes
+//!     to the tenants its prepare had rows for), kept in the ring, and
+//!     offered to each subscription of its tenants that started before it
+//!   a subscription whose buffer is full is detached, never waited for:
+//!     the others go on
 //!   at most every second: the position to every subscription (idle)
-//!   a subscription that starts behind the hub's position rewinds the
-//!     hub to the older position; the others skip what they already had
 //!   a broken stream reconnects from the hub's position; a lost history
 //!     (39800) ends every subscription with that error
 //!   no subscriptions for 30 s: the hub stops and closes its dump
+//!
+//! subscribe(tenant, from), and a detached subscription's return:
+//!   from at or after the hub's position → listen
+//!   from inside the ring → the ring's groups after from, then listen
+//!   the hub started under `gather` ago and delivered nothing → it moves
+//!     its start back to from (a worker's restart: every sequencer comes
+//!     back at once, each from its own checkpoint)
+//!   else → a private catch-up dump for the tenant alone (at most
+//!     `max_catchup` per cluster; the others wait for one), which hands
+//!     over to the hub as soon as the ring covers its position
 //! ```
 //!
-//! One dump per cluster and process, however many tenants: the
-//! 1,000-tenant run of R9 item 84 had 25 dumps (one per tenant with
-//! queues) fill a node's connections.
+//! One dump per cluster and process, however many tenants and stream
+//! instances: the 1,000-tenant run of R9 item 84 had 25 dumps (one per
+//! tenant with queues) fill a node's connections, and item 127 counted 76
+//! dumps for 75 stream instances.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use sprig_binlog::{Gtid, GtidPos};
+use sprig_binlog::{Gtid, GtidPos, Value};
 use sprig_common::ids::{ClusterId, TenantId};
 use sprig_common::names::SchemaName;
 use sprig_common::{ErrorKind, Result, SprigCode, SprigError};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::Instant;
 
-use crate::source::{Clusters, RawRow, RawTxn, SourceItem, TxnSource, XaMark};
+use crate::source::{Clusters, DumpScope, RawTxn, SourceItem, TxnSource, XaMark};
 
-/// Items a subscription buffers before the hub waits for it.
+/// Items a subscription buffers before it is detached.
 pub const SUB_CHANNEL: usize = 256;
 /// Idle positions go to every subscription at most this often.
 pub const IDLE_FANOUT: Duration = Duration::from_secs(1);
@@ -52,9 +68,70 @@ pub const HUB_LINGER: Duration = Duration::from_secs(30);
 
 type Item = Result<SourceItem>;
 
+/// A shared reader's sizes and limits.
+#[derive(Debug, Clone)]
+pub struct SharedOpts {
+    /// Items a subscription buffers. One whose buffer is full when a group
+    /// for it arrives is detached and comes back through the ring or a
+    /// catch-up dump: a slow consumer never holds up the others.
+    pub sub_channel: usize,
+    /// Groups the ring keeps at most.
+    pub ring_groups: usize,
+    /// Bytes (estimated) the ring keeps at most (chapter 38's
+    /// `feed.ring_mb`).
+    pub ring_bytes: usize,
+    /// Private catch-up dumps per cluster at once (chapter 38's
+    /// `feed.max_catchup_readers_per_cluster`).
+    pub max_catchup: usize,
+    /// For this long after it starts, while it has delivered no group, a
+    /// hub moves its start back for a subscription behind it.
+    pub gather: Duration,
+    /// A return through the ring with more groups than this takes a
+    /// catch-up dump instead.
+    pub max_backlog: usize,
+}
+
+impl Default for SharedOpts {
+    fn default() -> Self {
+        Self {
+            sub_channel: SUB_CHANNEL,
+            ring_groups: 50_000,
+            ring_bytes: 64 << 20,
+            max_catchup: 4,
+            gather: Duration::from_secs(10),
+            max_backlog: 4_096,
+        }
+    }
+}
+
+/// What a view keeps of its tenants' schemas.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Kept {
+    /// Rows of these internal tables (exact names, or prefixes ending in
+    /// `*`), outside catalogs.
+    Tables(Arc<[String]>),
+    /// Everything: rows of every schema of the tenant (its catalog too),
+    /// its DDL and statement-format DML.
+    All,
+}
+
 /// Whether group `g` lies after `from` (a domain `from` lacks: yes).
 fn after(from: &GtidPos, g: &Gtid) -> bool {
     from.get(g.domain).is_none_or(|x| g.seq > x.seq)
+}
+
+/// Per domain the newer of `a` and `b`; domains only one names keep its
+/// value.
+#[must_use]
+pub fn newer(a: &GtidPos, b: &GtidPos) -> GtidPos {
+    let mut out = a.clone();
+    for g in b.iter() {
+        match out.get(g.domain) {
+            Some(x) if x.seq >= g.seq => {}
+            _ => out.update(*g),
+        }
+    }
+    out
 }
 
 /// Per domain the older of `a` and `b`; domains only one names keep its
@@ -71,72 +148,136 @@ pub fn older(a: &GtidPos, b: &GtidPos) -> GtidPos {
     out
 }
 
-/// Whether `a` lies behind `b` in a domain both name.
-fn behind(a: &GtidPos, b: &GtidPos) -> bool {
-    a.iter()
-        .any(|g| b.get(g.domain).is_some_and(|x| g.seq < x.seq))
-}
-
-/// The tenant whose shard or reference schema `schema` is.
-fn tenant_of(schema: &str) -> Option<TenantId> {
-    match schema.parse::<SchemaName>().ok()? {
-        SchemaName::Catalog { .. } => None,
-        s => Some(s.tenant()),
-    }
-}
-
-/// A group split by tenant: each tenant's rows, in binlog order.
+/// A group split by tenant: each tenant's rows in binlog order, the DDL to
+/// each tenant it names, statement-format DML to its database's tenant.
 #[must_use]
 #[allow(clippy::implicit_hasher)]
 pub fn split(t: &RawTxn, xa: &mut HashMap<String, HashSet<TenantId>>) -> Vec<(TenantId, RawTxn)> {
-    let mut rows: Vec<(TenantId, Vec<RawRow>)> = Vec::new();
+    let mut parts: Vec<(TenantId, RawTxn)> = Vec::new();
+    let part = |parts: &mut Vec<(TenantId, RawTxn)>, tenant: TenantId| -> usize {
+        if let Some(i) = parts.iter().position(|(x, _)| *x == tenant) {
+            return i;
+        }
+        let mut sub = RawTxn::new(t.gtid, t.before.clone(), t.ts);
+        sub.stamps.clone_from(&t.stamps);
+        sub.apply = t.apply;
+        sub.xa.clone_from(&t.xa);
+        parts.push((tenant, sub));
+        parts.len() - 1
+    };
     for r in &t.rows {
-        let Some(tenant) = tenant_of(&r.table.schema) else {
-            continue;
-        };
-        match rows.iter_mut().find(|(x, _)| *x == tenant) {
-            Some((_, v)) => v.push(r.clone()),
-            None => rows.push((tenant, vec![r.clone()])),
+        if let Some(tenant) = DumpScope::tenant_of(&r.table.schema) {
+            let i = part(&mut parts, tenant);
+            parts[i].1.rows.push(r.clone());
         }
     }
-    let mut tenants: Vec<TenantId> = rows.iter().map(|(t, _)| *t).collect();
+    if let Some(d) = &t.ddl {
+        for tenant in DumpScope::tenants_named(&d.db, &d.sql) {
+            let i = part(&mut parts, tenant);
+            parts[i].1.ddl = Some(d.clone());
+        }
+    }
+    if let Some(db) = &t.statement_dml
+        && let Some(tenant) = DumpScope::tenant_of(db)
+    {
+        let i = part(&mut parts, tenant);
+        parts[i].1.statement_dml = Some(db.clone());
+    }
     match &t.xa {
         Some(XaMark::Prepare(x)) => {
-            xa.entry(x.clone())
-                .or_default()
-                .extend(tenants.iter().copied());
+            let seen: Vec<TenantId> = parts.iter().map(|(t, _)| *t).collect();
+            xa.entry(x.clone()).or_default().extend(seen);
         }
         Some(XaMark::Commit(x) | XaMark::Rollback(x)) => {
             for held in xa.remove(x).unwrap_or_default() {
-                if !tenants.contains(&held) {
-                    tenants.push(held);
-                }
+                part(&mut parts, held);
             }
         }
         None => {}
     }
-    tenants
-        .into_iter()
-        .map(|tenant| {
-            let mine = rows
+    parts
+}
+
+/// What `kept` lets through of a tenant's part of a group (`None`:
+/// nothing).
+#[must_use]
+pub fn view(part: &RawTxn, kept: &Kept) -> Option<RawTxn> {
+    match kept {
+        Kept::All => {
+            let empty = part.rows.is_empty()
+                && part.ddl.is_none()
+                && part.statement_dml.is_none()
+                && part.xa.is_none();
+            (!empty).then(|| part.clone())
+        }
+        Kept::Tables(tables) => {
+            let rows: Vec<_> = part
+                .rows
                 .iter()
-                .find(|(x, _)| *x == tenant)
-                .map(|(_, v)| v.clone())
-                .unwrap_or_default();
-            let mut sub = RawTxn::new(t.gtid, t.before.clone(), t.ts);
-            sub.stamps.clone_from(&t.stamps);
-            sub.rows = mine;
-            sub.apply = t.apply;
-            sub.xa.clone_from(&t.xa);
-            (tenant, sub)
+                .filter(|r| {
+                    tables
+                        .iter()
+                        .any(|p| DumpScope::table_matches(p, &r.table.table))
+                        && !matches!(
+                            r.table.schema.parse::<SchemaName>(),
+                            Ok(SchemaName::Catalog { .. })
+                        )
+                })
+                .cloned()
+                .collect();
+            if rows.is_empty() && part.xa.is_none() {
+                return None;
+            }
+            let mut v = RawTxn::new(part.gtid, part.before.clone(), part.ts);
+            v.stamps.clone_from(&part.stamps);
+            v.apply = part.apply;
+            v.xa.clone_from(&part.xa);
+            v.rows = rows;
+            Some(v)
+        }
+    }
+}
+
+fn value_bytes(v: &Value) -> usize {
+    match v {
+        Value::Decimal(s) => s.len(),
+        Value::String(b) | Value::Bytes(b) | Value::Geometry(b) => b.len(),
+        _ => 8,
+    }
+}
+
+/// A group's size in memory, roughly.
+fn approx_bytes(t: &RawTxn) -> usize {
+    let images: usize = t
+        .rows
+        .iter()
+        .map(|r| {
+            [&r.before, &r.after]
+                .into_iter()
+                .flatten()
+                .flat_map(|i| i.0.iter().flatten())
+                .map(|v| 16 + value_bytes(v))
+                .sum::<usize>()
+                + 64
         })
-        .collect()
+        .sum();
+    images + t.ddl.as_ref().map_or(0, |d| d.sql.len()) + 128
 }
 
 struct Sub {
     tenant: TenantId,
+    kept: Kept,
     from: GtidPos,
     tx: mpsc::Sender<Item>,
+    detached: Arc<AtomicBool>,
+}
+
+/// One group of the ring.
+struct RingEntry {
+    gtid: Gtid,
+    after: GtidPos,
+    parts: Vec<(TenantId, RawTxn)>,
+    bytes: usize,
 }
 
 #[derive(Default)]
@@ -147,8 +288,26 @@ struct HubState {
     running: bool,
     /// The position after the last group read.
     pos: Option<GtidPos>,
-    /// A subscription started behind `pos`: reopen here.
+    /// A subscription started behind `pos` while the hub was gathering:
+    /// reopen here.
     rewind: Option<GtidPos>,
+    /// The dump's scope must widen: reopen at `pos`.
+    reopen: bool,
+    /// The views' tables widened: the ring starts again at the reopen.
+    reset_ring: bool,
+    /// When this run began.
+    started: Option<Instant>,
+    /// A group went to a subscription in this run.
+    delivered: bool,
+    /// The newest groups with kept rows, oldest first.
+    ring: VecDeque<RingEntry>,
+    ring_bytes: usize,
+    /// The ring holds every group with kept rows after this position.
+    ring_start: GtidPos,
+    /// Live `Kept::All` subscriptions per tenant.
+    whole: HashMap<TenantId, usize>,
+    /// Tenants the open dump keeps whole, and since when.
+    scope_whole: HashMap<TenantId, GtidPos>,
 }
 
 impl HubState {
@@ -162,14 +321,43 @@ impl HubState {
             }
         }
     }
+
+    fn reset_ring(&mut self, at: &GtidPos) {
+        self.ring.clear();
+        self.ring_bytes = 0;
+        self.ring_start = at.clone();
+    }
+
+    fn register(&mut self, tenant: TenantId, kept: Kept, from: GtidPos, tx: mpsc::Sender<Item>, detached: Arc<AtomicBool>) {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.subs.insert(
+            id,
+            Sub {
+                tenant,
+                kept,
+                from,
+                tx,
+                detached,
+            },
+        );
+        self.by_tenant.entry(tenant).or_default().push(id);
+    }
+}
+
+/// What the views share: their tables, the options.
+struct FeedShared {
+    inner: Arc<dyn Clusters>,
+    tables: Mutex<BTreeSet<String>>,
+    opts: SharedOpts,
 }
 
 struct Hub {
     cluster: ClusterId,
-    inner: Arc<dyn Clusters>,
-    tables: Arc<[String]>,
+    feed: Arc<FeedShared>,
     state: Mutex<HubState>,
-    rewind: Notify,
+    wake: Notify,
+    catchup: Arc<Semaphore>,
 }
 
 /// Counters of one hub (tests, metrics).
@@ -181,6 +369,22 @@ pub struct HubStats {
     pub tenants: usize,
     /// Whether its dump task runs.
     pub running: bool,
+    /// Groups in the ring.
+    pub ring: usize,
+    /// Catch-up dumps open now.
+    pub catchups: usize,
+}
+
+/// How a subscription starts.
+enum Attach {
+    /// From the hub: the ring's groups first.
+    Live {
+        rx: mpsc::Receiver<Item>,
+        backlog: VecDeque<SourceItem>,
+        detached: Arc<AtomicBool>,
+    },
+    /// Its own dump until the ring covers it.
+    CatchUp,
 }
 
 impl Hub {
@@ -188,48 +392,113 @@ impl Hub {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn subscribe(self: &Arc<Self>, tenant: TenantId, from: &GtidPos) -> mpsc::Receiver<Item> {
-        let (tx, rx) = mpsc::channel(SUB_CHANNEL);
-        let start = {
-            let mut st = self.lock();
-            let id = st.next_id;
-            st.next_id += 1;
-            st.subs.insert(
-                id,
-                Sub {
-                    tenant,
-                    from: from.clone(),
-                    tx,
-                },
-            );
-            st.by_tenant.entry(tenant).or_default().push(id);
-            if st.running {
-                if let Some(p) = &st.pos
-                    && behind(from, p)
-                {
-                    let r = match &st.rewind {
-                        Some(r) => older(r, from),
-                        None => older(p, from),
-                    };
-                    st.rewind = Some(r);
-                    self.rewind.notify_one();
-                }
-                None
-            } else {
-                st.running = true;
-                let p = match st.pos.take() {
-                    Some(p) => older(&p, from),
-                    None => from.clone(),
-                };
-                st.pos = Some(p.clone());
-                Some(p)
-            }
-        };
-        if let Some(p) = start {
+    fn label(&self) -> String {
+        self.cluster.to_string()
+    }
+
+    /// Starts listening at `from` if the hub can serve it (see the module
+    /// docs); `first` allows moving a gathering hub's start back.
+    fn attach(self: &Arc<Self>, tenant: TenantId, kept: &Kept, from: &GtidPos, first: bool) -> Attach {
+        let opts = &self.feed.opts;
+        let (tx, rx) = mpsc::channel(opts.sub_channel);
+        let detached = Arc::new(AtomicBool::new(false));
+        let whole = matches!(kept, Kept::All);
+        let mut st = self.lock();
+        if !st.running {
+            st.running = true;
+            st.pos = Some(from.clone());
+            st.reset_ring(from);
+            st.started = Some(Instant::now());
+            st.delivered = false;
+            st.rewind = None;
+            st.reopen = false;
+            st.scope_whole.clear();
+            st.register(tenant, kept.clone(), from.clone(), tx, Arc::clone(&detached));
+            drop(st);
             let hub = Arc::clone(self);
-            tokio::spawn(async move { hub.run(p).await });
+            let start = from.clone();
+            tokio::spawn(async move { hub.run(start).await });
+            return Attach::Live {
+                rx,
+                backlog: VecDeque::new(),
+                detached,
+            };
         }
-        rx
+        let pos = st.pos.clone().unwrap_or_default();
+        if whole && !st.scope_whole.contains_key(&tenant) {
+            // The dump doesn't keep this tenant whole yet: it reopens at
+            // `pos` with it (the group in flight is read again).
+            st.reopen = true;
+            self.wake.notify_one();
+        }
+        if from.reached(&pos) {
+            st.register(tenant, kept.clone(), from.clone(), tx, Arc::clone(&detached));
+            return Attach::Live {
+                rx,
+                backlog: VecDeque::new(),
+                detached,
+            };
+        }
+        let since = if whole {
+            st.scope_whole.get(&tenant).cloned()
+        } else {
+            Some(st.ring_start.clone())
+        };
+        let covered =
+            from.reached(&st.ring_start) && since.as_ref().is_some_and(|s| from.reached(s));
+        if covered {
+            let backlog: VecDeque<SourceItem> = st
+                .ring
+                .iter()
+                .filter(|e| after(from, &e.gtid))
+                .filter_map(|e| {
+                    let (_, part) = e.parts.iter().find(|(t, _)| *t == tenant)?;
+                    view(part, kept).map(SourceItem::Txn)
+                })
+                .collect();
+            if backlog.len() <= opts.max_backlog {
+                metrics::counter!("sprig_feed_resumes_total", "tier" => "ring").increment(1);
+                st.register(tenant, kept.clone(), pos, tx, Arc::clone(&detached));
+                return Attach::Live {
+                    rx,
+                    backlog,
+                    detached,
+                };
+            }
+        }
+        let gathering = !st.delivered
+            && st
+                .started
+                .is_some_and(|s| s.elapsed() < self.feed.opts.gather);
+        if first && gathering {
+            let r = match &st.rewind {
+                Some(r) => older(r, from),
+                None => older(&pos, from),
+            };
+            st.rewind = Some(r);
+            self.wake.notify_one();
+            st.register(tenant, kept.clone(), from.clone(), tx, Arc::clone(&detached));
+            return Attach::Live {
+                rx,
+                backlog: VecDeque::new(),
+                detached,
+            };
+        }
+        Attach::CatchUp
+    }
+
+    fn hold_whole(&self, tenant: TenantId) {
+        *self.lock().whole.entry(tenant).or_default() += 1;
+    }
+
+    fn release_whole(&self, tenant: TenantId) {
+        let mut st = self.lock();
+        if let Some(n) = st.whole.get_mut(&tenant) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                st.whole.remove(&tenant);
+            }
+        }
     }
 
     fn stats(&self) -> HubStats {
@@ -238,6 +507,13 @@ impl Hub {
             subscriptions: st.subs.len(),
             tenants: st.by_tenant.len(),
             running: st.running,
+            ring: st.ring.len(),
+            catchups: self
+                .feed
+                .opts
+                .max_catchup
+                .max(1)
+                .saturating_sub(self.catchup.available_permits()),
         }
     }
 
@@ -256,16 +532,46 @@ impl Hub {
         }
     }
 
-    #[allow(clippy::too_many_lines)] // the loop of the module docs
+    /// The scope of the next dump: the views' tables and the tenants kept
+    /// whole now. Updates `scope_whole` (new tenants since `pos`).
+    fn scope(&self, st: &mut HubState, pos: &GtidPos, all_new: bool) -> DumpScope {
+        let tables: Vec<String> = self
+            .feed
+            .tables
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect();
+        let tenants: BTreeSet<TenantId> = st.whole.keys().copied().collect();
+        let mut since = HashMap::new();
+        for t in &tenants {
+            let s = match st.scope_whole.get(t) {
+                Some(s) if !all_new => s.clone(),
+                _ => pos.clone(),
+            };
+            since.insert(*t, s);
+        }
+        st.scope_whole = since;
+        DumpScope {
+            tables,
+            tenants,
+            only: None,
+        }
+    }
+
+    #[allow(clippy::too_many_lines, clippy::cast_precision_loss)] // the loop of the module docs
     async fn run(self: Arc<Self>, mut pos: GtidPos) {
+        let label = self.label();
         let mut xa: HashMap<String, HashSet<TenantId>> = HashMap::new();
         let mut src: Option<Box<dyn TxnSource>> = None;
+        let mut scope: Option<DumpScope> = None;
         let mut delay = Duration::from_millis(100);
         let mut last_idle = Instant::now();
         let mut empty_since: Option<Instant> = None;
         tracing::info!(cluster = %self.cluster, %pos, "shared feed reader starts");
         loop {
-            // Stop when nobody listens for a while.
+            // Stop when nobody listens for a while; rewind or widen.
             {
                 let mut st = self.lock();
                 st.subs.retain(|_, s| !s.tx.is_closed());
@@ -280,6 +586,9 @@ impl Hub {
                         st.running = false;
                         st.pos = Some(pos.clone());
                         st.rewind = None;
+                        st.reopen = false;
+                        st.reset_ring(&pos);
+                        st.scope_whole.clear();
                         tracing::info!(cluster = %self.cluster, "shared feed reader stops (no subscriptions)");
                         return;
                     }
@@ -287,27 +596,41 @@ impl Hub {
                     empty_since = None;
                 }
                 if let Some(r) = st.rewind.take() {
-                    tracing::info!(cluster = %self.cluster, from = %pos, to = %r, "shared feed reader rewinds");
+                    tracing::info!(cluster = %self.cluster, from = %pos, to = %r, "shared feed reader moves its start back");
                     pos = older(&pos, &r);
                     st.pos = Some(pos.clone());
+                    st.reset_ring(&pos);
                     src = None;
                     xa.clear();
+                    let s = self.scope(&mut st, &pos, true);
+                    scope = Some(s);
+                    st.reopen = false;
+                } else if st.reopen {
+                    st.reopen = false;
+                    src = None;
+                    if std::mem::take(&mut st.reset_ring) {
+                        st.reset_ring(&pos);
+                    }
+                    let s = self.scope(&mut st, &pos, false);
+                    scope = Some(s);
+                } else if scope.is_none() {
+                    let s = self.scope(&mut st, &pos, true);
+                    scope = Some(s);
                 }
             }
             if src.is_none() {
-                match self
-                    .inner
-                    .open_tables(&self.cluster, Arc::clone(&self.tables), &pos)
-                    .await
-                {
+                let sc = Arc::new(scope.clone().unwrap_or_default());
+                match self.feed.inner.open_scope(&self.cluster, sc, &pos).await {
                     Ok(s) => {
                         src = Some(s);
                         delay = Duration::from_millis(100);
-                        metrics::counter!("sprig_feed_shared_dumps_total", "cluster" => self.cluster.to_string()).increment(1);
+                        metrics::counter!("sprig_feed_shared_dumps_total", "cluster" => label.clone()).increment(1);
                     }
                     Err(e) if fatal(&e) => {
                         tracing::warn!(cluster = %self.cluster, error = %e, "shared feed reader: history lost");
                         self.fail_all(&e);
+                        tokio::time::sleep(delay).await;
+                        delay = (delay * 2).min(Duration::from_secs(5));
                         continue;
                     }
                     Err(e) => {
@@ -319,10 +642,11 @@ impl Hub {
                 }
             }
             let Some(s) = src.as_mut() else { continue };
-            // A rewind or the linger check may end the wait; dropping the
-            // source half-read is fine, it is reopened from `pos`.
+            // A rewind, a wider scope or the linger check may end the
+            // wait; dropping the source half-read is fine, it is reopened
+            // from `pos`.
             let item = tokio::select! {
-                () = self.rewind.notified() => continue,
+                () = self.wake.notified() => continue,
                 () = tokio::time::sleep(IDLE_FANOUT * 5) => {
                     // Quiet cluster: keep the subscriptions' positions moving.
                     Ok(SourceItem::Idle { pos: pos.clone() })
@@ -331,32 +655,78 @@ impl Hub {
             };
             match item {
                 Ok(SourceItem::Txn(t)) => {
-                    let after_pos = t.after();
-                    for (tenant, sub) in split(&t, &mut xa) {
-                        let targets: Vec<(u64, mpsc::Sender<Item>)> = {
-                            let st = self.lock();
-                            st.by_tenant
-                                .get(&tenant)
-                                .into_iter()
-                                .flatten()
-                                .filter_map(|id| {
-                                    let s = st.subs.get(id)?;
-                                    after(&s.from, &t.gtid).then(|| (*id, s.tx.clone()))
-                                })
-                                .collect()
-                        };
-                        for (id, tx) in targets {
-                            if tx.send(Ok(SourceItem::Txn(sub.clone()))).await.is_err() {
-                                self.lock().remove(id);
-                            } else if let Some(s) = self.lock().subs.get_mut(&id) {
-                                // Delivered: a rewind won't send it again.
-                                s.from.update(t.gtid);
+                    let mut st = self.lock();
+                    if st.rewind.is_some() || st.reopen {
+                        // Read with the old scope or start: read it again.
+                        drop(st);
+                        src = None;
+                        continue;
+                    }
+                    let parts = split(&t, &mut xa);
+                    let mut detach: Vec<u64> = Vec::new();
+                    let mut gone: Vec<u64> = Vec::new();
+                    let mut sent = false;
+                    {
+                        let HubState { subs, by_tenant, .. } = &mut *st;
+                        for (tenant, part) in &parts {
+                            let Some(ids) = by_tenant.get(tenant) else {
+                                continue;
+                            };
+                            for id in ids {
+                                let Some(s) = subs.get_mut(id) else { continue };
+                                if !after(&s.from, &t.gtid) {
+                                    continue;
+                                }
+                                let Some(v) = view(part, &s.kept) else {
+                                    s.from.update(t.gtid);
+                                    continue;
+                                };
+                                match s.tx.try_send(Ok(SourceItem::Txn(v))) {
+                                    Ok(()) => {
+                                        // Delivered: a rewind won't send it again.
+                                        s.from.update(t.gtid);
+                                        sent = true;
+                                    }
+                                    Err(mpsc::error::TrySendError::Full(_)) => detach.push(*id),
+                                    Err(mpsc::error::TrySendError::Closed(_)) => gone.push(*id),
+                                }
                             }
                         }
                     }
+                    for id in detach {
+                        if let Some(s) = st.subs.get(&id) {
+                            s.detached.store(true, Ordering::Release);
+                            tracing::debug!(cluster = %self.cluster, tenant = %s.tenant, "shared feed reader: a slow subscription is detached");
+                        }
+                        st.remove(id);
+                        metrics::counter!("sprig_feed_shared_detached_total", "cluster" => label.clone()).increment(1);
+                    }
+                    for id in gone {
+                        st.remove(id);
+                    }
+                    st.delivered |= sent;
+                    let after_pos = t.after();
+                    if !parts.is_empty() {
+                        let bytes = parts.iter().map(|(_, p)| approx_bytes(p)).sum();
+                        st.ring_bytes += bytes;
+                        st.ring.push_back(RingEntry {
+                            gtid: t.gtid,
+                            after: after_pos.clone(),
+                            parts,
+                            bytes,
+                        });
+                        let (max_groups, max_bytes) =
+                            (self.feed.opts.ring_groups, self.feed.opts.ring_bytes);
+                        while st.ring.len() > max_groups || st.ring_bytes > max_bytes {
+                            let Some(e) = st.ring.pop_front() else { break };
+                            st.ring_bytes -= e.bytes;
+                            st.ring_start = e.after;
+                        }
+                    }
                     pos = after_pos;
-                    self.lock().pos = Some(pos.clone());
-                    metrics::counter!("sprig_feed_shared_groups_total", "cluster" => self.cluster.to_string()).increment(1);
+                    st.pos = Some(pos.clone());
+                    drop(st);
+                    metrics::counter!("sprig_feed_shared_groups_total", "cluster" => label.clone()).increment(1);
                 }
                 Ok(SourceItem::Idle { pos: p }) => {
                     pos = p;
@@ -388,6 +758,10 @@ impl Hub {
                         s.from = pos.clone();
                     }
                 }
+                metrics::gauge!("sprig_feed_shared_subscriptions", "cluster" => label.clone())
+                    .set(st.subs.len() as f64);
+                metrics::gauge!("sprig_feed_ring_groups", "cluster" => label.clone())
+                    .set(st.ring.len() as f64);
             }
         }
     }
@@ -402,49 +776,252 @@ fn fatal(e: &SprigError) -> bool {
     )
 }
 
-/// One tenant's view of a hub.
-struct SubSource {
-    rx: mpsc::Receiver<Item>,
+/// A catch-up dump and its slot.
+struct CatchUp {
+    src: Box<dyn TxnSource>,
+    _permit: OwnedSemaphorePermit,
+    cluster: String,
+    checked: Instant,
 }
+
+impl Drop for CatchUp {
+    fn drop(&mut self) {
+        metrics::gauge!("sprig_feed_catchup_readers", "cluster" => self.cluster.clone())
+            .decrement(1.0);
+    }
+}
+
+enum Mode {
+    Live {
+        rx: mpsc::Receiver<Item>,
+        backlog: VecDeque<SourceItem>,
+        detached: Arc<AtomicBool>,
+    },
+    CatchUp(CatchUp),
+    /// Detached, or not served yet: attach again.
+    Out,
+}
+
+/// One tenant's view of a hub: the hub's groups for it, or its own
+/// catch-up dump while it is behind the ring.
+struct SubSource {
+    hub: Arc<Hub>,
+    tenant: TenantId,
+    kept: Kept,
+    /// The position after the last item returned.
+    pos: GtidPos,
+    mode: Mode,
+}
+
+impl Drop for SubSource {
+    fn drop(&mut self) {
+        if matches!(self.kept, Kept::All) {
+            self.hub.release_whole(self.tenant);
+        }
+    }
+}
+
+impl SubSource {
+    fn advance(&mut self, i: &SourceItem) {
+        self.pos = match i {
+            SourceItem::Txn(t) => newer(&self.pos, &t.after()),
+            SourceItem::Idle { pos } => newer(&self.pos, pos),
+        };
+    }
+
+    fn scope(&self) -> DumpScope {
+        match &self.kept {
+            Kept::All => DumpScope {
+                tables: Vec::new(),
+                tenants: [self.tenant].into_iter().collect(),
+                only: Some(self.tenant),
+            },
+            Kept::Tables(t) => DumpScope {
+                tables: t.to_vec(),
+                tenants: BTreeSet::new(),
+                only: Some(self.tenant),
+            },
+        }
+    }
+
+    fn live(&mut self, a: Attach) -> bool {
+        match a {
+            Attach::Live {
+                rx,
+                backlog,
+                detached,
+            } => {
+                self.mode = Mode::Live {
+                    rx,
+                    backlog,
+                    detached,
+                };
+                true
+            }
+            Attach::CatchUp => false,
+        }
+    }
+
+    /// Opens a catch-up dump, once a slot is free.
+    async fn catch_up(&mut self) -> Result<()> {
+        let permit = Arc::clone(&self.hub.catchup)
+            .acquire_owned()
+            .await
+            .map_err(|_| SprigError::internal("the shared reader's catch-up slots are gone"))?;
+        // Another catch-up may have moved the ring meanwhile.
+        let a = self.hub.attach(self.tenant, &self.kept, &self.pos, false);
+        if self.live(a) {
+            return Ok(());
+        }
+        let src = self
+            .hub
+            .feed
+            .inner
+            .open_scope(&self.hub.cluster, Arc::new(self.scope()), &self.pos)
+            .await?;
+        let cluster = self.hub.label();
+        metrics::gauge!("sprig_feed_catchup_readers", "cluster" => cluster.clone()).increment(1.0);
+        metrics::counter!("sprig_feed_resumes_total", "tier" => "binlog").increment(1);
+        tracing::debug!(cluster = %self.hub.cluster, tenant = %self.tenant, pos = %self.pos, "shared feed reader: catch-up dump");
+        self.mode = Mode::CatchUp(CatchUp {
+            src,
+            _permit: permit,
+            cluster,
+            checked: Instant::now(),
+        });
+        Ok(())
+    }
+}
+
+/// How often a catch-up dump asks whether the hub can take over.
+const REJOIN_EVERY: Duration = Duration::from_millis(100);
 
 #[async_trait::async_trait]
 impl TxnSource for SubSource {
     async fn next(&mut self) -> Result<SourceItem> {
-        match self.rx.recv().await {
-            Some(i) => i,
-            None => Err(SprigError::new(
-                SprigCode::BinlogDisconnected,
-                "the shared feed reader ended this subscription",
-            )),
+        loop {
+            match &mut self.mode {
+                Mode::Live {
+                    rx,
+                    backlog,
+                    detached,
+                } => {
+                    if let Some(i) = backlog.pop_front() {
+                        self.advance(&i);
+                        return Ok(i);
+                    }
+                    match rx.recv().await {
+                        Some(Ok(i)) => {
+                            self.advance(&i);
+                            return Ok(i);
+                        }
+                        Some(Err(e)) => return Err(e),
+                        None if detached.load(Ordering::Acquire) => self.mode = Mode::Out,
+                        None => {
+                            return Err(SprigError::new(
+                                SprigCode::BinlogDisconnected,
+                                "the shared feed reader ended this subscription",
+                            ));
+                        }
+                    }
+                }
+                Mode::Out => {
+                    let a = self.hub.attach(self.tenant, &self.kept, &self.pos, false);
+                    if !self.live(a) {
+                        self.catch_up().await?;
+                    }
+                }
+                Mode::CatchUp(c) => {
+                    let item = c.src.next().await?;
+                    let rejoin = c.checked.elapsed() >= REJOIN_EVERY;
+                    if rejoin {
+                        c.checked = Instant::now();
+                    }
+                    let out = match item {
+                        SourceItem::Txn(t) => {
+                            // The dump holds this tenant's rows only.
+                            let v = view(&t, &self.kept);
+                            self.pos = newer(&self.pos, &t.after());
+                            v.map(SourceItem::Txn)
+                        }
+                        SourceItem::Idle { pos } => {
+                            let i = SourceItem::Idle { pos };
+                            self.advance(&i);
+                            Some(i)
+                        }
+                    };
+                    if rejoin {
+                        let a = self.hub.attach(self.tenant, &self.kept, &self.pos, false);
+                        if self.live(a) {
+                            tracing::debug!(cluster = %self.hub.cluster, tenant = %self.tenant, pos = %self.pos, "shared feed reader: caught up");
+                        }
+                    }
+                    if let Some(o) = out {
+                        return Ok(o);
+                    }
+                }
+            }
         }
     }
 }
 
-/// [`Clusters`] whose tenant sources share one dump per cluster (see the
-/// module docs). Only rows of `tables` reach the tenants' tails.
-pub struct SharedClusters {
-    inner: Arc<dyn Clusters>,
-    tables: Arc<[String]>,
+/// One shared reader per process: a hub per cluster, seen through views
+/// (see the module docs).
+pub struct SharedFeed {
+    shared: Arc<FeedShared>,
     hubs: Mutex<HashMap<ClusterId, Arc<Hub>>>,
 }
 
-impl std::fmt::Debug for SharedClusters {
+impl std::fmt::Debug for SharedFeed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SharedClusters")
-            .field("tables", &self.tables)
-            .finish_non_exhaustive()
+        f.debug_struct("SharedFeed").finish_non_exhaustive()
     }
 }
 
-impl SharedClusters {
-    /// Shares `inner`'s cluster-wide sources for rows of `tables`.
+impl SharedFeed {
+    /// A shared reader over `inner`'s cluster-wide sources.
     #[must_use]
-    pub fn new(inner: Arc<dyn Clusters>, tables: &[&str]) -> Self {
-        Self {
-            inner,
-            tables: tables.iter().map(|t| (*t).to_owned()).collect(),
+    pub fn new(inner: Arc<dyn Clusters>, opts: SharedOpts) -> Arc<Self> {
+        Arc::new(Self {
+            shared: Arc::new(FeedShared {
+                inner,
+                tables: Mutex::new(BTreeSet::new()),
+                opts,
+            }),
             hubs: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// A view keeping `kept` of its tenants. New tables widen every
+    /// running hub's dump.
+    #[must_use]
+    pub fn view(self: &Arc<Self>, kept: Kept) -> Arc<SharedClusters> {
+        if let Kept::Tables(t) = &kept {
+            let mut tables = self
+                .shared
+                .tables
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let mut wider = false;
+            for x in t.iter() {
+                wider |= tables.insert(x.clone());
+            }
+            drop(tables);
+            if wider {
+                for h in self.hubs.lock().unwrap_or_else(PoisonError::into_inner).values() {
+                    let mut st = h.lock();
+                    if st.running {
+                        st.reopen = true;
+                        st.reset_ring = true;
+                        h.wake.notify_one();
+                    }
+                }
+            }
         }
+        Arc::new(SharedClusters {
+            feed: Arc::clone(self),
+            kept,
+        })
     }
 
     fn hub(&self, cluster: &ClusterId) -> Arc<Hub> {
@@ -452,10 +1029,10 @@ impl SharedClusters {
         Arc::clone(hubs.entry(cluster.clone()).or_insert_with(|| {
             Arc::new(Hub {
                 cluster: cluster.clone(),
-                inner: Arc::clone(&self.inner),
-                tables: Arc::clone(&self.tables),
+                feed: Arc::clone(&self.shared),
                 state: Mutex::new(HubState::default()),
-                rewind: Notify::new(),
+                wake: Notify::new(),
+                catchup: Arc::new(Semaphore::new(self.shared.opts.max_catchup.max(1))),
             })
         }))
     }
@@ -468,6 +1045,49 @@ impl SharedClusters {
     }
 }
 
+/// A view of a [`SharedFeed`]: a [`Clusters`] whose tenant sources share
+/// one dump per cluster (see the module docs).
+pub struct SharedClusters {
+    feed: Arc<SharedFeed>,
+    kept: Kept,
+}
+
+impl std::fmt::Debug for SharedClusters {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedClusters")
+            .field("kept", &self.kept)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SharedClusters {
+    /// A reader of its own over `inner`, keeping rows of `tables` (R9,
+    /// r9cluster's form: one view).
+    #[must_use]
+    pub fn new(inner: Arc<dyn Clusters>, tables: &[&str]) -> Self {
+        let feed = SharedFeed::new(inner, SharedOpts::default());
+        let v = feed.view(Kept::Tables(
+            tables.iter().map(|t| (*t).to_owned()).collect(),
+        ));
+        Self {
+            feed,
+            kept: v.kept.clone(),
+        }
+    }
+
+    /// The reader this view shares.
+    #[must_use]
+    pub fn feed(&self) -> &Arc<SharedFeed> {
+        &self.feed
+    }
+
+    /// A hub's counters (`None`: never opened).
+    #[must_use]
+    pub fn stats(&self, cluster: &ClusterId) -> Option<HubStats> {
+        self.feed.stats(cluster)
+    }
+}
+
 #[async_trait::async_trait]
 impl Clusters for SharedClusters {
     async fn open(
@@ -476,211 +1096,35 @@ impl Clusters for SharedClusters {
         tenant: TenantId,
         from: &GtidPos,
     ) -> Result<Box<dyn TxnSource>> {
-        let rx = self.hub(cluster).subscribe(tenant, from);
-        Ok(Box::new(SubSource { rx }))
+        let hub = self.feed.hub(cluster);
+        if matches!(self.kept, Kept::All) {
+            hub.hold_whole(tenant);
+        }
+        let mut s = SubSource {
+            hub: Arc::clone(&hub),
+            tenant,
+            kept: self.kept.clone(),
+            pos: from.clone(),
+            mode: Mode::Out,
+        };
+        let a = hub.attach(tenant, &self.kept, from, true);
+        s.live(a);
+        Ok(Box::new(s))
     }
 
-    async fn open_tables(
+    async fn open_scope(
         &self,
         cluster: &ClusterId,
-        tables: Arc<[String]>,
+        scope: Arc<DumpScope>,
         from: &GtidPos,
     ) -> Result<Box<dyn TxnSource>> {
-        self.inner.open_tables(cluster, tables, from).await
+        self.feed.shared.inner.open_scope(cluster, scope, from).await
     }
 
     async fn position(&self, cluster: &ClusterId) -> Result<GtidPos> {
-        self.inner.position(cluster).await
+        self.feed.shared.inner.position(cluster).await
     }
 }
 
 #[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used, clippy::many_single_char_names)]
-
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use sprig_binlog::{RowImage, Value};
-
-    use super::*;
-    use crate::source::{RowKind, TableShape};
-
-    fn g(seq: u64) -> Gtid {
-        Gtid {
-            domain: 0,
-            server: 1,
-            seq,
-        }
-    }
-
-    fn row(schema: &str) -> RawRow {
-        RawRow {
-            table: Arc::new(TableShape {
-                schema: schema.into(),
-                table: "__sprig_qo".into(),
-                columns: vec!["out_id".into()],
-                key: vec![0],
-            }),
-            kind: RowKind::Insert,
-            before: None,
-            after: Some(RowImage(vec![Some(Value::Int(1))])),
-            hint: None,
-        }
-    }
-
-    fn txn(seq: u64, schemas: &[&str]) -> RawTxn {
-        let mut t = RawTxn::new(g(seq), GtidPos::from_gtids([g(seq - 1)]), 0);
-        t.rows = schemas.iter().map(|s| row(s)).collect();
-        t
-    }
-
-    /// A cluster whose binlog is a fixed list of groups; counts dumps.
-    struct Fake {
-        groups: Vec<RawTxn>,
-        opens: Arc<AtomicUsize>,
-    }
-
-    struct FakeSrc {
-        groups: Vec<RawTxn>,
-    }
-
-    #[async_trait::async_trait]
-    impl TxnSource for FakeSrc {
-        async fn next(&mut self) -> Result<SourceItem> {
-            if self.groups.is_empty() {
-                std::future::pending::<()>().await;
-            }
-            Ok(SourceItem::Txn(self.groups.remove(0)))
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl Clusters for Fake {
-        async fn open(
-            &self,
-            _: &ClusterId,
-            _: TenantId,
-            _: &GtidPos,
-        ) -> Result<Box<dyn TxnSource>> {
-            unreachable!("the shared reader opens cluster-wide sources only")
-        }
-
-        async fn open_tables(
-            &self,
-            _: &ClusterId,
-            _: Arc<[String]>,
-            from: &GtidPos,
-        ) -> Result<Box<dyn TxnSource>> {
-            self.opens.fetch_add(1, Ordering::SeqCst);
-            let groups = self
-                .groups
-                .iter()
-                .filter(|t| after(from, &t.gtid))
-                .cloned()
-                .collect();
-            Ok(Box::new(FakeSrc { groups }))
-        }
-
-        async fn position(&self, _: &ClusterId) -> Result<GtidPos> {
-            Ok(GtidPos::from_gtids([g(0)]))
-        }
-    }
-
-    async fn take(src: &mut Box<dyn TxnSource>, n: usize) -> Vec<(u64, usize)> {
-        let mut out = Vec::new();
-        while out.len() < n {
-            match tokio::time::timeout(Duration::from_secs(5), src.next())
-                .await
-                .unwrap()
-                .unwrap()
-            {
-                SourceItem::Txn(t) => out.push((t.gtid.seq, t.rows.len())),
-                SourceItem::Idle { .. } => {}
-            }
-        }
-        out
-    }
-
-    #[test]
-    fn groups_split_by_tenant_and_xa_follows_its_prepare() {
-        let mut xa = HashMap::new();
-        let t = txn(
-            5,
-            &["t7_d1_g1_s1", "t8_d2_g1_s1", "t7_d1_g1_s2", "t9_sprig"],
-        );
-        let parts = split(&t, &mut xa);
-        let shape: Vec<(u64, usize)> = parts.iter().map(|(t, x)| (t.0, x.rows.len())).collect();
-        assert_eq!(shape, vec![(7, 2), (8, 1)]);
-        let mut p = txn(6, &["t7_d1_g1_s1"]);
-        p.xa = Some(XaMark::Prepare("x1".into()));
-        assert_eq!(split(&p, &mut xa).len(), 1);
-        let mut c = txn(7, &[]);
-        c.xa = Some(XaMark::Commit("x1".into()));
-        let parts = split(&c, &mut xa);
-        assert_eq!(parts.len(), 1);
-        assert_eq!(parts[0].0, TenantId(7));
-        assert!(xa.is_empty());
-        let a = GtidPos::from_gtids([g(5)]);
-        let b = GtidPos::from_gtids([g(3)]);
-        assert_eq!(older(&a, &b), b);
-        assert!(behind(&b, &a) && !behind(&a, &b));
-    }
-
-    #[tokio::test]
-    async fn many_tenants_share_one_dump_and_late_starters_rewind() {
-        let opens = Arc::new(AtomicUsize::new(0));
-        let fake = Fake {
-            groups: vec![
-                txn(1, &["t1_d1_g1_s1"]),
-                txn(2, &["t2_d1_g1_s1", "t1_d1_g1_s1"]),
-                txn(3, &["t2_d1_g1_s1"]),
-                txn(4, &["t1_d1_g1_s1"]),
-            ],
-            opens: Arc::clone(&opens),
-        };
-        let shared = SharedClusters::new(Arc::new(fake), &["__sprig_qo"]);
-        let c = ClusterId::new("dc-a-c1").unwrap();
-        // Tenant 1 from group 1 on; tenant 2 joins later from group 2 on.
-        let mut s1 = shared
-            .open(&c, TenantId(1), &GtidPos::from_gtids([g(0)]))
-            .await
-            .unwrap();
-        assert_eq!(take(&mut s1, 3).await, vec![(1, 1), (2, 1), (4, 1)]);
-        let mut s2 = shared
-            .open(&c, TenantId(2), &GtidPos::from_gtids([g(1)]))
-            .await
-            .unwrap();
-        // Tenant 2 started behind the hub: it rewinds, tenant 2 gets 2 and
-        // 3, and tenant 1 sees nothing twice.
-        assert_eq!(take(&mut s2, 2).await, vec![(2, 1), (3, 1)]);
-        let quiet = tokio::time::timeout(Duration::from_millis(300), async {
-            loop {
-                if let SourceItem::Txn(t) = s1.next().await.unwrap() {
-                    return t.gtid.seq;
-                }
-            }
-        })
-        .await;
-        assert!(quiet.is_err(), "tenant 1 got a group twice: {quiet:?}");
-        assert_eq!(
-            opens.load(Ordering::SeqCst),
-            2,
-            "one dump, reopened once to rewind"
-        );
-        let st = shared.stats(&c).unwrap();
-        assert_eq!((st.subscriptions, st.tenants, st.running), (2, 2, true));
-        // 1,000 more tenants add subscriptions, not dumps.
-        let mut subs = Vec::new();
-        for t in 10..1_010 {
-            subs.push(
-                shared
-                    .open(&c, TenantId(t), &GtidPos::from_gtids([g(4)]))
-                    .await
-                    .unwrap(),
-            );
-        }
-        assert_eq!(shared.stats(&c).unwrap().subscriptions, 1_002);
-        assert_eq!(opens.load(Ordering::SeqCst), 2);
-        drop(subs);
-    }
-}
+mod tests;

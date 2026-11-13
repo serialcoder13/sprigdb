@@ -410,7 +410,7 @@ pub(crate) async fn run(sub: &ArgMatches, out: Output) -> Result<(), Failed> {
         }
         Some(("logs", m)) => logs(m, out).await,
         Some(("dead-letters", m)) => dead_letters(m, out).await,
-        _ => Err("not implemented yet".to_owned().into()),
+        _ => Err("not available in this version".to_owned().into()),
     }
 }
 

@@ -430,6 +430,12 @@ sprig_codes! {
     /// The operator token is expired or revoked, or its owner is disabled:
     /// log in again.
     OperatorTokenExpired = 39316, "ER_SPRIG_OPERATOR_TOKEN_EXPIRED", "SprigOperatorTokenExpired", SQLSTATE_GENERAL, false;
+    /// Warning: GRANT dropped a server-wide privilege (SUPER, FILE, ...), which means nothing in a tenant (`auth.unsafe_privilege_action = warn`).
+    PrivilegeDropped = 39350, "ER_SPRIG_PRIVILEGE_DROPPED", "SprigPrivilegeDropped", SQLSTATE_GENERAL, false;
+    /// Warning: an account or grant change holds in the gateway; MariaDB's own grants follow shortly.
+    AuthPropagationPending = 39351, "ER_SPRIG_AUTH_PROPAGATION_PENDING", "SprigAuthPropagationPending", SQLSTATE_GENERAL, false;
+    /// A user named where only a role is allowed.
+    AccountAsRole = 39355, "ER_SPRIG_ACCOUNT_AS_ROLE", "SprigAccountAsRole", SQLSTATE_GENERAL, false;
     /// The tenant name is taken (chapter 29; the `tenant-names/` guard of
     /// chapter 23).
     TenantExists = 39360, "ER_SPRIG_TENANT_EXISTS", "SprigTenantExists", SQLSTATE_GENERAL, false;
@@ -460,6 +466,8 @@ sprig_codes! {
     /// gateway doesn't report knowing; upgrade those gateways first
     /// (chapter 29, "Choosing the engine").
     AuthorizerUnknownToGateways = 39368, "ER_SPRIG_AUTHORIZER_UNKNOWN_TO_GATEWAYS", "SprigAuthorizerUnknownToGateways", SQLSTATE_GENERAL, false;
+    /// Note: a routine without SQL SECURITY runs as DEFINER and applies its definer's row-level security policies, not its caller's.
+    RlsDefinerDefault = 39369, "ER_SPRIG_RLS_DEFINER_DEFAULT", "SprigRlsDefinerDefault", SQLSTATE_GENERAL, false;
     /// The control plane's store is unreachable (chapter 23).
     MetaUnavailable = 39500, "ER_SPRIG_META_UNAVAILABLE", "SprigMetaUnavailable", SQLSTATE_CONNECTION, true;
     /// This controller no longer leads (or never did): its session was lost
@@ -714,6 +722,62 @@ sprig_codes! {
     /// `DROP DATABASE` of a database whose cross-tenant outbox still holds
     /// committed rows after `inherit.outbox_drain_seconds` (chapter 42, R9).
     InheritOutboxPending = 39245, "ER_SPRIG_INHERIT_OUTBOX_PENDING", "SprigInheritOutboxPending", SQLSTATE_GENERAL, true;
+    /// Unknown virtual host, exchange or queue (AMQP 404, `amqp:not-found`).
+    MqNotFound = 39250, "ER_SPRIG_MQ_NOT_FOUND", "SprigMqNotFound", SQLSTATE_GENERAL, false;
+    /// A redeclare with other arguments, or an unknown delivery tag (AMQP 406).
+    MqPrecondition = 39251, "ER_SPRIG_MQ_PRECONDITION", "SprigMqPrecondition", SQLSTATE_GENERAL, false;
+    /// An exclusive queue or consumer is held by another connection (AMQP 405).
+    MqResourceLocked = 39252, "ER_SPRIG_MQ_RESOURCE_LOCKED", "SprigMqResourceLocked", SQLSTATE_GENERAL, false;
+    /// Permission denied on a virtual host, exchange or queue (AMQP 403).
+    MqAccessRefused = 39253, "ER_SPRIG_MQ_ACCESS_REFUSED", "SprigMqAccessRefused", SQLSTATE_GENERAL, false;
+    /// An AMQP method, flag or argument SprigDB doesn't support (AMQP 540).
+    MqNotImplemented = 39254, "ER_SPRIG_MQ_NOT_IMPLEMENTED", "SprigMqNotImplemented", SQLSTATE_GENERAL, false;
+    /// A mandatory publish reached no queue (AMQP 312, returned).
+    MqUnroutable = 39255, "ER_SPRIG_MQ_UNROUTABLE", "SprigMqUnroutable", SQLSTATE_GENERAL, false;
+    /// A publish to a full queue with `reject-publish` overflow (nacked).
+    MqQueueFull = 39256, "ER_SPRIG_MQ_QUEUE_FULL", "SprigMqQueueFull", SQLSTATE_GENERAL, false;
+    /// A message above `amqp.max_message_bytes`.
+    MqMessageTooLarge = 39257, "ER_SPRIG_MQ_MESSAGE_TOO_LARGE", "SprigMqMessageTooLarge", SQLSTATE_GENERAL, false;
+    /// An ack in a transaction of a message already settled or whose lease expired; the transaction rolls back.
+    MqAlreadySettled = 39258, "ER_SPRIG_MQ_ALREADY_SETTLED", "SprigMqAlreadySettled", SQLSTATE_GENERAL, false;
+    /// A malformed or forged delivery token.
+    MqDeliveryTokenInvalid = 39259, "ER_SPRIG_MQ_DELIVERY_TOKEN_INVALID", "SprigMqDeliveryTokenInvalid", SQLSTATE_GENERAL, false;
+    /// The queue's owner changed during the call; retry.
+    MqOwnerMoved = 39260, "ER_SPRIG_MQ_OWNER_MOVED", "SprigMqOwnerMoved", SQLSTATE_RETRY, true;
+    /// A publish wasn't committed within `amqp.publish_timeout_ms` (nacked).
+    MqConfirmTimeout = 39261, "ER_SPRIG_MQ_CONFIRM_TIMEOUT", "SprigMqConfirmTimeout", SQLSTATE_GENERAL, true;
+    /// A delivery stayed unacknowledged past the consumer timeout; the consumer is cancelled.
+    MqConsumerTimeout = 39262, "ER_SPRIG_MQ_CONSUMER_TIMEOUT", "SprigMqConsumerTimeout", SQLSTATE_GENERAL, false;
+    /// An ack inside a transaction would add a cluster without XA while `txn.non_xa_policy` is `reject`.
+    MqTxnNeedsXa = 39263, "ER_SPRIG_MQ_TXN_NEEDS_XA", "SprigMqTxnNeedsXa", SQLSTATE_GENERAL, false;
+    /// An `x-delay` above `queue.delay_max_ms`.
+    MqDelayOutOfRange = 39264, "ER_SPRIG_MQ_DELAY_OUT_OF_RANGE", "SprigMqDelayOutOfRange", SQLSTATE_GENERAL, false;
+    /// A login or publish outside the data centers the tenant's residency allows.
+    MqResidency = 39265, "ER_SPRIG_MQ_RESIDENCY", "SprigMqResidency", SQLSTATE_GENERAL, false;
+    /// Over a tenant quota; the connection is blocked.
+    MqQuota = 39266, "ER_SPRIG_MQ_QUOTA", "SprigMqQuota", SQLSTATE_GENERAL, true;
+    /// Above the virtual host's `max-queues` or `max-connections`.
+    MqVhostLimit = 39267, "ER_SPRIG_MQ_VHOST_LIMIT", "SprigMqVhostLimit", SQLSTATE_GENERAL, false;
+    /// A malformed AMQP frame or command, or a method on a channel that isn't open.
+    AmqpFrameError = 39268, "ER_SPRIG_AMQP_FRAME_ERROR", "SprigAmqpFrameError", SQLSTATE_GENERAL, false;
+    /// AMQP authentication failed.
+    AmqpSaslFailed = 39269, "ER_SPRIG_AMQP_SASL_FAILED", "SprigAmqpSaslFailed", SQLSTATE_GENERAL, false;
+    /// An unknown AMQP protocol header; SprigDB answers with the one it speaks and closes.
+    AmqpProtocolHeader = 39270, "ER_SPRIG_AMQP_PROTOCOL_HEADER", "SprigAmqpProtocolHeader", SQLSTATE_GENERAL, false;
+    /// Above `channel_max` or `amqp.max_channels_per_tenant`.
+    AmqpChannelLimit = 39271, "ER_SPRIG_AMQP_CHANNEL_LIMIT", "SprigAmqpChannelLimit", SQLSTATE_GENERAL, false;
+    /// An AMQP 1.0 link with a bad address or terminus.
+    Amqp10LinkRefused = 39272, "ER_SPRIG_AMQP10_LINK_REFUSED", "SprigAmqp10LinkRefused", SQLSTATE_GENERAL, false;
+    /// An AMQP 1.0 feature SprigDB doesn't support (transactions, link recovery, the second settle mode).
+    Amqp10Unsupported = 39273, "ER_SPRIG_AMQP10_UNSUPPORTED", "SprigAmqp10Unsupported", SQLSTATE_GENERAL, false;
+    /// A bad `x-stream-offset` or offset specification.
+    MqStreamOffset = 39274, "ER_SPRIG_MQ_STREAM_OFFSET", "SprigMqStreamOffset", SQLSTATE_GENERAL, false;
+    /// Direct reply-to misused: manual ack, another channel or a second consumer.
+    MqDirectReplyTo = 39275, "ER_SPRIG_MQ_DIRECT_REPLY_TO", "SprigMqDirectReplyTo", SQLSTATE_GENERAL, false;
+    /// A `RabbitMQ` management endpoint SprigDB doesn't serve (HTTP 501).
+    MqMgmtUnsupported = 39276, "ER_SPRIG_MQ_MGMT_UNSUPPORTED", "SprigMqMgmtUnsupported", SQLSTATE_GENERAL, false;
+    /// A message dropped in a dead-letter cycle (logged).
+    MqDeadLetterCycle = 39277, "ER_SPRIG_MQ_DEAD_LETTER_CYCLE", "SprigMqDeadLetterCycle", SQLSTATE_GENERAL, false;
     /// A request over a rate limit or admission control (chapter 37;
     /// analytics admission, chapter 35).
     RateLimited = 39780, "ER_SPRIG_RATE_LIMITED", "SprigRateLimited", SQLSTATE_GENERAL, true;
@@ -809,6 +873,46 @@ sprig_codes! {
     /// Warning: a search inside a transaction that wrote the object reads
     /// committed data only (chapter 39).
     SearchStaleInTxn = 39832, "ER_SPRIG_SEARCH_STALE_IN_TXN", "SprigSearchStaleInTxn", SQLSTATE_GENERAL, false;
+    /// A LATERAL the gateway must apply itself has more outer rows or bytes than it handles.
+    TranslateLimit = 39601, "ER_SPRIG_TRANSLATE_LIMIT", "SprigTranslateLimit", SQLSTATE_GENERAL, false;
+    /// A view, routine, trigger or event uses something only the gateway can do, which MariaDB can't do while it runs stored code.
+    NeedsGateway = 39602, "ER_SPRIG_NEEDS_GATEWAY", "SprigNeedsGateway", SQLSTATE_GENERAL, false;
+    /// A new MongoDB cursor past `mongo.max_cursors_per_tenant` or the cursor memory budget.
+    CursorLimit = 39630, "ER_SPRIG_CURSOR_LIMIT", "SprigCursorLimit", SQLSTATE_GENERAL, false;
+    /// A document's encoded `_id` is over 1024 bytes.
+    DocIdTooLong = 39660, "ER_SPRIG_DOC_ID_TOO_LONG", "SprigDocIdTooLong", SQLSTATE_GENERAL, false;
+    /// A MongoDB feature not supported in this version.
+    DocFeatureUnsupported = 39662, "ER_SPRIG_DOC_FEATURE_UNSUPPORTED", "SprigDocFeatureUnsupported", SQLSTATE_GENERAL, false;
+    /// Reserved: an array value in a collection's shard key field (not raised in this version).
+    ShardKeyArray = 39663, "ER_SPRIG_SHARD_KEY_ARRAY", "SprigShardKeyArray", SQLSTATE_GENERAL, false;
+    /// Not every gateway confirmed a new array path within `doc.path_publish_timeout_ms`; nothing of the write committed.
+    PathPublishTimeout = 39664, "ER_SPRIG_PATH_PUBLISH_TIMEOUT", "SprigPathPublishTimeout", SQLSTATE_GENERAL, true;
+    /// A document nested deeper than MariaDB's JSON limit (32 levels).
+    DocTooDeep = 39665, "ER_SPRIG_DOC_TOO_DEEP", "SprigDocTooDeep", SQLSTATE_GENERAL, false;
+    /// Reserved: a MongoDB message too small to hold its header (not raised in this version).
+    PacketTooSmall = 39666, "ER_SPRIG_PACKET_TOO_SMALL", "SprigPacketTooSmall", SQLSTATE_GENERAL, false;
+    /// Reserved: a document SprigDB can't store (not raised in this version).
+    DocInvalid = 39667, "ER_SPRIG_DOC_INVALID", "SprigDocInvalid", SQLSTATE_GENERAL, false;
+    /// Reserved: an update that changes `_id` (not raised in this version).
+    DocIdImmutable = 39668, "ER_SPRIG_DOC_ID_IMMUTABLE", "SprigDocIdImmutable", SQLSTATE_GENERAL, false;
+    /// A Redis 7.2 command not supported in this version.
+    RedisUnsupported = 39840, "ER_SPRIG_REDIS_UNSUPPORTED", "SprigRedisUnsupported", SQLSTATE_GENERAL, false;
+    /// A Lua scripting feature not supported (SCRIPT DEBUG, bytecode).
+    RedisLuaUnsupported = 39841, "ER_SPRIG_REDIS_LUA_UNSUPPORTED", "SprigRedisLuaUnsupported", SQLSTATE_GENERAL, false;
+    /// A Redis administrative command SprigDB doesn't offer; manage it through SQL, the API or sprigctl.
+    RedisRestricted = 39842, "ER_SPRIG_REDIS_RESTRICTED", "SprigRedisRestricted", SQLSTATE_GENERAL, false;
+    /// MULTI queued more commands than `redis.max_multi_commands`; EXEC aborts.
+    RedisMultiTooLarge = 39844, "ER_SPRIG_REDIS_MULTI_TOO_LARGE", "SprigRedisMultiTooLarge", SQLSTATE_GENERAL, false;
+    /// More blocked clients than `redis.max_blocked_per_tenant`.
+    RedisTooManyBlocked = 39845, "ER_SPRIG_REDIS_TOO_MANY_BLOCKED", "SprigRedisTooManyBlocked", SQLSTATE_GENERAL, true;
+    /// A write kept meeting conflicting writes until its retries ran out (TRYAGAIN).
+    RedisShardBusy = 39846, "ER_SPRIG_REDIS_SHARD_BUSY", "SprigRedisShardBusy", SQLSTATE_GENERAL, true;
+    /// No pub/sub hub could be reached.
+    RedisPubsubUnavailable = 39848, "ER_SPRIG_REDIS_PUBSUB_UNAVAILABLE", "SprigRedisPubsubUnavailable", SQLSTATE_GENERAL, true;
+    /// A script ran past its time or memory budget; it was rolled back.
+    RedisLuaBudgetExceeded = 39850, "ER_SPRIG_REDIS_LUA_BUDGET_EXCEEDED", "SprigRedisLuaBudgetExceeded", SQLSTATE_GENERAL, false;
+    /// A script used a key on another shard that isn't in KEYS.
+    RedisLuaUndeclaredKey = 39851, "ER_SPRIG_REDIS_LUA_UNDECLARED_KEY", "SprigRedisLuaUndeclaredKey", SQLSTATE_GENERAL, false;
     /// Unknown function, version or binding (chapter 41).
     LogicNotFound = 39860, "ER_SPRIG_LOGIC_NOT_FOUND", "SprigLogicNotFound", SQLSTATE_GENERAL, false;
     /// Parse or type error at deploy, with its location (chapter 41).
@@ -915,6 +1019,20 @@ sprig_codes! {
     /// An offset below the log start or above the high watermark
     /// (chapter 45).
     StreamOffsetOutOfRange = 39947, "ER_SPRIG_STREAM_OFFSET_OUT_OF_RANGE", "SprigStreamOffsetOutOfRange", SQLSTATE_GENERAL, false;
+    /// Reserved: a failover lost records a consumer had already seen (not raised in this version).
+    StreamTruncated = 39948, "ER_SPRIG_STREAM_TRUNCATED", "SprigStreamTruncated", SQLSTATE_GENERAL, false;
+    /// A Kafka produce with acks=0: SprigDB always acknowledges after commit.
+    KafkaAcksZero = 39950, "ER_SPRIG_KAFKA_ACKS_ZERO", "SprigKafkaAcksZero", SQLSTATE_GENERAL, false;
+    /// A Kafka producer with `transactional.id`: Kafka transactions aren't supported.
+    KafkaTransactionsUnsupported = 39951, "ER_SPRIG_KAFKA_TRANSACTIONS_UNSUPPORTED", "SprigKafkaTransactionsUnsupported", SQLSTATE_GENERAL, false;
+    /// A Kafka API or version SprigDB doesn't serve.
+    KafkaUnsupportedApi = 39952, "ER_SPRIG_KAFKA_UNSUPPORTED_API", "SprigKafkaUnsupportedApi", SQLSTATE_GENERAL, false;
+    /// Kafka SASL authentication failed.
+    KafkaSaslFailed = 39953, "ER_SPRIG_KAFKA_SASL_FAILED", "SprigKafkaSaslFailed", SQLSTATE_GENERAL, false;
+    /// Reserved: a consumer group moved to another gateway (not raised in this version; Kafka's `NOT_COORDINATOR` is sent).
+    KafkaNotCoordinator = 39954, "ER_SPRIG_KAFKA_NOT_COORDINATOR", "SprigKafkaNotCoordinator", SQLSTATE_GENERAL, true;
+    /// Reserved: over a tenant quota (not raised in this version).
+    KafkaQuota = 39956, "ER_SPRIG_KAFKA_QUOTA", "SprigKafkaQuota", SQLSTATE_GENERAL, true;
     /// A record without a key on a compacted stream (chapter 45).
     StreamCompactNeedsKey = 39955, "ER_SPRIG_STREAM_COMPACT_NEEDS_KEY", "SprigStreamCompactNeedsKey", SQLSTATE_GENERAL, false;
     /// `sprig.commit_offset` inside a transaction the gateway doesn't
@@ -998,12 +1116,141 @@ sprig_codes! {
     ApprovalPolicyInvalid = 39977, "ER_SPRIG_APPROVAL_POLICY_INVALID", "SprigApprovalPolicyInvalid", SQLSTATE_GENERAL, false;
     /// A test email or webhook failed (chapter 52).
     NotifyFailed = 39978, "ER_SPRIG_NOTIFY_FAILED", "SprigNotifyFailed", SQLSTATE_GENERAL, false;
+    /// sprig: the profiles file is unreadable or invalid, or names no such profile.
+    ShellProfileInvalid = 39980, "ER_SPRIG_SHELL_PROFILE_INVALID", "SprigShellProfileInvalid", SQLSTATE_GENERAL, false;
+    /// sprig: the keychain is unusable, or `secrets.toml` is readable by others.
+    ShellSecretUnavailable = 39981, "ER_SPRIG_SHELL_SECRET_UNAVAILABLE", "SprigShellSecretUnavailable", SQLSTATE_GENERAL, false;
+    /// sprig: a destructive statement in the CLI without `--yes`.
+    ShellConfirmationRequired = 39982, "ER_SPRIG_SHELL_CONFIRMATION_REQUIRED", "SprigShellConfirmationRequired", SQLSTATE_GENERAL, false;
+    /// sprig: the language can't go over the chosen transport.
+    ShellLanguageUnsupported = 39983, "ER_SPRIG_SHELL_LANGUAGE_UNSUPPORTED", "SprigShellLanguageUnsupported", SQLSTATE_GENERAL, false;
+    /// sprig: `sprig admin` found no `sprigctl`.
+    ShellSprigctlMissing = 39984, "ER_SPRIG_SHELL_SPRIGCTL_MISSING", "SprigShellSprigctlMissing", SQLSTATE_GENERAL, false;
+    /// sprig: input the shell can't split or parse.
+    ShellParse = 39985, "ER_SPRIG_SHELL_PARSE", "SprigShellParse", SQLSTATE_GENERAL, false;
+    /// sprig: the user cancelled the statement.
+    ShellCancelled = 39986, "ER_SPRIG_SHELL_CANCELLED", "SprigShellCancelled", SQLSTATE_GENERAL, false;
+    /// sprig: the gateway or native endpoint can't be reached.
+    ShellUnreachable = 39987, "ER_SPRIG_SHELL_UNREACHABLE", "SprigShellUnreachable", SQLSTATE_GENERAL, false;
+    /// sprig: a password login over plain HTTP to another host.
+    ShellInsecureTransport = 39988, "ER_SPRIG_SHELL_INSECURE_TRANSPORT", "SprigShellInsecureTransport", SQLSTATE_GENERAL, false;
     /// `sprigdb.toml` or its environment overrides are invalid. Raised only at
     /// process start; never reaches a client. Not yet in Appendix E.
     ConfigInvalid = 39998, "ER_SPRIG_CONFIG_INVALID", "SprigConfigInvalid", SQLSTATE_GENERAL, false;
     /// An internal invariant failed: a bug. Logged at error level with a
     /// trace id. Not yet in Appendix E.
     Internal = 39999, "ER_SPRIG_INTERNAL", "SprigInternal", SQLSTATE_GENERAL, false;
+}
+
+impl SprigCode {
+    /// Codes this version defines but never raises, each with a one-line
+    /// note: the generated reference lists them as reserved. A code leaves
+    /// this list when code starts raising it.
+    pub const RESERVED: &'static [(SprigCode, &'static str)] = &[
+        (
+            SprigCode::SinkOwnerPrivilegeLost,
+            "Reserved: a sink whose owner can no longer read its source; not raised in this version.",
+        ),
+        (
+            SprigCode::MqTxnNeedsXa,
+            "Reserved: an ack inside a transaction that would add a cluster without XA; not raised in this version.",
+        ),
+        (
+            SprigCode::MqResidency,
+            "Reserved: a queue login or publish outside the tenant's allowed data centers; not raised in this version.",
+        ),
+        (
+            SprigCode::MqStreamOffset,
+            "Reserved: a bad x-stream-offset; stream queues aren't served in this version.",
+        ),
+        (
+            SprigCode::MqMgmtUnsupported,
+            "Reserved: a RabbitMQ management endpoint SprigDB doesn't serve; not raised in this version.",
+        ),
+        (
+            SprigCode::ShardKeyArray,
+            "Reserved: an array value in a collection's shard key field; not raised in this version.",
+        ),
+        (
+            SprigCode::PacketTooSmall,
+            "Reserved: a MongoDB message too short for its header; not raised in this version.",
+        ),
+        (
+            SprigCode::DocInvalid,
+            "Reserved: a document SprigDB can't store; not raised in this version.",
+        ),
+        (
+            SprigCode::DocIdImmutable,
+            "Reserved: an update that changes _id; not raised in this version.",
+        ),
+        (
+            SprigCode::VectorTooManyIndexes,
+            "Reserved: more vector indexes on a table than vector.max_indexes_per_table; not raised in this version.",
+        ),
+        (
+            SprigCode::DimTzUnavailable,
+            "Reserved: a named time zone without MariaDB's time zone tables; not raised in this version.",
+        ),
+        (
+            SprigCode::DimVersionedTruncate,
+            "Reserved: TRUNCATE of a versioned dimension; not raised in this version.",
+        ),
+        (
+            SprigCode::DimHistoryPurged,
+            "Reserved: an as_of older than the history kept; not raised in this version.",
+        ),
+        (
+            SprigCode::GeoSridUnsupported,
+            "Reserved: a geographic SRID other than 4326; not raised in this version.",
+        ),
+        (
+            SprigCode::TenantAmbiguous,
+            "Reserved: a token whose issuer several tenants trust, with no SNI or x-sprig-tenant to pick one; token logins aren't offered in this version.",
+        ),
+        (
+            SprigCode::SearchNoPlacement,
+            "Reserved: no worker in an allowed data center can hold a search index's copies; not raised in this version.",
+        ),
+        (
+            SprigCode::SearchStaleInTxn,
+            "Reserved: a warning for a search inside a transaction that wrote the object; not raised in this version.",
+        ),
+        (
+            SprigCode::StreamTruncated,
+            "Reserved: a failover lost records a consumer had already read; not raised in this version.",
+        ),
+        (
+            SprigCode::KafkaNotCoordinator,
+            "Reserved: a consumer group moved to another gateway; this version sends Kafka's own NOT_COORDINATOR.",
+        ),
+        (
+            SprigCode::KafkaQuota,
+            "Reserved: a Kafka client over a tenant quota; not raised in this version.",
+        ),
+    ];
+
+    /// The note of a code this version defines but never raises.
+    #[must_use]
+    pub fn reserved(self) -> Option<&'static str> {
+        Self::RESERVED
+            .iter()
+            .find(|(c, _)| *c == self)
+            .map(|(_, note)| *note)
+    }
+
+    /// The code of a number, if the registry has one.
+    #[must_use]
+    pub fn from_number(n: u16) -> Option<Self> {
+        Self::ALL.iter().copied().find(|c| c.number() == n)
+    }
+
+    /// The name without its `ER_SPRIG_` prefix, as the Redis and Kafka
+    /// front ends print it (`SPRIG <NAME> <number> ...`).
+    #[must_use]
+    pub fn short_name(self) -> &'static str {
+        let n = self.name();
+        n.strip_prefix("ER_SPRIG_").unwrap_or(n)
+    }
 }
 
 impl SprigError {
@@ -1151,7 +1398,27 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::ApprovalWindowInvalid
         | SprigCode::StudioViewAsNotReadOnly
         | SprigCode::RlsPolicyInvalid
-        | SprigCode::ApprovalPolicyInvalid => (Code::InvalidArgument, 400),
+        | SprigCode::ApprovalPolicyInvalid
+        | SprigCode::MqPrecondition
+        | SprigCode::MqDeliveryTokenInvalid
+        | SprigCode::MqDelayOutOfRange
+        | SprigCode::MqStreamOffset
+        | SprigCode::MqDirectReplyTo
+        | SprigCode::MqUnroutable
+        | SprigCode::AmqpFrameError
+        | SprigCode::AmqpProtocolHeader
+        | SprigCode::DocIdTooLong
+        | SprigCode::DocTooDeep
+        | SprigCode::DocInvalid
+        | SprigCode::ShardKeyArray
+        | SprigCode::PacketTooSmall
+        | SprigCode::DocIdImmutable
+        | SprigCode::RedisLuaUndeclaredKey
+        | SprigCode::AccountAsRole
+        | SprigCode::KafkaAcksZero
+        | SprigCode::ShellParse
+        | SprigCode::ShellProfileInvalid
+        | SprigCode::ShellLanguageUnsupported => (Code::InvalidArgument, 400),
         SprigCode::SettingLocked
         | SprigCode::BinlogUnsupported
         | SprigCode::FeedSourceUnsupported
@@ -1177,7 +1444,12 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::DdlUnsupported
         | SprigCode::DdlShardDrift
         | SprigCode::FkActionNotDistributed
-        | SprigCode::HeldBranchStatement => (Code::FailedPrecondition, 400),
+        | SprigCode::HeldBranchStatement
+        | SprigCode::MqTxnNeedsXa
+        | SprigCode::NeedsGateway
+        | SprigCode::PrivilegeDropped
+        | SprigCode::AuthPropagationPending
+        | SprigCode::RlsDefinerDefault => (Code::FailedPrecondition, 400),
         SprigCode::GatewayDraining
         | SprigCode::ListenerRetired
         | SprigCode::MetaUnavailable
@@ -1215,7 +1487,11 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::StudioNotBuilt
         | SprigCode::NotifyFailed
         | SprigCode::HeldBranchFenced
-        | SprigCode::Phase2Pending => (Code::Unavailable, 503),
+        | SprigCode::Phase2Pending
+        | SprigCode::PathPublishTimeout
+        | SprigCode::RedisPubsubUnavailable
+        | SprigCode::KafkaNotCoordinator
+        | SprigCode::ShellUnreachable => (Code::Unavailable, 503),
         SprigCode::CatalogConflict
         | SprigCode::TenantTreeBusy
         | SprigCode::TxnHandleUnknown
@@ -1235,7 +1511,9 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::ShardMapChanged
         | SprigCode::DdlFailed
         | SprigCode::SinkScriptFailed
-        | SprigCode::SinkFenced => (Code::Aborted, 409),
+        | SprigCode::SinkFenced
+        | SprigCode::MqOwnerMoved
+        | SprigCode::RedisShardBusy => (Code::Aborted, 409),
         SprigCode::CrossClusterWriteRejected | SprigCode::TooManyBranches => {
             (Code::FailedPrecondition, 400)
         }
@@ -1267,7 +1545,10 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::StudioDisabled
         | SprigCode::StudioCursorUnknown
         | SprigCode::RecommendationNotFound
-        | SprigCode::OperatorNotFound => (Code::NotFound, 404),
+        | SprigCode::OperatorNotFound
+        | SprigCode::MqNotFound
+        | SprigCode::Amqp10LinkRefused
+        | SprigCode::ShellSprigctlMissing => (Code::NotFound, 404),
         SprigCode::ClusterExists
         | SprigCode::TenantExists
         | SprigCode::FeedSubscriptionExists
@@ -1342,7 +1623,10 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::SearchStaleInTxn
         | SprigCode::LogicRolloutBlocked
         | SprigCode::LogicInUse
-        | SprigCode::RecommendationStale => (Code::FailedPrecondition, 409),
+        | SprigCode::RecommendationStale
+        | SprigCode::MqResourceLocked
+        | SprigCode::MqAlreadySettled
+        | SprigCode::StreamTruncated => (Code::FailedPrecondition, 409),
         SprigCode::TenantSuspended
         | SprigCode::RemoteAccessDenied
         | SprigCode::DefinerRefused
@@ -1371,7 +1655,11 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::StudioOperatorModeDisabled
         | SprigCode::StudioViewAsDenied
         | SprigCode::ApprovalDenied
-        | SprigCode::OperatorForbidden => (Code::PermissionDenied, 403),
+        | SprigCode::OperatorForbidden
+        | SprigCode::MqAccessRefused
+        | SprigCode::MqResidency
+        | SprigCode::ShellConfirmationRequired
+        | SprigCode::ShellInsecureTransport => (Code::PermissionDenied, 403),
         SprigCode::LoginRateLimited
         | SprigCode::TenantConnectionLimit
         | SprigCode::AdmissionTimeout
@@ -1386,13 +1674,24 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::InheritBroadcastLimit
         | SprigCode::DimTooManyGroups
         | SprigCode::RateLimited
-        | SprigCode::StreamSlowConsumer => (Code::ResourceExhausted, 429),
+        | SprigCode::StreamSlowConsumer
+        | SprigCode::MqQueueFull
+        | SprigCode::MqQuota
+        | SprigCode::MqVhostLimit
+        | SprigCode::AmqpChannelLimit
+        | SprigCode::CursorLimit
+        | SprigCode::RedisMultiTooLarge
+        | SprigCode::RedisTooManyBlocked
+        | SprigCode::RedisLuaBudgetExceeded
+        | SprigCode::KafkaQuota
+        | SprigCode::TranslateLimit => (Code::ResourceExhausted, 429),
         SprigCode::PlacementUnavailable | SprigCode::ProvisionNoHosts | SprigCode::NoDcCapacity => {
             (Code::ResourceExhausted, 503)
         }
         SprigCode::RequestTooLarge
         | SprigCode::StreamRecordTooLarge
-        | SprigCode::SinkRecordTooLarge => (Code::InvalidArgument, 413),
+        | SprigCode::SinkRecordTooLarge
+        | SprigCode::MqMessageTooLarge => (Code::InvalidArgument, 413),
         SprigCode::StreamOffsetOutOfRange => (Code::OutOfRange, 416),
         SprigCode::TransportUnsupported => (Code::FailedPrecondition, 415),
         SprigCode::AdminUnauthenticated
@@ -1405,8 +1704,25 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::TenantAmbiguous
         | SprigCode::StudioSessionIdle
         | SprigCode::StudioSessionExpired
-        | SprigCode::StudioExportTicketInvalid => (Code::Unauthenticated, 401),
-        SprigCode::ConfigInvalid | SprigCode::Internal => (Code::Internal, 500),
+        | SprigCode::StudioExportTicketInvalid
+        | SprigCode::AmqpSaslFailed
+        | SprigCode::KafkaSaslFailed
+        | SprigCode::ShellSecretUnavailable => (Code::Unauthenticated, 401),
+        // Protocol front ends' and the shell's own codes.
+        SprigCode::MqNotImplemented
+        | SprigCode::Amqp10Unsupported
+        | SprigCode::MqMgmtUnsupported
+        | SprigCode::DocFeatureUnsupported
+        | SprigCode::RedisUnsupported
+        | SprigCode::RedisLuaUnsupported
+        | SprigCode::RedisRestricted
+        | SprigCode::KafkaTransactionsUnsupported
+        | SprigCode::KafkaUnsupportedApi => (Code::Unimplemented, 501),
+        SprigCode::MqConfirmTimeout | SprigCode::MqConsumerTimeout => (Code::DeadlineExceeded, 504),
+        SprigCode::ShellCancelled => (Code::Cancelled, 499),
+        SprigCode::MqDeadLetterCycle | SprigCode::ConfigInvalid | SprigCode::Internal => {
+            (Code::Internal, 500)
+        }
     };
     ProtocolError {
         mysql_errno: code.number(),
