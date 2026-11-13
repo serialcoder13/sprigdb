@@ -1,9 +1,11 @@
 ---
-title: Getting started
+title: Quick start
 audience: [user, dba, operator]
+sidebar:
+  order: 1
 ---
 
-# Getting started
+# Quick start
 
 This guide runs SprigDB on your own machine with Docker Compose, then connects to it with an ordinary MySQL client. It takes about ten minutes, most of it the first build.
 
@@ -83,4 +85,4 @@ Press `Ctrl-K` in either for the command palette.
 
 - [Settings](../reference/settings.md): what you can tune, at which scope.
 - [Error codes](../reference/errors.md): what an error means and what to do.
-- [Developing SprigDB](development.md): the other environments (three data centres), running a single role, and the tests.
+- [Developing SprigDB](../operate/development.md): the other environments (three data centres), running a single role, and the tests.

@@ -5,10 +5,11 @@
 //! tenant; **gw** keys global and dc.
 //!
 //! How M0.4 reads them *(choice)*: the gateway builds its
-//! [`RecorderConfig`] from the global and dc values when it starts
-//! ([`recorder_config`]), so the recorder's keys apply at the next gateway
-//! start; the flusher and the rollup read theirs on every run, so those
-//! apply live. Per-object resolution of the data keys (a tenant turning
+//! [`RecorderConfig`] from the global and dc values ([`recorder_config`])
+//! when it starts and again whenever a `workload.*` key changes (it
+//! follows the settings and swaps the recorder's configuration), so the
+//! recorder's keys apply live, as declared; the flusher and the rollup
+//! read theirs on every run. Per-object resolution of the data keys (a tenant turning
 //! samples off for one table) waits for the recorder to resolve per
 //! fingerprint; `workload.capture_samples` is the exception: the gateway
 //! resolves it for the tenant before it captures a sample.

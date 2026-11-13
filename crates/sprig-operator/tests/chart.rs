@@ -101,3 +101,189 @@ fn templates_are_balanced_and_the_chart_lists_every_role() {
         );
     }
 }
+
+fn template(name: &str) -> String {
+    std::fs::read_to_string(chart().join("templates").join(name)).unwrap()
+}
+
+/// The comma list a `define` in `_helpers.tpl` returns.
+fn helper_list(name: &str) -> Vec<String> {
+    let h = template("_helpers.tpl");
+    let start = format!("{{{{- define \"{name}\" -}}}}\n");
+    let i = h.find(&start).unwrap_or_else(|| panic!("no {name}")) + start.len();
+    let line = h[i..].lines().next().unwrap();
+    line.split(',').map(str::to_owned).collect()
+}
+
+#[test]
+fn client_certificates_are_set_on_every_listener_with_the_gateways_keys() {
+    let all = helper_list("sprigdb.allListeners");
+    // The gateway registers exactly these listeners' client_cert keys and
+    // the CA path the settings job writes.
+    let gw = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../sprig-gateway/src/listener/settings.rs"),
+    )
+    .unwrap();
+    let registered: Vec<String> = gw
+        .lines()
+        .filter_map(|l| l.strip_prefix("client_cert!(\""))
+        .map(|l| l.split('"').next().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        all, registered,
+        "sprigdb.allListeners vs the gateway's listeners"
+    );
+    assert!(gw.contains("\"tls.bundles.default.client_ca_path\""));
+    for plain in helper_list("sprigdb.plainListeners") {
+        assert!(all.contains(&plain), "{plain}");
+    }
+    for opt in helper_list("sprigdb.optionalListeners") {
+        assert!(all.contains(&opt), "{opt}");
+    }
+
+    let job = template("settings-job.yaml");
+    assert!(job.contains(
+        "settings set listener.{{ $name }}.client_cert {{ include \"sprigdb.clientCert\" (dict \"root\" $ \"name\" $name) }}"
+    ));
+    assert!(job.contains("range $name := splitList \",\" (include \"sprigdb.allListeners\" .)"));
+    assert!(job.contains("settings set tls.bundles.default.client_ca_path \"{{ $caPath }}\""));
+    // The CA is set before any listener asks for client certificates, and
+    // asking without a CA doesn't render.
+    let ca = job.find("tls.bundles.default.client_ca_path").unwrap();
+    let modes = job.find(".client_cert {{").unwrap();
+    assert!(ca < modes, "client_ca_path must be set before client_cert");
+    assert!(job.contains("{{- if and (include \"sprigdb.anyClientCert\" .) (not $caPath) }}"));
+    assert!(job.contains("{{- fail \"gateway.clientTls.clientCert asks for client certificates"));
+
+    let gw_t = template("gateway.yaml");
+    assert!(
+        gw_t.contains(
+            "- name: client-ca\n          secret: {secretName: {{ $clientCa.secretName }}}"
+        )
+    );
+    assert!(
+        gw_t.contains("- name: client-ca\n          configMap: {name: {{ $clientCa.configMap }}}")
+    );
+    assert!(gw_t.contains("- {name: client-ca, mountPath: {{ $clientCa.mountPath | default \"/etc/sprigdb/client-ca\" }}, readOnly: true}"));
+    let helpers = template("_helpers.tpl");
+    assert!(helpers.contains(
+        "{{ $ca.mountPath | default \"/etc/sprigdb/client-ca\" }}/{{ $ca.key | default \"ca.crt\" }}"
+    ));
+
+    // values.schema.json: one entry per listener, and the gateway's modes.
+    let schema: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(chart().join("values.schema.json")).unwrap())
+            .unwrap();
+    let cc = &schema["properties"]["gateway"]["properties"]["clientTls"]["properties"];
+    let mut listed: Vec<String> = cc["clientCert"]["properties"]["listeners"]["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    listed.sort();
+    let mut want = all.clone();
+    want.sort();
+    assert_eq!(listed, want);
+    assert_eq!(
+        schema["$defs"]["clientCertMode"]["anyOf"][0]["enum"],
+        serde_json::json!(["off", "optional", "required"])
+    );
+    for k in ["secretName", "configMap", "key", "mountPath"] {
+        assert!(cc["clientCa"]["properties"][k].is_object(), "clientCa.{k}");
+    }
+    let values = std::fs::read_to_string(chart().join("values.yaml")).unwrap();
+    assert!(values.contains("    clientCert:\n      default: \"off\"\n      listeners: {}\n"));
+    assert!(values.contains("    clientCa: {secretName: \"\", configMap: \"\", key: ca.crt, mountPath: /etc/sprigdb/client-ca}\n"));
+}
+
+#[test]
+fn controllers_register_an_admin_address_kubernetes_resolves() {
+    let c = template("controller.yaml");
+    assert!(c.contains("kind: StatefulSet\nmetadata:\n  name: sprigdb-controller\n"));
+    assert!(c.contains("  serviceName: sprigdb-controller-pods\n"));
+    // The headless Service that gives each pod its name.
+    let svc = c
+        .split("\n---\n")
+        .find(|d| d.contains("name: sprigdb-controller-pods\n") && d.contains("kind: Service"))
+        .expect("the headless Service");
+    assert!(svc.contains("clusterIP: None"));
+    assert!(svc.contains("publishNotReadyAddresses: true"));
+    assert!(svc.contains("{name: admin, port: 7480}"));
+    // The advertised address, as the controller reads it.
+    let line = c
+        .lines()
+        .find(|l| l.contains("name: SPRIGDB_CONTROLLER_ADMIN_ADVERTISE"))
+        .expect("SPRIGDB_CONTROLLER_ADMIN_ADVERTISE");
+    let value = line
+        .split("value: \"")
+        .nth(1)
+        .unwrap()
+        .trim_end_matches("\"}");
+    assert_eq!(
+        value,
+        "$(POD_NAME).sprigdb-controller-pods.{{ .Release.Namespace }}.svc:7480"
+    );
+    assert!(c.contains(
+        "- name: POD_NAME\n              valueFrom: {fieldRef: {fieldPath: metadata.name}}"
+    ));
+    let pod = value
+        .replace("$(POD_NAME)", "sprigdb-controller-1")
+        .replace("{{ .Release.Namespace }}", "sprigdb");
+    // The rest as configmap-toml.yaml writes it, trimmed.
+    let cfg = sprig_common::ProcessConfig::from_toml_and_env(
+        "[node]\ndc = \"fra1\"\n[controller]\nadmin_addr = \"0.0.0.0:7480\"\n",
+        [("SPRIGDB_CONTROLLER_ADMIN_ADVERTISE".to_owned(), pod.clone())],
+    )
+    .unwrap();
+    assert_eq!(
+        cfg.controller.admin_advertise.as_deref(),
+        Some(pod.as_str())
+    );
+    // The Admin API's certificate covers it (one DNS label under the
+    // wildcard).
+    let certs = template("certificates.yaml");
+    assert!(certs.contains("- \"*.sprigdb-controller-pods.{{ $.Release.Namespace }}.svc\""));
+    let values = std::fs::read_to_string(chart().join("values.yaml")).unwrap();
+    assert!(values.contains("*.sprigdb-controller-pods.<namespace>.svc"));
+}
+
+#[test]
+fn every_role_with_telemetry_has_a_service_the_service_monitor_scrapes() {
+    let t = chart().join("templates");
+    let mut docs = Vec::new();
+    for e in std::fs::read_dir(&t).unwrap() {
+        let s = std::fs::read_to_string(e.unwrap().path()).unwrap();
+        docs.extend(s.split("\n---\n").map(str::to_owned).collect::<Vec<_>>());
+    }
+    let component = |d: &str, key: &str| -> Option<String> {
+        let i = d.find(key)? + key.len();
+        Some(d[i..].split('}').next()?.trim().to_owned())
+    };
+    let mut roles = Vec::new();
+    for d in &docs {
+        if d.contains("containerPort: 9180}") && d.contains("name: telemetry, containerPort") {
+            roles.push(component(d, "matchLabels: {app.kubernetes.io/component:").unwrap());
+        }
+    }
+    roles.sort();
+    assert_eq!(roles, ["controller", "gateway", "operator", "worker"]);
+    for r in &roles {
+        let n = docs
+            .iter()
+            .filter(|d| {
+                d.contains("kind: Service\n")
+                    && component(d, "selector: {app.kubernetes.io/component:").as_deref()
+                        == Some(r.as_str())
+                    && d.contains("{name: telemetry, port: 9180}")
+            })
+            .count();
+        // Exactly one, or Prometheus scrapes each pod twice.
+        assert_eq!(n, 1, "{r}: Services publishing telemetry");
+    }
+    // The leading operator reads mariadb-operator's backup Jobs.
+    assert!(
+        template("operator.yaml")
+            .contains("  - apiGroups: [batch]\n    resources: [jobs]\n    verbs: [list]\n")
+    );
+}

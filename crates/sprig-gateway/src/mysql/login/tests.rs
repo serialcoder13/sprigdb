@@ -161,6 +161,10 @@ fn requests_carry_sni_certificates_and_expired_password_support() {
         cipher: "TLS_AES_128_GCM_SHA256",
         sni: Some("acme.db.example".into()),
         client_cert: true,
+        client_dn: Some(sprig_auth::mysql::ClientDn {
+            subject: "/CN=alice".into(),
+            issuer: "/CN=ca".into(),
+        }),
     };
     let r = request(
         Persona::MariaDb,
@@ -170,6 +174,10 @@ fn requests_carry_sni_certificates_and_expired_password_support() {
         Caps::CAN_HANDLE_EXPIRED_PASSWORDS,
     );
     assert!(r.tls && r.client_cert && r.can_handle_expired_password);
+    assert_eq!(
+        r.client_dn.as_ref().map(|d| d.subject.as_str()),
+        Some("/CN=alice")
+    );
     assert_eq!(r.sni.as_deref(), Some("acme.db.example"));
     let plain = request(
         Persona::MySql84,

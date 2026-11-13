@@ -1,4 +1,4 @@
-# SprigDB for one data center (chapter 27, "Helm chart").
+# SprigDB for one data center.
 dc:
   id: fra1
   tags: {jurisdiction: EU, country: DE}
@@ -11,7 +11,7 @@ etcd:
   storage: 20Gi
   image: quay.io/coreos/etcd:v3.6.5
   # Keep the last hour of revisions. Without auto-compaction etcd keeps
-  # every revision and its database grows (about 0.7 MB/h in the M0.7 soak).
+  # every revision and its database grows (about 0.7 MB/h in a long test).
   autoCompaction: {mode: periodic, retention: 1h}
   # Defragments every member of the DC tier, one at a time, to return the
   # space compaction frees (sprigdb-etcd-defrag CronJob). With etcd auth on
@@ -24,20 +24,77 @@ controller:
   globalCandidate: true
   # The deployment's first DC writes the deployment id, its DC record and
   # the tenant id counter once (guarded; safe on every replica). Without it
-  # the controllers wait for another DC to bootstrap (found on kind, r2close).
+  # the controllers wait for another DC to bootstrap.
   bootstrap: false
+  # The Admin API on 7480 (sprigctl, the operator, the settings job).
+  # With tls.enabled it is HTTPS: the controller's own certificate, or the
+  # kubernetes.io/tls secret tlsSecret names (its names must include
+  # sprigdb-controller.<namespace>.svc, and
+  # *.sprigdb-controller-pods.<namespace>.svc: each controller registers
+  # <pod>.sprigdb-controller-pods.<namespace>.svc:7480 as its Admin address,
+  # where gateways forward Admin calls), and every client in the chart
+  # checks it against the CA bundle. Without TLS it would be plain HTTP: the
+  # chart refuses that unless allowPlain is true (development only).
+  adminApi: {tlsSecret: "", allowPlain: false}
 gateway:
   autoscaling: {minReplicas: 3, maxReplicas: 30, targetCPUUtilizationPercentage: 60}
   service: {type: LoadBalancer}
+  # The certificate clients see on the TLS listeners: a kubernetes.io/tls
+  # secret (tls.crt, the chain with the leaf first, and tls.key), mounted at
+  # mountPath. The settings job points tls.bundles.default.cert_path and
+  # key_path at it, and the gateways re-read the files when the secret
+  # changes, without a restart. Empty secretName: no mount; set those two
+  # settings yourself (settings.dc) to files the gateways can read.
+  clientTls:
+    secretName: ""
+    mountPath: /etc/sprigdb/client-tls
+    # Client certificates (mutual TLS, for users created with REQUIRE X509,
+    # SUBJECT or ISSUER). The settings job sets listener.<name>.client_cert
+    # on every listener at this DC's scope: off (no certificate asked for),
+    # optional (checked when the client sends one) or required (a TLS
+    # handshake without one fails). default covers the listeners with TLS:
+    # mysql, mariadb, https, mongo, redis, bolt, kafka and amqps. listeners
+    # sets one listener, e.g. {mysql: required, https: optional}; http and
+    # amqp take a value only from there, and need their TLS turned on
+    # (settings.dc) first. Quote "off": YAML reads a bare off as false (the
+    # chart treats both as off).
+    clientCert:
+      default: "off"
+      listeners: {}
+    # The CAs (PEM) client certificates must chain to: a Secret or a
+    # ConfigMap (a trust-manager Bundle, say) with that file under key,
+    # mounted at mountPath. The settings job points
+    # tls.bundles.default.client_ca_path at it. Required when any listener
+    # isn't off. The gateways read the file when a listener's settings
+    # change or a gateway starts, not when the file changes.
+    clientCa: {secretName: "", configMap: "", key: ca.crt, mountPath: /etc/sprigdb/client-ca}
+  # Client listeners besides MySQL (3306), MariaDB (3307), HTTP (8080) and
+  # HTTPS (8443), which are always on. A toggle sets listener.<name>.enabled
+  # (and listener.<name>.bind to its port) at this DC's scope through the
+  # settings job, and publishes the port on the gateway Service. amqp is
+  # AMQP without TLS; amqps is AMQP over TLS. Kafka clients also connect to
+  # every gateway directly, at the address Kafka's metadata names (each
+  # gateway's registered address unless [gateway] kafka_advertise_host is
+  # set), so clients outside the Kubernetes cluster need those addresses
+  # routable.
+  listeners:
+    mongo: {enabled: false, port: 27017}
+    redis: {enabled: false, port: 6379}
+    bolt: {enabled: false, port: 7687}
+    kafka: {enabled: false, port: 9092}
+    amqp: {enabled: false, port: 5672}
+    amqps: {enabled: false, port: 5671}
 worker:
   replicas: 2
 operator:
   replicas: 2
-  # The agent sidecar in every MariaDB pod (fence-only, chapter 25).
+  # The agent sidecar in every MariaDB pod: it fences its node when the
+  # node loses its writer lease.
   agentSidecar: true
   readyTimeoutSeconds: 1800
   # The DC controller's Admin API; empty: the controller Service in this
-  # namespace (http://sprigdb-controller.<namespace>.svc:7480).
+  # namespace (https://sprigdb-controller.<namespace>.svc:7480, or http://
+  # with controller.adminApi.allowPlain).
   controllerAdmin: ""
 # One Service per MariaDB pod, so other DCs reach every node.
 # nodePortHost: with type NodePort, the host every node port is reached at
@@ -45,7 +102,8 @@ operator:
 nodeServices: {type: LoadBalancer, nodePortHost: ""}
 tls:
   # false: development only (kind): no cert-manager Certificates, etcd and
-  # the roles without TLS, mariadb-operator's own CA (r2close).
+  # the roles without TLS, mariadb-operator's own CA. The Admin API then
+  # needs controller.adminApi.allowPlain: true.
   enabled: true
   issuerRef: {kind: ClusterIssuer, name: sprig-fra1-ca}
   # trust-manager Bundle with every DC's CA, mounted as ca.crt.

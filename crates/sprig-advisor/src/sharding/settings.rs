@@ -38,7 +38,7 @@ pub static MODE: Setting<Cow<'static, str>> = Setting {
     apply: Apply::Live,
     operator_only: true,
     owner: 16,
-    doc: "Sharding advisor: on, approve (chapter 52), recommend or off",
+    doc: "Sharding advisor: on, approve (held for approval), recommend or off",
 };
 sprig_settings::register!(MODE);
 

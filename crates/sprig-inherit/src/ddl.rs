@@ -367,14 +367,9 @@ pub(crate) async fn enable(
     let Some((_, object_id)) = r.object_id(table.db.as_deref(), &table.name).await? else {
         return Err(no_table(table, ctx));
     };
-    if ctx
+    let hierarchical = ctx
         .types()
-        .is_some_and(|t| sprig_types::has_hierarchy(t, db, &table.name, ctx.lctn))
-    {
-        return Err(unsupported(
-            "a table with a record hierarchy can't be inheritable yet",
-        ));
-    }
+        .is_some_and(|t| sprig_types::has_hierarchy(t, db, &table.name, ctx.lctn));
     let type_root = ctx.type_tree(db, &table.name).map(|(root, _)| root);
     let layer = match &table.db {
         Some(d) => format!("{}.{}", q(d), q(&table.name)),
@@ -383,11 +378,16 @@ pub(crate) async fn enable(
     let old = crate::guard::show_columns(r, &layer).await?;
     // Generated columns (a discriminated root's type columns) aren't
     // fields: merged views compute them ([`Ctx::derived`]).
-    let cols: Vec<String> = old
+    let mut cols: Vec<String> = old
         .iter()
         .filter(|c| !c.generated())
         .map(|c| c.name.clone())
         .collect();
+    // A record hierarchy's paths are fields, kept per space (decision
+    // T22): `SHOW COLUMNS` never lists them.
+    if hierarchical && crate::hier::probe_paths(r, &layer).await {
+        cols.extend(crate::hier::PATH_COLUMNS.iter().map(|c| (*c).to_owned()));
+    }
     let (pk, uniques) = crate::guard::show_uniques(r, &layer).await?;
     let key: Vec<String> = match key {
         Some(k) => k.to_vec(),
@@ -438,6 +438,25 @@ pub(crate) async fn enable(
             *b"42S22",
             format!("Unknown column '{t}' in 'TAG FIELD'"),
         ));
+    }
+    if hierarchical {
+        // Inside one tenant only (decision T22, piece 6).
+        let probe = InheritableObject {
+            object_id,
+            db,
+            table: table.name.clone(),
+            key: key_cols.clone(),
+            columns: Vec::new(),
+            slots: std::collections::BTreeMap::new(),
+            uniques: Vec::new(),
+            tag_field: None,
+            version: 1,
+            auto: None,
+            links: Vec::new(),
+            adopted: false,
+            type_root: None,
+        };
+        crate::hier::refuse_tenants(ctx, &probe)?;
     }
     let klist = key_cols.iter().map(|c| q(c)).collect::<Vec<_>>().join(", ");
     let mut ops = vec![
@@ -794,6 +813,17 @@ pub async fn create_share(ctx: &Ctx<'_>, r: &mut dyn Runner, s: &NewShare<'_>) -
     if let Some(f) = s.filter {
         validate_filter(o, f, columns.as_deref(), &ctx.lex)?;
     }
+    // A record hierarchy is shared whole, inside the tenant (decision T22).
+    for m in ctx.state.group_of(o.object_id) {
+        if let Some(mo) = ctx.state.object(m) {
+            crate::hier::check_share(
+                mo,
+                matches!(to, ShareTarget::Tenant(_)),
+                to == ShareTarget::AllChildren && from == ROOT_SPACE,
+                s.filter.is_some() || s.columns.is_some(),
+            )?;
+        }
+    }
     let edges = ctx.chain_edges(o, from)? + 1;
     if edges > ctx.limits.max_depth {
         return Err(SprigError::new(
@@ -828,6 +858,19 @@ pub async fn create_share(ctx: &Ctx<'_>, r: &mut dyn Runner, s: &NewShare<'_>) -
         None if deep => MergeMode::Materialized,
         Some(_) | None => MergeMode::ReadThrough,
     };
+    if mode == MergeMode::Materialized
+        && ctx
+            .state
+            .group_of(o.object_id)
+            .iter()
+            .filter_map(|m| ctx.state.object(*m))
+            .any(|m| crate::hier::has_paths(m))
+    {
+        return Err(unsupported(
+            "a materialized share of a table with a record hierarchy is not supported yet: \
+             set inherit.merge = read_through",
+        ));
+    }
     let mut c = root_change(ctx);
     c.upsert_shares.push(Share {
         id: 0,
@@ -891,6 +934,7 @@ pub async fn alter_share(
                 return Err(alter_denied(&db, &o.table));
             }
             validate_filter(o, f, sh.columns.as_deref(), &ctx.lex)?;
+            crate::hier::check_share(o, false, false, true)?;
             let mut n = (*sh).clone();
             n.filter = Some(f.clone());
             n.version += 1;
@@ -918,6 +962,7 @@ pub async fn alter_share(
                 if let Some(f) = t {
                     validate_filter(o, f, sh.columns.as_deref(), &ctx.lex)?;
                 }
+                crate::hier::check_share(o, false, false, t.is_some())?;
                 let mut n = (*sh).clone();
                 n.take.clone_from(t);
                 n.version += 1;
@@ -1009,6 +1054,34 @@ pub async fn drop_share(
         let db = ctx.db_name(o.db).unwrap_or_default();
         if !ctx.privileges.alter(&db, o.db, o.object_id) {
             return Err(alter_denied(&db, &o.table));
+        }
+    }
+    // A record hierarchy's spaces below keep their own rows only while
+    // the rows they hang under stay visible (decision T22).
+    if let Some(o) = ctx.state.object(sh.object_id).filter(|o| crate::hier::has_paths(o))
+        && let crate::model::ShareTarget::Space(to) = sh.to
+    {
+        let mut spaces = vec![to];
+        spaces.extend(ctx.state.descendants(to));
+        let res = ctx.resolve(&Name {
+            db: ctx.db_name(o.db),
+            name: o.table.clone(),
+        })?;
+        if let Some(res) = res {
+            let rows = r
+                .query(&format!(
+                    "SELECT 1 FROM {} WHERE `_sprig_space` IN ({}) AND `_sprig_state` IN ('own', \
+                     'orphan') LIMIT 1",
+                    res.layer,
+                    spaces.iter().map(|x| x.0.to_string()).collect::<Vec<_>>().join(", ")
+                ))
+                .await?;
+            if !rows.rows.is_empty() {
+                return Err(unsupported(
+                    "DROP SHARE of a table with a record hierarchy while the spaces it serves \
+                     have their own rows: SPRIG RESET or delete them first",
+                ));
+            }
         }
     }
     // The children it served, read before the drop (bugfix-44).

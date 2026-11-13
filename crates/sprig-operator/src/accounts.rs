@@ -127,7 +127,7 @@ pub fn credentials_toml(ctl_password: &str, repl_password: &str, ca_file: Option
         None => "tls = \"skip_verify\"\n".into(),
     };
     format!(
-        "# Written by the SprigDB operator (chapter 27).\n\
+        "# Written by the SprigDB operator.\n\
          [sprig_ctl]\nuser = \"sprig_ctl\"\npassword = \"{ctl_password}\"\n{tls}\n\
          [sprig_repl]\nuser = \"sprig_repl\"\npassword = \"{repl_password}\"\n{tls}"
     )

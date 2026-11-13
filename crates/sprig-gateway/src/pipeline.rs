@@ -367,6 +367,13 @@ pub trait SessionExec: Send {
         let _ = action;
         None
     }
+
+    /// The verified claims of the token the session's caller presented,
+    /// for `SPRIG_CLAIM()` (chapter 29); executors without row-level
+    /// security ignore them.
+    fn set_claims(&mut self, claims: Option<std::sync::Arc<serde_json::Value>>) {
+        let _ = claims;
+    }
 }
 
 /// The client side of a response, as an executor sees it.
@@ -637,6 +644,10 @@ impl SessionExec for HookedSession {
 
     fn holds_tenant_privilege(&self, action: sprig_auth::authz::Action) -> Option<bool> {
         self.inner.holds_tenant_privilege(action)
+    }
+
+    fn set_claims(&mut self, claims: Option<std::sync::Arc<serde_json::Value>>) {
+        self.inner.set_claims(claims);
     }
 }
 

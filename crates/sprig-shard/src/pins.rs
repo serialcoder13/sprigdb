@@ -683,7 +683,7 @@ fn check_rekey(new: &Pin, f: &Facts<'_>) -> Result<()> {
         SprigCode::PinNeedsRekey,
         format!(
             "{} is in a table group that has already split into {} shards; pinning it {} would \
-             change its key or group, which needs an online re-key (R3)",
+             change its key or group, which needs an online re-key (`sprigctl shard rekey`)",
             (f.name)(new.object),
             me.shards,
             new.kind.as_str().to_ascii_uppercase()

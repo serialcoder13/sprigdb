@@ -270,6 +270,17 @@ pub struct SeqStats {
     pub batches: AtomicU64,
     /// Feed items read.
     pub items: AtomicU64,
+    /// How far behind the sequencer reads, in ms: now minus the commit
+    /// time (its HLC's seconds) of the last change read; 0 once the feed
+    /// says it is caught up (R9, r9feed: lag per instance).
+    pub lag_ms: AtomicU64,
+}
+
+/// Milliseconds since the Unix epoch now.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Why [`Sequencer::run`] returned.
@@ -506,6 +517,12 @@ impl Sequencer {
                 self.stats.items.fetch_add(1, Ordering::Relaxed);
                 match item {
                     FeedItem::Event(e) => {
+                        let commit_ms = (e.hlc >> 32).saturating_mul(1000);
+                        if commit_ms > 0 {
+                            self.stats
+                                .lag_ms
+                                .store(now_ms().saturating_sub(commit_ms), Ordering::Relaxed);
+                        }
                         if let Some((r, id)) = self.record(&e)
                             && self.owns(r.partition)
                         {
@@ -524,6 +541,9 @@ impl Sequencer {
                         if txn.is_empty() {
                             resume = Some(token);
                             dirty = true;
+                            if pending.is_empty() {
+                                self.stats.lag_ms.store(0, Ordering::Relaxed);
+                            }
                         }
                     }
                 }

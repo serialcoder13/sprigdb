@@ -39,7 +39,58 @@ pub struct ListenerKeys {
     pub tls: &'static Setting<Text>,
     /// `listener.<name>.cert`.
     pub cert: &'static Setting<Text>,
+    /// `listener.<name>.client_cert` (wireup, 13 Nov).
+    pub client_cert: &'static Setting<Text>,
 }
+
+/// `listener.<name>.client_cert`: whether the listener asks TLS clients for
+/// a certificate (`off`, `optional`, `required`), verified against
+/// `tls.bundles.default.client_ca_path`, for `REQUIRE X509`, `SUBJECT` and
+/// `ISSUER` (chapter 14).
+macro_rules! client_cert {
+    ($name:literal, $CC:ident) => {
+        #[doc = concat!("`listener.", $name, ".client_cert`.")]
+        pub static $CC: Setting<Text> = Setting {
+            key: concat!("listener.", $name, ".client_cert"),
+            default: Cow::Borrowed("off"),
+            scopes: Scopes::PROCESS,
+            hard: HardBounds::one_of(TLS_MODES),
+            apply: Apply::Rebind,
+            operator_only: false,
+            owner: 4,
+            doc: concat!(
+                "Client certificates on the ",
+                $name,
+                " listener: off, optional or required (checked against tls.bundles.default.client_ca_path)"
+            ),
+        };
+        sprig_settings::register!($CC);
+    };
+}
+
+client_cert!("mysql", MYSQL_CLIENT_CERT);
+client_cert!("mariadb", MARIADB_CLIENT_CERT);
+client_cert!("http", HTTP_CLIENT_CERT);
+client_cert!("https", HTTPS_CLIENT_CERT);
+client_cert!("mongo", MONGO_CLIENT_CERT);
+client_cert!("redis", REDIS_CLIENT_CERT);
+client_cert!("bolt", BOLT_CLIENT_CERT);
+client_cert!("kafka", KAFKA_CLIENT_CERT);
+client_cert!("amqp", AMQP_CLIENT_CERT);
+client_cert!("amqps", AMQPS_CLIENT_CERT);
+
+/// `tls.bundles.default.client_ca_path`.
+pub static DEFAULT_BUNDLE_CLIENT_CA: Setting<Text> = Setting {
+    key: "tls.bundles.default.client_ca_path",
+    default: Cow::Borrowed(""),
+    scopes: Scopes::PROCESS,
+    hard: HardBounds::NONE,
+    apply: Apply::Rebind,
+    operator_only: false,
+    owner: 4,
+    doc: "PEM CA certificates that sign client certificates (listener.<name>.client_cert); read when listeners apply",
+};
+sprig_settings::register!(DEFAULT_BUNDLE_CLIENT_CA);
 
 macro_rules! listener {
     ($name:literal, $bind:literal, $enabled:literal, $tls:literal,
@@ -212,6 +263,7 @@ pub static LISTENERS: [ListenerKeys; 10] = [
         enabled: &MYSQL_ENABLED,
         tls: &MYSQL_TLS,
         cert: &MYSQL_CERT,
+        client_cert: &MYSQL_CLIENT_CERT,
     },
     ListenerKeys {
         name: "mariadb",
@@ -220,6 +272,7 @@ pub static LISTENERS: [ListenerKeys; 10] = [
         enabled: &MARIADB_ENABLED,
         tls: &MARIADB_TLS,
         cert: &MARIADB_CERT,
+        client_cert: &MARIADB_CLIENT_CERT,
     },
     ListenerKeys {
         name: "http",
@@ -228,6 +281,7 @@ pub static LISTENERS: [ListenerKeys; 10] = [
         enabled: &HTTP_ENABLED,
         tls: &HTTP_TLS,
         cert: &HTTP_CERT,
+        client_cert: &HTTP_CLIENT_CERT,
     },
     ListenerKeys {
         name: "https",
@@ -236,6 +290,7 @@ pub static LISTENERS: [ListenerKeys; 10] = [
         enabled: &HTTPS_ENABLED,
         tls: &HTTPS_TLS,
         cert: &HTTPS_CERT,
+        client_cert: &HTTPS_CLIENT_CERT,
     },
     ListenerKeys {
         name: "mongo",
@@ -244,6 +299,7 @@ pub static LISTENERS: [ListenerKeys; 10] = [
         enabled: &MONGO_ENABLED,
         tls: &MONGO_TLS,
         cert: &MONGO_CERT,
+        client_cert: &MONGO_CLIENT_CERT,
     },
     ListenerKeys {
         name: "redis",
@@ -252,6 +308,7 @@ pub static LISTENERS: [ListenerKeys; 10] = [
         enabled: &REDIS_ENABLED,
         tls: &REDIS_TLS,
         cert: &REDIS_CERT,
+        client_cert: &REDIS_CLIENT_CERT,
     },
     ListenerKeys {
         name: "bolt",
@@ -260,6 +317,7 @@ pub static LISTENERS: [ListenerKeys; 10] = [
         enabled: &BOLT_ENABLED,
         tls: &BOLT_TLS,
         cert: &BOLT_CERT,
+        client_cert: &BOLT_CLIENT_CERT,
     },
     ListenerKeys {
         name: "kafka",
@@ -268,6 +326,7 @@ pub static LISTENERS: [ListenerKeys; 10] = [
         enabled: &KAFKA_ENABLED,
         tls: &KAFKA_TLS,
         cert: &KAFKA_CERT,
+        client_cert: &KAFKA_CLIENT_CERT,
     },
     ListenerKeys {
         name: "amqp",
@@ -276,6 +335,7 @@ pub static LISTENERS: [ListenerKeys; 10] = [
         enabled: &AMQP_ENABLED,
         tls: &AMQP_TLS,
         cert: &AMQP_CERT,
+        client_cert: &AMQP_CLIENT_CERT,
     },
     ListenerKeys {
         name: "amqps",
@@ -284,6 +344,7 @@ pub static LISTENERS: [ListenerKeys; 10] = [
         enabled: &AMQPS_ENABLED,
         tls: &AMQPS_TLS,
         cert: &AMQPS_CERT,
+        client_cert: &AMQPS_CLIENT_CERT,
     },
 ];
 
@@ -460,6 +521,13 @@ pub fn resolve(settings: &MemSettings<'_>, ctx: &SettingCtx<'_>, certs: &CertSto
         } else {
             None
         };
+        let (client_cert, client_ca) = match client_certs(settings, ctx, keys, enabled, tls) {
+            Ok(c) => c,
+            Err(e) => {
+                res.rejected.push(reject(e));
+                continue;
+            }
+        };
         res.specs.push(ListenerSpec {
             name: keys.name,
             protocol: keys.protocol,
@@ -467,12 +535,52 @@ pub fn resolve(settings: &MemSettings<'_>, ctx: &SettingCtx<'_>, certs: &CertSto
             enabled,
             tls,
             cert,
+            client_cert,
+            client_ca,
             min_tls,
             proxy: proxy.clone(),
             handshake_timeout,
         });
     }
     res
+}
+
+/// A listener's `client_cert` mode and, unless it is `off` (or the
+/// listener is), the CA bundle client certificates must chain to.
+fn client_certs(
+    settings: &MemSettings<'_>,
+    ctx: &SettingCtx<'_>,
+    keys: &ListenerKeys,
+    enabled: bool,
+    tls: TlsMode,
+) -> Result<(TlsMode, Option<Arc<crate::tls::ClientCa>>), String> {
+    let Ok(mode) = settings.get(keys.client_cert, ctx).parse::<TlsMode>() else {
+        return Err(format!(
+            "{} is not off, optional or required",
+            keys.client_cert.key
+        ));
+    };
+    if !enabled || mode == TlsMode::Off {
+        return Ok((mode, None));
+    }
+    if tls == TlsMode::Off {
+        return Err(format!(
+            "{} = {} needs TLS ({} is off)",
+            keys.client_cert.key,
+            mode.as_str(),
+            keys.tls.key
+        ));
+    }
+    let path = settings.get(&DEFAULT_BUNDLE_CLIENT_CA, ctx);
+    if path.is_empty() {
+        return Err(format!(
+            "{} needs a CA: set {}",
+            keys.client_cert.key, DEFAULT_BUNDLE_CLIENT_CA.key
+        ));
+    }
+    let ca = crate::tls::ClientCa::load(Path::new(path.as_ref()))
+        .map_err(|e| format!("client CA {e}"))?;
+    Ok((mode, Some(Arc::new(ca))))
 }
 
 fn bundle(

@@ -234,7 +234,12 @@ impl GatewayPeer for Service {
         };
         let row = target.process_row(sessions.clock().now());
         let tenant = (r.tenant_id != 0).then_some(TenantId(r.tenant_id));
-        let owner = row.user.as_deref() == Some(r.user.as_str()) && row.tenant == tenant;
+        // An empty user is a `CONNECTION_ADMIN` caller's: any user's
+        // session of its tenant (never without a tenant).
+        let owner = row.tenant == tenant
+            && row.user.is_some()
+            && (row.user.as_deref() == Some(r.user.as_str())
+                || (r.user.is_empty() && tenant.is_some()));
         if owner {
             if r.query_only {
                 target.flags().kill_query();

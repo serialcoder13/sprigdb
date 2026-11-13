@@ -397,6 +397,31 @@ pub fn is_reserved_database(name: &str) -> bool {
     digits > 0 && b.get(1 + digits) == Some(&b'_')
 }
 
+/// The shortest tenant name, in characters.
+pub const TENANT_NAME_MIN: usize = 2;
+
+/// The longest tenant name, in characters (a DNS label).
+pub const TENANT_NAME_MAX: usize = 63;
+
+/// Whether `s` is a tenant name (chapter 14, "Tenant names"; chapter 23):
+/// `^[a-z][a-z0-9-]{0,61}[a-z0-9]$`, a lowercase DNS label of 2 to 63
+/// characters that starts with a letter and doesn't end with a hyphen
+/// (tenant names appear in TLS SNI host names).
+///
+/// The one rule for every place that meets a tenant name: creating a
+/// tenant, logins (`acme.alice`, SNI tenant endpoints, API keys), the
+/// `x-sprig-tenant` header and REST paths (decision bugfix-interim, tenant
+/// names).
+#[must_use]
+pub fn is_tenant_name(s: &str) -> bool {
+    let b = s.as_bytes();
+    (TENANT_NAME_MIN..=TENANT_NAME_MAX).contains(&b.len())
+        && b[0].is_ascii_lowercase()
+        && b[b.len() - 1] != b'-'
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+}
+
 /// Quotes an identifier with backquotes, doubling any inside it.
 #[must_use]
 pub fn quote(ident: &str) -> String {
@@ -431,6 +456,28 @@ fn canonical<T: FromStr>(s: &str, max_digits: usize) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tenant_names_are_dns_labels_of_two_or_more() {
+        for ok in ["ab", "acme", "a1", "pune-2", "a-b", &"x".repeat(63)] {
+            assert!(is_tenant_name(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "a",
+            "Acme",
+            "2acme",
+            "acme-",
+            "a-",
+            "ac_me",
+            "ac.me",
+            "test me",
+            "ünï",
+            &"x".repeat(64),
+        ] {
+            assert!(!is_tenant_name(bad), "{bad}");
+        }
+    }
 
     #[test]
     fn schemas_format_as_the_guide_says() {

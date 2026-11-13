@@ -126,6 +126,11 @@ pub struct AuthzServices {
     placed: Mutex<HashMap<TenantId, Checked>>,
     gates: Mutex<HashMap<(TenantId, ClusterId), Gate>>,
     migrating: Mutex<HashSet<TenantId>>,
+    /// Tenants whose `auth` and `authz` modules this process found (or
+    /// brought) at their newest formats (decision bugfix-interim: a
+    /// catalog left at an older `auth` format refused `CREATE USER` with
+    /// 1265, its `verifiers.mechanism` lacking `scram_sha_512`).
+    current: Mutex<HashSet<TenantId>>,
     /// Tenants being deleted or deleted (decision bugfix-32): their
     /// backend accounts are never made again here.
     gone: Mutex<HashSet<TenantId>>,
@@ -192,14 +197,25 @@ impl AuthzServices {
     /// per process and tenant at a time; a failure is logged and retried
     /// by a later session).
     async fn migrate_if_needed(&self, svc: &TenantServices, cat: &TenantCatalog) {
-        let migrated = AuthzState::of(cat).is_some_and(AuthzState::is_migrated);
+        // Format 2 too (WATCH where SELECT was granted): an upgraded
+        // tenant's watchers keep watching.
+        // The `auth` module too, once per process and tenant: nothing else
+        // brings an existing tenant's `auth` tables to their newest format
+        // (only the paths that need formats 4 and 5 did), and `CREATE
+        // USER` writes a `scram_sha_512` verifier that format 3 allows.
+        let migrated = AuthzState::of(cat).is_some_and(AuthzState::is_current)
+            && lock(&self.current).contains(&cat.tenant);
         if migrated || !lock(&self.migrating).insert(cat.tenant) {
             return;
         }
         let r = sprig_auth::authz::migrate(&*svc.locator, &svc.catalog, cat.tenant).await;
         match r {
+            Ok(0) => {
+                lock(&self.current).insert(cat.tenant);
+            }
             Ok(v) => {
-                tracing::info!(tenant = %cat.tenant, auth_version = v, "authz module migrated: existing users keep every privilege");
+                lock(&self.current).insert(cat.tenant);
+                tracing::info!(tenant = %cat.tenant, auth_version = v, "auth and authz modules migrated to their newest formats");
             }
             Err(e) => {
                 tracing::warn!(tenant = %cat.tenant, error = %e, "authz migration failed; retried later");

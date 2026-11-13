@@ -168,3 +168,43 @@ async fn the_background_tasks_flush_and_ship() {
     assert_eq!(sink.records().len(), 100);
     let _ = fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn retention_removes_whole_days_past_the_limit_oldest_first() {
+    let root = tmp("retention");
+    let day = 86_400_000_u64;
+    // "Today" is 2026-11-13; 10 days' retention keeps 2026-11-03 on.
+    let today = 20_770 * day;
+    assert_eq!(civil_date(today), "2026-11-13");
+    for (stream, d) in [
+        ("platform", "2026-10-01"),
+        ("platform", "2026-11-02"),
+        ("platform", "2026-11-03"),
+        ("tenant-7", "2026-10-15"),
+        ("tenant-7", "2026-11-12"),
+        ("tenant-9", "2026-09-01"),
+    ] {
+        let dir = root.join("audit").join(stream).join(d);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("x-1-1.jsonl"), b"{}\n").unwrap();
+    }
+    // Not a day: never touched.
+    fs::create_dir_all(root.join("audit").join("platform").join("notes")).unwrap();
+    // tenant-9's stream is kept by its resolver (None).
+    let days = |s: &str| (s != "tenant-9").then_some(10);
+    let r = DirSink::prune(&root, today, &days, 2).unwrap();
+    assert_eq!(r.removed, ["platform/2026-10-01", "tenant-7/2026-10-15"]);
+    assert!(r.more);
+    let r = DirSink::prune(&root, today, &days, 100).unwrap();
+    assert_eq!(r.removed, ["platform/2026-11-02"]);
+    assert!(!r.more);
+    for kept in [
+        "platform/2026-11-03",
+        "tenant-7/2026-11-12",
+        "tenant-9/2026-09-01",
+        "platform/notes",
+    ] {
+        assert!(root.join("audit").join(kept).exists(), "{kept}");
+    }
+    let _ = fs::remove_dir_all(&root);
+}

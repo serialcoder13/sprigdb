@@ -352,7 +352,9 @@ pub(crate) fn cluster_show(c: &ClusterView) -> String {
         }
     }
     if c.tuning_plan.is_empty() {
-        s.push_str("tuning:       no plan yet (server tuning is chapter 09 step 10)\n");
+        s.push_str(
+            "tuning:       no plan (automatic server tuning isn't offered in this release)\n",
+        );
     } else {
         s.push_str("tuning:\n");
         for t in &c.tuning_plan {
@@ -440,7 +442,11 @@ pub(crate) fn tenant_list(tenants: &[TenantView]) -> String {
             [
                 t.tenant_id.to_string(),
                 t.name.clone(),
-                t.state.clone(),
+                if t.suspended {
+                    format!("{},suspended", t.state)
+                } else {
+                    t.state.clone()
+                },
                 t.parent.clone().unwrap_or_else(|| "-".to_owned()),
                 t.home_dc.to_string(),
                 t.depth.to_string(),
@@ -463,6 +469,13 @@ pub(crate) fn tenant_show(t: &TenantView) -> String {
     let mut s = String::new();
     let _ = writeln!(s, "tenant:            {} ({})", t.name, t.tenant_id);
     let _ = writeln!(s, "state:             {}", t.state);
+    if t.suspended {
+        let _ = writeln!(
+            s,
+            "suspended:         yes ({})",
+            t.suspended_reason.as_deref().unwrap_or("no reason given")
+        );
+    }
     let _ = writeln!(s, "home dc:           {}", t.home_dc);
     let _ = writeln!(
         s,
@@ -570,7 +583,6 @@ pub(crate) fn settings_describe(k: &SettingKeyView) -> String {
             (false, true) => "operators, and tenants within bounds",
         }
     );
-    let _ = writeln!(s, "owner:          chapter {:02}", k.owner);
     s
 }
 

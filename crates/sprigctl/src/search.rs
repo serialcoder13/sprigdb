@@ -22,7 +22,7 @@ use crate::{Failed, Output, print};
 pub(crate) fn group() -> Command {
     let tenant = || Arg::new("tenant").required(true).help("The tenant");
     Command::new("search")
-        .about("Search indexes and their copies on workers (chapter 39)")
+        .about("Search indexes and their copies on workers")
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(

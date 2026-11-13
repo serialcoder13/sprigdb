@@ -28,7 +28,7 @@ use crate::{Failed, Output, print};
 /// `sprigctl tenant move`.
 pub(crate) fn move_command() -> Command {
     Command::new("move")
-        .about("Move a tenant to another data center, online (chapter 24)")
+        .about("Move a tenant to another data center, online")
         .arg(Arg::new("name").required(true).help("The tenant"))
         .arg(
             Arg::new("to")
@@ -65,7 +65,7 @@ pub(crate) fn move_command() -> Command {
 /// `sprigctl tenant traffic`.
 pub(crate) fn traffic_command() -> Command {
     Command::new("traffic")
-        .about("A tenant's traffic by client data center, and the move it suggests (chapter 24)")
+        .about("A tenant's traffic by client data center, and the move it suggests")
         .arg(Arg::new("name").required(true).help("The tenant"))
 }
 

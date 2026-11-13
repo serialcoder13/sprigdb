@@ -116,7 +116,7 @@ keys! {
     /// `approvals.webhook_connection`.
     WEBHOOK_CONNECTION: Text = "approvals.webhook_connection", Cow::Borrowed(""), TENANT_ONLY,
         HardBounds::NONE, false, 52,
-        "<database>.<connection> or platform:<name>: a webhook connection (chapter 51) that gets the tenant's events";
+        "<database>.<connection> or platform:<name>: a webhook connection that gets the tenant's events";
     /// `approvals.stream_database`.
     STREAM_DATABASE: Text = "approvals.stream_database", Cow::Borrowed(""), TENANT_ONLY,
         HardBounds::NONE, false, 52,

@@ -6290,6 +6290,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snap",
+ "sprig-common",
  "subtle",
  "thiserror",
  "tokio",
@@ -6517,6 +6518,7 @@ dependencies = [
  "rustls-native-certs",
  "serde",
  "serde_json",
+ "sprig-common",
  "sprig-proto-bolt",
  "sprig-proto-mongo",
  "tokio",
@@ -6712,6 +6714,7 @@ name = "sprig-worker"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "bson",
  "gethostname",
  "http-body-util",
  "hyper",
@@ -6727,6 +6730,7 @@ dependencies = [
  "sprig-cluster",
  "sprig-common",
  "sprig-controller",
+ "sprig-doc",
  "sprig-feed",
  "sprig-graph",
  "sprig-inherit",
@@ -6751,6 +6755,7 @@ dependencies = [
 name = "sprig-workload"
 version = "0.0.1"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "metrics",
  "mysql_async",

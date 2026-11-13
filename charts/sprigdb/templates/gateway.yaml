@@ -1,5 +1,8 @@
 {{- /* Gateways: Deployment, HorizontalPodAutoscaler, Service; no
-     service-account token (chapter 27). */}}
+     service-account token. */}}
+{{- $listeners := .Values.gateway.listeners | default dict }}
+{{- $clientTls := .Values.gateway.clientTls | default dict }}
+{{- $clientCa := $clientTls.clientCa | default dict }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -17,8 +20,7 @@ spec:
     spec:
       automountServiceAccountToken: false
       # Kubernetes' service-link variables (SPRIGDB_CONTROLLER_PORT=tcp://...)
-      # read as SPRIGDB_<SECTION>_<KEY> configuration and stop the process
-      # (found by r2close's helm install).
+      # read as SPRIGDB_<SECTION>_<KEY> configuration and stop the process.
       enableServiceLinks: false
       terminationGracePeriodSeconds: 90
       {{- include "sprigdb.podSecurity" . | nindent 6 }}
@@ -33,10 +35,14 @@ spec:
           ports:
             - {name: mysql, containerPort: 3306}
             - {name: mariadb, containerPort: 3307}
-            - {name: mongodb, containerPort: 27017}
-            - {name: redis, containerPort: 6379}
             - {name: http, containerPort: 8080}
             - {name: https, containerPort: 8443}
+            {{- range $name := splitList "," (include "sprigdb.optionalListeners" .) }}
+            {{- $l := get $listeners $name | default dict }}
+            {{- if $l.enabled }}
+            - {name: {{ $name }}, containerPort: {{ $l.port }}}
+            {{- end }}
+            {{- end }}
             - {name: peer, containerPort: 7403}
             - {name: telemetry, containerPort: 9180}
           readinessProbe:
@@ -47,16 +53,34 @@ spec:
           securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
           volumeMounts:
             {{- include "sprigdb.tlsMounts" . | nindent 12 }}
-            # Catalog reads and database DDL run as each cluster's sprig_ctl
-            # (found by r2close's helm install: logins failed without it).
+            # Catalog reads and database DDL run as each cluster's sprig_ctl.
             - {name: creds, mountPath: /etc/sprigdb/creds, readOnly: true}
             - {name: backends, mountPath: /etc/sprigdb/backends, readOnly: true}
+            {{- if $clientTls.secretName }}
+            # The certificate clients see (gateway.clientTls).
+            - {name: client-tls, mountPath: {{ $clientTls.mountPath | default "/etc/sprigdb/client-tls" }}, readOnly: true}
+            {{- end }}
+            {{- if or $clientCa.secretName $clientCa.configMap }}
+            # The CAs that sign client certificates (gateway.clientTls.clientCa).
+            - {name: client-ca, mountPath: {{ $clientCa.mountPath | default "/etc/sprigdb/client-ca" }}, readOnly: true}
+            {{- end }}
       volumes:
         {{- include "sprigdb.tlsVolumes" (dict "root" . "role" "gateway" "secret" "sprigdb-gateway-tls") | nindent 8 }}
         - name: creds
           secret: {secretName: sprigdb-cluster-credentials, optional: true}
         - name: backends
           secret: {secretName: sprigdb-gateway-backends}
+        {{- if $clientTls.secretName }}
+        - name: client-tls
+          secret: {secretName: {{ $clientTls.secretName }}}
+        {{- end }}
+        {{- if $clientCa.secretName }}
+        - name: client-ca
+          secret: {secretName: {{ $clientCa.secretName }}}
+        {{- else if $clientCa.configMap }}
+        - name: client-ca
+          configMap: {name: {{ $clientCa.configMap }}}
+        {{- end }}
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -84,10 +108,14 @@ spec:
   ports:
     - {name: mysql, port: 3306}
     - {name: mariadb, port: 3307}
-    - {name: mongodb, port: 27017}
-    - {name: redis, port: 6379}
     - {name: http, port: 8080}
     - {name: https, port: 8443}
+    {{- range $name := splitList "," (include "sprigdb.optionalListeners" .) }}
+    {{- $l := get $listeners $name | default dict }}
+    {{- if $l.enabled }}
+    - {name: {{ $name }}, port: {{ $l.port }}}
+    {{- end }}
+    {{- end }}
 ---
 apiVersion: v1
 kind: Service

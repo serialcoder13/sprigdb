@@ -7,6 +7,8 @@
 
 use std::fmt;
 
+use sprig_common::SprigCode;
+
 /// The shell's own error numbers (chapter 53, "Errors").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellCode {
@@ -31,36 +33,32 @@ pub enum ShellCode {
 }
 
 impl ShellCode {
+    /// The registry's code (`SprigCode`), which holds the number and name.
+    #[must_use]
+    pub const fn sprig(self) -> SprigCode {
+        match self {
+            ShellCode::ProfileInvalid => SprigCode::ShellProfileInvalid,
+            ShellCode::SecretUnavailable => SprigCode::ShellSecretUnavailable,
+            ShellCode::ConfirmationRequired => SprigCode::ShellConfirmationRequired,
+            ShellCode::LanguageUnsupported => SprigCode::ShellLanguageUnsupported,
+            ShellCode::SprigctlMissing => SprigCode::ShellSprigctlMissing,
+            ShellCode::Parse => SprigCode::ShellParse,
+            ShellCode::Cancelled => SprigCode::ShellCancelled,
+            ShellCode::Unreachable => SprigCode::ShellUnreachable,
+            ShellCode::InsecureTransport => SprigCode::ShellInsecureTransport,
+        }
+    }
+
     /// The error number.
     #[must_use]
     pub fn code(self) -> u32 {
-        match self {
-            ShellCode::ProfileInvalid => 39980,
-            ShellCode::SecretUnavailable => 39981,
-            ShellCode::ConfirmationRequired => 39982,
-            ShellCode::LanguageUnsupported => 39983,
-            ShellCode::SprigctlMissing => 39984,
-            ShellCode::Parse => 39985,
-            ShellCode::Cancelled => 39986,
-            ShellCode::Unreachable => 39987,
-            ShellCode::InsecureTransport => 39988,
-        }
+        u32::from(self.sprig().number())
     }
 
     /// The `ER_SPRIG_SHELL_*` name.
     #[must_use]
     pub fn name(self) -> &'static str {
-        match self {
-            ShellCode::ProfileInvalid => "ER_SPRIG_SHELL_PROFILE_INVALID",
-            ShellCode::SecretUnavailable => "ER_SPRIG_SHELL_SECRET_UNAVAILABLE",
-            ShellCode::ConfirmationRequired => "ER_SPRIG_SHELL_CONFIRMATION_REQUIRED",
-            ShellCode::LanguageUnsupported => "ER_SPRIG_SHELL_LANGUAGE_UNSUPPORTED",
-            ShellCode::SprigctlMissing => "ER_SPRIG_SHELL_SPRIGCTL_MISSING",
-            ShellCode::Parse => "ER_SPRIG_SHELL_PARSE",
-            ShellCode::Cancelled => "ER_SPRIG_SHELL_CANCELLED",
-            ShellCode::Unreachable => "ER_SPRIG_SHELL_UNREACHABLE",
-            ShellCode::InsecureTransport => "ER_SPRIG_SHELL_INSECURE_TRANSPORT",
-        }
+        self.sprig().name()
     }
 }
 

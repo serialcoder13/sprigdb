@@ -270,7 +270,7 @@ pub fn choose_method(
             DdlMethod::Online => BuildMethod::Online,
             DdlMethod::CopySwap | DdlMethod::Toi if has_mover => BuildMethod::CopySwap,
             DdlMethod::CopySwap | DdlMethod::Toi => {
-                BuildMethod::Recommend("no online build here and no mover (M0.6)".into())
+                BuildMethod::Recommend("no online build here and no mover".into())
             }
         };
     };
@@ -289,9 +289,7 @@ pub fn choose_method(
     };
     match policy.switch {
         GaleraSwitch::Mover if has_mover => BuildMethod::CopySwap,
-        GaleraSwitch::Mover => {
-            BuildMethod::Recommend("copy-and-swap needs the mover (M0.6)".into())
-        }
+        GaleraSwitch::Mover => BuildMethod::Recommend("copy-and-swap needs the mover".into()),
         GaleraSwitch::RecommendOnly => BuildMethod::Recommend("galera builds are off".into()),
         GaleraSwitch::ToiOnly | GaleraSwitch::Auto if small => BuildMethod::GaleraToi,
         GaleraSwitch::ToiOnly => BuildMethod::Recommend(format!(

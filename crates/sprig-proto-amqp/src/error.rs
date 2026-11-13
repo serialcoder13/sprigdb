@@ -1,8 +1,10 @@
-//! Chapter 50's error numbers (39250–39289) and how they reach AMQP
+//! The queue and AMQP error numbers (39250–39289) and how they reach AMQP
 //! clients: a 0-9-1 reply code, or a 1.0 condition symbol, with SprigDB's
 //! number and name in the text.
 
 use std::fmt;
+
+use sprig_common::SprigCode;
 
 /// AMQP 0-9-1 reply codes (the spec's constants, as RabbitMQ uses them).
 pub mod reply {
@@ -196,75 +198,51 @@ impl MqCode {
         Self::ALL.into_iter().find(|c| c.number() == n)
     }
 
+    /// The registry's code (`SprigCode`), which holds the number and name.
+    #[must_use]
+    pub const fn sprig(self) -> SprigCode {
+        match self {
+            MqCode::NotFound => SprigCode::MqNotFound,
+            MqCode::Precondition => SprigCode::MqPrecondition,
+            MqCode::ResourceLocked => SprigCode::MqResourceLocked,
+            MqCode::AccessRefused => SprigCode::MqAccessRefused,
+            MqCode::NotImplemented => SprigCode::MqNotImplemented,
+            MqCode::Unroutable => SprigCode::MqUnroutable,
+            MqCode::QueueFull => SprigCode::MqQueueFull,
+            MqCode::MessageTooLarge => SprigCode::MqMessageTooLarge,
+            MqCode::AlreadySettled => SprigCode::MqAlreadySettled,
+            MqCode::DeliveryTokenInvalid => SprigCode::MqDeliveryTokenInvalid,
+            MqCode::OwnerMoved => SprigCode::MqOwnerMoved,
+            MqCode::ConfirmTimeout => SprigCode::MqConfirmTimeout,
+            MqCode::ConsumerTimeout => SprigCode::MqConsumerTimeout,
+            MqCode::TxnNeedsXa => SprigCode::MqTxnNeedsXa,
+            MqCode::DelayOutOfRange => SprigCode::MqDelayOutOfRange,
+            MqCode::Residency => SprigCode::MqResidency,
+            MqCode::Quota => SprigCode::MqQuota,
+            MqCode::VhostLimit => SprigCode::MqVhostLimit,
+            MqCode::FrameError => SprigCode::AmqpFrameError,
+            MqCode::SaslFailed => SprigCode::AmqpSaslFailed,
+            MqCode::ProtocolHeader => SprigCode::AmqpProtocolHeader,
+            MqCode::ChannelLimit => SprigCode::AmqpChannelLimit,
+            MqCode::LinkRefused => SprigCode::Amqp10LinkRefused,
+            MqCode::Amqp10Unsupported => SprigCode::Amqp10Unsupported,
+            MqCode::StreamOffset => SprigCode::MqStreamOffset,
+            MqCode::DirectReplyTo => SprigCode::MqDirectReplyTo,
+            MqCode::MgmtUnsupported => SprigCode::MqMgmtUnsupported,
+            MqCode::DeadLetterCycle => SprigCode::MqDeadLetterCycle,
+        }
+    }
+
     /// The SprigDB error number.
     #[must_use]
     pub const fn number(self) -> u32 {
-        39250
-            + match self {
-                MqCode::NotFound => 0,
-                MqCode::Precondition => 1,
-                MqCode::ResourceLocked => 2,
-                MqCode::AccessRefused => 3,
-                MqCode::NotImplemented => 4,
-                MqCode::Unroutable => 5,
-                MqCode::QueueFull => 6,
-                MqCode::MessageTooLarge => 7,
-                MqCode::AlreadySettled => 8,
-                MqCode::DeliveryTokenInvalid => 9,
-                MqCode::OwnerMoved => 10,
-                MqCode::ConfirmTimeout => 11,
-                MqCode::ConsumerTimeout => 12,
-                MqCode::TxnNeedsXa => 13,
-                MqCode::DelayOutOfRange => 14,
-                MqCode::Residency => 15,
-                MqCode::Quota => 16,
-                MqCode::VhostLimit => 17,
-                MqCode::FrameError => 18,
-                MqCode::SaslFailed => 19,
-                MqCode::ProtocolHeader => 20,
-                MqCode::ChannelLimit => 21,
-                MqCode::LinkRefused => 22,
-                MqCode::Amqp10Unsupported => 23,
-                MqCode::StreamOffset => 24,
-                MqCode::DirectReplyTo => 25,
-                MqCode::MgmtUnsupported => 26,
-                MqCode::DeadLetterCycle => 27,
-            }
+        self.sprig().number() as u32
     }
 
     /// The `ER_SPRIG_*` name.
     #[must_use]
     pub const fn name(self) -> &'static str {
-        match self {
-            MqCode::NotFound => "ER_SPRIG_MQ_NOT_FOUND",
-            MqCode::Precondition => "ER_SPRIG_MQ_PRECONDITION",
-            MqCode::ResourceLocked => "ER_SPRIG_MQ_RESOURCE_LOCKED",
-            MqCode::AccessRefused => "ER_SPRIG_MQ_ACCESS_REFUSED",
-            MqCode::NotImplemented => "ER_SPRIG_MQ_NOT_IMPLEMENTED",
-            MqCode::Unroutable => "ER_SPRIG_MQ_UNROUTABLE",
-            MqCode::QueueFull => "ER_SPRIG_MQ_QUEUE_FULL",
-            MqCode::MessageTooLarge => "ER_SPRIG_MQ_MESSAGE_TOO_LARGE",
-            MqCode::AlreadySettled => "ER_SPRIG_MQ_ALREADY_SETTLED",
-            MqCode::DeliveryTokenInvalid => "ER_SPRIG_MQ_DELIVERY_TOKEN_INVALID",
-            MqCode::OwnerMoved => "ER_SPRIG_MQ_OWNER_MOVED",
-            MqCode::ConfirmTimeout => "ER_SPRIG_MQ_CONFIRM_TIMEOUT",
-            MqCode::ConsumerTimeout => "ER_SPRIG_MQ_CONSUMER_TIMEOUT",
-            MqCode::TxnNeedsXa => "ER_SPRIG_MQ_TXN_NEEDS_XA",
-            MqCode::DelayOutOfRange => "ER_SPRIG_MQ_DELAY_OUT_OF_RANGE",
-            MqCode::Residency => "ER_SPRIG_MQ_RESIDENCY",
-            MqCode::Quota => "ER_SPRIG_MQ_QUOTA",
-            MqCode::VhostLimit => "ER_SPRIG_MQ_VHOST_LIMIT",
-            MqCode::FrameError => "ER_SPRIG_AMQP_FRAME_ERROR",
-            MqCode::SaslFailed => "ER_SPRIG_AMQP_SASL_FAILED",
-            MqCode::ProtocolHeader => "ER_SPRIG_AMQP_PROTOCOL_HEADER",
-            MqCode::ChannelLimit => "ER_SPRIG_AMQP_CHANNEL_LIMIT",
-            MqCode::LinkRefused => "ER_SPRIG_AMQP10_LINK_REFUSED",
-            MqCode::Amqp10Unsupported => "ER_SPRIG_AMQP10_UNSUPPORTED",
-            MqCode::StreamOffset => "ER_SPRIG_MQ_STREAM_OFFSET",
-            MqCode::DirectReplyTo => "ER_SPRIG_MQ_DIRECT_REPLY_TO",
-            MqCode::MgmtUnsupported => "ER_SPRIG_MQ_MGMT_UNSUPPORTED",
-            MqCode::DeadLetterCycle => "ER_SPRIG_MQ_DEAD_LETTER_CYCLE",
-        }
+        self.sprig().name()
     }
 
     /// The 0-9-1 reply code an error of this number gets by default.

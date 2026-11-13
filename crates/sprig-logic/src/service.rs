@@ -203,6 +203,158 @@ pub fn js_signature(d: &Declaration) -> sprig_logic_compile::js::Signature {
             .map(|p| (p.name.clone(), crate::declare::Param::ir_ty(&p.ty)))
             .collect(),
         returns: d.returns.as_deref().map(crate::declare::Param::ir_ty),
+        row: None,
+    }
+}
+
+/// The JavaScript front end's signature of a recorded version: its
+/// `logic_versions.signature` (the declared SQL types in `params[].sql`
+/// and `returns`, else the IR type names).
+#[must_use]
+pub fn js_signature_of(sig: &serde_json::Value) -> sprig_logic_compile::js::Signature {
+    use sprig_logic_compile::ir::Ty;
+    let ty_name = |n: &str| match n {
+        "i64" => Ty::Int,
+        "f64" => Ty::Float,
+        "bool" => Ty::Bool,
+        "json" => Ty::Json,
+        _ => Ty::Str,
+    };
+    sprig_logic_compile::js::Signature {
+        params: sig["params"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|p| {
+                let name = p["name"].as_str().unwrap_or_default().to_owned();
+                let ty = p["sql"].as_str().map_or_else(
+                    || ty_name(p["type"].as_str().unwrap_or("")),
+                    crate::declare::Param::ir_ty,
+                );
+                (name, ty)
+            })
+            .collect(),
+        returns: sig["returns"]
+            .as_str()
+            .map(crate::declare::Param::ir_ty)
+            .or_else(|| {
+                // A version recorded before `returns` was: `scalar` and the
+                // output's one field.
+                (sig["scalar"].as_bool() == Some(true)).then(|| {
+                    sig["events"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .find(|e| e["name"] == "output")
+                        .and_then(|e| e["fields"][0]["type"].as_str())
+                        .map_or(Ty::Json, ty_name)
+                })
+            }),
+        row: None,
+    }
+}
+
+/// Compiles a recorded version of a function in its own language: KIRun
+/// from its definition, JavaScript with the version's signature (the
+/// front end needs the declared parameter types), Lua and SQL to their
+/// reasons. Computed columns compile the active version of the function
+/// they call this way.
+///
+/// # Errors
+/// As [`compile`] and [`sprig_logic_compile::js::compile_with`].
+pub fn compile_version(
+    runtime: sprig_logic_compile::Runtime,
+    name: &str,
+    source: &str,
+    signature: &serde_json::Value,
+    cat: &dyn sprig_logic_compile::Columns,
+    opts: &Options,
+) -> Result<sprig_logic_compile::Compiled> {
+    if runtime == sprig_logic_compile::Runtime::Javascript {
+        sprig_logic_compile::js::compile_with(name, source, &js_signature_of(signature), cat, opts)
+    } else {
+        compile(runtime, source, cat, opts)
+    }
+}
+
+/// A computed column's generation expression (R7 order 3; the gateway
+/// puts it in place of the call with [`enforce::rewrite_computed`]): the active
+/// version of function `name` (its `runtime` text, `source` and recorded
+/// `signature`) compiled, then written as one expression over the call's
+/// arguments ([`enforce::computed_expr`]).
+///
+/// Only code that compiles with no reason qualifies: a version with
+/// reasons has placeholder parts, and the routine and engine-tier forms
+/// of a computed column aren't built. Among the reasons is
+/// `js.nondeterministic` (`Math.random()`, `Date.now()`, `new Date()`)
+/// and KIRun's random steps: a generated column, stored or virtual, must
+/// give the same value for the same row on every shard and replica.
+///
+/// # Errors
+/// 39862 for code with no expression form; 39874 for the wrong number of
+/// arguments; 39861 for a definition that doesn't parse.
+pub fn computed_column(
+    name: &str,
+    runtime: &str,
+    source: &str,
+    signature: &serde_json::Value,
+    call: &enforce::ComputedCall,
+) -> Result<String> {
+    let runtime =
+        sprig_logic_compile::Runtime::parse(runtime).unwrap_or(sprig_logic_compile::Runtime::Kirun);
+    let compiled = compile_version(
+        runtime,
+        name,
+        source,
+        signature,
+        &StaticColumns::new(),
+        &Options::default(),
+    )?;
+    let (Some(f), true) = (&compiled.ir, compiled.analysis.reasons.is_empty()) else {
+        let why: Vec<String> = compiled
+            .analysis
+            .reasons
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        return Err(unsupported(format!(
+            "{name} can't make computed column {}: a computed column needs code that compiles \
+             into one SQL expression, and {name} doesn't compile into MariaDB ({}); computed \
+             columns through the engine tier aren't built",
+            call.column,
+            if why.is_empty() {
+                "no compiled form".to_owned()
+            } else {
+                why.join("; ")
+            }
+        )));
+    };
+    enforce::computed_expr(f, call)
+}
+
+/// Compiles a validation's or after-commit trigger's body against `table`
+/// (JavaScript binds the row by name, see
+/// [`sprig_logic_compile::js::compile_with`]; KIRun's parameters bind by
+/// name too, decision V2).
+///
+/// # Errors
+/// As [`compile`].
+pub fn compile_bound(
+    d: &Declaration,
+    table: &str,
+    cat: &dyn sprig_logic_compile::Columns,
+    opts: &Options,
+) -> Result<sprig_logic_compile::Compiled> {
+    if d.runtime == sprig_logic_compile::Runtime::Javascript {
+        sprig_logic_compile::js::compile_with(
+            &d.name,
+            &d.body,
+            &sprig_logic_compile::js::Signature::row_of(table),
+            cat,
+            opts,
+        )
+    } else {
+        compile(d.runtime, &d.body, cat, opts)
     }
 }
 
@@ -266,6 +418,82 @@ pub async fn deploy(
     creator: Option<Creator<'_>>,
 ) -> Result<Outcome> {
     deploy_at(d, t, session, creator, At::default()).await
+}
+
+/// Computed columns made from function `prev` (R7 order 3) hold a copy of
+/// its body as their generation expression, made for its signature. A new
+/// version `f` that takes other parameter types, or returns another type,
+/// would no longer fit the calls in those columns: 39875 naming them. With
+/// the same signature the columns keep the expression they were made from,
+/// and the notes say so.
+///
+/// # Errors
+/// 39875; the catalog's.
+async fn computed_dependents(
+    c: &mut Conn,
+    store: &LogicStore,
+    prev: &ModuleRow,
+    f: &sprig_logic_compile::Function,
+    cols: &StaticColumns,
+) -> Result<Vec<String>> {
+    let Some(active) = prev.active_version else {
+        return Ok(Vec::new());
+    };
+    // Only columns that still exist: a dropped column leaves its binding.
+    let columns: Vec<String> = crate::drop::computed_columns(c, store, prev.module_id)
+        .await?
+        .into_iter()
+        .map(|(_, n)| n)
+        .filter(|n| match n.split_once('.') {
+            Some(("?", _)) | None => true,
+            Some((t, col)) => sprig_logic_compile::Columns::column(cols, t, col).is_some(),
+        })
+        .collect();
+    if columns.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (sig, _) = store.version_signature(c, prev.module_id, active).await?;
+    let old = crate::rollout::function_of(&prev.name, &sig);
+    let shape = |g: &sprig_logic_compile::Function| {
+        (
+            g.params.iter().map(|p| p.ty).collect::<Vec<_>>(),
+            g.event("output")
+                .map(|e| e.fields.iter().map(|(_, t)| *t).collect::<Vec<_>>()),
+        )
+    };
+    let (op, oo) = shape(&old);
+    let (np, no) = shape(f);
+    if op != np || oo != no {
+        let show = |ps: &[sprig_logic_compile::ir::Ty]| {
+            ps.iter().map(|t| t.name()).collect::<Vec<_>>().join(", ")
+        };
+        return Err(SprigError::new(
+            SprigCode::LogicInUse,
+            format!(
+                "{} is used by computed columns {}, made for its signature ({}) of version \
+                 {active}; this version takes ({}){}. Drop or re-create those columns first, \
+                 or keep the signature",
+                prev.name,
+                columns.join(", "),
+                show(&op),
+                show(&np),
+                if oo == no {
+                    ""
+                } else {
+                    " and returns another type"
+                },
+            ),
+        ));
+    }
+    Ok(columns
+        .iter()
+        .map(|c| {
+            format!(
+                "computed column {c} keeps the expression of version {active}: a generated \
+                 column holds its own copy; re-create it to use this version"
+            )
+        })
+        .collect())
 }
 
 /// Where and as what [`deploy_at`] deploys (R7 close-out).
@@ -380,10 +608,16 @@ pub async fn deploy_at(
         // the language); `SQL SECURITY DEFINER` is fine in MariaDB.
         sprig_logic_js::Program::new(d.runtime.as_str(), &d.name, &d.body, script_sig(d))?;
     }
+    let computed_notes = match (&previous, &compiled.ir) {
+        (Some(prev), Some(f)) if d.kind == Kind::Function => {
+            computed_dependents(t.catalog, &store, prev, f, &cols).await?
+        }
+        _ => Vec::new(),
+    };
     // A staged rollout (R7 follow-ups): the active version stays for most
     // callers; it must take the same parameters, in the same language,
     // with the same rights, so one wrapper can hold both.
-    let mut rollout_notes = Vec::new();
+    let mut rollout_notes = computed_notes;
     let stage = match (d.rollout, &previous) {
         (Some(spec), Some(prev))
             if matches!(d.kind, Kind::Function | Kind::Procedure)
@@ -854,7 +1088,17 @@ pub async fn deploy_bound(
         compile_max_cost: t.compile_max_cost,
         definer_security: true,
     };
-    let compiled = compile(d.runtime, &d.body, &cols, &opts)?;
+    let compiled = compile_bound(d, table, &cols, &opts)?;
+    if d.runtime == sprig_logic_compile::Runtime::Javascript {
+        // QuickJS must accept it too: the engine tier defines the
+        // language, and test runs run it there.
+        sprig_logic_js::Program::new(
+            d.runtime.as_str(),
+            &d.name,
+            &d.body,
+            crate::testrun::js_row_sig(&d.body),
+        )?;
+    }
     let placed = placement::place(&compiled, d.tier, t.single_shard)?;
     let (Some(f), Some(p), Tier::MariaDb) = (&compiled.ir, &compiled.plsql, placed.tier) else {
         let why: Vec<String> = placed.reasons.iter().map(ToString::to_string).collect();
@@ -1298,4 +1542,167 @@ pub async fn abort(
     let _ = LogicStore::new(catalog_schema)
         .set_version_state(catalog, p.module_id, p.version, "failed")
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use sprig_logic_compile::ir::Ty;
+
+    /// The signature `deploy_at` records for
+    /// `net(price DOUBLE, stock INT) RETURNS DOUBLE` in JavaScript.
+    fn net_sig() -> serde_json::Value {
+        serde_json::json!({
+            "params": [
+                {"name": "price", "type": "f64", "sql": "double"},
+                {"name": "stock", "type": "i64", "sql": "int"}
+            ],
+            "events": [{"name": "output", "fields": [{"name": "value", "type": "f64"}]}],
+            "scalar": true,
+            "returns": "double"
+        })
+    }
+
+    fn call(sql: &str) -> enforce::ComputedCall {
+        enforce::parse_computed(sql).unwrap()
+    }
+
+    #[test]
+    fn javascript_signatures_come_from_the_version() {
+        let s = js_signature_of(&net_sig());
+        assert_eq!(
+            s.params,
+            [
+                ("price".to_owned(), Ty::Float),
+                ("stock".to_owned(), Ty::Int)
+            ]
+        );
+        assert_eq!(s.returns, Some(Ty::Float));
+        // Recorded before `returns` was: `scalar` and the output's field.
+        let mut old = net_sig();
+        old.as_object_mut().unwrap().remove("returns");
+        old["params"][1].as_object_mut().unwrap().remove("sql");
+        let s = js_signature_of(&old);
+        assert_eq!(s.params[1].1, Ty::Int);
+        assert_eq!(s.returns, Some(Ty::Float));
+    }
+
+    #[test]
+    fn a_javascript_function_makes_a_computed_column() {
+        let c = call("ALTER TABLE products ADD COLUMN c DOUBLE AS (net(price, stock)) STORED");
+        let body = "export default function (price, stock) { return price * stock; }";
+        let expr = computed_column("net", "javascript", body, &net_sig(), &c).unwrap();
+        assert!(
+            expr.contains("(price)") && expr.contains("(stock)"),
+            "{expr}"
+        );
+        // Before (jsbind) every JavaScript function was 39862 here.
+        let wrong = call("ALTER TABLE products ADD COLUMN c DOUBLE AS (net(price)) VIRTUAL");
+        let e = computed_column("net", "javascript", body, &net_sig(), &wrong).unwrap_err();
+        assert_eq!(e.code(), Some(SprigCode::LogicSignatureMismatch));
+    }
+
+    #[test]
+    fn nondeterministic_code_makes_no_computed_column() {
+        for (stored, sql) in [
+            (
+                true,
+                "ALTER TABLE p ADD COLUMN c DOUBLE AS (net(price, stock)) STORED",
+            ),
+            (
+                false,
+                "ALTER TABLE p ADD COLUMN c DOUBLE AS (net(price, stock)) VIRTUAL",
+            ),
+        ] {
+            let c = call(sql);
+            assert_eq!(c.stored, stored);
+            for body in [
+                "return price * stock * Math.random();",
+                "return Date.now() + price;",
+            ] {
+                let e = computed_column("net", "javascript", body, &net_sig(), &c).unwrap_err();
+                assert_eq!(e.code(), Some(SprigCode::LogicUnsupported), "{body}");
+                assert!(e.message.contains("js.nondeterministic"), "{}", e.message);
+            }
+        }
+        // Lua has no compiler front end (RC24).
+        let c = call("ALTER TABLE p ADD COLUMN c DOUBLE AS (net(price, stock))");
+        let e = computed_column("net", "lua", "return price * stock", &net_sig(), &c).unwrap_err();
+        assert!(e.message.contains("lua.front_end"), "{}", e.message);
+    }
+
+    fn sales() -> StaticColumns {
+        StaticColumns::new().table(
+            "sales",
+            &[("id", Ty::Int), ("qty", Ty::Int), ("status", Ty::Str)],
+        )
+    }
+
+    #[test]
+    fn javascript_validations_bind_the_row() {
+        let opts = Options::default();
+        // One message from the new row only: a CHECK.
+        let d = crate::declare::parse(
+            "CREATE VALIDATION qty_ok ON sales FOR INSERT, UPDATE LANGUAGE javascript AS $$
+             export default function (row) { if (row.qty <= 0) sprig.reject('qty must be positive'); }
+             $$",
+        )
+        .unwrap();
+        let c = compile_bound(&d, "sales", &sales(), &opts).unwrap();
+        assert!(c.compilable(), "{:?}", c.analysis.reasons);
+        let f = c.ir.as_ref().unwrap();
+        let bound = enforce::bind_row(f, "sales", &sales()).unwrap();
+        let (en, _) = enforce::plan_validation(f, &bound, &d.events, 7, 1);
+        match en {
+            Enforcement::Check { message, expr, .. } => {
+                assert_eq!(message, "qty must be positive");
+                assert!(expr.contains("`qty`"), "{expr}");
+            }
+            Enforcement::Triggers => panic!("not a CHECK"),
+        }
+        // Reading old: BEFORE triggers with NEW, OLD and the operation.
+        let d = crate::declare::parse(
+            "CREATE VALIDATION grows ON sales FOR UPDATE LANGUAGE javascript AS $$
+             if (old !== null && old.qty > row.qty) sprig.reject(`qty ${old.qty} can't fall to ${row.qty}`);
+             $$",
+        )
+        .unwrap();
+        let c = compile_bound(&d, "sales", &sales(), &opts).unwrap();
+        assert!(c.compilable(), "{:?}", c.analysis.reasons);
+        let f = c.ir.as_ref().unwrap();
+        let bound = enforce::bind_row(f, "sales", &sales()).unwrap();
+        assert!(matches!(
+            enforce::plan_validation(f, &bound, &d.events, 7, 1).0,
+            Enforcement::Triggers
+        ));
+        let t = enforce::validation_trigger("s", "tg", "sales", "update", "e", &bound);
+        assert!(
+            t.contains("NEW.`qty`") && t.contains("OLD.`qty`") && t.contains("'update'"),
+            "{t}"
+        );
+        // An after-commit trigger, and Lua's refusal.
+        let d = crate::declare::parse(
+            "CREATE TRIGGER audit AFTER COMMIT ON sales FOR INSERT, DELETE LANGUAGE javascript AS $$
+             export default function (row, op) {
+               db.exec('INSERT INTO sales (id, qty, status) VALUES (?, ?, ?)', [row.id + 1000, row.qty, op]);
+             }
+             $$",
+        )
+        .unwrap();
+        let c = compile_bound(&d, "sales", &sales(), &opts).unwrap();
+        assert!(c.compilable(), "{:?}", c.analysis.reasons);
+        let names: Vec<&str> =
+            c.ir.as_ref()
+                .unwrap()
+                .params
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect();
+        assert_eq!(names, ["id", "qty", "op"]);
+        let mut d = d;
+        d.runtime = sprig_logic_compile::Runtime::Lua;
+        let c = compile_bound(&d, "sales", &sales(), &opts).unwrap();
+        assert!(!c.compilable());
+    }
 }

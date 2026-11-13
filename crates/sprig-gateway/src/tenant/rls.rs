@@ -1470,6 +1470,10 @@ pub fn doc_policies(
 pub struct DocViews {
     /// (database, table) → the policies.
     pub tables: HashMap<(String, String), DocPolicies>,
+    /// (database, table) the session may read but not `WATCH` (chapters
+    /// 29 and 38): [`DocPolicies::Hidden`] in `tables` too; a stream over
+    /// one of them alone is refused.
+    pub unwatched: std::collections::HashSet<(String, String)>,
 }
 
 impl DocViews {
@@ -1503,9 +1507,11 @@ impl DocViews {
 }
 
 /// [`DocViews`] for a session with compiled policies `rls` (none: empty).
-/// Tables the session may not `SELECT` are [`DocPolicies::Hidden`] too
-/// (RL40): a database or deployment change stream leaves their events out,
-/// as MongoDB asks `find` on every collection of what it watches.
+/// Tables the session may not `SELECT`, or may not `WATCH` (chapter 38: an
+/// application stream needs `WATCH` on each object), are
+/// [`DocPolicies::Hidden`] too (RL40): a database or deployment change
+/// stream leaves their events out, as MongoDB asks `find` and
+/// `changeStream` on every collection of what it watches.
 #[must_use]
 pub fn doc_views(ts: &TenantSession, cat: &TenantCatalog, rls: Option<&SessionRls>) -> DocViews {
     let mut out = DocViews::default();
@@ -1520,18 +1526,17 @@ pub fn doc_views(ts: &TenantSession, cat: &TenantCatalog, rls: Option<&SessionRl
                 continue;
             };
             let db_key = database_key(&db.name, lctn);
-            if !grants.allows(
-                Action::Select,
-                Target::Object {
-                    db_key: &db_key,
-                    db: obj.db_id,
-                    object: obj.object_id,
-                },
-            ) {
-                out.tables.insert(
-                    (db.name.to_lowercase(), obj.name.to_lowercase()),
-                    DocPolicies::Hidden,
-                );
+            let on = Target::Object {
+                db_key: &db_key,
+                db: obj.db_id,
+                object: obj.object_id,
+            };
+            let key = (db.name.to_lowercase(), obj.name.to_lowercase());
+            if !grants.allows(Action::Select, on) {
+                out.tables.insert(key, DocPolicies::Hidden);
+            } else if !grants.allows(Action::Watch, on) {
+                out.tables.insert(key.clone(), DocPolicies::Hidden);
+                out.unwatched.insert(key);
             }
         }
     }

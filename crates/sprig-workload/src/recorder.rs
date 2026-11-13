@@ -508,7 +508,9 @@ const SHARDS: usize = 64;
 
 /// Per-gateway workload recorder (chapter 12, `Recorder`).
 pub struct Recorder {
-    cfg: RecorderConfig,
+    /// The settings; replaced whole when a `workload.*` key changes
+    /// ([`Recorder::set_config`]).
+    cfg: arc_swap::ArcSwap<RecorderConfig>,
     clock: Arc<dyn Clock>,
     shards: Box<[Padded]>,
     tenants: Mutex<HashMap<TenantId, TenantState>>,
@@ -574,7 +576,7 @@ impl Recorder {
     #[must_use]
     pub fn new(cfg: RecorderConfig, clock: Arc<dyn Clock>) -> Self {
         Self {
-            cfg,
+            cfg: arc_swap::ArcSwap::from_pointee(cfg),
             clock,
             shards: (0..SHARDS)
                 .map(|_| Padded(Mutex::new(HashMap::new())))
@@ -595,10 +597,20 @@ impl Recorder {
         }
     }
 
-    /// The settings.
+    /// The settings now.
     #[must_use]
-    pub fn config(&self) -> &RecorderConfig {
-        &self.cfg
+    pub fn config(&self) -> Arc<RecorderConfig> {
+        self.cfg.load_full()
+    }
+
+    /// Replaces the settings (the `workload.*` keys apply live): the next
+    /// statement plans and records with them. A new `bucket_minutes`
+    /// applies from the next bucket boundary it computes; entries already
+    /// open keep their bucket.
+    pub fn set_config(&self, cfg: RecorderConfig) {
+        if *self.cfg.load_full() != cfg {
+            self.cfg.store(Arc::new(cfg));
+        }
     }
 
     fn shard(&self, key: &Key) -> &Mutex<HashMap<Key, Entry>> {
@@ -606,7 +618,7 @@ impl Recorder {
     }
 
     fn bucket_secs(&self) -> u64 {
-        u64::from(self.cfg.bucket_minutes.max(1)) * 60
+        u64::from(self.cfg.load().bucket_minutes.max(1)) * 60
     }
 
     /// (bucket start, now) in seconds since the epoch.
@@ -618,7 +630,8 @@ impl Recorder {
     }
 
     fn tenant_cap(&self) -> usize {
-        self.cfg.max_memory_bytes / 100 * usize::from(self.cfg.max_tenant_memory_pct.min(100))
+        self.cfg.load().max_memory_bytes / 100
+            * usize::from(self.cfg.load().max_tenant_memory_pct.min(100))
     }
 
     /// Asks for probes and parameter capture around one execution (chapter
@@ -641,22 +654,22 @@ impl Recorder {
         } else {
             &Stats::default()
         };
-        let watch_us = self.cfg.watch_p95_ms.saturating_mul(1000);
+        let watch_us = self.cfg.load().watch_p95_ms.saturating_mul(1000);
         let p95 = cur.latency_hist.quantile_us(0.95).unwrap_or(0);
         let watched = e.watched || p95 > watch_us || e.prev_p95_us > watch_us;
         if !watched {
             return ProbePlan::default();
         }
         let roll = mix(fp.id.0 ^ cur.exec_count.rotate_left(17) ^ tenant.0);
-        let full =
-            cur.mean_us() >= self.cfg.full_probe_ms.saturating_mul(1000) && cur.exec_count > 0;
+        let full = cur.mean_us() >= self.cfg.load().full_probe_ms.saturating_mul(1000)
+            && cur.exec_count > 0;
         let examined =
-            full || cur.examined_samples == 0 || under(roll, self.cfg.examined_sample_rate);
-        let capture_params = self.cfg.capture_samples
+            full || cur.examined_samples == 0 || under(roll, self.cfg.load().examined_sample_rate);
+        let capture_params = self.cfg.load().capture_samples
             && !fp.sensitive
             && Reserved::of(fp.id).is_none()
-            && (e.samples_in_bucket.1 < self.cfg.samples_per_bucket
-                || under(mix(roll), self.cfg.sample_rate));
+            && (e.samples_in_bucket.1 < self.cfg.load().samples_per_bucket
+                || under(mix(roll), self.cfg.load().sample_rate));
         if capture_params {
             e.samples_in_bucket.1 = e.samples_in_bucket.1.saturating_add(1);
         }
@@ -735,8 +748,8 @@ impl Recorder {
             s.returned_sampled = s.returned_sampled.saturating_add(ex.rows_returned);
             #[allow(clippy::cast_precision_loss)]
             let small = (ex.rows_returned.max(ex.rows_affected) as f64)
-                <= self.cfg.scan_max_returned_ratio * x as f64;
-            if x >= self.cfg.scan_min_examined && small {
+                <= self.cfg.load().scan_max_returned_ratio * x as f64;
+            if x >= self.cfg.load().scan_min_examined && small {
                 s.scan_runs += 1;
                 s.scan_sessions.insert(ex.session);
             }
@@ -809,7 +822,8 @@ impl Recorder {
             let st = t.entry(tenant).or_default();
             let known = st.known.contains(&fp.id.0);
             let reserved = Reserved::of(fp.id).is_some();
-            let cap = usize::try_from(self.cfg.max_fingerprints_per_tenant).unwrap_or(usize::MAX);
+            let cap =
+                usize::try_from(self.cfg.load().max_fingerprints_per_tenant).unwrap_or(usize::MAX);
             let over = !known && !reserved && st.known.len() >= cap;
             let meta = if over {
                 self.other_total.fetch_add(1, Ordering::Relaxed);
@@ -878,7 +892,7 @@ impl Recorder {
     /// Evicts when over the gateway or the tenant cap.
     fn enforce_caps(&self, tenant: TenantId, tenant_bytes: usize) {
         let total = self.memory.load(Ordering::Relaxed);
-        let over_total = total > self.cfg.max_memory_bytes;
+        let over_total = total > self.cfg.load().max_memory_bytes;
         let over_tenant = tenant_bytes > self.tenant_cap();
         if !(over_total || over_tenant) {
             return;
@@ -893,13 +907,13 @@ impl Recorder {
         if over_tenant {
             self.evict(Some(tenant), self.tenant_cap() / 10 * 9);
         }
-        if self.memory.load(Ordering::Relaxed) > self.cfg.max_memory_bytes {
+        if self.memory.load(Ordering::Relaxed) > self.cfg.load().max_memory_bytes {
             // The flusher's backlog may hold at most a quarter of the cap;
             // past that its oldest rows are dropped (and counted) before
             // live entries are evicted.
-            self.trim_closed(self.cfg.max_memory_bytes / 4);
-            self.evict(None, self.cfg.max_memory_bytes / 10 * 9);
-            self.trim_closed(self.cfg.max_memory_bytes / 4);
+            self.trim_closed(self.cfg.load().max_memory_bytes / 4);
+            self.evict(None, self.cfg.load().max_memory_bytes / 10 * 9);
+            self.trim_closed(self.cfg.load().max_memory_bytes / 4);
         }
         self.evicting.store(false, Ordering::Release);
     }
@@ -1013,7 +1027,7 @@ impl Recorder {
         }
         self.memory.fetch_add(bytes, Ordering::Relaxed);
         self.closed_bytes.fetch_add(bytes, Ordering::Relaxed);
-        self.trim_closed(self.cfg.max_memory_bytes / 4);
+        self.trim_closed(self.cfg.load().max_memory_bytes / 4);
     }
 
     /// Takes the first sightings since the last call.

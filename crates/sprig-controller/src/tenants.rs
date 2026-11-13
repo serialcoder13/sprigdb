@@ -588,7 +588,7 @@ where
                     return Ok(CreateTenantResponse {
                         created: true,
                         tenant,
-                        placement: Some(format!("dc {home}: least busy allowed DC (chapter 24)")),
+                        placement: Some(format!("dc {home}: least busy allowed DC")),
                     });
                 }
                 Some(e) if e.body().state == TenantState::Failed => {
@@ -1124,6 +1124,8 @@ where
             auth_version: b.auth_version,
             settings_version: b.settings_version,
             cluster,
+            suspended: b.suspended,
+            suspended_reason: b.suspended_reason.clone(),
             ancestry,
             created_at: b.created_at.clone(),
             mod_revision: e.mod_revision,

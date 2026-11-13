@@ -14,7 +14,7 @@
 //!   drivers authenticate against.
 //! - **Roles.** A MongoDB role `(role, db)` is the SQL role
 //!   `mongo.<db>.<role>`. Built-in roles are created on first use with
-//!   their privileges (`read` is `SELECT` on `db.*`, `readWrite` adds
+//!   their privileges (`read` is `SELECT, WATCH` on `db.*`, `readWrite` adds
 //!   `INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, INDEX`, ...);
 //!   `createRole` makes a custom one from `privileges` and `roles`. Every
 //!   granted role is a default role, since MongoDB has no `SET ROLE`.
@@ -45,15 +45,17 @@ const DUPLICATE_ROLE: i32 = 51002;
 /// A built-in role: its SQL privileges, and whether it is tenant-wide
 /// (`*AnyDatabase`, `root`, cluster roles: only on `admin`).
 fn builtin(role: &str) -> Option<(&'static str, bool)> {
-    const RW: &str = "SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, INDEX";
+    // MongoDB's read roles carry `changeStream`, which is chapter 29's
+    // `WATCH` (decision bugfix-interim).
+    const RW: &str = "SELECT, WATCH, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, INDEX";
     Some(match role {
-        "read" => ("SELECT", false),
+        "read" => ("SELECT, WATCH", false),
         "readWrite" => (RW, false),
         "dbAdmin" => ("CREATE, DROP, ALTER, INDEX", false),
         "userAdmin" => ("GRANT OPTION", false),
         "dbOwner" => ("ALL PRIVILEGES", false),
         "enableSharding" => ("", false),
-        "readAnyDatabase" | "backup" => ("SELECT", true),
+        "readAnyDatabase" | "backup" => ("SELECT, WATCH", true),
         "readWriteAnyDatabase" => (RW, true),
         "dbAdminAnyDatabase" => ("CREATE, DROP, ALTER, INDEX", true),
         "userAdminAnyDatabase" => ("CREATE USER, GRANT OPTION", true),
@@ -624,7 +626,10 @@ fn sql_privileges(actions: &[Bson]) -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
     for a in actions.iter().filter_map(Bson::as_str) {
         let p: &[&'static str] = match a {
-            "find" | "listCollections" | "listIndexes" | "changeStream" => &["SELECT"],
+            "find" | "listCollections" | "listIndexes" => &["SELECT"],
+            // Chapter 29: `changeStream` is `WATCH`; a stream needs `find`
+            // too, as in MongoDB.
+            "changeStream" => &["WATCH"],
             "insert" => &["INSERT"],
             "update" => &["UPDATE"],
             "remove" => &["DELETE"],
@@ -657,7 +662,7 @@ mod tests {
             Some(("readWrite".into(), "shop".into()))
         );
         assert_eq!(mongo_role("app_role"), None);
-        assert_eq!(builtin("readAnyDatabase"), Some(("SELECT", true)));
+        assert_eq!(builtin("readAnyDatabase"), Some(("SELECT, WATCH", true)));
         assert!(builtin("nope").is_none());
         assert_eq!(
             roles_of(
@@ -674,6 +679,12 @@ mod tests {
             sql_privileges(&[Bson::from("find"), Bson::from("insert"), Bson::from("find")]),
             vec!["SELECT", "INSERT"]
         );
+        // Chapter 29: changeStream is WATCH (a stream needs find too).
+        assert_eq!(
+            sql_privileges(&[Bson::from("find"), Bson::from("changeStream")]),
+            vec!["SELECT", "WATCH"]
+        );
+        assert_eq!(builtin("read"), Some(("SELECT, WATCH", false)));
         assert_eq!(account("o'k"), "'o''k'@'%'");
     }
 }

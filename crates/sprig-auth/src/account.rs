@@ -52,15 +52,13 @@ pub use host::HostPattern;
 /// The longest login name, in characters (chapter 14, "Name limits").
 pub const MAX_LOGIN_NAME: usize = 255;
 
-/// Whether `s` is a tenant name: `^[a-z][a-z0-9-]{1,62}$` (chapter 14).
+/// Whether `s` is a tenant name: the one rule of
+/// [`sprig_common::names::is_tenant_name`] (chapter 14), which creating a
+/// tenant checks too, so every tenant that can be created can be logged in
+/// to.
 #[must_use]
 pub fn valid_tenant_name(s: &str) -> bool {
-    let b = s.as_bytes();
-    (2..=63).contains(&b.len())
-        && b[0].is_ascii_lowercase()
-        && b[1..]
-            .iter()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+    sprig_common::names::is_tenant_name(s)
 }
 
 /// A login name split into tenant and user.

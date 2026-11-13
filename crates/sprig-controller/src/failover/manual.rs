@@ -193,7 +193,7 @@ impl FailoverRole {
         }
         if !e.residency_allows(&y) {
             return Err(refused(format!(
-                "tenant {name}'s residency doesn't allow {y} (chapter 26): it never leaves its allowed data centers"
+                "tenant {name}'s residency doesn't allow {y}: it never leaves its allowed data centers"
             )));
         }
         let ydc = global
@@ -428,7 +428,7 @@ impl FailoverRole {
         }
         if !e.residency_allows(&req.dc) {
             return Err(refused(format!(
-                "tenant {name}'s residency doesn't allow a copy in {} (chapter 26)",
+                "tenant {name}'s residency doesn't allow a copy in {}",
                 req.dc
             )));
         }

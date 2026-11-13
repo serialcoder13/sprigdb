@@ -256,6 +256,7 @@ impl Suite {
                 })
                 .collect(),
             returns: sig.scalar.then_some(Ty::Int),
+            row: None,
         };
         let c =
             sprig_logic_compile::js::compile_with(name, js, &jsig, &self.columns(), &opts).unwrap();

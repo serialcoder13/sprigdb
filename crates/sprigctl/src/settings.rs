@@ -30,7 +30,7 @@ use crate::client::AdminClient;
 use crate::{Failed, Output, print, render};
 
 const SCOPE_HELP: &str = "global, dc, cluster, tenant, database or object (with --tenant, --db, \
-                          --object, --cluster, --dc), or chapter 47's form: dc:<id>, \
+                          --object, --cluster, --dc), or one context string: dc:<id>, \
                           cluster:<id>, tenant:<name>, db:<tenant>.<db>, object:<tenant>.<db>.<object>";
 
 fn key() -> Arg {
@@ -125,7 +125,7 @@ pub(crate) fn group() -> Command {
                 .arg(
                     Arg::new("scope")
                         .long("scope")
-                        .help("The context in chapter 47's form, such as object:acme.shop.orders"),
+                        .help("The context as one string, such as object:acme.shop.orders"),
                 ),
         ))
         .subcommand(write_args(

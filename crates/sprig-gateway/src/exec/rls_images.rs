@@ -12,6 +12,7 @@
 //! ```text
 //! table t of the request, image i:
 //!   no SELECT on the table (or no such table)  → v = 0
+//!   `watch` asked and no WATCH on the table     → v = 0
 //!   image null                                 → v = 1 (the privilege alone)
 //!   the table's policies don't bind the session → v = 1
 //!   bound: the session's SELECT policies, rendered with its session values
@@ -67,6 +68,11 @@ pub(crate) struct ImagesRequest {
     /// key-value key), not base64 as change records do.
     #[serde(default)]
     pub plain_binary: bool,
+    /// Also `WATCH` on each table (chapters 29 and 38: an application
+    /// change stream needs it); `Changes.Watch` sets it, keyspace
+    /// notifications don't.
+    #[serde(default)]
+    pub watch: bool,
 }
 
 /// The marked statement of `req`.
@@ -213,7 +219,10 @@ impl PassSession {
                     db: db.db_id,
                     object: obj.object_id,
                 };
-                if !g.unrestricted() && !g.allows(Action::Select, on) {
+                if !g.unrestricted()
+                    && (!g.allows(Action::Select, on)
+                        || (req.watch && !g.allows(Action::Watch, on)))
+                {
                     none(&mut out);
                     continue;
                 }
@@ -351,9 +360,11 @@ mod tests {
                 images: vec![None, Some(serde_json::Map::new())],
             }],
             plain_binary: false,
+            watch: true,
         };
         let s = statement(&req);
         assert!(s.starts_with(MARK));
+        assert!(s.contains("\"watch\":true"));
         assert!(s.contains("\"table\":\"docs\""));
         let rows = vec![
             vec![Some("0".into()), Some("1".into()), Some("1".into())],

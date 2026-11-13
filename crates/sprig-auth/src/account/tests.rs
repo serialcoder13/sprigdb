@@ -19,6 +19,35 @@ fn tenant_names() {
     assert!(!valid_tenant_name("ac_me"));
     assert!(!valid_tenant_name(&"a".repeat(64)));
     assert!(valid_tenant_name(&"a".repeat(63)));
+    // A DNS label never ends with a hyphen (the rule creation uses too).
+    assert!(!valid_tenant_name("acme-"));
+}
+
+#[test]
+fn logins_accept_every_name_creation_accepts() {
+    // The one shared rule: what `sprigctl tenant create` takes, a login
+    // can name, on a shared endpoint, by SNI and in an API key.
+    for name in ["ab", "a1", "pune-2", &"x".repeat(63)] {
+        assert!(sprig_common::names::is_tenant_name(name));
+        let p = parse_login(&format!("{name}.alice"), None, &sfx(), 32).unwrap();
+        assert_eq!(p.tenant, name);
+        let sni = format!("{name}.db.example.com");
+        let p = parse_login("alice", Some(&sni), &sfx(), 32).unwrap();
+        assert_eq!(p.tenant, name);
+        let key = format!("sprig_{name}_{}_{}", "a".repeat(12), "0".repeat(64));
+        assert_eq!(crate::apikey::parse_key(&key).unwrap().tenant, name);
+    }
+    for name in ["a", "acme-", "Acme"] {
+        assert!(parse_login(&format!("{name}.alice"), None, &sfx(), 32).is_none());
+        // Host names are case-insensitive: SNI `Acme.` is tenant `acme`.
+        let sni = format!("{name}.db.example.com");
+        assert_eq!(
+            parse_login("alice", Some(&sni), &sfx(), 32).is_none(),
+            name != "Acme"
+        );
+        let key = format!("sprig_{name}_{}_{}", "a".repeat(12), "0".repeat(64));
+        assert!(crate::apikey::parse_key(&key).is_none());
+    }
 }
 
 #[test]

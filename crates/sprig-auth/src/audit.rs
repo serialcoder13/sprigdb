@@ -79,6 +79,21 @@ pub mod events {
     pub const HANDOFF: &str = "auth.handoff";
     /// An address was refused for too many failed logins.
     pub const RATE_LIMITED: &str = "auth.rate_limited";
+    /// `GRANT` of privileges (chapter 29: every grant change is audited;
+    /// `detail` is the statement as parsed, never a secret).
+    pub const PRIVILEGES_GRANTED: &str = "authz.privileges_granted";
+    /// `REVOKE` of privileges, or `REVOKE ALL PRIVILEGES, GRANT OPTION`.
+    pub const PRIVILEGES_REVOKED: &str = "authz.privileges_revoked";
+    /// `CREATE ROLE`.
+    pub const ROLE_CREATED: &str = "authz.role_created";
+    /// `DROP ROLE`.
+    pub const ROLE_DROPPED: &str = "authz.role_dropped";
+    /// `GRANT role TO ...`.
+    pub const ROLES_GRANTED: &str = "authz.roles_granted";
+    /// `REVOKE role FROM ...`.
+    pub const ROLES_REVOKED: &str = "authz.roles_revoked";
+    /// `SET DEFAULT ROLE`.
+    pub const DEFAULT_ROLES_SET: &str = "authz.default_roles_set";
     /// Verifiers a password lacked were stored at a login (SCRAM backfill;
     /// the detail lists the mechanisms, never a verifier).
     pub const VERIFIERS_ADDED: &str = "auth.verifiers_added";

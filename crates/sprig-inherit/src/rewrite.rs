@@ -218,7 +218,8 @@ fn expand_wildcards(stmt: &mut Statement, rf: &Ref) {
                 return ControlFlow::Continue(());
             };
             let single = s.from.len() == 1 && s.from[0].joins.is_empty();
-            // A typed table's type columns are invisible, as in its table.
+            // A typed table's type columns are invisible, as in its table,
+            // and so are a record hierarchy's path columns.
             let typed = self.rf.r.obj.type_root.is_some();
             let cols = |a: &str| -> Vec<SelectItem> {
                 self.rf
@@ -230,6 +231,7 @@ fn expand_wildcards(stmt: &mut Statement, rf: &Ref) {
                         !(typed
                             && (c.eq_ignore_ascii_case("_type")
                                 || c.eq_ignore_ascii_case("_type_path")))
+                            && !crate::hier::is_path_column(c)
                     })
                     .map(|c| {
                         SelectItem::UnnamedExpr(Expr::CompoundIdentifier(vec![
@@ -398,6 +400,24 @@ pub(crate) async fn replace_refs(
     }
     if v.refs.is_empty() {
         return Ok(None);
+    }
+    // A record hierarchy's path columns: in the view only when the
+    // statement names them (a type plan's), and never in `*` (decision
+    // T22; a derived table has no invisible columns).
+    let paths_named = crate::grammar::identifiers(stmt.to_string().as_bytes(), &ctx.lex)
+        .iter()
+        .any(|i| crate::hier::is_path_column(i));
+    for rf in &mut v.refs {
+        if crate::hier::has_paths(&rf.r.obj) && !paths_named {
+            rf.r.obj = std::sync::Arc::new(crate::hier::without_paths(&rf.r.obj));
+        }
+    }
+    if paths_named && !origin {
+        for rf in &v.refs {
+            if crate::hier::has_paths(&rf.r.obj) {
+                expand_wildcards(stmt, rf);
+            }
+        }
     }
     if origin {
         if v.refs.len() != 1 {

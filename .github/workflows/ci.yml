@@ -1,8 +1,8 @@
 # CI stages of chapter 46 ("Flows"):
 #
-#   S0  every push and pull request   rustfmt, clippy, unit tests, cargo deny,
+#   S0  every push to main            rustfmt, clippy, unit tests, cargo deny,
 #                                     Compose files validated
-#   S1  main, PRs labelled full-ci    integration tests against Compose (all
+#   S1  main and on demand            integration tests against Compose (all
 #                                     single-DC profiles, plus toxiproxy,
 #                                     faultd and elle-cli), SPRIG_TEST_* set;
 #                                     simulations, 200 seeds per suite
@@ -18,20 +18,14 @@
 # suites they run.
 name: ci
 
-# Runs (Kiran, 12 Nov 2026: CI was running all the time):
-# - push: main only; branches are covered by their pull requests, so a
-#   change no longer runs twice (branch push + pull request).
-# - Docs, the website, brand assets and Markdown don't run the Rust jobs.
-# - S1 runs on main, on demand, weekly, and on pull requests labelled
-#   `full-ci`; other pull requests get S0 only.
-# - S2 weekly (Sunday) while the repository is private and minutes are
-#   billed; back to nightly once it's public.
+# Runs (Kiran, 12 Nov 2026: "run ci only in main not in all branches"):
+# - pushes to main only; branches and pull requests don't run CI;
+# - docs, the website, brand assets and Markdown don't run it either;
+# - by hand (Actions → ci → Run workflow), for any branch;
+# - S2 weekly (Sunday) while minutes are billed.
 on:
   push:
     branches: [main]
-    paths-ignore: ["docs/**", "site/**", "brand/**", "**/*.md"]
-  pull_request:
-    types: [opened, synchronize, reopened, labeled]
     paths-ignore: ["docs/**", "site/**", "brand/**", "**/*.md"]
   workflow_dispatch:
   schedule:
@@ -47,6 +41,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Line tables only: backtraces keep file and line, the build and its cache
+  # shrink by about half.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
   # ---------------------------------------------------------------- S0 ----
@@ -68,6 +66,10 @@ jobs:
       # etcd-client and tonic build scripts need protoc.
       - run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: clippy
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:
@@ -79,6 +81,10 @@ jobs:
       # etcd-client and tonic build scripts need protoc.
       - run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
@@ -112,6 +118,10 @@ jobs:
       - run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
         working-directory: .
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: SPRIG_STUDIO_DIST=$PWD/studio/dist cargo test --locked -p sprig-studio
         working-directory: .
       - uses: actions/upload-artifact@v4
@@ -129,8 +139,6 @@ jobs:
     name: S1 Studio end to end
     needs: [studio]
     if: >-
-      (github.event_name == 'pull_request' &&
-        contains(github.event.pull_request.labels.*.name, 'full-ci')) ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
       github.ref == 'refs/heads/main'
@@ -152,6 +160,10 @@ jobs:
       # etcd-client and tonic build scripts need protoc.
       - run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Start Compose (etcd + one node)
         working-directory: deploy/compose
         run: docker compose --profile single up -d --wait --wait-timeout 300
@@ -220,8 +232,6 @@ jobs:
     name: S1 fuzz smoke
     needs: [fmt, clippy, test]
     if: >-
-      (github.event_name == 'pull_request' &&
-        contains(github.event.pull_request.labels.*.name, 'full-ci')) ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
       github.ref == 'refs/heads/main'
@@ -264,8 +274,6 @@ jobs:
     name: S1 integration (Compose, one DC)
     needs: [fmt, clippy, test, compose]
     if: >-
-      (github.event_name == 'pull_request' &&
-        contains(github.event.pull_request.labels.*.name, 'full-ci')) ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
       github.ref == 'refs/heads/main'
@@ -289,6 +297,10 @@ jobs:
       # etcd-client and tonic build scripts need protoc.
       - run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
@@ -328,8 +340,6 @@ jobs:
     name: S1 simulation (seeded)
     needs: [fmt, clippy, test]
     if: >-
-      (github.event_name == 'pull_request' &&
-        contains(github.event.pull_request.labels.*.name, 'full-ci')) ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
       github.ref == 'refs/heads/main'
@@ -348,7 +358,9 @@ jobs:
       - run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - uses: Swatinem/rust-cache@v2
         with:
-          key: tokio-unstable
+          shared-key: sim-tokio-unstable
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
@@ -402,6 +414,10 @@ jobs:
       # etcd-client and tonic build scripts need protoc.
       - run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
@@ -476,6 +492,10 @@ jobs:
       # etcd-client and tonic build scripts need protoc.
       - run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Start Compose (one node) and build the connector images
         working-directory: deploy/compose
         run: |
@@ -530,8 +550,6 @@ jobs:
     name: M0.3 and M0.5 tenants, names, settings and isolation (gateway)
     needs: [integration]
     if: >-
-      (github.event_name == 'pull_request' &&
-        contains(github.event.pull_request.labels.*.name, 'full-ci')) ||
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
       github.ref == 'refs/heads/main'
@@ -545,6 +563,10 @@ jobs:
       # etcd-client and tonic build scripts need protoc.
       - run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Start Compose (etcd + one node) and build the m03 images
         working-directory: deploy/compose
         run: |
@@ -609,6 +631,10 @@ jobs:
       # etcd-client and tonic build scripts need protoc.
       - run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Start Compose (etcd and every topology) and build the m03 images
         working-directory: deploy/compose
         run: |

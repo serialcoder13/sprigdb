@@ -1,6 +1,6 @@
 # Go-live checklist: SprigDB's first run on real VMs
 
-What to have ready before the first install on real VMs, in the order you need it. RUNBOOK.md has the procedures; this list is only what to prepare and decide. Everything here was rehearsed on one laptop (three Compose projects standing in for three VMs, hardening rounds 1 to 3); none of it has run on a real VM yet.
+What to have ready before the first install on real VMs, in the order you need it. RUNBOOK.md has the procedures; this list is only what to prepare and decide. Everything here was rehearsed on one laptop (three Compose projects standing in for three VMs); none of it has run on a real VM yet.
 
 ## 1. VMs
 
@@ -28,7 +28,7 @@ What to have ready before the first install on real VMs, in the order you need i
 
 - [ ] **Decide:** the bundle's own CA (`sprig-vm.sh init` makes it; every client then needs `ca.pem`), or a public certificate for the client name. With a public certificate, put its chain and key in `secrets/tls/gateway.pem` and `gateway-key.pem`; the internal certificates stay on the bundle's CA.
 - [ ] **Where the CA key lives** after `init`: off the VMs (a password manager, a vault, an offline disk). It comes back only to rotate certificates or add a VM.
-- [ ] **Rotation reminder:** the generated certificates last 397 days (`SPRIG_CERT_DAYS`); the `SprigCertExpiringSoon` alert warns 14 days ahead. `rotate-certs` needs no restart.
+- [ ] **Rotation reminder:** the generated certificates last 397 days (`SPRIG_CERT_DAYS`); the `CertificateExpiring` alert warns 14 days ahead, and `CertificateExpiringSoon` pages 3 days ahead. `rotate-certs` needs no restart.
 
 ## 5. Secrets
 

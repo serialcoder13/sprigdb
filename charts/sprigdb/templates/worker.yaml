@@ -1,4 +1,4 @@
-{{- /* The worker role (chapter 27, "How the roles deploy on Kubernetes"). */}}
+{{- /* The worker role. */}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -16,8 +16,7 @@ spec:
     spec:
       automountServiceAccountToken: false
       # Kubernetes' service-link variables (SPRIGDB_CONTROLLER_PORT=tcp://...)
-      # read as SPRIGDB_<SECTION>_<KEY> configuration and stop the process
-      # (found by r2close's helm install).
+      # read as SPRIGDB_<SECTION>_<KEY> configuration and stop the process.
       enableServiceLinks: false
       {{- include "sprigdb.podSecurity" . | nindent 6 }}
       containers:
@@ -45,3 +44,15 @@ spec:
         {{- include "sprigdb.tlsVolumes" (dict "root" . "role" "worker" "secret" "sprigdb-worker-tls") | nindent 8 }}
         - name: creds
           secret: {secretName: sprigdb-cluster-credentials, optional: true}
+---
+# The workers' telemetry, for the ServiceMonitor.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sprigdb-worker-telemetry
+  labels: {{- include "sprigdb.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector: {app.kubernetes.io/component: worker}
+  ports:
+    - {name: telemetry, port: 9180}

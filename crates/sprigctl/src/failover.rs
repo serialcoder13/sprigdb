@@ -31,7 +31,7 @@ use crate::{Failed, Output, print};
 /// `sprigctl tenant failover`.
 pub(crate) fn failover_command() -> Command {
     Command::new("failover")
-        .about("Fail a tenant over to its standby in another data center (chapter 25)")
+        .about("Fail a tenant over to its standby in another data center")
         .arg(
             Arg::new("name")
                 .required_unless_present("all-from")

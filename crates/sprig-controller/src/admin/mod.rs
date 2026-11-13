@@ -22,6 +22,7 @@
 //! | `Tenants.ListTenants` | `GET /admin/v1/tenants` |
 //! | `Tenants.GetTenant` | `GET /admin/v1/tenants/{name}` |
 //! | `Tenants.DeleteTenant` | `DELETE /admin/v1/tenants/{name}` |
+//! | `Tenants.SuspendTenant`, `ResumeTenant` | `POST /admin/v1/tenants/{name}:suspend\|:resume` ([`crate::users`]) |
 //! | `Users.CreateUser` (interim) | `POST /admin/v1/tenants/{name}/users` ([`crate::users`]) |
 //! | `Tenants.ExportAccounts`, `ImportAccounts` (chapter 47) | `GET`, `POST /admin/v1/tenants/{name}/accounts` |
 //! | `Tenants.MoveTenant`, `PinTenant`, `UnpinTenant`, traffic | `/admin/v1/tenants/{name}:move\|:pin\|:unpin`, `.../move`, `.../traffic`, `/admin/v1/traffic/reports` ([`dcmove`]) |
@@ -333,6 +334,37 @@ impl AdminService {
             .as_ref()
             .ok_or_else(|| invalid("this controller doesn't manage users"))?
             .import_accounts(tenant, accounts)
+            .await
+    }
+
+    /// `Tenants.SuspendTenant` (chapter 14, "Suspension"): the tenant and
+    /// its subtree refuse logins (39303), their sessions close and their
+    /// background work waits. Any controller answers it: the directory
+    /// write is a compare-and-swap, the auth changes are the catalogs'.
+    ///
+    /// # Errors
+    /// As [`UserAdmin::suspend`].
+    pub async fn suspend_tenant(
+        &self,
+        tenant: &str,
+        req: crate::users::SuspendTenantRequest,
+    ) -> Result<crate::users::SuspendTenantResponse> {
+        self.users
+            .as_ref()
+            .ok_or_else(|| invalid("this controller doesn't manage users"))?
+            .suspend(tenant, req)
+            .await
+    }
+
+    /// `Tenants.ResumeTenant`.
+    ///
+    /// # Errors
+    /// As [`UserAdmin::resume`].
+    pub async fn resume_tenant(&self, tenant: &str) -> Result<crate::users::SuspendTenantResponse> {
+        self.users
+            .as_ref()
+            .ok_or_else(|| invalid("this controller doesn't manage users"))?
+            .resume(tenant)
             .await
     }
 

@@ -471,7 +471,7 @@ function Tenants() {
         </tbody>
       </table>
       <p className="muted">
-        Child tenants are created with <code>CREATE TENANT c UNDER b</code> (chapter 29), which the gateway does not run yet; use{' '}
+        Child tenants are created with <code>CREATE TENANT c UNDER b</code>, which the gateway does not run yet; use{' '}
         <code>sprigctl tenant create</code> until then.
       </p>
     </div>

@@ -34,7 +34,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     let role = Role::Agent;
     let cfg = &ctx.config;
     if cfg.agent.cluster.is_none() {
-        tracing::warn!(%role, "no [agent] cluster: no node to fence; no plan engine yet (chapter 27 steps 4-6)");
+        tracing::warn!(%role, "no [agent] cluster is set: this agent has no node to manage or fence");
         ctx.health.set_ready();
         ctx.shutdown.cancelled().await;
         ctx.health.set_draining();

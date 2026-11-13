@@ -116,6 +116,12 @@ pub struct ListenerSpec {
     pub tls: TlsMode,
     /// The certificate bundle; needed unless `tls` is `off`.
     pub cert: Option<Arc<CertBundle>>,
+    /// `listener.<name>.client_cert`: `off`, `optional` (verified when
+    /// presented) or `required` (a TLS handshake without one fails).
+    pub client_cert: TlsMode,
+    /// The CAs client certificates must chain to, unless `client_cert` is
+    /// `off`.
+    pub client_ca: Option<Arc<tls::ClientCa>>,
     /// Lowest TLS version.
     pub min_tls: TlsVersion,
     /// PROXY protocol policy.
@@ -136,6 +142,8 @@ impl ListenerSpec {
             enabled: true,
             tls: TlsMode::Off,
             cert: None,
+            client_cert: TlsMode::Off,
+            client_ca: None,
             min_tls: TlsVersion::V1_2,
             proxy: ProxyPolicy::OFF,
             handshake_timeout: Duration::from_secs(10),
@@ -154,6 +162,8 @@ impl ListenerSpec {
             && self.bind == o.bind
             && self.enabled == o.enabled
             && self.tls == o.tls
+            && self.client_cert == o.client_cert
+            && self.client_ca == o.client_ca
             && self.min_tls == o.min_tls
             && self.proxy == o.proxy
             && self.handshake_timeout == o.handshake_timeout
@@ -520,8 +530,13 @@ impl ListenerManager {
             (_, TlsMode::Off) => None,
             (None, _) => return Err("TLS mode needs a certificate bundle".into()),
             (Some(cert), _) => {
-                let mut cfg =
-                    tls::server_config(cert.clone(), spec.min_tls).map_err(|e| e.message)?;
+                let client = match (spec.client_cert, &spec.client_ca) {
+                    (TlsMode::Off, _) => None,
+                    (_, None) => return Err("client certificates need a CA".into()),
+                    (m, Some(ca)) => Some((&**ca, m == TlsMode::Required)),
+                };
+                let mut cfg = tls::server_config_with(cert.clone(), spec.min_tls, client)
+                    .map_err(|e| e.message)?;
                 if spec.protocol == Protocol::Http {
                     // ALPN: h2 first, then HTTP/1.1 (chapter 37).
                     let c = Arc::make_mut(&mut cfg);

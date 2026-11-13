@@ -250,8 +250,8 @@ impl StudioState {
                     tracing::warn!(
                         path = %p.display(),
                         "Studio's older operator mode ([gateway] operator_token_file with \
-                         studio.operator_logins) is deprecated and will be removed in the release \
-                         after Phase 1: sign operators in as named operators (chapter 14) instead"
+                         studio.operator_logins) is deprecated and will be removed in a later release: \
+                         sign operators in as named operators (`sprigctl operator`) instead"
                     );
                     Some(t.trim().to_owned())
                 }
@@ -614,6 +614,22 @@ pub fn session_client(authorization: Option<&str>) -> Option<String> {
         .ok()?;
     let v: Value = serde_json::from_slice(&raw).ok()?;
     v.get("cli").and_then(Value::as_str).map(str::to_owned)
+}
+
+/// Every claim of the session token in `authorization`, read without
+/// checking the signature: only for a caller already verified. What
+/// `SPRIG_CLAIM('k')` reads in that caller's statements (chapter 29;
+/// decision bugfix-interim).
+#[must_use]
+pub fn session_claims(authorization: Option<&str>) -> Option<Value> {
+    let t = bearer(authorization)?.strip_prefix(ACCESS_PREFIX)?;
+    let payload = t.split('.').nth(1)?;
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    serde_json::from_slice::<Value>(&raw)
+        .ok()
+        .filter(Value::is_object)
 }
 
 /// The caps a REST or gRPC body asks for: `max_rows`, `max_bytes`,

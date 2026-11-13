@@ -16,6 +16,8 @@ pub mod graph_mirror;
 pub mod inherit;
 // Chapter 33 (R6): the key-value expiry and old-generation sweeper.
 pub mod kv_sweep;
+// Chapter 31 (wireup): the TTL monitor.
+pub mod doc_ttl;
 pub mod logic;
 // Chapter 41 (R9): triggers on streams and queues.
 pub mod msg_triggers;
@@ -78,6 +80,8 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     let registry_logic = registry.clone();
     let registry_search = registry.clone();
     let sweep_registry = registry.clone();
+    let ttl_registry = registry.clone();
+    let ttl_dc = dc.clone();
     let recovery_env = recovery::RecoveryEnv {
         dc: dc.clone(),
         registry: registry.clone(),
@@ -211,8 +215,15 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         locator: Arc::clone(&env.locator),
         clusters: Arc::clone(&env.clusters) as Arc<dyn sprig_feed::Clusters>,
     };
-    // Chapter 45's stream sequencers, on the logic jobs' pools and feeds.
-    let streams_env = streams::StreamsEnv::from_logic(&env);
+    // R9 (r9feed): one shared binlog reader per cluster for this worker's
+    // internal consumers: stream sequencers and the queue forwarder.
+    let shared_feed = sprig_feed::shared::SharedFeed::new(
+        Arc::clone(&env.clusters) as Arc<dyn sprig_feed::Clusters>,
+        sprig_feed::shared::SharedOpts::default(),
+    );
+    // Chapter 45's stream sequencers, on the logic jobs' pools and the
+    // shared reader.
+    let streams_env = streams::StreamsEnv::from_logic(&env, &shared_feed);
     // Chapter 51's sink tasks, on the same pools, with the global tier
     // (platform connections) and the master key file (credentials).
     let sinks_env = sinks::SinksEnv::new(
@@ -245,11 +256,9 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     let forwarder_env = queue_forwarder::ForwarderEnv {
         dc: dc_logic.clone(),
         locator: Arc::clone(&env.locator),
-        // R9 (r9cluster): one shared binlog dump per cluster for every
-        // tenant's outbox rows.
-        clusters: queue_forwarder::shared_reader(
-            Arc::clone(&env.clusters) as Arc<dyn sprig_feed::Clusters>
-        ),
+        // R9 (r9cluster, r9feed): the shared reader's view of every
+        // tenant's queue outbox rows.
+        clusters: queue_forwarder::shared_view(&shared_feed),
         peer: Arc::clone(&msg_env.gateways) as Arc<dyn sprig_sinks::peer::SinkPeer>,
     };
     // Chapter 39 (R5 round 6): the search role, when SPRIG_SEARCH_LISTEN
@@ -313,6 +322,14 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             ),
             settings: Some(live.clone()),
         }))
+        .with_handler(Arc::new(doc_ttl::DocTtl(doc_ttl::DocTtlEnv {
+            dc: ttl_dc,
+            pools: Arc::new(
+                sprig_controller::catalogs::RegistryPools::new(ttl_registry, None)
+                    .budget("doc_ttl", 2),
+            ),
+            settings: live.clone(),
+        })))
         .with_handler(Arc::new(errant_extract))
         .with_handler(Arc::new(rebuild_handler));
     if let Some(r) = search_role {

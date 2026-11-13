@@ -302,6 +302,24 @@ pub(super) struct GwRunner<'s, 'c, 'x> {
 }
 
 impl GwRunner<'_, '_, '_> {
+    /// A record hierarchy's path statements see every row: the paths of
+    /// rows a user's row-level security hides must follow too (decision
+    /// T22). Only when the tenant protects a table at all.
+    fn paths_exempt(&self, object: &str) -> Option<crate::tenant::rls::ExemptGuard> {
+        let ts = self.sess.tenant.as_deref()?;
+        let cat = ts.catalog()?;
+        sprig_auth::authz::rls::RlsState::of(cat)
+            .filter(|s| s.any_enabled())
+            .map(|_| {
+                crate::tenant::rls::exempt_internal(
+                    self.cx.session.id,
+                    ts.tenant.0,
+                    "hierarchy paths",
+                    object,
+                )
+            })
+    }
+
     async fn run(&mut self, sql: &str) -> Result<Collect> {
         let mut sink = Collect {
             wire: self.wire,
@@ -438,6 +456,41 @@ impl Runner for GwRunner<'_, '_, '_> {
     fn set_physical(&mut self, on: bool) {
         // Not a type plan's statement: chapter 42 doesn't plan it.
         self.typed = !on;
+    }
+
+    async fn hierarchy_changed(
+        &mut self,
+        db: Option<&str>,
+        table: &str,
+        change: &sprig_types::HierChange,
+    ) -> Result<()> {
+        let t = match db {
+            Some(d) => format!(
+                "{}.{}",
+                sprig_common::names::quote(d),
+                sprig_common::names::quote(table)
+            ),
+            None => sprig_common::names::quote(table),
+        };
+        // Through chapter 42 (a type plan's statement): the spaces below
+        // reconcile their paths (decision T22), seeing every row.
+        let _exempt = self.paths_exempt(table);
+        self.exec(&format!(
+            "ALTER TABLE {t} SPRIG RECONCILE HIERARCHY {}",
+            change.clause()
+        ))
+        .await
+        .map(|_| ())
+    }
+
+    async fn exec_paths(&mut self, sql: &str) -> Result<Done> {
+        let _exempt = self.paths_exempt("");
+        self.exec(sql).await
+    }
+
+    async fn query_paths(&mut self, sql: &str) -> Result<Rows> {
+        let _exempt = self.paths_exempt("");
+        self.query(sql).await
     }
 
     async fn tree_changed(&mut self, db: Option<&str>, root: &str, key: &[String]) -> Result<()> {

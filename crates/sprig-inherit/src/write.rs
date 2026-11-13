@@ -567,6 +567,8 @@ struct Candidate {
     key: String,
     space: SpaceId,
     depth: u16,
+    /// Its `_sprig_ovr`.
+    bits: u64,
 }
 
 /// Deletes `keys` (visible in `s`) in `s`, and orphans what loses its
@@ -613,8 +615,8 @@ async fn delete_keys(
         if !desc.is_empty() {
             let rows = r
                 .query(&format!(
-                    "SELECT {}, `_sprig_space` FROM {} WHERE `_sprig_space` IN ({}) AND \
-                     `_sprig_state` = 'ovr' AND {}",
+                    "SELECT {}, `_sprig_space`, `_sprig_ovr` FROM {} WHERE `_sprig_space` IN \
+                     ({}) AND `_sprig_state` = 'ovr' AND {}",
                     key_list(o, None),
                     res.layer,
                     desc.iter()
@@ -636,7 +638,17 @@ async fn delete_keys(
                     .state
                     .space(space, ctx.tenant_name)
                     .map_or(0, |x| x.depth);
-                candidates.push(Candidate { key, space, depth });
+                let bits = row
+                    .get(n + 1)
+                    .and_then(Option::as_ref)
+                    .and_then(|v| std::str::from_utf8(v).ok()?.parse().ok())
+                    .unwrap_or(ALL_BITS);
+                candidates.push(Candidate {
+                    key,
+                    space,
+                    depth,
+                    bits,
+                });
             }
         }
         let parents: BTreeSet<SpaceId> = candidates
@@ -765,7 +777,11 @@ async fn delete_keys(
                     c.space.0,
                     key_in(o, std::slice::from_ref(&c.key))
                 );
-                if ctx.limits.parent_delete_follow {
+                // A hierarchy's path override isn't the space's edit: it
+                // goes with its record (decision T22).
+                let pb = crate::hier::path_bits(o);
+                let paths_only = pb != 0 && c.bits & !pb == 0;
+                if ctx.limits.parent_delete_follow || paths_only {
                     r.exec(&format!("DELETE FROM {} WHERE {target}", res.layer))
                         .await?;
                     metrics::counter!("sprig_inherit_orphans_total", "policy" => "follow", "path" => "sync").increment(1);
@@ -861,7 +877,13 @@ pub async fn insert(sql: &str, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Hand
             })
             .collect();
     } else if columns.is_empty() {
-        columns.clone_from(&o.columns);
+        // A hierarchy's path columns are invisible: not in a bare VALUES.
+        columns = o
+            .columns
+            .iter()
+            .filter(|c| !crate::hier::is_path_column(c))
+            .cloned()
+            .collect();
     }
     for c in &columns {
         if o.column(c).is_none() {
@@ -1181,10 +1203,37 @@ pub async fn reset(
             format!("{} is not inheritable", table.name),
         ));
     };
-    let o = &res.obj;
-    let s = ctx.space;
     let cond = filter.map(|f| format!(" AND ({f})")).unwrap_or_default();
     layer_op("reset");
+    // A hierarchy's paths follow the reset records in this space and below
+    // (decision T22).
+    if let Some(h) = crate::hier::hierarchy_of(ctx, &res.obj).filter(|_| crate::hier::has_paths(&res.obj)) {
+        let tx = Txn::begin(tr(r)).await?;
+        let result = async {
+            let keys = crate::hier::reset_keys(ctx, r, &res, &h, &cond).await?;
+            let d = reset_rows(ctx, r, &res, columns, &cond, false).await?;
+            crate::hier::after_reset(ctx, r, &res, &h, &keys).await?;
+            Ok(d)
+        }
+        .await;
+        return tx.end(tr(r), result).await;
+    }
+    reset_rows(ctx, r, &res, columns, &cond, true).await
+}
+
+/// [`reset`]'s statements; `bracket`: a field reset's two statements run
+/// in their own transaction.
+async fn reset_rows(
+    ctx: &Ctx<'_>,
+    r: &mut dyn Runner,
+    res: &Resolved,
+    columns: Option<&[String]>,
+    cond: &str,
+    bracket: bool,
+) -> Result<Done> {
+    let res = res.clone();
+    let o = &res.obj;
+    let s = ctx.space;
     let Some(cols) = columns else {
         // An orphan's record exists nowhere above: resetting it takes the
         // key out of this space's view, so it is checked like a delete
@@ -1228,7 +1277,11 @@ pub async fn reset(
         }
         bits |= o.bit(c);
     }
-    let tx = Txn::begin(tr(r)).await?;
+    let tx = if bracket {
+        Some(Txn::begin(tr(r)).await?)
+    } else {
+        None
+    };
     let result = async {
         let d = r
             .exec(&format!(
@@ -1246,7 +1299,10 @@ pub async fn reset(
         Ok(d)
     }
     .await;
-    tx.end(tr(r), result).await
+    match tx {
+        Some(t) => t.end(tr(r), result).await,
+        None => result,
+    }
 }
 
 /// `TRUNCATE` of an inheritable object: the session space's own rows,

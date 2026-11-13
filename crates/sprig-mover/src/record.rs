@@ -254,7 +254,7 @@ pub fn sharded_tenant(tenant: TenantId, groups: &[u32]) -> SprigError {
     SprigError::new(
         SprigCode::ShardedTenantMove,
         format!(
-            "tenant {tenant} has table groups {groups:?}: R1 doesn't move a sharded tenant \
+            "tenant {tenant} has table groups {groups:?}: a sharded tenant isn't moved \
              whole (its groups' shard maps wouldn't follow); move its shards with \
              `sprigctl shard move`"
         ),
@@ -1047,10 +1047,10 @@ fn check_spec(spec: &JobSpec) -> Result<()> {
         k => return bad(&format!("{} arrives in a later release", k.as_str())),
     }
     if spec.sources.len() != 1 || spec.targets.len() != 1 {
-        return bad("R0 jobs have one source and one target");
+        return bad("this job kind has one source and one target");
     }
     if spec.routing != Routing::Whole {
-        return bad("R0 jobs route whole shards");
+        return bad("this job kind routes whole shards");
     }
     if matches!(spec.cutover, CutoverMode::Group { .. }) {
         return bad("group cutovers are hash-range jobs'");
@@ -1096,10 +1096,10 @@ fn check_reshard(spec: &JobSpec) -> Result<()> {
     let from = &spec.sources[0].cluster;
     let to = &spec.targets[0].cluster;
     if spec.sources.iter().any(|s| &s.cluster != from) {
-        return bad("R1 merges shards of one cluster (move one first)");
+        return bad("a merge takes shards of one cluster (move one first)");
     }
     if spec.targets.iter().any(|t| &t.cluster != to) {
-        return bad("R1 places a job's new shards on one cluster");
+        return bad("a job places its new shards on one cluster");
     }
     if spec.kind == JobKind::MoveShard && from == to {
         return bad("a shard move needs another cluster");

@@ -65,6 +65,7 @@ impl KafkaIdentity {
                 client_ip: c.peer.ip(),
                 tls: c.tls,
                 client_cert: c.client_cert,
+                client_dn: None,
                 can_handle_expired_password: false,
             })
             .await

@@ -15,7 +15,7 @@ The gateway's REST API, as `/v1/openapi.json` describes it on every gateway. Req
 
 | Method | Path | Operation | Description |
 |---|---|---|---|
-| GET | `/v1/recommendations` | `Recommendations.ListRecommendations` | Approvals inbox: recommendations the caller may see (filters kind, state, level, all, db, table) |
+| GET | `/v1/recommendations` | `Recommendations.ListRecommendations` | The approvals inbox: recommendations the caller may see (filters kind, state, level, all, db, table) |
 | GET | `/v1/recommendations/{id}` | `Recommendations.GetRecommendation` | One recommendation with its evidence, history and comments |
 | POST | `/v1/recommendations/{id}` | `Recommendations.ActOnRecommendation` | {id}:approve, :ignore, :snooze, :reopen or :comment, as the caller |
 | POST | `/v1/recommendations:bulk` | `Recommendations.BulkAct` | One action on up to 200 recommendations |

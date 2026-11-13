@@ -67,6 +67,8 @@ pub struct NewUser {
     pub source: UserSource,
     /// `REQUIRE`.
     pub require_tls: RequireTls,
+    /// `REQUIRE SUBJECT` and `ISSUER`.
+    pub require_dn: (Option<String>, Option<String>),
     /// Created locked (`ACCOUNT LOCK`).
     pub account_locked: bool,
     /// Created expired (`PASSWORD EXPIRE`).
@@ -100,6 +102,7 @@ impl NewUser {
             kind: UserKind::User,
             source: UserSource::Sql,
             require_tls: RequireTls::None,
+            require_dn: (None, None),
             account_locked: false,
             password_expired: false,
             created_by_tenant: 0,
@@ -335,6 +338,8 @@ pub async fn create_user(
         let mut row = UserRow::new(id, &new.name, &new.host, new.source, now, version);
         row.kind = new.kind;
         row.require_tls = new.require_tls;
+        row.require_subject.clone_from(&new.require_dn.0);
+        row.require_issuer.clone_from(&new.require_dn.1);
         row.account_locked = new.account_locked;
         row.password_expired = new.password_expired;
         row.created_by_tenant = new.created_by_tenant;
@@ -649,7 +654,7 @@ pub async fn set_password_expired(
     .await
 }
 
-/// `REQUIRE NONE | SSL | X509`.
+/// `REQUIRE NONE | SSL | X509` (clearing `SUBJECT` and `ISSUER`).
 ///
 /// # Errors
 /// As [`set_password`].
@@ -659,11 +664,95 @@ pub async fn set_require_tls(
     user: UserId,
     require: RequireTls,
 ) -> Result<Changed> {
+    set_require(cat, tenant, user, require, (None, None)).await
+}
+
+/// `REQUIRE ...` with `SUBJECT` and `ISSUER` (`dn`); a `dn` naming either
+/// first brings the catalog to the auth module's format 6.
+///
+/// # Errors
+/// As [`set_password`]; the migrator's.
+pub async fn set_require(
+    cat: &MariaCatalog,
+    tenant: TenantId,
+    user: UserId,
+    require: RequireTls,
+    dn: (Option<String>, Option<String>),
+) -> Result<Changed> {
+    if dn.0.is_some() || dn.1.is_some() {
+        migrate_dn(cat, tenant).await?;
+    }
     with_user(cat, tenant, user, "ALTER USER", move |_, _, row| {
         row.require_tls = require;
+        row.require_subject.clone_from(&dn.0);
+        row.require_issuer.clone_from(&dn.1);
         Box::pin(async { Ok(()) })
     })
     .await
+}
+
+/// `ATTRIBUTE '{...}'` or `COMMENT '...'` (chapter 29's
+/// `SPRIG_USER_ATTR()`): `patch`, a JSON object, merged into the user's
+/// `attributes` as MySQL 8.4 merges `user_attributes.metadata` (RFC 7396:
+/// a `null` value removes its key).
+///
+/// # Errors
+/// As [`set_password`].
+pub async fn merge_attributes(
+    cat: &MariaCatalog,
+    tenant: TenantId,
+    user: UserId,
+    patch: serde_json::Value,
+) -> Result<Changed> {
+    with_user(cat, tenant, user, "ALTER USER", move |_, _, row| {
+        row.attributes = merge_patch(row.attributes.take(), &patch);
+        Box::pin(async { Ok(()) })
+    })
+    .await
+}
+
+/// RFC 7396's merge of `patch` into `base` (objects merge key by key; a
+/// `null` removes; anything else replaces). An empty result is `None`.
+#[must_use]
+pub fn merge_patch(
+    base: Option<serde_json::Value>,
+    patch: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    fn merge(base: &mut serde_json::Value, patch: &serde_json::Value) {
+        let serde_json::Value::Object(p) = patch else {
+            *base = patch.clone();
+            return;
+        };
+        if !base.is_object() {
+            *base = serde_json::Value::Object(serde_json::Map::new());
+        }
+        if let serde_json::Value::Object(b) = base {
+            for (k, v) in p {
+                if v.is_null() {
+                    b.remove(k);
+                } else {
+                    merge(b.entry(k.clone()).or_insert(serde_json::Value::Null), v);
+                }
+            }
+        }
+    }
+    let mut b = base.unwrap_or(serde_json::Value::Null);
+    merge(&mut b, patch);
+    match &b {
+        serde_json::Value::Object(m) if m.is_empty() => None,
+        _ => Some(b),
+    }
+}
+
+/// The auth module at format 6 (`REQUIRE SUBJECT` and `ISSUER`) in
+/// `tenant`'s catalog, before a change writes them.
+///
+/// # Errors
+/// 39070 if the catalog is unreachable; the migrator's.
+pub async fn migrate_dn(cat: &MariaCatalog, tenant: TenantId) -> Result<()> {
+    let ep = cat.backend().locator().writer(tenant).await?;
+    let mut conn = ep.pool.get_conn().await.map_err(crate::store::map_err)?;
+    crate::store::migrate_dn(&mut conn, ep.store.schema()).await
 }
 
 /// `DROP USER`: the row becomes a tombstone (its name is free, its id

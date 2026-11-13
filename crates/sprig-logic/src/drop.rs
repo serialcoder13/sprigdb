@@ -378,36 +378,7 @@ pub async fn dependents(
         Err(e) if absent(&e) => Vec::new(),
         r => r.map_err(map_err)?,
     };
-    let r: std::result::Result<Vec<(u64, Option<u64>, String)>, _> = c
-        .exec(
-            format!(
-                "SELECT binding_id, object_id, column_name FROM {s}.logic_bindings \
-                 WHERE module_id = ? AND column_name IS NOT NULL AND state = 'active'"
-            ),
-            (m.module_id,),
-        )
-        .await;
-    let cols = match r {
-        Err(e) if absent(&e) => Vec::new(),
-        r => r.map_err(map_err)?,
-    };
-    for (b, obj, col) in cols {
-        let table: Option<String> = match obj {
-            Some(o) => c
-                .exec_first(
-                    format!("SELECT name FROM {s}.objects WHERE object_id = ?"),
-                    (o,),
-                )
-                .await
-                .ok()
-                .flatten(),
-            None => None,
-        };
-        d.columns.push((
-            b,
-            format!("{}.{col}", table.unwrap_or_else(|| "?".to_owned())),
-        ));
-    }
+    d.columns = computed_columns(c, store, m.module_id).await?;
     // Other live modules of the database whose active code calls it.
     let r: std::result::Result<Vec<(String, String, String)>, _> = c
         .exec(
@@ -429,6 +400,51 @@ pub async fn dependents(
         }
     }
     Ok(d)
+}
+
+/// The computed columns made from module `module_id`: (binding id,
+/// `table.column`).
+///
+/// # Errors
+/// The catalog's.
+pub async fn computed_columns(
+    c: &mut Conn,
+    store: &LogicStore,
+    module_id: u64,
+) -> Result<Vec<(u64, String)>> {
+    let s = sprig_common::names::quote(store.schema());
+    let mut out = Vec::new();
+    let r: std::result::Result<Vec<(u64, Option<u64>, String)>, _> = c
+        .exec(
+            format!(
+                "SELECT binding_id, object_id, column_name FROM {s}.logic_bindings \
+                 WHERE module_id = ? AND column_name IS NOT NULL AND state = 'active'"
+            ),
+            (module_id,),
+        )
+        .await;
+    let cols = match r {
+        Err(e) if absent(&e) => Vec::new(),
+        r => r.map_err(map_err)?,
+    };
+    for (b, obj, col) in cols {
+        let table: Option<String> = match obj {
+            Some(o) => c
+                .exec_first(
+                    format!("SELECT name FROM {s}.objects WHERE object_id = ?"),
+                    (o,),
+                )
+                .await
+                .ok()
+                .flatten(),
+            None => None,
+        };
+        out.push((
+            b,
+            format!("{}.{col}", table.unwrap_or_else(|| "?".to_owned())),
+        ));
+    }
+    Ok(out)
 }
 
 /// The objects a function's or procedure's versions left in a shard

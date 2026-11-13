@@ -192,8 +192,12 @@ pub async fn run(cx: &mut Ctx<'_>, name: &str, a: &[Bytes]) -> Option<R<Frame>> 
 #[must_use]
 pub fn unsupported(name: &str) -> Frame {
     match name {
-        n if n.starts_with('x') => reply::unsupported(n, "planned for Phase 2 (streams)"),
-        n if n.starts_with("pf") => reply::unsupported(n, "planned for Phase 2 (HyperLogLog)"),
+        n if n.starts_with('x') => {
+            reply::unsupported(n, "not supported in this version (Redis streams)")
+        }
+        n if n.starts_with("pf") => {
+            reply::unsupported(n, "not supported in this version (HyperLogLog)")
+        }
         "monitor" => reply::unsupported(name, "not offered yet"),
         n => reply::restricted(n),
     }

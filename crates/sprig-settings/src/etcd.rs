@@ -218,7 +218,7 @@ impl SettingsStores {
 
 fn not_etcd(scope: &Scope) -> SprigError {
     SprigError::internal(format!(
-        "{scope:?} is a catalog scope: written through the tenant catalog (chapter 08)"
+        "{scope:?} is a catalog scope: written through the tenant catalog"
     ))
 }
 

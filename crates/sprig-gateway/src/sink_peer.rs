@@ -189,6 +189,7 @@ async fn serve_inner(
                     })
                     .collect(),
                 plain_binary: false,
+                watch: false,
             };
             let sql = crate::exec::rls_images::statement(&req);
             let results = run(engine, &caller, "", sql, None, caps).await?;

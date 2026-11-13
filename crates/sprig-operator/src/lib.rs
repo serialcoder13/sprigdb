@@ -13,7 +13,9 @@
 //! - [`reconcile`]: the reconcile steps and pools; [`accounts`] (system
 //!   accounts) and [`register`] (the DC controller) are its seams;
 //! - [`lease`]: leader election through a `Lease`;
-//! - [`provisioner`]: the `Provisioner` trait over the custom resources.
+//! - [`provisioner`]: the `Provisioner` trait over the custom resources;
+//! - [`backups`]: the newest successful backup of each cluster, from
+//!   mariadb-operator's backup Jobs, exported for the `BackupMissed` alert.
 //!
 //! [`run`] reconciles when the process runs in a pod (the service-account
 //! token and `KUBERNETES_SERVICE_HOST`); elsewhere it reports ready and
@@ -21,6 +23,7 @@
 //! watching: a handful of objects per DC.
 
 pub mod accounts;
+pub mod backups;
 pub mod crd;
 pub mod failover;
 pub mod kube;
@@ -77,8 +80,12 @@ pub struct OperatorConfig {
     pub mariadb_ca_file: Option<String>,
     /// The cluster DNS domain.
     pub cluster_domain: String,
-    /// The DC controller's Admin API, `http://host:port`.
+    /// The DC controller's Admin API, `http://host:port` or
+    /// `https://host:port`.
     pub controller_admin: Option<String>,
+    /// The CA bundle an `https://` Admin API's certificate is checked
+    /// against (`SPRIG_OPERATOR_CONTROLLER_CA_FILE`).
+    pub controller_ca_file: Option<String>,
     /// How long a `MariaDB` may take to be Ready.
     pub ready_timeout: Duration,
     /// How long the primary must not answer, with its pod not Ready, before
@@ -104,6 +111,7 @@ impl OperatorConfig {
             mariadb_ca_file: None,
             cluster_domain: "cluster.local".into(),
             controller_admin: None,
+            controller_ca_file: None,
             ready_timeout: Duration::from_secs(30 * 60),
             failover_detect: Duration::from_secs(5),
         }
@@ -133,6 +141,7 @@ impl OperatorConfig {
         c.mariadb_ca_file = opt("SPRIG_OPERATOR_MARIADB_CA_FILE");
         c.node_port_host = opt("SPRIG_OPERATOR_NODE_PORT_HOST");
         c.controller_admin = opt("SPRIG_OPERATOR_CONTROLLER_ADMIN");
+        c.controller_ca_file = opt("SPRIG_OPERATOR_CONTROLLER_CA_FILE");
         if let Some(s) = opt("SPRIG_OPERATOR_READY_TIMEOUT_SECONDS").and_then(|s| s.parse().ok()) {
             c.ready_timeout = Duration::from_secs(s);
         }
@@ -219,6 +228,37 @@ pub async fn watch_all(rec: &Reconciler) -> Result<()> {
     Ok(())
 }
 
+/// The DC controller's Admin API client (`SPRIG_OPERATOR_CONTROLLER_ADMIN`,
+/// with `SPRIG_OPERATOR_CONTROLLER_CA_FILE` for `https://`).
+///
+/// # Errors
+/// 39998 without an endpoint, or when the CA file can't be read.
+fn admin_registrar(
+    cfg: &OperatorConfig,
+    token: Option<String>,
+) -> Result<Arc<dyn register::ClusterRegistrar>> {
+    let Some(ep) = &cfg.controller_admin else {
+        return Err(sprig_common::SprigError::new(
+            sprig_common::SprigCode::ConfigInvalid,
+            "SPRIG_OPERATOR_CONTROLLER_ADMIN must name the DC controller's Admin API",
+        ));
+    };
+    let ca = match &cfg.controller_ca_file {
+        Some(f) => Some(std::fs::read(f).map_err(|e| {
+            sprig_common::SprigError::new(
+                sprig_common::SprigCode::ConfigInvalid,
+                format!("SPRIG_OPERATOR_CONTROLLER_CA_FILE {f}: {e}"),
+            )
+        })?),
+        None => None,
+    };
+    Ok(Arc::new(register::AdminRegistrar::with_ca(
+        ep,
+        token,
+        ca.as_deref(),
+    )?))
+}
+
 /// Runs the operator role until `ctx.shutdown` is cancelled.
 ///
 /// The `sprigdb` binary has already bound the telemetry port, so
@@ -240,18 +280,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     let cfg = OperatorConfig::from_env(&kcfg.namespace, &env);
     let kube: Arc<dyn KubeApi> =
         Arc::new(HttpKube::new(kcfg).map_err(sprig_common::SprigError::from)?);
-    let registrar: Arc<dyn register::ClusterRegistrar> = match &cfg.controller_admin {
-        Some(ep) => Arc::new(register::AdminRegistrar::new(
-            ep,
-            env("SPRIG_OPERATOR_ADMIN_TOKEN"),
-        )?),
-        None => {
-            return Err(sprig_common::SprigError::new(
-                sprig_common::SprigCode::ConfigInvalid,
-                "SPRIG_OPERATOR_CONTROLLER_ADMIN must name the DC controller's Admin API",
-            ));
-        }
-    };
+    let registrar = admin_registrar(&cfg, env("SPRIG_OPERATOR_ADMIN_TOKEN"))?;
     let accounts: Arc<dyn accounts::SystemAccounts> = Arc::new(accounts::MysqlAccounts::new(
         cfg.mariadb_ca_file.as_ref().map(Into::into),
     ));
@@ -276,6 +305,8 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     // A failover can take 20 s; don't replay the missed ticks in a burst.
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_pass: Option<Instant> = None;
+    let mut last_backups: Option<Instant> = None;
+    let mut backup_exporter = backups::BackupExporter::new();
     let mut leading = false;
     loop {
         tokio::select! {
@@ -306,6 +337,17 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         }
         if leading && let Err(e) = watch_all(&rec).await {
             tracing::warn!(error = %e, "failover watch pass failed");
+        }
+        // The backup gauge, from the leader only (followers keep their
+        // last values; the alert takes the newest).
+        if leading && last_backups.is_none_or(|t| t.elapsed() >= backups::PERIOD) {
+            last_backups = Some(Instant::now());
+            if let Err(e) = backup_exporter
+                .export_once(rec.kube(), &rec.config().namespace)
+                .await
+            {
+                tracing::warn!(error = %e, "backup Jobs not read; the backup gauge keeps its last values");
+            }
         }
     }
     ctx.health.set_draining();

@@ -20,7 +20,7 @@ use sprig_common::ids::{ClusterId, DbId, TenantId};
 use sprig_common::{CancellationToken, Result, SprigCode, SprigError};
 use sprig_feed::names::StaticResolver;
 use sprig_feed::source::{
-    Clusters, RawDdl, RawRow, RawTxn, RowKind, SourceItem, TableShape, TxnSource,
+    Clusters, DumpScope, RawDdl, RawRow, RawTxn, RowKind, SourceItem, TableShape, TxnSource,
 };
 use sprig_feed::{FeedItem, MetaPlacement, Op, ResumeToken, StartAt, TailOptions, TenantTail};
 use sprig_meta::Tier;
@@ -112,6 +112,16 @@ struct SimTxns {
     drop: f64,
     src: bool,
     next: u64,
+    /// A cluster-wide dump's scope (the shared reader's, R9 r9feed).
+    scope: Option<Arc<DumpScope>>,
+}
+
+/// What a dump with `scope` keeps of a group (as `BinlogTxns` does).
+fn cut(mut t: RawTxn, scope: &DumpScope) -> RawTxn {
+    t.rows
+        .retain(|r| scope.keeps(&r.table.schema, &r.table.table));
+    t.ddl = t.ddl.filter(|d| scope.names_whole(&d.db, &d.sql));
+    t
 }
 
 #[async_trait::async_trait]
@@ -160,6 +170,10 @@ impl TxnSource for SimTxns {
                 }
             };
             if let Some(t) = txn {
+                let t = match &self.scope {
+                    Some(s) => cut(t, s),
+                    None => t,
+                };
                 self.world.chaos_yield().await;
                 if self.world.rng().chance(self.drop) {
                     self.world.record("fault feed stream drop");
@@ -215,6 +229,42 @@ impl Clusters for SimClusters {
             drop: self.drop,
             src,
             next: seq + 1,
+            scope: None,
+        }))
+    }
+
+    async fn open_scope(
+        &self,
+        cluster: &ClusterId,
+        scope: Arc<DumpScope>,
+        from: &GtidPos,
+    ) -> Result<Box<dyn TxnSource>> {
+        self.world.chaos_yield().await;
+        if self.world.rng().chance(self.drop) {
+            return Err(SprigError::new(SprigCode::BinlogDisconnected, "injected"));
+        }
+        let src = *cluster == self.src;
+        if !src && *cluster != self.tgt {
+            return Err(SprigError::new(
+                SprigCode::ClusterNotFound,
+                cluster.to_string(),
+            ));
+        }
+        let d = if src { DOMAIN } else { TGT_DOMAIN };
+        let seq = from.get(d).map_or(0, |g| g.seq);
+        self.world.record(format!(
+            "feed dump {} from {seq} ({})",
+            if src { "src" } else { "tgt" },
+            if scope.only.is_some() { "catch-up" } else { "shared" }
+        ));
+        Ok(Box::new(SimTxns {
+            db: self.db.clone(),
+            notify: self.notify.clone(),
+            world: self.world.clone(),
+            drop: self.drop,
+            src,
+            next: seq + 1,
+            scope: Some(scope),
         }))
     }
 

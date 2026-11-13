@@ -94,24 +94,28 @@ pub mod err {
     pub const UNKNOWN_TOPIC_ID: i16 = 100;
 }
 
-/// SprigDB's own error numbers for the Kafka front end (chapter 45,
-/// "Errors"), carried in responses' message fields.
+/// SprigDB's own error numbers for the Kafka front end, carried in
+/// responses' message fields; numbers and names come from the registry
+/// (`SprigCode`).
 #[allow(missing_docs)]
 pub mod sprig {
-    pub const STREAM_NOT_FOUND: u16 = 39940;
-    pub const STREAM_APPEND_ONLY: u16 = 39941;
-    pub const STREAM_EXISTS: u16 = 39942;
-    pub const STREAM_PARTITIONS_DECREASE: u16 = 39943;
-    pub const STREAM_RECORD_TOO_LARGE: u16 = 39944;
-    pub const STREAM_SEQUENCING_TIMEOUT: u16 = 39946;
-    pub const STREAM_OFFSET_OUT_OF_RANGE: u16 = 39947;
-    pub const STREAM_TRUNCATED: u16 = 39948;
-    pub const KAFKA_ACKS_ZERO: u16 = 39950;
-    pub const KAFKA_TRANSACTIONS_UNSUPPORTED: u16 = 39951;
-    pub const KAFKA_UNSUPPORTED_API: u16 = 39952;
-    pub const KAFKA_SASL_FAILED: u16 = 39953;
-    pub const KAFKA_NOT_COORDINATOR: u16 = 39954;
-    pub const STREAM_COMPACT_NEEDS_KEY: u16 = 39955;
+    use sprig_common::SprigCode;
+
+    pub const STREAM_NOT_FOUND: u16 = SprigCode::StreamNotFound.number();
+    pub const STREAM_APPEND_ONLY: u16 = SprigCode::StreamAppendOnly.number();
+    pub const STREAM_EXISTS: u16 = SprigCode::StreamExists.number();
+    pub const STREAM_PARTITIONS_DECREASE: u16 = SprigCode::StreamPartitionsDecrease.number();
+    pub const STREAM_RECORD_TOO_LARGE: u16 = SprigCode::StreamRecordTooLarge.number();
+    pub const STREAM_SEQUENCING_TIMEOUT: u16 = SprigCode::StreamSequencingTimeout.number();
+    pub const STREAM_OFFSET_OUT_OF_RANGE: u16 = SprigCode::StreamOffsetOutOfRange.number();
+    pub const STREAM_TRUNCATED: u16 = SprigCode::StreamTruncated.number();
+    pub const KAFKA_ACKS_ZERO: u16 = SprigCode::KafkaAcksZero.number();
+    pub const KAFKA_TRANSACTIONS_UNSUPPORTED: u16 =
+        SprigCode::KafkaTransactionsUnsupported.number();
+    pub const KAFKA_UNSUPPORTED_API: u16 = SprigCode::KafkaUnsupportedApi.number();
+    pub const KAFKA_SASL_FAILED: u16 = SprigCode::KafkaSaslFailed.number();
+    pub const KAFKA_NOT_COORDINATOR: u16 = SprigCode::KafkaNotCoordinator.number();
+    pub const STREAM_COMPACT_NEEDS_KEY: u16 = SprigCode::StreamCompactNeedsKey.number();
 }
 
 /// One served API: its key and version range.

@@ -160,7 +160,7 @@ impl InboxAction {
             ActKind::Window | ActKind::Comment => {
                 return Err(ShellError::shell(
                     ShellCode::LanguageUnsupported,
-                    "windows and comments need the Admin API (chapter 52's SQL has no form for them)",
+                    "windows and comments need the Admin API (SQL has no statement for them)",
                 ));
             }
         })
@@ -347,8 +347,8 @@ impl Inbox {
                 self.items.clear();
                 self.loaded = false;
                 self.note = Some(
-                    "This deployment doesn't serve chapter 52's Recommendations API yet \
-                     (approvals build step 6). The inbox fills in once it does."
+                    "This deployment doesn't serve the Recommendations API yet. \
+                     The inbox fills in once it does."
                         .to_owned(),
                 );
             }
@@ -533,7 +533,7 @@ pub fn command() -> Command {
     };
     let reason = || Arg::new("reason").long("reason");
     Command::new("approvals")
-        .about("The approvals inbox (chapter 52's recommendations)")
+        .about("The approvals inbox: recommendations waiting for a decision")
         .subcommand_required(true)
         .subcommand(
             Command::new("list")
@@ -678,9 +678,7 @@ pub async fn cli(ctx: &Ctx, top: &ArgMatches, m: &ArgMatches) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             if not_served(&e) {
-                eprintln!(
-                    "sprig: this deployment doesn't serve chapter 52's Recommendations API yet ({e})"
-                );
+                eprintln!("sprig: this deployment doesn't serve the Recommendations API yet ({e})");
             } else {
                 eprintln!("sprig: {e}");
             }

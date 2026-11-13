@@ -53,6 +53,12 @@ use crate::pipeline::{
 };
 use crate::session::{Session, SessionState, SessionTable};
 
+/// Whether the session holds `CONNECTION_ADMIN` (chapter 29), for `KILL`.
+fn connection_admin(exec: &dyn SessionExec) -> bool {
+    exec.holds_tenant_privilege(sprig_auth::authz::Action::ConnectionAdmin)
+        .unwrap_or(false)
+}
+
 /// Messages buffered between the executor and the HTTP response.
 pub const CHANNEL_DEPTH: usize = 4;
 /// How long an expired handle is remembered, so its use gets 39782.
@@ -352,6 +358,11 @@ impl SqlEngine {
             backend: caller.principal.backend.clone(),
             persona: Persona::MySql84,
         });
+        // Chapter 29 (decision bugfix-interim): `SPRIG_CLAIM()` reads the
+        // verified session token's claims; Basic and API keys have none.
+        exec.set_claims(
+            super::studio::session_claims(caller.authorization.as_deref()).map(Arc::new),
+        );
         let mut db = None;
         if !no_database(database) {
             let mut cx = ExecCtx {
@@ -430,6 +441,7 @@ impl SqlEngine {
                     .last_status
                     .unwrap_or(sprig_proto_mysql::StatusFlags::AUTOCOMMIT),
                 peers: self.peers.as_deref(),
+                connection_admin: connection_admin(&**exec),
             };
             return answer(&l, session, &env, sink).await;
         }

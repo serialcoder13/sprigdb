@@ -4,5 +4,20 @@ It needs mariadb-operator, cert-manager and trust-manager in this cluster.
 {{- else }}
 It needs mariadb-operator in this cluster. TLS is off (tls.enabled=false): development only.
 {{- end }}
+Admin API: {{ include "sprigdb.adminEndpoint" . }}
+Client listeners: mysql 3306, mariadb 3307, http 8080, https 8443
+{{- range $name := splitList "," (include "sprigdb.optionalListeners" .) }}
+{{- $l := get ($.Values.gateway.listeners | default dict) $name | default dict }}
+{{- if $l.enabled }}, {{ $name }} {{ $l.port }}{{ end }}
+{{- end }}
+{{- if not (.Values.gateway.clientTls | default dict).secretName }}
+Client certificate: none mounted (gateway.clientTls); set tls.bundles.default.cert_path and key_path for the TLS listeners.
+{{- end }}
+Client certificates asked for:
+{{- range $name := splitList "," (include "sprigdb.allListeners" .) }}
+{{- $m := include "sprigdb.clientCert" (dict "root" $ "name" $name) }}
+{{- if ne $m "off" }} {{ $name }}={{ $m }}{{ end }}
+{{- end }}
+{{- if not (include "sprigdb.anyClientCert" .) }} none (gateway.clientTls.clientCert){{ end }}
 Pools: {{ range .Values.pools }}{{ .name }} ({{ .topology }}, {{ .minClusters | default 0 }}-{{ .maxClusters }}) {{ end }}
   kubectl -n {{ .Release.Namespace }} get sprigclusters

@@ -142,15 +142,15 @@ impl Clusters for RegistryClusters {
         }
     }
 
-    async fn open_tables(
+    async fn open_scope(
         &self,
         cluster: &ClusterId,
-        tables: Arc<[String]>,
+        scope: Arc<sprig_feed::source::DumpScope>,
         from: &GtidPos,
     ) -> Result<Box<dyn TxnSource>> {
         let a = self.access(cluster).await?;
         let id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
-        match BinlogTxns::connect_tables(&a.repl, tables, from, id).await {
+        match BinlogTxns::connect_scope(&a.repl, scope, from, id).await {
             Ok(t) => Ok(Box::new(t)),
             Err(e) => {
                 self.access

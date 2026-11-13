@@ -53,7 +53,7 @@ use sprig_catalog::{
 };
 use sprig_cluster::registry::ClusterRegistry;
 use sprig_common::Result;
-use sprig_common::ids::DcId;
+use sprig_common::ids::{DcId, TenantId};
 use sprig_common::time::Clock;
 use sprig_meta::MetaStore;
 use sprig_settings::{LiveSettings, Registration, Registry, Settings};
@@ -212,6 +212,7 @@ impl TenantServices {
             Arc::clone(&sessions),
             settings.clone(),
             dc.clone(),
+            Arc::clone(&global),
         );
         let catalog = Versioner::new(
             MariaBackend::new(Arc::clone(&dyn_locator)).with_clock(Arc::clone(&clock)),
@@ -370,15 +371,63 @@ fn close_dropped_users(svc: &Arc<TenantServices>) {
     });
 }
 
+/// Whether `tenant`'s directory entry, or an ancestor's on its path, is
+/// suspended, read through (linearizable): the flag a suspension sets
+/// before its auth change (chapter 14, "Suspension"). `false` when the
+/// entry can't be read.
+async fn suspended_now(global: &Arc<dyn sprig_meta::MetaStore>, tenant: TenantId) -> bool {
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct Entry {
+        #[serde(default)]
+        suspended: bool,
+        #[serde(default)]
+        path: String,
+    }
+    impl sprig_meta::Versioned for Entry {
+        const V: u32 = 1;
+    }
+    async fn read(global: &Arc<dyn sprig_meta::MetaStore>, id: u64) -> Option<Entry> {
+        let key = global.tier().key(&format!("tenants/{id}")).ok()?;
+        let kv = global
+            .get(&key, sprig_meta::Consistency::Linearizable)
+            .await
+            .ok()??;
+        sprig_meta::Record::<Entry>::decode(&kv.value)
+            .ok()
+            .map(|r| r.body)
+    }
+    let Some(e) = read(global, tenant.0).await else {
+        return false;
+    };
+    if e.suspended {
+        return true;
+    }
+    for anc in e
+        .path
+        .split('/')
+        .filter_map(|p| p.parse::<u64>().ok())
+        .filter(|&a| a != tenant.0)
+    {
+        if read(global, anc).await.is_some_and(|a| a.suspended) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Follows the auth change feed: sessions of users who were dropped or
 /// locked, or lost the password method, close at their next safe point
 /// with 39306, where the tenant's `auth.close_sessions_on_revoke` is on
-/// (chapter 14, "Caching and revocation").
+/// (chapter 14, "Caching and revocation"). So do every session of a
+/// tenant that is suspended, or under a suspended tenant, when its auth
+/// version moves: a suspension commits an empty auth change in the tenant
+/// and each tenant below it (chapter 14, "Suspension").
 fn close_revoked_sessions(
     mut changes: tokio::sync::broadcast::Receiver<Arc<sprig_auth::revoke::AuthChange>>,
     sessions: Arc<SessionTable>,
     settings: Settings,
     dc: DcId,
+    global: Arc<dyn sprig_meta::MetaStore>,
 ) {
     use sprig_auth::settings::CLOSE_SESSIONS_ON_REVOKE;
     use tokio::sync::broadcast::error::RecvError;
@@ -392,7 +441,9 @@ fn close_revoked_sessions(
                 }
                 Err(RecvError::Closed) => return,
             };
-            if !change.revoked.iter().any(|r| r.reason.closes_sessions()) {
+            let revokes = change.revoked.iter().any(|r| r.reason.closes_sessions());
+            let suspended = suspended_now(&global, change.tenant).await;
+            if !revokes && !suspended {
                 continue;
             }
             let ancestry: Vec<_> = change.catalog.ancestry.iter().map(|a| a.id).collect();
@@ -402,6 +453,11 @@ fn close_revoked_sessions(
                 &ctx,
                 Some(&change.catalog.settings),
             ) {
+                continue;
+            }
+            if suspended {
+                let n = sessions.close_tenant(change.tenant);
+                tracing::info!(tenant = %change.tenant, sessions = n, auth_version = change.auth_version, "closing sessions of a suspended tenant");
                 continue;
             }
             for r in change.revoked.iter().filter(|r| r.reason.closes_sessions()) {

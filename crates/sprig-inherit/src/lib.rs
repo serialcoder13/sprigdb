@@ -54,6 +54,7 @@ pub mod copy;
 pub mod ddl;
 pub mod grammar;
 pub mod guard;
+pub mod hier;
 pub mod ids;
 pub mod links;
 pub mod model;
@@ -229,8 +230,11 @@ pub fn maybe_inherit(sql: &[u8], state: Option<&InheritState>) -> bool {
 /// The chapter's errors (39880-39895), 1062, 1142 and the steps' errors
 /// with logical names.
 pub async fn handle(sql: &str, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Handled> {
+    // Reserved names are SprigDB's own, except a type plan's statements on
+    // a record hierarchy's path columns, which are fields (decision T22).
     if !maybe_inherit(sql.as_bytes(), Some(ctx.state))
-        || grammar::names_reserved(sql.as_bytes(), &ctx.lex)
+        || (grammar::names_reserved(sql.as_bytes(), &ctx.lex)
+            && !(ctx.from_types && hier::names_only_paths(sql, &ctx.lex)))
     {
         return Ok(Handled::NotInherit);
     }
@@ -273,6 +277,11 @@ pub async fn handle(sql: &str, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Hand
         }
         Stmt::DropInheritable(table) => {
             return ddl::drop_inheritable(ctx, r, &table).await.map(Handled::Ok);
+        }
+        Stmt::Reconcile { table, change } => {
+            return Box::pin(hier::follow(ctx, r, &table, &change))
+                .await
+                .map(Handled::Ok);
         }
         Stmt::CreateShare {
             name,
@@ -353,6 +362,25 @@ pub async fn handle(sql: &str, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Hand
     // A type plan's DDL (type columns, extension tables) is the type
     // layer's; it makes new tables of an inheritable tree inheritable
     // itself (`SPRIG INHERITABLE`, above).
+    // ADD and DROP HIERARCHY on an inheritable table (their ALTERs of the
+    // path columns): the columns become or stop being fields. Adding them
+    // is refused unless inside one tenant, from the space owning every row.
+    if ctx.from_types
+        && let Stmt::AlterTable(n) = &stmt
+        && grammar::names_reserved(sql.as_bytes(), &ctx.lex)
+        && let Some(res) = ctx.resolve(n)?
+    {
+        let upper = sql.to_ascii_uppercase();
+        if upper.contains("ADD COLUMN IF NOT EXISTS _SPRIG_HPATH") {
+            Box::pin(hier::before_add(ctx, r, &res)).await?;
+        }
+        if upper.contains("DROP COLUMN IF EXISTS _SPRIG_HPATH") {
+            Box::pin(hier::before_drop(r, &res)).await?;
+        }
+        let d = r.exec(sql).await?;
+        Box::pin(guard::follow_columns(ctx, r, &res)).await?;
+        return Ok(Handled::Ok(d));
+    }
     if ctx.from_types {
         let type_columns = || {
             grammar::identifiers(sql.as_bytes(), &ctx.lex)

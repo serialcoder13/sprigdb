@@ -734,6 +734,8 @@ fn tenant_view(id: u64, name: &str, parent: Option<&str>) -> TenantView {
         auth_version: 0,
         settings_version: 3,
         cluster: Some(ClusterId::new("mum1-c1").unwrap()),
+        suspended: false,
+        suspended_reason: None,
         ancestry: parent.into_iter().map(Into::into).collect(),
         created_at: "2026-11-08T09:00:00Z".into(),
         mod_revision: 9,

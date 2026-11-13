@@ -599,7 +599,7 @@ pub fn structural(input: &Input, s: &AdvisorSettings) -> (Design, Vec<String>) {
             }
             Some(PinKind::Reference) => {
                 evidence.push(format!(
-                    "{}: pinned REFERENCE; unsharded in R1 (reference copies are not built)",
+                    "{}: pinned REFERENCE; unsharded (reference copies aren't offered in this release)",
                     t.name
                 ));
                 out.insert(t.object);

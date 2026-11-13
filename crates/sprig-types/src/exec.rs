@@ -138,6 +138,43 @@ pub trait Runner: Send {
         let _ = on;
     }
 
+    /// A structural change of the record hierarchy of `table`, which is
+    /// inheritable ([`Runner::tree_inheritable`]): chapter 42 serializes
+    /// the plan ([`HierChange::Lock`]) and brings the paths of every space
+    /// below the session's up to date (decision T22). A no-op where there
+    /// is no inheritance layer.
+    ///
+    /// # Errors
+    /// The inheritance layer's: 39711-39716 when a space below would get a
+    /// cycle, lose a parent or grow too deep.
+    async fn hierarchy_changed(
+        &mut self,
+        db: Option<&str>,
+        table: &str,
+        change: &HierChange,
+    ) -> Result<()> {
+        let _ = (db, table, change);
+        Ok(())
+    }
+
+    /// Runs a statement that only maintains hierarchy paths (the fill, a
+    /// move's range `UPDATE`): every row's path must follow, so the gateway
+    /// runs it without row-level security.
+    ///
+    /// # Errors
+    /// The statement's error, with logical names.
+    async fn exec_paths(&mut self, sql: &str) -> Result<Done> {
+        self.exec(sql).await
+    }
+
+    /// [`Runner::exec_paths`] for a statement that returns rows.
+    ///
+    /// # Errors
+    /// The statement's error, with logical names.
+    async fn query_paths(&mut self, sql: &str) -> Result<Rows> {
+        self.query(sql).await
+    }
+
     /// Whether the session's `innodb_snapshot_isolation` is on (MariaDB
     /// 11.8's default; the MySQL persona turns it off, decision D9). Asked
     /// only by a plan inside a client's transaction ([`Txn::begin`]).
@@ -152,6 +189,35 @@ pub trait Runner: Send {
             .and_then(|r| r.first())
             .and_then(Option::as_deref)
             .is_some_and(|v| matches!(v, b"1" | b"ON" | b"on")))
+    }
+}
+
+/// A structural change of an inheritable table's record hierarchy
+/// ([`Runner::hierarchy_changed`]). Keys are SQL literals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HierChange {
+    /// The plan starts: structural changes of the table run one at a time.
+    Lock,
+    /// These rows got a new path in the session's space (inserted or
+    /// moved rows, the tops of their subtrees).
+    Changed(Vec<String>),
+    /// These rows were deleted in the session's space.
+    Deleted(Vec<String>),
+    /// `ADD HIERARCHY` gave every row of the session's space its path.
+    Added,
+}
+
+impl HierChange {
+    /// The words after `ALTER TABLE t SPRIG RECONCILE HIERARCHY` that
+    /// carry the change to chapter 42.
+    #[must_use]
+    pub fn clause(&self) -> String {
+        match self {
+            Self::Lock => "LOCK".into(),
+            Self::Added => "ADDED".into(),
+            Self::Changed(k) => format!("CHANGED ({})", k.join(", ")),
+            Self::Deleted(k) => format!("DELETED ({})", k.join(", ")),
+        }
     }
 }
 

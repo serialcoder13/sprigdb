@@ -42,6 +42,9 @@ sprig-streams = { path = "../sprig-streams" }
 sprig-sinks = { path = "../sprig-sinks" }
 # Chapter 33 (R6): the key-value sweeper.
 sprig-kv = { path = "../sprig-kv" }
+# Chapter 31 (wireup): the TTL monitor's deletes.
+sprig-doc = { path = "../sprig-doc" }
+bson = "=2.15.0"
 sprig-workload.workspace = true
 sprig-meta.workspace = true
 sprig-mover.workspace = true

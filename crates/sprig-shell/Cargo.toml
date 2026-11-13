@@ -1,6 +1,6 @@
 [package]
 name = "sprig-shell"
-description = "SprigDB: the `sprig` terminal shell, a TUI and a scriptable CLI (chapter 53)"
+description = "SprigDB: the `sprig` terminal shell, a TUI and a scriptable CLI"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -29,6 +29,8 @@ toml.workspace = true
 # (RESP is parsed here: sprig-proto-redis is server-side only).
 mysql_async.workspace = true
 sprig-proto-mongo = { path = "../sprig-proto-mongo" }
+# SprigDB's error registry: the shell's own codes live there too.
+sprig-common.workspace = true
 sprig-proto-bolt = { path = "../sprig-proto-bolt" }
 bytes.workspace = true
 bson = "=2.15.0"

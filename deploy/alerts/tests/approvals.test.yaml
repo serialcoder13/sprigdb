@@ -19,18 +19,18 @@ tests:
           - exp_labels: { severity: ticket, kind: dc.move, level: tenant }
             exp_annotations:
               summary: A recommendation has waited more than 3 days for a decision
-              runbook: chapter 52 (approve, ignore or snooze it; or set approvals.escalate_after)
+              runbook: "Approve, ignore or snooze it in the approvals inbox (sprigctl recommendations), or set approvals.escalate_after"
       - eval_time: 8m
         alertname: SprigApprovalsApplyFailing
         exp_alerts:
           - exp_labels: { severity: ticket, kind: index.create }
             exp_annotations:
               summary: An approved change failed to apply
-              runbook: chapter 52 (sprigctl recommendations show <id>; the component's own job)
+              runbook: "sprigctl recommendations show <id> gives the failure; then check the component's own job"
       - eval_time: 70m
         alertname: SprigApprovalsNotifyFailing
         exp_alerts:
           - exp_labels: { severity: ticket, channel: email }
             exp_annotations:
               summary: Approval notifications on a channel fail and none get through
-              runbook: chapter 52 (approvals.smtp_url, approvals.webhook_url, the stream's database)
+              runbook: "Check approvals.smtp_url, approvals.webhook_url and the stream's database"

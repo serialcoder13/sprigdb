@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! CREATE USER [IF NOT EXISTS] acct [auth] {, acct [auth]} [DEFAULT ROLE roles]
-//!     [REQUIRE NONE|SSL|X509] [PASSWORD EXPIRE [DEFAULT|NEVER]] [ACCOUNT LOCK|UNLOCK]
+//!     [REQUIRE NONE|SSL|X509|SUBJECT '..' [AND] ISSUER '..'] [PASSWORD EXPIRE [DEFAULT|NEVER]] [ACCOUNT LOCK|UNLOCK]
 //! ALTER USER [IF EXISTS] acct [auth [RETAIN CURRENT PASSWORD]] {, ...} [DEFAULT ROLE roles]
 //!     [REQUIRE ...] [PASSWORD EXPIRE ...] [ACCOUNT ...] [DISCARD OLD PASSWORD]
 //! DROP USER [IF EXISTS] acct {, acct}
@@ -451,21 +451,75 @@ fn user_items(p: &mut P<'_>, alter: bool) -> R<Vec<UserItem>> {
     Ok(v)
 }
 
+/// `REQUIRE NONE | SSL | X509 | SUBJECT '..' [AND] ISSUER '..'` after the
+/// keyword: `SUBJECT` and `ISSUER` in any order, `AND` between them
+/// optional (MySQL); a verified client certificate with that subject and
+/// issuer. `CIPHER` isn't supported.
+fn require_clause(p: &mut P<'_>, o: &mut UserOptions) -> R<()> {
+    o.require_dn = (None, None);
+    o.require = Some(if p.eat_word("NONE") {
+        RequireTls::None
+    } else if p.eat_word("SSL") {
+        RequireTls::Ssl
+    } else if p.eat_word("X509") {
+        RequireTls::X509
+    } else {
+        let mut any = false;
+        loop {
+            if p.eat_word("SUBJECT") && o.require_dn.0.is_none() {
+                let v = String::from_utf8(p.string()?).map_err(|_| p.err())?;
+                o.require_dn.0 = Some(v);
+            } else if p.eat_word("ISSUER") && o.require_dn.1.is_none() {
+                let v = String::from_utf8(p.string()?).map_err(|_| p.err())?;
+                o.require_dn.1 = Some(v);
+            } else if p.eat_word("CIPHER") {
+                return Err(unsupported("REQUIRE CIPHER"));
+            } else {
+                break;
+            }
+            any = true;
+            let _ = p.eat_word("AND");
+        }
+        if !any {
+            return Err(p.err());
+        }
+        RequireTls::X509
+    });
+    Ok(())
+}
+
+/// `COMMENT 'text'` (as `{"comment": text}`) or `ATTRIBUTE '{json}'`, as
+/// the JSON text of an object; 3934 for an attribute that isn't one.
+fn attribute_option(p: &mut P<'_>) -> R<String> {
+    let comment = p.eat_word("COMMENT");
+    if !comment {
+        p.at += 1;
+    }
+    let raw = String::from_utf8_lossy(&p.string()?).into_owned();
+    let v = if comment {
+        serde_json::json!({ "comment": raw })
+    } else {
+        match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(v @ serde_json::Value::Object(_)) => v,
+            _ => {
+                return Err(SprigError::standard(
+                    3934,
+                    *b"HY000",
+                    "The user attribute must be a valid JSON object",
+                ));
+            }
+        }
+    };
+    Ok(v.to_string())
+}
+
 fn user_options(p: &mut P<'_>) -> R<UserOptions> {
     let mut o = UserOptions::default();
     loop {
         if p.eat_words(&["DEFAULT", "ROLE"]) {
             o.default_roles = p.accounts()?;
         } else if p.eat_word("REQUIRE") {
-            o.require = Some(if p.eat_word("NONE") {
-                RequireTls::None
-            } else if p.eat_word("SSL") {
-                RequireTls::Ssl
-            } else if p.eat_word("X509") {
-                RequireTls::X509
-            } else {
-                return Err(unsupported("REQUIRE SUBJECT, ISSUER or CIPHER"));
-            });
+            require_clause(p, &mut o)?;
         } else if p.eat_words(&["PASSWORD", "EXPIRE"]) {
             if p.eat_word("DEFAULT") {
                 o.clauses.password_lifetime = Some(None);
@@ -519,7 +573,14 @@ fn user_options(p: &mut P<'_>) -> R<UserOptions> {
             }
         } else if p.eat_words(&["DISCARD", "OLD", "PASSWORD"]) {
             o.discard_old = true;
-        } else if p.word("WITH") || p.word("PASSWORD") || p.word("COMMENT") || p.word("ATTRIBUTE") {
+        } else if p.word("COMMENT") || p.word("ATTRIBUTE") {
+            // Chapter 29's `SPRIG_USER_ATTR()` reads these (MySQL 8.4's
+            // `user_attributes.metadata`).
+            if o.attribute.is_some() {
+                return Err(p.err());
+            }
+            o.attribute = Some(attribute_option(p)?);
+        } else if p.word("WITH") || p.word("PASSWORD") {
             let t = p.peek().map(|t| p.text(t)).unwrap_or_default();
             return Err(unsupported(&format!("{} options", t.to_ascii_uppercase())));
         } else {
@@ -974,6 +1035,52 @@ mod tests {
                 &LexOptions::mysql84()
             )
             .is_some_and(|r| r.is_err())
+        );
+    }
+
+    #[test]
+    fn require_subject_and_issuer() {
+        let opts = |sql: &str| match parse_ok(sql) {
+            AccountStmt::CreateUser { options, .. } | AccountStmt::AlterUser { options, .. } => {
+                (options.require, options.require_dn)
+            }
+            other => panic!("{other:?}"),
+        };
+        let both = (
+            Some(RequireTls::X509),
+            (Some("/CN=a".to_owned()), Some("/CN=ca".to_owned())),
+        );
+        assert_eq!(
+            opts("CREATE USER u REQUIRE SUBJECT '/CN=a' AND ISSUER '/CN=ca'"),
+            both
+        );
+        assert_eq!(
+            opts("ALTER USER u REQUIRE ISSUER '/CN=ca' SUBJECT '/CN=a'"),
+            both
+        );
+        assert_eq!(
+            opts("ALTER USER u REQUIRE SUBJECT '/CN=a' ACCOUNT LOCK"),
+            (Some(RequireTls::X509), (Some("/CN=a".to_owned()), None))
+        );
+        assert_eq!(
+            opts("ALTER USER u REQUIRE X509"),
+            (Some(RequireTls::X509), (None, None))
+        );
+        assert!(
+            parse(
+                b"CREATE USER u REQUIRE CIPHER 'x'",
+                &LexOptions::for_persona(Persona::MySql84)
+            )
+            .unwrap()
+            .is_err()
+        );
+        assert!(
+            parse(
+                b"CREATE USER u REQUIRE",
+                &LexOptions::for_persona(Persona::MySql84)
+            )
+            .unwrap()
+            .is_err()
         );
     }
 

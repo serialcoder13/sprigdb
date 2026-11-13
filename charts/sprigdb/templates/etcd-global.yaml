@@ -1,4 +1,4 @@
-{{- /* One global voter in this DC, when global.voter.enabled (chapter 23). */}}
+{{- /* One global voter in this DC, when global.voter.enabled. */}}
 {{- if .Values.global.voter.enabled }}
 apiVersion: apps/v1
 kind: StatefulSet

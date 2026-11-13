@@ -58,7 +58,7 @@ use sprig_common::ids::DbId;
 use sprig_sql::lex::LexOptions;
 use sqlparser::ast::{ObjectName, ObjectNamePart, Statement, VisitMut, VisitorMut};
 
-pub use exec::{Done, Limits, Rows, Runner, Txn};
+pub use exec::{Done, HierChange, Limits, Rows, Runner, Txn};
 pub use model::{DbTypes, HierarchyDef, TypeDef, TypesState};
 pub use rewrite::{Lookup, MetaRename};
 pub use store::{TYPES_MODULE, TypesChange, TypesExtension, TypesStore};

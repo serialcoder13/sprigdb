@@ -218,7 +218,11 @@ pub(crate) async fn run(c: &AdminClient, sub: &ArgMatches, out: Output) -> Resul
                 )));
             }
         }
-        other => return Err(Failed(format!("txn {other}: not implemented yet"))),
+        other => {
+            return Err(Failed(format!(
+                "txn {other}: not available in this version"
+            )));
+        }
     }
     Ok(())
 }

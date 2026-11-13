@@ -1153,6 +1153,11 @@ pub struct Variant {
     /// Run a change topic's sequencer on the tenant's feed too (chapter
     /// 45), killed and overlapped at random (the stream invariant).
     pub streams: bool,
+    /// The sequencer reads through the shared per-cluster reader
+    /// (`sprig_feed::shared`, R9 r9feed) with tiny buffers and ring, so
+    /// its subscription is detached, comes back through the ring, and
+    /// falls back to catch-up dumps (the same stream invariant).
+    pub shared_feed: bool,
 }
 
 /// Runs one seed of [`run_move`] with an after-commit trigger on the
@@ -1184,6 +1189,26 @@ pub async fn run_move_streams(world: World) -> std::result::Result<(), String> {
         world,
         Variant {
             streams: true,
+            ..Variant::default()
+        },
+    )
+    .await
+}
+
+/// [`run_move_streams`] with the sequencer reading through the shared
+/// per-cluster reader (R9, r9feed): its tail subscribes to one hub per
+/// cluster, whose tiny buffers and ring make it detach, return through the
+/// ring and fall back to catch-up dumps while the tenant moves, streams
+/// drop and the sequencer is killed. The stream invariant must hold.
+///
+/// # Errors
+/// The first broken invariant.
+pub async fn run_move_streams_shared(world: World) -> std::result::Result<(), String> {
+    run_move_with(
+        world,
+        Variant {
+            streams: true,
+            shared_feed: true,
             ..Variant::default()
         },
     )
@@ -1396,6 +1421,7 @@ async fn run_move_with(world: World, variant: Variant) -> std::result::Result<()
         tokio::spawn(streams::sequencer_worker(
             world.clone(),
             feed_clusters.clone(),
+            variant.shared_feed,
             tier.clone(),
             sc.faults,
             feed_goal.clone(),

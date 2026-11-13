@@ -21,10 +21,13 @@ function walk(dir) {
   });
 }
 
+// Tooling folders: the PDF build's assembled book and the example harness.
+const skip = ['pdf/', 'tests/'];
+
 let pages = 0;
 for (const file of walk(src)) {
   const rel = relative(src, file);
-  if (!rel.endsWith('.md')) continue;
+  if (!rel.endsWith('.md') || skip.some((s) => rel.startsWith(s))) continue;
   let text = readFileSync(file, 'utf8');
   text = text.replace(/^(---\n[\s\S]*?\n---\n)\s*# [^\n]*\n/, '$1\n');
   text = text.replace(/\]\((?!https?:|#)([^)]+?)\.md(#[^)]*)?\)/g, (_, p, h) => `](../${p.replace(/^\.\//, '')}/${h ?? ''})`);

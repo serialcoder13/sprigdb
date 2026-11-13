@@ -2024,9 +2024,7 @@ impl Engine {
                     Bson::String(t) => {
                         return Err(MongoError::new(
                             code::SPRIG_DOC_FEATURE_UNSUPPORTED,
-                            format!(
-                                "'{t}' indexes are not supported in this release (chapter 39 and 36)"
-                            ),
+                            format!("'{t}' indexes are not supported in this version"),
                         ));
                     }
                     other => match filter::as_i64(other) {
@@ -2050,6 +2048,8 @@ impl Engine {
                 }
                 pattern.push((p.clone(), dir));
             }
+            // TTL (wireup): MongoDB 8.0's checks of expireAfterSeconds.
+            let expire = ttl::create_expire(s, &pattern)?;
             let name = s
                 .get_str("name")
                 .map_or_else(|_| meta::default_index_name(key), str::to_owned);
@@ -2061,8 +2061,21 @@ impl Engine {
             // index is made beside it, and automatic indexing retires its
             // own as redundant.
             if let Some(ex) = m.indexes.iter().find(|i| i.name == name && !i.is_auto()) {
-                if ex.key == pattern && ex.unique == unique {
+                if ex.key == pattern && ex.unique == unique && ex.expire_after == expire {
                     continue;
+                }
+                if ex.key == pattern && ex.unique == unique {
+                    let mut want = doc! {"v": 2, "key": key.clone(), "name": name.clone()};
+                    if let Some(e) = expire {
+                        want.insert("expireAfterSeconds", e);
+                    }
+                    return Err(MongoError::new(
+                        code::INDEX_OPTIONS_CONFLICT,
+                        format!(
+                            "An equivalent index already exists with the same name but different options. Requested index: {want}, existing index: {}",
+                            ex.spec()
+                        ),
+                    ));
                 }
                 return Err(MongoError::new(
                     code::INDEX_KEY_SPECS_CONFLICT,
@@ -2106,7 +2119,7 @@ impl Engine {
                 key: pattern.clone(),
                 unique,
                 sparse: s.get_bool("sparse").unwrap_or(false),
-                expire_after: s.get("expireAfterSeconds").and_then(filter::as_i64),
+                expire_after: expire,
                 origin: if migrated {
                     "migrated".into()
                 } else {
@@ -3167,6 +3180,8 @@ mod graph;
 
 /// Capped collections and tailable cursors (M7).
 pub mod capped;
+// TTL indexes: their checks and the monitor's deletes (wireup).
+pub mod ttl;
 
 /// `find` with `allowDiskUse` (M7).
 mod find_spill;

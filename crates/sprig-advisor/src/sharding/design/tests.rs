@@ -419,7 +419,7 @@ fn pinned_unsharded_and_reference_tables_stay_out_of_groups() {
     assert!(
         r.evidence
             .iter()
-            .any(|e| e.starts_with("products: pinned REFERENCE; unsharded in R1")),
+            .any(|e| e.starts_with("products: pinned REFERENCE; unsharded")),
         "{:?}",
         r.evidence
     );

@@ -1,11 +1,17 @@
-{{- /* The controller role (chapter 27, "How the roles deploy on Kubernetes"). */}}
+{{- /* The controller role: a StatefulSet, so each pod has a DNS name
+     (sprigdb-controller-<i>.sprigdb-controller-pods.<namespace>.svc) that
+     it registers as its Admin address; gateways forward Admin calls to the
+     leader there. */}}
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: sprigdb-controller
   labels: {{- include "sprigdb.labels" . | nindent 4 }}
 spec:
+  serviceName: sprigdb-controller-pods
   replicas: {{ .Values.controller.replicas }}
+  # The replicas elect a leader through etcd; none waits for another.
+  podManagementPolicy: Parallel
   selector:
     matchLabels: {app.kubernetes.io/component: controller}
   template:
@@ -16,8 +22,7 @@ spec:
     spec:
       automountServiceAccountToken: false
       # Kubernetes' service-link variables (SPRIGDB_CONTROLLER_PORT=tcp://...)
-      # read as SPRIGDB_<SECTION>_<KEY> configuration and stop the process
-      # (found by r2close's helm install).
+      # read as SPRIGDB_<SECTION>_<KEY> configuration and stop the process.
       enableServiceLinks: false
       {{- include "sprigdb.podSecurity" . | nindent 6 }}
       containers:
@@ -28,9 +33,17 @@ spec:
           env:
             - name: SPRIGDB_NODE_ID
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            # The Admin address in this controller's registration: the
+            # pod's name under the headless Service, which resolves inside
+            # the cluster and which the controller certificate covers
+            # (*.sprigdb-controller-pods.<namespace>.svc). Unset, the
+            # controller would register its hostname, which nothing
+            # resolves.
+            - {name: SPRIGDB_CONTROLLER_ADMIN_ADVERTISE, value: "$(POD_NAME).sprigdb-controller-pods.{{ .Release.Namespace }}.svc:7480"}
             # Gateways, agents and workers renew their DC permits here; the
-            # loopback default left every other pod fenced (39501), found
-            # by r2close's helm install.
+            # loopback default would leave every other pod fenced (39501).
             - name: POD_IP
               valueFrom: {fieldRef: {fieldPath: status.podIP}}
             - {name: SPRIGDB_CONTROLLER_INTERNAL_ADVERTISE, value: "$(POD_IP):7400"}
@@ -50,10 +63,17 @@ spec:
             # operator; updated in place, re-read at each connection.
             - {name: creds, mountPath: /etc/sprigdb/creds, readOnly: true}
             - {name: admin-token, mountPath: /etc/sprigdb/admin, readOnly: true}
+            {{- if and .Values.tls.enabled (.Values.controller.adminApi | default dict).tlsSecret }}
+            - {name: admin-tls, mountPath: /etc/sprigdb/admin-tls, readOnly: true}
+            {{- end }}
       volumes:
         {{- include "sprigdb.tlsVolumes" (dict "root" . "role" "controller" "secret" "sprigdb-controller-tls") | nindent 8 }}
         - name: admin-token
           secret: {secretName: sprigdb-admin-token}
+        {{- if and .Values.tls.enabled (.Values.controller.adminApi | default dict).tlsSecret }}
+        - name: admin-tls
+          secret: {secretName: {{ .Values.controller.adminApi.tlsSecret }}}
+        {{- end }}
         - name: creds
           secret: {secretName: sprigdb-cluster-credentials, optional: true}
 ---
@@ -67,3 +87,20 @@ spec:
   ports:
     - {name: admin, port: 7480}
     - {name: internal, port: 7400}
+---
+# Headless: one DNS name per controller pod, for the Admin addresses the
+# controllers register, and the telemetry port the ServiceMonitor scrapes.
+# Names are published before a pod is ready, so a starting leader can be
+# reached.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sprigdb-controller-pods
+  labels: {{- include "sprigdb.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: {app.kubernetes.io/component: controller}
+  ports:
+    - {name: admin, port: 7480}
+    - {name: telemetry, port: 9180}

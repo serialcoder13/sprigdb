@@ -144,6 +144,7 @@ pub(crate) struct World {
 /// 9 nat@% native only "npw"
 /// 10 svc@% "pw", `api_key` only
 /// 11 dual@% "pw", `caching_sha2_password` and native verifiers
+/// 12 subj@% "pw", REQUIRE SUBJECT '/CN=alice' AND ISSUER '/CN=ca'
 /// and tenant `susp` (43, suspended) with 1 carol@% "pw".
 pub(crate) fn world(policy: FixedPolicy) -> World {
     world_at(policy, None)
@@ -193,6 +194,11 @@ pub(crate) fn world_at(
         r.auth_methods = AuthMethods::API_KEY;
     });
     add(11, "dual", "%", b"pw", &|_| {});
+    add(12, "subj", "%", b"pw", &|r| {
+        r.require_tls = RequireTls::X509;
+        r.require_subject = Some("/CN=alice".into());
+        r.require_issuer = Some("/CN=ca".into());
+    });
     vs.push(sha2(11, 1, Slot::Secondary, b"old-pw"));
     vs.push(sha2(12, 1, Slot::History, b"ancient"));
     vs.push(native(91, 9, b"npw"));
@@ -289,6 +295,7 @@ pub(crate) fn req(login: &str) -> LoginRequest {
         client_ip: "192.0.2.10".parse().unwrap(),
         tls: true,
         client_cert: false,
+        client_dn: None,
         can_handle_expired_password: false,
     }
 }
@@ -606,9 +613,32 @@ async fn tls_requirements() {
     );
     let cert = LoginRequest {
         client_cert: true,
+        client_dn: None,
         ..req("acme.x509")
     };
     assert_eq!(run(&w.svc, cert, b"pw").await.verdict, AuthVerdict::Accept);
+    // REQUIRE SUBJECT and ISSUER (wireup) compare the verified names.
+    let dn = |s: &str, i: &str| LoginRequest {
+        client_cert: true,
+        client_dn: Some(crate::mysql::ClientDn {
+            subject: s.into(),
+            issuer: i.into(),
+        }),
+        ..req("acme.subj")
+    };
+    assert_eq!(
+        run(&w.svc, dn("/CN=alice", "/CN=ca"), b"pw").await.verdict,
+        AuthVerdict::Accept
+    );
+    for bad in [dn("/CN=bob", "/CN=ca"), dn("/CN=alice", "/CN=other")] {
+        assert_eq!(err(&run(&w.svc, bad, b"pw").await.verdict).code, 1045);
+    }
+    let no_names = LoginRequest {
+        client_cert: true,
+        client_dn: None,
+        ..req("acme.subj")
+    };
+    assert_eq!(err(&run(&w.svc, no_names, b"pw").await.verdict).code, 1045);
     // Without TLS the full path needs RSA (decision D4): 1045 with a hint.
     let r = run(
         &w.svc,

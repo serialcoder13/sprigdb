@@ -218,9 +218,13 @@ impl<S> MaybeTls<S> {
                 .unwrap_or("unknown"),
             sni: conn.server_name().map(str::to_owned),
             // rustls hands back peer certificates only after verifying them
-            // against the listener's client verifier; listeners don't ask
-            // for client certificates yet, so this stays false for now.
+            // against the listener's client verifier
+            // (`listener.<name>.client_cert`, wireup).
             client_cert: conn.peer_certificates().is_some_and(|c| !c.is_empty()),
+            client_dn: conn
+                .peer_certificates()
+                .and_then(|c| c.first())
+                .and_then(|c| crate::tls::client_dn(c)),
         })
     }
 }
@@ -277,6 +281,8 @@ pub struct TlsInfo {
     /// The client presented a certificate the listener verified (chapter
     /// 14's `REQUIRE X509`).
     pub client_cert: bool,
+    /// That certificate's subject and issuer (`REQUIRE SUBJECT`, `ISSUER`).
+    pub client_dn: Option<sprig_auth::mysql::ClientDn>,
 }
 
 /// What a connection runs over now: plaintext or a TLS version. Set by the

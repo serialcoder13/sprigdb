@@ -109,7 +109,7 @@ fn recommendation_paths() -> Value {
     let p = |name: &str| json!({"name": name, "in": "path", "required": true, "schema": {"type": "string"}});
     json!({
         "/v1/recommendations": {"get": op("Recommendations.ListRecommendations", "sprig.admin.v1.Recommendations",
-            "Chapter 52's approvals inbox: recommendations the caller may see (filters kind, state, level, all, db, table)",
+            "The approvals inbox: recommendations the caller may see (filters kind, state, level, all, db, table)",
             None, "JsonReply")},
         "/v1/recommendations/{id}": {
             "get": with_params(op("Recommendations.GetRecommendation", "sprig.admin.v1.Recommendations",

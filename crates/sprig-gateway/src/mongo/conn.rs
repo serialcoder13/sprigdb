@@ -80,6 +80,9 @@ pub struct Conn {
     pub(crate) sql: Option<SqlSession>,
     /// The data center named by `appName` (`orders~mum1`).
     pub(crate) dc: Option<String>,
+    /// That DC when it is a known one (chapter 24): the connection's SQL
+    /// sessions count their statements as traffic from it.
+    pub(crate) client_dc: Option<sprig_common::ids::DcId>,
     /// A restore connection (`mongorestore`): indexes are `migrated`.
     pub(crate) restore: bool,
     pub(crate) hello_done: bool,
@@ -156,6 +159,7 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
         compressors: Vec::new(),
         sql: None,
         dc: None,
+        client_dc: None,
         restore: false,
         hello_done: false,
         close_now: false,
@@ -385,6 +389,9 @@ impl Conn {
             if let Some((_, dc)) = app.rsplit_once('~') {
                 self.dc = Some(dc.to_owned());
             }
+            // Chapter 24: the hint votes in the tenant's traffic, counted
+            // like MySQL's `sprig_dc` (an unknown id as none).
+            self.client_dc = crate::dc::hint("mongodb", self.dc.as_deref()).known();
             if app.eq_ignore_ascii_case("mongorestore") {
                 self.restore = true;
             }
@@ -513,6 +520,7 @@ impl Conn {
                 client_ip: self.peer.ip(),
                 tls: self.tls.is_some(),
                 client_cert: self.tls.as_ref().is_some_and(|t| t.client_cert),
+                client_dn: self.tls.as_ref().and_then(|t| t.client_dn.clone()),
                 can_handle_expired_password: false,
             })
             .await;
@@ -617,6 +625,8 @@ impl Conn {
                 64 * 1024 * 1024,
             )
             .map_err(|e| MongoError::new(code::INTERNAL_ERROR, e.message))?;
+            let mut s = s;
+            s.set_client_dc(self.client_dc.clone());
             self.sql = Some(s);
         }
         self.sql

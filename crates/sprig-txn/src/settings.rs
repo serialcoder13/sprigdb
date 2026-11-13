@@ -55,7 +55,7 @@ pub static NON_XA_POLICY: Setting<Cow<'static, str>> = Setting {
     apply: Apply::Live,
     operator_only: false,
     owner: 18,
-    doc: "reject, best_effort or sprig_2pc (R3)",
+    doc: "A write that adds a second cluster without XA: reject (error 39440), best_effort (each cluster commits on its own) or sprig_2pc (held branches: atomic, but if a gateway dies after the commit point other writers can change those rows before the replay)",
 };
 sprig_settings::register!(NON_XA_POLICY);
 
@@ -108,8 +108,16 @@ pub enum NonXaPolicy {
     Reject,
     /// XA where possible, the rest committed one at a time.
     BestEffort,
-    /// R3: agents hold the extra branches. Until then it behaves as
-    /// `reject`.
+    /// Sprig 2PC: a branch on a cluster without XA records its writes and
+    /// is held as a prepared branch (`crate::redo`); after a crash the
+    /// controller's resolver replays or drops its redo rows, so the
+    /// transaction stays atomic. The gateway session holds the branch on
+    /// its own connection, so a gateway that dies after the commit point
+    /// releases the branch's locks before the replay runs, and another
+    /// writer can change those rows in between. That is why it stays
+    /// opt-in (the default is `reject`) until the relay fence runs in
+    /// deployments. A backend that can't record writes
+    /// (`start_redo` returns false) gets `reject`'s behaviour.
     Sprig2pc,
 }
 
@@ -259,7 +267,7 @@ pub fn check_resolve_window(
             "{} ({commit_resolve_timeout_ms} ms) must stay below {} ({min_age_seconds} s = \
              {min_age_ms} ms): otherwise a coordinator can record an abort for a transaction \
              whose commit row the resolver already swept, and tell the client \"rolled back\" \
-             for a committed transaction (chapter 18)",
+             for a committed transaction",
             COMMIT_RESOLVE_TIMEOUT_MS.key, RESOLVER_MIN_AGE_SECONDS.key
         ),
     ))

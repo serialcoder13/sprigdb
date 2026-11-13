@@ -126,7 +126,7 @@ pub(crate) struct AccountsFile {
 pub(crate) fn export_command() -> Command {
     gateway_args(
         Command::new("export")
-            .about("Export a tenant: schemas, rows, users and grants, settings (chapter 47)")
+            .about("Export a tenant: schemas, rows, users and grants, settings")
             .arg(Arg::new("name").required(true).help("The tenant"))
             .arg(
                 Arg::new("to")

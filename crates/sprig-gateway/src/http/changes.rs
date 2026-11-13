@@ -6,18 +6,19 @@
 //!
 //! ```text
 //! watch(caller, database, objects, start_after | Last-Event-ID | now):
-//!   every requested table: SELECT (the image check below, no image), else 1142
+//!   every requested table: SELECT, then WATCH (the image check below, no
+//!     image), else 1142 naming the missing one (chapters 29 and 38)
 //!   tail the tenant's feed (chapter 38's TenantTail) from the token or now
 //!   per batch of feed events (up to 256, or what arrived within 20 ms):
 //!     events of the database (of `objects` when given; internal tables never)
 //!     the images checked in one session of the caller (exec::rls_images):
-//!       SELECT on the table, and its row-level security with the caller's
+//!       SELECT and WATCH on the table, and its row-level security with the caller's
 //!       session values; checked at every batch, so a grant, role or policy
 //!       change applies from the next one
 //!     insert: after visible        delete: before visible
 //!     update: both → update; before only → delete; after only → insert
 //!     ddl, truncate: SELECT on the table
-//!   no event for api.stream heartbeat (10 s): a heartbeat with the last token
+//!   no event for api.stream.heartbeat_seconds (15 s by default): a heartbeat with the last token
 //!   framing: gRPC one ChangeEvent; SSE "id: <token>\nevent: <op>\ndata: <JSON>\n\n";
 //!   WebSocket one text frame of JSON; NDJSON one JSON line
 //! ```
@@ -268,6 +269,18 @@ fn denied(caller: &Caller, db: &str, table: &str) -> SprigError {
     )
 }
 
+/// 1142 for a table the caller may read but not `WATCH`.
+fn denied_watch(caller: &Caller, db: &str, table: &str) -> SprigError {
+    SprigError::standard(
+        1142,
+        *b"42000",
+        format!(
+            "WATCH command denied to user '{}'@'{}' for table `{db}`.`{table}`",
+            caller.principal.user, caller.principal.host
+        ),
+    )
+}
+
 /// Opens a watch: its events, then (on failure) one error, then the end.
 ///
 /// # Errors
@@ -305,9 +318,10 @@ pub async fn open(
             "No database selected".to_owned(),
         ));
     }
-    // 1. SELECT on every requested table.
+    // 1. SELECT, then WATCH (chapters 29 and 38), on every requested
+    //    table.
     if !spec.objects.is_empty() {
-        let req = ImagesRequest {
+        let mut req = ImagesRequest {
             tables: spec
                 .objects
                 .iter()
@@ -318,10 +332,16 @@ pub async fn open(
                 })
                 .collect(),
             plain_binary: false,
+            watch: false,
         };
         let ok = check(core, &caller, &req).await?;
         if let Some(i) = ok.iter().position(|v| !v.first().copied().unwrap_or(false)) {
             return Err(denied(&caller, &spec.database, &spec.objects[i]));
+        }
+        req.watch = true;
+        let ok = check(core, &caller, &req).await?;
+        if let Some(i) = ok.iter().position(|v| !v.first().copied().unwrap_or(false)) {
+            return Err(denied_watch(&caller, &spec.database, &spec.objects[i]));
         }
     }
     let slot = Slot::take(tenant, limits.change_streams_max)?;
@@ -536,7 +556,11 @@ async fn run(
                 Err(_) => break,
             }
         }
-        let mut req = ImagesRequest::default();
+        // Chapters 29 and 38: every event needs WATCH on its table too.
+        let mut req = ImagesRequest {
+            watch: true,
+            ..ImagesRequest::default()
+        };
         let mut tables: HashMap<String, usize> = HashMap::new();
         let mut pending: Vec<Pending> = Vec::new();
         for it in items {

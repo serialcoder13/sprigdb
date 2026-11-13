@@ -285,7 +285,7 @@ impl ViaParent {
                     return reject(
                         Reason::InsertKey,
                         "a row whose parent doesn't exist, with foreign_key_checks = 0 \
-                         (chapter 19's orphanage isn't built)",
+                         (rows without a parent aren't supported)",
                     );
                 }
             }

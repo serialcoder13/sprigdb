@@ -77,7 +77,7 @@ pub struct IndexDef {
     pub unique: bool,
     /// `sparse` (recorded; MariaDB indexes every row).
     pub sparse: bool,
-    /// `expireAfterSeconds` (recorded; the TTL worker isn't built yet).
+    /// `expireAfterSeconds`: a TTL index (`engine::ttl`, `sprig_worker::doc_ttl`).
     pub expire_after: Option<i64>,
     /// `user`, `migrated` or `auto`.
     pub origin: String,
@@ -134,7 +134,12 @@ impl IndexDef {
             d.insert("sparse", true);
         }
         if let Some(e) = self.expire_after {
-            d.insert("expireAfterSeconds", e);
+            // An int, as MongoDB 8.0 lists it (the range is checked when
+            // it is set).
+            match i32::try_from(e) {
+                Ok(i) => d.insert("expireAfterSeconds", i),
+                Err(_) => d.insert("expireAfterSeconds", e),
+            };
         }
         for (k, v) in &self.extra {
             d.insert(k.clone(), v.clone());

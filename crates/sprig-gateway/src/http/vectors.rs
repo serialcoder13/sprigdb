@@ -228,7 +228,7 @@ async fn ann_gate(
                 AnnGate::Go(v.get("ticket").cloned().filter(|t| !t.is_null()))
             } else {
                 let why = v.get("why").and_then(Value::as_str).unwrap_or("");
-                tracing::info!(index = %def.name, why, "automatic vector graph held (chapter 52)");
+                tracing::info!(index = %def.name, why, "automatic vector graph held for approval");
                 AnnGate::Skip
             }
         }
@@ -435,13 +435,13 @@ pub async fn call(
             if !s(body, "type").is_empty() {
                 return Err(SprigError::new(
                     SprigCode::VectorFilterNotIndexed,
-                    "type filters (chapter 32) aren't offered on vector indexes in this release",
+                    "type filters aren't offered on vector indexes in this release",
                 ));
             }
             if body.get("text").is_some_and(|t| !s(t, "query").is_empty()) {
                 return Err(SprigError::new(
                     SprigCode::VectorFilterNotIndexed,
-                    "hybrid search with full text (chapter 39) isn't offered in this release",
+                    "hybrid search with full text isn't offered in this release",
                 ));
             }
             let filter = match s(body, "filter") {

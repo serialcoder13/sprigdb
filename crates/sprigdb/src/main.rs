@@ -50,15 +50,15 @@ struct Cli {
 
 #[derive(Debug, Clone, Copy, Subcommand)]
 enum RoleCommand {
-    /// Client listeners and sessions (chapter 04).
+    /// Client listeners and sessions: every protocol clients connect to.
     Gateway,
-    /// Reconcilers and leader election (chapter 23).
+    /// The control plane: tenants, placement, settings and failover.
     Controller,
-    /// The job runtime (chapters 10 and 13).
+    /// Background jobs: data moves, sinks, triggers, search and recovery.
     Worker,
-    /// The node agent for VMs (chapter 27).
+    /// The node agent that manages MariaDB on a VM.
     Agent,
-    /// The Kubernetes operator (chapter 27).
+    /// The Kubernetes operator.
     Operator,
     /// Prints every setting this binary knows as JSON, for the generated
     /// settings reference (`docs/reference/settings.md`); not a role.
@@ -172,6 +172,7 @@ fn start_audit(
         ));
     };
     let sink = std::sync::Arc::new(DirSink::new(sink_dir, config.node.dc.clone()));
+    let sink_ret = std::sync::Arc::clone(&sink);
     let p = Pipeline::open(
         spool,
         config.node.id(),
@@ -180,6 +181,9 @@ fn start_audit(
         sink,
     )?;
     let task = p.spawn(stop.clone());
+    // Chapter 47's `audit.retention_days` (decision bugfix-interim): the
+    // sink's old days go, hourly and in batches.
+    let _retention = sink_ret.spawn_retention(stop.clone());
     audit::install(p)?;
     tracing::info!(spool = %spool.display(), sink = %sink_dir.display(), "audit pipeline started");
     Ok(Some(task))

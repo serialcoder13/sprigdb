@@ -324,9 +324,11 @@ impl PassSession {
             let pos = testrun::positional(&req.args, &names, &subject.name)?;
             (subject.program.coerce(&subject.name, pos)?, info)
         } else {
+            // KIRun's parameters, or a JavaScript validation's or
+            // trigger's (bound by name, jsbind); Lua takes `ctx`.
             let kp = match &subject.program {
-                sprig_logic::engine::Program::Kirun(p) => p.params().to_vec(),
-                _ => Vec::new(),
+                sprig_logic::engine::Program::Lua(_) => Vec::new(),
+                p => param_names(p),
             };
             testrun::trigger_args(&req, &subject.runtime, &kp, &info)
         };

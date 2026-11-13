@@ -24,7 +24,7 @@ pub(crate) fn group() -> Command {
             .help("The graph, as database.graph")
     };
     Command::new("graph")
-        .about("Graphs (chapter 43)")
+        .about("Graphs")
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(

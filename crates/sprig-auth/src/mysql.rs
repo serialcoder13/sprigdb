@@ -112,8 +112,21 @@ pub struct LoginRequest {
     /// The client presented a certificate the gateway verified
     /// (`REQUIRE X509`).
     pub client_cert: bool,
+    /// That certificate's subject and issuer (`REQUIRE SUBJECT`, `ISSUER`);
+    /// `None` without one, or where the front end doesn't pass them.
+    pub client_dn: Option<ClientDn>,
     /// The client set `CLIENT_CAN_HANDLE_EXPIRED_PASSWORDS`.
     pub can_handle_expired_password: bool,
+}
+
+/// A verified client certificate's names, in MySQL's form
+/// (`/C=US/O=Acme/CN=alice`, as OpenSSL's one-line form writes them).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ClientDn {
+    /// The subject.
+    pub subject: String,
+    /// The issuer.
+    pub issuer: String,
 }
 
 /// Who logged in (the MySQL subset of chapter 14's `Principal`).
@@ -1290,8 +1303,16 @@ impl MysqlLogin {
         }
         // d. TLS requirements.
         let need_tls = row.require_tls != RequireTls::None || self.policy_bool(c, &REQUIRE_TLS);
+        // `REQUIRE SUBJECT` and `ISSUER` compare the verified certificate's
+        // names exactly, as MySQL does.
+        let dn = self.req.client_dn.as_ref().filter(|_| self.req.client_cert);
+        let dn_ok = |want: &Option<String>, got: Option<&String>| {
+            want.as_ref().is_none_or(|w| got == Some(w))
+        };
         if (need_tls && !self.req.tls)
             || (row.require_tls == RequireTls::X509 && !self.req.client_cert)
+            || !dn_ok(&row.require_subject, dn.map(|d| &d.subject))
+            || !dn_ok(&row.require_issuer, dn.map(|d| &d.issuer))
         {
             let e = self.denied();
             return self.refuse("tls_required", path, e);

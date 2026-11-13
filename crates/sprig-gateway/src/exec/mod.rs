@@ -45,6 +45,8 @@ mod logic;
 mod logic_bound;
 // Chapter 41: DROP of logic modules and their dependents (R7 follow-ups).
 mod logic_drop;
+// Chapter 41: `EXPLAIN FUNCTION | PROCEDURE` (placement of stored versions).
+mod logic_explain;
 // Chapter 41: staged rollouts at call time (R7 follow-ups).
 mod logic_rollout;
 // Chapter 41: `Logic.TestRun` (R7 follow-ups).
@@ -1230,6 +1232,13 @@ impl SessionExec for PassSession {
             cat,
             p.row_policies().as_deref(),
         )))
+    }
+
+    fn set_claims(&mut self, claims: Option<std::sync::Arc<serde_json::Value>>) {
+        // Chapter 29: SPRIG_CLAIM() reads the caller's verified token.
+        if let Some(ts) = self.tenant.as_deref_mut() {
+            ts.rls.claims = claims;
+        }
     }
 
     fn holds_tenant_privilege(&self, action: sprig_auth::authz::Action) -> Option<bool> {

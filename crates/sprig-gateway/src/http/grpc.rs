@@ -782,6 +782,8 @@ admin_service!(TenantsSvc, tenants_server::Tenants, TenantsServer, "Tenants", {
     list_tenants: ListRequest => "ListTenants",
     get_tenant: NameRequest => "GetTenant",
     delete_tenant: NameRequest => "DeleteTenant",
+    suspend_tenant: NameRequest => "SuspendTenant",
+    resume_tenant: NameRequest => "ResumeTenant",
 });
 admin_service!(UsersSvc, users_server::Users, UsersServer, "Users", {
     create_user: NameRequest => "CreateUser",

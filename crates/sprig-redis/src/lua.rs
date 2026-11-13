@@ -883,8 +883,7 @@ fn run_blocking(
                 )
             };
             Outcome::Abort(crate::reply::sprig(
-                "REDIS_LUA_BUDGET_EXCEEDED",
-                39850,
+                sprig_common::SprigCode::RedisLuaBudgetExceeded,
                 &format!("{which}; rolled back"),
             ))
         }

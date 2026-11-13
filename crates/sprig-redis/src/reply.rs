@@ -2,6 +2,7 @@
 
 use std::fmt::Write as _;
 
+use sprig_common::SprigCode;
 use sprig_proto_redis::Frame;
 
 /// `WRONGTYPE` (chapter 33's 39730).
@@ -74,18 +75,22 @@ fn trunc(b: &[u8]) -> String {
     s.replace(['\r', '\n'], " ")
 }
 
-/// `-SPRIG <NAME> <number> <message>` (chapter 40, "Errors").
+/// `-SPRIG <NAME> <number> <message>`, the name and number from the
+/// registry (`SprigCode`).
 #[must_use]
-pub fn sprig(name: &str, code: u16, message: &str) -> Frame {
-    Frame::error(format!("SPRIG {name} {code} {message}"))
+pub fn sprig(code: SprigCode, message: &str) -> Frame {
+    Frame::error(format!(
+        "SPRIG {} {} {message}",
+        code.short_name(),
+        code.number()
+    ))
 }
 
 /// 39840: a Redis 7.2 command not in this release.
 #[must_use]
 pub fn unsupported(cmd: &str, when: &str) -> Frame {
     sprig(
-        "REDIS_UNSUPPORTED",
-        39840,
+        SprigCode::RedisUnsupported,
         &format!("{} is {when}", cmd.to_ascii_uppercase()),
     )
 }
@@ -94,8 +99,7 @@ pub fn unsupported(cmd: &str, when: &str) -> Frame {
 #[must_use]
 pub fn restricted(cmd: &str) -> Frame {
     sprig(
-        "REDIS_RESTRICTED",
-        39842,
+        SprigCode::RedisRestricted,
         &format!(
             "{} is not offered; manage SprigDB through SQL, the API or sprigctl",
             cmd.to_ascii_uppercase()
@@ -107,8 +111,7 @@ pub fn restricted(cmd: &str) -> Frame {
 #[must_use]
 pub fn element_too_long() -> Frame {
     sprig(
-        "KV_ELEMENT_TOO_LONG",
-        39731,
+        SprigCode::KvElementTooLong,
         "hash fields and set members are at most 2024 bytes",
     )
 }
@@ -116,15 +119,14 @@ pub fn element_too_long() -> Frame {
 /// 39723: a key over 1024 bytes.
 #[must_use]
 pub fn key_too_long() -> Frame {
-    sprig("KV_INVALID_KEY", 39723, "keys are at most 1024 bytes")
+    sprig(SprigCode::KvInvalidKey, "keys are at most 1024 bytes")
 }
 
 /// 39724: a value over the namespace's `max_value_bytes`.
 #[must_use]
 pub fn value_too_big(max: usize) -> Frame {
     sprig(
-        "KV_VALUE_INVALID",
-        39724,
+        SprigCode::KvValueInvalid,
         &format!("values are at most {max} bytes in this database"),
     )
 }
@@ -132,7 +134,12 @@ pub fn value_too_big(max: usize) -> Frame {
 /// 39846: retries spent on conflicts.
 #[must_use]
 pub fn tryagain() -> Frame {
-    Frame::error("TRYAGAIN SPRIG REDIS_SHARD_BUSY 39846 conflicting writes; retry")
+    let c = SprigCode::RedisShardBusy;
+    Frame::error(format!(
+        "TRYAGAIN SPRIG {} {} conflicting writes; retry",
+        c.short_name(),
+        c.number()
+    ))
 }
 
 /// A backend failure, as `-ERR`.

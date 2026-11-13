@@ -349,6 +349,10 @@ impl SessionExec for ObservedSession {
     fn holds_tenant_privilege(&self, action: sprig_auth::authz::Action) -> Option<bool> {
         self.inner.holds_tenant_privilege(action)
     }
+
+    fn set_claims(&mut self, claims: Option<std::sync::Arc<serde_json::Value>>) {
+        self.inner.set_claims(claims);
+    }
 }
 
 /// A sink that notes the class of an error relayed through it (a backend

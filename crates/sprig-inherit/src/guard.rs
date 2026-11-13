@@ -631,6 +631,14 @@ fn destructive(op: &AlterTableOperation, old: &[OldColumn]) -> Option<String> {
             _ => Some(format!("altering {}", column_name.value)),
         },
         AlterTableOperation::Algorithm { .. } | AlterTableOperation::Lock { .. } => None,
+        // DROP HIERARCHY: paths are derived, so nothing is lost below.
+        AlterTableOperation::DropColumn { column_names, .. }
+            if column_names
+                .iter()
+                .all(|c| crate::hier::is_path_column(&c.value)) =>
+        {
+            None
+        }
         AlterTableOperation::DropColumn { .. } => Some("dropping a column".into()),
         AlterTableOperation::RenameColumn { .. } => Some("renaming a column".into()),
         AlterTableOperation::RenameTable { .. } => Some("renaming the table".into()),
@@ -710,11 +718,16 @@ pub(crate) async fn follow_columns(
     r: &mut dyn Runner,
     res: &Resolved,
 ) -> Result<()> {
-    let cols: Vec<String> = show_columns(r, &res.layer)
+    let mut cols: Vec<String> = show_columns(r, &res.layer)
         .await?
         .into_iter()
         .map(|c| c.name)
         .collect();
+    // A record hierarchy's invisible path columns are fields too
+    // (decision T22).
+    if crate::hier::probe_paths(r, &res.layer).await {
+        cols.extend(crate::hier::PATH_COLUMNS.iter().map(|c| (*c).to_owned()));
+    }
     let (_, uniques) = show_uniques(r, &res.layer).await?;
     let mut o = (*res.obj).clone();
     let mut changed = false;

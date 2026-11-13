@@ -572,6 +572,7 @@ impl BoltGraphService {
                 client_ip: info.peer.ip(),
                 tls: info.tls,
                 client_cert: false,
+                client_dn: None,
                 can_handle_expired_password: false,
             })
             .await;

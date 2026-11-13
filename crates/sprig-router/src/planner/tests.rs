@@ -368,6 +368,164 @@ fn explain_sprig_wraps_the_plan() {
     assert!(t.sql.starts_with("EXPLAIN SELECT"), "{}", t.sql);
 }
 
+/// Every EXPLAIN form a client sends, or the MySQL persona's rewrites
+/// leave (`EXPLAIN s` → `EXPLAIN EXTENDED s`, `EXPLAIN ANALYZE s` →
+/// `ANALYZE FORMAT=JSON s`, `EXPLAIN FORMAT=TREE s` → `EXPLAIN
+/// FORMAT=JSON s`), keeps its head on the one shard it explains. The
+/// docs harness's failure: `EXPLAIN EXTENDED SELECT * …` reached
+/// sqlparser and failed at column 25.
+#[test]
+fn explain_forms_keep_their_head_on_routed_tables() {
+    for (sql, head) in [
+        // MariaDB persona, as the client wrote it.
+        (
+            "EXPLAIN SELECT * FROM orders WHERE cid = 42",
+            "EXPLAIN SELECT",
+        ),
+        (
+            "EXPLAIN SELECT id FROM orders WHERE cid = 42",
+            "EXPLAIN SELECT",
+        ),
+        (
+            "explain format=json SELECT * FROM orders WHERE cid = 42",
+            "explain format=json SELECT",
+        ),
+        (
+            "EXPLAIN FORMAT = JSON SELECT * FROM orders",
+            "EXPLAIN FORMAT = JSON SELECT",
+        ),
+        (
+            "EXPLAIN EXTENDED SELECT * FROM orders",
+            "EXPLAIN EXTENDED SELECT",
+        ),
+        (
+            "EXPLAIN PARTITIONS SELECT * FROM orders",
+            "EXPLAIN PARTITIONS SELECT",
+        ),
+        (
+            "ANALYZE SELECT * FROM orders WHERE cid = 42",
+            "ANALYZE SELECT",
+        ),
+        (
+            "ANALYZE FORMAT=JSON SELECT * FROM orders",
+            "ANALYZE FORMAT=JSON SELECT",
+        ),
+        (
+            "EXPLAIN ANALYZE SELECT * FROM orders",
+            "EXPLAIN ANALYZE SELECT",
+        ),
+        (
+            "DESCRIBE SELECT * FROM orders WHERE cid = 42",
+            "DESCRIBE SELECT",
+        ),
+        ("DESC SELECT * FROM orders", "DESC SELECT"),
+        (
+            "  EXPLAIN\n  EXTENDED SELECT * FROM orders",
+            "EXPLAIN\n  EXTENDED SELECT",
+        ),
+        // MySQL persona, after its rewrites.
+        (
+            "EXPLAIN EXTENDED SELECT * FROM orders WHERE cid = 42",
+            "EXPLAIN EXTENDED SELECT",
+        ),
+        (
+            "EXPLAIN FORMAT=JSON SELECT * FROM orders",
+            "EXPLAIN FORMAT=JSON SELECT",
+        ),
+        (
+            "ANALYZE FORMAT=JSON SELECT * FROM orders WHERE cid = 42",
+            "ANALYZE FORMAT=JSON SELECT",
+        ),
+        // Writes and a lookup join explain their first target.
+        (
+            "EXPLAIN EXTENDED UPDATE orders SET note = 'x' WHERE cid = 3",
+            "EXPLAIN EXTENDED UPDATE",
+        ),
+        (
+            "EXPLAIN EXTENDED DELETE FROM orders",
+            "EXPLAIN EXTENDED DELETE",
+        ),
+        (
+            "EXPLAIN EXTENDED INSERT INTO orders (cid, id) VALUES (1, 1)",
+            "EXPLAIN EXTENDED INSERT",
+        ),
+    ] {
+        let t = pass(sql);
+        assert!(t.sql.starts_with(head), "{sql}: {}", t.sql);
+        assert!(t.sql.contains("t1_d1_g9_s"), "{sql}: {}", t.sql);
+    }
+    // One shard's schema, not the logical one.
+    let t = pass("EXPLAIN EXTENDED SELECT * FROM orders WHERE cid = 42");
+    assert_eq!(t.shard, pass("SELECT * FROM orders WHERE cid = 42").shard);
+    // ANALYZE runs the statement: never a write on one shard.
+    for sql in [
+        "ANALYZE FORMAT=JSON UPDATE orders SET note = 'x' WHERE cid = 3",
+        "ANALYZE DELETE FROM orders",
+        "EXPLAIN ANALYZE INSERT INTO orders (cid, id) VALUES (1, 1)",
+    ] {
+        assert_eq!(reason(sql), Reason::Unsupported, "{sql}");
+    }
+    // Not EXPLAINs of a statement: as before.
+    assert!(matches!(p("EXPLAIN SELECT 1"), Plan::NotRouted));
+    assert!(matches!(
+        p("EXPLAIN EXTENDED SELECT * FROM other"),
+        Plan::NotRouted
+    ));
+    assert!(matches!(p("ANALYZE TABLE orders"), Plan::Reject(_)));
+    assert!(matches!(
+        p("EXPLAIN FORMAT=SPRIG SELECT * FROM orders"),
+        Plan::Explain(_)
+    ));
+    assert!(split_explain("DESCRIBE orders").is_none());
+    assert!(split_explain("ANALYZE TABLE orders").is_none());
+    assert!(split_explain("EXPLAIN FORMAT=SPRIG SELECT 1").is_none());
+    assert!(split_explain("EXPLAINX SELECT 1").is_none());
+    assert!(split_explain("EXPLAIN FORMAT= SELECT 1").is_none());
+}
+
+/// A prepared EXPLAIN keeps its head too, MariaDB-only heads included.
+#[test]
+fn prepared_explain_keeps_its_head() {
+    let t = topo();
+    let cx = PlanCtx {
+        topo: &t,
+        default_schema: Some(DEF),
+        session_cluster: "c1",
+        max_route_values: 1024,
+        lookup_batch: 256,
+        ids: crate::planner::IdMode::default(),
+    };
+    for (sql, head) in [
+        ("EXPLAIN SELECT * FROM orders WHERE cid = ?", "EXPLAIN "),
+        (
+            "EXPLAIN FORMAT=JSON SELECT * FROM orders WHERE cid = ?",
+            "EXPLAIN FORMAT=JSON ",
+        ),
+        (
+            "EXPLAIN EXTENDED SELECT * FROM orders WHERE cid = ?",
+            "EXPLAIN EXTENDED ",
+        ),
+        (
+            "ANALYZE FORMAT=JSON SELECT * FROM orders WHERE cid = ?",
+            "ANALYZE FORMAT=JSON ",
+        ),
+        ("DESCRIBE SELECT * FROM orders WHERE cid = ?", "DESCRIBE "),
+    ] {
+        let tpl = parse_template(sql, &t).unwrap().unwrap();
+        assert_eq!(tpl.params(), 1, "{sql}");
+        let pp = plan_prepared(&tpl, &[ParamLit::Int(42)], &cx);
+        let Plan::Pass(target) = &pp.plan else {
+            panic!("{sql}: {:?}", pp.plan)
+        };
+        assert!(target.sql.starts_with(head), "{sql}: {}", target.sql);
+        assert!(target.sql.contains("42"), "{sql}: {}", target.sql);
+        assert_eq!(
+            target.shard,
+            pass("SELECT * FROM orders WHERE cid = 42").shard
+        );
+    }
+}
+
 #[test]
 fn string_literals_keep_their_escapes() {
     let t = pass(r"SELECT 'a\'b', 'c\\d' FROM orders WHERE cid = 1");
@@ -683,6 +841,100 @@ fn a_zero_key_without_auto_increment_is_a_value() {
     );
     match p("INSERT INTO orders (id, cid) VALUES (5, 0), (6, 0)") {
         Plan::Pass(t) => assert!(t.sql.contains("(5, 0), (6, 0)"), "{}", t.sql),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// bugfix prepfix: a SQL-level `EXECUTE … USING` runs its statement's text
+/// with the values written in ([`ParamLit::sql`], as the gateway's
+/// `sql_prepare` renders them), planned like the client's own statement:
+/// the same shard as the literal text, a reference table's copy, an
+/// unsharded table unrouted, and on a moved map wherever the map says
+/// now.
+#[test]
+fn sql_level_executions_route_as_their_text() {
+    let s = |b: &[u8]| ParamLit::Str {
+        bytes: b.to_vec(),
+        charset: "utf8mb4".into(),
+    };
+    let one = |sql: &str, params: &[ParamLit]| {
+        let text = render_params(sql, params).unwrap();
+        pass(&text)
+    };
+    let tpl = "SELECT * FROM orders WHERE cid = ?";
+    for (params, literal) in [
+        (
+            vec![ParamLit::Int(42)],
+            "SELECT * FROM orders WHERE cid = 42",
+        ),
+        (
+            vec![ParamLit::Int(-17)],
+            "SELECT * FROM orders WHERE cid = -17",
+        ),
+        (vec![s(b"42")], "SELECT * FROM orders WHERE cid = '42'"),
+        (
+            vec![ParamLit::Raw("42".into())],
+            "SELECT * FROM orders WHERE cid = 42",
+        ),
+    ] {
+        let a = one(tpl, &params);
+        let b = pass(literal);
+        assert_eq!((a.shard, &a.cluster), (b.shard, &b.cluster), "{params:?}");
+    }
+    // An INSERT's key value routes it.
+    let a = one(
+        "INSERT INTO orders (cid, note) VALUES (?, ?)",
+        &[ParamLit::Int(42), s(b"x")],
+    );
+    assert_eq!(a.shard, pass("SELECT * FROM orders WHERE cid = 42").shard);
+    assert!(a.sql.contains("_utf8mb4 X'78'"), "{}", a.sql);
+    // A reference table alone: its copy, no shard.
+    let r = one("SELECT * FROM countries WHERE code = ?", &[s(b"de")]);
+    assert_eq!(r.shard, 0);
+    // An unsharded table: not routed.
+    let text = render_params(
+        "SELECT * FROM t1_d1_g1_s1.users WHERE id = ?",
+        &[ParamLit::Int(3)],
+    )
+    .unwrap();
+    assert_eq!(p(&text), Plan::NotRouted);
+    // Several keys: several shards, values in every shard's text.
+    let text = render_params(
+        "SELECT cid FROM orders WHERE cid IN (?, ?, ?)",
+        &[ParamLit::Int(1), ParamLit::Int(2), ParamLit::Int(3)],
+    )
+    .unwrap();
+    match p(&text) {
+        Plan::Read(r) => assert!(r.targets.iter().all(|t| !t.sql.contains('?'))),
+        Plan::Pass(t) => assert!(!t.sql.contains('?')),
+        other => panic!("{other:?}"),
+    }
+    // A shard moved between PREPARE and EXECUTE: the next execution's
+    // plan follows the map of the moment.
+    let moved: TopologyFile = serde_json::from_str(
+        r#"{"tenants": {"a": {
+          "groups": [
+            {"id": 9, "key_class": "int", "shards": [
+              {"shard": 1, "schema": "t1_d1_g9_s1", "cluster": "c2"},
+              {"shard": 2, "schema": "t1_d1_g9_s2", "cluster": "c2"},
+              {"shard": 3, "schema": "t1_d1_g9_s3", "cluster": "c2"},
+              {"shard": 4, "schema": "t1_d1_g9_s4", "cluster": "c2"}]}],
+          "tables": [
+            {"schema": "t1_d1_g1_s1", "table": "orders", "group": 9, "key": "cid", "key_ordinal": 1}]}}}"#,
+    )
+    .unwrap();
+    let moved = moved.tenants["a"].build().unwrap();
+    let cx = PlanCtx {
+        topo: &moved,
+        default_schema: Some(DEF),
+        session_cluster: "c1",
+        max_route_values: 1024,
+        lookup_batch: 256,
+        ids: crate::planner::IdMode::default(),
+    };
+    let text = render_params(tpl, &[ParamLit::Int(42)]).unwrap();
+    match plan(&text, &cx) {
+        Plan::Pass(t) => assert_eq!(t.cluster, "c2"),
         other => panic!("{other:?}"),
     }
 }

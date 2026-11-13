@@ -267,8 +267,7 @@ impl Session {
             if q.len() >= self.env.config().max_multi_commands {
                 self.multi_err = true;
                 return vec![reply::sprig(
-                    "REDIS_MULTI_TOO_LARGE",
-                    39844,
+                    sprig_common::SprigCode::RedisMultiTooLarge,
                     "too many commands queued (redis.max_multi_commands)",
                 )];
             }
@@ -441,7 +440,7 @@ impl Session {
             "client" => one(self.client(a)),
             "swapdb" => one(reply::unsupported(
                 "swapdb",
-                "not offered yet: it needs chapter 40's redis_databases map",
+                "not supported in this version",
             )),
             "multi" => {
                 if self.multi.is_some() {
@@ -493,8 +492,7 @@ impl Session {
                 {
                     Ok(n) => one(Frame::Integer(n)),
                     Err(e) => one(reply::sprig(
-                        "REDIS_PUBSUB_UNAVAILABLE",
-                        39848,
+                        sprig_common::SprigCode::RedisPubsubUnavailable,
                         &format!("no pub/sub hub reachable: {e}"),
                     )),
                 }
@@ -830,6 +828,8 @@ impl Session {
         {
             tracing::debug!(error = %e, "redis session isolation not set");
         }
+        // Chapter 24: a name set before AUTH names the DC too.
+        l.sql.client_dc(self.dc_hint.as_deref());
         self.login = Some(l);
     }
 
@@ -860,6 +860,9 @@ impl Session {
             .rposition(|b| *b == b'~')
             .map(|p| String::from_utf8_lossy(&n[p + 1..]).into_owned())
             .filter(|s| !s.is_empty());
+        if let Some(l) = self.login.as_mut() {
+            l.sql.client_dc(self.dc_hint.as_deref());
+        }
         self.name = if n.is_empty() { None } else { Some(n) };
         Ok(())
     }
@@ -1466,8 +1469,7 @@ impl Session {
             .unwrap_or_default();
         if !env.waits.enter(&scope, cfg.max_blocked_per_tenant) {
             return Ok(vec![reply::sprig(
-                "REDIS_TOO_MANY_BLOCKED",
-                39845,
+                sprig_common::SprigCode::RedisTooManyBlocked,
                 "too many blocked clients (redis.max_blocked_per_tenant)",
             )]);
         }
@@ -1837,8 +1839,7 @@ impl Session {
             };
             if !same_shard {
                 return Ok(reply::sprig(
-                    "REDIS_LUA_UNDECLARED_KEY",
-                    39851,
+                    sprig_common::SprigCode::RedisLuaUndeclaredKey,
                     &format!(
                         "the script used key '{}', which is not in KEYS",
                         String::from_utf8_lossy(&k[..k.len().min(64)])
@@ -1922,8 +1923,7 @@ impl Session {
                 }
             }
             "DEBUG" => reply::sprig(
-                "REDIS_LUA_UNSUPPORTED",
-                39841,
+                sprig_common::SprigCode::RedisLuaUnsupported,
                 "SCRIPT DEBUG is not offered",
             ),
             "HELP" => Frame::Array(vec![Frame::simple(

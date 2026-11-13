@@ -1178,6 +1178,34 @@ pub async fn execute(cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome>
             return show_grants(cx, &state, account.as_ref(), using);
         }
     }
+    // Chapter 29: every grant and role change is an audit event (users'
+    // own events come from chapter 14's `AccountOps` above). Only changes
+    // that committed are recorded.
+    if version.is_some()
+        && let Some(event) = grant_event(stmt)
+    {
+        let mut e = crate::audit::AuditEvent::new(
+            event,
+            match cx.persona {
+                Persona::MySql84 => "mysql",
+                Persona::MariaDb => "mariadb",
+            },
+            cx.clock.wall(),
+        );
+        e.tenant = Some(cx.tenant);
+        e.tenant_name = cx.tenant_name.map(str::to_owned);
+        e.actor = Some(cx.actor());
+        let mut detail = format!("{stmt:?}");
+        if detail.len() > 4000 {
+            let mut cut = 4000;
+            while !detail.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            detail.truncate(cut);
+        }
+        e.detail = Some(detail);
+        cx.audit.emit(&e);
+    }
     Ok(Outcome::Ok {
         notes,
         auth_version: version,
@@ -1215,6 +1243,42 @@ fn choose(
                 .collect()
         }
         RoleChoice::List(list) => named(list)?,
+    })
+}
+
+/// `ATTRIBUTE` or `COMMENT` of `options` as the JSON object to merge.
+fn attribute_patch(options: &UserOptions) -> Result<Option<serde_json::Value>> {
+    options
+        .attribute
+        .as_deref()
+        .map(|t| {
+            serde_json::from_str::<serde_json::Value>(t)
+                .ok()
+                .filter(serde_json::Value::is_object)
+                .ok_or_else(|| {
+                    SprigError::standard(
+                        3934,
+                        *b"HY000",
+                        "The user attribute must be a valid JSON object",
+                    )
+                })
+        })
+        .transpose()
+}
+
+/// The audit event of a grant or role statement; `None` for the others
+/// (users are audited by chapter 14's `AccountOps`).
+fn grant_event(stmt: &AccountStmt) -> Option<&'static str> {
+    use crate::audit::events;
+    Some(match stmt {
+        AccountStmt::Grant { .. } => events::PRIVILEGES_GRANTED,
+        AccountStmt::Revoke { .. } | AccountStmt::RevokeAll { .. } => events::PRIVILEGES_REVOKED,
+        AccountStmt::CreateRole { .. } => events::ROLE_CREATED,
+        AccountStmt::DropRole { .. } => events::ROLE_DROPPED,
+        AccountStmt::GrantRoles { .. } => events::ROLES_GRANTED,
+        AccountStmt::RevokeRoles { .. } => events::ROLES_REVOKED,
+        AccountStmt::SetDefaultRole { .. } => events::DEFAULT_ROLES_SET,
+        _ => return None,
     })
 }
 
@@ -1314,6 +1378,10 @@ async fn create_users(
         new.password_expired = options.expire.unwrap_or(false);
         if let Some(r) = options.require {
             new.require_tls = r;
+            new.require_dn.clone_from(&options.require_dn);
+            if new.require_dn.0.is_some() || new.require_dn.1.is_some() {
+                admin::migrate_dn(cx.catalog, cx.tenant).await?;
+            }
         }
         let changed = ops.create_user(&new).await.map_err(|e| match e.kind {
             sprig_common::ErrorKind::Backend { errno: 1396, .. }
@@ -1326,6 +1394,13 @@ async fn create_users(
         if options.clauses != AccountClauses::default() {
             version = Some(
                 ops.set_clauses(changed.user_id, &acc.name, &acc.host, options.clauses)
+                    .await?
+                    .auth_version,
+            );
+        }
+        if let Some(a) = attribute_patch(options)? {
+            version = Some(
+                admin::merge_attributes(cx.catalog, cx.tenant, changed.user_id, a)
                     .await?
                     .auth_version,
             );
@@ -1363,6 +1438,7 @@ async fn alter_users(
                     && options.default_roles.is_empty()
                     && options.lock.is_none()
                     && options.require.is_none()
+                    && options.attribute.is_none()
                     && options.clauses == AccountClauses::default();
                 if !own_password_only {
                     if options.set_password {
@@ -1431,13 +1507,19 @@ async fn alter_users(
             version = keep(ops.set_expired(id, &acc.name, &acc.host, e).await?);
         }
         if let Some(r) = options.require {
-            version = keep(admin::set_require_tls(cx.catalog, cx.tenant, id, r).await?);
+            version = keep(
+                admin::set_require(cx.catalog, cx.tenant, id, r, options.require_dn.clone())
+                    .await?,
+            );
         }
         if options.clauses != AccountClauses::default() {
             version = keep(
                 ops.set_clauses(id, &acc.name, &acc.host, options.clauses)
                     .await?,
             );
+        }
+        if let Some(a) = attribute_patch(options)? {
+            version = keep(admin::merge_attributes(cx.catalog, cx.tenant, id, a).await?);
         }
         if !options.default_roles.is_empty() {
             let granted = state.granted_roles(id);

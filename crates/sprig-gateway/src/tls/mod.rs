@@ -242,16 +242,117 @@ pub fn server_config(
     bundle: Arc<CertBundle>,
     min: TlsVersion,
 ) -> Result<Arc<rustls::ServerConfig>> {
+    server_config_with(bundle, min, None)
+}
+
+/// [`server_config`] that also asks for a client certificate signed by
+/// `client.0`: verified when presented, and required when `client.1`
+/// (`listener.<name>.client_cert = required`), else optional.
+///
+/// # Errors
+/// `Internal` if the provider rejects the protocol versions (a bug);
+/// `ConfigInvalid` if the CA can't build a verifier.
+pub fn server_config_with(
+    bundle: Arc<CertBundle>,
+    min: TlsVersion,
+    client: Option<(&ClientCa, bool)>,
+) -> Result<Arc<rustls::ServerConfig>> {
     let versions: &[&'static rustls::SupportedProtocolVersion] = match min {
         TlsVersion::V1_2 => &[&rustls::version::TLS13, &rustls::version::TLS12],
         TlsVersion::V1_3 => &[&rustls::version::TLS13],
     };
-    let cfg = rustls::ServerConfig::builder_with_provider(provider())
+    let builder = rustls::ServerConfig::builder_with_provider(provider())
         .with_protocol_versions(versions)
-        .map_err(|e| SprigError::internal("TLS protocol versions").with_source(e))?
-        .with_no_client_auth()
-        .with_cert_resolver(bundle);
+        .map_err(|e| SprigError::internal("TLS protocol versions").with_source(e))?;
+    let cfg = match client {
+        None => builder.with_no_client_auth().with_cert_resolver(bundle),
+        Some((ca, required)) => {
+            let mut v = rustls::server::WebPkiClientVerifier::builder_with_provider(
+                Arc::clone(&ca.roots),
+                provider(),
+            );
+            if !required {
+                v = v.allow_unauthenticated();
+            }
+            let v = v.build().map_err(|e| {
+                SprigError::new(
+                    SprigCode::ConfigInvalid,
+                    format!("client CA {}: {e}", ca.path.display()),
+                )
+            })?;
+            builder
+                .with_client_cert_verifier(v)
+                .with_cert_resolver(bundle)
+        }
+    };
     Ok(Arc::new(cfg))
+}
+
+/// The CAs whose client certificates listeners accept
+/// (`tls.bundles.default.client_ca_path`): PEM, one or more certificates.
+/// Read when the listeners are applied (a change to the file applies at
+/// the next listener change or gateway start).
+pub struct ClientCa {
+    /// The file.
+    pub path: PathBuf,
+    pem: Vec<u8>,
+    roots: Arc<rustls::RootCertStore>,
+}
+
+impl fmt::Debug for ClientCa {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClientCa")
+            .field("path", &self.path)
+            .field("roots", &self.roots.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for ClientCa {
+    fn eq(&self, o: &Self) -> bool {
+        self.path == o.path && self.pem == o.pem
+    }
+}
+
+impl ClientCa {
+    /// Reads and checks `path`.
+    ///
+    /// # Errors
+    /// Why the file isn't a usable CA bundle.
+    pub fn load(path: &Path) -> std::result::Result<Self, String> {
+        let pem = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Self::from_pem(path, pem)
+    }
+
+    /// A CA bundle from PEM text (`path` names it in messages).
+    ///
+    /// # Errors
+    /// Why the text isn't a usable CA bundle.
+    pub fn from_pem(path: &Path, pem: Vec<u8>) -> std::result::Result<Self, String> {
+        let mut roots = rustls::RootCertStore::empty();
+        for c in CertificateDer::pem_slice_iter(&pem) {
+            let c = c.map_err(|e| format!("{}: {e}", path.display()))?;
+            roots
+                .add(c)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        if roots.is_empty() {
+            return Err(format!("{}: no certificate", path.display()));
+        }
+        Ok(Self {
+            path: path.to_owned(),
+            pem,
+            roots: Arc::new(roots),
+        })
+    }
+}
+
+/// The subject and issuer of a DER certificate in MySQL's form
+/// (`/C=US/O=Acme/CN=alice`), for `REQUIRE SUBJECT` and `ISSUER`.
+#[must_use]
+pub fn client_dn(cert: &[u8]) -> Option<sprig_auth::mysql::ClientDn> {
+    let (subject, issuer) = der::names(cert)?;
+    Some(sprig_auth::mysql::ClientDn { subject, issuer })
 }
 
 /// Every bundle in use, by name, and the poller that rotates them.

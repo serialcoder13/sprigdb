@@ -232,6 +232,7 @@ impl sprig_redis::keyspace::KeyFilter for KeyImages {
                 images,
             }],
             plain_binary: true,
+            watch: false,
         })
     }
 
@@ -243,6 +244,7 @@ impl sprig_redis::keyspace::KeyFilter for KeyImages {
                 ..TableImages::default()
             }],
             plain_binary: true,
+            watch: false,
         };
         let text: Vec<Vec<Option<String>>> = rows
             .iter()
@@ -429,6 +431,7 @@ impl Auth for GatewayAuth {
                 client_ip: self.peer.ip(),
                 tls: self.tls.is_some(),
                 client_cert: self.tls.as_ref().is_some_and(|t| t.client_cert),
+                client_dn: self.tls.as_ref().and_then(|t| t.client_dn.clone()),
                 can_handle_expired_password: false,
             })
             .await;
@@ -687,6 +690,12 @@ impl SqlRunner for SqlSession {
 
     fn notified(&mut self, on: bool) {
         self.notified = on;
+    }
+
+    fn client_dc(&mut self, raw: Option<&str>) {
+        // Chapter 24: the session's statements count as traffic from this
+        // DC (an unknown or missing id as none), as MySQL's `sprig_dc`.
+        self.session.client_dc = crate::dc::hint("redis", raw).known();
     }
 }
 

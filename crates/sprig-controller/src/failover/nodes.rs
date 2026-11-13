@@ -494,7 +494,7 @@ impl PromoteHooks for ClusterHooks {
             // `home` (step 3), so no routed write meets a revoked grant.
             // Step 4 retries if a node didn't answer here.
             if let Err(e) = self.restore_standby_grants(tenant, &tier, &targets).await {
-                tracing::warn!(%tenant, error = %e, "standby grants not restored yet; step 4 retries");
+                tracing::warn!(%tenant, error = %e, "standby grants not restored yet; a later failover step retries");
             }
             return Ok(applied);
         }

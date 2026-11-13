@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Generates SprigDB's Grafana dashboards (chapter 47, "SLOs and burn-rate
-alerts"; build step 7) and checks them.
+"""Generates SprigDB's Grafana dashboards and checks them.
 
     deploy/dashboards/gen.py          # write fleet.json, dc.json, cluster.json,
                                       # tenant.json, data-movement.json
@@ -23,13 +22,11 @@ import sys
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 
-# Metrics that dashboards or alerts may name before their chapter emits
-# them, with the milestone that brings them.
-LATER = {
-    "sprig_backup_last_success_timestamp_seconds": "R2 backups (chapter 47 step 9)",
-    "sprig_controller_dc_moves_reverted_total": "R2 DC migration (chapter 24)",
-    "sprig_balancer_split_merge_flaps_total": "R1 split and merge (chapter 20)",
-}
+# Metrics that dashboards or alerts may name although no crate emits them
+# yet. Keep it empty: a panel or alert on a metric nobody exports shows
+# nothing and never fires (deploy/alerts/check-metrics.py checks the alerts
+# the same way, including metrics of etcd).
+LATER: dict[str, str] = {}
 
 DS = {"type": "prometheus", "uid": "${datasource}"}
 
@@ -348,7 +345,7 @@ def movement():
 
 def approvals():
     b = Board("sprig-approvals", "SprigDB approvals",
-              "Chapter 52: recommendations waiting for approval, decisions, escalations, "
+              "Recommendations waiting for approval, decisions, escalations, "
               "auto-applies, applied changes and notifications.", [DC_VAR])
     sel = 'dc=~"$dc"'
     b.annotation("Approved changes applied",
@@ -436,7 +433,7 @@ def main():
                     failed = True
         if not failed:
             print(f"dashboards up to date; every sprig_* metric they and the alert rules use is emitted "
-                  f"({len(emitted)} metrics in the code, {len(LATER)} allowed for later milestones)")
+                  f"({len(emitted)} metrics in the code)")
     sys.exit(1 if failed else 0)
 
 

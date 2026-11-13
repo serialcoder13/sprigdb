@@ -132,7 +132,7 @@ fn password_file() -> Arg {
 /// `sprigctl login`.
 pub(crate) fn login_cmd() -> Command {
     Command::new("login")
-        .about("Log in as a named operator (chapter 14); the session is kept per endpoint")
+        .about("Log in as a named operator; the session is kept per endpoint")
         .arg(
             Arg::new("name")
                 .long("name")
@@ -165,7 +165,7 @@ pub(crate) fn whoami_cmd() -> Command {
 /// `sprigctl operator`.
 pub(crate) fn operator_group() -> Command {
     Command::new("operator")
-        .about("Named platform and DC operators (chapter 14)")
+        .about("Named platform and DC operators")
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(
@@ -203,7 +203,7 @@ pub(crate) fn operator_group() -> Command {
 /// `sprigctl token`.
 pub(crate) fn token_group() -> Command {
     Command::new("token")
-        .about("Tokens you issue for scripts and services (chapter 14)")
+        .about("Tokens you issue for scripts and services")
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(

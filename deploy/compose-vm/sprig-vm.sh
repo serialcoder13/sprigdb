@@ -643,8 +643,36 @@ backup() {
     dc_compose exec -T "$enc_svc" bash -c "cd /backups/$ts && chown -R $uidgid . && chmod 600 *.enc *.log"
     (cd "$d" && sums_make)
     du -sh "$d" | awk -v ts="$ts" '{print "sprig-vm: backup " ts " done (" $1 ", encrypted)"}'
+    record_backup "$ts"
     copy_off "$ts"
     prune
+}
+
+# Records a finished backup in etcd (backups/<cluster>/full in this DC), for
+# the controllers' sprig_backup_last_success_timestamp_seconds gauge and the
+# BackupMissed alert. The clusters recorded are this bundle's own cluster and
+# any cluster registered on one of this VM's MariaDB services (mariadb-N).
+# A failure here only warns: the backup itself is done.
+record_backup() {
+    local ts=$1 list ids id now svcs
+    now=$(date -u +%s)
+    svcs=$(mariadb_services | jq -R . | jq -sc .)
+    if ! list=$(ctl -o json cluster list 2>/dev/null); then
+        say "warning: backup $ts not recorded for the BackupMissed alert (cluster list failed)"
+        return 0
+    fi
+    ids=$(jq -r --arg n "$cluster_name" --argjson s "$svcs" '.clusters[]?
+        | select(.name == $n or any(.nodes[]?; (.addr | split(":")[0]) as $h | $s | index($h)))
+        | .cluster_id' <<<"$list" | sort -u)
+    [[ -n $ids ]] || { say "warning: backup $ts not recorded: no registered cluster on this VM"; return 0; }
+    for id in $ids; do
+        if etcdctl_retry put "/sprig/dc/$dc/backups/$id/full" \
+            "{\"v\":1,\"finished_at\":$now,\"name\":\"$ts\"}" >/dev/null; then
+            say "backup $ts recorded for cluster $id"
+        else
+            say "warning: backup $ts not recorded for cluster $id (etcd)"
+        fi
+    done
 }
 
 # SPRIG_BACKUP_COPY_TO: a directory (a mounted disk or network share) or

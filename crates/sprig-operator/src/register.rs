@@ -7,14 +7,19 @@
 //! call), with the nodes' advertised addresses and the credential
 //! references the operator wrote.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{Method, Request};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, ServerName};
 use serde_json::{Value, json};
 use sprig_cluster::record::{NodeSpec, SecretRefs, TopologyKind};
 use sprig_common::{Result, SprigCode, SprigError};
 use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
 
 use crate::crd::FailoverDriver;
 
@@ -100,12 +105,24 @@ pub fn request_body(r: &ClusterRegistration) -> Value {
     })
 }
 
-/// [`ClusterRegistrar`] over the controller's Admin API (`http://`).
-#[derive(Debug, Clone)]
+/// [`ClusterRegistrar`] over the controller's Admin API (`http://`, or
+/// `https://` checked against a CA bundle).
+#[derive(Clone)]
 pub struct AdminRegistrar {
     host: String,
     port: u16,
     token: Option<String>,
+    tls: Option<(TlsConnector, ServerName<'static>)>,
+}
+
+impl std::fmt::Debug for AdminRegistrar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdminRegistrar")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("https", &self.tls.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl AdminRegistrar {
@@ -115,21 +132,72 @@ impl AdminRegistrar {
     /// # Errors
     /// Internal for an endpoint that isn't `http://host:port`.
     pub fn new(endpoint: &str, token: Option<String>) -> Result<Self> {
-        let rest = endpoint
-            .strip_prefix("http://")
-            .ok_or_else(|| {
-                SprigError::internal(format!(
-                    "controller endpoint {endpoint}: expected http://host:port"
-                ))
-            })?
-            .trim_end_matches('/');
+        Self::with_ca(endpoint, token, None)
+    }
+
+    /// The controller at `endpoint`: `http://host:port`, or
+    /// `https://host:port` whose certificate is checked against `ca_pem`
+    /// (PEM, one or more CA certificates) and must name `host`.
+    ///
+    /// # Errors
+    /// `ConfigInvalid` for an endpoint that isn't `http(s)://host:port`, an
+    /// `https://` endpoint without a CA bundle, or a CA bundle with no
+    /// usable certificate.
+    pub fn with_ca(endpoint: &str, token: Option<String>, ca_pem: Option<&[u8]>) -> Result<Self> {
+        let bad = |why: &str| {
+            SprigError::new(
+                SprigCode::ConfigInvalid,
+                format!("controller endpoint {endpoint}: {why}"),
+            )
+        };
+        let (https, rest) = if let Some(r) = endpoint.strip_prefix("https://") {
+            (true, r)
+        } else if let Some(r) = endpoint.strip_prefix("http://") {
+            (false, r)
+        } else {
+            return Err(bad("expected http://host:port or https://host:port"));
+        };
+        let rest = rest.trim_end_matches('/');
         let (host, port) = rest
             .rsplit_once(':')
             .and_then(|(h, p)| Some((h.to_owned(), p.parse().ok()?)))
-            .ok_or_else(|| {
-                SprigError::internal(format!("controller endpoint {endpoint}: no port"))
+            .ok_or_else(|| bad("no port"))?;
+        let tls = if https {
+            let pem = ca_pem.ok_or_else(|| {
+                bad("https needs the CA bundle its certificate is checked against")
             })?;
-        Ok(Self { host, port, token })
+            let mut roots = rustls::RootCertStore::empty();
+            for c in CertificateDer::pem_slice_iter(pem) {
+                let c = c.map_err(|e| bad(&format!("CA bundle: {e}")))?;
+                roots.add(c).map_err(|e| bad(&format!("CA bundle: {e}")))?;
+            }
+            if roots.is_empty() {
+                return Err(bad("the CA bundle holds no certificate"));
+            }
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            let mut cc = rustls::ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .map_err(|e| bad(&e.to_string()))?
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            cc.alpn_protocols = vec![b"http/1.1".to_vec()];
+            let name = ServerName::try_from(host.clone()).map_err(|e| bad(&e.to_string()))?;
+            Some((TlsConnector::from(Arc::new(cc)), name))
+        } else {
+            None
+        };
+        Ok(Self {
+            host,
+            port,
+            token,
+            tls,
+        })
+    }
+
+    /// Whether calls go over HTTPS.
+    #[must_use]
+    pub fn is_https(&self) -> bool {
+        self.tls.is_some()
     }
 
     async fn post(&self, path: &str, body: &Value) -> Result<(u16, Value)> {
@@ -142,13 +210,26 @@ impl AdminRegistrar {
         let tcp = TcpStream::connect((self.host.as_str(), self.port))
             .await
             .map_err(|e| t(&e))?;
-        let (mut send, conn) =
-            hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tcp))
-                .await
-                .map_err(|e| t(&e))?;
-        tokio::spawn(async move {
-            let _ = conn.await;
-        });
+        let mut send = if let Some((tls, name)) = &self.tls {
+            let s = tls.connect(name.clone(), tcp).await.map_err(|e| t(&e))?;
+            let (send, conn) =
+                hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(s))
+                    .await
+                    .map_err(|e| t(&e))?;
+            tokio::spawn(async move {
+                let _ = conn.await;
+            });
+            send
+        } else {
+            let (send, conn) =
+                hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tcp))
+                    .await
+                    .map_err(|e| t(&e))?;
+            tokio::spawn(async move {
+                let _ = conn.await;
+            });
+            send
+        };
         let mut b = Request::builder()
             .method(Method::POST)
             .uri(path)
@@ -288,5 +369,34 @@ mod tests {
         );
         let e = parse_response(400, &json!({"code": 39510, "message": "no"})).unwrap_err();
         assert_eq!(e.code(), Some(SprigCode::ProvisionerUnsupported));
+    }
+
+    #[test]
+    fn admin_endpoints_parse_and_https_needs_a_ca() {
+        let r = AdminRegistrar::new("http://ctl.ns.svc:7480/", None).unwrap();
+        assert_eq!(
+            (r.host.as_str(), r.port, r.is_https()),
+            ("ctl.ns.svc", 7480, false)
+        );
+        let e = AdminRegistrar::new("https://ctl.ns.svc:7480", None).unwrap_err();
+        assert!(e.to_string().contains("CA bundle"), "{e}");
+        let e = AdminRegistrar::with_ca("https://ctl.ns.svc:7480", None, Some(b"")).unwrap_err();
+        assert!(e.to_string().contains("no certificate"), "{e}");
+        assert!(AdminRegistrar::new("ctl:7480", None).is_err());
+        assert!(AdminRegistrar::new("http://ctl", None).is_err());
+        // A throwaway self-signed CA (P-256), only parsed here.
+        let ca = "-----BEGIN CERTIFICATE-----\n\
+                  MIIBezCCASGgAwIBAgIUQ5nxo3ua30mko+2hmSl2gsNB184wCgYIKoZIzj0EAwIw\n\
+                  EjEQMA4GA1UEAwwHdGVzdC1jYTAgFw0yNjExMTIyMDU1MDdaGA8yMTI2MTAxOTIw\n\
+                  NTUwN1owEjEQMA4GA1UEAwwHdGVzdC1jYTBZMBMGByqGSM49AgEGCCqGSM49AwEH\n\
+                  A0IABIir9VkfvBeCeRX8UiLNZLAawt0VdRS7QExf9uN4g9w40Fugvdwp0HIpXI8h\n\
+                  tKYer3BfmmlnFPIxonoN5actKVmjUzBRMB0GA1UdDgQWBBRZ9uNYwUsDNIviMCnm\n\
+                  U2k6Ge2PKzAfBgNVHSMEGDAWgBRZ9uNYwUsDNIviMCnmU2k6Ge2PKzAPBgNVHRMB\n\
+                  Af8EBTADAQH/MAoGCCqGSM49BAMCA0gAMEUCIQC5rB0p8Rf8U3l6vTQ7DiK0tjPa\n\
+                  p7DAGVGMkNx/o3ZQbAIgQCuHa9iN/SvhbUqSwssAYFGaAoL7YoF3WT4xfXUTht8=\n\
+                  -----END CERTIFICATE-----";
+        let r =
+            AdminRegistrar::with_ca("https://ctl.ns.svc:7480", None, Some(ca.as_bytes())).unwrap();
+        assert!(r.is_https());
     }
 }

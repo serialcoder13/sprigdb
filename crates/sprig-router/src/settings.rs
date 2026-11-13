@@ -115,7 +115,7 @@ pub static DATAFUSION_MEMORY_MB: Setting<u64> = Setting {
     apply: Apply::Live,
     operator_only: false,
     owner: 35,
-    doc: "Memory per DataFusion query (R3)",
+    doc: "Memory per DataFusion query",
 };
 sprig_settings::register!(DATAFUSION_MEMORY_MB);
 
