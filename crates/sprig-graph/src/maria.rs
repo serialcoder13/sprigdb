@@ -50,7 +50,7 @@ use sprig_router::graph_route::{
 
 use crate::store::{
     EdgeKey, EdgeRow, FarLink, FarRead, GraphStore, IdKind, IndexDef, Link, NodeRow, Reach, Scan,
-    SchemaCounts, StoreStats, TrailRow, rk_of,
+    SchemaCounts, StoreStats, rk_of,
 };
 
 /// Labels and relationship types of a graph, and how new ones are made.
@@ -623,6 +623,72 @@ impl<'c> MariaStore<'c> {
             self.stats.sql_us += u64::try_from(t0.elapsed().as_micros()).unwrap_or(u64::MAX);
             self.stats.sql_rows += rows.len() as u64;
             out.push((i, rows));
+        }
+        Ok(out)
+    }
+
+    /// Several read routes in one round trip per cluster: each target's
+    /// statement tagged with its route's index (`SELECT k AS q, x.* FROM
+    /// (...) x`), all of a cluster's in one `UNION ALL`. Rows come back
+    /// with their route's index, the statement's columns after the tag.
+    async fn route_tagged(&mut self, specs: Vec<(HopOp, Targets)>) -> Result<Vec<(usize, Row)>> {
+        let mut parts: Vec<(String, usize, String)> = Vec::new(); // (cluster, shard index, sql)
+        for (k, (op, targets)) in specs.into_iter().enumerate() {
+            let r = plan_route(&RouteSpec {
+                group: Arc::clone(&self.group),
+                graph: self.layout.graph,
+                op,
+                targets,
+            });
+            if let (Some(until), Some(h)) = (r.held_until_ms, &self.holds) {
+                h.wait(until).await?;
+            }
+            self.note(&r);
+            for t in r.targets() {
+                let i = self
+                    .layout
+                    .shards
+                    .iter()
+                    .position(|s| s.shard == t.shard && s.schema == t.at.schema)
+                    .ok_or_else(|| {
+                        SprigError::new(
+                            SprigCode::ShardMapChanged,
+                            "a graph route names a shard the statement's map doesn't have; retry",
+                        )
+                    })?;
+                parts.push((
+                    t.cluster.clone(),
+                    i,
+                    format!("(SELECT {k} AS q, x.* FROM ({}) x)", t.sql),
+                ));
+            }
+        }
+        let mut clusters: Vec<String> = Vec::new();
+        for (c, _, _) in &parts {
+            if !clusters.contains(c) {
+                clusters.push(c.clone());
+            }
+        }
+        let mut out = Vec::new();
+        for c in clusters {
+            let mine: Vec<&(String, usize, String)> = parts.iter().filter(|p| p.0 == c).collect();
+            let i = mine[0].1;
+            let sql = mine
+                .iter()
+                .map(|p| p.2.as_str())
+                .collect::<Vec<_>>()
+                .join(" UNION ALL ");
+            self.stats.shard_queries += 1;
+            let at = self.layout.shards[i].clone();
+            let conn = self.conns.conn(&at, false).await?;
+            let t0 = std::time::Instant::now();
+            let rows: Vec<Row> = conn.query(sql).await.map_err(backend_error)?;
+            self.stats.sql_us += u64::try_from(t0.elapsed().as_micros()).unwrap_or(u64::MAX);
+            self.stats.sql_rows += rows.len() as u64;
+            for mut r in rows {
+                let q = usize::try_from(u64_col(r.take(0))).unwrap_or(0);
+                out.push((q, r));
+            }
         }
         Ok(out)
     }
@@ -1291,6 +1357,46 @@ impl GraphStore for MariaStore<'_> {
         Ok(out)
     }
 
+    async fn links_both(&mut self, from: &[u64], types: &[u32]) -> Result<Vec<(Link, bool)>> {
+        if from.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mirror = self.read_mirrors().await;
+        let link = |out: bool, mirror: bool| HopOp::Links {
+            out,
+            mirror,
+            types: types.to_vec(),
+            far: None,
+        };
+        let inn = if mirror {
+            Targets::ByKey(from.to_vec())
+        } else {
+            Targets::All(from.to_vec())
+        };
+        let rows = self
+            .route_tagged(vec![
+                (link(true, false), Targets::ByKey(from.to_vec())),
+                (link(false, mirror), inn),
+            ])
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(q, mut r)| {
+                (
+                    Link {
+                        src: u64_col(r.take(1)),
+                        dst: u64_col(r.take(2)),
+                        src_rk: u64_col(r.take(3)),
+                        dst_rk: u64_col(r.take(4)),
+                        id: u64_col(r.take(5)),
+                        rtype: u32::try_from(u64_col(r.take(6))).unwrap_or(0),
+                    },
+                    q == 0,
+                )
+            })
+            .collect())
+    }
+
     async fn links(&mut self, from: &[u64], types: &[u32], dir: Dir) -> Result<Vec<Link>> {
         Ok(self
             .links_with(from, types, dir, None)
@@ -1345,65 +1451,6 @@ impl GraphStore for MariaStore<'_> {
 
     fn late_props(&self) -> bool {
         true
-    }
-
-    async fn trails(
-        &mut self,
-        seeds: &[(u64, u64)],
-        types: &[u32],
-        dir: Dir,
-        min: u32,
-        max: u32,
-    ) -> Result<Option<Vec<TrailRow>>> {
-        // One statement needs every shard on one server; incoming steps
-        // need fresh mirrors (or a single shard).
-        let first = self.layout.shards.first().map(|s| s.cluster.clone());
-        if first.is_none()
-            || self
-                .layout
-                .shards
-                .iter()
-                .any(|s| Some(&s.cluster) != first.as_ref())
-        {
-            return Ok(None);
-        }
-        let inn = dir != Dir::Out;
-        let mirror = inn && self.many();
-        if mirror && !self.read_mirrors().await {
-            return Ok(None);
-        }
-        let mut out = Vec::new();
-        for chunk in seeds.chunks(1000) {
-            self.stats.cte_queries += 1;
-            let op = HopOp::Trails {
-                seeds: chunk.to_vec(),
-                types: types.to_vec(),
-                out: dir != Dir::In,
-                inn,
-                mirror,
-                min,
-                max,
-            };
-            for (_, rows) in self.route(op, Targets::Shard(0), false).await? {
-                for mut r in rows {
-                    let path: String = match r.take::<MyValue, _>(4) {
-                        Some(MyValue::Bytes(b)) => String::from_utf8_lossy(&b).into_owned(),
-                        _ => String::new(),
-                    };
-                    out.push(TrailRow {
-                        origin: u64_col(r.take(0)),
-                        end: u64_col(r.take(1)),
-                        end_rk: u64_col(r.take(2)),
-                        rels: path
-                            .split(',')
-                            .filter(|x| !x.is_empty())
-                            .filter_map(|x| x.parse().ok())
-                            .collect(),
-                    });
-                }
-            }
-        }
-        Ok(Some(out))
     }
 
     async fn nodes_part(&mut self, ids: &[u64], keys: Option<&[String]>) -> Result<Vec<NodeRow>> {

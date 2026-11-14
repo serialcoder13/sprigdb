@@ -24,13 +24,22 @@
 //! - [`settings`]: the `ai.*` keys;
 //! - [`budget`]: daily token budgets;
 //! - [`audit`]: conversations, messages and usage in the tenant catalog;
+//! - [`feedback`]: votes on answers and proposal outcomes, and the prompt
+//!   notes made of them;
+//! - [`glossary`]: the tenant's business terms;
 //! - [`turn`]: one chat turn, provider and tools in a loop;
-//! - [`mod@metrics`]: the `sprig_ai_*` metrics.
+//! - [`mod@metrics`]: the `sprig_ai_*` metrics;
+//! - `eval` (feature `eval`, and in tests): the evaluation sets and their
+//!   runner.
 
 pub mod audit;
 pub mod budget;
 pub mod egress;
 pub mod error;
+pub mod feedback;
+pub mod glossary;
+#[cfg(any(test, feature = "eval"))]
+pub mod eval;
 pub mod keys;
 pub mod metrics;
 pub mod prompt;
@@ -43,6 +52,8 @@ pub mod tools;
 pub mod turn;
 
 pub use audit::{AuditStore, CatalogAudit, ConvId, MemoryAudit, MsgKind};
+pub use feedback::{FeedbackStore, Outcome};
+pub use glossary::{CatalogGlossary, GlossaryStore, MemoryGlossary};
 pub use budget::{Budget, UsageToday};
 pub use egress::{EgressPolicy, Scrubber};
 pub use provider::{

@@ -651,3 +651,39 @@ async fn whole_tenants_starting_behind_a_busy_hub_get_every_group_once() {
         }
     }
 }
+
+/// r9feed2: a replay fills the new tenant's parts into the ring, so its
+/// subscription, detached later as a slow reader, comes back through the
+/// ring, not a catch-up dump.
+#[tokio::test]
+async fn a_replayed_tenant_detached_later_returns_through_the_ring() {
+    let mk = |s: u64| {
+        let mut t = txn(s, &["t1_d1_g1_s1"]);
+        t.rows.push(row_in("t2_d1_g1_s1", "orders"));
+        t
+    };
+    let fake = Fake::with((1..=10).map(mk).collect());
+    let opts = SharedOpts {
+        sub_channel: 2,
+        gather: Duration::ZERO,
+        ..SharedOpts::default()
+    };
+    let feed = SharedFeed::new(Arc::new(fake.clone()), opts);
+    let outbox = feed.view(Kept::Tables(vec!["__sprig_qo".to_owned()].into()));
+    let all = feed.view(Kept::All);
+    let c = cluster();
+    let mut q = outbox.open(&c, TenantId(1), &at(0)).await.unwrap();
+    assert_eq!(take(&mut q, 10).await.len(), 10);
+    // Tenant 2 starts at 5 (a replay), reads nothing while 10 more come:
+    // its buffer of 2 fills and it is detached.
+    let mut w = all.open(&c, TenantId(2), &at(5)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    for s in 11..=20 {
+        fake.push(mk(s));
+    }
+    assert_eq!(take(&mut q, 10).await.len(), 10);
+    let seqs: Vec<u64> = take(&mut w, 15).await.iter().map(|x| x.0).collect();
+    assert_eq!(seqs, (6..=20).collect::<Vec<_>>());
+    assert!(quiet(&mut w, 300).await);
+    assert_eq!(fake.catchup_opens(), 0, "the ring served the return");
+}

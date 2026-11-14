@@ -1,0 +1,30 @@
+role = "admin"
+description = "The administration assistant on scrubbed incident intake, health checks and SprigDB's own decisions."
+
+[[case]]
+id = "admin-01"
+tags = ["incident", "replication"]
+message = """
+Incident fingerprint 9c2e: code 39412 (ER_SPRIG_REPLICA_LAG_HIGH), component controller, span replica.watch.
+Count: 412 in the last hour; 7-day baseline 4 per hour (100x). Affected: cluster db-eu-2 replica of tenant acme database shop.
+Topology: 2 DCs, 6 gateways, 4 clusters (3 nodes each). Version 1.4.2.
+"""
+scrub = { tenant = ["acme"], database = ["shop"], host = ["db-eu-2"] }
+world = [
+  { tool = "search_docs", json = { hits = [{ page = "operations/replication", heading = "Replica lag", text = "Lag above ai.replica.lag_warn_seconds usually means a long transaction on the primary or a saturated replica disk." }] }, sources = [{ kind = "docs", title = "Replica lag", reference = "operations/replication#replica-lag" }] },
+  { tool = "metrics_trend", json = { name = "sprig_replica_lag_seconds", days = [{ day = "2026-11-12", p95 = 0.4 }, { day = "2026-11-13", p95 = 0.5 }, { day = "2026-11-14", p95 = 48.0 }] } },
+]
+calls = [
+  { tool = "search_docs", args = { query = "replica lag high", audience = "operator" }, has = { query = ["lag"] } },
+  { tool = "metrics_trend", args = { name = "sprig_replica_lag_seconds", days = 7 }, round = 1 },
+  { tool = "propose_recommendation", args = { kind = "ai_incident_advice", subject = "replica lag on host#placeholder", body = "Check for a long transaction on the primary; then the replica's disk." } },
+]
+answer = """
+**Cause:** replica lag jumped today (p95 48 s against 0.5 s) — usually a long transaction on the primary or a saturated replica disk.
+**Steps:** 1. Look for long-running transactions on the primary. 2. Check the replica's disk throughput. 3. Watch sprig_replica_lag_seconds after.
+I put this in the approvals inbox as advice. Docs: Replica lag (operations/replication#replica-lag).
+"""
+must = ["cause", "steps"]
+must_any = [["long transaction", "long-running transaction"]]
+cite = true
+rubric = "Names a likely cause (long transaction on the primary or replica disk), gives ordered steps, files advice with propose_recommendation, cites the replication docs, and never names tenants or hosts."

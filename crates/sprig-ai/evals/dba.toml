@@ -1,0 +1,26 @@
+role = "dba"
+description = "The DBA assistant: tuning, plans, indexes, settings, sharding, policies, logic, approvals."
+
+[[case]]
+id = "dba-01"
+tags = ["tuning", "index"]
+message = "The order history page is slow. What's wrong?"
+context = "Database: shop"
+world = [
+  { tool = "workload", json = { top = [{ id = "fp_7a1", text = "SELECT * FROM orders WHERE customer_id = ? ORDER BY created_at DESC LIMIT ?", calls = 120000, p95_ms = 840, rows_examined_avg = 2100000 }] } },
+  { tool = "explain", json = { query_block = { table = { table_name = "orders", access_type = "ALL", rows_examined_per_scan = 2100000, filtered = 0.01, using_filesort = true } } } },
+  { tool = "indexes", json = { indexes = [{ name = "PRIMARY", columns = ["id"], unique = true, auto = false }] } },
+]
+calls = [
+  { tool = "workload", args = { db = "shop", hours = 24 } },
+  { tool = "explain", args = { db = "shop", sql = "SELECT * FROM orders WHERE customer_id = 42 ORDER BY created_at DESC LIMIT 20" }, has = { sql = ["orders", "customer_id"] }, round = 2 },
+  { tool = "indexes", args = { db = "shop", table = "orders" }, round = 2 },
+  { tool = "propose_sql", args = { db = "shop", sql = "CREATE INDEX ix_orders_customer_created ON orders (customer_id, created_at)", why = "The history query scans all 2.1M orders and sorts them; this index serves the filter and the order.", estimate = "Online build, a few minutes on 2.1M rows" }, has = { sql = ["index", "customer_id"] } },
+]
+answer = """
+The history query (fp_7a1, 120k calls, p95 840 ms) scans every row of `orders` and sorts: there is no index on `customer_id`.
+I proposed an index on `(customer_id, created_at)`; it serves both the filter and the sort. It hasn't run — review it and run it when you're ready.
+"""
+must = ["customer_id", "index"]
+must_any = [["hasn't run", "has not run", "not run"]]
+rubric = "Finds the full scan in the plan, explains the missing index on customer_id, proposes a composite index (customer_id, created_at) through propose_sql, and says it hasn't run."

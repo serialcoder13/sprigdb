@@ -180,6 +180,7 @@ pub async fn run_stream(
         push: std::collections::HashMap::new(),
         only: std::collections::HashMap::new(),
         profile: false,
+        prune: None,
     };
     let mut clauses = q.parts[0].clauses.clone();
     // SKIP and LIMIT apply to the whole stream, not to each page.

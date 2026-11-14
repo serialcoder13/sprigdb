@@ -223,11 +223,13 @@ fn title_of(t: &str) -> String {
 // ---- in memory ----
 
 #[derive(Default)]
-struct Mem {
-    convs: BTreeMap<u64, Conversation>,
-    msgs: Vec<(u64, StoredMessage)>,
+pub(crate) struct Mem {
+    pub(crate) convs: BTreeMap<u64, Conversation>,
+    pub(crate) msgs: Vec<(u64, StoredMessage)>,
     usage: BTreeMap<(u32, Role), (u64, u64, u32)>,
-    next: u64,
+    pub(crate) next: u64,
+    /// Feedback rows ([`crate::feedback`]), oldest first.
+    pub(crate) feedback: Vec<crate::feedback::MemFeedback>,
 }
 
 /// An in-memory store, for tests and evaluation runs.
@@ -243,7 +245,7 @@ impl std::fmt::Debug for MemoryAudit {
 }
 
 impl MemoryAudit {
-    fn lock(&self) -> std::sync::MutexGuard<'_, Mem> {
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, Mem> {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -373,7 +375,7 @@ impl std::fmt::Debug for CatalogAudit {
     }
 }
 
-fn unavailable(e: mysql_async::Error) -> SprigError {
+pub(crate) fn unavailable(e: mysql_async::Error) -> SprigError {
     SprigError::new(
         SprigCode::CatalogUnavailable,
         "the tenant's catalog is unreachable",
@@ -402,12 +404,12 @@ impl CatalogAudit {
         }
     }
 
-    fn t(&self, table: &str) -> String {
+    pub(crate) fn t(&self, table: &str) -> String {
         format!("{}.{}", quote(&self.schema), quote(table))
     }
 
     /// A connection, after creating the module the first time.
-    async fn conn(&self) -> Result<mysql_async::Conn> {
+    pub(crate) async fn conn(&self) -> Result<mysql_async::Conn> {
         let mut conn = self.pool.get_conn().await.map_err(unavailable)?;
         self.ready
             .get_or_try_init(|| async {
@@ -619,6 +621,93 @@ impl AuditStore for CatalogAudit {
         .map_err(unavailable)?;
         Ok(c.affected_rows())
     }
+}
+
+/// The provider history of a stored conversation, to continue it: the
+/// user's texts, the model's answers as they were, and each tool result as
+/// the model got it. A tool call left without a result (a turn that failed
+/// while its tools ran) gets an error result, so the history stays valid.
+#[must_use]
+pub fn history(msgs: &[StoredMessage]) -> Vec<crate::provider::Message> {
+    use crate::provider::{Block, Message, MsgRole};
+    fn flush(out: &mut Vec<Message>, pending: &mut Vec<String>) {
+        if pending.is_empty() {
+            return;
+        }
+        let results = pending.drain(..).map(|id| Block::ToolResult {
+            tool_use_id: id,
+            content: crate::egress::wrap(
+                &serde_json::json!({"error": "not run: the turn ended before this call finished"})
+                    .to_string(),
+            ),
+            is_error: true,
+        });
+        match out.last_mut() {
+            Some(m) if m.role == MsgRole::User => m.content.extend(results),
+            _ => out.push(Message {
+                role: MsgRole::User,
+                content: results.collect(),
+            }),
+        }
+    }
+    let mut out: Vec<Message> = Vec::new();
+    let mut pending: Vec<String> = Vec::new();
+    for m in msgs {
+        match m.kind {
+            MsgKind::User => {
+                flush(&mut out, &mut pending);
+                let text = m.body["text"].as_str().unwrap_or_default().to_owned();
+                match out.last_mut() {
+                    Some(last) if last.role == MsgRole::User => {
+                        last.content.push(Block::Text { text });
+                    }
+                    _ => out.push(Message::user(text)),
+                }
+            }
+            MsgKind::Assistant => {
+                flush(&mut out, &mut pending);
+                let Ok(msg) = serde_json::from_value::<Message>(m.body.clone()) else {
+                    continue;
+                };
+                pending = msg
+                    .tool_calls()
+                    .into_iter()
+                    .map(|(id, _, _)| id.to_owned())
+                    .collect();
+                out.push(msg);
+            }
+            MsgKind::ToolResult => {
+                let id = m.body["id"].as_str().unwrap_or_default().to_owned();
+                let Some(at) = pending.iter().position(|p| *p == id) else {
+                    continue;
+                };
+                pending.remove(at);
+                let block = Block::ToolResult {
+                    tool_use_id: id,
+                    content: crate::egress::wrap(&m.body["result"].to_string()),
+                    is_error: !m.body["ok"].as_bool().unwrap_or(false),
+                };
+                match out.last_mut() {
+                    Some(last)
+                        if last.role == MsgRole::User
+                            && last
+                                .content
+                                .iter()
+                                .all(|b| matches!(b, Block::ToolResult { .. })) =>
+                    {
+                        last.content.push(block);
+                    }
+                    _ => out.push(Message {
+                        role: MsgRole::User,
+                        content: vec![block],
+                    }),
+                }
+            }
+            MsgKind::ToolCall | MsgKind::Proposal | MsgKind::SystemNote => {}
+        }
+    }
+    flush(&mut out, &mut pending);
+    out
 }
 
 #[cfg(test)]

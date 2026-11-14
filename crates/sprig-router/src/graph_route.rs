@@ -261,28 +261,6 @@ pub enum HopOp {
         /// The `LIMIT`.
         limit: usize,
     },
-    /// Every trail of `min..=max` hops from `seeds` (node, routing hash)
-    /// in one recursive CTE over every shard schema of the group, which
-    /// must all be on one cluster: rows `o, id, rk, d, path` (origin, end,
-    /// its hash, length, the edge ids as `,id,id...`). Outgoing steps read
-    /// the edges by `src`; incoming ones the mirrors (`mirror`) or, with
-    /// one shard, the edges' `rev` key.
-    Trails {
-        /// The origins and their routing hashes.
-        seeds: Vec<(u64, u64)>,
-        /// Type ids (empty: any).
-        types: Vec<u32>,
-        /// Outgoing steps.
-        out: bool,
-        /// Incoming steps.
-        inn: bool,
-        /// Incoming through the mirrors.
-        mirror: bool,
-        /// Shortest trail kept.
-        min: u32,
-        /// Longest trail.
-        max: u32,
-    },
     /// One shard's recursive CTE from `seeds` (origin, node).
     Reach {
         /// The seeds.
@@ -316,7 +294,6 @@ impl HopOp {
             Self::Edges => "edges",
             Self::Touching { .. } => "touching",
             Self::Reach { .. } => "reach",
-            Self::Trails { .. } => "trails",
         }
     }
 }
@@ -472,12 +449,7 @@ fn statement(spec: &RouteSpec, i: usize, ids: &[u64]) -> Option<String> {
     let t = |x| table(schema, spec.graph, x);
     let nodes = t(GraphTable::Nodes);
     let edges = t(GraphTable::Edges);
-    if ids.is_empty()
-        && !matches!(
-            spec.op,
-            HopOp::Scan(_) | HopOp::Reach { .. } | HopOp::Trails { .. }
-        )
-    {
+    if ids.is_empty() && !matches!(spec.op, HopOp::Scan(_) | HopOp::Reach { .. }) {
         return None;
     }
     let id_list = ids_list(ids);
@@ -740,81 +712,6 @@ fn statement(spec: &RouteSpec, i: usize, ids: &[u64]) -> Option<String> {
             "SELECT {EDGE_COLS} FROM {edges} e WHERE e.{} IN ({id_list}) LIMIT {limit}",
             if *out { "src" } else { "dst" }
         ),
-        HopOp::Trails {
-            seeds,
-            types,
-            out,
-            inn,
-            mirror,
-            min,
-            max,
-        } => {
-            if seeds.is_empty() || *max == 0 {
-                return None;
-            }
-            let mut seed_sql = String::new();
-            for (k, (n, rk)) in seeds.iter().enumerate() {
-                if k > 0 {
-                    seed_sql.push_str(" UNION ALL ");
-                }
-                let _ = write!(seed_sql, "SELECT {n} AS o, {n} AS n, {rk} AS rk");
-            }
-            let both = *out && *inn;
-            let mut parts = String::new();
-            for (j, sh) in g.shards.iter().enumerate() {
-                let mut range = format!("r.rk >= {}", sh.lo);
-                if let Some(next) = g.shards.get(j + 1) {
-                    let _ = write!(range, " AND r.rk < {}", next.lo);
-                }
-                let e = table(&sh.schema, spec.graph, GraphTable::Edges);
-                if *out {
-                    let _ = write!(
-                        parts,
-                        " UNION ALL SELECT r.o, e.dst, e.dst_rk, r.d + 1, CONCAT(r.path, ',', e.id) \
-                         FROM r JOIN {e} e ON e.src = r.id{} WHERE r.d < {max} AND {range} \
-                         AND FIND_IN_SET(e.id, r.path) = 0",
-                        types_filter("e", types)
-                    );
-                }
-                if *inn {
-                    // A self-loop is one step, already taken outgoing.
-                    let lp = |a: &str| {
-                        if both {
-                            format!(" AND {a}.src <> {a}.dst")
-                        } else {
-                            String::new()
-                        }
-                    };
-                    if *mirror {
-                        let m = table(&sh.schema, spec.graph, GraphTable::Mirrors);
-                        let _ = write!(
-                            parts,
-                            " UNION ALL SELECT r.o, m.src, m.src_rk, r.d + 1, CONCAT(r.path, ',', m.id) \
-                             FROM r JOIN {m} m ON m.dst = r.id{} WHERE r.d < {max} AND {range} \
-                             AND FIND_IN_SET(m.id, r.path) = 0{}",
-                            types_filter("m", types),
-                            lp("m")
-                        );
-                    } else {
-                        let _ = write!(
-                            parts,
-                            " UNION ALL SELECT r.o, e.src, e._sprig_rk, r.d + 1, CONCAT(r.path, ',', e.id) \
-                             FROM r JOIN {e} e ON e.dst = r.id{} WHERE r.d < {max} AND {range} \
-                             AND FIND_IN_SET(e.id, r.path) = 0{}",
-                            types_filter("e", types),
-                            lp("e")
-                        );
-                    }
-                }
-            }
-            format!(
-                "SET STATEMENT max_recursive_iterations = {iters} FOR \
-                 WITH RECURSIVE r (o, id, rk, d, path) AS ( \
-                   SELECT s.o, s.n, s.rk, 0, CAST('' AS CHAR(4000)) FROM ({seed_sql}) s{parts} \
-                 ) SELECT o, id, rk, d, path FROM r WHERE d >= {min}",
-                iters = max + 1,
-            )
-        }
         HopOp::Reach {
             seeds,
             types,

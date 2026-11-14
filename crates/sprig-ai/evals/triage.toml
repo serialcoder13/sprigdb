@@ -1,0 +1,13 @@
+role = "triage"
+description = "Screening administration intake: noise or needs_advice."
+
+[[case]]
+id = "triage-01"
+tags = ["noise"]
+message = """
+Incident fingerprint 4f1a: code 1205 (lock wait timeout), component gateway, span sql.execute.
+Count: 3 in the last hour; 7-day baseline 2.8 per hour. Not a critical code.
+Topology: 2 DCs, 6 gateways, 4 clusters. Version 1.4.2.
+"""
+label = "noise"
+rubric = "A rate at its usual baseline, not critical: noise."

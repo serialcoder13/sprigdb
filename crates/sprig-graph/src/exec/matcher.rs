@@ -1156,39 +1156,55 @@ impl Exec<'_> {
         let mut raw: Vec<(u64, u64, u64, Link)> = Vec::new();
         let mut seen: HashSet<(u64, u64)> = HashSet::new();
         let mut nodes: HashMap<u64, Arc<Node>> = HashMap::new();
+        // Both ways with nothing to read or filter with the links: one
+        // round trip for both directions.
+        let together =
+            dir == Dir::Both && only.is_empty() && rel_keys.is_none() && rel_filter.is_empty();
+        let dirs: &[Dir] = if together { &[Dir::Both] } else { dirs };
         for d in dirs {
             for batch in ids.chunks(self.id_batch()) {
                 // Joined far nodes save a round trip, but over many links
                 // the joins cost more in MariaDB than reading the nodes by
                 // id: only small frontiers join them.
                 let join = far && batch.len() <= JOIN_FAR_MAX;
-                let found =
-                    if join || !only.is_empty() || rel_keys.is_some() || !rel_filter.is_empty() {
-                        let fr = crate::store::FarRead {
-                            keys: keys.as_deref(),
-                            filter: &filter,
-                            only: &only,
-                            join,
-                            rel_keys: rel_keys.as_deref(),
-                            rel_filter: &rel_filter,
-                        };
-                        self.store.links_far(batch, types, *d, &fr).await?
-                    } else {
-                        self.store
-                            .links(batch, types, *d)
-                            .await?
-                            .into_iter()
-                            .map(|l| (l, None, None))
-                            .collect()
+                let found: Vec<(crate::store::FarLink, bool)> = if *d == Dir::Both {
+                    self.store
+                        .links_both(batch, types)
+                        .await?
+                        .into_iter()
+                        .map(|(l, out)| ((l, None, None), out))
+                        .collect()
+                } else if join || !only.is_empty() || rel_keys.is_some() || !rel_filter.is_empty() {
+                    let fr = crate::store::FarRead {
+                        keys: keys.as_deref(),
+                        filter: &filter,
+                        only: &only,
+                        join,
+                        rel_keys: rel_keys.as_deref(),
+                        rel_filter: &rel_filter,
                     };
-                for (l, n, rp) in found {
+                    self.store
+                        .links_far(batch, types, *d, &fr)
+                        .await?
+                        .into_iter()
+                        .map(|x| (x, *d == Dir::Out))
+                        .collect()
+                } else {
+                    self.store
+                        .links(batch, types, *d)
+                        .await?
+                        .into_iter()
+                        .map(|l| ((l, None, None), *d == Dir::Out))
+                        .collect()
+                };
+                for ((l, n, rp), out_link) in found {
                     if let Some((props, types)) = rp
                         && !rel_props.contains_key(&l.id)
                     {
                         let r = self.rel_from(&l, &props, types.as_ref(), rel_keys.as_deref());
                         rel_props.insert(l.id, r);
                     }
-                    let (near, far_id, far_rk) = if *d == Dir::Out {
+                    let (near, far_id, far_rk) = if out_link {
                         (l.src, l.dst, l.dst_rk)
                     } else {
                         (l.dst, l.src, l.src_rk)
@@ -1527,6 +1543,30 @@ impl Exec<'_> {
             self.late_cur(&mut cur, &need).await?;
             self.hop_edges(&ids, &types, rp.dir).await?
         };
+        // Far nodes a top-k MATCH can't keep any more (see `Exec::prune`).
+        let beaten: HashSet<u64> = match (&self.prune, &np.var) {
+            (Some(p), Some(v)) if p.var == *v && p.bound.is_some() => {
+                let mut scratch = Row::new();
+                let mut out = HashSet::new();
+                let mut seen_far: HashSet<u64> = HashSet::new();
+                for (_, far) in hops.values().flatten() {
+                    if !seen_far.insert(far.id) {
+                        continue;
+                    }
+                    scratch.insert(v.clone(), Value::Node(far.clone()));
+                    let ks: Option<Vec<Value>> = p
+                        .keys
+                        .iter()
+                        .map(|(e, _)| eval(e, &scratch, self.params).ok())
+                        .collect();
+                    if ks.is_some_and(|k| p.beaten(&k)) {
+                        out.insert(far.id);
+                    }
+                }
+                out
+            }
+            _ => HashSet::new(),
+        };
         let mut out = Vec::new();
         for (r, n) in cur {
             let Some(cands) = hops.get(&n.id) else {
@@ -1534,7 +1574,7 @@ impl Exec<'_> {
             };
             let used = Self::row_rels(&r);
             for (rel, far) in cands {
-                if used.contains(&rel.id) {
+                if used.contains(&rel.id) || beaten.contains(&far.id) {
                     continue;
                 }
                 if let Some(v) = &rp.var {
@@ -1788,47 +1828,6 @@ impl Exec<'_> {
             for (o, t) in &live {
                 done.entry(*o).or_default().push(t.clone());
                 total += 1;
-            }
-        }
-        // Trails that bind no relationship or path: one recursive CTE over
-        // the shards' schemas where the store can (one server), instead of
-        // a statement per level. An unbounded pattern asks for one hop
-        // more: a trail that long means the pattern went past
-        // `graph.max_hops`.
-        if self.late && !track && rp.var.is_none() && rp.props.is_none() && !live.is_empty() {
-            let seeds: Vec<(u64, u64)> = origins.iter().map(|o| (o.id, o.rk)).collect();
-            let ask = if unbounded { max + 1 } else { max };
-            if let Some(found) = self
-                .store
-                .trails(&seeds, &types, rp.dir, min.max(1), ask)
-                .await?
-            {
-                self.plan
-                    .push("VarExpand: trails in one recursive CTE over the shards' schemas".into());
-                for t in found {
-                    if unbounded && t.rels.len() > max as usize {
-                        return Err(budget_error(
-                            "hops",
-                            format!(
-                                "an unbounded pattern went past graph.max_hops = {}",
-                                self.b.max_hops
-                            ),
-                        ));
-                    }
-                    total += 1;
-                    if total > self.b.max_rows {
-                        return Err(budget_error(
-                            "rows",
-                            format!("more than graph.max_rows = {} paths", self.b.max_rows),
-                        ));
-                    }
-                    done.entry(t.origin).or_default().push(Trail {
-                        end: t.end,
-                        rels: t.rels,
-                        nodes: vec![],
-                    });
-                }
-                live.clear();
             }
         }
         let mut level = 0u32;
@@ -2184,20 +2183,26 @@ impl Exec<'_> {
         };
         let mut raw: Vec<(u64, u64, Link)> = Vec::new();
         let mut seen: HashSet<(u64, u64)> = HashSet::new();
-        for d in dirs {
-            for batch in ids.chunks(self.id_batch()) {
-                for l in self.store.links(batch, types, *d).await? {
-                    let (near, far) = if *d == Dir::Out {
-                        (l.src, l.dst)
-                    } else {
-                        (l.dst, l.src)
-                    };
-                    if seen.insert((near, l.id)) {
-                        raw.push((near, far, l));
+        let mut keep = |l: Link, out: bool, raw: &mut Vec<(u64, u64, Link)>| {
+            let (near, far) = if out { (l.src, l.dst) } else { (l.dst, l.src) };
+            if seen.insert((near, l.id)) {
+                raw.push((near, far, l));
+            }
+        };
+        for batch in ids.chunks(self.id_batch()) {
+            if dir == Dir::Both {
+                // Both ways in one round trip.
+                for (l, out) in self.store.links_both(batch, types).await? {
+                    keep(l, out, &mut raw);
+                }
+            } else {
+                for d in dirs {
+                    for l in self.store.links(batch, types, *d).await? {
+                        keep(l, *d == Dir::Out, &mut raw);
                     }
                 }
-                self.check_time()?;
             }
+            self.check_time()?;
         }
         if rp.props.is_some() {
             let mut keys: Vec<(u64, u64)> = raw.iter().map(|(_, _, l)| (l.src_rk, l.id)).collect();

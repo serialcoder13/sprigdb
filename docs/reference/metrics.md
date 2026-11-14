@@ -9,7 +9,7 @@ source: the metric macros in the source tree, and docs/metrics-help.toml
 
 Every metric SprigDB records, as exported on each process's telemetry port (`/metrics`, Prometheus text) and through OTLP. Counters end in `_total`; durations are histograms in seconds.
 
-451 metrics in 52 groups.
+458 metrics in 53 groups.
 
 ## `sprig_advisor_*`
 
@@ -30,6 +30,18 @@ Every metric SprigDB records, as exported on each process's telemetry port (`/me
 |---|---|---|---|---|
 | `sprig_agent_fenced` | gauge | `cluster` | sprig-agent | Whether the node agent has fenced its MariaDB node (`read_only` on, sessions killed) because it lost its writer lease or permit; `cluster` is the node's cluster. Unit: 0 or 1. |
 | `sprig_agent_writer_lease_remaining_seconds` | gauge | `cluster` | sprig-agent | Time left on the writer lease the node agent holds for its MariaDB node; `cluster` is the node's cluster. Unit: seconds. |
+
+## `sprig_ai_*`
+
+| Metric | Type | Labels | Recorded by | Description |
+|---|---|---|---|---|
+| `sprig_ai_budget_stops_total` | counter | - | sprig-ai | AI assistant turns stopped because the tenant's or the user's daily token budget was used up (`ER_SPRIG_AI_BUDGET_EXCEEDED`). Unit: count. |
+| `sprig_ai_egress_reduced_total` | counter | `role` | sprig-ai | Tool results the AI egress gate reduced before they reached the provider: rows or values withheld because `ai.share_data` is off, or a result cut at 200 rows or 64 KiB; `role` is the assistant. Unit: count. |
+| `sprig_ai_proposals_total` | counter | `kind`, `outcome` | sprig-ai | Proposals the AI assistants made; `kind` is `sql`, `recommendation`, `tile`, `glossary` or `generate_rows`, `outcome` is what became of it (`shown` when made). Unit: count. |
+| `sprig_ai_requests_total` | counter | `model`, `provider`, `result`, `role` | sprig-ai | Calls to an AI provider; `role` is the assistant, `provider` and `model` as configured in `ai.model.<role>`, `result` is `ok`, `refused` or `error` (after retries). Unit: count. |
+| `sprig_ai_tokens_total` | counter | `direction`, `role` | sprig-ai | Tokens AI providers reported; `role` is the assistant, `direction` is `input` (uncached), `output`, `cache_read` or `cache_write`. Unit: tokens. |
+| `sprig_ai_tool_calls_total` | counter | `result`, `tool` | sprig-ai | Tool calls made by the AI assistants; `tool` is the tool, `result` is `ok`, `error`, `denied` (outside the role or invalid input) or `proposed`. Unit: count. |
+| `sprig_ai_turn_seconds` | histogram | `role` | sprig-ai | Duration of one AI assistant turn, model calls and tools together; `role` is the assistant. Unit: seconds. |
 
 ## `sprig_amqp_*`
 

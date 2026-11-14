@@ -9,7 +9,7 @@ source: the settings registry (sprig-settings)
 
 Every setting SprigDB declares, with its default, the scopes that may set it, hard bounds and when a change applies. Settings resolve from the most specific scope: object, database, tenant and its ancestors, cluster, data center, global, then the built-in default. Read them with `SHOW SPRIG SETTINGS`, change them with `ALTER TENANT|DATABASE|TABLE … SPRIG SET (key = value)` or `sprigctl settings`.
 
-686 settings in 59 groups.
+702 settings in 60 groups.
 
 ## `advisor`
 
@@ -26,6 +26,27 @@ Every setting SprigDB declares, with its default, the scopes that may set it, ha
 | `advisor.mode` | text | `on` | tenant, dc, global (operator only) | on, approve, recommend, off | live | Sharding advisor: on, approve (held for approval), recommend or off |
 | `advisor.txn_weight` | float | `2` | tenant, global (operator only) | 0 to 100 | live | Weight of a write transaction |
 | `advisor.window_days` | float | `7` | tenant, global (operator only) | 0 to 365 | live | Statistics window |
+
+## `ai`
+
+| Key | Type | Default | Scopes | Bounds | Applies | Description |
+|---|---|---|---|---|---|---|
+| `ai.audit_payload_days` | int | `30` | tenant, global | 0 to 3650 | live | Days the exact payloads sent to the AI provider are kept with the conversation; 0 keeps only their hashes |
+| `ai.budget.tenant_tokens_day` | int | `2000000` | tenant, global | 0 to 1000000000000 | live | Tokens all of a tenant's assistant turns may use per UTC day before they stop; 0 allows none |
+| `ai.budget.user_tokens_day` | int | `200000` | tenant, global | 0 to 1000000000000 | live | Tokens one user's assistant turns may use per UTC day before they stop; 0 allows none |
+| `ai.effort.admin` | text | `medium` | global (operator only) | low, medium, high, xhigh, max | live | The administration agent's effort: low, medium, high, xhigh or max, for models that support it |
+| `ai.effort.data` | text | `medium` | global (operator only) | low, medium, high, xhigh, max | live | The data specialist's effort: low, medium, high, xhigh or max |
+| `ai.effort.dba` | text | `medium` | global (operator only) | low, medium, high, xhigh, max | live | The DBA assistant's effort: low, medium, high, xhigh or max |
+| `ai.effort.triage` | text | `low` | global (operator only) | low, medium, high, xhigh, max | live | The triage model's effort: low, medium, high, xhigh or max |
+| `ai.enabled` | bool | `false` | tenant, global | - | live | Turn on the tenant's AI assistants. Off until a provider is configured and a tenant admin turns it on |
+| `ai.max_output_tokens` | int | `16000` | global (operator only) | 256 to 128000 | live | Output tokens one model call may produce, reasoning included |
+| `ai.max_tool_rounds` | int | `12` | global (operator only) | 0 to 100 | live | Tool rounds one assistant turn may take |
+| `ai.model.admin` | text | `` | global (operator only) | - | live | provider/model for the administration agent, such as anthropic/claude-opus-5-5; empty: none |
+| `ai.model.data` | text | `` | global (operator only) | - | live | provider/model for the data specialist; empty: none |
+| `ai.model.dba` | text | `` | global (operator only) | - | live | provider/model for the DBA assistant; empty: none |
+| `ai.model.triage` | text | `` | global (operator only) | - | live | provider/model that screens administration intake for noise; empty: none |
+| `ai.share_data` | bool | `false` | database, tenant, global | - | live | Let the assistants send rows, results and value statistics to the AI provider; off sends schema, plans and statistics without values |
+| `ai.timeout_seconds` | int | `120` | global (operator only) | 5 to 3600 | live | Wall time of one assistant turn, model calls and tools together |
 
 ## `amqp`
 

@@ -747,10 +747,14 @@ async fn delete_keys(
         // A hide marker over an override takes the record's values too:
         // the row-level security triggers check it as the deleted record
         // (RL65).
-        let refresh: String = o
-            .values()
-            .map(|c| format!("{c} = VALUES({c}), ", c = q(c)))
-            .collect();
+        let refresh = o.values().fold(String::new(), |mut acc, c| {
+            let c = q(c);
+            acc.push_str(&c);
+            acc.push_str(" = VALUES(");
+            acc.push_str(&c);
+            acc.push_str("), ");
+            acc
+        });
         r.exec(&format!(
             "INSERT INTO {} ({}, `_sprig_space`, `_sprig_state`, `_sprig_ovr`) SELECT {}, {}, \
              'hide', 0 FROM ({}) AS `__sprig_h` ON DUPLICATE KEY UPDATE {refresh}`_sprig_state` = \

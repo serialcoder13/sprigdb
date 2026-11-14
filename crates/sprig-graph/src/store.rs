@@ -169,19 +169,6 @@ pub struct FarRead<'a> {
 /// read, and its relationship's properties and types when read.
 pub type FarLink = (Link, Option<NodeRow>, Option<(Json, Option<Json>)>);
 
-/// One trail [`GraphStore::trails`] found.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrailRow {
-    /// The origin.
-    pub origin: u64,
-    /// The end node.
-    pub end: u64,
-    /// Its routing hash.
-    pub end_rk: u64,
-    /// The edges, in order.
-    pub rels: Vec<u64>,
-}
-
 /// Which id counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdKind {
@@ -337,6 +324,24 @@ pub trait GraphStore: Send {
         self.edges_at(at).await
     }
 
+    /// [`GraphStore::links`] both ways in one step where the store can:
+    /// each link with `true` when it goes out of `from`.
+    async fn links_both(&mut self, from: &[u64], types: &[u32]) -> Result<Vec<(Link, bool)>> {
+        let mut v: Vec<(Link, bool)> = self
+            .links(from, types, Dir::Out)
+            .await?
+            .into_iter()
+            .map(|l| (l, true))
+            .collect();
+        v.extend(
+            self.links(from, types, Dir::In)
+                .await?
+                .into_iter()
+                .map(|l| (l, false)),
+        );
+        Ok(v)
+    }
+
     /// [`GraphStore::links`] with the far nodes read in the same step
     /// where the store can (`keys` of their properties: `None` all;
     /// links to far nodes failing `filter` may be left out). A link
@@ -355,21 +360,6 @@ pub trait GraphStore: Send {
             .into_iter()
             .map(|l| (l, None, None))
             .collect())
-    }
-
-    /// Every trail of `min..=max` hops over `types` in `dir` from each of
-    /// `seeds` (node, routing hash), in one statement where the store
-    /// can (`None`: it can't, and the caller walks level by level).
-    async fn trails(
-        &mut self,
-        seeds: &[(u64, u64)],
-        types: &[u32],
-        dir: Dir,
-        min: u32,
-        max: u32,
-    ) -> Result<Option<Vec<TrailRow>>> {
-        let _ = (seeds, types, dir, min, max);
-        Ok(None)
     }
 
     /// Edges by id whose sources' routing hashes are known: `(src_rk,

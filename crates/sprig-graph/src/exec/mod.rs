@@ -306,6 +306,7 @@ async fn run_with(
         push: HashMap::new(),
         only: HashMap::new(),
         profile: q.explain == Explain::Profile,
+        prune: None,
     };
     if q.explain == Explain::Explain {
         let mut plan = explain(q);
@@ -401,6 +402,52 @@ fn pushed(where_: &Expr, params: &Params) -> HashMap<String, Vec<(String, CmpOp,
         out.entry(v.clone()).or_default().push((k.clone(), op, x));
     }
     out
+}
+
+/// [`Exec::prune`] for projection `p` after a `MATCH` whose incoming rows
+/// look like `first`: when every sort key, aliases replaced by their
+/// items, reads the same one variable the rows don't bind yet.
+fn prune_of(p: &Projection, first: Option<&Row>) -> Option<Prune> {
+    let mut var: Option<String> = None;
+    let mut keys = Vec::new();
+    for (e, asc) in &p.order {
+        let e = match e {
+            Expr::Var(v) => p
+                .items
+                .iter()
+                .find(|(_, a)| a == v)
+                .map_or_else(|| e.clone(), |(ie, _)| ie.clone()),
+            other => other.clone(),
+        };
+        let mut ok = true;
+        e.walk(&mut |x| match x {
+            Expr::Var(v) => {
+                if p.items.iter().any(|(_, a)| a == v) && !matches!(&e, Expr::Var(_)) {
+                    ok = false;
+                }
+                match &var {
+                    None => var = Some(v.clone()),
+                    Some(w) if w == v => {}
+                    Some(_) => ok = false,
+                }
+            }
+            Expr::Pattern(_) | Expr::Subquery(..) | Expr::Slot(_) => ok = false,
+            _ => {}
+        });
+        if !ok || e.has_aggregate() {
+            return None;
+        }
+        keys.push((e, *asc));
+    }
+    let var = var?;
+    if first.is_some_and(|r| r.contains_key(&var)) {
+        return None;
+    }
+    Some(Prune {
+        var,
+        keys,
+        bound: None,
+    })
 }
 
 /// Incoming rows per chunk of a `MATCH` that keeps only its best rows
@@ -630,6 +677,34 @@ pub(crate) struct Exec<'a> {
     pub(crate) only: HashMap<String, Vec<u64>>,
     /// `PROFILE`: each clause's time and rows go into the plan.
     pub(crate) profile: bool,
+    /// While a `MATCH` keeps only its best rows ([`Exec::match_top`]):
+    /// hops that bind the one variable the sort keys read skip far nodes
+    /// already worse than the last row kept.
+    pub(crate) prune: Option<Prune>,
+}
+
+/// [`Exec::prune`]: the variable, the sort keys over it alone with their
+/// directions, and the keys of the last row kept so far.
+pub(crate) struct Prune {
+    pub(crate) var: String,
+    pub(crate) keys: Vec<(Expr, bool)>,
+    pub(crate) bound: Option<Vec<Value>>,
+}
+
+impl Prune {
+    /// Whether `ks` sorts strictly after the bound (so its row can't be
+    /// kept).
+    pub(crate) fn beaten(&self, ks: &[Value]) -> bool {
+        let Some(b) = &self.bound else { return false };
+        for (i, (_, asc)) in self.keys.iter().enumerate() {
+            let o = ks[i].order(&b[i]);
+            let o = if *asc { o } else { o.reverse() };
+            if o != std::cmp::Ordering::Equal {
+                return o == std::cmp::Ordering::Greater;
+            }
+        }
+        false
+    }
 }
 
 /// The variables of `row` that none of `rest` names: what
@@ -907,10 +982,12 @@ impl Exec<'_> {
         let prefetch = std::mem::take(&mut self.prefetch);
         let push = std::mem::take(&mut self.push);
         let only = std::mem::take(&mut self.only);
+        let prune = self.prune.take();
         let r = Box::pin(self.lifted_values_in(l, rows)).await;
         self.prefetch = prefetch;
         self.push = push;
         self.only = only;
+        self.prune = prune;
         r
     }
 
@@ -1866,6 +1943,15 @@ impl Exec<'_> {
         let mut kept: Vec<(Vec<Value>, usize, Row)> = Vec::new();
         let mut pos = 0usize;
         let mut rows = rows;
+        // Sort keys that read one variable the MATCH binds (aliases
+        // replaced by their items): far nodes of that variable already
+        // worse than the last row kept needn't become rows. Not under
+        // OPTIONAL MATCH, where a row with no match would appear instead.
+        self.prune = if optional {
+            None
+        } else {
+            prune_of(p, rows.first())
+        };
         while !rows.is_empty() {
             let rest = rows.split_off(MATCH_CHUNK.min(rows.len()));
             let chunk = std::mem::replace(&mut rows, rest);
@@ -1880,7 +1966,15 @@ impl Exec<'_> {
             if kept.len() > n.saturating_mul(2).max(MATCH_CHUNK) {
                 Self::keep_top(&mut kept, p, n);
             }
+            if kept.len() >= n
+                && n > 0
+                && let Some(pr) = &mut self.prune
+            {
+                Self::keep_top(&mut kept, p, n);
+                pr.bound = kept.last().map(|(k, _, _)| k.clone());
+            }
         }
+        self.prune = None;
         Self::keep_top(&mut kept, p, n);
         self.plan.push(format!(
             "Top {n}: the MATCH kept only the rows the next projection keeps, in chunks of {MATCH_CHUNK} incoming rows"

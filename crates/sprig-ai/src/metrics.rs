@@ -12,6 +12,9 @@
 //! - `sprig_ai_proposals_total{kind,outcome}`: proposals; this crate
 //!   records `shown`.
 //! - `sprig_ai_budget_stops_total`: turns stopped by a daily budget.
+//! - `sprig_ai_feedback_total{role,vote}`: thumbs up or down on answers.
+//! - `sprig_ai_payloads_purged_total`: exact payloads dropped after
+//!   `ai.audit_payload_days` (their hashes stay).
 
 use std::time::Duration;
 
@@ -83,4 +86,19 @@ pub fn proposal(kind: &'static str, outcome: &'static str) {
 /// A turn stopped by a budget.
 pub fn budget_stop() {
     metrics::counter!("sprig_ai_budget_stops_total").increment(1);
+}
+
+/// A thumbs up or down; `vote` is `up` or `down`.
+pub fn feedback(role: Role, vote: &'static str) {
+    metrics::counter!(
+        "sprig_ai_feedback_total",
+        "role" => role.as_str(),
+        "vote" => vote
+    )
+    .increment(1);
+}
+
+/// Payloads dropped by the retention purge.
+pub fn payloads_purged(n: u64) {
+    metrics::counter!("sprig_ai_payloads_purged_total").increment(n);
 }
