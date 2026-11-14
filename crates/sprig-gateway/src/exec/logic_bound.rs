@@ -558,7 +558,7 @@ impl PassSession {
             })?;
             let source = store.source(&mut conn, module.module_id, v).await?;
             // The version's signature: JavaScript compiles only with its
-            // declared parameter types (jsbind).
+            // declared parameter types.
             let (sig, _) = store
                 .version_signature(&mut conn, module.module_id, v)
                 .await?;

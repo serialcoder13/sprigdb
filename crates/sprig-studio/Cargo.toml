@@ -18,7 +18,7 @@ sprig-settings.workspace = true
 tracing.workspace = true
 
 [build-dependencies]
-# The ETag of each embedded file (chapter 44: a hash of the identity bytes).
+# The ETag of each embedded file: a hash of the identity bytes.
 sha2.workspace = true
 
 [dev-dependencies]

@@ -6,9 +6,9 @@
 # (deploy/compose/ci/outcomes.py; the target is always "sprig"). A test that
 # fails on MongoDB too is never counted against SprigDB.
 #
-# From the partial runs on the laptop (decisions/r5-interim.md D34, D36; 152
-# of about 4,000 tests). The full suite is defined in CI, not yet run.
+# From the partial runs on the laptop (152 of about 4,000 tests). The full
+# suite is defined in CI, not yet run.
 # Capped collections and $where are supported now (sprig-doc's capped.rs and
 # serverjs.rs; mongo.server_js is on by default): their entries were removed
 # on 13 Nov 2026 from the code, not from a new run of the suite.
-sprig fail *elemMatch*DBRef* :: $elemMatch on a DBRef's $id (r5-interim, round 4 summary); not investigated
+sprig fail *elemMatch*DBRef* :: $elemMatch on a DBRef's $id; not investigated

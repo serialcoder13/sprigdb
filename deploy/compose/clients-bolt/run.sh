@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The Neo4j drivers' testkit (neo4j-drivers/testkit, Apache-2.0) against a
-# Neo4j reference and SprigDB's Bolt listener (chapter 43, "Testing"), for
-# CI's heavy-suite jobs (.github/workflows/heavy-protocols.yml). Runs on the
+# Neo4j reference and SprigDB's Bolt listener, for CI's heavy-suite jobs
+# (.github/workflows/heavy-protocols.yml). Runs on the
 # CI runner itself: the driver's own testkit glue (testkit/build.py, then
 # testkit/backend.py on 127.0.0.1:9876) builds and serves the driver, and
 # testkit_run.py runs testkit's integration tests (tests.neo4j) through it,
@@ -10,12 +10,11 @@
 #
 #   run.sh python | go | java
 #
-# Pinned: testkit commit 75f4aa8 and the Python driver commit 9c876c1 (both
-# from r8four's download, decisions/r8-interim.md G46; testkit's branch 6.x);
-# the Go driver tag v6.4.0 (go.mod: Go 1.24; run on a laptop by r8testkit,
-# 11 November 2026, decisions/r8-interim.md G66) and the Java driver tag
-# 6.0.0 (not run yet, G68). Needs on the runner: git, python3 with venv,
-# and Go (go) or a JDK with Maven (java).
+# Pinned: testkit commit 75f4aa8 and the Python driver commit 9c876c1
+# (testkit's branch 6.x); the Go driver tag v6.4.0 (go.mod: Go 1.24; run on
+# a laptop on 11 November 2026) and the Java driver tag 6.0.0 (not run yet).
+# Needs on the runner: git, python3 with venv, and Go (go) or a JDK with
+# Maven (java).
 #
 #   SPRIG_BOLT_REF   reference host:port (127.0.0.1:7687), neo4j / SPRIG_BOLT_REF_PASSWORD
 #   SPRIG_BOLT_SUT   SprigDB host:port (127.0.0.1:27687, deploy/compose/ci/listeners.sh),

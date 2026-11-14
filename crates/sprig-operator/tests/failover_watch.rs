@@ -1,4 +1,4 @@
-//! The failover watch (r2opfix) against the fake Kubernetes API server and
+//! The failover watch against the fake Kubernetes API server and
 //! a fake replication seam: SprigDB promotes the most advanced replica, not
 //! the next pod index; it waits for a second source; it stops when no
 //! replica may be promoted; and it repairs, or marks for rebuild, replicas
@@ -376,7 +376,7 @@ async fn operator_driven_and_unregistered_clusters_are_not_watched() {
     assert_eq!(w.watch().await, WatchOutcome::Skipped);
 }
 
-/// The real SQL seam against a live replica (r2opfix, kind):
+/// The real SQL seam against a live replica (on kind):
 /// `SPRIG_R2OPFIX_REPLICA=<host:port>,<root password>`. Reads its state,
 /// and drains it.
 #[tokio::test]

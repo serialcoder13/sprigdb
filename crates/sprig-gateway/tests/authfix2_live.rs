@@ -870,7 +870,7 @@ async fn client_certificates_everywhere() {
     .await;
     ck.ok("listeners applied", ready, String::new);
 
-    // MySQL (already covered by wireup; the CA reload below uses it).
+    // MySQL (already covered by `wireup_live.rs`; the CA reload below uses it).
     let r = my(p, "acme.af2_subj", UPW, Some(&alice)).await;
     ck.ok("MySQL: SUBJECT/ISSUER match", r.is_ok(), || msg(&r));
 

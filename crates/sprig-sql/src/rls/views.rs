@@ -55,6 +55,12 @@ pub const HIDDEN_PREFIX: &str = "__sprig_rlsh_";
 /// The function returning the session's context inside a view.
 pub const CTX_FUNCTION: &str = "__sprig_rls_ctx";
 
+/// The alias of a layer-table reference inside a merged view of an
+/// inheritable table (chapter 42; `sprig_inherit::view::LAYER_ALIAS`): the
+/// rewrite leaves it to the filter on the merged records, and the swap reads
+/// it through the all-columns view whatever else the statement selects.
+pub const MERGED_LAYER_ALIAS: &str = "__sprig_lyr";
+
 /// The longest table name a view name holds whole (64 - 12).
 const NAME_MAX: usize = 52;
 
@@ -495,10 +501,16 @@ pub fn swap(
     let mut widened = false;
     // The all-columns view when the statement names an invisible column of the
     // table.
-    let mut choose = |view: String| -> String {
+    let mut choose = |view: String, layer: bool| -> String {
         let Some((full, cols)) = lookup.hidden(&view) else {
             return view;
         };
+        // A merged view's layer reference (chapter 42) names the layer
+        // columns, and `*` never reaches it: it is read from a CTE body
+        // with its columns listed.
+        if layer {
+            return full;
+        }
         let seen = ident_cache.get_or_insert_with(|| idents(&t));
         if cols.iter().any(|c| seen.contains(c)) {
             widened = true;
@@ -629,7 +641,13 @@ pub fn swap(
                 && !func
                 && let Some(view) = lookup.view(schema.as_deref(), &table)
             {
-                let view = choose(view);
+                let alias_at = if t.word(last + 1, "AS") { last + 2 } else { last + 1 };
+                let layer = t
+                    .toks
+                    .get(alias_at)
+                    .is_some_and(|x| x.kind.is_ident_like())
+                    && val(&t, alias_at) == MERGED_LAYER_ALIAS;
+                let view = choose(view, layer);
                 let tok = t.toks[last];
                 match pos {
                     Pos::Insert => {
@@ -1097,6 +1115,20 @@ mod tests {
         assert!(hidden_view_name(&"y".repeat(51), 123_456_789).len() <= 64);
         assert!(is_policy_view("__sprig_rlsh_docs") && is_policy_view("__SPRIG_RLS_docs"));
         assert!(!is_policy_view("__sprig_rls_ctx") && !is_policy_view("docs"));
+        // A merged view's layer reference (chapter 42) reads the all-columns
+        // view whatever the statement's `*`s select.
+        assert_eq!(
+            a("SELECT * FROM (SELECT id FROM docs `__sprig_lyr` WHERE `_sprig_rk` = 1) AS d")
+                .as_deref(),
+            Some(
+                "SELECT * FROM (SELECT id FROM `__sprig_rlsh_docs` `__sprig_lyr` WHERE \
+                 `_sprig_rk` = 1) AS d"
+            )
+        );
+        assert_eq!(
+            a("SELECT * FROM (SELECT id FROM docs AS __sprig_lyr) AS d").as_deref(),
+            Some("SELECT * FROM (SELECT id FROM `__sprig_rlsh_docs` AS __sprig_lyr) AS d")
+        );
     }
 
     #[test]

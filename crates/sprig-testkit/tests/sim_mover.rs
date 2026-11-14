@@ -45,7 +45,7 @@ fn a_trigger_runs_each_change_once_across_moves_and_worker_kills() {
 }
 
 /// The same, with the trigger reading through the shared per-cluster
-/// reader (R9, r9feed2): detached by its tiny buffer, it comes back through
+/// reader: detached by its tiny buffer, it comes back through
 /// the ring, a replay or a catch-up dump, and follows the move. Every
 /// client change still runs exactly once.
 #[test]

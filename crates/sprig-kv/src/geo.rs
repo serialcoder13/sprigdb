@@ -1,5 +1,4 @@
-//! Locations of keys and `GeoSearch` (chapter 33, "Interfaces"; chapter
-//! 36, "Other models"; R6 round 3).
+//! Locations of keys and `GeoSearch`.
 //!
 //! A namespace gets two columns on its key table the first time a key is
 //! given a location: `loc POINT NULL` (longitude in X, latitude in Y, as
@@ -8,10 +7,9 @@
 //! (`_sprig_s2 BETWEEN ...`), keeps the candidates inside the region by
 //! the exact WGS 84 test (Karney), and orders by distance when asked.
 //! A nearest-k search without a region grows a circle from
-//! `geo.knn_initial_radius_m` (1 km) by four until it holds k keys, as
-//! chapter 36's `nearest()` does. The statements run through the caller's
-//! session, so on a sharded namespace each shard is read and the router
-//! merges.
+//! `geo.knn_initial_radius_m` (1 km) by four until it holds k keys
+//! ([`nearest`]). The statements run through the caller's session, so on
+//! a sharded namespace each shard is read and the router merges.
 
 use sprig_common::{SprigCode, SprigError};
 use sprig_geo::region::{Region, distance_m};

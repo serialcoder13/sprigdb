@@ -1,4 +1,4 @@
-// Editor tabs (chapter 44 step 8): text, database and title per tab; kept
+// Editor tabs: text, database and title per tab; kept
 // in IndexedDB per tenant and user while studio.persist_drafts is on.
 
 import { create } from 'zustand';
@@ -10,7 +10,7 @@ export interface Tab {
   title: string;
   sql: string;
   db: string | null;
-  /** The tab's language (chapter 44 steps 19 and 27); SQL when absent. */
+  /** The tab's language; SQL when absent. */
   language?: 'sql' | 'cypher' | 'gql' | 'mongo';
   /** For Cypher and GQL: the graph, sent as Bolt's `db.graph`. */
   graph?: string;

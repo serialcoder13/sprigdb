@@ -1,5 +1,4 @@
-// Random ids: W3C trace context for each user action (chapter 44, "API
-// client and routes"), and local ids.
+// Random ids: W3C trace context for each user action, and local ids.
 
 function hex(bytes: number): string {
   const b = new Uint8Array(bytes);

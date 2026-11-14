@@ -25,7 +25,7 @@ interface Subscription {
   kinds: string;
 }
 
-/** Approval policy at one level (chapter 52): every kind's mode, the level
+/** Approval policy at one level: every kind's mode, the level
  * a new item goes to and its timers, resolved at the tenant, a database or
  * a table, plus the user's own email subscription. Values are changed
  * with SQL (`ALTER ... SPRIG SET`) or on the Settings page; operators use

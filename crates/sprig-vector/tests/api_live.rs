@@ -1,5 +1,4 @@
-//! The Vectors API (chapter 34) and the key-value API's gRPC path (chapter
-//! 33) through a gateway, over REST (HTTP/1.1) and gRPC (h2c), with the
+//! The Vectors API and the key-value API's gRPC path through a gateway, over REST (HTTP/1.1) and gRPC (h2c), with the
 //! same answers from both.
 //!
 //! - `SPRIG_TEST_KV_HTTP`: the gateway's HTTP listener (`127.0.0.1:23081`).
@@ -185,7 +184,7 @@ async fn vectors_over_rest_and_grpc() {
     assert!(h0["metadata"].as_str().unwrap().contains("\"cat\":1"));
     assert!(h0["location"]["latitude"].is_number());
 
-    // Errors, with chapter 37's status codes.
+    // Errors, with the API's status codes.
     let (st, v) = http(
         &addr,
         &auth,
@@ -327,7 +326,7 @@ async fn vectors_over_rest_and_grpc() {
         assert_ne!(st, 200);
     }
 
-    // The key-value API over gRPC (chapter 33): put, get, exec, delete.
+    // The key-value API over gRPC: put, get, exec, delete.
     let mut kc = pb::key_value_client::KeyValueClient::with_interceptor(
         ch,
         move |mut r: tonic::Request<()>| {

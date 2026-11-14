@@ -1,5 +1,5 @@
 # Known differences between a RabbitMQ 4.x reference and SprigDB for the
-# pika 1.3.2 scenarios (amqp_diff.py); test ids are scenario names. r9final measured 21 of 21 equal to RabbitMQ 3.13.7 (10 November 2026); the 4.x reference has not run yet (defined in CI, not yet run).
+# pika 1.3.2 scenarios (amqp_diff.py); test ids are scenario names. A laptop run measured 21 of 21 equal to RabbitMQ 3.13.7 (10 November 2026); the 4.x reference has not run yet (defined in CI, not yet run).
 # Format: <target-glob> <fail|skip|flaky|exclude> <test-glob> :: <reason>
 # (deploy/compose/ci/outcomes.py; the target is always "sprig"). A listed
 # fail that matches the reference again is reported as stale.

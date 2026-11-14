@@ -1,4 +1,4 @@
-// A result held in the browser (chapter 44, "Result buffer"): rows go into
+// A result held in the browser: rows go into
 // column arrays and stop at studio.max_result_rows or studio.max_result_mb,
 // whichever comes first.
 
@@ -49,8 +49,7 @@ export class ResultBuffer {
 
   /**
    * Adds a cursor's page and drops the oldest rows so the buffer keeps at
-   * most maxRows rows and maxBytes (chapter 44: "keeping a window of
-   * max_result_rows").
+   * most maxRows rows and maxBytes (a window of max_result_rows).
    */
   slide(rows: Row[]): void {
     for (const row of rows) {

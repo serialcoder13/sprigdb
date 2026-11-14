@@ -1,4 +1,4 @@
--- Integer result metadata (chapter 28 step 11, gaps row 34): run with
+-- Integer result metadata: run with
 -- --column-type-info; the check keeps each column's name and type.
 DROP TABLE IF EXISTS c_im_t;
 CREATE TABLE c_im_t (id INT PRIMARY KEY, ti TINYINT, si SMALLINT, i INT, ui INT UNSIGNED, dt DATETIME, bt BIT(8));

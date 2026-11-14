@@ -796,7 +796,7 @@ impl LookupCatalog {
 /// `sprig_auto_<8 hex>`, in state `building`. The build itself
 /// ([`direct::build`]) is the same as for unique lookups; automatic
 /// indexing then watches it for `auto_index.observe_days` and drops it
-/// ([`direct::drop`]) unless p95 improved by `auto_index.min_improvement_pct`.
+/// (`direct::drop`) unless p95 improved by `auto_index.min_improvement_pct`.
 #[must_use]
 pub fn propose_auto_lookup(
     id: LookupId,

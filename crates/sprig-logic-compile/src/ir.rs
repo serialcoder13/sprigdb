@@ -13,8 +13,8 @@
 //!   typed locals (scalarized rows), never an expression.
 //!
 //! The semantics every consumer must agree on are written on each
-//! variant. Where they differ from JavaScript or KIRun, `EXPLAIN
-//! FUNCTION` lists the difference.
+//! variant. Where they differ from JavaScript or KIRun,
+//! `EXPLAIN FUNCTION` lists the difference.
 
 use std::fmt;
 

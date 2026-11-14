@@ -1,8 +1,7 @@
-# SprigDB development environment (chapter 27, "Development setup"; chapter
-# 46, "Integration with Docker Compose").
+# SprigDB development environment.
 #
 # This first version runs one simulated data center: a single-member etcd
-# (single-etcd mode, chapter 23) and MariaDB in three topologies, one profile
+# (single-etcd mode) and MariaDB in three topologies, one profile
 # each. Start one topology at a time:
 #
 #   docker compose --profile single up -d        # etcd + one node
@@ -14,7 +13,7 @@
 # Fault injection (toxiproxy, faultd) and elle-cli have profiles of their
 # own, faults and elle, outside `all`: see the end of this file.
 #
-# Per-node identity follows chapter 27: server_id = cluster_number * 100 +
+# Per-node identity: server_id = cluster_number * 100 +
 # index, gtid_domain_id = cluster_number. Cluster numbers: single 1,
 # replication 2, galera 3. Galera nodes share wsrep_gtid_domain_id 3 and keep
 # distinct node-local domains (301-303).
@@ -30,10 +29,10 @@ x-mariadb: &mariadb
     MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-sprig-dev-root}
     # glibc gives each busy thread its own malloc arena; with 400 connections
     # RSS grew ~300 MB past what MariaDB itself counted (Memory_used 562 MB,
-    # anon 868 MB on single-1, 11 Nov). Hardening round 1, HD2.
+    # anon 868 MB on single-1, 11 Nov).
     MALLOC_ARENA_MAX: "4"
   # An OOM-killed node comes back by itself (galera-1's entrypoint decides
-  # bootstrap vs join; the others rejoin or resync). Hardening round 1, HD2.
+  # bootstrap vs join; the others rejoin or resync).
   restart: unless-stopped
   networks: [dc-a]
   ulimits:
@@ -55,7 +54,7 @@ x-galera-health: &galera-health
   # donor's users, so the image's own healthcheck account isn't reliable.
   # It also records the node's last committed position in the shared
   # galera-state volume, which a full restart's bootstrap reads
-  # (mariadb/galera-start.sh, bugfix-41).
+  # (mariadb/galera-start.sh).
   test: [CMD, /bin/bash, /usr/local/bin/sprig-galera-start.sh, health]
   interval: 5s
   timeout: 5s
@@ -70,7 +69,7 @@ services:
       - --name=etcd-0
       - --data-dir=/etcd-data
       # Keep only the last hour of revisions (as deploy/compose-vm): without it
-      # etcd's database grows with every write (about 0.7 MB/h in the M0.7 soak).
+      # etcd's database grows with every write (about 0.7 MB/h in the soak).
       - --auto-compaction-mode=periodic
       - --auto-compaction-retention=1h
       - --listen-client-urls=http://0.0.0.0:2379
@@ -92,8 +91,7 @@ services:
     <<: *mariadb
     profiles: [single, all]
     hostname: single
-    # The many-tenant tests (1,000 tenants, r9cluster's 75) run here: 2.5 GB
-    # (the lead's live value of 11 Nov). Hardening round 1, HD2.
+    # The many-tenant tests (up to 1,000 tenants) run here: 2.5 GB.
     mem_limit: ${MARIADB_SINGLE_MEM_LIMIT:-2560m}
     memswap_limit: ${MARIADB_SINGLE_MEMSWAP_LIMIT:-3g}
     command: [--server-id=101, --gtid-domain-id=1]
@@ -147,10 +145,9 @@ services:
     profiles: [galera, all]
     hostname: galera-1
     # mariadb/galera-start.sh: after a crash it recovers the node's position
-    # from InnoDB first, so a full restart keeps the cluster's state UUID
-    # (bugfix-41); it bootstraps only a node marked safe_to_bootstrap: 1, or
-    # galera-1 on a fresh volume, and otherwise joins. Reset the cluster with
-    # `down -v`.
+    # from InnoDB first, so a full restart keeps the cluster's state UUID; it
+    # bootstraps only a node marked safe_to_bootstrap: 1, or galera-1 on a
+    # fresh volume, and otherwise joins. Reset the cluster with `down -v`.
     entrypoint: [/bin/bash, /usr/local/bin/sprig-galera-start.sh, first]
     command:
       - --server-id=301
@@ -204,7 +201,7 @@ services:
     ports: ["127.0.0.1:13323:3306"]
     volumes: *galera-conf
 
-  # --- fault injection (chapter 46, "Fault injection"): profile faults ----
+  # --- fault injection: profile faults ----
   # Start next to a running stack without touching it:
   #
   #   docker compose --profile faults up -d toxiproxy faultd
@@ -239,11 +236,10 @@ services:
     profiles: [elle]
     network_mode: none
 
-  # --- connector matrix and sysbench (chapter 46, step 5; chapter 05,
-  # step 13): profile connectors. One image per client runtime; run.sh
-  # builds them and runs one container per connector and TLS mode, one at a
-  # time, against any endpoint (MariaDB or MySQL directly today, the
-  # gateway's 3306 and 3307 later):
+  # --- connector matrix and sysbench: profile connectors. One image per
+  # client runtime; run.sh builds them and runs one container per connector
+  # and TLS mode, one at a time, against any endpoint (MariaDB or MySQL
+  # directly today, the gateway's 3306 and 3307 later):
   #
   #   connectors/run.sh 127.0.0.1 13301 mariadb
   #
@@ -318,7 +314,7 @@ services:
     image: sprigdb-conn-prisma:dev
     mem_limit: 768m
 
-  # Milestone M0.3's "done when" harness (m03/README.md): two tenants run the
+  # The tenant harness (m03/README.md): two tenants run the
   # same schema-tool suite (Flyway, Hibernate validation, mysqldump and
   # mariadb-dump) and the isolation checks, one container at a time:
   #

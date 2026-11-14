@@ -1,5 +1,4 @@
-# SprigDB three-data-center development layout (chapter 27, "Development
-# setup"; chapter 46, "Integration with Docker Compose").
+# SprigDB three-data-center development layout.
 #
 # Always run it through ./3dc.sh, or pass `-p sprigdb-3dc` yourself: the
 # `.env` next to this file sets COMPOSE_PROJECT_NAME=sprigdb-dev for
@@ -22,8 +21,8 @@
 # | iad1 | 10.10.3.0/24 | iad1-c1: single node                              |
 #
 # The netem service adds one-way delays between DC subnets with tc netem
-# (netem/netem.sh): mum1-fra1 30 ms, mum1-iad1 80 ms, fra1-iad1 60 ms, the
-# values of chapter 46, so a ping between DCs shows 60, 160 and 120 ms.
+# (netem/netem.sh): mum1-fra1 30 ms, mum1-iad1 80 ms, fra1-iad1 60 ms, so a
+# ping between DCs shows 60, 160 and 120 ms.
 # Override with SPRIG3DC_DELAY_MUM1_FRA1_MS and friends; SPRIG3DC_JITTER_MS
 # adds jitter.
 #
@@ -31,7 +30,7 @@
 # 79 DC etcd, 80 global etcd, 06-08 MariaDB nodes. deploy/compose/env.3dc.toml
 # describes the same layout for sprig-testkit (Env::three_dc).
 #
-# Per-node identity follows chapter 27: server_id = cluster_number * 100 +
+# Per-node identity: server_id = cluster_number * 100 +
 # index, gtid_domain_id = cluster_number; clusters mum1-c1 = 1, fra1-c1 = 2,
 # iad1-c1 = 3. The MariaDB config files are shared with compose.yaml.
 #
@@ -107,7 +106,7 @@ services:
       - --name=mum1-etcd
       - --data-dir=/etcd-data
       # Keep only the last hour of revisions (as deploy/compose-vm): without it
-      # etcd's database grows with every write (about 0.7 MB/h in the M0.7 soak).
+      # etcd's database grows with every write (about 0.7 MB/h in the soak).
       - --auto-compaction-mode=periodic
       - --auto-compaction-retention=1h
       - --listen-client-urls=http://0.0.0.0:2379
@@ -129,7 +128,7 @@ services:
       - --name=etcd-g-mum1
       - --data-dir=/etcd-data
       # Keep only the last hour of revisions (as deploy/compose-vm): without it
-      # etcd's database grows with every write (about 0.7 MB/h in the M0.7 soak).
+      # etcd's database grows with every write (about 0.7 MB/h in the soak).
       - --auto-compaction-mode=periodic
       - --auto-compaction-retention=1h
       - --listen-client-urls=http://0.0.0.0:2379
@@ -193,7 +192,7 @@ services:
       - --name=fra1-etcd
       - --data-dir=/etcd-data
       # Keep only the last hour of revisions (as deploy/compose-vm): without it
-      # etcd's database grows with every write (about 0.7 MB/h in the M0.7 soak).
+      # etcd's database grows with every write (about 0.7 MB/h in the soak).
       - --auto-compaction-mode=periodic
       - --auto-compaction-retention=1h
       - --listen-client-urls=http://0.0.0.0:2379
@@ -212,7 +211,7 @@ services:
       - --name=etcd-g-fra1
       - --data-dir=/etcd-data
       # Keep only the last hour of revisions (as deploy/compose-vm): without it
-      # etcd's database grows with every write (about 0.7 MB/h in the M0.7 soak).
+      # etcd's database grows with every write (about 0.7 MB/h in the soak).
       - --auto-compaction-mode=periodic
       - --auto-compaction-retention=1h
       - --listen-client-urls=http://0.0.0.0:2379
@@ -293,7 +292,7 @@ services:
       - --name=iad1-etcd
       - --data-dir=/etcd-data
       # Keep only the last hour of revisions (as deploy/compose-vm): without it
-      # etcd's database grows with every write (about 0.7 MB/h in the M0.7 soak).
+      # etcd's database grows with every write (about 0.7 MB/h in the soak).
       - --auto-compaction-mode=periodic
       - --auto-compaction-retention=1h
       - --listen-client-urls=http://0.0.0.0:2379
@@ -312,7 +311,7 @@ services:
       - --name=etcd-g-iad1
       - --data-dir=/etcd-data
       # Keep only the last hour of revisions (as deploy/compose-vm): without it
-      # etcd's database grows with every write (about 0.7 MB/h in the M0.7 soak).
+      # etcd's database grows with every write (about 0.7 MB/h in the soak).
       - --auto-compaction-mode=periodic
       - --auto-compaction-retention=1h
       - --listen-client-urls=http://0.0.0.0:2379

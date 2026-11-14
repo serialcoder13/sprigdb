@@ -1,11 +1,10 @@
-//! The `studio.*` keys (chapter 44, "Configuration") and the values
-//! serving reads from them.
+//! The `studio.*` keys and the values serving reads from them.
 //!
 //! Every key is a live setting. Lists (`studio.listeners`,
 //! `studio.public_origins`) are comma-separated text until the settings
 //! registry has a list type. Keys the chapter also accepts at tenant,
 //! database or object scope are registered with those scopes; the gateway
-//! resolves them at its own scopes (dc, global) in R0, as it does the
+//! resolves them at its own scopes (dc, global) for now, as it does the
 //! `api.*` keys, because a request's tenant is known only after it signs
 //! in.
 
@@ -207,7 +206,7 @@ pub fn origin_of(url: &str) -> Option<String> {
     Some(format!("{scheme}://{host}"))
 }
 
-/// The Content-Security-Policy of chapter 44, with the tile server's
+/// Studio's Content-Security-Policy, with the tile server's
 /// origin when `studio.map_tile_url` names one.
 #[must_use]
 pub fn csp(map_tile_url: &str) -> String {

@@ -12,8 +12,8 @@ import { useNavigate } from 'react-router';
 
 type Tab = 'columns' | 'indexes' | 'ddl' | 'data' | StructureTab;
 
-/** An object's detail (chapter 44 step 7): columns, indexes with their
- * origin, the definition, and data (step 10). */
+/** An object's detail: columns, indexes with their origin, the definition,
+ * and data. */
 export function ObjectPage() {
   const { tenant = '', db = '', kind = 'table', name = '' } = useParams();
   const snap = useSnapshot(db);

@@ -1,13 +1,13 @@
-//! The sequencer (chapter 45, "Sequencing and offsets"; build step 5):
-//! one per (stream, log shard), reading the tenant's feed in commit order,
-//! giving each record of its partitions the next offset, and appending
-//! records and the feed position in one local transaction on the log shard.
+//! The sequencer: one per (stream, log shard), reading the tenant's feed
+//! in commit order, giving each record of its partitions the next offset,
+//! and appending records and the feed position in one local transaction on
+//! the log shard.
 //!
 //! ```text
 //! run(stream s, log shard L):
 //!  1. acquire: in one transaction on L, lock L's shard row of
 //!     __sprig_sl_ckpt, raise its leader epoch, read the feed position
-//!  2. open the tenant's feed after that position (chapter 38)
+//!  2. open the tenant's feed after that position
 //!  3. per feed item, in commit order:
 //!       event of s's source (an outbox insert, or a change of the watched
 //!         object) whose partition is on L → a record of the open transaction
@@ -25,7 +25,7 @@
 //! anyway (a commit whose answer was lost, then retried) is caught by
 //! `uk_source`: its records are skipped and their offsets not reused.
 //!
-//! **Leases (as built).** The worker's job runtime (chapter 23) gives each
+//! **Leases.** The worker's job runtime gives each
 //! (stream, log shard) one sequencer job under its lease. The lease alone
 //! can't stop a sequencer that hasn't noticed it lost the job, so the
 //! leader epoch in the shard row fences it inside MariaDB: every append
@@ -190,7 +190,7 @@ pub trait FeedOpener: Send + Sync {
     async fn open(&self, start: &Start) -> Result<Box<dyn FeedSource>>;
 }
 
-/// Where high watermarks go (chapter 45: etcd and waiting fetches).
+/// Where high watermarks go (etcd and waiting fetches).
 #[async_trait::async_trait]
 pub trait Watermarks: Send + Sync {
     /// The partitions' new high watermarks.
@@ -199,7 +199,7 @@ pub trait Watermarks: Send + Sync {
 
 /// A sequencer's feed as the shared pump reads it (`sprig_feed::pump`:
 /// a task of its own, so the run loop's deadlines can't cancel a read
-/// half-way; decision r9-131).
+/// half-way).
 #[async_trait::async_trait]
 impl sprig_feed::pump::Source for Box<dyn FeedSource> {
     type Item = FeedItem;
@@ -284,7 +284,7 @@ pub struct SeqStats {
     pub items: AtomicU64,
     /// How far behind the sequencer reads, in ms: now minus the commit
     /// time (its HLC's seconds) of the last change read; 0 once the feed
-    /// says it is caught up (R9, r9feed: lag per instance).
+    /// says it is caught up (lag per instance).
     pub lag_ms: AtomicU64,
 }
 
@@ -501,7 +501,7 @@ impl Sequencer {
         // Read in a task of its own: a feed's `next` isn't cancel-safe (a
         // tail takes a group from its source, then awaits catalog lookups),
         // and the deadlines below would drop it half-way, losing the group
-        // (R9, r9feed: new instances lost their first record).
+        // (new instances used to lose their first record).
         let mut feed = sprig_feed::pump::Pump::start(
             self.feed.open(&acq.start).await?,
             sprig_feed::pump::Pump::<FeedItem>::AHEAD,

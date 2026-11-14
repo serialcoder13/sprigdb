@@ -375,8 +375,8 @@ async fn multipart_and_failed_completion_and_sweep() {
     assert!(e.retryable);
     eprintln!("failed completion: {}", e.message);
     assert!(c.head_object(&key).await.unwrap().is_none());
-    // MinIO lists multipart uploads only for an exact object name (open
-    // question 11): by prefix it finds none.
+    // MinIO lists multipart uploads only for an exact object name: by prefix
+    // it finds none.
     assert!(c.list_uploads(&prefix).await.unwrap().is_empty());
     assert_eq!(c.list_uploads(&key).await.unwrap().len(), 1);
     eprintln!("MinIO: ListMultipartUploads by prefix finds nothing; by exact key finds the upload");

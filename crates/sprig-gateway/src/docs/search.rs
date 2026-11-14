@@ -4,7 +4,8 @@
 //! q_vec := embed(query)                        -- none: keyword only
 //! bm25  := MATCH(text, heading_path, terms) AGAINST (query) top 40,
 //!          on the version, audience-filtered
-//! vec   := VEC_DISTANCE_COSINE(embedding, q_vec) top 40, exact (no index)
+//! vec   := VEC_DISTANCE_COSINE(embedding, q_vec) top 40 through the VECTOR index
+//!          (200 read, then filtered by version and audience)
 //! hits  := RRF(bm25 weighted keyword_weight(query), vec), k = 60;
 //!          at most 2 per page; the first `limit`
 //! ```
@@ -163,8 +164,14 @@ async fn keyword_ids(
     Ok(rows.into_iter().map(|(id, _)| id).collect())
 }
 
-/// The vector list: chunk ids, nearest first (an exact scan; the docs
-/// are a few thousand rows).
+/// Nearest neighbours read from the vector index before the version and
+/// audience filters apply: every kept release and audience shares the
+/// index, so it is read past [`CANDIDATES`].
+const VECTOR_OVERSAMPLE: usize = 5;
+
+/// The vector list: chunk ids, nearest first. The `VECTOR` index answers
+/// the inner `ORDER BY ... LIMIT` (a few milliseconds); an exact scan of
+/// a few thousand rows took a few hundred.
 async fn vector_ids(
     conn: &mut Conn,
     version: &str,
@@ -177,15 +184,18 @@ async fn vector_ids(
         ""
     };
     let sql = format!(
-        "SELECT chunk_id FROM {} IGNORE INDEX (v_emb) WHERE version = ?{filter} \
-         ORDER BY VEC_DISTANCE_COSINE(embedding, VEC_FromText(?)), chunk_id LIMIT {CANDIDATES}",
-        table::qualified(table::CHUNKS)
+        "SELECT chunk_id FROM (SELECT chunk_id, version, audience, \
+         VEC_DISTANCE_COSINE(embedding, VEC_FromText(?)) AS d FROM {} \
+         ORDER BY VEC_DISTANCE_COSINE(embedding, VEC_FromText(?)) LIMIT {}) AS near \
+         WHERE version = ?{filter} ORDER BY d, chunk_id LIMIT {CANDIDATES}",
+        table::qualified(table::CHUNKS),
+        CANDIDATES * VECTOR_OVERSAMPLE
     );
-    let mut params: Vec<Value> = vec![version.into()];
+    let v = table::vector_text(q);
+    let mut params: Vec<Value> = vec![v.clone().into(), v.into(), version.into()];
     if let Some(a) = audience {
         params.push(a.into());
     }
-    params.push(table::vector_text(q).into());
     conn.exec(sql, params).await.map_err(|e| db("vector", e))
 }
 

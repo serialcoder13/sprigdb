@@ -1,5 +1,4 @@
-//! The expiry and old-generation sweeper (chapter 33, "Expiry and
-//! garbage"; chapter 40, "Expiry: lazy and active").
+//! The expiry and old-generation sweeper (active expiry).
 //!
 //! Reads hide expired keys at once; this removes their rows. It runs in a
 //! worker as `sprig_ctl` over a cluster's physical schemas:

@@ -1,4 +1,4 @@
-//! A namespace's tables (chapter 33, "Tables per namespace").
+//! A namespace's tables.
 //!
 //! - the **key table** `<name>`: one row per key (type, string value,
 //!   element count, list bounds, generation, version, expiry);
@@ -8,7 +8,7 @@
 //!   `(c, score)`, `c` being -1, 0 or 1 for `-inf`, finite and `+inf`.
 //!
 //! Every row carries the distribution key `_sprig_dk` and its routing hash
-//! `_sprig_rk` (chapter 15), filled by the front end, so a sharded group
+//! `_sprig_rk`, filled by the front end, so a sharded group
 //! routes on `_sprig_dk` and `SCAN` walks keys in hash order.
 
 use sprig_shard::key::{KeyClass, KeySpec, KeyValue};
@@ -183,7 +183,7 @@ impl Namespace {
     }
 
     /// `_sprig_rk` of `key`: `xxh3_64` of its normalized distribution key
-    /// (chapter 15, binary class).
+    /// (binary class).
     #[must_use]
     pub fn routing_hash(&self, key: &[u8]) -> u64 {
         routing_hash_of(self.dist_key(key))

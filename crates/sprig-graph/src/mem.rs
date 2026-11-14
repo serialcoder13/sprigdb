@@ -34,6 +34,21 @@ pub struct MemStore {
     pub per_shard: HashMap<usize, u64>,
     /// `CALL { } IN TRANSACTIONS`: the store as the current batch began.
     batch_base: Option<Box<MemStore>>,
+    /// Hops may read properties late (as over MariaDB), for tests.
+    late: bool,
+}
+
+/// `j` (an object) with only `keys`.
+fn only(j: &serde_json::Value, keys: &[String]) -> serde_json::Value {
+    match j {
+        serde_json::Value::Object(m) => serde_json::Value::Object(
+            m.iter()
+                .filter(|(k, _)| keys.contains(k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 /// The unique key of `props` (with its `_types`) under `d`: `None` if a
@@ -81,6 +96,14 @@ impl MemStore {
             next_edge: 1,
             ..Self::default()
         }
+    }
+
+    /// Lets the executor read properties late, as it does over MariaDB:
+    /// [`GraphStore::nodes_part`] then gives only the keys asked for.
+    #[must_use]
+    pub fn with_late_reads(mut self) -> Self {
+        self.late = true;
+        self
     }
 
     fn hit(&mut self, shard: usize) {
@@ -219,6 +242,40 @@ impl GraphStore for MemStore {
 
     fn stats(&self) -> StoreStats {
         self.stats
+    }
+
+    fn late_props(&self) -> bool {
+        self.late
+    }
+
+    async fn nodes_part(&mut self, ids: &[u64], keys: Option<&[String]>) -> Result<Vec<NodeRow>> {
+        let rows = self.nodes(ids).await?;
+        let Some(keys) = keys else { return Ok(rows) };
+        Ok(rows
+            .into_iter()
+            .map(|mut n| {
+                n.props = only(&n.props, keys);
+                n.types = n.types.as_ref().map(|t| only(t, keys));
+                n
+            })
+            .collect())
+    }
+
+    async fn edges_part(
+        &mut self,
+        at: &[(u64, u64)],
+        keys: Option<&[String]>,
+    ) -> Result<Vec<EdgeRow>> {
+        let rows = self.edges_at(at).await?;
+        let Some(keys) = keys else { return Ok(rows) };
+        Ok(rows
+            .into_iter()
+            .map(|mut e| {
+                e.props = only(&e.props, keys);
+                e.types = e.types.as_ref().map(|t| only(t, keys));
+                e
+            })
+            .collect())
     }
 
     async fn scan(&mut self, s: &Scan) -> Result<Vec<NodeRow>> {

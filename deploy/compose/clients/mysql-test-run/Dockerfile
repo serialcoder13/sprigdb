@@ -1,5 +1,5 @@
 # MySQL's mysql-test-run.pl and mysqltest for CI's heavy-suite job
-# (deploy/compose/clients/run.sh mysql-test-run; chapter 46 step 10). The
+# (deploy/compose/clients/run.sh mysql-test-run). The
 # test package (mysql-community-test, GPL, a test tool: nothing of it ships
 # with SprigDB) of the same release as the reference server, on top of the
 # official image, which already has the matching mysql client. The RPM is

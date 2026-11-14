@@ -16,7 +16,7 @@
 //! with the tenant still on its source, within 30 s.
 //!
 //! The tenant id comes from `SPRIG_TEST_TENANT_BASE` (default
-//! 3,530,600,000, agent r0fix's range) plus the process id modulo 1,000;
+//! 3,530,600,000) plus the process id modulo 1,000;
 //! the test drops only its own schemas, jobs and map by exact name.
 
 #![allow(clippy::unwrap_used, clippy::too_many_lines, clippy::similar_names)]

@@ -728,6 +728,7 @@ mod tests {
             rk: 0xa,
             labels: vec!["P".into()],
             props: BTreeMap::from([("n".into(), Value::Int(1))]),
+            partial: None,
         });
         let b = Arc::new(Node {
             graph: 9,
@@ -735,6 +736,7 @@ mod tests {
             rk: 0xb,
             labels: vec![],
             props: BTreeMap::new(),
+            partial: None,
         });
         // b -> a, walked from a: index negative.
         let r = Arc::new(Rel {
@@ -746,6 +748,7 @@ mod tests {
             dst_rk: 0xa,
             rtype: "R".into(),
             props: BTreeMap::new(),
+            partial: None,
         });
         let PackValue::Struct { tag, fields } = to_pack(&Value::Node(a.clone())) else {
             panic!("node")

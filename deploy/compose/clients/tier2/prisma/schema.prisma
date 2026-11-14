@@ -1,5 +1,4 @@
-// Prisma ORM's migrations and drift check against a MySQL endpoint (R4
-// round 4, tier 2).
+// Prisma ORM's migrations and drift check against a MySQL endpoint (tier 2).
 datasource db {
   provider = "mysql"
   url      = env("DATABASE_URL")

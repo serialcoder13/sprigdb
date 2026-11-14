@@ -1,7 +1,6 @@
-// Per-browser preferences (chapter 44, "Data structures and storage"):
-// theme, locale, column widths. Never tokens, results or drafts. Storage can
-// be missing or throw (private windows, blocked site data); Studio works
-// without it.
+// Per-browser preferences: theme, locale, column widths. Never tokens,
+// results or drafts. Storage can be missing or throw (private windows,
+// blocked site data); Studio works without it.
 
 const PREFIX = 'sprig-studio.';
 

@@ -5,7 +5,7 @@
 //!
 //! | Request | Does |
 //! |---|---|
-//! | `GET`/`HEAD` under `studio.path`, `POST <path>/_/errors` | Studio's files ([`sprig_studio::serve`]) |
+//! | `GET`/`HEAD` under `studio.path`, `POST <path>/_/errors` | Studio's files ([`sprig_studio::serve()`]) |
 //! | `POST /v1/auth/login` | Password login: an access token, and the refresh token as an `HttpOnly` cookie |
 //! | `POST /v1/auth/refresh`, `/v1/auth/logout` | Rotate or end the session (cookie, `X-Sprig-CSRF`, same origin) |
 //! | `POST /v1/auth/mfa`, `/v1/auth/factors...`, `POST /v1/auth/impersonate` | Second factors and impersonation ([`mfa`]) |

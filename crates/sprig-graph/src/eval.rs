@@ -266,24 +266,36 @@ pub fn eval(e: &Expr, row: &Row, params: &Params) -> Result<Value> {
         }
         Expr::MapProjection(b, items) => {
             let base = eval(b, row, params)?;
-            let props: BTreeMap<String, Value> = match &base {
+            match &base {
                 Value::Null => return Ok(Value::Null),
-                Value::Node(n) => n.props.clone(),
-                Value::Rel(r) => r.props.clone(),
-                Value::Map(m) => m.clone(),
+                Value::Node(_) | Value::Rel(_) | Value::Map(_) => {}
                 other => {
                     return Err(type_error(format!(
                         "a map projection of a {}",
                         other.type_name()
                     )));
                 }
+            }
+            // A late-read element gives only the keys asked for.
+            let one = |k: &str| -> Result<Value> {
+                match &base {
+                    Value::Node(n) => n.prop(k),
+                    Value::Rel(r) => r.prop(k),
+                    Value::Map(m) => Ok(m.get(k).cloned().unwrap_or(Value::Null)),
+                    _ => Ok(Value::Null),
+                }
             };
             let mut out = BTreeMap::new();
             for it in items {
                 match it {
-                    MapItem::All => out.extend(props.clone()),
+                    MapItem::All => out.extend(match &base {
+                        Value::Node(n) => n.all_props()?.clone(),
+                        Value::Rel(r) => r.all_props()?.clone(),
+                        Value::Map(m) => m.clone(),
+                        _ => BTreeMap::new(),
+                    }),
                     MapItem::Prop(k) => {
-                        out.insert(k.clone(), props.get(k).cloned().unwrap_or(Value::Null));
+                        out.insert(k.clone(), one(k)?);
                     }
                     MapItem::Lit(k, e) => {
                         out.insert(k.clone(), eval(e, row, params)?);
@@ -318,8 +330,8 @@ fn tri(b: Option<bool>) -> Value {
 fn prop(v: &Value, k: &str) -> Result<Value> {
     Ok(match v {
         Value::Null => Value::Null,
-        Value::Node(n) => n.props.get(k).cloned().unwrap_or(Value::Null),
-        Value::Rel(r) => r.props.get(k).cloned().unwrap_or(Value::Null),
+        Value::Node(n) => n.prop(k)?,
+        Value::Rel(r) => r.prop(k)?,
         Value::Map(m) => m.get(k).cloned().unwrap_or(Value::Null),
         other => match crate::temporal::property(other, k)? {
             Some(v) => v,
@@ -679,15 +691,19 @@ pub fn call(name: &str, args: Vec<Value>) -> Result<Value> {
             o => return Err(type_error(format!("type() of a {}", o.type_name()))),
         },
         "properties" => match a0 {
-            Value::Node(n) => Value::Map(n.props.clone()),
-            Value::Rel(r) => Value::Map(r.props.clone()),
+            Value::Node(n) => Value::Map(n.all_props()?.clone()),
+            Value::Rel(r) => Value::Map(r.all_props()?.clone()),
             m @ Value::Map(_) => m,
             Value::Null => Value::Null,
             o => return Err(type_error(format!("properties() of a {}", o.type_name()))),
         },
         "keys" => match a0 {
-            Value::Node(n) => Value::List(n.props.keys().cloned().map(Value::String).collect()),
-            Value::Rel(r) => Value::List(r.props.keys().cloned().map(Value::String).collect()),
+            Value::Node(n) => {
+                Value::List(n.all_props()?.keys().cloned().map(Value::String).collect())
+            }
+            Value::Rel(r) => {
+                Value::List(r.all_props()?.keys().cloned().map(Value::String).collect())
+            }
             Value::Map(m) => Value::List(m.keys().cloned().map(Value::String).collect()),
             Value::Null => Value::Null,
             o => return Err(type_error(format!("keys() of a {}", o.type_name()))),

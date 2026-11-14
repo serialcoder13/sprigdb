@@ -5,7 +5,7 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
-/** An inheritable table (chapter 42): the merged view of the session's space. */
+/** An inheritable table: the merged view of the session's space. */
 @Entity
 @Table(name = "products")
 public class Product {

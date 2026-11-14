@@ -1,4 +1,4 @@
-// The activity bar's sections (decision R1): today's pages regrouped into a
+// The activity bar's sections: today's pages regrouped into a
 // few sections, each with the pages it holds. Routes are unchanged.
 
 import type { ComponentType, SVGProps } from 'react';

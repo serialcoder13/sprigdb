@@ -4,6 +4,6 @@
 
 # The test needs a slow streaming result: a cross join of
 # information_schema.tables with itself, LIMIT 20000. A tenant sees only its
-# own few tables (chapter 07), so the result is a few hundred rows, done
+# own few tables, so the result is a few hundred rows, done
 # before the second thread looks. Not a protocol difference.
 gateway-* flaky tests.test_connection.test_result_concurrent_use_raises :: a tenant's information_schema.tables is small, so the "slow" result often finishes before the second thread looks (failed on the debug gateway, passed on the release one)

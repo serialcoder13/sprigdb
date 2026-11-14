@@ -1,10 +1,9 @@
-// The Redis console and key browser (chapter 44 step 22) over the key-value
-// API's Exec and Scan (chapter 37). A namespace is chosen by database and
-// name; as `sprig` does over REST (tui decision T11) the defaults are
-// database `redis` and namespace `db0`. Each line of the console is one
-// command, checked against the command table, confirmed when
-// studio.confirm_writes covers it (FLUSHDB, FLUSHALL and SWAPDB always ask),
-// and its reply printed as redis-cli prints it.
+// The Redis console and key browser over the key-value API's Exec and
+// Scan. A namespace is chosen by database and name; as `sprig` does over
+// REST the defaults are database `redis` and namespace `db0`. Each line of
+// the console is one command, checked against the command table, confirmed
+// when studio.confirm_writes covers it (FLUSHDB, FLUSHALL and SWAPDB always
+// ask), and its reply printed as redis-cli prints it.
 
 import { lazy, Suspense, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router';
@@ -305,7 +304,7 @@ function KeyValue({ db, ns, entry, onOpen, onChanged }: Readonly<{ db: string; n
     if (edit === null) return;
     setErr(null);
     try {
-      // Saved only if nobody changed the key since it was read (chapter 33's version condition).
+      // Saved only if nobody changed the key since it was read (a version condition).
       await put(db, ns, entry.key, edit, entry.version);
       setNotice('Saved.');
       onChanged();

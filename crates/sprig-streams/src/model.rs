@@ -1,5 +1,5 @@
-//! Streams as the catalog and the sequencer see them (chapter 45,
-//! "Interfaces" and "Data structures and storage").
+//! Streams as the catalog and the sequencer see them: interfaces, data
+//! structures and storage.
 //!
 //! **Physical names (as built).** A stream's tables are named by its id,
 //! not its name: the outbox `__sprig_eo_<stream_id>`, the log
@@ -15,8 +15,7 @@ use sprig_catalog::cache::ExtState;
 use sprig_common::ids::{DbId, GroupId, ObjectId, ShardId, TenantId};
 use sprig_common::names::SchemaName;
 
-/// `streams.stream_id`: an id from the tenant's object counter (chapter
-/// 08), so it can become `objects.object_id` once streams are catalog
+/// `streams.stream_id`: an id from the tenant's object counter, so it can become `objects.object_id` once streams are catalog
 /// objects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct StreamId(pub u64);
@@ -97,7 +96,7 @@ impl Cleanup {
 /// `streams.envelope`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Envelope {
-    /// Chapter 45's change envelope (change topics).
+    /// The change envelope (change topics).
     ChangeJson,
     /// The value as published (event streams).
     Raw,
@@ -176,7 +175,7 @@ impl ShardSlot {
 }
 
 /// A log shard: a shard schema of the stream's log group and the
-/// partitions it holds (chapter 45: the log group is sharded by partition,
+/// partitions it holds (the log group is sharded by partition,
 /// so each partition lives whole on one shard).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogShard {
@@ -233,7 +232,7 @@ pub struct StreamDef {
 }
 
 impl StreamDef {
-    /// The outbox table's name (chapter 45: `__sprig_eo_<stream>`; by id,
+    /// The outbox table's name (`__sprig_eo_<stream>`; by id,
     /// see the module docs).
     #[must_use]
     pub fn outbox_table(&self) -> String {
@@ -306,7 +305,7 @@ pub fn valid_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-/// A record as read from the log (chapter 45's `Record`).
+/// A record as read from the log (the log's `Record`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
     /// Its partition.

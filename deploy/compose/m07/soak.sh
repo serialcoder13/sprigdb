@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The no-restart soak runner (milestone M0.7): load over the MySQL wire,
+# The no-restart soak runner: load over the MySQL wire,
 # REST and gRPC on the m07 stack's gateway 1 while certificates, TLS modes
 # and settings change (crates/sprig-gateway/tests/soak_live.rs).
 #

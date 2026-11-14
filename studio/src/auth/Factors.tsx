@@ -6,8 +6,7 @@ import { QrCode } from './QrCode';
 
 const page = { maxInlineSize: 480, marginInline: 'auto', paddingBlockStart: 64 } as const;
 
-/** The second step of a login (chapter 14 step 13): an authenticator code
- * or a recovery code. */
+/** The second step of a login: an authenticator code or a recovery code. */
 export function SecondFactor({ challenge, onRestart }: Readonly<{ challenge: string; onRestart: () => void }>) {
   const intl = useIntl();
   const [code, setCode] = useState('');

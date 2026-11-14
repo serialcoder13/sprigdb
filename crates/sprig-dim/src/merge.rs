@@ -1,5 +1,4 @@
-//! Merging, subtotals, order and limit (chapter 35, "Merging and
-//! subtotals").
+//! Merging, subtotals, order and limit.
 //!
 //! ```text
 //! merge(rows, spec):

@@ -1,4 +1,4 @@
-// R6 Hibernate check (chapter 32): ddl-auto=validate over typed tables
+// Typed-tables Hibernate check: ddl-auto=validate over typed tables
 // (asset, vehicle, truck, created by ../../flyway), then a JPA write
 // through a subtype and polymorphic reads; then Hibernate's SINGLE_TABLE
 // inheritance with @DiscriminatorColumn over fleet, which SprigDB types by

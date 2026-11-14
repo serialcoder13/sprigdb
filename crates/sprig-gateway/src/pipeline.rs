@@ -373,7 +373,7 @@ pub trait SessionExec: Send {
     }
 
     /// A prepared single-row read for a protocol engine (MongoDB's `_id`
-    /// finds, S154): statement `stmt` executed with `params` on the
+    /// finds): statement `stmt` executed with `params` on the
     /// session's backend connection, without a [`ResultSink`]. The
     /// statement's privileges, row-level security and placement are checked
     /// as [`Self::execute`] checks them; [`PointRead::Fallback`] whenever

@@ -469,8 +469,9 @@ jobs:
   # -------------------------------------------------- connector gate ----
   # The connector gate: the tier 1 connectors and sysbench pass through the
   # gateway on 3306 (persona mysql) and 3307 (persona mariadb), and the
-  # gateway adds at most 0.5 ms at p50 over direct MariaDB. The harness is deploy/compose/connectors (README there);
-  # it already passes against MariaDB 11.8 and MySQL 8.4 directly.
+  # gateway adds at most 0.5 ms at p50 over direct MariaDB. The harness is
+  # deploy/compose/connectors (README there); it already passes against
+  # MariaDB 11.8 and MySQL 8.4 directly.
   #
   # Disabled until the gateway serves the MySQL protocol. To enable: drop
   # `if: false` (or narrow it, e.g. to workflow_dispatch and schedule), and
@@ -534,10 +535,10 @@ jobs:
 
   # Two tenants on one cluster run the same schema-tool suite (Flyway,
   # Hibernate validation, mysqldump and mariadb-dump) and see only their own
-  # objects; no physical name reaches a client in the leak suite; an object-scope setting is live within seconds
-  # and an out-of-bounds value is refused with 39080. The harness is
-  # deploy/compose/m03 (README there); its baseline mode already passes
-  # against MariaDB 11.8 directly.
+  # objects; no physical name reaches a client in the leak suite; an
+  # object-scope setting is live within seconds and an out-of-bounds value is
+  # refused with 39080. The harness is deploy/compose/m03 (README there); its
+  # baseline mode already passes against MariaDB 11.8 directly.
   #
   # gateway-dev.sh up provisions the tenants itself (acme and globex on
   # dc-a-single, users acme.app and globex.app with password sprig-dev-app).

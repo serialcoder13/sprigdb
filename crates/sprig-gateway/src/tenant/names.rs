@@ -1,5 +1,5 @@
 //! The pieces name virtualization asks the gateway for: the
-//! tenant's [`NameMap`] built from a catalog snapshot, the tenant's
+//! tenant's `NameMap` built from a catalog snapshot, the tenant's
 //! sessions for `SHOW PROCESSLIST`, and account names for output.
 
 use std::sync::Arc;

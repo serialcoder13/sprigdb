@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# R9's 10,000-tenant scale test (chapter 48, R9 done-when; decisions r9 items 85
-# and 90). NOT for the laptop or the shared dev clusters: run it on a machine of
-# its own (a CI runner or a short-lived cloud VM), which the lead asks Kiran for.
+# The 10,000-tenant scale test. NOT for the laptop or the shared dev clusters:
+# run it on a machine of its own (a CI runner or a short-lived cloud VM).
 #
 # Machine: 16 vCPU, 64 GB RAM, 300 GB local SSD (NVMe), Linux x86_64 or arm64,
 # Docker 24+. Smaller fails for memory, not CPU: 10,000 tenants hold about
@@ -25,14 +24,14 @@
 #
 # What it measures (each step's numbers go to $OUT/results.tsv):
 #   1. the definitions first: a declarer tenant with a stream, an exchange, a
-#      queue and a binding FOR EACH TENANT and two fan-in sinks (as r9fwd's
-#      1,000-tenant attempt, decision 85)
+#      queue and a binding FOR EACH TENANT and two fan-in sinks (as in an
+#      earlier 1,000-tenant attempt)
 #   2. 10,000 members under it, $PAR at a time (default 8); each time the
 #      count passes a multiple of $EVERY (default 500), whatever $PAR is:
 #      MariaDB memory and connections, binlog dumps on the node, the workers'
 #      and gateways' RSS, etcd's database size, creation rate. It stops if
 #      MariaDB passes 90% of its memory or 80% of max_connections.
-#   3. the forwarder (decision 86): one transactional publish from each of
+#   3. the forwarder: one transactional publish from each of
 #      1,000 random members, 32 at a time; every message arrives once; commit
 #      to delivery p50/p99; binlog dumps on the node stay at one per worker
 #      process and cluster

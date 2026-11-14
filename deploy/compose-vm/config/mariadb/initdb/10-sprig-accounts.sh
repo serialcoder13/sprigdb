@@ -1,8 +1,8 @@
 #!/bin/bash
 # First start only (an empty datadir): SprigDB's accounts on this node
-# (chapter 27, "External registration"; on a managed node sprig_ctl holds
-# every privilege, because the controller sets server variables, fences and
-# manages tenant accounts). Passwords come from the secret files.
+# (on a managed node sprig_ctl holds every privilege, because the
+# controller sets server variables, fences and manages tenant accounts).
+# Passwords come from the secret files.
 # The agents (compose.db-ha.yaml) fence with sprig_ctl, which holds
 # READ_ONLY ADMIN and CONNECTION ADMIN through ALL PRIVILEGES.
 set -euo pipefail

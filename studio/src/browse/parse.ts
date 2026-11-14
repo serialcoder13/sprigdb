@@ -1,4 +1,4 @@
-// Import parsing (chapter 44, "Import"): RFC 4180 CSV with a header row, or
+// Import parsing: RFC 4180 CSV with a header row, or
 // NDJSON (one object per line). Parsing is incremental, so a large file is
 // read in slices.
 

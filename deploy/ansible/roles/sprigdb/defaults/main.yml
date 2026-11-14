@@ -1,5 +1,5 @@
 ---
-# SprigDB on VMs (chapter 27, "VM packaging"). Untested: Ansible and
+# SprigDB on VMs. Untested: Ansible and
 # Molecule aren't installed where this role was written.
 sprigdb_version: "0.0.1"
 # Where the packages come from: a local file pushed to the host, or a
@@ -17,7 +17,7 @@ etcd_archive_url: "https://github.com/etcd-io/etcd/releases/download/v{{ etcd_ve
 sprigdb_ca_pem: ""
 sprigdb_cert_pem: ""
 sprigdb_key_pem: ""
-# etcd auto-compaction (bugfix-53), written into /etc/sprigdb/etcd-<tier>.yaml.
+# etcd auto-compaction, written into /etc/sprigdb/etcd-<tier>.yaml.
 etcd_compaction:
   auto-compaction-mode: periodic
   auto-compaction-retention: '"1h"'

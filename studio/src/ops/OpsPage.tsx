@@ -36,7 +36,7 @@ function ops<T>(path: string, init?: { body: unknown }): Promise<T> {
   return json<T>(`/v1/ops/${path}`, init ? { body: init.body, headers } : { headers });
 }
 
-/** Signs a named operator in (chapter 14): password, then a TOTP code or
+/** Signs a named operator in: password, then a TOTP code or
  * a recovery code in the same field; the first sign-in enrols the
  * authenticator (QR code, secret and link) and shows the recovery codes
  * once. */
@@ -491,7 +491,7 @@ function Jobs() {
   );
 }
 
-/** Operator mode (chapter 44 step 17): data centers, clusters, tenants
+/** Operator mode: data centers, clusters, tenants
  * with placement, moves and splits with catch-up lag and cutover holds,
  * jobs, failovers, in-doubt transactions. Shown only to platform
  * operators; destructive actions ask for the target's name and a reason. */

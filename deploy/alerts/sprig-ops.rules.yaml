@@ -162,7 +162,7 @@ groups:
   - name: sprig-streams
     rules:
       # Each worker exports how many of its stream sequencers are further
-      # behind than stream.sequencer_lag_alert_seconds (decision r9-132).
+      # behind than stream.sequencer_lag_alert_seconds.
       - alert: SprigStreamSequencersLagging
         expr: max by (instance) (sprig_stream_sequencers_lagging) > 0
         for: 10m

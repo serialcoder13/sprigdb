@@ -267,6 +267,7 @@ pub fn rows_digest<'a>(rows: impl IntoIterator<Item = &'a Row>) -> [u8; 32] {
 }
 
 #[cfg(test)]
+#[allow(clippy::float_cmp, clippy::type_complexity)]
 mod tests {
     use super::*;
     use crate::pack::chunk_pages;

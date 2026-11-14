@@ -502,8 +502,8 @@ sql_enum! {
 impl DropReason {
     /// A drop that says the definition is harmful or useless, so it may
     /// not be proposed again for `auto_index.recreate_block_days`: the
-    /// observer's verdicts, and an operator's drop or rejection (chapter
-    /// 07: an index a person dropped isn't rebuilt behind their back).
+    /// observer's verdicts, and an operator's drop or rejection (an
+    /// index a person dropped isn't rebuilt behind their back).
     #[must_use]
     pub const fn blocks_recreate(self) -> bool {
         matches!(

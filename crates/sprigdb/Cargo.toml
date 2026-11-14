@@ -24,9 +24,8 @@ tracing.workspace = true
 mimalloc = { workspace = true, optional = true }
 
 [features]
-# mimalloc as the global allocator, on by default (perf1 S143; the default
-# since S152/S155). `system-alloc` keeps the platform allocator (glibc on
-# Linux) even with the default features on.
+# mimalloc as the global allocator, on by default. `system-alloc` keeps the
+# platform allocator (glibc on Linux) even with the default features on.
 default = ["mimalloc"]
 mimalloc = ["dep:mimalloc"]
 system-alloc = []

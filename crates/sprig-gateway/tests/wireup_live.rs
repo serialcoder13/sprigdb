@@ -1,5 +1,5 @@
 //! Tenant endpoints by TLS SNI and client certificates on the MySQL
-//! listener (wireup, 13 Nov 2026), against a running gateway.
+//! listener, against a running gateway.
 //!
 //! - `tenant_endpoints_by_sni`: with `listener.tenant_sni_suffixes` set,
 //!   `app` connecting to `acme.<suffix>` logs in to acme and to

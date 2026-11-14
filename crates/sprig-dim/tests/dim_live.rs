@@ -1,4 +1,4 @@
-//! Dimensional models against plain SQL (chapter 35, "Testing"): API
+//! Dimensional models against plain SQL: API
 //! results against MariaDB's own `GROUP BY ... WITH ROLLUP` on random
 //! queries; type 2 attribution against a Rust reference; time zones across
 //! a daylight-saving change.

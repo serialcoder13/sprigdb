@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The balancer's live test bed (milestone M0.6, chapter 11): "the balancer
-# evens out a deliberately skewed fleet without oscillating".
+# The balancer's live test bed: the balancer must even out a deliberately
+# skewed fleet without oscillating.
 #
 # A deployment of its own (sprigdb-bl, DC dc-bl) on its own etcd container
 # (sprigdb-dev-bl-etcd, 127.0.0.1:18379, 256 MB), so its balancer only ever
@@ -239,8 +239,8 @@ leftovers() {
     done <"$state/owned"
 }
 
-# The mover's rows of this bed's jobs in __sprig_sys (chapter 10's
-# watermark, position and XA tables), on every writer.
+# The mover's rows of this bed's jobs in __sprig_sys (its watermark,
+# position and XA tables), on every writer.
 forget_jobs() {
     local ids port tbl
     ctl -o json job list 2>/dev/null | jq -r '.jobs[].id' >>"$state/jobs" || true

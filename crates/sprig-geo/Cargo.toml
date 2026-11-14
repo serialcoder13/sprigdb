@@ -9,7 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-# Karney's exact geodesics on WGS 84 (chapter 36, "Libraries"); MIT.
+# Karney's exact geodesics on WGS 84; MIT.
 geographiclib-rs = { version = "=0.2.7", default-features = false }
 
 [lints]

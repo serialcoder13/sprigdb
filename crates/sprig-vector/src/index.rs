@@ -1,4 +1,4 @@
-//! Standalone vector indexes (chapter 34, "Data structures and storage"):
+//! Standalone vector indexes:
 //! one table per index in a logical database, its definition in the
 //! table's comment, so the index needs no catalog row.
 //!
@@ -6,7 +6,7 @@
 //! CREATE TABLE `<name>` (
 //!   id     VARBINARY(254) NOT NULL PRIMARY KEY,
 //!   v      VECTOR(<dimensions>) NOT NULL,
-//!   doc    JSON NULL,             -- metadata, stored as chapter 31 stores documents
+//!   doc    JSON NULL,             -- metadata, stored as the document store stores documents
 //!   _types JSON NULL,             -- its type map
 //!   [lat DOUBLE NULL, lng DOUBLE NULL, _sprig_s2 BIGINT UNSIGNED NULL, KEY (_sprig_s2)]
 //!   [VECTOR INDEX ann (v) M=<m> DISTANCE=<metric>]   -- once the ANN graph is built
@@ -104,7 +104,7 @@ impl Similarity {
         }
     }
 
-    /// Chapter 34's score from a distance: Euclidean `1 / (1 + d)`;
+    /// The score from a distance: Euclidean `1 / (1 + d)`;
     /// cosine and `dotProduct` `(1 + similarity) / 2`, which is `1 - d/2`.
     #[must_use]
     pub fn score(self, d: f64) -> f64 {
@@ -203,7 +203,7 @@ pub struct IndexDef {
     pub ann_mode: AnnMode,
     /// Whether it is.
     pub ann_state: AnnState,
-    /// Items carry a location (chapter 36): `lat`, `lng` and `_sprig_s2`.
+    /// Items carry a location: `lat`, `lng` and `_sprig_s2`.
     pub geo: bool,
     /// The last recall measured when the graph was validated.
     pub recall: Option<f64>,

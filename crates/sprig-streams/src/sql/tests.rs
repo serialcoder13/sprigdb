@@ -292,7 +292,7 @@ async fn create_publish_read_drop() {
         panic!()
     };
     assert_eq!(rows[0][0].as_deref(), Some("order_events"));
-    // r9feed2: the sequencer's lag, NULL while none runs it.
+    // The sequencer's lag, NULL while none runs it.
     assert_eq!(columns.last().map(String::as_str), Some("Lag_ms"));
     assert_eq!(rows[0].last(), Some(&None));
     m.lags.insert(def.id, 1250);
@@ -354,7 +354,7 @@ async fn change_topics() {
         .unwrap_err();
     assert_eq!(e.code(), Some(SprigCode::RlsUnsupported));
     m.filtered = false;
-    // RL38: a view or routine over a change topic would read it with its
+    // A view or routine over a change topic would read it with its
     // definer's rights, bypassing the table's policies for its readers:
     // refused even when nothing binds the creator now.
     for s in [

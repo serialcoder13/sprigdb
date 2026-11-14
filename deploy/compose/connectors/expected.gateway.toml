@@ -1,48 +1,48 @@
-# Expected outcomes for the connector matrix through the gateway (M0.2),
+# Expected outcomes for the connector matrix through the gateway,
 # merged over expected.toml with SPRIG_CONN_EXPECTED_OVERLAY:
 #
 #   SPRIG_CONN_USER=app SPRIG_CONN_PASSWORD=sprig-dev-app \
 #   SPRIG_CONN_EXPECTED_OVERLAY=deploy/compose/connectors/expected.gateway.toml \
 #     deploy/compose/connectors/run.sh 127.0.0.1 13306 mysql
 #
-# Each entry is an interim decision of the plan's decisions/m0.2-interim.md.
+# Each entry says why the outcome differs from expected.toml's.
 
 [mysql."*"]
-# D7: the check reads performance_schema.session_connect_attrs, which the
+# The check reads performance_schema.session_connect_attrs, which the
 # MariaDB backends have off. The gateway parses the attributes; showing
-# them there is the R4 translator's job (chapter 28).
+# them there is the translator's job.
 conn_attrs = "skip"
 
 [mysql.mysql-connector-j]
-# D8: Connector/J 9.7 binds a BigInteger above Long.MAX_VALUE as a signed
+# Connector/J 9.7 binds a BigInteger above Long.MAX_VALUE as a signed
 # BIGINT (type 8, no unsigned flag) holding the bits of -1. MySQL 8.4
 # resolves the parameter's type from the column (BIGINT UNSIGNED) and
 # accepts it; MariaDB reads -1 and fails with 1264. MariaDB's PREPARE_OK
 # reports untyped parameters (type NULL), so the gateway can't tell this
-# from a real -1 until the parser and catalog know the column (the R4
-# translator, chapter 28).
+# from a real -1 until the translator's parser and catalog know the
+# column.
 prepared_biginteger = "fail"
 
 [mysql.hibernate]
 # Hibernate with MySQL Connector/J reads information_schema.KEYWORDS
 # WHERE RESERVED = 1 to resolve its dialect; MariaDB's KEYWORDS has no
 # RESERVED column. The 3306 persona answers that the MySQL way with the
-# core information_schema providers (M0.5; decisions/mysql-persona-gaps.md).
+# core information_schema providers.
 schema_validate = "fail"
 # MySQLDialect binds JSON values as CAST(? AS json), which MariaDB has no
-# syntax for (1064): the R4 translator's rewrite (chapter 28).
+# syntax for (1064): a rewrite for the translator.
 crud = "fail"
 query = "fail"
 optimistic_lock = "fail"
 
 [mysql.hibernate-mariadb]
 # ddl-auto=validate expects a json column; MariaDB's JSON is LONGTEXT. The
-# 3306 persona reports json for such columns in M0.5 (same decisions file).
+# 3306 persona is meant to report json for such columns.
 schema_validate = "fail"
 
 [mysql.sqlalchemy-pymysql]
 # JSON columns reflect as LONGTEXT (MariaDB's JSON); the 3306 persona
-# reports json in M0.5 (decisions/mysql-persona-gaps.md, gap 3).
+# is meant to report json.
 reflection = "fail"
 
 [mysql.sqlalchemy-mysqlclient]
@@ -50,7 +50,7 @@ reflection = "fail"
 reflection = "fail"
 
 [mysql.prisma]
-# db pull introspects JSON columns as LONGTEXT (gap 3, M0.5); the steps
+# db pull introspects JSON columns as LONGTEXT; the steps
 # after it report "an earlier step failed".
 connect = "fail"
 db_pull = "fail"
@@ -60,12 +60,12 @@ transaction = "fail"
 
 [mysql.mysqldump]
 # mysqldump 8.4 reads information_schema.COLUMN_STATISTICS and sets
-# terminology_use_previous (gap 7, R4).
+# terminology_use_previous, which MariaDB lacks.
 dump = "fail"
 
 [mysql.mariadb-dump]
 # Against MySQL 8.4 the restore rejects values for virtual generated
-# columns (gap 8); behind the gateway the backend is MariaDB, so it works.
+# columns; behind the gateway the backend is MariaDB, so it works.
 restore = "pass"
 checksum = "pass"
 objects = "pass"
@@ -74,6 +74,6 @@ objects = "pass"
 # MySQL 8.4 accepts w_ytd under ONLY_FULL_GROUP_BY because it depends on
 # the grouped primary key (functional dependence); MariaDB doesn't detect
 # that and fails with 1055. The 3306 persona's sql_mode comes from MySQL 8.4,
-# so this needs the R4 translator (or a looser persona sql_mode). sysbench
+# so this needs the translator (or a looser persona sql_mode). sysbench
 # runs plaintext only, so only the disabled pass reports it.
 disabled.check = "fail"

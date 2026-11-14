@@ -10,9 +10,9 @@
 //!   snapshot, filtered by privilege, changed with stream DDL run as the
 //!   user), and consumer groups in `stream_groups` and `stream_offsets`
 //!   through `sprig-streams`' store;
-//! - [`data`]: Produce, Fetch, ListOffsets and OffsetForLeaderEpoch (build
-//!   steps 10 and 11) over `sprig-streams`' publish and log reader, as
-//!   `sprig-proto-kafka`'s data plane.
+//! - [`data`]: Produce, Fetch, ListOffsets and OffsetForLeaderEpoch over
+//!   `sprig-streams`' publish and log reader, as `sprig-proto-kafka`'s data
+//!   plane.
 
 // Kafka API and config names fill the docs.
 #![allow(clippy::doc_markdown)]

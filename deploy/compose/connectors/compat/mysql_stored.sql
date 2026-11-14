@@ -1,7 +1,6 @@
 -- The 3306 rules inside views and stored programs, and MySQL's printing
--- of expressions in SHOW CREATE TABLE (chapter 28 steps 10 and 12, R4
--- round 4). 39602 (what needs the gateway) has no MySQL counterpart and
--- is tested in the gateway's unit tests.
+-- of expressions in SHOW CREATE TABLE. 39602 (what needs the gateway) has
+-- no MySQL counterpart and is tested in the gateway's unit tests.
 DROP VIEW IF EXISTS c_ms_v1;
 DROP VIEW IF EXISTS c_ms_v2;
 DROP PROCEDURE IF EXISTS c_ms_p;

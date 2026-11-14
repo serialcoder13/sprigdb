@@ -1,5 +1,5 @@
-// Account statements Studio's forms generate (chapter 29; chapter 44:
-// "the statements a SQL client would", shown before they run). Passwords
+// Account statements Studio's forms generate: the statements a SQL client
+// would run, shown before they run. Passwords
 // never appear here: they go through Users.SetPassword.
 
 import { account, ident } from '../lib/sql';

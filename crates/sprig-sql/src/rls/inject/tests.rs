@@ -415,7 +415,7 @@ fn differential_corpus() {
 }
 
 /// `Mock`, whose `orders` references under `__sprig_lyr` are layers of
-/// merged views the caller filtered (chapter 42).
+/// merged views the caller filtered.
 struct Merged;
 
 impl Resolver for Merged {

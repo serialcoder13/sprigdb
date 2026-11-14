@@ -5,7 +5,7 @@ interface State {
   error: Error | null;
 }
 
-/** Shows an error with a reload button and reports it (chapter 44). */
+/** Shows an error with a reload button and reports it. */
 export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
   override state: State = { error: null };
 

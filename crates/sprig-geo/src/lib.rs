@@ -1,13 +1,13 @@
 //! `sprig-geo`: geodesic functions, axis order, S2 cells and coverings.
 //!
-//! Layer: 2 data layer. Design: [chapter 36](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/36-geo.md) (Geospatial) of the SprigDB low-level design.
+//! Layer: 2 data layer.
 //!
-//! - [`mysql`] (R4): MySQL 8.4's geographic numbers for SRID 4326 (the
+//! - [`mysql`]: MySQL 8.4's geographic numbers for SRID 4326 (the
 //!   Andoyer distance Boost.Geometry computes, `ST_Distance_Sphere`'s
 //!   haversine), WKT axis swaps and the bounding box a distance predicate
 //!   may use.
-//! - [`s2`] (R6): S2 cell ids, leaf cells of locations and coverings.
-//! - [`region`] (R6): the regions of SprigDB's own APIs (circle, box,
+//! - [`s2`]: S2 cell ids, leaf cells of locations and coverings.
+//! - [`region`]: the regions of SprigDB's own APIs (circle, box,
 //!   polygon) with their bounding caps, S2 ranges and exact tests: WGS 84
 //!   distances by Karney's method (`geographiclib-rs`), great-circle edges
 //!   for polygons.

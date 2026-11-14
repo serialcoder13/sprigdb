@@ -1,4 +1,4 @@
-// Data inheritance (chapter 42; inheritance plan step 7): each inheritable
+// Data inheritance: each inheritable
 // table's origin level and group, the shares with the tables they carry,
 // and, for a delete that was refused (1451), what still references the
 // rows. Read-only: every view is a statement run as the signed-in user.

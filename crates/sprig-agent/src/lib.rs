@@ -1,14 +1,12 @@
 //! `sprig-agent`: the agent role, the node agent for VMs: MariaDB install,
 //! settings, health, backups.
 //!
-//! Layer 3 (roles). Design: [chapter 27](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/27-provisioning.md) (Provisioning) and
-//! [chapter 25](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/25-failover.md) (Failover) of the SprigDB low-level design.
+//! Layer 3 (roles).
 //!
-//! What exists: [`fence`], chapter 25's self-fence of the agent's MariaDB
-//! node (R2): the DC permit, the writer lease, `read_only` and session
-//! kills, and the watchdog. It runs when `[agent] cluster` names the
-//! node's cluster. Not yet: chapter 27's plan engine and MariaDB
-//! supervision (steps 4-6).
+//! What exists: [`fence`], the self-fence of the agent's MariaDB node:
+//! the DC permit, the writer lease, `read_only` and session kills, and
+//! the watchdog. It runs when `[agent] cluster` names the node's cluster.
+//! Not yet: the provisioning plan engine and MariaDB supervision.
 
 pub mod fence;
 pub mod rebuild;
@@ -69,7 +67,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         Arc::clone(&store),
         target.clone(),
     );
-    // Chapter 25's node_rebuild: the internal service (backup streams and
+    // node_rebuild: the internal service (backup streams and
     // rebuilds), when `[agent] internal_addr` is set.
     let mut service_task = None;
     if let Some(addr) = cfg.agent.internal_addr {
@@ -82,7 +80,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         let bound = listener.local_addr().map_err(|e| {
             sprig_common::SprigError::internal(format!("[agent] internal_addr: {e}"))
         })?;
-        // Decision RC2: mutual TLS with `[tls]` (the backup stream carries
+        // Mutual TLS with `[tls]` (the backup stream carries
         // tenant data); plain HTTP only without it, for development.
         let internal_tls = cfg
             .tls

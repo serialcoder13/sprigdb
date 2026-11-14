@@ -1,5 +1,4 @@
-// Message and record bodies (chapter 44, "Sinks": bodies show as text, JSON
-// or hex). The API sends binary cells as base64.
+// Message and record bodies, shown as text, JSON or hex. The API sends binary cells as base64.
 
 /** A base64 cell as UTF-8 text, else as `0x` hex; null stays null. */
 export function binaryText(b64: string | null): string | null {

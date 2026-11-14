@@ -20,7 +20,7 @@ interface Conflict {
   mine: Change;
 }
 
-/** Browse and edit a table (chapter 44 step 10): keyset pages on the key,
+/** Browse and edit a table: keyset pages on the key,
  * edits saved in one transaction with optimistic concurrency. */
 export function Browse({ db, table, cols, editable }: { db: string; table: string; cols: ColumnInfo[]; editable: boolean }) {
   const intl = useIntl();

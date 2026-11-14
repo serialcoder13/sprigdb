@@ -518,13 +518,21 @@ impl GwSession {
         read_mode: bool,
         cat: &TenantCatalog,
     ) -> Result<()> {
+        // An auto-commit read at READ COMMITTED needs no transaction: each
+        // of its statements sees the latest commits inside one as well, so
+        // it saves the `SET TRANSACTION`, `START TRANSACTION` and `COMMIT`
+        // round trips.
+        if rc.conns.is_empty() && rc.implicit && self.isolation(cat) == "READ COMMITTED" {
+            rc.autocommit = true;
+        }
+        let tx = !rc.autocommit;
         for c in rc.missing(&g.shards) {
             let cluster = ClusterId::new(&c)
                 .map_err(|e| SprigError::internal(format!("cluster id {c}: {e}")))?;
             let conn = if read_mode {
-                self.read_conn(&cluster, cat).await?
+                self.read_conn(&cluster, tx, cat).await?
             } else {
-                self.writer_conn(&cluster, true, cat).await?
+                self.writer_conn(&cluster, true, tx, cat).await?
             };
             rc.conns.insert(c, conn);
         }
@@ -625,16 +633,20 @@ impl GwSession {
         .map_err(backend_error)
     }
 
-    /// A transaction on the writer of `cluster`.
+    /// A transaction on the writer of `cluster` (`tx`; else a connection
+    /// for auto-commit statements).
     async fn writer_conn(
         &self,
         cluster: &ClusterId,
         read_only: bool,
+        tx: bool,
         cat: &TenantCatalog,
     ) -> Result<mysql_async::Conn> {
         let pool = self.graphs.session_pool(cluster).await?;
         let mut c = pool.get_conn().await.map_err(backend_error)?;
-        self.start_tx(&mut c, read_only, cat).await?;
+        if tx {
+            self.start_tx(&mut c, read_only, cat).await?;
+        }
         Ok(c)
     }
 
@@ -643,6 +655,7 @@ impl GwSession {
     async fn read_conn(
         &self,
         cluster: &ClusterId,
+        tx: bool,
         cat: &TenantCatalog,
     ) -> Result<mysql_async::Conn> {
         let ctx = cat.setting_ctx(&self.dc);
@@ -664,6 +677,7 @@ impl GwSession {
             ));
             let outcome = match pool.get_conn().await {
                 Err(e) => Err(("error", e.to_string())),
+                Ok(c) if target.is_empty() && !tx => Ok((c, "none")),
                 Ok(mut c) if target.is_empty() => match self.start_tx(&mut c, true, cat).await {
                     Ok(()) => Ok((c, "none")),
                     Err(e) => Err(("error", e.to_string())),
@@ -676,6 +690,7 @@ impl GwSession {
                         )
                         .await;
                     match r {
+                        Ok(Some(Some(0))) if !tx => Ok((c, "ok")),
                         Ok(Some(Some(0))) => match self.start_tx(&mut c, true, cat).await {
                             Ok(()) => Ok((c, "ok")),
                             Err(e) => Err(("error", e.to_string())),
@@ -699,7 +714,7 @@ impl GwSession {
                 }
             }
         }
-        self.writer_conn(cluster, true, cat).await
+        self.writer_conn(cluster, true, tx, cat).await
     }
 
     /// The open transaction's connections, back from a streamed result if

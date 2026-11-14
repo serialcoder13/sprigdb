@@ -6,7 +6,7 @@
 import { useEffect, useRef } from 'react';
 import * as monaco from 'monaco-editor/editor';
 import 'monaco-editor/languages/definitions/mysql/register';
-// Round 4: Cypher (graphs), JavaScript (MongoDB commands, logic), Redis and
+// Cypher (graphs), JavaScript (MongoDB commands, logic), Redis and
 // Lua, all Monarch tokenizers without workers of their own.
 import 'monaco-editor/languages/definitions/cypher/register';
 import 'monaco-editor/languages/definitions/javascript/register';
@@ -64,7 +64,7 @@ let themesDefined = false;
 function defineThemes(): void {
   if (themesDefined) return;
   themesDefined = true;
-  // The calmer palette of the workspace redesign (decision R5): indigo
+  // The calmer palette of the workspace redesign: indigo
   // keywords, burnt-orange strings, coral numbers, muted comments; every
   // colour at 4.5:1 or more on its background.
   monaco.editor.defineTheme('sprig-light', {

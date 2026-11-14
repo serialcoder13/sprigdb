@@ -1,5 +1,4 @@
-//! `reconcile(SprigCluster)` and the pool loop (chapter 27, "The
-//! Kubernetes operator").
+//! `reconcile(SprigCluster)` and the pool loop.
 //!
 //! ```text
 //! reconcile(SprigCluster sc):
@@ -391,7 +390,7 @@ impl Reconciler {
     /// webhook refusing the `MariaDB`) leaves its reason in the status and
     /// a `ReconcileError` Event when the reason changes, keeping the phase
     /// (`Pending` for a new cluster), so `kubectl get sprigclusters` shows
-    /// why nothing happens (r2close; r2kind's leftover).
+    /// why nothing happens.
     async fn note_error(&self, raw: &Value, e: &SprigError) {
         let Ok(sc) = serde_json::from_value::<SprigCluster>(raw.clone()) else {
             return;
@@ -455,7 +454,7 @@ impl Reconciler {
                 Some(mapping::update_patch(&desired)),
             )
             .await?;
-        // The domain ConfigMap the pods mount (r2opfix), before the pods
+        // The domain ConfigMap the pods mount, before the pods
         // start; the domain once the cluster has a number.
         let cm = mapping::domain_config_map(&sc, old.cluster_number.filter(|n| *n > 0));
         self.ensure(
@@ -537,7 +536,7 @@ impl Reconciler {
                 }
                 // A pod restarted after a failover boots in domain 0, and the
                 // cluster may stay not Ready for long (a broken replica):
-                // keep the domain on every node that answers (kind, r2kind).
+                // keep the domain on every node that answers (seen on kind).
                 if let Some(n) = old.cluster_number.filter(|n| *n > 0)
                     && old.cluster_id.is_some()
                 {
@@ -551,7 +550,7 @@ impl Reconciler {
             });
         }
         let addrs: Vec<String> = addrs.into_iter().flatten().collect();
-        // 5 (the book's 4). System accounts.
+        // 5 (step 4 of the module docs). System accounts.
         let Some(root) = self
             .secret_value(&ns, &format!("{name}-root"), "password")
             .await?
@@ -584,7 +583,7 @@ impl Reconciler {
                 requeue: Duration::from_secs(15),
             });
         }
-        // 6 (the book's 5). Registration.
+        // 6 (step 5 of the module docs). Registration.
         let nodes: Vec<NodeAddress> = addrs
             .iter()
             .enumerate()
@@ -670,7 +669,7 @@ impl Reconciler {
                 status.last_failover.clone_from(&w.last);
             }
         }
-        // 7 (the book's 6).
+        // 7 (step 6 of the module docs).
         status.phase = if old.phase == Phase::Active || old.phase == Phase::Probing {
             Phase::Active
         } else {
@@ -717,7 +716,7 @@ impl Reconciler {
         }
     }
 
-    /// A scale or a replaced Service: the record follows (r2opfix), so a
+    /// A scale or a replaced Service: the record follows, so a
     /// freed address can't keep pointing at another cluster's node; the
     /// probes also refuse a node whose identity isn't the pinned one.
     async fn sync_nodes(&self, name: &str, status: &mut SprigClusterStatus, nodes: &[NodeAddress]) {

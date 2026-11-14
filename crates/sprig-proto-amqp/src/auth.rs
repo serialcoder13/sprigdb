@@ -24,7 +24,7 @@ pub struct ConnInfo {
     /// distinguished name, per `amqp.cert_login_field`), for `EXTERNAL`.
     pub cert_login: Option<String>,
     /// That certificate's subject and issuer in MySQL's form
-    /// (`/O=Acme/CN=alice`), for `REQUIRE SUBJECT` and `ISSUER` (authfix2);
+    /// (`/O=Acme/CN=alice`), for `REQUIRE SUBJECT` and `ISSUER`;
     /// `None` without a verified certificate.
     pub client_dn: Option<(String, String)>,
 }

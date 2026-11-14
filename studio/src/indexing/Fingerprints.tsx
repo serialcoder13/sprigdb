@@ -1,6 +1,6 @@
-// The Fingerprints and Before-and-after views (chapter 44, "Automatic
-// indexing"): top fingerprints by total time from Workload.ListFingerprints,
-// and one fingerprint's p95 per bucket from Workload.Series, charted with
+// The Fingerprints and Before-and-after views of automatic indexing: top
+// fingerprints by total time from Workload.ListFingerprints, and one
+// fingerprint's p95 per bucket from Workload.Series, charted with
 // the grid as the accessible alternative.
 
 import { useMemo, useState } from 'react';

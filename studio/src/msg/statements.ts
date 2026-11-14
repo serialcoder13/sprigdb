@@ -1,6 +1,5 @@
-// The statements the stream, queue, sink and inherited views run (chapter
-// 44 steps 28–31), built from forms and shown before they run, as a SQL
-// client would write them (chapters 45, 50, 51, 42).
+// The statements the stream, queue, sink and inherited views run, built
+// from forms and shown before they run, as a SQL client would write them.
 
 import { ident, sqlString } from '../logic/declaration';
 import type { GraphData } from '../graph/elements';
@@ -85,12 +84,12 @@ export function bindingsGraph(t: Topology): GraphData {
   return g;
 }
 
-// ---- Connections and script sinks (Studio round 5, chapter 51) ----
+// ---- Connections and script sinks ----
 
 export type ConnKind = 'webhook' | 'kafka' | 's3' | 'mysql' | 'postgresql';
 export const CONN_KINDS: readonly ConnKind[] = ['webhook', 'kafka', 's3', 'mysql', 'postgresql'];
 
-/** The options each connection type needs (chapter 51; 39218 otherwise). */
+/** The options each connection type needs (39218 otherwise). */
 export const CONN_REQUIRED: Record<ConnKind, readonly string[]> = {
   webhook: ['url'],
   kafka: ['bootstrap'],
@@ -225,7 +224,7 @@ export function scriptOf(create: string): { language: ScriptLanguage; body: stri
   return { language, body };
 }
 
-/** A starting point for each script language (chapter 51, "Script sinks"). */
+/** A starting point for each script language. */
 export const SCRIPT_TEMPLATES: Record<ScriptLanguage, string> = {
   javascript: `// deliver(batch, ctx): batch = {id, attempt, records}.
 // Return nothing or {ok: true} (all delivered), {retry: true}, {fail: reason}
@@ -258,7 +257,7 @@ end
 `,
 };
 
-// ---- Queue pages (Studio round 6; chapter 50, R9 item 89) ----
+// ---- Queue pages ----
 
 /** The optional vhost argument: absent for the default `/`. */
 function vh(vhost?: string | null): string {
@@ -270,7 +269,7 @@ export function mqInfo(queue: string, vhost?: string | null): string {
   return `CALL sprig.mq_info(${sqlString(queue)}${vh(vhost)})`;
 }
 
-/** `CALL sprig.mq_info(NULL [, vhost])` (ST66): one row per queue the user may read (`queue`, `ready`, `unacked`, `consumers`). */
+/** `CALL sprig.mq_info(NULL [, vhost])`: one row per queue the user may read (`queue`, `ready`, `unacked`, `consumers`). */
 export function mqInfoAll(vhost?: string | null): string {
   return `CALL sprig.mq_info(NULL${vh(vhost)})`;
 }
@@ -289,7 +288,7 @@ export function mqPurge(queue: string, vhost?: string | null): string {
 /**
  * `CALL sprig.mq_republish(q, exchange, routing_key | NULL, max [, vhost])`:
  * moves up to `max` messages to an exchange, keeping each one's routing
- * key when `routingKey` is empty. At least once (R9 item 89).
+ * key when `routingKey` is empty. At least once.
  */
 export function mqRepublish(queue: string, exchange: string, routingKey: string, max: number, vhost?: string | null): string {
   if (!Number.isInteger(max) || max < 1 || max > 10_000) throw new Error('move 1 to 10,000 messages');
@@ -322,7 +321,7 @@ export function queueInfos(columns: readonly string[], rows: readonly (readonly 
   return out;
 }
 
-// ---- Dry runs (Studio round 6; chapter 51, R9 items 104–105) ----
+// ---- Dry runs ----
 
 /** `TEST CONNECTION c`, or with `write`, `TEST CONNECTION c WRITE [TO 'target']` (writes one marked record). */
 export function testConnection(name: string, write?: { to: string } | null): string {
@@ -337,12 +336,12 @@ export function testSink(name: string, sample = 10): string {
   return `TEST SINK ${ident(name)} WITH SAMPLE ${sample}`;
 }
 
-/** `TEST CREATE CONNECTION ...` (ST68): the checks of a definition that isn't saved; masked as {@link createConnection}. */
+/** `TEST CREATE CONNECTION ...`: the checks of a definition that isn't saved; masked as {@link createConnection}. */
 export function testNewConnection(name: string, kind: ConnKind, options: readonly Pair[], credentials: readonly Pair[], mask = false): string {
   return `TEST ${createConnection(name, kind, options, credentials, mask)}`;
 }
 
-/** `TEST CREATE SINK ... WITH SAMPLE n` (ST69): the dry run of a sink that isn't saved. */
+/** `TEST CREATE SINK ... WITH SAMPLE n`: the dry run of a sink that isn't saved. */
 export function testNewSink(create: string, sample = 10): string {
   if (!/^CREATE SINK /.test(create)) throw new Error('not a CREATE SINK statement');
   if (!Number.isInteger(sample) || sample < 1 || sample > 1000) throw new Error('sample 1 to 1,000 records');
@@ -352,7 +351,7 @@ export function testNewSink(create: string, sample = 10): string {
 export type TargetKind = 'webhook' | 'kafka' | 's3' | 'database';
 export const TARGET_KINDS: readonly TargetKind[] = ['webhook', 'kafka', 's3', 'database'];
 
-/** What the sink form holds (chapter 51's `CREATE SINK`, a connection target). */
+/** What the sink form holds (`CREATE SINK` to a connection target). */
 export interface SinkSpec {
   name: string;
   from: SinkSource;

@@ -12,7 +12,7 @@ dc_seeds = ["https://etcd:2379"]
 global_seeds = []
 deployment_id = "sprigdb"
 
-# Mutual TLS to etcd (chapter 23). sprig-vm.sh init makes these.
+# Mutual TLS to etcd. sprig-vm.sh init makes these.
 [tls]
 ca = "/run/sprig/tls/ca.pem"
 cert = "/run/sprig/tls/client.pem"
@@ -21,7 +21,7 @@ key = "/run/sprig/tls/client-key.pem"
 [controller]
 # The first controller to start writes the deployment records once.
 bootstrap = true
-# Admin API (chapter 37). Not loopback, so a token is required. HTTPS with
+# Admin API. Not loopback, so a token is required. HTTPS with
 # the controller certificate sprig-vm.sh init makes; sprigctl needs
 # --ca-file (SPRIGCTL_CA_FILE). The address and the advertised name come
 # from compose.yaml (SPRIGDB_CONTROLLER_ADMIN_ADDR, _ADMIN_ADVERTISE).
@@ -29,7 +29,7 @@ admin_addr = "0.0.0.0:7480"
 admin_tls_cert = "/run/sprig/tls/controller.pem"
 admin_tls_key = "/run/sprig/tls/controller-key.pem"
 admin_token_file = "/run/sprig/sprig/admin-token"
-# The gateways' token for Studio's routes (decision ST12).
+# The gateways' token for Studio's routes.
 gateway_token_file = "/run/sprig/sprig/gateway-token"
 internal_addr = "0.0.0.0:7481"
 internal_advertise = "controller:7481"

@@ -1,7 +1,6 @@
-//! Residency policies (chapter 26, "Interfaces" and "Evaluating a
-//! policy"; build step 1): a condition over DC tags. A crate of its own
-//! (R9, r9more) so gateways check sink destinations at `CREATE CONNECTION`
-//! without linking the controller role.
+//! Residency policies: a condition over DC tags. A crate of its own so
+//! gateways check sink destinations at `CREATE CONNECTION` without
+//! linking the controller role.
 //!
 //! ```text
 //! policy   := or_expr                               # empty policy = every DC

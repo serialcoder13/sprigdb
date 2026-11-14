@@ -1,6 +1,5 @@
-//! The agent's self-fence of its MariaDB node (chapter 25, "DC leases,
-//! sub-leases and self-fencing" steps 6 and 9; "Primary + replicas,
-//! driven by SprigDB": writer leases; build step 1).
+//! The agent's self-fence of its MariaDB node: DC permits, self-fencing
+//! and the writer lease of a primary with replicas.
 //!
 //! ```text
 //! every 200 ms:
@@ -20,11 +19,9 @@
 //! The agent registers `agents/<id>` (`cluster`, `node`, `addr`,
 //! `mysqld`) under a lease, so the DC leader lists the node as
 //! self-fencing in `dc-observe/<dc>`. MariaDB itself boots with
-//! `read_only = ON` (chapter 25), so a node is writable only while its
-//! agent says so.
+//! `read_only = ON`, so a node is writable only while its agent says so.
 //!
-//! **For the controller's `cluster_failover` loop** (chapter 25, "Primary
-//! and replicas, driven by SprigDB" step 1): a node that refuses
+//! **For the controller's `cluster_failover` loop**: a node that refuses
 //! connections for `MYSQLD_DOWN_AFTER` is `down` in the registration, and
 //! its agent hands the writer lease back ("the agent fences, then releases
 //! the lease"); a node that only times out is slow and keeps it. A lease
@@ -36,9 +33,9 @@
 //! promoted, or a promoted replica whose peers haven't reattached yet,
 //! makes its first commit wait out `rpl_semi_sync_master_timeout`.
 //!
-//! **Where it differs from the book.** The writer lease goes to whichever
-//! agent's node doesn't replicate (the book: the cluster record's writer,
-//! which these records don't carry yet). Two nodes that both stopped
+//! **Not yet.** The writer lease goes to whichever agent's node doesn't
+//! replicate, not to a writer the cluster record names: these records
+//! don't carry one yet. Two nodes that both stopped
 //! replicating can't both be writable: the lease key is created only when
 //! missing.
 
@@ -293,7 +290,7 @@ struct FailoverView {
     #[serde(default)]
     history: Vec<FormerView>,
     /// The writer the controller published, and its epoch: a lease this
-    /// agent writes afresh carries that epoch (hardening round 3).
+    /// agent writes afresh carries that epoch.
     #[serde(default)]
     writer: Option<String>,
     #[serde(default)]
@@ -315,7 +312,7 @@ struct FormerView {
 /// Whether the controller's record keeps `node` out: the former writer of
 /// its last failover that hasn't been rejoined or rebuilt (`fenced`,
 /// `diverged`, `rebuilding`). Such a node must never take the writer
-/// lease, even if the lease is free (chapter 25 step 2: a returning
+/// lease, even if the lease is free (a returning
 /// former writer is checked, then rejoined or rebuilt, never served).
 fn kept_out(v: &FailoverView, node: &str) -> bool {
     v.history
@@ -477,7 +474,7 @@ impl AgentFence {
         // for this node, or, when the lease is written afresh (a restarted
         // agent whose old lease ended with its session), from the failover
         // record that names this node the writer: a lease at epoch 0 after
-        // a failover is one gateways refuse (hardening round 3).
+        // a failover is one gateways refuse.
         let published_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let epoch_for_lease = Arc::clone(&published_epoch);
         let lease_value = move |found: Option<&WriterLease>| {
@@ -493,7 +490,7 @@ impl AgentFence {
         };
         let mut record_read = false;
         let mut conn: Option<ProbeSession> = None;
-        // `None`: not known yet. MariaDB boots read-only (chapter 25).
+        // `None`: not known yet. MariaDB boots read-only.
         let mut serving: Option<bool> = None;
         // Since when connections are refused (not timed out).
         let mut refused_since: Option<std::time::Instant> = None;
@@ -587,9 +584,9 @@ impl AgentFence {
             // Until the record has been read, a fresh lease could carry a
             // stale epoch: wait for it.
             let held_back = kept || !record_read || self.hold.load(Ordering::SeqCst);
-            // The agent fences, then releases the lease (chapter 25 step
-            // 1): a down mysqld can't be the writer, and the controller's
-            // cluster failover waits for the lease to go.
+            // The agent fences, then releases the lease: a down mysqld can't
+            // be the writer, and the controller's cluster failover waits for
+            // the lease to go.
             if mysqld == MysqldState::Down && writer.release().await {
                 tracing::warn!(cluster = %label, "mysqld down: writer lease handed back");
             }
@@ -669,7 +666,7 @@ impl AgentFence {
                     && matches!(semisync_resume(c).await, Ok(true))
                 {
                     // Also a writer whose mysqld restarted (it boots with
-                    // the primary side off, hardening round 3): with a
+                    // the primary side off): with a
                     // replica attached, acknowledged commits wait for it
                     // again.
                     semisync_suspended = false;
@@ -722,8 +719,8 @@ mod tests {
     }
 
     /// A restarted writer's agent writes its lease with the epoch of the
-    /// last failover that made it the writer (hardening round 3: a fresh
-    /// lease at epoch 0 after two failovers was refused by every gateway).
+    /// last failover that made it the writer (a fresh lease at epoch 0
+    /// after two failovers would be refused by every gateway).
     #[test]
     fn a_fresh_lease_carries_the_published_writer_epoch() {
         let v = view(

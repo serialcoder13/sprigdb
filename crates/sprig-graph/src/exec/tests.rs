@@ -1377,3 +1377,42 @@ async fn ldbc_forms_answer_as_neo4j_does() {
         }
     }
 }
+
+/// Reads that leave properties to the clauses that need them
+/// ([`super::late`]) answer as reads of whole rows do.
+#[tokio::test]
+async fn late_reads_answer_as_whole_reads() {
+    let cases = [
+        "MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b)-[:BOUGHT]->(p) RETURN b.name, p.name",
+        "MATCH (a:Person)-[r:KNOWS]->(b) RETURN a.name AS x, r.since AS s, b ORDER BY x LIMIT 2",
+        "MATCH (a:Person)-[r:KNOWS]->(b) RETURN r AS rel, b.name AS n ORDER BY rel.since, n LIMIT 3",
+        "MATCH (a:Person)-[:BOUGHT]->(p) WITH p, collect(a) AS buyers UNWIND buyers AS b
+         RETURN p.name AS p, b.name AS b ORDER BY p, b",
+        "MATCH (a:Person)-[:BOUGHT]->(p) WITH a, head(collect(p)) AS first
+         RETURN a.name AS a, first.name AS f, first {.price} AS m ORDER BY a",
+        "MATCH (a:Person)-[:KNOWS]->(b) RETURN properties(b) AS props, keys(a) AS ks ORDER BY ks, props.name",
+        "MATCH path = (a:Person {name: 'Alice'})-[:KNOWS*1..2]-(b) RETURN path, b.name ORDER BY b.name",
+        "MATCH (a:Person {name: 'Alice'})-[:KNOWS*1..3]-(b) WHERE b.age > 26 RETURN DISTINCT b.name AS n ORDER BY n",
+        "MATCH (a:Person {name: 'Alice'}), (d:Person {name: 'Dave'}) MATCH p = shortestPath((a)-[:KNOWS*]-(d))
+         RETURN [n IN nodes(p) | n.name] AS names, p",
+        "MATCH (c:Person {name: 'Carol'}) OPTIONAL MATCH (c)-[:BOUGHT]->(x:Product) WHERE x.price > 5
+         RETURN c.name, x.name",
+        "MATCH (a:Person)-[:KNOWS]->(b) WITH b AS friend, a WHERE friend.age > 26
+         RETURN friend.name AS f, a.email AS e ORDER BY f",
+        "MATCH (p:Product)<-[:BOUGHT]-(a) WITH p, count(*) AS c ORDER BY c DESC, p.name LIMIT 2
+         MATCH (p)<-[:BOUGHT]-(x) RETURN p.name, x.name ORDER BY p.name, x.name",
+        "MATCH (a:Person)-[:KNOWS]->(b) RETURN a {.name, .age} AS m, b ORDER BY m.name SKIP 1 LIMIT 2",
+        "MATCH (a:Person)-[:KNOWS]->(b) WITH collect(b) AS bs
+         RETURN [x IN bs WHERE x.age > 30 | x.name] AS old, reduce(t = 0, x IN bs | t + coalesce(x.age, 0)) AS ages",
+    ];
+    for shards in [1, 4] {
+        let mut whole = social(shards).await;
+        let mut late = social(shards).await.with_late_reads();
+        for c in cases {
+            let a = q(&mut whole, c).await;
+            let b = q(&mut late, c).await;
+            assert_eq!(show(&a), show(&b), "{c} on {shards} shard(s)");
+            assert_eq!(a.columns, b.columns, "{c}");
+        }
+    }
+}

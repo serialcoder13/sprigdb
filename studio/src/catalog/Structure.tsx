@@ -118,7 +118,7 @@ function Triggers({ db, table }: { db: string; table: string }) {
   );
 }
 
-/** Row-level security policies on the table (chapter 29). */
+/** Row-level security policies on the table. */
 function Policies({ db, table }: { db: string; table: string }) {
   const { tenant = '' } = useParams();
   const q = useQuery({
@@ -144,7 +144,7 @@ function Policies({ db, table }: { db: string; table: string }) {
   );
 }
 
-/** Whether and how the table is inherited (chapter 42). */
+/** Whether and how the table is inherited. */
 function Inheritance({ db, table }: { db: string; table: string }) {
   const { tenant = '' } = useParams();
   const q = useQuery({ queryKey: ['inherit', 'tables'], queryFn: () => objects('-', 'SHOW INHERITABLE TABLES') });
@@ -174,7 +174,7 @@ function Inheritance({ db, table }: { db: string; table: string }) {
   );
 }
 
-/** Where the table's shards live (chapter 15). */
+/** Where the table's shards live. */
 function Shards({ db, table }: { db: string; table: string }) {
   const { tenant = '' } = useParams();
   const q = useQuery({ queryKey: ['shards'], queryFn: () => json<{ groups: ShardGroup[] }>('/v1/shards') });

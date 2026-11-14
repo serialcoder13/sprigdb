@@ -10,7 +10,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 use super::{Exec, RELS, budget_error, pattern_vars};
 use crate::ast::{BinOp, Dir, Expr, NodePat, PathKind, PathPattern, RelPat};
 use crate::eval::{Row, eval, path_value};
-use crate::store::{EdgeRow, NodeRow, Reach, Scan};
+use crate::store::{EdgeRow, Link, NodeRow, Reach, Scan};
 use crate::value::{Node, Rel, Value, parse_element_id};
 
 const PATH_NODES: &str = " pn";
@@ -146,15 +146,17 @@ fn is_const(e: &Expr) -> bool {
 /// One hop's candidates: (relationship, far node).
 type Hops = HashMap<u64, Vec<(Arc<Rel>, Arc<Node>)>>;
 
-/// One side of a bidirectional search: node to (depth, predecessors).
-type Side = HashMap<u64, (u32, Vec<(u64, Arc<Rel>)>)>;
+/// One side of a breadth-first search: node to (depth, predecessors
+/// (previous node, edge id)).
+type Side = HashMap<u64, (u32, Vec<(u64, u64)>)>;
 
-/// A trail found by path-mode expansion.
+/// A trail found by path-mode expansion: its end, its edges and the
+/// nodes after its origin, by id.
 #[derive(Clone)]
 struct Trail {
-    end: Arc<Node>,
-    rels: Vec<Arc<Rel>>,
-    nodes: Vec<Arc<Node>>,
+    end: u64,
+    rels: Vec<u64>,
+    nodes: Vec<u64>,
 }
 
 impl Exec<'_> {
@@ -226,6 +228,7 @@ impl Exec<'_> {
                     })
                     .collect();
                 if !ready.is_empty() {
+                    self.late(&mut rows, &ready).await?;
                     let mut kept = Vec::with_capacity(rows.len());
                     for r in rows {
                         let mut keep = true;
@@ -339,7 +342,7 @@ impl Exec<'_> {
             match eval(pe, row, self.params)? {
                 Value::Map(m) => {
                     for (k, v) in m {
-                        let have = n.props.get(&k).cloned().unwrap_or(Value::Null);
+                        let have = n.prop(&k)?;
                         if have.cypher_eq(&v) != Some(true) {
                             return Ok(false);
                         }
@@ -365,7 +368,7 @@ impl Exec<'_> {
             && let Value::Map(m) = eval(pe, row, self.params)?
         {
             for (k, v) in m {
-                let have = r.props.get(&k).cloned().unwrap_or(Value::Null);
+                let have = r.prop(&k)?;
                 if have.cypher_eq(&v) != Some(true) {
                     return Ok(false);
                 }
@@ -529,6 +532,13 @@ impl Exec<'_> {
             }
             _ => (pat.clone(), false),
         };
+        // A property map on the start node compares its properties (and
+        // maybe the rows' values): read them first.
+        let mut rows = rows;
+        if let Some(pe) = &pat.start.props {
+            let need = Self::map_need(pat.start.var.as_ref(), pe);
+            self.late_needs(&mut rows, &need).await?;
+        }
         let track = pat.var.is_some();
         // Start points.
         let mut cur: Vec<(Row, Arc<Node>)> = Vec::new();
@@ -608,7 +618,6 @@ impl Exec<'_> {
             // r.x`, or what a disjunction implies): one scan for every
             // row's values, then each row meets only the nodes its own
             // value finds.
-            let mut rows = rows;
             let join = self
                 .row_pushdown(&pat.start, conj, &mut rows, &mut scan)
                 .await?;
@@ -898,6 +907,181 @@ impl Exec<'_> {
         Ok(out)
     }
 
+    /// What checking node pattern `{..}` map `pe` on `var` reads: the
+    /// map's keys of the node, and what its values read of the rows.
+    fn map_need(var: Option<&String>, pe: &Expr) -> HashMap<String, super::late::Need> {
+        let mut need = HashMap::new();
+        super::late::needs(pe, true, &mut need);
+        if let Some(v) = var {
+            let n = match pe {
+                Expr::Map(m) => super::late::Need::Keys(m.iter().map(|(k, _)| k.clone()).collect()),
+                _ => super::late::Need::All,
+            };
+            need.insert(v.clone(), n);
+        }
+        need
+    }
+
+    /// [`Exec::hop_edges`] without properties: links, and the far
+    /// nodes' ids, hashes and labels (`far`; else stand-ins with the id
+    /// and hash alone, for anonymous unlabelled nodes nothing reads).
+    async fn hop_light(&mut self, ids: &[u64], types: &[u32], dir: Dir, far: bool) -> Result<Hops> {
+        let dirs: &[Dir] = match dir {
+            Dir::Both => &[Dir::Out, Dir::In],
+            Dir::Out => &[Dir::Out],
+            Dir::In => &[Dir::In],
+        };
+        let mut raw: Vec<(u64, u64, u64, Link)> = Vec::new();
+        let mut seen: HashSet<(u64, u64)> = HashSet::new();
+        for d in dirs {
+            for batch in ids.chunks(self.b.batch_nodes.max(1)) {
+                for l in self.store.links(batch, types, *d).await? {
+                    let (near, far_id, far_rk) = if *d == Dir::Out {
+                        (l.src, l.dst, l.dst_rk)
+                    } else {
+                        (l.dst, l.src, l.src_rk)
+                    };
+                    if seen.insert((near, l.id)) {
+                        raw.push((near, far_id, far_rk, l));
+                    }
+                }
+                self.check_time()?;
+            }
+        }
+        let mut nodes: HashMap<u64, Arc<Node>> = HashMap::new();
+        if far {
+            let mut want: Vec<u64> = Vec::new();
+            for (_, f, _, _) in &raw {
+                if let Some(n) = self.seen_nodes.get(f) {
+                    nodes.insert(*f, Arc::clone(n));
+                } else {
+                    want.push(*f);
+                }
+            }
+            want.sort_unstable();
+            want.dedup();
+            for batch in want.chunks(self.b.batch_nodes.max(1)) {
+                for r in self.store.nodes_part(batch, Some(&[])).await? {
+                    nodes.insert(r.id, self.bare_node(&r));
+                }
+            }
+        }
+        let graph = self.store.graph_id();
+        let mut out: Hops = HashMap::new();
+        for (near, f, rk, l) in raw {
+            let far = if far {
+                match nodes.get(&f) {
+                    Some(n) => Arc::clone(n),
+                    None => continue, // dangling: deleted in this transaction
+                }
+            } else {
+                Arc::new(Node {
+                    graph,
+                    id: f,
+                    rk,
+                    labels: Vec::new(),
+                    props: crate::value::Props::new(),
+                    partial: Some(Arc::from(Vec::<String>::new())),
+                })
+            };
+            let rel = match self.seen_rels.get(&l.id) {
+                Some(r) => Arc::clone(r),
+                None => Arc::new(Rel {
+                    graph,
+                    id: l.id,
+                    src: l.src,
+                    dst: l.dst,
+                    src_rk: l.src_rk,
+                    dst_rk: l.dst_rk,
+                    rtype: self
+                        .store
+                        .type_name(l.rtype)
+                        .unwrap_or_else(|| format!("#{}", l.rtype)),
+                    props: crate::value::Props::new(),
+                    partial: Some(Arc::from(Vec::<String>::new())),
+                }),
+            };
+            out.entry(near).or_default().push((rel, far));
+        }
+        Ok(out)
+    }
+
+    /// [`Exec::late_needs`] for the rows of `cur` (and their nodes).
+    async fn late_cur(
+        &mut self,
+        cur: &mut [(Row, Arc<Node>)],
+        need: &HashMap<String, super::late::Need>,
+    ) -> Result<()> {
+        if !self.late || need.is_empty() || cur.is_empty() {
+            return Ok(());
+        }
+        let mut rows: Vec<Row> = cur.iter_mut().map(|(r, _)| std::mem::take(r)).collect();
+        self.late_needs(&mut rows, need).await?;
+        for ((r, _), nr) in cur.iter_mut().zip(rows) {
+            *r = nr;
+        }
+        Ok(())
+    }
+
+    /// Nodes by id for binding to `np`: without properties when they're
+    /// read late and `np` compares none here.
+    async fn bind_nodes(&mut self, ids: &[u64], np: &NodePat) -> Result<HashMap<u64, Arc<Node>>> {
+        let mut out = HashMap::new();
+        let light = self.late && np.props.is_none();
+        let mut want = Vec::new();
+        for id in ids {
+            match self.seen_nodes.get(id) {
+                Some(n) if light || n.partial.is_none() => {
+                    out.insert(*id, Arc::clone(n));
+                }
+                _ => want.push(*id),
+            }
+        }
+        want.sort_unstable();
+        want.dedup();
+        for batch in want.chunks(self.b.batch_nodes.max(1)) {
+            if light {
+                for r in self.store.nodes_part(batch, Some(&[])).await? {
+                    out.insert(r.id, self.bare_node(&r));
+                }
+            } else {
+                for r in self.store.nodes(batch).await? {
+                    out.insert(r.id, self.node_val(&r));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Relationships by `(src_rk, id)`: without properties when they're
+    /// read late.
+    async fn rels_by_key(&mut self, keys: Vec<(u64, u64)>) -> Result<HashMap<u64, Arc<Rel>>> {
+        let mut keys = keys;
+        keys.sort_unstable();
+        keys.dedup();
+        let mut rels: HashMap<u64, Arc<Rel>> = HashMap::new();
+        keys.retain(|(_, id)| match self.seen_rels.get(id) {
+            Some(r) => {
+                rels.insert(*id, Arc::clone(r));
+                false
+            }
+            None => true,
+        });
+        let light = self.late;
+        for batch in keys.chunks(self.b.batch_nodes.max(1)) {
+            let part: Option<&[String]> = if light { Some(&[]) } else { None };
+            for e in self.store.edges_part(batch, part).await? {
+                let r = if light {
+                    self.bare_rel(&e)
+                } else {
+                    self.rel_val(&e)
+                };
+                rels.insert(e.id, r);
+            }
+        }
+        Ok(rels)
+    }
+
     fn row_rels(r: &Row) -> HashSet<u64> {
         match r.get(RELS) {
             Some(Value::List(l)) => l
@@ -975,8 +1159,22 @@ impl Exec<'_> {
                 format!(":{}", rp.types.join("|"))
             }
         ));
+        let mut cur = cur;
         let ids = Self::frontier(&cur);
-        let hops = self.hop_edges(&ids, &types, rp.dir).await?;
+        let hops = if self.late && np.props.is_none() && rp.props.is_none() {
+            // Links, and the far nodes' labels when the pattern names or
+            // labels them; properties are read when a clause needs them.
+            let far = np.var.is_some() || np.labels.is_some() || track;
+            self.hop_light(&ids, &types, rp.dir, far).await?
+        } else {
+            // Property maps on the pattern compare far elements here.
+            let mut need = HashMap::new();
+            for pe in [np.props.as_ref(), rp.props.as_ref()].into_iter().flatten() {
+                super::late::needs(pe, true, &mut need);
+            }
+            self.late_cur(&mut cur, &need).await?;
+            self.hop_edges(&ids, &types, rp.dir).await?
+        };
         let mut out = Vec::new();
         for (r, n) in cur {
             let Some(cands) = hops.get(&n.id) else {
@@ -1170,12 +1368,7 @@ impl Exec<'_> {
                 .filter(|i| s.insert(*i))
                 .collect()
         };
-        let mut nodes: HashMap<u64, Arc<Node>> = HashMap::new();
-        for batch in ids.chunks(self.b.batch_nodes.max(1)) {
-            for r in self.store.nodes(batch).await? {
-                nodes.insert(r.id, self.node_val(&r));
-            }
-        }
+        let nodes = self.bind_nodes(&ids, np).await?;
         let mut out = Vec::new();
         for (r, n) in cur {
             let Some(ends) = by_origin.get(&n.id) else {
@@ -1195,7 +1388,9 @@ impl Exec<'_> {
         Ok(out)
     }
 
-    /// Path mode: every trail of `min..=max` hops from each origin.
+    /// Path mode: every trail of `min..=max` hops from each origin. The
+    /// levels read links only; the trails' ends (and their relationships
+    /// and nodes when the pattern binds them) are read at the end.
     #[allow(clippy::too_many_arguments)]
     async fn var_paths(
         &mut self,
@@ -1221,7 +1416,7 @@ impl Exec<'_> {
                 .filter(|n| seen.insert(n.id))
                 .collect()
         };
-        let empty = Row::new();
+        let mut links: HashMap<u64, Link> = HashMap::new();
         let mut done: HashMap<u64, Vec<Trail>> = HashMap::new();
         let mut live: Vec<(u64, Trail)> = origins
             .iter()
@@ -1229,7 +1424,7 @@ impl Exec<'_> {
                 (
                     o.id,
                     Trail {
-                        end: o.clone(),
+                        end: o.id,
                         rels: vec![],
                         nodes: vec![],
                     },
@@ -1248,12 +1443,13 @@ impl Exec<'_> {
             self.check_time()?;
             if level >= max {
                 if unbounded {
-                    let ids: Vec<u64> = live.iter().map(|(_, t)| t.end.id).collect();
-                    let hops = self.hop_edges(&ids, &types, rp.dir).await?;
+                    let ids: Vec<u64> = live.iter().map(|(_, t)| t.end).collect();
+                    let hops = self
+                        .level_links(&ids, &types, rp, rp.dir, &mut links)
+                        .await?;
                     let more = live.iter().any(|(_, t)| {
-                        hops.get(&t.end.id).is_some_and(|c| {
-                            c.iter().any(|(r, _)| !t.rels.iter().any(|x| x.id == r.id))
-                        })
+                        hops.get(&t.end)
+                            .is_some_and(|c| c.iter().any(|(_, r)| !t.rels.contains(r)))
                     });
                     if more {
                         return Err(budget_error(
@@ -1280,25 +1476,27 @@ impl Exec<'_> {
             let ids: Vec<u64> = {
                 let mut s = HashSet::new();
                 live.iter()
-                    .map(|(_, t)| t.end.id)
+                    .map(|(_, t)| t.end)
                     .filter(|i| s.insert(*i))
                     .collect()
             };
             metrics::counter!("sprig_graph_shard_queries_total", "tier" => "gateway").increment(1);
-            let hops = self.hop_edges(&ids, &types, rp.dir).await?;
+            let hops = self
+                .level_links(&ids, &types, rp, rp.dir, &mut links)
+                .await?;
             let mut next = Vec::new();
             for (o, t) in live {
-                let Some(c) = hops.get(&t.end.id) else {
+                let Some(c) = hops.get(&t.end) else {
                     continue;
                 };
-                for (rel, far) in c {
-                    if t.rels.iter().any(|x| x.id == rel.id) || !self.rel_ok(rp, rel, &empty)? {
+                for &(far, rel) in c {
+                    if t.rels.contains(&rel) {
                         continue;
                     }
                     let mut nt = t.clone();
-                    nt.rels.push(rel.clone());
-                    nt.nodes.push(far.clone());
-                    nt.end = far.clone();
+                    nt.rels.push(rel);
+                    nt.nodes.push(far);
+                    nt.end = far;
                     if level + 1 >= min {
                         done.entry(o).or_default().push(nt.clone());
                         total += 1;
@@ -1315,6 +1513,31 @@ impl Exec<'_> {
             live = next;
             level += 1;
         }
+        // The elements the rows bind: every trail's end; its relationships
+        // when the pattern names them; its nodes too for a path variable.
+        let want_rels = rp.var.is_some() || track;
+        let mut node_ids: Vec<u64> = Vec::new();
+        let mut rel_keys: Vec<(u64, u64)> = Vec::new();
+        for ts in done.values() {
+            for t in ts {
+                node_ids.push(t.end);
+                if track {
+                    node_ids.extend(t.nodes.iter().copied());
+                }
+                if want_rels {
+                    rel_keys.extend(
+                        t.rels
+                            .iter()
+                            .filter_map(|r| links.get(r).map(|l| (l.src_rk, l.id))),
+                    );
+                }
+            }
+        }
+        let mut nodes: HashMap<u64, Arc<Node>> =
+            origins.iter().map(|n| (n.id, n.clone())).collect();
+        node_ids.retain(|i| !nodes.contains_key(i));
+        nodes.extend(self.bind_nodes(&node_ids, np).await?);
+        let rels = self.rels_by_key(rel_keys).await?;
         let mut out = Vec::new();
         for (r, n) in cur {
             let Some(trails) = done.get(&n.id) else {
@@ -1322,9 +1545,21 @@ impl Exec<'_> {
             };
             let used = Self::row_rels(&r);
             for t in trails {
-                if t.rels.iter().any(|x| used.contains(&x.id)) {
+                if t.rels.iter().any(|x| used.contains(x)) {
                     continue;
                 }
+                // A trail through an element gone in this transaction.
+                let Some(end) = nodes.get(&t.end) else {
+                    continue;
+                };
+                let trels: Vec<Arc<Rel>> = if want_rels {
+                    match t.rels.iter().map(|x| rels.get(x).cloned()).collect() {
+                        Some(v) => v,
+                        None => continue,
+                    }
+                } else {
+                    Vec::new()
+                };
                 if let Some(v) = &rp.var
                     && let Some(Value::List(b)) = r.get(v)
                 {
@@ -1338,27 +1573,30 @@ impl Exec<'_> {
                             }
                         })
                         .collect();
-                    if ids != t.rels.iter().map(|x| x.id).collect::<Vec<_>>() {
+                    if ids != t.rels {
                         continue;
                     }
                 }
                 let mut nr = r.clone();
-                if !self.bind_far(&mut nr, np, &t.end)? {
+                if !self.bind_far(&mut nr, np, end)? {
                     continue;
                 }
                 if let Some(v) = &rp.var {
                     nr.insert(
                         v.clone(),
-                        Value::List(t.rels.iter().cloned().map(Value::Rel).collect()),
+                        Value::List(trels.iter().cloned().map(Value::Rel).collect()),
                     );
                 }
                 for x in &t.rels {
-                    Self::push_rel(&mut nr, x.id);
+                    Self::push_rel(&mut nr, *x);
                 }
                 if track {
-                    Self::push_path(&mut nr, &t.rels, &t.nodes);
+                    let tnodes: Option<Vec<Arc<Node>>> =
+                        t.nodes.iter().map(|x| nodes.get(x).cloned()).collect();
+                    let Some(tnodes) = tnodes else { continue };
+                    Self::push_path(&mut nr, &trels, &tnodes);
                 }
-                out.push((nr, t.end.clone()));
+                out.push((nr, end.clone()));
             }
             self.check_rows(out.len())?;
         }
@@ -1470,6 +1708,13 @@ impl Exec<'_> {
                 ));
             }
         }
+        let mut rows = rows;
+        for np in [&pat.start, end_pat] {
+            if let Some(pe) = &np.props {
+                let need = Self::map_need(np.var.as_ref(), pe);
+                self.late_needs(&mut rows, &need).await?;
+            }
+        }
         let mut out = Vec::new();
         for r in rows {
             let a = Self::bound_node(&r, pat.start.var.as_ref());
@@ -1520,9 +1765,107 @@ impl Exec<'_> {
         Ok(out)
     }
 
+    /// One hop's links from `ids` in `dir` (both ways for `Both`, a
+    /// self-loop once), in batches of `graph.batch_nodes`: near id to
+    /// (far id, edge id). Only ids are read; with a property map on the
+    /// relationship pattern, the edges are read to check it. Every link
+    /// kept is recorded in `links`.
+    async fn level_links(
+        &mut self,
+        ids: &[u64],
+        types: &[u32],
+        rp: &RelPat,
+        dir: Dir,
+        links: &mut HashMap<u64, Link>,
+    ) -> Result<HashMap<u64, Vec<(u64, u64)>>> {
+        let dirs: &[Dir] = match dir {
+            Dir::Both => &[Dir::Out, Dir::In],
+            Dir::Out => &[Dir::Out],
+            Dir::In => &[Dir::In],
+        };
+        let mut raw: Vec<(u64, u64, Link)> = Vec::new();
+        let mut seen: HashSet<(u64, u64)> = HashSet::new();
+        for d in dirs {
+            for batch in ids.chunks(self.b.batch_nodes.max(1)) {
+                for l in self.store.links(batch, types, *d).await? {
+                    let (near, far) = if *d == Dir::Out {
+                        (l.src, l.dst)
+                    } else {
+                        (l.dst, l.src)
+                    };
+                    if seen.insert((near, l.id)) {
+                        raw.push((near, far, l));
+                    }
+                }
+                self.check_time()?;
+            }
+        }
+        if rp.props.is_some() {
+            let mut keys: Vec<(u64, u64)> = raw.iter().map(|(_, _, l)| (l.src_rk, l.id)).collect();
+            keys.sort_unstable();
+            keys.dedup();
+            let empty = Row::new();
+            let mut ok: HashSet<u64> = HashSet::new();
+            for batch in keys.chunks(self.b.batch_nodes.max(1)) {
+                for e in self.store.edges_at(batch).await? {
+                    if self.rel_ok(rp, &self.rel_val(&e), &empty)? {
+                        ok.insert(e.id);
+                    }
+                }
+            }
+            raw.retain(|(_, _, l)| ok.contains(&l.id));
+        }
+        let mut out: HashMap<u64, Vec<(u64, u64)>> = HashMap::new();
+        for (near, far, l) in raw {
+            out.entry(near).or_default().push((far, l.id));
+            links.insert(l.id, l);
+        }
+        Ok(out)
+    }
+
+    /// The nodes and relationships of `paths` (node ids, edge ids),
+    /// read in batches; `known` nodes aren't read again. A path whose node
+    /// or relationship is gone (deleted earlier in this transaction) is
+    /// dropped.
+    async fn materialize(
+        &mut self,
+        paths: Vec<IdPath>,
+        links: &HashMap<u64, Link>,
+        known: &[&Arc<Node>],
+    ) -> Result<Vec<Path>> {
+        let mut nodes: HashMap<u64, Arc<Node>> =
+            known.iter().map(|n| (n.id, Arc::clone(n))).collect();
+        let want: Vec<u64> = paths
+            .iter()
+            .flat_map(|(ns, _)| ns.iter().copied())
+            .filter(|i| !nodes.contains_key(i))
+            .collect();
+        let any = NodePat {
+            var: None,
+            labels: None,
+            props: None,
+        };
+        nodes.extend(self.bind_nodes(&want, &any).await?);
+        let keys: Vec<(u64, u64)> = paths
+            .iter()
+            .flat_map(|(_, rs)| rs.iter())
+            .filter_map(|id| links.get(id).map(|l| (l.src_rk, l.id)))
+            .collect();
+        let rels = self.rels_by_key(keys).await?;
+        Ok(paths
+            .into_iter()
+            .filter_map(|(ns, rs)| {
+                let ns: Option<Vec<Arc<Node>>> = ns.iter().map(|i| nodes.get(i).cloned()).collect();
+                let rs: Option<Vec<Arc<Rel>>> = rs.iter().map(|i| rels.get(i).cloned()).collect();
+                Some((ns?, rs?))
+            })
+            .collect())
+    }
+
     /// One breadth-first search from `a` over at most `max` hops: a
     /// shortest path to each of `targets` it reaches (the first found at
-    /// the smallest depth).
+    /// the smallest depth). It reads links only; the paths kept are read
+    /// at the end.
     async fn bfs_many(
         &mut self,
         a: &Arc<Node>,
@@ -1531,9 +1874,8 @@ impl Exec<'_> {
         types: &[u32],
         max: u32,
     ) -> Result<HashMap<u64, Path>> {
-        let empty = Row::new();
+        let mut links: HashMap<u64, Link> = HashMap::new();
         let mut side: Side = HashMap::from([(a.id, (0, vec![]))]);
-        let mut nodes: HashMap<u64, Arc<Node>> = HashMap::from([(a.id, a.clone())]);
         let mut front = vec![a.id];
         let mut left: HashSet<u64> = targets.clone();
         let mut d = 0u32;
@@ -1549,35 +1891,44 @@ impl Exec<'_> {
                     ),
                 ));
             }
-            let hops = self.hop_edges(&front, types, rp.dir).await?;
+            let hops = self
+                .level_links(&front, types, rp, rp.dir, &mut links)
+                .await?;
             d += 1;
             let mut next = Vec::new();
             for near in &front {
-                for (rel, far) in hops.get(near).map_or(&[][..], Vec::as_slice) {
-                    if side.contains_key(&far.id) || !self.rel_ok(rp, rel, &empty)? {
+                for &(far, rel) in hops.get(near).map_or(&[][..], Vec::as_slice) {
+                    if side.contains_key(&far) {
                         continue;
                     }
-                    side.insert(far.id, (d, vec![(*near, rel.clone())]));
-                    nodes.entry(far.id).or_insert_with(|| far.clone());
-                    left.remove(&far.id);
-                    next.push(far.id);
+                    side.insert(far, (d, vec![(*near, rel)]));
+                    left.remove(&far);
+                    next.push(far);
                 }
             }
             front = next;
         }
-        let mut out = HashMap::new();
+        let mut found: Vec<(u64, IdPath)> = Vec::new();
         for t in targets {
             if !side.contains_key(t) {
                 continue;
             }
             if let Some((ns, rs)) = walk_back(&side, *t, 1).into_iter().next() {
-                let ns: Vec<Arc<Node>> = ns
-                    .iter()
-                    .rev()
-                    .filter_map(|i| nodes.get(i).cloned())
-                    .collect();
-                let rs: Vec<Arc<Rel>> = rs.into_iter().rev().collect();
-                out.insert(*t, (ns, rs));
+                let ns: Vec<u64> = ns.into_iter().rev().collect();
+                let rs: Vec<u64> = rs.into_iter().rev().collect();
+                found.push((*t, (ns, rs)));
+            }
+        }
+        let ends: Vec<u64> = found.iter().map(|(t, _)| *t).collect();
+        let paths = self
+            .materialize(found.into_iter().map(|(_, p)| p).collect(), &links, &[a])
+            .await?;
+        let mut out = HashMap::new();
+        for p in paths {
+            if let Some(last) = p.0.last()
+                && ends.contains(&last.id)
+            {
+                out.insert(last.id, p);
             }
         }
         Ok(out)
@@ -1594,7 +1945,7 @@ impl Exec<'_> {
         max: u32,
         unbounded: bool,
         all: bool,
-    ) -> Result<Vec<(Vec<Arc<Node>>, Vec<Arc<Rel>>)>> {
+    ) -> Result<Vec<Path>> {
         if a.id == b.id {
             return Ok(if min == 0 {
                 vec![(vec![a.clone()], vec![])]
@@ -1602,12 +1953,10 @@ impl Exec<'_> {
                 vec![]
             });
         }
-        let empty = Row::new();
-        // node -> (depth, predecessors (prev node, rel))
+        let mut links: HashMap<u64, Link> = HashMap::new();
+        // node -> (depth, predecessors (prev node, edge id))
         let mut fwd: Side = HashMap::from([(a.id, (0, vec![]))]);
         let mut bwd: Side = HashMap::from([(b.id, (0, vec![]))]);
-        let mut nodes: HashMap<u64, Arc<Node>> =
-            HashMap::from([(a.id, a.clone()), (b.id, b.clone())]);
         let mut ff = vec![a.id];
         let mut bf = vec![b.id];
         let (mut df, mut db) = (0u32, 0u32);
@@ -1618,11 +1967,7 @@ impl Exec<'_> {
                 return Ok(vec![]);
             }
             let forward = ff.len() <= bf.len();
-            let (front, side, other, dir, depth) = if forward {
-                (&ff, &mut fwd, &bwd, rp.dir, &mut df)
-            } else {
-                (&bf, &mut bwd, &fwd, rp.dir.reverse(), &mut db)
-            };
+            let front = if forward { ff.clone() } else { bf.clone() };
             if front.len() > self.b.max_frontier {
                 return Err(budget_error(
                     "frontier",
@@ -1633,23 +1978,24 @@ impl Exec<'_> {
                     ),
                 ));
             }
-            let ids = front.clone();
-            let hops = self.hop_edges(&ids, types, dir).await?;
+            let dir = if forward { rp.dir } else { rp.dir.reverse() };
+            let hops = self.level_links(&front, types, rp, dir, &mut links).await?;
+            let (side, other, depth) = if forward {
+                (&mut fwd, &bwd, &mut df)
+            } else {
+                (&mut bwd, &fwd, &mut db)
+            };
             *depth += 1;
             let d = *depth;
             let mut next = Vec::new();
-            for near in &ids {
-                for (rel, far) in hops.get(near).map_or(&[][..], Vec::as_slice) {
-                    if !self.rel_ok(rp, rel, &empty)? {
-                        continue;
-                    }
-                    nodes.entry(far.id).or_insert_with(|| far.clone());
-                    match side.get_mut(&far.id) {
+            for near in &front {
+                for &(far, rel) in hops.get(near).map_or(&[][..], Vec::as_slice) {
+                    match side.get_mut(&far) {
                         None => {
-                            side.insert(far.id, (d, vec![(*near, rel.clone())]));
-                            next.push(far.id);
+                            side.insert(far, (d, vec![(*near, rel)]));
+                            next.push(far);
                         }
-                        Some((fd, preds)) if *fd == d && all => preds.push((*near, rel.clone())),
+                        Some((fd, preds)) if *fd == d && all => preds.push((*near, rel)),
                         _ => {}
                     }
                 }
@@ -1687,8 +2033,8 @@ impl Exec<'_> {
             .filter(|m| fwd[m].0 + bwd[m].0 == best)
             .collect();
         let limit = if all { self.b.max_rows } else { 1 };
-        let mut out = Vec::new();
-        for m in meet {
+        let mut out: Vec<IdPath> = Vec::new();
+        'meet: for m in meet {
             let left = walk_back(&fwd, m, limit);
             let right = walk_back(&bwd, m, limit);
             for (ln, lr) in &left {
@@ -1696,21 +2042,21 @@ impl Exec<'_> {
                     // a .. m, then m .. b.
                     let mut ns: Vec<u64> = ln.iter().rev().copied().collect();
                     ns.extend(rn.iter().skip(1));
-                    let mut rs: Vec<Arc<Rel>> = lr.iter().rev().cloned().collect();
-                    rs.extend(rr.iter().cloned());
-                    out.push((
-                        ns.iter().filter_map(|i| nodes.get(i).cloned()).collect(),
-                        rs,
-                    ));
+                    let mut rs: Vec<u64> = lr.iter().rev().copied().collect();
+                    rs.extend(rr.iter().copied());
+                    out.push((ns, rs));
                     if out.len() >= limit {
-                        return Ok(out);
+                        break 'meet;
                     }
                 }
             }
         }
-        Ok(out)
+        self.materialize(out, &links, &[a, b]).await
     }
 }
+
+/// A path by ids: its nodes and edges in order.
+type IdPath = (Vec<u64>, Vec<u64>);
 
 /// A path: its nodes and relationships in order.
 type Path = (Vec<Arc<Node>>, Vec<Arc<Rel>>);
@@ -1719,10 +2065,10 @@ type Path = (Vec<Arc<Node>>, Vec<Arc<Rel>>);
 const MANY_TARGETS: usize = 2;
 
 /// Every path from `m` back to its side's origin through the
-/// predecessors: node ids from `m`, relationships from `m`'s side.
-fn walk_back(side: &Side, m: u64, limit: usize) -> Vec<(Vec<u64>, Vec<Arc<Rel>>)> {
+/// predecessors: node ids from `m`, edge ids from `m`'s side.
+fn walk_back(side: &Side, m: u64, limit: usize) -> Vec<(Vec<u64>, Vec<u64>)> {
     let mut out = Vec::new();
-    let mut stack: Vec<(Vec<u64>, Vec<Arc<Rel>>)> = vec![(vec![m], vec![])];
+    let mut stack: Vec<(Vec<u64>, Vec<u64>)> = vec![(vec![m], vec![])];
     while let Some((ns, rs)) = stack.pop() {
         let last = *ns.last().unwrap_or(&m);
         let preds = side
@@ -1740,7 +2086,7 @@ fn walk_back(side: &Side, m: u64, limit: usize) -> Vec<(Vec<u64>, Vec<Arc<Rel>>)
             let mut n2 = ns.clone();
             n2.push(*p);
             let mut r2 = rs.clone();
-            r2.push(r.clone());
+            r2.push(*r);
             stack.push((n2, r2));
         }
     }

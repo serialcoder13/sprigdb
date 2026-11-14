@@ -1,10 +1,9 @@
 //! Step 5 of the reconcile: register the cluster through the DC
-//! controller (chapter 27, "The Kubernetes operator"), with
-//! `provisioner = kubernetes`, so probes start.
+//! controller, with `provisioner = kubernetes`, so probes start.
 //!
 //! [`AdminRegistrar`] calls the controller's Admin API,
-//! `POST /admin/v1/clusters` (chapter 09's `sprigctl cluster register`
-//! call), with the nodes' advertised addresses and the credential
+//! `POST /admin/v1/clusters` (the call `sprigctl cluster register`
+//! makes), with the nodes' advertised addresses and the credential
 //! references the operator wrote.
 
 use std::sync::Arc;
@@ -59,7 +58,7 @@ pub trait ClusterRegistrar: Send + Sync + 'static {
     async fn register(&self, r: &ClusterRegistration) -> Result<Registered>;
 
     /// Replaces the record's nodes after a scale or a replacement
-    /// (`:setNodes`, r2opfix). The default refuses (registrars that can't).
+    /// (`:setNodes`). The default refuses (registrars that can't).
     ///
     /// # Errors
     /// The controller's refusal or a transport error.
@@ -71,7 +70,7 @@ pub trait ClusterRegistrar: Send + Sync + 'static {
         ))
     }
 
-    /// Retires a drained cluster's record (`:retire`, r2opfix).
+    /// Retires a drained cluster's record (`:retire`).
     ///
     /// # Errors
     /// 39106 unless the cluster is drained; a transport error.
@@ -96,7 +95,7 @@ pub fn request_body(r: &ClusterRegistration) -> Value {
         // The record's `declared.failover` is `provider` or `none`: on
         // Kubernetes the provider side fails over, whether mariadb-operator
         // alone (`operator`) or with the SprigDB operator choosing the
-        // replica (`sprig`; r2opfix: `sprig` was refused before).
+        // replica (`sprig`, which the controller used to refuse).
         "declared": {
             "failover": match r.failover_driver {
                 FailoverDriver::Operator | FailoverDriver::Sprig => "provider",
@@ -424,7 +423,7 @@ fn split_endpoint(endpoint: &str) -> Option<(String, u16)> {
 }
 
 /// The leader a 39504 answer names (`... send the request to the leader,
-/// <name>`, chapter 23); `None` for any other answer.
+/// <name>`); `None` for any other answer.
 fn not_leader((status, v): &(u16, Value)) -> Option<String> {
     if *status < 300 || v["code"].as_u64() != Some(u64::from(SprigCode::NotLeader.number())) {
         return None;
@@ -550,8 +549,8 @@ mod tests {
 
     /// The Service lands on a non-leader, which answers 39504 naming the
     /// leader; the registrar sends the call again to the leader's address
-    /// from the template, and later calls go there first (bugfix-107's
-    /// leftover: before, registration got through only when a reconcile
+    /// from the template, and later calls go there first (before,
+    /// registration got through only when a reconcile
     /// pass happened to land on the leader).
     #[tokio::test]
     async fn leader_only_calls_follow_the_dc_leader() {

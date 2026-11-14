@@ -822,7 +822,7 @@ impl MetaStore for EtcdStore {
         let mut keeper = guard.take();
         // Keep-alives are bounded by their callers (sessions and DC leases
         // retry until their lease's own deadline); the per-request deadline
-        // only stops a call that has lost its way (r2next: a slow etcd must
+        // only stops a call that has lost its way (a slow etcd must
         // not end a lease that is still alive).
         let bound = self.timeout.max(KEEP_ALIVE_BOUND);
         let r = tokio::time::timeout(bound, self.keep_alive_once(lease, &mut keeper)).await;

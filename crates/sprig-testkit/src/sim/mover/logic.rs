@@ -155,8 +155,8 @@ impl Outcomes for SimOut {
 
 /// The trigger's worker: runs the binding over the feed, killed at random,
 /// started again from its checkpoint, until the checkpoint reaches the
-/// goal. With `shared` the feed reads through a shared reader (R9,
-/// r9feed2), a new one for each worker that starts after a kill.
+/// goal. With `shared` the feed reads through a shared reader, a new one
+/// for each worker that starts after a kill.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(super) async fn trigger_worker(
     world: World,

@@ -43,7 +43,7 @@ export function score(query: string, text: string): number | null {
 
 const THEMES: Theme[] = ['system', 'light', 'dark', 'contrast'];
 
-/** The command palette (decision R1): Ctrl+K or Ctrl+P, one search over pages,
+/** The command palette: Ctrl+K or Ctrl+P, one search over pages,
  * open tabs, databases, the objects of databases already loaded, and commands. */
 export function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void }) {
   // Mounted only while open, so each opening starts empty.

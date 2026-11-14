@@ -43,7 +43,7 @@ use crate::lex::LexOptions;
 pub const CONTEXT_VAR: &str = "sprig_rls";
 
 /// The context's key listing the tables the current statement reads only
-/// as layers of merged views (chapter 42) the gateway filtered with the
+/// as layers of merged views the gateway filtered with the
 /// session's policies on the merged records: their policy views let every
 /// row through for that statement. Triggers never read it, so writes stay
 /// checked.
@@ -320,7 +320,7 @@ impl TriggerSpec<'_> {
             }
         };
         // Views only, never the triggers: a statement reading the table as
-        // the layers of a merged view (chapter 42) that the gateway filtered
+        // the layers of a merged view that the gateway filtered
         // on the merged records names it in "m" (MERGED_LAYERS_KEY).
         let view = |name: String, all: bool| {
             format!(

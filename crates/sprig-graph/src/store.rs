@@ -111,6 +111,37 @@ pub struct Reach {
     pub depth: u32,
 }
 
+/// One hop's link without properties ([`GraphStore::links`]): an edge's
+/// ends, their routing hashes, its id and type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Link {
+    /// Source node.
+    pub src: u64,
+    /// Destination node.
+    pub dst: u64,
+    /// The source's routing hash (where the edge lives).
+    pub src_rk: u64,
+    /// The destination's routing hash.
+    pub dst_rk: u64,
+    /// `id`.
+    pub id: u64,
+    /// Type id.
+    pub rtype: u32,
+}
+
+impl From<&EdgeRow> for Link {
+    fn from(e: &EdgeRow) -> Self {
+        Self {
+            src: e.src,
+            dst: e.dst,
+            src_rk: e.src_rk,
+            dst_rk: e.dst_rk,
+            id: e.id,
+            rtype: e.rtype,
+        }
+    }
+}
+
 /// Which id counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdKind {
@@ -127,6 +158,10 @@ pub struct StoreStats {
     pub shard_queries: u64,
     /// Of which recursive CTEs.
     pub cte_queries: u64,
+    /// Time spent waiting for shard statements, in microseconds.
+    pub sql_us: u64,
+    /// Rows the shard statements returned.
+    pub sql_rows: u64,
 }
 
 /// A property index or uniqueness constraint of a native graph.
@@ -210,6 +245,51 @@ pub trait GraphStore: Send {
         types: &[u32],
         dir: Dir,
     ) -> Result<Vec<(EdgeRow, Option<NodeRow>)>>;
+
+    /// One hop from `from` as links only: no properties and no far
+    /// nodes (breadth-first searches and trail enumeration read only
+    /// ids; the elements they keep are read afterwards).
+    async fn links(&mut self, from: &[u64], types: &[u32], dir: Dir) -> Result<Vec<Link>> {
+        Ok(self
+            .expand(from, types, dir)
+            .await?
+            .iter()
+            .map(|(e, _)| Link::from(e))
+            .collect())
+    }
+
+    /// Whether hops may read links and far nodes without properties,
+    /// reading properties late ([`GraphStore::nodes_part`]); stores that
+    /// say no answer every read with whole rows.
+    fn late_props(&self) -> bool {
+        false
+    }
+
+    /// Nodes by id with only `keys` of their properties (`Some(&[])`:
+    /// none, just ids and labels; `None`: all). A node without one of
+    /// the keys simply lacks it.
+    async fn nodes_part(&mut self, ids: &[u64], keys: Option<&[String]>) -> Result<Vec<NodeRow>> {
+        let _ = keys;
+        self.nodes(ids).await
+    }
+
+    /// Edges by `(src_rk, id)` with only `keys` of their properties, as
+    /// [`GraphStore::nodes_part`].
+    async fn edges_part(
+        &mut self,
+        at: &[(u64, u64)],
+        keys: Option<&[String]>,
+    ) -> Result<Vec<EdgeRow>> {
+        let _ = keys;
+        self.edges_at(at).await
+    }
+
+    /// Edges by id whose sources' routing hashes are known: `(src_rk,
+    /// id)` (routed to their shards; [`GraphStore::edges`] otherwise).
+    async fn edges_at(&mut self, keys: &[(u64, u64)]) -> Result<Vec<EdgeRow>> {
+        let ids: Vec<u64> = keys.iter().map(|(_, id)| *id).collect();
+        self.edges(&ids).await
+    }
 
     /// One shard's recursive CTE: from `seeds` (origin, node) on `shard`,
     /// up to `hops` hops over `types` in `dir`, each node once per origin

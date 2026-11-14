@@ -18,7 +18,7 @@ import {
   type SettingRow,
 } from './settings';
 
-/** Settings at every scope (chapter 44 step 11): effective value, source
+/** Settings at every scope: effective value, source
  * and bounds for each key, the same chain as `sprigctl config explain`.
  * Tenant administrators set tenant, database and object values (and a
  * descendant tenant's); ancestors and the operational scopes show

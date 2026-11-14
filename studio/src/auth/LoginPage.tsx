@@ -5,7 +5,7 @@ import { insecureLoginBlocked, login, useSession, type LoginStep } from './sessi
 import { Enrol, SecondFactor } from './Factors';
 import { errorText } from '../api/errors';
 
-/** Sign-in (chapter 44, "Login and the session"). Paste and password
+/** Sign-in. Paste and password
  * managers work (WCAG 3.3.8): plain inputs with autocomplete hints. */
 export function LoginPage() {
   const intl = useIntl();

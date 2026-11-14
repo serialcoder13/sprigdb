@@ -1,4 +1,4 @@
--- M0.3 schema-tool suite (../../README.md): the same migrations for both
+-- Tenant harness schema-tool suite (../../README.md): the same migrations for both
 -- tenants, into the same logical database names. ${crm} and ${shop} are
 -- the logical names (`crm`, `shop` through the gateway; prefixed per
 -- stand-in tenant in baseline mode). Flyway's checksums are of this raw

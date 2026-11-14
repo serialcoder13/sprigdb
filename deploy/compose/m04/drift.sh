@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# M0.4's drift suite (chapter 13 "Testing": schema tools see no drift with
-# automatic indexes present; chapter 48 M0.4, done-when 4).
+# The automatic-indexing drift suite: schema tools see no drift with
+# automatic indexes present.
 #
 #   deploy/compose/m04/drift.sh [tenant-user] [password]     # acme.app, sprig-dev-app
 #

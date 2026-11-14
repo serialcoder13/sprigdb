@@ -152,7 +152,7 @@ pub fn digest_expr(t: &TableMeta) -> String {
 /// page's `key > after` then compares them by member index, the order
 /// `ORDER BY` uses (as strings, `'object' < 'tenant'` while the index
 /// order is the reverse, so pages skipped rows and verification of a
-/// table such as the catalog's `settings` never converged; found by r9streams).
+/// table such as the catalog's `settings` never converged).
 #[must_use]
 pub fn digest_list(t: &TableMeta) -> String {
     let keys: Vec<String> = t.pk.iter().map(|&i| col_expr(t, i)).collect();

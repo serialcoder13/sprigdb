@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Runs a database driver's own upstream test suite against one endpoint: the
-# gateway's MySQL 8.4 or MariaDB port, or a plain server as the baseline
-# (chapter 28, "Testing"; chapter 46, "Compatibility suites").
+# gateway's MySQL 8.4 or MariaDB port, or a plain server as the baseline.
 #
 #   run.sh <suite> <host> <port> <persona>
 #
@@ -55,9 +54,9 @@
 #
 # Expected files can `exclude` tests per target. They keep statements of
 # 16 MiB and more away from gateways: the development clusters keep MariaDB's
-# 16 MiB max_allowed_packet and a 1 GiB memory cap (gaps row 30;
-# decisions/r4-interim.md, "Client test suites"). Use your own gateway and
-# tenant, take the heavy-job lock, and expect runs of 1 to 10 minutes each.
+# 16 MiB max_allowed_packet and a 1 GiB memory cap, while the gateway
+# answers 64 MiB. Use your own gateway and tenant, take the heavy-job lock,
+# and expect runs of 1 to 10 minutes each.
 #
 # Examples (a gateway's tenant user, then a plain MariaDB as root):
 #   SPRIG_CLIENTS_USER=acme.app SPRIG_CLIENTS_PASSWORD=sprig-dev-app \
@@ -131,7 +130,7 @@ mkdir -p "$RESULTS/raw"
 # SQL as the suite's main login, through the mariadb client image. It logs
 # in over TLS: that also fills the gateway's caching_sha2_password cache, so
 # the suite's own plaintext logins take the fast path (the gateway has no
-# RSA key exchange: decision D4, decisions/m0.2-interim.md).
+# RSA key exchange).
 sql_as() {
   local u=$1 p=$2
   shift 2

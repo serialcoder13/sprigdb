@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Flyway and Liquibase against a MySQL endpoint (R4 round 4, tier 2).
+<!-- Flyway and Liquibase against a MySQL endpoint (tier 2).
      Flyway 11 community and Liquibase 4.x are Apache-2.0 (Liquibase 5 isn't:
      stay on 4.x). MySQL Connector/J is the JDBC driver, as for the suites. -->
 <project xmlns="http://maven.apache.org/POM/4.0.0">

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# MongoDB tier 1 client suites (chapter 46; chapter 30, "Testing"; R5).
+# MongoDB tier 1 client suites.
 #
 #   run.sh spring-data <mongodb-uri>          SprigDB's Spring Data MongoDB smoke suite
 #   run.sh mongoose <mongodb-uri-with-db> [test files...]

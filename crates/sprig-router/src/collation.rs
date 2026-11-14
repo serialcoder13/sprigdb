@@ -7,8 +7,8 @@
 //! `_0900_` names are aliases of `NO PAD` collations. A
 //! level a collation lacks repeats its last level, as `WEIGHT_STRING`
 //! does, so comparing all three levels is exact for one-level collations
-//! too. `utf8mb4_uca1400_ai_cs` has no level 2 (empty weights). Chapter
-//! 15's collation table in `sprig-shard` replaces this one when it lands.
+//! too. `utf8mb4_uca1400_ai_cs` has no level 2 (empty weights). A
+//! collation table in `sprig-shard` replaces this one when it lands.
 
 use std::cmp::Ordering;
 

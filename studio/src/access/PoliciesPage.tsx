@@ -1,7 +1,6 @@
-// Roles, the policy editor and the "view as this user" tester (chapter 44
-// step 18; chapter 29). Roles and policies are the statements a SQL client
-// runs (CREATE ROLE, GRANT, CREATE POLICY ...), built by forms and shown
-// before they run. The tester calls Policies.TestAs: one read-only
+// Roles, the policy editor and the "view as this user" tester. Roles and
+// policies are the statements a SQL client runs (CREATE ROLE, GRANT, CREATE
+// POLICY ...), built by forms and shown before they run. The tester calls Policies.TestAs: one read-only
 // statement run as another user of the tenant, never wider than the
 // caller's own view.
 

@@ -1,5 +1,4 @@
-//! Sprig 2PC's relay fence, live (chapter 18, "The relay fence"; decisions
-//! Q28, Q36 and Q37): two single-node Galera clusters (`wsrep_on`, no XA),
+//! Sprig 2PC's relay fence, live: two single-node Galera clusters (`wsrep_on`, no XA),
 //! the agent's relay (`sprig_agent::relay`) in front of the second, and
 //! the coordinator writing both under `sprig_2pc`.
 //!
@@ -396,7 +395,7 @@ impl TxnBackend for GwBackend {
 }
 
 /// `relay`: the relayed address of `cs[1]` and its relay; `None`: direct
-/// (Sprig 2PC as built in R3, no fence).
+/// (Sprig 2PC without the relay fence).
 fn gateway(cs: &[Live], relay: Option<(&str, &Arc<Relay>)>) -> Arc<GwBackend> {
     let mut m = BTreeMap::new();
     for (i, c) in cs.iter().enumerate() {
@@ -555,10 +554,10 @@ async fn append_until_done(url: &str, c: &Live, tag: &str) -> (u32, u32) {
     }
 }
 
-/// Without the fence (Sprig 2PC as built in R3): a gateway that dies after
+/// Without the fence: a gateway that dies after
 /// the commit point releases its held rows; another writer's append lands
 /// first; the resolver's replay then writes the held branch's value over
-/// it. The other writer's committed append is lost: decision Q12's window.
+/// it. The other writer's committed append is lost: the window the fence closes.
 #[tokio::test(flavor = "multi_thread")]
 async fn without_the_fence_a_replay_overwrites_a_later_write() {
     let Some(cs) = clusters() else {
@@ -645,7 +644,7 @@ async fn the_fence_keeps_held_rows_until_they_are_replayed() {
 /// so the held branch rolls back. A new relay recovers the node before it
 /// admits anyone. Also measures what MariaDB does with an autocommit
 /// statement that was waiting for the held rows when its client vanished
-/// (decision Q36's residual): it runs on and commits.
+/// (a case the fence leaves open): it runs on and commits.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_relay_crash_recovers_before_admitting() {
     let Some(cs) = clusters() else {
@@ -703,7 +702,7 @@ async fn a_relay_crash_recovers_before_admitting() {
     assert!(v0_after.ends_with(",W"), "{v0_after}");
 }
 
-/// Decision Q37: phase 2 outruns `txn.phase2_wait_ms` (the held branch's
+/// Phase 2 outruns `txn.phase2_wait_ms` (the held branch's
 /// `COMMIT` waits behind `FLUSH TABLES WITH READ LOCK`); `COMMIT` answers
 /// OK with a straggler. A plain read misses the row; the session's next
 /// statement on that cluster settles the straggler first and sees it.

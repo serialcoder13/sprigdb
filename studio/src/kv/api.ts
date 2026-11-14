@@ -1,6 +1,6 @@
-// The key-value API (chapter 37; chapter 33, "As built in R6"): Exec runs one
-// Redis command on a namespace, Scan pages keys by prefix, Put and Delete
-// take a version condition. Calls run in the caller's own session.
+// The key-value API: Exec runs one Redis command on a namespace, Scan pages
+// keys by prefix, Put and Delete take a version condition. Calls run in the
+// caller's own session.
 
 import { json } from '../api/client';
 import type { Reply } from './commands';

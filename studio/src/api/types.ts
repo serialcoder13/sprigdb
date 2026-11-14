@@ -1,4 +1,4 @@
-// Types of the data API's JSON (chapter 37, "As built in R0"): each SQL
+// Types of the data API's JSON: each SQL
 // cell is the MySQL text form or null; binary columns are base64.
 
 export interface Column {

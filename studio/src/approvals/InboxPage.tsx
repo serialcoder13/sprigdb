@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { json } from '../api/client';
 import { errorText } from '../api/errors';
 
-/** Chapter 52's recommendation, as the controller returns it. */
+/** A recommendation, as the controller returns it. */
 export interface Recommendation {
   id: string;
   kind: string;
@@ -73,7 +73,7 @@ export function useOpenCount(): number {
   return q.data?.open ?? 0;
 }
 
-/** Recommendations held for approval (chapter 52): filters, the item with
+/** Recommendations held for approval: filters, the item with
  * its evidence and history, and approve, approve in a window, ignore,
  * snooze, comment and bulk actions. What a user sees and may act on is
  * decided by the controller from their grants. */

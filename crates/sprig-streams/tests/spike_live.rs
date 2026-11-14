@@ -1,7 +1,8 @@
-//! Chapter 45 build step 1: the stream-log spike (`decisions/spike-stream-log.md`).
+//! The stream-log spike: the log table's layout measured before the
+//! streams core was built on it.
 //!
 //! Appends and range reads on the stream log's table, partitioned by `day`
-//! as chapter 45 lays it out, on the dev replication cluster (primary with
+//! as the stream log is, on the dev replication cluster (primary with
 //! two semi-synchronous replicas, binlog on), in the schema
 //! `r9streams_spike`, which the run drops at the end.
 //!

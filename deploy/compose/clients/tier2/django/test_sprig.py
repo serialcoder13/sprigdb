@@ -1,4 +1,4 @@
-# Django's own test suite against a MySQL endpoint (R4 round 4, tier 2):
+# Django's own test suite against a MySQL endpoint (tier 2):
 # PyMySQL stands in for mysqlclient (no compiler in the image).
 import os
 

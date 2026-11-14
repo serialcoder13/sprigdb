@@ -1,6 +1,5 @@
--- Translator rules of R4 round 2 (chapter 28): SHOW ENGINES (gaps row 48),
--- VERSION() inside stored code (row 53), WITH ROLLUP with ORDER BY and
--- GROUPING() (step 9), user-level locks (step 14).
+-- Translator rules: SHOW ENGINES, VERSION() inside stored code, WITH
+-- ROLLUP with ORDER BY and GROUPING(), user-level locks.
 SHOW ENGINES;
 DROP TABLE IF EXISTS c_mc_t;
 DROP PROCEDURE IF EXISTS c_mc_p;
@@ -18,7 +17,7 @@ CREATE PROCEDURE c_mc_p(OUT v VARCHAR(255)) SELECT VERSION() INTO v;
 CREATE FUNCTION c_mc_f() RETURNS VARCHAR(255) DETERMINISTIC RETURN VERSION();
 CALL c_mc_p(@c_mc_v);
 -- Compared as bytes: a user variable replayed on another backend connection
--- can carry another collation (gaps row 57).
+-- can carry another collation.
 SELECT CAST(@c_mc_v AS BINARY) = CAST(VERSION() AS BINARY), CAST(c_mc_f() AS BINARY) = CAST(VERSION() AS BINARY);
 SELECT ROUTINE_DEFINITION FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = DATABASE() AND ROUTINE_NAME = 'c_mc_f';
 SELECT GET_LOCK('c_mc_Lock', 0), IS_FREE_LOCK('c_mc_Lock'), IS_FREE_LOCK('c_mc_lock'), IS_USED_LOCK('c_mc_Lock') IS NOT NULL, IS_FREE_LOCK('c_mc_other');

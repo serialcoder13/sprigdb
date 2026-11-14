@@ -1,6 +1,6 @@
 # Connector matrix, sysbench and the latency gate
 
-This directory holds the harness for milestone M0.2's "done when" (chapter 48): the tier 1 SQL connectors and sysbench must pass through the gateway on both ports, and the gateway must add no more than 0.5 ms at p50. The design comes from chapter 46, step 5, and chapter 05, step 13. Today it runs against MariaDB 11.8 and MySQL 8.4 directly, and every check passes there or has an expected outcome in `expected.toml`. Later the same commands point at the gateway's 3306 and 3307.
+This directory holds the harness for the connector gate: the tier 1 SQL connectors and sysbench must pass through the gateway on both ports, and the gateway must add no more than 0.5 ms at p50. Today it runs against MariaDB 11.8 and MySQL 8.4 directly, and every check passes there or has an expected outcome in `expected.toml`. Later the same commands point at the gateway's 3306 and 3307.
 
 ## Run it
 
@@ -113,9 +113,9 @@ Each reports its own checks (`[check_sets]` in `expected.toml`).
 | `mysqldump`, `mariadb-dump` | `source` (3 tables, 1,003 rows of 30 column types incl. BIT, ENUM, SET, YEAR, POINT, JSON, a generated column; a trigger, a view, a procedure, a function), `dump` (`--single-transaction --routines --triggers --events --hex-blob`), `restore` (into a new schema), `checksum` (`CHECKSUM TABLE` and counts equal), `objects` (`SHOW CREATE` equal; view, procedure, function and trigger work) |
 | `sysbench-tpcc` | `prepare`, `run` (20 s, 2 threads, server-side prepares; the detail counts errors sysbench ignores: 1213, 1205, 1020), `check` (tpcc_check.lua), `cleanup` |
 
-## Persona compatibility (`persona-sql`, chapter 28 R4)
+## Persona compatibility (`persona-sql`)
 
-`compat/` holds SQL corpora run by the `mysql` 8.4 client of the `conn-mysql-cli` image (mounted at `/compat`, no image rebuild). Each output is compared line by line with the reference server's: `golden/mysql/` was captured from MySQL 8.4.11 and `golden/mariadb/` from MariaDB 11.8.9, as root, with `SPRIG_COMPAT_CAPTURE=1`. The checks are `sql_mode`, `max_execution_time`, `errors`, `show_index`, `show_grants`, `roles`, `gis` (n/a on persona `mariadb`) and `stored_mode` (stored programs keep the `sql_mode` they were created in; gaps row 27). Later rounds added `group_by`, `int_meta`, `mysql_compat`, `mysql_ddl`, `session_status`, `perf_schema`, `mysql_stored` and (R4 round 5) `mysql_json_index`: JSON operators, mixed functional key parts and their printing, a descending index over a foreign key, stored code as written, `USE performance_schema` and digest counts (3306 only). R4 round 6 added `mysql_ddl_answers` (3306 only). It covers collation names (`utf8mb4_bin`, `SHOW CREATE DATABASE`), foreign key errors 1824 and 1826, names over 64 characters (1059), `MyISAM`'s descending key parts (1178), `DEFAULT (now())`, escaped literal defaults, a column of a multi-column unique index, `KILL QUERY` of the session's own statement, and stored programs' character sets. R4 round 7 added `mysql_show_answers` (3306 only, run with `mysql -vv`): `ALTER TABLE`'s `Records: ... Duplicates: ... Warnings: ...` line, `SHOW PROCEDURE STATUS`'s `Language` column and `SHOW CREATE TRIGGER`'s backquoted head, with times and the definer normalized. `SPRIG_COMPAT_CHECKS` runs a subset, for instance to capture one new golden file. `<check>.mariadb.sql` replaces a corpus where MariaDB's syntax differs, and `known.<persona>.sed` removes documented differences from both sides (`decisions/mysql-persona-gaps.md`). Outputs are normalized for `at line N`, the client address and the database name. The `roles` check logs in as a user the corpus creates (`<tenant>.r4c_u1` through the gateway), always over TLS.
+`compat/` holds SQL corpora run by the `mysql` 8.4 client of the `conn-mysql-cli` image (mounted at `/compat`, no image rebuild). Each output is compared line by line with the reference server's: `golden/mysql/` was captured from MySQL 8.4.11 and `golden/mariadb/` from MariaDB 11.8.9, as root, with `SPRIG_COMPAT_CAPTURE=1`. The checks are `sql_mode`, `max_execution_time`, `errors`, `show_index`, `show_grants`, `roles`, `gis` (n/a on persona `mariadb`) and `stored_mode` (stored programs keep the `sql_mode` they were created in). Later additions are `group_by`, `int_meta`, `mysql_compat`, `mysql_ddl`, `session_status`, `perf_schema`, `mysql_stored` and `mysql_json_index`: JSON operators, mixed functional key parts and their printing, a descending index over a foreign key, stored code as written, `USE performance_schema` and digest counts (3306 only). `mysql_ddl_answers` (3306 only) covers collation names (`utf8mb4_bin`, `SHOW CREATE DATABASE`), foreign key errors 1824 and 1826, names over 64 characters (1059), `MyISAM`'s descending key parts (1178), `DEFAULT (now())`, escaped literal defaults, a column of a multi-column unique index, `KILL QUERY` of the session's own statement, and stored programs' character sets. `mysql_show_answers` (3306 only, run with `mysql -vv`): `ALTER TABLE`'s `Records: ... Duplicates: ... Warnings: ...` line, `SHOW PROCEDURE STATUS`'s `Language` column and `SHOW CREATE TRIGGER`'s backquoted head, with times and the definer normalized. `SPRIG_COMPAT_CHECKS` runs a subset, for instance to capture one new golden file. `<check>.mariadb.sql` replaces a corpus where MariaDB's syntax differs, and `known.<persona>.sed` removes documented differences from both sides. Outputs are normalized for `at line N`, the client address and the database name. The `roles` check logs in as a user the corpus creates (`<tenant>.r4c_u1` through the gateway), always over TLS.
 
 ```sh
 docker run --rm -v "$PWD/compat:/compat:ro" -v /tmp/cap:/capture -e SPRIG_COMPAT_CAPTURE=1 \
@@ -141,7 +141,7 @@ docker run --rm -v "$PWD/compat:/compat:ro" -v /tmp/cap:/capture -e SPRIG_COMPAT
 
 ## Catalog (tenant) mode
 
-`expected.catalog.toml` is the overlay for runs through the gateway in catalog mode, with a tenant user (its header shows the commands). On 8 November 2026 (milestone M0.5) Hibernate with both Connector/Js, both SQLAlchemy drivers and Prisma ran on both ports and both TLS modes: 124 checks, all as expected. On 3306 every check passes, because chapter 28's translator answers `information_schema.KEYWORDS` with MySQL 8.4's list, reports JSON columns as `json` (in `information_schema`, `SHOW COLUMNS`, `SHOW CREATE TABLE`, and as type 245 in result metadata), rewrites `CAST(? AS JSON)`, and reads a foreign key's default rule as `NO ACTION`. On 3307 the two Hibernate `schema_validate` failures are MariaDB 11.8's own, as in `expected.toml`.
+`expected.catalog.toml` is the overlay for runs through the gateway in catalog mode, with a tenant user (its header shows the commands). On 8 November 2026 Hibernate with both Connector/Js, both SQLAlchemy drivers and Prisma ran on both ports and both TLS modes: 124 checks, all as expected. On 3306 every check passes, because the translator answers `information_schema.KEYWORDS` with MySQL 8.4's list, reports JSON columns as `json` (in `information_schema`, `SHOW COLUMNS`, `SHOW CREATE TABLE`, and as type 245 in result metadata), rewrites `CAST(? AS JSON)`, and reads a foreign key's default rule as `NO ACTION`. On 3307 the two Hibernate `schema_validate` failures are MariaDB 11.8's own, as in `expected.toml`.
 
 ## The latency gate
 
@@ -160,7 +160,7 @@ SPRIG_TEST_DOCKER=1 SPRIG_TEST_CONNECTORS=127.0.0.1:3306:mysql,127.0.0.1:3307:ma
   cargo test -p sprig-testkit --test connectors_matrix -- --ignored --nocapture
 ```
 
-CI has the job `connectors` (M0.2) in `.github/workflows/ci.yml`. It runs both tests against the gateway and stays disabled until the gateway exists.
+CI has the job `connectors` in `.github/workflows/ci.yml`. It runs both tests against the gateway and stays disabled until the gateway exists.
 
 ## Differences between the references worth knowing
 
@@ -176,4 +176,4 @@ Checks that pass on both references but assert persona-specific answers, because
 
 ## Not covered yet
 
-Golden captures and fuzz targets (the rest of chapter 05's step 13), and the `optional` TLS mode of the listeners: both wait for the gateway. Prisma 7 (driver adapters over the `mariadb` npm package) is not in the matrix; Prisma 6 covers the Rust engines.
+Golden captures and fuzz targets for the gateway, and the `optional` TLS mode of the listeners: both wait for the gateway. Prisma 7 (driver adapters over the `mariadb` npm package) is not in the matrix; Prisma 6 covers the Rust engines.

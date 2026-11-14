@@ -1,15 +1,13 @@
 //! `sprigdb`: the one server binary. The role is a subcommand:
 //! `sprigdb gateway`, `controller`, `worker`, `agent` or `operator`.
 //!
-//! Layer 4 (binaries). Design: chapter 03 (Codebase and conventions) and
-//! chapter 04 (Gateway, "Startup" and "Drain") of the SprigDB low-level
-//! design; names in the writing guide, 5.1.
+//! Layer 4 (binaries).
 //!
 //! Every role starts the same way:
 //! 1. read `sprigdb.toml` and `SPRIGDB_*` overrides;
 //! 2. set up logging and the Prometheus recorder;
 //! 3. bind the telemetry port (`/healthz` 200, `/readyz` 503, `/metrics`);
-//! 4. start chapter 47's OTLP trace exporter and, with `[audit] spool_dir`,
+//! 4. start the OTLP trace exporter and, with `[audit] spool_dir`,
 //!    the audit pipeline (spool and shipper to `[audit] sink_dir`);
 //! 5. run the role, which marks itself ready;
 //! 6. on SIGTERM or SIGINT, cancel the role's shutdown token, wait for it to
@@ -17,7 +15,7 @@
 
 mod sdnotify;
 
-/// mimalloc as the process allocator, the default (S152, S155): per-thread
+/// mimalloc as the process allocator, the default: per-thread
 /// heaps instead of the platform allocator's. `--features system-alloc`
 /// builds with the platform allocator (glibc on Linux) instead.
 #[cfg(all(feature = "mimalloc", not(feature = "system-alloc")))]
@@ -192,8 +190,8 @@ fn start_audit(
         sink,
     )?;
     let task = p.spawn(stop.clone());
-    // Chapter 47's `audit.retention_days` (decision bugfix-interim): the
-    // sink's old days go, hourly and in batches.
+    // `audit.retention_days`: the sink's old days go, hourly and in
+    // batches.
     let _retention = sink_ret.spawn_retention(stop.clone());
     audit::install(p)?;
     tracing::info!(spool = %spool.display(), sink = %sink_dir.display(), "audit pipeline started");
@@ -206,7 +204,7 @@ fn build_runtime(worker_threads: usize) -> std::io::Result<tokio::runtime::Runti
     // 8 MiB worker stacks (tokio's default is 2 MiB): sqlparser recurses
     // per nesting level, and a debug build overflowed 2 MiB (aborting the
     // process) on a 2.8 KB statement nested 14 deep, the MySQL persona's
-    // SRID 4326 distance (chapter 36). Only touched pages are committed.
+    // SRID 4326 distance. Only touched pages are committed.
     b.thread_stack_size(8 << 20);
     if worker_threads > 0 {
         b.worker_threads(worker_threads);
@@ -230,13 +228,13 @@ async fn run(role: Role, config: ProcessConfig, source: Option<(PathBuf, String)
     );
 
     let health = Health::default();
-    // VMs: systemd's Type=notify units (chapter 27).
+    // VMs: systemd's Type=notify units.
     sdnotify::spawn(health.clone());
     if let Some((path, text)) = source {
         health.watch_config(path, text);
     }
     let stop_telemetry = CancellationToken::new();
-    // Chapter 47: kept traces go to telemetry.otlp_endpoint once a role's
+    // Kept traces go to telemetry.otlp_endpoint once a role's
     // settings name one (sprig_settings::ops::apply_live).
     telemetry::trace::otlp::install(telemetry::trace::otlp::OtlpExporter::spawn(
         None,
@@ -257,7 +255,7 @@ async fn run(role: Role, config: ProcessConfig, source: Option<(PathBuf, String)
     ));
     let shutdown = CancellationToken::new();
     tokio::spawn(cancel_on_signal(shutdown.clone()));
-    // Hardening round 3: the process identity for `https://` internal
+    // The process identity for `https://` internal
     // calls (permits, peer pings, observations, the relay) to controllers
     // with `[controller] internal_tls`.
     if let Some(t) = &config.tls

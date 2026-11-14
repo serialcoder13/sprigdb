@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Operations for the SprigDB Compose-on-VM bundle (RUNBOOK.md has the
-# procedures; chapter 27, "Compose on VMs").
+# procedures).
 #
 #   ./sprig-vm.sh init                  make secrets/ (CA, certificates, passwords, tokens, backup key pair)
 #   ./sprig-vm.sh check-secrets         check secrets/'s owners and modes (up runs it too)
@@ -270,7 +270,7 @@ init() {
         rand >sprig/gateway-token
         echo "1 $(rand)" >sprig/workload-keys
         cat >sprig/cluster-credentials.toml <<EOF
-# Cluster credentials (chapter 27): sprigctl cluster register --credentials file:/run/sprig/sprig/cluster-credentials.toml
+# Cluster credentials: sprigctl cluster register --credentials file:/run/sprig/sprig/cluster-credentials.toml
 [sprig_ctl]
 user = "sprig_ctl"
 password = "$(cat mariadb/sprig_ctl-password)"
@@ -284,7 +284,7 @@ tls = "verify"
 ca_file = "/run/sprig/tls/ca.pem"
 EOF
         cat >sprig/backends.toml <<EOF
-# The gateway's backend accounts (chapter 29): one MariaDB account per user,
+# The gateway's backend accounts: one MariaDB account per user,
 # t<tenant>_u<user>, with passwords derived from backend_secret.
 [per_user]
 secret = "file:backends.toml#backend_secret"
@@ -314,9 +314,9 @@ sans_cover() {
     done
 }
 
-# Bundles made before hardening round 2 lack the controller's certificate,
-# the backups' key pair, and a process certificate that also serves (the
-# peer service): make what is missing.
+# Bundles made by older versions of this script lack the controller's
+# certificate, the backups' key pair, and a process certificate that also
+# serves (the peer service): make what is missing.
 ensure_secrets() {
     if [[ ! -s secrets/tls/controller.pem ]] || ! openssl x509 -in secrets/tls/client.pem -noout -ext extendedKeyUsage 2>/dev/null | grep -q 'Server Auth'; then
         [[ -f secrets/ca/ca-key.pem ]] ||
@@ -836,7 +836,7 @@ rotate_certs() {
     process_cert
     # Read again without a restart: the gateway's client bundle within two
     # polls; the controller's Admin API and internal port within a few
-    # seconds (hardening round 3); MariaDB on FLUSH SSL; etcd on each new
+    # seconds; MariaDB on FLUSH SSL; etcd on each new
     # connection. The process certificate (client.pem) is presented by every
     # SprigDB process as it connects: each picks the new one up when it next
     # starts, and the old one stays valid until it expires.
@@ -974,7 +974,7 @@ monitoring_config() {
     say "config/prometheus-targets.json: every VM's gateway, controller, worker and agent"
 }
 
-# bugfix-53: auto-compaction (compose.yaml) frees etcd's old revisions;
+# Auto-compaction (compose.yaml) frees etcd's old revisions;
 # defrag gives that space back to the disk and the quota. etcdctl goes
 # through the members in order, so only one pauses at a time.
 etcd_defrag() {

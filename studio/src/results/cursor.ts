@@ -1,7 +1,6 @@
-// Fetching past the row cap (chapter 44, "Results: streaming, caps,
-// cursors, exports"; decisions ST23 and ST30). A cursor rides the gateway's
-// stream of the statement with backpressure; it holds no backend session of
-// its own, and the gateway closes it after studio.cursor_idle_seconds.
+// Fetching past the row cap. A cursor rides the gateway's stream of the
+// statement with backpressure; it holds no backend session of its own, and
+// the gateway closes it after studio.cursor_idle_seconds.
 //
 // The browser closes its cursor as soon as it isn't needed: a new run, the
 // result leaving the page, the tab hidden or closed. "Fetch more" after

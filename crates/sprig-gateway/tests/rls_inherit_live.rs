@@ -1,8 +1,7 @@
-//! Row-level security on inherited rows (decision T31, round rlsinherit):
+//! Row-level security on inherited rows:
 //! a tenant's policies filter every row it reads of an inheritable table,
 //! its own and those it inherits from parent spaces and parent tenants,
-//! on every read path, evaluated on the merged records (chapter 29, "Data
-//! inheritance").
+//! on every read path, evaluated on the merged records.
 //!
 //! Tenants `a > b > c`, and `b`'s space `b1`; table `docs` (a record
 //! hierarchy) made in `a` and shared `a > b > (b1, c)`, read through or
@@ -80,8 +79,7 @@ fn env() -> Option<Env> {
         mariadb,
         http,
         t,
-        materialized: std::env::var("SPRIG_TEST_RLSI_MODE").ok().as_deref()
-            == Some("materialized"),
+        materialized: std::env::var("SPRIG_TEST_RLSI_MODE").ok().as_deref() == Some("materialized"),
     })
 }
 
@@ -197,8 +195,12 @@ fn policies(t: usize) -> Vec<&'static str> {
         "CREATE POLICY p_bob ON docs FOR SELECT, UPDATE, DELETE TO bob USING (owner = 'bob')",
     ];
     match t {
-        0 => v.push("CREATE POLICY p_tier ON docs AS RESTRICTIVE FOR ALL TO PUBLIC USING (tier <= 2)"),
-        1 => v.push("CREATE POLICY p_vis ON docs AS RESTRICTIVE FOR ALL TO PUBLIC USING (visible = 1)"),
+        0 => v.push(
+            "CREATE POLICY p_tier ON docs AS RESTRICTIVE FOR ALL TO PUBLIC USING (tier <= 2)",
+        ),
+        1 => v.push(
+            "CREATE POLICY p_vis ON docs AS RESTRICTIVE FOR ALL TO PUBLIC USING (visible = 1)",
+        ),
         _ => {
             v.push("CREATE POLICY p_t3 ON docs FOR SELECT TO alice USING (tier = 3)");
             v.push("CREATE POLICY p_nz ON docs AS RESTRICTIVE FOR ALL TO PUBLIC USING (tier <> 0)");
@@ -215,7 +217,7 @@ enum Cmd {
 }
 
 /// Whether tenant `t`'s policies show `r` to `user` for `cmd` (the
-/// write's policies with `SELECT`'s, as chapter 29 applies them).
+/// write's policies with `SELECT`'s, as the gateway applies them).
 fn shows(t: usize, user: &str, r: &Rec, cmd: Cmd) -> bool {
     if user == "app" {
         return true;
@@ -440,7 +442,10 @@ impl Fixture<'_> {
             }
             Path::Prepared => {
                 let mut c = self.session(mysql, level, user).await;
-                match c.exec::<i64, _, _>("SELECT id FROM docs WHERE id > ?", (0,)).await {
+                match c
+                    .exec::<i64, _, _>("SELECT id FROM docs WHERE id > ?", (0,))
+                    .await
+                {
                     Ok(v) => Got::Ids(v.into_iter().collect()),
                     Err(e) => Got::Refused(e.to_string()),
                 }
@@ -628,7 +633,10 @@ async fn no_read_path_returns_an_inherited_row_a_policy_hides() {
     }
     must(
         &mut app[1],
-        &format!("CREATE SHARE rlsi_{tag}{pid}_bc ON docs TO SPACE `{}`", e.t[2]),
+        &format!(
+            "CREATE SHARE rlsi_{tag}{pid}_bc ON docs TO SPACE `{}`",
+            e.t[2]
+        ),
     )
     .await;
     if e.materialized {
@@ -732,7 +740,10 @@ async fn no_read_path_returns_an_inherited_row_a_policy_hides() {
                     }
                     (Got::Refused(msg), Must::SubsetOrRefused) => {
                         *refused
-                            .entry(format!("{p:?}: {}", msg.chars().take(90).collect::<String>()))
+                            .entry(format!(
+                                "{p:?}: {}",
+                                msg.chars().take(90).collect::<String>()
+                            ))
                             .or_default() += 1;
                     }
                     (other, _) => wrong.push(format!("{at}: {other:?}")),
@@ -741,7 +752,11 @@ async fn no_read_path_returns_an_inherited_row_a_policy_hides() {
         }
     }
     eprintln!("{checks} path checks; refused (allowed): {refused:#?}");
-    assert!(leaks.is_empty(), "hidden records returned:\n{}", leaks.join("\n"));
+    assert!(
+        leaks.is_empty(),
+        "hidden records returned:\n{}",
+        leaks.join("\n")
+    );
     assert!(wrong.is_empty(), "wrong answers:\n{}", wrong.join("\n"));
 
     // Change streams: c's alice gets a's changes only for records c's
@@ -778,11 +793,20 @@ async fn no_read_path_returns_an_inherited_row_a_policy_hides() {
         .into_iter()
         .filter(|k| ![50, 3, 1].contains(k))
         .collect();
-    assert!(leak_a.is_empty(), "alice@c got hidden records' events: {leak_a:?}");
-    assert!(keys(&ka).contains(&50), "alice@c missed her record's insert: {ka:?}");
+    assert!(
+        leak_a.is_empty(),
+        "alice@c got hidden records' events: {leak_a:?}"
+    );
+    assert!(
+        keys(&ka).contains(&50),
+        "alice@c missed her record's insert: {ka:?}"
+    );
     assert!(ke.is_empty(), "eve@c got events: {ke:?}");
     let leak_b: Vec<i64> = keys(&kb).into_iter().filter(|k| *k != 51).collect();
-    assert!(leak_b.is_empty(), "bob@b got hidden records' events: {leak_b:?}");
+    assert!(
+        leak_b.is_empty(),
+        "bob@b got hidden records' events: {leak_b:?}"
+    );
     assert!(keys(&kb).contains(&51), "bob@b missed his record: {kb:?}");
 
     // Cleanup, best effort: rows below a, shares bottom first, users, the
@@ -792,9 +816,21 @@ async fn no_read_path_returns_an_inherited_row_a_policy_hides() {
         let _ = try_exec(&mut c, "SPRIG RESET docs").await;
         let _ = try_exec(&mut c, "DELETE FROM docs WHERE id > 1000000").await;
     }
-    let _ = try_exec(&mut app[1], &format!("DROP SHARE IF EXISTS rlsi_{tag}{pid}_bc")).await;
-    let _ = try_exec(&mut app[1], &format!("DROP SHARE IF EXISTS rlsi_{tag}{pid}_bb")).await;
-    let _ = try_exec(&mut app[0], &format!("DROP SHARE IF EXISTS rlsi_{tag}{pid}_ab")).await;
+    let _ = try_exec(
+        &mut app[1],
+        &format!("DROP SHARE IF EXISTS rlsi_{tag}{pid}_bc"),
+    )
+    .await;
+    let _ = try_exec(
+        &mut app[1],
+        &format!("DROP SHARE IF EXISTS rlsi_{tag}{pid}_bb"),
+    )
+    .await;
+    let _ = try_exec(
+        &mut app[0],
+        &format!("DROP SHARE IF EXISTS rlsi_{tag}{pid}_ab"),
+    )
+    .await;
     let _ = try_exec(&mut app[1], &format!("DROP SPACE IF EXISTS `{b1}` CASCADE")).await;
     for c in app.iter_mut().rev() {
         let _ = try_exec(c, "DROP GRAPH IF EXISTS rlsi_g").await;

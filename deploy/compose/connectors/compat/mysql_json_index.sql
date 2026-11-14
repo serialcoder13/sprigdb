@@ -1,11 +1,11 @@
--- R4 round 5 (chapter 28): MySQL's JSON operators and JSON constants in
+-- MySQL's JSON operators and JSON constants in
 -- comparisons (Django's KT() fields, key lookups and JSON checks),
 -- functional key parts mixed with plain ones and their printing in
 -- STATISTICS and SHOW INDEX, a descending index over a foreign key's
--- column, lateral aggregates inside expressions (gaps row 71), stored
--- code as written (gaps row 69), USE performance_schema (gaps row 68)
--- and statement digests. The collection-write check (39602) has no MySQL
--- counterpart and is tested in sprig-sql's unit tests and live.
+-- column, lateral aggregates inside expressions, stored code as written,
+-- USE performance_schema and statement digests. The collection-write check
+-- (39602) has no MySQL counterpart and is tested in sprig-sql's unit tests
+-- and live.
 DROP VIEW IF EXISTS c_mj_n;
 DROP PROCEDURE IF EXISTS c_mj_p;
 DROP TABLE IF EXISTS c_mj_b;

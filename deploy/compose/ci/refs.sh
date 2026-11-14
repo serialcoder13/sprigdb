@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Reference servers for CI's heavy-suite jobs (chapter 46, "Differential
-# testing"; decisions/r4-interim.md, "Kiran's answer on heavy suites"). Each
-# suite runs on the reference first, then through the gateway, and a test
-# that fails on the reference too is not counted against SprigDB
+# Reference servers for CI's heavy-suite jobs. Each suite runs on the
+# reference first, then through the gateway, and a test that fails on the
+# reference too is not counted against SprigDB
 # (deploy/compose/clients/summarize.py, SPRIG_CLIENTS_BASELINE).
 #
 #   refs.sh up <ref>...     start and wait until it answers

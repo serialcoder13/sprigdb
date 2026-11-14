@@ -132,15 +132,14 @@ pub struct ViewSql<'a> {
 
 const ORIGIN: &str = "`_sprig_o`";
 
-/// The alias of every layer-table reference inside a merged view that
-/// merges (an overlay, or the top level of one). The gateway's row-level
+/// The alias of every layer-table reference inside a merged view. The gateway's row-level
 /// security rewrite leaves references under it alone and filters the merged
 /// records instead (chapter 29, "Data inheritance"): a filter on each layer
 /// row would drop an override or a hide marker and show the parent's values.
 /// Clients can't write it: a statement naming a `__sprig_` name never
 /// reaches the inheritance layer, so a reference under this alias in a
 /// statement the layer generated is always its own.
-pub const LAYER_ALIAS: &str = "__sprig_lyr";
+pub const LAYER_ALIAS: &str = sprig_sql::rls::views::MERGED_LAYER_ALIAS;
 
 /// [`LAYER_ALIAS`], quoted.
 const C: &str = "`__sprig_lyr`";
@@ -380,12 +379,19 @@ impl ViewSql<'_> {
         cols.join(", ")
     }
 
-    /// Whether [`ViewSql::view`] merges levels (its layer references are
-    /// under [`LAYER_ALIAS`]); `false` when it is the space's own rows read
-    /// as they are.
+    /// The names of [`ViewSql::view`]'s columns, quoted and listed (a
+    /// query over the view names them rather than `*`: chapter 29's swap
+    /// refuses `*` beside an all-columns policy view).
     #[must_use]
-    pub fn merges(&self, chain: &Chain) -> bool {
-        !(chain.is_base() && !self.origin)
+    pub fn output_columns(&self) -> String {
+        let mut cols = self.o.columns.iter().map(|c| q(c)).collect::<Vec<_>>();
+        if self.origin {
+            cols.push(ORIGIN.into());
+        }
+        for (c, _) in &self.derived {
+            cols.push(q(c));
+        }
+        cols.join(", ")
     }
 
     /// The merged view of `chain`'s last space, as a query.
@@ -393,7 +399,7 @@ impl ViewSql<'_> {
     pub fn view(&self, chain: &Chain) -> String {
         if chain.is_base() && !self.origin {
             return format!(
-                "SELECT {} FROM {} WHERE `_sprig_space` = {} AND `_sprig_state` IN ('own', \
+                "SELECT {} FROM {} {C} WHERE `_sprig_space` = {} AND `_sprig_state` IN ('own', \
                  'orphan'){}",
                 self.select_list(),
                 self.layer,
@@ -517,7 +523,6 @@ mod tests {
              (SELECT 1 FROM `__sprig_p2` p WHERE c.`id` = p.`id`)) SELECT `id`, `name`, \
              `colour`, `price`, `region` FROM `__sprig_l2`")
         );
-        assert!(v.merges(&chain()) && !v.merges(&chain().upto(1)));
     }
 
     #[test]
@@ -533,8 +538,9 @@ mod tests {
         let base = v.view(&chain().upto(1));
         assert_eq!(
             base,
-            "SELECT `id`, `name`, `colour`, `price`, `region` FROM `shop`.`products` WHERE \
-             `_sprig_space` = 1 AND `_sprig_state` IN ('own', 'orphan') AND `id` IN (2, 5)"
+            "SELECT `id`, `name`, `colour`, `price`, `region` FROM `shop`.`products` \
+             `__sprig_lyr` WHERE `_sprig_space` = 1 AND `_sprig_state` IN ('own', 'orphan') AND \
+             `id` IN (2, 5)"
         );
         let deep = v.view(&chain());
         assert_eq!(deep.matches("IN (2, 5)").count(), 3);

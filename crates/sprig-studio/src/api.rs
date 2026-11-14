@@ -1,8 +1,7 @@
-//! Studio's REST routes in the data API's `OpenAPI` document (chapter 37,
-//! "APIs for Studio", R0 part).
+//! Studio's REST routes in the data API's `OpenAPI` document.
 //!
 //! The gateway answers these ahead of the proto route table (they are REST
-//! only in R0); [`merge_into`] adds them to `/v1/openapi.json`, which the
+//! only for now); [`merge_into`] adds them to `/v1/openapi.json`, which the
 //! Studio client's types are generated from (`pnpm gen:api`).
 
 use serde_json::{Value, json};
@@ -57,7 +56,7 @@ fn docs_paths() -> Value {
     })
 }
 
-/// Studio round 4 (chapter 44 steps 18, 26, 28–31): the logic editors'
+/// The logic editors'
 /// `Logic` routes, the stream, queue and sink views' routes, and
 /// `Policies.TestAs`.
 fn round4_paths() -> Value {
@@ -117,7 +116,7 @@ fn round4_paths() -> Value {
     })
 }
 
-/// Chapter 52's approvals inbox.
+/// The approvals inbox.
 fn recommendation_paths() -> Value {
     let p = |name: &str| json!({"name": name, "in": "path", "required": true, "schema": {"type": "string"}});
     json!({

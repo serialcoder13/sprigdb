@@ -133,8 +133,8 @@ impl JobHandler for QueueForwarder {
                 .await;
         }
         if cx.spec["tenant"].is_u64() {
-            // An r9fwd job (one per tenant): the cluster's job serves the
-            // tenant now.
+            // An older per-tenant job: the cluster's job serves the tenant
+            // now.
             return Ok(json!({"end": "superseded"}));
         }
         Err("spec.cluster is missing".to_owned())

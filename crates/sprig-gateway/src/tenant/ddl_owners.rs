@@ -5,7 +5,7 @@
 //! ([`sprig_catalog::ddl::DdlEngine::owner_id`]). A gateway process keeps
 //! `gateway-processes/<token>` in its DC's tier under its registration
 //! lease ([`crate::registry::PROCESS_PREFIX`]). A DDL that waits for a
-//! target another gateway's job holds asks [`GatewayOwners::gone`]: once
+//! target another gateway's job holds asks `GatewayOwners::gone`: once
 //! that process's key has gone (it stopped, crashed or restarted, so its
 //! lease ran out) and the job is older than [`MIN_AGE`], the job is
 //! resolved at once instead of after `catalog.stuck_state_minutes`.

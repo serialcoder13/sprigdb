@@ -1,4 +1,4 @@
--- ONLY_FULL_GROUP_BY and the ORDER BY rules (chapter 28, step 8): the
+-- ONLY_FULL_GROUP_BY and the ORDER BY rules: the
 -- statements the checker's unit tests were measured with on MySQL 8.4.11.
 DROP TABLE IF EXISTS c_gb_t, c_gb_s, c_gb_ins;
 CREATE TABLE c_gb_t (id INT PRIMARY KEY, a INT, b INT, c INT NOT NULL, u INT NOT NULL, n INT, UNIQUE KEY (u), UNIQUE KEY (n));

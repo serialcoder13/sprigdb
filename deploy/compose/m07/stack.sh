@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M0.7's private stack (chapters 04, 23, 37): its own etcd and MariaDB
+# The soak's private stack: its own etcd and MariaDB
 # (compose.yaml here, project sprigdb-dev-cp), one controller and two
 # gateways on the host, in data center dc-m7. Tests that change dc-scope
 # listener, TLS and gateway settings, drain gateways or run load use it, so

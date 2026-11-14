@@ -1,4 +1,4 @@
-// Editor drafts in IndexedDB (chapter 44): per tenant and user, never
+// Editor drafts in IndexedDB: per tenant and user, never
 // results or tokens, cleared at logout; only when studio.persist_drafts.
 // Any failure (private windows, blocked storage) leaves drafts in memory.
 

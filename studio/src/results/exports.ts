@@ -1,4 +1,4 @@
-// Exports (chapter 44, "Exports"): a ticket from Exports.CreateTicket, then
+// Exports: a ticket from Exports.CreateTicket, then
 // a hidden form POST /v1/exports. The browser's download manager handles any
 // size, and no ticket appears in a URL.
 

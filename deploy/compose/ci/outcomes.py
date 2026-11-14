@@ -1,6 +1,6 @@
 """Compares a client suite's outcomes on a reference server with its
 outcomes through SprigDB, for CI's heavy-suite jobs
-(.github/workflows/heavy-protocols.yml; chapter 46, "Differential testing").
+(.github/workflows/heavy-protocols.yml).
 
     outcomes.py scenarios <ref.json> <sut.json> <expected> <target> <out-dir>
     outcomes.py tests <format> <ref-raw> <sut-raw> <expected> <target> <out-dir>

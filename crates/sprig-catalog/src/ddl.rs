@@ -736,7 +736,7 @@ impl Default for DdlOpts {
     fn default() -> Self {
         Self {
             // `catalog.ddl_wait_ms`'s default: the key is registered ahead
-            // of a per-tenant read (marked unbuilt, bugfix-89's round).
+            // of a per-tenant read (marked unbuilt).
             ddl_wait: Duration::from_millis(10_000),
             poll: Duration::from_millis(50),
             // Four reads over 3.5 s (waits of 0.5, 1 and 2 s): a dropped

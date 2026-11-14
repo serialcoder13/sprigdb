@@ -1,5 +1,5 @@
 # A development gateway next to the controller of sprigdb.dev.toml, in the
-# same DC and on the same etcd (milestone M0.2). gateway-dev.sh runs both:
+# same DC and on the same etcd. gateway-dev.sh runs both:
 #
 #   deploy/compose/gateway-dev.sh up
 #
@@ -8,9 +8,9 @@
 #   cargo run -p sprigdb -- --config deploy/compose/sprigdb.gateway.dev.toml gateway
 #
 # The listeners aren't configured here: their addresses, TLS modes and
-# certificate bundle are live settings in etcd (chapter 04), which
-# gateway-dev.sh writes (13306 and 13307, decision D6). Without them the
-# gateway would try 3306 and 3307 with TLS required and no certificate.
+# certificate bundle are live settings in etcd, which gateway-dev.sh
+# writes (13306 and 13307). Without them the gateway would try 3306 and 3307
+# with TLS required and no certificate.
 #
 # Development only: plain-text etcd, no [tls].
 
@@ -24,8 +24,8 @@ global_seeds = []
 deployment_id = "sprigdb-dev"
 
 [gateway]
-# Where logins come from (M0.3): "catalog" (tenants acme and globex, users
-# acme.app and globex.app, logical names) or "accounts_file" (M0.2's interim
+# Where logins come from: "catalog" (tenants acme and globex, users
+# acme.app and globex.app, logical names) or "accounts_file" (the fixed
 # logins app, app_repl and app_galera on the raw clusters, names unchanged).
 # gateway-dev.sh sets SPRIGDB_GATEWAY_LOGIN_MODE from SPRIG_GATEWAY_LOGIN_MODE.
 login_mode = "catalog"
@@ -38,9 +38,9 @@ advertise_addr = "127.0.0.1"
 # root, or set SPRIGDB_GATEWAY_* to absolute paths.
 # accounts_file mode: the logins.
 accounts_file = "deploy/compose/gateway-accounts.dev.toml"
-# catalog mode: the backend account tenant sessions use (interim, chapter 14).
+# catalog mode: the backend account tenant sessions use.
 backends_file = "deploy/compose/gateway-backends.dev.toml"
-# Chapter 12's sealed parameter samples: the development master secret.
+# Sealed parameter samples: the development master secret.
 workload_key_file = "deploy/compose/workload-keys.dev"
 
 [telemetry]

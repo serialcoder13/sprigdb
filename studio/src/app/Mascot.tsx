@@ -1,4 +1,4 @@
-// The SprigDB mascot (coral-gold colourway, decision R5): small exported
+// The SprigDB mascot (coral-gold colourway): small exported
 // copies in public/mascot at 48, 96, 220 and 440 px; the browser picks one.
 
 export type Pose =

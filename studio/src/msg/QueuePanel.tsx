@@ -1,10 +1,9 @@
-// A queue's counts and its page (chapter 44 step 29; Studio round 6): ready,
-// unacknowledged and consumers from `sprig.mq_info` (every queue of the page
-// in one call, ST66), browsing without taking
-// (`sprig.mq_browse`), "get and requeue", purge and republish. Every call is
-// a statement run as the signed-in user, so the queue engine checks their
-// queue permissions (R9 item 89); purge and republish are shown first, with
-// what they do, before they run.
+// A queue's counts and its page: ready, unacknowledged and consumers from
+// `sprig.mq_info` (every queue of the page in one call), browsing without
+// taking (`sprig.mq_browse`), "get and requeue", purge and republish. Every
+// call is a statement run as the signed-in user, so the queue engine checks
+// their queue permissions; purge and republish are shown first, with what
+// they do, before they run.
 
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -29,7 +28,7 @@ export function useQueueInfo(db: string, queue: string, vhost: string | null) {
 }
 
 /**
- * `mq_info` for every queue of the vhost in one call (ST66), refreshed every
+ * `mq_info` for every queue of the vhost in one call, refreshed every
  * 5 s while the page shows: a map by queue name, which leaves out queues the
  * user may not read. `null` from a gateway without the batch form; the rows
  * then ask one queue each.
@@ -104,7 +103,7 @@ export function QueueDetail({
     }
   };
   // Get, then give every message back with a nack (requeue): they count as
-  // redelivered, as with RabbitMQ's management UI (decision ST45).
+  // redelivered, as with RabbitMQ's management UI.
   const peek = async () => {
     setShown({ how: 'peek', rows: null, err: null });
     const tx = await begin(db).catch(() => null);

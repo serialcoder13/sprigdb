@@ -1,4 +1,4 @@
-// The graph view (chapter 44, "Renderers"): Cytoscape.js (MIT), loaded on
+// The graph view: Cytoscape.js (MIT), loaded on
 // first use, drawing at most studio.graph_max_elements nodes plus
 // relationships. Selecting a node or relationship shows its labels and
 // properties as text; "Expand" fetches the node's neighbours with a bounded

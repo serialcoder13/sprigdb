@@ -1,5 +1,4 @@
-//! Change-topic records (chapter 45, "Change topics and envelopes"; build
-//! step 6): one feed event of the watched object becomes one record.
+//! Change-topic records: one feed event of the watched object becomes one record.
 //!
 //! ```json
 //! {"op": "u", "before": {...}, "after": {...},
@@ -16,7 +15,7 @@
 //! **As built:** SQL tables only (typed tables and hierarchies are tables
 //! here: their rows arrive as rows of their physical tables). Collections,
 //! key-value namespaces, Redis structures and graphs wait for their
-//! models' feed decoding (R5, R6, R8). `source.tenant` is the tenant id.
+//! models' feed decoding. `source.tenant` is the tenant id.
 //! `DECIMAL` values are JSON numbers (trailing zeros are lost: `49.90` is
 //! `49.9`); binary strings and spatial values are base64; temporal values
 //! are their MariaDB text.

@@ -1,6 +1,5 @@
-//! Change streams over inheritable tables (chapter 42, `ViewMapper`;
-//! decision T30): a subscriber sees the records of its own space's merged
-//! view, never the layer rows behind them.
+//! Change streams over inheritable tables: a subscriber sees the records of
+//! its own space's merged view, never the layer rows behind them.
 //!
 //! ```text
 //! map(event of table t, subscriber in space s of its tenant):
@@ -24,9 +23,8 @@
 //!     subscriber → delete; else nothing
 //! ```
 //!
-//! The emitted record is the merged one read at map time, as the chapter
-//! designs: events of one key in one batch carry its state at the end of
-//! the batch.
+//! The emitted record is the merged one read at map time, by design:
+//! events of one key in one batch carry its state at the end of the batch.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;

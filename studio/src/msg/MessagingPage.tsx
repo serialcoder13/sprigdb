@@ -1,9 +1,9 @@
-// Streams, queues, sinks and inherited messaging objects (chapter 44 steps
-// 28–31), per logical database (for queues, its virtual host). Lists come
+// Streams, queues, sinks and inherited messaging objects, per logical
+// database (for queues, its virtual host). Lists come
 // from the statements a SQL client runs (SHOW STREAMS, SHOW SINKS, SHOW
 // SINK STATUS, SHOW INHERITED ...), so the gateway shows only what the
 // user may read; consumer groups with lag, the queue topology and sink
-// dead letters come from the round's small REST routes. Every change is a
+// dead letters come from small REST routes. Every change is a
 // statement shown before it runs.
 
 import { lazy, Suspense, useState } from 'react';
@@ -43,7 +43,7 @@ export interface Table {
 export async function table(db: string | null, sql: string): Promise<Table> {
   const r = await rowsOf(db, sql);
   // Binary columns (a stream's key and value) arrive as base64: shown as
-  // text when they are UTF-8, else as hex (chapter 44, "Bodies").
+  // text when they are UTF-8, else as hex.
   const bin = r.columns.map((c) => !!c.binary);
   return { columns: r.columns.map((c) => c.name), rows: r.rows.map((row) => row.map((v, i) => (bin[i] ? binaryText(v) : v))) };
 }
@@ -91,9 +91,9 @@ export function Generic({ t, testid, onPick, pickLabel }: Readonly<{ t: Table; t
 }
 
 /** Runs a statement after showing it; `shown` is the text on screen when it
- * differs (credential values masked, round 5). `runTable` (round 6) also
- * shows a warning in the dialog and returns the statement's first result,
- * whose first row is the outcome line (`purged`, `moved`, ...). */
+ * differs (credential values masked). `runTable` also shows a warning in
+ * the dialog and returns the statement's first result, whose first row is
+ * the outcome line (`purged`, `moved`, ...). */
 export function useStatement(db: string) {
   const [c, setC] = useState<{ sql: string; note?: string; resolve: (ok: boolean) => void } | null>(null);
   const [msg, setMsg] = useState<{ text: string; error: boolean } | null>(null);
@@ -393,10 +393,10 @@ function Queues({ db }: Readonly<{ db: string }>) {
   const [pub, setPub] = useState({ exchange: '', key: '', body: '{"test": true}' });
   const [open, setOpen] = useState<string | null>(null);
   const t = topo.data;
-  // The database is its own vhost; gateways before round 6 sent null
+  // The database is its own vhost; older gateways sent null
   // when the vhost had no mq_vhosts row, even with queues.
   const vhost = t ? (t.vhost ?? (t.exchanges.length || t.queues.length ? db : null)) : null;
-  // Every queue's counts in one call (ST66).
+  // Every queue's counts in one call.
   const all = useAllQueueInfo(db, vhost);
   return (
     <div className="stack">

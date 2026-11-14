@@ -1,5 +1,5 @@
-//! The sequencer job and what it needs around the [`Sequencer`] (chapter
-//! 45, "Sequencing and offsets", "Retention and compaction").
+//! The sequencer job and what it needs around the [`Sequencer`]
+//! (sequencing, offsets, retention and compaction).
 //!
 //! ```text
 //! CREATE STREAM (gateway) → feed subscription stream:<id>, kind `stream`
@@ -8,7 +8,7 @@
 //! worker: run_job:
 //!   load the stream's row; gone or dropping → end
 //!   Sequencer over a MariaLog on the tenant's cluster now, its feed a
-//!     TenantTail that keeps the stream's outbox (chapter 38's filter rule 1
+//!     TenantTail that keeps the stream's outbox (the feed's default filter
 //!     would drop __sprig_ tables)
 //!   every second: progress (the job runtime's lease: a lost job is cancelled)
 //!   every minute: retention and compaction (crate::retention), with the
@@ -338,7 +338,7 @@ pub trait JobEnv: Send + Sync {
     }
 }
 
-/// Where a job reports progress (chapter 23's job runtime).
+/// Where a job reports progress (the job runtime).
 #[async_trait::async_trait]
 pub trait Report: Send + Sync {
     /// Reports progress; `false` when the job was lost.
@@ -472,14 +472,14 @@ pub async fn run_job(
                 });
                 // Lag per instance stays in the progress record (`lag_ms`);
                 // the gauges are this worker's worst lag and the count over
-                // the threshold (decision r9-132).
+                // the threshold.
                 lag::export(false);
                 if !report.progress(p).await {
                     stop.cancel();
                 }
                 // DROP STREAM removes the subscription first: stop at once,
-                // so the job's slot is free within a second (r9triggers;
-                // the catalog check below runs only every minute).
+                // so the job's slot is free within a second (the catalog
+                // check below runs only every minute).
                 if subscription_gone(&subs, tenant, id).await {
                     tracing::info!(stream = id.0, "stream's subscription dropped; its sequencer stops");
                     stop.cancel();
@@ -514,8 +514,8 @@ pub async fn run_job(
     })
 }
 
-/// The lag of this worker's stream sequencers as bounded series (R9,
-/// feedcancel; decision r9-132, replacing r9feed's gauge per instance):
+/// The lag of this worker's stream sequencers as bounded series (they
+/// replace an earlier gauge per instance):
 ///
 /// - `sprig_stream_sequencer_lag_max_seconds`: the worst lag of the
 ///   sequencers running here (0 with none);
@@ -630,7 +630,7 @@ pub mod lag {
 }
 
 /// Each running sequencer's lag (`lag_ms` in its job's progress record,
-/// chapter 45's "Lag per instance"), for `SHOW STREAMS` (R9, r9feed2).
+/// the lag per instance), for `SHOW STREAMS`.
 ///
 /// The DC's jobs are listed at most once a second per process, whatever
 /// the number of sessions asking: a job's progress changes once a second

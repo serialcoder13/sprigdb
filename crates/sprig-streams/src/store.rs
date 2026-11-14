@@ -1,14 +1,13 @@
-//! The `streams` catalog module (chapter 45, "Catalog tables"; build step
-//! 2): `streams`, `stream_groups` and `stream_offsets` in `t<tenant>_sprig`,
-//! their migration, the snapshot loader ([`StreamsExtension`]) and the
-//! writes stream DDL makes.
+//! The `streams` catalog module: `streams`, `stream_groups` and
+//! `stream_offsets` in `t<tenant>_sprig`, their migration, the snapshot
+//! loader ([`StreamsExtension`]) and the writes stream DDL makes.
 //!
 //! Every stream DDL commits its row in one versioned catalog change, and
 //! every gateway's snapshot reloads `streams` whole (it is small). A
 //! catalog bootstrapped before the module has no tables; the first stream
 //! DDL migrates it ([`migrate`]).
 //!
-//! **As built, against the book:** `streams` has three more columns:
+//! **Extra columns.** Besides its core columns, `streams` has
 //! `source_name` (a change topic's table, for its envelope),
 //! `outbox_shards` and `log_shards` (the shard schemas of the outbox and the
 //! log, as `[{"group":g,"shard":s,"partitions":[...]}]`), and
@@ -36,7 +35,7 @@ use crate::model::{
 /// The module name.
 pub const MODULE: &str = "streams";
 
-/// `streams` (chapter 45, with the columns of the module docs).
+/// `streams` (with the columns of the module docs).
 pub const DDL_STREAMS: &str = "CREATE TABLE IF NOT EXISTS streams (
   stream_id         BIGINT UNSIGNED NOT NULL,
   db_id             INT UNSIGNED NOT NULL,
@@ -59,7 +58,7 @@ pub const DDL_STREAMS: &str = "CREATE TABLE IF NOT EXISTS streams (
   UNIQUE KEY uk_stream_name (db_id, name)
 ) ENGINE=InnoDB";
 
-/// `stream_groups` (chapter 45): the durable part of consumer groups.
+/// `stream_groups`: the durable part of consumer groups.
 pub const DDL_STREAM_GROUPS: &str = "CREATE TABLE IF NOT EXISTS stream_groups (
   group_name        VARCHAR(255) NOT NULL,
   protocol_type     VARCHAR(64) NOT NULL,
@@ -69,7 +68,7 @@ pub const DDL_STREAM_GROUPS: &str = "CREATE TABLE IF NOT EXISTS stream_groups (
   PRIMARY KEY (group_name)
 ) ENGINE=InnoDB";
 
-/// `stream_offsets` (chapter 45): committed offsets.
+/// `stream_offsets`: committed offsets.
 pub const DDL_STREAM_OFFSETS: &str = "CREATE TABLE IF NOT EXISTS stream_offsets (
   group_name        VARCHAR(255) NOT NULL,
   stream_id         BIGINT UNSIGNED NOT NULL,
@@ -81,7 +80,7 @@ pub const DDL_STREAM_OFFSETS: &str = "CREATE TABLE IF NOT EXISTS stream_offsets 
   PRIMARY KEY (group_name, stream_id, partition_no)
 ) ENGINE=InnoDB";
 
-/// `stream_offsets.instance_tenant_id` (chapter 45, R9 fan-in): the member
+/// `stream_offsets.instance_tenant_id` (fan-in): the member
 /// whose instance a fan-in reader's position is on; 0 for the tenant's own
 /// streams. Running it again rebuilds the same key.
 pub const ALTER_STREAM_OFFSETS_INSTANCE: &str = "ALTER TABLE stream_offsets \
@@ -89,7 +88,7 @@ pub const ALTER_STREAM_OFFSETS_INSTANCE: &str = "ALTER TABLE stream_offsets \
   DROP PRIMARY KEY, \
   ADD PRIMARY KEY (group_name, instance_tenant_id, stream_id, partition_no)";
 
-/// `stream_fanin_topics` (chapter 45, R9, r9queue): the ids under which a
+/// `stream_fanin_topics`: the ids under which a
 /// fan-in reader sees its members' instances as Kafka topics. A topic's
 /// stream id is bit 62 plus `fanin_id`, so any 64-bit tenant id and stream
 /// id work (the earlier packing of both into the id capped tenant ids at
@@ -277,7 +276,7 @@ fn def_of(r: &Row) -> Result<StreamDef> {
 pub struct CommittedOffset {
     /// The consumer group.
     pub group: String,
-    /// The member whose instance `stream` is (fan-in, R9); 0 for the
+    /// The member whose instance `stream` is (fan-in); 0 for the
     /// tenant's own stream.
     pub instance_tenant: u64,
     /// The stream (in `instance_tenant`'s id space when that isn't 0).
@@ -326,7 +325,7 @@ impl GroupRowState {
 }
 
 /// A consumer group's durable part (`stream_groups`): membership lives in
-/// its coordinator's memory (chapter 45, "Consumer groups").
+/// its coordinator's memory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupRow {
     /// The group id.
@@ -816,9 +815,9 @@ mod tests {
     fn module_is_well_formed() {
         Migrator::new(&[STREAMS_MODULE]).unwrap();
         assert_eq!(STREAMS_MODULE.newest(), 3);
-        // Migration 2 (R9 fan-in): the column and the key with it.
+        // Migration 2 (fan-in): the column and the key with it.
         assert!(STREAMS_MIGRATIONS[1].statements[0].contains("instance_tenant_id"));
-        // Migration 3 (r9queue): fan-in topic ids by lookup.
+        // Migration 3: fan-in topic ids by lookup.
         assert!(STREAMS_MIGRATIONS[2].statements[0].contains("stream_fanin_topics"));
         for ddl in STREAMS_MIGRATIONS[0].statements {
             assert!(ddl.starts_with("CREATE TABLE IF NOT EXISTS "));

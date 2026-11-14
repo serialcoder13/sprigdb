@@ -1,10 +1,10 @@
 # Rails 8.0.3 Active Record (mysql2): tests that pass on MySQL 8.4.11 and not through 3306 (tab, reason).
-# Measured 12 Nov 2026 (R4 round 5, r4five): MySQL 8.4.11 8,420 pass, 0 fail, 42 skip; gateway 8,402 / 18 / 42,
-# after the round's fix of column names like t0_r0 (decision X23). None of the 18 investigated in round 5.
-# 12 Nov 2026 (R4 round 6, r4six): MySQL 8.4.11 8,420 pass, 0 fail, 42 skip; gateway 8,416 / 4 / 42. Fourteen of the
-# eighteen now answer as on MySQL (decisions X24-X30, X33): the "text sizes" were a collation Rails dumps when it
+# Measured 12 Nov 2026 (first run): MySQL 8.4.11 8,420 pass, 0 fail, 42 skip; gateway 8,402 / 18 / 42,
+# after a fix of column names like t0_r0. None of the 18 investigated in that run.
+# 12 Nov 2026 (second run): MySQL 8.4.11 8,420 pass, 0 fail, 42 skip; gateway 8,416 / 4 / 42. Fourteen of the
+# eighteen now answer as on MySQL: the "text sizes" were a collation Rails dumps when it
 # differs from SHOW TABLE STATUS's. The four left are below.
 OptimizerHintsTest#test_optimizer_hints	EXPLAIN with a NO_RANGE_OPTIMIZATION hint: MariaDB ignores MySQL's hint, so the plan differs
 OptimizerHintsTest#test_optimizer_hints_is_sanitized	as test_optimizer_hints
-SchemaDumperTest#test_schema_dumps_index_type	a FULLTEXT index is a search index (chapter 39) and doesn't appear as an index in the dump
+SchemaDumperTest#test_schema_dumps_index_type	a FULLTEXT index is a search index and doesn't appear as an index in the dump
 ActiveRecord::ConnectionAdapters::SchemaTest#test_dump_indexes	as test_schema_dumps_index_type: one index fewer (FULLTEXT)

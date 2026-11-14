@@ -1,8 +1,7 @@
-# mysql-test-run subsets for R4 (chapter 46 step 10; chapter 48's R4 gate:
-# "mysql-test-run subsets"). One <suite>.<test> per line, chosen for what
-# the translator emulates (chapter 28). Names the package doesn't have are
-# left out of the run and listed in missing.txt (run-mtr.sh): this list was
-# written without a copy of the 8.4 tree, so the first CI run settles it.
+# mysql-test-run subsets. One <suite>.<test> per line, chosen for what the
+# translator emulates. Names the package doesn't have are left out of the
+# run and listed in missing.txt (run-mtr.sh): this list was written without
+# a copy of the 8.4 tree, so the first CI run settles it.
 
 # Grouping, ONLY_FULL_GROUP_BY with functional dependencies, rollup (steps 8, 9)
 main.group_by
@@ -20,7 +19,7 @@ main.window_functions
 main.subquery_all
 main.union
 
-# Expressions and functions (step 7)
+# Expressions and functions
 main.func_str
 main.func_math
 main.func_time
@@ -31,7 +30,7 @@ main.user_var
 json.json_functions_innodb
 json.json_table
 
-# DDL, functional and invisible indexes, SHOW CREATE TABLE (step 10)
+# DDL, functional and invisible indexes, SHOW CREATE TABLE
 main.functional_index
 main.invisible_indexes
 main.create
@@ -40,11 +39,11 @@ main.check_constraints
 main.show_check
 main.information_schema
 
-# INSERT ... ON DUPLICATE KEY UPDATE row alias, VALUES ROW, TABLE (step 7)
+# INSERT ... ON DUPLICATE KEY UPDATE row alias, VALUES ROW, TABLE
 main.insert_update
 main.table_value_constructor
 
-# EXPLAIN shapes (step 11)
+# EXPLAIN shapes
 main.explain_json_all
 main.explain_tree
 
@@ -53,11 +52,11 @@ main.locking_clause
 main.lock_multi
 main.get_lock
 
-# sql_mode and variables (step 2)
+# sql_mode and variables
 main.sql_mode
 main.variables
 
-# Stored programs (step 12)
+# Stored programs
 main.sp
 main.trigger
 main.view

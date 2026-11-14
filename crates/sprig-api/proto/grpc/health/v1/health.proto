@@ -1,5 +1,5 @@
 // The standard gRPC health service (grpc/grpc-proto, Apache-2.0), served on
-// 8080 and 8443 beside SprigDB's services (chapter 37 step 2).
+// 8080 and 8443 beside SprigDB's services.
 syntax = "proto3";
 
 package grpc.health.v1;

@@ -1,7 +1,8 @@
-# R6 (chapter 42) Hibernate check: Spring Data JPA with ddl-auto=validate
-# against an inheritable table, then writes and reads in two spaces. Built like the
-# M0.3 check (../../../m03/hibernate): the connector matrix's pom.xml from the
-# `conn` build context, so the dependency layer is shared.
+# Inheritable-table Hibernate check: Spring Data JPA with ddl-auto=validate
+# against an inheritable table, then writes and reads in two spaces. Built
+# like the tenant harness's check (../../../m03/hibernate): the connector
+# matrix's pom.xml from the `conn` build context, so the dependency layer is
+# shared.
 ARG JDK=eclipse-temurin:21.0.8_9-jdk
 ARG JRE=eclipse-temurin:21.0.8_9-jre
 FROM ${JDK} AS build

@@ -1,4 +1,4 @@
-// Chapter 52's approvals inbox end to end: the badge, filters, the item
+// The approvals inbox end to end: the badge, filters, the item
 // view with its evidence, comment, snooze, approve in a window, ignore,
 // bulk actions and the policy page; accessibility with axe-core.
 //
@@ -30,7 +30,7 @@ function answer(page: Page, values: string[]) {
 
 test.describe.serial('Approvals inbox (chapter 52)', () => {
   // Each run snoozes and ignores the items it found open, so an earlier
-  // run's (another browser's) index items are reopened first (ST65).
+  // run's (another browser's) index items are reopened first.
   test.beforeAll(async ({ request }) => {
     const token = await apiToken(request);
     const headers = { authorization: `Bearer ${token}` };

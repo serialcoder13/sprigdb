@@ -1,4 +1,4 @@
-// The one call wrapper (chapter 44, "API client and routes"): bearer token,
+// The one call wrapper: bearer token,
 // x-sprig-client, a fresh traceparent per call, one coordinated refresh and
 // retry on an expired token, errors as ApiError with their trace id.
 
@@ -106,7 +106,7 @@ export async function json<T>(path: string, opts: RequestOptions = {}): Promise<
 const etagged = new Map<string, { etag: string; body: unknown }>();
 
 /**
- * A GET whose answer carries an ETag (the Catalog service, chapter 37):
+ * A GET whose answer carries an ETag (the Catalog service):
  * sent with If-None-Match, and a 304 returns the copy kept from last time.
  */
 export async function cachedJson<T>(path: string, opts: RequestOptions = {}): Promise<T> {

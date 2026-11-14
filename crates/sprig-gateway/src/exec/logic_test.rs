@@ -324,7 +324,7 @@ impl PassSession {
             (subject.program.coerce(&subject.name, pos)?, info)
         } else {
             // KIRun's parameters, or a JavaScript validation's or
-            // trigger's (bound by name, jsbind); Lua takes `ctx`.
+            // trigger's (bound by name); Lua takes `ctx`.
             let kp = match &subject.program {
                 sprig_logic::engine::Program::Lua(_) => Vec::new(),
                 p => param_names(p),

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The persona-compat checks (connector `persona-sql`, chapter 28 R4): SQL
+# The persona-compat checks (connector `persona-sql`): SQL
 # corpora run with the `mysql` 8.4 client and compared, value for value,
 # with the output of the reference server the persona stands for (golden/
 # mysql: MySQL 8.4.11; golden/mariadb: MariaDB 11.8.9), captured with
@@ -62,7 +62,7 @@ c_roles() {
   printf 'GRANT r4c_r2 TO r4c_u1;\n' >"$WORK/regrant.sql"
   admin "$WORK/regrant.sql"
   # Always over TLS: a first plaintext login with caching_sha2_password
-  # needs the RSA exchange, which the gateway doesn't offer (chapter 05).
+  # needs the RSA exchange, which the gateway doesn't offer.
   local tls=$TLS
   TLS=required
   run_as "${PREFIX}r4c_u1" 'Sprig-dev-1!' "$(corpus roles)"
@@ -79,31 +79,30 @@ c_int_meta() {
     grep -E '^(Field +[0-9]+:|Type:|ERROR)' | paste - - | sed -E 's/Field +[0-9]+: +//; s/[[:space:]]+Type: +/ /'
 }
 c_mysql_compat() { admin "$(corpus mysql_compat)"; }
-# R4 round 3: generated NOT NULL, default collations, LATERAL, functional
-# key parts; and per-session status counters (a fresh login of its own).
+# Generated NOT NULL, default collations, LATERAL, functional key parts;
+# and per-session status counters (a fresh login of its own).
 c_mysql_ddl() { admin "$(corpus mysql_ddl)"; }
 c_session_status() { admin "$(corpus session_status)"; }
-# R4 round 4: performance_schema and sys (3306 only).
+# performance_schema and sys (3306 only).
 c_perf_schema() { admin "$(corpus perf_schema)"; }
-# R4 round 4: LATERAL and rollup inside views and stored programs; MySQL's
+# LATERAL and rollup inside views and stored programs; MySQL's
 # printing of expressions in SHOW CREATE TABLE (3306 only).
 c_mysql_stored() { admin "$(corpus mysql_stored)"; }
-# R4 round 5: JSON operators, mixed functional key parts and their
+# JSON operators, mixed functional key parts and their
 # printing, a descending index over a foreign key, lateral aggregate
 # names, stored code as written, USE performance_schema, statement
 # digests (3306 only).
 c_mysql_json_index() { admin "$(corpus mysql_json_index)"; }
-# R4 round 6: MySQL's answers to DDL that MariaDB answers differently
-# (gaps rows 67 and 78: collation names, foreign key errors, long names,
-# MyISAM's descending parts, DEFAULT (now()), escaped defaults, a column
-# of a multi-column unique index, KILL QUERY of the session's own
-# statement, stored programs' character sets; 3306 only).
+# MySQL's answers to DDL that MariaDB answers differently (collation
+# names, foreign key errors, long names, MyISAM's descending parts, DEFAULT
+# (now()), escaped defaults, a column of a multi-column unique index, KILL
+# QUERY of the session's own statement, stored programs' character sets;
+# 3306 only).
 c_mysql_ddl_answers() { admin "$(corpus mysql_ddl_answers)"; }
-# R4 round 7 (decision X36): ALTER TABLE's OK info line (-vv prints it),
-# SHOW PROCEDURE/FUNCTION STATUS's Language column (column names kept),
-# SHOW CREATE TRIGGER's backquoted head (3306 only). Times and the
-# definer (root on the reference, the tenant's user through the gateway)
-# are normalized.
+# ALTER TABLE's OK info line (-vv prints it), SHOW PROCEDURE/FUNCTION
+# STATUS's Language column (column names kept), SHOW CREATE TRIGGER's
+# backquoted head (3306 only). Times and the definer (root on the
+# reference, the tenant's user through the gateway) are normalized.
 c_mysql_show_answers() {
   base_args "$SPRIG_USER" "$SPRIG_PASSWORD"
   sed "s/@DB@/$DB/g" "$(corpus mysql_show_answers)" | mysql "${ARGS[@]}" -vv --column-names 2>&1 |
@@ -140,7 +139,7 @@ for check in $CHECKS; do
   fi
   if [[ $check == session_status && $SPRIG_PERSONA != mysql ]]; then
     # The gateway counts by MySQL's rules on both ports; MariaDB also
-    # counts SHOW STATUS as a SELECT (decisions/r4-interim.md Z4).
+    # counts SHOW STATUS as a SELECT.
     emit session_status n/a "counted by MySQL's rules on both ports"
     continue
   fi

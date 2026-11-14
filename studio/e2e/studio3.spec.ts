@@ -1,5 +1,5 @@
-// Studio round 4 end to end (chapter 44 steps 1 (ST33's QR code), 27, 22,
-// 19–20, 26, 28–31, 18), against studio3's private deployment:
+// Studio end to end (the TOTP QR code, graphs, the Redis console, the
+// MongoDB editor, logic, messaging, view as), against a private deployment:
 // STUDIO_URL=http://127.0.0.1:27080 STUDIO_SHOTS=../target/agent-studio3/screenshots pnpm e2e studio3
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
@@ -227,7 +227,7 @@ test.describe.serial('Studio round 4: MongoDB', () => {
     await shot(page, 'mongo-tree');
     // Edit Ben's score; his int64 `visits` (7) must stay int64.
     const ben = page.getByTestId('doc-1');
-    // Round 5: canonical output, so Ben's small int64 shows as int64, not int.
+    // Canonical output, so Ben's small int64 shows as int64, not int.
     await expect(ben.locator('[data-type="int64"]')).toHaveCount(1);
     await ben.getByRole('button', { name: 'Edit score' }).click();
     await expect(page.getByTestId('edit-type')).toHaveValue('double');
@@ -302,7 +302,7 @@ test.describe.serial('Studio round 4: logic', () => {
     await expect(page.getByTestId('logic-active')).toHaveText('1');
     await expect(page.getByTestId('logic-modules')).toContainText('studio3_double');
     await shot(page, 'logic-js');
-    // A test run (Logic.TestRun since round 6): always rolled back.
+    // A test run (Logic.TestRun): always rolled back.
     await page.getByTestId('logic-tab-test').click();
     await page.getByTestId('logic-arg-a').fill('21');
     await page.getByTestId('logic-test-run').click();

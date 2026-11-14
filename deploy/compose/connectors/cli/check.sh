@@ -258,7 +258,7 @@ c_conn_attrs() {
   echo "_client_name=$out"
 }
 
-# --- chapter 05 matrix items --------------------------------------------------
+# --- protocol feature checks --------------------------------------------------
 
 PERSONA=${SPRIG_PERSONA:-mariadb}
 INFILE_ROWS='1=héllo 🌱|2=quoted, comma|3=NULL'

@@ -28,9 +28,8 @@ use sprig_settings::registry::{MARKED, Mark};
 
 /// Listed keys nothing reads in a way the scan sees. Keys registered ahead
 /// of their code aren't listed here: they are marked `Unbuilt` in
-/// `sprig_settings::registry::MARKED` (bugfix-89's round, smallfix), which
-/// hides them from the listings, and the test checks that nothing reads
-/// them.
+/// `sprig_settings::registry::MARKED`, which hides them from the listings,
+/// and the test checks that nothing reads them.
 const KNOWN_UNREAD: &[(&str, &str)] = &[(
     "sink.kafka.offsets_topic",
     "read only through the sink.* option merge, by key",
@@ -39,8 +38,7 @@ const KNOWN_UNREAD: &[(&str, &str)] = &[(
 /// Keys tenants may set whose reading files show no tenant context, each
 /// read per tenant in a way the scan can't see. Real gaps (read at dc and
 /// global only, so a tenant's value does nothing) aren't allowed here: the
-/// declaration is narrowed or the read made per tenant (bugfix-89's round,
-/// smallfix); the test fails on an entry that doesn't start "not a gap".
+/// declaration is narrowed or the read made per tenant; the test fails on an entry that doesn't start "not a gap".
 const KNOWN_TENANT_GAPS: &[(&str, &str)] = &[
     (
         "sink.auto_resume",

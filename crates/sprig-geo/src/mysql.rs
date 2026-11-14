@@ -1,5 +1,5 @@
-//! MySQL 8.4's geographic computations on SRID 4326 (chapter 36, "MySQL
-//! persona rewrite"; R4).
+//! MySQL 8.4's geographic computations on SRID 4326, for the MySQL
+//! persona's rewrites.
 //!
 //! MySQL computes `ST_Distance` between two geographic points with
 //! Boost.Geometry's Andoyer inverse formula on the WGS 84 ellipsoid, and
@@ -186,8 +186,7 @@ pub fn swap_wkt(wkt: &str) -> Option<String> {
 /// Degrees of latitude and longitude around `(lat, lon)` that hold every
 /// point within `r` metres: `(min_lat, min_lon, max_lat, max_lon)`, or
 /// `None` when the box would cross a pole or ±180° (the caller then
-/// filters nothing). The constants err on the large side (chapter 36,
-/// "Geodesic bounding box").
+/// filters nothing). The constants err on the large side.
 #[must_use]
 pub fn grow(lat: f64, lon: f64, r: f64) -> Option<(f64, f64, f64, f64)> {
     let dlat = r / 110_574.0 + 1e-9;

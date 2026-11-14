@@ -199,7 +199,7 @@ mod tests {
         )
     }
 
-    /// A fan-in sink's owner (smallfix, the lead's item): it pauses when
+    /// A fan-in sink's owner: it pauses when
     /// the owner loses `SPRIG_FAN_IN` or `SELECT` on the definition's name,
     /// as other sinks pause on `SELECT`.
     #[test]

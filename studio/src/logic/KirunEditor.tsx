@@ -3,7 +3,7 @@
 // form, inside Studio's layout and theme. The repository is KIRun's own
 // functions plus signatures of SprigDB's (Sprig.Db.*, Sprig.Http.Fetch,
 // Sprig.Mq.*), so the editor validates and completes them; they run only in
-// the gateway (chapter 41).
+// the gateway.
 
 import { useEffect, useMemo, useState } from 'react';
 import { KIRunEditor } from '@fincity/kirun-ui';

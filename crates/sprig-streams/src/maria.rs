@@ -1,6 +1,6 @@
 //! The stream log in MariaDB: [`MariaLog`], the [`LogStore`] of one
-//! (stream, log shard) on the shard's cluster (chapter 45, "Sequencing and
-//! offsets").
+//! (stream, log shard) on the shard's cluster (sequencing and
+//! offsets).
 //!
 //! ```text
 //! acquire: BEGIN; SELECT ... FROM __sprig_sl_ckpt WHERE stream_id = s FOR UPDATE

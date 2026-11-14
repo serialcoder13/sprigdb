@@ -542,7 +542,7 @@ impl Shared {
 
 /// A per-tenant delivery quota: a token bucket in bytes. `per_sec` is the
 /// tenant's budget across every worker (`sink.tenant_bytes_per_sec`); the
-/// bucket fills at this worker's share of it, which [`share_quotas`] sets
+/// bucket fills at this worker's share of it, which `share_quotas` sets
 /// from what each worker asked for in the last window.
 #[derive(Debug)]
 pub struct Quota {

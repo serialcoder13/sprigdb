@@ -1,7 +1,6 @@
-// Decodes a Sql.Query NDJSON stream off the main thread (chapter 44, "API
-// client and routes": streams are decoded in a Web Worker). The main thread
-// sends {type: 'start', url, headers, body}; the worker posts header, rows,
-// end, error and done messages, and stops on {type: 'cancel'} (the gateway
+// Decodes a Sql.Query NDJSON stream off the main thread, in a Web Worker.
+// The main thread sends {type: 'start', url, headers, body}; the worker posts
+// header, rows, end, error and done messages, and stops on {type: 'cancel'} (the gateway
 // then kills the backend query).
 
 import { NdjsonDecoder } from './ndjson';

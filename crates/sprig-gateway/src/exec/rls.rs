@@ -823,8 +823,7 @@ impl PassSession {
 
     /// The session's policy predicate on table `db.table` for `cmds`, its
     /// columns qualified with `qual` and the session's values bound: the
-    /// filter on an inheritable table's merged records (chapter 29, "Data
-    /// inheritance"; decision rlsinherit). `None` when the table's policies
+    /// filter on an inheritable table's merged records. `None` when the table's policies
     /// don't bind the session (or an internal exempt session).
     ///
     /// # Errors
@@ -1151,8 +1150,8 @@ impl PassSession {
             .map_err(|_| unsupported("a statement over a protected table that isn't UTF-8"))?;
         // A statement the inheritance layer generated reads inheritable
         // tables as the layers of merged views it filtered on the merged
-        // records (chapter 29, "Data inheritance").
-        let internal = ts.types.internal;
+        // records.
+        let internal = ts.types.internal && ts.inherit.generated;
         // The resolver isn't `Send`: everything it touches ends here.
         let (inj, covered, stale, needs_checks, merged) = {
             let temp = |d: Option<&str>, n: &str| ts.is_temp(d, n);

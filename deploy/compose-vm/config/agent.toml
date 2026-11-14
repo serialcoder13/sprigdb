@@ -1,7 +1,6 @@
-# Node agent (compose.db-ha.yaml; chapter 25, "DC leases, sub-leases and
-# self-fencing"). compose sets node.dc, node.id, meta.dc_seeds,
-# meta.deployment_id, agent.cluster and agent.node through SPRIGDB_*
-# variables.
+# Node agent (compose.db-ha.yaml). compose sets node.dc, node.id,
+# meta.dc_seeds, meta.deployment_id, agent.cluster and agent.node through
+# SPRIGDB_* variables.
 
 [node]
 dc = "dc1"

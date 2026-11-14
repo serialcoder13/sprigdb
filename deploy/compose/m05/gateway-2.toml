@@ -1,4 +1,4 @@
-# A second development gateway (milestone M0.5): the isolation suite's
+# A second development gateway: the isolation suite's
 # propagation check revokes a privilege through the first gateway
 # (gateway-dev.sh, 13306/13307) and times its refusal here. Same DC, same
 # etcd, same backends file; its own node id, listeners and telemetry port.

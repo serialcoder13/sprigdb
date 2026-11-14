@@ -1179,7 +1179,7 @@ pub async fn run_move_triggers(world: World) -> std::result::Result<(), String> 
 }
 
 /// [`run_move_triggers`] with the trigger's feed reading through the
-/// shared per-cluster reader (R9, r9feed2), with tiny buffers and ring:
+/// shared per-cluster reader, with tiny buffers and ring:
 /// its subscription is detached, comes back through the ring, a replay or
 /// a catch-up dump, and follows the move. Every change must still run
 /// exactly once.

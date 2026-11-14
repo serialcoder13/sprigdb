@@ -1,7 +1,6 @@
-//! Regions of SprigDB's own APIs (chapter 36, "Semantics per front end":
-//! key-value, vectors, analytics, REST): WGS 84 distances by Karney's
-//! method, great-circle polygon edges, S2 coverings for the `_sprig_s2`
-//! index.
+//! Regions of SprigDB's own APIs (key-value, vectors, analytics, REST):
+//! WGS 84 distances by Karney's method, great-circle polygon edges, S2
+//! coverings for the `_sprig_s2` index.
 //!
 //! ```text
 //! query(region):
@@ -17,7 +16,7 @@ use geographiclib_rs::{Geodesic, InverseGeodesic};
 
 use crate::s2::{self, Cap, Point};
 
-/// Metres per radian used for caps around ellipsoidal circles (chapter 36).
+/// Metres per radian used for caps around ellipsoidal circles.
 pub const CAP_EARTH_RADIUS_M: f64 = 6_335_000.0;
 /// `geo.s2_index_min_level`.
 pub const QUERY_MIN_LEVEL: u8 = 4;
@@ -275,7 +274,7 @@ mod tests {
         // -73.8) to LHR (51.6, -0.5) is 5,551,759.400319 m on WGS 84.
         let d = distance_m(40.6, -73.8, 51.6, -0.5);
         assert!((d - 5_551_759.400).abs() < 0.01, "{d}");
-        // MySQL's documented ST_Distance example in exact form (chapter 36):
+        // MySQL's documented ST_Distance example in exact form:
         // POINT(1 1) to POINT(2 2) is 156,876.149 m by Karney.
         let d = distance_m(1.0, 1.0, 2.0, 2.0);
         assert!((d - 156_876.149).abs() < 0.01, "{d}");

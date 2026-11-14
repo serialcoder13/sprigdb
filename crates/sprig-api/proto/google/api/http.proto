@@ -1,6 +1,6 @@
 // The subset of googleapis' google/api/http.proto that SprigDB's protos use:
-// the HttpRule that maps an RPC to a REST route (chapter 37, "REST
-// transcoding"). Field numbers match the original (Apache-2.0, Google LLC),
+// the HttpRule that maps an RPC to a REST route, for REST transcoding.
+// Field numbers match the original (Apache-2.0, Google LLC),
 // so standard tooling reads these annotations unchanged.
 syntax = "proto3";
 

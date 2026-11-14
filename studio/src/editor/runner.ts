@@ -1,9 +1,9 @@
-// Running statements (chapter 44, "Results: streaming, caps, cursors,
-// exports"): one stream per statement, results into capped buffers, cancel
-// on a full buffer, on the user's Cancel, or at studio.statement_timeout_ms.
+// Running statements: one stream per statement, results into capped
+// buffers, cancel on a full buffer, on the user's Cancel, or at
+// studio.statement_timeout_ms.
 // The caps and the timeout also go to the gateway, which clamps them to the
-// studio.* settings and stops the statement itself (decision ST8): a
-// result it cut ends with `truncated`, a statement past its time with 3024.
+// studio.* settings and stops the statement itself: a result it cut ends
+// with `truncated`, a statement past its time with 3024.
 
 import { query, type QueryLanguage } from '../api/sql';
 import { ResultBuffer } from '../results/buffer';

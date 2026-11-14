@@ -1,5 +1,5 @@
 # A TCP load balancer in front of the gateways (RUNBOOK.md, "Load
-# balancer"; hardening round 3): Envoy (Apache-2.0), on its own small VM or
+# balancer"): Envoy (Apache-2.0), on its own small VM or
 # on each VM behind a floating address. One listener per client port; each
 # forwards connections to the gateways whose readiness endpoint answers 200
 # (GET /readyz on their telemetry port, every second). A gateway that is

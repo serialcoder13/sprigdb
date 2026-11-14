@@ -274,8 +274,8 @@ impl SqlSession {
         self.exec.row_policy_docs()
     }
 
-    /// Whether the session holds `action` on the whole tenant (M5:
-    /// `$currentOp`'s `allUsers` needs `PROCESS`); `None` when it can't
+    /// Whether the session holds `action` on the whole tenant
+    /// (`$currentOp`'s `allUsers` needs `PROCESS`); `None` when it can't
     /// tell.
     #[must_use]
     pub fn holds_tenant_privilege(&self, action: sprig_auth::authz::Action) -> Option<bool> {

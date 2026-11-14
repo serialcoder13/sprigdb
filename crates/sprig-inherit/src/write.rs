@@ -119,7 +119,7 @@ fn view(r: &Resolved, chain: &Chain, keys: Option<Vec<String>>) -> String {
 }
 
 /// [`view`] (every record), filtered by the session's policies for `cmd`
-/// when it merges ([`crate::rewrite::filtered`]).
+/// ([`crate::rewrite::filtered`]).
 async fn filtered_view(
     ctx: &Ctx<'_>,
     r: &mut dyn Runner,
@@ -127,19 +127,15 @@ async fn filtered_view(
     chain: &Chain,
     cmd: RowCmd,
 ) -> Result<String> {
-    let v = view(res, chain, None);
-    let merges = ViewSql {
+    let vs = ViewSql {
         o: &res.obj,
         layer: res.layer.clone(),
         keys: None,
         origin: false,
         derived: res.derived.clone(),
-    }
-    .merges(chain);
-    if !merges {
-        return Ok(v);
-    }
-    crate::rewrite::filtered(ctx, r, res, v, cmd).await
+    };
+    let v = vs.view(chain);
+    crate::rewrite::filtered(ctx, r, res, v, &vs.output_columns(), cmd).await
 }
 
 fn unknown_column(c: &str) -> SprigError {

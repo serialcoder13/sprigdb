@@ -18,7 +18,7 @@
 //! The test creates the tenant on `dc-a-c1`, gives it three tables in one
 //! database (`cust`, `ord` with a foreign key to it, `la`), sets its own
 //! `sharding.min_shards = 2`, `advisor.mode = off` and
-//! `advisor.min_ndv_per_shard = 0` (as r2harden's tenant G), waits for the
+//! `advisor.min_ndv_per_shard = 0` (as `live_r2harden_bins.rs`'s tenant G), waits for the
 //! loop's design and its split, then runs prepared and text statements on
 //! fresh connections: none may fail. It deletes the tenant at the end.
 

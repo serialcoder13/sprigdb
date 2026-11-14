@@ -1,4 +1,4 @@
-// Workspace tabs (decision R1): every page you open becomes a tab, beside the
+// Workspace tabs: every page you open becomes a tab, beside the
 // query tabs, so several things stay open side by side. Query tabs keep their
 // own store (editor/tabs.ts, with drafts); this store keeps the other pages
 // and the order of everything.

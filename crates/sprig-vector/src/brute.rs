@@ -1,5 +1,4 @@
-//! Exact distances in Rust (chapter 34, "Testing": "against brute force
-//! in Rust"): the reference for exactness and recall.
+//! Exact distances in Rust, brute force: the reference for exactness and recall.
 
 use crate::index::Metric;
 

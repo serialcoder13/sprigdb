@@ -348,7 +348,7 @@ def c_conn_attrs():
     return "%s=%s" % (want[0], attrs[want[0]])
 
 
-# --- chapter 05 matrix items --------------------------------------------------
+# --- protocol feature checks --------------------------------------------------
 
 INFILE = '1,héllo 🌱\n2,"quoted, comma"\n3,\\N\n'
 INFILE_ROWS = "1=héllo 🌱|2=quoted, comma|3=NULL"

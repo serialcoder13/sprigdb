@@ -3,7 +3,7 @@
 //! dropping. `CREATE USER` and the other account statements and
 //! `sprigctl` call these.
 //!
-//! Every call is one auth change ([`Versioner::change_with`] with
+//! Every call is one auth change (`Versioner::change_with` with
 //! [`VersionKind::Auth`]): the rows commit with a new auth version, which
 //! every gateway's cache follows. Hashing happens before the change opens,
 //! on the blocking pool, so the version row isn't held during it.

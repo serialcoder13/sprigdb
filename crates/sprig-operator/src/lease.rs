@@ -1,6 +1,5 @@
 //! The operator's leader election through a `coordination.k8s.io/v1`
-//! `Lease` (chapter 27: "the operator elects through a Lease"; two replicas,
-//! one acting).
+//! `Lease` (two replicas, one acting).
 //!
 //! ```text
 //! every pass: read Lease sprigdb-operator

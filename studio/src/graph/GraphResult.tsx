@@ -5,7 +5,7 @@ import type { ResultBuffer } from '../results/buffer';
 import { expandQuery, graphOf, merge, type GraphData } from './elements';
 import GraphView from './GraphView';
 
-/** A Cypher or GQL result drawn as a graph, with "expand" (chapter 44 step 27). */
+/** A Cypher or GQL result drawn as a graph, with "expand". */
 export default function GraphResult({
   buffer,
   rows,

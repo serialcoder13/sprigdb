@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Milestone M0.3's "done when" harness (chapter 48), against one endpoint:
+# The tenant harness, against one endpoint:
 #
 #   run.sh <host> <port> <persona> <tenantA-user> <tenantB-user> <password>
 #

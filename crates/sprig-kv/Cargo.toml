@@ -14,7 +14,7 @@ getrandom.workspace = true
 sprig-common.workspace = true
 # Routing hashes: the same xxh3_64 over normalized bytes as every table.
 sprig-shard.workspace = true
-# Key locations and GeoSearch: S2 cells and WGS 84 distances (chapter 36).
+# Key locations and GeoSearch: S2 cells and WGS 84 distances.
 sprig-geo = { path = "../sprig-geo" }
 
 [lints]

@@ -1,1 +1,1 @@
-# Flyway 11.14.1 and Liquibase 4.33.0 steps: none differ (R4 round 4, 11 / 0 / 0 on both).
+# Flyway 11.14.1 and Liquibase 4.33.0 steps: none differ (11 / 0 / 0 on both).

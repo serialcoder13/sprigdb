@@ -23,7 +23,7 @@ export interface GridProps {
 const ROW_H = 26;
 
 /**
- * The results grid (chapter 44, "Renderers"): virtualized rows, the ARIA
+ * The results grid: virtualized rows, the ARIA
  * grid pattern with aria-rowcount and aria-rowindex, arrow-key navigation,
  * values rendered as text only.
  */

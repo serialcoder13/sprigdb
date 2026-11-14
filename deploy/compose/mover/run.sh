@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The mover's live gateway test bed (milestone M0.6): a second gateway in
+# The mover's live gateway test bed: a second gateway in
 # dc-a on 17306/17307 (gateway.toml) and the tenant `moversb` with the user
 # app, made through the running controller's Admin API (gateway-dev.sh up
 # must be running: it registers the clusters).

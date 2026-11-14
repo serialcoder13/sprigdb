@@ -1,5 +1,4 @@
-// Operator mode's data (chapter 44 step 17): the Admin API's replies
-// through /v1/ops/ (decision ST35).
+// Operator mode's data: the Admin API's replies through /v1/ops/.
 
 export interface OpsCluster {
   cluster_id: string;
@@ -67,8 +66,7 @@ export function fmtMs(ms: number | null | undefined): string {
 
 /**
  * A destructive or operator action: the operator types the target's name,
- * then a reason (chapter 44: "Destructive actions ask for the target's
- * name and a reason, which the audit records"). Null when abandoned.
+ * then a reason, both of which the audit records. Null when abandoned.
  */
 export function confirmTyped(target: string, action: string, ask: (q: string) => string | null = (q) => window.prompt(q)): string | null {
   const typed = ask(`${action}: type ${target} to confirm`);
@@ -77,7 +75,7 @@ export function confirmTyped(target: string, action: string, ask: (q: string) =>
   return reason ? reason : null;
 }
 
-// ---- Named operators (chapter 14, "Operators") ----
+// ---- Named operators ----
 // Studio signs the operator in through /v1/ops:login and keeps the
 // session token for this tab only (sessionStorage); every /v1/ops/ call
 // carries it as x-sprig-operator, and the controller checks the person's
@@ -138,7 +136,7 @@ export function operatorHeaders(s: OperatorSession | null = operatorSession()): 
 
 /** Whether this tab is in the older operator mode (a Studio login listed
  * in `studio.operator_logins`, using the gateway's token), which is
- * deprecated in favour of named operators (decision ST73): the login has
+ * deprecated in favour of named operators: the login has
  * the platform role and no named operator is signed in. */
 export function legacyOperatorMode(platformRoles: readonly string[] | undefined, s: OperatorSession | null): boolean {
   return !s && (platformRoles ?? []).includes('operator');

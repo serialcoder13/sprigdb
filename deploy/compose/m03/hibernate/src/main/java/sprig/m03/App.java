@@ -1,9 +1,9 @@
-// M0.3 schema-tool suite, Hibernate part (../../../../../../README.md).
+// Tenant harness schema-tool suite, Hibernate part (../../../../../../README.md).
 //
 // Spring Data JPA with ddl-auto=validate against the schema Flyway created
 // for one tenant (crm.customers, shop.products, shop.orders and the view
 // shop.order_totals), then reads and writes through it. Run once per
-// tenant; prints one JSON line per check on stdout, in the M0.3 format:
+// tenant; prints one JSON line per check on stdout, in the harness's format:
 //
 //   {"suite":"hibernate","tenant":"acme_app","connector":"hibernate-mariadb",
 //    "check":"schema_validate","status":"pass","detail":"...","ms":812.0}

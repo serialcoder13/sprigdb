@@ -3,19 +3,19 @@
 # (summarize.py). Test ids are pytest's junit classname.name. The suite
 # runs its backend tests only (`-m backend`) through PyMySQL.
 
-# Through the gateway's MySQL port (r4two, 10 November 2026, SPRIG_CLIENTS_PATHS=test/dialect:
+# Through the gateway's MySQL port (10 November 2026, SPRIG_CLIENTS_PATHS=test/dialect:
 # 1,531 pass / 14 fail / 9,726 skip of 11,271; MySQL 8.4.11: 1,545 / 0 / 9,726).
-gateway-mysql flaky test.dialect.mysql.test_query.ComputedTest_*.test_column_computed_for_nullable?False? :: built in R4 round 3 (r4three), expected to pass; not rerun here (CI runs it): was gaps row 49: NULL / NOT NULL on a generated column is a 1064 on MariaDB
-gateway-mysql flaky test.dialect.mysql.test_query.ComputedTest_*.test_column_computed_for_nullable?None? :: built in R4 round 3 (r4three), expected to pass; not rerun here (CI runs it): was gaps row 49: NULL / NOT NULL on a generated column is a 1064 on MariaDB
-gateway-mysql flaky test.dialect.mysql.test_reflection.ReflectionTest_*.test_nullable_reflection?ddl_columns6-expected_reflected6-_exclusions_06? :: built in R4 round 3 (r4three), expected to pass; not rerun here (CI runs it): was gaps row 49: this case declares a generated column NOT NULL (1064)
-gateway-mysql fail test.dialect.mysql.test_reflection.ReflectionTest_*.test_reflect_fulltext_comment :: FULLTEXT ... WITH PARSER ngram: MariaDB has no ngram parser (1128); chapter 28 hands it to search in R5
-gateway-mysql fail test.dialect.mysql.test_reflection.ReflectionTest_*.test_reflection_with_subpartition_options :: SHOW CREATE TABLE prints MariaDB's partition clauses (chapter 28 step 10's renderer isn't built)
-gateway-mysql fail test.dialect.mysql.test_reflection.ReflectionTest_*.test_reflection_with_subpartition_options_two :: SHOW CREATE TABLE prints MariaDB's partition clauses (chapter 28 step 10's renderer isn't built)
-gateway-mysql fail test.dialect.test_suite.ComponentReflectionTestExtra_*.test_get_foreign_key_options?None-None-RESTRICT-_exclusions_04? :: gaps row 6 (decided): an explicit RESTRICT reads NO ACTION, since MariaDB stores both alike
-gateway-mysql fail test.dialect.test_suite.ComponentReflectionTestExtra_*.test_get_foreign_key_options?None-RESTRICT-None-_exclusions_05? :: gaps row 6 (decided): an explicit RESTRICT reads NO ACTION, since MariaDB stores both alike
-gateway-mysql fail test.dialect.test_suite.HasTableTest_*.test_has_table_temp_table :: a TEMPORARY table isn't in the gateway's information_schema views; to fix with chapter 28's providers
+gateway-mysql flaky test.dialect.mysql.test_query.ComputedTest_*.test_column_computed_for_nullable?False? :: fixed since, expected to pass; not rerun here (CI runs it): was: NULL / NOT NULL on a generated column is a 1064 on MariaDB
+gateway-mysql flaky test.dialect.mysql.test_query.ComputedTest_*.test_column_computed_for_nullable?None? :: fixed since, expected to pass; not rerun here (CI runs it): was: NULL / NOT NULL on a generated column is a 1064 on MariaDB
+gateway-mysql flaky test.dialect.mysql.test_reflection.ReflectionTest_*.test_nullable_reflection?ddl_columns6-expected_reflected6-_exclusions_06? :: fixed since, expected to pass; not rerun here (CI runs it): was: this case declares a generated column NOT NULL (1064)
+gateway-mysql fail test.dialect.mysql.test_reflection.ReflectionTest_*.test_reflect_fulltext_comment :: FULLTEXT ... WITH PARSER ngram: MariaDB has no ngram parser (1128); to be handed to search indexes
+gateway-mysql fail test.dialect.mysql.test_reflection.ReflectionTest_*.test_reflection_with_subpartition_options :: SHOW CREATE TABLE prints MariaDB's partition clauses (the gateway doesn't render MySQL's partition clauses yet)
+gateway-mysql fail test.dialect.mysql.test_reflection.ReflectionTest_*.test_reflection_with_subpartition_options_two :: SHOW CREATE TABLE prints MariaDB's partition clauses (the gateway doesn't render MySQL's partition clauses yet)
+gateway-mysql fail test.dialect.test_suite.ComponentReflectionTestExtra_*.test_get_foreign_key_options?None-None-RESTRICT-_exclusions_04? :: decided: an explicit RESTRICT reads NO ACTION, since MariaDB stores both alike
+gateway-mysql fail test.dialect.test_suite.ComponentReflectionTestExtra_*.test_get_foreign_key_options?None-RESTRICT-None-_exclusions_05? :: decided: an explicit RESTRICT reads NO ACTION, since MariaDB stores both alike
+gateway-mysql fail test.dialect.test_suite.HasTableTest_*.test_has_table_temp_table :: a TEMPORARY table isn't in the gateway's information_schema views; to fix in the gateway's information_schema providers
 gateway-mysql fail test.dialect.test_suite.JSONTest_*.test_index_typed_access?_decimal1? :: MariaDB returns the exact decimal from a JSON path where MySQL loses precision; the test expects MySQL's limitation
 gateway-mysql fail test.dialect.test_suite.JSONTest_*.test_index_typed_comparison?_decimal1? :: MariaDB returns the exact decimal from a JSON path where MySQL loses precision; the test expects MySQL's limitation
 gateway-mysql fail test.dialect.test_suite.JSONTest_*.test_path_typed_comparison?_decimal1? :: MariaDB returns the exact decimal from a JSON path where MySQL loses precision; the test expects MySQL's limitation
-gateway-mysql fail test.dialect.test_suite.ReturningGuardsTest_*.test_delete_single :: decided (chapter 28, MariaDB persona): 3306 accepts MariaDB's RETURNING, MySQL refuses it
-gateway-mysql fail test.dialect.test_suite.ReturningGuardsTest_*.test_insert_single :: decided (chapter 28, MariaDB persona): 3306 accepts MariaDB's RETURNING, MySQL refuses it
+gateway-mysql fail test.dialect.test_suite.ReturningGuardsTest_*.test_delete_single :: decided: 3306 accepts MariaDB's RETURNING, MySQL refuses it
+gateway-mysql fail test.dialect.test_suite.ReturningGuardsTest_*.test_insert_single :: decided: 3306 accepts MariaDB's RETURNING, MySQL refuses it

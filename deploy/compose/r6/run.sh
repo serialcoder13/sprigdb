@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# R6 order 1 (chapter 32) through a gateway: what schema tools see of typed
-# tables and record hierarchies.
+# Typed tables through a gateway: what schema tools see of typed tables and
+# record hierarchies.
 #
 #   run.sh <host> <mysql-port> <mariadb-port> <user> <password>
 #   run.sh 127.0.0.1 33306 33307 r6-types.r6app sprig-dev-app

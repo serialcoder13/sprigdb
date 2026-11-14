@@ -6,7 +6,7 @@ import { useTabs } from '../editor/tabs';
 import { Mascot } from '../app/Mascot';
 import { useRel } from './WorkspaceTabs';
 
-/** The status bar (decision R1): connection, tenant, database and gateway,
+/** The status bar: connection, tenant, database and gateway,
  * with the mascot showing whether Studio is busy. */
 export function StatusBar() {
   const intl = useIntl();

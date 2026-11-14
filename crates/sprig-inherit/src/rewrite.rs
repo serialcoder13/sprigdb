@@ -290,7 +290,7 @@ pub(crate) fn view_of(
     r: &Resolved,
     origin: bool,
     keys: Option<Vec<String>>,
-) -> Result<(String, bool)> {
+) -> Result<(String, String)> {
     let chain = ctx.chain(&r.obj, ctx.space, &r.prefix)?;
     let v = ViewSql {
         o: &r.obj,
@@ -299,13 +299,14 @@ pub(crate) fn view_of(
         origin,
         derived: r.derived.clone(),
     };
-    Ok((v.view(&chain), v.merges(&chain)))
+    Ok((v.view(&chain), v.output_columns()))
 }
 
 /// The qualifier of a filtered merged view's rows.
 const MERGED: &str = "`__sprig_m`";
 
-/// `view` (a merged view of `res` that merges) as the session may see it:
+/// `view` (a merged view of `res`, whose columns are `columns`) as the
+/// session may see it:
 /// its records filtered by the session's row-level security policies on
 /// `res`'s table, evaluated on the merged values (chapter 29, "Data
 /// inheritance"; decision rlsinherit). Inherited rows, from a parent space,
@@ -320,6 +321,7 @@ pub(crate) async fn filtered(
     r: &mut dyn Runner,
     res: &Resolved,
     view: String,
+    columns: &str,
     cmd: RowCmd,
 ) -> Result<String> {
     let Some(p) = r
@@ -344,7 +346,9 @@ pub(crate) async fn filtered(
     } else {
         p
     };
-    Ok(format!("SELECT * FROM ({view}) AS {MERGED} WHERE ({p})"))
+    Ok(format!(
+        "SELECT {columns} FROM ({view}) AS {MERGED} WHERE ({p})"
+    ))
 }
 
 fn is_literal(e: &Expr) -> bool {
@@ -507,9 +511,9 @@ async fn replace_refs_with(
     let mut text = stmt.to_string();
     for rf in v.refs.iter().rev() {
         upstream::ensure(ctx, r, &rf.r).await?;
-        let (mut view, merges) = view_of(ctx, &rf.r, origin, pushed_keys(stmt, rf))?;
-        if filter && merges {
-            view = filtered(ctx, r, &rf.r, view, RowCmd::Select).await?;
+        let (mut view, columns) = view_of(ctx, &rf.r, origin, pushed_keys(stmt, rf))?;
+        if filter {
+            view = filtered(ctx, r, &rf.r, view, &columns, RowCmd::Select).await?;
         }
         text = text.replace(&rf.placeholder, &format!("({view})"));
     }

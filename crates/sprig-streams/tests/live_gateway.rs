@@ -1,8 +1,8 @@
-//! Chapter 45's core live, through a gateway (R9): streams created with
+//! The streams core live, through a gateway: streams created with
 //! SQL, publishing inside transactions (some rolled back), a change topic
 //! on the same table, records read back in order with `SELECT ... FROM
 //! <stream>`, while a script moves the tenant between clusters and kills
-//! the worker running the sequencer (`run.sh` of r9streams' notes drives
+//! the worker running the sequencer (an external run script drives
 //! both). And the throughput of one partition and of several.
 //!
 //! ```text
@@ -178,7 +178,7 @@ async fn count(c: &mut Conn, stream: &str) -> u64 {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "live: needs r9streams' private deployment"]
+#[ignore = "live: needs a private deployment"]
 async fn publish_change_topic_and_read_back_across_a_move() {
     let writers = env_u64("SPRIG_LIVE_WRITERS", 4);
     let per = env_u64("SPRIG_LIVE_PER_WRITER", 400);
@@ -401,7 +401,7 @@ async fn publish_change_topic_and_read_back_across_a_move() {
 /// publishes (500 records per statement, autocommit), then the time until
 /// the log holds them all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-#[ignore = "live: needs r9streams' private deployment"]
+#[ignore = "live: needs a private deployment"]
 async fn throughput_per_partition() {
     let records = env_u64("SPRIG_LIVE_RECORDS", 50_000);
     let mut c = conn(None).await;

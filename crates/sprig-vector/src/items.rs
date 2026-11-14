@@ -1,7 +1,7 @@
-//! Writes to a standalone index (chapter 34, "Writes"): dimensions are
+//! Writes to a standalone index: dimensions are
 //! checked before MariaDB sees a vector (39736), `dotProduct` indexes store
 //! unit vectors (a zero vector is refused, 39737), and metadata is stored
-//! as chapter 31 stores documents (`doc` and its type map `_types`), so
+//! as the document store stores documents (`doc` and its type map `_types`), so
 //! filters use MongoDB's rules.
 
 use std::fmt::Write as _;

@@ -1,4 +1,4 @@
-// The shards view's data (chapter 44 step 15): table groups from the
+// The shards view's data: table groups from the
 // tenant's catalog with each group's map from the controller.
 
 export interface ShardRange {

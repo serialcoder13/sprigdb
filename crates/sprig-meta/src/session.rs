@@ -221,7 +221,7 @@ pub const RETRY_AFTER: Duration = Duration::from_millis(250);
 ///
 /// One keep-alive every `period`. Each may take as long as the session is
 /// still certainly alive (its deadline minus the margin): a slow etcd that
-/// answers within the TTL keeps the session (r2next). A keep-alive that
+/// answers within the TTL keeps the session. A keep-alive that
 /// fails or runs out of that time is retried after [`RETRY_AFTER`], until
 /// the deadline passes; only then is the session lost. The deadline only
 /// moves on an answer, from the time read before sending, so a lease that

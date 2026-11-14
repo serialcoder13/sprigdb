@@ -90,9 +90,8 @@ pub trait Resolver {
     }
 
     /// Whether the reference to protected table `key` under `alias` is a
-    /// layer read inside a merged view of an inheritable object (chapter
-    /// 42), whose rows the gateway filtered once, on the merged records
-    /// (chapter 29, "Data inheritance"). Such a reference gets no predicate:
+    /// layer read inside a merged view of an inheritable object,
+    /// whose rows the gateway filtered once, on the merged records. Such a reference gets no predicate:
     /// a filter on each layer row would drop overrides and hide markers and
     /// show the parent's values instead.
     fn merged_layer(&self, key: usize, alias: &str) -> bool {

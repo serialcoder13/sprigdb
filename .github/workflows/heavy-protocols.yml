@@ -1,12 +1,13 @@
 # Heavy client suites of the non-SQL protocols, too big for a laptop.
-# Nightly and on demand. Each job starts a SprigDB stack (.github/actions/sprig-stack: Compose, a release
-# gateway in catalog mode, tenant acme, login acme.app / sprig-dev-app) with
-# the protocol's listener (deploy/compose/ci/listeners.sh), starts a pinned
-# reference server, runs the suite on the reference and then through
-# SprigDB, and compares the two (deploy/compose/ci/outcomes.py): a job fails
-# only on a difference its expected file doesn't list, or on a listed one
-# that has gone away. Every download happens on the runner, every version is
-# pinned (images by tag, packages by version, repositories by tag or commit).
+# Nightly and on demand. Each job starts a SprigDB stack
+# (.github/actions/sprig-stack: Compose, a release gateway in catalog mode,
+# tenant acme, login acme.app / sprig-dev-app) with the protocol's listener
+# (deploy/compose/ci/listeners.sh), starts a pinned reference server, runs
+# the suite on the reference and then through SprigDB, and compares the two
+# (deploy/compose/ci/outcomes.py): a job fails only on a difference its
+# expected file doesn't list, or on a listed one that has gone away. Every
+# download happens on the runner, every version is pinned (images by tag,
+# packages by version, repositories by tag or commit).
 #
 #   amqp      RabbitMQ 4.1.0 reference: pika scenarios (21 of them), the
 #             amqp091-go integration tests, Java and .NET client scenarios,

@@ -181,6 +181,15 @@ impl AuthzServices {
         lock(&self.placed).remove(&tenant);
     }
 
+    /// `tenant`'s physical relations changed without a catalog version (a
+    /// share view or an inherited table's materialized copy was made): its next
+    /// statement reconciles its backend grants, so accounts whose grants
+    /// row-level security narrowed to single relations get `SELECT` on the
+    /// new one.
+    pub fn relations_changed(&self, tenant: TenantId) {
+        lock(&self.checked).retain(|(t, _), _| *t != tenant);
+    }
+
     /// Whether sessions run as per-user backend accounts.
     #[must_use]
     pub fn per_user(&self) -> bool {

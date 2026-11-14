@@ -669,7 +669,12 @@ fn counts(stats: &BTreeMap<String, i64>) -> BTreeMap<&'static str, i64> {
 }
 
 async fn run(s: &Scenario, shards: usize) -> Outcome {
-    let mut store = MemStore::new(shards);
+    // The sharded run reads properties late, as reads over MariaDB do.
+    let mut store = if shards > 1 {
+        MemStore::new(shards).with_late_reads()
+    } else {
+        MemStore::new(shards)
+    };
     let mut params = Params::new();
     let mut result: Option<Result<Output, sprig_common::SprigError>> = None;
     let mut stats: BTreeMap<String, i64> = BTreeMap::new();
@@ -851,9 +856,8 @@ async fn opencypher_tck() {
                     Outcome::Fail(why) => {
                         fail += 1;
                         e.1 += 1;
-                        if shards == 1 {
-                            let _ = writeln!(report, "FAIL {} :: {}: {why}", s.feature, s.name);
-                        }
+                        let tag = if shards == 1 { "FAIL" } else { "FAIL4" };
+                        let _ = writeln!(report, "{tag} {} :: {}: {why}", s.feature, s.name);
                     }
                     Outcome::Skip(why) => {
                         skip += 1;

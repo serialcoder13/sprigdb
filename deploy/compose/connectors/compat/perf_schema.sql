@@ -1,6 +1,6 @@
--- performance_schema and sys as MySQL 8.4 clients and tools read them
--- (chapter 28 step 13, R4 round 4). Only values that don't depend on the
--- server's history or its version string are printed.
+-- performance_schema and sys as MySQL 8.4 clients and tools read them.
+-- Only values that don't depend on the server's history or its version
+-- string are printed.
 DROP VIEW IF EXISTS ps_v;
 DROP TABLE IF EXISTS ps_t;
 CREATE TABLE ps_t (id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY, a INT, KEY ka (a));

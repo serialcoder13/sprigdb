@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# The sink fault-injection suite (chapter 51, "Fault injection"; R9, r9tests
-# decision 108, made a CI job by r9last): a queue sink delivers N messages
-# through toxiproxy to PostgreSQL (EXACTLY ONCE), Kafka or MinIO (at least
-# once); at about a quarter delivered a fault starts:
+# The sink fault-injection suite: a queue sink delivers N messages through
+# toxiproxy to PostgreSQL (EXACTLY ONCE), Kafka or MinIO (at least once); at
+# about a quarter delivered a fault starts:
 #
 #   cut        the proxy refuses and drops connections for F s (20)
 #   down       the destination's container stopped for F s (45)

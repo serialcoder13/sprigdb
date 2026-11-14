@@ -1,6 +1,5 @@
-// A function's or procedure's staged rollout (chapter 44 step 26, Studio
-// round 6; decisions RC18–RC21), and dropping a module with what still uses
-// it (RC22). The stage and each version's numbers come from
+// A function's or procedure's staged rollout, and dropping a module with what
+// still uses it. The stage and each version's numbers come from
 // `GET .../rollout` every 5 s; moving, promoting and aborting are the
 // statements a SQL client runs (`ALTER ... ROLLOUT TO n | PROMOTE | ABORT`),
 // shown before they run. When the gateway rolled a candidate back by itself,
@@ -233,7 +232,7 @@ const CASCADE_DOES: [keyof Dependents, string, string][] = [
 ];
 
 /**
- * What uses the module (`SHOW DEPENDENTS`, ST67), or `null` when nothing
+ * What uses the module (`SHOW DEPENDENTS`), or `null` when nothing
  * can (not a function or procedure) or the gateway can't say (older ones:
  * the refused drop's 39875 text is read then).
  */

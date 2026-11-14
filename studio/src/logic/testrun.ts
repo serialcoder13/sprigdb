@@ -1,5 +1,4 @@
-// Logic test runs (chapter 41 "Test runs", chapter 44 step 26; decisions
-// RC13–RC17): `POST /v1/databases/{db}/logic:testRun` runs a deployed
+// Logic test runs: `POST /v1/databases/{db}/logic:testRun` runs a deployed
 // version or the editor's draft against given inputs, in a transaction that
 // is always rolled back, with `fetch` answered by mocks (never sent). The
 // answer is the whole report: the event or the error, every statement, the

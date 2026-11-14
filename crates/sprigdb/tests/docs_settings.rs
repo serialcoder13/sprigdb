@@ -1,6 +1,6 @@
-//! `docs/reference/settings.md` lists exactly the settings this binary knows
-//! (chapter 55, "Interfaces"). The page is rendered from `sprigdb
-//! docs-settings`: the server's own registry, so no key is missing or extra.
+//! `docs/reference/settings.md` lists exactly the settings this binary knows.
+//! The page is rendered from `sprigdb docs-settings`: the server's own
+//! registry, so no key is missing or extra.
 //! With `SPRIG_DOCS_REGEN=1` the test rewrites the page instead of checking it.
 
 use std::path::PathBuf;

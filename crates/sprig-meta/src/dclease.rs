@@ -282,7 +282,7 @@ impl DcLease {
 
     async fn round(&self, may_take: bool) -> Result<()> {
         // The lease first: its renewal never waits behind another read
-        // (r2next: a slow linearizable read of the DC record used to hold
+        // (a slow linearizable read of the DC record used to hold
         // up the keep-alive until the permits lapsed).
         let held = self.lock().lease;
         let renewed = match held {
@@ -417,7 +417,7 @@ impl DcLease {
     /// Renews every period until dropped; `leading` says whether this
     /// controller may take a new lease. A failed round is retried after
     /// [`RETRY_AFTER`], so one slow or lost keep-alive costs a quarter
-    /// second, not a period (r2next).
+    /// second, not a period.
     pub async fn run(&self, leading: impl Fn() -> bool) {
         loop {
             let started = tokio::time::Instant::now();

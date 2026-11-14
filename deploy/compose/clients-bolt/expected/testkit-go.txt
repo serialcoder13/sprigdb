@@ -5,12 +5,11 @@
 # (deploy/compose/ci/outcomes.py; the target is always "sprig"). A test that
 # fails on Neo4j too is never counted against SprigDB.
 #
-# First run (r8testkit, 11 November 2026, testkit 75f4aa8, Go driver v6.4.0,
-# Neo4j 5.26.0 community reference, SprigDB on a private laptop
-# deployment): 127 tests, reference 112 pass / 15 skip. SprigDB before the
-# round's fixes 88 / 24 fail / 15 skip; after them (decisions/r8-interim.md
-# G66) 108 pass / 4 fail / 15 skip. Every remaining difference is listed below (G67).
-# Round 8 (r8eight, 12 November 2026; decisions/r8-interim.md G69-G75):
-# Bolt 5.5-5.8, CALL { } IN TRANSACTIONS, byte arrays and errors after the
-# first rows closed the four differences G67 listed. SprigDB 112 pass / 0 fail /
-# 15 skip, the reference's own result.
+# First run (11 November 2026, testkit 75f4aa8, Go driver v6.4.0, Neo4j
+# 5.26.0 community reference, SprigDB on a private laptop deployment): 127
+# tests, reference 112 pass / 15 skip. SprigDB before that day's fixes 88 /
+# 24 fail / 15 skip; after them 108 pass / 4 fail / 15 skip. Every remaining
+# difference was listed below.
+# 12 November 2026: Bolt 5.5-5.8, CALL { } IN TRANSACTIONS, byte arrays and
+# errors after the first rows closed the four remaining differences. SprigDB
+# 112 pass / 0 fail / 15 skip, the reference's own result.

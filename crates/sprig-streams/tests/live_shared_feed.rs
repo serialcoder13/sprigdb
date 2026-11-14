@@ -1,5 +1,5 @@
-//! Live: many stream instances on one cluster share one binlog dump (R9,
-//! r9feed; decision 127 item 1). Against a private deployment (a gateway,
+//! Live: many stream instances on one cluster share one binlog dump.
+//! Against a private deployment (a gateway,
 //! one worker, the controller, one MariaDB node).
 //!
 //! ```text

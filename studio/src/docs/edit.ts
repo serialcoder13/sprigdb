@@ -1,11 +1,10 @@
-// Saving an edited document (chapter 44, "Editing with optimistic
-// concurrency", collections). The gateway sends relaxed Extended JSON
-// (chapter 37, "Languages"), which doesn't say whether a small integer was
+// Saving an edited document, with optimistic concurrency. The gateway sends
+// relaxed Extended JSON, which doesn't say whether a small integer was
 // stored as int32 or int64, so a save never rewrites fields the user didn't
 // touch: it is an update by `_id` that `$set`s only the edited paths, with
 // their types as the badges say, and also requires every top-level field as
 // read, so a concurrent change matches nothing (n = 0) and becomes a
-// conflict instead of being overwritten (decision ST41).
+// conflict instead of being overwritten.
 
 import { idOf, toEjson, type BVal } from './ejson';
 

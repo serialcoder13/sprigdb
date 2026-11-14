@@ -13,7 +13,7 @@ async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true
 getrandom.workspace = true
-# The Kubernetes REST client (chapter 27 step 10): no kube-rs, just HTTP/1.1
+# The Kubernetes REST client: no kube-rs, just HTTP/1.1
 # over hyper with rustls, against the in-cluster service-account config.
 http-body-util.workspace = true
 hyper.workspace = true

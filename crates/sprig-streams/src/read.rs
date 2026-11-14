@@ -1,6 +1,5 @@
-//! Reading a stream (chapter 45, "SQL": "A stream reads like a table with
-//! the columns `partition_no`, `offset_no`, `ts`, `key`, `value` and
-//! `headers`"), and the log reads the Kafka front end will use.
+//! Reading a stream (a stream reads like a table with the columns
+//! `partition_no`, `offset_no`, `ts`, `key`, `value` and `headers`), and the log reads the Kafka front end will use.
 //!
 //! **SQL.** Each stream named in a `FROM` becomes a derived table over its
 //! log, keeping the name as its alias:
@@ -16,9 +15,9 @@
 //!
 //! MariaDB merges the derived table, so the log's primary key
 //! `(partition_no, offset_no, day)` serves partition and offset ranges
-//! (`decisions/spike-stream-log.md`). `key` is a reserved word in MariaDB:
-//! bare `key` and `value` words of a statement that reads a stream are
-//! quoted before it is parsed.
+//! (measured by the stream-log spike, `tests/spike_live.rs`). `key` is a
+//! reserved word in MariaDB: bare `key` and `value` words of a statement
+//! that reads a stream are quoted before it is parsed.
 
 use std::ops::ControlFlow;
 
@@ -84,8 +83,8 @@ pub fn derived_sql(db: Option<&str>, id: StreamId) -> String {
 /// predicate (`` `__sprig_ci`.`col` ``).
 pub const FILTER_QUAL: &str = "`__sprig_ci`";
 
-/// A change topic's records as one reader may see them (chapter 29,
-/// "Change feed consumers"; RLS round 5, decision RL44): each record's
+/// A change topic's records as one reader may see them (row-level
+/// security for change feed consumers): each record's
 /// `before` and `after` images are read as rows of the table
 /// (`JSON_TABLE` with the table's column types and collations) and the
 /// reader's `SELECT` policies, rendered with its session values over
@@ -349,7 +348,7 @@ pub struct ReadBatch {
     pub bounds: Bounds,
 }
 
-/// Reads of one log shard schema, for chapter 45's `StreamLog::read` and
+/// Reads of one log shard schema, for `StreamLog::read` and
 /// `high_watermark` (the Kafka front end and HTTP consumers build on it).
 #[derive(Debug, Clone)]
 pub struct LogReader {
@@ -518,8 +517,8 @@ impl LogReader {
         ))
     }
 
-    /// Records of partition `p` from offset `from` (chapter 45's fetch,
-    /// steps 2 and 3).
+    /// Records of partition `p` from offset `from` (a fetch's range
+    /// check and read).
     ///
     /// # Errors
     /// 39947 when `from` is below the log start or above the high
@@ -588,7 +587,7 @@ impl LogReader {
     }
 
     /// Waits until partition `p`'s high watermark passes `o` or `deadline`
-    /// comes (chapter 45's `wait_beyond`, by polling the checkpoint every
+    /// comes (`wait_beyond`, by polling the checkpoint every
     /// `every`; the watermark signal from the sequencer will replace the
     /// polling for the Kafka front end).
     ///

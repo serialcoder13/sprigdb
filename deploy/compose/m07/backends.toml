@@ -1,13 +1,12 @@
-# The backend account tenant sessions use, interim (chapter 14, "Backend
-# target, interim"; format in crates/sprig-gateway/src/tenant/backends.rs).
+# The backend account tenant sessions use (format in
+# crates/sprig-gateway/src/tenant/backends.rs).
 # Development only.
 #
 # Catalog logins (`[gateway] login_mode = "catalog"`, gateway-dev.sh's
-# default) run every tenant's statements as one MariaDB account until
-# chapter 29's per-user backend accounts (M0.5). The cluster is each
-# tenant's catalog cluster, from its shard map. Clients never see this
-# account: names in output (DEFINER, grantees, messages) show the session's
-# own user.
+# default) run every tenant's statements as this one MariaDB account. The
+# cluster is each tenant's catalog cluster, from its shard map. Clients
+# never see this account: names in output (DEFINER, grantees, messages)
+# show the session's own user.
 
 [default]
 backend_user = "root"

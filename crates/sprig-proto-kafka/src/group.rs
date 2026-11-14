@@ -624,7 +624,7 @@ impl Group {
 /// The coordinator of every group this gateway holds the lease of.
 pub struct Coordinator {
     groups: std::sync::Mutex<HashMap<GroupKey, Arc<Mutex<Group>>>>,
-    /// Each group's writer of its durable row (r9more): rows are written
+    /// Each group's writer of its durable row: rows are written
     /// off the group's lock and off the timer loop, one group's writes in
     /// order, so a slow catalog write never holds up a rebalance.
     writers: std::sync::Mutex<HashMap<GroupKey, Arc<Writer>>>,
@@ -1415,7 +1415,7 @@ mod tests {
         }
     }
 
-    /// r9more: a group's row write that hangs (a catalog row lock, a slow
+    /// Regression: a group's row write that hangs (a catalog row lock, a slow
     /// backend) held the shared timer loop, so a new group's first join
     /// waited for it (36.6 s measured with kafka-python against a held
     /// row lock). Now the other group's join completes after its own

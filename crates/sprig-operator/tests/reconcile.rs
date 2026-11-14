@@ -1,6 +1,6 @@
 //! The operator's reconcile loop against an in-process fake Kubernetes API
-//! server, through the real HTTP client (chapter 27, "The Kubernetes
-//! operator"; no real cluster is involved).
+//! server, through the real HTTP client (no real cluster
+//! is involved).
 
 #![allow(clippy::unwrap_used, clippy::too_many_lines)]
 
@@ -476,7 +476,7 @@ async fn pools_keep_their_minimum_and_provision_up_to_the_maximum() {
     prov.retire(&sprig_common::ids::ClusterId::new(id).unwrap())
         .await
         .unwrap();
-    // The record was retired first (r2opfix).
+    // The record was retired first.
     assert_eq!(w.registrar.retired.lock().unwrap().len(), 1);
     assert!(w.api.get(SC, "default-1").is_none());
     assert!(w.api.get(MDB, "default-1").is_none());
@@ -552,7 +552,7 @@ async fn a_stale_resource_version_is_a_conflict() {
     let _ = w.clock.now();
 }
 
-/// r2close (r2kind's leftover): a pass the API refuses (mariadb-operator's
+/// A pass the API refuses (mariadb-operator's
 /// webhook) leaves its reason in the status and one `ReconcileError` Event,
 /// instead of an empty phase; the next good pass clears it.
 #[tokio::test]

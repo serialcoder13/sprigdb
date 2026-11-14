@@ -355,7 +355,7 @@ async fn retention_follows_the_setting_and_an_operators_end_stands() {
     let mut ended = r.clone();
     ended.retain_until_ms = Some(now - 1);
     assert_eq!(ended.retain_until(48 * hour, now), Some(now - 1));
-    // Records written before r2final have no start: the stored end.
+    // Records written by older versions have no start: the stored end.
     let mut old = r.clone();
     old.retain_from_ms = None;
     assert_eq!(old.retain_until(Duration::ZERO, now), old.retain_until_ms);

@@ -1,4 +1,4 @@
-// Security pass (chapter 44, "Testing: Security"): headers and CSP, cookie
+// Security pass: headers and CSP, cookie
 // endpoints refusing cross-site use, refresh-token reuse, token storage.
 import { expect, test } from '@playwright/test';
 import { LOGIN, PASSWORD, signIn } from './fixtures';

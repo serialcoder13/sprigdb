@@ -1596,7 +1596,7 @@ mod tests {
             expr.contains("(price)") && expr.contains("(stock)"),
             "{expr}"
         );
-        // Before (jsbind) every JavaScript function was 39862 here.
+        // Every JavaScript function used to be 39862 here.
         let wrong = call("ALTER TABLE products ADD COLUMN c DOUBLE AS (net(price)) VIRTUAL");
         let e = computed_column("net", "javascript", body, &net_sig(), &wrong).unwrap_err();
         assert_eq!(e.code(), Some(SprigCode::LogicSignatureMismatch));

@@ -616,7 +616,7 @@ async fn tls_requirements() {
         ..req("acme.x509")
     };
     assert_eq!(run(&w.svc, cert, b"pw").await.verdict, AuthVerdict::Accept);
-    // REQUIRE SUBJECT and ISSUER (wireup) compare the verified names.
+    // REQUIRE SUBJECT and ISSUER compare the verified names.
     let dn = |s: &str, i: &str| LoginRequest {
         client_cert: true,
         client_dn: Some(crate::mysql::ClientDn {

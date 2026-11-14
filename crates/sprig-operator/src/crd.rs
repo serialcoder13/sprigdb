@@ -1,6 +1,6 @@
 //! The operator's two custom resources, `SprigCluster` and
-//! `SprigClusterPool` in `sprigdb.io/v1alpha1` (chapter 27, "Kubernetes:
-//! CRDs and their mapping"), and their `CustomResourceDefinition`s.
+//! `SprigClusterPool` in `sprigdb.io/v1alpha1`, and their
+//! `CustomResourceDefinition`s.
 //!
 //! ```yaml
 //! apiVersion: sprigdb.io/v1alpha1
@@ -75,12 +75,12 @@ pub enum Topology {
 pub enum FailoverDriver {
     /// mariadb-operator alone (`replication.primary.autoFailover: true`):
     /// it promotes the replica with the highest applied position, skipping
-    /// any with relay log left, so zero loss isn't guaranteed (r2kind).
+    /// any with relay log left, so zero loss isn't guaranteed.
     Operator,
     /// SprigDB chooses (the default): `autoFailover: false`, and the SprigDB
     /// operator picks the most advanced replica and sets
     /// `replication.primary.podIndex`, so mariadb-operator's switchover
-    /// promotes it ([`crate::failover`]). Chapter 25's controller loop
+    /// promotes it ([`crate::failover`]). The controller's failover loop
     /// leaves Kubernetes clusters alone either way.
     #[default]
     Sprig,
@@ -168,7 +168,7 @@ impl SprigClusterSpec {
     }
 }
 
-/// `status.phase` (chapter 27, "State machines"; `requested` is a
+/// `status.phase` (`requested` is a
 /// `SprigCluster` without a status yet).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Phase {

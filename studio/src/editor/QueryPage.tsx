@@ -48,7 +48,7 @@ interface Confirm {
   resolve(ok: boolean): void;
 }
 
-/** The SQL editor (chapter 44 step 8) with its results (step 9). */
+/** The SQL editor with its results. */
 export function QueryPage() {
   const intl = useIntl();
   const { tenant = '', tab: tabId = '' } = useParams();

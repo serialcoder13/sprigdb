@@ -3,7 +3,7 @@
 //!
 //! **Same path as the wire.** Each request opens a gateway [`Session`] (it
 //! shows in `SHOW PROCESSLIST` and answers `KILL`), opens the executor's
-//! session for the authenticated principal ([`Executor::open`], as a MySQL
+//! session for the authenticated principal (`Executor::open`, as a MySQL
 //! login does), runs `USE <database>` through [`SessionExec::init_db`],
 //! then hands each request to [`SessionExec::execute`] as a `COM_QUERY`. So
 //! name virtualization, privileges, workload capture and error mapping are

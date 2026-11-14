@@ -1,4 +1,4 @@
-# faultd (chapter 46, "Fault injection"): iptables partitions and netem
+# faultd: iptables partitions and netem
 # delays inside other containers' network namespaces. Runs privileged in
 # the host PID namespace; sprig-testkit drives it with `docker exec` and
 # only ever targets its own sprig-sim-* containers.

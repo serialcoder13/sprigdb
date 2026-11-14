@@ -1,4 +1,4 @@
-//! The aggregation-expression corpus (M1, 12 Nov 2026) through a SprigDB
+//! The aggregation-expression corpus through a SprigDB
 //! gateway's MongoDB listener and the MongoDB Rust driver: the live check
 //! of `crates/sprig-doc/tests/expr_diff.rs`, which runs the same cases on
 //! the engine directly. Answers are compared with the ones MongoDB 8.0.34

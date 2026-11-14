@@ -159,7 +159,7 @@ impl FeedOpener for SlowScript {
     }
 }
 
-/// Regression (r9feed's live runs): the run loop's deadlines must not drop
+/// Regression (seen in live runs): the run loop's deadlines must not drop
 /// a feed read half-way. A tail takes a group from its source and then
 /// awaits catalog lookups; a batch or idle-checkpoint deadline that
 /// cancelled that read lost the group (6 new instances lost their first

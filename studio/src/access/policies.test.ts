@@ -11,7 +11,7 @@ describe('roles and policies (step 18)', () => {
     expect(grantRole('auditors', 'bob@localhost')).toBe("GRANT 'auditors'@'%' TO 'bob'@'localhost'");
   });
 
-  it('builds CREATE POLICY as chapter 29 writes it', () => {
+  it('builds CREATE POLICY in the documented form', () => {
     expect(
       createPolicy({ name: 'own', db: 'shop', table: 'orders', kind: 'PERMISSIVE', command: 'SELECT', to: 'app_user', using: "owner_id = SPRIG_CLAIM('sub')", check: '' }),
     ).toBe("CREATE POLICY `own` ON `shop`.`orders` AS PERMISSIVE FOR SELECT TO `app_user` USING (owner_id = SPRIG_CLAIM('sub'))");

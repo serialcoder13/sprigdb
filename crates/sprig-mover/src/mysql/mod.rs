@@ -171,7 +171,7 @@ impl ClusterAccess {
             cluster: rec.cluster_id.clone(),
             topology: rec.topology,
             // The credential's TLS too: managed clusters' sprig_repl is
-            // REQUIRE SSL (r2opfix).
+            // REQUIRE SSL.
             repl: r.binlog_source().await,
             writer,
             nodes,

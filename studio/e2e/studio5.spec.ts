@@ -1,5 +1,4 @@
-// Studio round 5 end to end (chapter 44; decisions ST47–ST52), against
-// studio5's private deployment:
+// Studio end to end, against a private deployment:
 //   STUDIO_URL=http://127.0.0.1:24080 STUDIO_SHOTS=../target/agent-studio5/screenshots pnpm e2e studio5
 // Graphs in the catalog snapshot (explorer, object page, the editor's graph
 // picker and completion), exact BSON types from canonical Extended JSON,

@@ -128,7 +128,7 @@ pub fn start(live: Option<&(LiveSettings, DcId)>, gateway_id: &str) {
 }
 
 /// Applies the current memory limits and, when `doc.spill_dir` changed,
-/// sets up the new directory (bugfix-89: these keys are declared live).
+/// sets up the new directory (these keys are declared live).
 fn follow(l: &LiveSettings, cx: &SettingCtx<'_>) {
     let n = |s: &'static Setting<u64>| usize::try_from(l.get(s, cx)).unwrap_or(usize::MAX);
     sprig_doc::engine::set_memory_limits(n(&AGG_STAGE_MEMORY_BYTES), n(&MAX_SORT_BYTES));

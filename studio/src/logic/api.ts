@@ -1,5 +1,4 @@
-// The logic editors' API (chapter 44 step 26; chapter 37 "As built for
-// Studio", round 4): modules, versions, Logic.Compile (a dry run), logs and
+// The logic editors' API: modules, versions, Logic.Compile (a dry run), logs and
 // dead letters. Deploys, rollbacks and test runs are statements.
 
 import { json } from '../api/client';
@@ -121,7 +120,7 @@ export const settleDeadLetters = (db: string, kind: string, name: string, verb: 
     body: ids === 'all' ? { all: true } : { ids },
   });
 
-// ---- Rollout (Studio round 6; decisions RC18–RC21) ----
+// ---- Rollout ----
 
 export interface RolloutRow {
   module_id: number;
@@ -157,7 +156,7 @@ export interface RolloutView {
 
 export const getRollout = (db: string, kind: string, name: string) => json<RolloutView>(`${one(db, kind, name)}/rollout`);
 
-/** The newest log line saying a rollout rolled back by itself (RC19), if any. */
+/** The newest log line saying a rollout rolled back by itself, if any. */
 export function autoRollback(rows: readonly LogRow[]): LogRow | null {
   let best: LogRow | null = null;
   for (const l of rows) {

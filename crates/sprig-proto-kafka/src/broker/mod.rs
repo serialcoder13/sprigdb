@@ -69,7 +69,7 @@ pub struct ConnInfo {
     /// A verified client certificate.
     pub client_cert: bool,
     /// Its subject and issuer in MySQL's form (`/O=Acme/CN=alice`), for
-    /// `REQUIRE SUBJECT` and `ISSUER` (authfix2).
+    /// `REQUIRE SUBJECT` and `ISSUER`.
     pub client_dn: Option<(String, String)>,
 }
 

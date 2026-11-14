@@ -1,5 +1,4 @@
-// Completion words for the MongoDB editor (chapter 44, "Editors and
-// completion"): shell methods, query and update operators, stages.
+// Completion words for the MongoDB editor: shell methods, query and update operators, stages.
 export const MONGO_WORDS = [
   'find', 'findOne', 'aggregate', 'countDocuments', 'estimatedDocumentCount', 'distinct', 'insertOne', 'insertMany',
   'updateOne', 'updateMany', 'replaceOne', 'deleteOne', 'deleteMany', 'createIndex', 'getIndexes', 'dropIndex', 'drop',

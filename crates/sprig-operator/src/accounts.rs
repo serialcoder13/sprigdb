@@ -1,11 +1,10 @@
 //! Step 4 of the reconcile: the system accounts `sprig_ctl`, `sprig_repl`
 //! and `sprig_gw` (the gateways' monitoring account, `SLAVE MONITOR` only,
 //! its password derived from `sprig_ctl`'s), created over TLS with the root credentials in
-//! mariadb-operator's Secret (chapter 27, "The Kubernetes operator"), and
-//! the cluster's `gtid_domain_id` once registration gave it a number.
+//! mariadb-operator's Secret, and the cluster's `gtid_domain_id` once registration gave it a number.
 //!
-//! **Where it differs from the book.** The book's accounts accept only the
-//! gateway's or worker's certificate subject (`REQUIRE SUBJECT`). The
+//! **Certificates.** The accounts should accept only the gateway's or
+//! worker's certificate subject (`REQUIRE SUBJECT`), but the
 //! system-account credentials SprigDB resolves today are a password over
 //! TLS without a client certificate (`sprig-provision::credentials`), so
 //! the accounts here are `REQUIRE SSL` with a generated password; they move
@@ -96,9 +95,9 @@ pub fn account_sql(ctl_password: &str, repl_password: &str) -> Vec<String> {
         "GRANT SUPER, CREATE USER, PROCESS, CONNECTION ADMIN, BINLOG MONITOR, SLAVE MONITOR, \
          RELOAD, READ_ONLY ADMIN, BINLOG ADMIN, SET USER ON *.* TO 'sprig_ctl'@'%'"
             .into(),
-        // Chapter 09's full list: on kind the probes reported these three
+        // The probes' full list: on kind they reported these three
         // missing (SET USER gates compiled logic). The gateway's per-user
-        // backend accounts (chapter 29) read the grant tables as sprig_ctl.
+        // backend accounts read the grant tables as sprig_ctl.
         "GRANT SELECT ON mysql.db TO 'sprig_ctl'@'%'".into(),
         "GRANT SELECT ON mysql.global_priv TO 'sprig_ctl'@'%'".into(),
         "GRANT SELECT ON mysql.tables_priv TO 'sprig_ctl'@'%'".into(),
@@ -109,7 +108,7 @@ pub fn account_sql(ctl_password: &str, repl_password: &str) -> Vec<String> {
         "GRANT REPLICATION SLAVE, BINLOG MONITOR ON *.* TO 'sprig_repl'@'%'".into(),
     ]
     .into_iter()
-    // The gateways' monitoring account (chapter 09): `SLAVE MONITOR` only,
+    // The gateways' monitoring account: `SLAVE MONITOR` only,
     // its password derived from sprig_ctl's, as the gateways derive it.
     .chain(sprig_provision::gw_account::account_sql(
         &sprig_provision::gw_account::derived_password(ctl_password),

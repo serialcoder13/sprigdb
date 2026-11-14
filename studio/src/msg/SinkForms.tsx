@@ -1,5 +1,4 @@
-// Connection forms and the script-sink editor (chapter 44 "Sinks", chapter
-// 51; Studio round 5, decisions ST48 and ST49). Everything is a statement
+// Connection forms and the script-sink editor. Everything is a statement
 // shown before it runs, as a SQL client would write it:
 //
 // - connections: `SHOW CONNECTIONS FROM`, `SHOW CREATE CONNECTION`,
@@ -8,10 +7,10 @@
 // - script sinks: `CREATE SINK ... TO SCRIPT LANGUAGE l AS $$...$$` and
 //   `ALTER SINK ... SET SCRIPT AS $$...$$`, edited in Monaco (JavaScript,
 //   Lua) or `@fincity/kirun-ui` (KIRun);
-// - sinks to a connection (webhook, Kafka, S3, database; round 7, ST70):
+// - sinks to a connection (webhook, Kafka, S3, database):
 //   `CREATE SINK ... TO <target> CONNECTION c ...`;
-// - dry runs before saving (round 7): `TEST CREATE CONNECTION ...` (ST68)
-//   and `TEST CREATE SINK ... WITH SAMPLE n` (ST69) create nothing.
+// - dry runs before saving: `TEST CREATE CONNECTION ...` and
+//   `TEST CREATE SINK ... WITH SAMPLE n` create nothing.
 //
 // Credentials are write-only: the fields are password inputs, the statement
 // on screen shows '********' for each value, the values live only in this
@@ -132,7 +131,7 @@ function NewConnection({ db, onDone }: Readonly<{ db: string; onDone: () => void
       setErr(errorText(e));
     }
   };
-  // Dry run before saving (ST68): TEST CREATE CONNECTION checks the
+  // Dry run before saving: TEST CREATE CONNECTION checks the
   // definition as given and creates nothing.
   const testFirst = async () => {
     setErr(null);
@@ -485,7 +484,7 @@ const EMPTY_SINK: SinkSpec = {
 
 const WHERE_TO: Record<SinkSpec['target'], string> = { webhook: 'Path', kafka: 'Topic', s3: 'Key prefix', database: 'Table' };
 
-/** A sink to a connection (ST70): the `CREATE SINK` form, with a dry run before creating it. */
+/** A sink to a connection: the `CREATE SINK` form, with a dry run before creating it. */
 function NewSink({ db, onDone }: Readonly<{ db: string; onDone: () => void }>) {
   const st = useStatement(db);
   const conns = useQuery({ queryKey: ['connections', db], queryFn: () => table(db, `SHOW CONNECTIONS FROM \`${db.replace(/`/g, '``')}\``) });

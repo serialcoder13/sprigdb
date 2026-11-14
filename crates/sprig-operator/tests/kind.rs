@@ -1,9 +1,8 @@
-//! The Kubernetes provisioner against a real cluster (chapter 27,
-//! "Testing"): `create` and `retire` through [`KubernetesProvisioner`] and
-//! the real REST client, on a kind cluster with mariadb-operator.
+//! The Kubernetes provisioner against a real cluster: `create` and
+//! `retire` through [`KubernetesProvisioner`] and the real REST client,
+//! on a kind cluster with mariadb-operator.
 //!
-//! Skipped unless `SPRIG_KIND_API` is set. The run in
-//! `decisions/r2-failover.md` ("Kubernetes on kind (r2kind)") set:
+//! Skipped unless `SPRIG_KIND_API` is set. A run on kind sets:
 //!
 //! - `SPRIG_KIND_API`: the API server, `https://127.0.0.1:<port>`;
 //! - `SPRIG_KIND_CA`: its CA bundle (PEM file);
@@ -15,7 +14,7 @@
 //!   a `ClusterSpec` naming that `SprigClusterPool`;
 //! - `SPRIG_KIND_RETIRE`: `<cluster_id>,...`: one `retire` each;
 //! - `SPRIG_KIND_ADMIN`: the controller's Admin API (`http://host:port`),
-//!   which `retire` asks to retire the drained record first (r2opfix).
+//!   which `retire` asks to retire the drained record first.
 //!
 //! The operator itself runs in the cluster; this test only drives the
 //! provisioner's two operations and prints what they did.
@@ -59,7 +58,7 @@ fn provisioner() -> Option<(KubernetesProvisioner, Arc<dyn KubeApi>, String)> {
     let rec = Reconciler::new(
         Arc::clone(&kube),
         Arc::new(MysqlAccounts::new(None)),
-        // `retire` retires the record first (r2opfix): SPRIG_KIND_ADMIN is
+        // `retire` retires the record first: SPRIG_KIND_ADMIN is
         // the controller's Admin API.
         Arc::new(
             AdminRegistrar::new(
@@ -151,7 +150,7 @@ async fn kind_ack_workload() {
         }
     };
     let f: Vec<&str> = raw.split(',').collect();
-    // `a|b|c` (r2opfix): straight to MariaDB, as root over TLS, always to
+    // `a|b|c`: straight to MariaDB, as root over TLS, always to
     // the node that is writable (`@@read_only = 0`), into r2opfix_acks.acks
     // instead of app.acks; measures the database without the gateway.
     let direct: Vec<String> = f[0].split('|').map(str::to_owned).collect();

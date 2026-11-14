@@ -5,10 +5,10 @@
 //! SPRIG_AMQP_ADDR=127.0.0.1:43672 SPRIG_AMQP_ADDR2=127.0.0.1:43682 \
 //! SPRIG_AMQP_USER=acme.app SPRIG_AMQP_PASSWORD=sprig-dev-app \
 //! SPRIG_ETCD=http://127.0.0.1:43379 \
-//! SPRIG_KILL_GW1='kill -9 $(cat target/agent-r9queues2/priv/gateway.pid)' \
+//! SPRIG_KILL_GW1='kill -9 $(cat <dir>/gateway.pid)' \
 //! SPRIG_START_GW1='deploy/compose/gateway-dev.sh restart' \
-//! SPRIG_KILL_GW2='kill -9 $(cat target/agent-r9queues2/priv/gw2.pid)' \
-//! SPRIG_START_GW2='source target/agent-r9queues2/live/env.sh; gw2' \
+//! SPRIG_KILL_GW2='kill -9 $(cat <dir>/gw2.pid)' \
+//! SPRIG_START_GW2='source <dir>/env.sh; gw2' \
 //! cargo test --release -p sprig-queues --test live_relay -- --nocapture --test-threads 1
 //! ```
 //!

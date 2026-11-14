@@ -5,7 +5,7 @@ import { ident, qualified, sqlValue } from '../lib/sql';
 import { parseCsv, parseNdjson } from './parse';
 import type { Cell } from '../api/types';
 
-/** Import CSV or NDJSON (chapter 44, "Import"): batches of
+/** Import CSV or NDJSON: batches of
  * studio.import_batch_rows, each its own transaction, with progress,
  * rejected rows and a resume point; above studio.import_max_mb, sprigctl. */
 export function ImportDialog({

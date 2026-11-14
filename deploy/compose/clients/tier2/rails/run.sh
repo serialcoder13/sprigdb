@@ -1,5 +1,5 @@
 #!/bin/sh
-# Rails 8.0.3's Active Record tests on the mysql2 adapter (tier 2, chapter 28),
+# Rails 8.0.3's Active Record tests on the mysql2 adapter (tier 2),
 # inside ruby:3.4-bookworm. The test config logs in as T2_USER/T2_PASSWORD
 # at MYSQL_HOST:MYSQL_PORT; the two test databases are made here, since
 # rake's db:mysql tasks need the mysql client and a passwordless root.

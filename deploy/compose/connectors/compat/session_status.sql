@@ -1,4 +1,4 @@
--- Per-session status counters (gaps row 46): a session sees its own
+-- Per-session status counters: a session sees its own
 -- statements, wherever its backend connections come from. Com_select
 -- isn't compared: the mysql client sends another SELECT at login to a
 -- server whose version string isn't MySQL's own.

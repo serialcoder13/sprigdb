@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Milestone M0.5's SQL isolation suite (chapter 29 step 6, chapter 46 step
-# 4): crates/sprig-testkit/tests/m05_isolation.rs against the development
-# gateway (gateway-dev.sh up: tenants acme and globex, admins acme.app and
-# globex.app), with a second gateway (m05/gateway-2.toml, 13316/13317) for
-# the revocation-propagation check, and MariaDB's grant tables audited
-# through the single node's root.
+# The SQL isolation suite: crates/sprig-testkit/tests/m05_isolation.rs
+# against the development gateway (gateway-dev.sh up: tenants acme and
+# globex, admins acme.app and globex.app), with a second gateway
+# (m05/gateway-2.toml, 13316/13317) for the revocation-propagation check,
+# and MariaDB's grant tables audited through the single node's root.
 #
 #   deploy/compose/m05/run.sh
 #

@@ -1,4 +1,4 @@
-//! Point reads for protocol engines (S149 step 1, S154): a prepared
+//! Point reads for protocol engines: a prepared
 //! single-row read (MongoDB's `_id` finds) executed on the session's
 //! backend connection without the relay, the result sink or the general
 //! execute's per-statement planning.
@@ -101,7 +101,9 @@ impl PassSession {
             || s.long_data_over
             || !s.renames.is_empty()
             || s.session_status
-            || s.mapper.as_ref().is_some_and(|m| m.needs_rows())
+            || s.mapper
+                .as_ref()
+                .is_some_and(sprig_sql::names::ResultMapper::needs_rows)
         {
             return fallback;
         }

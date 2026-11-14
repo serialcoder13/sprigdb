@@ -5,14 +5,14 @@
 #   COMPOSE_FILE=compose.yaml:compose.ha.yaml
 #
 # etcd's client and peer ports, the gateway's peer service and the
-# controller's internal port (permits; SPRIG_INTERNAL_TLS, hardening round
-# 3) use mutual TLS, and MariaDB requires TLS. The telemetry ports
-# (/metrics, /readyz) are plain HTTP on the private address, for the load
+# controller's internal port (permits; SPRIG_INTERNAL_TLS) use mutual TLS,
+# and MariaDB requires TLS. The telemetry ports (/metrics, /readyz) are
+# plain HTTP on the private address, for the load
 # balancer's health checks and Prometheus (RUNBOOK.md, "Monitoring").
 #
-# Needs a sprigdb image from hardening round 3 or later (it sets
-# controller.internal_tls and gateway.kafka_advertise_host, which older
-# builds refuse); to roll back past round 3, use that round's files.
+# Needs a sprigdb image recent enough to know controller.internal_tls and
+# gateway.kafka_advertise_host (older builds refuse them); to roll back to
+# an older build, use the bundle files from its time.
 
 services:
   etcd:

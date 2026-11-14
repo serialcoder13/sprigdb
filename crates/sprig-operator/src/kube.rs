@@ -1,4 +1,4 @@
-//! A small Kubernetes REST client (chapter 27 step 10).
+//! A small Kubernetes REST client.
 //!
 //! The operator needs a handful of calls on namespaced objects: get, list
 //! (with a label selector), create, JSON merge patch, replace (for Lease
@@ -6,7 +6,7 @@
 //! concurrency) and delete. [`KubeApi`] is that surface; [`HttpKube`]
 //! implements it with HTTP/1.1 over hyper and rustls, one kept-alive
 //! connection, and the in-cluster service-account configuration
-//! ([`HttpKube::in_cluster`]). Objects are `serde_json::Value`s; the typed
+//! ([`KubeConfig::in_cluster`]). Objects are `serde_json::Value`s; the typed
 //! views live in [`crate::crd`].
 //!
 //! No kube-rs: it isn't vendored here, and the operator's needs are small

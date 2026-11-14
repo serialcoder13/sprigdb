@@ -53,7 +53,7 @@ function DbNode({ tenant, db, filter, open: initial }: { tenant: string; db: str
   );
 }
 
-/** The explorer tree (chapter 44 step 7): databases, then objects by kind. */
+/** The explorer tree: databases, then objects by kind. */
 export function Explorer() {
   const intl = useIntl();
   const { tenant = '', db: current } = useParams();

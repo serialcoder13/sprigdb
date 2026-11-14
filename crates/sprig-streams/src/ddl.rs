@@ -1,8 +1,7 @@
-//! Physical tables of a stream (chapter 45, "Outbox rows" and "The stream
-//! log"; build steps 3 and 4): the statements that create and drop them in
-//! a shard schema.
+//! Physical tables of a stream (the outbox rows and the stream log): the
+//! statements that create and drop them in a shard schema.
 //!
-//! **As built, against the book's tables:**
+//! **Table details:**
 //!
 //! - The outbox fills `event_id` and `ts` itself, with MariaDB's
 //!   `UUID_v7()` and `UTC_TIMESTAMP(3)` as column defaults, so any

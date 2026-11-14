@@ -31,7 +31,7 @@
 //! - [`groups`]: table groups and members in the catalog (the `sharding`
 //!   catalog module), `colocation_safe`;
 //! - [`rk`]: the `_sprig_rk` column's statements;
-//! - [`reference`]: reference-table copy states and read decisions;
+//! - [`reference`](mod@reference): reference-table copy states and read decisions;
 //! - [`ids`]: ID blocks for `AUTO_INCREMENT`;
 //! - [`lookup`]: unique and automatic lookup indexes, the consistent-lookup
 //!   claim and release, routing through lookups, build and orphan scan.

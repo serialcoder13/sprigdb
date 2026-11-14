@@ -10,26 +10,26 @@
 #     hibernate hibernate-mariadb sqlalchemy-pymysql sqlalchemy-mysqlclient prisma
 #
 # Checked on 8 November 2026 for the ORMs above, on both ports and both TLS
-# modes (milestone M0.5, chapter 28's R0 translator). The other connectors
-# keep expected.gateway.toml's entries until they are run in this mode.
+# modes. The other connectors keep expected.gateway.toml's entries until
+# they are run in this mode.
 #
 # 3306: Hibernate with both Connector/Js, SQLAlchemy and Prisma pass every
 # check. The translator answers information_schema.KEYWORDS with MySQL 8.4's
 # list, reports JSON columns as json (information_schema, SHOW COLUMNS, SHOW
 # CREATE TABLE, type 245 in result metadata), rewrites CAST(? AS JSON), and
-# reads a foreign key's default rule as NO ACTION (decisions/mysql-persona-gaps.md
-# rows 2, 3 and 6).
+# reads a foreign key's default rule as NO ACTION.
 #
 # 3307 behaves as MariaDB 11.8 does: expected.toml's [mariadb.hibernate] and
 # [mariadb.hibernate-mariadb] schema_validate failures stand (MariaDB's JSON
 # is LONGTEXT, and its KEYWORDS has no RESERVED column).
 
 [mysql."*"]
-# D7: performance_schema is off on the MariaDB backends (R4).
+# performance_schema is off on the MariaDB backends.
 conn_attrs = "skip"
 
 [mysql.mysql-connector-j]
-# D8 (expected.gateway.toml): needs the R4 translator.
+# A BigInteger above Long.MAX_VALUE (expected.gateway.toml): needs the
+# translator.
 prepared_biginteger = "fail"
 
 [mysql.mariadb-dump]
