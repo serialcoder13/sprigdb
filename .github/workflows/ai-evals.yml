@@ -1,0 +1,101 @@
+# The AI assistants' evaluation sets against a real model (live mode).
+#
+# The stub mode needs nothing and runs in every `cargo test` (ci.yml, S0
+# unit tests). This workflow calls a real model, so it costs money and
+# needs a key:
+#
+#   - it runs only by hand (Actions → ai-evals → Run workflow) until the
+#     schedule below is turned on;
+#   - without the ANTHROPIC_API_KEY secret it skips itself, green;
+#   - one model, the sets run one after another, results uploaded as an
+#     artifact (target/ai-evals);
+#   - when crates/sprig-ai/evals/baselines/<role>-<provider>_<model>.json
+#     exists, the run is compared with it and fails if a score drops.
+#
+# See crates/sprig-ai/evals/README.md.
+name: ai-evals
+
+on:
+  workflow_dispatch:
+    inputs:
+      roles:
+        description: "Sets to run: space-separated admin triage dba data"
+        required: false
+        default: "admin triage dba data"
+      model:
+        description: "The model, as provider/model"
+        required: false
+        default: "anthropic/claude-opus-5-5"
+      tolerance:
+        description: "How far a set's mean score may drop below its baseline"
+        required: false
+        default: "0.02"
+  # Nightly once the key is configured and the cost is agreed:
+  # schedule:
+  #   - cron: "23 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-evals
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  live:
+    name: AI evaluation sets (live)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ROLES: ${{ inputs.roles || 'admin triage dba data' }}
+      MODEL: ${{ inputs.model || 'anthropic/claude-opus-5-5' }}
+      TOLERANCE: ${{ inputs.tolerance || '0.02' }}
+    steps:
+      - name: Check for the key
+        id: key
+        run: |
+          if [ -n "$ANTHROPIC_API_KEY" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::ANTHROPIC_API_KEY isn't set; the live evaluation is skipped."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.key.outputs.ok == 'true'
+        uses: actions/checkout@v4
+      - if: steps.key.outputs.ok == 'true'
+        run: rustup toolchain install
+      # etcd-client and tonic build scripts need protoc.
+      - if: steps.key.outputs.ok == 'true'
+        run: sudo apt-get update -q && sudo apt-get install -y -q protobuf-compiler
+      - if: steps.key.outputs.ok == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ai-evals
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - if: steps.key.outputs.ok == 'true'
+        name: Run the sets
+        env:
+          SPRIG_AI_EVAL_LIVE: "1"
+        run: |
+          set -u
+          cargo build --locked -p sprig-ai --features eval --bin ai-eval
+          slug=$(printf '%s' "$MODEL" | tr -c 'A-Za-z0-9._-' '_')
+          status=0
+          for role in $ROLES; do
+            base="crates/sprig-ai/evals/baselines/${role}-${slug}.json"
+            args=(--mode live --role "$role" --model "$MODEL" --tolerance "$TOLERANCE")
+            if [ -f "$base" ]; then args+=(--baseline "$base"); fi
+            cargo run --locked -q -p sprig-ai --features eval --bin ai-eval -- "${args[@]}" || status=1
+          done
+          exit $status
+      - if: always() && steps.key.outputs.ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-evals
+          path: target/ai-evals
+          if-no-files-found: warn

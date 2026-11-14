@@ -81,9 +81,6 @@ impl RoleCommand {
 
 /// `sprigdb docs-settings`: the settings registry as this binary links it.
 fn docs_settings() -> ExitCode {
-    // No role calls the AI core yet: name one of its keys so it is linked
-    // and its `ai.*` keys are listed.
-    let _ = sprig_ai::settings::ENABLED.key;
     let docs = match sprig_settings::Registry::global() {
         Ok(reg) => {
             let mut docs = sprig_docs::reference::settings_from_registry(reg);

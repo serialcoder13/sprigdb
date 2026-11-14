@@ -211,7 +211,12 @@ pub fn run_dir(out: &Path, role: Role, model: &str) -> PathBuf {
 pub fn write(out: &Path, summary: &Summary, records: &[CaseRecord]) -> std::io::Result<PathBuf> {
     let dir = run_dir(out, summary.role, &summary.model);
     std::fs::create_dir_all(&dir)?;
-    let stem = format!("{}-{}-{}", summary.started, summary.mode.as_str(), summary.prompt);
+    let stem = format!(
+        "{}-{}-{}",
+        summary.started,
+        summary.mode.as_str(),
+        summary.prompt
+    );
     let mut lines = String::new();
     for r in records {
         lines.push_str(&serde_json::to_string(r).map_err(std::io::Error::other)?);
@@ -233,9 +238,7 @@ pub fn last_summary(out: &Path, role: Role, model: &str, except: &Path) -> Optio
     let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.to_string_lossy().ends_with(".summary.json") && p.as_path() != except
-        })
+        .filter(|p| p.to_string_lossy().ends_with(".summary.json") && p.as_path() != except)
         .collect();
     // Names start with the start time, so the last one is the newest.
     found.sort();

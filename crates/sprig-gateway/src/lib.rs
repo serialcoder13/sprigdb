@@ -387,6 +387,12 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             Some((live.clone(), dc.clone())),
         )?));
     }
+    // The AI assistants: providers from the global tier, their keys
+    // opened with the master key file.
+    http::studio::ai::install(
+        Arc::clone(&stores.global),
+        ctx.config.gateway.workload_key_file.as_deref(),
+    );
     let http_fe = Arc::new(http::HttpFrontend::new(Arc::clone(&core)));
     // Kafka on 9092: catalog logins only, since topics are
     // a tenant's streams.

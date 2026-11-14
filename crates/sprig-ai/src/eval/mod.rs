@@ -43,10 +43,22 @@ use crate::tools::ToolRegistry;
 
 /// The shipped sets, by role: the file name and its text.
 pub const SETS: [(Role, &str, &str); 4] = [
-    (Role::Admin, "admin.toml", include_str!("../../evals/admin.toml")),
-    (Role::Triage, "triage.toml", include_str!("../../evals/triage.toml")),
+    (
+        Role::Admin,
+        "admin.toml",
+        include_str!("../../evals/admin.toml"),
+    ),
+    (
+        Role::Triage,
+        "triage.toml",
+        include_str!("../../evals/triage.toml"),
+    ),
     (Role::Dba, "dba.toml", include_str!("../../evals/dba.toml")),
-    (Role::Data, "data.toml", include_str!("../../evals/data.toml")),
+    (
+        Role::Data,
+        "data.toml",
+        include_str!("../../evals/data.toml"),
+    ),
 ];
 
 /// The shipped set text of `role`.
@@ -115,7 +127,7 @@ pub async fn run_set_live(
 fn selected<'a>(set: &'a Set, only: &'a [String]) -> impl Iterator<Item = &'a Case> {
     set.cases
         .iter()
-        .filter(move |c| only.is_empty() || only.iter().any(|o| *o == c.id))
+        .filter(move |c| only.is_empty() || only.contains(&c.id))
 }
 
 #[cfg(test)]

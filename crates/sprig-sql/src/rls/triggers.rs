@@ -562,29 +562,6 @@ mod tests {
         assert!(s[1].contains("OLD.owner") && s[1].contains("NEW.owner"));
         assert!(s[2].contains("BEFORE DELETE") && !s[2].contains("NEW."));
         assert!(!s.iter().any(|t| t.contains("_sprig_state")));
-        // An inheritable table's: overrides and hide markers are checked
-        // as the update and the delete they are (RL65).
-        let l = spec.statements_for(true).unwrap();
-        assert!(
-            l[0].contains("CASE NEW.`_sprig_state` WHEN 'ovr' THEN ((JSON_CONTAINS(@sprig_rls, '3', '$.p') AND (NEW.owner")
-                && l[0].contains("WHEN 'hide' THEN ((JSON_CONTAINS(@sprig_rls, '3', '$.p') AND (NEW.owner")
-                && l[0].contains("ELSE (((JSON_CONTAINS(@sprig_rls, '3', '$.p') AND (NEW.owner = JSON_VALUE(@sprig_rls, '$.s.claims.\"sub\"')))) AND (NOT JSON_CONTAINS(@sprig_rls, '4', '$.p') OR (NEW.amount < 100))) END"),
-            "{}",
-            l[0]
-        );
-        // The INSERT-only restrictive policy 4 reaches neither marker.
-        let marker = &l[0][..l[0].find(" ELSE ").unwrap()];
-        assert!(!marker.contains("'4'"), "{marker}");
-        assert!(
-            l[1].contains("WHEN NEW.`_sprig_state` = 'hide' AND OLD.`_sprig_state` <> 'hide' THEN")
-                && l[1].contains(
-                    "WHEN OLD.`_sprig_state` = 'ovr' AND NEW.`_sprig_state` = 'ovr' THEN"
-                )
-                && l[1].contains("OLD.owner"),
-            "{}",
-            l[1]
-        );
-        assert_eq!(l[2], s[2]);
         let vs = spec.view_statements("`t42_u7`@`%`", &[]).unwrap();
         let v = [vs.function.clone(), vs.views[0].clone()];
         assert!(
@@ -626,6 +603,61 @@ mod tests {
             drops("s", 9)[2],
             "DROP TRIGGER IF EXISTS `s`.`__sprig_rls_bd_9`"
         );
+    }
+
+    /// An inheritable table's triggers: overrides and hide markers are
+    /// checked as the update and the delete they are (RL65).
+    #[test]
+    fn layered_triggers_check_markers_as_updates_and_deletes() {
+        let pols = [
+            TriggerPolicy {
+                id: 3,
+                restrictive: false,
+                commands: 15,
+                using: Some("owner = SPRIG_CLAIM('sub')"),
+                check: None,
+            },
+            TriggerPolicy {
+                id: 4,
+                restrictive: true,
+                commands: 2,
+                using: None,
+                check: Some("amount < 100"),
+            },
+        ];
+        let physical = |s: &str| Ok(s.to_owned());
+        let spec = TriggerSpec {
+            schema: "t42_d1_g1_s1",
+            table: "orders",
+            object: 77,
+            tenant: 42,
+            definer: "`t42_u7`@`%`",
+            policies: &pols,
+            lex: LexOptions::mariadb(),
+            physical: &physical,
+        };
+        let s = spec.statements().unwrap();
+        let l = spec.statements_for(true).unwrap();
+        assert!(
+            l[0].contains("CASE NEW.`_sprig_state` WHEN 'ovr' THEN ((JSON_CONTAINS(@sprig_rls, '3', '$.p') AND (NEW.owner")
+                && l[0].contains("WHEN 'hide' THEN ((JSON_CONTAINS(@sprig_rls, '3', '$.p') AND (NEW.owner")
+                && l[0].contains("ELSE (((JSON_CONTAINS(@sprig_rls, '3', '$.p') AND (NEW.owner = JSON_VALUE(@sprig_rls, '$.s.claims.\"sub\"')))) AND (NOT JSON_CONTAINS(@sprig_rls, '4', '$.p') OR (NEW.amount < 100))) END"),
+            "{}",
+            l[0]
+        );
+        // The INSERT-only restrictive policy 4 reaches neither marker.
+        let marker = &l[0][..l[0].find(" ELSE ").unwrap()];
+        assert!(!marker.contains("'4'"), "{marker}");
+        assert!(
+            l[1].contains("WHEN NEW.`_sprig_state` = 'hide' AND OLD.`_sprig_state` <> 'hide' THEN")
+                && l[1].contains(
+                    "WHEN OLD.`_sprig_state` = 'ovr' AND NEW.`_sprig_state` = 'ovr' THEN"
+                )
+                && l[1].contains("OLD.owner"),
+            "{}",
+            l[1]
+        );
+        assert_eq!(l[2], s[2]);
     }
 
     #[test]

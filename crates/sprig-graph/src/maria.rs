@@ -628,8 +628,8 @@ impl<'c> MariaStore<'c> {
     }
 
     /// Several read routes in one round trip per cluster: each target's
-    /// statement tagged with its route's index (`SELECT k AS q, x.* FROM
-    /// (...) x`), all of a cluster's in one `UNION ALL`. Rows come back
+    /// statement tagged with its route's index (`SELECT k AS q, ...`), all
+    /// of a cluster's in one `UNION ALL` (the routes' columns must match). Rows come back
     /// with their route's index, the statement's columns after the tag.
     async fn route_tagged(&mut self, specs: Vec<(HopOp, Targets)>) -> Result<Vec<(usize, Row)>> {
         let mut parts: Vec<(String, usize, String)> = Vec::new(); // (cluster, shard index, sql)
@@ -656,11 +656,12 @@ impl<'c> MariaStore<'c> {
                             "a graph route names a shard the statement's map doesn't have; retry",
                         )
                     })?;
-                parts.push((
-                    t.cluster.clone(),
-                    i,
-                    format!("(SELECT {k} AS q, x.* FROM ({}) x)", t.sql),
-                ));
+                // The tag goes in as the first column (a derived table
+                // would refuse the statements' repeated column names).
+                let Some(rest) = t.sql.strip_prefix("SELECT ") else {
+                    return Err(SprigError::internal("a tagged route that isn't a SELECT"));
+                };
+                parts.push((t.cluster.clone(), i, format!("(SELECT {k} AS q, {rest})")));
             }
         }
         let mut clusters: Vec<String> = Vec::new();
@@ -1355,6 +1356,80 @@ impl GraphStore for MariaStore<'_> {
             }
         }
         Ok(out)
+    }
+
+    async fn links_far_both(
+        &mut self,
+        from: &[u64],
+        types: &[u32],
+        far: &FarRead<'_>,
+    ) -> Result<Vec<(FarLink, bool)>> {
+        if from.is_empty() {
+            return Ok(Vec::new());
+        }
+        let num = |f: &[(String, CmpOp, f64)]| -> Vec<(String, CmpOp, String)> {
+            f.iter()
+                .filter(|(_, _, x)| x.is_finite())
+                .map(|(k, op, x)| (k.clone(), *op, format!("{x:?}")))
+                .collect()
+        };
+        let spec = FarNodes {
+            rel_keys: far.rel_keys.map(<[String]>::to_vec),
+            rel_filter: num(far.rel_filter),
+            keys: far.keys.map(<[String]>::to_vec),
+            filter: num(far.filter),
+            only: far.only.to_vec(),
+            join: far.join,
+        };
+        let mirror = self.read_mirrors().await;
+        let inn = if mirror {
+            Targets::ByKey(from.to_vec())
+        } else {
+            Targets::All(from.to_vec())
+        };
+        let link = |out: bool, mirror: bool| HopOp::Links {
+            out,
+            mirror,
+            types: types.to_vec(),
+            far: Some(spec.clone()),
+        };
+        let rows = self
+            .route_tagged(vec![
+                (link(true, false), Targets::ByKey(from.to_vec())),
+                (link(false, mirror), inn),
+            ])
+            .await?;
+        let with_rel = far.rel_keys.is_some();
+        Ok(rows
+            .into_iter()
+            .map(|(q, mut r)| {
+                let l = Link {
+                    src: u64_col(r.take(1)),
+                    dst: u64_col(r.take(2)),
+                    src_rk: u64_col(r.take(3)),
+                    dst_rk: u64_col(r.take(4)),
+                    id: u64_col(r.take(5)),
+                    rtype: u32::try_from(u64_col(r.take(6))).unwrap_or(0),
+                };
+                let n = if far.join {
+                    node_at(&mut r, 7).map(|mut n| {
+                        n.props = drop_nulls(n.props);
+                        n.types = n.types.map(drop_nulls);
+                        n
+                    })
+                } else {
+                    None
+                };
+                let at = if far.join { 12 } else { 7 };
+                let rel = if with_rel {
+                    json_col(r.take(at))
+                        .map(|p| (drop_nulls(p), json_col(r.take(at + 1)).map(drop_nulls)))
+                } else {
+                    None
+                };
+                ((l, n, rel), q == 0)
+            })
+            .collect())
     }
 
     async fn links_both(&mut self, from: &[u64], types: &[u32]) -> Result<Vec<(Link, bool)>> {

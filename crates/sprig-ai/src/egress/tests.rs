@@ -159,7 +159,14 @@ fn secrets_are_masked() {
             "Authorization: Bearer abc.def.ghi and more",
             "Authorization: Bearer *** and more",
         ),
-        ("don't worry, sprig_abcdefghijklmnopq", "don't worry, ***"),
+        (
+            "don't worry, sprig_acme_abcdefghjkmn_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "don't worry, ***",
+        ),
+        (
+            "sprig_backend_replica_lag_seconds rose",
+            "sprig_backend_replica_lag_seconds rose",
+        ),
         ("WHERE name = 'bob'", "WHERE name = 'bob'"),
     ] {
         let got = redact_secrets(input);
@@ -308,4 +315,21 @@ proptest! {
         }
         prop_assert!(g.reduced);
     }
+}
+
+#[test]
+fn the_scrubber_leaves_english_prose_alone() {
+    let s = Scrubber::new(&[1; 32]);
+    for prose in [
+        "show the lag on the replica, then compare it to the primary",
+        "with luck the move finishes by noon and goes to c2",
+        "Raise the limit, then call it done as soon as it settles",
+    ] {
+        assert_eq!(s.text(prose), prose);
+    }
+    // Lower-case statements are still caught.
+    let out = s.text("ran: select id from orders where total > 5");
+    assert!(!out.contains("orders"), "{out}");
+    let out = s.text("show tables from shop");
+    assert!(!out.contains("shop"), "{out}");
 }

@@ -342,6 +342,29 @@ pub trait GraphStore: Send {
         Ok(v)
     }
 
+    /// [`GraphStore::links_far`] both ways in one step where the store
+    /// can: each link with `true` when it goes out of `from`.
+    async fn links_far_both(
+        &mut self,
+        from: &[u64],
+        types: &[u32],
+        far: &FarRead<'_>,
+    ) -> Result<Vec<(FarLink, bool)>> {
+        let mut v: Vec<(FarLink, bool)> = self
+            .links_far(from, types, Dir::Out, far)
+            .await?
+            .into_iter()
+            .map(|l| (l, true))
+            .collect();
+        v.extend(
+            self.links_far(from, types, Dir::In, far)
+                .await?
+                .into_iter()
+                .map(|l| (l, false)),
+        );
+        Ok(v)
+    }
+
     /// [`GraphStore::links`] with the far nodes read in the same step
     /// where the store can (`keys` of their properties: `None` all;
     /// links to far nodes failing `filter` may be left out). A link

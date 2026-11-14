@@ -30,6 +30,7 @@ use crate::ast::{BinOp, Expr, MapItem};
 use crate::eval::Row;
 use crate::store::{EdgeRow, NodeRow};
 use crate::value::{Node, Rel, Value};
+use sprig_router::graph_route::CmpOp;
 
 /// A need's pseudo-key: the node's labels (`labels(v)`, `v:L`, a label
 /// in a later pattern on bound `v`).
@@ -642,6 +643,7 @@ impl Exec<'_> {
         ids: &[u64],
         var: Option<&String>,
         extra: Option<&Need>,
+        label: Option<u32>,
     ) -> Result<HashMap<u64, Arc<Node>>> {
         let need = self.need_of(var, extra);
         let only = var.and_then(|v| self.only.get(v)).cloned();
@@ -669,10 +671,14 @@ impl Exec<'_> {
             Some(Need::All) => None,
             Some(Need::Keys(ks)) => Some(ks.iter().filter(|k| real(k)).cloned().collect()),
         };
-        let filter = var
-            .and_then(|v| self.push.get(v))
-            .cloned()
-            .unwrap_or_default();
+        let mut filter = self.filters_for(var);
+        if let Some(l) = label {
+            filter.push((
+                format!("{}{l}", sprig_router::graph_route::LABEL_KEY),
+                CmpOp::Eq,
+                0.0,
+            ));
+        }
         let batch = self.id_batch();
         for chunk in want.chunks(batch) {
             for r in self
@@ -692,6 +698,40 @@ impl Exec<'_> {
             }
         }
         Ok(out)
+    }
+
+    /// The numeric filters a read of `var`'s nodes may apply: the
+    /// `WHERE`'s ([`Exec::push`]), and while a top-k `MATCH` has a bound
+    /// ([`Exec::prune`]) on a numeric first sort key `var.k`, the numbers
+    /// already worse than it (other values and `null`s pass: Cypher orders
+    /// them elsewhere).
+    pub(crate) fn filters_for(&self, var: Option<&String>) -> Vec<(String, CmpOp, f64)> {
+        let Some(v) = var else { return Vec::new() };
+        let mut out = self.push.get(v).cloned().unwrap_or_default();
+        if let Some(p) = &self.prune
+            && p.var == *v
+            && let (Some(bound), Some((Expr::Prop(t, k), asc))) = (&p.bound, p.keys.first())
+            && matches!(&**t, Expr::Var(x) if x == v)
+        {
+            let x = match bound.first() {
+                Some(Value::Int(i)) if i.unsigned_abs() < (1u64 << 52) => {
+                    #[allow(clippy::cast_precision_loss)] // below 2^52: exact
+                    let f = *i as f64;
+                    Some(f)
+                }
+                Some(Value::Float(f)) if f.is_finite() => Some(*f),
+                _ => None,
+            };
+            if let Some(x) = x {
+                let op = if *asc {
+                    CmpOp::NotNumAbove
+                } else {
+                    CmpOp::NotNumBelow
+                };
+                out.push((k.clone(), op, x));
+            }
+        }
+        out
     }
 
     /// What reading nodes for `var` brings with them: the clause's

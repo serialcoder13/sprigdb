@@ -15,6 +15,7 @@
 //!   are called with the same caller, so their own checks apply.
 //! - Results come back unreduced; the egress gate reduces them.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,15 +25,15 @@ use http_body_util::BodyExt;
 use hyper::{Method, Response};
 use prost_types::value::Kind;
 use serde_json::{Map, Value, json};
-use sprig_ai::tools::{Column, ColumnStats, ResultSet, Source, ToolBody, ToolOutput, ToolSpec};
 use sprig_ai::ToolHost;
+use sprig_ai::tools::{Column, ColumnStats, ResultSet, Source, ToolBody, ToolOutput, ToolSpec};
 use sprig_api::proto::v1::ExecuteResponse;
 use sprig_common::{Result, SprigCode, SprigError};
 use tokio::sync::mpsc;
 use tonic::body::Body;
 
-use super::super::super::sql::{CHANNEL_DEPTH, Caller, Caps, SqlCall, collect};
 use super::super::super::Core;
+use super::super::super::sql::{CHANNEL_DEPTH, Caller, Caps, SqlCall, collect};
 use super::super::{quote_literal, run_sql};
 
 /// Rows `column_stats` reads per table at most.
@@ -126,13 +127,7 @@ fn objects(r: &ExecuteResponse) -> Vec<Map<String, Value>> {
     let rs = result_set(r);
     rs.rows
         .into_iter()
-        .map(|row| {
-            rs.columns
-                .iter()
-                .map(|c| c.name.clone())
-                .zip(row)
-                .collect()
-        })
+        .map(|row| rs.columns.iter().map(|c| c.name.clone()).zip(row).collect())
         .collect()
 }
 
@@ -358,8 +353,7 @@ impl GatewayHost {
                 .first()
                 .and_then(|row| row.get(1))
                 .and_then(Value::as_str)
-                .map(|d| json!(clip(d, 8000)))
-                .unwrap_or(Value::Null),
+                .map_or(Value::Null, |d| json!(clip(d, 8000))),
             Err(_) => Value::Null,
         };
         Ok(ToolOutput {
@@ -367,7 +361,11 @@ impl GatewayHost {
                 "db": db, "table": table, "columns": columns,
                 "indexes": indexes, "definition": definition,
             })),
-            sources: vec![source("table", format!("{db}.{table}"), format!("{db}.{table}"))],
+            sources: vec![source(
+                "table",
+                format!("{db}.{table}"),
+                format!("{db}.{table}"),
+            )],
         })
     }
 
@@ -390,8 +388,9 @@ impl GatewayHost {
             .first()
             .and_then(|row| row.first())
             .and_then(Value::as_str)
-            .map(|p| serde_json::from_str::<Value>(p).unwrap_or_else(|_| json!(p)))
-            .unwrap_or(Value::Null);
+            .map_or(Value::Null, |p| {
+                serde_json::from_str::<Value>(p).unwrap_or_else(|_| json!(p))
+            });
         Ok(ToolOutput {
             body: ToolBody::Json(json!({"db": db, "plan": plan})),
             sources: vec![source("plan", "EXPLAIN FORMAT=JSON", db)],
@@ -410,7 +409,11 @@ impl GatewayHost {
             body: ToolBody::Json(
                 json!({"db": db, "table": table, "indexes": index_list(&objects(&r))}),
             ),
-            sources: vec![source("table", format!("{db}.{table}"), format!("{db}.{table}"))],
+            sources: vec![source(
+                "table",
+                format!("{db}.{table}"),
+                format!("{db}.{table}"),
+            )],
         })
     }
 
@@ -432,7 +435,7 @@ impl GatewayHost {
             } else {
                 key.to_owned()
             };
-            sql.push_str(&format!(" LIKE {}", quote_literal(&pat)));
+            let _ = write!(sql, " LIKE {}", quote_literal(&pat));
         }
         let r = self.sql("-", sql).await?;
         let mut rows = objects(&r);
@@ -451,6 +454,7 @@ impl GatewayHost {
         })
     }
 
+    #[allow(clippy::too_many_lines)] // the counts, then each column's values
     async fn column_stats(&self, input: &Value) -> Result<ToolOutput> {
         let (db, table) = (s(input, "db"), s(input, "table"));
         let wanted: Vec<&str> = input["cols"]
@@ -472,8 +476,14 @@ impl GatewayHost {
             .into_iter()
             .map(|m| {
                 (
-                    m.get("name").and_then(Value::as_str).unwrap_or("").to_owned(),
-                    m.get("type").and_then(Value::as_str).unwrap_or("").to_owned(),
+                    m.get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_owned(),
+                    m.get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_owned(),
                 )
             })
             .collect();
@@ -517,7 +527,7 @@ impl GatewayHost {
         let row = result_set(&r).rows.into_iter().next().unwrap_or_default();
         let num = |v: Option<&Value>| -> u64 {
             match v {
-                Some(Value::Number(n)) => n.as_f64().map_or(0, |f| f as u64),
+                Some(Value::Number(n)) => n.as_u64().unwrap_or_else(|| whole(n.as_f64())),
                 Some(Value::String(s)) => s.parse().unwrap_or(0),
                 _ => 0,
             }
@@ -570,13 +580,20 @@ impl GatewayHost {
         }
         Ok(ToolOutput {
             body: ToolBody::Stats(stats),
-            sources: vec![source("table", format!("{db}.{table}"), format!("{db}.{table}"))],
+            sources: vec![source(
+                "table",
+                format!("{db}.{table}"),
+                format!("{db}.{table}"),
+            )],
         })
     }
 
     async fn run_query(&self, input: &Value) -> Result<ToolOutput> {
         let (db, sql) = (s(input, "db"), s(input, "sql"));
-        let limit = input["limit"].as_u64().unwrap_or(DEFAULT_LIMIT).clamp(1, 1000);
+        let limit = input["limit"]
+            .as_u64()
+            .unwrap_or(DEFAULT_LIMIT)
+            .clamp(1, 1000);
         let caps = Caps {
             max_rows: limit,
             max_bytes: 0,
@@ -603,7 +620,11 @@ impl GatewayHost {
                 "as": v["as"], "columns": v["columns"], "row_count": rows,
                 "truncated": v["truncated"], "policies": v["policies"],
             })),
-            sources: vec![source("policy", "row-level security tester", s(input, "db"))],
+            sources: vec![source(
+                "policy",
+                "row-level security tester",
+                s(input, "db"),
+            )],
         })
     }
 
@@ -617,6 +638,19 @@ impl GatewayHost {
         )
         .await?;
         Ok(ToolOutput::json(reply_json(r).await?))
+    }
+}
+
+/// A count that came back as a float.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)] // clamped first
+fn whole(f: Option<f64>) -> u64 {
+    match f {
+        Some(x) if x.is_finite() && x > 0.0 => x.min(u64::MAX as f64) as u64,
+        _ => 0,
     }
 }
 
@@ -638,8 +672,7 @@ fn index_list(rows: &[Map<String, Value>]) -> Vec<Value> {
         }
         let unique = r
             .get("Non_unique")
-            .map(|v| v.as_str() == Some("0") || v.as_f64() == Some(0.0))
-            .unwrap_or(false);
+            .is_some_and(|v| v.as_str() == Some("0") || v.as_f64().is_some_and(|f| f.abs() < 0.5));
         out.push((
             name.clone(),
             json!({
@@ -670,7 +703,9 @@ impl ToolHost for GatewayHost {
                 }
                 let r =
                     super::super::workload::series(&self.core, &self.caller, id, "days=7").await?;
-                Ok(ToolOutput::json(json!({"id": id, "series": reply_json(r).await?})))
+                Ok(ToolOutput::json(
+                    json!({"id": id, "series": reply_json(r).await?}),
+                ))
             }
             "explain" => self.explain(input).await,
             "indexes" => self.indexes(input).await,

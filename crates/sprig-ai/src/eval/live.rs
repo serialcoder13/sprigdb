@@ -30,9 +30,9 @@ use std::sync::Arc;
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
+use crate::provider::Provider;
 use crate::provider::anthropic::{AnthropicConfig, AnthropicProvider};
 use crate::provider::openai::{KeyHeader, OpenAiConfig, OpenAiProvider};
-use crate::provider::Provider;
 use crate::providers::ProviderSettings;
 
 /// Must be `1` for a live run.
@@ -110,7 +110,10 @@ pub fn split_model(spec: &str) -> Result<(&str, &str), String> {
 /// # Errors
 /// Live runs not enabled, an unknown provider, a missing key or bad
 /// settings.
-pub fn provider(spec: &str, file: Option<&ProviderFile>) -> Result<(Arc<dyn Provider>, String), String> {
+pub fn provider(
+    spec: &str,
+    file: Option<&ProviderFile>,
+) -> Result<(Arc<dyn Provider>, String), String> {
     if std::env::var(LIVE_ENV).as_deref() != Ok("1") {
         return Err(format!(
             "live runs call a real model; set {LIVE_ENV}=1 to allow them"
@@ -129,11 +132,11 @@ pub fn provider(spec: &str, file: Option<&ProviderFile>) -> Result<(Arc<dyn Prov
     };
     let p: Arc<dyn Provider> = match entry.settings {
         ProviderSettings::AnthropicMessages(mut c) => {
-            c.name = name.to_owned();
+            name.clone_into(&mut c.name);
             Arc::new(AnthropicProvider::new(c, key).map_err(|e| e.message)?)
         }
         ProviderSettings::OpenAiChat(mut c) => {
-            c.name = name.to_owned();
+            name.clone_into(&mut c.name);
             Arc::new(OpenAiProvider::new(c, key).map_err(|e| e.message)?)
         }
     };

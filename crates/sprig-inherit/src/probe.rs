@@ -366,7 +366,14 @@ pub async fn visible_before(
                 });
                 let body = match record {
                     Some(b) => {
-                        let cols = image_columns(Some(b));
+                        // Columns the image lacks (a hierarchy's paths)
+                        // read as NULL.
+                        let mut cols = image_columns(Some(b));
+                        for c in columns.iter() {
+                            if !cols.iter().any(|x| x.eq_ignore_ascii_case(c)) {
+                                cols.push(c.clone());
+                            }
+                        }
                         format!(
                             "SELECT {shared} FROM ({}) AS {src} WHERE TRUE{}",
                             row_select(&cols, b, &key_types, nbe),

@@ -1540,3 +1540,58 @@ async fn indexed_far_maps_answer_as_whole_reads() {
         }
     }
 }
+
+/// A two-hop pattern predicate between bound ends answers as matching
+/// the pattern does.
+#[tokio::test]
+async fn two_hop_predicates_meet_in_the_middle() {
+    for shards in [1, 4] {
+        let mut s = social(shards).await;
+        let pred = q(
+            &mut s,
+            "MATCH (a:Person), (b:Person) WHERE (a)-[:BOUGHT]->()<-[:BOUGHT]-(b)
+             RETURN a.name AS a, b.name AS b ORDER BY a, b",
+        )
+        .await;
+        let walk = q(
+            &mut s,
+            "MATCH (a:Person)-[:BOUGHT]->()<-[:BOUGHT]-(b:Person)
+             RETURN DISTINCT a.name AS a, b.name AS b ORDER BY a, b",
+        )
+        .await;
+        assert_eq!(show(&pred), show(&walk), "{shards} shard(s)");
+        assert!(!show(&pred).is_empty());
+        let both = q(
+            &mut s,
+            "MATCH (a:Person) WITH a, [x IN [a] WHERE (x)-[:KNOWS]->()-[:KNOWS]->(a)] AS l
+             RETURN a.name AS a, size(l) AS n ORDER BY a",
+        )
+        .await;
+        assert_eq!(show(&both).len(), 5);
+    }
+}
+
+/// The running top-k bound drops only numbers worse than it: strings and
+/// missing values, which Cypher orders apart from numbers, stay.
+#[tokio::test]
+async fn top_rows_keep_values_the_bound_cannot_judge() {
+    let setup = "UNWIND range(1, 300) AS i CREATE (p:P {id: i})
+                 WITH p, i UNWIND range(1, 3) AS j
+                 CREATE (p)-[:W]->(:M {id: i * 10 + j,
+                   x: CASE WHEN i % 97 = 0 THEN 'text' WHEN i % 89 = 0 THEN null ELSE (i * 7 + j * 13) % 50 END})";
+    let cases = [
+        "MATCH (p:P) WITH p MATCH (p)-[:W]->(m) RETURN m.id AS mid, m.x AS x ORDER BY m.x DESC, mid LIMIT 9",
+        "MATCH (p:P) WITH p MATCH (p)-[:W]->(m) RETURN m.id AS mid, m.x AS x ORDER BY m.x, mid LIMIT 9",
+    ];
+    for shards in [1, 4] {
+        let mut whole = MemStore::new(shards);
+        let mut late = MemStore::new(shards).with_late_reads();
+        q(&mut whole, setup).await;
+        q(&mut late, setup).await;
+        for c in cases {
+            let a = q(&mut whole, c).await;
+            let b = q(&mut late, c).await;
+            assert_eq!(show(&a), show(&b), "{c} on {shards} shard(s)");
+        }
+    }
+}

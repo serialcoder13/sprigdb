@@ -31,7 +31,10 @@ fn every_shipped_set_parses_and_passes_its_static_checks() {
 fn every_shipped_set_has_about_fifty_cases() {
     for (_, file, text) in SETS {
         let n = load(text).unwrap().cases.len();
-        assert!(n >= MIN_CASES, "{file} has {n} cases, fewer than {MIN_CASES}");
+        assert!(
+            n >= MIN_CASES,
+            "{file} has {n} cases, fewer than {MIN_CASES}"
+        );
     }
 }
 
@@ -145,7 +148,7 @@ impl Provider for Leaky {
     fn kind(&self) -> ProviderKind {
         ProviderKind::Scripted
     }
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "leaky"
     }
     async fn chat(
@@ -185,7 +188,11 @@ async fn a_leak_in_a_sent_body_is_caught() {
         "the tenant acme again",
     ));
     let (r, _) = drive(Role::Admin, &admin, p, "m", Mode::Live, None).await;
-    assert!(r.safety.iter().any(|s| s.contains("acme")), "{:?}", r.safety);
+    assert!(
+        r.safety.iter().any(|s| s.contains("acme")),
+        "{:?}",
+        r.safety
+    );
 }
 
 #[tokio::test]
@@ -209,9 +216,13 @@ async fn a_judge_grades_through_the_provider_trait() {
     let g = r.judge.clone().unwrap();
     assert!((g.score - 0.5).abs() < 1e-9);
     assert!((r.answer - 0.75).abs() < 1e-9, "{r:?}");
-    assert_eq!(
-        parse_grade("Sure: {\"score\": 3, \"reason\": 1}").unwrap().score,
-        1.0
+    assert!(
+        (parse_grade("Sure: {\"score\": 3, \"reason\": 1}")
+            .unwrap()
+            .score
+            - 1.0)
+            .abs()
+            < 1e-9
     );
     assert!(parse_grade("no grade").is_none());
 }
@@ -234,7 +245,14 @@ has = { sql = ["customer_id"] }
         denied: false,
     };
     let exp = std::slice::from_ref(&e);
-    assert!((tool_score(exp, &[made("SHOP", "select * from orders where customer_id=9")]) - 1.0).abs() < 1e-9);
+    assert!(
+        (tool_score(
+            exp,
+            &[made("SHOP", "select * from orders where customer_id=9")]
+        ) - 1.0)
+            .abs()
+            < 1e-9
+    );
     assert!((tool_score(exp, &[made("shop", "SELECT 1")]) - 0.5).abs() < 1e-9);
     assert!((tool_score(exp, &[made("other", "customer_id")]) - 0.5).abs() < 1e-9);
     assert!(tool_score(exp, &[]) < 1e-9);
@@ -247,9 +265,15 @@ has = { sql = ["customer_id"] }
 fn writes_through_reads_are_recognised() {
     assert!(writes_through_read("run_query", "DELETE FROM t"));
     assert!(writes_through_read("run_query", "SELECT 1; DROP TABLE t"));
-    assert!(writes_through_read("run_query", "SELECT * FROM t FOR UPDATE"));
+    assert!(writes_through_read(
+        "run_query",
+        "SELECT * FROM t FOR UPDATE"
+    ));
     assert!(writes_through_read("explain", "DROP TABLE t"));
-    assert!(!writes_through_read("explain", "DELETE FROM t WHERE id = 1"));
+    assert!(!writes_through_read(
+        "explain",
+        "DELETE FROM t WHERE id = 1"
+    ));
     assert!(!writes_through_read("run_query", "SELECT 1"));
     assert!(!writes_through_read("run_query", "not sql at all"));
     assert!(!writes_through_read("propose_sql", "DROP TABLE t"));
@@ -260,7 +284,10 @@ fn words_match_whole() {
     assert!(contains_word("the tenant ACME, again", "acme"));
     assert!(!contains_word("acmecorp", "acme"));
     assert!(!contains_word("table#xacmey", "acme"));
-    assert!(contains_word("mail alice@example.com now", "alice@example.com"));
+    assert!(contains_word(
+        "mail alice@example.com now",
+        "alice@example.com"
+    ));
     assert!(contains_word("{\"t\":\"EMEA\"}", "EMEA"));
 }
 
@@ -287,14 +314,49 @@ fn summaries_compare_with_a_baseline() {
         sent: Vec::new(),
         judge: None,
     };
-    let base = Summary::of(Role::Dba, Mode::Live, "a/m", "p1", "s1", 1, &[rec("a", 1.0, true), rec("b", 0.8, true)]);
-    let same = Summary::of(Role::Dba, Mode::Live, "a/m", "p2", "s1", 2, &[rec("a", 1.0, true), rec("b", 0.8, true)]);
+    let base = Summary::of(
+        Role::Dba,
+        Mode::Live,
+        "a/m",
+        "p1",
+        "s1",
+        1,
+        &[rec("a", 1.0, true), rec("b", 0.8, true)],
+    );
+    let same = Summary::of(
+        Role::Dba,
+        Mode::Live,
+        "a/m",
+        "p2",
+        "s1",
+        2,
+        &[rec("a", 1.0, true), rec("b", 0.8, true)],
+    );
     assert!(compare(&same, &base, 0.0).ok);
-    let worse = Summary::of(Role::Dba, Mode::Live, "a/m", "p2", "s1", 2, &[rec("a", 0.5, true), rec("b", 0.8, true)]);
+    let worse = Summary::of(
+        Role::Dba,
+        Mode::Live,
+        "a/m",
+        "p2",
+        "s1",
+        2,
+        &[rec("a", 0.5, true), rec("b", 0.8, true)],
+    );
     let v = compare(&worse, &base, 0.02);
     assert!(!v.ok);
-    assert!(v.lines.iter().any(|l| l.contains("a: 1.00 → 0.50")), "{v:?}");
-    let unsafe_ = Summary::of(Role::Dba, Mode::Live, "a/m", "p2", "s1", 2, &[rec("a", 1.0, true), rec("b", 0.0, false)]);
+    assert!(
+        v.lines.iter().any(|l| l.contains("a: 1.00 → 0.50")),
+        "{v:?}"
+    );
+    let unsafe_ = Summary::of(
+        Role::Dba,
+        Mode::Live,
+        "a/m",
+        "p2",
+        "s1",
+        2,
+        &[rec("a", 1.0, true), rec("b", 0.0, false)],
+    );
     assert!(!compare(&unsafe_, &base, 1.0).ok);
     let other = Summary::of(Role::Data, Mode::Live, "a/m", "p2", "s1", 2, &[]);
     assert!(!compare(&other, &base, 1.0).ok);
@@ -308,7 +370,10 @@ fn results_are_written_and_the_last_run_is_found() {
     let b = Summary::of(Role::Data, Mode::Stub, "stub", "p", "s", 200, &[]);
     let pa = report::write(&dir, &a, &[]).unwrap();
     let pb = report::write(&dir, &b, &[]).unwrap();
-    assert_eq!(report::last_summary(&dir, Role::Data, "stub", &pb), Some(pa.clone()));
+    assert_eq!(
+        report::last_summary(&dir, Role::Data, "stub", &pb),
+        Some(pa.clone())
+    );
     assert_eq!(report::read_summary(&pb).unwrap(), b);
     assert!(pb.with_extension("").with_extension("jsonl").exists() || dir.exists());
     let _ = std::fs::remove_dir_all(&dir);

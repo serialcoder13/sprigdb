@@ -9,7 +9,7 @@ source: the gateway's OpenAPI document (/v1/openapi.json)
 
 The gateway's REST API, as `/v1/openapi.json` describes it on every gateway. Requests authenticate with `Authorization: Bearer <token or API key>` (or HTTP Basic where allowed) and act with the caller's own rights. Statements stream as NDJSON from `POST /v1/databases/{database}/sql:query`. The same services are available over gRPC.
 
-90 operations in 26 services.
+97 operations in 27 services.
 
 ## sprig.admin.v1.Recommendations
 
@@ -22,6 +22,18 @@ The gateway's REST API, as `/v1/openapi.json` describes it on every gateway. Req
 | GET | `/v1/recommendations:policy` | `Recommendations.GetApprovalPolicy` | Every kind's mode, level and timers at the tenant, a database (db) or a table (object) |
 | GET | `/v1/recommendations:subscriptions` | `Recommendations.ListSubscriptions` | The tenant's approval email subscriptions |
 | POST | `/v1/recommendations:subscriptions` | `Recommendations.SetSubscription` | The caller's own address and delivery (immediate, digest or off) |
+
+## sprig.v1.Ai
+
+| Method | Path | Operation | Description |
+|---|---|---|---|
+| POST | `/v1/ai/chat` | `Ai.Chat` | One assistant turn, streamed as NDJSON: one AiChatEvent per line (start, text, thinking, tool_start, tool_end, proposal, usage, sources, error, end). Proposals are shown, never run. Errors found before the turn starts (39990, 39991, 39992, 39995, a role the caller may not use) are plain HTTP errors |
+| GET | `/v1/ai/conversations` | `Ai.ListConversations` | The caller's conversations with the tenant assistants, newest first |
+| GET | `/v1/ai/conversations/{id}` | `Ai.GetConversation` | One of the caller's conversations with its messages, including the exact payloads sent to the provider while ai.audit_payload_days keeps them (payloads=false leaves them out) |
+| POST | `/v1/ai/feedback` | `Ai.Feedback` | A thumbs up or down on an answer ({message_id, vote, note}), or what became of a proposal ({proposal_id, outcome, note}) |
+| GET | `/v1/ai/glossary` | `Ai.ListGlossary` | The tenant glossary (status accepted, proposed or all) |
+| POST | `/v1/ai/glossary` | `Ai.PutGlossaryTerm` | Adds or replaces an accepted term (tenant administrators) |
+| POST | `/v1/ai/glossary/{term}` | `Ai.GlossaryAction` | {term}:accept or :reject a proposed term, or {term}:delete a term (tenant administrators) |
 
 ## sprig.v1.Analytics
 

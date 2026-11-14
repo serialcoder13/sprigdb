@@ -16,6 +16,7 @@
 //!   `ai.share_data` on or off.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -128,8 +129,7 @@ impl NewTerm {
         let s = |k: &str| {
             v.get(k)
                 .and_then(Value::as_str)
-                .map(str::trim)
-                .unwrap_or("")
+                .map_or("", str::trim)
                 .to_owned()
         };
         let sql = Some(s("sql"))
@@ -172,7 +172,11 @@ impl NewTerm {
                 "a definition is 1 to {MAX_TEXT} characters"
             )));
         }
-        if self.sql.as_ref().is_some_and(|s| s.chars().count() > MAX_TEXT) {
+        if self
+            .sql
+            .as_ref()
+            .is_some_and(|s| s.chars().count() > MAX_TEXT)
+        {
             return Err(invalid(format!(
                 "the SQL expression is longer than {MAX_TEXT} characters"
             )));
@@ -256,10 +260,10 @@ pub fn prompt(entries: &[Entry]) -> Option<String> {
     for e in entries.iter().filter(|e| e.status == Status::Accepted) {
         let mut line = format!("- {}: {}", e.term, e.definition.replace('\n', " "));
         if let Some(s) = &e.sql {
-            line.push_str(&format!(" SQL: `{}`.", s.replace('\n', " ")));
+            let _ = write!(line, " SQL: `{}`.", s.replace('\n', " "));
         }
         if !e.tables.is_empty() {
-            line.push_str(&format!(" Tables: {}.", e.tables.join(", ")));
+            let _ = write!(line, " Tables: {}.", e.tables.join(", "));
         }
         let line = crate::egress::redact_secrets(&line);
         if out.len() + line.len() + 1 > PROMPT_BYTES {
@@ -273,9 +277,10 @@ pub fn prompt(entries: &[Entry]) -> Option<String> {
         return None;
     }
     if left > 0 {
-        out.push_str(&format!(
-            "({left} more terms didn't fit; ask the user when a term is unclear.)\n"
-        ));
+        let _ = writeln!(
+            out,
+            "({left} more terms didn't fit; ask the user when a term is unclear.)"
+        );
     }
     Some(out)
 }
@@ -559,8 +564,15 @@ impl GlossaryStore for CatalogGlossary {
     ) -> Result<()> {
         t.check()?;
         let mut c = self.conn().await?;
-        self.upsert(&mut c, t, Status::Proposed, author, author_name, proposal_id)
-            .await
+        self.upsert(
+            &mut c,
+            t,
+            Status::Proposed,
+            author,
+            author_name,
+            proposal_id,
+        )
+        .await
     }
 
     async fn accept(&self, term: &str, by: UserId) -> Result<bool> {
@@ -572,7 +584,9 @@ impl GlossaryStore for CatalogGlossary {
             .map_err(unavailable)?;
         let have: Option<u64> = tx
             .exec_first(
-                format!("SELECT entry_id FROM {t} WHERE term = ? AND status = 'proposed' FOR UPDATE"),
+                format!(
+                    "SELECT entry_id FROM {t} WHERE term = ? AND status = 'proposed' FOR UPDATE"
+                ),
                 (term,),
             )
             .await
@@ -640,10 +654,10 @@ mod tests {
         assert_eq!(t.sql.as_deref(), Some("SUM(amount) - SUM(refund)"));
         assert!(NewTerm::from_json(&json!({"term": "", "definition": "x"})).is_err());
         assert!(NewTerm::from_json(&json!({"term": "x", "definition": ""})).is_err());
-        assert!(NewTerm::from_json(&json!({"term": "x", "definition": "y", "tables": "t"})).is_err());
         assert!(
-            NewTerm::from_json(&json!({"term": "x".repeat(129), "definition": "y"})).is_err()
+            NewTerm::from_json(&json!({"term": "x", "definition": "y", "tables": "t"})).is_err()
         );
+        assert!(NewTerm::from_json(&json!({"term": "x".repeat(129), "definition": "y"})).is_err());
     }
 
     #[tokio::test]
@@ -676,7 +690,7 @@ mod tests {
         g.put(
             &NewTerm {
                 term: "token".into(),
-                definition: "the API token is sprig_abcdefghijklmnop".into(),
+                definition: "the API token is sprig_acme_abcdefghjkmn_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
                 sql: None,
                 tables: vec![],
             },
@@ -686,7 +700,7 @@ mod tests {
         .await
         .unwrap();
         let p = prompt(&g.list(None).await.unwrap()).unwrap();
-        assert!(!p.contains("sprig_abcdefghijklmnop"), "secrets masked: {p}");
+        assert!(!p.contains("sprig_acme_abcdefghjkmn_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"), "secrets masked: {p}");
         assert!(g.delete("active customer").await.unwrap());
         assert!(!g.delete("active customer").await.unwrap());
     }

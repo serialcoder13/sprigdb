@@ -36,10 +36,10 @@ pub mod audit;
 pub mod budget;
 pub mod egress;
 pub mod error;
-pub mod feedback;
-pub mod glossary;
 #[cfg(any(test, feature = "eval"))]
 pub mod eval;
+pub mod feedback;
+pub mod glossary;
 pub mod keys;
 pub mod metrics;
 pub mod prompt;
@@ -52,10 +52,10 @@ pub mod tools;
 pub mod turn;
 
 pub use audit::{AuditStore, CatalogAudit, ConvId, MemoryAudit, MsgKind};
-pub use feedback::{FeedbackStore, Outcome};
-pub use glossary::{CatalogGlossary, GlossaryStore, MemoryGlossary};
 pub use budget::{Budget, UsageToday};
 pub use egress::{EgressPolicy, Scrubber};
+pub use feedback::{FeedbackStore, Outcome};
+pub use glossary::{CatalogGlossary, GlossaryStore, MemoryGlossary};
 pub use provider::{
     Block, ChatOutcome, ChatRequest, ChatSink, Delta, Effort, Message, MsgRole, Provider,
     ProviderKind, Sent, Stop, ToolDef, Usage,

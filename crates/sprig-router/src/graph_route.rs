@@ -172,6 +172,12 @@ pub enum CmpOp {
     Ge,
     /// `=`.
     Eq,
+    /// Keeps the row unless the value is a JSON number below the given
+    /// one (any other value, or none, passes): a sort bound, which must
+    /// not drop the strings and `null`s Cypher orders elsewhere.
+    NotNumBelow,
+    /// The same for a JSON number above the given one.
+    NotNumAbove,
 }
 
 impl CmpOp {
@@ -179,9 +185,9 @@ impl CmpOp {
     #[must_use]
     pub fn sql(self) -> &'static str {
         match self {
-            Self::Lt => "<",
+            Self::Lt | Self::NotNumBelow => "<",
             Self::Le => "<=",
-            Self::Gt => ">",
+            Self::Gt | Self::NotNumAbove => ">",
             Self::Ge => ">=",
             Self::Eq => "=",
         }
@@ -387,6 +393,22 @@ fn part_cols(alias: &str, keys: &[String]) -> String {
 
 /// `JSON_VALUE(<props>, '$."k"') <op> <v>`, or `None` for a key that
 /// can't be a path or a value that isn't a decimal number.
+/// A filter key naming a required label instead of a property:
+/// `LABEL_KEY` then the label id (the value is ignored).
+pub const LABEL_KEY: &str = "\u{1}label:";
+
+/// A node filter: [`number_filter`] on a property, or for a
+/// [`LABEL_KEY`] key, `JSON_CONTAINS(<labels>, '<id>')`.
+fn node_filter(props: &str, labels: &str, k: &str, op: CmpOp, v: &str) -> Option<String> {
+    match k.strip_prefix(LABEL_KEY) {
+        Some(id) => id
+            .parse::<u32>()
+            .ok()
+            .map(|id| format!("JSON_CONTAINS({labels}, '{id}')")),
+        None => number_filter(props, k, op, v),
+    }
+}
+
 fn number_filter(props: &str, k: &str, op: CmpOp, v: &str) -> Option<String> {
     let number = !v.is_empty()
         && v.chars()
@@ -394,11 +416,15 @@ fn number_filter(props: &str, k: &str, op: CmpOp, v: &str) -> Option<String> {
     if k.contains(['"', '\\']) || !number {
         return None;
     }
-    Some(format!(
-        "JSON_VALUE({props}, {}) {} {v}",
-        Lit::Str(format!("$.\"{k}\"")).sql(),
-        op.sql()
-    ))
+    let path = Lit::Str(format!("$.\"{k}\"")).sql();
+    Some(match op {
+        CmpOp::NotNumBelow | CmpOp::NotNumAbove => format!(
+            "NOT (JSON_TYPE(JSON_EXTRACT({props}, {path})) IN ('INTEGER', 'UNSIGNED INTEGER', 'DOUBLE') \
+             AND JSON_VALUE({props}, {path}) {} {v})",
+            op.sql()
+        ),
+        _ => format!("JSON_VALUE({props}, {path}) {} {v}", op.sql()),
+    })
 }
 
 /// [`part_cols`] over the expressions `props` and `types`.
@@ -611,8 +637,9 @@ fn statement(spec: &RouteSpec, i: usize, ids: &[u64]) -> Option<String> {
                     Some(keys) => part_exprs(&fprops, &ftypes, keys),
                 };
                 let _ = write!(select, ", {fid}, {far_rk}, {}, {pcols}", co(&labels));
+                let flabels = co(&labels);
                 for (k, op, v) in &far.filter {
-                    if let Some(c) = number_filter(&fprops, k, *op, v) {
+                    if let Some(c) = node_filter(&fprops, &flabels, k, *op, v) {
                         conds.push(format!("({fid} IS NULL OR {c})"));
                     }
                 }
@@ -687,7 +714,7 @@ fn statement(spec: &RouteSpec, i: usize, ids: &[u64]) -> Option<String> {
             // a non-number gives a superset or the same rows as Cypher's
             // null.
             for (k, op, v) in filter {
-                if let Some(c) = number_filter("n.props", k, *op, v) {
+                if let Some(c) = node_filter("n.props", "n.labels", k, *op, v) {
                     let _ = write!(sql, " AND {c}");
                 }
             }

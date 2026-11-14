@@ -335,6 +335,14 @@ const TOKEN_PREFIXES: &[&str] = &[
 ];
 
 fn looks_like_token(w: &str) -> bool {
+    // A SprigDB API key is `sprig_<tenant>_<key id>_<64 hex digits>`; other
+    // `sprig_` words, such as metric names, aren't secrets.
+    if let Some(rest) = w.strip_prefix("sprig_") {
+        let secret = rest.rsplit('_').next().unwrap_or("");
+        return rest.contains('_')
+            && secret.len() >= 32
+            && secret.bytes().all(|b| b.is_ascii_hexdigit());
+    }
     TOKEN_PREFIXES
         .iter()
         .any(|p| w.starts_with(p) && w.len() >= p.len() + 12)
@@ -513,6 +521,24 @@ const STATEMENT_START: &[&str] = &[
 const STATEMENT_MORE: &[&str] = &[
     "FROM", "INTO", "SET", "TABLE", "WHERE", "VALUES", "DATABASE", "SCHEMA", "INDEX", "VIEW",
     "USER", "ON", "BY", "AS", "JOIN", "TO",
+];
+/// The confirming words that are rare in English prose. A statement
+/// written in lower case (`show ...`, `with ...`) needs one of these, so
+/// "show the lag on the replica" or "with luck it moves to c2" stays text.
+const STATEMENT_STRONG: &[&str] = &[
+    "FROM",
+    "INTO",
+    "WHERE",
+    "VALUES",
+    "TABLE",
+    "TABLES",
+    "DATABASE",
+    "DATABASES",
+    "SCHEMA",
+    "INDEX",
+    "VIEW",
+    "JOIN",
+    "SELECT",
 ];
 
 /// Digits in a run that is treated as a value (or an id) rather than a
@@ -694,9 +720,16 @@ impl Scrubber {
                     .is_none_or(|c| !(c.is_ascii_alphanumeric() || *c == b'_'));
                 if boundary(at) && after_ok {
                     let rest = &up[end..];
+                    // Upper case, as statements are usually written: any
+                    // confirming word will do. Otherwise only a strong one.
+                    let confirm = if line[at..end] == up[at..end] {
+                        STATEMENT_MORE
+                    } else {
+                        STATEMENT_STRONG
+                    };
                     let more = rest
                         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                        .any(|w| STATEMENT_MORE.contains(&w));
+                        .any(|w| confirm.contains(&w));
                     if more {
                         return Some(at);
                     }

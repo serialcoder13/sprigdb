@@ -631,6 +631,11 @@ impl sprig_inherit::Runner for InhRunner<'_, '_, '_> {
             };
             SprigError::new(SprigCode::BackendUnavailable, msg).with_source(e)
         })?;
+        // Back to the pool first: the reconcile below waits for the
+        // tenant's gate and then for a slot of this same pool (4 slots), so
+        // sessions holding a slot here while its holder waits for one
+        // stopped every catalog read on the cluster (rlsinherit2).
+        drop(conn);
         // A share view was made: accounts row-level security narrowed to
         // single relations need SELECT on it (rlsinherit).
         if let Some(ts) = self.gw.sess.tenant.as_deref()

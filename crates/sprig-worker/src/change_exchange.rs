@@ -251,6 +251,8 @@ async fn read(
     wait: Duration,
 ) -> Result<Next> {
     tokio::select! {
+        // Cancel first: unbiased, a ready item could win after a cancel.
+        biased;
         () = cancel.cancelled() => Ok(Next::Stop),
         r = tokio::time::timeout(wait, feed.next()) => match r {
             Ok(i) => Ok(Next::Item(i?)),

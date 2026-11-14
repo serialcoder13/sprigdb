@@ -10,12 +10,14 @@
 //!   subject) are used, never an answer's text, with secrets masked.
 //!   Feedback improves prompts and evaluation sets, never model weights.
 
+use std::fmt::Write as _;
+
 use async_trait::async_trait;
 use mysql_async::prelude::Queryable as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sprig_common::ids::UserId;
 use sprig_common::Result;
+use sprig_common::ids::UserId;
 
 use crate::audit::{CatalogAudit, MemoryAudit, MsgKind, unavailable};
 use crate::role::Role;
@@ -159,10 +161,10 @@ pub fn prompt(notes: &[Note]) -> Option<String> {
                     n.proposal_kind.as_deref().unwrap_or("a")
                 );
                 if let Some(lb) = &n.label {
-                    l.push_str(&format!(": {lb}"));
+                    let _ = write!(l, ": {lb}");
                 }
                 if let Some(t) = &note {
-                    l.push_str(&format!(" (their note: {t})"));
+                    let _ = write!(l, " (their note: {t})");
                 }
                 l
             }
@@ -415,7 +417,12 @@ mod tests {
         let bob = UserId(2);
         let c = a.create(ann, Role::Data, "q").await.unwrap();
         let answer = a
-            .append(c, MsgKind::Assistant, &json!({"role": "assistant", "content": []}), None)
+            .append(
+                c,
+                MsgKind::Assistant,
+                &json!({"role": "assistant", "content": []}),
+                None,
+            )
             .await
             .unwrap();
         a.append(
@@ -433,7 +440,9 @@ mod tests {
             Some(Role::Data)
         );
         assert_eq!(
-            a.outcome(bob, "p-1", Outcome::Accepted, None).await.unwrap(),
+            a.outcome(bob, "p-1", Outcome::Accepted, None)
+                .await
+                .unwrap(),
             None
         );
         assert_eq!(
@@ -443,7 +452,9 @@ mod tests {
             Some((Role::Data, "sql".to_owned()))
         );
         assert_eq!(
-            a.outcome(ann, "nope", Outcome::Dismissed, None).await.unwrap(),
+            a.outcome(ann, "nope", Outcome::Dismissed, None)
+                .await
+                .unwrap(),
             None
         );
         let notes = a.recent(PROMPT_NOTES).await.unwrap();

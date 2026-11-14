@@ -25,6 +25,8 @@ hyper-util = { workspace = true, features = ["server", "server-auto", "server-gr
 prost.workspace = true
 prost-types.workspace = true
 sprig-api.workspace = true
+# The AI assistants: providers, tools, the egress gate, audit.
+sprig-ai.workspace = true
 tonic = { workspace = true, features = ["codegen", "router", "channel", "tls-ring"] }
 metrics.workspace = true
 mysql_async.workspace = true

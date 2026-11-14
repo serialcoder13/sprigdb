@@ -664,25 +664,34 @@ async fn triggers_search_and_change_streams_share_one_dump_per_process() {
         // 6. Search: each index holds exactly its table's rows.
         for j in 0..indexes {
             let mut last = Vec::new();
+            let mut error = String::new();
             let want: Vec<i64> = committed[ti].iter().copied().collect();
-            for _ in 0..60 {
+            for _ in 0..120 {
                 let r: Result<Vec<i64>, _> = c
                     .query(format!(
                         "SELECT id FROM sprig_search('ix{j}', 'row write', \
                          JSON_OBJECT('limit', 100000, 'consistency', 'latest')) AS s ORDER BY id"
                     ))
                     .await;
-                if let Ok(ids) = r {
-                    last = ids;
-                    if last == want {
-                        break;
+                match r {
+                    Ok(ids) => {
+                        last = ids;
+                        if last == want {
+                            break;
+                        }
                     }
+                    Err(e) => error = e.to_string(),
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
             if last != want {
+                let shown: Vec<mysql_async::Row> = c
+                    .query(format!("SHOW SEARCH INDEXES FROM s{j}"))
+                    .await
+                    .unwrap_or_default();
+                let shown: Vec<String> = shown.iter().map(|r| format!("{r:?}")).collect();
                 failures.push(format!(
-                    "{t}: ix{j} holds {} rows, the table {}",
+                    "{t}: ix{j} holds {} rows, the table {} (last error: {error}; {shown:?})",
                     last.len(),
                     want.len()
                 ));

@@ -273,16 +273,19 @@ impl GraphStore for MemStore {
         // else (missing, strings) fails.
         rows.retain(|n| {
             filter.iter().all(|(k, op, x)| {
-                n.props
-                    .get(k)
-                    .and_then(serde_json::Value::as_f64)
-                    .is_some_and(|v| match op {
-                        CmpOp::Lt => v < *x,
-                        CmpOp::Le => v <= *x,
-                        CmpOp::Gt => v > *x,
-                        CmpOp::Ge => v >= *x,
-                        CmpOp::Eq => (v - *x).abs() == 0.0,
-                    })
+                if let Some(id) = k.strip_prefix(sprig_router::graph_route::LABEL_KEY) {
+                    return id.parse::<u32>().is_ok_and(|id| n.labels.contains(&id));
+                }
+                let v = n.props.get(k).and_then(serde_json::Value::as_f64);
+                match op {
+                    CmpOp::NotNumBelow => v.is_none_or(|v| v >= *x),
+                    CmpOp::NotNumAbove => v.is_none_or(|v| v <= *x),
+                    CmpOp::Lt => v.is_some_and(|v| v < *x),
+                    CmpOp::Le => v.is_some_and(|v| v <= *x),
+                    CmpOp::Gt => v.is_some_and(|v| v > *x),
+                    CmpOp::Ge => v.is_some_and(|v| v >= *x),
+                    CmpOp::Eq => v.is_some_and(|v| (v - *x).abs() == 0.0),
+                }
             })
         });
         let Some(keys) = keys else { return Ok(rows) };

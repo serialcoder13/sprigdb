@@ -380,6 +380,8 @@ fn pushed(where_: &Expr, params: &Params) -> HashMap<String, Vec<(String, CmpOp,
             CmpOp::Gt => CmpOp::Lt,
             CmpOp::Ge => CmpOp::Le,
             CmpOp::Eq => CmpOp::Eq,
+            CmpOp::NotNumBelow => CmpOp::NotNumAbove,
+            CmpOp::NotNumAbove => CmpOp::NotNumBelow,
         };
         let (v, k, e, op) = match (&**a, &**b) {
             (Expr::Prop(t, k), e) if matches!(&**t, Expr::Var(_)) => (t, k, e, op),
@@ -1033,34 +1035,90 @@ impl Exec<'_> {
                 let Some((patterns, where_, map)) = comprehension(q) else {
                     return Ok(Vec::new());
                 };
-                let mut tagged: Vec<Row> = rows
+                if rows.is_empty() {
+                    return Ok(Vec::new());
+                }
+                // The outer variables the comprehension reads: rows equal
+                // on them get the same list, so it runs once per distinct
+                // combination (LDBC IC14 ran it for every relationship of
+                // every shortest path, the same relationships many times).
+                let mut used: Vec<String> = Vec::new();
+                {
+                    let mut names: Vec<String> = patterns.iter().flat_map(pattern_vars).collect();
+                    let mut take = |e: &Expr| {
+                        e.walk(&mut |x| {
+                            if let Expr::Var(v) = x {
+                                names.push(v.clone());
+                            }
+                        });
+                    };
+                    if let Some(w) = where_ {
+                        take(w);
+                    }
+                    take(map);
+                    for p in patterns {
+                        for np in std::iter::once(&p.start).chain(p.steps.iter().map(|(_, n)| n)) {
+                            if let Some(pe) = &np.props {
+                                take(pe);
+                            }
+                        }
+                        for (rp, _) in &p.steps {
+                            if let Some(pe) = &rp.props {
+                                take(pe);
+                            }
+                        }
+                    }
+                    for n in names {
+                        if !n.starts_with(' ') && rows[0].contains_key(&n) && !used.contains(&n) {
+                            used.push(n);
+                        }
+                    }
+                }
+                let mut group_of: Vec<usize> = Vec::with_capacity(rows.len());
+                let mut firsts: Vec<usize> = Vec::new();
+                let mut seen: HashMap<Vec<Key>, usize> = HashMap::new();
+                for (i, r) in rows.iter().enumerate() {
+                    let k: Vec<Key> = used
+                        .iter()
+                        .map(|v| r.get(v).map_or(Key::Null, Value::key))
+                        .collect();
+                    let g = *seen.entry(k).or_insert_with(|| {
+                        firsts.push(i);
+                        firsts.len() - 1
+                    });
+                    group_of.push(g);
+                }
+                let mut tagged: Vec<Row> = firsts
                     .iter()
                     .enumerate()
-                    .map(|(i, r)| {
-                        let mut t: Row = r
+                    .map(|(g, &i)| {
+                        // Only what the comprehension reads: the rows it
+                        // multiplies don't carry the outer row's paths and
+                        // lists.
+                        let mut t: Row = rows[i]
                             .iter()
-                            .filter(|(k, _)| !k.starts_with(' '))
+                            .filter(|(k, _)| used.contains(k))
                             .map(|(k, v)| (k.clone(), v.clone()))
                             .collect();
-                        t.insert(" pcrow".into(), Value::Int(i64::try_from(i).unwrap_or(0)));
+                        t.insert(" pcrow".into(), Value::Int(i64::try_from(g).unwrap_or(0)));
                         t
                     })
                     .collect();
-                if tagged.is_empty() {
-                    return Ok(Vec::new());
-                }
                 tagged =
                     Box::pin(self.match_clause(tagged, patterns, where_, false, false)).await?;
                 let vals = self.eval_rows(map, &mut tagged).await?;
-                let mut out: Vec<Vec<Value>> = vec![Vec::new(); rows.len()];
+                let mut per_group: Vec<Vec<Value>> = vec![Vec::new(); firsts.len()];
                 for (r, v) in tagged.iter().zip(vals) {
                     if let Some(Value::Int(i)) = r.get(" pcrow")
-                        && let Some(o) = usize::try_from(*i).ok().and_then(|i| out.get_mut(i))
+                        && let Some(o) = usize::try_from(*i).ok().and_then(|i| per_group.get_mut(i))
                     {
                         o.push(v);
                     }
                 }
-                out.into_iter().map(Value::List).collect()
+                group_of
+                    .into_iter()
+                    .map(|g| Value::List(per_group[g].clone()))
+                    .collect()
             }
             Lifted::Subquery(k, q) => {
                 let mut v = Vec::with_capacity(rows.len());

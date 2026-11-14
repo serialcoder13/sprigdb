@@ -1,6 +1,405 @@
 {
   "components": {
     "schemas": {
+      "AiChatEvent": {
+        "properties": {
+          "conversation": {
+            "nullable": true,
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "error": {
+            "$ref": "#/components/schemas/Error"
+          },
+          "filed": {
+            "nullable": true,
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "input": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "model": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "proposal": {
+            "properties": {
+              "body": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "id": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "sql",
+                  "recommendation",
+                  "tile",
+                  "glossary",
+                  "generate_rows"
+                ],
+                "type": "string"
+              },
+              "tool_use_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "body"
+            ],
+            "type": "object"
+          },
+          "reduced": {
+            "type": "boolean"
+          },
+          "role": {
+            "type": "string"
+          },
+          "share_data": {
+            "type": "boolean"
+          },
+          "sources": {
+            "items": {
+              "properties": {
+                "kind": {
+                  "type": "string"
+                },
+                "reference": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "title",
+                "reference"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "stop": {
+            "enum": [
+              "end_turn",
+              "max_tokens",
+              "refusal",
+              "other"
+            ],
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "start",
+              "text",
+              "thinking",
+              "tool_start",
+              "tool_end",
+              "proposal",
+              "usage",
+              "sources",
+              "error",
+              "end"
+            ],
+            "type": "string"
+          },
+          "usage": {
+            "additionalProperties": true,
+            "type": "object"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "AiChatRequest": {
+        "properties": {
+          "context": {
+            "items": {
+              "properties": {
+                "kind": {
+                  "enum": [
+                    "query",
+                    "table",
+                    "note",
+                    "result"
+                  ],
+                  "type": "string"
+                },
+                "ref": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "ref"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "conversation": {
+            "type": "string"
+          },
+          "database": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "data",
+              "dba",
+              "admin"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "message"
+        ],
+        "type": "object"
+      },
+      "AiConversation": {
+        "properties": {
+          "conversation": {
+            "$ref": "#/components/schemas/AiConversationHeader"
+          },
+          "messages": {
+            "items": {
+              "properties": {
+                "body": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "created_ms": {
+                  "type": "integer"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "user",
+                    "assistant",
+                    "tool_call",
+                    "tool_result",
+                    "proposal",
+                    "system_note"
+                  ],
+                  "type": "string"
+                },
+                "sent_hash": {
+                  "nullable": true,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "kind",
+                "body"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "conversation",
+          "messages"
+        ],
+        "type": "object"
+      },
+      "AiConversationHeader": {
+        "properties": {
+          "created_ms": {
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_ms": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "role",
+          "title"
+        ],
+        "type": "object"
+      },
+      "AiConversations": {
+        "properties": {
+          "conversations": {
+            "items": {
+              "$ref": "#/components/schemas/AiConversationHeader"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "conversations"
+        ],
+        "type": "object"
+      },
+      "AiFeedbackRequest": {
+        "properties": {
+          "message_id": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          },
+          "outcome": {
+            "enum": [
+              "accepted",
+              "dismissed",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "proposal_id": {
+            "type": "string"
+          },
+          "vote": {
+            "enum": [
+              "up",
+              "down"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "AiGlossary": {
+        "properties": {
+          "can_edit": {
+            "type": "boolean"
+          },
+          "terms": {
+            "items": {
+              "properties": {
+                "accepted_by": {
+                  "nullable": true,
+                  "type": "integer"
+                },
+                "author": {
+                  "type": "string"
+                },
+                "author_id": {
+                  "type": "integer"
+                },
+                "definition": {
+                  "type": "string"
+                },
+                "proposal_id": {
+                  "nullable": true,
+                  "type": "string"
+                },
+                "sql": {
+                  "nullable": true,
+                  "type": "string"
+                },
+                "status": {
+                  "enum": [
+                    "proposed",
+                    "accepted"
+                  ],
+                  "type": "string"
+                },
+                "tables": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "term": {
+                  "type": "string"
+                },
+                "updated_ms": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "term",
+                "status",
+                "definition"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "terms",
+          "can_edit"
+        ],
+        "type": "object"
+      },
+      "AiGlossaryTerm": {
+        "properties": {
+          "definition": {
+            "type": "string"
+          },
+          "sql": {
+            "type": "string"
+          },
+          "tables": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "term": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "term",
+          "definition"
+        ],
+        "type": "object"
+      },
+      "AiRecorded": {
+        "properties": {
+          "recorded": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "recorded"
+        ],
+        "type": "object"
+      },
       "AnalyticsExplain": {
         "description": "The AnalyticsExplain message as JSON (proto3 mapping)",
         "type": "object"
@@ -1176,6 +1575,299 @@
   },
   "openapi": "3.0.3",
   "paths": {
+    "/v1/ai/chat": {
+      "post": {
+        "operationId": "Ai.Chat",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiChatRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiChatEvent"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "One assistant turn, streamed as NDJSON: one AiChatEvent per line (start, text, thinking, tool_start, tool_end, proposal, usage, sources, error, end). Proposals are shown, never run. Errors found before the turn starts (39990, 39991, 39992, 39995, a role the caller may not use) are plain HTTP errors",
+        "tags": [
+          "sprig.v1.Ai"
+        ]
+      }
+    },
+    "/v1/ai/conversations": {
+      "get": {
+        "operationId": "Ai.ListConversations",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiConversations"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "The caller's conversations with the tenant assistants, newest first",
+        "tags": [
+          "sprig.v1.Ai"
+        ]
+      }
+    },
+    "/v1/ai/conversations/{id}": {
+      "get": {
+        "operationId": "Ai.GetConversation",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "payloads",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiConversation"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "One of the caller's conversations with its messages, including the exact payloads sent to the provider while ai.audit_payload_days keeps them (payloads=false leaves them out)",
+        "tags": [
+          "sprig.v1.Ai"
+        ]
+      }
+    },
+    "/v1/ai/feedback": {
+      "post": {
+        "operationId": "Ai.Feedback",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiFeedbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiRecorded"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "A thumbs up or down on an answer ({message_id, vote, note}), or what became of a proposal ({proposal_id, outcome, note})",
+        "tags": [
+          "sprig.v1.Ai"
+        ]
+      }
+    },
+    "/v1/ai/glossary": {
+      "get": {
+        "operationId": "Ai.ListGlossary",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiGlossary"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "The tenant glossary (status accepted, proposed or all)",
+        "tags": [
+          "sprig.v1.Ai"
+        ]
+      },
+      "post": {
+        "operationId": "Ai.PutGlossaryTerm",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiGlossaryTerm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Adds or replaces an accepted term (tenant administrators)",
+        "tags": [
+          "sprig.v1.Ai"
+        ]
+      }
+    },
+    "/v1/ai/glossary/{term}": {
+      "post": {
+        "operationId": "Ai.GlossaryAction",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "term",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "{term}:accept or :reject a proposed term, or {term}:delete a term (tenant administrators)",
+        "tags": [
+          "sprig.v1.Ai"
+        ]
+      }
+    },
     "/v1/api-keys": {
       "get": {
         "operationId": "ApiKeys.ListKeys",

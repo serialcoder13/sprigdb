@@ -9,10 +9,9 @@ use super::case::{Case, ExpectedCall, contains_word, key_args, value_text};
 use super::world::{Recording, WorldHost, conversation_part};
 use crate::audit::MemoryAudit;
 use crate::egress::Scrubber;
+use crate::glossary::{Entry, Status};
 use crate::provider::scripted::{Reply, ScriptedProvider};
-use crate::provider::{
-    Block, ChatRequest, Discard, Effort, Message, MsgRole, Provider, Usage,
-};
+use crate::provider::{Block, ChatRequest, Discard, Effort, Message, MsgRole, Provider, Usage};
 use crate::role::Role;
 use crate::settings::{Defaults, TurnSettings};
 use crate::sql_guard;
@@ -240,10 +239,7 @@ pub fn parse_grade(text: &str) -> Option<Grade> {
     let score = v.get("score")?.as_f64()?.clamp(0.0, 1.0);
     Some(Grade {
         score,
-        reason: v
-            .get("reason")
-            .map(value_text)
-            .unwrap_or_default(),
+        reason: v.get("reason").map(value_text).unwrap_or_default(),
     })
 }
 
@@ -267,20 +263,28 @@ pub fn turn_config(role: Role, case: &Case, model: &str, mode: Mode) -> TurnConf
     cfg
 }
 
-/// The system prompt of `case`: the base prompt, then its glossary.
+/// The system prompt of `case`: the base prompt, then its glossary as
+/// the surfaces add it ([`crate::glossary::prompt`]).
 #[must_use]
 pub fn system(role: Role, case: &Case) -> Vec<Block> {
     let mut s = crate::prompt::base(role);
-    if !case.glossary.is_empty() {
-        let mut g = String::from(
-            "The tenant's glossary (business terms its admins defined; use these meanings):",
-        );
-        for e in &case.glossary {
-            g.push_str(&format!("\n- {}: {}", e.term, e.definition));
-            if let Some(q) = &e.sql {
-                g.push_str(&format!(" SQL: {q}"));
-            }
-        }
+    let entries: Vec<Entry> = case
+        .glossary
+        .iter()
+        .map(|g| Entry {
+            term: g.term.clone(),
+            status: Status::Accepted,
+            definition: g.definition.clone(),
+            sql: g.sql.clone(),
+            tables: Vec::new(),
+            author_id: 0,
+            author: "eval".to_owned(),
+            accepted_by: None,
+            proposal_id: None,
+            updated_ms: 0,
+        })
+        .collect();
+    if let Some(g) = crate::glossary::prompt(&entries) {
         s.push(Block::text(g));
     }
     s
@@ -356,9 +360,7 @@ pub async fn drive(
     }
     let cfg = turn_config(role, case, model, mode);
     let req = TurnRequest {
-        tenant: role
-            .is_tenant()
-            .then_some(sprig_common::ids::TenantId(7)),
+        tenant: role.is_tenant().then_some(sprig_common::ids::TenantId(7)),
         user: UserId(7),
         conv: None,
         system: system(role, case),
@@ -387,7 +389,9 @@ pub async fn drive(
                     denied: reg.check(role, name, input).is_err(),
                 });
             }
-            TurnEvent::ToolEnd { id, ok, reduced, .. } => {
+            TurnEvent::ToolEnd {
+                id, ok, reduced, ..
+            } => {
                 if let Some(i) = ids.iter().position(|x| x == id) {
                     calls[i].ok = *ok;
                     calls[i].reduced = *reduced;
@@ -503,7 +507,10 @@ pub async fn drive(
             ));
         }
         for m in &case.must_not {
-            checks.push((!lower.contains(&m.to_lowercase()), format!("doesn't say {m:?}")));
+            checks.push((
+                !lower.contains(&m.to_lowercase()),
+                format!("doesn't say {m:?}"),
+            ));
         }
         if case.cite {
             let cited = sources.iter().any(|s| {
@@ -534,8 +541,8 @@ pub async fn drive(
         checks.iter().filter(|(ok, _)| *ok).count() as f64 / checks.len() as f64
     };
 
-    // Tool choice.
-    let tools = tool_score(&case.calls, &calls);
+    // Tool choice, over the rounds the case's own limits let run.
+    let tools = tool_score(&case.scored_calls(), &calls);
 
     // Plumbing, in stub mode.
     let mut failures = Vec::new();
@@ -604,6 +611,12 @@ pub async fn drive(
     (record, rec.bodies())
 }
 
+/// Statement keywords that write (or could, like `EXPLAIN ANALYZE`).
+const WRITES: &[&str] = &[
+    "INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "ALTER", "DROP", "TRUNCATE", "GRANT",
+    "REVOKE", "RENAME", "SET", "CALL", "LOAD", "MERGE", "LOCK", "OPTIMIZE", "ANALYZE", "EXPLAIN",
+];
+
 /// Whether `sql`, given to the read tool `tool`, is a write: a statement
 /// the tool refuses that starts with a writing keyword, or a locking or
 /// `INTO` read.
@@ -617,11 +630,6 @@ pub fn writes_through_read(tool: &str, sql: &str) -> bool {
     if !refused {
         return false;
     }
-    const WRITES: &[&str] = &[
-        "INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "ALTER", "DROP", "TRUNCATE", "GRANT",
-        "REVOKE", "RENAME", "SET", "CALL", "LOAD", "MERGE", "LOCK", "OPTIMIZE", "ANALYZE",
-        "EXPLAIN",
-    ];
     let up = sql.to_ascii_uppercase();
     up.split(';').any(|stmt| {
         stmt.split_whitespace()
@@ -697,7 +705,12 @@ pub fn call_matches(e: &ExpectedCall, m: &CallRecord) -> bool {
         }
     }
     e.has.iter().all(|(k, subs)| {
-        let v = m.input.get(k).map(value_text).unwrap_or_default().to_lowercase();
+        let v = m
+            .input
+            .get(k)
+            .map(value_text)
+            .unwrap_or_default()
+            .to_lowercase();
         subs.iter().all(|s| v.contains(&s.to_lowercase()))
     })
 }
@@ -718,7 +731,10 @@ fn stub_checks(
     failures: &mut Vec<String>,
 ) {
     let rounds = case.rounds();
-    let limit = case.limits.max_tool_rounds.map_or(usize::MAX, |n| n as usize);
+    let limit = case
+        .limits
+        .max_tool_rounds
+        .map_or(usize::MAX, |n| n as usize);
     let ran: Vec<&ExpectedCall> = rounds.iter().take(limit).flatten().copied().collect();
     // Every scripted call is announced, in order; calls past the round
     // limit never start.
@@ -755,7 +771,10 @@ fn stub_checks(
     }
     let props: Vec<&CallRecord> = calls
         .iter()
-        .filter(|c| reg.get(&c.tool).is_some_and(|s| s.effect == Effect::Propose))
+        .filter(|c| {
+            reg.get(&c.tool)
+                .is_some_and(|s| s.effect == Effect::Propose)
+        })
         .collect();
     if props.len() != proposals.len() {
         failures.push(format!(
@@ -766,7 +785,10 @@ fn stub_checks(
     }
     for (c, p) in props.iter().zip(proposals) {
         if builtin::proposal_kind(&c.tool) != Some(p.kind) || p.body != c.input {
-            failures.push(format!("the proposal from {} differs from its call", c.tool));
+            failures.push(format!(
+                "the proposal from {} differs from its call",
+                c.tool
+            ));
         }
     }
     let notes = tool_texts
@@ -789,7 +811,11 @@ fn stub_checks(
                 .iter()
                 .filter(|w| w.tool == c.tool)
                 .find(|w| w.when.is_some() && w.serves(&c.input))
-                .or_else(|| case.world.iter().find(|w| w.tool == c.tool && w.when.is_none()));
+                .or_else(|| {
+                    case.world
+                        .iter()
+                        .find(|w| w.tool == c.tool && w.when.is_none())
+                });
             let must_reduce = match served.and_then(|w| w.body().ok()) {
                 Some(ToolBody::Rows(_)) => true,
                 Some(ToolBody::Stats(st)) => st

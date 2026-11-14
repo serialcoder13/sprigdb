@@ -43,7 +43,48 @@ pub fn paths() -> Value {
     if let (Value::Object(m), Value::Object(r)) = (&mut v, docs_paths()) {
         m.extend(r);
     }
+    if let (Value::Object(m), Value::Object(r)) = (&mut v, ai_paths()) {
+        m.extend(r);
+    }
     v
+}
+
+/// The AI assistants: chat, conversations, feedback and the glossary.
+fn ai_paths() -> Value {
+    let p = |name: &str| json!({"name": name, "in": "path", "required": true, "schema": {"type": "string"}});
+    let q = |name: &str| json!({"name": name, "in": "query", "required": false, "schema": {"type": "string"}});
+    let mut chat = op(
+        "Ai.Chat",
+        "sprig.v1.Ai",
+        "One assistant turn, streamed as NDJSON: one AiChatEvent per line (start, text, thinking, tool_start, \
+         tool_end, proposal, usage, sources, error, end). Proposals are shown, never run. Errors found before the \
+         turn starts (39990, 39991, 39992, 39995, a role the caller may not use) are plain HTTP errors",
+        Some("AiChatRequest"),
+        "AiChatEvent",
+    );
+    chat["responses"]["200"]["content"] = json!({"application/x-ndjson": {
+        "schema": {"$ref": "#/components/schemas/AiChatEvent"}}});
+    json!({
+        "/v1/ai/chat": {"post": chat},
+        "/v1/ai/conversations": {"get": with_params(op("Ai.ListConversations", "sprig.v1.Ai",
+            "The caller's conversations with the tenant assistants, newest first", None, "AiConversations"),
+            &[q("limit")])},
+        "/v1/ai/conversations/{id}": {"get": with_params(op("Ai.GetConversation", "sprig.v1.Ai",
+            "One of the caller's conversations with its messages, including the exact payloads sent to the \
+             provider while ai.audit_payload_days keeps them (payloads=false leaves them out)",
+            None, "AiConversation"), &[p("id"), q("payloads")])},
+        "/v1/ai/feedback": {"post": op("Ai.Feedback", "sprig.v1.Ai",
+            "A thumbs up or down on an answer ({message_id, vote, note}), or what became of a proposal \
+             ({proposal_id, outcome, note})", Some("AiFeedbackRequest"), "AiRecorded")},
+        "/v1/ai/glossary": {
+            "get": with_params(op("Ai.ListGlossary", "sprig.v1.Ai",
+                "The tenant glossary (status accepted, proposed or all)", None, "AiGlossary"), &[q("status")]),
+            "post": op("Ai.PutGlossaryTerm", "sprig.v1.Ai",
+                "Adds or replaces an accepted term (tenant administrators)", Some("AiGlossaryTerm"), "JsonReply")},
+        "/v1/ai/glossary/{term}": {"post": with_params(op("Ai.GlossaryAction", "sprig.v1.Ai",
+            "{term}:accept or :reject a proposed term, or {term}:delete a term (tenant administrators)",
+            None, "JsonReply"), &[p("term")])},
+    })
 }
 
 /// Docs search over the release's documentation.
@@ -265,6 +306,14 @@ fn core_paths() -> Value {
 /// The component schemas the paths use.
 #[must_use]
 pub fn schemas() -> Value {
+    let mut v = core_schemas();
+    if let (Value::Object(m), Value::Object(a)) = (&mut v, ai_schemas()) {
+        m.extend(a);
+    }
+    v
+}
+
+fn core_schemas() -> Value {
     let s = |props: Value, req: &[&str]| json!({"type": "object", "properties": props, "required": req});
     let string = json!({"type": "string"});
     let int = json!({"type": "integer"});
@@ -344,6 +393,58 @@ pub fn schemas() -> Value {
             "mode": {"type": "string", "enum": ["hybrid", "keyword"]},
             "hits": {"type": "array", "items": {"$ref": "#/components/schemas/DocsSearchHit"}}}),
             &["version", "mode", "hits"]),
+    })
+}
+
+/// The AI assistants' schemas.
+fn ai_schemas() -> Value {
+    let s = |props: Value, req: &[&str]| json!({"type": "object", "properties": props, "required": req});
+    let string = json!({"type": "string"});
+    let int = json!({"type": "integer"});
+    let boolean = json!({"type": "boolean"});
+    let obj = json!({"type": "object", "additionalProperties": true});
+    let nullable = json!({"type": "string", "nullable": true});
+    json!({
+        "AiChatRequest": s(json!({"role": {"type": "string", "enum": ["data", "dba", "admin"]},
+            "message": string, "conversation": string, "database": string,
+            "context": {"type": "array", "items": s(json!({
+                "kind": {"type": "string", "enum": ["query", "table", "note", "result"]}, "ref": string}),
+                &["kind", "ref"])}}), &["role", "message"]),
+        "AiChatEvent": s(json!({"type": {"type": "string", "enum": ["start", "text", "thinking",
+                "tool_start", "tool_end", "proposal", "usage", "sources", "error", "end"]},
+            "conversation": nullable, "role": string, "model": string, "share_data": boolean,
+            "text": string, "id": string, "name": string, "input": obj, "ok": boolean, "reduced": boolean,
+            "proposal": s(json!({"id": string, "kind": {"type": "string",
+                "enum": ["sql", "recommendation", "tile", "glossary", "generate_rows"]},
+                "tool_use_id": string, "body": obj}), &["id", "kind", "body"]),
+            "filed": nullable, "usage": obj,
+            "sources": {"type": "array", "items": s(json!({"kind": string, "title": string,
+                "reference": string}), &["kind", "title", "reference"])},
+            "error": {"$ref": "#/components/schemas/Error"},
+            "stop": {"type": "string", "enum": ["end_turn", "max_tokens", "refusal", "other"]},
+            "detail": string}), &["type"]),
+        "AiConversationHeader": s(json!({"id": string, "role": string, "title": string,
+            "created_ms": int, "updated_ms": int}), &["id", "role", "title"]),
+        "AiConversations": s(json!({"conversations": {"type": "array",
+            "items": {"$ref": "#/components/schemas/AiConversationHeader"}}}), &["conversations"]),
+        "AiConversation": s(json!({"conversation": {"$ref": "#/components/schemas/AiConversationHeader"},
+            "messages": {"type": "array", "items": s(json!({"id": string,
+                "kind": {"type": "string", "enum": ["user", "assistant", "tool_call", "tool_result",
+                    "proposal", "system_note"]},
+                "body": obj, "sent_hash": nullable, "created_ms": int}), &["id", "kind", "body"])}}),
+            &["conversation", "messages"]),
+        "AiFeedbackRequest": s(json!({"message_id": string, "vote": {"type": "string", "enum": ["up", "down"]},
+            "proposal_id": string, "outcome": {"type": "string", "enum": ["accepted", "dismissed", "failed"]},
+            "note": string}), &[]),
+        "AiRecorded": s(json!({"recorded": boolean}), &["recorded"]),
+        "AiGlossaryTerm": s(json!({"term": string, "definition": string, "sql": string,
+            "tables": {"type": "array", "items": string}}), &["term", "definition"]),
+        "AiGlossary": s(json!({"terms": {"type": "array", "items": s(json!({"term": string,
+                "status": {"type": "string", "enum": ["proposed", "accepted"]}, "definition": string,
+                "sql": nullable, "tables": {"type": "array", "items": string}, "author_id": int,
+                "author": string, "accepted_by": {"type": "integer", "nullable": true},
+                "proposal_id": nullable, "updated_ms": int}), &["term", "status", "definition"])},
+            "can_edit": boolean}), &["terms", "can_edit"])
     })
 }
 

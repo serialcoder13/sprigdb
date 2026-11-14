@@ -30,6 +30,8 @@
 //!   and certificate changes under load with no restart; see [`check`].
 //! - `sprigctl txn list|show|resolve`: in-doubt distributed
 //!   transactions; see [`txn`].
+//! - `sprigctl ai provider add|list|test|remove`: the AI assistants'
+//!   providers; see [`ai`].
 //!
 //! Every other command group is hidden, and prints "not available in this version",
 //! exiting with status 1.
@@ -42,6 +44,8 @@
 //! (`SPRIGCTL_CA_FILE`), plus `--client-cert` and `--client-key` when the
 //! controller requires a client certificate.
 
+// AI providers.
+mod ai;
 mod check;
 mod client;
 mod cluster;
@@ -502,6 +506,7 @@ fn cli() -> Command {
         .subcommand(space::group())
         .subcommand(inherit::group())
         .subcommand(txn::group())
+        .subcommand(ai::group())
         .subcommand(sink::group())
         .subcommand(graph::group())
         .subcommand(search::group())
@@ -560,7 +565,7 @@ fn main() -> ExitCode {
     let implemented = match group {
         "dc" | "cluster" | "settings" | "index" | "job" | "gateway" | "check" | "advisor"
         | "shard" | "space" | "txn" | "sink" | "graph" | "search" | "recommendations"
-        | "inherit" | "login" | "logout" | "whoami" | "operator" | "token" => true,
+        | "inherit" | "login" | "logout" | "whoami" | "operator" | "token" | "ai" => true,
         "explain" => matches!(name.as_str(), "query" | "decision" | "placement"),
         "tenant" => !TENANT_LATER.contains(&name.as_str()),
         "logic" => logic::implemented(&name),
@@ -633,6 +638,9 @@ fn main() -> ExitCode {
                 .await
                 .map(|()| ExitCode::SUCCESS),
             "txn" => txn::run(&client, sub, output(&matches))
+                .await
+                .map(|()| ExitCode::SUCCESS),
+            "ai" => ai::run(&client, sub, matches.get_flag("dry-run"), output(&matches))
                 .await
                 .map(|()| ExitCode::SUCCESS),
             "shard" if sharding::run_shard(&client, sub, output(&matches)).await? => {

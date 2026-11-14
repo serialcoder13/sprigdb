@@ -137,8 +137,9 @@ pub struct Case {
     #[serde(default)]
     pub share_data: bool,
     /// Names the administration scrubber knows, by kind (`tenant`,
-    /// `database`, `table`, `column`, `user`, `host`): none of them may
-    /// reach the provider.
+    /// `database`, `table`, `column`, `user`, `host`, or `name` for any
+    /// other object: a sink, a function): none of them may reach the
+    /// provider.
     #[serde(default)]
     pub scrub: BTreeMap<String, Vec<String>>,
     /// What each tool returns.
@@ -250,6 +251,7 @@ pub fn name_kind(s: &str) -> Option<NameKind> {
         "column" => NameKind::Column,
         "user" => NameKind::User,
         "host" => NameKind::Host,
+        "name" => NameKind::Name,
         _ => return None,
     })
 }
@@ -339,7 +341,9 @@ impl Case {
     #[must_use]
     pub fn user_text(&self) -> String {
         match &self.context {
-            Some(c) if !c.trim().is_empty() => format!("Context:\n{}\n\n{}", c.trim(), self.message),
+            Some(c) if !c.trim().is_empty() => {
+                format!("Context:\n{}\n\n{}", c.trim(), self.message)
+            }
             _ => self.message.clone(),
         }
     }
@@ -367,6 +371,24 @@ impl Case {
             prev = r;
         }
         out.into_iter().map(|(_, v)| v).collect()
+    }
+
+    /// The expected calls a run is scored on: those in the rounds the
+    /// case's limits let run (the first `max_tool_rounds`; only the first
+    /// round when the case ends in an error such as a spent budget).
+    #[must_use]
+    pub fn scored_calls(&self) -> Vec<ExpectedCall> {
+        let limit = match (self.limits.max_tool_rounds, self.error) {
+            (Some(n), _) => n as usize,
+            (None, Some(_)) => 1,
+            (None, None) => usize::MAX,
+        };
+        self.rounds()
+            .into_iter()
+            .take(limit)
+            .flatten()
+            .cloned()
+            .collect()
     }
 
     /// The expected stop label.
@@ -485,6 +507,7 @@ impl Case {
 ///
 /// # Errors
 /// Every problem found, one per line.
+#[allow(clippy::too_many_lines)] // one list of checks
 pub fn check_set(set: &Set, reg: &ToolRegistry) -> Result<(), Vec<String>> {
     let role = set.role;
     let mut errs = Vec::new();
@@ -512,7 +535,7 @@ pub fn check_set(set: &Set, reg: &ToolRegistry) -> Result<(), Vec<String>> {
         } else if c.answer.as_deref().is_none_or(|a| a.trim().is_empty()) && c.error.is_none() {
             err("no reference answer".into());
         }
-        for (k, _) in &c.scrub {
+        for k in c.scrub.keys() {
             if name_kind(k).is_none() {
                 err(format!("unknown scrub kind {k}"));
             }
@@ -535,7 +558,10 @@ pub fn check_set(set: &Set, reg: &ToolRegistry) -> Result<(), Vec<String>> {
             match reg.check(role, &call.tool, &call.args) {
                 Ok(spec) => {
                     if spec.effect == Effect::Read
-                        && !c.world.iter().any(|w| w.tool == call.tool && w.serves(&call.args))
+                        && !c
+                            .world
+                            .iter()
+                            .any(|w| w.tool == call.tool && w.serves(&call.args))
                     {
                         err(format!("{} has no world entry for its args", call.tool));
                     }
@@ -590,13 +616,17 @@ pub fn check_set(set: &Set, reg: &ToolRegistry) -> Result<(), Vec<String>> {
             .join("\n");
         for term in c.must_not_send(role) {
             if contains_word(&args, &term) {
-                err(format!("the expected calls hold {term:?}, which must not be sent"));
+                err(format!(
+                    "the expected calls hold {term:?}, which must not be sent"
+                ));
             }
         }
         if !role.is_tenant() {
             for (_, n) in c.scrub_names() {
                 if contains_word(&c.reference(), n) {
-                    err(format!("the reference answer names {n:?}, which the gate hides"));
+                    err(format!(
+                        "the reference answer names {n:?}, which the gate hides"
+                    ));
                 }
             }
         }

@@ -100,7 +100,10 @@ fn fail(msg: &str) -> ExitCode {
 
 fn print_failures(records: &[CaseRecord]) {
     for r in records.iter().filter(|r| !r.pass) {
-        println!("  FAIL {} (score {:.2})", r.id, r.score);
+        println!(
+            "  FAIL {} (score {:.2}: tools {:.2}, answer {:.2})",
+            r.id, r.score, r.tools, r.answer
+        );
         for s in &r.safety {
             println!("    unsafe: {s}");
         }
@@ -128,7 +131,10 @@ fn main() -> ExitCode {
 
     // Live: the model and the judge.
     let file: Option<ProviderFile> = match std::env::var(live::PROVIDERS_ENV) {
-        Ok(p) => match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|t| live::parse_providers(&t)) {
+        Ok(p) => match std::fs::read_to_string(&p)
+            .map_err(|e| e.to_string())
+            .and_then(|t| live::parse_providers(&t))
+        {
             Ok(f) => Some(f),
             Err(e) => return fail(&format!("{p}: {e}")),
         },
@@ -157,7 +163,10 @@ fn main() -> ExitCode {
         _ => None,
     };
 
-    let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(rt) => rt,
         Err(e) => return fail(&e.to_string()),
     };
