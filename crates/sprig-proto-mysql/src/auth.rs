@@ -1,15 +1,15 @@
-//! Server auth plugins (chapter 05, "Authentication plugins"; build step 4).
+//! Server auth plugins.
 //!
-//! This module moves bytes; a [`LoginFlow`] (chapter 14's login decisions,
+//! This module moves bytes; a [`LoginFlow`] (the login decisions,
 //! implemented by the gateway) decides. The plugins:
 //!
-//! - [`CachingSha2Password`] (both personas, the default): the empty
-//!   password (an empty response or a single NUL, answered with the
-//!   verdict at once), the fast path (`AuthMoreData 0x03` then the verdict), and the
-//!   full path (`AuthMoreData 0x04`, then the clear-text password over TLS).
-//!   Without TLS the full path would need the server's RSA key; decision D4
-//!   (`decisions/m0.2-interim.md`) refuses it with [`Outcome::NeedsTls`],
-//!   whether the client asks for the key (`0x02`) or already has one.
+//! - [`CachingSha2Password`] (both personas, the default): the empty password
+//!   (an empty response or a single NUL, answered with the verdict at once),
+//!   the fast path (`AuthMoreData 0x03` then the verdict), and the full path
+//!   (`AuthMoreData 0x04`, then the clear-text password over TLS). Without TLS
+//!   the full path would need the server's RSA key; SprigDB has no RSA and
+//!   refuses it with [`Outcome::NeedsTls`], whether the client asks for the key
+//!   (`0x02`) or already has one.
 //! - [`NativePassword`]: `mysql_native_password`, when the flow allows it.
 //! - [`ClearPassword`]: `mysql_clear_password`, refused with 3159 without
 //!   TLS.
@@ -19,7 +19,7 @@
 //! with another one (and always for `COM_CHANGE_USER`), then runs it to the
 //! end. An unknown account takes exactly the same packets as a real one
 //! that misses the fast cache: the flow fails it at the end, after the same
-//! hash work (the decoy, chapter 14).
+//! hash work (the decoy).
 //!
 //! The verdict ([`AuthVerdict`]) comes back to the caller, which sends the
 //! OK packet (or the ERR) itself, since the OK carries session state.
@@ -105,7 +105,7 @@ pub enum AuthPath {
     /// `caching_sha2_password` full path over TLS.
     Full,
     /// `caching_sha2_password` full path without TLS: the RSA exchange
-    /// (refused until D4 is lifted).
+    /// (refused: SprigDB has no RSA).
     Rsa,
     /// `mysql_native_password`.
     Native,
@@ -136,7 +136,7 @@ pub enum Outcome {
     /// The credential didn't match (or the account doesn't exist).
     WrongCredentials,
     /// The full path was needed without TLS, which needs the RSA exchange
-    /// (decision D4: not supported yet; the client should use TLS).
+    /// (not supported; the client should use TLS).
     NeedsTls,
 }
 
@@ -149,7 +149,7 @@ pub enum AuthVerdict {
     Refuse(ErrPacket),
 }
 
-/// One login conversation's decisions (chapter 14, "MySQL logins"): the
+/// One login conversation's decisions: the
 /// plugins call these and never learn whether the account exists.
 ///
 /// Implementations must cost the same for an unknown account as for a real
@@ -177,7 +177,7 @@ pub trait LoginFlow: Send {
     /// cache on success.
     async fn check_password(&mut self, password: Zeroizing<Vec<u8>>) -> bool;
 
-    /// The verdict: chapter 14's policy checks after the credential check,
+    /// The verdict: the policy checks after the credential check,
     /// and the ERR packet (1045, 3118, ...) on refusal.
     async fn decide(&mut self, outcome: Outcome, path: AuthPath) -> AuthVerdict;
 }
@@ -213,7 +213,7 @@ impl AuthIo<'_> {
     }
 }
 
-/// The server side of one auth plugin (chapter 05, "Interfaces").
+/// The server side of one auth plugin.
 #[async_trait]
 pub trait ServerAuthPlugin: Send + Sync {
     /// The plugin name.
@@ -277,7 +277,7 @@ impl ServerAuthPlugin for CachingSha2Password {
         let reply = io.io.read_packet().await?;
         if !io.tls {
             // The client asks for the public key (0x02) or sends an RSA
-            // ciphertext: decision D4 refuses both.
+            // ciphertext: without RSA support, both are refused.
             return Ok(flow.decide(Outcome::NeedsTls, AuthPath::Rsa).await);
         }
         let ok = flow.check_password(password_of(&reply)).await;

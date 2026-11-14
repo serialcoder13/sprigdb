@@ -25,6 +25,7 @@ There are two listeners, both off by default. Both serve AMQP 0-9-1 and 1.0; the
 | `listener.amqps.bind` | text | `0.0.0.0:5671` | Address and port |
 | `listener.amqps.tls` | text | `required` | `required`, `optional` or `off` |
 | `listener.amqps.cert` | text | `default` | Certificate bundle |
+| `listener.amqps.client_cert` | text | `off` | Client certificates: `off`, `optional` or `required` (see [Client certificates](../security/tls.md#client-certificates)). Needed for `EXTERNAL` and for accounts that require a certificate |
 | `listener.amqp.tenant` | text | empty | Tenant of user names without a dot, on both listeners |
 
 5672 is plaintext by default, as RabbitMQ's port is. Prefer 5671: with PLAIN authentication the password crosses the network as it is. TLS starts with the first byte on a TLS listener; AMQP has no in-protocol upgrade.
@@ -37,7 +38,8 @@ Connection settings:
 
 | Setting | Type | Default | Meaning |
 |---|---|---|---|
-| `amqp.sasl_mechanisms` | text | `PLAIN,AMQPLAIN,EXTERNAL` | Mechanisms offered |
+| `amqp.sasl_mechanisms` | text | `PLAIN,AMQPLAIN,EXTERNAL` | Mechanisms offered. `EXTERNAL` is offered only on a connection that presented a verified client certificate |
+| `amqp.cert_login_field` | text | `common_name` | For `EXTERNAL`, the certificate field that names the user: `common_name` (the subject's last `CN`) or `distinguished_name` (the whole subject, as RabbitMQ prints it: `CN=acme.app,O=Acme`) |
 | `amqp.frame_max` | int | `131072` | Largest frame, negotiated at connection |
 | `amqp.channel_max` | int | `2047` | Channels per connection |
 | `amqp.heartbeat_seconds` | int | `60` | Heartbeat the server proposes; the connection closes after two missed intervals |
@@ -71,16 +73,33 @@ Exchanges, queues and bindings belong to their virtual host, so two tenants (or 
 |---|---|---|
 | `PLAIN` | yes | 0-9-1 and 1.0 |
 | `AMQPLAIN` | yes | 0-9-1 only |
-| `EXTERNAL` | no | Listed in `amqp.sasl_mechanisms`, but never offered: the AMQP listeners don't pass client certificates to the login, even when `listener.amqps.client_cert` asks for one |
+| `EXTERNAL` | yes | 0-9-1 and 1.0. Offered only when the connection presented a client certificate the listener verified; the certificate names the user. See below |
 | `ANONYMOUS` | no | |
 
 The tenant comes from the user name: `acme.app` is user `app` of tenant `acme`. If `listener.amqp.tenant` names a tenant, a plain user name such as `app` logs in to that tenant, so applications written for RabbitMQ keep their user names. A dotted name wins over the bound tenant. On a tenant endpoint (a TLS host name such as `acme.db.example.com` under `listener.tenant_sni_suffixes`), the host name names the tenant and wins over both; see [Tenant endpoints by server name](../security/tls.md#tenant-endpoints-by-server-name).
 
-Accounts with a client-certificate requirement (`REQUIRE X509`, `SUBJECT` or `ISSUER`) can't log in over AMQP.
+Client-certificate requirements are checked on every AMQP login, against the certificate the connection presented. With `PLAIN` or `AMQPLAIN`, an account with `REQUIRE X509` needs a certificate the listener verified, and one with `REQUIRE SUBJECT` or `REQUIRE ISSUER` needs a certificate whose subject or issuer is exactly the name given, in addition to its password.
 
 A refused login gets `connection.close` with 403 `ACCESS_REFUSED` and `ER_SPRIG_AMQP_SASL_FAILED` (39269) when the client announces `authentication_failure_close`, as current RabbitMQ clients do; otherwise the socket closes. The login runs the same checks as every other protocol: account locks, expired passwords, `REQUIRE SSL`, `auth.require_tls`, failure delays and the per-address limit. `connection.update-secret` checks the new secret as a fresh login.
 
 To use an exchange or queue you need grants on the virtual host's database, or on the exchange or queue name. See [Queues](../data-models/queues.md#privileges).
+
+### Log in with a client certificate (EXTERNAL)
+
+SASL `EXTERNAL` logs in with the client certificate alone, as RabbitMQ's certificate login does. To use it:
+
+1. Have the listener ask for certificates: set `tls.bundles.default.client_ca_path` and `listener.amqps.client_cert` to `optional` or `required`. See [Client certificates](../security/tls.md#client-certificates).
+2. Issue the client a certificate whose common name is its login name, such as `CN=acme.billing`. The user name follows the usual rules: `acme.billing` names tenant `acme`, and a plain `billing` works on a bound listener (`listener.amqp.tenant`) or a tenant endpoint. `amqp.cert_login_field = distinguished_name` uses the whole subject instead.
+3. Give the account a certificate requirement. Only an account with `REQUIRE X509`, `REQUIRE SUBJECT` or `REQUIRE ISSUER` may log in without a password, and its `SUBJECT` and `ISSUER` are still checked:
+
+   ```sql
+   CREATE USER 'billing'@'%' IDENTIFIED BY 's3cret-Passw0rd'
+       REQUIRE SUBJECT '/O=Acme/CN=acme.billing' AND ISSUER '/O=Acme/CN=Acme client CA';
+   ```
+
+4. Connect with the certificate and the `EXTERNAL` mechanism, for example in Python with pika: `pika.credentials.ExternalCredentials()` and `ssl_options` holding the certificate and key.
+
+`EXTERNAL` for an account without a certificate requirement, or with a certificate that doesn't meet it, is refused like a wrong password. An authorization identity, if the client sends one, must be the same name the certificate gives. The other login checks (locks, expired passwords, `auth.require_tls`, failure delays) apply as for a password login. A connection without a verified certificate isn't offered `EXTERNAL` at all.
 
 ## Connect
 
@@ -185,8 +204,7 @@ AMQP 1.0 clients use the same exchanges and queues. Targets are `/exchanges/<exc
 |---|---|
 | Stream queues and super streams | 540 `NOT_IMPLEMENTED` |
 | `immediate` publishes, `prefetch_size`, `basic.recover` without requeue, `channel.flow` off | 540 |
-| SASL `EXTERNAL` (client-certificate logins), `ANONYMOUS` | Not offered |
-| Accounts with `REQUIRE X509`, `SUBJECT` or `ISSUER` | Their logins are refused |
+| SASL `ANONYMOUS` | Not offered |
 | The RabbitMQ management HTTP API (port 15672) and its web UI | Use `GET /v1/databases/{database}/mq`, `sprig.mq_info`, or [Studio](../tools/studio.md) |
 | MQTT and STOMP | No listener |
 | Atomic `tx.commit` across queues | Publish and acknowledge from SQL inside a database transaction instead |

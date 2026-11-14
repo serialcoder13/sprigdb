@@ -1,5 +1,4 @@
-//! MySQL 8.0's row syntax that MariaDB 11.8 lacks, rewritten on port 3306
-//! (chapter 28's rule catalogue, build step 7):
+//! MySQL 8.0's row syntax that MariaDB 11.8 lacks, rewritten on port 3306:
 //!
 //! - `TABLE t ...` at the start of a statement becomes `SELECT * FROM t ...`.
 //! - `INSERT ... VALUES ROW(1, 2), ROW(3, 4)` loses the `ROW` keywords.

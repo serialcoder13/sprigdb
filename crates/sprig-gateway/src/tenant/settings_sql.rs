@@ -1,6 +1,6 @@
-//! Settings in SQL, executed (chapter 08, "Setting a value"; build step
-//! 8): [`sprig_sql::settings_stmt`] parses, this resolves names against the
-//! session's snapshot and writes through the catalog's
+//! Settings in SQL, executed: [`sprig_sql::settings_stmt`] parses, this
+//! resolves names against the session's snapshot and writes through the
+//! catalog's
 //! [`TenantSettingsWriter`](sprig_catalog::TenantSettingsWriter) as the
 //! session's user.
 //!
@@ -16,10 +16,9 @@
 //!   several keys writes them one by one, in order, and stops at the first
 //!   refusal (each write is its own catalog change).
 //! - **Bounds.** `SET BOUNDS` changes only the parts it names, merged with
-//!   the row in the session's snapshot (chapter 08, "Bounds changes").
-//! - **Privileges** are chapter 29's; until then the writer's allow-all
-//!   hook passes every write, and `operator_only` keys are refused with
-//!   1227 (decision N3).
+//!   the row in the session's snapshot.
+//! - **Privileges** are checked by `super::authz::settings_check`, and
+//!   `operator_only` keys are refused with 1227.
 //! - **Warnings.** A bounds change that will clamp or ignore narrower
 //!   values answers OK with one warning per value (code 39080), shown by
 //!   `SHOW WARNINGS`.
@@ -298,7 +297,7 @@ pub async fn execute(
         }
         SettingsStmt::Alter { target, op } => {
             let r = resolve(ts, cat, current, target).await?;
-            // Chapter 29's settings privileges.
+            // The settings privileges.
             super::authz::settings_check(
                 ts,
                 r.target,
@@ -387,7 +386,7 @@ fn scope_name(k: ScopeKind, cat: &TenantCatalog) -> String {
 }
 
 /// The columns of `SHOW SPRIG SETTINGS`, as `information_schema.SPRIG_SETTINGS`
-/// names them (chapter 07).
+/// names them.
 #[must_use]
 pub fn show_columns(charset: u16) -> Vec<ColumnDef> {
     [
@@ -476,8 +475,7 @@ fn rows_for(
 /// (`names.local_view_max_rows`'s default; the key isn't registered yet).
 pub const VIEW_MAX_ROWS: usize = 10_000;
 
-/// `information_schema.SPRIG_SETTINGS` (chapter 07, "SprigDB views";
-/// build step 11, settings only): every key's effective value for the
+/// `information_schema.SPRIG_SETTINGS`: every key's effective value for the
 /// tenant, each live database and each live table, as a derived table of
 /// literal rows the rest of the query runs over in MariaDB. More than
 /// [`VIEW_MAX_ROWS`] rows fail with 39052.
@@ -616,15 +614,14 @@ const RUNS_NOW: &[&str] = &[
     "EXPLAIN", "DESCRIBE", "DESC",
 ];
 
-/// Chapter 07 rule 9: the view is literal rows, so inlining it where
-/// MariaDB keeps the text (a view, routine, trigger or event body, `CREATE
-/// TABLE ... SELECT`, a compound statement's body) would bake a snapshot
-/// of the tenant's settings into a stored object. A text that references
-/// the view is inlined only when each of its statements starts with a
-/// [`RUNS_NOW`] word (`SET STATEMENT ... FOR` excepted), else 39051, as
-/// `names::plan` answers for the other mapped views. A `PREPARE` string
-/// is never inlined (a string literal isn't scanned here), and `plan`
-/// refuses it.
+/// The view is literal rows, so inlining it where MariaDB keeps the text (a
+/// view, routine, trigger or event body, `CREATE TABLE ... SELECT`, a
+/// compound statement's body) would bake a snapshot of the tenant's
+/// settings into a stored object. A text that references the view is
+/// inlined only when each of its statements starts with a [`RUNS_NOW`] word
+/// (`SET STATEMENT ... FOR` excepted), else 39051, as `names::plan` answers
+/// for the other mapped views. A `PREPARE` string is never inlined (a
+/// string literal isn't scanned here), and `plan` refuses it.
 fn refuse_stored(text: &[u8], sig: &[&sprig_sql::lex::Token]) -> Option<SprigError> {
     use sprig_sql::lex::{TokenKind, ident_value};
     let word = |t: &sprig_sql::lex::Token| -> String {

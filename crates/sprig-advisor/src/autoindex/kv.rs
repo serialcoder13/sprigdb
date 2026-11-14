@@ -1,10 +1,9 @@
-//! Chapter 33's key-value shapes in automatic indexing (chapter 13, "Other
-//! models"; chapter 33 build step 9; R6 round 5).
+//! Key-value shapes in automatic indexing.
 //!
 //! Redis keys and key prefixes are primary-key ranges, and sorted sets
 //! have their score index, so most key-value shapes need nothing. What
 //! does need an index is SQL that looks for a hash field's value or a set
-//! member across keys, through chapter 33's read-only views:
+//! member across keys, through the key-value read-only views:
 //!
 //! ```sql
 //! SELECT k FROM cache__hash WHERE field = 'email' AND value = 'asha@x.io';
@@ -26,7 +25,7 @@
 //! and vector indexes. An element-table index costs every element write
 //! of the namespace (hash fields, list items, set members alike).
 //!
-//! **Value fields of string keys** (R6 round 6, decision K3).
+//! **Value fields of string keys**.
 //! `JSON_VALUE(v, '$.email') = ...` on a key table gets a field column
 //! `_sprig_p_<slug>_<8 hex>` ([`field_column`]) defined as
 //! `LONGBLOB AS (JSON_VALUE(v, '<path>')) VIRTUAL INVISIBLE`, with a
@@ -36,7 +35,7 @@
 //! MariaDB 11.8 puts the column in place of the expression by itself
 //! (its virtual-column substitution) for `=`, `IN`, `BETWEEN`, `<`, `>`
 //! and `IS NULL`, in `SELECT`, `UPDATE` and `DELETE`, with literals or
-//! `?`. Decision K2 had found no substitution because it tried
+//! `?`. An earlier attempt had found no substitution because it tried
 //! `VARCHAR`, `TEXT` and `CAST` columns, whose types differ from the
 //! expression's. So no statement is rewritten: the gateway, the router,
 //! prepared statements and the replay send the client's text as it is.
@@ -53,7 +52,7 @@ use super::candidates::{FpInput, MODEL_READ_FACTOR};
 use super::model::{Candidate, Evidence, IndexDef, IndexKind, KeyPart, PartSource, Role};
 use super::stats::TableStats;
 
-/// Which view of chapter 33 a shape reads.
+/// Which key-value view a shape reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KvView {
     /// `<ns>__hash (k, field, value)`.
@@ -287,7 +286,7 @@ pub fn ignore_through_view(
 }
 
 /// Whether `f` filters a key-value key table's value by a JSON path
-/// (a value field, decision K3).
+/// (a value field).
 #[must_use]
 pub fn value_field(f: &FpInput, alias: &str, stats: &TableStats) -> bool {
     is_key_table(stats)
@@ -298,7 +297,7 @@ pub fn value_field(f: &FpInput, alias: &str, stats: &TableStats) -> bool {
         })
 }
 
-/// Whether `stats` describe a key table (chapter 33: `k`, `type`, a
+/// Whether `stats` describe a key table (`k`, `type`, a
 /// `LONGBLOB` `v` and `_sprig_dk`, and not an element or sorted-set table).
 #[must_use]
 pub fn is_key_table(stats: &TableStats) -> bool {
@@ -385,7 +384,7 @@ pub fn fields_of(def: &super::model::IndexDef) -> Vec<(String, String)> {
     if def.kind != IndexKind::FieldColumn {
         return Vec::new();
     }
-    // A document index (S131): its pair columns, each with its path.
+    // A document index: its pair columns, each with its path.
     if super::doc::is_doc(def) {
         return super::doc::paths_of(def)
             .into_iter()
@@ -459,7 +458,7 @@ pub fn drop_fields_sql(schema: &str, table: &str, columns: &[String]) -> Option<
 pub fn maintained_columns(def: &super::model::IndexDef) -> Vec<String> {
     let mut cols: Vec<String> = def.columns().map(str::to_owned).collect();
     if super::doc::is_doc(def) {
-        // A document index changes with the document (S131).
+        // A document index changes with the document.
         cols.push(sprig_workload::fingerprint::mongo::DOC_COLUMN.to_owned());
     } else if def.kind == IndexKind::FieldColumn {
         cols.push(VALUE_COLUMN.to_owned());
@@ -720,7 +719,7 @@ mod tests {
         assert!((w.touching(c[0].def.columns()) - 0.0).abs() < 1e-9);
         let m = maintained_columns(&c[0].def);
         assert!((w.touching(m.iter().map(String::as_str)) - 100.0).abs() < 1e-9);
-        // The generator proposes it instead of skipping the shape (K2).
+        // The generator proposes it instead of skipping the shape.
         let g = super::super::candidates::Generator::default().generate_all(&f, &|o| {
             (o == KEYS).then(|| Box::leak(Box::new(key_stats())) as &TableStats)
         });
@@ -771,7 +770,7 @@ mod tests {
         assert_ne!(field_column("$.a.b"), field_column("$.\"a.b\""));
     }
 
-    /// Decision A4: a Redis write command's guarded batch (one compound
+    /// A Redis write command's guarded batch (one compound
     /// statement) has no shape; the gateway now fingerprints each write
     /// inside it, so the element table's write load, and the write cost of
     /// an element-table candidate, count them.
@@ -878,8 +877,8 @@ mod tests {
         assert!(ignore_through_view(sql, "s2", "__sprig_ke_db0", "i", Some("s1")).is_none());
     }
 
-    /// Decision X34: a fingerprint stored before R6 round 6 (shape version
-    /// 1, `json_path` without `func` and `cmp`) gets no field column; once
+    /// A fingerprint stored with shape version 1 (`json_path` without
+    /// `func` and `cmp`) gets no field column; once
     /// a gateway sees the statement again, the store rewrites the row, and
     /// the shape read back gets the candidate. The store part runs against
     /// `SPRIG_TEST_MARIADB_SINGLE` (skipped without it).
@@ -937,7 +936,7 @@ mod tests {
         t.insert_fingerprints(&mut conn, std::slice::from_ref(&n))
             .await
             .unwrap();
-        // The row as a build before R6 round 6 left it.
+        // The row as an older build (shape version 1) left it.
         let stored_old = by_field(OLD_EMAIL_EQ).to_json();
         conn.exec_drop(
             format!("UPDATE {q}.workload_fingerprints SET shape = ?, shape_version = 1"),

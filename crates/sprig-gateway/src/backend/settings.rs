@@ -1,5 +1,5 @@
-//! The `backend.*` keys (chapter 06, "Configuration"; Appendix B) and
-//! [`BackendSettings`], the resolved values pools and routing read.
+//! The `backend.*` keys and [`BackendSettings`], the resolved values pools
+//! and routing read.
 //!
 //! Every key is live. [`LiveBackendSettings`] resolves them per cluster
 //! ("cluster-scope values resolve against the pool's cluster") and caches
@@ -19,8 +19,6 @@ use crate::reads::settings as reads;
 
 type Text = Cow<'static, str>;
 
-/// Tenant (and ancestors), cluster, dc and global: "tenant, ops".
-const TENANT_OPS: Scopes = Scopes(0b11_1100);
 
 macro_rules! key {
     ($NAME:ident, $t:ty, $key:literal, $default:expr, $scopes:expr, $hard:expr, $doc:literal) => {
@@ -44,7 +42,7 @@ key!(
     Text,
     "backend.pool_mode",
     Cow::Borrowed("transaction"),
-    Scopes::DATA,
+    Scopes::OPERATIONAL,
     HardBounds::one_of(&["transaction", "session"]),
     "transaction or session"
 );
@@ -62,7 +60,7 @@ key!(
     u32,
     "backend.max_conns_per_account_node",
     32,
-    TENANT_OPS,
+    Scopes::OPERATIONAL,
     HardBounds::range(1, 100_000),
     "Per gateway, one pool"
 );
@@ -71,7 +69,7 @@ key!(
     u64,
     "backend.acquire_timeout_ms",
     2000,
-    TENANT_OPS,
+    Scopes::OPERATIONAL,
     HardBounds::range(1, 600_000),
     "Wait for a connection"
 );
@@ -175,9 +173,8 @@ pub enum CausalScope {
     TenantGateway,
 }
 
-/// `reads.galera_unconfirmed` (decision D14): where a Galera read goes
-/// when it must see a write and no node but the writer has a polled
-/// position covering it yet.
+/// `reads.galera_unconfirmed`: where a Galera read goes when it must see a
+/// write and no node but the writer has a polled position covering it yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GaleraUnconfirmed {
     /// The least-loaded node that isn't behind, after the bounded check

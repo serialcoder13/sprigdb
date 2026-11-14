@@ -1,4 +1,4 @@
-//! The resolver (chapter 18, "Resolver"): finishes in-doubt branches after
+//! The resolver: finishes in-doubt branches after
 //! crashes, drains prepared branches before a mover fence, and deletes
 //! decision rows that are no longer needed.
 //!
@@ -9,7 +9,7 @@
 //!     o = decide_by_race(home anchor of the gtrid, dtid)
 //!     XA COMMIT or XA ROLLBACK it; 1397 while still listed: a live connection
 //!       owns it, retry on the next scan
-//!   for each held branch with redo rows on C older than min_age (Sprig 2PC, R3):
+//!   for each held branch with redo rows on C older than min_age (Sprig 2PC):
 //!     o = decide_by_race(home anchor of its gtrid, dtid)
 //!     commit: replay its statements and delete the rows, in one transaction
 //!     abort:  delete the rows
@@ -53,7 +53,7 @@ pub struct ScanReport {
     pub oldest: Duration,
 }
 
-/// What one pass over a cluster's redo rows did (Sprig 2PC, R3).
+/// What one pass over a cluster's redo rows did (Sprig 2PC).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RedoReport {
     /// Held branches with redo rows.
@@ -72,7 +72,7 @@ pub struct RedoReport {
     /// Not decided yet.
     pub unresolved: usize,
     /// The cluster's redo rows were left alone: its agents' relay fence
-    /// recovers them (decision Q36).
+    /// recovers them.
     pub fenced: bool,
 }
 
@@ -104,9 +104,9 @@ pub struct Resolver {
     locator: Arc<dyn AnchorLocator>,
     cfg: RwLock<ResolverConfig>,
     first_seen: Mutex<HashMap<(ClusterId, Xid), Instant>>,
-    /// Clusters whose tenants' connections pass the agents' relay fence
-    /// (decision Q36): their redo rows are the agents' to recover, inside
-    /// the fence, so [`Resolver::scan_redo`] leaves them alone.
+    /// Clusters whose tenants' connections pass the agents' relay fence:
+    /// their redo rows are the agents' to recover, inside the fence, so
+    /// [`Resolver::scan_redo`] leaves them alone.
     fenced: RwLock<std::collections::BTreeSet<ClusterId>>,
 }
 
@@ -142,9 +142,9 @@ impl Resolver {
         }
     }
 
-    /// Names the clusters whose redo rows the agents' relay fence recovers
-    /// (decision Q36); [`Resolver::scan_redo`] skips them. Replaces the
-    /// previous set.
+    /// Names the clusters whose redo rows the agents' relay fence
+    /// recovers; [`Resolver::scan_redo`] skips them. Replaces the previous
+    /// set.
     pub fn set_fenced(&self, clusters: impl IntoIterator<Item = ClusterId>) {
         *self.fenced.write().unwrap_or_else(PoisonError::into_inner) =
             clusters.into_iter().collect();
@@ -398,7 +398,7 @@ impl Resolver {
         }
     }
 
-    /// Sprig 2PC (R3): replays committed held branches whose redo rows are
+    /// Sprig 2PC: replays committed held branches whose redo rows are
     /// older than `txn.resolver_min_age_seconds`, and drops aborted ones.
     ///
     /// # Errors

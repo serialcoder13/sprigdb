@@ -1,5 +1,4 @@
-//! `information_schema` branches over schemas on other clusters (chapter
-//! 07, "Physical names"; bugfix-5 and bugfix-8).
+//! `information_schema` branches over schemas on other clusters.
 //!
 //! A table group with no shard on the session's cluster has its
 //! representative schema elsewhere ([`GroupedTables`]), so the inline

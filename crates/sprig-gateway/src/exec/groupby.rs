@@ -1,5 +1,5 @@
-//! 3306: MySQL 8.4's `ONLY_FULL_GROUP_BY` and its two `ORDER BY` rules
-//! (chapter 28, build step 8), applied before a tenant's statement is sent.
+//! 3306: MySQL 8.4's `ONLY_FULL_GROUP_BY` and its two `ORDER BY` rules,
+//! applied before a tenant's statement is sent.
 //!
 //! The rule itself is `sprig_sql::compat::groupby`. This module gives it
 //! table definitions: columns, nullability and unique keys, read from

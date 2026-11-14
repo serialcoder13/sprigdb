@@ -1,5 +1,4 @@
-//! Sprig 2PC's relay fence (chapter 18, "The relay fence"; decisions Q28
-//! and Q36): the part of the writer node's agent that keeps a held
+//! Sprig 2PC's relay fence: the part of the writer node's agent that keeps a held
 //! branch's rows out of reach until the branch is recovered.
 //!
 //! Every connection of a tenant with `sprig_2pc` to a Galera node passes

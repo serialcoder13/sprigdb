@@ -1,20 +1,20 @@
-//! A logged-in Bolt session (chapter 43, "Bolt front end"): statements,
+//! A logged-in Bolt session: statements,
 //! transactions, bookmarks and replica reads.
 //!
 //! - **Statements.** A `RUN` is parsed, its graph resolved (the default
-//!   graph made on its first write), chapter 29's table actions checked,
+//!   graph made on its first write), its table privileges checked,
 //!   and run on a `sprig_ctl` connection of the tenant's cluster: one
 //!   MariaDB transaction per auto-commit `RUN`, or the explicit
 //!   transaction's. Reads whose rows don't depend on each other stream
 //!   ([`super::stream`]); the rest are computed whole, within
 //!   `bolt.max_buffered_result_mb` (39918).
-//! - **Bookmarks** (decision G9's follow-up). After a commit that wrote,
+//! - **Bookmarks.** After a commit that wrote,
 //!   the session adds the connection's `@@last_gtid` to its causal target
 //!   (GTID positions per cluster) and answers a signed bookmark carrying
 //!   the whole target ([`sprig_graph::bookmark`]). Bookmarks a driver
 //!   passes (`BEGIN` or `RUN`'s `bookmarks`) are checked (39917 for a bad
 //!   or foreign one) and join the target.
-//! - **Replica reads** (chapter 06's read-your-writes). A read in `mode:
+//! - **Replica reads** (read-your-writes). A read in `mode:
 //!   "r"` on a primary with replicas goes to a replica, taking turns, after
 //!   `MASTER_GTID_WAIT` for the target within `reads.gtid_wait_timeout_ms`;
 //!   a replica that doesn't catch up in time, or fails, leaves the read on
@@ -60,7 +60,7 @@ use crate::reads::GtidSet;
 enum TxConns {
     /// `mode: "r"`: read-only transactions per cluster.
     Read(ReadConns),
-    /// Chapter 18's coordinator.
+    /// The transaction coordinator.
     Write(Box<TxnCoordinator<GraphBackend>>),
 }
 
@@ -114,7 +114,7 @@ struct Prepared {
     /// transaction's is in its `Tx`).
     timeout: Option<Duration>,
     /// Per-label and per-type grants, when the graph-wide ones don't give
-    /// `SELECT` (decision G42) or a write action (round 5, G50).
+    /// `SELECT` or a write action.
     visible: Option<Access>,
 }
 
@@ -136,7 +136,7 @@ async fn run_on(
     p: &Params,
     b: &sprig_graph::Budgets,
 ) -> Result<sprig_graph::Output> {
-    // Lazy: a read's row error comes after the rows before it (R8 round 8).
+    // Lazy: a read's row error comes after the rows before it.
     match vis {
         None => sprig_graph::exec::run_lazy(store, q, p, b).await,
         Some(v) => {
@@ -531,7 +531,7 @@ impl GwSession {
         Ok(())
     }
 
-    /// Chapter 18's `txn.*` settings for the tenant (round 5:
+    /// The `txn.*` settings for the tenant (for example
     /// `txn.non_xa_policy = sprig_2pc` holds graph writes' branches on
     /// clusters without XA, as SQL sessions do).
     fn txn_config(&self, cat: &TenantCatalog) -> sprig_txn::TxnConfig {
@@ -545,7 +545,7 @@ impl GwSession {
         )
     }
 
-    /// The mirror gate of a read statement on `g` (round 5): `None` unless
+    /// The mirror gate of a read statement on `g`: `None` unless
     /// the applier keeps `g`'s mirrors.
     fn gate(&self, g: &GraphRef, cat: &TenantCatalog) -> Option<Arc<dyn MirrorGate>> {
         if !g.shards.mirror_async {
@@ -801,7 +801,7 @@ impl GwSession {
         let Some(mut g) = graph else {
             return Err(SprigError::internal("graph missing"));
         };
-        // Round 5: the graph's mirror mode follows `graph.mirror`.
+        // The graph's mirror mode follows `graph.mirror`.
         if self.graphs.follow_mirror_setting(&g, &cat).await {
             cat = self.graphs.catalog(tenant, Freshness::Latest).await?;
             if let Some(now) = self.graphs.resolve(&cat, &g.db, &g.name).await? {
@@ -824,7 +824,7 @@ impl GwSession {
                     visible.get_or_insert_with(Access::default).vis = Some(v);
                     continue;
                 }
-                // Writes may rest on them too (round 5): each write is
+                // Writes may rest on them too: each write is
                 // then checked against the labels and types it touches.
                 if matches!(a, Action::Insert | Action::Update | Action::Delete)
                     && g.def.kind != "mapped"
@@ -919,8 +919,7 @@ impl GwSession {
                     ),
                 ));
             }
-            // An invoker's check on every source table (chapter 43,
-            // "Security notes").
+            // An invoker's check on every source table.
             let def = mapped_def(&g)?;
             for (t, o) in self.graphs.mapped_sources(&cat, g.db_id, &def)? {
                 if !self.graphs.allows(
@@ -1044,7 +1043,7 @@ impl GwSession {
                     return Ok(StartOrResult::Stream(rx, g.name));
                 }
                 // A route over a range a mover holds waits for the hold,
-                // then plans again (R8 round 8, G69).
+                // then plans again.
                 let holds: Arc<dyn sprig_graph::maria::HoldWait> = Arc::new(RouteHolds {
                     graphs: Arc::clone(&self.graphs),
                     g: g.clone(),
@@ -1368,7 +1367,7 @@ impl GwSession {
                 Ok(StartOrResult::Stream(rx, g)) => match super::stream::start(rx).await {
                     Ok(s) => break (s, g),
                     // A streamed read that failed before its first row
-                    // (nothing reached the client): as below (round 5).
+                    // (nothing reached the client): as below.
                     Err(f) if self.tx.is_none() && attempt < 5 && stale_failure(&f) => {
                         attempt += 1;
                         metrics::counter!("sprig_graph_stale_map_retries_total").increment(1);
@@ -1429,10 +1428,9 @@ impl BoltSession for GwSession {
             Arc::clone(s.handle())
         });
         let r = match handle {
-            // On a blocking thread from its first poll (R8 round 10,
-            // decision G80; before, guarded like a MySQL statement, G40
-            // and decision bugfix-1, which moved it only after 100 ms and
-            // while slots lasted).
+            // On a blocking thread from its first poll (not guarded like a
+            // MySQL statement, which moves only after 100 ms and while
+            // slots last).
             Some(h) => {
                 Box::pin(crate::offload::run_graph(async {
                     tokio::select! {
@@ -1616,7 +1614,7 @@ mod tests {
 
     #[test]
     fn tx_timeouts_answer_neo4j_codes() {
-        // The drivers' testkit (R8): a lock wait cut by tx_timeout is
+        // The drivers' testkit: a lock wait cut by tx_timeout is
         // LockClientStopped; the time budget set by tx_timeout is
         // TransactionTimedOutClientConfiguration; without a tx_timeout
         // both keep their usual codes.

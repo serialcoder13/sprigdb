@@ -1,6 +1,5 @@
 //! Row-level security for paths that stream a table's rows out of the
-//! gateway's session rewrite (chapter 29, "Change feed consumers"; RLS
-//! round 4, decisions RL36 onward).
+//! gateway's session rewrite.
 //!
 //! ```text
 //! change topic t.changes read by a principal (SQL, Kafka, a stream trigger,
@@ -13,12 +12,12 @@
 //! The checks are the same at creation (a trigger's or sink's) and at each
 //! run, so a policy, role or grant change after creation stops delivery.
 //!
-//! **Per-record filtering (RLS round 5, decision RL44).** A session the
-//! table's policies bind reads the topic through [`record_filter`]: its
-//! `SELECT` policies, rendered with its own session values exactly as the
-//! rewrite renders them for the table, are evaluated by MariaDB over each
-//! record's `before` and `after` images (`JSON_TABLE` with the table's
-//! column types and collations, [`filter_columns`]):
+//! **Per-record filtering.** A session the table's policies bind reads the
+//! topic through [`record_filter`]: its `SELECT` policies, rendered with
+//! its own session values exactly as the rewrite renders them for the
+//! table, are evaluated by MariaDB over each record's `before` and `after`
+//! images (`JSON_TABLE` with the table's column types and collations,
+//! [`filter_columns`]):
 //!
 //! ```text
 //! c: after visible        d: before visible       ddl, t: always
@@ -75,7 +74,7 @@ pub fn change_topic_readable(
     Ok(())
 }
 
-/// How a principal may read a change topic (RL44).
+/// How a principal may read a change topic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopicAccess {
     /// Every record as stored.
@@ -86,8 +85,7 @@ pub enum TopicAccess {
 
 /// Whether `grants` may read change topic `def`, and how: `SELECT` on its
 /// source table (1142 without), its records filtered when the table's
-/// policies bind the grants (RL44; [`change_topic_readable`] refused
-/// those).
+/// policies bind the grants ([`change_topic_readable`] refuses those).
 ///
 /// # Errors
 /// 1142.
@@ -303,7 +301,7 @@ pub fn json_table_columns(columns: &[FilterColumn]) -> String {
 /// How session `ts` reads change topic `def` of table `object` (database
 /// `db_name`): `None` when the table's policies don't bind it, else its
 /// `SELECT` policies rendered with its session values over
-/// [`sprig_streams::read::FILTER_QUAL`] (decision RL44).
+/// [`sprig_streams::read::FILTER_QUAL`].
 ///
 /// # Errors
 /// The rewrite's (39364, 39366 for a subtree above
@@ -367,11 +365,11 @@ pub async fn record_filter(
 
 /// Binary string columns (`BINARY`, `VARBINARY`, the `BLOB`s) that
 /// `predicate` reads, decoded from the image's base64 rather than hiding
-/// the record (RLS round 6, decision RL56: a key-value namespace's key
-/// `k` is `VARBINARY`, so key policies would otherwise hide every change
-/// of a namespace): each is read from the image as text and every
-/// reference `qual.c` in the predicate becomes `FROM_BASE64(qual.c)`.
-/// Bit, spatial and vector columns stay opaque.
+/// the record (a key-value namespace's key `k` is `VARBINARY`, so key
+/// policies would otherwise hide every change of a namespace): each is read
+/// from the image as text and every reference `qual.c` in the predicate
+/// becomes `FROM_BASE64(qual.c)`. Bit, spatial and vector columns stay
+/// opaque.
 fn decode_binary(
     columns: &[FilterColumn],
     mut predicate: String,
@@ -479,7 +477,7 @@ mod tests {
             json_table_columns(&cols),
             "`owner` varchar(64) PATH '$.\"owner\"', `b` longtext PATH '$.__sprig_none'"
         );
-        // RL56: a binary column the predicate reads is decoded from base64.
+        // A binary column the predicate reads is decoded from base64.
         let (c2, p2) = decode_binary(
             &cols,
             "(`__sprig_ci`.b LIKE 'a:%') AND (`__sprig_ci`.`B` <> `__sprig_ci`.bx)".to_owned(),

@@ -1,4 +1,4 @@
-//! The name pairs stored code reads (chapter 07 step 12, R4): the rows of
+//! The name pairs stored code reads: the rows of
 //! `__sprig_sys.__sprig_names` on each cluster, which the lookups
 //! [`sprig_sql::names::stored::substitute`] puts into views and stored
 //! programs turn backend names into logical ones with.
@@ -42,7 +42,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// Whether this process has created the lookup objects on `cluster`, so
-/// statements may name them (chapter 07's `information_schema` mapping).
+/// statements may name them (the `information_schema` mapping).
 #[must_use]
 pub fn ready(cluster: &ClusterId) -> bool {
     lock(&READY).contains(cluster)

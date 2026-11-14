@@ -1,5 +1,5 @@
 //! The cargo-fuzz targets' corpora and crash regressions, replayed on
-//! stable in the ordinary test run (chapter 46, step 4).
+//! stable in the ordinary test run.
 //!
 //! The target bodies live in `fuzz/src/lib.rs` (the cargo-fuzz project,
 //! outside the workspace); this file includes it by path, so every

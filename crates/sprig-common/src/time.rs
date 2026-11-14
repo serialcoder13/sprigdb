@@ -1,4 +1,4 @@
-//! Clocks (chapter 03, "Time and clocks").
+//! Clocks.
 //!
 //! Every component reads time through [`Clock`], never `Instant::now()`
 //! directly, so deterministic simulation can swap in a virtual clock.

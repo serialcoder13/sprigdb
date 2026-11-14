@@ -91,7 +91,7 @@ fn tail_sampling_keeps_failures_and_slow_roots_only() {
     );
 }
 
-/// S142: a light child (`ChildSpan`) is kept with its root as a
+/// A light child (`ChildSpan`) is kept with its root as a
 /// `tracing` child is, under the innermost traced span, with its
 /// attributes; outside a trace there is none.
 #[test]

@@ -1,7 +1,7 @@
-//! R2's last round with the real binaries (r2last): read-only standby
-//! copies (decision RF10), tenant-scope settings in controllers and workers
-//! (RF3), and tenants that follow their traffic between three DCs with
-//! least-busy placement of new tenants (chapter 24, build steps 7 and 8).
+//! Standbys, tenant settings and DC moves with the real binaries: read-only
+//! standby copies, tenant-scope settings in controllers and workers, and
+//! tenants that follow their traffic between three DCs with least-busy
+//! placement of new tenants.
 //!
 //! ```sh
 //! cargo build -p sprigdb -p sprigctl
@@ -14,20 +14,20 @@
 //! `mariadb:11.8` primary (768 MB, 1 GB declared storage). Each
 //! controller's internal service sits behind a delay proxy, so the
 //! measured latency matrix is fra1-ams1 30 ms and 120 ms to sin1. Tenant
-//! ids start at 58,840,600,000 (rules 8b and 8f).
+//! ids start at 58,840,600,000, above every tenant id on the dev clusters.
 //!
-//! 1. RF3: with fra1's dc-scope `failover.standby_dcs = 1`, a tenant whose
+//! 1. Tenant settings: with fra1's dc-scope `failover.standby_dcs = 1`, a tenant whose
 //!    own value is 0 gets no standby; raising its own value starts one.
-//! 2. RF10: a direct write by a tenant account to the standby copy is
+//! 2. Read-only standby: a direct write by a tenant account to the standby copy is
 //!    refused (1142); reads work.
-//! 3. Step 7: `r2last-t` reads from fra1 (150/s) and writes from ams1
+//! 3. Traffic: `r2last-t` reads from fra1 (150/s) and writes from ams1
 //!    (100/s): writes weigh 3, so it moves to ams1 by itself, within its
-//!    own tenant-scope write-pause budget (RF3). `r2last-r` (residency EU)
+//!    own tenant-scope write-pause budget. `r2last-r` (residency EU)
 //!    gets its traffic from sin1 and stays, with ResidencyRemoteTraffic.
-//! 4. Step 8: a new tenant without a hint lands in the least busy DC
+//! 4. Least busy: a new tenant without a hint lands in the least busy DC
 //!    (sin1); a child of the EU tenant lands in the least busy EU DC.
 //! 5. T's traffic moves to sin1: the cooldown holds it, then it moves.
-//! 6. RF10: fra1 frozen, `r2last-s` promoted to ams1; the promotion gives
+//! 6. Promotion: fra1 frozen, `r2last-s` promoted to ams1; the promotion gives
 //!    the tenant's accounts their writes back; no acknowledged write lost.
 
 #![allow(
@@ -58,9 +58,9 @@ const ROOT_PW: &str = "sprig-r2last-root";
 const REPL_PW: &str = "sprig-r2last-repl";
 const APP_PW: &str = "sprig-r2last-app";
 const DEPLOYMENT: &str = "sprigdb-r2last";
-/// Rules 8b and 8f: port 28406 x 100,000, plus 56 x 10^9 to stay above
-/// every id on the dev clusters (53,130,600,001 on 10 Nov, 13:30 IST).
-/// Only this test's own containers hold these schemas.
+/// The private deployment's MySQL port 28406 x 100,000, plus 56 x 10^9 to
+/// stay above every id on the dev clusters (53,130,600,001 on 10 Nov,
+/// 13:30 IST). Only this test's own containers hold these schemas.
 const TENANT_BASE: u64 = 58_840_600_000;
 const KEYS: u64 = 8;
 const DCS: [&str; 3] = ["fra1", "ams1", "sin1"];
@@ -596,7 +596,7 @@ async fn job_state(store: &dyn MetaStore, dc: &str, job: &str) -> Value {
         .unwrap_or_default()
 }
 // ============================================================================
-// r2last: delay proxies, paced clients, settings
+// Delay proxies, paced clients, settings
 // ============================================================================
 
 /// A TCP proxy on `listen` to `upstream` that holds every chunk `half`
@@ -1026,7 +1026,7 @@ async fn bins_r2last_readonly_standbys_tenant_scopes_and_traffic_following() {
     // ---- deployment settings (global, dc) ----
     let certs = sprig_testkit::compose::compose_dir().join("gateway-certs");
     let global_settings: Vec<(&str, Value)> = vec![
-        // Chapter 24's decision, shortened for a test.
+        // The DC-move decision's timing, shortened for a test.
         ("migration.evaluate_seconds", json!(5)),
         ("migration.window_minutes", json!(2)),
         ("migration.min_signal_requests", json!(300)),
@@ -1283,7 +1283,7 @@ async fn bins_r2last_readonly_standbys_tenant_scopes_and_traffic_following() {
         let id = v["tenant"]["tenant_id"].as_u64().expect("tenant id");
         assert!(
             (TENANT_BASE..TENANT_BASE + 100_000).contains(&id),
-            "rule 8f: {id} outside this deployment's range"
+            "tenant id range: {id} outside this deployment's range"
         );
         ids.insert(t.clone(), id);
         home_of.insert(t.clone(), dc.clone());
@@ -1327,7 +1327,7 @@ async fn bins_r2last_readonly_standbys_tenant_scopes_and_traffic_following() {
     eprintln!("fillers written ({:?})", t_all.elapsed());
 
     // =====================================================================
-    // 1. RF3: a tenant's own failover.standby_dcs wins over its DC's
+    // 1. A tenant's own failover.standby_dcs wins over its DC's
     // =====================================================================
     let s_id = ids["r2last-s"];
     let t_id = ids["r2last-t"];
@@ -1350,7 +1350,7 @@ async fn bins_r2last_readonly_standbys_tenant_scopes_and_traffic_following() {
     for t in ["r2last-s", "r2last-gf"] {
         tenant_setting(&sprigctl, "fra1", t, "failover.standby_dcs", "0").await;
     }
-    // The direct account RF10 checks: the tenant's own name pattern, so the
+    // The direct account the read-only check uses: the tenant's own name pattern, so the
     // standby copies it with its grants.
     let direct = format!("t{s_id}_direct");
     for q in [
@@ -1396,7 +1396,7 @@ async fn bins_r2last_readonly_standbys_tenant_scopes_and_traffic_following() {
         es["standby_jobs"]
             .as_object()
             .is_none_or(serde_json::Map::is_empty),
-        "RF3: S's tenant-scope 0 must win over fra1's 1: {es}"
+        "tenant settings: S's tenant-scope 0 must win over fra1's 1: {es}"
     );
     eprintln!("1. S (tenant-scope failover.standby_dcs = 0) has no standby while fra1's is 1");
     let raised = Instant::now();
@@ -1423,7 +1423,7 @@ async fn bins_r2last_readonly_standbys_tenant_scopes_and_traffic_following() {
     };
 
     // =====================================================================
-    // 2. RF10: the standby copy is read-only for the tenant's accounts
+    // 2. The standby copy is read-only for the tenant's accounts
     // =====================================================================
     let s_schema = scalar(
         &root_url(ams1_port),
@@ -1457,7 +1457,7 @@ async fn bins_r2last_readonly_standbys_tenant_scopes_and_traffic_following() {
     assert_eq!(
         w,
         Err("1142".to_owned()),
-        "RF10: a direct write to the standby copy must be refused"
+        "read-only standby: a direct write to the standby copy must be refused"
     );
     assert!(read.is_some(), "reads of the copy still work");
     let recorded = scalar(
@@ -1468,7 +1468,7 @@ async fn bins_r2last_readonly_standbys_tenant_scopes_and_traffic_following() {
     )
     .await;
     eprintln!(
-        "2. RF10: a direct INSERT on S's standby copy in ams1 got 1142; SELECT works ({read:?} rows); {recorded:?} grants recorded for the promotion"
+        "2. read-only standby: a direct INSERT on S's standby copy in ams1 got 1142; SELECT works ({read:?} rows); {recorded:?} grants recorded for the promotion"
     );
     // The home still takes direct writes (the account is the tenant's).
     let (w, _) = try_write(fra1_port).await.expect("home login");
@@ -1485,9 +1485,9 @@ async fn bins_r2last_readonly_standbys_tenant_scopes_and_traffic_following() {
     }
 
     // =====================================================================
-    // 3. Chapter 24 step 7: T follows its traffic, fra1 -> ams1
+    // 3. T follows its traffic, fra1 -> ams1
     // =====================================================================
-    // RF3 again: T's own write-pause budget.
+    // Tenant settings again: T's own write-pause budget.
     tenant_setting(
         &sprigctl,
         "fra1",
@@ -1567,7 +1567,7 @@ async fn bins_r2last_readonly_standbys_tenant_scopes_and_traffic_following() {
     );
     assert_eq!(
         lm["migration"]["max_pause_ms"], 1500,
-        "RF3: T's tenant-scope budget: {lm}"
+        "tenant settings: T's tenant-scope budget: {lm}"
     );
     assert!(
         seen1
@@ -1589,7 +1589,7 @@ async fn bins_r2last_readonly_standbys_tenant_scopes_and_traffic_following() {
     );
 
     // =====================================================================
-    // 4. Chapter 24 step 8: new tenants land in the least busy allowed DC
+    // 4. New tenants land in the least busy allowed DC
     // =====================================================================
     let loads = list(&*store, "/sprig/g/dc-load/").await;
     let spare: BTreeMap<String, f64> = loads
@@ -1612,7 +1612,7 @@ async fn bins_r2last_readonly_standbys_tenant_scopes_and_traffic_following() {
     let n_id = v["tenant"]["tenant_id"].as_u64().expect("n id");
     assert!(
         (TENANT_BASE..TENANT_BASE + 100_000).contains(&n_id),
-        "rule 8f: {n_id}"
+        "tenant id range: {n_id}"
     );
     ids.insert("r2last-n".into(), n_id);
     let n_home = v["tenant"]["home_dc"]
@@ -1634,7 +1634,7 @@ async fn bins_r2last_readonly_standbys_tenant_scopes_and_traffic_following() {
     let rc_id = v["tenant"]["tenant_id"].as_u64().expect("rc id");
     assert!(
         (TENANT_BASE..TENANT_BASE + 100_000).contains(&rc_id),
-        "rule 8f: {rc_id}"
+        "tenant id range: {rc_id}"
     );
     ids.insert("r2last-rc".into(), rc_id);
     let rc_home = v["tenant"]["home_dc"]
@@ -1722,7 +1722,7 @@ async fn bins_r2last_readonly_standbys_tenant_scopes_and_traffic_following() {
     }
 
     // =====================================================================
-    // 6. RF10: promotion restores writes; no acknowledged write lost
+    // 6. Promotion restores writes; no acknowledged write lost
     // =====================================================================
     let s_stop = Arc::new(AtomicBool::new(false));
     let s_tally = Arc::new(Mutex::new(Tally::default()));
@@ -1790,7 +1790,7 @@ async fn bins_r2last_readonly_standbys_tenant_scopes_and_traffic_following() {
     assert_eq!(
         w,
         Ok(()),
-        "RF10: the promotion restores the tenant's write privileges"
+        "promotion: the promotion restores the tenant's write privileges"
     );
     {
         let mut c = mysql_async::Conn::new(opts(&root_url(ams1_port)))
@@ -1839,11 +1839,11 @@ async fn bins_r2last_readonly_standbys_tenant_scopes_and_traffic_following() {
 }
 
 // ============================================================================
-// Chapter 52 (approvals2): a DC move held at tenant level, escalated
+// Approvals: a DC move held at tenant level, escalated
 // tenant -> ancestor -> platform, approved over gRPC, then applied
 // ============================================================================
 
-/// Rule 8f for the approvals test: above every tenant id on the dev
+/// Tenant ids for the approvals test: above every tenant id on the dev
 /// clusters (921,306,000,001 on 10 Nov 2026, 23:00 IST): port 24025 x 10^8.
 /// Only this test's own containers hold these schemas.
 const AP2_BASE: u64 = 2_402_500_000_000;
@@ -2000,7 +2000,7 @@ async fn bins_approvals_dc_move_escalates_tenant_ancestor_platform() {
         put(
             &*store,
             &format!("/sprig/g/settings/{k}"),
-            json!({"v": 1, "value": v, "set_by": "op:approvals2", "reason": "chapter 52 live test"}),
+            json!({"v": 1, "value": v, "set_by": "op:approvals2", "reason": "approvals live test"}),
         )
         .await;
     }
@@ -2023,7 +2023,7 @@ async fn bins_approvals_dc_move_escalates_tenant_ancestor_platform() {
             put(
                 &*store,
                 &format!("/sprig/dc/{d}/settings/{k}"),
-                json!({"v": 1, "value": v, "set_by": "op:approvals2", "reason": "chapter 52 live test"}),
+                json!({"v": 1, "value": v, "set_by": "op:approvals2", "reason": "approvals live test"}),
             )
             .await;
         }
@@ -2237,7 +2237,7 @@ async fn bins_approvals_dc_move_escalates_tenant_ancestor_platform() {
     for id in [parent, kid] {
         assert!(
             (AP2_BASE..AP2_BASE + 100_000).contains(&id),
-            "rule 8f: {id} outside this test's range"
+            "tenant id range: {id} outside this test's range"
         );
     }
     user_and_schema(&sprigctl, "fra1", "ap2-kid").await;

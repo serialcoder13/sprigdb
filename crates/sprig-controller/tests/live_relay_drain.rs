@@ -1,5 +1,5 @@
-//! Relay-log safe drains, live (chapter 25, "Primary + replicas, driven by
-//! SprigDB"; decisions/r2-failover.md, "Relay-log safe drains (r2drain)").
+//! Relay-log safe drains in a primary + replicas cluster driven by
+//! SprigDB, live.
 //! Set `SPRIG_TEST_DOCKER=1` to run. Each test builds its own primary and
 //! two replicas from `mariadb:11.8` (containers `r2drain-*`, 768 MB each,
 //! semi-sync `AFTER_SYNC`, `gtid_strict_mode`, `log_slave_updates`,
@@ -579,7 +579,7 @@ async fn both_threads_stopped_blocks_the_promotion() {
             assert!(why.contains("db2"), "{why}");
         }
         Choice::Promote(cand) => {
-            // What the promotion would lose (the code before r2drain).
+            // What the promotion would lose (without a relay-log safe drain).
             let best = if cand.node.as_str() == "db2" {
                 db2
             } else {

@@ -1,4 +1,4 @@
-//! The gateway's side of `LogicPeer.SinkSql` (chapter 51, R9, r9queue): a
+//! The gateway's side of `LogicPeer.SinkSql`: a
 //! sink task's statements in a session of the sink's owner, opened as the
 //! trigger runs are ([`crate::triggers::principal_of`]), through the
 //! gateway's SQL engine, so everything a session of the owner checks
@@ -13,11 +13,11 @@
 //!                       otherwise), autocommit, in order; each statement's
 //!                       error is its own result's
 //! FanInGet / FanInSettle  a fan-in queue sink's reads of member instances
-//! FanInRelease            (R9, r9last) a dead fan-in task's leases back
+//! FanInRelease            a dead fan-in task's leases back
 //!                       (crate::inherited::fanin_sink)
-//! Images {tables}       (RL50) which row images the user may see: rows
+//! Images {tables}       which row images the user may see: rows
 //!                       (t, i, v) of crate::exec::rls_images
-//! Publish {statements}  (RL52) a change exchange's CALL sprig.mq_publish
+//! Publish {statements}  a change exchange's CALL sprig.mq_publish
 //!                       calls, autocommit, in order
 //! ```
 
@@ -54,7 +54,7 @@ async fn serve_inner(
     engine: &Arc<SqlEngine>,
     req: SqlRequest,
 ) -> Result<SqlReply> {
-    // R9 (r9fwd): the feed-driven outbox forwarder's step, internal (no
+    // The feed-driven outbox forwarder's step, internal (no
     // session, no principal).
     if let SqlOp::OutboxForward { schema, table, ids } = &req.op {
         let svc = engine
@@ -108,7 +108,7 @@ async fn serve_inner(
             // Every queue call names its vhost (an argument, or the
             // delivery token's), so the session selects no database: a
             // user granted only the queue (an inherited queue sink's
-            // sprig_inherited, R9 r9tests) may not `USE` the database.
+            // sprig_inherited) may not `USE` the database.
             for sql in statements {
                 match run(engine, &caller, "", sql, None, caps).await {
                     Ok(mut r) => results.push(r.pop().unwrap_or_default()),
@@ -150,7 +150,7 @@ async fn serve_inner(
             )
             .await
         }
-        // R9 (r9last): a dead fan-in task's leases in one member.
+        // A dead fan-in task's leases in one member.
         SqlOp::FanInRelease {
             def_tenant,
             def_object,
@@ -175,7 +175,7 @@ async fn serve_inner(
             .await
         }
         SqlOp::OutboxForward { .. } => Err(SprigError::internal("served above")),
-        // Chapter 29 (RLS round 5, RL50): an after-commit trigger's images
+        // An after-commit trigger's images
         // as its definer may see them, through the marked image check
         // (crate::exec::rls_images), whose nonce only this process knows.
         SqlOp::Images { tables } => {
@@ -198,7 +198,7 @@ async fn serve_inner(
                 ..SqlReply::default()
             })
         }
-        // Chapter 50 (RL52): a change exchange's publishes as the user who
+        // A change exchange's publishes as the user who
         // set it (its privileges on the exchange apply).
         SqlOp::Publish { statements } => {
             sprig_sinks::peer::check_publish_calls(&statements)?;

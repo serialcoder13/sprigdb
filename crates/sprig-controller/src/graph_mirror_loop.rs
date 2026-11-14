@@ -1,5 +1,5 @@
-//! The `graph_mirror` loop (chapter 43, "Mirrors and freshness"; R8 round
-//! 5, decision G47), on the DC leader, every two seconds:
+//! The `graph_mirror` loop (graph mirrors and their freshness), on the DC
+//! leader, every two seconds:
 //!
 //! ```text
 //! each active feed subscription of kind `graph_mirror` (one per tenant,

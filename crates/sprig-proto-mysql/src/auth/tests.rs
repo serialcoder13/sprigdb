@@ -169,7 +169,7 @@ async fn wrong_password_is_refused_with_the_flows_error() {
 
 #[tokio::test]
 async fn rsa_path_is_refused_without_hashing() {
-    // D4: the client asks for the public key over plaintext.
+    // No RSA: the client asks for the public key over plaintext.
     let mut flow = Mock::default();
     let (v, _) = exchange(
         &mut flow,

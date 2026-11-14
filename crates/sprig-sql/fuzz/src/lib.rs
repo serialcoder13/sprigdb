@@ -1,6 +1,5 @@
-//! Fuzz harnesses for `sprig-sql` (chapter 46 step 4): the persona-aware
-//! lexer, chapter 07's name rewriter and plan, and chapter 28's R0
-//! rewrites.
+//! Fuzz harnesses for `sprig-sql`: the persona-aware lexer, the name
+//! rewriter and plan, and the translator's core rewrites.
 //!
 //! Each `fuzz_*` function is one cargo-fuzz target's body. They live here,
 //! not in `fuzz_targets/`, so the same code also runs on stable as a corpus
@@ -8,7 +7,7 @@
 //! `crates/sprig-sql/tests/fuzz_replay.rs`, which includes this file by
 //! path.
 //!
-//! The oracle is chapter 46's (no panic, no hang, bounded memory) plus the
+//! The oracle is no panic, no hang and bounded memory, plus the
 //! invariants each layer promises:
 //!
 //! - **lexer**: tokens cover every byte, in order, with no gaps; every
@@ -17,7 +16,7 @@
 //! - **rewriter**: a forwarded statement lexes, unrewrites, and its result
 //!   mapper runs over a resultset whose values are the statement's own
 //!   bytes.
-//! - **compat**: every R0 rewrite returns, and rewritten text lexes.
+//! - **compat**: every core rewrite returns, and rewritten text lexes.
 //!
 //! The first input byte picks the settings (persona, `sql_mode` flags),
 //! so every target accepts any byte string.
@@ -108,7 +107,7 @@ pub fn fuzz_lexer(data: &[u8]) {
     }
 }
 
-/// `rewriter`: chapter 07's plan for tenant 42 in `billing`, then each
+/// `rewriter`: the name layer's plan for tenant 42 in `billing`, then each
 /// forwarded statement's result mapper.
 pub fn fuzz_rewriter(data: &[u8]) {
     let Some((cfg, sql)) = split(data) else {
@@ -156,7 +155,7 @@ pub fn fuzz_rewriter(data: &[u8]) {
     }
 }
 
-/// `compat`: chapter 28's R0 rewrites on arbitrary text.
+/// `compat`: the translator's core rewrites on arbitrary text.
 pub fn fuzz_compat(data: &[u8]) {
     let Some((cfg, sql)) = split(data) else {
         return;

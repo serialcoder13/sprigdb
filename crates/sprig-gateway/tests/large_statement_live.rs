@@ -1,5 +1,4 @@
-//! Very large statements don't stall the gateway (chapter 04, "Large
-//! statements"): a 64 MiB text statement, the 64 MiB row it wrote read
+//! Very large statements don't stall the gateway: a 64 MiB text statement, the 64 MiB row it wrote read
 //! back, and a 16 MiB prepared-statement parameter go through a running
 //! gateway while other sessions keep running small statements; their
 //! latency is measured before and during the large ones.

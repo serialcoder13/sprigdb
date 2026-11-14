@@ -2,7 +2,7 @@
 //! packet framing, the handshake with `mysql_native_password`, text queries,
 //! `COM_REGISTER_SLAVE` and `COM_BINLOG_DUMP`.
 //!
-//! `sprig-proto-mysql` owns the full codec (chapter 05); this module keeps
+//! `sprig-proto-mysql` owns the full codec; this module keeps
 //! the little a binlog client needs. TLS follows the standard upgrade: an
 //! SSL request after the greeting, the TLS handshake, then the handshake
 //! response inside TLS ([`crate::tls`]).

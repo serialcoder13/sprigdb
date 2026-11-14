@@ -1,4 +1,4 @@
-//! The golden capture tool (chapter 05, "Testing": golden captures).
+//! The golden capture tool.
 //!
 //! Connects to real servers over plain TCP, speaks the protocol with this
 //! crate's codec and packet encoders, and records every packet each side

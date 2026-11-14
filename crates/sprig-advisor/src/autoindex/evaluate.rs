@@ -1,13 +1,13 @@
-//! One evaluation of one tenant (chapter 13, "Trigger evaluation" to
-//! "Selection under budgets", and the start of "Flows"): the entry point
-//! the controller's loop calls every `auto_index.eval_interval_minutes`.
+//! One evaluation of one tenant, from trigger evaluation to selection under
+//! budgets: the entry point the controller's loop calls every
+//! `auto_index.eval_interval_minutes`.
 //!
 //! ```text
 //! evaluate(tenant):
 //!   tenant mode off                                  → nothing
 //!   W := the workload window (window_hours, tenant scope), Studio left out
 //!   q := qualify(W)                                  (qualify module)
-//!   watch every qualified fingerprint (chapter 12)
+//!   watch every qualified fingerprint
 //!   for each object o with a qualified fingerprint:
 //!     F      := every fingerprint of W reading or writing o, as FpInput
 //!     stats  := the table's statistics; missing or stale columns are
@@ -31,7 +31,7 @@
 //! ([`StatsSource`]), the catalog tables ([`EvalStore`]) and the decision
 //! log, so an evaluation is deterministic for tests.
 //!
-//! **Choices** (also in the report):
+//! **Choices:**
 //!
 //! - **The validation queue** is the `auto_indexes` rows in `validating`,
 //!   which the controller's `auto_index` loop validates
@@ -117,15 +117,15 @@ pub struct ObjectMeta {
     pub build_rate_bytes_per_sec: Option<f64>,
 }
 
-/// The tenant's catalog objects (chapter 08), as the controller's
+/// The tenant's catalog objects, as the controller's
 /// snapshot knows them.
 pub trait ObjectDirectory: Send + Sync {
     /// `object`'s description, `None` for an unknown object.
     fn meta(&self, object: ObjectId) -> Option<ObjectMeta>;
 
-    /// Chapter 33's views over a key-value namespace (`<ns>__hash`,
+    /// The views over a key-value namespace (`<ns>__hash`,
     /// `<ns>__set`): the element table a view object reads; `None` for
-    /// other objects (R6 round 5).
+    /// other objects.
     fn kv_view(&self, object: ObjectId) -> Option<super::kv::KvTarget> {
         let _ = object;
         None
@@ -139,7 +139,7 @@ impl ObjectDirectory for BTreeMap<ObjectId, ObjectMeta> {
 }
 
 /// Where table statistics come from: a node holding a shard of the
-/// object (chapter 13, "Statistics").
+/// object.
 #[async_trait::async_trait]
 pub trait StatsSource: Send + Sync {
     /// The statistics of `object`'s table, `None` when it has none (the
@@ -393,7 +393,7 @@ pub fn literals(s: &SampledLiterals) -> Vec<Literal> {
         .collect()
 }
 
-/// Chapter 12's window statistics as the generator and the cost model
+/// The workload window statistics as the generator and the cost model
 /// read them.
 #[must_use]
 pub fn fp_input(w: &FpWindowStats, fast_only: bool) -> FpInput {
@@ -767,7 +767,7 @@ impl Evaluator {
     /// Settings, the workload store or the catalog failing before any
     /// table is evaluated. A table whose statistics or rows fail is
     /// reported in its [`TableOutcome::error`]; the others go on.
-    #[allow(clippy::too_many_lines)] // the chapter's flow, in one place
+    #[allow(clippy::too_many_lines)] // the whole flow, in one place
     pub async fn evaluate_at(&self, cx: &EvalCx<'_>, now: SystemTime) -> Result<Evaluation> {
         let tctx = SettingCtx {
             db: None,
@@ -803,7 +803,7 @@ impl Evaluator {
         // A fingerprint an index now serves is judged on its runs since
         // that index was built, not the whole window: the slow runs from
         // before the build would otherwise propose redundant variants
-        // beside it (M0.4, cooldown_hours = 0).
+        // beside it (cooldown_hours = 0).
         let mut cut: BTreeMap<Fingerprint, SystemTime> = BTreeMap::new();
         for o in &objects {
             for r in cx.store.indexes_on(*o).await? {
@@ -1188,8 +1188,7 @@ impl Evaluator {
             let advise = c
                 .primaries()
                 .all(|f| quals.get(&f).is_some_and(|q| advise_by_stats(q)));
-            // An ANN index changes results: `auto_index.vector_ann` decides
-            // (chapter 13, "Other models"; R6 round 3).
+            // An ANN index changes results: `auto_index.vector_ann` decides.
             let mode = if c.def.kind == IndexKind::Vector {
                 match (policy.mode, policy.vector_ann) {
                     (Mode::Off, _) | (_, Mode::Off) => Mode::Off,
@@ -1461,8 +1460,7 @@ impl Evaluator {
                 .collect();
             // Columns read by the served and the regression fingerprints:
             // the covering retry extends the candidate by those of the
-            // statement that regressed, which is usually not one it serves
-            // (worked example 3's F6).
+            // statement that regressed, which is usually not one it serves.
             let columns_read: BTreeMap<Fingerprint, Vec<String>> = f
                 .candidate
                 .serves
@@ -1573,8 +1571,8 @@ struct Written<'a, 'b> {
 ///
 /// # Errors
 /// The workload store's.
-/// Moves shapes that read chapter 33's views onto the element tables
-/// (`super::kv::translate`, R6 round 5).
+/// Moves shapes that read key-value views onto the element tables
+/// (`super::kv::translate`).
 fn kv_views(cx: &EvalCx<'_>, entries: &mut [super::qualify::SourcedWindow]) {
     for e in entries.iter_mut() {
         if let Some(s) = super::kv::translate(&e.window.shape, &|o| cx.objects.kv_view(o)) {
@@ -1645,12 +1643,12 @@ async fn record_skip(
     Ok(())
 }
 
-/// Chapter 13's merge, with each covering variant costed beside its base
-/// candidate, not instead of it ("Covering columns": `emit c' := c ++
-/// need ... costed beside c`). `candidates::merge` alone would fold a base
-/// into its own covering variant (the base's parts are a prefix of it), so
-/// worked example 1's B `(customer_id, created_at)` would only be priced
-/// with `status` and `total` added. Base candidates merge among
+/// The merge, with each covering variant costed beside its base candidate,
+/// not instead of it (`c' := c ++ need` is costed beside `c`).
+/// `candidates::merge` alone would fold a base into its own covering
+/// variant (the base's parts are a prefix of it), so a base such as
+/// `(customer_id, created_at)` would only be priced with the covered
+/// columns added. Base candidates merge among
 /// themselves; covering variants are kept as generated, once each.
 #[must_use]
 pub fn merge_beside_covering(cands: Vec<Candidate>) -> Vec<Candidate> {

@@ -1,14 +1,14 @@
-//! R1's done-when for chapters 16 and 20, live: a tenant grows past
-//! `sharding.split_size_gb` and splits automatically under load.
+//! Automatic sharding, live: a tenant grows past `sharding.split_size_gb`
+//! and splits automatically under load.
 //!
-//! One tenant (id 3,030,600,001, rule 8b for agent r1split) on the Compose
-//! single node, in a private DC tier `r1split` of the dev etcd (its own
+//! One tenant (id 3,030,600,001, in a private deployment's id range) on
+//! the Compose single node, in a private DC tier `r1split` of the dev etcd (its own
 //! mover jobs and maps, so no other worker claims them):
 //!
 //! 1. a shop schema (`customers`, `orders`, `order_items`, `events`, `countries`) in
-//!    the R0 default group, with foreign keys, written by gateway-like
+//!    the default group, with foreign keys, written by gateway-like
 //!    writers that record every statement in the tenant's workload store
-//!    (chapter 12) and log every acknowledged write;
+//!    and log every acknowledged write;
 //! 2. the sharding loop (`sprig_controller::sharding`) with a split size of
 //!    a few MB: the advisor's first design (groups from foreign-key trees
 //!    and joins, `_sprig_rk` back-filled), then automatic splits to 2 and 4
@@ -285,7 +285,7 @@ async fn setup(p: &Pool, dc: &Arc<dyn MetaStore>, cluster: &ClusterId) {
     ))
     .await
     .unwrap();
-    // The tenant map (R0's group 0), on the private cluster id.
+    // The tenant map (group 0), on the private cluster id.
     let key = TenantMap::catalog_key(dc.tier(), TENANT).unwrap();
     dc.txn(Txn {
         when: vec![],

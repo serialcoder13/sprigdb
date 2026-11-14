@@ -1,5 +1,4 @@
-//! Row-level security on collections, live (chapter 29, R5; decisions
-//! RL33 and RL34): policies made with `sprigCreatePolicy` bind every
+//! Row-level security on collections, live: policies made with `sprigCreatePolicy` bind every
 //! MongoDB read and write of a bound user, SQL over the collection's
 //! table, and change streams.
 //!
@@ -399,7 +398,7 @@ async fn row_level_security_on_collections() {
         );
     }
 
-    // Change streams (RL34): alice sees her documents' events only; an
+    // Change streams: alice sees her documents' events only; an
     // update that hides one arrives as a delete, one that shows one as an
     // insert.
     let alice = client(&mongo_addr, "rlsm_alice", PW).await;
@@ -476,7 +475,7 @@ async fn row_level_security_on_collections() {
         e.as_ref().is_err_and(|e| code_of(e) == 39366),
         || format!("{:?}", e.as_ref().err()),
     );
-    // RL41: a policy change reaches a stream that is already open. The
+    // A policy change reaches a stream that is already open. The
     // restrictive `small` (n < 15) hides 203 when the stream opens; once it
     // is dropped, the gateway ends the stream with a resumable error, the
     // driver resumes, and 203 arrives.
@@ -502,7 +501,7 @@ async fn row_level_security_on_collections() {
         seen == vec!["Insert:203".to_owned()],
         || format!("{seen:?}"),
     );
-    // RL40: a database stream leaves out the events of collections the
+    // A database stream leaves out the events of collections the
     // watcher may not read (carol holds SELECT on notes only).
     let _ = admin_sql
         .query_drop("DROP USER IF EXISTS 'rlsm_carol'@'%'")

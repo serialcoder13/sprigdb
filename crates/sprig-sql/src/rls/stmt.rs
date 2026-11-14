@@ -1,7 +1,6 @@
-//! Row-level security statements (chapter 29, "Policies"; build step 21):
-//! parsing only. The gateway resolves names against the session's
-//! snapshot, checks `ALTER` on the table, validates the expressions
-//! ([`super::expr`]) and writes the catalog.
+//! Row-level security statements: parsing only. The gateway resolves names
+//! against the session's snapshot, checks `ALTER` on the table, validates the
+//! expressions ([`super::expr`]) and writes the catalog.
 //!
 //! ```text
 //! CREATE POLICY name ON [db.]table [AS PERMISSIVE | RESTRICTIVE]
@@ -174,7 +173,7 @@ pub enum PolicyStmt {
         /// `WITH CHECK (...)`.
         check: Option<String>,
         /// `SPRIG MONGO USING '<filter>'`: the `USING` as a MongoDB
-        /// filter (extended JSON), kept for change streams (RL33).
+        /// filter (extended JSON), kept for change streams.
         mongo_using: Option<String>,
         /// `SPRIG MONGO ... CHECK '<filter>'`.
         mongo_check: Option<String>,
@@ -544,7 +543,7 @@ fn create(p: &mut P<'_>) -> R<PolicyStmt> {
     if p.eat_words(&["WITH", "CHECK"]) {
         check = Some(p.paren_text()?);
     }
-    // RL33: the MongoDB forms of a collection's policy (`sprigCreatePolicy`
+    // The MongoDB forms of a collection's policy (`sprigCreatePolicy`
     // writes them; the SQL above is what the gateway and MariaDB apply).
     let mut mongo_using = None;
     let mut mongo_check = None;

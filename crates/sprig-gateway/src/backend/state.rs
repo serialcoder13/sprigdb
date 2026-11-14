@@ -1,5 +1,4 @@
-//! Session state, its replay and its digest (chapter 06, "Replay rules",
-//! "Acquire, sync and release"; build step 3).
+//! Session state, its replay and its digest.
 //!
 //! The client-visible state is [`SessionVars`]; what a backend connection
 //! holds is [`AppliedState`]. Before a statement runs on a connection,
@@ -12,8 +11,7 @@
 //! variable values travel as hex (`X'..'`, wrapped in `CONVERT(.. USING
 //! utf8mb4)` for text), so no escaping is needed.
 //!
-//! Names pass through unchanged (decision D2): the session's schema is the
-//! physical one until chapter 07.
+//! Names pass through unchanged: the session's schema is the physical one.
 
 use std::collections::BTreeMap;
 use std::hash::Hasher as _;
@@ -37,8 +35,8 @@ pub enum VarKind {
     Text,
 }
 
-/// The session variables that replay by value (chapter 06's allowed list,
-/// plus the character-set variables `SET NAMES` changes).
+/// The session variables that replay by value (the allowed list, plus the
+/// character-set variables `SET NAMES` changes).
 const ALLOWED: &[(&str, VarKind)] = &[
     ("autocommit", VarKind::Bool),
     ("sql_mode", VarKind::Text),
@@ -71,8 +69,8 @@ const ALLOWED: &[(&str, VarKind)] = &[
     ("default_storage_engine", VarKind::Text),
     ("default_tmp_storage_engine", VarKind::Text),
     ("character_set_collations", VarKind::Text),
-    // Decision D9: the 3306 persona turns it off (MySQL never fails a
-    // REPEATABLE READ update with 1020); a session may turn it back on.
+    // The 3306 persona turns it off (MySQL never fails a REPEATABLE READ
+    // update with 1020); a session may turn it back on.
     ("innodb_snapshot_isolation", VarKind::Bool),
 ];
 
@@ -136,9 +134,9 @@ pub enum VarValue {
     Text(Vec<u8>),
     /// A binary string.
     Binary(Vec<u8>),
-    /// Text (sent in `utf8mb4`) and the collation the variable held
-    /// (gaps row 57, R4 round 6): replayed with it, so a variable read on
-    /// another backend connection compares as it did where it was set.
+    /// Text (sent in `utf8mb4`) and the collation the variable held:
+    /// replayed with it, so a variable read on another backend connection
+    /// compares as it did where it was set.
     Collated(Vec<u8>, String),
 }
 
@@ -199,9 +197,9 @@ impl VarValue {
         }
     }
 
-    /// The value with the collation `COLLATION(@v)` reported, for text
-    /// (gaps row 57). A name that isn't a plain collation name, and
-    /// `binary`, leave the value as it is.
+    /// The value with the collation `COLLATION(@v)` reported, for text. A
+    /// name that isn't a plain collation name, and `binary`, leave the
+    /// value as it is.
     #[must_use]
     pub fn with_collation(self, collation: Option<&[u8]>) -> Self {
         let Some(c) = collation.and_then(|c| std::str::from_utf8(c).ok()) else {
@@ -280,7 +278,7 @@ impl Baseline {
 /// The session state a backend connection holds.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AppliedState {
-    /// Default schema (physical; D2: as the client named it).
+    /// Default schema (physical: as the client named it).
     pub schema: Option<String>,
     /// Allowed variables set away from the baseline (or set at all).
     pub vars: BTreeMap<String, String>,
@@ -289,7 +287,7 @@ pub struct AppliedState {
     /// The collation the client character set holds; `None`: the pool's
     /// ([`persona::COLLATION`], from the initialization's `SET NAMES`).
     pub client_collation: Option<String>,
-    /// The backend role (chapter 29); unused until R1.
+    /// The backend role (not used yet).
     pub role: Option<String>,
     /// User variables known to hold these values.
     pub user_vars: BTreeMap<String, VarValue>,
@@ -310,18 +308,18 @@ pub struct SessionVars {
     /// Allowed variables the session has set (or that its persona sets at
     /// login).
     pub vars: BTreeMap<String, String>,
-    /// The collation the client character set holds (chapter 06, "Login
-    /// collation"): no variable shows it (`character_set_client` shows the
-    /// character set), but string parameters of prepared statements get
-    /// it. Only `SET NAMES` can give it a collation other than the
-    /// character set's compiled default. `None`: the pool's.
+    /// The collation the client character set holds: no variable shows it
+    /// (`character_set_client` shows the character set), but string
+    /// parameters of prepared statements get it. Only `SET NAMES` can give it
+    /// a collation other than the character set's compiled default. `None`:
+    /// the pool's.
     pub client_collation: Option<String>,
     /// The character set of a login collation that is its compiled
     /// default: the server's `character_set_collations` decides the
     /// collation, known from the first connection's [`Baseline`] (see
     /// [`SessionVars::settle_login`]).
     pub login_charset: Option<String>,
-    /// The backend role (chapter 29); unused until R1.
+    /// The backend role (not used yet).
     pub role: Option<String>,
     /// User variables with known values.
     pub user_vars: BTreeMap<String, VarValue>,
@@ -332,20 +330,20 @@ pub struct SessionVars {
     /// `wsrep_sync_wait`, ...): the gateway answers these; backend
     /// connections keep the gateway's values.
     pub gateway_vars: BTreeMap<String, String>,
-    /// The MySQL persona's view of `sql_mode` (chapter 28, R4): what
-    /// `@@sql_mode` answers. `vars["sql_mode"]` holds the backend value.
+    /// The MySQL persona's view of `sql_mode`: what `@@sql_mode` answers.
+    /// `vars["sql_mode"]` holds the backend value.
     pub client_sql_mode: Option<String>,
     /// A literal `SET sql_mode` on its way: its view and backend value,
     /// recorded when the backend reports the same value.
     pub pending_sql_mode: Option<(String, String)>,
-    /// Chapter 29 (policy views, decision RL18): the protected tables this
+    /// Row-level security's policy views: the protected tables this
     /// session's policies bind, whose views its statements read instead.
     /// Not a variable: [`super::session::BackendSession`] applies it to
     /// every statement it sends.
     pub rls_views: Option<std::sync::Arc<sprig_sql::rls::views::ViewSwap>>,
 }
 
-/// The persona baselines (chapter 06, "New connections").
+/// The persona baselines.
 pub mod persona {
     /// MySQL 8.4's `sql_mode`.
     pub const MYSQL84_SQL_MODE: &str = "ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,\
@@ -355,14 +353,13 @@ pub mod persona {
         "STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION";
     /// The pool's connection collation.
     pub const COLLATION: &str = "utf8mb4_uca1400_ai_ci";
-    /// `innodb_snapshot_isolation` for the MySQL persona (decision D9); the
-    /// MariaDB persona keeps the server's default.
+    /// `innodb_snapshot_isolation` for the MySQL persona; the MariaDB persona
+    /// keeps the server's default.
     pub const MYSQL84_SNAPSHOT_ISOLATION: &str = "OFF";
-    /// `character_set_collations` for the MySQL persona (chapter 28, R4
-    /// round 3; gaps row 58): MySQL 8.4's default collation of each
-    /// character set MariaDB maps to a UCA 14.0 one. `utf8mb4` keeps the
-    /// backend's `utf8mb4_uca1400_ai_ci`, which 3306 shows as
-    /// `utf8mb4_0900_ai_ci`; the others are MySQL's `*_general_ci`.
+    /// `character_set_collations` for the MySQL persona: MySQL 8.4's default
+    /// collation of each character set MariaDB maps to a UCA 14.0 one.
+    /// `utf8mb4` keeps the backend's `utf8mb4_uca1400_ai_ci`, which 3306
+    /// shows as `utf8mb4_0900_ai_ci`; the others are MySQL's `*_general_ci`.
     pub const MYSQL84_CHARSET_COLLATIONS: &str = "utf8mb3=utf8mb3_general_ci,\
         ucs2=ucs2_general_ci,utf8mb4=utf8mb4_uca1400_ai_ci,utf16=utf16_general_ci,\
         utf32=utf32_general_ci";
@@ -387,21 +384,20 @@ pub fn charset_var(name: &str) -> bool {
 impl SessionVars {
     /// The state of a new session: the persona's `sql_mode`, the character
     /// sets MariaDB would give a direct client with the same handshake
-    /// collation (chapter 06, "Login collation"), and the schema named at
-    /// login. A compiled default collation is mapped through MariaDB 11.8's
-    /// default `character_set_collations` until [`Self::settle_login`]
-    /// learns the server's.
+    /// collation, and the schema named at login. A compiled default collation
+    /// is mapped through MariaDB 11.8's default `character_set_collations`
+    /// until [`Self::settle_login`] learns the server's.
     #[must_use]
     pub fn login(persona: Persona, collation_id: u16, schema: Option<String>) -> Self {
         let mut vars = BTreeMap::new();
         let mut client_sql_mode = None;
         if persona == Persona::MySql84 {
-            // Chapter 28 (R4): MariaDB runs the backend value of MySQL's
+            // MariaDB runs the backend value of MySQL's
             // default; `@@sql_mode` shows MySQL's.
             let m = sprig_sql::compat::sqlmode::MYSQL84_DEFAULT;
             vars.insert("sql_mode".to_owned(), m.backend());
             client_sql_mode = Some(m.render());
-            // D9: MySQL 8.4 has no snapshot-isolation check; MariaDB 11.8's
+            // MySQL 8.4 has no snapshot-isolation check; MariaDB 11.8's
             // default (ON) fails conflicting REPEATABLE READ updates with
             // 1020, which MySQL applications don't retry.
             vars.insert(
@@ -679,8 +675,8 @@ pub fn sync_prefix(
     } else {
         stmt.reads_user_vars.iter().collect()
     };
-    // Chapter 29: row-level security's context, which MariaDB's triggers
-    // read for any write, follows the session on every connection.
+    // Row-level security's context, which MariaDB's triggers read for any
+    // write, follows the session on every connection.
     reads.extend(
         session
             .user_vars
@@ -715,7 +711,7 @@ pub fn sync_prefix(
 }
 
 /// The user variable holding a session's row-level security context
-/// (chapter 29; `sprig_sql::rls::triggers::CONTEXT_VAR`).
+/// (`sprig_sql::rls::triggers::CONTEXT_VAR`).
 pub const RLS_CONTEXT_VAR: &str = "sprig_rls";
 
 /// What session tracking reported for one client statement, sorted by the
@@ -805,7 +801,7 @@ fn charset_changed(
 
 impl SessionVars {
     /// A literal `SET sql_mode` is about to run on the MySQL persona: its
-    /// client view and backend value (chapter 28, R4).
+    /// client view and backend value.
     pub fn expect_sql_mode(&mut self, view: String, backend: String) {
         self.pending_sql_mode = Some((view, backend));
     }
@@ -946,7 +942,7 @@ mod tests {
             "CONVERT(X'612762' USING utf8mb4)"
         );
         assert_eq!(VarValue::Binary(vec![0, 255]).literal(), "X'00FF'");
-        // Gaps row 57 (R4 round 6): the variable's collation comes along.
+        // The variable's collation comes along.
         assert_eq!(
             VarValue::Text(b"ab".to_vec())
                 .with_collation(Some(b"utf8mb4_0900_ai_ci"))
@@ -1117,8 +1113,8 @@ mod tests {
     #[test]
     fn login_state_per_persona() {
         let m = SessionVars::login(Persona::MySql84, 255, Some("app".into()));
-        // Chapter 28 (R4): the client sees MySQL's default; MariaDB runs
-        // it without ONLY_FULL_GROUP_BY and with TIME_ROUND_FRACTIONAL.
+        // The client sees MySQL's default; MariaDB runs it without
+        // ONLY_FULL_GROUP_BY and with TIME_ROUND_FRACTIONAL.
         assert_eq!(
             m.client_sql_mode.as_deref(),
             Some(persona::MYSQL84_SQL_MODE)

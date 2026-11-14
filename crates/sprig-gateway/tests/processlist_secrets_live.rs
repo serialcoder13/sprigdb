@@ -1,4 +1,4 @@
-//! bugfix-24 (decisions/bugfix-interim.md, Studio's ST48): a statement
+//! A statement
 //! that carries a password or a connection's credentials never shows
 //! them in another session's `SHOW PROCESSLIST` or
 //! `information_schema.PROCESSLIST`; they read `<secret>`, as on MySQL

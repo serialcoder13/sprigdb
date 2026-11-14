@@ -1,5 +1,4 @@
-//! Certificate bundles: watched PEM files behind a `rustls` resolver
-//! (chapter 04, "Live listener changes", build step 3).
+//! Certificate bundles: watched PEM files behind a `rustls` resolver.
 //!
 //! A [`CertBundle`] holds the current certificate chain and key of one
 //! bundle (`tls.bundles.<bundle>.cert_path`, `.key_path`) and is the
@@ -20,9 +19,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
+use rustls::DigitallySignedStruct;
+use rustls::client::danger::HandshakeSignatureValid;
 use rustls::crypto::CryptoProvider;
+use rustls::pki_types::UnixTime;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use sprig_common::time::Clock;
@@ -36,7 +39,7 @@ pub use der::not_after;
 
 /// How often [`CertStore::spawn_watcher`] polls by default. A change is
 /// loaded on the second poll that sees it, so rotation takes one to two
-/// intervals (chapter 04: "debounced 1 s").
+/// intervals (debounced 1 s).
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The crypto provider: `ring`, as the workspace's `rustls` features select.
@@ -246,16 +249,17 @@ pub fn server_config(
 }
 
 /// [`server_config`] that also asks for a client certificate signed by
-/// `client.0`: verified when presented, and required when `client.1`
-/// (`listener.<name>.client_cert = required`), else optional.
+/// `client.0`'s CAs: verified when presented, and required when `client.1`
+/// (`listener.<name>.client_cert = required`), else optional. The
+/// verifier reads the CAs at each handshake, so a changed CA file applies
+/// without a new configuration ([`ClientCa::poll`]).
 ///
 /// # Errors
-/// `Internal` if the provider rejects the protocol versions (a bug);
-/// `ConfigInvalid` if the CA can't build a verifier.
+/// `Internal` if the provider rejects the protocol versions (a bug).
 pub fn server_config_with(
     bundle: Arc<CertBundle>,
     min: TlsVersion,
-    client: Option<(&ClientCa, bool)>,
+    client: Option<(&Arc<ClientCa>, bool)>,
 ) -> Result<Arc<rustls::ServerConfig>> {
     let versions: &[&'static rustls::SupportedProtocolVersion] = match min {
         TlsVersion::V1_2 => &[&rustls::version::TLS13, &rustls::version::TLS12],
@@ -266,52 +270,90 @@ pub fn server_config_with(
         .map_err(|e| SprigError::internal("TLS protocol versions").with_source(e))?;
     let cfg = match client {
         None => builder.with_no_client_auth().with_cert_resolver(bundle),
-        Some((ca, required)) => {
-            let mut v = rustls::server::WebPkiClientVerifier::builder_with_provider(
-                Arc::clone(&ca.roots),
-                provider(),
-            );
-            if !required {
-                v = v.allow_unauthenticated();
-            }
-            let v = v.build().map_err(|e| {
-                SprigError::new(
-                    SprigCode::ConfigInvalid,
-                    format!("client CA {}: {e}", ca.path.display()),
-                )
-            })?;
-            builder
-                .with_client_cert_verifier(v)
-                .with_cert_resolver(bundle)
-        }
+        Some((ca, required)) => builder
+            .with_client_cert_verifier(Arc::new(LiveClientVerifier {
+                ca: Arc::clone(ca),
+                required,
+            }))
+            .with_cert_resolver(bundle),
     };
     Ok(Arc::new(cfg))
 }
 
+/// A client CA file's contents, checked, with the two verifiers built
+/// over them.
+struct CaLoaded {
+    pem: Vec<u8>,
+    roots: usize,
+    optional: Arc<dyn ClientCertVerifier>,
+    required: Arc<dyn ClientCertVerifier>,
+}
+
 /// The CAs whose client certificates listeners accept
 /// (`tls.bundles.default.client_ca_path`): PEM, one or more certificates.
-/// Read when the listeners are applied (a change to the file applies at
-/// the next listener change or gateway start).
+/// Re-read as the server certificate is ([`CertStore::poll`]):
+/// a change seen on two polls in a row is loaded and swapped in for new
+/// handshakes; a file that doesn't load keeps the old CAs, with an error
+/// logged. Connections already open keep running.
 pub struct ClientCa {
     /// The file.
     pub path: PathBuf,
-    pem: Vec<u8>,
-    roots: Arc<rustls::RootCertStore>,
+    current: ArcSwap<CaLoaded>,
+    watch: Mutex<CaWatch>,
+}
+
+#[derive(Default)]
+struct CaWatch {
+    pending: Option<Vec<u8>>,
+    rejected: Option<Vec<u8>>,
 }
 
 impl fmt::Debug for ClientCa {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ClientCa")
             .field("path", &self.path)
-            .field("roots", &self.roots.len())
+            .field("roots", &self.current.load().roots)
             .finish_non_exhaustive()
     }
 }
 
+/// Two handles on one file are the same CA: its contents change in place.
 impl PartialEq for ClientCa {
     fn eq(&self, o: &Self) -> bool {
-        self.path == o.path && self.pem == o.pem
+        self.path == o.path
     }
+}
+
+fn ca_loaded(path: &Path, pem: Vec<u8>) -> std::result::Result<CaLoaded, String> {
+    let mut roots = rustls::RootCertStore::empty();
+    for c in CertificateDer::pem_slice_iter(&pem) {
+        let c = c.map_err(|e| format!("{}: {e}", path.display()))?;
+        roots
+            .add(c)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    if roots.is_empty() {
+        return Err(format!("{}: no certificate", path.display()));
+    }
+    let n = roots.len();
+    let roots = Arc::new(roots);
+    let build = |required: bool| {
+        let mut v = rustls::server::WebPkiClientVerifier::builder_with_provider(
+            Arc::clone(&roots),
+            provider(),
+        );
+        if !required {
+            v = v.allow_unauthenticated();
+        }
+        v.build()
+            .map_err(|e| format!("client CA {}: {e}", path.display()))
+    };
+    Ok(CaLoaded {
+        pem,
+        roots: n,
+        optional: build(false)?,
+        required: build(true)?,
+    })
 }
 
 impl ClientCa {
@@ -324,26 +366,133 @@ impl ClientCa {
         Self::from_pem(path, pem)
     }
 
-    /// A CA bundle from PEM text (`path` names it in messages).
+    /// A CA bundle from PEM text (`path` names it in messages and is read
+    /// again by [`Self::poll`]).
     ///
     /// # Errors
     /// Why the text isn't a usable CA bundle.
     pub fn from_pem(path: &Path, pem: Vec<u8>) -> std::result::Result<Self, String> {
-        let mut roots = rustls::RootCertStore::empty();
-        for c in CertificateDer::pem_slice_iter(&pem) {
-            let c = c.map_err(|e| format!("{}: {e}", path.display()))?;
-            roots
-                .add(c)
-                .map_err(|e| format!("{}: {e}", path.display()))?;
-        }
-        if roots.is_empty() {
-            return Err(format!("{}: no certificate", path.display()));
-        }
         Ok(Self {
             path: path.to_owned(),
-            pem,
-            roots: Arc::new(roots),
+            current: ArcSwap::from_pointee(ca_loaded(path, pem)?),
+            watch: Mutex::new(CaWatch::default()),
         })
+    }
+
+    fn verifier(&self, required: bool) -> Arc<dyn ClientCertVerifier> {
+        let c = self.current.load();
+        if required {
+            Arc::clone(&c.required)
+        } else {
+            Arc::clone(&c.optional)
+        }
+    }
+
+    /// Re-reads the file; a change seen on two polls in a row is loaded
+    /// (as [`CertBundle::poll`]).
+    pub fn poll(&self) -> PollOutcome {
+        let outcome = self.poll_inner();
+        let path = self.path.display().to_string();
+        match &outcome {
+            PollOutcome::Rotated => {
+                tracing::info!(event = "gateway.client_ca_reloaded", path = %path, "client CA file reloaded");
+            }
+            PollOutcome::Rejected(e) => {
+                tracing::error!(event = "gateway.client_ca_rejected", path = %path, error = %e, "changed client CA file rejected; keeping the old CAs");
+            }
+            PollOutcome::Unchanged | PollOutcome::Pending => {}
+        }
+        outcome
+    }
+
+    fn poll_inner(&self) -> PollOutcome {
+        let Ok(pem) = std::fs::read(&self.path) else {
+            return PollOutcome::Pending;
+        };
+        let mut w = self.watch.lock().unwrap_or_else(PoisonError::into_inner);
+        if pem == self.current.load().pem {
+            w.pending = None;
+            return PollOutcome::Unchanged;
+        }
+        if w.rejected.as_ref() == Some(&pem) {
+            return PollOutcome::Unchanged;
+        }
+        if w.pending.as_ref() != Some(&pem) {
+            w.pending = Some(pem);
+            return PollOutcome::Pending;
+        }
+        w.pending = None;
+        match ca_loaded(&self.path, pem.clone()) {
+            Ok(l) => {
+                w.rejected = None;
+                self.current.store(Arc::new(l));
+                PollOutcome::Rotated
+            }
+            Err(e) => {
+                w.rejected = Some(pem);
+                PollOutcome::Rejected(SprigError::new(SprigCode::ConfigInvalid, e))
+            }
+        }
+    }
+}
+
+/// A listener's client verifier over a [`ClientCa`]: each handshake uses
+/// the CAs loaded now. Root hints aren't sent (they would be the old
+/// CAs' after a reload); clients send their certificate anyway.
+#[derive(Debug)]
+struct LiveClientVerifier {
+    ca: Arc<ClientCa>,
+    required: bool,
+}
+
+impl ClientCertVerifier for LiveClientVerifier {
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        self.required
+    }
+
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: UnixTime,
+    ) -> std::result::Result<ClientCertVerified, rustls::Error> {
+        self.ca
+            .verifier(self.required)
+            .verify_client_cert(end_entity, intermediates, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        self.ca
+            .verifier(self.required)
+            .verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        self.ca
+            .verifier(self.required)
+            .verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.ca.verifier(self.required).supported_verify_schemes()
     }
 }
 
@@ -358,6 +507,9 @@ pub fn client_dn(cert: &[u8]) -> Option<sprig_auth::mysql::ClientDn> {
 /// Every bundle in use, by name, and the poller that rotates them.
 pub struct CertStore {
     bundles: Mutex<HashMap<String, Arc<CertBundle>>>,
+    /// Client CA files in use, by path: polled with the
+    /// bundles.
+    client_cas: Mutex<HashMap<PathBuf, Arc<ClientCa>>>,
     clock: Arc<dyn Clock>,
 }
 
@@ -376,6 +528,7 @@ impl CertStore {
     pub fn new(clock: Arc<dyn Clock>) -> Self {
         Self {
             bundles: Mutex::new(HashMap::new()),
+            client_cas: Mutex::new(HashMap::new()),
             clock,
         }
     }
@@ -403,12 +556,42 @@ impl CertStore {
         Ok(b)
     }
 
-    /// Polls every bundle once (see [`CertBundle::poll`]).
+    /// The client CA file at `path`: the one already loaded, whose
+    /// contents [`Self::poll`] keeps current, otherwise a newly loaded one.
+    ///
+    /// # Errors
+    /// Why the file isn't a usable CA bundle.
+    pub fn client_ca(&self, path: &Path) -> std::result::Result<Arc<ClientCa>, String> {
+        let mut g = self
+            .client_cas
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(ca) = g.get(path) {
+            return Ok(Arc::clone(ca));
+        }
+        let ca = Arc::new(ClientCa::load(path)?);
+        g.insert(path.to_owned(), Arc::clone(&ca));
+        Ok(ca)
+    }
+
+    /// Polls every bundle once (see [`CertBundle::poll`]), then every
+    /// client CA file (named `client_ca:<path>`, [`ClientCa::poll`]).
     pub fn poll(&self) -> Vec<(String, PollOutcome)> {
         let bundles: Vec<Arc<CertBundle>> = self.lock().values().cloned().collect();
+        let cas: Vec<Arc<ClientCa>> = self
+            .client_cas
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect();
         bundles
             .into_iter()
             .map(|b| (b.name.clone(), b.poll()))
+            .chain(
+                cas.into_iter()
+                    .map(|c| (format!("client_ca:{}", c.path.display()), c.poll())),
+            )
             .collect()
     }
 

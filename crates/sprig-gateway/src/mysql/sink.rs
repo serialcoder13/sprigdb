@@ -192,7 +192,7 @@ where
     }
 
     async fn error(&mut self, err: &SprigError) -> Result<()> {
-        // 3306: MariaDB-only errors as MySQL 8.4's (chapter 28).
+        // 3306: MariaDB-only errors as MySQL 8.4's.
         let mapped = sprig_sql::compat::errmap::for_persona(self.persona, err);
         let p = ErrPacket::from_error(self.persona, mapped.as_ref().unwrap_or(err));
         self.feed(p.encode(self.caps)).await?;

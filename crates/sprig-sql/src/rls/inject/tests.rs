@@ -311,7 +311,7 @@ impl Lcg {
 }
 
 /// One random statement in two forms: as the client writes it, and with
-/// each protected table replaced by the chapter's filtered derived table
+/// each protected table replaced by a filtered derived table
 /// (the reference semantics).
 fn random_pair(r: &mut Lcg) -> (String, String) {
     let n = 2 + r.next(3);
@@ -384,8 +384,8 @@ fn random_pair(r: &mut Lcg) -> (String, String) {
 }
 
 /// Writes `SPRIG_TEST_RLS_DIFF_N` (default 500) pairs, rewritten and
-/// reference, to `SPRIG_TEST_RLS_DIFF_OUT` for
-/// `target/agent-rls/diff.py` to run on MariaDB.
+/// reference, to `SPRIG_TEST_RLS_DIFF_OUT` for a differential script to
+/// run on MariaDB.
 #[test]
 #[ignore = "generates the differential corpus for a live run"]
 fn differential_corpus() {

@@ -1,16 +1,15 @@
 //! Row-level security on every path that streams a table's rows out of
-//! the gateway's session rewrite (chapter 29, "Change feed consumers"; RLS
-//! round 4, decisions RL36 to RL39): change topics read in SQL, views over
+//! the gateway's session rewrite: change topics read in SQL, views over
 //! them, triggers on them, sinks from them, after-commit triggers on the
 //! table, and the dead letters those keep. Change topics are read record
-//! by record (RLS round 5, RL44): a user the table's policies bind reads
+//! by record: a user the table's policies bind reads
 //! the topic in SQL, and sets up a trigger or a sink on it, and gets only
 //! the records whose rows the policies show (an update whose row became
 //! hidden or visible as a delete or an insert); a path set up by a user
 //! the policies didn't bind keeps running when they come to bind that user
 //! (`FORCE ROW LEVEL SECURITY` binds the table's managers), filtered from
 //! then on. `CHANGES OF` sinks and after-commit triggers are filtered row
-//! by row the same way (RLS round 5 continued, RL50); MariaDB triggers on
+//! by row the same way; MariaDB triggers on
 //! the table stay refused to bound users.
 //!
 //! ```sh
@@ -40,7 +39,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const PW: &str = "Rlss-suite-pw-1";
 
-/// The tenant's trigger retry settings while the test runs (bugfix-65).
+/// The tenant's trigger retry settings while the test runs.
 const TRIGGER_RETRY: [(&str, u32); 3] = [
     ("logic.trigger_max_attempts", 2),
     ("logic.trigger_retry_initial_ms", 100),
@@ -304,7 +303,7 @@ async fn row_level_security_on_streamed_rows() {
     // Check 5's dead letter needs the trigger to give up within the 60 s
     // the check waits: 2 attempts, 100 ms apart. With the defaults (10
     // attempts, from 1 s doubling to 300 s) the record is still being
-    // retried then (bugfix-65). Workers read these at tenant scope (a
+    // retried then. Workers read these at tenant scope (a
     // database's value isn't read), so the test sets the tenant's, as
     // its header used to ask the deployment to, and resets them at the end.
     for (k, v) in TRIGGER_RETRY {
@@ -380,7 +379,7 @@ async fn row_level_security_on_streamed_rows() {
     must(&mut admin, "GRANT BYPASS RLS ON *.* TO 'rlss_writer'@'%'").await;
     must(&mut admin, "GRANT SPRIG_SINK_ADMIN ON *.* TO 'app'@'%'").await;
     // A global privilege applies to the grantee's next connection, as in
-    // MySQL (bugfix-65): the connections are made with it.
+    // MySQL: the connections are made with it.
     let mut admin = admin_conn(&sql_addr).await;
     must(
         &mut admin,
@@ -390,7 +389,7 @@ async fn row_level_security_on_streamed_rows() {
         ),
     )
     .await;
-    // RL50: CHANGES OF sinks post to their own paths.
+    // CHANGES OF sinks post to their own paths.
     for (c, path) in [("hook2", "c2"), ("hook3", "c3")] {
         must(
             &mut admin,
@@ -428,7 +427,7 @@ async fn row_level_security_on_streamed_rows() {
         || format!("{rows:?}"),
     );
 
-    // 1. SQL reads of the change topic (RL44): alice reads the records of
+    // 1. SQL reads of the change topic: alice reads the records of
     // her own rows, an update that gave her a row as an insert and one
     // that took hers away as a delete; mgr (a manager) reads them all.
     must(
@@ -500,7 +499,7 @@ async fn row_level_security_on_streamed_rows() {
         || format!("{v:?}"),
     );
 
-    // 2. A view over the change topic (RL47): made by the administrator (a
+    // 2. A view over the change topic: made by the administrator (a
     // manager), each reader gets the records its own policies show.
     let e = run(
         &mut admin,
@@ -555,8 +554,8 @@ async fn row_level_security_on_streamed_rows() {
     must(&mut admin, &format!("DROP POLICY not1 ON {DB}.docs")).await;
 
     // 3. Setting a path up as alice: a trigger and a sink on the change
-    // topic are allowed and filtered (RL44), and so are a `CHANGES OF` sink
-    // and an after-commit trigger (RL50); MariaDB triggers are refused.
+    // topic are allowed and filtered, and so are a `CHANGES OF` sink and
+    // an after-commit trigger; MariaDB triggers are refused.
     let e = run(&mut alice, &trigger_js("t_alice", "leak_alice")).await;
     ck.ok(
         "stream trigger on the change topic set up by a bound user",
@@ -627,7 +626,7 @@ async fn row_level_security_on_streamed_rows() {
         !leaked_h,
         String::new,
     );
-    // RL50: her CHANGES OF sink and after-commit trigger get her row, and
+    // Her CHANGES OF sink and after-commit trigger get her row, and
     // an update that gives her bob's row arrives as an insert (her
     // after-commit trigger is FOR INSERT); one that takes it back as a
     // delete of what she saw, never with bob's new values.
@@ -723,8 +722,8 @@ async fn row_level_security_on_streamed_rows() {
         String::new,
     );
     // ... and, once FORCE makes the policies bind mgr, deliver only what
-    // they show mgr (RL44, and RL50 for the after-commit trigger and the
-    // CHANGES OF sink: filtered, not stopped or held).
+    // they show mgr (the after-commit trigger and the CHANGES OF sink too:
+    // filtered, not stopped or held).
     must(
         &mut admin,
         &format!("ALTER TABLE {DB}.docs FORCE ROW LEVEL SECURITY"),
@@ -796,7 +795,7 @@ async fn row_level_security_on_streamed_rows() {
         || format!("{st:?}"),
     );
     // NO FORCE frees mgr: every path delivers bob's rows from then on (a
-    // record filtered while forced stays filtered: RL44, RL50).
+    // record filtered while forced stays filtered).
     must(
         &mut admin,
         &format!("ALTER TABLE {DB}.docs NO FORCE ROW LEVEL SECURITY"),
@@ -847,7 +846,7 @@ async fn row_level_security_on_streamed_rows() {
         || format!("{la:?}"),
     );
 
-    // 6. Worker-run code applies its definer's policies (RL42): mgr's
+    // 6. Worker-run code applies its definer's policies: mgr's
     // after-commit trigger on `events` writes a row for bob into `docs2`,
     // which is forced, so its policies bind mgr there; the write fails
     // MariaDB's check instead of passing as internal work.
@@ -909,7 +908,7 @@ async fn row_level_security_on_streamed_rows() {
         String::new,
     );
 
-    // 5. Dead letters (RL39): a record the stream trigger fails on for good
+    // 5. Dead letters: a record the stream trigger fails on for good
     // keeps the change record; alice (bound) gets it without the event,
     // the administrator (a manager) with it.
     must(

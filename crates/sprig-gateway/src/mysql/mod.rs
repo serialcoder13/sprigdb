@@ -1,26 +1,25 @@
-//! The MySQL 8.4 (3306) and MariaDB (3307) front end (chapter 05; chapter
-//! 04, "Session", "Dispatch into the layers", "Live listener changes").
+//! The MySQL 8.4 (3306) and MariaDB (3307) front end.
 //!
 //! [`MySqlFrontend::serve`] runs one client connection inside the session
 //! table's task wrapper (panic isolation, `KILL`):
 //!
-//! 1. **Connection phase** (chapter 05 step 3): a session and its
+//! 1. **Connection phase**: a session and its
 //!    connection id; the greeting with the persona's version string (read
 //!    live) and a fresh nonce; `SSL` advertised per the listener snapshot's
 //!    TLS mode; on an `SSLRequest` the TLS upgrade with the listener's
 //!    acceptor ([`ClientConn::start_tls`]); 1043 / 3159 / 1251 refusals;
 //!    capability negotiation and connection attributes; all within
 //!    `gateway.handshake_timeout_ms`.
-//! 2. **Login** (step 4): [`sprig_proto_mysql::auth::authenticate`] with
-//!    chapter 14's [`sprig_auth::MysqlLogin`] from the process's
-//!    [`login::LoginService`] (tenant catalogs, or the interim accounts file
+//! 2. **Login**: [`sprig_proto_mysql::auth::authenticate`] with a
+//!    [`sprig_auth::MysqlLogin`] from the process's
+//!    [`login::LoginService`] (tenant catalogs, or the accounts file
 //!    with `login_mode = "accounts_file"`); the executor's session opens;
 //!    `CONNECT_WITH_DB` runs `USE`; then the OK packet, after which the
-//!    codec switches to zlib or zstd if agreed (step 10).
-//! 3. **Command phase** (step 6, [`dispatch`]): one command at a time,
+//!    codec switches to zlib or zstd if agreed.
+//! 3. **Command phase** ([`dispatch`]): one command at a time,
 //!    statements through the [`pipeline`](crate::pipeline) executor.
 //!
-//! [`listener_hooks`] retires sessions of a tightened listener (step 12).
+//! [`listener_hooks`] retires sessions of a tightened listener.
 
 pub(crate) mod answer;
 pub mod dispatch;
@@ -65,7 +64,7 @@ pub struct MySqlConfig {
     pub persona: Persona,
     /// Where the live settings come from.
     pub settings: SettingsSource,
-    /// Logins (chapter 14): the source, the fast cache and the hashing
+    /// Logins: the source, the fast cache and the hashing
     /// slots, shared by both personas.
     pub login: Arc<LoginService>,
     /// The executor statements go to.
@@ -122,7 +121,7 @@ impl MySqlFrontend {
 
 /// What [`MySqlStack::start`] needs from the process.
 pub struct StackConfig {
-    /// Logins: catalog or the interim accounts file, by `[gateway]
+    /// Logins: catalog or the accounts file, by `[gateway]
     /// login_mode` (built in [`crate::run`]).
     pub login: Arc<LoginService>,
     /// The live settings mirror.
@@ -249,8 +248,8 @@ pub(crate) struct LoggedIn {
     pub(crate) exec: Box<dyn SessionExec>,
     pub(crate) db: Option<String>,
     pub(crate) attrs: Vec<(String, String)>,
-    /// The session's place under `limits.tenant_connections` (chapter 04
-    /// step 7), held for the connection's life.
+    /// The session's place under `limits.tenant_connections`, held for the
+    /// connection's life.
     pub(crate) attached: Option<crate::limits::Attached>,
 }
 
@@ -266,9 +265,9 @@ async fn connection(
         Arc::clone(&conn.transport),
     );
     let settings = shared.cfg.settings.current();
-    // gateway.handshake_timeout_ms, moved back by the failure delays
-    // (chapter 14) the login waits out: a delayed refusal still ends with
-    // its ERR packet, not a dropped connection.
+    // gateway.handshake_timeout_ms, moved back by the failure delays the
+    // login waits out: a delayed refusal still ends with its ERR packet,
+    // not a dropped connection.
     let conn_timeout = conn.listener.handshake_timeout;
     let delayed = Arc::new(AtomicU64::new(0));
     let phase = {
@@ -323,8 +322,8 @@ fn count_refusal(persona: Persona, r: Refusal) {
     metrics::counter!("sprig_mysql_plaintext_refused_total", "persona" => persona.as_str(), "reason" => reason).increment(1);
 }
 
-/// Greeting, TLS, negotiation and login, in the order chapter 05's state
-/// machine runs them. `Ok(None)`: the client was refused
+/// Greeting, TLS, negotiation and login, in the order the connection
+/// phase's state machine runs them. `Ok(None)`: the client was refused
 /// (the ERR packet is sent) or left.
 #[allow(clippy::too_many_lines)] // the connection phase, step by step
 async fn login_phase(
@@ -341,7 +340,7 @@ async fn login_phase(
         InProtocolTls::Required => TlsPolicy::Required,
     };
     // An address refused for too many failed logins gets 39300 in place of
-    // the greeting (chapter 14, "Rate limits").
+    // the greeting.
     if let Err(e) = shared.cfg.login.admit(conn.peer.ip()) {
         let p = ErrPacket::from_error(persona, &e);
         let mut seq = 0;
@@ -437,7 +436,7 @@ async fn login_phase(
             .increment(dropped as u64);
     }
 
-    // Login (chapter 05 step 4, chapter 14 "MySQL logins").
+    // Login.
     session.set_state(SessionState::Authenticating);
     let tls = matches!(conn.stream, MaybeTls::Tls(_));
     if tls && session.tls.is_none() {
@@ -485,7 +484,7 @@ async fn login_phase(
         },
     };
     session.set_principal(principal.clone());
-    // Chapter 24: the client's DC, from the connection attribute.
+    // The client's DC, from the connection attribute.
     session.client_dc = crate::dc::hint(
         "mysql",
         attrs
@@ -494,7 +493,7 @@ async fn login_phase(
             .map(|(_, v)| v.as_str()),
     )
     .known();
-    // limits.tenant_connections (chapter 04 step 7): 39001 after login.
+    // limits.tenant_connections: 39001 after login.
     let attached = match ctx.limits.as_ref().map(|l| l.attach(principal.tenant)) {
         Some(Err(e)) => {
             let p = ErrPacket::from_error(persona, &e);
@@ -505,7 +504,7 @@ async fn login_phase(
         None => None,
     };
 
-    // The packet limit tells the truth (chapter 05, "Packet limit"): no
+    // The packet limit tells the truth: no
     // more than the login's cluster accepts, less the gateway's headroom.
     let max_packet = match ctx.backends.as_ref() {
         Some(b) => {

@@ -1,4 +1,4 @@
-//! Chapter 20's write load on the DC leader: the sharding loop's
+//! Write load on the DC leader: the sharding loop's
 //! [`WriteLoad`] over the gateways' write sketches.
 //!
 //! ```text
@@ -17,10 +17,10 @@
 //! History lives in the leader's memory: a new leader starts with none,
 //! so a load split needs `sharding.split_sustain_minutes` of new data.
 //!
-//! **Hot clusters** *(choice)*: placement's load model, as the book says,
-//! read from the balancer's last run (`full` above `balancer.high_pct`).
-//! Before the balancer's first run, or without a balancer, no cluster is
-//! hot and no load split fires.
+//! **Hot clusters** *(choice)*: placement's load model, read from the
+//! balancer's last run (`full` above `balancer.high_pct`). Before the
+//! balancer's first run, or without a balancer, no cluster is hot and no
+//! load split fires.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};

@@ -1123,3 +1123,38 @@ async fn scram_credentials_from_the_cache() {
         assert!(l.scram_credential(ScramKind::Sha256).is_none(), "{name}");
     }
 }
+
+/// authfix2: one certificate check for every protocol's login.
+#[test]
+fn certificate_clauses_are_checked_alike() {
+    let mut r = UserRow::new(
+        sprig_common::ids::UserId(9),
+        "carol",
+        "%",
+        crate::store::UserSource::Sql,
+        std::time::UNIX_EPOCH,
+        1,
+    );
+    let dn = ClientDn {
+        subject: "/O=Acme/CN=carol".into(),
+        issuer: "/CN=Acme CA".into(),
+    };
+    assert!(certificate_ok(&r, false, None), "no clause");
+    r.require_tls = RequireTls::X509;
+    assert!(
+        !certificate_ok(&r, false, None),
+        "X509 without a certificate"
+    );
+    assert!(certificate_ok(&r, true, None), "X509 with one");
+    r.require_subject = Some("/O=Acme/CN=carol".into());
+    assert!(!certificate_ok(&r, true, None), "SUBJECT without names");
+    assert!(certificate_ok(&r, true, Some(&dn)));
+    assert!(
+        !certificate_ok(&r, false, Some(&dn)),
+        "names without a verified certificate"
+    );
+    r.require_issuer = Some("/CN=Other CA".into());
+    assert!(!certificate_ok(&r, true, Some(&dn)), "ISSUER differs");
+    r.require_issuer = Some("/CN=Acme CA".into());
+    assert!(certificate_ok(&r, true, Some(&dn)));
+}

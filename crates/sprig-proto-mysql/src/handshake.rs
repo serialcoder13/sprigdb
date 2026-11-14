@@ -1,6 +1,6 @@
-//! The server side of the connection phase (chapter 05, "Greeting and
-//! version strings", "Capability negotiation", "TLS upgrade and connection
-//! attributes"; build step 3).
+//! The server side of the connection phase: the greeting and
+//! version strings, capability negotiation, the TLS upgrade and connection
+//! attributes.
 //!
 //! The pieces, in the order a front end uses them:
 //!
@@ -20,7 +20,7 @@
 //!    after the auth OK packet.
 //!
 //! The TLS handshake itself belongs to the caller: the gateway's listener
-//! owns the certificate resolver (chapter 04).
+//! owns the certificate resolver.
 //!
 //! [`PacketIo`] is the packet transport the auth plugins ([`crate::auth`])
 //! use: [`RawIo`] during login, and a `Framed` [`PacketCodec`] for
@@ -54,7 +54,7 @@ pub const GREETING_PLUGIN: &str = "caching_sha2_password";
 pub const MAX_CONNECTION_PACKET: usize = 1 << 20;
 
 /// A fresh 20-byte nonce from the OS CSPRNG, each byte in 0x01-0x7F and
-/// none equal to `$`, as MySQL generates it (chapter 05: no zero bytes,
+/// none equal to `$`, as MySQL generates it (no zero bytes,
 /// since part 2 of the greeting's nonce is NUL-terminated).
 ///
 /// # Errors
@@ -113,9 +113,8 @@ impl CompressionOffer {
     }
 }
 
-/// The capabilities a listener of `persona` advertises (chapter 05's
-/// capability table): `SSL` only when TLS is offered, and the compression
-/// bits `offer` allows.
+/// The capabilities a listener of `persona` advertises: `SSL` only when
+/// TLS is offered, and the compression bits `offer` allows.
 #[must_use]
 pub fn server_caps(persona: Persona, tls_offered: bool, offer: CompressionOffer) -> Caps {
     let mut caps = Caps::server_default(persona);
@@ -356,10 +355,10 @@ impl TlsPolicy {
     }
 }
 
-/// The listener's transport rule (chapter 05, "Capability negotiation"),
-/// enforced from the capability bits alone, before the user name is read
-/// and identically for every tenant. `tls_active` says whether the stream
-/// is already TLS (the response that follows an upgrade).
+/// The listener's transport rule, enforced from the capability bits alone,
+/// before the user name is read and identically for every tenant.
+/// `tls_active` says whether the stream is already TLS (the response that
+/// follows an upgrade).
 pub fn check_transport(
     policy: TlsPolicy,
     hello: &ClientHello,
@@ -396,7 +395,7 @@ pub struct Negotiated {
     pub framing: Framing,
 }
 
-/// Capability negotiation (chapter 05): intersects the server's and the
+/// Capability negotiation: intersects the server's and the
 /// client's capabilities, refuses clients without 4.1 authentication
 /// (1251), and picks the framing. zlib wins when the client set both
 /// compression bits, as in MySQL; zstd uses the client's level (3 if it
@@ -436,7 +435,7 @@ pub fn negotiate(
 
 /// Keeps connection attributes up to `max_bytes` in total (key plus value
 /// lengths, in order); returns the kept ones and how many were dropped
-/// (chapter 05: "anything beyond is dropped and counted").
+/// (anything beyond is dropped and counted).
 #[must_use]
 pub fn limit_attrs(
     attrs: Vec<(String, String)>,

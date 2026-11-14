@@ -1,6 +1,5 @@
 //! A REST or gRPC client that goes away while its statement runs leaves no
-//! statement behind (chapter 37, "Streaming and pagination"; tui decision
-//! T3): the gateway notices the dropped connection or stream while the
+//! statement behind: the gateway notices the dropped connection or stream while the
 //! statement sends nothing (`SELECT SLEEP(30)`), kills the backend
 //! statement (`KILL QUERY` on its connection) and releases the session
 //! within a second. Inside a transaction handle only the statement stops:

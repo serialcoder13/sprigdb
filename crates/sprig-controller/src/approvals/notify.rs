@@ -1,6 +1,6 @@
-//! Notifications (chapter 52, "Notifications"): every event to the
+//! Approval notifications: every event to the
 //! tenant's `sprig_recommendations` stream and the platform tenant's, a
-//! signed webhook per event (chapter 51's `sprig-signature` and backoff),
+//! signed webhook per event (the sinks' `sprig-signature` and backoff),
 //! and email: at once for new, escalated, applied, failed and emergency
 //! items, and a daily digest of waiting ones. Nothing here can fail or
 //! slow a decision: channels run on spawned tasks and count their results
@@ -80,7 +80,7 @@ impl Notifier {
         }
     }
 
-    /// Webhooks through chapter 51's webhook target (the platform URL and
+    /// Webhooks through the sinks' webhook target (the platform URL and
     /// tenants' connections).
     pub fn set_webhooks(&self, w: Arc<super::webhook::Webhooks>) {
         let _ = self.webhooks.set(w);

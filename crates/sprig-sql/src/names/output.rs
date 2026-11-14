@@ -1,11 +1,10 @@
-//! Names on the way out (chapter 07, "Result metadata and error messages";
-//! build step 7): column definitions, error and warning messages, and any
-//! text MariaDB sends back.
+//! Names on the way out: column definitions, error and warning messages, and
+//! any text MariaDB sends back.
 //!
 //! Every function here works on the same scan: identifier runs (bytes in
 //! `[A-Za-z0-9_$]` or non-ASCII) that parse as a SprigDB physical name.
-//! Reserving `t<digits>_` for database names (chapter 07, "Reserved names")
-//! makes such a run in backend output a physical name.
+//! Reserving `t<digits>_` for database names makes such a run in backend output
+//! a physical name.
 //!
 //! | Run | Becomes |
 //! |---|---|
@@ -28,8 +27,8 @@ use sprig_proto_mysql::ColumnDef;
 use super::map::NameMap;
 use crate::lex::LexOptions;
 
-/// Resolves the tenant's backend accounts to the names clients know
-/// (chapter 29). Without one, account names map to `?`.
+/// Resolves the tenant's backend accounts to the names clients know. Without
+/// one, account names map to `?`.
 pub trait AccountResolver: Send + Sync {
     /// The user or role name for `account`, which belongs to the session's
     /// tenant: `alice` for `t42_u7`.
@@ -160,10 +159,9 @@ pub fn map_bytes<'t>(text: &'t [u8], ctx: &OutputCtx<'_>) -> Mapped<'t> {
     scan(text, ctx, false, false)
 }
 
-/// `keep_foreign`: a run that looks like a physical name but isn't the
-/// tenant's stays as it is instead of becoming `?` (column names, R4
-/// round 5: Rails names eager-loaded columns `t0_r0`, `t1_r2`, which read
-/// as backend role accounts).
+/// `keep_foreign`: a run that looks like a physical name but isn't the tenant's
+/// stays as it is instead of becoming `?` (column names: Rails names
+/// eager-loaded columns `t0_r0`, `t1_r2`, which read as backend role accounts).
 fn scan<'t>(text: &'t [u8], ctx: &OutputCtx<'_>, owners: bool, keep_foreign: bool) -> Mapped<'t> {
     let mut out: Option<Vec<u8>> = None;
     let mut foreign = 0;
@@ -236,11 +234,10 @@ pub fn map_text<'t>(msg: &'t str, ctx: &OutputCtx<'_>) -> (Cow<'t, str>, usize) 
     (text, m.foreign)
 }
 
-/// Maps the names in an error or warning message (chapter 07,
-/// `map_message`): the tenant's schemas become logical names, accounts
-/// become user names, internal tables their owning object, anything
-/// foreign becomes `?`. Use [`map_text`] to also learn how many foreign
-/// names were replaced.
+/// Maps the names in an error or warning message: the tenant's schemas become
+/// logical names, accounts become user names, internal tables their owning
+/// object, anything foreign becomes `?`. Use [`map_text`] to also learn how
+/// many foreign names were replaced.
 #[must_use]
 pub fn map_message<'t>(msg: &'t str, ctx: &OutputCtx<'_>) -> Cow<'t, str> {
     map_text(msg, ctx).0
@@ -269,8 +266,8 @@ pub fn map_column_def(cd: &mut ColumnDef, ctx: &OutputCtx<'_>) -> usize {
         &mut cd.name,
         &mut cd.org_name,
     ] {
-        // A column named after an expression with a stored body's lookup
-        // (chapter 07 step 12) shows the call instead.
+        // A column named after an expression with a stored body's lookup shows
+        // the call instead.
         if let Cow::Owned(o) = super::stored::restore(field) {
             *field = bytes::Bytes::from(o);
         }
@@ -287,8 +284,7 @@ pub fn map_column_def(cd: &mut ColumnDef, ctx: &OutputCtx<'_>) -> usize {
 
 /// Every `t<digits>_` in `bytes` that starts an identifier or follows `_`
 /// (`Tables_in_t42_...`): what a physical name looks like. The leak suite
-/// (chapter 07 build step 10) asserts this is empty for every byte a
-/// client can see.
+/// asserts this is empty for every byte a client can see.
 #[must_use]
 pub fn physical_name_leaks(bytes: &[u8]) -> Vec<String> {
     let mut found = Vec::new();

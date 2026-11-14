@@ -1,12 +1,10 @@
-//! Logical databases to physical schemas and back (chapter 07, "Physical
-//! names" and build step 1).
+//! Logical databases to physical schemas and back.
 //!
 //! The grammar of physical names lives in [`sprig_common::names`], the one
-//! module that knows the patterns (chapter 03, "Identifiers"); this module
-//! re-exports it and adds the per-tenant map. [`NameMap`] is the interface
-//! the rewriter uses. [`MemoryNameMap`] is an in-memory implementation for
-//! tests and for the gateway until chapter 08 step 4 builds the map from
-//! catalog snapshots and shard maps.
+//! module that knows the patterns; this module re-exports it and adds the
+//! per-tenant map. [`NameMap`] is the interface the rewriter uses.
+//! [`MemoryNameMap`] is an in-memory implementation for tests and for the
+//! gateway, which fills it from catalog snapshots.
 
 use std::collections::HashMap;
 
@@ -35,8 +33,8 @@ pub enum Purpose {
 pub struct SchemaSet(pub Vec<SchemaName>);
 
 impl SchemaSet {
-    /// The only schema, when there is exactly one (always so in R0, where
-    /// each database has one shard and no reference schema).
+    /// The only schema, when there is exactly one (a database with one
+    /// shard and no reference schema).
     #[must_use]
     pub fn single(&self) -> Option<SchemaName> {
         match self.0.as_slice() {
@@ -56,7 +54,7 @@ pub struct LogicalDb {
     /// Its shard schemas, one per shard of each table group, in the order
     /// the catalog lists them.
     pub shards: Vec<SchemaName>,
-    /// Its reference-table schema, from R1.
+    /// Its reference-table schema, if it has one.
     pub reference: Option<SchemaName>,
 }
 
@@ -82,10 +80,10 @@ pub trait NameMap: Send + Sync {
     fn list(&self) -> Vec<&LogicalDb>;
 
     /// The representative schemas of `db`'s other table groups (and its
-    /// reference schema), for metadata: the advisor moves a grouped table
-    /// out of the database's first shard into its group's schemas (chapter
-    /// 16), so `Purpose::Metadata` lists one schema per group. Empty when
-    /// nothing of `db` is grouped.
+    /// reference schema), for metadata: the advisor moves a grouped table out
+    /// of the database's first shard into its group's schemas, so
+    /// `Purpose::Metadata` lists one schema per group. Empty when nothing of
+    /// `db` is grouped.
     fn grouped_schemas(&self, _db: DbId) -> &[SchemaName] {
         &[]
     }
@@ -111,14 +109,14 @@ pub trait NameMap: Send + Sync {
     ///
     /// [`NameError::UnknownDatabase`] (1049) when the tenant has no such
     /// database. The caller forces one catalog refresh and retries before
-    /// sending it to the client (chapter 07, "Failure handling").
+    /// sending it to the client.
     fn physical(&self, db: &str, purpose: Purpose) -> Result<SchemaSet, NameError> {
         let ldb = self
             .database(db)
             .ok_or_else(|| NameError::UnknownDatabase(db.to_owned()))?;
         let mut set = match purpose {
-            // R0 has one shard per database; from R1 the router picks the
-            // shard and asks per shard.
+            // The first shard; with several, the router picks the shard and
+            // asks per shard.
             Purpose::Session | Purpose::Read | Purpose::Write => {
                 ldb.shards.first().copied().into_iter().collect()
             }
@@ -176,10 +174,9 @@ fn representatives(shards: &[SchemaName]) -> Vec<SchemaName> {
     best
 }
 
-/// Where a tenant's grouped tables are, for metadata (chapter 07,
-/// "Physical names"; R1). Built by the gateway from the router's layout
-/// for the cluster a session's metadata statements run on: per group, its
-/// lowest shard on that cluster, else its lowest shard.
+/// Where a tenant's grouped tables are, for metadata. Built by the gateway from
+/// the router's layout for the cluster a session's metadata statements run on:
+/// per group, its lowest shard on that cluster, else its lowest shard.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GroupedTables {
     /// Per database: one representative schema per group, each once,
@@ -188,7 +185,7 @@ pub struct GroupedTables {
     /// Per database and lowercase table name: its group's representative.
     tables: HashMap<(DbId, String), SchemaName>,
     /// Representatives on another cluster than the session's, with their
-    /// cluster (bugfix-8: their `information_schema` rows are read there).
+    /// cluster (their `information_schema` rows are read there).
     remote: HashMap<SchemaName, String>,
 }
 
@@ -267,8 +264,8 @@ impl NameMap for WithGroups<'_> {
     }
 }
 
-/// An in-memory [`NameMap`] for tests and for the gateway until the
-/// catalog-backed map exists (chapter 08 step 4).
+/// An in-memory [`NameMap`] for tests and for the gateway, which fills it
+/// from catalog snapshots.
 #[derive(Debug, Clone)]
 pub struct MemoryNameMap {
     tenant: TenantId,

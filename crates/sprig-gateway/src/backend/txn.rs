@@ -1,4 +1,4 @@
-//! The session's backend connection as a chapter 18 transaction branch:
+//! The session's backend connection as a Sprig 2PC transaction branch:
 //! [`sprig_txn::BranchConn`] on [`BackendSession`], so the coordinator
 //! sends its control statements (`START TRANSACTION`, `XA START`, `XA END;
 //! XA PREPARE`, the decision insert and `COMMIT`, savepoints) through the
@@ -6,7 +6,7 @@
 //!
 //! Not yet: the session holding one `TxnCoordinator` with a
 //! `BackendSession` per cluster (a gateway `TxnBackend`), and the router's
-//! executor calling it (chapter 18, "Interfaces", the router's side).
+//! executor calling it.
 
 use sprig_common::ErrorKind;
 use sprig_proto_mysql::client::PacketKind;
@@ -15,11 +15,11 @@ use sprig_txn::{BranchConn, Ctl, DbError, DbResult, RedoStmt};
 use super::state::SessionVars;
 use super::{BackendSession, StmtClass, StmtInfo};
 
-/// Sprig 2PC (R3): a held branch's record of its writes on a
+/// Sprig 2PC: a held branch's record of its writes on a
 /// [`BackendSession`]: each text `INSERT`, `UPDATE`, `DELETE` or `REPLACE`
 /// that succeeded, with its replay context (the branch's fixed clock,
 /// `insert_id`, `sql_mode`, `time_zone`, the client character set), and
-/// the first write it can't replay (chapter 18's determinism rule; a
+/// the first write it can't replay (the determinism rule; a
 /// binary-protocol write, whose values aren't text here).
 #[derive(Debug, Default)]
 pub(crate) struct Recording {
@@ -30,7 +30,7 @@ pub(crate) struct Recording {
     /// The statement in flight, recorded when it succeeds.
     pub(super) pending: Option<String>,
     /// The next binary-protocol statement with its bound values written
-    /// in (decision Q17): recorded like a text statement.
+    /// in: recorded like a text statement.
     pub(super) bound: Option<String>,
 }
 

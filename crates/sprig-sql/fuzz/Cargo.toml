@@ -1,8 +1,7 @@
-# cargo-fuzz targets for sprig-sql (chapter 46 step 4): the lexer, the name
-# rewriter and the translator's R0 rewrites. Not a workspace member: it has
-# its own [workspace] below and its own Cargo.lock, needs nightly, and is
-# never shipped. See README.md, and ../../sprig-proto-mysql/fuzz for the
-# wire codec's targets.
+# cargo-fuzz targets for sprig-sql: the lexer, the name rewriter and the
+# translator's core rewrites. Not a workspace member: it has its own [workspace]
+# below and its own Cargo.lock, needs nightly, and is never shipped. See
+# README.md, and ../../sprig-proto-mysql/fuzz for the wire codec's targets.
 
 [package]
 name = "sprig-sql-fuzz"

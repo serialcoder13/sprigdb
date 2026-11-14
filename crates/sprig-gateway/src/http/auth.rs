@@ -1,9 +1,8 @@
-//! Authentication of HTTP requests (chapter 37, "Authentication"; chapter
-//! 14, "HTTP on 8080 and 8443").
+//! Authentication of HTTP requests.
 //!
 //! The HTTP front end asks an [`HttpAuthenticator`] for the principal of
-//! each data request. [`ChapterFourteen`] is the implementation: chapter
-//! 14's `sprig_auth::http::HttpAuth` (HTTP Basic and `Bearer
+//! each data request. [`ChapterFourteen`] is the implementation:
+//! `sprig_auth::http::HttpAuth` (HTTP Basic and `Bearer
 //! sprig_<tenant>_<id>_<secret>` API keys), over the same `LoginService`
 //! the MySQL listeners use, so a request is checked exactly like a MySQL
 //! login of the same user. Its refusal (MySQL's 1045 text and the like)
@@ -35,6 +34,9 @@ pub struct HttpCredentials {
     pub tls: bool,
     /// The client presented a certificate the listener verified.
     pub client_cert: bool,
+    /// That certificate's subject and issuer, for `REQUIRE SUBJECT` and
+    /// `ISSUER`.
+    pub client_dn: Option<sprig_auth::mysql::ClientDn>,
 }
 
 /// Decides who sent a request.
@@ -48,10 +50,10 @@ pub trait HttpAuthenticator: Send + Sync + 'static {
     async fn authenticate(&self, creds: &HttpCredentials) -> Result<Principal>;
 }
 
-/// The `WWW-Authenticate` value of a 401 (chapter 14).
+/// The `WWW-Authenticate` value of a 401.
 pub const WWW_AUTHENTICATE: &str = sprig_auth::http::WWW_AUTHENTICATE;
 
-/// Chapter 14's HTTP authentication.
+/// The HTTP authentication of `sprig_auth::http::HttpAuth`.
 pub struct ChapterFourteen {
     inner: sprig_auth::http::HttpAuth,
 }
@@ -82,6 +84,8 @@ impl HttpAuthenticator for ChapterFourteen {
             tenant_header: creds.tenant_header.as_deref(),
             client_ip: creds.client_ip,
             tls: creds.tls,
+            client_cert: creds.client_cert,
+            client_dn: creds.client_dn.as_ref(),
         };
         self.inner.authenticate(&req).await.map_err(|e| {
             sprig_api::status::from_parts(e.error.code, &e.error.sqlstate, &e.error.message)

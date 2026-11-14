@@ -1,20 +1,20 @@
-//! Tenants in the gateway (milestone M0.3): catalog logins, the catalog
-//! cache, name virtualization, DDL through the catalog and settings in SQL.
+//! Tenants in the gateway: catalog logins, the catalog cache, name
+//! virtualization, DDL through the catalog and settings in SQL.
 //!
 //! [`TenantServices`] is the process-wide half, built once in
 //! [`crate::run`] when `[gateway] login_mode` is `catalog`:
 //!
-//! - the [`TenantCache`] of catalog snapshots (chapter 08 step 4), loading
-//!   through a [`MariaSource`] with chapter 14's [`AuthExtension`]
-//!   registered, invalidated by the global tier's directory watch, and
-//!   telling [`Settings`] about every load (so resolved-setting watches
-//!   follow tenant, database and object rows);
-//! - the catalog's [`DdlEngine`] (chapter 08 step 10) and
-//!   [`TenantSettingsWriter`] (step 7), both versioned through the
+//! - the [`TenantCache`] of catalog snapshots, loading through a
+//!   [`MariaSource`] with the [`AuthExtension`] registered, invalidated by
+//!   the global tier's directory watch, and telling [`Settings`] about
+//!   every load (so resolved-setting watches follow tenant, database and
+//!   object rows);
+//! - the catalog's [`DdlEngine`] and
+//!   [`TenantSettingsWriter`], both versioned through the
 //!   tenant's directory entry;
 //! - the [`locator::GatewayLocator`]: shard maps to clusters, and
 //!   `sprig_ctl` pools for catalog work and database DDL;
-//! - what chapter 07's plan needs per statement: the
+//! - what the statement plan needs per statement: the
 //!   `information_schema` column registry, the gateway's sessions, and
 //!   the backend version for executable-comment neutralization.
 //!
@@ -31,14 +31,16 @@ pub mod locator;
 pub mod names;
 pub mod password;
 pub mod pins_sql;
-// Chapter 52: recommendations in SQL.
+// Recommendations in SQL.
 pub mod rec_sql;
-// Chapter 29: row-level security (R4).
+// Row-level security.
 pub mod rls;
-// Chapter 29: row-level security for streamed rows (RLS round 4).
+// Row-level security for streamed rows.
 pub mod rls_streams;
 pub mod session;
 pub mod settings_sql;
+// Sinks whose owner lost access (39229).
+pub mod sink_owners;
 pub mod stored_names;
 
 use std::sync::Arc;
@@ -96,12 +98,12 @@ pub struct TenantServices {
     pub global: Arc<dyn MetaStore>,
     /// Wall-clock time.
     pub clock: Arc<dyn Clock>,
-    /// Chapter 14's auth change feed (revocation), over the cache's load
-    /// feed; chapter 29's privilege cache can follow it too.
+    /// The auth change feed (revocation), over the cache's load
+    /// feed; the privilege cache can follow it too.
     pub auth_changes: Arc<AuthChanges>,
-    /// Chapter 29: per-user backend accounts and their reconcile state.
+    /// Per-user backend accounts and their reconcile state.
     pub authz: authz::AuthzServices,
-    /// Chapter 50: the queue engine, set when the AMQP front end starts
+    /// The queue engine, set when the AMQP front end starts
     /// (`sprig.mq_*` calls in SQL use it).
     pub mq: std::sync::OnceLock<Arc<sprig_queues::QueueEngine>>,
     _follow: Registration,
@@ -117,9 +119,8 @@ impl std::fmt::Debug for TenantServices {
 }
 
 /// The tenant settings writer's guards: `auth.authorizer` names an engine
-/// every live gateway knows (chapter 29), and (bugfix-62, Q39)
-/// `txn.commit_resolve_timeout_ms` stays below
-/// `txn.resolver_min_age_seconds`.
+/// every live gateway knows, and `txn.commit_resolve_timeout_ms` stays
+/// below `txn.resolver_min_age_seconds`.
 fn settings_guard(live: &LiveSettings, dc: &DcId) -> Arc<dyn sprig_settings::ValueGuard> {
     Arc::new(sprig_settings::AllGuards(vec![
         Arc::new(sprig_auth::authz::engine_guard::EngineGuard::new(
@@ -151,7 +152,7 @@ impl TenantServices {
         let stores = live.stores();
         let dc = stores.dc_id().clone();
         let global = Arc::clone(&stores.global);
-        // Chapter 24: tenants homed in other DCs, the DC registry for
+        // Tenants homed in other DCs, the DC registry for
         // client hints, and traffic reports to the home DCs.
         let routing = crate::dc::DcRouting::new(dc.clone());
         let locator = Arc::new(
@@ -172,27 +173,27 @@ impl TenantServices {
         let extensions: Vec<Arc<dyn CatalogExtension>> = vec![
             Arc::new(AuthExtension),
             Arc::new(sprig_auth::authz::AuthzExtension),
-            // Chapter 29: row-level security policies (R4).
+            // Row-level security policies.
             Arc::new(sprig_auth::authz::rls::RlsExtension),
-            // Chapter 32: types and record hierarchies.
+            // Types and record hierarchies.
             Arc::new(sprig_types::TypesExtension),
-            // Chapter 45: event streams (R9).
+            // Event streams.
             Arc::new(sprig_streams::StreamsExtension),
-            // Chapter 50: exchanges, queues and bindings (R9).
+            // Exchanges, queues and bindings.
             Arc::new(sprig_queues::catalog::MqExtension),
-            // Chapter 51: sinks and connections (R9).
+            // Sinks and connections.
             Arc::new(sprig_sinks::store::SinksExtension),
-            // Chapter 43: graphs, labels and relationship types (R8).
+            // Graphs, labels and relationship types.
             Arc::new(sprig_graph::catalog::GraphExtension),
-            // Chapter 42: spaces, inheritable objects and shares.
+            // Spaces, inheritable objects and shares.
             Arc::new(sprig_inherit::InheritExtension),
-            // Chapter 42 (R9): inherited messaging objects.
+            // Inherited messaging objects.
             Arc::new(sprig_inherit::msg::MsgExtension),
-            // Chapter 15's table groups, for the router (chapter 17).
+            // Table groups, for the router.
             Arc::new(crate::exec::router::ShardingExtension),
-            // Chapter 31: collections, their indexes and field columns (R5).
+            // Collections, their indexes and field columns.
             Arc::new(crate::mongo::catalog::DocExtension),
-            // Chapter 39: search indexes and analyzers (R5 round 5).
+            // Search indexes and analyzers.
             Arc::new(crate::search::catalog::SearchExtension),
         ];
         let source = MariaSource::new(Arc::clone(&dyn_locator), extensions)?;
@@ -218,12 +219,12 @@ impl TenantServices {
             MariaBackend::new(Arc::clone(&dyn_locator)).with_clock(Arc::clone(&clock)),
             Arc::new(DirectoryAllocator::new(Arc::clone(&global))),
         );
-        // Chapter 42: no destructive change of a shared object, checked
-        // under the catalog lock (decision I7).
+        // No destructive change of a shared object, checked
+        // under the catalog lock.
         let ddl = DdlEngine::new(catalog.clone(), Arc::clone(&clock))
             .with_check(sprig_inherit::guard::SharedCheck::shared());
         let ddl = ddl_owners::owned(ddl, &dc, &stores.dc, &locator);
-        // Chapter 29: SPRIG SET auth.authorizer only names an engine every
+        // SPRIG SET auth.authorizer only names an engine every
         // live gateway knows.
         let writer = TenantSettingsWriter::new(
             catalog.clone(),
@@ -251,17 +252,17 @@ impl TenantServices {
             mq: std::sync::OnceLock::new(),
             _follow: follow,
         });
-        // Chapter 42 (R9): rows of cross-tenant outboxes a lost commit hook
+        // Rows of cross-tenant outboxes a lost commit hook
         // left behind.
         crate::inherited::outbox::start_sweeper(&svc);
         crate::inherited::broadcast::start_fan_out(&svc);
         crate::inherited::lifecycle::start_sweeper(&svc);
-        // R9 (r9queue): members' failed inherited sink deploys, on a timer.
+        // Members' failed inherited sink deploys, on a timer.
         crate::inherited::sinks::retry::start(&svc);
-        // bugfix-47: members' inherited sinks no definition reaches any more.
+        // Members' inherited sinks no definition reaches any more.
         crate::inherited::orphan_sinks::start(&svc);
-        // Decision bugfix-29: a deleted tenant's pooled backend
-        // connections close as soon as its directory entry goes.
+        // A deleted tenant's pooled backend connections close as soon as
+        // its directory entry goes.
         close_deleted_tenants(&svc);
         close_dropped_users(&svc);
         Ok(svc)
@@ -271,8 +272,8 @@ impl TenantServices {
 /// Follows the directory (`tenants/<id>`): when a tenant's entry is
 /// deleted (its cleanup finished), every pooled backend connection of its
 /// accounts on this gateway closes, and the gateway forgets what it
-/// reconciled for it (decision bugfix-29; before, each served user kept an
-/// idle connection per cluster until `backend.idle_timeout_seconds`).
+/// reconciled for it (otherwise each served user would keep an idle
+/// connection per cluster until `backend.idle_timeout_seconds`).
 fn close_deleted_tenants(svc: &Arc<TenantServices>) {
     use futures::StreamExt;
     use sprig_common::ids::TenantId;
@@ -295,8 +296,8 @@ fn close_deleted_tenants(svc: &Arc<TenantServices>) {
                         };
                         let key = match ev {
                             Ok(WatchEvent::Delete { key, .. }) => key,
-                            // Decision bugfix-32: a tenant marked `deleting`
-                            // gets no backend account made again here.
+                            // A tenant marked `deleting` gets no backend
+                            // account made again here.
                             Ok(WatchEvent::Put(kv)) => {
                                 let deleting =
                                     sprig_meta::Record::<crate::inherited::DirEntry>::decode(
@@ -340,8 +341,8 @@ fn close_deleted_tenants(svc: &Arc<TenantServices>) {
 }
 
 /// Follows the auth change feed: a dropped user's pooled backend
-/// connections close on every gateway that loads the change (decision
-/// bugfix-29). The reconciling gateway also retires them when it drops the
+/// connections close on every gateway that loads the change. The
+/// reconciling gateway also retires them when it drops the
 /// account; the others never see a grant change for it.
 fn close_dropped_users(svc: &Arc<TenantServices>) {
     use sprig_auth::revoke::RevokeReason;
@@ -373,8 +374,7 @@ fn close_dropped_users(svc: &Arc<TenantServices>) {
 
 /// Whether `tenant`'s directory entry, or an ancestor's on its path, is
 /// suspended, read through (linearizable): the flag a suspension sets
-/// before its auth change (chapter 14, "Suspension"). `false` when the
-/// entry can't be read.
+/// before its auth change. `false` when the entry can't be read.
 async fn suspended_now(global: &Arc<dyn sprig_meta::MetaStore>, tenant: TenantId) -> bool {
     #[derive(serde::Serialize, serde::Deserialize)]
     struct Entry {
@@ -416,12 +416,11 @@ async fn suspended_now(global: &Arc<dyn sprig_meta::MetaStore>, tenant: TenantId
 }
 
 /// Follows the auth change feed: sessions of users who were dropped or
-/// locked, or lost the password method, close at their next safe point
-/// with 39306, where the tenant's `auth.close_sessions_on_revoke` is on
-/// (chapter 14, "Caching and revocation"). So do every session of a
-/// tenant that is suspended, or under a suspended tenant, when its auth
-/// version moves: a suspension commits an empty auth change in the tenant
-/// and each tenant below it (chapter 14, "Suspension").
+/// locked, or lost the password method, close at their next safe point with
+/// 39306, where the tenant's `auth.close_sessions_on_revoke` is on. So do
+/// every session of a tenant that is suspended, or under a suspended
+/// tenant, when its auth version moves: a suspension commits an empty auth
+/// change in the tenant and each tenant below it.
 fn close_revoked_sessions(
     mut changes: tokio::sync::broadcast::Receiver<Arc<sprig_auth::revoke::AuthChange>>,
     sessions: Arc<SessionTable>,

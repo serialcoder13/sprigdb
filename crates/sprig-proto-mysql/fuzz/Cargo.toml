@@ -1,5 +1,4 @@
-# cargo-fuzz targets for sprig-proto-mysql (chapter 05 build step 13,
-# chapter 46 step 4). Not a workspace member: it has its own [workspace]
+# cargo-fuzz targets for sprig-proto-mysql. Not a workspace member: it has its own [workspace]
 # below, its own Cargo.lock, needs nightly, and is never shipped. See
 # README.md for how to run it and for the libFuzzer licence note.
 

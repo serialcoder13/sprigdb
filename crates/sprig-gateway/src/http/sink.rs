@@ -53,7 +53,7 @@ pub enum Item {
 #[must_use]
 pub fn as_wire(e: &SprigError) -> SprigError {
     // The same two steps as the wire's sink: MariaDB-only errors as MySQL
-    // 8.4's (chapter 28), then the persona's error map.
+    // 8.4's, then the persona's error map.
     let mapped = sprig_sql::compat::errmap::for_persona(Persona::MySql84, e);
     let p = ErrPacket::from_error(Persona::MySql84, mapped.as_ref().unwrap_or(e));
     sprig_api::status::from_parts(p.code, &p.sqlstate, &p.message)
@@ -83,7 +83,7 @@ pub struct ChannelSink {
     /// The status of the last OK or terminator.
     pub last_status: Option<StatusFlags>,
     /// Caps per result (`Sql.Query`'s `max_rows`, `max_bytes`, clamped for
-    /// Studio; chapter 44 decision ST8): 0 for none.
+    /// Studio): 0 for none.
     cap_rows: u64,
     cap_bytes: u64,
     rows_in_result: u64,
@@ -149,9 +149,9 @@ impl ChannelSink {
         self.tx.is_closed()
     }
 
-    /// Resolves when the reader goes away: the HTTP client disconnected,
-    /// or a cursor closed (chapter 44, decision ST30). A statement waiting
-    /// for its first row would otherwise notice only at that row.
+    /// Resolves when the reader goes away: the HTTP client disconnected, or
+    /// a cursor closed. A statement waiting for its first row would
+    /// otherwise notice only at that row.
     pub fn reader_gone(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
         let tx = self.tx.clone();
         async move { tx.closed().await }

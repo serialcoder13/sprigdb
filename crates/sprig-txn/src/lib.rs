@@ -1,12 +1,12 @@
 //! `sprig-txn`: distributed transactions, the decision log and the
 //! resolver.
 //!
-//! Layer: 2 execution. Design: [chapter 18](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/18-transactions.md) (Distributed transactions) of the SprigDB low-level design.
+//! Layer: 2 execution.
 //!
 //! - [`coordinator`]: [`TxnCoordinator`], one per session: branches per
 //!   cluster, the write rule and `txn.non_xa_policy`, savepoints, and
-//!   commit as local, XA two-phase with a last resource, Sprig 2PC (R3:
-//!   held branches on clusters without XA, with [`redo`] records), or
+//!   commit as local, XA two-phase with a last resource, Sprig 2PC
+//!   (held branches on clusters without XA, with [`redo`] records), or
 //!   best effort.
 //! - [`race`]: deciding by insert race on `__sprig_dtx`, shared by the
 //!   coordinator and the resolver.
@@ -17,7 +17,7 @@
 //!   simulation (`tests/sim_txn.rs`) on the MariaDB model.
 //! - [`locate`]: [`MapLocator`], where an anchor's decision rows live now,
 //!   from the tenant's shard maps.
-//! - [`lookup`]: `DistTxn`, chapter 19's lookup sessions (Pre, Main,
+//! - [`lookup`]: `DistTxn`, lookup sessions (Pre, Main,
 //!   Post) on the coordinator.
 //! - [`xid`], [`decision`], [`settings`]: ids and xids, decision rows,
 //!   `txn.*` keys.
@@ -25,11 +25,11 @@
 //! The controller runs the resolver on the DC leader
 //! (`sprig-controller::txn_resolver`) with [`MapLocator`].
 //!
-//! - [`fence`]: Sprig 2PC's relay fence (decision Q36), run by the writer
+//! - [`fence`]: Sprig 2PC's relay fence, run by the writer
 //!   node's agent: a held branch's lost holder fences its tenant until the
 //!   branch is recovered.
 //!
-//! Not yet (later build steps): client XA rewriting,
+//! Not yet: client XA rewriting,
 //! eager consistent-snapshot branches, SERIALIZABLE autocommit reads,
 //! waiting for mover holds before prepare, the mover draining prepared
 //! branches before a fence, and `sprigctl txn`.

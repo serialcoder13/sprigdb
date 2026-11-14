@@ -1,4 +1,4 @@
-//! Chapter 40's pub/sub hubs over the peer service: the transport of
+//! The Redis pub/sub hubs over the peer service: the transport of
 //! `sprig_redis::fabric` (`sprig.internal.v1.RedisPeer` on 7403, mutual TLS
 //! as every peer call).
 //!

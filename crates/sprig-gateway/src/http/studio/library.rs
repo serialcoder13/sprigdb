@@ -1,6 +1,6 @@
-//! Saved queries and query history in the tenant's catalog (the Studio and TUI redesign; chapter 44, "As built
-//! in the workspace redesign"), so Studio and `sprig` share one library
-//! that follows the user between browsers and machines.
+//! Saved queries and query history in the tenant's catalog, so Studio and
+//! `sprig` share one library that follows the user between browsers and
+//! machines.
 //!
 //! | Route | Does |
 //! |---|---|
@@ -12,7 +12,7 @@
 //!
 //! - **Whose.** Each row belongs to one user of the tenant (`user_id`);
 //!   every route reads and writes only the caller's own rows. A tenant
-//!   login is needed (not the interim accounts file).
+//!   login is needed (not the accounts file).
 //! - **Where.** Two tables in `t<tenant>_sprig`, module `library`, created
 //!   the first time a gateway needs them for a tenant. They aren't
 //!   versioned catalog state: nothing is cached, every call reads them.
@@ -90,7 +90,7 @@ const CLIENTS: &[&str] = &["studio", "shell", "other"];
 // ---- redaction ----
 
 /// Words after which the next string literal is a secret (the shell's
-/// list, chapter 53 "Redaction").
+/// list).
 const SECRET_WORDS: &[&str] = &[
     "BY",
     "PASSWORD",

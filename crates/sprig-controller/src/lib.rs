@@ -1,61 +1,56 @@
 //! `sprig-controller`: the controller role, the reconciler runtime, leader
 //! election and the job scheduler.
 //!
-//! Layer 3 (roles). Design: [chapter 23](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/23-control-plane.md)
-//! (Control plane) of the SprigDB low-level design.
+//! Layer 3 (roles).
 //!
 //! What exists:
 //! - [`runtime`]: the [`Reconciler`](runtime::Reconciler) trait and the
 //!   runtime that hosts loops by tier, with DC (and optionally global)
-//!   leader election, fencing tokens and step-down (step 5);
+//!   leader election, fencing tokens and step-down;
 //! - [`dispatch`]: registrations, jobs, the dispatch and `gc` loops, and
-//!   the worker side's claims and progress writes (step 6);
-//! - [`dc`]: the DC records behind `sprigctl dc register|list|show`
-//!   (step 7);
+//!   the worker side's claims and progress writes;
+//! - [`dc`]: the DC records behind `sprigctl dc register|list|show`;
 //! - [`run`]: the role: connect (single-etcd mode when the DC and global
 //!   seeds are the same), bootstrap or verify the deployment, mirror the
-//!   settings, then run the loops and the Admin API until shutdown (step 7);
+//!   settings, then run the loops and the Admin API until shutdown;
 //! - [`settings`]: the `control.*` keys and the slot limits; [`live`]: the
-//!   etcd mirrors they are resolved from (chapter 23 step 8);
+//!   etcd mirrors they are resolved from;
 //! - [`monitor`]: the `registry` loop, which probes every cluster and keeps
-//!   its capability profile and health current (chapter 09);
+//!   its capability profile and health current;
 //! - [`admin`]: the Admin API's `Clusters`, `DataCenters` and `Tenants`
-//!   services (chapter 09 step 9, chapter 23 step 7, chapter 08 step 9,
-//!   chapter 37), served as REST on `[controller] admin_addr`;
+//!   services, served as REST on `[controller] admin_addr`;
 //! - [`tree`]: the tenant tree in the directory: entries, names, ids,
-//!   create under a parent and the delete guard (chapter 23 step 16, the
-//!   parts bootstrap needs);
+//!   create under a parent and the delete guard (the parts bootstrap
+//!   needs);
 //! - [`tree_settings`]: the `tree_settings` loop that copies ancestors'
-//!   settings into descendants' catalogs (chapter 08 step 6);
+//!   settings into descendants' catalogs;
 //! - [`settings_admin`]: the Admin API's `Settings` service: list and
 //!   describe keys, resolve one with its chain and provenance, and set,
-//!   reset, bound, lock and unlock it at every scope (chapter 08 step 7,
-//!   chapter 23 step 8, chapter 37, chapter 47);
+//!   reset, bound, lock and unlock it at every scope;
 //! - [`tenants`]: tenant bootstrap and deletion, and the
-//!   `tenant_bootstrap` loop that finishes or fails them (chapter 08 step
-//!   9); [`catalogs`]: how the controller reaches tenant catalogs;
+//!   `tenant_bootstrap` loop that finishes or fails them; [`catalogs`]:
+//!   how the controller reaches tenant catalogs;
 //! - [`autoindex_admin`]: the Admin API's automatic-indexing calls behind
-//!   `sprigctl index` and `sprigctl explain query` (chapter 13 step 13);
+//!   `sprigctl index` and `sprigctl explain query`;
 //! - [`autoindex_loop`]: the `auto_index` loop, evaluate → validate → roll
-//!   out → observe per tenant (chapter 13 steps 10 and 11), with
+//!   out → observe per tenant, with
 //!   [`autoindex_env`], its view of catalogs, objects, settings and
 //!   clusters;
-//! - [`catalog_reconciler`]: the `catalog_reconciler` loop (chapter 08 step
-//!   11): stuck DDL jobs finished or rolled back, missing and orphan
+//! - [`catalog_reconciler`]: the `catalog_reconciler` loop: stuck DDL jobs finished or rolled back, missing and orphan
 //!   schemas, outside objects adopted, tombstones purged by age, clamped
 //!   setting values counted.
-//! - [`failover`]: chapter 25's DC failover: permits and observers
+//! - [`failover`]: DC failover: permits and observers
 //!   served from the DC lease, the global leader's decision, promotion
-//!   with its commit point, and recovery of a returning DC (R2).
-//! - [`residency`]: chapter 26's policies, their resolution through the
-//!   tenant tree, compliance plans and the `residency` loop (R2).
+//!   with its commit point, and recovery of a returning DC.
+//! - [`residency`]: residency policies, their resolution through the
+//!   tenant tree, compliance plans and the `residency` loop.
 //!
-//! Not yet: the relay and peer services (R2), the latency prober, the
+//! Not yet: the relay and peer services, the latency prober, the
 //! global loops (`directory`, `tree_moves`, `dc_registry`), subtree moves,
-//! the decision log (chapter 11), and the Admin API's other services.
+//! the decision log, and the Admin API's other services.
 
 pub mod admin;
-// Chapter 52: approvals and recommendations for every automatic decision.
+// Approvals and recommendations for every automatic decision.
 pub mod approvals;
 pub mod autoindex_admin;
 pub mod autoindex_doc;
@@ -69,21 +64,21 @@ pub mod balancer_loop;
 pub mod catalog_reconciler;
 pub mod catalogs;
 pub mod dc;
-// Chapter 24 steps 7 and 9 (r2last): automatic moves between DCs.
+// Automatic moves between DCs.
 pub mod dc_migrate;
 pub mod dispatch;
 pub mod drain;
 pub mod failover;
 pub mod inherit_loop;
 pub mod latency;
-// Chapter 24 step 8 (r2last): least-busy DC placement.
+// Least-busy DC placement.
 pub mod least_busy;
 pub mod live;
 pub mod logic_loop;
-// Chapter 45 (R9): one sequencer job per stream.
+// One sequencer job per stream.
 pub mod migrate;
 pub mod monitor;
-// Chapter 14 (operators): named platform and DC operators.
+// Named platform and DC operators.
 pub mod operators;
 pub mod registration;
 pub mod residency;
@@ -92,22 +87,22 @@ pub mod settings;
 pub mod settings_admin;
 pub mod sharding;
 pub mod sharding_runtime;
-// Chapter 25 (R2, r2final): job standbys kept current by the mover.
+// Job standbys kept current by the mover.
 pub mod standby;
 pub mod streams_loop;
-// Chapter 43 (R8 round 5): the graph mirror applier jobs.
+// The graph mirror applier jobs.
 pub mod graph_mirror_loop;
-// RLS round 5 (RL52): `queue.change_exchange` forwarders.
+// `queue.change_exchange` forwarders.
 pub mod change_exchange_loop;
-// Chapter 39 (R5 round 6): search copies on workers.
+// Search copies on workers.
 pub mod search_loop;
-// Chapter 50 (R9, r9fwd): the feed-driven queue outbox forwarder jobs.
+// The feed-driven queue outbox forwarder jobs.
 pub mod queue_forwarder_loop;
-// Chapter 33 (R6): the key-value sweeper job.
+// The key-value sweeper job.
 pub mod kv_sweep_loop;
-// Chapter 31 (wireup): the TTL monitor job.
+// The TTL monitor job.
 pub mod doc_ttl_loop;
-// Chapter 51 (R9): sink tasks.
+// Sink tasks.
 pub mod sinks_loop;
 pub mod tenant_scopes;
 pub mod tenants;
@@ -173,7 +168,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     let global = tiers
         .global
         .ok_or_else(|| SprigError::internal("controllers always connect the global tier"))?;
-    // Endpoint discovery (chapter 23 step 9): new etcd members join the
+    // Endpoint discovery: new etcd members join the
     // client without a restart. One etcd in single-etcd mode: one follower.
     let discovery = Arc::new(sprig_meta::discovery::Discovery::new(&tiers.dc));
     let period = Duration::from_secs(settings::ETCD_MEMBER_REFRESH_SECONDS.default);
@@ -217,7 +212,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
     let Some(settings) = live::start(&stores, &dc, &ctx.shutdown).await? else {
         return Ok(());
     };
-    // Chapter 47: trace sampling, the OTLP endpoint and the audit spool
+    // Trace sampling, the OTLP endpoint and the audit spool
     // limit follow their settings.
     let _telemetry_settings = sprig_settings::ops::apply_live(&settings.live, &dc);
     let me = LeaderRecord {
@@ -235,7 +230,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         Arc::clone(&clock),
     ));
     // Tenant catalogs: found through their shard maps, changed with
-    // versions allocated in the directory (chapter 08).
+    // versions allocated in the directory.
     let pools: Arc<dyn ClusterPools> = Arc::new(RegistryPools::new(
         registry.clone(),
         Some(Arc::clone(&monitor)),
@@ -258,7 +253,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .with_group_maps(Arc::new(sprig_shard::ShardMapStore::new(Arc::clone(
             &stores.dc,
         ))))
-        // bugfix-45: a crashed gateway's DDL job goes within about a minute.
+        // A crashed gateway's DDL job goes within about a minute.
         .with_owners(Arc::new(sprig_catalog::ddl::ProcessOwners::new(
             Arc::clone(&stores.dc),
         ))),
@@ -278,7 +273,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
     // its Admin API for a request) while it reads snapshots, samples and
     // decisions: those long-held connections come from their own budget,
     // so they can never starve the short calls of every other loop
-    // (`catalogs` module docs; the R0 catalog-connection deadlock).
+    // (see the `catalogs` module docs).
     let ai_sessions = ShardMapLocator::new(
         Arc::clone(&stores.dc),
         Arc::new(
@@ -295,8 +290,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
             settings.live.clone(),
             Arc::clone(&clock),
         )
-        // `sprigctl index restore` runs its statements on the shards
-        // (decision O1).
+        // `sprigctl index restore` runs its statements on the shards.
         .with_env(Arc::new(autoindex_env::ControllerEnv::new(
             dc.clone(),
             locator.clone(),
@@ -312,9 +306,9 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         versioner.clone(),
         Arc::clone(&clock),
     ));
-    // Chapter 13's automatic indexing: evaluation, validation, builds and
-    // observation on the DC leader (no worker job runtime yet), reading
-    // chapter 12's workload store in the tenants' catalogs.
+    // Automatic indexing: evaluation, validation, builds and observation
+    // on the DC leader (no worker job runtime yet), reading the workload
+    // store in the tenants' catalogs.
     let jobs = autoindex_loop::JobShardLocks::new(Arc::clone(&stores.dc));
     let catalog_locator: Arc<dyn sprig_catalog::CatalogLocator> = Arc::new(locator.clone());
     let logic_locator = Arc::clone(&catalog_locator);
@@ -394,7 +388,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
             ..autoindex_loop::Cadence::default()
         },
     );
-    // Chapter 12's rollup and retention of the workload tables.
+    // Rollup and retention of the workload tables.
     let workload_rollup = workload_rollup::WorkloadRollup::new(
         Directory::new(Arc::clone(&stores.global)),
         Arc::new(locator.clone()),
@@ -402,17 +396,17 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         Some(settings.live.clone()),
         Arc::clone(&clock),
     );
-    // Chapter 11's balancer: plans and decisions; in `auto` mode its moves
-    // become chapter 10 jobs in the DC tier, which workers (`sprigdb
+    // The balancer: plans and decisions; in `auto` mode its moves
+    // become mover jobs in the DC tier, which workers (`sprigdb
     // worker`) claim and run. `recommend` and `dry_run` only record.
     let move_exec: Arc<dyn sprig_balancer::MoveExecutor> = Arc::new(
         sprig_balancer::mover::MoverExecutor::new(Arc::new(sprig_mover::MetaMover::new(
             sprig_mover::JobStore::new(Arc::clone(&stores.dc), Arc::clone(&clock)),
         ))),
     );
-    // Decision RF3 (r2last): tenant, database and object scopes from the
-    // tenants' catalogs, for the loops below that decide per tenant (the balancer and
-    // the sharding loop too: RL3, r2harden).
+    // Tenant, database and object scopes from the tenants' catalogs, for
+    // the loops below that decide per tenant (the balancer and the
+    // sharding loop too).
     let tenant_scopes = tenant_scopes::TenantScopes::new(
         Arc::clone(&stores.global),
         Arc::clone(&stores.dc),
@@ -439,7 +433,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         )
         .with_tenant_scopes(Arc::clone(&tenant_scopes)),
     );
-    // Chapters 16 and 20 (R1): the advisor's first design and automatic
+    // The advisor's first design and automatic
     // split, merge and move, per tenant homed here.
     let sharding = Arc::new(
         sharding_runtime::ShardingRuntime::new(
@@ -460,7 +454,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .with_publish(versioner.clone())
         .with_tenant_scopes(Arc::clone(&tenant_scopes)),
     );
-    // Chapter 52: approvals and recommendations. Items about a tenant live
+    // Approvals and recommendations. Items about a tenant live
     // in its catalog; cluster failovers in this DC's tier, DC failovers in
     // the global tier.
     let read_secret = |p: Option<&std::path::Path>| -> Result<Option<String>> {
@@ -485,7 +479,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
             },
         },
     ));
-    // Webhooks through chapter 51's webhook target: the platform URL and
+    // Webhooks through the sinks' webhook target: the platform URL and
     // tenants' own connections (their credentials open with the master
     // key file, as in sink workers).
     notifier.set_webhooks(Arc::new(approvals::webhook::Webhooks::new(
@@ -534,7 +528,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
     let _ = balancer.approvals.set(Arc::clone(&approvals));
     approvals::install(Arc::clone(&approvals));
     notifier.bind(Arc::clone(&approvals));
-    // Chapter 20: load splits need placement's hot clusters.
+    // Load splits need placement's hot clusters.
     sharding
         .write_load()
         .set_placement(Arc::clone(&balancer) as Arc<dyn write_load::HotClusters>);
@@ -542,10 +536,9 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         Arc::clone(&stores.dc),
         locator.clone(),
         Arc::clone(&tree),
-        // Chapter 14's verifier tables and chapter 13's automatic-indexing
-        // tables with the core catalog.
-        // Chapter 11's decision log too.
-        // R9 (r9scale): a member below FOR EACH TENANT messaging
+        // The verifier tables and the automatic-indexing tables with the
+        // core catalog, and the decision log too.
+        // A member below FOR EACH TENANT messaging
         // definitions gets their catalog modules at creation.
         Arc::new(inherit_loop::WithMessagingModules::new(
             balancer_loop::WithDecisions(autoindex_loop::WithAutoIndex(users::AuthHooks)),
@@ -554,10 +547,10 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         Arc::clone(&clock),
         Some(settings.live.clone()),
     )?);
-    // bugfix-27: cleanup drops a deleted tenant's databases itself.
+    // Cleanup drops a deleted tenant's databases itself.
     tenants.set_database_dropper(Arc::clone(&reconciler) as Arc<dyn tenants::DeletedDatabases>);
     let tree_loop = TreeSettings::new(tree, dc.clone(), Some(settings.live.clone()))?;
-    // Chapter 24: moves between DCs and traffic windows.
+    // Moves between DCs and traffic windows.
     let moves = Arc::new(
         migrate::DcMoves::new(
             dc.clone(),
@@ -580,20 +573,20 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .with_loop(Loop::new(workload_rollup))
         .with_loop(Loop::new(Arc::clone(&balancer)))
         .with_loop(Loop::new(migrate::MigrationLoop::new(Arc::clone(&moves))))
-        // Chapter 24 steps 7-9 (r2last): tenants follow their traffic.
+        // Tenants follow their traffic.
         .with_loop(Loop::new(
             dc_migrate::MigrationDecider::new(Arc::clone(&moves), Some(Arc::clone(&balancer)))
                 .with_approvals(Arc::clone(&approvals)),
         ))
         .with_loop(Loop::from_arc(Arc::clone(&sharding)))
-        // Chapter 18: in-doubt distributed transactions and decision rows.
+        // In-doubt distributed transactions and decision rows.
         .with_loop(Loop::new(txn_resolver::ResolverLoop::for_controller(
             &dc,
             &stores,
             Arc::clone(&monitor),
             settings.live.clone(),
         )?))
-        // Chapter 41 (R7 order 5): after-commit trigger jobs and schedules.
+        // After-commit trigger jobs and schedules.
         .with_loop(Loop::new(logic_loop::LogicLoop::new(logic_locator)))
         .with_loop(Loop::new(inherit_loop::InheritLoop))
         .with_loop(Loop::new(streams_loop::StreamsLoop))
@@ -607,14 +600,14 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         )))))
         .with_loop(Loop::new(doc_ttl_loop::DocTtlLoop))
         .with_loop(Loop::new(sinks_loop::SinksLoop::default()))
-        // Chapter 52: escalation, auto-apply, appliers, expiry, gauges.
+        // Approvals: escalation, auto-apply, appliers, expiry, gauges.
         .with_loop(Loop::new(
             approvals::ApprovalsLoop::new(Arc::clone(&approvals)).with_notifier(Arc::clone(&notifier)),
         ))
-        // Chapter 52: the same for DC failover items in the global tier.
+        // The same for DC failover items in the global tier.
         .with_loop(Loop::new(approvals::GlobalApprovalsLoop::new(Arc::clone(&approvals))))
         .global_candidate(cfg.controller.global_candidate);
-    // Chapter 25 (r2final): job standbys, in single-etcd mode (the loop
+    // Job standbys, in single-etcd mode (the loop
     // writes the standby DC's tier through the one etcd).
     let rt = if single_etcd(&cfg.meta) {
         rt.with_loop(Loop::new(
@@ -632,7 +625,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
     } else {
         rt
     };
-    // Chapter 25 (R2): the DC lease, permits, observations, the return of
+    // The DC lease, permits, observations, the return of
     // a lost DC and the global failover decision (failover::role).
     let failover = failover::role::FailoverRole::new(
         dc.clone(),
@@ -643,7 +636,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         single_etcd(&cfg.meta),
     );
     let rt = failover.loops().into_iter().fold(rt, Runtime::with_loop);
-    // Chapter 26 (R2): residency policies, their convergence loop and the
+    // Residency policies, their convergence loop and the
     // Admin calls.
     let residency = Arc::new(residency::Residency::new(
         dc.clone(),
@@ -653,7 +646,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         Some(Arc::clone(&moves)),
     ));
     let rt = rt.with_loop(Loop::new(residency::ResidencyLoop(Arc::clone(&residency))));
-    // Chapter 23 steps 12 and 13 (R2): the latency matrix and the DC
+    // The latency matrix and the DC
     // lifecycle.
     let latency = latency::LatencyProber::new(
         dc.clone(),
@@ -666,7 +659,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         cfg.controller.internal_advertise.as_deref(),
     )
     .await?;
-    // Hardening round 3: mutual TLS on the internal port with the process
+    // Mutual TLS on the internal port with the process
     // identity, when `[controller] internal_tls` is on.
     let internal_tls = internal_tls_config(cfg)?;
     let internal_https = internal_tls.is_some();
@@ -691,7 +684,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         .as_deref()
         .map(http::load_token)
         .transpose()?;
-    // Chapter 14 (operators): the operator directory in the global tier,
+    // Operators: the operator directory in the global tier,
     // and the guard in front of the whole Admin API.
     let operators = Arc::new(operators::Operators::new(
         Arc::clone(&stores.global),
@@ -713,7 +706,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         services.push((name.clone(), http::load_token(path)?));
     }
     let named = operators.switched().await.unwrap_or(false);
-    // Chapter 37, "Admin API over TLS": HTTPS when a certificate is set.
+    // Admin API over TLS: HTTPS when a certificate is set.
     let admin_tls = http::tls_config(&cfg.controller)?;
     let admin_https = admin_tls.is_some();
     let listener = http::bind(
@@ -743,7 +736,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
             .with_residency(residency)
             .with_search_catalog(versioner.clone()),
     );
-    // Chapter 52: the `Recommendations` service beside the Admin API.
+    // The `Recommendations` service beside the Admin API.
     let dc_token = cfg
         .controller
         .dc_operator_token_file
@@ -780,7 +773,7 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         admin_tls,
         ctx.shutdown.clone(),
     ));
-    // Gateways find the leader's Admin API here (chapter 37 step 4).
+    // Gateways find the leader's Admin API here.
     let registered = tokio::spawn(registration::keep(
         Arc::clone(&reg_store),
         Arc::clone(&clock),

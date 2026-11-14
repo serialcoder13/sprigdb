@@ -1,8 +1,7 @@
-//! Chapter 28 steps 3 and 4 against a real MariaDB: the persona-shaped
-//! `information_schema` providers and `SHOW` rewrites run on MariaDB 11.8,
-//! and what a 3306 client sees matches MySQL 8.4 (values captured from
-//! MySQL 8.4.11 on 8 November 2026). Skipped unless the Compose single
-//! node is named:
+//! The collation map and the persona-shaped `information_schema` providers and
+//! `SHOW` rewrites run on MariaDB 11.8, and what a 3306 client sees matches
+//! MySQL 8.4 (values captured from MySQL 8.4.11 on 8 November 2026). Skipped
+//! unless the Compose single node is named:
 //!
 //! ```sh
 //! export SPRIG_TEST_MARIADB_SINGLE=mysql://root:sprig-dev-root@127.0.0.1:13301

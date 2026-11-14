@@ -1,7 +1,7 @@
-//! H9 (bugfix3, decisions/bugfix-interim.md bugfix-7): a tenant the
-//! sharding loop's own first design sharded answers through the gateway.
+//! Regression: a tenant the sharding loop's own first design sharded
+//! answers through the gateway.
 //!
-//! The loop's first design (chapter 16, "Regroup") moves every table of a
+//! The loop's first design (its regroup) moves every table of a
 //! group out of its database's first shard schema into the group's own
 //! schemas. Text statements were routed there, but `COM_STMT_PREPARE` went
 //! to the database's first schema, where the table no longer is, so every

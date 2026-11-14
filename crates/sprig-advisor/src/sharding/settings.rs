@@ -1,6 +1,6 @@
-//! Chapter 16's `advisor.*` keys (chapter 03, "Declaring a key") and
-//! [`AdvisorSettings`], a typed snapshot for one tenant. Every key accepts
-//! the tenant and global scopes; `advisor.mode` also dc.
+//! The `advisor.*` keys and [`AdvisorSettings`], a typed snapshot for one
+//! tenant. Every key accepts the tenant and global scopes; `advisor.mode`
+//! also dc.
 
 use std::borrow::Cow;
 use std::time::Duration;
@@ -91,7 +91,7 @@ pub enum AdvisorMode {
     On,
     /// Runs; `apply` becomes `recommend`.
     Recommend,
-    /// Runs; `apply` waits for an approval (chapter 52), then applies.
+    /// Runs; `apply` waits for an approval, then applies.
     Approve,
     /// No runs: a first split uses the structural design.
     Off,
@@ -124,8 +124,7 @@ pub struct AdvisorSettings {
     pub max_moves: u32,
 }
 
-/// One key over the etcd scopes and, when given, a tenant's own rows
-/// (RL3, r2harden).
+/// One key over the etcd scopes and, when given, a tenant's own rows.
 fn layered<T: sprig_settings::SettingValue>(
     s: &MemSettings<'_>,
     rows: Option<&TenantSettings>,
@@ -154,7 +153,7 @@ impl AdvisorSettings {
     }
 
     /// [`Self::resolve`] with the tenant's own catalog rows (tenant,
-    /// database, ancestors) layered over the etcd scopes (RL3, r2harden):
+    /// database, ancestors) layered over the etcd scopes:
     /// what a gateway would resolve.
     #[must_use]
     pub fn resolve_with(

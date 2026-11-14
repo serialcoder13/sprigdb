@@ -1,5 +1,4 @@
-//! Second factors and impersonation over HTTP (chapter 14 steps 13–14;
-//! chapter 44 step 16), on `sprig-auth::mfa`.
+//! Second factors and impersonation over HTTP, on `sprig-auth::mfa`.
 //!
 //! | Route | Does |
 //! |---|---|
@@ -17,8 +16,8 @@
 //! once: TOTP steps are stored with a compare-and-set, recovery codes are
 //! deleted when used.
 //!
-//! **Impersonation** (decision ST34) needs a session (no Basic or API
-//! key), `SPRIG_TENANT_ADMIN` over the user's tenant (the caller's own or a
+//! **Impersonation** needs a session (no Basic or API key),
+//! `SPRIG_TENANT_ADMIN` over the user's tenant (the caller's own or a
 //! descendant), a user who doesn't administer the caller's tenant,
 //! `auth.impersonation` on for that tenant, a reason, at most
 //! `auth.impersonation_max_minutes`, and a second factor in the caller's
@@ -115,8 +114,8 @@ pub fn acting(authorization: Option<&str>) -> Option<Act> {
     serde_json::from_value(v.get("act")?.clone()).ok()
 }
 
-/// Refuses an impersonation session (chapter 14: it can't impersonate,
-/// change passwords or factors, or create API keys).
+/// Refuses an impersonation session (it can't impersonate, change
+/// passwords or factors, or create API keys).
 ///
 /// # Errors
 /// 39305.
@@ -590,7 +589,7 @@ async fn subject(
 }
 
 /// `POST /v1/auth/impersonate`.
-#[allow(clippy::too_many_lines)] // chapter 14's checks, one after another
+#[allow(clippy::too_many_lines)] // the impersonation checks, one after another
 pub(super) async fn impersonate(
     core: &Arc<Core>,
     info: &ConnInfo,

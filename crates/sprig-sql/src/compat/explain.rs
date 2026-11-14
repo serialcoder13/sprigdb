@@ -1,5 +1,4 @@
-//! `EXPLAIN`'s shape on port 3306 (chapter 28, "Output on port 3306";
-//! build step 11; R4 round 3).
+//! `EXPLAIN`'s shape on port 3306.
 //!
 //! MySQL 8.4's traditional `EXPLAIN` has twelve columns: `id`,
 //! `select_type`, `table`, `partitions`, `type`, `possible_keys`, `key`,
@@ -9,13 +8,14 @@
 //! EXTENDED` ([`rewrite`]), and the gateway's output sink inserts
 //! `partitions` (always `NULL`: SprigDB's tables aren't partitioned the
 //! MySQL way) and types `rows` as MySQL does ([`EXPLAIN_EXTENDED_COLUMNS`]).
-//! The plans themselves are MariaDB's optimizer's (chapter 28 non-goal).
+//! The plans themselves are MariaDB's optimizer's (matching MySQL's plans
+//! is a non-goal).
 //!
 //! `EXPLAIN FORMAT=JSON` passes through: MariaDB's JSON has its own
 //! structure (`query_block` with MariaDB's members). `EXPLAIN tbl`
 //! (`DESCRIBE`) is [`super::schema::describe_target`]'s.
 //!
-//! **Tree formats (R4 round 4).** `EXPLAIN FORMAT=TREE` runs as MariaDB's
+//! **Tree formats.** `EXPLAIN FORMAT=TREE` runs as MariaDB's
 //! `EXPLAIN FORMAT=JSON`, and `EXPLAIN ANALYZE` (with or without
 //! `FORMAT=TREE`) as `ANALYZE FORMAT=JSON`, which runs the statement as
 //! MySQL's does. The output sink renders the JSON plan as MySQL's tree
@@ -634,7 +634,7 @@ mod tests {
 
     #[test]
     fn trees_from_mariadb_plans() {
-        // Captured from MariaDB 11.8.9 (R4 round 4).
+        // Captured from MariaDB 11.8.9.
         let scan = br#"{"query_block":{"select_id":1,"cost":0.00282078,"nested_loop":[{"table":{"table_name":"c","access_type":"range","possible_keys":["PRIMARY"],"key":"PRIMARY","key_length":"4","used_key_parts":["id"],"loops":1,"rows":2,"cost":0.00282078,"filtered":100,"attached_condition":"c.`id` > 1"}}]}}"#;
         assert_eq!(
             tree(scan, false, None).unwrap(),

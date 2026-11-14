@@ -38,7 +38,8 @@
 //! the session (logical names, chapter 29's checks, chapter 17's router).
 //!
 //! Not built: federated edges (Spider), collections and key-value
-//! namespaces, `ViewMapper` for the feed.
+//! namespaces. `ViewMapper` is the gateway's (`http::changes`, decision
+//! T30): change streams carry each subscriber's merged records.
 
 // The plans read best as the chapter's steps in order, over SQL text built
 // with format!; short names (o, s, r, k) follow the chapter's pseudocode.
@@ -81,6 +82,9 @@ use sprig_types::{Done, Rows};
 
 pub use model::{InheritState, InheritableObject, LayerState, ROOT_SPACE, Share, Space, SpaceId};
 pub use plan::{Ctx, Limits, Privileges};
+/// Chapter 32's catalog module: the copy worker reads child tenants'
+/// record hierarchies from it (decision T28).
+pub use sprig_types::TypesExtension;
 pub use store::{INHERIT_MODULE, InheritChange, InheritExtension, InheritStore, MODULE};
 
 use crate::grammar::Stmt;
@@ -186,6 +190,22 @@ pub trait Runner: sprig_types::Runner {
     ) -> Result<Vec<ids::TreeTable>> {
         let _ = (root, db, table);
         Ok(Vec::new())
+    }
+
+    /// Takes the record-hierarchy lock of `object` (its row of
+    /// [`hier::LOCK_TABLE`] in `schema`, made on first use) on tenant `t`'s
+    /// cluster as the system, never with the user's grants (decision T27):
+    /// `FOR UPDATE` on a provisioning connection that holds it until the
+    /// session's transaction ends. Taking a lock the session holds is a
+    /// no-op.
+    ///
+    /// # Errors
+    /// The backend's (1205 after the lock wait).
+    async fn hier_lock(&mut self, t: TenantId, schema: &str, object: u64) -> Result<()> {
+        let _ = (t, schema, object);
+        Err(SprigError::internal(
+            "no system connection for the hierarchy lock in this runner",
+        ))
     }
 }
 
@@ -362,6 +382,18 @@ pub async fn handle(sql: &str, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Hand
     // A type plan's DDL (type columns, extension tables) is the type
     // layer's; it makes new tables of an inheritable tree inheritable
     // itself (`SPRIG INHERITABLE`, above).
+    // A client's ADD | DROP HIERARCHY is chapter 32's; its own ALTERs of
+    // the path columns come back below.
+    if !ctx.from_types
+        && let Stmt::AlterTable(_) = &stmt
+        && let ids = grammar::identifiers(sql.as_bytes(), &ctx.lex)
+        && ids.iter().any(|i| i.eq_ignore_ascii_case("HIERARCHY"))
+        && ids
+            .iter()
+            .any(|i| i.eq_ignore_ascii_case("ADD") || i.eq_ignore_ascii_case("DROP"))
+    {
+        return Ok(Handled::NotInherit);
+    }
     // ADD and DROP HIERARCHY on an inheritable table (their ALTERs of the
     // path columns): the columns become or stop being fields. Adding them
     // is refused unless inside one tenant, from the space owning every row.
@@ -375,7 +407,7 @@ pub async fn handle(sql: &str, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Hand
             Box::pin(hier::before_add(ctx, r, &res)).await?;
         }
         if upper.contains("DROP COLUMN IF EXISTS _SPRIG_HPATH") {
-            Box::pin(hier::before_drop(r, &res)).await?;
+            Box::pin(hier::before_drop(ctx, r, &res)).await?;
         }
         let d = r.exec(sql).await?;
         Box::pin(guard::follow_columns(ctx, r, &res)).await?;

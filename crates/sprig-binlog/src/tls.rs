@@ -1,5 +1,4 @@
-//! TLS to the binlog source (chapter 10, "The binlog client"; chapter 38,
-//! "Binlog sources").
+//! TLS to the binlog source.
 //!
 //! The reader upgrades its connection the way every MySQL client does:
 //! after the server's greeting it sends an SSL request (the handshake

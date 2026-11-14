@@ -35,6 +35,9 @@
 //!     below t: read the source's merged view of K now (writer), filtered by
 //!     the share and cut to its columns; upsert what is there, tombstone
 //!     what isn't, each write guarded by _sprig_src_v
+//!   hierarchy pass, parents first (decision T28): for each tenant x below
+//!     t that inherits db.table with a record hierarchy: under x's lock,
+//!     reconcile x's root space and the spaces below it for K
 //! seed(copy): create the tables; read the source's whole view; upsert it;
 //!   tombstone the keys the copy holds that the source doesn't; serving
 //! ```
@@ -626,6 +629,8 @@ pub struct Maintainer {
     family: Family,
     copies: CopyStates,
     views: BTreeSet<(u64, String, String)>,
+    /// The family's catalog versions when `views` was last valid.
+    views_at: Vec<(TenantId, u64)>,
     /// Root tenants whose `inherit_refs` this maintainer made sure of.
     refs_ready: BTreeSet<u64>,
     /// What it did so far.
@@ -669,6 +674,7 @@ impl Maintainer {
             family: Family::default(),
             copies: CopyStates::default(),
             views: BTreeSet::new(),
+            views_at: Vec::new(),
             refs_ready: BTreeSet::new(),
             counts: Counts::default(),
         }
@@ -698,6 +704,19 @@ impl Maintainer {
     /// The catalogs' and backends'.
     pub async fn refresh(&mut self) -> Result<usize> {
         self.family = load_family(self.env.as_ref(), self.root).await?;
+        // A catalog change may have dropped share views (a parent's DROP
+        // SHARE drops them on every child, and share ids are reused): they
+        // are made again before their next read.
+        let at: Vec<(TenantId, u64)> = self
+            .family
+            .cats
+            .iter()
+            .map(|(t, c)| (*t, c.version))
+            .collect();
+        if at != self.views_at {
+            self.views.clear();
+            self.views_at = at;
+        }
         let mut states = CopyStates::default();
         let mut schemas: BTreeSet<(TenantId, String)> = BTreeSet::new();
         for e in &self.family.edges {
@@ -1142,6 +1161,110 @@ impl Maintainer {
                 .collect();
             self.write(e, &rows, &gone).await?;
         }
+        self.hier_pass(tenant, db, table, keys).await?;
+        Ok(())
+    }
+
+    /// The hierarchy pass of [`Self::on_keys`] (decision T28): every tenant
+    /// below `tenant` that inherits `db.table` through unbroken tenant
+    /// edges and has its record hierarchy brings its paths of `keys` up to
+    /// date, parents first, each in one transaction under its lock. A
+    /// conflict there (a cycle or a missing parent that the change's own
+    /// check couldn't see, in a tenant reading a copy that lagged) leaves
+    /// that tenant's paths of the keys as they were, with a warning.
+    ///
+    /// # Errors
+    /// The backends'.
+    async fn hier_pass(
+        &mut self,
+        tenant: TenantId,
+        db: &str,
+        table: &str,
+        keys: &[KeyLit],
+    ) -> Result<()> {
+        let targets: Vec<TenantId> = self
+            .family
+            .tenants
+            .iter()
+            .copied()
+            .filter(|x| *x != tenant && self.family.at_or_above(tenant, *x))
+            .collect();
+        let lits: Vec<String> = keys.iter().map(KeyLit::tuple).collect();
+        for x in targets {
+            let Ok(line) = self.lineage(x, db, table) else {
+                continue;
+            };
+            if line.len() < 2 || !line.iter().any(|(t, _, _)| *t == tenant) {
+                continue;
+            }
+            let Some((_, xo, schema)) = line.last().cloned() else {
+                continue;
+            };
+            if !crate::hier::has_paths(&xo) {
+                continue;
+            }
+            // Through a materialized edge, x reads its serving copy (no
+            // share view could reach the parent's cluster); a copy still
+            // seeding gets its paths with its rows.
+            let into_x = match self.family.ancestors.get(&x).and_then(|a| a.last()) {
+                Some(parent) => tenant_edge(parent, &self.family.cats[&x], db, table, false)?,
+                None => None,
+            };
+            match into_x {
+                Some(up) if up.share.mode == MergeMode::Materialized => {
+                    let ready = self
+                        .copies
+                        .ready(
+                            CopyKey {
+                                tenant: x,
+                                object: xo.object_id,
+                                share: UPSTREAM,
+                            },
+                            xo.version,
+                            up.share.version,
+                        )
+                        .is_some();
+                    if !ready {
+                        continue;
+                    }
+                }
+                _ => self.ensure_views(x, db, table).await?,
+            }
+            let copies = self.copies.clone();
+            let Some(mut ctx) = self.family.ctx(x, &copies) else {
+                continue;
+            };
+            // Paths here must follow the committed change whatever its
+            // size (decision T29); the size is reported instead.
+            ctx.limits.max_move_rows = u64::MAX;
+            let Some(h) = crate::hier::hierarchy_of(&ctx, &xo) else {
+                continue;
+            };
+            let res = crate::plan::Resolved {
+                db: xo.db,
+                db_name: db.to_owned(),
+                layer: format!("{}.{}", q(&schema), q(&xo.table)),
+                prefix: format!("{}.", q(&schema)),
+                derived: ctx.derived(&xo),
+                obj: Arc::clone(&xo),
+            };
+            let mut run = crate::hier::tenants::ConnRunner::new(self.env.conn(x).await?);
+            match crate::hier::reconcile_tenant(&ctx, &mut run, &res, &h, &schema, &lits).await {
+                Ok(n) => {
+                    if n > 0 {
+                        metrics::counter!("sprig_inherit_hierarchy_tenant_reconciles_total")
+                            .increment(1);
+                        tracing::debug!(tenant = %x, table, rows = n, "child tenant's paths reconciled");
+                    }
+                }
+                Err(e) if crate::hier::tenants::is_conflict(&e) => {
+                    metrics::counter!("sprig_inherit_hierarchy_conflicts_total").increment(1);
+                    tracing::warn!(tenant = %x, table, error = %e.message,
+                        "a change above conflicts with this tenant's own tree; its paths of these records stay as they were");
+                }
+                Err(e) => return Err(e),
+            }
+        }
         Ok(())
     }
 
@@ -1237,6 +1360,21 @@ impl Maintainer {
                 Some(fam)
             };
             let mut c = self.env.conn(x).await?;
+            // A record hierarchy's path-only overrides go with their
+            // records (decision T26), never orphaned.
+            if crate::hier::has_paths(&xo) {
+                c.query_drop(format!(
+                    "DELETE FROM {}.{} WHERE `_sprig_space` = {} AND `_sprig_state` = 'ovr' AND \
+                     `_sprig_ovr` & {} = 0 AND {}",
+                    q(&xschema),
+                    q(&xo.table),
+                    ROOT_SPACE.0,
+                    !crate::hier::path_bits(&xo),
+                    key_pred(&xo.key, &lost, "")
+                ))
+                .await
+                .map_err(exec_err)?;
+            }
             c.query_drop(format!(
                 "UPDATE {}.{} SET `_sprig_state` = 'orphan', `_sprig_ovr` = {ALL_BITS} WHERE \
                  `_sprig_space` = {} AND `_sprig_state` = 'ovr' AND {}",

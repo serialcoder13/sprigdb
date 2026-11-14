@@ -114,7 +114,7 @@ impl NodeSql {
 
     /// The table's columns and indexes except `skip`: a change means user
     /// DDL ran during the validation. Field columns (`_sprig_p_*`) don't
-    /// count: a field-column candidate adds its own (R6 round 6).
+    /// count: a field-column candidate adds its own.
     pub(crate) async fn table_signature(
         &mut self,
         t: &IndexTarget,
@@ -229,16 +229,16 @@ pub(crate) fn add_index_sql(t: &IndexTarget, name: &str, columns: &str, online: 
     )
 }
 
-/// [`add_index_sql`] for any kind of `def`, as `name` (chapter 13,
-/// "Other models"; R6 round 3): spatial and vector indexes are added
-/// without `ALGORITHM=INPLACE, LOCK=NONE`, which MariaDB refuses for them.
+/// [`add_index_sql`] for any kind of `def`, as `name`: spatial and vector
+/// indexes are added without `ALGORITHM=INPLACE, LOCK=NONE`, which MariaDB
+/// refuses for them.
 pub(crate) fn add_def_sql(
     t: &IndexTarget,
     name: &str,
     def: &crate::autoindex::model::IndexDef,
     online: bool,
 ) -> String {
-    // Field columns (R6 round 6) are added first, by
+    // Field columns are added first, by
     // [`add_fields_sql`]; their index builds online like a B-tree.
     if matches!(
         def.kind,
@@ -254,7 +254,7 @@ pub(crate) fn add_def_sql(
     )
 }
 
-/// The field columns of `def` (R6 round 6, decision K3), added before
+/// The field columns of `def`, added before
 /// its index: `ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...,
 /// ALGORITHM=INSTANT`; `None` for other kinds.
 pub(crate) fn add_fields_sql(

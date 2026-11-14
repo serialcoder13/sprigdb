@@ -290,13 +290,13 @@ How a validation works:
 
 The same check in JavaScript, with a second rule that reads the row before the write:
 
-```sql
+```sql test
 DELIMITER //
 CREATE OR REPLACE VALIDATION order_rules ON orders FOR INSERT, UPDATE LANGUAGE javascript AS $$
 export default function (row, old) {
   if (row.qty <= 0) sprig.reject(`qty ${row.qty} must be positive`);
-  if (old !== null && old.note === 'shipped' && row.qty !== old.qty)
-    sprig.reject("the quantity of a shipped order can't change");
+  if (old !== null && row.qty < old.qty)
+    sprig.reject(`qty can only go up (was ${old.qty})`);
 }
 $$ //
 DELIMITER ;
@@ -327,7 +327,7 @@ id	stock_value
 
 SprigDB writes the function's body as one SQL expression, with the arguments in place of the parameters, and runs the `ALTER TABLE` as ordinary DDL. `STORED` and `VIRTUAL` work as in MariaDB. The function must be KIRun or JavaScript, and its body must have an expression form: no data access, no loops, no JSON values, no division by a value that isn't constant, and at most 64 paths. A KIRun function's `output` event must have exactly one field; a JavaScript function returns the value. Otherwise the statement fails with 39862, as does a Lua function, and a JavaScript function that calls `Math.random()`, `Date.now()`, `Date()`, `performance.now()` or `crypto.*` (reason `js.nondeterministic`). A wrong argument count fails with 39874.
 
-```sql
+```sql test
 DELIMITER //
 CREATE OR REPLACE FUNCTION line_net(price DOUBLE, qty INT) RETURNS DOUBLE LANGUAGE javascript AS $$
 export default function (price, qty) {

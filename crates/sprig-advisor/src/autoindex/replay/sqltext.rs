@@ -1,4 +1,4 @@
-//! Statement text for replay (chapter 13, "Replay and acceptance"):
+//! Statement text for replay:
 //! binding a sample's literals into a fingerprint's text, the select form
 //! of a write, and the `IGNORE INDEX` hint that gives the before plan.
 //!
@@ -320,7 +320,7 @@ fn depths(toks: &[Tok]) -> Vec<i32> {
         .collect()
 }
 
-/// A sampled literal (chapter 12, "Parameter samples for replay"). The
+/// A sampled literal. The
 /// sample's literal list holds one value per `?` of the fingerprint text,
 /// in order; a collapsed `IN (...)` takes one [`SampleValue::List`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -347,9 +347,9 @@ pub enum SampleValue {
     /// `TRUE` or `FALSE`.
     Bool(bool),
     /// The literal exactly as the client wrote it (`'open'`,
-    /// `_utf8mb4'x'`, `-42`, `X'0A'`, `DATE '2026-06-01'`): chapter 12's
-    /// literal spans, replayed without re-typing. Must be one literal;
-    /// [`bind_literals`] refuses anything else.
+    /// `_utf8mb4'x'`, `-42`, `X'0A'`, `DATE '2026-06-01'`): the workload
+    /// recorder's literal spans, replayed without re-typing. Must be one
+    /// literal; [`bind_literals`] refuses anything else.
     Raw(String),
     /// An `IN` list, or a row constructor when nested.
     List(Vec<SampleValue>),
@@ -553,7 +553,7 @@ pub struct SelectForm {
     pub from_kind: String,
 }
 
-/// The replayable `SELECT` of a statement (chapter 13):
+/// The replayable `SELECT` of a statement:
 ///
 /// - `SELECT` and `WITH`: as written, without a locking clause
 ///   (`FOR UPDATE`, `LOCK IN SHARE MODE`), since replay must take no row

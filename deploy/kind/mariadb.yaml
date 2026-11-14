@@ -1,0 +1,87 @@
+# The smoke test's backend: one MariaDB node registered as an external
+# single-node cluster (mariadb-operator isn't installed). TLS from the
+# smoke CA (Secret smoke-mariadb-tls), the settings of a SprigDB-managed
+# node that matter here, and SprigDB's two system accounts.
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: smoke-mariadb}
+data:
+  sprig.cnf: |
+    [mariadbd]
+    server_id                     = 1
+    gtid_domain_id                = 1
+    log_bin                       = mariadb-bin
+    binlog_format                 = ROW
+    binlog_row_image              = FULL
+    binlog_row_metadata           = FULL
+    binlog_annotate_row_events    = ON
+    gtid_strict_mode              = ON
+    log_slave_updates             = ON
+    skip_name_resolve             = ON
+    innodb_buffer_pool_size       = 128M
+    max_connections               = 300
+    ssl_ca                        = /etc/mysql/tls/ca.crt
+    ssl_cert                      = /etc/mysql/tls/tls.crt
+    ssl_key                       = /etc/mysql/tls/tls.key
+    require_secure_transport      = ON
+  10-sprig-accounts.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" <<SQL
+    SET SESSION sql_log_bin = 0;
+    CREATE USER IF NOT EXISTS 'sprig_ctl'@'%' IDENTIFIED BY '$SPRIG_CTL_PASSWORD' REQUIRE SSL;
+    GRANT ALL PRIVILEGES ON *.* TO 'sprig_ctl'@'%' WITH GRANT OPTION;
+    CREATE USER IF NOT EXISTS 'sprig_repl'@'%' IDENTIFIED BY '$SPRIG_REPL_PASSWORD' REQUIRE SSL;
+    GRANT REPLICATION SLAVE, REPLICATION SLAVE ADMIN, BINLOG MONITOR, SLAVE MONITOR, SELECT, RELOAD ON *.* TO 'sprig_repl'@'%';
+    SQL
+---
+apiVersion: v1
+kind: Service
+metadata: {name: smoke-mariadb}
+spec:
+  selector: {app: smoke-mariadb}
+  ports: [{name: mysql, port: 3306}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: smoke-mariadb}
+spec:
+  serviceName: smoke-mariadb
+  replicas: 1
+  selector: {matchLabels: {app: smoke-mariadb}}
+  template:
+    metadata: {labels: {app: smoke-mariadb}}
+    spec:
+      containers:
+        - name: mariadb
+          image: mariadb:11.8
+          imagePullPolicy: Never
+          env:
+            - name: MARIADB_ROOT_PASSWORD
+              valueFrom: {secretKeyRef: {name: smoke-mariadb-pw, key: root}}
+            - name: SPRIG_CTL_PASSWORD
+              valueFrom: {secretKeyRef: {name: smoke-mariadb-pw, key: ctl}}
+            - name: SPRIG_REPL_PASSWORD
+              valueFrom: {secretKeyRef: {name: smoke-mariadb-pw, key: repl}}
+          ports: [{name: mysql, containerPort: 3306}]
+          resources:
+            requests: {memory: 384Mi}
+            limits: {memory: 768Mi}
+          readinessProbe:
+            exec: {command: ["healthcheck.sh", "--connect", "--innodb_initialized"]}
+            periodSeconds: 5
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/mysql}
+            - {name: cnf, mountPath: /etc/mysql/conf.d/sprig.cnf, subPath: sprig.cnf}
+            - {name: cnf, mountPath: /docker-entrypoint-initdb.d/10-sprig-accounts.sh, subPath: 10-sprig-accounts.sh}
+            - {name: tls, mountPath: /etc/mysql/tls, readOnly: true}
+      volumes:
+        - name: cnf
+          configMap: {name: smoke-mariadb, defaultMode: 0555}
+        - name: tls
+          secret: {secretName: smoke-mariadb-tls}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: {requests: {storage: 2Gi}}

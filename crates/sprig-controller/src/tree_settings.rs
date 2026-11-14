@@ -1,6 +1,5 @@
 //! The `tree_settings` loop: copies ancestors' tenant-scope settings into
-//! every descendant's catalog (chapter 08, "Ancestry and ancestors'
-//! settings"; build step 6).
+//! every descendant's catalog.
 //!
 //! ```text
 //! tree_settings loop (DC leader; keys: tenants homed in this DC):
@@ -30,20 +29,20 @@
 //!   `settings_version`, path and parent and fans out only when one of
 //!   them moved. A tenant seen for the first time counts as moved.
 //! - **The path index** is a scan of the controller's mirror of
-//!   `tenants/` (fine for R0's directory sizes; chapter 23's open question
-//!   7 covers very wide trees).
+//!   `tenants/` (fine for today's directory sizes; very wide trees are
+//!   still an open question).
 //! - **Rows at the right version.** An ancestor's rows are read at a
 //!   catalog version at or above its directory `settings_version`. A
 //!   catalog behind its directory has a gap; the loop closes it with
-//!   `settle` (an empty change, chapter 08) and reads again, else retries.
+//!   `settle` (an empty change) and reads again, else retries.
 //! - **Fan-out** runs `catalog.tree_sync_concurrency` descendants at once.
 //!   Every descendant copies from each ancestor's own catalog, never from
 //!   its parent's copy, so the order doesn't matter.
 //! - **Ancestry modes.** Only `copy` (and `auto`, which behaves as `copy`)
 //!   is implemented. A tenant whose own or freshly copied rows name
 //!   `shared` or `reference` is reported `Blocked` rather than copied, since
-//!   copying could store settings where residency forbids it. TODO(chapter
-//!   08 step 18).
+//!   copying could store settings where residency forbids it. TODO: the
+//!   `shared` and `reference` modes.
 //!
 //! Metrics: `sprig_settings_tree_syncs_total` (`outcome`) and
 //! `sprig_settings_tree_lag_seconds` (the age of the oldest uncopied change
@@ -139,8 +138,7 @@ where
         &self.directory
     }
 
-    /// Reconciles `entry`'s catalog with the directory: chapter 08's
-    /// `reconcile(d)`.
+    /// Reconciles `entry`'s catalog with the directory (`reconcile(d)`).
     ///
     /// # Errors
     /// 39072 if the tenant or an ancestor has no catalog (or directory

@@ -1,8 +1,8 @@
-//! Chapter 25 in the executor: the DC permit gates writes of tenants
+//! DC failover in the executor: the DC permit gates writes of tenants
 //! homed in this DC, and a fenced copy refuses writes with 39530 (see
 //! [`crate::failover`]). While a promotion finishes (the map followed in
 //! the new home is still `standby`), writes wait up to
-//! [`PROMOTION_WAIT`], then get 39530 too (decision F6).
+//! [`PROMOTION_WAIT`], then get 39530 too.
 
 use std::time::{Duration, Instant};
 

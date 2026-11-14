@@ -1,4 +1,4 @@
-//! Chapter 13 step 12 through a running gateway in catalog mode: automatic
+//! Automatic indexes through a running gateway in catalog mode: automatic
 //! indexes hidden from `SHOW INDEX`, `SHOW CREATE TABLE` and
 //! `information_schema.STATISTICS`, shown with `SET
 //! @sprig_show_auto_indexes = 1`, reserved names refused with 39050, and
@@ -207,7 +207,7 @@ async fn automatic_indexes_through_the_gateway() {
             "{keys:?}"
         );
 
-        // Shown, a user may drop it (chapter 07).
+        // Shown, a user may drop it.
         c.query_drop("SET @sprig_show_auto_indexes = ON")
             .await
             .unwrap();

@@ -1,5 +1,5 @@
-//! Spilling's settings and the command's `allowDiskUse` (M5, decisions
-//! S72–S76). The engine's side is `sprig_doc::spill`.
+//! Spilling's settings and the command's `allowDiskUse`. The engine's side
+//! is `sprig_doc::spill`.
 //!
 //! - `doc.agg_stage_memory_bytes` and `doc.max_sort_bytes` are read when
 //!   the front end starts (the engine's settings);

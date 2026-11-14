@@ -1,8 +1,8 @@
-//! Chapter 19's foreign keys on the DDL path (R3, decision Q9's leftover).
+//! Foreign keys between distributed tables on the DDL path.
 //!
 //! An `ALTER TABLE child ADD [CONSTRAINT n] FOREIGN KEY (cols) REFERENCES
 //! parent (cols) …` whose two tables the router distributes is decided
-//! here, before chapter 21's DDL engine runs the statement on the shards:
+//! here, before the DDL engine runs the statement on the shards:
 //!
 //! ```text
 //! both ends on one shard (one group and database, and the child follows

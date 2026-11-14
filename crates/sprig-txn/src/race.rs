@@ -1,4 +1,4 @@
-//! Deciding by insert race (chapter 18): the one rule the coordinator and
+//! Deciding by insert race: the one rule the coordinator and
 //! the resolver share.
 //!
 //! ```text

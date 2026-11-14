@@ -1,7 +1,7 @@
-//! The Admin API's guard (chapter 14, "Operators"): one layer in front of
+//! The Admin API's guard: one layer in front of
 //! every `/admin/v1/` route that authenticates the caller, checks their
 //! role, DC and token scopes, records them as the actor, and audits every
-//! change with their name (chapter 47's `admin.*`).
+//! change with their name (the `admin.*` audit events).
 //!
 //! ```text
 //! credential                       before the switch     after the switch
@@ -15,7 +15,7 @@
 //!
 //! A DC operator reaches only its DCs' controllers; there it reads
 //! everything and changes clusters, mover and other jobs, in-doubt
-//! transactions, recommendations (chapter 52 checks the level), its DCs'
+//! transactions, recommendations (the approvals check the level), its DCs'
 //! drains, and settings at `dc` and `cluster` scope. A token's scopes
 //! (`<area>:read|write`) narrow its owner's rights. Gateways' service
 //! identities pass to the routes, which accept them only where Studio's
@@ -24,7 +24,7 @@
 //! The guard hands the routes the caller in the `x-sprig-authn` header
 //! (JSON of [`Principal`]), after removing any copy the request brought.
 //!
-//! **The client's address (ST47).** Every audit line the guard writes,
+//! **The client's address.** Every audit line the guard writes,
 //! and the sign-in events, name the client's address. It is the TCP peer,
 //! unless the request carries `x-sprig-client-addr` (the address a gateway
 //! saw) together with `x-sprig-relay-auth` holding the secret of a

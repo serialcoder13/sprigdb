@@ -1,6 +1,6 @@
-//! Client-disconnect detection while a statement runs (chapter 04: "On
-//! client disconnect mid-statement the task sends `KILL QUERY` and discards
-//! the backend connection").
+//! Client-disconnect detection while a statement runs: on a client
+//! disconnect mid-statement the task sends `KILL QUERY` and discards the
+//! backend connection.
 //!
 //! The command loop owns the client stream inside a `Framed`, which the
 //! running statement writes through, so it can't also lend the stream to

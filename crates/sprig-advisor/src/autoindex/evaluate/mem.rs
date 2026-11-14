@@ -1,6 +1,6 @@
 //! In-memory [`EvalStore`], [`StatsSource`] and [`DecisionLog`], for
 //! tests and for replaying recorded workloads with simulated time
-//! (chapter 13, "Testing": stability).
+//! ("Testing": stability).
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};

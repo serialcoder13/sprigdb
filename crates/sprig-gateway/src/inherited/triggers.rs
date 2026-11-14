@@ -1,5 +1,4 @@
-//! Inherited triggers (chapter 41, "Inherited triggers"; chapter 42,
-//! "Run-as: the member's `sprig_inherited` principal"):
+//! Inherited triggers, run as the member's `sprig_inherited` principal:
 //!
 //! ```text
 //! ensure_for_stream(T, stream definition S, T's instance of S):
@@ -13,16 +12,15 @@
 //!       sprig_inherited, module database = S's database in T
 //!       its consumer group starts at 0 when the stream instance was made
 //!       after G (every record then came after G), else at each partition's
-//!       high watermark; the index entry starts its job (chapter 41)
+//!       high watermark; the index entry starts its job
 //!     an instance whose body is behind (G changed, or the nearest body
 //!     override changed): deploy the new body as a new version (OR REPLACE
 //!       keeps the binding and the position); the job picks it up within 5 s
 //!     enabled again: the index entry comes back
 //! ```
 //!
-//! Every run is then an ordinary trigger run of T (chapter 41): in a
-//! gateway, as T's `sprig_inherited`, exactly once per record, in the
-//! engine tier.
+//! Every run is then an ordinary trigger run of T: in a gateway, as T's
+//! `sprig_inherited`, exactly once per record, in the engine tier.
 
 use std::sync::Arc;
 
@@ -93,7 +91,7 @@ pub fn on_queue(chain: &Chain, queue: &Definition) -> Vec<Arc<Definition>> {
 }
 
 /// What an inherited trigger reads in the member: a stream instance, or a
-/// queue instance (an ordinary queue of the member, chapter 50).
+/// queue instance (an ordinary queue of the member).
 #[derive(Clone, Copy)]
 pub struct Source<'a> {
     /// The member.
@@ -293,7 +291,7 @@ async fn ensure_for(
             id
         };
         // A queue trigger takes its messages as sprig_inherited: it reads
-        // them and deletes their rows in the vhost's shard (chapter 50: an
+        // them and deletes their rows in the vhost's shard (an
         // acknowledgement needs DELETE on the database), granted with
         // GRANTS.
         let extra: Vec<GrantItem> = if src.kind == SourceKind::Queue {
@@ -528,7 +526,7 @@ pub fn actions_of(item: &GrantItem) -> Result<ActionSet> {
 
 /// `t`'s `sprig_inherited`: created when missing (locked: nobody can log
 /// in as it); with `grant`, `g`'s `GRANTS` are added to it. Its backend
-/// account follows (chapter 29).
+/// account follows.
 ///
 /// # Errors
 /// The catalog's.
@@ -615,7 +613,7 @@ pub async fn ensure_run_as(
         let v = change.commit().await?;
         cat = wait_auth(svc, t, v).await?;
     }
-    // Its backend account on the member's cluster (chapter 29).
+    // Its backend account on the member's cluster.
     let cluster = svc.locator.cluster(t).await?;
     if let Err(e) = svc.authz.ensure(svc, &cat, &cluster).await {
         tracing::warn!(tenant = %t, error = %e, "sprig_inherited's backend grants not applied yet");
@@ -623,12 +621,11 @@ pub async fn ensure_run_as(
     Ok(user)
 }
 
-/// Takes back `SELECT, DELETE ON db.*` from member `t`'s `sprig_inherited`
-/// (R9, r9last): the database grant inherited queue sinks had before they
-/// were granted their queue alone. Kept while an inherited trigger of
-/// `chain` is declared in `db` (a queue trigger acknowledges inside its
-/// transaction, which needs the database's `DELETE`). True when a grant
-/// was taken back.
+/// Takes back `SELECT, DELETE ON db.*` from member `t`'s `sprig_inherited`:
+/// the database grant inherited queue sinks had before they were granted
+/// their queue alone. Kept while an inherited trigger of `chain` is declared
+/// in `db` (a queue trigger acknowledges inside its transaction, which needs
+/// the database's `DELETE`). True when a grant was taken back.
 ///
 /// # Errors
 /// The catalog's.
@@ -732,11 +729,11 @@ fn blocked_set() -> &'static std::sync::Mutex<std::collections::HashSet<(TenantI
     M.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
 
-/// Chapter 42, "Run-as": a run of an inherited trigger (its definer is
-/// `sprig_inherited`) that failed for a missing privilege becomes
-/// transient with 39242, so the record waits (retried with backoff, never
-/// dead-lettered) until the grant returns; the instance is marked
-/// `blocked` meanwhile, and unmarked by its next good run.
+/// A run of an inherited trigger (its definer is `sprig_inherited`) that
+/// failed for a missing privilege becomes transient with 39242, so the record
+/// waits (retried with backoff, never dead-lettered) until the grant returns;
+/// the instance is marked `blocked` meanwhile, and unmarked by its next good
+/// run.
 pub async fn on_run(
     svc: &Arc<TenantServices>,
     t: TenantId,

@@ -1,10 +1,7 @@
-//! The backend account a tenant's sessions use, interim (chapter 14,
-//! "Backend target, interim"): chapter 29's per-user backend accounts
-//! `t<tenant>_u<user_id>` arrive in M0.5. Until then `[gateway]
-//! backends_file` names one backend account per tenant, or a default for
-//! every tenant. The cluster is the tenant's catalog cluster, from its
-//! shard map (R0 keeps every database there, decision N4), unless the
-//! entry names one.
+//! The backend account a tenant's sessions use. `[gateway] backends_file`
+//! names one backend account per tenant, or a default for every tenant,
+//! or per-user accounts (below). The cluster is the tenant's catalog
+//! cluster, from its shard map, unless the entry names one.
 //!
 //! ```toml
 //! [default]                      # every tenant without its own entry
@@ -23,14 +20,13 @@
 //!
 //! A relative `file:` path is relative to the file's directory. The file is
 //! read at start-up. A verified login of a tenant with neither an entry
-//! nor a default fails with 39998, as chapter 14 says.
+//! nor a default fails with 39998.
 //!
-//! **Per-user backend accounts** (chapter 29, M0.5). With a `[per_user]`
-//! table, every tenant without its own `[tenants.<name>]` entry runs each
-//! user's statements as that user's own MariaDB account,
-//! `t<tenant>_u<user>`, whose password derives from the secret
-//! ([`BackendKey`]); the gateway creates and grants the accounts itself
-//! (`super::authz`). `[default]` then serves nothing.
+//! **Per-user backend accounts.** With a `[per_user]` table, every tenant
+//! without its own `[tenants.<name>]` entry runs each user's statements as
+//! that user's own MariaDB account, `t<tenant>_u<user>`, whose password
+//! derives from the secret ([`BackendKey`]); the gateway creates and grants
+//! the accounts itself (`super::authz`). `[default]` then serves nothing.
 //!
 //! ```toml
 //! [per_user]

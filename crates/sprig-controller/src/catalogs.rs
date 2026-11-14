@@ -1,5 +1,4 @@
-//! How the controller reaches tenant catalogs (chapter 08, "Where the
-//! catalog lives").
+//! How the controller reaches tenant catalogs.
 //!
 //! A tenant's catalog is shard 0 of table group 0: the shard map
 //! `shardmaps/<tenant>/0` in the tenant's home DC tier names its cluster,
@@ -8,12 +7,11 @@
 //! follows that chain for [`sprig_catalog::MariaBackend`]; [`ClusterPools`]
 //! is the cluster half, so tests can point clusters at their own servers.
 //!
-//! Where this differs from the book, for now: catalog loads read the writer
-//! (chapter 08 lets them read a local replica); ancestors homed in other
-//! DCs are unreachable until the relay (R2) carries their shard maps.
+//! Limits, for now: catalog loads read the writer (never a local replica);
+//! ancestors homed in other DCs are unreachable until the relay carries
+//! their shard maps.
 //!
-//! **Connection budgets** (chapter 13, "Settings scopes and budgets"; the
-//! R0 fix of the catalog-connection deadlock). Each [`RegistryPools`] is
+//! **Connection budgets** (the fix of a catalog-connection deadlock). Each [`RegistryPools`] is
 //! one budget: at most `max` connections per cluster. The controller's
 //! short catalog calls (settings, the reconciler, decisions, tenant
 //! deletion, snapshots) share one budget of [`POOL_MAX`]; the automatic
@@ -120,7 +118,7 @@ pub trait ClusterPools: Send + Sync + 'static {
     async fn placeable(&self) -> Result<Vec<ClusterId>>;
 
     /// Clusters of this DC that may hold a tenant's objects, for a deleted
-    /// tenant's cleanup (chapter 08): every registered cluster but
+    /// tenant's cleanup: every registered cluster but
     /// `rejected` and `retired` ones. The default is [`Self::placeable`].
     ///
     /// # Errors
@@ -259,8 +257,8 @@ impl RegistryPools {
     }
 }
 
-/// A cluster's writer as the failover loop publishes it (chapter 25), read
-/// as the gateway reads it (`sprig_gateway::backend::cluster`, W1):
+/// A cluster's writer as the failover loop publishes it, read as the
+/// gateway reads it (`sprig_gateway::backend::cluster`):
 /// `leases/writer/<cluster>`, else the `cluster-failover` record's writer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Published {
@@ -606,7 +604,7 @@ pub async fn not_held(locator: &dyn CatalogLocator, tenant: TenantId) -> Result<
 }
 
 /// Runs `migrator` on `tenant`'s catalog `schema` through `conn`, unless a
-/// mover's cutover holds the catalog (chapter 10, "Cutover"): the cutover
+/// mover's cutover holds the catalog: the cutover
 /// may rename the catalog's tables away, and a migration then would create
 /// empty ones under their names. The migrator itself also refuses a
 /// catalog holding fenced tables; this check keeps the controller from

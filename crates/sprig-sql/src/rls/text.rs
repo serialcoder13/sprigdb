@@ -2,11 +2,11 @@
 //! positions (line and character column, from 1) to byte offsets, the
 //! statement's significant tokens, and span edits.
 //!
-//! Both rewrites ([`super::expr`] and [`super::inject`]) parse chapter 07's
-//! parse view of a text (same characters on the same lines, comments
-//! blanked, strings as `x`), so an AST position names the same place in
-//! the original text, and every change is an insertion or replacement at
-//! token boundaries of the original.
+//! Both rewrites ([`super::expr`] and [`super::inject`]) parse the name layer's
+//! parse view of a text (same characters on the same lines, comments blanked,
+//! strings as `x`), so an AST position names the same place in the original
+//! text, and every change is an insertion or replacement at token boundaries of
+//! the original.
 
 use sprig_common::SprigError;
 use sqlparser::tokenizer::Location;

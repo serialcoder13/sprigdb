@@ -1,17 +1,16 @@
-//! Inherited exchanges, queues and bindings (chapter 50, "Inherited
-//! exchanges, queues and bindings"; chapter 42):
+//! Inherited exchanges, queues and bindings:
 //!
 //! ```text
 //! ensure_vhost(T, database db):        on T's first use of the vhost (an AMQP
 //!                                      connection opening it, a SQL mq_* call,
 //!                                      a publish an ancestor targets at T)
 //!   the exchange, queue and binding definitions of db reaching T
-//!   T's database db, created empty if T has none (r9fet decision 2)
+//!   T's database db, created empty if T has none
 //!   each exchange or queue without an instance row: an instance row (id from
 //!     T's object counter, 'active'); then, in one versioned catalog change of
 //!     T, the ordinary mq_exchanges / mq_queues / mq_bindings rows: the
-//!     instance IS an ordinary exchange or queue of T (r9fet decision 1, as for
-//!     streams), so the queue engine, AMQP, SQL and triggers work unchanged
+//!     instance IS an ordinary exchange or queue of T (as for streams), so
+//!     the queue engine, AMQP, SQL and triggers work unchanged
 //!   a binding disabled for T (ALTER INHERITED BINDING ... DISABLE, or an AMQP
 //!     queue.unbind of it in T) is left out, or removed
 //!   queue arguments: the definition's, overlaid by the nearest overrides
@@ -107,7 +106,7 @@ pub fn declared_in(chain: &Chain, db: &str) -> Vec<Arc<Definition>> {
 }
 
 /// A queue instance's arguments: the definition's, with each overridable
-/// argument's nearest override (chapter 42, "Overrides").
+/// argument's nearest override.
 #[must_use]
 pub fn queue_arguments(
     chain: &Chain,
@@ -226,11 +225,10 @@ pub async fn ensure_vhost(
     let db_name = defs[0].db_name.clone();
     let started = std::time::Instant::now();
     let ep = svc.locator.writer(t).await?;
-    // R9 (r9scale): the catalog's `inherit_msg` and `mq` modules in one
-    // migration run (two runs before), then the member's database. Not at
-    // the same time: a catalog load that starts before a module's tables
-    // exist fails with 1412 when it reads them (seen when they ran
-    // together).
+    // The catalog's `inherit_msg` and `mq` modules in one migration run (two
+    // runs before), then the member's database. Not at the same time: a
+    // catalog load that starts before a module's tables exist fails with 1412
+    // when it reads them (seen when they ran together).
     {
         let mut c = ep.pool.get_conn().await.map_err(cat_err)?;
         sprig_catalog::Migrator::new(&[
@@ -292,7 +290,7 @@ pub async fn ensure_vhost(
         };
         if let (Some(id), None) = (present, &row_now) {
             // The member's own object of that name shadows the definition
-            // for it (chapter 42, "Failure handling").
+            // for it.
             tracing::warn!(tenant = %t, def = %key, name = %d.name, object = id, "a member's own object shadows an inherited one");
             continue;
         }
@@ -502,7 +500,7 @@ pub async fn ensure_vhost(
         .await?;
         if d.kind == DefKind::Queue {
             super::triggers::ensure_for_queue(svc, chain, d, (row.db_id.0, &row.name), *id).await?;
-            // R9 (r9fanin): its FOR EACH TENANT sinks, as for streams.
+            // Its FOR EACH TENANT sinks, as for streams.
             super::sinks::ensure_for_queue(svc, chain, d, t).await;
         }
     }
@@ -513,7 +511,7 @@ pub async fn ensure_vhost(
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .insert((t, db_key(db)), sig);
-    // Chapter 42: inherit.broadcast_replay, for instances made just now.
+    // inherit.broadcast_replay, for instances made just now.
     for d in fresh {
         tokio::spawn(super::broadcast::replay(Arc::clone(svc), d, t));
     }
@@ -980,8 +978,7 @@ struct Names {
 
 /// The engine's vhost of a tenant that inherited exchanges, queues or
 /// bindings, or declares them: targeted publishes, stamped headers, and
-/// the inherited names protected (chapter 50, "Inherited exchanges, queues
-/// and bindings").
+/// the inherited names protected.
 pub struct InheritVhost {
     inner: Arc<dyn Vhost>,
     svc: Arc<TenantServices>,
@@ -995,8 +992,8 @@ pub struct InheritVhost {
     order: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     /// The connection's events (fan-in consumers deliver into them).
     events: Option<sprig_proto_amqp::backend::EventSender>,
-    /// Fan-in consumers of the connection (chapter 50, "Fan-in
-    /// consumers"), ended or not: their deliveries stay settleable.
+    /// Fan-in consumers of the connection, ended or not: their deliveries
+    /// stay settleable.
     fanins: Mutex<HashMap<ConsumerId, Arc<super::fanin_mq::FanIn>>>,
 }
 
@@ -1052,9 +1049,8 @@ impl InheritVhost {
             .cloned()
     }
 
-    /// `basic.consume` with `x-sprig-fan-in` on a queue definition's name
-    /// (chapter 50, "Fan-in consumers"); `None` when the consume isn't
-    /// one.
+    /// `basic.consume` with `x-sprig-fan-in` on a queue definition's name;
+    /// `None` when the consume isn't one.
     async fn fan_in_consume(
         &self,
         cx: &OpCtx,
@@ -1210,9 +1206,8 @@ impl InheritVhost {
 }
 
 impl InheritVhost {
-    /// `x-sprig-tenant: *` (or `@*:key`): a broadcast of the definition
-    /// (chapter 42, "Broadcast"), confirmed once its log has it; in this
-    /// connection's publish order.
+    /// `x-sprig-tenant: *` (or `@*:key`): a broadcast of the definition,
+    /// confirmed once its log has it; in this connection's publish order.
     fn broadcast(&self, m: Message, key: String, kind: DefKind, name: String) -> Published {
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let prev = self

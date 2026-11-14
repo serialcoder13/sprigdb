@@ -1,11 +1,10 @@
-//! Topics and consumer groups in the tenant catalog (chapter 45 build
-//! steps 12 and 13).
+//! Topics and consumer groups in the tenant catalog.
 //!
 //! **Topics** ([`StreamTopics`]) are the tenant's streams, named
 //! `<database>.<stream>` (a change topic `shop.orders.changes`). Reads come
 //! from the tenant's catalog snapshot (`sprig-streams`' `StreamsState`).
 //! Changes are stream DDL run through the gateway's SQL engine as the
-//! logged-in user, so chapter 29's privileges, the catalog change and the
+//! logged-in user, so the privilege checks, the catalog change and the
 //! physical tables are exactly what `CREATE STREAM` does in SQL:
 //!
 //! | Kafka | SQL |
@@ -18,7 +17,7 @@
 //! | `retention.ms`, `retention.bytes`, `max.message.bytes` | ``ALTER STREAM ... SET (stream.retention_hours = h, stream.retention_bytes = b, stream.max_message_bytes = m)``, or `RESET (...)` when deleted |
 //!
 //! A topic is listed (and described) only to users who may read or write
-//! its stream (chapter 29's `SELECT` or `INSERT`, on the stream or its
+//! its stream (`SELECT` or `INSERT`, on the stream or its
 //! database; for a change topic, `SELECT` on its table).
 //!
 //! **Groups** ([`CatalogGroups`]) are `stream_groups` and `stream_offsets`
@@ -306,7 +305,7 @@ impl Topics for StreamTopics {
             .filter(|d| self.data.visible(p, &cat, d))
             .filter_map(|d| self.info(p, &cat, d))
             .collect();
-        // Chapter 42 (R9): inherited streams' topics.
+        // Inherited streams' topics.
         for n in self.data.inherited_names(p).await {
             if !out.iter().any(|t| t.name == n)
                 && let Some(t) = self.get(p, &n).await?
@@ -323,7 +322,7 @@ impl Topics for StreamTopics {
         if let Some(t) = self.find(p, &cat, name) {
             return Ok(Some(t));
         }
-        // Chapter 42 (R9): an inherited stream's topic, as a member or
+        // An inherited stream's topic, as a member or
         // the declaring tenant sees it.
         let Some(i) = self.data.inherited_info(p, name).await else {
             return Ok(None);
@@ -593,8 +592,8 @@ impl GroupStore for CatalogGroups {
             .start_transaction(mysql_async::TxOpts::default())
             .await
             .map_err(store_err)?;
-        // A fan-in topic's position is on its member's instance (chapter
-        // 45, R9): its id is looked up before the transaction.
+        // A fan-in topic's position is on its member's instance: its id is
+        // looked up before the transaction.
         let mut parts = Vec::with_capacity(offsets.len());
         for o in offsets {
             parts.push(

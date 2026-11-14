@@ -1,5 +1,4 @@
-//! Fuzz harnesses for `sprig-proto-mysql` (chapter 05 build step 13,
-//! chapter 46 step 4).
+//! Fuzz harnesses for `sprig-proto-mysql`.
 //!
 //! Each `fuzz_*` function is one cargo-fuzz target's body. They live here,
 //! not in `fuzz_targets/`, so the same code also runs on stable as a corpus
@@ -7,7 +6,7 @@
 //! `crates/sprig-proto-mysql/tests/golden_fuzz_replay.rs`, which includes this
 //! file by path.
 //!
-//! The oracle is the one chapter 46 names: no panic, no hang, bounded
+//! The oracle: no panic, no hang, bounded
 //! memory, and, where the crate has an encoder, decode -> encode -> decode
 //! stability. Stability is checked on bytes: `e1 = encode(decode(x))` must
 //! decode again and encode to exactly `e1`. Byte comparison (rather than

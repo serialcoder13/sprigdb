@@ -34,7 +34,7 @@ Within one tenant, these behave as on a single MySQL or MariaDB server:
 
 - `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `REPLACE`, upserts, joins, subqueries, CTEs (including recursive ones), window functions, set operations and JSON functions;
 - transactions, savepoints, `SELECT … FOR UPDATE`, locking reads and MariaDB's isolation levels;
-- prepared statements (text and binary protocol), cursors, multi-statements, `LOAD DATA LOCAL INFILE` (when the client allows it and `sql.local_infile` is on), long data, bulk execute on 3307;
+- prepared statements: the binary protocol's, and SQL-level `PREPARE`, `EXECUTE`, `EXECUTE IMMEDIATE` and `DEALLOCATE PREPARE` (see [SQL-level prepared statements](#sql-level-prepared-statements)); cursors, multi-statements, `LOAD DATA LOCAL INFILE` (when the client allows it and `sql.local_infile` is on), long data, bulk execute on 3307;
 - `CREATE`, `ALTER`, `DROP` and `RENAME` of databases, tables, views, indexes, sequences, procedures, functions, triggers and events; `TRUNCATE`; temporary tables;
 - users, roles and grants, with MySQL's statements (see [Tenants and accounts](tenants-and-accounts.md));
 - `GET_LOCK()` and the other user-level locks, scoped to your tenant;
@@ -96,12 +96,69 @@ Schema changes go through SprigDB's catalog, so every gateway sees a new definit
 - On a sharded table, a change runs on every shard, all or nothing: a shard that refuses it rolls back the shards already changed. A change that removed data and then fails on a shard is finished later by SprigDB (39480 `ER_SPRIG_DDL_FAILED`). If the shards already disagree on the table's definition, the change is refused with 39483 `ER_SPRIG_DDL_SHARD_DRIFT`.
 - One statement may not change tables of different table groups, or a sharded table and another database (39481 `ER_SPRIG_DDL_UNSUPPORTED`): run it once per table.
 - DDL inside a transaction commits it first, as in MySQL.
-- Stored programs always get your own account as `DEFINER`; see [Definers](tenants-and-accounts.md#definers).
+- Views and stored programs get your own account as `DEFINER` unless you name another account, which needs `SET_ANY_DEFINER`; see [Definers](tenants-and-accounts.md#definers).
 - A DDL statement of a shape the catalog can't handle fails with 39051.
+
+### SQL-level prepared statements
+
+`PREPARE`, `EXECUTE`, `EXECUTE IMMEDIATE` and `DEALLOCATE PREPARE` (or `DROP PREPARE`) work on every tenant. On a tenant whose tables are all unsharded, they go to MariaDB unchanged, and the session then keeps one backend connection until it ends, since SprigDB can't replay a statement MariaDB holds. Once a tenant has a sharded table, the gateway holds the statements itself, so they work across shards, clusters and moves:
+
+```sql
+PREPARE orders_of FROM 'SELECT id, total FROM orders WHERE customer_id = ?';
+SET @c = 42;
+EXECUTE orders_of USING @c;
+EXECUTE orders_of USING 43;
+DEALLOCATE PREPARE orders_of;
+
+EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM order_items WHERE order_id = ?' USING 1001;
+```
+
+How the gateway runs them:
+
+- **`PREPARE name FROM source`.** The source is a string literal, a user variable or any expression that gives the statement's text. The text is checked as a binary-protocol prepare would check it: names, privileges and the tables' metadata. So a mistake fails at `PREPARE`, as in MariaDB, and nothing is kept. Preparing a name that is in use first drops the old statement, even when the new one fails. Names aren't case-sensitive. Names bind in the database that is current at `PREPARE`, as in MariaDB, even if you `USE` another one before `EXECUTE`.
+- **`EXECUTE name [USING value, ...]`.** Each value can be a literal, a user variable or an expression. The gateway writes the values into the text and runs it as your own statement: it is planned again at each execution, with the shard layout of that moment, so a statement on `customer_id = ?` reaches one shard, and a shard move never leaves it stale. Privileges are checked again at each execution. The wrong number of values fails with 1210 (`Incorrect arguments to EXECUTE`).
+- **`EXECUTE IMMEDIATE source [USING value, ...]`.** Prepares and runs the text once, with the same checks.
+- **`DEALLOCATE PREPARE name`.** Forgets the statement.
+- A name the session doesn't hold fails with 1243 (`Unknown prepared statement handler (name) given to EXECUTE`, or `... to DEALLOCATE PREPARE`).
+
+Text that names a table with row-level security is refused in `PREPARE` and `EXECUTE`, as on every tenant; see [Row-level security](row-level-security.md).
+
+When the gateway holds the statements, two results differ from MariaDB's: a select-list expression with a parameter is named after its value (`5+1`, not `?+1`; a bare `?` is still named `?`), and a parameter's result column has the type of the literal it became.
 
 ### Accounts
 
 Accounts belong to your tenant and are named without the tenant prefix inside SQL; you log in as `tenant.user`. Server-wide privileges (`SUPER`, `FILE`, replication) are dropped with a warning, and server-wide `SHOW` statements (`SHOW ENGINE`, `SHOW BINARY LOGS`, replica status) fail with 1227. See [Tenants and accounts](tenants-and-accounts.md).
+
+### SET GLOBAL sets the tenant's defaults
+
+On one MariaDB server, `SET GLOBAL` changes the server for everyone. In SprigDB, a MariaDB server holds many tenants, so `SET GLOBAL` never reaches MariaDB. Instead, a user with `SYSTEM_VARIABLES_ADMIN` can set the tenant's defaults for five variables:
+
+| Variable | Tenant setting | Values |
+|---|---|---|
+| `sql_mode` | `compat.global.sql_mode` | Modes of the port's persona, checked as `SET` checks them |
+| `time_zone` | `compat.global.time_zone` | A time zone MariaDB accepts, such as `'+01:00'` |
+| `transaction_isolation` | `compat.global.transaction_isolation` | `READ-UNCOMMITTED`, `READ-COMMITTED`, `REPEATABLE-READ` or `SERIALIZABLE`, or `SET GLOBAL TRANSACTION ISOLATION LEVEL ...` |
+| `max_execution_time` | `compat.global.max_execution_time` | Milliseconds, 0 to 4294967295. 3306 only: on 3307 it fails with 1193, as MariaDB has no such variable |
+| `wait_timeout` | `compat.global.wait_timeout` | Seconds, 1 to 31536000 |
+
+```sql
+SET GLOBAL time_zone = '+01:00';
+SET GLOBAL sql_mode = 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION';
+SET GLOBAL TRANSACTION ISOLATION LEVEL READ COMMITTED;
+SET @@global.wait_timeout = 600;
+SET GLOBAL time_zone = DEFAULT;    -- remove the tenant's default
+SELECT @@global.time_zone;         -- the tenant's default, or the server's
+```
+
+As on MySQL, a global value changes the sessions that start afterwards, not the session that set it or other open sessions. New SQL sessions of the tenant on every gateway, on 3306, on 3307 and over HTTP, start with the defaults before their first statement; a session that runs `COM_RESET_CONNECTION` gets them again. A default the other port can't take, such as a MariaDB-only `sql_mode` name in a 3306 session, is left out of that session and logged by the gateway. `@@global.<variable>` reads the tenant's value. `SET PERSIST` and `SET PERSIST_ONLY` do the same as `SET GLOBAL`, since the defaults are stored in the tenant's catalog anyway. `DEFAULT` removes the tenant's value, so new sessions get the server's again.
+
+The rules:
+
+- Without `SYSTEM_VARIABLES_ADMIN`, `SET GLOBAL`, `SET PERSIST` and `@@global.` assignments fail with 1227 (`you need (at least one of) the SUPER or SYSTEM_VARIABLES_ADMIN privilege(s)`).
+- Any other variable fails with 1227 even with the privilege, because it would change the MariaDB server for every tenant on it. The message lists the five variables a tenant can set.
+- A value is checked before anything is stored: an unknown time zone fails with 1298, an unknown `sql_mode` or isolation level with 1231, a number out of range with 1231, and text for a number with 1232. An expression, such as `CONCAT('+0', '4:00')`, is evaluated first. If one assignment of a statement fails, none is stored.
+- Session assignments in the same statement (`SET GLOBAL time_zone = '+01:00', SESSION wait_timeout = 30`) still apply to your own session.
+- The defaults are the tenant's settings, so `SHOW SPRIG SETTINGS LIKE 'compat.global.%'` shows them, and every change is recorded with its user and the reason `SET GLOBAL`. They don't apply to other tenants.
 
 ## Statements SprigDB adds
 

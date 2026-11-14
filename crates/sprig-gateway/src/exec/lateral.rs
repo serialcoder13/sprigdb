@@ -1,5 +1,4 @@
-//! `LATERAL`'s gateway apply on port 3306 (chapter 28, "`LATERAL`" step 3;
-//! R4 round 4).
+//! `LATERAL`'s gateway apply on port 3306.
 //!
 //! A `LATERAL` derived table the text rewrite can't express as SQL
 //! (`sprig_sql::compat::lateral::rewrite`: any correlation other than

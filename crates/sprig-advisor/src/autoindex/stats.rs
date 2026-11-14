@@ -1,4 +1,4 @@
-//! The statistics reader (chapter 13, "Statistics"; build step 3): MariaDB's
+//! The statistics reader: MariaDB's
 //! engine-independent statistics, the `JSON_HB` histogram parser, the
 //! selectivity rules and the analyze job.
 //!
@@ -27,10 +27,9 @@
 //!                     else the product of the parts
 //! ```
 //!
-//! Two corrections to chapter 13's text, measured on 11.8.9: `JSON_HB`
-//! bucket sizes and `avg_frequency` are over **non-NULL** rows, so the
-//! histogram estimate is scaled by `1 - nulls_ratio` and the
-//! `avg_frequency` estimate is not (the chapter multiplies the latter).
+//! Measured on 11.8.9: `JSON_HB` bucket sizes and `avg_frequency` are over
+//! **non-NULL** rows, so the histogram estimate is scaled by
+//! `1 - nulls_ratio` and the `avg_frequency` estimate is not.
 
 pub mod analyze;
 pub mod histogram;
@@ -46,8 +45,8 @@ pub use reader::{StatsReader, weigh};
 
 use super::model::IndexInfo;
 
-/// The selectivity used where nothing better is known (chapter 13: a
-/// range without a histogram or values).
+/// The selectivity used where nothing better is known (a range without a
+/// histogram or values).
 pub const DEFAULT_SEL: f64 = 0.10;
 
 /// A sampled parameter value. Values never leave the process that
@@ -428,7 +427,7 @@ impl TableStats {
     }
 
     /// Statistics were collected before the table changed by more than
-    /// `ratio` (chapter 13: 0.2) according to `InnoDB`'s `n_rows`.
+    /// `ratio` (0.2 by default) according to `InnoDB`'s `n_rows`.
     #[must_use]
     pub fn is_stale(&self, ratio: f64) -> bool {
         match (self.cardinality, self.n_rows) {

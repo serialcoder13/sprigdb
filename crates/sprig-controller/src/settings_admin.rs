@@ -1,7 +1,5 @@
-//! The Admin API's `Settings` service (chapter 37): list and describe
-//! keys, resolve one with its chain, and change values, bounds and locks
-//! at every scope (chapter 08 "Setting a value", chapter 23 "Settings:
-//! writes, bounds and watches", chapter 47 "Explaining settings").
+//! The Admin API's `Settings` service: list and describe keys, resolve one
+//! with its chain, and change values, bounds and locks at every scope.
 //!
 //! | Call | Route |
 //! |---|---|
@@ -20,17 +18,17 @@
 //! - **Reads** resolve against this controller's etcd mirror
 //!   ([`LiveSettings`], what every process here resolves with) and, for a
 //!   tenant context, a fresh full read of the tenant's catalog (its
-//!   writer), with chapter 08's algorithm ([`explain_layered`]). Each step
+//!   writer), with the layered resolution ([`explain_layered`]). Each step
 //!   of the chain carries who last changed its row and when: the etcd
 //!   record's `set_by`, `set_at` and `reason`, the catalog row's `set_by`,
 //!   `set_at` and version.
 //! - **`global`, `dc`, `cluster`** are written with
 //!   [`SettingsWriter::set_guarded`] under the fencing compare of the
 //!   leader the call is served by ([`AdminService`](crate::admin::AdminService)
-//!   passes it): chapter 23's checks (scope, type, every wider scope's
+//!   passes it): the etcd writer's checks (scope, type, every wider scope's
 //!   bounds and locks), the record's `set_by`/`set_at`/`reason`, and
-//!   warnings for this DC's narrower values the new bounds clamp. In R0
-//!   (single-etcd mode) a DC leader writes `global` records, as it writes
+//!   warnings for this DC's narrower values the new bounds clamp. In
+//!   single-etcd mode a DC leader writes `global` records, as it writes
 //!   the tenant directory; a controller that leads the global tier uses
 //!   that leadership instead.
 //! - **`tenant`, `database`, `object`** go through
@@ -43,17 +41,17 @@
 //!   read just before the write (a concurrent bounds change of the same
 //!   row in between is overwritten, as with SQL).
 //! - **Audit.** Every change is logged as a `settings.changed` event
-//!   (chapter 47) with key, scope, action, old and new row, who and why;
+//!   with key, scope, action, old and new row, who and why;
 //!   the writers add their own `settings.set` events. Tightened bounds
 //!   come back as warnings and, for catalog scopes, are recorded as a
-//!   `bounds_tightened` decision (chapter 08 step 7).
+//!   `bounds_tightened` decision.
 //!
 //! Refusals: 39081 unknown key, 39082 scope not accepted, 39084 wrong
 //! type, 39080 outside the bounds in force, 39083 locked by a wider scope,
 //! 1049 or 1146 for a database or object that doesn't exist, 39072 for an
 //! unknown or inactive tenant, 39504 off the leader (etcd scopes), 39792
 //! for a malformed request, 39368 for an `auth.authorizer` engine some
-//! live gateway doesn't know (chapter 29).
+//! live gateway doesn't know.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -71,7 +69,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 use sprig_meta::Cmp;
 use sprig_meta::bootstrap::rfc3339;
 use sprig_settings::{
-    AnySetting, Apply, BoundsPatch, Explanation, Ignored, LiveSettings, RecordOutcome, Registry,
+    AnySetting, BoundsPatch, Explanation, Ignored, LiveSettings, RecordOutcome, Registry,
     Scope, ScopeKind, SettingChange, SettingCtx, SettingEdit, SettingRecord, SettingsWriter,
     StepOutcome, Value, ValueKind, Warning, explain_layered,
 };
@@ -187,12 +185,8 @@ pub fn key_view(def: &dyn AnySetting) -> SettingKeyView {
             .map(|(_, n)| (*n).to_owned())
             .collect(),
         hard_bounds: def.hard().into(),
-        apply: match def.apply() {
-            Apply::Live => "live",
-            Apply::NewSessions => "new_sessions",
-            Apply::Rebind => "rebind",
-        }
-        .to_owned(),
+        // `restart` for a key read only at start (bugfix-89).
+        apply: sprig_settings::registry::apply_name(def).to_owned(),
         operator_only: def.operator_only(),
         tenant_settable: tenant_settable(def),
         owner: def.owner(),
@@ -364,7 +358,7 @@ fn kind_of(scope: &ScopeRef) -> ScopeKind {
     }
 }
 
-/// Chapter 08's checks 1 and 2, before anything is read: the key exists
+/// The first two checks, before anything is read: the key exists
 /// and accepts the scope.
 ///
 /// # Errors
@@ -436,7 +430,7 @@ fn audit(key: &str, w: &SettingWrite, r: &SettingWriteResponse) {
         reason = %w.reason,
         "setting changed through the Admin API"
     );
-    // Chapter 47's pipeline (platform stream: an operator's change through
+    // The audit pipeline (platform stream: an operator's change through
     // the Admin API, whatever its scope).
     sprig_common::audit::record(
         sprig_common::audit::AuditStream::Platform,
@@ -651,9 +645,8 @@ where
         clock: Arc<dyn Clock>,
     ) -> Self {
         let registry = live.registry();
-        // Chapter 29: auth.authorizer only names an engine every live
-        // gateway knows.
-        // bugfix-62 (Q39): txn.commit_resolve_timeout_ms stays below
+        // auth.authorizer only names an engine every live gateway knows.
+        // txn.commit_resolve_timeout_ms stays below
         // txn.resolver_min_age_seconds.
         let guard: Arc<dyn sprig_settings::ValueGuard> = Arc::new(sprig_settings::AllGuards(vec![
             Arc::new(sprig_auth::authz::engine_guard::EngineGuard::new(
@@ -1092,7 +1085,7 @@ where
     ) -> Result<SettingWriteResponse> {
         let def = check_key_and_scope(self.registry(), key, &w.scope)?;
         let actor = actor_of(w)?;
-        // Chapter 47: Admin API mutations fail closed while the audit
+        // Admin API mutations fail closed while the audit
         // spool is full.
         sprig_common::audit::check_available()?;
         let r = if w.scope.is_etcd() {

@@ -119,6 +119,24 @@ pub struct LoginRequest {
     pub can_handle_expired_password: bool,
 }
 
+/// Whether a login meets `row`'s certificate clauses (chapter 14's step
+/// 3d): `REQUIRE X509` needs a verified client certificate, and `REQUIRE
+/// SUBJECT` and `ISSUER` compare its names exactly, as MySQL does. Every
+/// protocol's login uses it (authfix2).
+#[must_use]
+pub fn certificate_ok(
+    row: &crate::store::UserRow,
+    client_cert: bool,
+    dn: Option<&ClientDn>,
+) -> bool {
+    let dn = dn.filter(|_| client_cert);
+    let dn_ok =
+        |want: &Option<String>, got: Option<&String>| want.as_ref().is_none_or(|w| got == Some(w));
+    (row.require_tls != RequireTls::X509 || client_cert)
+        && dn_ok(&row.require_subject, dn.map(|d| &d.subject))
+        && dn_ok(&row.require_issuer, dn.map(|d| &d.issuer))
+}
+
 /// A verified client certificate's names, in MySQL's form
 /// (`/C=US/O=Acme/CN=alice`, as OpenSSL's one-line form writes them).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1109,6 +1127,23 @@ impl MysqlLogin {
         }
     }
 
+    /// Whether the account this login resolved to asks for a client
+    /// certificate (`REQUIRE X509`, `SUBJECT` or `ISSUER`): the only
+    /// accounts a certificate alone may log in to (AMQP's SASL `EXTERNAL`,
+    /// authfix2). `false` for the decoy and file accounts.
+    #[must_use]
+    pub fn certificate_account(&self) -> bool {
+        match &self.target {
+            Target::Catalog(c) => {
+                let r = &c.user.row;
+                r.require_tls == RequireTls::X509
+                    || r.require_subject.is_some()
+                    || r.require_issuer.is_some()
+            }
+            _ => false,
+        }
+    }
+
     /// The fast path for a clear-text password (HTTP Basic): whether the
     /// fast cache holds `SHA256(SHA256(password))` for one of the account's
     /// verifiers. On `false` the caller runs the full path
@@ -1303,16 +1338,8 @@ impl MysqlLogin {
         }
         // d. TLS requirements.
         let need_tls = row.require_tls != RequireTls::None || self.policy_bool(c, &REQUIRE_TLS);
-        // `REQUIRE SUBJECT` and `ISSUER` compare the verified certificate's
-        // names exactly, as MySQL does.
-        let dn = self.req.client_dn.as_ref().filter(|_| self.req.client_cert);
-        let dn_ok = |want: &Option<String>, got: Option<&String>| {
-            want.as_ref().is_none_or(|w| got == Some(w))
-        };
         if (need_tls && !self.req.tls)
-            || (row.require_tls == RequireTls::X509 && !self.req.client_cert)
-            || !dn_ok(&row.require_subject, dn.map(|d| &d.subject))
-            || !dn_ok(&row.require_issuer, dn.map(|d| &d.issuer))
+            || !certificate_ok(row, self.req.client_cert, self.req.client_dn.as_ref())
         {
             let e = self.denied();
             return self.refuse("tls_required", path, e);

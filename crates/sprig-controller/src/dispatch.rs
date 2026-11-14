@@ -1,5 +1,5 @@
-//! Registrations, jobs, dispatch and claims (chapter 23, "One job scheduler
-//! for every loop"; build step 6).
+//! Registrations, jobs, dispatch and claims: one job scheduler for every
+//! loop.
 //!
 //! Every automatic loop submits work as jobs to one scheduler, so loops
 //! can't overload a cluster between them.
@@ -52,7 +52,7 @@ pub const OPERATOR: &str = "operator";
 /// Job kinds of which a tenant may run only one at a time.
 pub const EXCLUSIVE_KINDS: &[&str] = &["migrate", "promote"];
 
-/// A job's state (chapter 23, "State machines").
+/// A job's state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobState {
@@ -133,12 +133,12 @@ pub enum JobClass {
     /// Everything else: no per-cluster limit.
     Other,
     /// Long-running consumers that mostly wait: stream sequencers and
-    /// triggers on streams and queues (chapters 41 and 45, R9). One job per
+    /// triggers on streams and queues. One job per
     /// stream or binding, so they get their own, larger pool
     /// ([`CONSUMER_SLOTS`] per worker) and never starve `Other` jobs or each
     /// other. No per-cluster limit.
     Consumer,
-    /// Search copies (chapter 39, R5 round 6): one long-running job per
+    /// Search copies: one long-running job per
     /// copy of an index. Only workers with the search role offer these
     /// slots. No per-cluster limit. Jobs whose spec names a `spread` key
     /// go to a worker holding no other live job with that key when one
@@ -161,8 +161,8 @@ pub struct Owner {
     pub attempt: u32,
 }
 
-/// `jobs/<job_id>` (chapter 23, "DC tier"). Each kind's chapter owns `spec`
-/// and `progress`.
+/// `jobs/<job_id>` in the DC tier. Each kind's own module owns `spec` and
+/// `progress`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Job {
     /// The job.
@@ -205,10 +205,10 @@ pub struct Job {
     /// When it reached a final state (Unix ms).
     #[serde(default)]
     pub finished_ms: Option<u64>,
-    /// What to do; owned by the kind's chapter.
+    /// What to do; owned by the kind's own module.
     #[serde(default)]
     pub spec: Value,
-    /// How far it got; owned by the kind's chapter.
+    /// How far it got; owned by the kind's own module.
     #[serde(default)]
     pub progress: Value,
     /// Why it failed.
@@ -503,8 +503,8 @@ pub async fn submit(l: &Leadership, clock: &dyn Clock, new: NewJob) -> Result<Jo
 }
 
 /// Submits a job as `queued` under an Admin API leader guard (the
-/// leader's key compare) rather than a [`Leadership`] (r2close: an
-/// operator's `node_rebuild` and `errant_extract`).
+/// leader's key compare) rather than a [`Leadership`] (an operator's
+/// `node_rebuild` and `errant_extract`).
 ///
 /// # Errors
 /// 39504 `ER_SPRIG_NOT_LEADER` when the guard fails; the store's errors.
@@ -732,8 +732,7 @@ pub struct PassReport {
     pub cancelled_suspended: Vec<JobId>,
 }
 
-/// Job kinds that wait while their tenant is suspended (chapter 14,
-/// "Suspension"; decision bugfix-interim): work that runs the tenant's own
+/// Job kinds that wait while their tenant is suspended: work that runs the tenant's own
 /// code or sends its data out. Housekeeping (moves, index builds, search
 /// copies, key-value and TTL sweeps, stream sequencers, outbox forwarders,
 /// change exchanges) goes on, so the data stays as the tenant left it.
@@ -983,7 +982,7 @@ pub async fn dispatch_pass(cx: &LoopCx) -> Result<PassReport> {
         }
     }
 
-    // 2b. Chapter 14's suspension: a suspended tenant's paused kinds
+    // 2b. Suspension: a suspended tenant's paused kinds
     //     wait. Running and assigned ones are cancelled (their workers stop
     //     at the next progress write) and their loops submit them again;
     //     queued ones stay queued; a due schedule run is skipped.
@@ -1185,7 +1184,7 @@ fn publish_job_metrics(jobs: &[StoredJob], starts: &HashMap<TenantId, u32>) {
 // ---- the gc loop ------------------------------------------------------------
 
 /// The `gc` loop's job part (DC leader): deletes finished jobs 7 days after
-/// they end. Dropping retired source schemas is chapter 10's part.
+/// they end. Dropping retired source schemas is the mover's part.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct JobGc;
 

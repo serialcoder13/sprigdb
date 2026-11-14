@@ -1,5 +1,5 @@
-//! The gateway's [`DdlExecutor`] (chapter 08, "DDL write path", phase 2):
-//! physical DDL on the tenant's cluster.
+//! The gateway's [`DdlExecutor`] (phase 2 of the catalog's DDL write path,
+//! `sprig_catalog::ddl`): physical DDL on the tenant's cluster.
 //!
 //! - **Object DDL** (tables, views, routines, triggers, events, indexes,
 //!   renames, `TRUNCATE`) runs on the session's own backend session, as
@@ -11,12 +11,11 @@
 //!   has already made every qualified name physical.
 //! - **Stored programs** (procedures, functions, triggers, events) run as
 //!   `sprig_ctl` too, always with the session's own backend account as
-//!   `DEFINER` (chapter 29, "Definers of stored code"): see
-//!   `stored_program`.
+//!   `DEFINER`: see `stored_program`.
 //! - **Database DDL** (`CREATE`, `ALTER`, `DROP DATABASE`) runs as the
 //!   cluster's provisioning account `sprig_ctl`: creating a `t<id>_d...`
 //!   schema needs a server-level privilege no tenant's backend account
-//!   should hold (R0; chapter 29 derives per-tenant grants in M0.5).
+//!   should hold.
 //! - **Reads** for phase 3 (`SHOW CREATE`, the schema's defaults) and the
 //!   reconciler's questions go through `sprig_ctl` on the writer too, so
 //!   they never disturb the session's state.
@@ -48,17 +47,21 @@ pub struct GatewayDdl<'a> {
     /// `sprig_ctl`'s pool, to check stored programs' definers.
     ctl_pool: Option<mysql_async::Pool>,
     /// The version string the session's persona reports: `VERSION()` in a
-    /// body becomes it (gaps row 53).
+    /// body becomes it.
     version: Option<String>,
-    /// The backends' OK packets for the statement's object DDL, summed
-    /// (R4, decision X36): what the client's OK reports.
+    /// The backends' OK packets for the statement's object DDL, summed:
+    /// what the client's OK reports.
     rows: Option<Arc<BackendRows>>,
+    /// Another user's backend account the statement named as `DEFINER`
+    /// (a `SET_ANY_DEFINER` holder's): views then run as
+    /// `sprig_ctl` with it too, like stored programs.
+    definer: Option<(String, String)>,
 }
 
-/// The rows the backends' OK packets reported for one DDL statement (R4,
-/// decision X36): affected rows, and the `Records: R  Duplicates: D
-/// Warnings: W` info an `ALTER TABLE`, `CREATE INDEX` or `DROP INDEX`
-/// carries (on MariaDB as on MySQL), summed over the statements run.
+/// The rows the backends' OK packets reported for one DDL statement:
+/// affected rows, and the `Records: R Duplicates: D Warnings: W` info an
+/// `ALTER TABLE`, `CREATE INDEX` or `DROP INDEX` carries (on MariaDB as on
+/// MySQL), summed over the statements run.
 #[derive(Debug, Default)]
 pub struct BackendRows(std::sync::Mutex<(u64, Option<[u64; 3]>)>);
 
@@ -120,10 +123,20 @@ impl<'a> GatewayDdl<'a> {
             ctl_pool: None,
             version: None,
             rows: None,
+            definer: None,
         }
     }
 
-    /// Sums the backends' OK packets into `rows` (R4, decision X36).
+    /// Stored programs and views get `definer` (user, host) as their
+    /// `DEFINER` instead of the session's account (`SET_ANY_DEFINER`).
+    /// `None` keeps the session's.
+    #[must_use]
+    pub fn defined_by(mut self, definer: Option<(String, String)>) -> Self {
+        self.definer = definer;
+        self
+    }
+
+    /// Sums the backends' OK packets into `rows`.
     #[must_use]
     pub fn counting(mut self, rows: Arc<BackendRows>) -> Self {
         self.rows = Some(rows);
@@ -131,7 +144,7 @@ impl<'a> GatewayDdl<'a> {
     }
 
     /// `VERSION()` in views and stored programs gives `v`, the version the
-    /// session's persona reports (chapter 07 step 12; gaps row 53).
+    /// session's persona reports.
     #[must_use]
     pub fn reporting_version(mut self, v: String) -> Self {
         self.version = Some(v);
@@ -243,7 +256,7 @@ impl GatewayDdl<'_> {
 
     /// The `sql_mode` a stored program created by this session records
     /// (`None`: the server's default, which `sprig_ctl` runs too), and the
-    /// lexer options of the session's text (chapter 28, R4; gaps row 27).
+    /// lexer options of the session's text.
     async fn session_modes(&self) -> (Option<String>, LexOptions) {
         let bs = self.bs.lock().await;
         let vars = bs.vars();
@@ -268,8 +281,8 @@ impl GatewayDdl<'_> {
     }
 
     /// The session's `character_set_client` and `collation_connection`,
-    /// which a stored program records (R4 round 6, gaps row 67): MariaDB
-    /// keeps the creating connection's, which would be `sprig_ctl`'s.
+    /// which a stored program records: MariaDB keeps the creating
+    /// connection's, which would be `sprig_ctl`'s.
     async fn session_charsets(&self) -> Charsets {
         let bs = self.bs.lock().await;
         let v = &bs.vars().vars;
@@ -283,7 +296,10 @@ impl GatewayDdl<'_> {
     /// `DEFINER` and the session's `sql_mode`, then the definer MariaDB
     /// recorded is checked.
     async fn stored_program(&self, stmt: &PhysicalDdl, mode: Option<&str>) -> Result<()> {
-        let (user, host) = self.session_account().await?;
+        let (user, host) = match &self.definer {
+            Some(d) => d.clone(),
+            None => self.session_account().await?,
+        };
         let definer = format!("DEFINER={}@{}", bq(&user), bq(&host));
         let charsets = self.session_charsets().await;
         let sql = in_mode(
@@ -316,11 +332,11 @@ impl GatewayDdl<'_> {
 async fn verify_definer_on(pool: &mysql_async::Pool, stmt: &PhysicalDdl, want: &str) -> Result<()> {
     use mysql_async::prelude::Queryable;
     let (kind, name) = match &stmt.effect {
-        Effect::Create { kind, name } => (*kind, name),
-        Effect::Alter {
-            kind: ObjectKind::Event,
+        Effect::Create { kind, name }
+        | Effect::Alter {
+            kind: kind @ (ObjectKind::Event | ObjectKind::View),
             name,
-        } => (ObjectKind::Event, name),
+        } => (*kind, name),
         _ => return Ok(()),
     };
 
@@ -344,6 +360,11 @@ async fn verify_definer_on(pool: &mysql_async::Pool, stmt: &PhysicalDdl, want: &
             "SELECT DEFINER FROM information_schema.EVENTS WHERE EVENT_SCHEMA = ? \
                  AND EVENT_NAME = ?",
             "EVENT",
+        ),
+        ObjectKind::View => (
+            "SELECT DEFINER FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ? \
+                 AND TABLE_NAME = ?",
+            "VIEW",
         ),
         _ => return Ok(()),
     };
@@ -555,20 +576,20 @@ fn insert_definer(sql: &[u8], lex: LexOptions, definer: &str) -> Option<Vec<u8>>
     Some(out)
 }
 
-/// `sql` run under `mode` (chapter 28, R4; gaps row 27): MariaDB records
-/// the creating session's `sql_mode` with each routine, trigger and event,
-/// as MySQL does, and parses the statement under it. `sprig_ctl`'s pooled
-/// connection gets `SET SESSION sql_mode` first, in the same request; the
-/// pool resets the connection when it comes back.
+/// `sql` run under `mode`: MariaDB records the creating session's
+/// `sql_mode` with each routine, trigger and event, as MySQL does, and
+/// parses the statement under it. `sprig_ctl`'s pooled connection gets
+/// `SET SESSION sql_mode` first, in the same request; the pool resets the
+/// connection when it comes back.
 fn in_mode(sql: &str, mode: Option<&str>, charsets: &Charsets) -> String {
     let lit = |v: &str| sprig_sql::names::rewrite::sql_string(v, false);
     let mut sets: Vec<String> = Vec::new();
     if let Some(m) = mode {
         sets.push(format!("sql_mode = {}", lit(m)));
     }
-    // R4 round 6 (gaps row 67): the session's character sets, which MariaDB
-    // records with the program. The client character set only when the
-    // text reads the same in it (the gateway holds the statement as UTF-8).
+    // The session's character sets, which MariaDB records with the program.
+    // The client character set only when the text reads the same in it (the
+    // gateway holds the statement as UTF-8).
     if let Some(cs) = charsets.client.as_deref()
         && (sql.is_ascii()
             || ["utf8mb4", "utf8mb3", "utf8"]
@@ -594,12 +615,11 @@ struct Charsets {
     collation: Option<String>,
 }
 
-/// Chapter 07 step 12: a `CREATE` or `ALTER` of a view, routine, trigger
-/// or event with its account functions and `DATABASE()` turned into
-/// lookups of logical names ([`sprig_sql::names::stored::substitute`]);
-/// `None` when there is nothing to change.
-/// `mode` is the `sql_mode` the body is created under: with `ORACLE`,
-/// `SQLERRM` is mapped too.
+/// A `CREATE` or `ALTER` of a view, routine, trigger or event with its
+/// account functions and `DATABASE()` turned into lookups of logical names
+/// ([`sprig_sql::names::stored::substitute`]); `None` when there is nothing
+/// to change. `mode` is the `sql_mode` the body is created under: with
+/// `ORACLE`, `SQLERRM` is mapped too.
 fn names_in_body(
     stmt: &PhysicalDdl,
     lex: LexOptions,
@@ -633,7 +653,7 @@ fn names_in_body(
 
 /// Routines, triggers and events: with binary logging on, MariaDB refuses
 /// to create them (1419) for an account without `SUPER`, unless
-/// `log_bin_trust_function_creators` is on server-wide. R0 runs them as
+/// `log_bin_trust_function_creators` is on server-wide. The gateway runs them as
 /// `sprig_ctl` in the object's schema (the engine's `PhysicalDdl::schema`),
 /// where unqualified names in the statement resolve as in the session (the
 /// object's database is the session's current one unless qualified, and
@@ -650,6 +670,22 @@ fn stored_program(e: &Effect) -> bool {
     matches!(
         k,
         ObjectKind::Procedure | ObjectKind::Function | ObjectKind::Trigger | ObjectKind::Event
+    )
+}
+
+/// `CREATE` or `ALTER` of a view: with another account as `DEFINER`
+/// it runs as `sprig_ctl` with that account written in, since
+/// the session's backend account can't name another definer.
+fn view_definition(e: &Effect) -> bool {
+    matches!(
+        e,
+        Effect::Create {
+            kind: ObjectKind::View,
+            ..
+        } | Effect::Alter {
+            kind: ObjectKind::View,
+            ..
+        }
     )
 }
 
@@ -683,7 +719,8 @@ impl DdlExecutor for GatewayDdl<'_> {
         let (mode, lex) = self.session_modes().await;
         let sub = names_in_body(stmt, lex, mode.as_deref(), self.version.as_deref());
         let stmt = sub.as_ref().unwrap_or(stmt);
-        if stored_program(&stmt.effect) {
+        if stored_program(&stmt.effect) || (self.definer.is_some() && view_definition(&stmt.effect))
+        {
             return self.stored_program(stmt, mode.as_deref()).await;
         }
         if stmt.effect.on_schema() {
@@ -761,11 +798,11 @@ impl DdlExecutor for GatewayDdl<'_> {
     }
 }
 
-/// Chapter 21's wait for chapter 20's shard jobs (open question 10): a
-/// split, merge or shard move holds `mover/shard-locks/<tenant>/g<g>s<s>`
-/// in the tenant's home DC tier for each source shard, from admission
-/// until the job ends. A schema change on such a shard polls until the
-/// lock is gone, up to `wait` (`ddl.mover_wait_minutes`), then fails with
+/// The wait for shard jobs: a split, merge or shard move holds
+/// `mover/shard-locks/<tenant>/g<g>s<s>` in the tenant's home DC tier for
+/// each source shard, from admission until the job ends. A schema change on
+/// such a shard polls until the lock is gone, up to `wait`
+/// (`ddl.mover_wait_minutes`), then fails with
 /// 39470. A locked shard that is no longer in its group's map belongs to
 /// a job that already committed: the statement's layout is stale, so it
 /// fails with 39110 and the client retries on the new map.
@@ -887,18 +924,18 @@ impl MoverLocks {
 
 /// Where a database's shards are: for its template schema and a table
 /// (`None`: routines, events and views), the shard schemas and their
-/// clusters, or `None` when the statement stays on the template (R0).
+/// clusters, or `None` when the statement stays on the template.
 pub type ShardLayout =
     Arc<dyn Fn(&str, Option<&str>) -> Option<Vec<(String, ClusterId)>> + Send + Sync>;
 
-/// Chapter 21 in the gateway: DDL on a table group's shards.
+/// DDL on a table group's shards.
 ///
 /// The catalog's [`DdlEngine`](sprig_catalog::ddl::DdlEngine) asks
 /// [`DdlExecutor::shards`] where a statement goes; this executor answers
-/// from `layout` (in R1 the router's topology) and runs each shard's
-/// statement as `sprig_ctl` on that shard's cluster, after the gateway's
-/// own privilege check. Stored programs keep chapter 29's rule on every
-/// shard: their definer is the creating user's backend account
+/// from `layout` (the router's topology) and runs each shard's statement as
+/// `sprig_ctl` on that shard's cluster, after the gateway's own privilege
+/// check. Stored programs keep the definer rule on every shard: their
+/// definer is the creating user's backend account
 /// (`t<tenant>_u<user>`@`%`), written into the statement and checked after
 /// creation. Statements on schemas outside the layout (unsharded tables,
 /// the template) go to the session's [`GatewayDdl`] as before.
@@ -945,7 +982,7 @@ impl<'a> ShardedDdl<'a> {
         }
     }
 
-    /// The same executor waiting for chapter 20's shard jobs (see
+    /// The same executor waiting for the mover's shard jobs (see
     /// [`MoverLocks`]).
     #[must_use]
     pub fn with_mover_locks(mut self, movers: MoverLocks) -> Self {
@@ -1000,7 +1037,9 @@ impl DdlExecutor for ShardedDdl<'_> {
         let (mode, lex) = self.inner.session_modes().await;
         let sub = names_in_body(stmt, lex, mode.as_deref(), self.inner.version.as_deref());
         let stmt = sub.as_ref().unwrap_or(stmt);
-        if stored_program(&stmt.effect) && !matches!(stmt.effect, Effect::Drop { .. }) {
+        if (stored_program(&stmt.effect) && !matches!(stmt.effect, Effect::Drop { .. }))
+            || (self.inner.definer.is_some() && view_definition(&stmt.effect))
+        {
             return self.stored_program_on(&pool, stmt, mode.as_deref()).await;
         }
         // Undo re-creations (`Effect::Restore`) keep the definer they had.
@@ -1100,7 +1139,7 @@ impl DdlExecutor for ShardedDdl<'_> {
 mod tests {
     use super::*;
 
-    /// R4, decision X36: the backends' `Records:` info lines are summed;
+    /// The backends' `Records:` info lines are summed;
     /// a statement without one (a rename) leaves none.
     #[test]
     fn backend_rows_sum_the_info_lines() {
@@ -1145,9 +1184,9 @@ mod tests {
             in_mode("CREATE VIEW v AS SELECT 1", None, &none),
             "CREATE VIEW v AS SELECT 1"
         );
-        // R4 round 6 (gaps row 67): the session's character sets too; a
-        // client character set the UTF-8 text doesn't read the same in is
-        // left out unless the text is ASCII.
+        // The session's character sets too; a client character set the
+        // UTF-8 text doesn't read the same in is left out unless the text
+        // is ASCII.
         let latin1 = Charsets {
             client: Some("latin1".to_owned()),
             collation: Some("latin1_swedish_ci".to_owned()),
@@ -1375,8 +1414,8 @@ mod mover_lock_tests {
         SchemaName::shard(T, DbId(1), GroupId(3), ShardId(s))
     }
 
-    /// Chapter 21 open question 10: a schema change waits for a split of
-    /// its shards, gives up with 39470, and calls a replaced shard stale.
+    /// A schema change waits for a split of its shards, gives up with
+    /// 39470, and calls a replaced shard stale.
     #[tokio::test]
     async fn schema_changes_wait_for_shard_jobs() {
         let s: Arc<dyn MetaStore> = Arc::new(MemStore::new(Tier::Dc(DcId::new("dc-a").unwrap())));

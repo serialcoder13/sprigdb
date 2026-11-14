@@ -1,5 +1,5 @@
-//! The Admin API's sharding calls (chapter 20's `sprigctl shard list|split|
-//! merge|move`, chapter 16's `sprigctl advisor run|show|apply`), over the
+//! The Admin API's sharding calls (`sprigctl shard list|split|merge|move`,
+//! `sprigctl advisor run|show|apply`), over the
 //! controller's [`ShardingLoop`](crate::sharding::ShardingLoop).
 //!
 //! ```text
@@ -74,7 +74,7 @@ impl AdminService {
         self.sharding()?.shards(t).await
     }
 
-    /// `sprigctl graph list <tenant>` (chapter 43).
+    /// `sprigctl graph list <tenant>`.
     ///
     /// # Errors
     /// The tenant lookup's and the loop's errors.

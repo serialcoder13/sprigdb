@@ -1,4 +1,4 @@
-//! The analyze job (`auto_index_analyze`, chapter 13 "Statistics").
+//! The analyze job (`auto_index_analyze`).
 //!
 //! Statistics are filled only by `ANALYZE ... PERSISTENT`. When a
 //! candidate's columns have no statistics, or the table changed by more
@@ -13,13 +13,12 @@
 //! ```
 //!
 //! `LOCAL` keeps it out of the binlog. Measured on 11.8.9:
-//! `analyze_sample_percentage` is settable per session (chapter 13's open
-//! question 2, second half).
+//! `analyze_sample_percentage` is settable per session.
 //!
 //! [`AnalyzeThrottle`] keeps the job from hammering a table: at most one
 //! analyze per table per [`AnalyzeLimits::per_table`], and at most
-//! [`AnalyzeLimits::max_per_window`] per tenant per window. The chapter
-//! names no settings for these; the defaults are this crate's (one per
+//! [`AnalyzeLimits::max_per_window`] per tenant per window. There are no
+//! settings for these; the defaults are this crate's (one per
 //! table per 6 hours, 20 per tenant per hour).
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
@@ -81,7 +80,7 @@ impl AnalyzePlan {
 /// Throttle and staleness limits.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AnalyzeLimits {
-    /// Stale above this relative change in rows (chapter 13: 0.2).
+    /// Stale above this relative change in rows (default 0.2).
     pub stale_ratio: f64,
     /// At most one analyze per table per this.
     pub per_table: Duration,

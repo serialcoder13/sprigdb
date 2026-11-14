@@ -22,6 +22,8 @@
 //! a failed publish is retried with backoff (the change isn't skipped);
 //! the checkpoint moves after what was published, at most every second:
 //! at least once, in commit order
+//! the tail is read by a task of its own (sprig_feed::pump), so the loop's
+//!   1 s housekeeping wait never cancels a read half-way (decision r9-131)
 //! the job ends when the subscription is dropped (checked every 5 s)
 //! ```
 
@@ -33,6 +35,7 @@ use sprig_common::ids::TenantId;
 use sprig_common::{Result, SprigCode, SprigError};
 use sprig_controller::dispatch::JobClass;
 use sprig_feed::names::CatalogResolver;
+use sprig_feed::pump::Pump;
 use sprig_feed::subs::Subscriptions;
 use sprig_feed::{
     ChangeEvent, Clusters, FeedItem, MetaPlacement, Op, ResumeToken, StartAt, TailOptions,
@@ -219,6 +222,43 @@ fn now_ms() -> u64 {
     .unwrap_or(0)
 }
 
+/// What the forwarder's loop reads next.
+#[derive(Debug)]
+enum Next {
+    /// A feed item.
+    Item(FeedItem),
+    /// Nothing within the wait: the loop's housekeeping runs.
+    Quiet,
+    /// The job was cancelled.
+    Stop,
+}
+
+/// The tail as the loop reads it: in a task of its own (decision r9-131).
+/// `TenantTail::next` isn't cancel-safe, and the loop's 1 s wait would
+/// otherwise drop a transaction whose catalog lookup outlasts it (a new
+/// table's first row while a move holds the catalog, say).
+type Feed = Pump<FeedItem>;
+
+fn feed_of(tail: TenantTail) -> Feed {
+    Pump::start(tail, Pump::<FeedItem>::AHEAD, "change exchange forwarder")
+}
+
+/// The next feed item, or [`Next::Quiet`] after `wait` without one.
+/// Cancel-safe: an item is taken only when it is returned.
+async fn read(
+    feed: &mut Feed,
+    cancel: &sprig_common::CancellationToken,
+    wait: Duration,
+) -> Result<Next> {
+    tokio::select! {
+        () = cancel.cancelled() => Ok(Next::Stop),
+        r = tokio::time::timeout(wait, feed.next()) => match r {
+            Ok(i) => Ok(Next::Item(i?)),
+            Err(_) => Ok(Next::Quiet),
+        },
+    }
+}
+
 #[allow(clippy::too_many_lines)] // the loop of the module docs
 async fn serve(env: &LogicEnv, cx: &JobCtx, tenant: TenantId, name: &str) -> Result<Value> {
     let subs = Subscriptions::new(Arc::clone(&env.dc));
@@ -241,7 +281,7 @@ async fn serve(env: &LogicEnv, cx: &JobCtx, tenant: TenantId, name: &str) -> Res
         Some(cp) => StartAt::After(cp.resume_token()?),
         None => StartAt::Now,
     };
-    let mut tail = TenantTail::start(
+    let tail = TenantTail::start(
         tenant,
         start,
         Arc::clone(&env.clusters) as Arc<dyn Clusters>,
@@ -252,6 +292,7 @@ async fn serve(env: &LogicEnv, cx: &JobCtx, tenant: TenantId, name: &str) -> Res
         TailOptions::default(),
     )
     .await?;
+    let mut feed = feed_of(tail);
     tracing::info!(%tenant, table = %spec.table, exchange = %spec.exchange, job = %cx.job_id, "change exchange forwarder started");
     let run_as = RunAs {
         tenant: tenant.0,
@@ -290,12 +331,10 @@ async fn serve(env: &LogicEnv, cx: &JobCtx, tenant: TenantId, name: &str) -> Res
                 .progress(json!({"published": published, "filtered": filtered}))
                 .await;
         }
-        let item = tokio::select! {
-            () = cx.cancel.cancelled() => break,
-            r = tokio::time::timeout(Duration::from_secs(1), tail.next()) => match r {
-                Ok(i) => i?,
-                Err(_) => continue,
-            },
+        let item = match read(&mut feed, &cx.cancel, Duration::from_secs(1)).await? {
+            Next::Item(i) => i,
+            Next::Quiet => continue,
+            Next::Stop => break,
         };
         let e = match item {
             FeedItem::Event(e) => e,
@@ -434,6 +473,56 @@ async fn serve(env: &LogicEnv, cx: &JobCtx, tenant: TenantId, name: &str) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Decision r9-131: the 1 s housekeeping wait fires while the tail
+    /// waits on a new table's catalog lookup (1.5 s here). Every change
+    /// must still come once, in order, and a restart from the last token
+    /// taken must repeat none.
+    #[tokio::test(start_paused = true)]
+    async fn the_housekeeping_wait_never_drops_a_change() {
+        use sprig_feed::testing::{SlowFeed, keys_once};
+        let feed = SlowFeed::new(12, Duration::from_millis(1500));
+        let cancel = sprig_common::CancellationToken::new();
+        let mut items = Vec::new();
+        let mut last = None;
+        let mut f = feed_of(feed.tail().await);
+        // The first half, then a restart from the last token handled.
+        let end = tokio::time::Instant::now() + Duration::from_secs(60);
+        while tokio::time::Instant::now() < end && keys_once(&items).len() < 6 {
+            if let Next::Item(i) = read(&mut f, &cancel, Duration::from_secs(1)).await.unwrap() {
+                if !matches!(i, FeedItem::Event(_)) {
+                    last = Some(i.token().clone());
+                }
+                items.push(i);
+            }
+        }
+        drop(f);
+        // Events after the last boundary token weren't checkpointed.
+        let token = last.unwrap();
+        let mut kept: Vec<FeedItem> = Vec::new();
+        for i in items {
+            let boundary = !matches!(i, FeedItem::Event(_)) && i.token() == &token;
+            kept.push(i);
+            if boundary {
+                break;
+            }
+        }
+        let mut f = feed_of(feed.tail_from(StartAt::After(token)).await);
+        let end = tokio::time::Instant::now() + Duration::from_secs(120);
+        while tokio::time::Instant::now() < end && keys_once(&kept).len() < 12 {
+            match read(&mut f, &cancel, Duration::from_secs(1)).await.unwrap() {
+                Next::Item(i) => kept.push(i),
+                Next::Quiet => {}
+                Next::Stop => unreachable!(),
+            }
+        }
+        assert_eq!(keys_once(&kept), (1..=12).collect::<Vec<_>>());
+        cancel.cancel();
+        assert!(matches!(
+            read(&mut f, &cancel, Duration::from_secs(1)).await.unwrap(),
+            Next::Stop
+        ));
+    }
 
     #[test]
     fn ops_and_bodies() {

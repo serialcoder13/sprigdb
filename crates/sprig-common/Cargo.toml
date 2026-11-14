@@ -9,12 +9,12 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-# The audit sink trait (chapter 47).
+# The audit sink trait.
 async-trait.workspace = true
 axum.workspace = true
-# Trace and span ids (chapter 47).
+# Trace and span ids.
 getrandom.workspace = true
-# The OTLP/HTTP trace exporter (chapter 47).
+# The OTLP/HTTP trace exporter.
 bytes.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["client", "http1"] }
@@ -23,7 +23,7 @@ serde_json.workspace = true
 gethostname.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
-# The Admin API over TLS (`https`, hardening round 2): both already in the tree.
+# The Admin API over TLS (`https`): both already in the tree.
 rustls.workspace = true
 tokio-rustls.workspace = true
 # hyper's connector trait for the internal services' TLS connector (MIT).

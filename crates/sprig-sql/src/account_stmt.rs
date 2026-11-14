@@ -1,6 +1,6 @@
-//! Account statements in SQL (chapter 29, "MySQL account statements"):
-//! parsing into [`sprig_auth::authz::stmt::AccountStmt`] with logical
-//! names; `sprig_auth::authz::account_sql` runs them.
+//! MySQL account statements in SQL: parsing into
+//! [`sprig_auth::authz::stmt::AccountStmt`] with logical names;
+//! `sprig_auth::authz::account_sql` runs them.
 //!
 //! ```text
 //! CREATE USER [IF NOT EXISTS] acct [auth] {, acct [auth]} [DEFAULT ROLE roles]
@@ -25,7 +25,7 @@
 //! ```
 //!
 //! [`parse`] returns `None` for text that isn't one of these, so other
-//! paths keep it (a user's own password change, chapter 14). Shapes
+//! paths keep it (a user's own password change). Shapes
 //! SprigDB doesn't take (`GRANT PROXY`, `IDENTIFIED ... AS 'hash'`,
 //! `RENAME USER`, password and resource options) fail with 1235.
 
@@ -257,6 +257,7 @@ pub fn parse(sql: &[u8], opts: &LexOptions) -> Option<R<AccountStmt>> {
         || p.word("GRANT")
         || p.word("REVOKE")
         || p.word("SHOW") && p.is_word(1, "GRANTS")
+        || p.word("SHOW") && p.is_word(1, "CREATE") && p.is_word(2, "USER")
         || p.word("FLUSH") && p.is_word(1, "PRIVILEGES")
         || p.word("RENAME") && p.is_word(1, "USER")
         || p.word("SET")
@@ -270,8 +271,7 @@ pub fn parse(sql: &[u8], opts: &LexOptions) -> Option<R<AccountStmt>> {
 }
 
 /// `SET PASSWORD FOR acct = 'pw'` (after `SET PASSWORD FOR`): `ALTER USER
-/// acct IDENTIFIED BY 'pw'` under MySQL's own privilege rule for it
-/// (bugfix-26).
+/// acct IDENTIFIED BY 'pw'` under MySQL's own privilege rule for it.
 fn set_password_for(p: &mut P<'_>) -> R<AccountStmt> {
     let user = p.user_spec()?;
     if !p.eat_punct("=") {
@@ -318,6 +318,11 @@ fn stmt(p: &mut P<'_>) -> R<AccountStmt> {
         }
         p.end()?;
         return Ok(AccountStmt::ShowGrants { account, using });
+    }
+    if p.eat_words(&["SHOW", "CREATE", "USER"]) {
+        let account = p.user_spec()?;
+        p.end()?;
+        return Ok(AccountStmt::ShowCreateUser { account });
     }
     if p.eat_words(&["CREATE", "USER"]) {
         let if_not_exists = p.eat_words(&["IF", "NOT", "EXISTS"]);
@@ -574,7 +579,7 @@ fn user_options(p: &mut P<'_>) -> R<UserOptions> {
         } else if p.eat_words(&["DISCARD", "OLD", "PASSWORD"]) {
             o.discard_old = true;
         } else if p.word("COMMENT") || p.word("ATTRIBUTE") {
-            // Chapter 29's `SPRIG_USER_ATTR()` reads these (MySQL 8.4's
+            // `SPRIG_USER_ATTR()` reads these (MySQL 8.4's
             // `user_attributes.metadata`).
             if o.attribute.is_some() {
                 return Err(p.err());
@@ -625,7 +630,7 @@ fn priv_list(p: &mut P<'_>) -> R<Vec<PrivItem>> {
         if words.is_empty() {
             return Err(p.err());
         }
-        // Neo4j's property list (`SET PROPERTY {*}`, chapter 43 round 5):
+        // Neo4j's property list (`SET PROPERTY {*}`):
         // kept in the name, so a list other than `*` is refused later.
         if p.eat_punct("{") {
             let mut inner = Vec::new();
@@ -663,9 +668,9 @@ fn priv_list(p: &mut P<'_>) -> R<Vec<PrivItem>> {
     }
 }
 
-/// `GRAPH [db.]g NODES L` / `GRAPH [db.]g RELATIONSHIPS T` (chapter 43,
-/// R8), when `GRAPH` is followed by a graph name and an element kind (so
-/// `ON graph TO ...` still names a table called `graph`).
+/// `GRAPH [db.]g NODES L` / `GRAPH [db.]g RELATIONSHIPS T`, when `GRAPH` is
+/// followed by a graph name and an element kind (so `ON graph TO ...` still
+/// names a table called `graph`).
 fn graph_target(p: &mut P<'_>) -> Option<GrantOn> {
     if !p.word("GRAPH") {
         return None;
@@ -922,7 +927,7 @@ mod tests {
                 ..
             } if name == "KNOWS"
         ));
-        // Per-label write grants (round 5).
+        // Per-label write grants.
         assert!(matches!(
             parse_ok("GRANT CREATE, DELETE, SET PROPERTY {*} ON GRAPH g NODES L TO w"),
             AccountStmt::Grant { ref privileges, .. }

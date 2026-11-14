@@ -36,6 +36,7 @@ The chart installs none of the operators above. Build the image with `deploy/com
 | StatefulSet and Service | `sprigdb-controller` | Admin API on 7480, internal port 7400 (permits and peer pings), telemetry on 9180. Pods are `sprigdb-controller-0`, `-1`, ...; they start in parallel and elect a leader through etcd |
 | Headless Service | `sprigdb-controller-pods` | One DNS name per controller pod, published before the pod is ready. Each controller registers `<pod>.sprigdb-controller-pods.<namespace>.svc:7480` as its Admin address, where gateways forward Admin calls to the leader. Also the controllers' telemetry port, 9180 |
 | Deployment, HorizontalPodAutoscaler and Service | `sprigdb-gateway` | Client ports 3306, 3307, 27017, 6379, 8080 and 8443; peer port 7403 |
+| Headless Service | `sprigdb-gateway-pods` | One DNS name per gateway pod, `<pod IP with dashes>.sprigdb-gateway-pods.<namespace>.svc`, published before the pod is ready. Each gateway registers that name, so Kafka clients, other gateways (cross-gateway `KILL`, drains, transaction forwarding, queue and pub/sub relays on 7403) and workers can reach it; the gateway certificate covers it |
 | Service | `sprigdb-gateway-health` | The gateways' telemetry port, 9180 |
 | Deployment | `sprigdb-worker` | Background jobs |
 | Headless Service | `sprigdb-worker-telemetry` | The workers' telemetry port, 9180 |
@@ -86,7 +87,7 @@ Every SprigDB pod runs as a non-root user (65532) with a read-only root file sys
 | `gateway.clientTls.mountPath` | string | `/etc/sprigdb/client-tls` | Where that Secret is mounted in the gateways |
 | `gateway.clientTls.clientCert.default` | string | `"off"` | Client certificates on every TLS listener (`mysql`, `mariadb`, `https`, `mongo`, `redis`, `bolt`, `kafka`, `amqps`): `"off"`, `optional` or `required`. Quote `"off"`; a bare `off` is read as false, which the chart also treats as off. See [Client certificates](#client-certificates) |
 | `gateway.clientTls.clientCert.listeners.<name>` | string | none | One listener's mode, overriding `default`. The only way to set `http` and `amqp`, whose TLS is off by default |
-| `gateway.clientTls.clientCa.secretName`, `.configMap` | string | `""` | A Secret, or a ConfigMap (such as a trust-manager bundle), holding the PEM CAs that sign client certificates. Required when any listener isn't off |
+| `gateway.clientTls.clientCa.secretName`, `.configMap` | string | `""` | A Secret, or a ConfigMap (such as a trust-manager bundle), holding the PEM CAs that sign client certificates. Required when any listener isn't off. Without it, the chart leaves the client-certificate settings alone |
 | `gateway.clientTls.clientCa.key` | string | `ca.crt` | The file in that Secret or ConfigMap |
 | `gateway.clientTls.clientCa.mountPath` | string | `/etc/sprigdb/client-ca` | Where it is mounted in the gateways |
 | `worker.replicas` | int | `2` | |
@@ -107,6 +108,23 @@ Every SprigDB pod runs as a non-root user (65532) with a read-only root file sys
 | `networkPolicy.enabled` | bool | `true` | Only SprigDB pods may reach etcd, and the controller's Admin and telemetry ports |
 
 `values.schema.json` checks the values on install: a wrong type, an etcd size other than 1, 3 or 5, or a pool without its required fields is refused before anything is created.
+
+## What has been tested on a cluster
+
+The chart's smoke test, `deploy/kind/smoke.sh`, installs it on a local kind cluster with TLS on and checks, from pods inside the cluster:
+
+- `helm lint` and `helm template`;
+- the controller StatefulSet, each controller's per-pod Admin address, and the Admin API over HTTPS with `--ca-file`;
+- logins on the MySQL and MariaDB ports;
+- the gateway Service publishing all ten listener ports, with Bolt, Kafka and AMQP clients connecting;
+- required client certificates: a valid certificate is accepted, a missing or foreign one refused;
+- a hand-set `listener.<name>.client_cert` value surviving `helm upgrade`;
+- `/metrics` on all four telemetry Services;
+- an upgrade from the earlier chart, whose controllers were a Deployment, with the data kept.
+
+Run it with `deploy/kind/smoke.sh`; `SMOKE_PHASES` picks a subset of its phases (`lint`, `install`, `admin`, `clients`, `mtls`, `metrics`, `backup`, `upgrade`), and `SMOKE_KEEP=1` keeps the cluster afterwards.
+
+Not covered by that test: cert-manager and mariadb-operator themselves (the test uses stand-ins, so no real backup runs), and MongoDB clients.
 
 ## Install
 
@@ -145,7 +163,7 @@ kubectl -n sprigdb get sprigclusterpools,sprigclusters
 What happens next:
 
 1. etcd starts; the controllers connect, the first DC's controllers bootstrap the deployment, and one controller becomes the DC leader.
-2. The settings Job waits for the controller, registers the DC with `dc.tags`, and applies `settings.global`, the optional listeners, the client certificate, the client-certificate modes and CA, and then `settings.dc` (all recorded with reason `helm`). It runs again after every upgrade.
+2. The settings Job waits for the controller, registers the DC with `dc.tags`, and applies `settings.global`, the optional listeners, the client certificate, the client-certificate modes and CA (only when `gateway.clientTls.clientCa` is set), and then `settings.dc` (all recorded with reason `helm`). It runs again after every upgrade.
 3. The operator creates `minClusters` SprigClusters in each pool and turns each into a mariadb-operator `MariaDB`.
 4. When a MariaDB is Ready, the operator creates the system accounts `sprig_ctl` and `sprig_repl` over TLS, stores their passwords in the Secret `sprigdb-cluster-credentials` (mounted on controllers, workers and gateways at `/etc/sprigdb/creds`), and registers the cluster with the controller. The controller's probes start, and the SprigCluster becomes `Active`.
 
@@ -202,10 +220,12 @@ gateway:
 What the chart does with these values:
 
 - It mounts the CA in every gateway at `clientCa.mountPath`, and the settings Job sets `tls.bundles.default.client_ca_path` to `<mountPath>/<key>` at this DC's scope.
-- The settings Job sets `listener.<name>.client_cert` on all ten listeners at this DC's scope, on every install and upgrade: the listener's entry under `clientCert.listeners`, else `clientCert.default` for the TLS listeners, else `off`. A value set by hand with `sprigctl` at the DC scope is overwritten at the next upgrade; put lasting values in these chart values, or in `settings.dc`, which the Job applies afterwards.
+- When `clientCa.secretName` or `clientCa.configMap` is set, the settings Job sets `listener.<name>.client_cert` on all ten listeners at this DC's scope, on every install and upgrade: the listener's entry under `clientCert.listeners`, else `clientCert.default` for the TLS listeners, else `off`. The chart then owns these values, and one set by hand with `sprigctl` at the DC scope is overwritten at the next upgrade; put lasting values in these chart values, or in `settings.dc`, which the Job applies afterwards.
+- When no `clientCa` is set, the Job writes neither `tls.bundles.default.client_ca_path` nor any `listener.<name>.client_cert`, so values you set by hand with `sprigctl` survive upgrades.
+- To turn client certificates off with the chart, set the modes to `"off"` and keep `clientCa` for that upgrade, so the Job writes the `off` values; remove `clientCa` afterwards if you like.
 - `http` and `amqp` take a value only from `clientCert.listeners`, and their TLS must be turned on first (`listener.http.tls` or `listener.amqp.tls` in `settings.dc`); otherwise the gateway rejects the listener change.
 - If any listener's mode isn't off and neither `clientCa.secretName` nor `clientCa.configMap` is set, the chart refuses to render: "gateway.clientTls.clientCert asks for client certificates: name the CA that signs them in gateway.clientTls.clientCa (secretName or configMap)".
-- The gateways read the CA file when a listener's settings change or a gateway starts, not when the file changes. After rotating the CA, restart the gateways (`kubectl -n sprigdb rollout restart deployment/sprigdb-gateway`).
+- The gateways re-read the CA file within a few seconds of it changing, as they do the server certificate, with no restart. When the Secret or ConfigMap is updated (by trust-manager, for example), Kubernetes updates the mounted file and the gateways pick it up. Keep the old and the new CA in the bundle while clients move to certificates from the new one.
 
 `helm install` and `helm upgrade` print which listeners ask for certificates. See [Client certificates](../security/tls.md#client-certificates) for the modes and what each protocol checks.
 

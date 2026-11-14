@@ -86,6 +86,11 @@ pub struct OperatorConfig {
     /// The CA bundle an `https://` Admin API's certificate is checked
     /// against (`SPRIG_OPERATOR_CONTROLLER_CA_FILE`).
     pub controller_ca_file: Option<String>,
+    /// Where the controller named `{leader}` serves the Admin API
+    /// (`SPRIG_OPERATOR_CONTROLLER_LEADER_ADMIN`, for example
+    /// `https://{leader}.sprigdb-controller-pods.<ns>.svc:7480`): calls only
+    /// the DC leader serves follow its 39504 refusal there.
+    pub controller_leader_admin: Option<String>,
     /// How long a `MariaDB` may take to be Ready.
     pub ready_timeout: Duration,
     /// How long the primary must not answer, with its pod not Ready, before
@@ -112,6 +117,7 @@ impl OperatorConfig {
             cluster_domain: "cluster.local".into(),
             controller_admin: None,
             controller_ca_file: None,
+            controller_leader_admin: None,
             ready_timeout: Duration::from_secs(30 * 60),
             failover_detect: Duration::from_secs(5),
         }
@@ -142,6 +148,7 @@ impl OperatorConfig {
         c.node_port_host = opt("SPRIG_OPERATOR_NODE_PORT_HOST");
         c.controller_admin = opt("SPRIG_OPERATOR_CONTROLLER_ADMIN");
         c.controller_ca_file = opt("SPRIG_OPERATOR_CONTROLLER_CA_FILE");
+        c.controller_leader_admin = opt("SPRIG_OPERATOR_CONTROLLER_LEADER_ADMIN");
         if let Some(s) = opt("SPRIG_OPERATOR_READY_TIMEOUT_SECONDS").and_then(|s| s.parse().ok()) {
             c.ready_timeout = Duration::from_secs(s);
         }
@@ -229,7 +236,8 @@ pub async fn watch_all(rec: &Reconciler) -> Result<()> {
 }
 
 /// The DC controller's Admin API client (`SPRIG_OPERATOR_CONTROLLER_ADMIN`,
-/// with `SPRIG_OPERATOR_CONTROLLER_CA_FILE` for `https://`).
+/// with `SPRIG_OPERATOR_CONTROLLER_CA_FILE` for `https://`, following the
+/// leader through `SPRIG_OPERATOR_CONTROLLER_LEADER_ADMIN`).
 ///
 /// # Errors
 /// 39998 without an endpoint, or when the CA file can't be read.
@@ -252,11 +260,10 @@ fn admin_registrar(
         })?),
         None => None,
     };
-    Ok(Arc::new(register::AdminRegistrar::with_ca(
-        ep,
-        token,
-        ca.as_deref(),
-    )?))
+    Ok(Arc::new(
+        register::AdminRegistrar::with_ca(ep, token, ca.as_deref())?
+            .with_leader_template(cfg.controller_leader_admin.clone())?,
+    ))
 }
 
 /// Runs the operator role until `ctx.shutdown` is cancelled.

@@ -101,11 +101,9 @@ impl Drop for LiveGuard {
 /// What a dump with `scope` keeps of `t` (as `BinlogTxns` does).
 fn cut(t: &RawTxn, scope: &DumpScope) -> Option<RawTxn> {
     let mut out = t.clone();
-    out.rows.retain(|r| scope.keeps(&r.table.schema, &r.table.table));
-    out.ddl = t
-        .ddl
-        .clone()
-        .filter(|d| scope.names_whole(&d.db, &d.sql));
+    out.rows
+        .retain(|r| scope.keeps(&r.table.schema, &r.table.table));
+    out.ddl = t.ddl.clone().filter(|d| scope.names_whole(&d.db, &d.sql));
     let empty = out.rows.is_empty() && out.ddl.is_none() && out.xa.is_none();
     (!empty).then_some(out)
 }
@@ -335,13 +333,21 @@ async fn behind_the_ring_a_catch_up_dump_reads_then_hands_over() {
     assert_eq!(take(&mut a, 10).await.len(), 10);
     // A consumer keeps reading: at the next check the hub takes over.
     assert!(quiet(&mut b, 500).await);
-    assert_eq!(fake.live.load(Ordering::SeqCst), 1, "only the hub's dump is open");
+    assert_eq!(
+        fake.live.load(Ordering::SeqCst),
+        1,
+        "only the hub's dump is open"
+    );
     assert_eq!(feed.stats(&c).unwrap().catchups, 0);
 }
 
 #[tokio::test]
 async fn subscriptions_arriving_together_move_a_gathering_hub_back() {
-    let fake = Fake::with((1..=20).map(|s| txn(s, &["t1_d1_g1_s1", "t2_d1_g1_s1"])).collect());
+    let fake = Fake::with(
+        (1..=20)
+            .map(|s| txn(s, &["t1_d1_g1_s1", "t2_d1_g1_s1"]))
+            .collect(),
+    );
     let feed = SharedFeed::new(Arc::new(fake.clone()), SharedOpts::default());
     let shared = feed.view(Kept::Tables(vec!["__sprig_qo".to_owned()].into()));
     let c = cluster();
@@ -398,7 +404,11 @@ async fn a_whole_tenant_view_gets_its_tables_and_ddl_and_widens_the_dump() {
             .any(|s| s.only.is_none() && s.tenants.contains(&TenantId(1))),
         "the hub's dump keeps tenant 1 whole: {scopes:?}"
     );
-    assert_eq!(fake.live.load(Ordering::SeqCst), 1, "only the hub's dump is open");
+    assert_eq!(
+        fake.live.load(Ordering::SeqCst),
+        1,
+        "only the hub's dump is open"
+    );
     // The outbox view still sees its row once, and no DDL.
     assert!(quiet(&mut q, 300).await);
     // A new group with rows of both kinds reaches each view as it keeps.
@@ -407,4 +417,25 @@ async fn a_whole_tenant_view_gets_its_tables_and_ddl_and_widens_the_dump() {
     fake.push(g3);
     assert_eq!(take(&mut w, 1).await, vec![(3, 2)]);
     assert_eq!(take(&mut q, 1).await, vec![(3, 1)]);
+}
+
+/// Regression (r9feed's live run 2): a subscription registered behind a
+/// gathering hub, waiting for it to move back, gets no idle position ahead
+/// of the groups it hasn't had (its tail would skip them).
+#[test]
+fn no_idle_position_while_a_move_back_is_pending() {
+    let mut st = HubState::default();
+    let (tx_a, mut rx_a) = mpsc::channel(4);
+    let (tx_b, mut rx_b) = mpsc::channel(4);
+    st.register(TenantId(1), Kept::All, at(5), tx_a, Arc::default());
+    // B started at 0 behind the hub at 5: registered at 0, move back asked.
+    st.register(TenantId(2), Kept::All, at(0), tx_b, Arc::default());
+    st.rewind = Some(at(0));
+    st.idle_fanout(&at(5));
+    assert!(rx_a.try_recv().is_err() && rx_b.try_recv().is_err());
+    // Once the hub has moved back, it reads 1..5 again and sends positions.
+    st.rewind = None;
+    st.idle_fanout(&at(0));
+    assert!(rx_b.try_recv().is_ok(), "B is at 0: position 0 is fine");
+    assert!(rx_a.try_recv().is_err(), "A is at 5: nothing before it");
 }

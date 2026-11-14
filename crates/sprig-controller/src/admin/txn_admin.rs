@@ -1,5 +1,5 @@
-//! The Admin API's calls for in-doubt distributed transactions (chapter
-//! 18, "Observability"; `sprigctl txn list|show|resolve`), over
+//! The Admin API's calls for in-doubt distributed transactions (`sprigctl
+//! txn list|show|resolve`), over
 //! `sprig_txn::indoubt`.
 //!
 //! ```text

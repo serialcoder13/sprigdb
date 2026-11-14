@@ -49,8 +49,10 @@ gateway:
     secretName: ""
     mountPath: /etc/sprigdb/client-tls
     # Client certificates (mutual TLS, for users created with REQUIRE X509,
-    # SUBJECT or ISSUER). The settings job sets listener.<name>.client_cert
-    # on every listener at this DC's scope: off (no certificate asked for),
+    # SUBJECT or ISSUER). When clientCa below is set, the settings job sets
+    # listener.<name>.client_cert on every listener at this DC's scope (and
+    # nothing when it isn't, so values set by hand with sprigctl stay): off
+    # (no certificate asked for),
     # optional (checked when the client sends one) or required (a TLS
     # handshake without one fails). default covers the listeners with TLS:
     # mysql, mariadb, https, mongo, redis, bolt, kafka and amqps. listeners
@@ -65,18 +67,22 @@ gateway:
     # ConfigMap (a trust-manager Bundle, say) with that file under key,
     # mounted at mountPath. The settings job points
     # tls.bundles.default.client_ca_path at it. Required when any listener
-    # isn't off. The gateways read the file when a listener's settings
-    # change or a gateway starts, not when the file changes.
+    # isn't off. The gateways re-read the file within a few seconds of it
+    # changing, as they do the server certificate. To turn client
+    # certificates off, set the modes to off and keep clientCa for that
+    # upgrade.
     clientCa: {secretName: "", configMap: "", key: ca.crt, mountPath: /etc/sprigdb/client-ca}
   # Client listeners besides MySQL (3306), MariaDB (3307), HTTP (8080) and
   # HTTPS (8443), which are always on. A toggle sets listener.<name>.enabled
   # (and listener.<name>.bind to its port) at this DC's scope through the
   # settings job, and publishes the port on the gateway Service. amqp is
   # AMQP without TLS; amqps is AMQP over TLS. Kafka clients also connect to
-  # every gateway directly, at the address Kafka's metadata names (each
-  # gateway's registered address unless [gateway] kafka_advertise_host is
-  # set), so clients outside the Kubernetes cluster need those addresses
-  # routable.
+  # every gateway directly, at the address Kafka's metadata names: each
+  # gateway's registered address, <pod IP, dashed>.sprigdb-gateway-pods.
+  # <namespace>.svc, unless [gateway] kafka_advertise_host is set. Clients
+  # inside the cluster resolve it (clientTls' certificate must then name
+  # *.sprigdb-gateway-pods.<namespace>.svc for them to verify it); clients
+  # outside need kafka_advertise_host and routable addresses.
   listeners:
     mongo: {enabled: false, port: 27017}
     redis: {enabled: false, port: 6379}

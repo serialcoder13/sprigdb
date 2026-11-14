@@ -1,5 +1,5 @@
 //! [`GtidSet`]: a MariaDB GTID position, one sequence number per
-//! replication domain (chapter 06, "Read routing and read-your-writes").
+//! replication domain, for read routing and read-your-writes.
 
 use std::collections::BTreeMap;
 use std::fmt;

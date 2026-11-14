@@ -1,20 +1,19 @@
-//! Graph DDL in a tenant session (chapter 43, "Language surface"; build
-//! step 2): `CREATE GRAPH [IF NOT EXISTS] [db.]name` and `DROP GRAPH [IF
+//! Graph DDL in a tenant session: `CREATE GRAPH [IF NOT EXISTS] [db.]name` and `DROP GRAPH [IF
 //! EXISTS] [db.]name` on 3306 and 3307, through [`crate::graphs`].
-//! `CREATE [OR REPLACE] PROPERTY GRAPH` makes a mapped graph (round 3);
+//! `CREATE [OR REPLACE] PROPERTY GRAPH` makes a mapped graph;
 //! `ALTER GRAPH` answers 39901.
 //!
 //! SQL/PGQ's `GRAPH_TABLE (g MATCH ... COLUMNS (...))` in any statement:
 //! in a single `SELECT` (or `EXPLAIN FORMAT=SPRIG SELECT`) each call
 //! becomes a placeholder and the router path binds its rows and plans the
-//! statement (R8 round 6, `Plan::Graph`: `exec::router::graph`); in other
+//! statement (`Plan::Graph`: `exec::router::graph`); in other
 //! statements each one runs as a Cypher read through
 //! [`GatewayGraphs::query_read`] and is replaced by its rows as a derived
-//! table before the pipeline (round 3), and the rewritten statement runs
+//! table before the pipeline, and the rewritten statement runs
 //! as usual.
 //!
 //! `CREATE GRAPH` needs `CREATE` on the database, `DROP GRAPH` needs
-//! `DROP` on the graph or its database (chapter 29); `CREATE PROPERTY
+//! `DROP` on the graph or its database; `CREATE PROPERTY
 //! GRAPH` also needs `SELECT` on every table it maps.
 
 use bytes::Bytes;
@@ -54,7 +53,7 @@ fn lit(v: &sprig_graph::value::Value) -> sprig_router::GraphLit {
 
 impl PassSession {
     /// `GRAPH_TABLE` in a statement: a single `SELECT` continues with
-    /// placeholders for the router path to bind (R8 round 6); any other
+    /// placeholders for the router path to bind; any other
     /// statement runs each call now and continues with its rows in place.
     /// `None` when the text has none.
     pub(super) async fn tenant_graph_table(
@@ -134,7 +133,7 @@ impl PassSession {
             .map(Some)
     }
 
-    /// Chapter 43's step of [`PassSession::tenant_text`]: `None` when the
+    /// The graph DDL step of [`PassSession::tenant_text`]: `None` when the
     /// statement isn't graph DDL.
     pub(super) async fn tenant_graph_ddl(
         &mut self,

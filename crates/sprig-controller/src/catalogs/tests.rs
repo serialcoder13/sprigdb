@@ -1,5 +1,5 @@
 //! Which node controllers write to after a cluster failover (the
-//! published writer first, as the gateway's W1 reads it).
+//! published writer first, as the gateway reads it).
 
 #![allow(clippy::unwrap_used)]
 
@@ -139,9 +139,9 @@ async fn the_published_writer_is_read_from_the_dc_tier() {
     );
 }
 
-/// Chapter 10, "Cutover": while a mover holds the catalog's shard map,
-/// the controller runs no catalog migration (the cutover may rename the
-/// catalog's tables away; found in R9's live move).
+/// While a mover's cutover holds the catalog's shard map, the controller
+/// runs no catalog migration (the cutover may rename the catalog's tables
+/// away; found in a live move).
 #[tokio::test]
 async fn catalog_migrations_wait_while_a_cutover_holds_the_catalog() {
     let dc = MemStore::new(unique_tier());
@@ -175,7 +175,7 @@ async fn catalog_migrations_wait_while_a_cutover_holds_the_catalog() {
     assert!(e.retryable && e.to_string().contains("job-42"), "{e}");
 }
 
-/// The sequence agent r9streams hit in a live move (9 Nov): a cutover
+/// A sequence seen in a live move: a cutover
 /// rename-fenced the tenant's catalog, catalog migrations then ran on it,
 /// and the unfence found "both t…_sprig.databases and its fenced name
 /// exist". Now the migration refuses the fenced catalog, so the unfence

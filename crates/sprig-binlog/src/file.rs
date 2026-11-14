@@ -1,5 +1,5 @@
-//! File mode: reading binlog files, such as archived ones (chapter 38,
-//! "Retention and archive"), with the same [`Decoder`] as the stream.
+//! File mode: reading binlog files, such as archived ones, with the same
+//! [`Decoder`] as the stream.
 
 use std::path::Path;
 

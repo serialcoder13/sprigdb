@@ -1,4 +1,4 @@
-//! `SPRIG SHOW ADVICE` rows from a stored design, as chapter 16's
+//! `SPRIG SHOW ADVICE` rows from a stored design, as the sharding
 //! advisor writes it (`Design::to_json`).
 
 #![allow(clippy::unwrap_used)]

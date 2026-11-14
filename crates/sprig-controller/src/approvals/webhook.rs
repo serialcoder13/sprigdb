@@ -1,5 +1,5 @@
-//! Approval webhooks over chapter 51's webhook target (chapter 52,
-//! "Notifications"; decision AP13).
+//! Approval webhooks over the sinks' webhook target: notifications of
+//! approval events.
 //!
 //! - **The platform's** `approvals.webhook_url` (`http://` or `https://`,
 //!   DC and global scope) gets every event. The operator chose the host, so
@@ -17,7 +17,7 @@
 //!   master key file, `[controller] workload_key_file`).
 //!
 //! Every POST carries `Sprig-Event`, `Sprig-Idempotency-Key` and the
-//! connection's signature; delivery retries with chapter 51's backoff
+//! connection's signature; delivery retries with the sinks' backoff
 //! ([`super::notify::WEBHOOK_ATTEMPTS`] attempts) and never blocks a
 //! decision.
 
@@ -107,7 +107,7 @@ impl ConnName {
     }
 }
 
-/// Opens tenants' webhook connections for approval events: chapter 51's
+/// Opens tenants' webhook connections for approval events: the sinks'
 /// [`SinkEnv`] as the controller sees it.
 pub struct Webhooks {
     locator: Arc<dyn CatalogLocator>,
@@ -390,7 +390,7 @@ impl SinkEnv for Webhooks {
     }
 
     async fn residency_of(&self, tenant: TenantId) -> Result<Box<dyn Residency>> {
-        // The sink workers' rule, from `sprig-residency` (approvals round 3).
+        // The sink workers' rule, from `sprig-residency`.
         sprig_sinks::residency::residency_of(&*self.global, tenant).await
     }
 

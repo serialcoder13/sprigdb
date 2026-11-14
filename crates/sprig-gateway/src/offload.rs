@@ -1,10 +1,9 @@
-//! Large requests off the runtime's worker threads (chapter 04, "Large
-//! statements"; decision gwhard-1).
+//! Large requests off the runtime's worker threads.
 //!
 //! Lexing, name virtualization, the translator's rewrites, router planning
 //! and workload fingerprinting all scan a statement's whole text, more than
 //! once. For a 16 MiB statement that held a tokio worker for over 2 s in a
-//! debug build, and chapter 25's watchdog, which takes a runtime that
+//! debug build, and the failover watchdog, which takes a runtime that
 //! stops answering for that long for a stuck process, aborted the gateway.
 //! One client must never be able to do that.
 //!
@@ -20,7 +19,7 @@
 //!
 //! Outside a multi-threaded runtime (unit tests) the future runs as is.
 //!
-//! **Heavy statements of any size** (decision bugfix-1, after G40). A
+//! **Heavy statements of any size.** A
 //! short statement can be heavy too: a cross-shard sort, an analytic read,
 //! a large result's encoding. Every request through [`run_for`] is timed
 //! poll by poll ([`Guarded`]): once its own polls used [`SHED_AFTER`] of a
@@ -132,7 +131,7 @@ pub fn cpu<R>(size: usize, f: impl FnOnce() -> R) -> R {
     }
 }
 
-// ----- graph statements (R8 round 10, decision G80) -------------------------
+// ----- graph statements ------------------------------------------------------
 
 /// How long a graph statement waits for one of [`graph_slots`] before it
 /// runs without one.
@@ -149,7 +148,7 @@ pub fn graph_slots() -> &'static Arc<Semaphore> {
     })
 }
 
-/// Runs a graph statement (Bolt, R8 round 10, decision G80) on a
+/// Runs a graph statement (Bolt) on a
 /// blocking thread from its first poll: matching, sorting and
 /// aggregating a large graph result are CPU work between awaits that
 /// can last seconds, and on a runtime worker they held every other
@@ -187,7 +186,7 @@ pub async fn run_graph_stream<F: Future>(fut: F) -> F::Output {
     tokio::task::block_in_place(|| Handle::current().block_on(fut))
 }
 
-// ----- the stall guard (decision bugfix-1) ---------------------------------
+// ----- the stall guard -------------------------------------------------------
 
 /// A request whose own polls used this much of a worker's time runs the
 /// rest of its way on a blocking thread.
@@ -316,7 +315,7 @@ impl<F: Future> Future for Guarded<F> {
 
 /// The watchdog saw the runtime stuck for `stuck`: logs and counts it, and
 /// stops every statement whose current poll has run for `min_poll` or more
-/// (decision bugfix-1). Returns how many it stopped.
+/// Returns how many it stopped.
 pub fn on_stall(stuck: Duration, min_poll: Duration) -> usize {
     metrics::counter!("sprig_gateway_runtime_stalls_total").increment(1);
     let now = now_us();
@@ -543,7 +542,7 @@ mod tests {
         }
     }
 
-    /// G40: short but heavy statements (each poll 400 ms of CPU, like a
+    /// Short but heavy statements (each poll 400 ms of CPU, like a
     /// sort that doesn't yield) on both workers of a two-worker runtime.
     /// A second client's simple request, sent from another thread, still
     /// answers within 150 ms once the heavy ones have had their first
@@ -606,7 +605,7 @@ mod tests {
         }
     }
 
-    /// R8 round 10: graph statements on more threads than the runtime has
+    /// Graph statements on more threads than the runtime has
     /// workers, each one long poll that doesn't yield, leave a ticker on
     /// the runtime free; run through the stall guard instead, the same
     /// statements held both workers for their whole first poll.

@@ -363,7 +363,7 @@ fn write_load_counts_updates_touching_the_index() {
 
 proptest! {
     /// More runs never lower the benefit; more writes never lower the
-    /// write cost (chapter 13, "Testing").
+    /// write cost.
     #[test]
     fn cost_is_monotone(runs_mul in 1u64..10, write_mul in 1u64..10) {
         let t = orders();
@@ -456,7 +456,7 @@ proptest! {
     }
 }
 
-/// Decision E2: the storage budget is 20% of the table, never below the
+/// The storage budget is 20% of the table, never below the
 /// floor (`auto_index.min_storage_budget_mb`, 64 MB).
 #[test]
 fn storage_budget_has_a_floor_for_small_tables() {

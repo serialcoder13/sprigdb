@@ -1,7 +1,7 @@
-//! Tenants' shard layouts from the catalog and the shard maps (chapter 15,
-//! "Interfaces"): what the router plans against.
+//! Tenants' shard layouts from the catalog and the shard maps: what the
+//! router plans against.
 //!
-//! - [`ShardingExtension`] loads chapter 15's catalog module (`sharding`:
+//! - [`ShardingExtension`] loads the sharding catalog module (`sharding`:
 //!   `table_groups`, `group_members`, `reference_tables`) into every
 //!   catalog snapshot, with each member's `SHOW CREATE TABLE` text from
 //!   `schema_versions` (the key's position and unique keys). A change to
@@ -59,7 +59,7 @@ pub(crate) struct MemberRow {
     pub rk_fill: bool,
     /// A parent member's `parent_fk` (the constraint to its parent).
     pub parent_fk: Option<String>,
-    /// During an online re-key (chapter 16): the new key, this member's
+    /// During an online re-key: the new key, this member's
     /// columns for it, and the re-key's first new shard id
     /// (`next_routing`). The router uses them once every range of the
     /// group's map is a new shard: the cutover replaced all of them in one
@@ -93,7 +93,7 @@ pub(crate) struct CopyRow {
 /// A `lookup_indexes` row as read.
 type LookupTuple = (u64, u64, String, Option<String>, bool, String, u32, String);
 
-/// One `lookup_indexes` row (chapter 19).
+/// One `lookup_indexes` row.
 #[derive(Debug, Clone)]
 pub(crate) struct LookupRow {
     pub id: u64,
@@ -137,9 +137,9 @@ pub(crate) struct ShardingState {
     pub members: Vec<MemberRow>,
     /// Reference copies.
     pub copies: Vec<CopyRow>,
-    /// Lookup indexes (chapter 19's `lookup_indexes`).
+    /// Lookup indexes (`lookup_indexes`).
     pub lookups: Vec<LookupRow>,
-    /// Foreign keys (chapter 19's `foreign_keys`; R3).
+    /// Foreign keys (`foreign_keys`).
     pub fks: Vec<sprig_shard::fk::ForeignKey>,
 }
 
@@ -155,7 +155,7 @@ impl ExtState for ShardingState {
     }
 }
 
-/// Chapter 15's catalog module, loaded into snapshots for the router.
+/// The sharding catalog module, loaded into snapshots for the router.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ShardingExtension;
 
@@ -246,7 +246,7 @@ impl CatalogExtension for ShardingExtension {
             ))
             .await
             .map_err(db_err)?;
-        // Chapter 19's lookup indexes, once that table exists.
+        // Lookup indexes, once that table exists.
         let has_lookups: Option<u64> = conn
             .exec_first(
                 "SELECT COUNT(*) FROM information_schema.TABLES \
@@ -266,7 +266,7 @@ impl CatalogExtension for ShardingExtension {
         } else {
             Vec::new()
         };
-        // Chapter 19's foreign keys (R3): the rows the gateway keeps.
+        // Foreign keys: the rows the gateway keeps.
         let has_fks: Option<u64> = conn
             .exec_first(
                 "SELECT COUNT(*) FROM information_schema.TABLES \
@@ -362,16 +362,16 @@ pub(crate) struct TenantLayout {
     /// rolled back with 39424.
     pub epochs: HashMap<String, u64>,
     /// The catalog object of each table the router knows, by its default
-    /// schema and name, lowercase (chapter 19's DDL path, R3).
+    /// schema and name, lowercase (for the foreign-key DDL path).
     pub objects: HashMap<(String, String), u64>,
-    /// Chapter 07's metadata placement of the grouped tables, per cluster
+    /// The metadata placement of the grouped tables, per cluster
     /// a session runs metadata statements on (made at first use).
     pub grouped: Mutex<HashMap<String, Arc<GroupedTables>>>,
 }
 
 impl TenantLayout {
     /// Where metadata statements of a session on `cluster` read each
-    /// grouped table (chapter 07, "Physical names"): its group's lowest
+    /// grouped table: its group's lowest
     /// shard on `cluster`, else its group's lowest shard; a reference
     /// table's schema. Statements keep naming the database's own schema;
     /// only `SHOW`, `DESCRIBE` and `information_schema` read these.
@@ -398,7 +398,7 @@ impl TenantLayout {
                 continue;
             };
             g.add(DbId(e.group.db), &e.name, schema);
-            // bugfix-8: its `information_schema` rows are read there.
+            // Its `information_schema` rows are read there.
             if local.is_none() && !e.is_reference() {
                 g.set_remote(schema, &shard.cluster);
             }
@@ -408,7 +408,7 @@ impl TenantLayout {
         g
     }
 
-    /// Chapter 07 (R1): the cluster a `SHOW` or `DESCRIBE` of one grouped
+    /// The cluster a `SHOW` or `DESCRIBE` of one grouped
     /// table runs on when the table's schema (as [`Self::grouped_tables`]
     /// picked it) has no copy on the session's cluster `main`; `None` when
     /// it may run on `main`.
@@ -417,8 +417,7 @@ impl TenantLayout {
         let first = sql.split_ascii_whitespace().next()?.to_ascii_uppercase();
         // 3306 answers `SHOW [FULL] COLUMNS`, `DESCRIBE` and `SHOW INDEX`
         // with a `SELECT` over `information_schema` that probes the table
-        // (`(SELECT 1 FROM schema.t LIMIT 0) IS NULL`): it runs there too
-        // (bugfix3).
+        // (`(SELECT 1 FROM schema.t LIMIT 0) IS NULL`): it runs there too.
         let probe = first == "SELECT" && sql.contains("LIMIT 0) IS NULL");
         if !probe && !matches!(first.as_str(), "SHOW" | "DESCRIBE" | "DESC") {
             return None;
@@ -579,7 +578,7 @@ fn build(cat: &TenantCatalog, state: &ShardingState, cache: &ShardMapCache) -> T
         };
         match cache.get(tenant, GroupId(g.id)) {
             Ok(map) => {
-                // An online re-key's cutover committed (chapter 16): every
+                // An online re-key's cutover committed: every
                 // range is a new shard, hashed by the new key, before the
                 // catalog's key is rewritten; the members' next routing
                 // has it.
@@ -714,7 +713,7 @@ fn build(cat: &TenantCatalog, state: &ShardingState, cache: &ShardMapCache) -> T
     }
     let mut topo =
         sprig_router::topology::catalog::build_with_fks(tenant.0, &groups, &tables, &state.fks);
-    // R8 round 6: groups without a table the router plans (a graph's
+    // Groups without a table the router plans (a graph's
     // group), by id, in their database's schemas (`Plan::Graph`'s shards).
     for g in &groups {
         let used = tables

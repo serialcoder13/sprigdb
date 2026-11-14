@@ -1,5 +1,4 @@
-//! The connection task wrapper (chapter 04, "Accept and protocol
-//! detection": "a panic is caught at the task boundary").
+//! The connection task wrapper: a panic is caught at the task boundary.
 //!
 //! A panic in one session's task is caught here, logged with the session id
 //! and counted; the session leaves the table and its connection closes. No

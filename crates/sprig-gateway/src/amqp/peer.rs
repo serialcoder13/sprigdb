@@ -1,7 +1,7 @@
-//! The queue relay between gateways (chapter 50, "The queue owner"):
+//! The queue relay between gateways, toward each queue's owner:
 //! `sprig.internal.v1.QueuePeer` on the peer service (7403, mutual TLS
-//! from the internal CA as chapter 04 requires; plaintext on loopback in
-//! development, like every peer call).
+//! from the internal CA; plaintext on loopback in development, like every
+//! peer call).
 //!
 //! - [`QueuePeerService`]: this gateway's side of other gateways' relay
 //!   streams (its queue owners serve them) and of their direct reply-to

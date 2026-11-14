@@ -1,5 +1,5 @@
-//! Resuming on another node from a GTID position (chapter 10, "Failure
-//! handling"): reading from a replica with the same GTIDs, switching Galera
+//! Resuming on another node from a GTID position after a
+//! failure: reading from a replica with the same GTIDs, switching Galera
 //! nodes, and following a promoted replica; and refusing (1236) a position
 //! the new node never had.
 

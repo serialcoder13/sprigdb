@@ -1,4 +1,4 @@
-//! The catalog reconciler (chapter 08, "Reconciler"; build step 11).
+//! The catalog reconciler.
 //!
 //! Every `catalog.reconcile_interval_seconds` the home DC leader compares
 //! each tenant's catalog with `information_schema` on its cluster and
@@ -7,8 +7,8 @@
 //! | Finding (`finding` label) | Action |
 //! |---|---|
 //! | DDL job older than `catalog.stuck_state_minutes` (`stuck_job`) | Finish if the physical state matches, else roll back; drops roll forward ([`DdlEngine::resolve`]) |
-//! | DDL job of a gateway process that has ended, at least a minute old (`stuck_job`, bugfix-45) | The same, at once ([`CatalogReconciler::with_owners`]) |
-//! | Shard schema missing (`schema_missing`) | Alert (R0 has no mover-created shards to recreate) |
+//! | DDL job of a gateway process that has ended, at least a minute old (`stuck_job`) | The same, at once ([`CatalogReconciler::with_owners`]) |
+//! | Shard schema missing (`schema_missing`) | Alert (no mover-created shards to recreate) |
 //! | Object missing (`object_missing`) | Alert |
 //! | Physical schema with no catalog entry (`orphan_schema`) | Quarantine; drop after `catalog.orphan_retention_days` if empty |
 //! | Schema of a dropped database still there (`dropped_schema_exists`) | Drop it: the catalog committed the drop |
@@ -20,7 +20,7 @@
 //! - a job younger than the stuck age is left alone, unless its owner is a
 //!   gateway process whose `gateway-processes/<token>` key has gone and
 //!   the job is at least a minute old
-//!   ([`OWNER_MIN_AGE`](sprig_catalog::ddl::OWNER_MIN_AGE), bugfix-45); a
+//!   ([`OWNER_MIN_AGE`](sprig_catalog::ddl::OWNER_MIN_AGE)); a
 //!   schema in which MariaDB is running DDL right now is left alone
 //!   whatever the job's age ([`DdlExecutor::busy`]);
 //! - while a tenant has a young gateway job, its jobs (only) are looked
@@ -32,8 +32,8 @@
 //!   not compared: a rename that ran but hasn't been published would look
 //!   like an outside table.
 //!
-//! **Purging by age.** Tables have no `changed_at` (chapter 08, open
-//! question 7), so the loop keeps marks: on every pass it notes the
+//! **Purging by age.** Tables have no `changed_at`, so the loop keeps
+//! marks: on every pass it notes the
 //! committed catalog version with the time its version row was last
 //! written (`set_at`, never earlier than that version's commit). It purges
 //! up to the newest mark older than the retention. A new leader starts
@@ -43,7 +43,7 @@
 //!
 //! Quarantine of orphan schemas is remembered by this leader only: a new
 //! leader starts the clock again (late, never early). Definition drift and
-//! backend grants are not checked yet (chapters 21 and 29).
+//! backend grants are not checked yet.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -68,20 +68,20 @@ use crate::runtime::{LoopCx, LoopTier, MetaEvent, Outcome, Reconciler};
 use crate::tree::{Directory, StoredEntry, TenantState};
 
 /// Between full passes, how often the jobs of a tenant with a young
-/// gateway-owned DDL job are looked at again (bugfix-45).
+/// gateway-owned DDL job are looked at again.
 pub const JOB_RECHECK: Duration = Duration::from_secs(30);
 
 /// Where the reconciler reaches a tenant's cluster.
 #[async_trait::async_trait]
 pub trait ExecutorSource: Send + Sync + 'static {
-    /// An executor on `tenant`'s cluster (R0: the catalog's).
+    /// An executor on `tenant`'s cluster (the catalog's).
     ///
     /// # Errors
     /// 39072 if the tenant has no catalog here; the cluster's errors.
     async fn executor(&self, tenant: TenantId) -> Result<Arc<dyn DdlExecutor>>;
 
     /// An executor that also reaches every shard of a multi-shard DDL job
-    /// (chapter 21), each on its recorded cluster. The default is
+    /// each on its recorded cluster. The default is
     /// [`executor`](Self::executor) (every shard on the catalog's cluster).
     ///
     /// # Errors
@@ -204,8 +204,8 @@ impl Finding {
     }
 }
 
-/// One finding and what was done about it (chapter 11's decision log
-/// takes these once it exists).
+/// One finding and what was done about it (the decision log takes these
+/// once it exists).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconcileDecision {
     /// The tenant.
@@ -229,7 +229,7 @@ pub trait DecisionLog: Send + Sync + 'static {
     async fn record(&self, d: &ReconcileDecision);
 }
 
-/// Logs decisions as `decision` events until chapter 11's log exists.
+/// Logs decisions as `decision` events until the decision log exists.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LogDecisions;
 
@@ -299,7 +299,7 @@ pub struct PassReport {
     /// Jobs left alone: too young, or their schema busy.
     pub jobs_waiting: usize,
     /// Of those, jobs younger than the stuck age whose owner is a gateway
-    /// process (bugfix-45): looked at again after [`JOB_RECHECK`].
+    /// process: looked at again after [`JOB_RECHECK`].
     pub gateway_jobs_waiting: usize,
     /// Objects adopted.
     pub adopted: usize,
@@ -332,7 +332,7 @@ struct TenantMemory {
     orphans: HashMap<SchemaName, SystemTime>,
     last_pass: Option<std::time::Instant>,
     clamped: BTreeMap<&'static str, usize>,
-    /// A young gateway job was waiting at the last look (bugfix-45).
+    /// A young gateway job was waiting at the last look.
     jobs_recheck: bool,
 }
 
@@ -350,15 +350,14 @@ where
     fixed: Option<ReconcileConfig>,
     clock: Arc<dyn Clock>,
     memory: Mutex<HashMap<TenantId, TenantMemory>>,
-    /// The groups with shard maps (chapter 20): their shard schemas are
+    /// The groups with shard maps: their shard schemas are
     /// never orphans. `None`: no shard schema of a non-default group is.
     group_maps: Option<Arc<dyn GroupMaps>>,
-    /// Whose jobs are abandoned (bugfix-45); `None`: only the stuck age.
+    /// Whose jobs are abandoned; `None`: only the stuck age.
     owners: Option<Arc<dyn OwnerCheck>>,
 }
 
-/// The table groups of a tenant that have shard maps (chapters 15 and
-/// 20). A split's new shards, a merge's target and a retired source all
+/// The table groups of a tenant that have shard maps. A split's new shards, a merge's target and a retired source all
 /// belong to such a group: their schemas are the mover's and the sharding
 /// loop's to create and drop, never the reconciler's.
 #[async_trait::async_trait]
@@ -443,7 +442,7 @@ where
     }
 
     /// Resolves a job whose owner `owners` finds gone at once, without
-    /// waiting for the stuck age (bugfix-45): a gateway that crashed or
+    /// waiting for the stuck age: a gateway that crashed or
     /// restarted mid-DDL (its `gateway-processes/<token>` key gone, the
     /// job at least [`OWNER_MIN_AGE`](sprig_catalog::ddl::OWNER_MIN_AGE)
     /// old). Before, such a job held its
@@ -456,7 +455,7 @@ where
     }
 
     /// Recognises the shard schemas of groups with shard maps in
-    /// `maps` (chapter 20); without it, no shard schema of a group other
+    /// `maps`; without it, no shard schema of a group other
     /// than a database's default group is ever an orphan.
     #[must_use]
     pub fn with_group_maps(mut self, maps: Arc<dyn GroupMaps>) -> Self {
@@ -510,7 +509,7 @@ where
     /// Only when the catalog or the cluster can't be read at all; a step
     /// that fails is reported in [`PassReport::errors`] and the pass
     /// carries on.
-    #[allow(clippy::too_many_lines)] // the chapter's table, in order
+    #[allow(clippy::too_many_lines)] // the module docs' table, in order
     pub async fn pass(&self, tenant: TenantId) -> Result<PassReport> {
         let cfg = self.config();
         let now = self.clock.wall();
@@ -523,7 +522,7 @@ where
         let mut resolved_any = false;
         for intent in DdlIntent::all(&snap.settings) {
             let age = now.duration_since(intent.started()).unwrap_or_default();
-            // Chapter 21: a multi-shard job reaches every shard's cluster.
+            // A multi-shard job reaches every shard's cluster.
             let (exec, schemas) = match &intent.shards {
                 Some(set) => {
                     let routes = set.routes();
@@ -542,7 +541,7 @@ where
                 busy |= exec.busy(s).await.unwrap_or(true);
             }
             let young = age < cfg.stuck;
-            // bugfix-45: a gateway process that ended left the job.
+            // A gateway process that ended left the job.
             let abandoned = young && !busy && self.owner_gone(&intent, age).await;
             if busy || (young && !abandoned) {
                 report.jobs_waiting += 1;
@@ -583,16 +582,16 @@ where
         let lctn = self.lower_case_table_names(tenant, &snap);
 
         // A tenant being deleted: nobody can log in to drop its databases
-        // any more, and cleanup waits for them (chapter 08, "Deleting a
-        // tenant"), so they go here, through the DDL path, once no job
-        // holds them; the rest of the pass doesn't apply.
+        // any more, and cleanup waits for them, so they go here, through
+        // the DDL path, once no job holds them; the rest of the pass
+        // doesn't apply.
         if self
             .directory
             .get(tenant)
             .await?
             .is_some_and(|e| e.body().state == TenantState::Deleting)
         {
-            // Only a live job holds a database here (bugfix-27): an object
+            // Only a live job holds a database here: an object
             // left `creating` or naming a job that no longer exists (an
             // inherited instance whose creation a crash or the deletion
             // cut short) would otherwise hold its database, and the
@@ -939,7 +938,7 @@ where
         Ok(report)
     }
 
-    /// Whether `intent`'s owner has certainly gone (bugfix-45).
+    /// Whether `intent`'s owner has certainly gone.
     async fn owner_gone(&self, intent: &DdlIntent, age: Duration) -> bool {
         match (&self.owners, intent.owner.as_deref()) {
             (Some(o), Some(owner)) => o.gone(owner, age).await,
@@ -947,7 +946,7 @@ where
         }
     }
 
-    /// Between full passes (bugfix-45): `tenant`'s DDL jobs only, each
+    /// Between full passes: `tenant`'s DDL jobs only, each
     /// resolved once its gateway process has ended (or the stuck age has
     /// passed) and none of its schemas is busy. A multi-shard job waits
     /// for the full pass.
@@ -1189,7 +1188,7 @@ where
             if !recheck || self.owners.is_none() {
                 return Ok(Outcome::RequeueAfter(left));
             }
-            // bugfix-45: a young gateway job was waiting; its process may
+            // A young gateway job was waiting; its process may
             // have ended since.
             let report = self.recheck_jobs(*key).await?;
             for e in &report.errors {
@@ -1215,7 +1214,7 @@ where
     }
 }
 
-/// The loop over a reconciler shared with tenant cleanup (bugfix-27).
+/// The loop over a reconciler shared with tenant cleanup.
 #[async_trait::async_trait]
 impl<B: DdlBackend> Reconciler for Arc<CatalogReconciler<B>>
 where
@@ -1252,9 +1251,9 @@ where
     }
 }
 
-/// Tenant cleanup drops a deleted tenant's databases with the same pass
-/// (bugfix-27): for a `deleting` tenant [`CatalogReconciler::pass`]
-/// resolves stuck jobs and drops every listed database, nothing else.
+/// Tenant cleanup drops a deleted tenant's databases with the same pass:
+/// for a `deleting` tenant [`CatalogReconciler::pass`] resolves stuck jobs
+/// and drops every listed database, nothing else.
 #[async_trait::async_trait]
 impl<B: DdlBackend> crate::tenants::DeletedDatabases for CatalogReconciler<B>
 where

@@ -28,7 +28,7 @@ fn job_standbys_round_trip_through_the_directory_entry() {
     assert!(job_standbys(&serde_json::Map::new()).is_empty());
 }
 
-/// RL3 (r2harden): a tenant's own `failover.mode` and
+/// A tenant's own `failover.mode` and
 /// `failover.rpo_seconds` reach its directory entry, where the global
 /// failover decision reads them when the home DC (and so the catalog) is
 /// lost; the copy goes away when the tenant's rows no longer differ.

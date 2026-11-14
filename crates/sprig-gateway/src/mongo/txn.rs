@@ -1,5 +1,4 @@
-//! Transaction outcomes that outlive the gateway (chapter 30, "Sessions
-//! and transactions"; build step 8; `decisions/r5-interim.md` D17).
+//! Transaction outcomes that outlive the gateway.
 //!
 //! - **Commit records.** `commitTransaction` writes a `committed` row for
 //!   `(lsid, uid)` with the transaction's number in the `__sprig_doc_sessions`

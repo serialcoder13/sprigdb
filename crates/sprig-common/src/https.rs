@@ -1,6 +1,5 @@
-//! HTTPS for the controller's Admin API (chapter 37, "Admin API over TLS";
-//! hardening round 2): the server side the controller serves `admin_addr`
-//! with, and the client side gateways and `sprigctl` call it with.
+//! HTTPS for the controller's Admin API: the server side the controller
+//! serves `admin_addr` with, and the client side gateways and `sprigctl` call it with.
 //!
 //! - [`server_config`]: a certificate chain and key in PEM files, and
 //!   optionally a CA whose client certificates are then required (mutual
@@ -40,8 +39,8 @@ use crate::{Result, SprigCode, SprigError};
 pub use rustls::{ClientConfig, ServerConfig};
 
 /// The header in which a gateway relaying an Admin API call passes the
-/// address its client connected from (ST47). The controller believes it
-/// only with [`RELAY_AUTH_HEADER`].
+/// address its client connected from. The controller believes it only
+/// with [`RELAY_AUTH_HEADER`].
 pub const CLIENT_ADDR_HEADER: &str = "x-sprig-client-addr";
 
 /// The header in which a relaying gateway presents its service identity's
@@ -119,7 +118,7 @@ pub fn server_config(
 /// The configuration keys error messages name: certificate, key, client CA.
 pub type KeyNames = [&'static str; 3];
 
-/// The Admin API's keys (chapter 37, "Admin API over TLS").
+/// The Admin API's keys.
 pub const ADMIN_NAMES: KeyNames = [
     "[controller] admin_tls_cert",
     "[controller] admin_tls_key",
@@ -404,13 +403,13 @@ impl axum::serve::Listener for TlsListener {
 }
 
 // ---------------------------------------------------------------------------
-// The internal services' client side (hardening round 3)
+// The internal services' client side
 // ---------------------------------------------------------------------------
 
 static INTERNAL_CLIENT: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
 
 /// Installs this process's client identity for `https://` internal calls
-/// (permits, peer pings, observations, the relay; chapter 25): it verifies
+/// (permits, peer pings, observations, the relay): it verifies
 /// controllers against `ca` and presents `cert` and `key` (the process
 /// identity in `[tls]`). The first call wins; later ones are ignored.
 ///

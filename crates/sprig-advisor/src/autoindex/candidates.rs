@@ -1,6 +1,5 @@
-//! Candidate generation (chapter 13, "Candidate generation", "Covering
-//! columns", "Merging candidates and checking existing indexes"; build
-//! step 4).
+//! Candidate generation: covering columns, merging candidates and checking
+//! existing indexes.
 //!
 //! For each qualifying fingerprint and each table it references, the
 //! generator reads the fingerprint's [`Shape`] into a [`TableAccess`]: the
@@ -21,21 +20,21 @@
 //! query uses; then add_covering; then merge per table.
 //! ```
 //!
-//! **Choices where the chapter is silent** (each also in the report):
+//! **Choices this generator makes:**
 //!
 //! - An `IN` list is an equality for the index's seek but breaks the order
 //!   of the columns after it (MariaDB doesn't merge the per-value ranges in
 //!   order), so with an `ORDER BY ... LIMIT` the generator also emits the
-//!   variant without the `IN` columns. This is how worked example 1's
-//!   variant B `(customer_id, created_at)` arises: its `status IN (...)` is
-//!   left as a filter.
+//!   variant without the `IN` columns. This is how a candidate like
+//!   `(customer_id, created_at)` arises when a `status IN (...)` sits
+//!   between the equality and the order column: the `IN` is left as a
+//!   filter.
 //! - An `IN` list longer than 32 values (sampled, else `in_list_max`) is
 //!   treated as a range.
 //! - `ORDER BY` on the primary key after equalities needs no part: `InnoDB`'s
 //!   secondary entries end with the primary key, so `(account_id)` already
 //!   returns an account's rows in `id` order. Such a candidate is marked
-//!   [`Evidence::pk_order`] and never merged into a longer index (worked
-//!   example 2's F3).
+//!   [`Evidence::pk_order`] and never merged into a longer index.
 //! - A uniform `ORDER BY ... DESC` gets ascending parts (a backward scan
 //!   serves it), so `ASC` and `DESC` queries share one index; only mixed
 //!   directions get descending parts.
@@ -82,7 +81,7 @@ pub enum Literal {
 }
 
 /// A qualifying fingerprint with the window statistics generation and the
-/// cost model use. Chapter 12's `FpWindowStats` will convert into it.
+/// cost model use. The workload store's `FpWindowStats` will convert into it.
 #[derive(Debug, Clone)]
 pub struct FpInput {
     /// The fingerprint.
@@ -297,7 +296,7 @@ pub struct Skipped {
 
 /// Spatial functions whose predicates a `SPATIAL INDEX` serves: the MBR
 /// functions MariaDB reads the R-tree for, and the geodesic ones the
-/// MySQL persona narrows with a candidate box (chapter 36).
+/// MySQL persona narrows with a candidate box.
 const SPATIAL_FUNCTIONS: &[&str] = &[
     "ST_DISTANCE",
     "ST_DISTANCE_SPHERE",
@@ -315,12 +314,12 @@ const SPATIAL_FUNCTIONS: &[&str] = &[
 /// candidate list. A rough figure for the cost model.
 pub const MODEL_READ_FACTOR: f64 = 1.3;
 
-/// Chapter 13's "Other models" for SQL tables (R6 round 3):
+/// Candidates of the other models for SQL tables:
 ///
 /// - **Spatial:** a `SPATIAL INDEX` on a `NOT NULL` geometry column that
 ///   a spatial predicate filters on (an MBR function, or a geodesic one
 ///   the MySQL persona turns into an R-tree box). A nullable column would
-///   need chapter 36's companion box: no candidate.
+///   need a companion box column: no candidate.
 /// - **Vector:** a `VECTOR INDEX` on a `NOT NULL` vector column a query
 ///   orders by `VEC_DISTANCE_*(col, ...)` with a `LIMIT`, with the
 ///   queries' metric and `M` 8 below a million rows, 16 above. The
@@ -443,7 +442,7 @@ pub struct Generated {
     pub skipped: Vec<Skipped>,
 }
 
-/// Chapter 13's generator interface, for one table's statistics.
+/// The generator interface, for one table's statistics.
 pub trait CandidateGenerator: Send + Sync {
     /// The candidates `f` gets on `object`, whose statistics are `stats`
     /// and whose existing indexes are `existing` (unused by generation,
@@ -528,9 +527,9 @@ impl Generator {
                 continue;
             };
             let acc = access(f, &t.alias, object, stats);
-            // Chapter 33's element tables (R6 round 5) get only their own
+            // Key-value element tables get only their own
             // shapes' indexes (`super::kv`).
-            // Chapter 31's collection tables (R5, S131) get only document
+            // Document collection tables get only document
             // indexes, from MongoDB shapes (`super::doc`).
             if super::doc::is_collection_table(stats) {
                 let cands = super::doc::candidates(f, &t.alias, object, stats);
@@ -549,9 +548,9 @@ impl Generator {
                 super::kv::candidates(f, &t.alias, object, stats)
             } else {
                 let mut cands = self.for_table(&acc, stats);
-                // Chapter 13's other models (R6 round 3): spatial and vector.
+                // The other models: spatial and vector.
                 cands.extend(model_candidates(f, &t.alias, object, stats));
-                // Value fields of key-value keys (R6 round 6, decision K3).
+                // Value fields of key-value keys.
                 cands.extend(super::kv::field_candidates(f, &t.alias, object, stats));
                 cands
             };
@@ -571,9 +570,9 @@ impl Generator {
         out
     }
 
-    /// The candidates of one table access (chapter 13's `generate`).
+    /// The candidates of one table access.
     #[must_use]
-    #[allow(clippy::too_many_lines, clippy::many_single_char_names)] // the chapter's `generate`, in one place
+    #[allow(clippy::too_many_lines, clippy::many_single_char_names)] // `generate`, in one place
     pub fn for_table(&self, acc: &TableAccess, stats: &TableStats) -> Vec<Candidate> {
         let lob = |c: &str| stats.columns.get(c).is_some_and(|i| i.lob);
         let mut eq: Vec<&PredSel> = acc
@@ -730,7 +729,7 @@ impl Generator {
         }
     }
 
-    /// Chapter 13's `add_covering`: the variant `c ++ need` when it is
+    /// `add_covering`: the variant `c ++ need` when it is
     /// small and `c` reads enough rows for lookups to matter.
     fn add_covering(
         &self,
@@ -747,8 +746,7 @@ impl Generator {
 
     /// `c` extended by the columns `acc` reads that it lacks, within the
     /// covering limits; `None` when they don't fit. Also the validation's
-    /// covering retry (worked example 3): `acc` is then the regressing
-    /// statement's access.
+    /// covering retry: `acc` is then the regressing statement's access.
     #[must_use]
     pub fn extend_covering(
         &self,
@@ -980,8 +978,8 @@ fn table_predicates(f: &FpInput, alias: &str, stats: &TableStats) -> TablePreds 
     }
 }
 
-/// Reads `f`'s shape for table `alias` (chapter 13: `P`, `E`, `R`, `O`,
-/// `G` and the covering inputs).
+/// Reads `f`'s shape for table `alias` (`P`, `E`, `R`, `O`, `G` and the
+/// covering inputs).
 #[must_use]
 pub fn access(f: &FpInput, alias: &str, object: ObjectId, stats: &TableStats) -> TableAccess {
     let shape = &f.shape;
@@ -1282,7 +1280,7 @@ fn follows_order(rest: &[KeyPart], order: &[(String, SortDir)], range: Option<&s
     true
 }
 
-/// Chapter 13's `merge` for the candidates of one table: shortest first,
+/// Merges the candidates of one table: shortest first,
 /// a candidate whose parts are a prefix of a longer one's is merged into
 /// the first such longer one, unless it relies on the primary-key order a
 /// longer key breaks, or it covers columns the longer one lacks.
@@ -1341,7 +1339,7 @@ pub fn merge(mut cands: Vec<Candidate>) -> Vec<Candidate> {
     out.into_iter().flatten().collect()
 }
 
-/// Chapter 13's `covered_by`: the first existing index that serves `c`
+/// `covered_by`: the first existing index that serves `c`
 /// already. Only indexes that [count](IndexInfo::counts) are considered:
 /// user, system and migrated ones, and usable automatic ones, never an
 /// `IGNORED` one.

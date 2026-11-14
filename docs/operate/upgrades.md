@@ -131,6 +131,13 @@ Earlier versions of the chart ran the controllers as a Deployment. The current c
 - The DC's leader moves to one of the new pods once the old ones are gone. Admin calls (`sprigctl`, Studio's operator pages) made while it moves may need a retry.
 - If you set `controller.adminApi.tlsSecret`, its certificate must also name `*.sprigdb-controller-pods.<namespace>.svc` before you upgrade. The chart's own controller certificate already covers it.
 - The upgrade also adds telemetry Services for workers and operators, and lets the operator list `batch` Jobs to export backup times; see [Monitoring](deploy-kubernetes.md#monitoring).
+- The controllers elect a leader through etcd, so replacing them needs nothing from you. The old pods remove their own records as they shut down.
+- The Admin API is HTTPS when `tls.enabled` is on, and refuses plain HTTP unless `controller.adminApi.allowPlain` is set. Point anything outside the cluster that called `http://…:7480` at `https://` with the CA bundle (`--ca-file`).
+- cert-manager reissues `sprigdb-controller-tls` and `sprigdb-gateway-tls` with the new names on its own, because the upgrade changes their `Certificate`s.
+- The gateways' backend credentials Secret gains the CA bundle (`ca_file`), so per-user backend connections check MariaDB's certificate; its password is kept.
+- Client-certificate settings you set before with `settings.dc` or `sprigctl` stay. Setting `gateway.clientTls.secretName` replaces them at the upgrade.
+
+An upgrade from the Deployment layout has been tested on a kind cluster: the StatefulSet came up, the data was kept, and the Admin API answered over HTTPS afterwards.
 
 Upgrade one data centre at a time, as for any release.
 

@@ -1,5 +1,5 @@
-//! The `queue_forwarder` loop (chapter 50, "Publishing inside a database
-//! transaction"; R9, r9fwd), on the DC leader, every two seconds:
+//! The `queue_forwarder` loop (publishing inside a database transaction),
+//! on the DC leader, every two seconds:
 //!
 //! ```text
 //! if any feed subscription of kind `queue_forwarder` is active (one per
@@ -9,10 +9,10 @@
 //!   one (spec: cluster); a job whose worker died is requeued by dispatch,
 //!   and a failed or finished one is replaced here, so each cluster has
 //!   one forwarder, which serves every subscribed tenant the cluster holds
-//!   from one binlog dump (R9 item 84, r9cluster)
+//!   from one binlog dump
 //! ```
 //!
-//! Jobs of the per-tenant shape (spec: tenant, r9fwd) end themselves on a
+//! Jobs of the older per-tenant shape (spec: tenant) end themselves on a
 //! worker of this build.
 //!
 //! The worker's job (`sprig_worker::queue_forwarder`) and the gateways

@@ -207,6 +207,7 @@ export function Browse({ db, table, cols, editable }: { db: string; table: strin
         editable={canEdit ? (r, c) => !ref.readOnly.has(c) && !deleted.has(r) : undefined}
         edited={(r, c) => r < rows.length && (edits.get(r)?.has(c) ?? false)}
         rowClass={(r) => (deleted.has(r) ? 'deleted' : r >= rows.length ? 'added' : '')}
+        onActive={setActive}
         onEdit={(r, c, v) => {
           setActive(r);
           if (r >= rows.length) {

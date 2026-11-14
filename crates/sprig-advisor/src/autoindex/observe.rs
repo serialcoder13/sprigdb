@@ -1,6 +1,6 @@
-//! Observation, usage judgement, retirement and dropping (chapter 13 build
-//! step 11, "Observing and dropping"; decision O1), and the reconciler that
-//! keeps the store and the shards' real indexes in step ([`drift`]).
+//! Observation, usage judgement, retirement and dropping, and the
+//! reconciler that keeps the store and the shards' real indexes in step
+//! ([`drift`]).
 //!
 //! ```text
 //! observing, daily (watch_every):     # for auto_index.observe_days after the build
@@ -27,12 +27,12 @@
 //! failed: whatever a failed rollout left is dropped the same way
 //! ```
 //!
-//! Nothing here counts days of disuse (decision O1): an index on a quiet
+//! Nothing here counts days of disuse: an index on a quiet
 //! table is never judged on too little evidence, and an index on a busy one
 //! is judged quickly. [`user`] applies the same rule to user and migrated
 //! indexes, under `auto_index.retire_user_indexes`.
 //!
-//! Workload numbers come through [`WorkloadSource`] (chapter 12's store):
+//! Workload numbers come through [`WorkloadSource`]:
 //! `None` means "unknown", and nothing is judged on it — an index is never
 //! dropped because the workload store is missing.
 //!
@@ -125,7 +125,7 @@ pub struct UsageSample {
     pub sql: String,
 }
 
-/// Chapter 12's workload store, as observation reads it. `None` means the
+/// The workload store, as observation reads it. `None` means the
 /// numbers aren't known.
 #[async_trait::async_trait]
 pub trait WorkloadSource: Send + Sync {
@@ -170,7 +170,7 @@ pub trait WorkloadSource: Send + Sync {
     }
 
     /// The objects read from `since` to `until`: the tables whose user
-    /// indexes are judged (decision O1). `None`: unknown.
+    /// indexes are judged. `None`: unknown.
     ///
     /// # Errors
     /// The store couldn't be read.
@@ -213,7 +213,7 @@ impl WorkloadSource for NoWorkload {
 /// Observation settings besides [`ObserveRules`].
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ObserveSettings {
-    /// The watch's period (the chapter's daily).
+    /// The watch's period (daily by default).
     pub watch_every: Duration,
     /// How often a table's reads are counted for the usage judgement:
     /// `auto_index.eval_interval_minutes` (60). A cadence only; nothing is
@@ -388,21 +388,21 @@ pub struct ObserveCx<'a> {
     pub settings: &'a ObserveSettings,
     /// Lock waits and retries for retire and drop statements.
     pub ddl: &'a RolloutSettings,
-    /// Chapter 12's numbers.
+    /// The workload numbers.
     pub workload: &'a dyn WorkloadSource,
     /// Decisions.
     pub decisions: &'a dyn DecisionLog,
     /// Now.
     pub now: SystemTime,
-    /// Chapter 52's gate for removing an index; `None`: never held.
+    /// The approval gate for removing an index; `None`: never held.
     pub removals: Option<&'a dyn RemovalGate>,
 }
 
-/// Chapter 52's gate before an index is removed: an automatic index's
-/// retirement or drop, or a user or migrated index's removal (decision
-/// O1). Under `approve` it holds the removal until someone approves it;
-/// the observer proposes it again on its next judgement, so an approved
-/// removal goes ahead only if the evidence still asks for it.
+/// The approval gate before an index is removed: an automatic index's
+/// retirement or drop, or a user or migrated index's removal. Under
+/// `approve` it holds the removal until someone approves it; the observer
+/// proposes it again on its next judgement, so an approved removal goes
+/// ahead only if the evidence still asks for it.
 #[async_trait::async_trait]
 pub trait RemovalGate: Send + Sync {
     /// Whether to remove now.
@@ -471,7 +471,7 @@ pub enum ObserveStep {
     Dropped(Option<DropReason>),
     /// A statement failed; try again later.
     Failed(String),
-    /// The removal waits for an approval (chapter 52); the reason names
+    /// The removal waits for an approval; the reason names
     /// the item.
     Held(String),
 }
@@ -505,7 +505,7 @@ pub struct WatchState {
     pub measures: WatchMeasures,
 }
 
-/// `observed.usage`: the usage judgement's state (decision O1).
+/// `observed.usage`: the usage judgement's state.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UsageState {
     /// The last count of reads, Unix ms.
@@ -540,7 +540,7 @@ pub struct RetireState {
     #[serde(default)]
     pub since_ms: u64,
     /// Targets' runs-weighted p95 before it was ignored, ms (rows retired
-    /// before decision O1).
+    /// before usage-based judgement).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub p95_before_ms: Option<f64>,
     /// The fingerprints it served, as they ran before it was ignored.
@@ -690,7 +690,7 @@ async fn serving<Q: Queryable + Send>(
             }
         }
     }
-    // Usage (decision O1): judged by reads, never by days.
+    // Usage: judged by reads, never by days.
     let mut us: UsageState = part(row.observed.as_ref(), "usage");
     if now_ms.saturating_sub(us.last_check_ms) >= ms(cx.settings.usage_every) {
         let columns: Vec<String> = def.parts.iter().map(|p| p.column.clone()).collect();
@@ -1071,7 +1071,7 @@ fn change(from: IndexState, to: IndexState, at: SystemTime, r: Option<DropReason
 /// user's index serves whatever it did. `before` holds the fingerprints it
 /// served as they ran (else its targets' latency over the last
 /// `watch_every` is read): what "regressed while ignored" compares with.
-/// Chapter 52's gate is asked first.
+/// The approval gate is asked first.
 #[allow(clippy::too_many_lines)] // the gate, the toggle and the drop
 async fn retire<Q: Queryable + Send>(
     store: &AutoIndexStore,
@@ -1194,7 +1194,7 @@ async fn retire<Q: Queryable + Send>(
     drop_all(store, q, cx, row, IndexState::Dropping, Some(reason)).await
 }
 
-/// What the watch of an `IGNORED` index concluded (decision O1).
+/// What the watch of an `IGNORED` index concluded.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum IgnoredWatch {
     /// Unknown numbers, or fewer reads than `usage_sample_reads`: keep
@@ -1232,7 +1232,7 @@ pub(crate) async fn watch_ignored(
     ) {
         return Ok(IgnoredWatch::Regressed(r));
     }
-    // Rows retired before decision O1 kept only their targets' p95.
+    // Rows retired before usage-based judgement kept only their targets' p95.
     if let Some(before) = rs.p95_before_ms.filter(|b| *b > 0.0)
         && let Some(now) = targets_p95(legacy_targets, &l)
         && 100.0 * (now / before - 1.0) > cx.rules.max_regression_pct
@@ -1506,7 +1506,7 @@ pub fn check_auto(row: &AutoIndexRow) -> Result<()> {
 
 /// Retires `row` now for `reason`, as observation would: the retirement
 /// selection asks for when a table is over a tightened budget or a better
-/// automatic index replaces it (chapter 13, "Selection under budgets"),
+/// automatic index replaces it,
 /// which evaluation reports and the loop applies. Only `observing` and
 /// `active` rows move; anything else is [`ObserveStep::Idle`].
 ///

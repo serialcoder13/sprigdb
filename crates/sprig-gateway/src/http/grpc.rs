@@ -1,8 +1,8 @@
 //! The gRPC services on 8080 (h2c) and 8443 (ALPN h2): `sprig.v1.Sql`,
-//! `sprig.v1.Transactions`, `sprig.v1.Sinks` and `Connections` (their
-//! `Test` calls, R9), every `sprig.admin.v1` service (`Operators`
-//! too: sign-in and tokens relay to the controller, whose guard decides) and
-//! `grpc.health.v1.Health` (chapter 37 steps 2, 4 and 6).
+//! `sprig.v1.Transactions`, `sprig.v1.Sinks` and `Connections` (their `Test`
+//! calls), every `sprig.admin.v1` service (`Operators` too: sign-in and
+//! tokens relay to the controller, whose guard decides) and
+//! `grpc.health.v1.Health`.
 //!
 //! They run the same code as REST: SQL through [`SqlEngine`](super::sql::SqlEngine),
 //! admin calls through [`AdminApi`](super::admin::AdminApi) (the gRPC
@@ -76,7 +76,7 @@ pub(crate) async fn caller<T>(
         )
         .await
         .map_err(|e| st(&e))?;
-    // Chapter 24: the client's DC, as gRPC metadata `sprig-dc`.
+    // The client's DC, as gRPC metadata `sprig-dc`.
     c.client_dc = crate::dc::hint("grpc", meta(req, "sprig-dc").as_deref()).known();
     Ok(c)
 }
@@ -270,7 +270,7 @@ impl Functions for FunctionsSvc {
     }
 }
 
-/// `sprig.v1.Logic` (chapter 41; R7 follow-ups).
+/// `sprig.v1.Logic`.
 #[derive(Clone)]
 struct LogicSvc(Arc<Core>);
 
@@ -601,10 +601,10 @@ impl AdminReq for TenantObjectRequest {
     }
 }
 
-/// `sprig.admin.v1.Recommendations` for a tenant login (chapter 52): the
-/// same caller claim as the REST face `/v1/recommendations`. `None` when
-/// the credential isn't a tenant login (operators' tokens go through the
-/// Admin API as they are).
+/// `sprig.admin.v1.Recommendations` for a tenant login: the same caller
+/// claim as the REST face `/v1/recommendations`. `None` when the credential
+/// isn't a tenant login (operators' tokens go through the Admin API as they
+/// are).
 async fn recommendations_as_tenant<R: AdminReq>(
     core: &Arc<Core>,
     rpc: &str,
@@ -686,7 +686,7 @@ async fn admin_call<R: AdminReq>(
     let info = req.extensions().get::<ConnInfo>().cloned();
     let r = req.into_inner();
     let route = by_name(rpc).ok_or_else(|| Status::unimplemented(rpc.to_owned()))?;
-    // `studio.operator_mtls` covers the Operators service (ST47).
+    // `studio.operator_mtls` covers the Operators service.
     if route.service == "sprig.admin.v1.Operators" {
         let mtls = core
             .studio
@@ -725,7 +725,7 @@ async fn admin_call<R: AdminReq>(
         path.push_str(query.trim_start_matches('?'));
     }
     let method = Method::from_bytes(route.method.as_bytes()).unwrap_or(Method::GET);
-    // The controller records the client's address (ST47).
+    // The controller records the client's address.
     let reply = core
         .admin
         .forward_from(
@@ -850,8 +850,8 @@ admin_service!(OperatorsSvc, operators_server::Operators, OperatorsServer, "Oper
     revoke_token: NameRequest => "RevokeToken",
 });
 
-/// `sprig.v1.Sinks.Test` and `sprig.v1.Connections.Test` (chapter 51,
-/// R9 closers): the statements the REST routes run, as the caller.
+/// `sprig.v1.Sinks.Test` and `sprig.v1.Connections.Test`: the statements
+/// the REST routes run, as the caller.
 struct SinksSvc(Arc<Core>);
 
 /// The columns and rows of a test as the reply; a `NULL` cell is a null.
@@ -959,7 +959,7 @@ impl Health for HealthSvc {
     }
 }
 
-/// `sprig.v1.Changes` (chapter 37 step 11; RLS round 5, RL45).
+/// `sprig.v1.Changes`.
 struct ChangesSvc(Arc<Core>);
 
 #[tonic::async_trait]

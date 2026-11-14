@@ -1,7 +1,7 @@
-//! Chapter 07 steps 4, 5, 7 and 8 against a real MariaDB: the `SHOW`
-//! family through the result mappers, the `information_schema` inline
-//! views, error messages, and the leak check on every byte a client would
-//! see. Skipped unless the Compose single node is named:
+//! Name virtualization against a real MariaDB: the `SHOW` family through the
+//! result mappers, the `information_schema` inline views, error messages, and
+//! the leak check on every byte a client would see. Skipped unless the Compose
+//! single node is named:
 //!
 //! ```sh
 //! export SPRIG_TEST_MARIADB_SINGLE=mysql://root:sprig-dev-root@127.0.0.1:13301

@@ -1,10 +1,9 @@
-//! The `api.*` keys the HTTP listeners read (chapter 37, "Configuration").
+//! The `api.*` keys the HTTP listeners read.
 //!
 //! Every key is read when a request needs it, so a change applies to the
-//! next request. Keys the chapter also accepts at tenant scope resolve at
-//! the process scopes (dc, global) in R0: a request knows its tenant only
-//! after authentication, and per-tenant API limits arrive with rate limits
-//! (chapter 37 step 9).
+//! next request. Keys that also accept tenant scope resolve at the process
+//! scopes (dc, global): a request knows its tenant only after
+//! authentication, and there are no per-tenant API limits yet.
 
 use std::time::Duration;
 
@@ -32,7 +31,7 @@ key!(
     TXN_IDLE_TIMEOUT_MS,
     "api.txn.idle_timeout_ms",
     10_000,
-    Scopes::TREE,
+    Scopes::PROCESS,
     100,
     3_600_000,
     "Idle time before a transaction handle expires"
@@ -41,7 +40,7 @@ key!(
     TXN_MAX_LIFETIME_MS,
     "api.txn.max_lifetime_ms",
     60_000,
-    Scopes::TREE,
+    Scopes::PROCESS,
     100,
     86_400_000,
     "Longest life of a transaction handle"
@@ -50,7 +49,7 @@ key!(
     TXN_MAX_OPEN_PER_TENANT,
     "api.txn.max_open_per_tenant",
     256,
-    Scopes::TREE,
+    Scopes::PROCESS,
     0,
     1_000_000,
     "Open transaction handles per tenant per gateway"
@@ -68,7 +67,7 @@ key!(
     STREAM_MAX_PER_TENANT,
     "api.stream.max_per_tenant",
     1000,
-    Scopes::TREE,
+    Scopes::PROCESS,
     0,
     1_000_000,
     "Open change streams per tenant per gateway"
@@ -77,7 +76,7 @@ key!(
     STREAM_HEARTBEAT_SECONDS,
     "api.stream.heartbeat_seconds",
     15,
-    Scopes::TREE,
+    Scopes::PROCESS,
     1,
     3600,
     "Heartbeat when no change event arrives"
@@ -136,7 +135,7 @@ pub struct ApiSettings {
     pub max_request: usize,
     /// `api.max_concurrent_streams`.
     pub max_streams: u32,
-    /// `api.stream.max_per_tenant` (RL53): open change streams per tenant
+    /// `api.stream.max_per_tenant`: open change streams per tenant
     /// on this gateway.
     pub change_streams_max: usize,
     /// `api.stream.heartbeat_seconds`.

@@ -1,9 +1,8 @@
 //! MySQL 8.4's `performance_schema` tables and `sys` views: each one's
 //! columns and the `CAST` type that stands for its MySQL type.
 //!
-//! Generated from MySQL 8.4.11's `information_schema.COLUMNS` by
-//! `target/agent-r4four/scripts/gen_ps_catalog.py` (R4 round 4); each entry
-//! is `(schema, table, "COLUMN:CAST;...")`.
+//! Generated from MySQL 8.4.11's `information_schema.COLUMNS` by a one-off
+//! script; each entry is `(schema, table, "COLUMN:CAST;...")`.
 
 /// Every object, ordered by schema and name.
 pub(super) static OBJECTS: &[(&str, &str, &str)] = &[

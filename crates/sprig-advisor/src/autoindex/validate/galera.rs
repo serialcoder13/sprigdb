@@ -1,5 +1,4 @@
-//! Galera RSU validation (chapter 13 build step 8; "Validation harness",
-//! Galera, desynced node).
+//! Galera RSU validation, on a desynced node.
 //!
 //! ```text
 //! 1. checks: the cluster is Primary with at least min_cluster_size nodes,
@@ -28,7 +27,7 @@
 //! lags and serves nothing until it resyncs. An extra index on one node is
 //! harmless for row-based write sets. The session variables die with the
 //! session; the validator still sets `wsrep_OSU_method` back to `TOI`
-//! after each statement, as the chapter does, and checks the globals.
+//! after each statement, and checks the globals.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -62,7 +61,7 @@ pub struct RsuValidator {
     marker: Arc<dyn NodeMarker>,
     probe_timeout: Duration,
     /// The writer: an index already on the node but not there is a
-    /// cut-off validation's leftover, dropped before building (bugfix-61).
+    /// cut-off validation's leftover, dropped before building.
     writer: Option<NodeEndpoint>,
 }
 
@@ -93,8 +92,7 @@ impl RsuValidator {
     /// Compares with the cluster's `writer` before building: the
     /// validation's index already on the node but not on the writer is a
     /// cut-off validation's leftover, dropped in RSU with the binary log
-    /// off instead of aborting with `index_exists` (bugfix-61,
-    /// [`super::orphans`]).
+    /// off instead of aborting with `index_exists` ([`super::orphans`]).
     #[must_use]
     pub fn with_writer(mut self, writer: NodeEndpoint) -> Self {
         self.writer = Some(writer);
@@ -267,7 +265,7 @@ impl Validator for RsuValidator {
         let mut r = report(plan, Method::GaleraRsu, &self.node.node);
         let name = plan.index_name();
         let t = &plan.target;
-        // bugfix-61: while this runs, nothing in this process takes the
+        // While this runs, nothing in this process takes the
         // node's validation index for a leftover.
         let _running = super::orphans::running(&self.node.node, t);
 
@@ -407,7 +405,7 @@ impl Validator for RsuValidator {
         match &mut ddl {
             Err(e) => abort(&mut r, format!("DDL session: {e}")),
             Ok(d) => {
-                // A field-column candidate's columns (R6 round 6) go to the
+                // A field-column candidate's columns go to the
                 // whole cluster (TOI, instant, invisible and without
                 // storage), so no node's rows differ from another's; only
                 // the index is built in RSU. They stay afterwards.

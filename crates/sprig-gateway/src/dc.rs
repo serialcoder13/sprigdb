@@ -1,4 +1,4 @@
-//! Data centers in the gateway (chapter 24, build steps 1 and 3): the
+//! Data centers in the gateway: the
 //! client's DC id, and the traffic counts the home DC weighs.
 //!
 //! **DC ids.** A MySQL or MariaDB client names its DC with the connection
@@ -21,12 +21,11 @@
 //! (`sprig-controller::traffic`). Counts that can't be sent are kept and
 //! summed into the next report.
 //!
-//! **Where the book differs (R0).** Chapter 24 sends `Traffic.Report` to
-//! the gateway's own DC leader over the internal gRPC port, which merges
-//! rows and forwards one batch per home DC. Until that port exists the
-//! gateway reports straight to each home DC's leader through the Admin
-//! port (found as chapter 37's forwarding finds it, in that DC's tier of
-//! the one etcd). Unknown client DCs report as `"?"`, missing ones as `""`.
+//! **Report path.** There is no internal gRPC port for traffic reports
+//! yet (one that would let the gateway's own DC leader merge rows and
+//! forward one batch per home DC), so the gateway reports straight to each
+//! home DC's leader through the Admin port (found as the Admin API's
+//! forwarding finds it, in that DC's tier of the one etcd). Unknown client DCs report as `"?"`, missing ones as `""`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
@@ -131,7 +130,7 @@ pub fn registry() -> Option<&'static DcRegistry> {
     REGISTRY.get()
 }
 
-/// Chapter 24's `hint(raw)`: absent or empty is `Missing`; text that isn't
+/// `hint(raw)`: absent or empty is `Missing`; text that isn't
 /// a DC id (`[a-z][a-z0-9-]{1,31}` after lowercasing and trimming) is
 /// `Unknown`; a registered, not retired DC is `Known`. Without a registry
 /// (development without etcd) a well-formed id is taken as known.
@@ -276,7 +275,7 @@ pub struct TrafficRow {
     pub writes: u64,
 }
 
-/// A traffic report (chapter 24's `TrafficBatch`, as JSON).
+/// A traffic report (a `TrafficBatch`, as JSON).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrafficBatch {
     /// Unix minute the counts end in.

@@ -1,14 +1,14 @@
-//! The sharding loop ([`crate::sharding::ShardingLoop`], chapters 16 and
-//! 20) in the controller's runtime: a DC-leader loop over the tenants
+//! The sharding loop ([`crate::sharding::ShardingLoop`]) in the
+//! controller's runtime: a DC-leader loop over the tenants
 //! homed here and `active`, one tick per tenant every
 //! `sharding.check_interval_seconds`, with every setting resolved from the
 //! controller's live settings (etcd: global, dc and tenant scopes).
 //!
-//! Where this differs from the book: chapter 16 runs the advisor as a
-//! worker job; there is no worker job runtime for it yet, so the DC leader
+//! The advisor is meant to run as a worker job; there is no worker job
+//! runtime for it yet, so the DC leader
 //! runs the advisor's first design inside the tick, as the library loop
 //! does. Tenant-scope values stored in tenants' catalogs are read through
-//! [`crate::tenant_scopes`] (RL3, r2harden): a tenant's own `sharding.*`,
+//! [`crate::tenant_scopes`]: a tenant's own `sharding.*`,
 //! `advisor.*` and `mover.cutover_max_hold_ms` rows win over its DC's.
 
 use std::sync::Arc;
@@ -51,7 +51,7 @@ type ScopesCell = Arc<std::sync::OnceLock<Arc<crate::tenant_scopes::TenantScopes
 pub struct LiveSource {
     live: Option<LiveSettings>,
     dc: DcId,
-    /// Tenants' own catalog rows (RL3), as cached.
+    /// Tenants' own catalog rows, as cached.
     scopes: ScopesCell,
 }
 
@@ -112,9 +112,9 @@ pub struct ShardingRuntime {
     dir: Directory,
     dc: DcId,
     settings: Arc<dyn SettingsSource>,
-    /// Chapter 20's gateway write sketches (load splits).
+    /// The gateways' write sketches (load splits).
     write_load: Arc<GatewayWriteLoad>,
-    /// [`LiveSource`]'s tenant-rows cache (RL3).
+    /// [`LiveSource`]'s tenant-rows cache.
     scopes: ScopesCell,
 }
 
@@ -168,7 +168,7 @@ impl ShardingRuntime {
         }
     }
 
-    /// The same loop reading tenants' own catalog rows (RL3, r2harden).
+    /// The same loop reading tenants' own catalog rows.
     #[must_use]
     pub fn with_tenant_scopes(self, s: Arc<crate::tenant_scopes::TenantScopes>) -> Self {
         let _ = self.scopes.set(s);

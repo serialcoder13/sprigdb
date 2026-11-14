@@ -1,5 +1,4 @@
-//! Inherited streams over Kafka (chapter 45, "Inherited streams", "The
-//! Kafka view"; chapter 42; R9, r9fet):
+//! Inherited streams over Kafka:
 //!
 //! - **A member** produces to `<db>.<stream>` of an inherited stream as if
 //!   it were its own: the first produce creates its instance (an ordinary
@@ -216,7 +215,7 @@ impl GatewayData {
                 ))
             })?;
             if target == "*" {
-                // A broadcast (chapter 42): logged now, delivered to every
+                // A broadcast: logged now, delivered to every
                 // member by the fan-out.
                 r.headers.retain(|h| h.key != TENANT && h.key != ORIGIN);
                 let rec = publish::Publish {
@@ -414,16 +413,15 @@ impl GatewayData {
 }
 
 // ---------------------------------------------------------------------------
-// Fan-in topics (chapter 45, "The Kafka view"; chapter 42, "Fan-in"; R9,
-// r9next): in an ancestor P holding SPRIG_FAN_IN and SELECT on an inherited
-// stream's name, each existing instance of a descendant member T is also
-// the read-only topic `__t.<T>.<db>.<stream>`. A consumer group subscribing
-// to the pattern `__t\..*\.<db>\.<stream>` reads every member; its offsets
+// Fan-in topics: in an ancestor P holding SPRIG_FAN_IN and SELECT on an
+// inherited stream's name, each existing instance of a descendant member T
+// is also the read-only topic `__t.<T>.<db>.<stream>`. A consumer group
+// subscribing to the pattern `__t\..*\.<db>\.<stream>` reads every member; its offsets
 // go to P's `stream_offsets` with `instance_tenant_id = T`. The topic's
 // stream id is [`FANIN_FLAG`] | an id P's catalog assigns to (T, the
-// instance's stream id) in `stream_fanin_topics` (R9, r9queue: any 64-bit
-// tenant id works; r9next packed T into the id, which capped tenant ids at
-// 2^38), so the broker's group code (keyed by stream id) needs no change.
+// instance's stream id) in `stream_fanin_topics` (so any 64-bit tenant id
+// works, where packing T into the id would cap tenant ids at 2^38), so the
+// broker's group code (keyed by stream id) needs no change.
 // Ids are cached per gateway; a row never changes once written. Members
 // whose residency sets `deny_remote_access` are left out.
 // ---------------------------------------------------------------------------

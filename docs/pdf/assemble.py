@@ -59,6 +59,12 @@ def page(path, section):
     # Drop the page's own H1 (it becomes the chapter heading) and shift the rest.
     body = re.sub(r"^# [^\n]*\n", "", body, count=1)
     body = re.sub(r"^(#{1,5}) ", lambda m: "#" + m.group(1) + " ", body, flags=re.M)
+    # Images: paths from typst's root, docs/ (build-pdf.sh passes --root).
+    body = re.sub(
+        r"(!\[[^\]]*\]\()(?!https?:)([^)\s]+)\)",
+        lambda m: m.group(1) + "/" + str((DOCS / section / m.group(2)).resolve().relative_to(DOCS)) + ")",
+        body,
+    )
     # Generated pages start with an HTML comment.
     body = re.sub(r"<!--.*?-->\n?", "", body, flags=re.S)
     body = re.sub(

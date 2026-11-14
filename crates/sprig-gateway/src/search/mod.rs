@@ -1,4 +1,4 @@
-//! Full-text search in the gateway (chapter 39; R5 rounds 5 and 6).
+//! Full-text search in the gateway.
 //!
 //! **Where copies live.** With `search.copies` above 0 (2 by default) and a
 //! worker with the search role in the DC, copies run on workers
@@ -6,7 +6,7 @@
 //! index's record, the controller places `search.copies` copies on
 //! different workers, and queries go to a ready copy, the other one when it
 //! fails. Without search workers (or with `search.copies = 0`), every
-//! gateway that serves an index holds one copy itself (decision S1),
+//! gateway that serves an index holds one copy itself,
 //! under `SPRIG_SEARCH_DIR` (default `<temp>/sprig-search/<gateway id>`).
 //! Both run the same copy runtime (`sprig_search::copy`).
 //!
@@ -60,13 +60,13 @@ pub use runtime::Runtime;
 
 pub use sprig_search::settings::*;
 
-/// How fresh a search must be (chapter 39, "Freshness").
+/// How fresh a search must be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Consistency {
     /// The last commit.
     StaleOk,
     /// Everything committed on the tenant's cluster before the query.
-    /// `own_writes` is served as this (decision S5): stronger, and the
+    /// `own_writes` is served as this: stronger, and the
     /// wait is the same when the session's last write is the newest.
     Latest,
 }

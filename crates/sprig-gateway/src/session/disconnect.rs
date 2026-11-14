@@ -1,6 +1,5 @@
-//! Client-disconnect detection (chapter 04, "Accept and protocol
-//! detection": "On client disconnect mid-statement the task sends `KILL
-//! QUERY` and discards the backend connection").
+//! Client-disconnect detection: on a client disconnect mid-statement the
+//! task sends `KILL QUERY` and discards the backend connection.
 //!
 //! Between statements a front end is reading from the client, so a hang-up
 //! shows as end of file. During a statement nothing reads the socket; these

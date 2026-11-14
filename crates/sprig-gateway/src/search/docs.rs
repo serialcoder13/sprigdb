@@ -1,12 +1,12 @@
-//! Text and search indexes on collections for the document engine
-//! (chapter 39, MongoDB; chapter 30 routes the commands): the engine's
+//! Text and search indexes on collections for the document engine (the
+//! MongoDB front end routes the commands here): the engine's
 //! [`TextSearch`] over the gateway's search service.
 //!
 //! - `createIndexes` with `"text"` keys makes a `mongo_text` index (one
 //!   per collection, as in MongoDB); `createSearchIndexes` with
-//!   `type: "search"` a `mongo_search` index. Both are chapter 39 search
+//!   `type: "search"` a `mongo_search` index. Both are full-text search
 //!   indexes in the tenant catalog, built here as the creating user.
-//! - `$text` waits for `latest` by default (decision S9): MongoDB's text
+//! - `$text` waits for `latest` by default: MongoDB's text
 //!   indexes are updated with the write, so a driver reading its own
 //!   write expects to find it. `$search` and `$searchMeta` use
 //!   `search.default_consistency`, as Atlas Search is eventually
@@ -341,7 +341,7 @@ impl DocSearch {
     }
 }
 
-/// The keys of `hits` whose documents the session reads (decision S24).
+/// The keys of `hits` whose documents the session reads.
 async fn visible_ids(
     sql: &mut dyn SqlRunner,
     def: &IndexDef,
@@ -638,7 +638,7 @@ impl TextSearch for DocSearch {
             }
         };
         // The copy's count includes documents hidden from a caller a row
-        // policy binds (decision S24): shown to others only.
+        // policy binds: shown to others only.
         let shown =
             execute && !super::visible::needs_visible(def, sql.row_policy_binds(def.object_id));
         let (hits, took) = if shown {
@@ -696,7 +696,7 @@ impl TextSearch for DocSearch {
                     )));
                 }
                 // `$caseSensitive` and `$diacriticSensitive` are applied by
-                // the engine after the search (M3, decision S101).
+                // the engine after the search.
                 let hits = self
                     .search(
                         t,
@@ -794,7 +794,7 @@ impl TextSearch for DocSearch {
                     names.push(fname.clone());
                     ops.push(sprig_search::rpc::Op::Facet { path, n, bounds });
                 }
-                // Decision S24: a caller a row policy on the collection
+                // A caller a row policy on the collection
                 // binds gets the count and facets of the documents it may
                 // see (the copy's own include hidden ones): the same ops
                 // over the query restricted to the visible keys.

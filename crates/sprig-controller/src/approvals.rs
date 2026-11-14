@@ -1,4 +1,4 @@
-//! Chapter 52 in the controller: the approvals hub every deciding loop
+//! Approvals in the controller: the approvals hub every deciding loop
 //! calls before acting ([`ControllerApprovals`]), appliers for components
 //! that never revisit a held decision, the decision-log hook, and the
 //! `approvals` loop that runs timers, appliers and gauges.
@@ -182,7 +182,7 @@ impl ControllerApprovals {
 
     /// Brings this controller's copy of `tenant`'s setting rows up to the
     /// directory's catalog version now, so the next resolution sees a change
-    /// made a moment ago (approvals round 3: the vector gate).
+    /// made a moment ago (the vector gate).
     pub async fn refresh_tenant(&self, tenant: TenantId) {
         if let Some(s) = &self.scopes {
             let _ = s.get_fresh(tenant).await;
@@ -416,7 +416,7 @@ pub fn installed() -> Option<&'static Arc<ControllerApprovals>> {
     PROCESS.get()
 }
 
-/// Chapter 52's gate for a cluster writer failover the safety checks
+/// The approval gate for a cluster writer failover the safety checks
 /// allow: `None` to go ahead, `Some(why)` to hold. Held only when
 /// `failover.mode = approve` comes from the global scope; an approval
 /// lets the failover code proceed on a later pass only if its checks
@@ -460,7 +460,7 @@ pub async fn failover_gate(dc: &DcId, cluster: &ClusterId, writer: &str) -> Opti
     }
 }
 
-/// What chapter 52's gate says about one tenant's promotion in a DC
+/// What the approval gate says about one tenant's promotion in a DC
 /// failover.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DcFailoverGate {
@@ -471,8 +471,9 @@ pub enum DcFailoverGate {
     Hold(String),
 }
 
-/// Chapter 52's gate for promoting `tenant` from the lost DC `x` to `to`
-/// in DC failover `failover_id` (the global leader, chapter 25 step 7).
+/// The approval gate for promoting `tenant` from the lost DC `x` to `to`
+/// in DC failover `failover_id` (on the global leader, when it plans the
+/// promotions).
 /// Held only when `failover.mode = approve` comes from the global scope;
 /// the item lives in the global tier. An approval lets the failover code
 /// go ahead only after it has checked again that the DC's lease is still
@@ -551,8 +552,7 @@ pub fn ancestors_of(path: &str, tenant: TenantId) -> Vec<TenantId> {
         .collect()
 }
 
-/// Writes every transition of a tenant's item to its decision log
-/// (chapter 11; chapter 52, "Observability").
+/// Writes every transition of a tenant's item to its decision log.
 pub struct DecisionHook {
     log: Arc<dyn DecisionLog>,
     dc: DcId,
@@ -650,7 +650,7 @@ impl fmt::Display for ApprovalKey {
     }
 }
 
-/// The `approvals` loop (chapter 52, "Escalation and auto-apply"): on the
+/// The `approvals` loop (escalation and auto-apply): on the
 /// DC leader, every `approvals.tick_seconds`, per tenant homed here and
 /// for the DC tier.
 pub struct ApprovalsLoop {

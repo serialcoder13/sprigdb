@@ -1,5 +1,4 @@
-//! SQL over REST and gRPC against the MySQL wire (milestone M0.7, chapter 37
-//! steps 2-6): the same statements give the same results and the same
+//! SQL over REST and gRPC against the MySQL wire: the same statements give the same results and the same
 //! errors, with the same name virtualization, on 8080 (HTTP/1.1 REST, h2c
 //! gRPC) and 8443 (TLS: REST, gRPC with ALPN h2).
 //!
@@ -650,7 +649,7 @@ async fn transport_and_credential_errors() {
 }
 
 /// A failed `USE` must not leave a session on a pooled connection that
-/// still has another default schema (chapter 06: a `USE` may borrow such a
+/// still has another default schema (a `USE` may borrow such a
 /// connection; a failed one closes it).
 #[tokio::test]
 async fn a_failed_use_never_leaves_another_schema() {

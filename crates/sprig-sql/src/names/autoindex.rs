@@ -1,15 +1,14 @@
-//! The SQL side of chapter 13's metadata-hiding contract (chapter 13,
-//! "Hiding from metadata"; chapter 07, "Reserved names"; build step 12):
+//! The SQL side of hiding automatic indexes from metadata:
 //!
 //! - **Reserved names.** User DDL that names an index `sprig_auto_*`
-//!   (case-insensitive) fails with 39050 `ER_SPRIG_RESERVED_NAME`:
-//!   `CREATE INDEX`, `ALTER TABLE ... ADD INDEX|KEY|UNIQUE|...`, an index
-//!   or constraint in `CREATE TABLE`, `RENAME INDEX ... TO`, `ALTER INDEX
-//!   ... IGNORED`. A `DROP INDEX` of one is allowed only while the session
-//!   shows automatic indexes (`@sprig_show_auto_indexes = 1`, chapter 07);
-//!   otherwise it fails the same way. [`index_changes`] reads the index
-//!   names of a DDL statement and [`check_reserved`] applies the rule;
-//!   [`plan`](super::plan()) calls both for every DDL statement.
+//!   (case-insensitive) fails with 39050 `ER_SPRIG_RESERVED_NAME`: `CREATE
+//!   INDEX`, `ALTER TABLE ... ADD INDEX|KEY|UNIQUE|...`, an index or constraint
+//!   in `CREATE TABLE`, `RENAME INDEX ... TO`, `ALTER INDEX ... IGNORED`. A
+//!   `DROP INDEX` of one is allowed only while the session shows automatic
+//!   indexes (`@sprig_show_auto_indexes = 1`); otherwise it fails the same way.
+//!   [`index_changes`] reads the index names of a DDL statement and
+//!   [`check_reserved`] applies the rule; [`plan`](super::plan()) calls both
+//!   for every DDL statement.
 //! - **The session flag.** `SET @sprig_show_auto_indexes = 1` (or `0`,
 //!   `ON`, `OFF`, `TRUE`, `FALSE`, a quoted `'1'`) is the gateway's, never
 //!   MariaDB's: [`session_flag`] recognizes it and the gateway keeps it in
@@ -348,7 +347,7 @@ pub fn index_changes(text: &[u8], opts: &LexOptions) -> Option<IndexChanges> {
     None
 }
 
-/// Applies chapter 07's rule to `ch`: creating, renaming to or from, or
+/// Applies the reserved-name rule to `ch`: creating, renaming to or from, or
 /// altering a `sprig_auto_*` index is 39050; dropping one is allowed only
 /// while the session shows automatic indexes (`vis`).
 ///

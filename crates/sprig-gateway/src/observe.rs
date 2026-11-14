@@ -1,6 +1,4 @@
-//! Statement SLIs and the root trace span (chapter 47, "Metric catalogue",
-//! "SLOs and burn-rate alerts" and "Traces and redaction"; build steps 2
-//! and 3).
+//! Statement SLIs and the root trace span.
 //!
 //! [`observed`] wraps the gateway's executor, outermost, so every request
 //! of every front end (MySQL, MariaDB, HTTP) passes it:
@@ -63,7 +61,7 @@ pub fn backend_time(d: Duration) {
     });
 }
 
-/// The `result` label of an error (chapter 47, "Metric catalogue").
+/// The `result` label of an error.
 #[must_use]
 pub fn classify(e: &SprigError) -> &'static str {
     match e.kind {
@@ -135,7 +133,7 @@ impl TenantRates {
     }
 }
 
-/// `exec` with SLI metrics and the root span in front (chapter 47).
+/// `exec` with SLI metrics and the root span in front.
 #[must_use]
 pub fn observed(exec: SharedExecutor) -> SharedExecutor {
     Arc::new(Observed { inner: exec })
@@ -166,7 +164,7 @@ struct ObservedSession {
 }
 
 /// Whether the innermost entered span is a traced request already (a
-/// MongoDB command's `gateway.request`, perf1 S142): an engine's
+/// MongoDB command's `gateway.request`): an engine's
 /// statements inside it record no root span of their own.
 fn in_traced_request() -> bool {
     tracing::Span::current()
@@ -174,9 +172,9 @@ fn in_traced_request() -> bool {
         .is_some_and(|m| m.target() == TARGET)
 }
 
-/// A session's SLI metric handles, registered on first use (R5 round 8:
-/// registering them with their labels on every statement cost about 2% of
-/// a MongoDB point read's gateway CPU). A session's protocol and tenant
+/// A session's SLI metric handles, registered on first use (registering
+/// them with their labels on every statement cost about 2% of a MongoDB
+/// point read's gateway CPU). A session's protocol and tenant
 /// don't change; `result` and whether the tenant has its own series do.
 #[derive(Default)]
 struct Sli {
@@ -247,7 +245,7 @@ impl SessionExec for ObservedSession {
             return self.inner.execute(cx, req, out).await;
         }
         let protocol = cx.session.protocol.as_str();
-        // One span per request (S142): an engine statement inside a
+        // One span per request: an engine statement inside a
         // traced command (MongoDB's) is part of that command's span.
         let span = if self.internal && in_traced_request() {
             None

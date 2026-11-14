@@ -1,4 +1,4 @@
-//! Decision O1 for user and migrated indexes: the same usage rule as for
+//! User and migrated indexes: the same usage rule as for
 //! automatic ones, under `auto_index.retire_user_indexes` (`on` removes,
 //! `recommend` only recommends, `off` leaves them alone). State lives in
 //! `index_usage` ([`UsageRow`]).
@@ -504,7 +504,7 @@ pub async fn object_pass<Q: Queryable + Send>(
                     };
                 let mut step = UserStep::Checked;
                 let mut observed_after = None;
-                // Chapter 52: `on` and `approve` ask the gate first; it holds
+                // `on` and `approve` ask the approval gate first; it holds
                 // the removal under approve (the row shows as recommended).
                 let gate = match &judged {
                     Some(j) if j.verdict == UsageVerdict::Remove => {

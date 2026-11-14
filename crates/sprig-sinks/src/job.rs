@@ -101,11 +101,75 @@ pub trait SinkEnv: Send + Sync {
     ) -> Result<bool> {
         Ok(false)
     }
+    /// Chapter 51 (39229, authfix2): why the sink's owner `owner` can no
+    /// longer read `sources` (dropped, locked, or `SELECT` lost), or
+    /// `None` while it can. By default `None`: workers without the tenant
+    /// catalog leave it to the gateway's check at grant changes.
+    ///
+    /// # Errors
+    /// The catalog's.
+    async fn owner_lost(
+        &self,
+        _tenant: TenantId,
+        _owner: u32,
+        _sources: &[OwnerRead],
+    ) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 /// The start of the pause reason row-level security gives a sink (RL25,
 /// RL31): a running task stops at once, not after its buffered records.
 pub const RLS_PAUSE: &str = "ER_SPRIG_RLS_UNSUPPORTED";
+
+/// The start of the pause reason when the sink's owner can no longer read
+/// its source (chapter 51, "Owner lost access"; authfix2): the sink
+/// resumes by itself once the owner can again.
+pub const OWNER_PAUSE: &str = "39229 ER_SPRIG_SINK_OWNER_PRIVILEGE_LOST";
+
+/// What a sink reads, for its owner's `SELECT` (39229): by database and
+/// name, or a table by object id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnerRead {
+    /// A table, stream or queue of database `db` (a change topic `t.changes`
+    /// reads as table `t`).
+    Named {
+        /// The database.
+        db: u32,
+        /// The name.
+        name: String,
+    },
+    /// A table (`CHANGES OF t`).
+    Object(u64),
+}
+
+/// The sources `def`'s owner must be able to read (chapter 51, "Owner
+/// lost access"). Fan-in sinks read other tenants' instances under
+/// `SPRIG_FAN_IN` and are left out.
+#[must_use]
+pub fn owner_reads(def: &SinkDef) -> Vec<OwnerRead> {
+    match &def.source {
+        SourceSpec::Stream { name, .. } => vec![OwnerRead::Named {
+            db: def.db_id,
+            name: name.strip_suffix(".changes").unwrap_or(name).to_owned(),
+        }],
+        SourceSpec::Queue { name, .. } => vec![OwnerRead::Named {
+            db: def.db_id,
+            name: name.clone(),
+        }],
+        SourceSpec::Changes { objects } => objects
+            .iter()
+            .map(|(id, _)| OwnerRead::Object(*id))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The pause reason of an owner that lost access.
+#[must_use]
+pub fn owner_pause_reason(why: &str) -> String {
+    format!("{OWNER_PAUSE}: {why}; the sink resumes once the owner can read its source again")
+}
 
 /// Who a sink's statements run as on a gateway: its owner, in its
 /// tenant (by name) and database.
@@ -418,6 +482,51 @@ struct CatalogControl {
     /// R9 (r9last): a grouped fan-in task's check of its sink's task
     /// count (see [`Regroup`]).
     regroup: Option<Regroup>,
+    /// Chapter 51 (39229, authfix2): the owner's access to the source,
+    /// checked at most every second before a batch.
+    owner: Option<OwnerCheck>,
+}
+
+/// A task's check of its sink owner's access (see
+/// [`SinkEnv::owner_lost`]).
+struct OwnerCheck {
+    env: Arc<dyn SinkEnv>,
+    tenant: TenantId,
+    owner: u32,
+    sources: Vec<OwnerRead>,
+    next: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl OwnerCheck {
+    fn new(env: &Arc<dyn SinkEnv>, tenant: TenantId, def: &SinkDef) -> Option<Self> {
+        let sources = owner_reads(def);
+        (!sources.is_empty()).then(|| Self {
+            env: Arc::clone(env),
+            tenant,
+            owner: def.owner_user_id,
+            sources,
+            next: std::sync::Mutex::new(None),
+        })
+    }
+
+    /// Why the owner lost access, checked now when `now` or once a second
+    /// has passed since the last check.
+    async fn lost(&self, now: bool) -> Result<Option<String>> {
+        let t = std::time::Instant::now();
+        {
+            let mut n = self
+                .next
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !now && n.is_some_and(|at| t < at) {
+                return Ok(None);
+            }
+            *n = Some(t + Duration::from_secs(1));
+        }
+        self.env
+            .owner_lost(self.tenant, self.owner, &self.sources)
+            .await
+    }
 }
 
 /// A fan-in task started as one of `of` tasks: it stops once the sink's
@@ -508,11 +617,70 @@ impl CatalogControl {
     }
 }
 
+impl CatalogControl {
+    /// Chapter 51 (39229, authfix2): a sink paused because its owner lost
+    /// access resumes once the owner can read its source again
+    /// (`Some(Run)`), else stays paused (`Some(Stop)`: the controller
+    /// starts the task again a few seconds later, which checks again). A
+    /// running sink whose owner lost access is paused (`Some(Stop)`).
+    async fn owner_directive(
+        &self,
+        c: &mut mysql_async::Conn,
+        state: Option<&(SinkState, Option<String>, u64)>,
+    ) -> Result<Option<Directive>> {
+        let Some(check) = &self.owner else {
+            return Ok(None);
+        };
+        let paused = matches!(
+            state,
+            Some((SinkState::Paused, Some(r), v))
+                if r.starts_with(OWNER_PAUSE) && *v == self.definition_ver
+        );
+        if paused {
+            if check.lost(true).await?.is_some() {
+                return Ok(Some(Directive::Stop));
+            }
+            self.store
+                .set_state(c, self.sink, SinkState::Running, None)
+                .await?;
+            tracing::info!(tenant = %check.tenant, sink = self.sink.0, "sink resumed: its owner can read its source again");
+            return Ok(Some(Directive::Run));
+        }
+        if !matches!(state, Some((SinkState::Running | SinkState::Failing, _, _))) {
+            return Ok(None);
+        }
+        let Some(why) = check.lost(false).await? else {
+            return Ok(None);
+        };
+        let reason = owner_pause_reason(&why);
+        self.store
+            .set_state(c, self.sink, SinkState::Paused, Some(&reason))
+            .await?;
+        self.store
+            .report_task(
+                c,
+                self.sink,
+                self.task,
+                self.epoch,
+                TaskState::Paused,
+                Some(&reason),
+                0,
+            )
+            .await?;
+        tracing::warn!(tenant = %check.tenant, sink = self.sink.0, reason = %why, code = 39229, "SprigSinkPaused: the sink's owner lost access to its source");
+        Ok(Some(Directive::Stop))
+    }
+}
+
 #[async_trait]
 impl Control for CatalogControl {
     async fn poll(&self) -> Result<Directive> {
         let mut c = self.conn().await?;
         let state = self.store.state_of(&mut c, self.sink).await?;
+        // Chapter 51 (39229): the owner's access, before anything runs.
+        if let Some(d) = self.owner_directive(&mut c, state.as_ref()).await? {
+            return Ok(d);
+        }
         if let Some(d) = stop_directive(state.as_ref(), self.definition_ver) {
             return Ok(d);
         }
@@ -1027,6 +1195,7 @@ pub async fn run_sink_task_of(
         // instead of paused when t's policies bind the owner (RL36).
         rls: None,
         regroup: None,
+        owner: OwnerCheck::new(&env, tenant, &def),
     });
     let dead = Arc::new(CatalogDead {
         pool: cat_pool.clone(),
@@ -1564,6 +1733,7 @@ async fn run_fan_in_task(
             }),
             _ => None,
         },
+        owner: OwnerCheck::new(&env, tenant, &def),
     });
     let dead = Arc::new(CatalogDead {
         pool: cat_pool.clone(),
@@ -1897,6 +2067,7 @@ async fn run_queue_task(
         delivered: AtomicU64::new(0),
         rls: None,
         regroup: None,
+        owner: OwnerCheck::new(&env, tenant, &def),
     });
     let dead = Arc::new(CatalogDead {
         pool: cat_pool.clone(),
@@ -2005,6 +2176,43 @@ pub fn needs(kind: TargetKind) -> &'static [ConnKind] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_reads_name_each_source() {
+        let mut d =
+            crate::probe::stand_in(4, "s", crate::model::TargetSpec::Webhook { path: None });
+        d.source = SourceSpec::Stream {
+            id: 9,
+            name: "orders.changes".into(),
+            partitions: 1,
+        };
+        assert_eq!(
+            owner_reads(&d),
+            vec![OwnerRead::Named {
+                db: 4,
+                name: "orders".into()
+            }]
+        );
+        d.source = SourceSpec::Queue {
+            id: 3,
+            name: "jobs".into(),
+        };
+        assert_eq!(
+            owner_reads(&d),
+            vec![OwnerRead::Named {
+                db: 4,
+                name: "jobs".into()
+            }]
+        );
+        d.source = SourceSpec::Changes {
+            objects: vec![(7, "a".into()), (8, "b".into())],
+        };
+        assert_eq!(
+            owner_reads(&d),
+            vec![OwnerRead::Object(7), OwnerRead::Object(8)]
+        );
+        assert!(owner_pause_reason("x").starts_with("39229 ER_SPRIG_SINK_OWNER_PRIVILEGE_LOST: x"));
+    }
 
     #[test]
     fn a_sink_paused_by_row_level_security_stops_its_task() {

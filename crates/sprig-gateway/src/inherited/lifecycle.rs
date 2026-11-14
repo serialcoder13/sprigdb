@@ -1,5 +1,4 @@
-//! The end of a definition and of an instance (chapter 42, "Dropping a
-//! definition"):
+//! The end of a definition and of an instance:
 //!
 //! ```text
 //! remove_all(D):   every member's instance of D goes: those the DC indexes,
@@ -169,9 +168,9 @@ pub async fn sweep(svc: &Arc<TenantServices>) -> Result<usize> {
             continue;
         }
         let r = async {
-            // A deleted declarer (bugfix-39): its definitions went with
-            // its catalog, and its members were deleted before it (39362),
-            // so only the entry is left.
+            // A deleted declarer: its definitions went with its catalog,
+            // and its members were deleted before it (39362), so only the
+            // entry is left.
             if super::dir_entry(svc, d.def.tenant).await?.is_none() {
                 tracing::info!(def = %d.def, "drop grace: the declarer is deleted; entry removed");
                 return unlist(svc, d.def).await;
@@ -219,13 +218,13 @@ pub fn start_sweeper(svc: &Arc<TenantServices>) {
     });
 }
 
-/// Member `t`'s `DROP DATABASE db` took the physical part of its
-/// inherited stream, exchange and queue instances there (bugfix-39):
-/// their rows and index entries go too, with `t`'s inherited triggers
-/// reading them, so the next use creates them again, as for a new member.
-/// Before, every publish to such an instance failed with 39899 until the
-/// definition was dropped. Detached instances are `t`'s own objects and
-/// went with the database. Returns how many went.
+/// Member `t`'s `DROP DATABASE db` took the physical part of its inherited
+/// stream, exchange and queue instances there: their rows and index entries
+/// go too, with `t`'s inherited triggers reading them, so the next use
+/// creates them again, as for a new member. Before, every publish to such
+/// an instance failed with 39899 until the definition was dropped. Detached
+/// instances are `t`'s own objects and went with the database. Returns how
+/// many went.
 ///
 /// # Errors
 /// The catalog's and the DC tier's.

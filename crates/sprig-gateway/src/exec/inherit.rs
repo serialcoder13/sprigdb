@@ -46,6 +46,74 @@ pub struct InheritSession {
     pub space: Option<SpaceId>,
 }
 
+/// The record-hierarchy locks the session's transaction holds (decision
+/// T27): each a provisioning connection inside a transaction holding a row
+/// of `__sprig_hlock` `FOR UPDATE`, so the system takes them whatever the
+/// user's grants. Released when the session's transaction ends
+/// ([`PassSession::release_hier_locks`]) or the session goes.
+#[derive(Default)]
+pub struct HierLocks {
+    held: Vec<((u64, String, u64), mysql_async::Conn)>,
+}
+
+impl std::fmt::Debug for HierLocks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HierLocks")
+            .field("held", &self.held.len())
+            .finish()
+    }
+}
+
+impl HierLocks {
+    /// Whether none is held.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.held.is_empty()
+    }
+
+    /// Ends every held lock's transaction and closes its connection.
+    pub async fn release(&mut self) {
+        let n = self.held.len();
+        for (_, mut c) in self.held.drain(..) {
+            let _ = c.query_drop("ROLLBACK").await;
+            let _ = c.disconnect().await;
+        }
+        if n > 0 {
+            metrics::counter!("sprig_inherit_hierarchy_locks_released_total").increment(n as u64);
+        }
+    }
+}
+
+impl Drop for HierLocks {
+    fn drop(&mut self) {
+        // A connection dropped inside its transaction is reset when the
+        // pool takes it back; end it first where a runtime is at hand.
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            for (_, mut c) in self.held.drain(..) {
+                rt.spawn(async move {
+                    let _ = c.query_drop("ROLLBACK").await;
+                    let _ = c.disconnect().await;
+                });
+            }
+        }
+    }
+}
+
+impl PassSession {
+    /// Releases the record-hierarchy locks once the session's transaction
+    /// has ended (decision T27).
+    pub(super) async fn release_hier_locks(&mut self) {
+        if self.status().contains(StatusFlags::IN_TRANS) {
+            return;
+        }
+        if let Some(ts) = self.tenant.as_deref_mut()
+            && !ts.hier_locks.is_empty()
+        {
+            ts.hier_locks.release().await;
+        }
+    }
+}
+
 struct GwPrivileges(Arc<dyn SessionGrants>);
 
 impl sprig_inherit::Privileges for GwPrivileges {
@@ -88,6 +156,11 @@ fn limits(ts: &TenantSession, cat: &TenantCatalog) -> Limits {
         svc.settings.get(k, &ctx, Some(&cat.settings)).into_owned()
     };
     let merge = text(&s::MERGE);
+    let max_move_rows = svc.settings.get(
+        &sprig_types::settings::HIERARCHY_MAX_MOVE_ROWS,
+        &ctx,
+        Some(&cat.settings),
+    );
     Limits {
         parent_delete_follow: text(&s::PARENT_DELETE) == "follow",
         override_record: text(&s::OVERRIDE) == "record",
@@ -97,6 +170,7 @@ fn limits(ts: &TenantSession, cat: &TenantCatalog) -> Limits {
         tenant_max_depth: 64,
         merge_unbuilt: merge == "federated",
         merge: sprig_inherit::model::MergeMode::parse(&merge),
+        max_move_rows,
     }
 }
 
@@ -566,6 +640,91 @@ impl sprig_inherit::Runner for InhRunner<'_, '_, '_> {
         let svc = Arc::clone(ts.services());
         let lctn = ts.lower_case_table_names();
         super::inherit_tree::tree_tables(&svc, root, db, table, lctn).await
+    }
+
+    async fn hier_lock(&mut self, t: TenantId, schema: &str, object: u64) -> Result<()> {
+        let key = (t.0, schema.to_owned(), object);
+        let wait = self
+            .gw
+            .sess
+            .bs
+            .as_ref()
+            .and_then(|b| {
+                b.vars()
+                    .vars
+                    .get("innodb_lock_wait_timeout")
+                    .and_then(|v| v.parse::<u64>().ok())
+            })
+            .unwrap_or(50)
+            .clamp(1, 3600);
+        let Some(ts) = self.gw.sess.tenant.as_deref() else {
+            return Err(SprigError::internal("no tenant"));
+        };
+        if ts.hier_locks.held.iter().any(|(k, _)| *k == key) {
+            return Ok(());
+        }
+        let svc = Arc::clone(ts.services());
+        let cluster = svc.locator.cluster(t).await?;
+        // Its own connection: held until the transaction ends, it can't
+        // take a slot of the shared pool another holder waits for.
+        let mut conn = svc.locator.ctl_conn(&cluster).await?;
+        let (row, lock) = sprig_inherit::hier::lock_sql(schema, object);
+        let fail = |e: mysql_async::Error| match &e {
+            mysql_async::Error::Server(s) if s.code == 1205 => SprigError::standard(
+                1205,
+                *b"HY000",
+                "Lock wait timeout exceeded; another structural change of this record \
+                 hierarchy is running: try restarting transaction",
+            ),
+            mysql_async::Error::Server(s) => SprigError::new(
+                SprigCode::BackendUnavailable,
+                format!("the record hierarchy's lock: {} ({})", s.message, s.code),
+            ),
+            other => SprigError::new(
+                SprigCode::BackendUnavailable,
+                format!("the record hierarchy's lock: {other}"),
+            ),
+        };
+        conn.query_drop(format!("SET SESSION innodb_lock_wait_timeout = {wait}"))
+            .await
+            .map_err(fail)?;
+        // The row exists after the first lock of the object: try first,
+        // and make the table and the row only when missing.
+        let mut made = false;
+        loop {
+            conn.query_drop("BEGIN").await.map_err(fail)?;
+            let got: std::result::Result<Vec<u64>, _> = conn.query(lock.as_str()).await;
+            // No row, or no table, yet: made once, then taken again.
+            let missing = match &got {
+                Ok(rows) => rows.is_empty(),
+                Err(mysql_async::Error::Server(e)) => e.code == 1146,
+                Err(_) => false,
+            };
+            match got {
+                Ok(rows) if !rows.is_empty() => break,
+                _ if missing && !made => {
+                    let _ = conn.query_drop("ROLLBACK").await;
+                    conn.query_drop(sprig_inherit::hier::lock_ddl(schema))
+                        .await
+                        .map_err(fail)?;
+                    conn.query_drop(row.as_str()).await.map_err(fail)?;
+                    made = true;
+                }
+                Ok(_) => {
+                    let _ = conn.query_drop("ROLLBACK").await;
+                    return Err(SprigError::internal("the hierarchy's lock row is missing"));
+                }
+                Err(e) => {
+                    let _ = conn.query_drop("ROLLBACK").await;
+                    return Err(fail(e));
+                }
+            }
+        }
+        metrics::counter!("sprig_inherit_hierarchy_locks_total").increment(1);
+        if let Some(ts) = self.gw.sess.tenant.as_deref_mut() {
+            ts.hier_locks.held.push((key, conn));
+        }
+        Ok(())
     }
 
     async fn subscribe(&mut self) -> Result<()> {

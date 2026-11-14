@@ -1,5 +1,4 @@
-//! A deleted tenant's cleanup (chapter 08, "Deleting a tenant"; decisions
-//! m0.6-interim "Tenant deletion cleanup (tenantdel)").
+//! A deleted tenant's cleanup.
 //!
 //! ```text
 //! cleanup(T), state deleting, every step idempotent (a crash resumes):
@@ -95,7 +94,7 @@ pub(crate) fn meta_prefixes(tenant: TenantId) -> Vec<String> {
         "feed/checkpoints",
         "logic/schedules",
         "mover/shard-locks",
-        // Chapter 42 (R9): the tenant's instances of inherited messaging
+        // The tenant's instances of inherited messaging
         // objects, and its cross-tenant outbox schemas.
         "inherit-instances",
         "inherit-xo",
@@ -188,7 +187,7 @@ pub(crate) async fn catalog_db_ids(pool: &Pool, schema: &str) -> Result<BTreeSet
     }
 }
 
-/// Marks every database of the catalog in `schema` dropped (bugfix-27's
+/// Marks every database of the catalog in `schema` dropped (the
 /// last resort for a deleted tenant, whose catalog goes next and whose
 /// schemas are dropped by id). Returns how many rows changed.
 ///

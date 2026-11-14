@@ -711,6 +711,62 @@ pub async fn merge_attributes(
     .await
 }
 
+/// The audit detail of a `REQUIRE` change: `REQUIRE X509`, or `REQUIRE
+/// SUBJECT '..' AND ISSUER '..'`.
+#[must_use]
+pub fn require_detail(require: RequireTls, dn: &(Option<String>, Option<String>)) -> String {
+    let mut parts = Vec::new();
+    if let Some(s) = &dn.0 {
+        parts.push(format!("SUBJECT '{s}'"));
+    }
+    if let Some(i) = &dn.1 {
+        parts.push(format!("ISSUER '{i}'"));
+    }
+    if parts.is_empty() {
+        parts.push(
+            match require {
+                RequireTls::None => "NONE",
+                RequireTls::Ssl => "SSL",
+                RequireTls::X509 => "X509",
+            }
+            .to_owned(),
+        );
+    }
+    format!("REQUIRE {}", parts.join(" AND "))
+}
+
+/// The audit detail of an `ATTRIBUTE` or `COMMENT` change: the keys set
+/// and removed, without values (`ATTRIBUTE set: org, team; removed: x`).
+#[must_use]
+pub fn attribute_detail(patch: &serde_json::Value) -> String {
+    let (mut set, mut removed) = (Vec::new(), Vec::new());
+    if let serde_json::Value::Object(m) = patch {
+        for (k, v) in m {
+            if v.is_null() {
+                removed.push(k.as_str());
+            } else {
+                set.push(k.as_str());
+            }
+        }
+    }
+    let what = if set == ["comment"] && removed.is_empty() {
+        "COMMENT"
+    } else {
+        "ATTRIBUTE"
+    };
+    let mut d = what.to_owned();
+    if !set.is_empty() {
+        d.push_str(" set: ");
+        d.push_str(&set.join(", "));
+    }
+    if !removed.is_empty() {
+        d.push_str(if set.is_empty() { " " } else { "; " });
+        d.push_str("removed: ");
+        d.push_str(&removed.join(", "));
+    }
+    d
+}
+
 /// RFC 7396's merge of `patch` into `base` (objects merge key by key; a
 /// `null` removes; anything else replaces). An empty result is `None`.
 #[must_use]
@@ -945,6 +1001,45 @@ impl AccountOps<'_> {
         self.done(r, e, |c| c.user_id)
     }
 
+    /// [`set_require`], audited as `auth.account_changed` naming the
+    /// clause (the certificate names are not secrets: MySQL's audit logs
+    /// the statement with them).
+    ///
+    /// # Errors
+    /// As [`set_require`].
+    pub async fn set_require(
+        &self,
+        user: UserId,
+        name: &str,
+        host: &str,
+        require: RequireTls,
+        dn: (Option<String>, Option<String>),
+    ) -> Result<Changed> {
+        let mut e = self.event(events::ACCOUNT_CHANGED, Some(user), name, host);
+        e.detail = Some(require_detail(require, &dn));
+        let r = set_require(self.cat, self.tenant, user, require, dn).await;
+        self.done(r, e, |c| c.user_id)
+    }
+
+    /// [`merge_attributes`], audited as `auth.account_changed` naming the
+    /// keys set and removed, never their values (attributes can hold
+    /// personal data).
+    ///
+    /// # Errors
+    /// As [`merge_attributes`].
+    pub async fn merge_attributes(
+        &self,
+        user: UserId,
+        name: &str,
+        host: &str,
+        patch: serde_json::Value,
+    ) -> Result<Changed> {
+        let mut e = self.event(events::ACCOUNT_CHANGED, Some(user), name, host);
+        e.detail = Some(attribute_detail(&patch));
+        let r = merge_attributes(self.cat, self.tenant, user, patch).await;
+        self.done(r, e, |c| c.user_id)
+    }
+
     /// [`set_password`] without policy checks: an administrator's reset
     /// ([`crate::policy::change_password`] checks the rules).
     ///
@@ -961,5 +1056,48 @@ impl AccountOps<'_> {
         let e = self.event(events::PASSWORD_CHANGED, Some(user), name, host);
         let r = set_password(self.cat, self.tenant, user, password, opts, self.clock).await;
         self.done(r, e, |c| c.user_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn require_details_name_the_clause() {
+        assert_eq!(
+            require_detail(RequireTls::X509, &(None, None)),
+            "REQUIRE X509"
+        );
+        assert_eq!(
+            require_detail(RequireTls::None, &(None, None)),
+            "REQUIRE NONE"
+        );
+        assert_eq!(
+            require_detail(
+                RequireTls::X509,
+                &(Some("/O=A/CN=b".into()), Some("/CN=CA".into()))
+            ),
+            "REQUIRE SUBJECT '/O=A/CN=b' AND ISSUER '/CN=CA'"
+        );
+        assert_eq!(
+            require_detail(RequireTls::X509, &(None, Some("/CN=CA".into()))),
+            "REQUIRE ISSUER '/CN=CA'"
+        );
+    }
+
+    #[test]
+    fn attribute_details_name_keys_never_values() {
+        let d = attribute_detail(&serde_json::json!({"org": "secret-org", "x": null}));
+        assert_eq!(d, "ATTRIBUTE set: org; removed: x");
+        assert!(!d.contains("secret-org"));
+        assert_eq!(
+            attribute_detail(&serde_json::json!({"comment": "hi there"})),
+            "COMMENT set: comment"
+        );
+        assert_eq!(
+            attribute_detail(&serde_json::json!({"a": null})),
+            "ATTRIBUTE removed: a"
+        );
     }
 }

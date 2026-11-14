@@ -1,6 +1,5 @@
 //! [`MapLocator`]: where an anchor's decision rows live now, from the
-//! tenant's shard maps (chapter 18, "Resolver"; chapter 15, "Shard maps in
-//! etcd").
+//! tenant's shard maps.
 //!
 //! An anchor names a database, a table group and a hash point (the start
 //! of the anchor shard's range when the transaction ran):

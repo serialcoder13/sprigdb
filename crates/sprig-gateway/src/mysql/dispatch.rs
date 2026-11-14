@@ -1,4 +1,4 @@
-//! Command dispatch (chapter 05, "Command table"; build step 6).
+//! Command dispatch.
 //!
 //! [`CommandLoop`] reads one command at a time (the codec's sequence ids
 //! restart with each), parses it, and either answers it in the gateway or
@@ -190,12 +190,12 @@ impl CommandLoop {
     ) -> Self {
         let watch = ClientWatch::new(&l.stream);
         let mut codec = PacketCodec::new(l.proto.max_packet);
-        // Compression starts after the auth OK packet (chapter 05).
+        // Compression starts after the auth OK packet.
         codec.set_framing(l.proto.framing);
         let mut framed =
             Framed::with_capacity(crate::offload::Paced::new(l.stream), codec, WRITE_CAPACITY);
         framed.set_backpressure_boundary(settings.relay_buffer.max(WRITE_CAPACITY));
-        // 3306's performance_schema.session_connect_attrs (R4 round 4).
+        // 3306's performance_schema.session_connect_attrs.
         session.connect_attrs = l.attrs;
         Self {
             shared,
@@ -226,10 +226,9 @@ impl CommandLoop {
     async fn serve(&mut self) -> Result<()> {
         loop {
             self.framed.codec_mut().reset_seq();
-            // A drain closes an idle session (outside a transaction) at once
-            // (chapter 04, "Drain" step 3), silently: an unsolicited ERR
-            // packet is read out of turn by most clients ("Packets out of
-            // sync"), so the client sees the closed connection on its next
+            // A drain closes an idle session (outside a transaction) at once,
+            // silently: an unsolicited ERR packet is read out of turn by most
+            // clients ("Packets out of sync"), so the client sees the closed connection on its next
             // use and reconnects. Other reasons (a stricter listener, a
             // revoked account) wait for the next command, which gets the
             // reason's error.
@@ -339,7 +338,7 @@ impl CommandLoop {
                 self.session
                     .begin_command("Query", Some(info_of(&sql, 1024)));
                 let r = if let Some(l) = local::classify(&sql) {
-                    // Counted in the session's SHOW STATUS (gaps row 46).
+                    // Counted in the session's SHOW STATUS.
                     self.session.local_questions += 1;
                     if matches!(l, Local::Variables(_)) {
                         self.session.local_selects += 1;
@@ -530,8 +529,7 @@ impl CommandLoop {
             db: self.db.as_deref(),
         };
         // A large request (gateway.large_statement_bytes) runs on a
-        // blocking thread, with its KILL and hang-up watches (chapter 04,
-        // "Large statements").
+        // blocking thread, with its KILL and hang-up watches.
         let (exec, watch) = (&mut self.exec, &self.watch);
         let end = crate::offload::run_for(&handle, size, self.settings.large_statement, async {
             tokio::select! {
@@ -692,7 +690,7 @@ impl CommandLoop {
         r
     }
 
-    /// `COM_CREATE_DB` and `COM_DROP_DB`, run as SQL (chapter 05).
+    /// `COM_CREATE_DB` and `COM_DROP_DB`, run as SQL.
     async fn db_statement(&mut self, verb: &str, name: &[u8]) -> Result<Flow> {
         let name = String::from_utf8_lossy(name).replace('`', "``");
         let sql = Bytes::from(format!("{verb} DATABASE `{name}`"));
@@ -858,7 +856,7 @@ impl CommandLoop {
             persona: self.proto.persona,
             version: self.settings.version(self.proto.persona),
             // The session's limit: the gateway's, no more than its
-            // cluster's (chapter 05, "Packet limit").
+            // cluster's.
             max_allowed_packet: self.proto.max_packet,
             hostname: &self.shared.cfg.hostname,
             status: self.status,
@@ -885,7 +883,7 @@ impl CommandLoop {
 
     /// `COM_STATISTICS`: a status string (not an OK packet).
     async fn statistics(&mut self) -> Result<Flow> {
-        // The same uptime `SHOW STATUS` answers (gaps row 61).
+        // The same uptime `SHOW STATUS` answers.
         let uptime = crate::exec::status::uptime_secs();
         let questions = self.shared.questions.load(Ordering::Relaxed);
         #[allow(clippy::cast_precision_loss)] // a rate for display

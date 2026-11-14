@@ -1,5 +1,4 @@
-//! The executor's side of workload capture (chapter 12; see
-//! [`crate::workload`]): fingerprint a tenant statement before it runs,
+//! The executor's side of workload capture (see [`crate::workload`]): fingerprint a tenant statement before it runs,
 //! ask for a `Handler_read_*` probe, and record it after.
 
 use sprig_catalog::TenantCatalog;
@@ -38,7 +37,7 @@ fn db_id_of(ts: &TenantSession, cat: Option<&TenantCatalog>, db: Option<&str>) -
     cat.database(&key).map_or(DbId(0), |r| r.db_id)
 }
 
-/// What a prepared statement's fingerprint was made under (R5 round 8):
+/// What a prepared statement's fingerprint was made under:
 /// the tenant catalog's version (table ids, and `lower_case_table_names`,
 /// a tenant setting the catalog carries), the current database, the
 /// lexer's options and the capture setting that changes the text.
@@ -107,7 +106,7 @@ impl PassSession {
             current_db: current.as_deref(),
             db_id: db_id_of(ts, cat, current.as_deref()),
             front_end: FrontEnd::of_persona(self.persona),
-            // `caller = studio` for a Studio session's statements (chapter 12).
+            // `caller = studio` for a Studio session's statements.
             caller: crate::workload::task_caller(),
             lower_case_table_names: lower,
             max_text_bytes: wl.workload().max_text_bytes(),
@@ -186,9 +185,9 @@ impl PassSession {
         }
     }
 
-    /// The writes inside a compound statement that ran (R6 round 6,
-    /// decision A4): chapter 40's guarded batches, one per Redis or
-    /// key-value write command, have no shape, so each `INSERT`,
+    /// The writes inside a compound statement that ran: the guarded
+    /// batches, one per Redis or key-value write command, have no shape, so
+    /// each `INSERT`,
     /// `REPLACE`, `UPDATE` and `DELETE` in the body is fingerprinted and
     /// counted on its own (weighted by its `IF` branches), and the tables'
     /// write load includes them.

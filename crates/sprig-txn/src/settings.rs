@@ -1,6 +1,5 @@
-//! Chapter 18's settings, declared next to the code (chapter 03,
-//! "Declaring a key"), and the snapshots the coordinator and the resolver
-//! read.
+//! The `txn.*` settings, declared next to the code, and the snapshots the
+//! coordinator and the resolver read.
 
 use std::borrow::Cow;
 use std::time::Duration;
@@ -245,7 +244,7 @@ impl TxnConfig {
     }
 }
 
-/// Q39 (bugfix-62): a coordinator races an unknown commit only until
+/// A coordinator races an unknown commit only until
 /// `txn.commit_resolve_timeout_ms` after the commit was sent, and that
 /// must end before the resolver may sweep the commit row, which it does
 /// once the row is `txn.resolver_min_age_seconds` old. So the timeout must
@@ -428,7 +427,7 @@ mod tests {
 
     #[test]
     fn commit_resolve_timeout_stays_below_the_resolvers_minimum_age() {
-        // Q39 (bugfix-62): the defaults pass; equal or above is refused.
+        // The defaults pass; equal or above is refused.
         check_resolve_window(5000, 30).unwrap();
         check_resolve_window(29_999, 30).unwrap();
         for (ms, s) in [(30_000, 30), (60_000, 30), (100, 0)] {

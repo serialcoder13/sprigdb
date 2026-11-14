@@ -1,10 +1,10 @@
-//! bugfix-38 (decisions/bugfix-interim.md): a DDL statement whose client
+//! A DDL statement whose client
 //! hangs up mid-way no longer holds its table for 15 minutes. Before, the
 //! gateway dropped the statement after phase 1 of the DDL engine had
 //! marked the table, so every later DDL on it waited `catalog.ddl_wait_ms`
 //! and failed with 39071 until the reconciler cleared the job
 //! (`catalog.stuck_state_minutes`, 15), as Sequelize's "supports schemas"
-//! tests did to `work.Users` (decision X22).
+//! tests did to `work.Users`.
 //!
 //! One session holds a metadata lock on the table (an open transaction
 //! that read it); a second runs `ALTER TABLE` on it, which waits for the

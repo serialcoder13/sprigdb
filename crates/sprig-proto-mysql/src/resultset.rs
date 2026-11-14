@@ -1,7 +1,6 @@
-//! Resultsets (chapter 05, "Resultsets: relay and rewrite"): column
-//! definitions, column counts, text and binary rows, the binary [`Value`]
-//! encoding shared with `COM_STMT_EXECUTE`, `PREPARE_OK`, and classifiers
-//! for the packets of a response.
+//! Resultsets: column definitions, column counts, text and binary rows, the
+//! binary [`Value`] encoding shared with `COM_STMT_EXECUTE`, `PREPARE_OK`, and
+//! classifiers for the packets of a response.
 //!
 //! A response starts with OK, ERR, a `LOCAL INFILE` request or a column
 //! count ([`classify_response`]). A resultset then has the column
@@ -140,8 +139,7 @@ const EXT_FORMAT_NAME: u8 = 1;
 /// A column definition (`Protocol::ColumnDefinition41`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ColumnDef {
-    /// Schema; physical on the backend side, rewritten to logical (chapter
-    /// 07).
+    /// Schema; physical on the backend side, rewritten to logical.
     pub schema: Bytes,
     /// Table alias.
     pub table: Bytes,
@@ -341,7 +339,7 @@ pub struct PrepareOk {
     pub params: u16,
     /// Warning count.
     pub warnings: u16,
-    /// `OPTIONAL_RESULTSET_METADATA` metadata-follows flag (R4).
+    /// `OPTIONAL_RESULTSET_METADATA` metadata-follows flag.
     pub metadata_follows: Option<u8>,
 }
 

@@ -47,7 +47,7 @@ ops_key!(
     /// `telemetry.trace_sample_ratio`.
     TRACE_SAMPLE_RATIO: f64 = "telemetry.trace_sample_ratio",
     0.01,
-    Scopes::TREE,
+    Scopes::PROCESS,
     HardBounds {
         min: Some(0.0),
         max: Some(1.0),
@@ -59,7 +59,7 @@ ops_key!(
     /// `telemetry.trace_slow_ms`.
     TRACE_SLOW_MS: u64 = "telemetry.trace_slow_ms",
     500,
-    Scopes::TREE,
+    Scopes::PROCESS,
     HardBounds::range(0, 3_600_000),
     "Export every slower or failed statement"
 );
@@ -83,7 +83,7 @@ ops_key!(
     /// `audit.retention_days`.
     AUDIT_RETENTION_DAYS: u64 = "audit.retention_days",
     365,
-    Scopes::TREE,
+    Scopes::PROCESS,
     HardBounds::range(1, 36_500),
     "Audit retention"
 );

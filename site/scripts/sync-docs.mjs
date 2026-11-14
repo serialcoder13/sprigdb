@@ -3,7 +3,7 @@
 // - README.md becomes the docs index;
 // - a leading "# Title" is dropped (Starlight renders the front-matter title);
 // - links between .md files lose their extension and become site paths.
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -27,7 +27,15 @@ const skip = ['pdf/', 'tests/'];
 let pages = 0;
 for (const file of walk(src)) {
   const rel = relative(src, file);
-  if (!rel.endsWith('.md') || skip.some((s) => rel.startsWith(s))) continue;
+  if (skip.some((s) => rel.startsWith(s))) continue;
+  // Images the pages use (docs/img/), copied beside them so relative
+  // paths keep working and Astro bundles them.
+  if (/\.(png|jpe?g|webp|svg|gif)$/i.test(rel)) {
+    mkdirSync(dirname(join(out, rel)), { recursive: true });
+    copyFileSync(file, join(out, rel));
+    continue;
+  }
+  if (!rel.endsWith('.md')) continue;
   let text = readFileSync(file, 'utf8');
   text = text.replace(/^(---\n[\s\S]*?\n---\n)\s*# [^\n]*\n/, '$1\n');
   text = text.replace(/\]\((?!https?:|#)([^)]+?)\.md(#[^)]*)?\)/g, (_, p, h) => `](../${p.replace(/^\.\//, '')}/${h ?? ''})`);

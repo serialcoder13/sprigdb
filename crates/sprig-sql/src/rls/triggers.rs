@@ -1,7 +1,6 @@
-//! MariaDB's side of row-level security (chapter 29, "Inside MariaDB";
-//! build step 24): `BEFORE INSERT`, `BEFORE UPDATE` and `BEFORE DELETE`
-//! triggers on each shard of a protected table that `SIGNAL` 39363 when a
-//! row version fails the policies of the session's context.
+//! MariaDB's side of row-level security: `BEFORE INSERT`, `BEFORE UPDATE` and
+//! `BEFORE DELETE` triggers on each shard of a protected table that `SIGNAL`
+//! 39363 when a row version fails the policies of the session's context.
 //!
 //! The context is the user variable `@sprig_rls`, which the gateway sets
 //! on every backend connection of a tenant with row-level security (a
@@ -133,8 +132,9 @@ impl Binder for JsonBinder<'_> {
         })
     }
 
-    /// The context's own list, or (RL58, `"subt"`/`"mant"` 1) the
-    /// session tenant's rows of `__sprig_sys.__sprig_subtree_v`.
+    /// The context's own list, or (`"subt"`/`"mant"` 1: a subtree too large
+    /// to inline) the session tenant's rows of
+    /// `__sprig_sys.__sprig_subtree_v`.
     fn membership(&self, func: &str) -> Result<(String, String), SprigError> {
         let (path, flag) = if func == "SPRIG_TENANT_IN_SUBTREE" {
             ("$.s.sub", "$.s.subt")
@@ -254,14 +254,14 @@ impl TriggerSpec<'_> {
     }
 
     /// The policy views (and the context function they read) on
-    /// [`TriggerSpec::schema`], to run after `USE` of it: updatable
-    /// `MERGE` views of the rows the session's `SELECT` policies show
+    /// [`TriggerSpec::schema`], to run after `USE` of it: updatable `MERGE`
+    /// views of the rows the session's `SELECT` policies show
     /// (`super::views`). `columns` are the table's columns there in order,
-    /// `true` for invisible ones (RL28): the first view names the visible
-    /// ones (what `SELECT *` on the table shows); a table with invisible
-    /// columns gets a second view with all of them, any other loses a stale
-    /// one. Without `columns` the first view is `SELECT *`. `definer` must
-    /// be able to read and write the table.
+    /// `true` for invisible ones: the first view names the visible ones (what
+    /// `SELECT *` on the table shows); a table with invisible columns gets a
+    /// second view with all of them, any other loses a stale one. Without
+    /// `columns` the first view is `SELECT *`. `definer` must be able to read
+    /// and write the table.
     ///
     /// # Errors
     /// 39364 if a stored expression can't be rendered.
@@ -288,7 +288,7 @@ impl TriggerSpec<'_> {
     /// The two policy views of `from` (this table, or one of its
     /// key-value element tables) keeping the rows where `ok` (or the
     /// guard) holds: the visible columns' view, then the all-columns view
-    /// or its `DROP` (RL28).
+    /// or its `DROP`.
     fn views_over(
         &self,
         definer: &str,
@@ -334,13 +334,12 @@ impl TriggerSpec<'_> {
         views
     }
 
-    /// The policy views of key-value element table `element` (chapter
-    /// 33's `__sprig_ke_<ns>` or `__sprig_kz_<ns>` next to this key table;
-    /// RLS round 6, decision RL55), to run after `USE` of
-    /// [`TriggerSpec::schema`] once the context function is there: an
-    /// element row shows when its key's row passes the key table's
-    /// `SELECT` policies, read through a correlated `EXISTS` on the key
-    /// table's primary key, so policies on any key-table column (a value,
+    /// The policy views of key-value element table `element`
+    /// (`__sprig_ke_<ns>` or `__sprig_kz_<ns>` next to this key table), to
+    /// run after `USE` of [`TriggerSpec::schema`] once the context function
+    /// is there: an element row shows when its key's row passes the key
+    /// table's `SELECT` policies, read through a correlated `EXISTS` on the
+    /// key table's primary key, so policies on any key-table column (a value,
     /// the type) apply to the structure's elements too. `columns` as in
     /// [`TriggerSpec::view_statements`], for the element table.
     ///
@@ -368,8 +367,8 @@ impl TriggerSpec<'_> {
 /// `EXISTS`, and the gateway's rewrite of element tables).
 pub const KEY_ALIAS: &str = "__sprig_kq";
 
-/// The prefixes of a key-value namespace's element and sorted-set tables
-/// (chapter 33): the namespace's key table name follows.
+/// The prefixes of a key-value namespace's element and sorted-set tables: the
+/// namespace's key table name follows.
 pub const KV_ELEMENT_PREFIXES: [&str; 2] = ["__sprig_ke_", "__sprig_kz_"];
 
 /// The element tables of key-value key table `table`, by name.
@@ -379,14 +378,14 @@ pub fn kv_element_tables(table: &str) -> [String; 2] {
 }
 
 impl TriggerSpec<'_> {
-    /// The filter view of a change topic of this table (chapter 29, RLS
-    /// round 5, decision RL47), to run after `USE` of the topic's log
-    /// schema: view `view` over log table `log` showing each reader (by the
-    /// context `__sprig_rls_ctx()` of its connection) the records whose
-    /// row images its `SELECT` policies show, an update that hides or shows
-    /// the row as a delete or an insert (`sprig_streams::read`'s rules).
-    /// `columns` is the table's `JSON_TABLE` column list; `filtered` false
-    /// (security off) makes a plain view of the log.
+    /// The filter view of a change topic of this table, to run after `USE` of
+    /// the topic's log schema: view `view` over log table `log` showing each
+    /// reader (by the context `__sprig_rls_ctx()` of its connection) the
+    /// records whose row images its `SELECT` policies show, an update that
+    /// hides or shows the row as a delete or an insert
+    /// (`sprig_streams::read`'s rules). `columns` is the table's `JSON_TABLE`
+    /// column list; `filtered` false (security off) makes a plain view of the
+    /// log.
     ///
     /// # Errors
     /// 39364 if a stored expression can't be rendered.
@@ -522,7 +521,7 @@ mod tests {
             v[1]
         );
         assert_eq!(vs.views[1], "DROP VIEW IF EXISTS `__sprig_rlsh_orders`");
-        // RL28: named columns; invisible ones only in the second view.
+        // Named columns; invisible ones only in the second view.
         let cols = [
             ("id".to_owned(), false),
             ("_sprig_rk".to_owned(), true),
@@ -551,7 +550,7 @@ mod tests {
 
     #[test]
     fn element_views_follow_the_key_tables_policies() {
-        // RL55: a policy on the key table's value column reaches the
+        // A policy on the key table's value column reaches the
         // namespace's elements through the key row.
         let pols = [TriggerPolicy {
             id: 5,

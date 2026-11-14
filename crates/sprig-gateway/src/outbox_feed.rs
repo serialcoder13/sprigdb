@@ -1,6 +1,5 @@
-//! The gateway's side of the feed-driven outbox forwarder (chapter 50,
-//! "Publishing inside a database transaction"; chapter 42, "Inside a
-//! database transaction"; R9, r9fwd).
+//! The gateway's side of the feed-driven outbox forwarder, which delivers
+//! queue publishes made inside a database transaction.
 //!
 //! A worker job per tenant (`queue_forwarder`, `sprig_worker::queue_forwarder`)
 //! reads the tenant's change feed for inserts into the queue outbox
@@ -29,7 +28,7 @@
 //! controller's loop gives each tenant's cluster a forwarder job, which
 //! starts the tenant's task within 5 s at that checkpoint. So a new
 //! tenant's first publishes are forwarded from the feed, in commit order,
-//! not by the 2 s fallback (decision 88; r9fanin).
+//! not by the 2 s fallback.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -66,7 +65,7 @@ fn subscribed() -> &'static Mutex<HashMap<u64, Once>> {
 /// waits for it (at most [`SUBSCRIBE_WAIT`]): the callers open a queue
 /// store or make a cross-tenant outbox before the tenant's first outbox
 /// row, so the subscription, with its start position, exists before that
-/// row commits (decision 88, r9fanin). Concurrent callers wait for the
+/// row commits. Concurrent callers wait for the
 /// same registration. A failed one is tried again by the next caller.
 pub async fn subscribe(svc: &TenantServices, tenant: TenantId) {
     let cell = Arc::clone(

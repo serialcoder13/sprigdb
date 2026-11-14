@@ -1,22 +1,22 @@
-//! The translator's R0 subset (chapter 28, build steps 1 to 5): what lets
-//! MySQL and MariaDB clients connect and introspect through either persona.
+//! The MySQL/MariaDB translator: what lets MySQL and MariaDB clients connect
+//! and introspect through either persona.
 //!
-//! - Step 1, executable comments per persona: [`crate::lex::versioned`]
+//! - Executable comments per persona: [`crate::lex::versioned`]
 //!   (the lexer's rules and neutralization) and
 //!   [`crate::lex::versioned::expand_for_mariadb`] (MySQL-only comments whose
 //!   body MariaDB understands).
-//! - Step 2, emulated variables and version strings: [`vars`].
-//! - Step 3, the collation map with metadata ids: [`collation`].
-//! - Step 4, the core `information_schema` providers and `SHOW` rewrites:
-//!   [`schema`] (persona shapes on top of chapter 07's inline views), and
+//! - Emulated variables and version strings: [`vars`].
+//! - The collation map with metadata ids: [`collation`].
+//! - The core `information_schema` providers and `SHOW` rewrites:
+//!   [`schema`] (persona shapes on top of the name layer's inline views), and
 //!   [`meta`] for result metadata (MySQL's `JSON` type, 245).
-//! - Step 5, error mapping: [`errmap`].
+//! - Error mapping: [`errmap`].
 //!
-//! R4 adds MySQL 8.4's `sql_mode` ([`sqlmode`]), `max_execution_time`
+//! On top of these: MySQL 8.4's `sql_mode` ([`sqlmode`]), `max_execution_time`
 //! and statement hints ([`setvar`]), and MySQL's wording of errors
-//! ([`errmap::reworded`], 1062 key names). The rule framework and
-//! translation cache of step 6 (`sprig_sql::translate`) are not built:
-//! the rules stay text rewrites on the lexer.
+//! ([`errmap::reworded`], 1062 key names). There is no separate rule
+//! framework or translation cache (`sprig_sql::translate`): the rules stay
+//! text rewrites on the lexer.
 
 pub mod collation;
 pub mod ddl;
@@ -49,10 +49,9 @@ use crate::lex::{self, LexOptions, TokenKind};
 
 /// `CAST(<operand> AS JSON)` with a parameter, a string or number literal
 /// or `NULL` as the operand (a client-side prepared statement inlines the
-/// parameter) becomes `JSON_COMPACT(<operand>)` (chapter 28, "Queries and
-/// expressions": MariaDB has no `JSON` cast; Hibernate's `MySQLDialect`
-/// binds every JSON value this way). Other operands are left for R4's
-/// rule. `None` when nothing changes.
+/// parameter) becomes `JSON_COMPACT(<operand>)` (MariaDB
+/// has no `JSON` cast; Hibernate's `MySQLDialect` binds every JSON value this
+/// way). Other operands are left alone. `None` when nothing changes.
 #[must_use]
 pub fn rewrite_json_casts(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
     let lower_has = sql.windows(4).any(|w| w.eq_ignore_ascii_case(b"json"));
@@ -115,11 +114,10 @@ pub fn rewrite_json_casts(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// MySQL's `INVISIBLE` and `VISIBLE` index options in `CREATE` and
-/// `ALTER` statements as MariaDB's `IGNORED` and `NOT IGNORED` (chapter
-/// 28, "DDL and types"; R4): after an index's key-part list, and in
-/// `ALTER INDEX i INVISIBLE`. A column's `INVISIBLE` (the same word in
-/// both servers) is left alone. `None` when nothing changes.
+/// MySQL's `INVISIBLE` and `VISIBLE` index options in `CREATE` and `ALTER`
+/// statements as MariaDB's `IGNORED` and `NOT IGNORED`: after an index's
+/// key-part list, and in `ALTER INDEX i INVISIBLE`. A column's `INVISIBLE` (the
+/// same word in both servers) is left alone. `None` when nothing changes.
 #[must_use]
 pub fn rewrite_index_visibility(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
     if !sql.windows(7).any(|w| w.eq_ignore_ascii_case(b"VISIBLE")) {
@@ -201,14 +199,13 @@ pub fn rewrite_index_visibility(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>
     Some(out)
 }
 
-/// MySQL's names for unnamed `CHECK` constraints in `CREATE TABLE`
-/// (chapter 28, "DDL and types"; R4): `<table>_chk_<n>`, numbered in
-/// order of appearance, as MySQL 8.4 names them (MariaDB would say
-/// `CONSTRAINT_1`, and 3819 shows the name). A column's `CHECK` moves to
-/// the table level under its MySQL name, as MySQL itself stores it
-/// (MariaDB refuses a named column check), which also keeps
-/// [`errmap`]'s column checks to the JSON checks MariaDB adds. `ALTER
-/// TABLE ... ADD CHECK` is left to MariaDB. `None` when nothing changes.
+/// MySQL's names for unnamed `CHECK` constraints in `CREATE TABLE`:
+/// `<table>_chk_<n>`, numbered in order of appearance, as MySQL 8.4 names them
+/// (MariaDB would say `CONSTRAINT_1`, and 3819 shows the name). A column's
+/// `CHECK` moves to the table level under its MySQL name, as MySQL itself
+/// stores it (MariaDB refuses a named column check), which also keeps
+/// [`errmap`]'s column checks to the JSON checks MariaDB adds. `ALTER TABLE ...
+/// ADD CHECK` is left to MariaDB. `None` when nothing changes.
 #[must_use]
 #[allow(clippy::too_many_lines, clippy::many_single_char_names)] // one pass over the table elements
 pub fn name_checks(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
@@ -367,9 +364,8 @@ pub fn name_checks(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// MySQL's column attribute `SRID n` in `CREATE` and `ALTER` as
-/// MariaDB's `REF_SYSTEM_ID=n` (chapter 28, "DDL and types"; R4; the
-/// executable-comment form `/*!80003 SRID n */` is
+/// MySQL's column attribute `SRID n` in `CREATE` and `ALTER` as MariaDB's
+/// `REF_SYSTEM_ID=n` (the executable-comment form `/*!80003 SRID n */` is
 /// [`lex::versioned`]'s). `None` when nothing changes.
 #[must_use]
 pub fn rewrite_srid_attribute(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
@@ -442,11 +438,11 @@ pub fn rewrite_srid_attribute(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> 
 /// One text rewrite of [`mysql_text_rewrites`].
 type TextStep = fn(&[u8], &LexOptions) -> Option<Vec<u8>>;
 
-/// The text rewrites the MySQL persona applies before name planning:
-/// executable comments MariaDB would skip ([`lex::versioned::expand_text_for_mariadb`]),
-/// `CAST(? AS JSON)` ([`rewrite_json_casts`]), and from R4 MySQL's names
-/// for unnamed checks, `SRID n`, `INVISIBLE` indexes and statement hints. `None` on the MariaDB
-/// persona and when nothing changes.
+/// The text rewrites the MySQL persona applies before name planning: executable
+/// comments MariaDB would skip ([`lex::versioned::expand_text_for_mariadb`]),
+/// `CAST(? AS JSON)` ([`rewrite_json_casts`]), MySQL's names for unnamed
+/// checks, `SRID n`, `INVISIBLE` indexes and statement hints. `None` on the
+/// MariaDB persona and when nothing changes.
 #[must_use]
 pub fn mysql_text_rewrites(sql: &[u8], opts: &LexOptions, backend_version: u32) -> Option<Vec<u8>> {
     if opts.persona != sprig_proto_mysql::packets::Persona::MySql84 {
@@ -455,34 +451,32 @@ pub fn mysql_text_rewrites(sql: &[u8], opts: &LexOptions, backend_version: u32) 
     let mut out: Option<Vec<u8>> =
         lex::versioned::expand_text_for_mariadb(sql, opts, backend_version);
     let steps: [TextStep; 15] = [
-        // R4 round 6: `DEFAULT (now())` kept apart from `CURRENT_TIMESTAMP`
-        // (gaps row 78).
+        // `DEFAULT (now())` kept apart from `CURRENT_TIMESTAMP`.
         mysqlddl::now_defaults,
-        // R4 round 5: `->` and `->>`, and JSON string constants in
+        // `->` and `->>`, and JSON string constants in
         // comparisons (before the functional key parts read them).
         jsonops::rewrite_arrows,
         jsonops::rewrite_string_constants,
         rewrite_json_casts,
         name_checks,
         rewrite_srid_attribute,
-        // R4: INVISIBLE indexes, and MAX_EXECUTION_TIME and SET_VAR hints
+        // INVISIBLE indexes, and MAX_EXECUTION_TIME and SET_VAR hints
         // as SET STATEMENT.
         rewrite_index_visibility,
         setvar::rewrite_hints,
-        // R4 (r4close): `TABLE t`, `VALUES ROW(...)` and the row alias of
+        // `TABLE t`, `VALUES ROW(...)` and the row alias of
         // `ON DUPLICATE KEY UPDATE`.
         rowsyntax::rewrite,
-        // R4 round 3: `NOT NULL` on generated columns (gaps row 49) and
-        // MySQL's default collations in database DDL (gaps row 58).
+        // `NOT NULL` on generated columns and MySQL's default collations in
+        // database DDL.
         ddl::generated_not_null,
         ddl::database_collation,
-        // R4 round 4: `DROP CHECK` as `DROP CONSTRAINT`.
+        // `DROP CHECK` as `DROP CONSTRAINT`.
         ddl::drop_check,
-        // R4 round 3: LATERAL derived tables (step 9) and functional key
-        // parts (step 10).
+        // LATERAL derived tables and functional key parts.
         lateral::rewrite,
         fxindex::rewrite,
-        // R4 round 3: EXPLAIN with MySQL's columns (step 11).
+        // EXPLAIN with MySQL's columns.
         explain::rewrite,
     ];
     for step in steps {

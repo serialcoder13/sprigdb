@@ -1,8 +1,7 @@
 //! DC failover under partitions, process pauses, kills and clock skew, in
-//! deterministic simulation (chapter 25, "Testing"; R2's done-when: "no
-//! split-brain writes", "automatic DC failover happens only when its
-//! conditions hold", "a returning data center stays fenced, its diverged
-//! transactions are reported").
+//! deterministic simulation: no split-brain writes, automatic DC failover
+//! only when its conditions hold, and a returning data center stays
+//! fenced with its diverged transactions reported.
 //!
 //! Three sites: `fra1` (home of tenants 1 and 2), `ams1` (their standby
 //! DC) and the witness `wit1`, plus two global-leader candidates. The real
@@ -33,8 +32,8 @@
 //!    only it holds (acknowledged or not) are exactly the diverged range
 //!    the report computes, and every acknowledged write missing from the
 //!    new home is in it.
-//! 4. **Residency** (chapter 26, R2's "a pinned tenant never leaves its
-//!    jurisdiction under any failure scenario"): tenant 3's residency
+//! 4. **Residency** (a pinned tenant never leaves its jurisdiction, under
+//!    any failure): tenant 3's residency
 //!    allows only `fra1`, yet it has a standby in `ams1` (one recorded
 //!    before its policy tightened, which the residency loop would drop);
 //!    it is never moved. Tenant 4 starts unrestricted, and in the random
@@ -952,7 +951,7 @@ async fn scenario(world: World, plan: FaultPlan) -> SimResult {
     check(&world, &s).await
 }
 
-#[allow(clippy::too_many_lines)] // one check per done-when item
+#[allow(clippy::too_many_lines)] // one check per property
 async fn check(world: &World, s: &S) -> SimResult {
     let store: Arc<dyn MetaStore> = Arc::new(world.etcd().store().clone());
     let sh = lock(s);

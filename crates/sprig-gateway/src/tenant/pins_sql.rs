@@ -1,15 +1,14 @@
-//! Sharding pins and advice in SQL, executed (chapter 16, "Interfaces";
-//! build steps 7 and 8): [`sprig_sql::pin_stmt`] parses, this resolves
-//! names against the session's snapshot, checks privileges and the
-//! conflict rules, and reads or writes the tenant's catalog.
+//! Sharding pins and advice in SQL, executed: [`sprig_sql::pin_stmt`]
+//! parses, this resolves names against the session's snapshot, checks
+//! privileges and the conflict rules, and reads or writes the tenant's
+//! catalog.
 //!
 //! - **`SPRIG PIN t ...`** needs `ALTER` on `t`, and for `COLOCATE WITH p`
-//!   on `p` too (1142, chapter 29's check). An unqualified `p` is in `t`'s
-//!   database. Inside one catalog transaction the gateway reads every pin
-//!   `FOR UPDATE` (so two pin statements check one after the other), the
-//!   current group members, the named tables' columns from
-//!   `information_schema` on the catalog's cluster (the tenant's cluster
-//!   in R1), and the shard count of `t`'s group from its shard map; then
+//!   on `p` too (1142). An unqualified `p` is in `t`'s database. Inside one
+//!   catalog transaction the gateway reads every pin `FOR UPDATE` (so two
+//!   pin statements check one after the other), the current group members,
+//!   the named tables' columns from `information_schema` on the catalog's
+//!   cluster, and the shard count of `t`'s group from its shard map; then
 //!   [`sprig_shard::pins::check_pin`] applies the conflict rules (39410,
 //!   1072) and the split-group rule (39411); then the pin is written to
 //!   `group_pins` (replacing an earlier pin of `t`) and
@@ -26,9 +25,8 @@
 //!   the session has no privilege on are left out. No run: no rows.
 //! - **`SPRIG SHOW PINS`** lists the pins of tables the session can see.
 //!
-//! Pins take effect in the next first design (chapter 16, "As built in
-//! R1"): a tenant whose groups exist already keeps them until R3's
-//! periodic runs and re-keys.
+//! Pins take effect in the next first design: a tenant whose groups exist
+//! already keeps them until periodic runs and re-keys.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -115,7 +113,7 @@ fn resolve(
     Ok((Arc::clone(d), Arc::clone(o)))
 }
 
-/// `ALTER` on the table (chapter 29, as `ALTER TABLE ... SPRIG SET`).
+/// `ALTER` on the table (as `ALTER TABLE ... SPRIG SET`).
 fn need_alter(ts: &TenantSession, d: &DatabaseRow, o: &ObjectRow) -> Result<()> {
     super::authz::settings_check(
         ts,

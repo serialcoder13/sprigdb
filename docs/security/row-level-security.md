@@ -133,7 +133,7 @@ It may not use placeholders (`?`), user or system variables, stored functions, n
 | `SPRIG_TENANT_IN_SUBTREE(expr)` | True when `expr` is the session's tenant or one of its descendants |
 | `SPRIG_TENANT_MANAGED(expr)` | True when `expr` is a tenant the user administers |
 | `SPRIG_USER_ATTR('key')` | An attribute stored on the user account (`CREATE USER ... ATTRIBUTE '{json}'`) |
-| `SPRIG_CLAIM('key')` | A claim of the session token that authenticated the statement (REST, gRPC, Studio) |
+| `SPRIG_CLAIM('key')` | A fixed claim of the SprigDB session token that authenticated the statement (REST, gRPC, Studio), such as `sub`, `ten` or `amr`; `NULL` without one. No custom claims |
 | `SPRIG_SESSION_SPACE()` | The session's space, for [data inheritance](../data-models/inheritance.md) |
 
 The values are bound into the statement as literals by the gateway, so they cost nothing at run time. `SPRIG_TENANT_IN_SUBTREE` and `SPRIG_TENANT_MANAGED` become `IN` lists of tenant ids up to `rls.inline_subtree_max` (1000) tenants; above that, they read a table of the subtree that gateways keep on each cluster.
@@ -243,7 +243,7 @@ curl -s https://gw.example.com:8443/v1/policies:testAs \
   -H 'Authorization: Bearer <admin-session-token>' -H 'Content-Type: application/json' \
   -d '{"user": "app", "host": "%", "database": "shop",
        "sql": "SELECT id, region FROM orders",
-       "claims": {"team": "emea"}, "attributes": {"region": "eu"}}'
+       "claims": {"cli": "api"}, "attributes": {"region": "eu"}}'
 ```
 
 The rules:
@@ -251,7 +251,7 @@ The rules:
 - The caller holds `SPRIG_TENANT_ADMIN` over the user's tenant (their own or a descendant), the user doesn't administer the caller's tenant, `studio.view_as` is `on` at the user's tenant, and the caller isn't impersonating. Else `ER_SPRIG_STUDIO_VIEW_AS_DENIED` (39930).
 - The statement is one read-only statement: `SELECT`, `WITH`, `TABLE`, `VALUES` or `SHOW`, without `INTO` or locking clauses. Else `ER_SPRIG_STUDIO_VIEW_AS_NOT_READ_ONLY` (39931).
 - It runs as the user, with their privileges, policies and session values, capped by `studio.max_result_rows` and `studio.statement_timeout_ms`.
-- Optional `claims` and `attributes` stand in for `SPRIG_CLAIM` and `SPRIG_USER_ATTR` values, so you can test policies that use them.
+- Optional `claims` and `attributes` stand in for `SPRIG_CLAIM` and `SPRIG_USER_ATTR` values, so you can test policies that use them. Real sessions carry only the fixed token claims, so a policy that tests any other claim key never matches outside the tester.
 - The reply lists every policy the rewrite applied, with its predicate as bound for this run.
 - Every test is audited as `studio.view_as`, with the caller, the user and a hash of the statement.
 
@@ -259,7 +259,7 @@ The rules:
 
 - **Managers are exempt by default.** Anyone with `ALTER` on a table bypasses its policies until you `FORCE` it. Grant `ALTER` sparingly on protected tables, or force them.
 - **`BYPASS RLS` and `SPRIG_TENANT_ADMIN`.** `BYPASS RLS` skips every policy it covers. A tenant's first administrator holds `ALL` on `*.*`, which includes `ALTER`, so they are a manager of every table and see all rows of unforced tables.
-- **Claims and attributes.** `SPRIG_USER_ATTR('key')` reads the account's attributes, which an administrator sets with `CREATE USER` or `ALTER USER ... ATTRIBUTE '{json}'` (or `COMMENT 'text'`, read as `SPRIG_USER_ATTR('comment')`); see [Accounts and logins](accounts-and-logins.md#users-and-passwords). `SPRIG_CLAIM('key')` reads the claims of the SprigDB session token that authenticated the statement, over REST, gRPC or Studio: `sub`, `ten`, `sid`, `amr`, `cli`, `iat` and `exp`, with `act` while impersonating. Sessions without a session token (MySQL and the other wire protocols, HTTP Basic, API keys) have no claims, so `SPRIG_CLAIM` returns `NULL` there, and a policy that relies on a claim hides rows from them. Tokens from external identity providers aren't accepted, so there are no custom claims.
+- **Claims and attributes.** `SPRIG_USER_ATTR('key')` reads the account's attributes, which an administrator sets with `CREATE USER` or `ALTER USER ... ATTRIBUTE '{json}'` (or `COMMENT 'text'`, read as `SPRIG_USER_ATTR('comment')`); see [Accounts and logins](accounts-and-logins.md#users-and-passwords). `SPRIG_CLAIM('key')` reads the fixed claims of the SprigDB session token that authenticated the statement, over REST, gRPC or Studio: `sub` (`<tenant id>:<user id>`), `ten` (the tenant's name), `sid` (the session id), `amr` (the login methods, an array), `cli` (`studio`, `api` or `cli`), `iat` and `exp` (Unix seconds), `act` while an administrator impersonates the user, and `iss` and `aud` (always `sprigdb`). Sessions without a session token (MySQL and the other wire protocols, HTTP Basic, API keys) have no claims, so `SPRIG_CLAIM` returns `NULL` there, and a policy that relies on a claim hides rows from them. Tokens from external identity providers (JWT, OIDC) aren't accepted, so there are no custom claims: use attributes for per-user values.
 - **Constraint errors.** A plain `INSERT` whose key collides with a hidden row fails with the duplicate-key error, which tells the user that a row with that key exists. Don't rely on row-level security to keep the existence of keys secret; use keys that reveal nothing.
 - **Stored code.** `SQL SECURITY DEFINER` routines over protected tables run under their definer's policies while they run, and the caller's again afterwards. Views and routines can't be created over protected tables (39366).
 - **Search indexes and analytics copies** are filled without row-level security; queries re-check results through your session, but treat index storage as containing every row.
@@ -272,6 +272,11 @@ The rules:
 | `rls.backend_enforcement` | text | `views` | database, tenant, global | `views`, `triggers` or `off` |
 | `rls.inline_subtree_max` | int | 1000 | tenant, dc, global | Tenant ids inlined for `SPRIG_TENANT_IN_SUBTREE` and `SPRIG_TENANT_MANAGED` |
 | `studio.view_as` | text | `on` | tenant, dc, global | Allow the row-level security tester |
+
+## Not supported yet
+
+- **Custom claims.** SprigDB doesn't accept JWT or OIDC tokens from an external identity provider, so `SPRIG_CLAIM` reads only the fixed claims of SprigDB's own session tokens. Put per-user values in account attributes and read them with `SPRIG_USER_ATTR`.
+- **Claims on other logins.** MySQL, MariaDB and the other wire protocols, HTTP Basic and API keys carry no token, so `SPRIG_CLAIM` returns `NULL` there.
 
 ## Related
 

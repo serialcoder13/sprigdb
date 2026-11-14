@@ -1,4 +1,4 @@
-//! The `reads.*` keys (chapter 06, "Configuration"; Appendix B).
+//! The `reads.*` keys.
 
 use std::borrow::Cow;
 
@@ -6,8 +6,6 @@ use sprig_settings::{Apply, HardBounds, Scopes, Setting};
 
 type Text = Cow<'static, str>;
 
-/// Tenant (and ancestors) and global.
-const TENANT_GLOBAL: Scopes = Scopes(0b10_0100);
 
 /// `reads.routing`: `auto` or `writer`.
 pub static ROUTING: Setting<Text> = Setting {
@@ -26,7 +24,7 @@ sprig_settings::register!(ROUTING);
 pub static CAUSAL_SCOPE: Setting<Text> = Setting {
     key: "reads.causal_scope",
     default: Cow::Borrowed("tenant_gateway"),
-    scopes: TENANT_GLOBAL,
+    scopes: Scopes::OPERATIONAL,
     hard: HardBounds::one_of(&["session", "tenant_gateway"]),
     apply: Apply::Live,
     operator_only: false,
@@ -39,7 +37,7 @@ sprig_settings::register!(CAUSAL_SCOPE);
 pub static MAX_REPLICA_LAG_MS: Setting<u64> = Setting {
     key: "reads.max_replica_lag_ms",
     default: 1000,
-    scopes: Scopes::ALL,
+    scopes: Scopes::OPERATIONAL,
     hard: HardBounds::range(0, 86_400_000),
     apply: Apply::Live,
     operator_only: false,
@@ -78,7 +76,7 @@ sprig_settings::register!(GTID_WAIT_TIMEOUT_MS);
 pub static MAX_GALERA_LAG_MS: Setting<u64> = Setting {
     key: "reads.max_galera_lag_ms",
     default: 1000,
-    scopes: Scopes::ALL,
+    scopes: Scopes::OPERATIONAL,
     hard: HardBounds::range(0, 86_400_000),
     apply: Apply::Live,
     operator_only: false,
@@ -91,7 +89,7 @@ sprig_settings::register!(MAX_GALERA_LAG_MS);
 pub static GALERA_SYNC_WAIT_TIMEOUT_MS: Setting<u64> = Setting {
     key: "reads.galera_sync_wait_timeout_ms",
     default: 300,
-    scopes: Scopes::ALL,
+    scopes: Scopes::OPERATIONAL,
     hard: HardBounds::range(1, 60_000),
     apply: Apply::Live,
     operator_only: false,
@@ -100,11 +98,11 @@ pub static GALERA_SYNC_WAIT_TIMEOUT_MS: Setting<u64> = Setting {
 };
 sprig_settings::register!(GALERA_SYNC_WAIT_TIMEOUT_MS);
 
-/// `reads.galera_unconfirmed`: `check` or `writer` (decision D14).
+/// `reads.galera_unconfirmed`: `check` or `writer`.
 pub static GALERA_UNCONFIRMED: Setting<Text> = Setting {
     key: "reads.galera_unconfirmed",
     default: Cow::Borrowed("check"),
-    scopes: Scopes::ALL,
+    scopes: Scopes::OPERATIONAL,
     hard: HardBounds::one_of(&["check", "writer"]),
     apply: Apply::Live,
     operator_only: false,

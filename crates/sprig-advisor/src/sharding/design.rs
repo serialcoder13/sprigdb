@@ -1,12 +1,11 @@
-//! The advisor's designs: the structural seed, scoring, the search and the
-//! verdict (chapter 16, "Structural design", "Scoring", "Key quality
-//! filters", "Search", "Confidence", "Verdicts and guardrails").
+//! The advisor's designs: the structural seed, scoring, key quality filters,
+//! the search, confidence and the verdict.
 //!
 //! Everything here is pure and deterministic: the same [`Input`] gives the
 //! same design, whatever order its parts came in.
 //!
-//! **R1 as built.** Statements carry no parameter values here (chapter 12
-//! samples are sealed, and the resolver of chapter 16 needs them), so a
+//! **As built.** Statements carry no parameter values here (workload
+//! samples are sealed, and a value resolver would need them), so a
 //! statement's targets are judged by which columns it fixes, not by the
 //! hashes of their values: an equality (or an insert's column list) on a
 //! member's routing columns pins it to one shard; an equality on a unique
@@ -14,25 +13,24 @@
 //! penalty); a parent member is pinned by an insert (the gateway reads its
 //! parent's hash) or by an equality on its foreign key (the resolver, one
 //! lookup); and members joined by a co-location-safe equality share their
-//! pin. Two pinned components of one group count as two shards, as the
-//! book counts distinct hashes. Moves are `Attach` (join-frequency
-//! clustering) and `Detach`; reference tables, `Rekey` and `Reparent` wait
-//! for R3.
+//! pin. Two pinned components of one group count as two shards, standing
+//! in for distinct hashes. Moves are `Attach` (join-frequency clustering)
+//! and `Detach`; reference tables, `Rekey` and `Reparent` aren't searched
+//! yet.
 //!
-//! **Pins** ([`Input::pins`], chapter 16 step 8) bind the seed and the
-//! search: a table pinned `UNSHARDED` or `REFERENCE` stays out of sharded
-//! groups (a `REFERENCE` pin too, since reference copies aren't built in
-//! R1); `SHARD KEY (cols)` makes the table route by exactly `cols`, as a
-//! column member of its parent's group when the foreign key reaches the
-//! group's key through `cols`, else as the root of its own group (its key
-//! passes no NDV or skew filter, only the type check); `COLOCATE WITH p ON
-//! (cols)` makes it a column member of `p`'s group on `cols`, in place of
-//! any foreign-key parent. The search never moves a pinned table.
+//! **Pins** ([`Input::pins`]) bind the seed and the search: a table pinned
+//! `UNSHARDED` or `REFERENCE` stays out of sharded groups (a `REFERENCE`
+//! pin too, since reference copies aren't built yet); `SHARD KEY (cols)`
+//! makes the table route by exactly `cols`, as a column member of its
+//! parent's group when the foreign key reaches the group's key through
+//! `cols`, else as the root of its own group (its key passes no NDV or
+//! skew filter, only the type check); `COLOCATE WITH p ON (cols)` makes it
+//! a column member of `p`'s group on `cols`, in place of any foreign-key
+//! parent. The search never moves a pinned table.
 //!
-//! **Joins across models** (chapter 22, "Co-location through the advisor";
-//! added by r1close). A join edge carries the query language whose
+//! **Joins across models.** A join edge carries the query language whose
 //! equality it uses ([`Rules`]): SQL's (MySQL's comparison of the two
-//! columns' types) or MongoDB's (`$lookup`, from R5). An edge co-locates
+//! columns' types) or MongoDB's (`$lookup`). An edge co-locates
 //! only when `sprig_shard::colocate::edge_colocated` holds: under SQL's
 //! rules both columns must fit the group's key and MySQL's comparison of
 //! their types must imply equal normalized bytes (an `INT` against a
@@ -53,7 +51,7 @@ use sprig_shard::{KeyClass, KeySpec};
 
 use super::settings::{AdvisorMode, AdvisorSettings};
 
-/// An object id (chapter 08's `objects.object_id`).
+/// An object id.
 pub type Obj = u64;
 
 /// One column of a table.
@@ -67,7 +65,7 @@ pub struct Column {
     pub ndv: Option<f64>,
     /// The share of rows holding its most common value, if known.
     pub top_share: Option<f64>,
-    /// Its SQL type (chapter 22's type map), for the comparison a join on
+    /// Its SQL type, for the comparison a join on
     /// it uses; `None` when unknown (its joins then never co-locate under
     /// SQL's rules).
     pub sql: Option<SqlType>,
@@ -126,15 +124,14 @@ pub struct Touch {
     pub write: bool,
 }
 
-/// Which query language's equality a join edge uses (chapter 22,
-/// "Comparison rules per query language").
+/// Which query language's equality a join edge uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum Rules {
     /// SQL, and what compiles to it (the Analytics API, REST, gRPC):
     /// MySQL's comparison of the two columns' types.
     #[default]
     Sql,
-    /// MongoDB's `$lookup` (R5): numbers by value across types, a string
+    /// MongoDB's `$lookup`: numbers by value across types, a string
     /// never equals a number.
     Mongo,
 }
@@ -209,10 +206,10 @@ pub struct Input {
     pub units: Vec<Unit>,
     /// `sharding.split_size_gb` in bytes (for expected shard counts).
     pub split_bytes: f64,
-    /// The tenant's pins (`SPRIG PIN`, chapter 15's `group_pins`).
+    /// The tenant's pins (`SPRIG PIN`).
     pub pins: Vec<Pin>,
-    /// Chapter 33's key-value units (a key table with its element
-    /// tables), placed by [`super::kv::imply`] (decision R28, R6 round 5).
+    /// Key-value units (a key table with its element
+    /// tables), placed by [`super::kv::imply`].
     pub kv: Vec<super::kv::KvUnit>,
     /// `sharding.split_write_share_pct` as a ratio, for the key-value load
     /// rule (0: the default, 0.5).
@@ -223,8 +220,8 @@ pub struct Input {
     /// reported as client pins).
     pub kv_decided: Vec<Obj>,
     /// Tables stored code keeps in their default schema (an implied
-    /// `UNSHARDED` pin each, with its own evidence line; decision
-    /// bugfix-31, [`super::code`]).
+    /// `UNSHARDED` pin each, with its own evidence line; see
+    /// [`super::code`]).
     pub held: Vec<Obj>,
     /// A trigger's table and a table its body names: both move into the
     /// same group or neither moves ([`super::code::settle`]).
@@ -393,7 +390,7 @@ impl Design {
     }
 }
 
-/// A design's score (chapter 16, `Score`).
+/// A design's score.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct Score {
     /// The weighted score in [0, 1].
@@ -566,11 +563,11 @@ fn derive(
     }
 }
 
-/// Chapter 16's `structural_design`, with the evidence of what it rejected.
+/// The structural seed design, with the evidence of what it rejected.
 #[must_use]
-#[allow(clippy::too_many_lines)] // the book's five steps, pins first
+#[allow(clippy::too_many_lines)] // five steps, pins first
 pub fn structural(input: &Input, s: &AdvisorSettings) -> (Design, Vec<String>) {
-    // Key-value units first (decision R28): their pins are implied.
+    // Key-value units first: their pins are implied.
     let owned;
     let input = if input.kv.is_empty() {
         input
@@ -852,7 +849,7 @@ impl Placed<'_> {
             return false;
         }
         let single = |r: &Routing, c: &str| matches!(r, Routing::Columns { columns } if columns.len() == 1 && columns[0] == c);
-        // Chapter 22: the equality itself must imply equal normalized bytes
+        // The equality itself must imply equal normalized bytes
         // under `key`, by the edge's rules and the two columns' types.
         let types_ok = |x: &(Obj, String), y: &(Obj, String), key: Option<KeyClass>| {
             if j.rules == Rules::Mongo {
@@ -923,7 +920,7 @@ fn pinned(input: &Input, t: &Touch, r: &Routing) -> Option<u32> {
     None
 }
 
-/// Chapter 16's `score(D)`.
+/// The score of design `d`.
 #[must_use]
 pub fn score(input: &Input, d: &Design, s: &AdvisorSettings) -> Score {
     score_weighted(input, d, s, None)
@@ -1185,7 +1182,7 @@ fn groups_count(d: &Design) -> usize {
     d.groups.len()
 }
 
-/// Chapter 16's `search`.
+/// Searches for the best design, starting from the structural seed.
 #[must_use]
 pub fn search(input: &Input, s: &AdvisorSettings) -> SearchResult {
     let mut input = input.clone();
@@ -1240,7 +1237,7 @@ pub fn search(input: &Input, s: &AdvisorSettings) -> SearchResult {
     }
 }
 
-/// Chapter 16's confidence before a first split: over 200 bootstrap
+/// The confidence before a first split: over 200 bootstrap
 /// resamples, the share where the best design beats the runner-up (1.0
 /// without a runner-up). Statements are aggregated per fingerprint, so a
 /// resample draws each fingerprint's executions from a Poisson
@@ -1299,7 +1296,7 @@ pub fn confidence(
     f64::from(wins) / 200.0
 }
 
-/// Why a run was started (chapter 16, `Cause`).
+/// Why a run was started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Cause {
@@ -1307,11 +1304,11 @@ pub enum Cause {
     FirstSplit,
     /// `min_shards` asks for groups.
     MinShards,
-    /// The periodic run (R3).
+    /// The periodic run.
     Periodic,
     /// An operator.
     Manual,
-    /// A new object (R3).
+    /// A new object.
     NewObject,
 }
 
@@ -1329,7 +1326,7 @@ impl Cause {
     }
 }
 
-/// A run's verdict (chapter 16, `Verdict`).
+/// A run's verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
@@ -1371,7 +1368,7 @@ pub struct Evidence {
     pub waited: std::time::Duration,
 }
 
-/// Chapter 16's `decide` for causes before a first split.
+/// The verdict for causes before a first split.
 #[must_use]
 pub fn decide(cause: Cause, e: &Evidence, s: &AdvisorSettings) -> Verdict {
     let v = match cause {

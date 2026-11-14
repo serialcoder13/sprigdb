@@ -2,8 +2,8 @@
 //!
 //! Cluster records name nodes by the addresses they have inside their data
 //! center's network. A process on a developer's machine can't always reach
-//! those addresses directly; the simulated data centers of chapter 24's
-//! move tests (`deploy/compose/dc/`) also need every connection a process
+//! those addresses directly; the simulated data centers of the
+//! cross-DC move tests (`deploy/compose/dc/`) also need every connection a process
 //! makes to start in that process's own simulated DC, so that the
 //! latency between DCs applies. Both are solved by a dial map, read once
 //! from the environment:

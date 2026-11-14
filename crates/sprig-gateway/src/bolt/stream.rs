@@ -1,5 +1,4 @@
-//! Streamed Bolt results (chapter 43, "Bolt front end", streaming;
-//! decision G4's follow-up): the statement runs in its own task on its
+//! Streamed Bolt results: the statement runs in its own task on its
 //! connection and hands rows through a bounded channel; `PULL` takes them
 //! as the client asks, so a slow client pauses the statement rather than
 //! the gateway buffering its answer. The channel holds at most
@@ -124,7 +123,7 @@ pub(super) fn summary(stats: BTreeMap<String, i64>, bookmark: Option<String>) ->
     StreamEnd { stats, bookmark }
 }
 
-/// The rest of a result whose top `RETURN` failed on a row (R8 round 8):
+/// The rest of a result whose top `RETURN` failed on a row:
 /// after the records before that row, `PULL` gets the failure, as with
 /// Neo4j's lazy results.
 pub(super) struct LateError(pub(super) Option<BoltFailure>);

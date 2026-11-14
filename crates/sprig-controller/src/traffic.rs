@@ -1,5 +1,5 @@
-//! Traffic windows on the home DC's leader (chapter 24, "Aggregating
-//! traffic statistics", "The migration decision"; build step 3).
+//! Traffic windows on the home DC's leader, and the migration decision
+//! they feed.
 //!
 //! Gateways report reads and writes per (tenant, client DC) every
 //! `routing.traffic_report_seconds` (`POST /admin/v1/traffic/reports`,
@@ -7,7 +7,7 @@
 //! one-minute buckets over `migration.window_minutes`; the ring is soft
 //! state, refilled by new reports after a leader change.
 //! `GET /admin/v1/tenants/{name}/traffic` (`sprigctl tenant traffic`)
-//! shows the window and what R0's `recommend` mode would decide:
+//! shows the window and what the `recommend` mode would decide:
 //!
 //! ```text
 //! w[d] = reads[d] + migration.write_weight * writes[d]   (known client DCs)
@@ -15,18 +15,17 @@
 //! L(c) = sum over d of w[d] * rtt(d, c) / W
 //! ```
 //!
-//! **R2.** With chapter 23's latency matrix ([`crate::latency`]) covering
-//! every pair, `L(c)` is in milliseconds ([`TrafficView::weighted_rtt_ms`])
-//! and the decision follows it.
+//! **Measured latency.** With the latency matrix ([`crate::latency`])
+//! covering every pair, `L(c)` is in milliseconds
+//! ([`TrafficView::weighted_rtt_ms`]) and the decision follows it.
 //!
-//! **Where the book differs (R0).** Without a latency matrix (before R2,
-//! chapter 23 step 12, or while a pair is unmeasured), `rtt(d, c)` is 0
-//! inside a DC and 1 between DCs:
+//! **Without a latency matrix** (or while a pair is unmeasured),
+//! `rtt(d, c)` is 0 inside a DC and 1 between DCs:
 //! `L(c)` is the share of weighted traffic that would cross DCs if `c`
 //! were home. The candidate is the DC with the lowest `L`, ties to the
 //! home; it qualifies when it beats the home by
-//! `migration.min_improvement_pct`. Nothing moves on its own in R0: the
-//! decision is shown, and `sprigctl tenant move` acts on it.
+//! `migration.min_improvement_pct`. Under `recommend` nothing moves on its
+//! own: the decision is shown, and `sprigctl tenant move` acts on it.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Mutex, PoisonError};
@@ -89,7 +88,7 @@ pub struct TrafficRow {
     pub writes: u64,
 }
 
-/// One report (chapter 24's `TrafficBatch`).
+/// One report (a `TrafficBatch`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrafficBatch {
     /// Unix minute.
@@ -143,19 +142,19 @@ pub struct TrafficView {
     pub weighted_total: u64,
     /// `W >= migration.min_signal_requests`.
     pub signal: bool,
-    /// `L(c)` per candidate DC (R0: the share of weighted traffic that
-    /// would cross DCs), in percent.
+    /// `L(c)` per candidate DC (with the 0/1 stand-in: the share of
+    /// weighted traffic that would cross DCs), in percent.
     pub cross_dc_pct: BTreeMap<String, f64>,
     /// `L(c)` per candidate DC in milliseconds, from the measured latency
-    /// matrix (R2, chapter 23 step 12), when it covers every pair; the
-    /// decision then uses it instead of [`TrafficView::cross_dc_pct`].
+    /// matrix, when it covers every pair; the decision then uses it
+    /// instead of [`TrafficView::cross_dc_pct`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub weighted_rtt_ms: BTreeMap<String, f64>,
     /// The best DC, if it qualifies as a move.
     pub candidate: Option<DcId>,
     /// `stay`, `candidate` or `no_signal`.
     pub decision: String,
-    /// R2 (r2last): the automatic decision loop's last evaluation of the
+    /// The automatic decision loop's last evaluation of the
     /// tenant and what it did (`crate::dc_migrate`), on its home leader.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto: Option<serde_json::Value>,
@@ -195,7 +194,7 @@ impl TrafficWindows {
     }
 
     /// The window of `tenant` ending at `now_minute`, and the decision,
-    /// with R0's 0/1 stand-in for `rtt` (see the module docs).
+    /// with the 0/1 stand-in for `rtt` (see the module docs).
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn view(
@@ -223,7 +222,7 @@ impl TrafficWindows {
     }
 
     /// As [`Self::view`], weighing traffic by `rtt(client_dc, candidate)`
-    /// in ms when given and it knows every pair needed (R2's measured
+    /// in ms when given and it knows every pair needed (the measured
     /// matrix, `crate::latency::Matrix::rtt`); otherwise the 0/1 stand-in.
     #[must_use]
     #[allow(
@@ -297,7 +296,7 @@ impl TrafficWindows {
                 best = Some((k.client_dc.clone(), v));
             }
         }
-        // R2: L(c) = sum w[d] * rtt(d, c) / W in ms, when the matrix knows
+        // L(c) = sum w[d] * rtt(d, c) / W in ms, when the matrix knows
         // every pair; the candidate and the decision then follow it.
         let mut measured = BTreeMap::new();
         if let Some(rtt) = rtt

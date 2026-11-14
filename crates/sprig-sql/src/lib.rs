@@ -1,11 +1,9 @@
 //! `sprig-sql`: parser extensions on sqlparser-rs, the binder, name
 //! virtualization and the translator.
 //!
-//! Layer: 2 execution. Design: [chapter 07](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/07-names.md)
-//! (Name virtualization) and [chapter 28](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/28-translator.md)
-//! (Translator) of the SprigDB low-level design.
+//! Layer: 2 execution.
 //!
-//! Implemented so far (chapter 07 build steps 1 to 5, 7 and 8):
+//! Modules:
 //!
 //! - [`lex`]: the persona-aware lexer, with executable comments
 //!   ([`lex::versioned`]), `ANSI_QUOTES` and `NO_BACKSLASH_ESCAPES`;
@@ -20,16 +18,15 @@
 //!   results and messages, hiding of internal objects, and the per-statement
 //!   plan the gateway follows;
 //! - [`names::ddl`]: the typed DDL target of each statement and its
-//!   conversion to `sprig-catalog`'s `DdlStatement` (chapter 08 step 10,
-//!   the gateway side).
-//! - [`settings_stmt`]: settings in SQL (chapter 08 step 8): `SPRIG SET`,
-//!   `RESET`, `BOUNDS`, `SHOW SPRIG SETTINGS` and `ALTER TENANT <name>`.
-//! - [`pin_stmt`]: sharding pins and advice (chapter 16 steps 7 and 8):
-//!   `SPRIG PIN`, `SPRIG UNPIN`, `SPRIG SHOW ADVICE` and `SPRIG SHOW PINS`.
-//! - [`compat`]: the translator's R0 subset (chapter 28 build steps 1 to
-//!   5): executable comments, emulated variables, the collation map, the
-//!   persona-shaped `information_schema` providers and `SHOW` rewrites,
-//!   result metadata and error mapping on 3306.
+//!   conversion to `sprig-catalog`'s `DdlStatement` (the gateway
+//!   side).
+//! - [`settings_stmt`]: settings in SQL: `SPRIG SET`, `RESET`, `BOUNDS`, `SHOW
+//!   SPRIG SETTINGS` and `ALTER TENANT <name>`.
+//! - [`pin_stmt`]: sharding pins and advice: `SPRIG PIN`, `SPRIG UNPIN`, `SPRIG
+//!   SHOW ADVICE` and `SPRIG SHOW PINS`.
+//! - [`compat`]: the MySQL/MariaDB translator: executable comments, emulated
+//!   variables, the collation map, the persona-shaped `information_schema`
+//!   providers and `SHOW` rewrites, result metadata and error mapping on 3306.
 
 pub mod access;
 pub mod account_stmt;
@@ -37,10 +34,10 @@ pub mod compat;
 pub mod lex;
 pub mod names;
 pub mod pin_stmt;
-// Chapter 52: recommendations in SQL.
+// Recommendations in SQL.
 pub mod rec_stmt;
-// Chapter 29: row-level security (policies and the rewrite, R4).
+// Row-level security (policies and the rewrite).
 pub mod rls;
 pub mod settings_stmt;
-// Chapter 16 (bugfix-31): what stored code's text names.
+// What stored code's text names.
 pub mod stored_refs;

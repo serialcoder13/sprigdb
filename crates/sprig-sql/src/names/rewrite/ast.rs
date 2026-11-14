@@ -1,5 +1,5 @@
-//! The AST path: schema positions from sqlparser-rs (chapter 07,
-//! "Statement rewrite": "for each object name N in the AST").
+//! The AST path: schema positions from sqlparser-rs, for each
+//! object name in the AST.
 //!
 //! For each statement of a kind sqlparser-rs models, the walker's split
 //! gives the statement's text. It is parsed with `MySqlDialect` from a

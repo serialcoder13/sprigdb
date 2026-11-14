@@ -1,7 +1,7 @@
-//! The reconciler that runs with each observation (chapter 13, "Observing
-//! and dropping"): it compares `information_schema.STATISTICS` on every
-//! shard with `auto_indexes`. MariaDB is the truth for whether an index
-//! exists, the catalog for who owns it.
+//! The reconciler that runs with each observation: it compares
+//! `information_schema.STATISTICS` on every shard with `auto_indexes`.
+//! MariaDB is the truth for whether an index exists, the catalog for who
+//! owns it.
 //!
 //! ```text
 //! for each shard of the object, on the writer:
@@ -22,8 +22,8 @@
 //!   indexes (replicas: and _sprig_p_ field columns) the writer lacks, the
 //!   leftovers of a validation cut off by a controller restart, dropped
 //!   with the binary log off, unless a validation of this process runs
-//!   there; Galera keeps the names of rows rolling out (bugfix-61;
-//!   validate::orphans)
+//!   there; Galera keeps the names of rows rolling out
+//!   (validate::orphans)
 //! ```
 //!
 //! `frozen` rows are left alone; `validating` and `recommended` rows
@@ -56,7 +56,7 @@ pub struct DriftReport {
     /// Replicas whose index differs from the writer's (reported only).
     pub replica_mismatch: Vec<String>,
     /// Leftovers of cut-off validations dropped on replicas or Galera
-    /// nodes, as `node:shard/name` (bugfix-61).
+    /// nodes, as `node:shard/name`.
     pub leftovers_dropped: Vec<String>,
     /// Statements that failed (retried next time).
     pub errors: Vec<String>,
@@ -252,7 +252,7 @@ pub async fn reconcile_object<Q: Queryable + Send>(
             n.close().await;
         }
     }
-    // Leftovers of cut-off validations on the other nodes (bugfix-61).
+    // Leftovers of cut-off validations on the other nodes.
     leftovers(cx, &by_name, &mut rep).await;
     if !rep.strays_dropped.is_empty()
         || !rep.rows_dropped.is_empty()

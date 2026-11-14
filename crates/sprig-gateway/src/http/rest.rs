@@ -1,6 +1,6 @@
-//! The REST router (chapter 37, "REST transcoding"): requests are matched
-//! against [`sprig_api::rest::ROUTES`] and run the same implementation as
-//! the gRPC services.
+//! The REST router: requests are matched against
+//! [`sprig_api::rest::ROUTES`] and run the same implementation as the gRPC
+//! services.
 //!
 //! - `Sql.Execute`: one JSON reply, up to `api.rest.max_buffered_bytes`.
 //! - `Sql.Query`: NDJSON with `Accept: application/x-ndjson` (one line per
@@ -11,8 +11,8 @@
 //!   forwarded to the controllers.
 //! - `GET /v1/openapi.json`, `GET /admin/v1/openapi.json`.
 //!
-//! Errors are SprigDB's REST error JSON with the status of chapter 37's
-//! table ([`sprig_api::status`]); 401 carries `WWW-Authenticate`, 429 and
+//! Errors are SprigDB's REST error JSON with the status from
+//! [`sprig_api::status`]; 401 carries `WWW-Authenticate`, 429 and
 //! 503 carry `Retry-After`.
 
 use std::sync::Arc;
@@ -36,7 +36,7 @@ use super::sink::Item;
 use super::sql::{CHANNEL_DEPTH, Caller, SqlCall, collect};
 use super::{ConnInfo, Core};
 
-/// The `x-sprig-tenant` header (chapter 37, "Authentication").
+/// The `x-sprig-tenant` header.
 pub const TENANT_HEADER: &str = "x-sprig-tenant";
 /// Set on calls forwarded between gateways.
 pub const FORWARDED_HEADER: &str = "x-sprig-forwarded";
@@ -138,7 +138,7 @@ pub async fn handle(core: &Arc<Core>, info: &ConnInfo, req: Request<Incoming>) -
     };
     let rpc = m.route.short_name();
     metrics::counter!("sprig_api_requests_total", "service" => m.route.service, "method" => m.route.rpc, "protocol" => "rest").increment(1);
-    // Chapter 37 step 11 (RLS round 5): change streams as SSE, WebSocket
+    // Change streams as SSE, WebSocket
     // or NDJSON.
     if rpc == "Changes.Watch" {
         let db = m.vars.get("database").cloned().unwrap_or_default();
@@ -160,7 +160,7 @@ async fn admin(
     m: Matched,
     req: Request<Incoming>,
 ) -> Result<Response<Body>, SprigError> {
-    // `studio.operator_mtls` covers the Operators routes (ST47).
+    // `studio.operator_mtls` covers the Operators routes.
     super::studio::ops::operators_cert(core, info, req.uri().path())?;
     let auth = header(&req, "authorization");
     if m.route.service == "sprig.admin.v1.Gateways" {
@@ -181,7 +181,7 @@ async fn admin(
         .map_or_else(|| req.uri().path().to_owned(), |p| p.as_str().to_owned());
     let max = core.engine.settings().max_request;
     let body = read_body(req, max).await?;
-    // The controller records the client's address (ST47).
+    // The controller records the client's address.
     let r = core
         .admin
         .forward_from(&method, &pq, auth.as_deref(), body, Some(info.peer.ip()))
@@ -204,7 +204,7 @@ async fn data(
     let api = core.engine.settings();
     let body = parse_json(&read_body(req, api.max_request).await?)?;
     let mut caller = core.caller(info, auth, tenant, host).await?;
-    // Chapter 24: the client's DC.
+    // The client's DC.
     caller.client_dc = crate::dc::hint("http", client_dc.as_deref()).known();
     let transaction = m
         .vars
@@ -304,7 +304,7 @@ async fn run_local(
         .unwrap_or_else(|| s(body, "transaction"));
     match rpc {
         "Sql.Execute" | "Sql.Query" => {
-            // Caps and timeout asked for, clamped for Studio (chapter 44).
+            // Caps and timeout asked for, clamped for Studio.
             let caps = core
                 .studio
                 .caps_for(caller, &database, super::studio::asked_caps(body));
@@ -317,8 +317,8 @@ async fn run_local(
             let e2 = Arc::clone(engine);
             let c2 = caller.clone();
             let txn = (!transaction.is_empty()).then_some(transaction);
-            // `language`: sql (default), cypher, gql or mongo (tui T2);
-            // `output`: canonical_ejson for mongo (Studio round 5).
+            // `language`: sql (default), cypher, gql or mongo;
+            // `output`: canonical_ejson for mongo.
             let language = super::lang::with_output(&s(body, "language"), &s(body, "output"));
             tokio::spawn(async move {
                 e2.run_in(&c2, &language, call, txn.as_deref(), caps, tx)
@@ -370,7 +370,7 @@ async fn run_local(
             let v = super::vectors::call(engine, caller, r, &request_json(m, body)).await?;
             Ok((200, Local::Json(v)))
         }
-        // R6 round 4: `Analytics.Query` streams as NDJSON when asked.
+        // `Analytics.Query` streams as NDJSON when asked.
         "Analytics.Query" if ndjson => {
             let rx = super::analytics::query_stream(
                 Arc::clone(engine),
@@ -402,9 +402,9 @@ async fn run_local(
     }
 }
 
-/// A buffered `Sql.Execute` (or, with `parts`, `Sql.Query`) reply as
-/// JSON. Chapter 04 (decision bugfix-1): a large result is rendered here,
-/// and encoded later, off the runtime's worker threads.
+/// A buffered `Sql.Execute` (or, with `parts`, `Sql.Query`) reply as JSON.
+/// A large result is rendered here, and encoded later, off the runtime's
+/// worker threads.
 fn render_sql(parts: bool, reply: &sprig_api::proto::v1::ExecuteResponse) -> Local {
     let rows: usize = reply.results.iter().map(|r| r.rows.len()).sum();
     let v = sprig_common::cpu::heavy(rows, || {
@@ -457,7 +457,7 @@ fn split_parts(r: &sprig_api::proto::v1::ExecuteResponse) -> Vec<Value> {
 }
 
 /// `Analytics.Query`'s parts as NDJSON: a header line, row lines, an end
-/// line, or an error line that ends the stream (R6 round 4).
+/// line, or an error line that ends the stream.
 fn analytics_ndjson(rx: mpsc::Receiver<super::analytics::Part>) -> Response<Body> {
     let stream = futures::stream::unfold(Some(rx), |rx| async move {
         let mut rx = rx?;
@@ -537,7 +537,7 @@ pub async fn forwarded(core: &Arc<Core>, req: ForwardRequest) -> ForwardReply {
         })?;
         let auth = (!req.authorization.is_empty()).then(|| req.authorization.clone());
         let caller = core.caller(&info, auth, None, None).await?;
-        // Studio's cursors (chapter 44) aren't in the route table.
+        // Studio's cursors aren't in the route table.
         if let Some(r) = super::studio::cursors::forwarded(core, &caller, &req.method, &body).await
         {
             return r;
@@ -625,7 +625,7 @@ mod render_tests {
     }
 
     /// Two large buffered results rendered at once on a two-worker
-    /// runtime leave a ticker running (chapter 04, decision bugfix-1).
+    /// runtime leave a ticker running.
     #[test]
     fn large_results_render_off_the_workers() {
         let rt = tokio::runtime::Builder::new_multi_thread()

@@ -1,8 +1,8 @@
-//! bugfix-34 (decisions/bugfix-interim.md): `DROP DATABASE` takes the
+//! `DROP DATABASE` takes the
 //! database's sinks, connections and logic triggers with it. Before, the
 //! sinks stayed `running` and the triggers `active` in the catalog, their
 //! DC index entries and feed subscriptions stayed, and the after-commit
-//! trigger's job ran on (rls4's audit).
+//! trigger's job ran on.
 //!
 //! A database with a table and its change topic, a stream, a webhook
 //! connection, a sink from the stream and one from the table's changes, a

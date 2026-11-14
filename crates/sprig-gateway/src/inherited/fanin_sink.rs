@@ -1,5 +1,4 @@
-//! Fan-in queue sinks' reads (chapter 51, "Fan-in sinks"; chapter 42,
-//! "Fan-in"; R9, r9queue): `CREATE SINK ... FROM QUEUE q FAN IN` in an
+//! Fan-in queue sinks' reads: `CREATE SINK ... FROM QUEUE q FAN IN` in an
 //! ancestor P reads every member's instance of the queue definition `q`.
 //! The sink's task (in a worker) lists the instances from the DC's index
 //! and asks a gateway, as the sink's owner, through `LogicPeer.SinkSql`:
@@ -12,7 +11,7 @@
 //!   → a get on the member's instance (an internal principal of the member,
 //!     as the AMQP fan-in consumer's), each message held lease_ms:
 //!     mq_get's columns (delivery_token first)
-//!   (R9, r9last: under the task's lease tag when it gives one)
+//!   (under the task's lease tag when it gives one)
 //! FanInRelease {def, member, db, queue, tag}
 //!   the same checks → the member's instance gives back what was held
 //!   under tag (a dead task's leases, as mq_release)
@@ -152,7 +151,7 @@ pub async fn get(
 }
 
 /// See the module docs: a dead task's leases in member `member`'s
-/// instance go back to the queue (R9, r9last).
+/// instance go back to the queue.
 ///
 /// # Errors
 /// As [`get`].

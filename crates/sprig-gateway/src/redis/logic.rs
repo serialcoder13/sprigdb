@@ -1,9 +1,8 @@
-//! `FCALL` and `FCALL_RO` of logic-layer functions (chapter 40 step 19;
-//! chapter 41, "Calling code"; R7).
+//! `FCALL` and `FCALL_RO` of logic-layer functions.
 //!
 //! `sprig-redis` asks this hook when a name isn't one of the tenant's Lua
 //! library functions (Lua functions are found first). The call becomes
-//! chapter 41's function call statement on the login's own executor
+//! a function call statement on the login's own executor
 //! session, exactly as `Functions.Call` over HTTP does: the session finds
 //! the function (the database a `db.name` names, else the tenant's
 //! `redis.logical_database`), checks `EXPOSE (redis)` (39789) and runs

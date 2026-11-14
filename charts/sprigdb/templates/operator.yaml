@@ -88,6 +88,10 @@ spec:
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
             - {name: SPRIGDB_NODE_DC, value: {{ .Values.dc.id | quote }}}
             - {name: SPRIG_OPERATOR_CONTROLLER_ADMIN, value: {{ .Values.operator.controllerAdmin | default (include "sprigdb.adminEndpoint" .) | quote }}}
+            # Registration is served only by the DC leader: a controller that
+            # doesn't lead answers 39504 naming it, and the operator sends the
+            # call again to the leader's own address (as the settings Job does).
+            - {name: SPRIG_OPERATOR_CONTROLLER_LEADER_ADMIN, value: "{{ include "sprigdb.adminScheme" . }}://{leader}.sprigdb-controller-pods.{{ .Release.Namespace }}.svc:7480"}
             - {name: SPRIG_OPERATOR_NODE_SERVICE_TYPE, value: {{ .Values.nodeServices.type | quote }}}
             {{- with .Values.nodeServices.nodePortHost }}
             - {name: SPRIG_OPERATOR_NODE_PORT_HOST, value: {{ . | quote }}}

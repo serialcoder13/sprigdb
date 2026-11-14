@@ -1,9 +1,8 @@
-//! CPU-heavy work off the runtime's worker threads (chapter 04, "Heavy
-//! statements"; decision bugfix-1).
+//! CPU-heavy work off the runtime's worker threads.
 //!
 //! A tokio worker thread that runs one long synchronous step (a sort of a
 //! million rows, a group-by fold, a JSON encode of a large result) holds
-//! every task queued behind it, and chapter 25's watchdog takes a runtime
+//! every task queued behind it, and the failover watchdog takes a runtime
 //! that stops answering for its stall time for a stuck process. So a step
 //! whose input is large runs through [`heavy`]: on a multi-threaded runtime
 //! `tokio::task::block_in_place` hands the worker's queue to another thread

@@ -862,6 +862,10 @@ async fn run(
     stop: CancellationToken,
 ) {
     loop {
+        // The tail is raced only against the stream's end, which drops it
+        // for good (a resumed stream starts from the client's token), so a
+        // half-read item is never lost here (decision r9-131). The
+        // client's waits are on the channel.
         let item = tokio::select! {
             () = stop.cancelled() => break,
             () = tx.closed() => break,

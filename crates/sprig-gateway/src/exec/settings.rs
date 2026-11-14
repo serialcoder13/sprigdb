@@ -1,6 +1,6 @@
-//! The pass-through executor's live settings (chapter 05,
-//! "Configuration"): read per statement, so a change applies to the next
-//! one. The tenant scopes can't apply before the tenant is known (M0.3);
+//! The pass-through executor's live settings: read per statement, so a
+//! change applies to the next one. The tenant scopes can't apply before the
+//! tenant is known;
 //! they resolve at the process scopes for now.
 
 use sprig_common::ids::DcId;
@@ -94,7 +94,7 @@ impl ExecSettingsSource {
 
     /// The persona's version string, as the greeting reports it
     /// (`gateway.mysql_server_version`, `gateway.mariadb_server_version`):
-    /// what `@@version` and `VERSION()` answer (chapter 28).
+    /// what `@@version` and `VERSION()` answer.
     #[must_use]
     pub fn persona_version(&self, persona: Persona) -> String {
         use crate::mysql::settings::{MARIADB_SERVER_VERSION, MYSQL_SERVER_VERSION};
@@ -105,7 +105,7 @@ impl ExecSettingsSource {
         match self {
             ExecSettingsSource::Fixed(_) => setting.default.clone().into_owned(),
             ExecSettingsSource::Live { live, dc } => {
-                // Decision PF7: asked several times per statement (the
+                // Asked several times per statement (the
                 // lexer's options); resolved once per settings snapshot.
                 type Memo = Option<(sprig_settings::Snapshot, DcId, [String; 2])>;
                 static MEMO: std::sync::Mutex<Memo> = std::sync::Mutex::new(None);

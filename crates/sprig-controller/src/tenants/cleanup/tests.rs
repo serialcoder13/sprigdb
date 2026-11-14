@@ -159,7 +159,7 @@ fn prefixes_end_with_a_slash() {
     }
     assert!(
         meta_prefixes(TenantId(3)).contains(&"inherit-instances/3/".to_owned()),
-        "a deleted member's instance index entries go with it (R9)"
+        "a deleted member's instance index entries go with it"
     );
     assert!(meta_prefixes(TenantId(3)).contains(&"inherit-xo/3/".to_owned()));
     assert_eq!(meta_keys(TenantId(3)), ["pins/3", "promotions/3"]);

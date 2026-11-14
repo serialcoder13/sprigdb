@@ -147,6 +147,7 @@ async fn client(b: &Arc<Broker>) -> Client<DuplexStream> {
             tls: true,
             sni: None,
             client_cert: false,
+            client_dn: None,
         };
         let _ = b.serve(&mut s, info, CancellationToken::new()).await;
     });

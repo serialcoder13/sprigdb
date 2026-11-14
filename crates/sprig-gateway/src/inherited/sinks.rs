@@ -1,5 +1,4 @@
-//! Inherited connections and sinks (chapter 51, "Inherited sinks and
-//! connections (`FOR EACH TENANT`)"; chapter 42; R9, r9more).
+//! Inherited connections and sinks (`FOR EACH TENANT`).
 //!
 //! ```text
 //! CREATE CONNECTION c FOR EACH TENANT [scope] TYPE k WITH (url = REQUIRED, ...)
@@ -108,7 +107,7 @@ pub struct SinkSpec {
     pub db: String,
     /// The source stream (or queue) definition's name.
     pub source: String,
-    /// `queue` for `FROM QUEUE q` (R9, r9fanin); empty for a stream.
+    /// `queue` for `FROM QUEUE q`; empty for a stream.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source_kind: String,
     /// The connections it names: (name, platform).
@@ -155,8 +154,7 @@ pub fn on_stream(chain: &Chain, stream: &Definition) -> Vec<Arc<Definition>> {
     on_source(chain, stream)
 }
 
-/// The sink definitions reaching the member whose source is `queue` (R9,
-/// r9fanin).
+/// The sink definitions reaching the member whose source is `queue`.
 #[must_use]
 pub fn on_queue(chain: &Chain, queue: &Definition) -> Vec<Arc<Definition>> {
     on_source(chain, queue)
@@ -184,7 +182,7 @@ fn cat_err(e: mysql_async::Error) -> SprigError {
 /// The sealed form of member credentials in an override:
 /// `{"<name>": {"kv": <key version>, "b": "<base64>"}}`, under the
 /// member's sink key with the connection definition's id as the
-/// connection (chapter 51, "Credentials").
+/// connection.
 ///
 /// # Errors
 /// 39216 without a key.
@@ -347,10 +345,10 @@ pub async fn ensure_for_stream(
     }
 }
 
-/// [`ensure_for_stream`] for a member's queue instance (R9, r9fanin): the
-/// sink definitions over `FOR EACH TENANT` queue `queue_def` reaching
-/// member `t` get its own queue sink, deployed when its queue instance is
-/// made (as for streams), reading that queue as its `sprig_inherited`.
+/// [`ensure_for_stream`] for a member's queue instance: the sink
+/// definitions over `FOR EACH TENANT` queue `queue_def` reaching member `t`
+/// get its own queue sink, deployed when its queue instance is made (as for
+/// streams), reading that queue as its `sprig_inherited`.
 pub async fn ensure_for_queue(
     svc: &Arc<TenantServices>,
     chain: &Chain,
@@ -393,17 +391,16 @@ async fn ensure_logged(
     }
 }
 
-/// Retrying members' failed sink deploys on a timer (chapter 51, R9,
-/// r9queue; r9more's item 60). A deploy that fails (the member's allowlist
-/// or residency refuses the destination, a name the member uses itself, a
-/// catalog error) leaves `inherit-sink-retry/<member>/<sink definition>` in
-/// the DC tier. Every 5 s each gateway lists the entries that are due;
-/// one gateway claims each (an etcd compare on the entry's revision, which
-/// also pushes its next try a minute out) and deploys it again. Success
-/// removes the entry; failure keeps the error in the instance row and
-/// waits 5 s, 10 s, 20 s ... up to 5 minutes. An entry whose member is
-/// gone, whose sink definition no longer reaches it, or whose stream
-/// instance is gone is dropped.
+/// Retrying members' failed sink deploys on a timer. A deploy that fails (the
+/// member's allowlist or residency refuses the destination, a name the member
+/// uses itself, a catalog error) leaves
+/// `inherit-sink-retry/<member>/<sink definition>` in the DC tier. Every 5 s
+/// each gateway lists the entries that are due; one gateway claims each (an
+/// etcd compare on the entry's revision, which also pushes its next try a
+/// minute out) and deploys it again. Success removes the entry; failure keeps
+/// the error in the instance row and waits 5 s, 10 s, 20 s ... up to 5
+/// minutes. An entry whose member is gone, whose sink definition no longer
+/// reaches it, or whose stream instance is gone is dropped.
 pub mod retry {
     use super::{
         Arc, Chain, DefKey, DefKind, DefState, Deserialize, InstanceState, Result, Serialize,
@@ -419,7 +416,7 @@ pub mod retry {
         pub tenant: TenantId,
         /// The sink definition.
         pub sink: DefKey,
-        /// Its source stream (or queue, r9fanin) definition.
+        /// Its source stream (or queue) definition.
         pub stream: DefKey,
         /// Failed tries so far.
         pub attempts: u32,
@@ -621,9 +618,9 @@ pub mod retry {
         else {
             return Ok(None);
         };
-        // The source: a stream definition (its instance must exist), or
-        // a queue definition (R9, r9fanin; a member without its queue
-        // instance yet fails the deploy and is tried again).
+        // The source: a stream definition (its instance must exist), or a
+        // queue definition (a member without its queue instance yet fails
+        // the deploy and is tried again).
         let stream_def = chain
             .reaching(DefKind::Stream)
             .into_iter()
@@ -789,9 +786,9 @@ async fn ensure_one(
     };
     let phys = row.as_ref().and_then(|r| r.physical.clone());
     let had_error = phys.as_ref().is_some_and(|p| p.get("error").is_some());
-    // R9 (r9last): a queue sink's instance is granted its queue alone; one
-    // deployed before (with the database grant) is granted again, and the
-    // database grant taken back.
+    // A queue sink's instance is granted its queue alone; one deployed
+    // before (with the database grant) is granted again, and the database
+    // grant taken back.
     let queue_source = spec.source_kind() == DefKind::Queue;
     let queue_grant_due = queue_source
         && phys
@@ -830,14 +827,14 @@ async fn ensure_one(
         return Ok(had_error);
     }
     // The member's sprig_inherited: the definition's GRANTS, and reading
-    // the stream's instance. A queue (R9, r9last: least privilege) is
-    // granted alone: SELECT and DELETE on the queue, the right `mq_get`
-    // checks; its acknowledgements outside a transaction are settled by
-    // the queue's owner, and the vhost opens for a right on one of its
-    // queues. Nothing on the database's tables. (r9tests saw members
-    // receive nothing with this grant: the cause was a dropped
-    // definition's member sinks left running, which took the new queue's
-    // first messages; see `members_of`.)
+    // the stream's instance. A queue is granted alone (least privilege):
+    // SELECT and DELETE on the queue, the right `mq_get` checks; its
+    // acknowledgements outside a transaction are settled by the queue's
+    // owner, and the vhost opens for a right on one of its queues.
+    // Nothing on the database's tables. (Members that receive nothing
+    // with this grant point to a dropped definition's member sinks left
+    // running, which take the new queue's first messages; see
+    // `members_of`.)
     let first = phys.as_ref().and_then(|p| p.get("sink")).is_none();
     let extra = if queue_source {
         vec![GrantItem {
@@ -1030,11 +1027,11 @@ async fn ensure_one(
                     cs.start_at = StartAt::Earliest;
                 }
                 // "Latest" is the definition's creation, not the deploy or
-                // the task's first run (R9, r9queue): the publish whose use
-                // of the instance deploys the sink was stamped before the
-                // deploy, and a task that can't start yet (a destination
-                // down, a credential still missing, a deploy retried on the
-                // timer) misses nothing published after the definition.
+                // the task's first run: the publish whose use of the
+                // instance deploys the sink was stamped before the deploy,
+                // and a task that can't start yet (a destination down, a
+                // credential still missing, a deploy retried on the timer)
+                // misses nothing published after the definition.
                 Some(_) if cs.start_at == StartAt::Latest => {
                     cs.start_at = StartAt::Timestamp {
                         ms: i64::try_from(s.created_at_ms).unwrap_or(i64::MAX),
@@ -1171,7 +1168,7 @@ pub async fn drop_instance(
 
 /// Drops member `t`'s sink `db.name` as its `sprig_inherited` (`run_as`),
 /// with its dead letters: an instance no definition reaches any more
-/// ([`super::orphan_sinks`], bugfix-47). `false` when it is gone already.
+/// ([`super::orphan_sinks`]). `false` when it is gone already.
 ///
 /// # Errors
 /// The catalog's.
@@ -1212,7 +1209,7 @@ pub(crate) async fn drop_member_sink(
 }
 
 /// Deletes member `t`'s `inherited_instances` row of its sink `sink`, which
-/// the sweep just dropped (bugfix-56: the sweep left the row behind).
+/// the sweep just dropped.
 ///
 /// # Errors
 /// The catalog's.
@@ -1244,8 +1241,8 @@ pub(crate) async fn drop_instance_rows(
 }
 
 /// Member `t`'s instance rows of sink definitions its chain no longer
-/// has (bugfix-56): rows of sinks dropped before bugfix-52, whose member
-/// had detached, and rows a failed drop left. The definitions' keys.
+/// has: rows of sinks dropped while their member was detached, and rows a
+/// failed drop left. The definitions' keys.
 ///
 /// # Errors
 /// The catalog's.
@@ -1289,7 +1286,7 @@ pub(crate) async fn stale_instance_rows(
 
 /// Deletes member `t`'s instance row of definition `k`, with the
 /// connections the row lists that its `sprig_inherited` owns and no sink
-/// of the member uses (the sweeps before bugfix-52 left them too).
+/// of the member uses (an earlier sweep may have left them too).
 ///
 /// # Errors
 /// The catalog's.
@@ -1345,8 +1342,8 @@ pub(crate) async fn delete_instance_row(
 }
 
 /// Drops the member's connections among `used` (a dropped sink's) that
-/// `run_as` owns and no sink of the member uses any more (bugfix-52: an
-/// orphaned instance's connections stayed behind).
+/// `run_as` owns and no sink of the member uses any more (otherwise an
+/// orphaned instance's connections stay behind).
 async fn drop_unused_connections(
     host: &mut DeployHost,
     run_as: UserId,
@@ -1382,7 +1379,7 @@ async fn drop_unused_connections(
 }
 
 /// Members holding an instance of sink definition `s` that the source's
-/// instance index doesn't list (bugfix-52): `ALTER INHERITED STREAM ...
+/// instance index doesn't list: `ALTER INHERITED STREAM ...
 /// DETACH` removes the member's source instance from `inherit-instances/`,
 /// but the member keeps its sink instance. Found through this DC's sink
 /// index: tenants below the declarer, not in `known`, whose catalog holds
@@ -1440,10 +1437,11 @@ pub async fn members_of(
     chain: &Chain,
     s: &Definition,
 ) -> Result<Vec<TenantId>> {
-    // The source's kind (R9, r9last): a queue-sourced definition's
-    // members were looked up as a stream's, found none, and `DROP SINK`
-    // left every member's instance running (inherit_live's queue sink
-    // test then lost a member's messages to the old task in a later run).
+    // The source's kind: looked up as a stream's, a queue-sourced
+    // definition's members would not be found, and `DROP SINK` would
+    // leave every member's instance running (inherit_live's queue sink
+    // test would then lose a member's messages to the old task in a later
+    // run).
     let Some(d) = source_of(chain, s) else {
         return Ok(Vec::new());
     };
@@ -1454,7 +1452,7 @@ pub async fn members_of(
         .collect())
 }
 
-/// The source stream (or queue, r9fanin) definition of sink definition
+/// The source stream (or queue) definition of sink definition
 /// `s`, from `chain` (the declarer's own rows included).
 #[must_use]
 pub fn source_of(chain: &Chain, s: &Definition) -> Option<DefKey> {

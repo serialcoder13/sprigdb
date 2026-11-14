@@ -1,5 +1,4 @@
-//! `queue.change_exchange` (chapter 50, "Change feed to an exchange";
-//! chapter 29, RLS round 5, decision RL52): after
+//! `queue.change_exchange` (a table's change feed to an exchange): after
 //! `ALTER TABLE t SPRIG SET | RESET (... queue.change_exchange ...)` the
 //! table's forwarder subscription matches the setting.
 //!

@@ -1,4 +1,4 @@
-//! Chapter 24's Admin API calls: moving a tenant to another data center
+//! The Admin API calls for moving a tenant to another data center
 //! and its traffic window (see [`crate::migrate`] and
 //! [`crate::traffic`]).
 //!
@@ -8,17 +8,17 @@
 //! POST /admin/v1/tenants/{name}:pin      pinned_dc = the home DC (and :unpin);
 //!                                        `sprigctl tenant pin` calls it
 //! POST /admin/v1/tenants/{name}:residency {"policy": "...", "deny_remote_access": true,
-//!                                        "apply": false}: chapter 26's plan, or apply
+//!                                        "apply": false}: the residency plan, or apply
 //! GET  /admin/v1/tenants/{name}/residency the policy, allowed DCs and state
-//! GET  /admin/v1/tenants/{name}/traffic  the window and the R0 decision
+//! GET  /admin/v1/tenants/{name}/traffic  the window and the decision
 //! POST /admin/v1/traffic/reports         gateways' counts (no bearer token:
 //!                                        counts only, on the private Admin port)
 //! ```
 //!
 //! A move is answered by the leader of the tenant's home DC (39504
 //! elsewhere in that DC; 39550 naming the home DC from another DC). A
-//! tenant pinned with `sprigctl tenant pin` (chapter 11's pin, which
-//! chapter 47 makes the one pin for placement and DC) doesn't move.
+//! tenant pinned with `sprigctl tenant pin` (the balancer's pin, the one
+//! pin for both placement and DC) doesn't move.
 
 use std::sync::Arc;
 
@@ -32,7 +32,7 @@ use crate::traffic::{
 };
 
 impl AdminService {
-    /// The same service with chapter 24's calls.
+    /// The same service with the DC move calls.
     #[must_use]
     pub fn with_moves(mut self, moves: Arc<DcMoves>) -> Self {
         self.moves = Some(moves);
@@ -67,7 +67,7 @@ impl AdminService {
         self.moves()?.status(t.tenant_id, name).await
     }
 
-    /// The same service with chapter 26's calls.
+    /// The same service with the residency calls.
     #[must_use]
     pub fn with_residency(mut self, r: Arc<crate::residency::Residency>) -> Self {
         self.residency = Some(r);
@@ -81,7 +81,7 @@ impl AdminService {
     }
 
     /// `Tenants.SetResidency` (`:residency`): the plan, and with `apply`
-    /// the policy (chapter 26, "Validation and convergence").
+    /// the policy.
     ///
     /// # Errors
     /// As [`crate::residency::Residency::set`].
@@ -121,14 +121,14 @@ impl AdminService {
         Ok(serde_json::json!({"rows": batch.rows.len()}))
     }
 
-    /// A tenant's traffic window and the decision R0 would show.
+    /// A tenant's traffic window and the decision it would show.
     ///
     /// # Errors
     /// The tenant lookup's errors.
     pub async fn tenant_traffic(&self, name: &str) -> Result<TrafficView> {
         let m = self.moves()?;
         let t = self.get_tenant(name).await?;
-        // R2: weigh by the measured latency matrix when it has rows.
+        // Weigh by the measured latency matrix when it has rows.
         let matrix = crate::latency::Matrix::read(&*self.stores.global)
             .await
             .unwrap_or_default();
@@ -144,7 +144,7 @@ impl AdminService {
             m.setting(&MIN_IMPROVEMENT_PCT),
             (!matrix.is_empty()).then_some(&rtt as &crate::traffic::RttFn<'_>),
         );
-        // R2 (r2last): what the automatic decision did last.
+        // What the automatic decision did last.
         v.auto = m.decisions.last(t.tenant_id);
         Ok(v)
     }

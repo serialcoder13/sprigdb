@@ -1,5 +1,4 @@
-//! The global failover decision (chapter 25, "The global failover
-//! decision"), run by the global leader.
+//! The global failover decision, run by the global leader.
 //!
 //! ```text
 //! dc_failover(X), global leader, when dc-leases/X is deleted:
@@ -21,8 +20,8 @@
 //!
 //! [`GlobalFailover::tick`] also moves a `failed` DC that holds a lease
 //! again (or a `suspect` one whose record ended `manual_only`) to
-//! `returning` (chapter 25, "A returning server or DC stays
-//! fenced"); the returning DC's own leader does the rest
+//! `returning` (a returning DC stays fenced); the returning DC's own
+//! leader does the rest
 //! ([`super::recovery::ReturningDc`]).
 //!
 //! **When a missing lease counts.** The leader acts on a DC whose lease it
@@ -80,14 +79,14 @@ pub struct GlobalFailover {
     /// Two tiers: positions the target DCs' `tenant_promote` loops
     /// reported, by (failover, tenant), until the record takes them.
     reported: Mutex<HashMap<(String, u64), BTreeMap<String, String>>>,
-    /// Chapter 52: promotions held for approval, by (failover, tenant),
+    /// Promotions held for approval, by (failover, tenant),
     /// with when the gate was last asked.
     held: Mutex<HashMap<(String, u64), Instant>>,
-    /// Chapter 52's approvals; the process's installed ones when unset.
+    /// The approvals hub; the process's installed one when unset.
     approvals: std::sync::OnceLock<Arc<crate::approvals::ControllerApprovals>>,
 }
 
-/// How often a held promotion asks chapter 52's gate again.
+/// How often a held promotion asks the approval gate again.
 pub const HOLD_RECHECK: Duration = Duration::from_secs(10);
 
 impl std::fmt::Debug for GlobalFailover {
@@ -142,7 +141,7 @@ impl GlobalFailover {
         }
     }
 
-    /// Holds promotions through `a` (chapter 52) instead of the process's
+    /// Holds promotions through `a` instead of the process's
     /// installed approvals.
     #[must_use]
     pub fn with_approvals(self, a: Arc<crate::approvals::ControllerApprovals>) -> Self {
@@ -519,7 +518,7 @@ impl GlobalFailover {
                 .filter(|(_, t)| t.outcome == "planned")
                 .map(|(i, _)| i)
                 .collect();
-            // Chapter 52: under a global `failover.mode = approve` each
+            // Under a global `failover.mode = approve` each
             // promotion waits for an approval, and an approved one goes
             // ahead only if the checks still allow it now.
             let (todo, tickets) = self.approvals(&mut f, &x, &s, todo).await?;
@@ -587,7 +586,7 @@ impl GlobalFailover {
                     }
                     Ok(Promoted::Committed { epoch }) => {
                         // Two tiers: the target DC's tenant_promote loop
-                        // finishes it (r2next).
+                        // finishes it.
                         t.outcome = "committed".into();
                         t.epoch = Some(epoch);
                         t.reason = None;
@@ -618,7 +617,7 @@ impl GlobalFailover {
         Ok(Outcome::Ended(f))
     }
 
-    /// Chapter 52's gate over the planned promotions `todo`: those to run
+    /// The approval gate over the planned promotions `todo`: those to run
     /// now, with the ticket of each one an approval released. A held
     /// tenant stays `planned` with the item in its reason, and asks again
     /// every [`HOLD_RECHECK`]. An approved one runs only if the lost DC's

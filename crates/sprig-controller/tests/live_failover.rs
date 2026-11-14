@@ -1,5 +1,4 @@
-//! Cluster failover against real MariaDB, Jepsen-style (chapter 25,
-//! "Testing"). Set `SPRIG_TEST_DOCKER=1` to run; `SPRIG_TEST_ELLE=1` adds
+//! Cluster failover against real MariaDB, Jepsen-style. Set `SPRIG_TEST_DOCKER=1` to run; `SPRIG_TEST_ELLE=1` adds
 //! elle-cli's list-append check of the whole history.
 //!
 //! - [`primary_replicas_promote_with_after_sync`]: three throwaway

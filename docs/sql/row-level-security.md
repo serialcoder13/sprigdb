@@ -106,7 +106,7 @@ It may not use `?` parameters, user or system variables (`@v`, `@@v`), non-deter
 | `SPRIG_TENANT_IN_SUBTREE(expr)` | True when `expr` is the id of the home tenant or one of its descendants |
 | `SPRIG_TENANT_MANAGED(expr)` | True when `expr` is the id of a tenant the user administers |
 | `SPRIG_USER_ATTR('key')` | The user's attribute `key`, set with `CREATE USER` or `ALTER USER ... ATTRIBUTE '{json}'` (see [Tenants and accounts](tenants-and-accounts.md#create-user)), or `NULL` |
-| `SPRIG_CLAIM('key')` | Claim `key` of the SprigDB session token that authenticated the statement (REST, gRPC and Studio): `sub`, `ten`, `sid`, `amr`, `cli`, `iat`, `exp`, and `act` while impersonating. `NULL` in sessions without a session token, such as MySQL logins, HTTP Basic and API keys |
+| `SPRIG_CLAIM('key')` | Claim `key` of the SprigDB session token (from `POST /v1/auth/login` or Studio) that authenticated the statement over REST, gRPC or Studio: `sub` (`<tenant id>:<user id>`), `ten` (the tenant's name), `sid` (the session id), `amr` (the login methods, an array), `cli` (`studio`, `api` or `cli`), `iat` and `exp` (Unix seconds), `act` while an administrator impersonates the user, and `iss` and `aud` (always `sprigdb`). A claim the token doesn't have is `NULL`. `NULL` in sessions without a session token, such as MySQL logins, HTTP Basic and API keys. Custom claims aren't available |
 | `SPRIG_SESSION_SPACE()` | The session's space id (see [Inheritance](inheritance.md)), or `NULL` |
 
 `SPRIG_USER_ATTR` and `SPRIG_CLAIM` take a string literal. Up to `rls.inline_subtree_max` tenant ids (default 1000) are written into the statement for `SPRIG_TENANT_IN_SUBTREE` and `SPRIG_TENANT_MANAGED`; beyond that, SprigDB reads them from a table.
@@ -328,6 +328,11 @@ Some statements can't carry the rewrite. On a table that binds the session, thes
 | 39364 | `ER_SPRIG_RLS_POLICY_INVALID` | The expression uses something a policy can't |
 | 39365 | `ER_SPRIG_RLS_POLICY_CYCLE` | Policies refer to each other's tables in a cycle |
 | 39366 | `ER_SPRIG_RLS_UNSUPPORTED` | A statement form that can't be filtered, on a protected table |
+
+## Not supported yet
+
+- **Custom claims.** SprigDB doesn't accept JWT or OIDC tokens from an external identity provider, so `SPRIG_CLAIM` reads only the fixed claims of SprigDB's own session tokens. Put per-user values in account attributes and read them with `SPRIG_USER_ATTR`.
+- **Claims on other logins.** MySQL, MariaDB and the other wire protocols, HTTP Basic and API keys carry no token, so `SPRIG_CLAIM` returns `NULL` there.
 
 ## Related
 

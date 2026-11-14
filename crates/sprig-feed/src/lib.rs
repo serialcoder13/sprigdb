@@ -17,6 +17,8 @@
 //! - [`merge`]: the k-way merge by `(clamp, cluster, row)` across clusters;
 //! - [`shared`]: one binlog dump per cluster shared by every tenant's
 //!   tail, for consumers of internal tables (the queue forwarder);
+//! - [`pump`]: a tail read by a task of its own, so a consumer's timers
+//!   can't cancel a read half-way (decision r9-131);
 //! - [`subs`]: subscriptions and acknowledged positions;
 //! - [`requirements`]: the binlog settings the feed needs (`feed_source`);
 //! - [`hlc`]: stamps and clamps.
@@ -35,11 +37,15 @@ pub mod merge;
 pub mod names;
 pub mod ownership;
 pub mod placement;
+pub mod pump;
 pub mod requirements;
 pub mod shared;
 pub mod source;
 pub mod subs;
 pub mod tail;
+/// Helpers for the feed consumers' tests (a tail with slow lookups).
+#[doc(hidden)]
+pub mod testing;
 pub mod token;
 
 pub use event::{ChangeEvent, DdlKind, EventId, FeedItem, Image, Op, ShardRef};

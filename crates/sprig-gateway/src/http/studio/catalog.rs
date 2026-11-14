@@ -1,5 +1,5 @@
-//! `Catalog` and `Sql.Check` (chapter 37, "APIs for Studio"; chapter 44,
-//! "Data structures and storage" and "Editors and completion").
+//! `Catalog` and `Sql.Check`, for Studio's data structures and its editors'
+//! completion.
 //!
 //! | Route | RPC | Does |
 //! |---|---|---|
@@ -10,11 +10,11 @@
 //!
 //! **Catalog.** Every answer is read with the caller's own rights (the same
 //! `information_schema` the MySQL front end serves, so privilege filtering
-//! and name virtualization are chapter 29's and chapter 07's), and carries
-//! an `ETag` built from the tenant's catalog version and auth version: DDL
-//! moves the first, grants and account changes the second. A request with a
-//! matching `If-None-Match` gets 304 without reading anything, so Studio's
-//! 60-second refetch costs one cached lookup while nothing changed.
+//! and name virtualization are the wire's), and carries an `ETag` built
+//! from the tenant's catalog version and auth version: DDL moves the first,
+//! grants and account changes the second. A request with a matching
+//! `If-None-Match` gets 304 without reading anything, so Studio's 60-second
+//! refetch costs one cached lookup while nothing changed.
 //!
 //! **Sql.Check.** Statements are split at semicolons outside quotes and
 //! comments, then each one is
@@ -29,7 +29,7 @@
 //! A statement the parser refuses but the server accepts (a MariaDB form
 //! sqlparser-rs doesn't know) gets no marker; one only the parser can judge
 //! (DDL) gets a warning, never an error, so the checker never blocks valid
-//! SQL. Decision ST19 in `decisions/studio-interim.md`.
+//! SQL.
 
 use std::sync::Arc;
 
@@ -509,11 +509,11 @@ pub(super) async fn snapshot(
     ))
 }
 
-/// The database's graphs the caller may read (chapter 43; Studio round 5):
-/// `SELECT` on the graph or its database, or grants on single labels and
-/// relationship types (decision G42), which then are the only ones listed.
-/// Each is `{kind: "graph", name, graph_kind, labels, types}`; the labels
-/// and types feed the Cypher editor's completion and graph picker.
+/// The database's graphs the caller may read: `SELECT` on the graph or its
+/// database, or grants on single labels and relationship types, which then
+/// are the only ones listed. Each is
+/// `{kind: "graph", name, graph_kind, labels, types}`; the labels and types
+/// feed the Cypher editor's completion and graph picker.
 async fn graphs_of(core: &Arc<Core>, caller: &Caller, db: &str) -> Vec<Value> {
     use sprig_auth::authz::Action;
     use sprig_catalog::store::{Namespace, ObjectKind, ObjectState};

@@ -1,9 +1,8 @@
-//! The `SHOW` family's result side (chapter 07 build step 4) on captured
-//! MariaDB 11.8 output: each fixture under `tests/fixtures/names/show/` is
-//! what MariaDB answered to the rewritten statement for tenant 9999
-//! (`billing` = `t9999_d1_g1_s1`, `crm` = `t9999_d2_g2_s2`); the mapper
-//! must produce what a client of the tenant sees. `names_live.rs`
-//! refreshes the fixtures.
+//! The `SHOW` family's result side on captured MariaDB 11.8 output: each
+//! fixture under `tests/fixtures/names/show/` is what MariaDB answered to the
+//! rewritten statement for tenant 9999 (`billing` = `t9999_d1_g1_s1`, `crm` =
+//! `t9999_d2_g2_s2`); the mapper must produce what a client of the tenant sees.
+//! `names_live.rs` refreshes the fixtures.
 
 #![allow(clippy::unwrap_used, missing_docs)]
 

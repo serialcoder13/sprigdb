@@ -1,4 +1,4 @@
-//! The replay harness (chapter 13, build step 6; "Replay and acceptance").
+//! The replay harness.
 //!
 //! A validator builds a candidate index on a node nobody else reads from,
 //! then replays the tenant's own sampled statements there, each one before
@@ -17,9 +17,9 @@
 //!
 //! **Inputs.** A [`ReplayStatement`] is one decrypted sample, already bound
 //! and already in physical names: the worker decrypts the sample
-//! (chapter 12, `sprig-workload::samples`), binds it with
+//! (`sprig-workload::samples`), binds it with
 //! [`ReplayStatement::bind`], and rewrites logical names to the shard's
-//! physical names with chapter 07's rewriter (`sprig-sql::names`) before
+//! physical names with the name rewriter (`sprig-sql::names`) before
 //! handing it here. Values stay in memory: nothing here logs or stores a
 //! statement's text, only fingerprints, sample ids and timings.
 //!
@@ -31,8 +31,8 @@
 //! Each sample's database, `sql_mode`, `time_zone` and character set are
 //! set before it runs.
 //!
-//! **Rounds** *(the chapter's "A B B A order", read as alternating
-//! rounds)*: one warm-up run of each side *(choice: both sides, so neither
+//! **Rounds** *(an "A B B A order", read as alternating rounds)*: one
+//! warm-up run of each side *(choice: both sides, so neither
 //! plan starts with a cold buffer pool)*, then `auto_index.replay_rounds`
 //! rounds, A then B in even rounds and B then A in odd ones; a statement
 //! whose A runs are noisy gets two more rounds.
@@ -57,7 +57,7 @@ pub use verdict::{
     StatementRuns, Thresholds, Verdict, VerdictKind, decide,
 };
 
-/// The session context a sample was captured with (chapter 12).
+/// The session context a sample was captured with.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionContext {
     /// The default database, physical.
@@ -439,7 +439,7 @@ pub async fn replay(
             let db = st.context.database.as_deref().or(cur.database.as_deref());
             let a =
                 match with_ignore_index(&f.sql, &target.schema, &target.table, &target.index, db) {
-                    // Chapter 33's views read an element table (R6 round 5).
+                    // Key-value views read an element table.
                     Err(Unreplayable::TableNotFound) => super::kv::ignore_through_view(
                         &f.sql,
                         &target.schema,

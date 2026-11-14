@@ -1,4 +1,4 @@
-//! Graceful close of HTTP connections on listener changes (gwdrain):
+//! Graceful close of HTTP connections on listener changes:
 //! gRPC and REST clients in tight loops while listeners change TLS mode,
 //! minimum TLS version and certificate, and while connections are closed
 //! with `GOAWAY`. Each failure is classified by what the client saw.
@@ -223,7 +223,7 @@ fn never_sent(s: &tonic::Status) -> bool {
 /// Client retry policies.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Policy {
-    /// Retry once on `Unavailable` (the soak client before gwdrain).
+    /// Retry once on `Unavailable` (the soak client's original policy).
     Unavailable,
     /// Also retry once a request the server never processed: one that never
     /// left the client, or a stream the server's `GOAWAY` refused (what
@@ -345,7 +345,7 @@ async fn rest_loop(
     }
 }
 
-/// The listener changes of the M0.7 soak against a gateway of our own:
+/// The listener changes a soak makes, against a gateway of our own:
 /// certificate rotation, `listener.https.tls` optional/required and
 /// `tls.min_version` 1.2/1.3, every `period`, with clients in tight loops:
 /// gRPC over TLS on `https` (as the soak's TLS gRPC worker), gRPC over h2c

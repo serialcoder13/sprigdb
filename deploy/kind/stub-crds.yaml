@@ -1,0 +1,44 @@
+# Stand-ins for CRDs the chart's objects need but whose controllers the
+# smoke test doesn't install: cert-manager's Certificate (smoke.sh makes
+# the Secrets each Certificate names), Prometheus Operator's ServiceMonitor
+# (rendered only to check it applies), and mariadb-operator's
+# PhysicalBackup (the owner of the stand-in backup Job). The schemas accept
+# any fields; nothing acts on these objects.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata: {name: certificates.cert-manager.io}
+spec:
+  group: cert-manager.io
+  scope: Namespaced
+  names: {kind: Certificate, plural: certificates, singular: certificate}
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema: {openAPIV3Schema: {type: object, x-kubernetes-preserve-unknown-fields: true}}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata: {name: servicemonitors.monitoring.coreos.com}
+spec:
+  group: monitoring.coreos.com
+  scope: Namespaced
+  names: {kind: ServiceMonitor, plural: servicemonitors, singular: servicemonitor}
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema: {openAPIV3Schema: {type: object, x-kubernetes-preserve-unknown-fields: true}}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata: {name: physicalbackups.k8s.mariadb.com}
+spec:
+  group: k8s.mariadb.com
+  scope: Namespaced
+  names: {kind: PhysicalBackup, plural: physicalbackups, singular: physicalbackup}
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema: {openAPIV3Schema: {type: object, x-kubernetes-preserve-unknown-fields: true}}

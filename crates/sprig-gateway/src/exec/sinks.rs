@@ -1,7 +1,6 @@
-//! Sinks and connections in a tenant session (chapter 51, R9: build steps
-//! 2–4, 15 and 18).
+//! Sinks and connections in a tenant session.
 //!
-//! Before chapter 07's name plan, each statement of a tenant text goes to
+//! Before the name layer's plan, each statement of a tenant text goes to
 //! [`sprig_sinks::sql::handle`]: `CREATE | ALTER | DROP CONNECTION`,
 //! `CREATE | ALTER | DROP SINK`, `SHOW SINKS | CONNECTIONS | PLATFORM
 //! CONNECTIONS`, `SHOW CREATE ...`, `SHOW SINK STATUS` and `GRANT | REVOKE
@@ -10,8 +9,8 @@
 //!
 //! Credentials are sealed here with the tenant's sink key (the master key
 //! file of `[gateway] workload_key_file`, purpose `sink`) and never stored
-//! or logged in plain text: these statements are answered before chapter
-//! 12's capture point, and logs show the redacted text.
+//! or logged in plain text: these statements are answered before the
+//! workload capture point, and logs show the redacted text.
 
 use std::sync::{Arc, OnceLock};
 
@@ -76,7 +75,7 @@ pub(crate) async fn residency_of(
 }
 
 /// A resolved `sink.*` setting of tenant `cat` at database `db`, as text
-/// (also for inherited sinks deployed in a member, R9).
+/// (also for inherited sinks deployed in a member).
 pub(crate) fn setting_of(
     svc: &crate::tenant::TenantServices,
     cat: &TenantCatalog,
@@ -106,10 +105,10 @@ pub(crate) fn setting_of(
     })
 }
 
-/// The environment `TEST CONNECTION` and `TEST SINK` run in on a gateway
-/// (R9, r9tests): a sink task's, over the tenant services (catalog and
-/// `sprig_ctl` pools, the DC and global tiers, the sink key file, the
-/// tenant's residency and live settings).
+/// The environment `TEST CONNECTION` and `TEST SINK` run in on a gateway:
+/// a sink task's, over the tenant services (catalog and `sprig_ctl` pools,
+/// the DC and global tiers, the sink key file, the tenant's residency and
+/// live settings).
 struct GwSinkEnv {
     svc: Arc<crate::tenant::TenantServices>,
 }
@@ -156,7 +155,7 @@ struct GwHost<'s> {
     cat: Arc<TenantCatalog>,
     migrated: bool,
     /// The tenant's residency, from its and its ancestors' directory
-    /// entries (R9, r9more: checked at `CREATE` and `ALTER CONNECTION`).
+    /// entries (checked at `CREATE` and `ALTER CONNECTION`).
     residency: sprig_sinks::residency::Shared,
 }
 
@@ -261,7 +260,7 @@ impl Host for GwHost<'_> {
         let lctn = self.lctn();
         let db_key = database_key(db_name, lctn);
         let name_key = object_key(ObjectKind::Table, name, lctn);
-        // Chapter 29 (RL36, RL44): `FROM STREAM t.changes` exports table t's
+        // `FROM STREAM t.changes` exports table t's
         // rows: SELECT on t decides; when t's policies bind the owner, the
         // worker delivers only the records they show (rls_filter).
         if let Some(row) = self.cat.database(&db_key)
@@ -281,11 +280,11 @@ impl Host for GwHost<'_> {
             )
             .is_ok();
         }
-        // Chapter 29 (RLS round 5, RL50): a table's rows reach a sink only
+        // A table's rows reach a sink only
         // through its change topic (`CHANGES OF t`), which the worker
         // filters batch by batch for the owner while t's policies bind it
         // (sprig_sinks::rls_filter); SELECT on t decides, as for any
-        // reader. Before, a bound owner was refused (RL14).
+        // reader. Before, a bound owner was refused.
         g.allows(
             Action::Select,
             Target::Named {
@@ -315,7 +314,7 @@ impl Host for GwHost<'_> {
         ) || g.allows(Action::Delete, Target::Database { db_key: &db_key })
     }
 
-    // R9 (r9queue): a durable queue of the database's vhost, from the
+    // A durable queue of the database's vhost, from the
     // snapshot's `mq` module.
     fn queue(&self, db: u32, name: &str) -> Option<u64> {
         let st = self
@@ -648,7 +647,7 @@ impl Host for GwHost<'_> {
         }))
     }
 
-    // R9 (r9queue): `FROM QUEUE q FAN IN`.
+    // `FROM QUEUE q FAN IN`.
     async fn fan_in_queue(
         &mut self,
         db: &str,
@@ -718,7 +717,7 @@ fn change_name(c: &Change) -> &'static str {
 }
 
 impl PassSession {
-    /// Chapter 51's step of [`PassSession::tenant_text`]: `None` when the
+    /// The sinks step of [`PassSession::tenant_text`]: `None` when the
     /// statement isn't a sink statement.
     pub(super) async fn tenant_sinks(
         &mut self,
@@ -741,7 +740,7 @@ impl PassSession {
             return Ok(None);
         };
         // Cheap: only statements that parse as sink statements go on
-        // (R9: and ALTER INHERITED CONNECTION | SINK).
+        // (and ALTER INHERITED CONNECTION | SINK).
         if let Ok(None) = sprig_sinks::grammar::parse(sql)
             && let Ok(None) = sprig_sinks::grammar::parse_inherited(sql)
         {
@@ -763,7 +762,7 @@ impl PassSession {
         };
         let logged = sprig_sinks::grammar::redact(sql).map_or_else(|| sql.to_owned(), |(r, _)| r);
         tracing::debug!(statement = %logged.chars().take(300).collect::<String>(), "sink statement");
-        // R9 (r9more): FOR EACH TENANT connections and sinks, and the
+        // FOR EACH TENANT connections and sinks, and the
         // overrides of inherited ones.
         // Boxing this call (clippy's large_futures, 16,416 bytes) makes the
         // compiler's Send check of the session's future overflow its

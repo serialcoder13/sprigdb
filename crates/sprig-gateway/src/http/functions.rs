@@ -1,6 +1,5 @@
-//! `sprig.v1.Functions` (chapter 37, "Logic functions as endpoints";
-//! chapter 41, "Calling code"; R7 order 6): `POST
-//! /v1/databases/{db}/functions/{name}:call` and `Functions.Call`.
+//! `sprig.v1.Functions`: `POST /v1/databases/{db}/functions/{name}:call`
+//! and `Functions.Call`.
 //!
 //! A call is one statement through [`SqlEngine`](super::sql::SqlEngine),
 //! as `Sql.Execute` runs one: the gateway session, the caller's
@@ -89,7 +88,7 @@ pub async fn call(
     Ok(json!({"event": event, "result": result}))
 }
 
-/// `Logic.TestRun` (chapter 41; R7 follow-ups): `body` is the request as
+/// `Logic.TestRun`: `body` is the request as
 /// `sprig_logic::testrun::TestRun`'s JSON (REST's body, or gRPC's fields
 /// with `inputs` spread in); runs as one marked statement in the caller's
 /// session, as [`call`] does, and returns the report.

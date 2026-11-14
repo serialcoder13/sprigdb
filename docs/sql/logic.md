@@ -222,7 +222,7 @@ INSERT INTO orders VALUES (101, 7, 0, 'none');
 
 The same rules in JavaScript, with a message that names the value, and a second rule that reads the row before the write:
 
-```sql
+```sql test
 DELIMITER //
 CREATE OR REPLACE VALIDATION order_rules ON orders FOR INSERT, UPDATE LANGUAGE javascript AS $$
 export default function (row, old) {
@@ -274,7 +274,7 @@ CREATE TRIGGER audit_orders AFTER COMMIT ON orders FOR INSERT LANGUAGE kirun AS 
 
 In JavaScript, the same audit for every kind of change (for a `DELETE`, `row` is the deleted row):
 
-```sql
+```sql test
 DELIMITER //
 CREATE TRIGGER audit_orders_js AFTER COMMIT ON orders FOR INSERT, UPDATE, DELETE LANGUAGE javascript AS $$
 export default function (row, old, op) {
@@ -394,7 +394,7 @@ id	stock_value
 
 In JavaScript, with a discount for ten or more:
 
-```sql
+```sql test
 DELIMITER //
 CREATE OR REPLACE FUNCTION line_net(price DOUBLE, qty INT) RETURNS DOUBLE LANGUAGE javascript AS $$
 export default function (price, qty) {
@@ -424,7 +424,7 @@ Shows where each version of the code runs and why. It returns one row per versio
 
 A name with no function or procedure fails with 39860. **Privileges:** `EXECUTE`, `ALTER ROUTINE` or `CREATE ROUTINE` on the database; `FORMAT = SQL` needs `ALTER ROUTINE`. `sprigctl logic compile` prints the same for code you haven't deployed.
 
-```sql
+```sql test
 EXPLAIN FUNCTION quote_js;
 EXPLAIN FUNCTION line_net FORMAT = SQL;
 ```
@@ -463,7 +463,7 @@ TEST FUNCTION draft WITH '{"source": "CREATE FUNCTION draft(a INT) RETURNS INT L
 
 A validation takes the row as it would see it. This run reports 39863 with "the quantity of a shipped order can't change":
 
-```sql
+```sql test
 TEST VALIDATION order_rules WITH '{"row": {"id": 100, "qty": 3, "note": "shipped"}, "old": {"id": 100, "qty": 1, "note": "shipped"}, "op": "update"}';
 ```
 

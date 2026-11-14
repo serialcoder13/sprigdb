@@ -1,5 +1,4 @@
-//! Client side of the auth plugins (chapter 05, "Authentication plugins"):
-//! the scrambles a client sends.
+//! Client side of the auth plugins: the scrambles a client sends.
 
 use sha1::Sha1;
 use sha2::{Digest as _, Sha256};

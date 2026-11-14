@@ -78,6 +78,8 @@ See [Operator mode](#operator-mode) below. The full list, with bounds, is in the
 
 Open `/studio` and sign in with your login, `tenant.user` (for example `acme.app`), and your password. Password managers and paste work in both fields.
 
+![The Sign in to SprigDB page, with User and Password fields and the Sign in button](../img/studio/sign-in.png)
+
 ```text
 https://gw.example.com:8443/studio
 User:      acme.app
@@ -130,13 +132,19 @@ Studio's window has five parts:
 - **The tabs** hold everything you have open: query tabs, tables, and pages. `Left` and `Right` move between tabs, and `Delete` (or a middle click) closes one.
 - **The status bar** shows whether you are connected (and whether Studio is working), the tenant and database, the gateway and its data centre, and your login.
 
-The tenant's home page welcomes you and lists your databases. If you are a tenant administrator, the tenant switcher lists your home tenant and its descendants; choosing a descendant opens its settings. Settings and access can target a descendant; data views always use your home tenant.
+The tenant's home page welcomes you and lists your databases, with who you are signed in as, your session limits, your privileges and the gateway you reached. If you are a tenant administrator, the tenant switcher lists your home tenant and its descendants; choosing a descendant opens its settings. Settings and access can target a descendant; data views always use your home tenant.
+
+![The workspace on the Welcome tab: title bar with the tenant, search box, theme menu and Sign out; activity bar and database tree on the left; status bar along the bottom](../img/studio/home.png)
 
 ### The explorer
 
 The database tree lists the databases you can see and, inside each, its tables (collections and key namespaces are tables too), views, graphs, procedures and functions. Type in **Filter objects** to narrow it; **Refresh** reloads it. The **Explorer** section also links to the [Redis console](#redis).
 
 A database's page lists its objects with their kind, estimated rows and comment, with **New query** and a link to the database's settings.
+
+![The explorer with the retail database expanded, and the database's page listing customers, orders and order_items with their estimated rows, and the order_total function and procedure](../img/studio/explorer.png)
+
+A [logic](../data-models/logic.md) function can appear twice in the tree and on this page, as a function and as a procedure of the same name: SprigDB creates a wrapper procedure for `CALL` and, when the code writes nothing, a stored function for `SELECT`.
 
 ### Object pages
 
@@ -159,7 +167,9 @@ Choosing an object opens its page:
 - **Shards** shows the table's table group and shards.
 - **Definition** shows `SHOW CREATE`.
 
-The page's **New query** button opens a query tab with `SELECT * FROM <table> LIMIT 100;` (or, for a graph, `MATCH (n)-[r]->(m) RETURN n, r, m LIMIT 25;`).
+![The Columns tab of the orders table, listing each column with its type, nullability, key, default and extra](../img/studio/table-columns.png)
+
+The page's **Query** button opens a query tab with `SELECT * FROM <table> LIMIT 100;` (or, for a graph, `MATCH (n)-[r]->(m) RETURN n, r, m LIMIT 25;`). A table's page also links to its **Settings**.
 
 ## The query editor
 
@@ -192,6 +202,8 @@ db.events.find({ type: "click", at: { $gte: ISODate("2026-11-01T00:00:00Z") } })
 
 A statement stops at `studio.statement_timeout_ms` and says so. While it runs, the status shows "Running…"; when it ends, its time.
 
+![A query tab: the Language and Database pickers, Run, Run all, Explain, Cancel and Save above the editor, and a result grid of orders by country below](../img/studio/query.png)
+
 ### Confirmations
 
 Before a statement runs, Studio classifies it and, depending on `studio.confirm_writes`, shows it with "Run this statement?" and the target database:
@@ -222,6 +234,8 @@ A result has up to four views:
 
 Studio opens a graph result as a graph and a MongoDB result as a tree; you can switch views at any time.
 
+![The Chart view of a result: Bar and Line choices above a bar chart with countries as categories and orders and avg_order as series](../img/studio/query-chart.png)
+
 ### Editing documents
 
 In the Tree view of a MongoDB result, you can edit a value and keep its type, or change the type badge (`str`, `int`, `long`, `dbl`, `dec`, `bool`, `oid` and the others). Saving updates the document by `_id`, setting only the paths you edited, and also requires every top-level field to be as you read it. If someone changed the document in the meantime, nothing is overwritten: Studio shows the original, the current and your version. Exports of documents are canonical Extended JSON.
@@ -230,17 +244,25 @@ In the Tree view of a MongoDB result, you can edit a value and keep its type, or
 
 A table's **Data** tab shows pages of 100 rows in primary-key order, with **Previous page** and **Next page**.
 
+![The Data tab of the orders table: the filter bar, the grid of rows, and the bar below with the pending-changes count, Apply, Reset, Copy as SQL, paging, Add row, Delete row and Import](../img/studio/table-data.png)
+
 ### Filtering
 
-The filter bar builds a `WHERE` clause from conditions on columns, joined with `AND`. Each condition takes one of `=`, `!=`, `<`, `<=`, `>`, `>=`, `LIKE`, `NOT LIKE`, `IN` (a comma-separated list), `IS NULL` or `IS NOT NULL`. **Write the WHERE clause yourself** switches to a text box. The clause is your own SQL, run with your own rights, like anything typed in a query tab.
+The filter bar builds a `WHERE` clause from conditions on columns, joined with `AND`. Each condition takes one of `=`, `!=`, `<`, `<=`, `>`, `>=`, `LIKE`, `NOT LIKE`, `IN` (a comma-separated list), `IS NULL` or `IS NOT NULL`. **Condition** adds a condition, **Filter** applies them, and **Clear** shows every row again. **</> WHERE** (Write the WHERE clause yourself) switches to a text box. The clause is your own SQL, run with your own rights, like anything typed in a query tab.
 
 ### Staged edits
 
 Edits are staged until you apply them:
 
 1. Double-click a cell, or press `Enter` or `F2`, to edit it; `Enter` keeps the value and `Escape` drops it.
-2. **Add row** adds an empty row; **Delete row** marks one for deletion.
-3. The bar counts the changes pending. **Copy as SQL** copies them as statements, **Reset** drops them, and **Apply** writes them all in one transaction.
+2. **Add row** adds an empty row at the end of the page; **Delete row** marks the row that has the focus (the cell you last clicked or moved to) for deletion.
+3. The bar counts the changes pending. **Copy as SQL** copies them as statements, **Reset** drops them, and **Apply** shows the statements; **Run them** writes them all in one transaction.
+
+Changed cells are highlighted, new rows are marked as added, and a row marked for deletion is struck through:
+
+![The orders grid with two edited cells highlighted, one row struck through for deletion, and 3 changes pending](../img/studio/staged-edits.png)
+
+![The statements Apply shows before they run: two UPDATE statements and a DELETE, with Run them and Cancel](../img/studio/staged-preview.png)
 
 Each `UPDATE` and `DELETE` names its row by every column as it was read, NULL-safely, so a row that someone changed since you read it matches nothing. Then the whole transaction rolls back and Studio says "Someone changed these rows since you read them", showing for each row the original, the current values (or "(deleted)") and yours. Choose **Keep mine (save against current)** to apply your edits over the current values, or **Take current** to reload.
 
@@ -260,6 +282,8 @@ A file over `studio.import_max_mb` is refused. Load a larger CSV with `LOAD DATA
 
 **Saved queries** (the star) and **History** (the clock) in the activity bar switch the side panel to those lists, each with a filter. Choosing an entry opens it in a query tab; saved queries can be deleted, and history cleared.
 
+![The Saved queries panel with a filter box and a saved query named Orders by country, open in a query tab](../img/studio/saved-queries.png)
+
 Both are kept per user in the tenant's catalog, so they follow you between browsers and are the same ones [`sprig`](sprig.md) shows. History keeps up to `studio.history_max` runs per user. When the gateway can't keep them for your login (for example a login from an accounts file), Studio keeps them in the browser while `studio.persist_drafts` is on, or for the session otherwise, and says so; queries saved in the browser before the catalog could keep them move there the first time it answers.
 
 Query tabs (their text, database and title) are kept in the browser's IndexedDB per tenant and user while `studio.persist_drafts` is on, until you sign out. Other per-browser preferences, such as the theme, are kept in `localStorage`. Studio never keeps tokens or results in browser storage.
@@ -276,6 +300,8 @@ Four views of [automatic indexing](../performance/automatic-indexing.md), which 
 - **Recommendations**: indexes waiting for a decision. **Approve** builds one; **Dismiss** rejects it.
 - **Fingerprints**: the tenant's statements by total time over the last hour, 24 hours or 7 days, from applications, Studio or both, with a p95 latency series per fingerprint over 7 days.
 - **Explain a query**: the plan of a fingerprint.
+
+![The Fingerprints tab of Automatic indexing, set to the last hour and to applications, listing statements on the retail database with their runs, total time, p50 and p95, and a Series button on each row](../img/studio/workload.png)
 
 **Freeze** pins an index so automatic indexing leaves it alone; **Unfreeze** releases it. Acting needs the right privileges on the database; otherwise the page says "view only". Statements run from Studio don't count toward automatic indexing unless `auto_index.include_studio` is on.
 
@@ -333,6 +359,8 @@ The **Logic** section lists the database's functions, procedures, triggers and v
 - **Check** compiles without deploying, shows which tier the code runs in and why ("Why not MariaDB"), and, for users with `ALTER ROUTINE`, the generated SQL. Errors are marked on their line, or on the step's name for KIRun.
 - **Deploy** shows and runs the statement. A function or procedure can be deployed to a share of callers first, picked by caller or by tenant.
 
+![The logic editor on a JavaScript function, order_total: its runtime, active version, tier and security, the Code, Versions, Rollout, Test run, Logs and Dead letters tabs, the parameters and return type, the code in the editor, and Check, Test run and Deploy](../img/studio/logic.png)
+
 A module's page has these tabs:
 
 | Tab | Shows |
@@ -360,7 +388,9 @@ The Redis page (under **Explorer**) has a console and a key browser for one key-
 
 ## Settings
 
-The **Settings** page shows every setting at a scope you choose: the tenant, a database, or a table. Each row has the key, the effective value, the scope it comes from (bold when it is set here) and the bounds in force. Tenant administrators set values at tenant, database and table scope, and at a descendant tenant's; wider scopes show read-only, as sources. Setting a value shows the statement first; the browser checks the bounds, and the gateway decides (39080 to 39084). See [Settings](../sql/settings.md).
+The **Settings** page shows every setting at a scope you choose: the tenant, a database, or a table. **Filter keys** narrows the list. Each row has the key, the effective value, the scope it comes from (bold when it is set here) and the bounds in force. Tenant administrators set values at tenant, database and table scope, and at a descendant tenant's; wider scopes show read-only, as sources. Setting a value shows the statement first; the browser checks the bounds, and the gateway decides (39080 to 39084). **Reset** appears on a key set at this scope and removes the value. Settings administrators also get **Lock**, which shows `ALTER … SPRIG SET BOUNDS (<key> LOCKED)` so that narrower scopes can't set the key. See [Settings](../sql/settings.md).
+
+![The Settings page at database scope for retail, filtered to studio. keys, with each key's effective value, source and bounds, and Set and Lock buttons](../img/studio/settings.png)
 
 ## Operator mode
 
@@ -391,6 +421,8 @@ A tenant login listed in `studio.operator_logins` also gets operator mode, with 
 ## The command palette
 
 `Ctrl+K` or `Ctrl+P` (`⌘+K`, `⌘+P` on a Mac), or the search box, opens one search over pages, open tabs, databases, the objects of databases already loaded, and commands: **New query tab**, **Switch theme** and **Sign out**. Type part of a name; matches rank by how early and how closely they match. `Up` and `Down` choose, `Enter` opens, and `Escape` closes.
+
+![The command palette with "ord" typed, listing the orders and order_items tables and the order_total function and procedure of the retail database](../img/studio/palette.png)
 
 ## Keyboard shortcuts
 

@@ -1,5 +1,4 @@
-//! Change-topic filter views (chapter 29, "Change feed consumers"; RLS
-//! round 5, decision RL47): what views and stored code over a change topic
+//! Change-topic filter views: what views and stored code over a change topic
 //! read, so their readers get only the records their own policies show.
 //!
 //! ```text

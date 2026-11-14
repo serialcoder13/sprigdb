@@ -1,6 +1,5 @@
-//! `[per_user]`'s TLS options (harden1's `ca_file`; lead's request in
-//! hardening round 2): what the backend pool builds its rustls
-//! configuration from, without a `GatewayLocator`.
+//! `[per_user]`'s TLS options (including `ca_file`): what the backend pool
+//! builds its rustls configuration from, without a `GatewayLocator`.
 
 use std::path::Path;
 use std::sync::Arc;

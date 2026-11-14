@@ -1,5 +1,4 @@
-//! Row-level security in tenant sessions (chapter 29, "Row-level
-//! security"; build steps 21 to 24, the gateway's side).
+//! Row-level security in tenant sessions: the gateway's side.
 //!
 //! ```text
 //! CREATE | ALTER | DROP POLICY, ALTER TABLE ... ROW LEVEL SECURITY:
@@ -421,7 +420,7 @@ pub async fn statement(
                 if name.len() > 64 {
                     return Err(invalid("a policy name is at most 64 characters"));
                 }
-                // RL33: a MongoDB form must be exactly what its SQL says.
+                // A MongoDB form must be exactly what its SQL says.
                 for (m, sql) in [(mongo_using, using), (mongo_check, check)] {
                     if let Some(m) = m {
                         let same = mongo_filter(m)
@@ -712,10 +711,10 @@ fn show(
     }
 }
 
-/// Studio's "view as" with simulated session values (chapter 44, ST46's
-/// rest; RLS round 2 item 8): claims and attributes that replace the
-/// user's own for the statements run in [`SIMULATED`]'s scope, and the
-/// policy predicates the rewrite rendered, by table, for the response.
+/// Studio's "view as" with simulated session values: claims and
+/// attributes that replace the user's own for the statements run in
+/// [`SIMULATED`]'s scope, and the policy predicates the rewrite rendered,
+/// by table, for the response.
 #[derive(Debug, Default)]
 pub struct Simulated {
     /// `SPRIG_CLAIM` values (an object), instead of the token's.
@@ -735,8 +734,7 @@ fn simulated() -> Option<Arc<Simulated>> {
     SIMULATED.try_with(Arc::clone).ok()
 }
 
-/// The values a statement's predicates bind (chapter 29's session
-/// functions).
+/// The values a statement's predicates bind (the session functions).
 pub struct SessionValues {
     current_user: String,
     user_id: u64,
@@ -745,13 +743,13 @@ pub struct SessionValues {
     space: Option<u64>,
     claims: Option<Arc<serde_json::Value>>,
     attrs: Option<serde_json::Value>,
-    /// `SPRIG_TENANT_IN_SUBTREE`: the home tenant and its descendants
-    /// (RL10, round 2), when a policy asks.
+    /// `SPRIG_TENANT_IN_SUBTREE`: the home tenant and its descendants,
+    /// when a policy asks.
     pub subtree: Option<Arc<Vec<u64>>>,
     /// `SPRIG_TENANT_MANAGED`: the tenants the user administers.
     pub managed: Option<Arc<Vec<u64>>>,
     /// The subtree is above `rls.inline_subtree_max`: it is read from
-    /// `__sprig_sys.__sprig_subtree_v` (RL58).
+    /// `__sprig_sys.__sprig_subtree_v`.
     pub subtree_table: bool,
     /// Likewise the managed tenants (an administrator's subtree).
     pub managed_table: bool,
@@ -873,20 +871,19 @@ pub struct Resolve<'a> {
     pub keys: RefCell<Vec<ObjectId>>,
     /// Keys that are a key-value namespace's element or sorted-set table
     /// (`__sprig_ke_<ns>`, `__sprig_kz_<ns>`), filtered by the namespace's
-    /// key policies (decisions RL35, RL55), with the key table's database
-    /// as written and its name.
+    /// key policies, with the key table's database as written and its
+    /// name.
     elements: RefCell<HashMap<usize, (String, String)>>,
     cache: RefCell<HashMap<(usize, Vec<Cmd>, String), String>>,
 }
 
-/// The prefixes of a key-value namespace's element and sorted-set tables
-/// (chapter 33).
+/// The prefixes of a key-value namespace's element and sorted-set tables.
 const KV_ELEMENT_PREFIXES: [&str; 2] = sprig_sql::rls::triggers::KV_ELEMENT_PREFIXES;
 
 /// `rendered` (a policy predicate rendered with qualifier `` `__sprig_kq` ``)
 /// with `qual` in its place, when it reads no column but the key `k`: an
-/// element row then shows exactly when its key's row would (RL35).
-/// `None` when it reads another column.
+/// element row then shows exactly when its key's row would. `None` when it
+/// reads another column.
 fn key_only(rendered: &str, qual: &str) -> Option<String> {
     const Q: &str = "`__sprig_kq`.";
     let mut rest = rendered;
@@ -1049,7 +1046,7 @@ impl Resolver for Resolve<'_> {
             .cat
             .database(&key)
             .filter(|r| r.state == DbState::Active)?;
-        // RL35: a key-value namespace's element tables follow its key
+        // A key-value namespace's element tables follow its key
         // table's policies.
         let lower = table.to_ascii_lowercase();
         let element = KV_ELEMENT_PREFIXES
@@ -1102,10 +1099,9 @@ impl Resolver for Resolve<'_> {
                 Cmd::Delete => cmd::DELETE,
             };
             if let Some((db, key_table)) = self.elements.borrow().get(&key) {
-                // RL35: a policy reading only the key filters the element
-                // row itself. RL55: any other reads the element's key row
-                // (its primary key) and applies the key table's policies
-                // there.
+                // A policy reading only the key filters the element row
+                // itself; any other reads the element's key row (its
+                // primary key) and applies the key table's policies there.
                 let r = self.render_one(&t, bit, "`__sprig_kq`", &name)?;
                 parts.push(key_only(&r, qual).unwrap_or_else(|| {
                     format!(
@@ -1148,7 +1144,7 @@ pub fn policy_reads(cat: &TenantCatalog, objects: &[ObjectId], lex: &LexOptions)
 }
 
 /// What this process last wrote to `__sprig_sys.__sprig_subtree`, by
-/// (tenant, cluster): a hash of the subtree (RL58).
+/// (tenant, cluster): a hash of the subtree.
 type SubtreeApplied = std::sync::Mutex<HashMap<(u64, String), u64>>;
 
 fn subtree_applied() -> &'static SubtreeApplied {
@@ -1157,10 +1153,10 @@ fn subtree_applied() -> &'static SubtreeApplied {
 }
 
 /// Brings tenant `tenant`'s rows of `__sprig_sys.__sprig_subtree` on
-/// `cluster` to `tree` (RL58), when they differ from what this process
-/// last wrote: creates the table and its `PUBLIC` view if needed, then
-/// deletes the rows no longer in the tree and inserts the new ones, in one
-/// transaction. Idempotent, so gateways may sync the same tenant at once.
+/// `cluster` to `tree`, when they differ from what this process last wrote:
+/// creates the table and its `PUBLIC` view if needed, then deletes the rows
+/// no longer in the tree and inserts the new ones, in one transaction.
+/// Idempotent, so gateways may sync the same tenant at once.
 ///
 /// # Errors
 /// The cluster's.
@@ -1259,7 +1255,7 @@ fn subtree_cache() -> &'static SubtreeCache {
 
 /// Tenant `root` and every tenant below it, from the directory's
 /// `tenants/<id>` records (their `path` lists the ancestors), cached for
-/// five seconds (RL10, round 2).
+/// five seconds.
 ///
 /// # Errors
 /// The directory's.
@@ -1353,7 +1349,7 @@ pub async fn bind_tree(
     let p = super::authz::privileges(ts, cat);
     let admin = p.unrestricted() || p.allows(Action::TenantAdmin, Target::Tenant);
     if tree.len() as u64 > max {
-        // RL58: the subtree goes to `__sprig_sys.__sprig_subtree` on the
+        // A large subtree goes to `__sprig_sys.__sprig_subtree` on the
         // tenant's clusters, and the statement reads it there.
         let mut clusters = crate::exec::router::placement_digest(svc, cat)
             .map(|p| p.1)
@@ -1386,16 +1382,16 @@ pub async fn bind_tree(
     Ok(())
 }
 
-// RLS round 5 (RL50): change sinks over a table are no longer paused when
-// its policies come to bind their owners (RL14, RL25): their workers filter
-// each batch for the owner (sprig_sinks::rls_filter).
+// Change sinks over a table are not paused when its policies come to bind
+// their owners: their workers filter each batch for the owner
+// (sprig_sinks::rls_filter).
 
 // ---------------------------------------------------------------------
-// Policy views (RLS round 2, decisions RL18 to RL21).
+// Policy views.
 
 /// The policies on a collection's table that bind a session, as MongoDB
-/// filters with the session's values bound (decision RL34): what a change
-/// stream shows of each event's documents.
+/// filters with the session's values bound: what a change stream shows of
+/// each event's documents.
 #[derive(Debug, Clone)]
 pub enum DocPolicies {
     /// No policy binds the session there.
@@ -1465,13 +1461,13 @@ pub fn doc_policies(
 }
 
 /// Every table whose policies bind a session, by lower-case (database,
-/// table), as [`DocPolicies`]; tables not here don't bind it (RL34).
+/// table), as [`DocPolicies`]; tables not here don't bind it.
 #[derive(Debug, Clone, Default)]
 pub struct DocViews {
     /// (database, table) → the policies.
     pub tables: HashMap<(String, String), DocPolicies>,
-    /// (database, table) the session may read but not `WATCH` (chapters
-    /// 29 and 38): [`DocPolicies::Hidden`] in `tables` too; a stream over
+    /// (database, table) the session may read but not `WATCH`:
+    /// [`DocPolicies::Hidden`] in `tables` too; a stream over
     /// one of them alone is refused.
     pub unwatched: std::collections::HashSet<(String, String)>,
 }
@@ -1479,7 +1475,7 @@ pub struct DocViews {
 impl DocViews {
     /// A digest of what the views show (tables, policies, bound values):
     /// a change stream compares it at each `getMore` with the one it
-    /// opened with (RL41).
+    /// opened with.
     #[must_use]
     pub fn fingerprint(views: Option<&Self>) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -1507,11 +1503,10 @@ impl DocViews {
 }
 
 /// [`DocViews`] for a session with compiled policies `rls` (none: empty).
-/// Tables the session may not `SELECT`, or may not `WATCH` (chapter 38: an
-/// application stream needs `WATCH` on each object), are
-/// [`DocPolicies::Hidden`] too (RL40): a database or deployment change
-/// stream leaves their events out, as MongoDB asks `find` and
-/// `changeStream` on every collection of what it watches.
+/// Tables the session may not `SELECT`, or may not `WATCH` (an application
+/// stream needs `WATCH` on each object), are [`DocPolicies::Hidden`] too: a
+/// database or deployment change stream leaves their events out, as MongoDB
+/// asks `find` and `changeStream` on every collection of what it watches.
 #[must_use]
 pub fn doc_views(ts: &TenantSession, cat: &TenantCatalog, rls: Option<&SessionRls>) -> DocViews {
     let mut out = DocViews::default();
@@ -1550,7 +1545,7 @@ pub fn doc_views(ts: &TenantSession, cat: &TenantCatalog, rls: Option<&SessionRl
         let Some(db) = cat.databases.get(obj.db_id) else {
             continue;
         };
-        // A table the session may not read stays hidden (RL40).
+        // A table the session may not read stays hidden.
         out.tables
             .entry((db.name.to_lowercase(), obj.name.to_lowercase()))
             .or_insert_with(|| doc_policies(ts, cat, rls, *o));
@@ -1569,9 +1564,8 @@ pub fn mongo_filter(text: &str) -> Option<bson::Document> {
 }
 
 /// Protected tables' invisible columns (lower case), by (tenant, object),
-/// as the last check of their shards found them: their policy views come
-/// in two (decision RL28), and a statement naming one of these reads the
-/// all-columns view.
+/// as the last check of their shards found them: their policy views come in
+/// two, and a statement naming one of these reads the all-columns view.
 type Hidden = std::sync::Mutex<HashMap<(u64, u64), Arc<Vec<String>>>>;
 
 fn hidden() -> &'static Hidden {
@@ -1601,10 +1595,9 @@ pub fn hidden_of(tenant: u64, object: u64) -> Option<Arc<Vec<String>>> {
         .cloned()
 }
 
-/// Key-value element tables with policy views (RLS round 6, decision
-/// RL55), by (tenant, key table's object): each element table's name and
-/// its invisible columns (lower case), as the last check of the key
-/// table's shards found them.
+/// Key-value element tables with policy views, by (tenant, key table's
+/// object): each element table's name and its invisible columns (lower
+/// case), as the last check of the key table's shards found them.
 type Elements = std::sync::Mutex<HashMap<(u64, u64), ElementViews>>;
 
 /// [`elements_of`]: (element table, its invisible columns).
@@ -1635,9 +1628,9 @@ pub fn elements_of(tenant: u64, object: u64) -> Option<ElementViews> {
         .cloned()
 }
 
-/// Accounts (`t42_u7`) defining wrapped definer routines (RLS round 6,
-/// decision RL57), by tenant: the catalog version they were last looked up
-/// at, and the accounts (those repoint wrapped since are added at once).
+/// Accounts (`t42_u7`) defining wrapped definer routines, by tenant: the
+/// catalog version they were last looked up at, and the accounts (those
+/// repoint wrapped since are added at once).
 type Definers = std::sync::Mutex<HashMap<u64, (u64, std::collections::BTreeSet<String>)>>;
 
 fn definers() -> &'static Definers {
@@ -1657,7 +1650,7 @@ pub fn definer_note(tenant: u64, account: &str) {
 }
 
 /// The accounts defining `tenant`'s wrapped definer routines, looked up
-/// on `cluster` once per catalog version `version` (RL57).
+/// on `cluster` once per catalog version `version`.
 ///
 /// # Errors
 /// The cluster's.
@@ -1705,13 +1698,13 @@ pub async fn definers_of(
     Ok(e.1.clone())
 }
 
-/// The `@sprig_rls` contexts of `accounts` (RL57), as the session's `"d"`:
-/// each definer's policies at the catalog's auth version, compiled with its
-/// default roles (chapter 29: a `SECURITY DEFINER` function runs with its
-/// definer's default roles), with its name, ids, attributes and space;
-/// claims are absent and the subtree sets empty (as for worker-run code,
-/// RL42). Accounts of other tenants or of gone users are left out (their
-/// routines keep the caller's context).
+/// The `@sprig_rls` contexts of `accounts`, as the session's `"d"`: each
+/// definer's policies at the catalog's auth version, compiled with its
+/// default roles (a `SECURITY DEFINER` function runs with its definer's
+/// default roles), with its name, ids, attributes and space; claims are
+/// absent and the subtree sets empty (as for worker-run code). Accounts of
+/// other tenants or of gone users are left out (their routines keep the
+/// caller's context).
 #[must_use]
 pub fn definer_contexts(
     cat: &TenantCatalog,
@@ -1771,7 +1764,7 @@ pub fn enforcement(svc: &super::TenantServices, cat: &TenantCatalog, db: DbId) -
 
 /// A hash of `rls.backend_enforcement` at every database with a protected
 /// table (0 without row-level security): the backend reconcile's key, so
-/// a change narrows or widens grants at once (RL30).
+/// a change narrows or widens grants at once.
 #[must_use]
 pub fn enforcement_digest(svc: &super::TenantServices, cat: &TenantCatalog) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -1889,7 +1882,7 @@ pub fn view_swap(
             .entry(o.db_id.0)
             .or_default()
             .insert(o.name.to_lowercase(), view);
-        // RL55: a key-value namespace's element tables read their own
+        // A key-value namespace's element tables read their own
         // policy views, which apply the key table's policies.
         for (e, cols) in elements_of(ts.tenant.0, t.object.0)
             .iter()
@@ -2043,8 +2036,8 @@ pub struct Tainted {
 
 impl Tainted {
     /// The names again, after the code in `safe` was pointed at the policy
-    /// views (RL20): only what still reaches a protected table unfiltered
-    /// (code not in `safe`, and what names it) stays.
+    /// views: only what still reaches a protected table unfiltered (code
+    /// not in `safe`, and what names it) stays.
     pub fn without(&mut self, safe: &HashSet<ObjectId>) {
         let seeds: HashSet<String> = self
             .code
@@ -2100,7 +2093,7 @@ fn closure(
 /// The tenant's views and stored code whose text names a protected table
 /// (or another such object), or that run dynamic SQL: MariaDB runs them
 /// with their definer's rights, unfiltered, so sessions bound by policies
-/// can't use them (39366) unless they read the policy views (RL20).
+/// can't use them (39366) unless they read the policy views.
 ///
 /// # Errors
 /// The catalog's.
@@ -2370,7 +2363,7 @@ pub fn inline_view(ts: &TenantSession, text: &[u8], lex: &LexOptions) -> Option<
 }
 
 /// Metadata columns that count or measure rows: hidden for protected
-/// tables from sessions their policies bind (chapter 29, "Evaluation").
+/// tables from sessions their policies bind.
 const MASKED: &[(&str, &[&str])] = &[
     (
         "TABLES",
@@ -2533,8 +2526,8 @@ pub fn mask_metadata(
 }
 
 /// Gateway sessions the gateway itself runs for work that must read whole
-/// tables: chapter 39's search seeds (decision S6, RL17). Not reachable by
-/// clients: only internal code registers a session, for its life.
+/// tables: the search seeds. Not reachable by clients: only internal code
+/// registers a session, for its life.
 fn exempt_sessions() -> &'static std::sync::Mutex<HashSet<u32>> {
     static S: std::sync::OnceLock<std::sync::Mutex<HashSet<u32>>> = std::sync::OnceLock::new();
     S.get_or_init(|| std::sync::Mutex::new(HashSet::new()))
@@ -2581,17 +2574,16 @@ pub fn is_exempt(id: sprig_common::ids::ConnId) -> bool {
         .contains(&id.0)
 }
 
-/// The note code of [`definer_default_note`] (chapter 29; RL57's addition,
-/// bugfix-63).
+/// The note code of [`definer_default_note`].
 pub const DEFINER_DEFAULT_NOTE: u16 = 39369;
 
 /// The protected tables a `CREATE PROCEDURE` or `CREATE FUNCTION` text
 /// names when it has no `SQL SECURITY` clause (MariaDB's default is
-/// `DEFINER`, so since RL57 the routine applies its definer's policies,
-/// not its caller's), as `db.table`, in order of first mention; `None`
-/// for any other statement, an explicit clause, or no protected table.
-/// `protected` holds `(db, table)` pairs in lower case; `db` is the
-/// database an unqualified name means (the routine's, else the current).
+/// `DEFINER`, so the routine applies its definer's policies, not its
+/// caller's), as `db.table`, in order of first mention; `None` for any
+/// other statement, an explicit clause, or no protected table. `protected`
+/// holds `(db, table)` pairs in lower case; `db` is the database an
+/// unqualified name means (the routine's, else the current).
 #[must_use]
 pub fn definer_default_tables(
     text: &[u8],
@@ -2673,9 +2665,9 @@ pub fn definer_default_tables(
     (!found.is_empty()).then_some(found)
 }
 
-/// RL57's addition (bugfix-63): a note for a `CREATE PROCEDURE` or
-/// `CREATE FUNCTION` without `SQL SECURITY` over policy-protected tables
-/// of `ts`'s tenant, naming them (see [`definer_default_tables`]).
+/// A note for a `CREATE PROCEDURE` or `CREATE FUNCTION` without
+/// `SQL SECURITY` over policy-protected tables of `ts`'s tenant, naming
+/// them (see [`definer_default_tables`]).
 #[must_use]
 pub fn definer_default_note(
     ts: &TenantSession,

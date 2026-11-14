@@ -1,5 +1,4 @@
-//! `sprig.admin.v1.Operators` on a gateway's 8080/8443 (chapter 14,
-//! "Operators"; decision OP12): sign-in, enrolment, tokens and sign-out
+//! `sprig.admin.v1.Operators` on a gateway's 8080/8443: sign-in, enrolment, tokens and sign-out
 //! over gRPC and REST, each relayed to the controller, whose guard decides.
 //!
 //! ```sh
@@ -12,7 +11,7 @@
 //! ```
 //!
 //! Each run creates one platform operator, `gw-op-<unix seconds>`, and
-//! disables it at the end (operators are never deleted, decision OP8).
+//! disables it at the end (operators are never deleted).
 
 #![allow(
     clippy::unwrap_used,
@@ -259,7 +258,7 @@ async fn operators_through_the_gateway() {
     let (s, v) = rest(&addr, "GET", "/admin/v1/tenants", Some(&tok), &Value::Null).await;
     assert_eq!(s, 403, "{v}");
     assert_eq!(v["code"], 39313, "{v}");
-    // A token can't issue tokens (OP5).
+    // A token can't issue tokens.
     let e = ops
         .create_token(with_auth(body(&json!({"scopes": ["*:read"]})), &tok))
         .await

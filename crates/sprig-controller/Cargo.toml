@@ -10,14 +10,14 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-# Automatic document indexes' doc_indexes rows (S133): their BSON key
-# pattern and chapter 31's field-column slugs.
+# Automatic document indexes' doc_indexes rows: their BSON key pattern and
+# the document field-column slugs.
 bson = "=2.15.0"
 sprig-doc = { path = "../sprig-doc" }
 axum.workspace = true
 futures.workspace = true
 gethostname.workspace = true
-# Chapter 25: clients of the internal failover services (permits, observers).
+# Clients of the internal failover services (permits, observers).
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
@@ -25,64 +25,64 @@ metrics.workspace = true
 mysql_async.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# Chapter 13: the automatic-indexing store behind `sprigctl index` and
+# The automatic-indexing store behind `sprigctl index` and
 # `sprigctl explain query` (autoindex_admin).
 sprig-advisor.workspace = true
-# Chapter 52: approvals and recommendations.
+# Approvals and recommendations.
 sprig-approvals.workspace = true
 sprig-auth.workspace = true
-# Chapter 11's balancer loop, decision log and explain calls.
+# The balancer loop, decision log and explain calls.
 sprig-balancer.workspace = true
 sprig-catalog.workspace = true
 sprig-cluster.workspace = true
 sprig-common.workspace = true
-# Chapter 41's logic loop: trigger jobs and schedules (R7 order 5).
+# The logic loop: trigger jobs and schedules.
 sprig-feed.workspace = true
 sprig-logic = { path = "../sprig-logic" }
-# Chapter 42: the copy worker's subscriptions and the spaces API.
+# The copy worker's subscriptions and the spaces API.
 sprig-inherit = { path = "../sprig-inherit" }
-# Chapter 45: the stream sequencer jobs (R9).
+# The stream sequencer jobs.
 sprig-streams = { path = "../sprig-streams" }
-# Chapter 50 (R9, r9scale): the `mq` catalog module a member under a
+# The `mq` catalog module a member under a
 # FOR EACH TENANT exchange or queue gets at creation.
 sprig-queues = { path = "../sprig-queues" }
-# Chapter 51 (R9): the sink index the sinks loop reads.
+# The sink index the sinks loop reads.
 sprig-sinks = { path = "../sprig-sinks" }
 sprig-meta.workspace = true
-# `mover.max_copies_per_cluster` is sprig-mover's key (chapter 10).
+# `mover.max_copies_per_cluster` is sprig-mover's key.
 sprig-mover.workspace = true
-# The tenant map a move starts from (chapter 15).
+# The tenant map a move starts from.
 sprig-shard.workspace = true
 sprig-provision.workspace = true
-# Residency policies (chapter 26), shared (R9, r9more).
+# Residency policies, shared with gateways and workers.
 sprig-residency.workspace = true
 sprig-settings.workspace = true
-# Chapter 07's rewriter and the persona's lexer: validation replays sampled
-# statements in the shards' physical names (chapter 13).
+# The SQL rewriter and the persona's lexer: validation replays sampled
+# statements in the shards' physical names.
 sprig-proto-mysql.workspace = true
 sprig-sql.workspace = true
-# Chapter 12's workload tables: bootstrap migrates them; the rollup loop.
+# The workload tables: bootstrap migrates them; the rollup loop.
 sprig-workload.workspace = true
-# Chapter 18's resolver loop (txn_resolver).
+# The in-doubt transaction resolver loop (txn_resolver).
 sprig-txn.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-# tests/live_node_rebuild.rs's test PKI (decision RC2), already in the tree.
+# tests/live_node_rebuild.rs's test PKI, already in the tree.
 rcgen.workspace = true
-# Chapter 52's approval webhook tests: an HTTPS receiver in process.
+# The approval webhook tests: an HTTPS receiver in process.
 rustls.workspace = true
 tokio-rustls.workspace = true
-# Chapter 52's multi-DC test calls the gateways' gRPC Recommendations.
+# The approvals multi-DC test calls the gateways' gRPC Recommendations.
 sprig-api.workspace = true
 tonic = { workspace = true, features = ["channel"] }
-# tests/live_split.rs builds a cluster access by hand (chapter 20).
+# tests/live_split.rs builds a cluster access by hand.
 sprig-binlog.workspace = true
 tracing-subscriber.workspace = true
 sprig-meta = { workspace = true, features = ["conformance"] }
-# Chapter 25's DC failover simulation (tests/sim_dc_failover.rs).
+# The DC failover simulation (tests/sim_dc_failover.rs).
 sprig-testkit.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 

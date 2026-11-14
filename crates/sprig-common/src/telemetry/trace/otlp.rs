@@ -5,10 +5,10 @@
 //! Traces queue in memory (at most [`QUEUE`]); a background task sends
 //! them once a second. When the collector is down a batch is retried for
 //! 30 s and then dropped and counted in `sprig_telemetry_spans_dropped_total`
-//! (chapter 47, "Failure handling": `/metrics` is pulled, so unaffected).
+//! (`/metrics` is pulled, so unaffected).
 //! The endpoint changes live ([`OtlpExporter::set_endpoint`]); `None` stops
-//! sending and drops what is queued. Plain HTTP only in R0: a collector in
-//! the same DC.
+//! sending and drops what is queued. Plain HTTP only for now: a collector
+//! in the same DC.
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};

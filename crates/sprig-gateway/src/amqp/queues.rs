@@ -1,6 +1,6 @@
-//! The queue engine's footing in the gateway (chapter 50, build steps
-//! 2–10 and 18): [`GatewayMq`] is `sprig-queues`' [`MqCatalog`] over the
-//! tenant catalog, the shard maps and chapter 29's grants, and
+//! The queue engine's footing in the gateway: [`GatewayMq`] is
+//! `sprig-queues`' [`MqCatalog`] over the tenant catalog, the shard maps
+//! and the tenant's grants, and
 //! [`EtcdLeases`] its owner leases in this DC's etcd tier.
 //!
 //! - **Vhosts.** `/` is `amqp.default_vhost_database`, any other vhost the
@@ -71,7 +71,7 @@ pub struct GatewayMq {
     /// When each tenant's catalog was last refreshed for routing.
     refreshed: Mutex<HashMap<u64, std::time::Instant>>,
     grants: Mutex<HashMap<GrantKey, Arc<dyn SessionGrants>>>,
-    /// Each cluster's feed-forwarder beat as last read (bugfix-42).
+    /// Each cluster's feed-forwarder beat as last read.
     beats: Mutex<HashMap<String, (std::time::Instant, bool)>>,
 }
 
@@ -233,7 +233,7 @@ impl MqCatalog for GatewayMq {
             .any(|a| self.allows(&*g, &cat, &row.name, a, None))
                 || g.unrestricted()
                 || Self::has_rule(p, &cat, &r)
-                // R9 (r9tests): a right on one of its queues only (an
+                // A right on one of its queues only (an
                 // inherited queue sink's sprig_inherited).
                 || Self::state(&cat)
                     .topology(row.db_id.0, cat.version)
@@ -419,9 +419,8 @@ impl MqCatalog for GatewayMq {
         };
         let s = Arc::new(MariaStore::new(pool, schema).with_replicas(replicas));
         s.set_confirm_replica(self.settings(v).confirm_replica);
-        // R9 (r9fwd): the tenant's feed-driven outbox forwarder, registered
-        // while the tables are made (r9scale); both before the store is
-        // used.
+        // The tenant's feed-driven outbox forwarder, registered while the
+        // tables are made; both before the store is used.
         let (made, ()) = tokio::join!(s.ensure(), crate::outbox_feed::subscribe(&self.svc, tenant));
         made.map_err(unavailable)?;
         lock(&self.maria).insert((v.tenant, v.db_id), Arc::clone(&s));
@@ -485,7 +484,7 @@ impl MqCatalog for GatewayMq {
     }
 
     /// The tenant's cluster's `queue-forwarder-beats/` beat, in its home DC's
-    /// tier, read at most once a second per cluster (bugfix-42).
+    /// tier, read at most once a second per cluster.
     async fn feed_forwarder_runs(&self, v: &VhostRef) -> bool {
         const REREAD: Duration = Duration::from_secs(1);
         let tenant = TenantId(v.tenant);
@@ -521,7 +520,7 @@ impl MqCatalog for GatewayMq {
 }
 
 impl GatewayMq {
-    /// Waits while a mover's cutover holds the tenant's map (chapter 10),
+    /// Waits while a mover's cutover holds the tenant's map,
     /// at most 10 s: a store opened on the cluster about to be fenced
     /// would write where the move no longer copies.
     async fn wait_out_hold(&self, tenant: TenantId) {

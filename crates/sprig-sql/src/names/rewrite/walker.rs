@@ -300,7 +300,7 @@ struct Walker<'a, 'c> {
     /// in the same text changes it.
     current: Option<String>,
     /// Recursion depth of the grammar functions, bounded so client input
-    /// can't exhaust the stack (chapter 03, "Security conventions").
+    /// can't exhaust the stack.
     nest: u32,
     /// The current database each statement started with.
     currents: Vec<Option<String>>,
@@ -579,8 +579,8 @@ impl Walker<'_, '_> {
 
     /// Maps database `name`, spelled by token `tok`.
     fn map_schema(&mut self, tok: usize, name: &str, object: Option<usize>) -> R<Option<String>> {
-        // Chapter 29 (RL58): row-level security's subtree view stays as
-        // written (it returns only the session tenant's own rows).
+        // Row-level security's subtree view stays as written (it returns only
+        // the session tenant's own rows).
         if object.is_some_and(|o| self.rls_subtree_view(o)) {
             return Ok(None);
         }
@@ -624,12 +624,12 @@ impl Walker<'_, '_> {
         Ok(Some(key))
     }
 
-    /// Chapter 07 (R1): a metadata statement about one table (`SHOW CREATE
-    /// TABLE`, `SHOW COLUMNS`, `SHOW INDEX`, `DESCRIBE`) reads the table
-    /// where it is. The advisor moves a grouped table out of its
-    /// database's first shard into its group's schemas, so its name gets
-    /// the group's representative schema: the edit of its database part
-    /// (`db`, that part's range) changes, or a bare name is qualified.
+    /// A metadata statement about one table (`SHOW CREATE TABLE`, `SHOW
+    /// COLUMNS`, `SHOW INDEX`, `DESCRIBE`) reads the table where it is. The
+    /// advisor moves a grouped table out of its database's first shard into
+    /// its group's schemas, so its name gets the group's representative
+    /// schema: the edit of its database part (`db`, that part's range)
+    /// changes, or a bare name is qualified.
     fn grouped_table(&mut self, table_tok: usize, db: Option<&std::ops::Range<usize>>) {
         if self.no_subst() {
             return;
@@ -716,7 +716,7 @@ impl Walker<'_, '_> {
     /// Whether token `tok` is `__sprig_subtree_v` qualified by
     /// `__sprig_sys`: the only `__sprig_sys` object a statement may name,
     /// which row-level security's rewrite puts in for subtrees above
-    /// `rls.inline_subtree_max` (chapter 29, RL58).
+    /// `rls.inline_subtree_max`.
     fn rls_subtree_view(&self, tok: usize) -> bool {
         tok >= 2
             && self.ident(tok)
@@ -734,7 +734,7 @@ impl Walker<'_, '_> {
         let raw = ident_value(self.bytes(tok));
         let name = String::from_utf8_lossy(&raw);
         // The hidden column of a MySQL functional key part, which the 3306
-        // translator writes into the statement (chapter 28, R4 round 3).
+        // translator writes into the statement.
         if !is_internal_column(&name) || crate::compat::fxindex::is_fx_column(&name) {
             return Ok(());
         }
@@ -955,11 +955,11 @@ impl Walker<'_, '_> {
         self.substitute(first, last, kind, lit);
     }
 
-    /// Chapter 07 step 12: an account function or `DATABASE()` in a
-    /// table's definition (a column `DEFAULT`, a generated column, a
-    /// `CHECK`) would run inside MariaDB on every row, as the backend
-    /// account in the physical schema, and store or show backend names.
-    /// MariaDB allows no subquery there, so no lookup can replace it: 39051.
+    /// An account function or `DATABASE()` in a table's definition (a column
+    /// `DEFAULT`, a generated column, a `CHECK`) would run inside MariaDB on
+    /// every row, as the backend account in the physical schema, and store or
+    /// show backend names. MariaDB allows no subquery there, so no lookup can
+    /// replace it: 39051.
     fn refuse_in_table(&self, j: usize) -> R {
         if self.creating_cols && !self.ctx.internal {
             return Err(NameError::Unsupported(format!(
@@ -2233,7 +2233,7 @@ impl Walker<'_, '_> {
             b"TABLE" => {
                 let if_exists = self.eat_if_exists();
                 let c = self.object(ObjectKind::Table, false)?;
-                // ALTER TABLE t SPRIG SET (...) writes settings (chapter 08).
+                // ALTER TABLE t SPRIG SET (...) writes settings.
                 let settings = self.at(b"SPRIG");
                 let mut renamed = None;
                 let mut other = false;
@@ -2479,7 +2479,7 @@ impl Walker<'_, '_> {
                 ObjectKind::Table
             };
             if self.op(self.i, b"*") {
-                // *.* (global) or * (current database): chapter 29.
+                // *.* (global) or * (current database).
                 self.i += 1;
                 if self.punct(self.i, b'.') && self.op(self.i + 1, b"*") {
                     self.i += 2;

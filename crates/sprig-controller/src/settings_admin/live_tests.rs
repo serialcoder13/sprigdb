@@ -32,7 +32,7 @@ use sprig_common::ids::{DbId, GroupId, ObjectId};
 use sprig_common::time::SystemClock;
 use sprig_meta::conformance::{ETCD_ENV, delete_prefix, unique_tier};
 use sprig_meta::{EtcdConfig, EtcdStore, MetaStore, Op, Txn};
-use sprig_settings::{HardBounds, Scopes, Setting, SettingsStores};
+use sprig_settings::{Apply, HardBounds, Scopes, Setting, SettingsStores};
 
 use super::*;
 use crate::admin::types::CreateTenantRequest;

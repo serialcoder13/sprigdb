@@ -53,6 +53,8 @@ use super::Core;
 use super::sql::{Caller, SqlCall, collect};
 use crate::exec::rls_images::{ImagesRequest, TableImages, answer, statement};
 
+mod inherit;
+
 /// Events read from the feed per batch at most.
 const DEPTH: usize = 256;
 
@@ -361,15 +363,19 @@ pub async fn open(
     let tail = TenantTail::start(
         tenant,
         start,
-        clusters,
+        Arc::clone(&clusters),
         Arc::clone(&placement),
-        names,
+        Arc::clone(&names),
         TailOptions {
             progress_every: Duration::from_millis(500),
             ..TailOptions::default()
         },
     )
     .await?;
+    // Chapter 42 (decision T30): the parent tenants' changes reach this
+    // tenant's view through read-through edges, without an event in its
+    // own feed; their feeds are tailed from now.
+    let above = inherit::ancestor_tails(&svc, tenant, &clusters, &placement, &names).await;
     let first = if spec.start_after.is_empty() {
         let segment = placement
             .history(tenant)
@@ -399,7 +405,7 @@ pub async fn open(
             &core,
             &caller,
             &spec,
-            tail,
+            (tail, above),
             first,
             limits.change_heartbeat,
             &tx,
@@ -436,8 +442,12 @@ struct Pending {
     table: usize,
     before: Option<usize>,
     after: Option<usize>,
-    /// DDL and truncate: the privilege alone.
+    /// DDL and truncate, and an inheritable object's events: the
+    /// privilege alone.
     probe: Option<usize>,
+    /// An inheritable object's event, mapped to the subscriber's space
+    /// (chapter 42, decision T30).
+    mapped: Option<inherit::Mapped>,
 }
 
 /// The event `p` becomes as the caller may see it (`None`: hidden).
@@ -507,6 +517,31 @@ fn shown(p: &Pending, seen: &[Vec<bool>], full: bool) -> Option<WatchEvent> {
     Some(out)
 }
 
+/// An inheritable object's event `p` as the subscriber sees it
+/// ([`inherit::decide`]).
+fn mapped_event(
+    p: &Pending,
+    m: &inherit::Mapped,
+    mapper: &inherit::Mapper,
+    seen: &[Vec<bool>],
+    records: &HashMap<String, inherit::Record>,
+    full: bool,
+) -> Option<WatchEvent> {
+    let v = |i: Option<usize>| i.is_some_and(|i| seen[p.table].get(i).copied().unwrap_or(false));
+    if !v(p.probe) {
+        return None;
+    }
+    let e = &p.event;
+    let mut out = WatchEvent {
+        resume_token: e.token.to_hex(),
+        commit_hlc: e.hlc,
+        object: e.table.clone(),
+        ..WatchEvent::default()
+    };
+    let rec = records.get(&inherit::key_id(&e.table, &m.key));
+    inherit::decide(mapper, e, m, rec, v(p.before), v(p.after), full, &mut out).then_some(out)
+}
+
 /// Whether the event is one the stream watches.
 fn wanted(spec: &WatchSpec, e: &sprig_feed::ChangeEvent) -> bool {
     e.db_name.eq_ignore_ascii_case(&spec.database)
@@ -519,43 +554,85 @@ fn wanted(spec: &WatchSpec, e: &sprig_feed::ChangeEvent) -> bool {
                 .any(|o| o.eq_ignore_ascii_case(&e.table)))
 }
 
+/// The stream's own feed as the loop reads it: in a task of its own
+/// (decision r9-131). `TenantTail::next` isn't cancel-safe, and the batch
+/// window, the heartbeat and the parent tenants' feeds race it below.
+pub(super) type OwnFeed = sprig_feed::pump::Pump<FeedItem>;
+
+fn own_feed(tail: TenantTail) -> OwnFeed {
+    sprig_feed::pump::Pump::start(tail, OwnFeed::AHEAD, "change stream")
+}
+
+/// What the stream's loop does next.
+#[derive(Debug)]
+enum Batch {
+    /// The client is gone.
+    Closed,
+    /// Nothing until the heartbeat.
+    Heartbeat,
+    /// Items, `(own feed, item)`: a parent tenant's item doesn't move the
+    /// token.
+    Items(Vec<(bool, FeedItem)>),
+}
+
+/// A batch: the first item (or a heartbeat at `until`), then what follows
+/// within 20 ms, up to 256 items. The timers cancel only channel reads.
+async fn gather(
+    tail: &mut OwnFeed,
+    above: &mut Option<mpsc::Receiver<Result<FeedItem>>>,
+    until: tokio::time::Instant,
+    tx: &mpsc::Sender<Result<WatchEvent>>,
+) -> Result<Batch> {
+    let mut items: Vec<(bool, FeedItem)> = Vec::new();
+    tokio::select! {
+        () = tx.closed() => return Ok(Batch::Closed),
+        r = tokio::time::timeout_at(until, inherit::next(tail, above)) => match r {
+            Ok((own, i)) => items.push((own, i?)),
+            Err(_) => return Ok(Batch::Heartbeat),
+        },
+    }
+    let more_until = tokio::time::Instant::now() + Duration::from_millis(20);
+    while items.len() < DEPTH {
+        match tokio::time::timeout_at(more_until, inherit::next(tail, above)).await {
+            Ok((own, i)) => items.push((own, i?)),
+            Err(_) => break,
+        }
+    }
+    Ok(Batch::Items(items))
+}
+
 #[allow(clippy::too_many_lines)] // the loop of the module docs
 async fn run(
     core: &Core,
     caller: &Caller,
     spec: &WatchSpec,
-    mut tail: TenantTail,
+    tails: (TenantTail, Option<mpsc::Receiver<Result<FeedItem>>>),
     first: String,
     heartbeat: Duration,
     tx: &mpsc::Sender<Result<WatchEvent>>,
 ) -> Result<()> {
+    let (tail, mut above) = tails;
+    let mut tail = own_feed(tail);
     let mut last = first;
     let mut quiet = tokio::time::Instant::now();
     loop {
-        // A batch: the first item (or a heartbeat's timeout), then what
-        // follows within 20 ms, up to 256 events.
-        let mut items = Vec::new();
         let until = quiet + heartbeat;
-        tokio::select! {
-            () = tx.closed() => return Ok(()),
-            r = tokio::time::timeout_at(until, tail.next()) => if let Ok(i) = r {
-                items.push(i?);
-            } else {
-                let hb = WatchEvent { resume_token: last.clone(), op: "heartbeat".into(), ..WatchEvent::default() };
+        let items = match gather(&mut tail, &mut above, until, tx).await? {
+            Batch::Closed => return Ok(()),
+            Batch::Heartbeat => {
+                let hb = WatchEvent {
+                    resume_token: last.clone(),
+                    op: "heartbeat".into(),
+                    ..WatchEvent::default()
+                };
                 if !deliver(tx, hb) {
                     return Ok(());
                 }
                 quiet = tokio::time::Instant::now();
                 continue;
-            },
-        }
-        let more_until = tokio::time::Instant::now() + Duration::from_millis(20);
-        while items.len() < DEPTH {
-            match tokio::time::timeout_at(more_until, tail.next()).await {
-                Ok(i) => items.push(i?),
-                Err(_) => break,
             }
-        }
+            Batch::Items(items) => items,
+        };
         // Chapters 29 and 38: every event needs WATCH on its table too.
         let mut req = ImagesRequest {
             watch: true,
@@ -563,10 +640,35 @@ async fn run(
         };
         let mut tables: HashMap<String, usize> = HashMap::new();
         let mut pending: Vec<Pending> = Vec::new();
-        for it in items {
+        // Inheritable objects' events become the subscriber's space's.
+        let mapper = if items.iter().any(|(_, i)| matches!(i, FeedItem::Event(_))) {
+            inherit::Mapper::load(core, caller).await
+        } else {
+            None
+        };
+        for (own, it) in items {
             match it {
-                FeedItem::Event(e) => {
-                    last = e.token.to_hex();
+                FeedItem::Event(mut e) => {
+                    if own {
+                        last = e.token.to_hex();
+                    } else {
+                        // A parent tenant's change: resumable as this
+                        // tenant's position.
+                        if let Ok(t) = ResumeToken::from_hex(&last) {
+                            e.token = t;
+                        }
+                    }
+                    let mut mapped = None;
+                    if !own && mapper.is_none() {
+                        continue;
+                    }
+                    if let Some(m) = &mapper {
+                        match m.classify(&mut e, own) {
+                            inherit::Class::Plain => {}
+                            inherit::Class::Drop => continue,
+                            inherit::Class::Inherit(x) => mapped = Some(x),
+                        }
+                    }
                     if !wanted(spec, &e) {
                         continue;
                     }
@@ -594,16 +696,22 @@ async fn run(
                         }
                         Op::Ddl(_) | Op::Truncate => probe = Some(push(None)),
                     }
+                    if mapped.is_some() && probe.is_none() {
+                        probe = Some(push(None));
+                    }
                     pending.push(Pending {
                         event: e,
                         table: t,
                         before,
                         after,
                         probe,
+                        mapped,
                     });
                 }
                 FeedItem::TxnEnd { token } | FeedItem::Progress { token } => {
-                    last = token.to_hex();
+                    if own {
+                        last = token.to_hex();
+                    }
                 }
             }
         }
@@ -611,9 +719,30 @@ async fn run(
             continue;
         }
         let seen = check(core, caller, &req).await?;
+        // The merged records, read now in the subscriber's space.
+        let keys: Vec<(String, serde_json::Map<String, Value>)> = pending
+            .iter()
+            .filter(|p| {
+                p.mapped.is_some()
+                    && p.probe
+                        .is_some_and(|i| seen[p.table].get(i).copied().unwrap_or(false))
+            })
+            .filter_map(|p| Some((p.event.table.clone(), p.mapped.as_ref()?.key.clone())))
+            .collect();
+        let records = if keys.is_empty() {
+            HashMap::new()
+        } else {
+            inherit::read(core, caller, &spec.database, &keys).await?
+        };
         let mut sent = 0u64;
         for p in &pending {
-            if let Some(ev) = shown(p, &seen, spec.full_document) {
+            let ev = match (&p.mapped, &mapper) {
+                (Some(m), Some(mapper)) => {
+                    mapped_event(p, m, mapper, &seen, &records, spec.full_document)
+                }
+                _ => shown(p, &seen, spec.full_document),
+            };
+            if let Some(ev) = ev {
                 if !deliver(tx, ev) {
                     return Ok(());
                 }
@@ -940,6 +1069,59 @@ fn ws_parse(buf: &[u8]) -> Option<(u8, Vec<u8>, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Decision r9-131: the 20 ms batch window, a short heartbeat and a
+    /// parent tenant's items all fire while the own tail waits on a new
+    /// table's catalog lookup (30 ms here). Every change of the own feed
+    /// must still come once, in order.
+    #[tokio::test(start_paused = true)]
+    async fn batch_windows_heartbeats_and_parent_items_never_drop_a_change() {
+        use sprig_feed::testing::{SlowFeed, keys_once};
+        let feed = SlowFeed::new(30, Duration::from_millis(30));
+        let mut tail = own_feed(feed.tail().await);
+        // A parent tenant's feed: an item every 7 ms.
+        let (ptx, prx) = mpsc::channel(4);
+        let tick = tokio::spawn(async move {
+            let token = sprig_feed::testing::token(0);
+            loop {
+                tokio::time::sleep(Duration::from_millis(7)).await;
+                if ptx
+                    .send(Ok(FeedItem::Progress {
+                        token: token.clone(),
+                    }))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+        let mut above = Some(prx);
+        let (tx, _rx) = mpsc::channel(16);
+        let mut own = Vec::new();
+        let (mut heartbeats, mut parents) = (0, 0);
+        let end = tokio::time::Instant::now() + Duration::from_secs(30);
+        while tokio::time::Instant::now() < end && keys_once(&own).len() < 30 {
+            let until = tokio::time::Instant::now() + Duration::from_millis(25);
+            match gather(&mut tail, &mut above, until, &tx).await.unwrap() {
+                Batch::Closed => unreachable!(),
+                Batch::Heartbeat => heartbeats += 1,
+                Batch::Items(items) => {
+                    for (mine, i) in items {
+                        if mine {
+                            own.push(i);
+                        } else {
+                            parents += 1;
+                        }
+                    }
+                }
+            }
+        }
+        tick.abort();
+        assert!(parents > 0);
+        let _ = heartbeats;
+        assert_eq!(keys_once(&own), (1..=30).collect::<Vec<_>>());
+    }
 
     #[test]
     fn rest_specs() {

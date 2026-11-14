@@ -1,6 +1,4 @@
-//! Deleting a tenant leaves nothing behind (chapter 08, "Deleting a
-//! tenant"; decisions m0.6-interim "Tenant deletion cleanup (tenantdel)"),
-//! against a running deployment: its controller, a worker and a gateway.
+//! Deleting a tenant leaves nothing behind, against a running deployment: its controller, a worker and a gateway.
 //!
 //! ```sh
 //! SPRIG_TEST_TENANTDEL_SPRIGCTL=target/debug/sprigctl \
@@ -24,8 +22,7 @@
 //! `__sprig_sys` rows, and the DC tier for the tenant's keys and job
 //! records.
 //!
-//! The second case (decision TD9, agent tenantdel2) is the one
-//! `gateway-dev.sh down` left half done: a tenant moved twice
+//! The second case is the one `gateway-dev.sh down` left half done: a tenant moved twice
 //! (`dc-a-c1` to `dc-a-c2`, whose retention the test then ends in the job
 //! record, then to `dc-a-c3`, the old copy kept; it needs `ETCD`) whose database also has shard schemas on the two clusters it
 //! left (made here directly, as a sharded group's shards would be). With
@@ -281,7 +278,7 @@ async fn deleting_a_tenant_leaves_nothing_behind() {
         .unwrap();
     let t = TenantId(created["tenant"]["tenant_id"].as_u64().expect("tenant id"));
     eprintln!("tenant {name} is {t}");
-    // Rule 8b/8e: a private deployment's ids stay in its own range. The
+    // A private deployment's ids stay in its own range. The
     // controller raises ids past every tenant schema on the clusters, so a
     // range below another deployment's would be left: undo and stop.
     if let Some(base) = env("ID_BASE").and_then(|b| b.parse::<u64>().ok())
@@ -504,7 +501,7 @@ async fn a_tenant_moved_twice_and_spread_over_clusters_is_deleted_within_seconds
     let _ = c.disconnect().await;
     // First move; its retention is then ended in the job record (as if
     // 24 hours had passed), so the job drops the old copy and finishes.
-    // The tenant's accounts stay on dc-a-c1 (TD4).
+    // The tenant's accounts stay on dc-a-c1.
     let etcd = env("ETCD").expect("this case needs SPRIG_TEST_TENANTDEL_ETCD");
     let cfg = EtcdConfig::new(vec![etcd]);
     let dc: Arc<dyn MetaStore> = Arc::new(

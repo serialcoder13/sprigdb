@@ -21,6 +21,7 @@ The Bolt listener is off by default.
 | `listener.bolt.bind` | text | `0.0.0.0:7687` | Address and port |
 | `listener.bolt.tls` | text | `required` | `required`, `optional` or `off` |
 | `listener.bolt.cert` | text | `default` | Certificate bundle |
+| `listener.bolt.client_cert` | text | `off` | Client certificates: `off`, `optional` or `required` (see [Client certificates](../security/tls.md#client-certificates)) |
 
 ```sh
 sprigctl settings set listener.bolt.enabled true --scope global --reason "Neo4j drivers"
@@ -112,7 +113,7 @@ The default graph is created on its first write, if its database exists; reading
 
 The user name must contain the tenant (`acme.app`), unless you connect over TLS to a tenant endpoint: a host name such as `acme.db.example.com` under `listener.tenant_sni_suffixes`, where you log in as plain `app` (see [Tenant endpoints by server name](../security/tls.md#tenant-endpoints-by-server-name)). Otherwise a plain user name fails with 39915 and the message `name the tenant: log in as <tenant>.<user>, or connect with the tenant's TLS server name`.
 
-Accounts with a client-certificate requirement (`REQUIRE X509`, `SUBJECT` or `ISSUER`) can't log in over Bolt.
+Client-certificate requirements are checked against the certificate the connection presented, so set `listener.bolt.client_cert` to `optional` or `required` for accounts that have one. An account with `REQUIRE X509` needs a certificate the listener verified; one with `REQUIRE SUBJECT` or `REQUIRE ISSUER` needs a certificate whose subject or issuer is exactly the name given. The certificate is checked in addition to the password, never instead of it, and a login that doesn't meet the requirement is refused like a wrong password.
 
 A wrong password, an unknown user or tenant, a locked account or any other refused login fails with `Neo.ClientError.Security.Unauthorized`:
 

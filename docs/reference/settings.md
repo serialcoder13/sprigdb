@@ -9,7 +9,7 @@ source: the settings registry (sprig-settings)
 
 Every setting SprigDB declares, with its default, the scopes that may set it, hard bounds and when a change applies. Settings resolve from the most specific scope: object, database, tenant and its ancestors, cluster, data center, global, then the built-in default. Read them with `SHOW SPRIG SETTINGS`, change them with `ALTER TENANT|DATABASE|TABLE … SPRIG SET (key = value)` or `sprigctl settings`.
 
-682 settings in 58 groups.
+703 settings in 59 groups.
 
 ## `advisor`
 
@@ -23,7 +23,7 @@ Every setting SprigDB declares, with its default, the scopes that may set it, ha
 | `advisor.min_ndv_per_shard` | int | `100` | tenant, global (operator only) | 0 to 1000000000 | live | Distinct values needed per expected shard |
 | `advisor.min_observe_hours` | float | `24` | tenant, global (operator only) | 0 to 8760 | live | History needed for a design |
 | `advisor.min_units` | int | `10000` | tenant, global (operator only) | 0 to 1000000000 | live | Sampled units needed |
-| `advisor.mode` | text | `on` | tenant, dc, global (operator only) | on, approve, recommend, off | live | Sharding advisor: on, approve, recommend or off |
+| `advisor.mode` | text | `on` | tenant, dc, global (operator only) | on, approve, recommend, off | live | Sharding advisor: on, approve (held for approval), recommend or off |
 | `advisor.txn_weight` | float | `2` | tenant, global (operator only) | 0 to 100 | live | Weight of a write transaction |
 | `advisor.window_days` | float | `7` | tenant, global (operator only) | 0 to 365 | live | Statistics window |
 
@@ -54,7 +54,7 @@ Every setting SprigDB declares, with its default, the scopes that may set it, ha
 
 | Key | Type | Default | Scopes | Bounds | Applies | Description |
 |---|---|---|---|---|---|---|
-| `analytics.datafusion_memory_mb` | int | `1024` | tenant, dc, global | 16 to 65536 | live | Memory per DataFusion query (R3) |
+| `analytics.datafusion_memory_mb` | int | `1024` | tenant, dc, global | 16 to 65536 | live | Memory per DataFusion query |
 | `analytics.max_concurrent_per_gateway` | int | `8` | dc, global | 1 to 1024 | live | Queries per gateway |
 | `analytics.max_concurrent_per_tenant` | int | `2` | tenant, dc, global | 1 to 1024 | live | Queries per tenant per gateway |
 | `analytics.max_groups` | int | `1000000` | database, tenant, dc, global | 1 to 1000000000 | live | Groups held by one merge |
@@ -242,9 +242,9 @@ Every setting SprigDB declares, with its default, the scopes that may set it, ha
 | `balancer.max_concurrent_moves_per_dc` | int | `4` | dc, global (operator only) | 0 to 1000 | live | Moves at once per DC |
 | `balancer.max_moves_per_tenant_per_day` | int | `2` | tenant, cluster, dc, global (operator only) | 0 to 1000 | live | Moves per tenant per day |
 | `balancer.min_gain_pct` | int | `0` | dc, global (operator only) | 0 to 100 | live | Optional floor: smallest relief of the source worth a move, in points (0: none) |
-| `balancer.mode` | text | `auto` | tenant, cluster, dc, global (operator only) | auto, approve, recommend, dry_run, off | live | auto, approve, recommend, dry_run or off |
+| `balancer.mode` | text | `auto` | tenant, cluster, dc, global (operator only) | auto, approve, recommend, dry_run, off | live | auto, approve (held for approval), recommend, dry_run or off |
 | `balancer.new_tenant_load` | float | `1` | dc, global (operator only) | 0 to 1000000 | live | Predicted storage of a new tenant, GB |
-| `balancer.provision_mode` | text | `recommend` | dc, global (operator only) | recommend, auto | live | recommend or auto (R2): who acts on add_cluster and add_replica |
+| `balancer.provision_mode` | text | `recommend` | dc, global (operator only) | recommend, auto | live | recommend or auto: who acts on add_cluster and add_replica |
 | `balancer.shard_cooldown_hours` | int | `24` | tenant, cluster, dc, global (operator only) | 0 to 8760 | live | Between moves of one shard |
 | `balancer.spread_pct` | int | `25` | dc, global (operator only) | 1 to 100 | live | Fullest minus emptiest that triggers a move |
 | `balancer.storage_hard_pct` | int | `90` | cluster, dc, global (operator only) | 1 to 100 | live | Hard storage ceiling |
@@ -303,6 +303,16 @@ Every setting SprigDB declares, with its default, the scopes that may set it, ha
 | `cluster.probe_timeout_ms` | int | `2000` | cluster, dc, global (operator only) | 100 to 60000 | live | Probe statement timeout |
 | `cluster.unhealthy_after_failures` | int | `3` | cluster, dc, global (operator only) | 1 to 100 | live | Failed probes before a node is unreachable |
 
+## `compat`
+
+| Key | Type | Default | Scopes | Bounds | Applies | Description |
+|---|---|---|---|---|---|---|
+| `compat.global.max_execution_time` | text | `` | tenant, dc, global | - | new sessions | The tenant's default max_execution_time in ms for new 3306 sessions (SET GLOBAL); empty: 0 |
+| `compat.global.sql_mode` | text | `` | tenant, dc, global | - | new sessions | The tenant's default sql_mode for new sessions (SET GLOBAL sql_mode); empty: the persona's |
+| `compat.global.time_zone` | text | `` | tenant, dc, global | - | new sessions | The tenant's default time_zone for new sessions (SET GLOBAL time_zone); empty: the server's |
+| `compat.global.transaction_isolation` | text | `` | tenant, dc, global | - | new sessions | The tenant's default transaction_isolation for new sessions (SET GLOBAL); empty: the server's |
+| `compat.global.wait_timeout` | text | `` | tenant, dc, global | - | new sessions | The tenant's default wait_timeout in seconds for new sessions (SET GLOBAL); empty: the gateway's |
+
 ## `control`
 
 | Key | Type | Default | Scopes | Bounds | Applies | Description |
@@ -336,10 +346,13 @@ Every setting SprigDB declares, with its default, the scopes that may set it, ha
 | `doc.allow_disk_use_by_default` | bool | `true` | dc, global | - | live | aggregate may spill when allowDiskUse is not given (MongoDB's allowDiskUseByDefault) |
 | `doc.graph_lookup_max_bytes` | int | `104857600` | dc, global | 4096 to 1099511627776 | live | $graphLookup memory per input document |
 | `doc.max_sort_bytes` | int | `104857600` | dc, global | 4096 to 1099511627776 | live | In-memory sort limit |
+| `doc.multi_write_batch` | int | `100` | object, database, tenant, global | 1 to 100000 | live | Documents per transaction in multi-document writes (as built: TTL deletes, per tenant) |
 | `doc.path_publish_timeout_ms` | int | `10000` | object, database, tenant, global | 100 to 600000 | live | Wait for gateways to load a new path or flag |
 | `doc.spill_dir` | text | `` | dc, global | - | live | Directory for spill files |
 | `doc.spill_max_bytes` | int | `10737418240` | dc, global | 0 to 17592186044416 | live | Spill bytes on disk per gateway |
 | `doc.spill_tenant_max_bytes` | int | `4294967296` | dc, global | 0 to 17592186044416 | live | Spill bytes on disk per tenant |
+| `doc.ttl_interval_seconds` | int | `60` | dc, global | 1 to 86400 | live | TTL pass interval: how often expired documents of TTL indexes are deleted |
+| `doc.ttl_tenant_deletes_per_second` | int | `5000` | tenant, dc, global | 0 to 10000000 | live | Most TTL deletes per second for one tenant; 0 for no limit |
 
 ## `failover`
 
@@ -355,7 +368,7 @@ Every setting SprigDB declares, with its default, the scopes that may set it, ha
 | `failover.max_parallel_promotions` | int | `16` | global (operator only) | 1 to 1024 | live | Concurrent tenant promotions |
 | `failover.min_interval_minutes` | int | `30` | cluster, dc, global (operator only) | 0 to 10080 | live | Only hard failures fail over again within it |
 | `failover.min_sites` | int | `3` | global (operator only) | 2 to 64 | live | Sites needed for automatic DC failover |
-| `failover.mode` | text | `auto` | tenant, cluster, dc, global (operator only) | auto, approve, manual | live | auto, approve (global scope only) or manual (the dry run) |
+| `failover.mode` | text | `auto` | tenant, cluster, dc, global (operator only) | auto, approve, manual | live | auto, approve (held for approval; global scope only) or manual (the dry run) |
 | `failover.observe_settle_ms` | int | `2000` | cluster, dc, global (operator only) | 0 to 60000 | live | An observed writer change holds this long before it is published |
 | `failover.observer_probe_interval_ms` | int | `1000` | global (operator only) | 10 to 60000 | live | Gap between probes |
 | `failover.observer_probes` | int | `3` | global (operator only) | 1 to 20 | live | Probes per observer |
@@ -437,7 +450,7 @@ Every setting SprigDB declares, with its default, the scopes that may set it, ha
 | `inherit.max_depth` | int | `16` | tenant, global | 1 to 64 | live | Longest share chain of one object |
 | `inherit.max_instances_per_tenant` | int | `1000` | tenant, global | 1 to 1000000 | live | Inherited instances one member may hold |
 | `inherit.member_publish` | text | `on` | object, tenant, global | on, off | live | Whether a member may publish into its own instance; off leaves publishing to ancestors |
-| `inherit.merge` | text | `auto` | object, database, tenant, global | auto, read_through, materialized, federated | live | auto, read_through, materialized or federated (R6 builds read_through) |
+| `inherit.merge` | text | `auto` | object, database, tenant, global | auto, read_through, materialized, federated | live | auto, read_through, materialized or federated (federated isn't offered in this release) |
 | `inherit.orphan_sink_sweep_seconds` | int | `600` | dc, global | 0 to 86400 | live | How often each gateway looks for members' inherited sinks that no FOR EACH TENANT definition reaches any more (0: never); one found in two passes in a row is dropped |
 | `inherit.outbox_drain_seconds` | int | `30` | object, database, tenant, global | 0 to 3600 | live | How long DROP DATABASE waits for its cross-tenant outbox to be forwarded (39245 after) |
 | `inherit.override` | text | `field` | object, database, tenant, global | field, record | live | field or record: what an update to an inherited record overrides |
@@ -482,48 +495,59 @@ Every setting SprigDB declares, with its default, the scopes that may set it, ha
 |---|---|---|---|---|---|---|
 | `listener.amqp.bind` | text | `0.0.0.0:5672` | dc, global | - | rebind | Address and port of the amqp listener |
 | `listener.amqp.cert` | text | `default` | dc, global | - | rebind | Certificate bundle of the amqp listener |
+| `listener.amqp.client_cert` | text | `off` | dc, global | required, optional, off | rebind | Client certificates on the amqp listener: off, optional or required (checked against tls.bundles.default.client_ca_path) |
 | `listener.amqp.enabled` | bool | `false` | dc, global | - | rebind | Serve the amqp listener |
 | `listener.amqp.tenant` | text | `` | dc, global | - | live | Tenant of plain user names on the AMQP listeners |
 | `listener.amqp.tls` | text | `off` | dc, global | required, optional, off | rebind | TLS mode of the amqp listener: required, optional or off |
 | `listener.amqps.bind` | text | `0.0.0.0:5671` | dc, global | - | rebind | Address and port of the amqps listener |
 | `listener.amqps.cert` | text | `default` | dc, global | - | rebind | Certificate bundle of the amqps listener |
+| `listener.amqps.client_cert` | text | `off` | dc, global | required, optional, off | rebind | Client certificates on the amqps listener: off, optional or required (checked against tls.bundles.default.client_ca_path) |
 | `listener.amqps.enabled` | bool | `false` | dc, global | - | rebind | Serve the amqps listener |
 | `listener.amqps.tls` | text | `required` | dc, global | required, optional, off | rebind | TLS mode of the amqps listener: required, optional or off |
 | `listener.bolt.bind` | text | `0.0.0.0:7687` | dc, global | - | rebind | Address and port of the bolt listener |
 | `listener.bolt.cert` | text | `default` | dc, global | - | rebind | Certificate bundle of the bolt listener |
+| `listener.bolt.client_cert` | text | `off` | dc, global | required, optional, off | rebind | Client certificates on the bolt listener: off, optional or required (checked against tls.bundles.default.client_ca_path) |
 | `listener.bolt.enabled` | bool | `false` | dc, global | - | rebind | Serve the bolt listener |
 | `listener.bolt.tls` | text | `required` | dc, global | required, optional, off | rebind | TLS mode of the bolt listener: required, optional or off |
 | `listener.drain_seconds` | int | `600` | dc, global | 0 to 86400 | live | Grace before sessions of a stricter or retired listener close |
 | `listener.http.bind` | text | `0.0.0.0:8080` | dc, global | - | rebind | Address and port of the http listener |
 | `listener.http.cert` | text | `default` | dc, global | - | rebind | Certificate bundle of the http listener |
+| `listener.http.client_cert` | text | `off` | dc, global | required, optional, off | rebind | Client certificates on the http listener: off, optional or required (checked against tls.bundles.default.client_ca_path) |
 | `listener.http.enabled` | bool | `true` | dc, global | - | rebind | Serve the http listener |
 | `listener.http.tls` | text | `off` | dc, global | required, optional, off | rebind | TLS mode of the http listener: required, optional or off |
 | `listener.https.bind` | text | `0.0.0.0:8443` | dc, global | - | rebind | Address and port of the https listener |
 | `listener.https.cert` | text | `default` | dc, global | - | rebind | Certificate bundle of the https listener |
+| `listener.https.client_cert` | text | `off` | dc, global | required, optional, off | rebind | Client certificates on the https listener: off, optional or required (checked against tls.bundles.default.client_ca_path) |
 | `listener.https.enabled` | bool | `true` | dc, global | - | rebind | Serve the https listener |
 | `listener.https.tls` | text | `required` | dc, global | required, optional, off | rebind | TLS mode of the https listener: required, optional or off |
 | `listener.kafka.bind` | text | `0.0.0.0:9092` | dc, global | - | rebind | Address and port of the kafka listener |
 | `listener.kafka.cert` | text | `default` | dc, global | - | rebind | Certificate bundle of the kafka listener |
+| `listener.kafka.client_cert` | text | `off` | dc, global | required, optional, off | rebind | Client certificates on the kafka listener: off, optional or required (checked against tls.bundles.default.client_ca_path) |
 | `listener.kafka.enabled` | bool | `false` | dc, global | - | rebind | Serve the kafka listener |
 | `listener.kafka.tls` | text | `required` | dc, global | required, optional, off | rebind | TLS mode of the kafka listener: required, optional or off |
 | `listener.mariadb.bind` | text | `0.0.0.0:3307` | dc, global | - | rebind | Address and port of the mariadb listener |
 | `listener.mariadb.cert` | text | `default` | dc, global | - | rebind | Certificate bundle of the mariadb listener |
+| `listener.mariadb.client_cert` | text | `off` | dc, global | required, optional, off | rebind | Client certificates on the mariadb listener: off, optional or required (checked against tls.bundles.default.client_ca_path) |
 | `listener.mariadb.enabled` | bool | `true` | dc, global | - | rebind | Serve the mariadb listener |
 | `listener.mariadb.tls` | text | `required` | dc, global | required, optional, off | rebind | TLS mode of the mariadb listener: required, optional or off |
 | `listener.mongo.bind` | text | `0.0.0.0:27017` | dc, global | - | rebind | Address and port of the mongo listener |
 | `listener.mongo.cert` | text | `default` | dc, global | - | rebind | Certificate bundle of the mongo listener |
+| `listener.mongo.client_cert` | text | `off` | dc, global | required, optional, off | rebind | Client certificates on the mongo listener: off, optional or required (checked against tls.bundles.default.client_ca_path) |
 | `listener.mongo.enabled` | bool | `false` | dc, global | - | rebind | Serve the mongo listener |
 | `listener.mongo.tls` | text | `required` | dc, global | required, optional, off | rebind | TLS mode of the mongo listener: required, optional or off |
 | `listener.mysql.bind` | text | `0.0.0.0:3306` | dc, global | - | rebind | Address and port of the mysql listener |
 | `listener.mysql.cert` | text | `default` | dc, global | - | rebind | Certificate bundle of the mysql listener |
+| `listener.mysql.client_cert` | text | `off` | dc, global | required, optional, off | rebind | Client certificates on the mysql listener: off, optional or required (checked against tls.bundles.default.client_ca_path) |
 | `listener.mysql.enabled` | bool | `true` | dc, global | - | rebind | Serve the mysql listener |
 | `listener.mysql.tls` | text | `required` | dc, global | required, optional, off | rebind | TLS mode of the mysql listener: required, optional or off |
 | `listener.peer.bind` | text | `0.0.0.0:7403` | dc, global (operator only) | - | rebind | Address of the internal peer service (always mutual TLS); read at start |
 | `listener.redis.bind` | text | `0.0.0.0:6379` | dc, global | - | rebind | Address and port of the redis listener |
 | `listener.redis.cert` | text | `default` | dc, global | - | rebind | Certificate bundle of the redis listener |
+| `listener.redis.client_cert` | text | `off` | dc, global | required, optional, off | rebind | Client certificates on the redis listener: off, optional or required (checked against tls.bundles.default.client_ca_path) |
 | `listener.redis.enabled` | bool | `false` | dc, global | - | rebind | Serve the redis listener |
 | `listener.redis.tenant` | text | `` | dc, global | - | live | Tenant of plain user names on the Redis listener |
 | `listener.redis.tls` | text | `required` | dc, global | required, optional, off | rebind | TLS mode of the redis listener: required, optional or off |
+| `listener.tenant_sni_suffixes` | text | `` | dc, global | - | live | Tenant endpoints by TLS SNI: comma-separated DNS suffixes; <tenant>.<suffix> names the tenant |
 
 ## `logic`
 
@@ -563,7 +587,7 @@ Every setting SprigDB declares, with its default, the scopes that may set it, ha
 | `migration.min_improvement_ms` | int | `5` | tenant, dc, global (operator only) | 0 to 60000 | live | Absolute gain a move needs |
 | `migration.min_improvement_pct` | int | `30` | tenant, dc, global (operator only) | 0 to 100 | live | Relative gain a move needs |
 | `migration.min_signal_requests` | int | `1000` | dc, global (operator only) | 0 to 1000000000 | live | Weighted requests with DC ids needed before traffic counts |
-| `migration.mode` | text | `auto` | tenant, dc, global (operator only) | auto, approve, recommend, off | live | auto, approve, recommend (dry run) or off |
+| `migration.mode` | text | `auto` | tenant, dc, global (operator only) | auto, approve, recommend, off | live | auto, approve (held for approval), recommend (dry run) or off |
 | `migration.sustain_minutes` | float | `15` | tenant, dc, global (operator only) | 0 to 10080 | live | How long the candidate must hold |
 | `migration.window_minutes` | int | `30` | dc, global (operator only) | 1 to 1440 | live | Traffic window of the migration decision |
 | `migration.write_pause_target_ms` | int | `5000` | tenant, dc, global (operator only) | 200 to 60000 | live | Tenant-wide write-pause budget of a move between DCs |
@@ -607,7 +631,7 @@ Every setting SprigDB declares, with its default, the scopes that may set it, ha
 | `mover.ready_max_lag_ms` | int | `1000` | cluster, dc, global (operator only) | 1 to 600000 | live | Lag needed before cutover |
 | `mover.ready_sustain_seconds` | int | `60` | cluster, dc, global (operator only) | 0 to 86400 | live | How long that lag must hold |
 | `mover.recovery_rate_pct` | int | `25` | cluster, dc, global (operator only) | 1 to 100 | live | Copy rate, as a share of normal, while a cluster is recovering |
-| `mover.server_id_base` | int | `4000000000` | dc, global (operator only) | 1000000 to 4199999000 | live | First binlog client server id, R0 only (from R1 the feed allocates) |
+| `mover.server_id_base` | int | `4000000000` | dc, global (operator only) | 1000000 to 4199999000 | live | First binlog client server id of the mover's jobs (a job adds an offset from its id) |
 | `mover.source_retain_hours` | int | `24` | cluster, dc, global (operator only) | 0 to 8760 | live | Fenced source kept before drop |
 | `mover.throttle_apply_lag_ms` | int | `5000` | cluster, dc, global (operator only) | 1 to 86400000 | live | Stop copying when catch-up lags this much |
 | `mover.throttle_flow_control_pct` | int | `5` | cluster, dc, global (operator only) | 0 to 100 | live | Galera flow control threshold |
@@ -783,7 +807,7 @@ Every setting SprigDB declares, with its default, the scopes that may set it, ha
 | `sharding.merge_cooldown_hours` | float | `24` | tenant, dc, global (operator only) | 0 to 8760 | live | Minimum age of shards before they merge |
 | `sharding.merge_size_gb` | float | `4` | database, tenant, cluster, dc, global (operator only) | 0 to 65536 | live | Merge quiet neighbours both below this |
 | `sharding.min_shards` | int | `1` | database, tenant, global (operator only) | 1 to 4096 | live | Pre-split count per group |
-| `sharding.mode` | text | `on` | tenant, cluster, dc, global (operator only) | on, approve, recommend, off | live | Automatic split, merge and move: on, approve, recommend (log only) or off |
+| `sharding.mode` | text | `on` | tenant, cluster, dc, global (operator only) | on, approve, recommend, off | live | Automatic split, merge and move: on, approve (held for approval), recommend (log only) or off |
 | `sharding.retire_hours` | float | `24` | tenant, dc, global (operator only) | 0 to 8760 | live | Retired shards kept fenced before drop |
 | `sharding.split_size_gb` | float | `32` | database, tenant, cluster, dc, global (operator only) | 0 to 65536 | live | Split a shard above this size |
 | `sharding.split_sustain_minutes` | int | `30` | tenant, cluster, dc, global (operator only) | 1 to 10080 | live | ...for this long |
@@ -858,6 +882,7 @@ Every setting SprigDB declares, with its default, the scopes that may set it, ha
 | `stream.retention_bytes` | int | `0` | object, database, tenant, global | 0 to 9223372036854776000 | live | Size retention per partition; 0 = none |
 | `stream.retention_hours` | int | `168` | object, database, tenant, global | 1 to 87600 | live | Time retention of a stream's records |
 | `stream.sequencer_batch_ms` | int | `10` | dc, global | 0 to 10000 | live | Batching window of a stream sequencer |
+| `stream.sequencer_lag_alert_seconds` | int | `60` | dc, global | 1 to 86400 | live | Lag past which a stream sequencer counts as lagging |
 | `stream.tombstone_hours` | int | `24` | object, database, tenant, global | 0 to 87600 | live | How long tombstones stay on compacted streams |
 
 ## `studio`
@@ -916,6 +941,7 @@ Every setting SprigDB declares, with its default, the scopes that may set it, ha
 | Key | Type | Default | Scopes | Bounds | Applies | Description |
 |---|---|---|---|---|---|---|
 | `tls.bundles.default.cert_path` | text | `` | dc, global | - | live | PEM certificate chain of the default bundle, leaf first; watched for changes |
+| `tls.bundles.default.client_ca_path` | text | `` | dc, global | - | rebind | PEM CA certificates that sign client certificates (listener.<name>.client_cert); watched for changes |
 | `tls.bundles.default.key_path` | text | `` | dc, global | - | live | PEM private key of the default bundle; watched for changes |
 | `tls.min_version` | text | `1.2` | dc, global | 1.2, 1.3 | rebind | Lowest TLS version client listeners accept |
 
@@ -936,7 +962,7 @@ Every setting SprigDB declares, with its default, the scopes that may set it, ha
 | `txn.commit_resolve_timeout_ms` | int | `5000` | tenant, dc, global | 100 to 600000 | live | Longest wait for an unknown outcome |
 | `txn.distributed_lock_wait_timeout_seconds` | int | `10` | database, tenant, dc, global | 1 to 3600 | live | Lock-wait cap with two branches |
 | `txn.max_branches` | int | `32` | tenant, global | 2 to 1024 | live | Clusters per transaction |
-| `txn.non_xa_policy` | text | `reject` | tenant, dc, global | reject, best_effort, sprig_2pc | live | reject, best_effort or sprig_2pc (R3) |
+| `txn.non_xa_policy` | text | `reject` | tenant, dc, global | reject, best_effort, sprig_2pc | live | A write that adds a second cluster without XA: reject (error 39440), best_effort (each cluster commits on its own) or sprig_2pc (held branches: atomic, but if a gateway dies after the commit point other writers can change those rows before the replay) |
 | `txn.phase2_wait_ms` | int | `1000` | tenant, dc, global | 0 to 600000 | live | Longest COMMIT waits for phase 2 |
 | `txn.prepare_timeout_ms` | int | `5000` | tenant, cluster, dc, global | 100 to 600000 | live | Deadline for each prepare |
 | `txn.resolver_interval_seconds` | int | `10` | dc, global | 1 to 3600 | live | Resolver scan interval |

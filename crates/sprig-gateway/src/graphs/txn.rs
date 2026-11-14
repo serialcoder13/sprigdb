@@ -1,7 +1,6 @@
-//! Bolt transactions over a graph's shards (chapter 43, "Writes and
-//! transactions"; chapter 18).
+//! Bolt transactions over a graph's shards.
 //!
-//! - **Writes** run on chapter 18's coordinator: a [`TxnCoordinator`] whose
+//! - **Writes** run on the transaction coordinator: a [`TxnCoordinator`] whose
 //!   branches are [`GraphBranch`]es, pooled `sprig_ctl` connections of each
 //!   shard's cluster (the gateway's Bolt pool), at `bolt.isolation`. One
 //!   cluster commits locally; several commit with XA two-phase commit and a
@@ -85,11 +84,11 @@ pub(crate) struct GraphBranch {
     /// The statement layer wrote through it.
     pub(crate) wrote: bool,
     positions: Positions,
-    /// Sprig 2PC: a held branch's record of its writes (R8 round 5).
+    /// Sprig 2PC: a held branch's record of its writes.
     redo: Option<Redo>,
 }
 
-/// What a held branch wrote, for its redo rows (chapter 18, "Sprig 2PC").
+/// What a held branch wrote, for its redo rows (Sprig 2PC).
 #[derive(Debug, Default)]
 struct Redo {
     timestamp_us: u64,
@@ -234,7 +233,7 @@ pub(crate) struct GraphBackend {
     caps: Mutex<HashMap<ClusterId, ClusterCaps>>,
     /// `READ COMMITTED` or `REPEATABLE READ`.
     isolation: Mutex<&'static str>,
-    /// Chapter 18's `txn.*` settings for the next coordinator (round 5:
+    /// The `txn.*` settings for the next coordinator (for example
     /// `txn.non_xa_policy = sprig_2pc` holds branches on clusters without
     /// XA).
     config: Mutex<Option<TxnConfig>>,
@@ -286,7 +285,7 @@ impl GraphBackend {
         });
     }
 
-    /// Learns `cluster`'s capability profile (chapter 09's `derived.xa`).
+    /// Learns `cluster`'s capability profile (its `derived.xa`).
     async fn ensure_caps(&self, cluster: &ClusterId) {
         if self
             .caps
@@ -412,7 +411,7 @@ pub(crate) struct CoordConns<'a> {
     /// Shards written so far (epoch check at commit).
     pub(crate) touched: &'a mut Vec<Touched>,
     /// An auto-commit statement's graph: `CALL { } IN TRANSACTIONS`
-    /// commits its batches here (R8 round 8); `None` in an explicit
+    /// commits its batches here; `None` in an explicit
     /// transaction.
     pub(crate) batches: Option<(Arc<crate::graphs::GatewayGraphs>, crate::graphs::GraphRef)>,
 }
@@ -466,8 +465,8 @@ impl ShardConns for CoordConns<'_> {
     }
 
     /// A batch commits as the whole statement does: the written shards'
-    /// epochs checked against the map now, then chapter 18's commit (Sprig
-    /// 2PC across clusters); the coordinator then starts afresh.
+    /// epochs checked against the map now, then the coordinator's commit
+    /// (Sprig 2PC across clusters); the coordinator then starts afresh.
     async fn end_batch(&mut self, ok: bool) -> Result<()> {
         let Some((graphs, g)) = &self.batches else {
             return Err(sprig_graph::store::not_implicit());

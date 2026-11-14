@@ -1,11 +1,10 @@
-//! Search indexes in the tenant catalog (chapter 39, "Catalog tables";
-//! build step 1): the `search` catalog module.
+//! Search indexes in the tenant catalog: the `search` catalog module.
 //!
 //! - **Tables.** `search_indexes`, `search_fields` and `search_analyzers`
 //!   in `t<tenant>_sprig`, created by the module's migration the first
 //!   time a gateway needs them for a tenant.
 //! - **Objects.** A search index is an object of kind `search_index`
-//!   (chapter 08), whose parent is the indexed table or collection, so its
+//!   whose parent is the indexed table or collection, so its
 //!   id is an `objects.object_id`.
 //! - **Definitions.** `search_indexes.definition` holds the normalized
 //!   definition ([`IndexDef`] as JSON, with what was given); one

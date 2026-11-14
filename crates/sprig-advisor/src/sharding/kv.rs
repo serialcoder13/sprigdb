@@ -1,5 +1,4 @@
-//! Chapter 33's key-value tables in the advisor (decisions R28, R6 rounds
-//! 4 and 5).
+//! Key-value tables in the advisor.
 //!
 //! A Redis database or key-value namespace is one **unit**: its key table
 //! (`db0`, `cache`) and its element tables (`__sprig_ke_<t>`,
@@ -10,11 +9,11 @@
 //!   keeps the element tables unsharded; `SHARD KEY (cols)` makes them
 //!   `COLOCATE WITH` it on `cols`.
 //! - **No pin.** The unit is sharded only when one of the rules that shard
-//!   anything else holds (round 5, the lead's change to R28):
+//!   anything else holds:
 //!   - **`min_shards`:** its database's `sharding.min_shards` is above 1;
 //!   - **size:** its tables hold at least half of `sharding.split_size_gb`,
 //!     the advisor's unit for an expected shard;
-//!   - **load:** its database's shard is write-hot by chapter 20's rule
+//!   - **load:** its database's shard is write-hot by the split rule
 //!     (`sharding.split_write_share_pct` of its cluster's writes for
 //!     `sharding.split_sustain_minutes`, on a hot cluster) and the unit
 //!     takes at least that share of the database's recorded writes.
@@ -36,7 +35,7 @@ use sprig_shard::pins::{Pin, PinKind};
 use super::design::{Column, Input, Obj, Table, key_quality};
 use super::settings::AdvisorSettings;
 
-/// The distribution-key column of chapter 33's tables.
+/// The distribution-key column of the key-value tables.
 pub const KV_DK: &str = "_sprig_dk";
 
 /// One Redis database or key-value namespace.
@@ -58,7 +57,7 @@ pub struct KvUnit {
     pub write_share: f64,
     /// `sharding.min_shards` of its database (0 or 1: none asked).
     pub min_shards: u32,
-    /// Its database's shard is write-hot by chapter 20's load rule.
+    /// Its database's shard is write-hot by the split's load rule.
     pub write_hot: bool,
 }
 

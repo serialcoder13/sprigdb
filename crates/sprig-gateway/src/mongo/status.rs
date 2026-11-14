@@ -1,4 +1,4 @@
-//! Smaller MongoDB 8.1–9.0 reporting items (M4, decision S116):
+//! Smaller MongoDB 8.1–9.0 reporting items:
 //! `connectionStatus.authInfo.UUID` (8.1), `serverStatus` with `none: 1`
 //! (8.3) and its change-stream metrics (9.0), and change-stream cursors
 //! with their position for `currentOp`/`$currentOp` (9.0's
@@ -26,8 +26,8 @@ static LIFESPAN_AVERAGE: Mutex<Option<f64>> = Mutex::new(None);
 /// The weight of the newest lifespan in [`LIFESPAN_AVERAGE`].
 const LIFESPAN_ALPHA: f64 = 0.2;
 
-/// MongoDB 9.0's `metrics.changeStreams` option and error counters
-/// (bugfix-60), by path below `metrics.changeStreams`.
+/// MongoDB 9.0's `metrics.changeStreams` option and error counters, by
+/// path below `metrics.changeStreams`.
 fn counters() -> std::sync::MutexGuard<'static, HashMap<String, u64>> {
     static M: std::sync::OnceLock<Mutex<HashMap<String, u64>>> = std::sync::OnceLock::new();
     M.get_or_init(|| Mutex::new(HashMap::new()))
@@ -279,7 +279,7 @@ fn change_stream_metrics(c: &Conn) -> Document {
         .filter(|(_, cur)| cur.try_lock().is_err())
         .count();
     let closed = CLOSED.load(Ordering::Relaxed);
-    // MongoDB 9.0's names (bugfix-60): `average` is an exponential moving
+    // MongoDB 9.0's names: `average` is an exponential moving
     // average in µs, `totalCount` the streams closed.
     let average = LIFESPAN_AVERAGE
         .lock()
@@ -434,8 +434,8 @@ mod tests {
 
     use super::*;
 
-    /// bugfix-60 (S116's leftover): the option counters and histograms, and
-    /// the error counters, under MongoDB 9.0's names.
+    /// The option counters and histograms, and the error counters, under
+    /// MongoDB 9.0's names.
     #[test]
     fn change_stream_option_and_error_counters() {
         stream_options(

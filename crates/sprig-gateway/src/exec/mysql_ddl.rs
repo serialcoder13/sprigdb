@@ -1,6 +1,5 @@
 //! MySQL 8.4's answers to DDL that MariaDB answers differently, where the
-//! gateway has to read the table first (chapter 28, "DDL and types" and
-//! "Error mapping"; R4 round 6, gaps row 78). The statement analysis is
+//! gateway has to read the table first. The statement analysis is
 //! `sprig_sql::compat::mysqlddl`; this module does the lookups, through
 //! the session with logical names, as `fxindex` does.
 //!

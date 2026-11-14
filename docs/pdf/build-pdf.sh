@@ -17,5 +17,6 @@ pandoc build/docs.md \
   --columns 20 --wrap none \
   --to typst -o build/docs.typ
 out="build/SprigDB-Docs${version:+-$version}.pdf"
-typst compile build/docs.typ "$out"
+# The root is docs/, so the book can use the pages' images in docs/img/.
+typst compile --root .. build/docs.typ "$out"
 echo "Wrote $(pwd)/$out"

@@ -1,12 +1,10 @@
 //! Answers for the statements the gateway handles itself ([`Local`]):
 //! persona variables, `KILL` and `SHOW PROCESSLIST`, written to any
 //! [`ResultSink`]. The MySQL command loop and the HTTP `Sql` service share
-//! them, so both answer the same way (chapter 04, "Dispatch into the
-//! layers").
+//! them, so both answer the same way.
 //!
 //! `KILL` of a session on another gateway (its id carries another slot)
-//! goes through the peer service when the gateway has one (chapter 04,
-//! "Registration, KILL and write holds").
+//! goes through the peer service when the gateway has one.
 
 use sprig_common::ids::ConnId;
 use sprig_common::{Result, SprigError};
@@ -33,7 +31,7 @@ pub(crate) struct LocalEnv<'a> {
     pub(crate) status: StatusFlags,
     /// Other gateways, for `KILL` of their sessions.
     pub(crate) peers: Option<&'a crate::peer::Peers>,
-    /// The session holds `CONNECTION_ADMIN` (chapter 29, tenant-scoped):
+    /// The session holds `CONNECTION_ADMIN` (tenant-scoped):
     /// it may kill other users' sessions of its tenant, as MySQL 8.4
     /// allows with `CONNECTION_ADMIN` (or the old `SUPER`).
     pub(crate) connection_admin: bool,
@@ -108,7 +106,7 @@ async fn variables(
 }
 
 /// `KILL [CONNECTION | QUERY] id`. A session may kill sessions of its own
-/// user; with `CONNECTION_ADMIN` (chapter 29, decision bugfix-interim) any
+/// user; with `CONNECTION_ADMIN` any
 /// session of its tenant, never another tenant's (MySQL's rule, scoped to
 /// the tenant).
 async fn kill(
@@ -129,7 +127,7 @@ async fn kill(
     let not_owner =
         || SprigError::standard(1095, *b"HY000", format!("You are not owner of thread {id}"));
     let Some(target) = env.sessions.get(id) else {
-        // Another gateway's slot: ask it (chapter 04 step 10).
+        // Another gateway's slot: ask it.
         if crate::session::slot_of(id) != env.sessions.slot()
             && let (Some(peers), Some(user)) = (env.peers, user.as_deref())
         {
@@ -158,7 +156,7 @@ async fn kill(
     if row.tenant != tenant || !(same_user || admin) {
         return sink.error(&not_owner()).await;
     }
-    // The session's own statement (R4 round 6, gaps row 78): `KILL
+    // The session's own statement: `KILL
     // QUERY` interrupts the `KILL` itself, which fails with 1317 as on
     // MySQL and MariaDB; `KILL CONNECTION` closes the session and fails
     // with MySQL's 1317 or MariaDB's 1927.
@@ -182,7 +180,7 @@ async fn kill(
 }
 
 /// `SHOW [FULL] PROCESSLIST` and `COM_PROCESS_INFO`: this gateway's
-/// sessions of the same user (chapter 29's `PROCESS` privilege later).
+/// sessions of the same user (the `PROCESS` privilege isn't consulted yet).
 async fn process_list(
     full: bool,
     me: &Session,

@@ -1,12 +1,12 @@
-//! Input assembly (chapter 16, "Inputs and the window"; build step 1):
+//! Input assembly:
 //! tables, columns, keys, sizes and declared foreign keys from the
 //! tenant's schemas on its cluster; statements and transaction footprints
-//! from chapter 12's workload store in its catalog.
+//! from the workload store in its catalog.
 //!
 //! Before a first split every table of a logical database lives in the
 //! database's default-group shard schema, `t<tenant>_d<db>_g<g>_s<s>`, on
 //! the tenant's cluster; the catalog's `objects` rows give each table its
-//! object id. The tenant's pins come from chapter 15's `group_pins`.
+//! object id. The tenant's pins come from `group_pins`.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
@@ -136,7 +136,7 @@ async fn default_schemas(
 /// and assembles the whole input (columns, keys, statistics, stored
 /// code) only when the bound passes the split size, so an idle tenant
 /// costs a catalog read a pass instead of a dozen `information_schema`
-/// queries (R9, r9scale).
+/// queries.
 ///
 /// # Errors
 /// MariaDB's.
@@ -234,7 +234,7 @@ pub async fn tables(
             .await
             .map_err(|e| db_err("foreign keys", &e))?;
         for (name, bytes) in tbls {
-            // Chapter 33's element tables follow their key table
+            // Key-value element tables follow their key table
             // ([`kv_units`]); other internal tables stay out.
             if sprig_common::names::is_internal_object(&name) && kv_key_table(&name).is_none() {
                 continue;
@@ -321,7 +321,7 @@ pub async fn tables(
     Ok((tables, fks, located))
 }
 
-/// The key table of one of chapter 33's element tables (`__sprig_ke_<t>`,
+/// The key table of a key-value element table (`__sprig_ke_<t>`,
 /// `__sprig_kz_<t>`): `<t>`.
 #[must_use]
 pub fn kv_key_table(name: &str) -> Option<&str> {
@@ -331,7 +331,7 @@ pub fn kv_key_table(name: &str) -> Option<&str> {
     })
 }
 
-/// Chapter 33's units (decision R28): each key table with its element
+/// Key-value units: each key table with its element
 /// tables, sized. Element tables whose key table isn't in the input leave
 /// it. Distinct `_sprig_dk` values and write shares are filled later
 /// ([`kv_samples`], [`kv_write_shares`]).
@@ -453,12 +453,12 @@ pub fn kv_write_shares(tables: &[Table], stmts: &[Stmt], units: &mut [KvUnit]) {
     }
 }
 
-/// Which equality a fingerprint kind's joins use (chapter 22, "Comparison
-/// rules per query language"), for every model whose shapes the advisor
+/// Which equality a fingerprint kind's joins use, for every model whose
+/// shapes the advisor
 /// reads: SQL and what compiles to it (the Analytics API, REST and gRPC)
-/// use SQL's; MongoDB shapes (`$lookup`, recorded from R5) use MongoDB's.
-/// Key-value, Redis, vector, search and logic fingerprints carry no join
-/// edges yet (R5 and R6); `None` for them.
+/// use SQL's; MongoDB shapes (`$lookup`) use MongoDB's. Key-value, Redis,
+/// vector, search and logic fingerprints carry no join edges yet; `None`
+/// for them.
 #[must_use]
 pub fn join_rules(kind: FpKind) -> Option<Rules> {
     match kind {
@@ -612,9 +612,9 @@ pub async fn assemble(
         units.extend(u);
     }
     let catalog = SchemaName::catalog(tenant).to_string();
-    // Chapter 16's pins (empty before the `sharding` module's format 3).
+    // The tenant's pins (empty before the `sharding` module's format 3).
     let pins = PinStore.load(c, &catalog).await?;
-    // Chapter 33's units (decision R28): placed by the design's rule.
+    // Key-value units: placed by the design's rule.
     let mut kv = kv_units(&mut tables, &mut located);
     kv_samples(c, &located, &mut kv).await?;
     kv_write_shares(&tables, &stmts, &mut kv);
@@ -635,7 +635,7 @@ pub async fn assemble(
         kv,
         ..Input::default()
     };
-    // Decision bugfix-31: tables stored code names stay where the code
+    // Tables stored code names stay where the code
     // reads them.
     let code = super::code::read(c, tenant).await?;
     let rules = super::code::rules(&code, &located);

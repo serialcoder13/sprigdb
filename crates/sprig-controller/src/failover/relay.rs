@@ -1,5 +1,4 @@
-//! The relay's `RemoteMaps`, served side (chapter 23, "The relay"; step
-//! 11): every controller answers reads of its own DC tier's `shardmaps/`
+//! The relay's `RemoteMaps`, served side: every controller answers reads of its own DC tier's `shardmaps/`
 //! and `clusters/` for processes in other DCs (`sprig_meta::relay`'s
 //! client), on `[controller] internal_addr`. Nothing else of the tier is
 //! served, and nothing is written.

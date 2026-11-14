@@ -24,7 +24,7 @@ use sprig_catalog::{DirectoryAllocator, VersionKind, Versioner};
 use sprig_common::ids::{DbId, GroupId, ObjectId};
 use sprig_common::time::SystemClock;
 use sprig_meta::{MemStore, MetaStore, Tier};
-use sprig_settings::{AnySetting, HardBounds, Scopes, Setting, SettingsStores};
+use sprig_settings::{AnySetting, Apply, HardBounds, Scopes, Setting, SettingsStores};
 
 use super::*;
 use crate::tree::NewTenant;
@@ -860,7 +860,7 @@ async fn ancestors_and_a_tenants_rows() {
     );
 }
 
-/// Chapter 29's engine-switch guard on the Admin API: `auth.authorizer` is
+/// The authorizer engine-switch guard on the Admin API: `auth.authorizer` is
 /// refused with 39368 at every scope while a live gateway doesn't list the
 /// engine, and accepted once none is left that doesn't.
 #[tokio::test]

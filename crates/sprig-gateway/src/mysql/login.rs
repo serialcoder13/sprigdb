@@ -1,12 +1,12 @@
-//! Logins (chapter 14, "MySQL logins"; chapter 05 step 4): the gateway
-//! hands chapter 05's auth plugins a [`sprig_auth::MysqlLogin`] from the
+//! Logins: the gateway hands the MySQL auth plugins a
+//! [`sprig_auth::MysqlLogin`] from the
 //! process's [`LoginService`], for the handshake and for `COM_CHANGE_USER`.
 //!
 //! The service's source is the configuration switch (`[gateway]
 //! login_mode`): `catalog` resolves the tenant from the login name (or
 //! SNI on a tenant endpoint) and reads the account from the tenant's
-//! cached catalog, with chapter 14's policy order and sandbox mode;
-//! `accounts_file` is M0.2's interim file (decision D1), for raw clusters.
+//! cached catalog, with the login policy order and sandbox mode;
+//! `accounts_file` reads the accounts from a file, for raw clusters.
 //! Both run the same decoy for unknown accounts, the same fast cache and
 //! the same hashing slots.
 //!
@@ -24,7 +24,7 @@ use sprig_proto_mysql::{Caps, Persona};
 use crate::frontend::TlsInfo;
 
 /// What every login shares (the login source, the fast cache, the hashing
-/// slots): chapter 14's [`LoginService`].
+/// slots): the [`LoginService`].
 pub type LoginDeps = LoginService;
 
 /// The request for a login of `user` (as sent) from `peer`.

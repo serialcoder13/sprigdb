@@ -1,5 +1,4 @@
-//! The controller's live settings (chapter 23, "Settings: writes, bounds
-//! and watches"): the `global`, `dc` and `cluster` scopes mirrored from
+//! The controller's live settings: the `global`, `dc` and `cluster` scopes mirrored from
 //! etcd by [`LiveSettings`], and the [`ControlSettings`] snapshot the
 //! runtime reads, re-resolved after every change.
 //!
@@ -45,7 +44,7 @@ pub async fn start(
         () = shutdown.cancelled() => return Ok(None),
         () = live.ready() => {}
     }
-    // bugfix-62 (Q39): no start with a commit-resolve window the resolver
+    // No start with a commit-resolve window the resolver
     // could sweep under.
     sprig_txn::settings::check_live(&live, dc)?;
     let first = ControlSettings::resolve(&live.snapshot(), dc);

@@ -1,5 +1,5 @@
 //! Table-driven DDL classification per statement form and persona (the
-//! gateway side of chapter 08 build step 10): every statement runs through
+//! gateway side of catalog DDL): every statement runs through
 //! the walker, `Engine::Auto` and, where sqlparser-rs models it,
 //! `Engine::Ast`; all three must give the same [`DdlTarget`].
 //!
@@ -281,8 +281,8 @@ fn databases() {
             "ALTER DATABASE `crm` CHAR SET utf8mb4 READ ONLY = 1",
             "AlterDatabase crm charset=utf8mb4 other=[READ]",
         ),
-        // A setting write, not DDL (chapter 08 step 8, not built): no
-        // target. Its dotted key is a position the walker doesn't read yet.
+        // A setting write, not DDL: no target. Its dotted key is a position
+        // the walker doesn't read yet.
         (
             X,
             "ALTER DATABASE crm SPRIG SET (doc.wildcard_index = 'on')",

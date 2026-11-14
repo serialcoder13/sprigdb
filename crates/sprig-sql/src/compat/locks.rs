@@ -1,5 +1,4 @@
-//! User-level locks per tenant (chapter 28, "MariaDB persona" item 5 and
-//! "Output on port 3306", build step 14).
+//! User-level locks per tenant.
 //!
 //! `GET_LOCK('jobs', 10)` names a lock in the server's one namespace, so
 //! two tenants on the same cluster would wait on each other's locks (and
@@ -229,8 +228,8 @@ pub fn rewrite(sql: &[u8], opts: &LexOptions, prefix: &str) -> Option<Vec<u8>> {
 /// The text of a stored program or view as the client wrote it: every
 /// scoped lock name ([`rewrite`]'s `CONCAT('t<id>:', LEFT(SHA2(..), 50))`)
 /// back to its argument, and the column alias the rewrite added dropped
-/// (R4 round 3: `SHOW CREATE` and `information_schema` showed the tenant's
-/// internal id). `None` when there is nothing to undo.
+/// (otherwise `SHOW CREATE` and `information_schema` would show the
+/// tenant's internal id). `None` when there is nothing to undo.
 #[must_use]
 pub fn unscope(text: &str) -> Option<String> {
     if !text.contains("CONCAT('t") || !text.contains(", 256), 50))") {

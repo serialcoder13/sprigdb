@@ -1,5 +1,4 @@
-//! Change exchanges filtered per change (chapter 50, "Change feed to an
-//! exchange"; chapter 29, RLS round 5, decision RL52):
+//! Change exchanges filtered per change by row-level security:
 //! `ALTER TABLE t SPRIG SET (queue.change_exchange = 'x')` publishes each
 //! committed change of `t` to exchange `x`, as the user who set it, with
 //! routing key `<db>.<t>.<op>` and the change envelope as the body. A user

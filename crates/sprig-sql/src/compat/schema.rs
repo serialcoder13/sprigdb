@@ -1,7 +1,6 @@
-//! The core `information_schema` providers and `SHOW` rewrites per persona
-//! (chapter 28, "Compatibility views"; build step 4).
+//! The core `information_schema` providers and `SHOW` rewrites per persona.
 //!
-//! Chapter 07's inline views ([`crate::names::infoschema`]) already turn
+//! The name layer's inline views ([`crate::names::infoschema`]) already turn
 //! every `information_schema` reference into a derived table over the
 //! backend's view, restricted to the tenant's schemas. This module gives
 //! those derived tables the persona's shape:
@@ -27,7 +26,7 @@
 //!   ([`mysql_create_table`]).
 //!
 //! Everything else keeps MariaDB's shape, which matches MySQL's for the
-//! other tables chapter 07 maps.
+//! other tables the name layer maps.
 
 use std::fmt::Write as _;
 
@@ -44,7 +43,7 @@ use crate::names::show::ShowInfo;
 /// Where one column of a persona-shaped view comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Src {
-    /// The backend's column of this name, mapped as chapter 07 maps it.
+    /// The backend's column of this name, mapped as the name layer maps it.
     Col(&'static str),
     /// An SQL expression over the backend's columns.
     Sql(String),
@@ -149,10 +148,10 @@ fn fx_expression(lit: Lit<'_>) -> String {
     )
 }
 
-/// `SHOW CREATE TABLE` text with functional key parts written back as
-/// MySQL writes them (3306, before chapter 07's filter hides `_sprig_`
-/// columns): each key's `` `_sprig_fx_..` `` part becomes `(expr)` and the
-/// hidden column's line goes.
+/// `SHOW CREATE TABLE` text with functional key parts written back as MySQL
+/// writes them (3306, before the name layer's filter hides `_sprig_` columns):
+/// each key's `` `_sprig_fx_..` `` part becomes `(expr)` and the hidden
+/// column's line goes.
 #[must_use]
 pub fn mysql_functional_parts(text: &str) -> String {
     if !text.contains(super::fxindex::FX_PREFIX) {
@@ -174,7 +173,7 @@ pub fn mysql_functional_parts(text: &str) -> String {
         let Some(v) = body.rfind(") VIRTUAL") else {
             continue;
         };
-        // R4 round 4: MySQL's printing (gaps row 64).
+        // MySQL's printing.
         let raw = &body[1..v];
         let e = super::exprprint::mysql_expr(raw, super::exprprint::table_charset(text))
             .unwrap_or_else(|| raw.replace("lcase(", "lower(").replace("ucase(", "upper("));
@@ -219,11 +218,10 @@ fn column_type(expr: &str, lit: Lit<'_>) -> String {
 /// `COLUMN_DEFAULT` as MySQL shows it: literals unquoted, no default and
 /// `DEFAULT NULL` both `NULL`, `CURRENT_TIMESTAMP` in capitals.
 ///
-/// R4 round 6 (gaps row 78): a literal's escapes are undone as well
-/// (MariaDB writes a newline `\n`, a carriage return `\r` and a backslash
-/// `\\`; MySQL shows the characters), and `localtimestamp(n)`, which an
-/// expression default `(now(n))` becomes on 3306 ([`super::mysqlddl`]),
-/// reads `now(n)`.
+/// A literal's escapes are undone as well (MariaDB writes a newline `\n`, a
+/// carriage return `\r` and a backslash `\\`; MySQL shows the characters), and
+/// `localtimestamp(n)`, which an expression default `(now(n))` becomes on 3306
+/// ([`super::mysqlddl`]), reads `now(n)`.
 fn column_default(lit: Lit<'_>) -> String {
     let d = "`COLUMN_DEFAULT`";
     // A backslash first becomes NUL, which MariaDB never leaves raw in the
@@ -282,7 +280,7 @@ fn extra(lit: Lit<'_>) -> String {
 
 /// MySQL 8.4's columns of an `information_schema` table whose shape
 /// differs from MariaDB 11.8's, with where each comes from. `None`: the
-/// shapes match (or the table isn't one chapter 07 maps).
+/// shapes match (or the table isn't one the name layer maps).
 #[must_use]
 #[allow(clippy::too_many_lines)] // one column list per table
 pub fn mysql_view(table: &str, lit: Lit<'_>) -> Option<Vec<(&'static str, Src)>> {
@@ -401,7 +399,7 @@ pub fn mysql_view(table: &str, lit: Lit<'_>) -> Option<Vec<(&'static str, Src)>>
                     lit("YES")
                 )),
             ));
-            // Functional key parts (R4 round 3, [`super::fxindex`]):
+            // Functional key parts ([`super::fxindex`]):
             // no column, and the expression (see [`fx_join`]).
             v[7] = (
                 "COLUMN_NAME",
@@ -783,7 +781,7 @@ pub fn is_show_engines(text: &[u8]) -> bool {
     }
 }
 
-/// `SHOW ENGINES` on 3306 (gaps row 48): MySQL 8.4's engines, names and
+/// `SHOW ENGINES` on 3306: MySQL 8.4's engines, names and
 /// comments, in its order, with `Support` from the backend's own
 /// `ENGINES` table: an engine MariaDB doesn't have reads `NO` (and `NULL`
 /// for the three capability columns, as MySQL shows a missing one), so
@@ -823,11 +821,11 @@ pub fn show_engines_sql(lit: Lit<'_>) -> Vec<u8> {
 }
 
 /// `SHOW COLLATION [LIKE 'p' | WHERE e]` on 3306 as a query over the
-/// MySQL-shaped `COLLATIONS` view ([`local_view`]), ordered by name as
-/// MySQL lists them, with MySQL's seven columns. MariaDB's own `SHOW
-/// COLLATION` also lists its 184 bare `uca1400_*` names with a `NULL` id,
-/// which MySQL Connector/J reads as a number (`ResultSetTest.testPadding`;
-/// gaps row 54). `None` when `text` isn't such a statement.
+/// MySQL-shaped `COLLATIONS` view ([`local_view`]), ordered by name as MySQL
+/// lists them, with MySQL's seven columns. MariaDB's own `SHOW COLLATION` also
+/// lists its 184 bare `uca1400_*` names with a `NULL` id, which MySQL
+/// Connector/J reads as a number (`ResultSetTest.testPadding`). `None` when
+/// `text` isn't such a statement.
 #[must_use]
 pub fn show_collation_sql(text: &[u8], lit: Lit<'_>) -> Option<Vec<u8>> {
     let t = text.trim_ascii();
@@ -1142,8 +1140,8 @@ fn mysql_collations(s: &str) -> String {
 }
 
 /// `SHOW CREATE DATABASE` text as MySQL 8.4 prints it on 3306: MySQL's
-/// collation names and its `/*!80016 DEFAULT ENCRYPTION='N' */` (R4 round
-/// 6; Rails reads the collation to decide which columns' it dumps).
+/// collation names and its `/*!80016 DEFAULT ENCRYPTION='N' */` (Rails reads
+/// the collation to decide which columns' it dumps).
 #[must_use]
 pub fn mysql_create_database(text: &str) -> String {
     let mut out = mysql_collations(text);
@@ -1201,7 +1199,7 @@ fn mysql_column_line(line: &str) -> String {
 /// default, in parentheses (`DEFAULT (curdate())`), with `localtimestamp`
 /// (what `DEFAULT (now())` becomes on 3306, [`super::mysqlddl`]) read
 /// `now`. MariaDB prints a lone function call without them. The special
-/// `CURRENT_TIMESTAMP` default stays as it is (R4 round 6, gaps row 78).
+/// `CURRENT_TIMESTAMP` default stays as it is.
 fn expression_default(rest: &str) -> String {
     let Some(at) = rest.find(" DEFAULT ") else {
         return rest.to_owned();
@@ -1266,7 +1264,7 @@ pub fn mysql_create_table(text: &str) -> String {
     if !text.starts_with("CREATE TABLE") && !text.starts_with("CREATE TEMPORARY TABLE") {
         return text.to_owned();
     }
-    // Generated columns' NOT NULL checks (R4 round 3, [`super::ddl`]): the
+    // Generated columns' NOT NULL checks ([`super::ddl`]): the
     // check line goes, the column says NOT NULL again.
     let mut not_null: Vec<String> = Vec::new();
     let kept: Vec<&str> = text
@@ -1319,7 +1317,7 @@ pub fn mysql_create_table(text: &str) -> String {
             prev.pop();
         }
     }
-    // R4 round 4: expressions printed the MySQL way (gaps row 62).
+    // Expressions printed the MySQL way.
     super::exprprint::mysql_expressions(&mysql_collations(&lines.join("\n")))
 }
 

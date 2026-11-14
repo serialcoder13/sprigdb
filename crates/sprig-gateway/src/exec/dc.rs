@@ -1,4 +1,4 @@
-//! Chapter 24 in the executor: `SET @sprig_dc` and the traffic counts (see
+//! DC routing in the executor: `SET @sprig_dc` and the traffic counts (see
 //! [`crate::dc`]).
 
 use sprig_common::{Result, SprigCode};
@@ -54,7 +54,7 @@ impl PassSession {
     }
 
     /// Counts a tenant statement as a read or a write from the session's
-    /// client DC (chapter 24, "Aggregating traffic statistics").
+    /// client DC.
     pub(super) fn count_traffic(&mut self, cx: &ExecCtx<'_>, req: &Request) {
         let Some(ts) = self.tenant.as_deref() else {
             return;

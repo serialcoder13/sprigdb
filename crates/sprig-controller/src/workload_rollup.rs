@@ -1,4 +1,4 @@
-//! Chapter 12's rollup and retention job (build step 4), as a DC-leader
+//! The workload store's rollup and retention job, as a DC-leader
 //! loop over the tenants homed here.
 //!
 //! Every [`INTERVAL`] each active tenant's workload tables are maintained
@@ -10,9 +10,8 @@
 //! fingerprints not seen within the retention. Each batch is one
 //! transaction, so a failed run is rerun from where it stopped.
 //!
-//! Where this differs from the book: chapter 12 runs it as a worker job;
-//! there is no worker job runtime yet, so the DC leader runs it, like
-//! chapter 13's builds. Settings are resolved at global and dc scope;
+//! It is meant to run as a worker job; there is no worker job runtime for
+//! it yet, so the DC leader runs it, like automatic indexing's builds. Settings are resolved at global and dc scope;
 //! tenant-scope values of the tenant keys wait for the job to read each
 //! catalog's settings.
 

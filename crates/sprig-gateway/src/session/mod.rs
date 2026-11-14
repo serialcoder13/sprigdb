@@ -1,4 +1,4 @@
-//! Sessions (chapter 04, "Session"; build step 5): the [`Session`] a
+//! Sessions: the [`Session`] a
 //! connection task owns, the [`SessionTable`] behind `SHOW PROCESSLIST` and
 //! `KILL`, connection-id allocation, the connection task wrapper with panic
 //! isolation ([`SessionTable::run`]) and client-disconnect detection
@@ -56,8 +56,8 @@ pub const MAX_SLOT: u16 = (1 << SLOT_BITS) - 1;
 /// The largest counter value.
 pub const MAX_COUNTER: u32 = (1 << COUNTER_BITS) - 1;
 
-/// The connection id for `slot` and `counter`: `slot << 20 | counter`
-/// (chapter 04: a 32-bit MySQL connection id).
+/// The connection id for `slot` and `counter`: `slot << 20 | counter`, a
+/// 32-bit MySQL connection id.
 ///
 /// # Panics
 /// Never: both parts are masked to their widths.
@@ -81,7 +81,7 @@ pub const fn counter_of(id: ConnId) -> u32 {
     id.0 & MAX_COUNTER
 }
 
-/// Where a session is in its life (chapter 04, "State machines").
+/// Where a session is in its life.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SessionState {
     /// Accepted; the protocol handshake is running.
@@ -116,7 +116,7 @@ impl fmt::Display for SessionState {
     }
 }
 
-/// Who a session logged in as: chapter 14's principal (tenant, user id,
+/// Who a session logged in as: the principal (tenant, user id,
 /// host, sandbox flag, backend target). Accounts-file logins have no
 /// tenant.
 pub use sprig_auth::Principal;
@@ -124,18 +124,18 @@ pub use sprig_auth::Principal;
 /// Why a session was asked to close at its next safe point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseReason {
-    /// The gateway is draining (chapter 04, "Drain"): 39000.
+    /// The gateway is draining: 39000.
     Drain,
-    /// The session's listener moved, was disabled or tightened (chapter 04,
-    /// "Live listener changes"): 39004.
+    /// The session's listener moved, was disabled or tightened (a live
+    /// listener change): 39004.
     ListenerRetired,
-    /// The session's account was dropped or locked (chapter 14,
-    /// `auth.close_sessions_on_revoke`): 39306.
+    /// The session's account was dropped or locked
+    /// (`auth.close_sessions_on_revoke`): 39306.
     Revoked,
-    /// A distributed `COMMIT`'s outcome is unknown (chapter 18): 39441.
+    /// A distributed `COMMIT`'s outcome is unknown: 39441.
     OutcomeUnknown,
-    /// The session's tenant (or an ancestor) was suspended (chapter 14,
-    /// "Suspension"; `auth.close_sessions_on_revoke`): 39306.
+    /// The session's tenant (or an ancestor) was suspended
+    /// (`auth.close_sessions_on_revoke`): 39306.
     Suspended,
 }
 
@@ -188,8 +188,8 @@ impl CloseReason {
     }
 }
 
-/// The kill and close requests other tasks make of a session (chapter 04:
-/// `kill_query`, `kill_conn`, `close_at_safe_point`).
+/// The kill and close requests other tasks make of a session:
+/// `kill_query`, `kill_conn`, `close_at_safe_point`.
 #[derive(Debug, Default)]
 pub struct SessionFlags {
     kill_query: AtomicBool,
@@ -240,8 +240,7 @@ impl SessionFlags {
     }
 
     /// Ask the session to close at its next safe point: between statements
-    /// and outside a transaction (chapter 04). The first reason given is
-    /// kept.
+    /// and outside a transaction. The first reason given is kept.
     pub fn close_at_safe_point(&self, reason: CloseReason) {
         let _ = self.close_at_safe_point.compare_exchange(
             0,
@@ -266,8 +265,8 @@ impl SessionFlags {
 
     /// Resolves once a close at the next safe point is asked for (or the
     /// connection is killed). A front end waiting idle for the next command
-    /// selects on it, so an idle session closes at once (chapter 04, "Drain"
-    /// step 3).
+    /// selects on it, so an idle session closes at once when the gateway
+    /// drains.
     pub async fn close_wanted(&self) {
         loop {
             let notified = self.wake.notified();
@@ -305,7 +304,7 @@ struct Activity {
     info: Option<String>,
     since: Option<Instant>,
     tenant: Option<TenantId>,
-    /// The logged-in catalog user, for revocation (chapter 14).
+    /// The logged-in catalog user, for revocation.
     user_id: Option<UserId>,
 }
 
@@ -439,12 +438,11 @@ pub struct ProcessRow {
     pub listener_gen: u64,
 }
 
-/// One client session, owned by its connection task (chapter 04,
-/// "Session"). It leaves the [`SessionTable`] when it is dropped and, under
+/// One client session, owned by its connection task. It leaves the [`SessionTable`] when it is dropped and, under
 /// [`SessionTable::run`], when the connection task ends.
 ///
 /// Fields whose types arrive with later steps are placeholders (`Option<()>`,
-/// always `None`), each naming the chapter that defines it.
+/// always `None`), each naming the type it will hold.
 pub struct Session {
     /// The connection id: `slot << 20 | counter`.
     pub id: ConnId,
@@ -457,35 +455,33 @@ pub struct Session {
     pub tls: Option<TlsInfo>,
     /// The listener generation at accept.
     pub listener_gen: u64,
-    /// The client's DC, a placement hint only (chapter 24).
+    /// The client's DC, a placement hint only.
     pub client_dc: Option<DcId>,
-    /// Who the session logged in as (interim; see [`Principal`]).
+    /// Who the session logged in as (see [`Principal`]).
     pub principal: Option<Principal>,
-    /// TODO(chapter 08): `TenantHandle`, an `Arc` snapshot of the tenant
-    /// catalog (M0.3).
+    /// TODO: `TenantHandle`, an `Arc` snapshot of the tenant catalog.
     pub tenant: Option<()>,
-    /// TODO(chapter 06): `SessionVars`, the tracked session variables.
+    /// TODO: `SessionVars`, the tracked session variables.
     pub vars: Option<()>,
-    /// TODO(chapter 18): `TxnState`.
+    /// TODO: `TxnState`.
     pub txn: Option<()>,
-    /// TODO(chapter 06): `PinSet`, what pins the session to a backend
+    /// TODO: `PinSet`, what pins the session to a backend
     /// connection.
     pub pins: Option<()>,
-    /// TODO(chapter 06): `BackendLease`, the leased backend connection.
+    /// TODO: `BackendLease`, the leased backend connection.
     pub backend: Option<()>,
-    /// TODO(chapter 04 step 7): `MemCharge`, memory charged to the gateway,
+    /// TODO: `MemCharge`, memory charged to the gateway,
     /// tenant and user.
     pub mem: Option<()>,
     /// Statements the front end answered itself (`SELECT @@version_comment`,
     /// `KILL`, `SHOW PROCESSLIST`), and how many were `SELECT`s: counted
-    /// in the session's `SHOW STATUS` (gaps row 46).
+    /// in the session's `SHOW STATUS`.
     pub local_questions: u64,
     /// See [`Self::local_questions`].
     pub local_selects: u64,
     /// The MySQL client's connection attributes (`_client_name`,
     /// `program_name`, ...), as kept after `gateway.max_connect_attrs_bytes`:
-    /// 3306's `performance_schema.session_connect_attrs` (chapter 28, R4
-    /// round 4).
+    /// 3306's `performance_schema.session_connect_attrs`.
     pub connect_attrs: Vec<(String, String)>,
     state: SessionState,
     handle: Arc<SessionHandle>,
@@ -542,7 +538,7 @@ impl Session {
         &self.handle
     }
 
-    /// The kill and close flags (chapter 04's `flags`).
+    /// The kill and close flags.
     #[must_use]
     pub fn flags(&self) -> &SessionFlags {
         &self.handle.flags

@@ -1,6 +1,6 @@
-//! The `tree_settings` loop (chapter 08 step 6) over the in-memory catalog
-//! and a `MemStore` directory: the writing guide's `a → b → c` example
-//! (12.16: "if b changes later and c didn't override, c gets it"), bounds
+//! The `tree_settings` loop over the in-memory catalog and a `MemStore`
+//! directory: the `a → b → c` example (if b changes later and c didn't
+//! override, c gets it), bounds
 //! set by an ancestor, moves, gaps, unsupported modes, which directory
 //! events count, and the loop end to end: a change at an ancestor reaches
 //! a descendant within seconds.

@@ -255,7 +255,11 @@ impl Clusters for SimClusters {
         self.world.record(format!(
             "feed dump {} from {seq} ({})",
             if src { "src" } else { "tgt" },
-            if scope.only.is_some() { "catch-up" } else { "shared" }
+            if scope.only.is_some() {
+                "catch-up"
+            } else {
+                "shared"
+            }
         ));
         Ok(Box::new(SimTxns {
             db: self.db.clone(),

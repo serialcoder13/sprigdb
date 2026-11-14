@@ -826,7 +826,10 @@ pub async fn execute(cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome>
     // full (39970); reads and SET ROLE don't.
     if !matches!(
         stmt,
-        AccountStmt::FlushPrivileges | AccountStmt::SetRole(_) | AccountStmt::ShowGrants { .. }
+        AccountStmt::FlushPrivileges
+            | AccountStmt::SetRole(_)
+            | AccountStmt::ShowGrants { .. }
+            | AccountStmt::ShowCreateUser { .. }
     ) {
         sprig_common::audit::check_available()?;
     }
@@ -1177,6 +1180,7 @@ pub async fn execute(cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome>
         AccountStmt::ShowGrants { account, using } => {
             return show_grants(cx, &state, account.as_ref(), using);
         }
+        AccountStmt::ShowCreateUser { account } => return show_create_user(cx, account),
     }
     // Chapter 29: every grant and role change is an audit event (users'
     // own events come from chapter 14's `AccountOps` above). Only changes
@@ -1508,7 +1512,7 @@ async fn alter_users(
         }
         if let Some(r) = options.require {
             version = keep(
-                admin::set_require(cx.catalog, cx.tenant, id, r, options.require_dn.clone())
+                ops.set_require(id, &acc.name, &acc.host, r, options.require_dn.clone())
                     .await?,
             );
         }
@@ -1519,7 +1523,7 @@ async fn alter_users(
             );
         }
         if let Some(a) = attribute_patch(options)? {
-            version = keep(admin::merge_attributes(cx.catalog, cx.tenant, id, a).await?);
+            version = keep(ops.merge_attributes(id, &acc.name, &acc.host, a).await?);
         }
         if !options.default_roles.is_empty() {
             let granted = state.granted_roles(id);
@@ -1705,6 +1709,42 @@ fn show_grants(
     Ok(Outcome::Grants {
         header: format!("Grants for {}@{}", acc.name, acc.host),
         lines,
+    })
+}
+
+/// `SHOW CREATE USER`: the account as MySQL 8.4 (3306) or MariaDB (3307)
+/// prints it, never with a password hash or verifier (chapter 14, "Never
+/// shown"). The session's own account always; another needs `CREATE USER`
+/// (MySQL also accepts `SELECT` on `mysql.user`, which tenants never
+/// hold), as `SHOW GRANTS` does. An unknown account fails with 1396.
+fn show_create_user(cx: &AccountCtx<'_>, account: &UserSpec) -> Result<Outcome> {
+    let acc = cx.spec(account);
+    let own = acc.name == cx.user_name && acc.host.eq_ignore_ascii_case(cx.user_host);
+    if !own && !cx.has_tenant(Action::CreateUser) {
+        return Err(match cx.persona {
+            Persona::MySql84 => table_denied(
+                cx.persona,
+                "SELECT",
+                cx.user_name,
+                cx.client_host,
+                "mysql",
+                "user",
+            ),
+            Persona::MariaDb => db_denied(cx.user_name, cx.user_host, "mysql"),
+        });
+    }
+    let row = cx.auth().and_then(|a| {
+        a.accounts(&acc.name)
+            .iter()
+            .find(|u| u.row.host.eq_ignore_ascii_case(&acc.host))
+            .map(|u| u.row.clone())
+    });
+    let Some(row) = row else {
+        return Err(cannot("SHOW CREATE USER", &[acc.to_string()]));
+    };
+    Ok(Outcome::Grants {
+        header: format!("CREATE USER for {}@{}", acc.name, acc.host),
+        lines: vec![show::create_user(&row, cx.persona)],
     })
 }
 

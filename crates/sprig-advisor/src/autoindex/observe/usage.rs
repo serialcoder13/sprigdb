@@ -1,4 +1,4 @@
-//! Decision O1: an index is removed by how its table is used, never by how
+//! An index is removed by how its table is used, never by how
 //! much time has passed. The pure part: reads counted, the usage ratio,
 //! the value check, periodic jobs, and the regression check while an index
 //! is `IGNORED`.
@@ -209,7 +209,7 @@ pub fn judge(
     }
     m.ratio = f(m.served) / f(m.reads);
     let floor = rules.min_usage_ratio * f(m.reads);
-    // Strictly less (Kiran, decision O1): an index on a table nobody
+    // Strictly less: an index on a table nobody
     // writes costs no write time, so even an unused one is kept there.
     if f(m.served) >= floor || m.saved_ms + m.periodic_saved_ms >= m.write_cost_ms {
         return (UsageVerdict::Keep, m);

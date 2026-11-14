@@ -1,13 +1,12 @@
-//! Tenant sessions follow their tenant's map (chapter 10, "Cutover";
-//! chapter 04's side of the hold; chapter 24, "Sessions during cutover"):
-//! while a mover cutover holds the map, a statement that would start new
-//! work waits (until the hold clears or its deadline passes); once the map
+//! Tenant sessions follow their tenant's map: while a mover cutover holds
+//! the map, a statement that would start new work waits (until the hold
+//! clears or its deadline passes); once the map
 //! points at another cluster, the session's backend moves there. A
 //! transaction left open on the old cluster is lost with its connection
 //! and reported as 1213, like any lost connection.
 //!
 //! The map followed is the one in the tenant's home DC, wherever this
-//! gateway is (chapter 24's remote homes; see
+//! gateway is (remote homes; see
 //! [`GatewayLocator`](crate::tenant::locator::GatewayLocator)). For a move
 //! between DCs:
 //!
@@ -20,7 +19,7 @@
 //! - every other session moves transparently: `USE`, variables and
 //!   prepared statements are replayed on the new home's connections.
 //!
-//! **A DC failover holds too (RL13, r2harden).** From the promotion's
+//! **A DC failover holds too.** From the promotion's
 //! commit point the directory names the new home, whose map stays
 //! `standby` until the promotion has drained the copy (its job reached
 //! the old home's last position), given the tenant's accounts their
@@ -41,10 +40,10 @@ use super::PassSession;
 const MAX_WAIT: Duration = Duration::from_secs(10);
 
 /// The longest one statement waits for a promotion to make the new home
-/// writable (RL13).
+/// writable.
 pub(super) const PROMOTION_HOLD: Duration = MAX_WAIT;
 
-/// Placement checks a session keeps per map generation (perf1, S148): a
+/// Placement checks a session keeps per map generation: a
 /// statement whose tenant's map mirror is at the generation the last
 /// check saw skips the work that check did. Every change to a map (a hold,
 /// a cutover, a split, a promotion) bumps the generation, and the home DC
@@ -87,7 +86,7 @@ fn now_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
-/// 1205 for a statement held past the cutover's deadline (chapter 24).
+/// 1205 for a statement held past the cutover's deadline.
 fn held_too_long() -> SprigError {
     SprigError::standard(
         1205,
@@ -97,7 +96,7 @@ fn held_too_long() -> SprigError {
     )
 }
 
-/// 1205 for a statement held past [`PROMOTION_HOLD`] (RL13): the tenant's
+/// 1205 for a statement held past [`PROMOTION_HOLD`]: the tenant's
 /// new home is still catching up; nothing was sent to it.
 fn promotion_held_too_long() -> SprigError {
     SprigError::standard(
@@ -116,7 +115,7 @@ impl PassSession {
         };
         let tenant = ts.tenant;
         let locator = ts.services().locator.clone();
-        // S148: nothing changed since the last statement found nothing to
+        // Nothing changed since the last statement found nothing to
         // wait for.
         let (home0, gen0) = locator.maps_generation(tenant);
         if let Some((d, g, c)) = &self.placement_memo.followed
@@ -135,7 +134,7 @@ impl PassSession {
             let Some(p) = locator.placement_followed(tenant).await else {
                 return Ok(()); // no map copy yet: route as before
             };
-            // RL13: a promotion is still draining the new home's copy. A
+            // A promotion is still draining the new home's copy. A
             // `quarantined` map is a home left behind (a move between DCs,
             // a failover) until the directory names the new one (read at
             // most once a second): wait for it too rather than answer

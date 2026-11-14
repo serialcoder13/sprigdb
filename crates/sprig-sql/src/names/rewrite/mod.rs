@@ -1,5 +1,4 @@
-//! The statement rewrite (chapter 07, "Statement rewrite"; build steps 2
-//! and 3).
+//! The statement rewrite.
 //!
 //! [`rewrite`] edits the client's text instead of regenerating SQL: it
 //! replaces only the tokens that name a logical database, and the calls it
@@ -19,17 +18,16 @@
 //!    dotted name in the text is accounted for by the AST; otherwise the
 //!    walker's stands. [`StatementInfo::engine`] says which one ran.
 //!
-//! Fail-closed rules (chapter 07, "Failure handling"): an unknown database
-//! is 1049; a qualified name in a position the rewriter does not
-//! understand is 39051, never forwarded unrewritten; a reference to a
-//! reserved `__sprig_` object fails as missing, a `_sprig_` column as 1054,
-//! and creating either is 39050.
+//! Fail-closed rules: an unknown database is 1049; a qualified name in a
+//! position the rewriter does not understand is 39051, never forwarded
+//! unrewritten; a reference to a reserved `__sprig_` object fails as missing, a
+//! `_sprig_` column as 1054, and creating either is 39050.
 //!
-//! String literals are never rewritten, with one exception: the SQL text
-//! of `PREPARE ... FROM '...'` and MariaDB's `EXECUTE IMMEDIATE '...'`,
-//! which is rewritten as a statement of its own. Schema names in
-//! `information_schema` filters are handled by step 5's inline views; this
-//! module only reports the system-schema references it sees
+//! String literals are never rewritten, with one exception: the SQL text of
+//! `PREPARE ... FROM '...'` and MariaDB's `EXECUTE IMMEDIATE '...'`, which is
+//! rewritten as a statement of its own. Schema names in `information_schema`
+//! filters are handled by the inline views ([`super::infoschema`]); this module
+//! only reports the system-schema references it sees
 //! ([`StatementInfo::system_refs`]).
 
 pub(crate) mod ast;
@@ -52,9 +50,8 @@ pub use subst::sql_string;
 /// The walker is the default: it is about ten times faster than parsing
 /// with sqlparser-rs (1.6 µs against 20 µs for a typical 240-byte
 /// qualified `SELECT`, release build), and the differential tests hold the
-/// two to the same answers. [`Engine::Auto`] runs the AST path as chapter
-/// 07 describes it, for shadow checking or once the router (R1) parses
-/// every statement anyway.
+/// two to the same answers. [`Engine::Auto`] runs the AST path, for shadow
+/// checking or once the router parses every statement anyway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Engine {
     /// The AST path where sqlparser-rs parses the statement and accounts for
@@ -446,12 +443,12 @@ fn apply_edits(src: &[u8], edits: &[Edit]) -> Vec<u8> {
     out
 }
 
-/// The reverse of [`rewrite`] for the schema names: every identifier
-/// token that is one of the tenant's physical schemas becomes its logical
-/// name, backquoted. Used for text that comes back from MariaDB with
-/// physical names in it (view bodies, `SHOW CREATE` output) and to check
-/// round trips. Physical names of other tenants and the tenant catalog are
-/// left alone (output mapping, step 7, replaces those with `?`).
+/// The reverse of [`rewrite`] for the schema names: every identifier token that
+/// is one of the tenant's physical schemas becomes its logical name,
+/// backquoted. Used for text that comes back from MariaDB with physical names
+/// in it (view bodies, `SHOW CREATE` output) and to check round trips. Physical
+/// names of other tenants and the tenant catalog are left alone (output mapping
+/// replaces those with `?`).
 ///
 /// String literals are untouched, as in [`rewrite`].
 #[must_use]

@@ -1,5 +1,4 @@
-//! A statement's trace and its SLI on a running gateway (chapter 47 steps 2
-//! and 3, milestone M0.7): a statement slower than `telemetry.trace_slow_ms`
+//! A statement's trace and its SLI on a running gateway: a statement slower than `telemetry.trace_slow_ms`
 //! (500 ms by default) is kept by tail sampling, and `/debug/traces` on the
 //! telemetry port shows its `gateway.request` root with a `backend.query`
 //! child naming the cluster; `sprig_gateway_statements_total` counted it.

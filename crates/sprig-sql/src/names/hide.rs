@@ -1,6 +1,5 @@
-//! Hiding internal objects (chapter 07, "Hiding and reserved objects";
-//! build step 8): what a session may see, the `SHOW CREATE TABLE` line
-//! filter, `CREATE TABLE ... LIKE`, and the original text of routines.
+//! Hiding internal objects: what a session may see, the `SHOW CREATE TABLE`
+//! line filter, `CREATE TABLE ... LIKE`, and the original text of routines.
 //!
 //! | Object | Hidden from | Shown by |
 //! |---|---|---|
@@ -207,7 +206,7 @@ fn classify(line: &str) -> Line<'_> {
     Line::Other(line)
 }
 
-/// The `SHOW CREATE TABLE` line filter (chapter 07). MariaDB prints one
+/// The `SHOW CREATE TABLE` line filter. MariaDB prints one
 /// column, key or constraint per line between `CREATE TABLE ... (` and
 /// `) ENGINE=...`; this drops the lines `vis` hides (columns, indexes and
 /// foreign keys on hidden columns, checks naming them, automatic indexes,
@@ -262,7 +261,7 @@ fn filter_lines(text: &str, mut drop: impl FnMut(&Line<'_>) -> bool) -> String {
     out
 }
 
-/// The statement `CREATE TABLE new LIKE old` runs as (chapter 07):
+/// The statement `CREATE TABLE new LIKE old` runs as:
 /// `head` is the client's statement up to the `LIKE` (or the `(` before
 /// it), already rewritten (``CREATE TABLE IF NOT EXISTS `t42_d1_g1_s1`.new``),
 /// and `create_text` the `Create Table` value of `SHOW CREATE TABLE old`.

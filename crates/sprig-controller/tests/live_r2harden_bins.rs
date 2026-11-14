@@ -1,8 +1,8 @@
-//! R2 hardening with the real binaries (r2harden): writes held while a
-//! DC failover drains the new home (RL13), a mover's fence never reaching
-//! clients as 1146 or 1049 (RL14), a promoted standby carrying the
-//! tenant's triggers, events, views and routines (RL12), and tenant-scope
-//! settings in the sharding loop (RL3).
+//! Failover and mover hardening with the real binaries: writes held while
+//! a DC failover drains the new home, a mover's fence never reaching
+//! clients as 1146 or 1049, a promoted standby carrying the tenant's
+//! triggers, events, views and routines, and tenant-scope settings in the
+//! sharding loop.
 //!
 //! ```sh
 //! cargo build -p sprigdb -p sprigctl
@@ -14,15 +14,15 @@
 //! each with its own controller, gateway, worker, agent and 768 MB
 //! `mariadb:11.8`; delay proxies make fra1-ams1 30 ms and sin1 120 ms):
 //!
-//! 1. RL12: S has a trigger, a view, a procedure and an event at fra1; its
+//! 1. Stored programs: S has a trigger, a view, a procedure and an event at fra1; its
 //!    standby streams in ams1; a second trigger and a row are added at
 //!    home: the copy gets the row, no trigger, and its event disabled.
-//! 2. RL14 and RL3: T (readers and writers through all three gateways,
+//! 2. Fences and tenant settings: T (readers and writers through all three gateways,
 //!    prepared statements) moves fra1 -> ams1 -> sin1 -> ams1 while G (a
 //!    tenant whose own `sharding.min_shards = 2` and `advisor.mode = off`
 //!    shard it) splits twice under load: no client sees 1146 or 1049,
 //!    nothing acknowledged is lost.
-//! 3. RL13 and RL12: fra1 frozen, S promoted to ams1 under writes from
+//! 3. Held writes and stored programs: fra1 frozen, S promoted to ams1 under writes from
 //!    fra1, ams1 and sin1: no client sees 1142, the gateways held
 //!    statements, and on ams1's binlog every client write comes after the
 //!    job's last; the promoted copy has both triggers, the event enabled,
@@ -56,7 +56,7 @@ const ROOT_PW: &str = "sprig-r2harden-root";
 const REPL_PW: &str = "sprig-r2harden-repl";
 const APP_PW: &str = "sprig-r2harden-app";
 const DEPLOYMENT: &str = "sprigdb-r2harden";
-/// Rules 8b and 8f: the tenant-id base, `R2HARDEN_TENANT_BASE`, chosen
+/// The tenant-id base, `R2HARDEN_TENANT_BASE`, chosen
 /// at the moment of the run above every `t<id>` on the dev clusters
 /// (13301, 13311, 13321) and checked there by the caller; only this
 /// test's own containers hold these schemas.
@@ -524,7 +524,7 @@ struct Tally {
     ack_ms: Vec<(u64, u64)>,
     /// (when, ms; code) per failed write.
     err_ms: Vec<(u64, String)>,
-    /// The first message per error code (bugfix3: what a code meant).
+    /// The first message per error code (what a code meant).
     first: BTreeMap<String, String>,
 }
 
@@ -586,7 +586,7 @@ async fn job_state(store: &dyn MetaStore, dc: &str, job: &str) -> Value {
         .unwrap_or_default()
 }
 // ============================================================================
-// r2last: delay proxies, paced clients, settings
+// Delay proxies, paced clients, settings
 // ============================================================================
 
 /// A TCP proxy on `listen` to `upstream` that holds every chunk `half`
@@ -870,7 +870,7 @@ async fn user_and_schema(sprigctl: &Path, dc: &str, t: &str) {
 }
 
 // ============================================================================
-// r2harden: metrics, binlog order, stored programs
+// Metrics, binlog order, stored programs
 // ============================================================================
 
 /// `GET path` on `port`, the body.
@@ -911,7 +911,7 @@ async fn metric_lines(port: u16, prefix: &str) -> Vec<String> {
         .collect()
 }
 
-/// RL13's proof on the promoted copy: in its binlog, where the last
+/// The held-writes proof on the promoted copy: in its binlog, where the last
 /// transaction the standby job applied to `schema`.la is (the job writes
 /// its position row, `__sprig_mover_pos`, in each) and where the first
 /// transaction writing it without that row is (a client's, through a
@@ -1081,7 +1081,7 @@ async fn paced_g(
     }
 }
 
-/// Errors that must never reach a client (RL13, RL14).
+/// Errors that must never reach a client (held writes, fences).
 fn forbidden(t: &Tally) -> Vec<(String, u64)> {
     t.errors
         .iter()
@@ -1111,7 +1111,7 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
         return;
     };
     let Some(base) = tenant_base() else {
-        eprintln!("set R2HARDEN_TENANT_BASE (rule 8f) first");
+        eprintln!("set R2HARDEN_TENANT_BASE (above every tenant id on the dev clusters) first");
         return;
     };
     let work = std::env::temp_dir().join(format!("r2harden-{}", std::process::id()));
@@ -1413,7 +1413,7 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
         let id = v["tenant"]["tenant_id"].as_u64().expect("tenant id");
         assert!(
             (base..base + 100_000).contains(&id),
-            "rule 8f: {id} outside this deployment's range"
+            "tenant id range: {id} outside this deployment's range"
         );
         ids.insert(t.to_owned(), id);
         user_and_schema(&sprigctl, "fra1", t).await;
@@ -1425,7 +1425,7 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
     }
 
     // =====================================================================
-    // 1. RL12: S's stored programs, then its standby in ams1
+    // 1. S's stored programs, then its standby in ams1
     // =====================================================================
     let s_schema = scalar(
         &root_url(fra1_port),
@@ -1522,9 +1522,9 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
     );
 
     // =====================================================================
-    // 2. RL14 and RL3: moves of T and splits of G under load
+    // 2. Moves of T and splits of G under load
     // =====================================================================
-    // G: two shards from the start, by its own settings (RL3: the sharding
+    // G: two shards from the start, by its own settings (the sharding
     // loop reads tenant-scope sharding.* and advisor.*).
     tenant_setting(&sprigctl, "fra1", "r2h-g", "advisor.mode", "off").await;
     // An empty table has no distinct values to judge a key by.
@@ -1551,19 +1551,18 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
         }
         assert!(
             set_at.elapsed() < Duration::from_secs(300),
-            "RL3: G's tenant-scope sharding.min_shards = 2 never split it: {:?}",
+            "tenant settings: G's tenant-scope sharding.min_shards = 2 never split it: {:?}",
             ctl(&sprigctl, "fra1", &["shard", "list", "r2h-g"])
         );
         tokio::time::sleep(Duration::from_secs(2)).await;
     };
     eprintln!(
-        "2. RL3: G's tenant-scope sharding.min_shards = 2, advisor.mode = off and advisor.min_ndv_per_shard = 0: group {gid} has shards {first:?} {:?} after the set",
+        "2. tenant settings: G's tenant-scope sharding.min_shards = 2, advisor.mode = off and advisor.min_ndv_per_shard = 0: group {gid} has shards {first:?} {:?} after the set",
         set_at.elapsed()
     );
     // G's load and splits run only with `R2HARDEN_SPLITS` set. They were
     // off while every prepared statement of a tenant the sharding loop's
-    // first design had regrouped got 1146 (decision H9, r2-failover.md);
-    // bugfix3 fixed that (bugfix-7, bugfix-interim.md).
+    // first design had regrouped got 1146; that has since been fixed.
     let splits = std::env::var_os("R2HARDEN_SPLITS").is_some();
     // One statement of G through each gateway before the load.
     for d in DCS {
@@ -1692,13 +1691,13 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
     );
     assert!(
         forbidden(&tt).is_empty(),
-        "RL14: T's clients saw {:?}",
+        "fences: T's clients saw {:?}",
         forbidden(&tt)
     );
     // G's checks are reported at the end, so part 3 runs either way.
     let mut late: Vec<String> = Vec::new();
     if !forbidden(&gt).is_empty() {
-        late.push(format!("RL14: G's clients saw {:?}", forbidden(&gt)));
+        late.push(format!("fences: G's clients saw {:?}", forbidden(&gt)));
     }
     // G's acknowledged appends: each on the shard schema its row is in.
     {
@@ -1741,7 +1740,7 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
     }
 
     // =====================================================================
-    // 3. RL13 and RL12: fra1 frozen, S promoted to ams1
+    // 3. With fra1 frozen, S promoted to ams1
     // =====================================================================
     let recorded = count(
         &ams1_url,
@@ -1750,7 +1749,7 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
         ),
     )
     .await;
-    eprintln!("3. RL12: {recorded} statements recorded on the copy for S's promotion");
+    eprintln!("3. stored programs: {recorded} statements recorded on the copy for S's promotion");
     let s_stop = Arc::new(AtomicBool::new(false));
     let s_tally = Arc::new(Mutex::new(Tally::default()));
     let mut s_clients = workload(
@@ -1833,7 +1832,7 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
     );
     let (gap, longest) = gaps(&st, window.0, window.1);
     eprintln!(
-        "3. RL13: {acked} acknowledged appends, {} lost, {} unknown; errors {:?}; statements held by the promotion {} ({hold_lines:?}); longest gap between acknowledged writes {gap} ms, longest write {longest} ms",
+        "3. held writes: {acked} acknowledged appends, {} lost, {} unknown; errors {:?}; statements held by the promotion {} ({hold_lines:?}); longest gap between acknowledged writes {gap} ms, longest write {longest} ms",
         lost.len(),
         st.unknown,
         st.errors,
@@ -1841,27 +1840,27 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
     );
     let (last_job, first_client) = binlog_order(&ams1_url, &s_schema).await;
     eprintln!(
-        "3. RL13: on ams1's binlog, the job's last write at {last_job:?}, the first client write at {first_client:?}"
+        "3. held writes: on ams1's binlog, the job's last write at {last_job:?}, the first client write at {first_client:?}"
     );
     assert!(lost.is_empty(), "acknowledged appends lost: {lost:?}");
     assert!(
         forbidden(&st).is_empty(),
-        "RL13: S's clients saw {:?}",
+        "held writes: S's clients saw {:?}",
         forbidden(&st)
     );
     assert!(
         holds - holds_before > 0.0,
-        "RL13: the promotion held statements"
+        "held writes: the promotion held statements"
     );
     if let (Some(j), Some(c)) = (&last_job, &first_client) {
         assert!(
             c > j,
-            "RL13: a client write reached the copy before the job's last write"
+            "held writes: a client write reached the copy before the job's last write"
         );
     } else {
         panic!("binlog order not found: {last_job:?} {first_client:?}");
     }
-    // RL12: the promoted copy carries S's triggers, enabled event, view
+    // The promoted copy carries S's triggers, enabled event, view
     // and routine; a trigger fires on a write through ams1's gateway.
     let trig = count(
         &ams1_url,
@@ -1900,7 +1899,7 @@ async fn bins_r2harden_holds_fences_and_stored_programs() {
     )
     .await;
     eprintln!(
-        "3. RL12: on the promoted copy: {trig} triggers, ev_one {ev:?}, view {view}, procedure {proc_n}; a new row's tag after insert and update: {tag:?}"
+        "3. stored programs: on the promoted copy: {trig} triggers, ev_one {ev:?}, view {view}, procedure {proc_n}; a new row's tag after insert and update: {tag:?}"
     );
     assert_eq!(trig, 2, "both triggers on the promoted copy");
     assert_eq!(

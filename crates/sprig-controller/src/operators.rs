@@ -1,5 +1,5 @@
-//! Named platform operators (chapter 14, "Operators"; chapter 23's global
-//! tier; chapter 47's audit): the people who run the platform log in as
+//! Named platform operators, kept in the global tier and audited: the
+//! people who run the platform log in as
 //! themselves, hold a role, and issue their own tokens.
 //!
 //! - **Directory**: `/sprig/g/operators/<name>` (account, verifier, sealed
@@ -150,7 +150,7 @@ pub struct OperatorRecord {
     /// `active` or `disabled`.
     #[serde(default)]
     pub state: OperatorState,
-    /// Chapter 14's `caching_sha2_password` verifier.
+    /// The `caching_sha2_password` verifier.
     pub verifier: String,
     /// When the password was last set.
     #[serde(default)]
@@ -1067,8 +1067,8 @@ impl Operators {
     }
 
     /// `Login` from the client address `addr` (the TCP peer, or the
-    /// caller's address a gateway relayed under its service identity,
-    /// ST47), which the audit events record.
+    /// caller's address a gateway relayed under its service identity),
+    /// which the audit events record.
     ///
     /// # Errors
     /// As [`Self::login`].

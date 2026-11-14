@@ -745,7 +745,7 @@ fn ocx<'a>(
 
 const DAY: Duration = Duration::from_secs(86_400);
 
-/// Decision O1: over 200 reads (`usage_sample_reads` 100) none uses our
+/// Over 200 reads (`usage_sample_reads` 100) none uses our
 /// index: ignored at once, and dropped once 100 more reads ran with
 /// nothing slower. No clock is moved. The user's indexes on the same table
 /// are never touched by this path.
@@ -904,7 +904,7 @@ impl WorkloadSource for Scripted {
     }
 }
 
-/// Decision O1 for user indexes: the primary key, a `UNIQUE` index and a
+/// User indexes: the primary key, a `UNIQUE` index and a
 /// foreign key's index are never tracked; a used one is kept; an unused
 /// one is ignored, watched by reads and dropped, then recreated from its
 /// saved definition; a rarely used one is brought back when a query it
@@ -1446,7 +1446,7 @@ async fn lock_queue_kills_a_waiting_build_single() {
     .await;
 }
 
-/// Chapter 52: a removal gate that holds until told to go, and records
+/// A removal gate that holds until told to go, and records
 /// what was reported.
 struct HoldingGate {
     go: AtomicBool,
@@ -1474,8 +1474,8 @@ impl crate::autoindex::observe::RemovalGate for HoldingGate {
     }
 }
 
-/// Chapter 52 (decision AP14): under `approve` an unused automatic index
-/// isn't ignored or dropped until the gate lets it go; the next judgement
+/// Under `approve` an unused automatic index isn't ignored or dropped
+/// until the gate lets it go; the next judgement
 /// proposes it again, and the approved removal goes ahead and is reported.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unused_index_waits_for_its_approval() {

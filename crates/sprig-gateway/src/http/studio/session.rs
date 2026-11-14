@@ -1,15 +1,13 @@
-//! Token sessions for browser logins (chapter 14, "SprigDB tokens and
-//! sessions"; chapter 44, "Login and the session").
+//! Token sessions for browser logins.
 //!
-//! Since Studio round 2 (decision ST1's alternative, built) the sessions
-//! are chapter 14's: `sprig_auth::token`. Access tokens are `EdDSA` JWS
-//! signed with this gateway's key, whose public half is published in the
-//! global tier, so any gateway in any DC verifies them; sessions live in
-//! the tenant catalog's `token_sessions`, so any gateway refreshes them and
-//! a refresh token used twice is caught wherever the two uses land. A
-//! gateway restart signs nobody out. Logins that don't come from a tenant
-//! catalog (the accounts file, tests) keep their sessions in memory
-//! ([`MemorySessions`]).
+//! The sessions are SprigDB's signed-token sessions: `sprig_auth::token`.
+//! Access tokens are `EdDSA` JWS signed with this gateway's key, whose
+//! public half is published in the global tier, so any gateway in any DC
+//! verifies them; sessions live in the tenant catalog's `token_sessions`,
+//! so any gateway refreshes them and a refresh token used twice is caught
+//! wherever the two uses land. A gateway restart signs nobody out. Logins
+//! that don't come from a tenant catalog (the accounts file, tests) keep
+//! their sessions in memory ([`MemorySessions`]).
 
 pub use sprig_auth::token::{ACCESS_PREFIX, Issued, Limits, MemorySessions, Verified};
 use sprig_common::SprigError;

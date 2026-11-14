@@ -112,7 +112,7 @@ Every protocol runs the same checks, in MySQL's order, and shares the counters:
 - A wrong password, an unknown user and an unknown tenant all fail the same way, so a probe can't tell which.
 - Failed logins count per account and address across protocols. After `auth.delay_after_failures` (3) failures in a row, further attempts are delayed; with `auth.failed_login_attempts` set, the account locks temporarily.
 - An address with more than `auth.ip_failures_per_minute` (30) failures a minute on a gateway is refused for `auth.ip_block_seconds` (300).
-- `ACCOUNT LOCK`, expired passwords, `REQUIRE SSL` and a suspended tenant are refused on every protocol. Client-certificate requirements are checked on MySQL, MariaDB, MongoDB and Redis, and `REQUIRE X509` on Kafka; accounts with them can't log in on the other protocols.
+- `ACCOUNT LOCK`, expired passwords, `REQUIRE SSL` and a suspended tenant are refused on every protocol. Client-certificate requirements (`REQUIRE X509`, `SUBJECT`, `ISSUER`) are checked on every protocol too, against the certificate the connection presented, when the listener asks for one (`listener.<name>.client_cert`).
 - Dropping or locking a user closes their open sessions at their next safe point (`auth.close_sessions_on_revoke`).
 
 See [Accounts and logins](../security/accounts-and-logins.md).

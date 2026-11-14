@@ -1,7 +1,7 @@
-//! The leak suite (chapter 07 build step 10, started here): every
-//! captured MariaDB output and message goes through the plan's mapper for
-//! the statement a client of tenant 9999 would have sent, and no byte the
-//! client sees may hold a physical name. Local answers are checked too.
+//! The leak suite: every captured MariaDB output and message goes through the
+//! plan's mapper for the statement a client of tenant 9999 would have sent, and
+//! no byte the client sees may hold a physical name. Local answers are checked
+//! too.
 
 #![allow(clippy::unwrap_used, missing_docs)]
 

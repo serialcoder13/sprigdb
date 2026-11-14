@@ -1,4 +1,4 @@
-//! Tenant bootstrap and deletion (chapter 08 step 9).
+//! Tenant bootstrap and deletion.
 //!
 //! The unit case runs without a server: placement is recorded before the
 //! catalog is touched. The live case needs `SPRIG_TEST_MARIADB_SINGLE`
@@ -9,10 +9,10 @@
 //! schemas `__sprig_test_tenant_<pid>_<tag>_<id>`, dropped afterwards, also
 //! when the case fails.
 //!
-//! The live case covers create (root, child, grandchild), interim
-//! placement (requested and fewest tenants), re-runs, a bootstrap left
-//! half done, the `tree_settings` copy over MariaDB, the M0.3 "done when"
-//! (an object-scope change takes effect within seconds; a value outside
+//! The live case covers create (root, child, grandchild), placement
+//! (requested and fewest tenants), re-runs, a bootstrap left half done,
+//! the `tree_settings` copy over MariaDB, settings taking effect (an
+//! object-scope change takes effect within seconds; a value outside
 //! its bounds is refused) and deletion with its guard.
 
 #![allow(
@@ -356,7 +356,7 @@ fn retaining_job(id: &str, tenant: TenantId) -> sprig_mover::JobRecord {
     serde_json::from_value(v).unwrap()
 }
 
-/// Regression (decision TD9): a tenant moved within the last 24 hours
+/// Regression: a tenant moved within the last 24 hours
 /// waits for its move job to drop the old copy. The tenant loop looks
 /// again within seconds ([`CLEANUP_JOBS_RECHECK`]), not after the 30 s of
 /// a blocked key, which outlasted `gateway-dev.sh down`'s wait: the
@@ -506,7 +506,7 @@ async fn live_bootstrap_tree_settings_and_delete() {
         .unwrap();
     with_env(pools, Some(&url), |env| async move {
         let registry = Registry::global().unwrap();
-        // Create a → b → c, with interim placement.
+        // Create a → b → c.
         let a = env.create("a", None, None).await.unwrap();
         assert!(a.created);
         assert_eq!(a.tenant.state, "active");
@@ -671,7 +671,7 @@ async fn live_bootstrap_tree_settings_and_delete() {
             Value::Int(20)
         );
 
-        // M0.3 "done when": an object-scope change takes effect within
+        // Settings take effect: an object-scope change takes effect within
         // seconds; a value outside its bounds is refused.
         let (shop, orders) = (DbId(1), ObjectId(1));
         let mut ch = env
@@ -778,7 +778,7 @@ async fn live_bootstrap_tree_settings_and_delete() {
 }
 
 /// Ids are never reused, and bootstrap never adopts a catalog schema an
-/// earlier tenant with the same id left behind (chapter 23): a new id is
+/// earlier tenant with the same id left behind: a new id is
 /// raised past the catalogs on the clusters; a schema found anyway (the
 /// counter behind, a cluster unread) is refused unless it carries this
 /// tenant's mark, and deleting the refused tenant leaves it alone.

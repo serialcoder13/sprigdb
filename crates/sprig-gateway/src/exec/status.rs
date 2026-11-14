@@ -1,5 +1,4 @@
-//! Per-session status counters (chapter 28, "Output on port 3306", R4
-//! round 3; gaps rows 46 and 61).
+//! Per-session status counters.
 //!
 //! A client's backend connections are pooled: MariaDB's session counters
 //! (`Com_select`, `Questions`, ...) count every session that ever used the
@@ -11,7 +10,7 @@
 //! rows ([`super::relay::ConnStatus`]).
 //!
 //! `Uptime` is the gateway's, the same number `COM_STATISTICS` reports
-//! (gaps row 61: PDO's server info and `SHOW STATUS` disagreed), and
+//! (otherwise PDO's server info and `SHOW STATUS` disagree), and
 //! `Prepared_stmt_count` is the session's open prepared statements: a
 //! tenant sees no other session's.
 

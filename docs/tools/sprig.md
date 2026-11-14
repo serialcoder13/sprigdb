@@ -357,6 +357,10 @@ The exit code is `sprigctl`'s.
 
 Run `sprig` on a terminal of at least 60 columns by 16 rows. The top line holds the tabs: one or more query tabs, table view tabs, then the fixed screens Dashboard, Admin and Inbox (the Inbox shows how many items wait). The bottom line shows the profile, the gateway, the database, `[txn]` while a transaction is open, and the main keys.
 
+Until you run a statement, the results pane shows the keys to start with:
+
+![The sprig TUI: tabs along the top, the explorer with the shop database open on the left, the SQL editor, and a results pane that lists Ctrl-K, F5 and F1](../img/sprig/tui-welcome.png)
+
 ```text
  ❯ 1 sql shop │ ◔ Dashboard │ ◈ Admin │ ⚑ Inbox
 ┌ Explorer ──────────────┐┌ Editor [sql] ────────────────────────────────┐
@@ -380,6 +384,8 @@ Each query tab has the explorer on the left, an editor and the results.
 - **Editor.** Syntax highlighting for the tab's language, and completion with `Tab` (keywords and the names the explorer has loaded; `Up`/`Down` and `Enter` to choose). `F4` switches the language between SQL, Redis, Cypher and MongoDB. `F5` or `Ctrl-R` runs the statement at the cursor; `Enter` after a `;` at the end of the text runs everything typed; `Alt-Enter` adds a new line.
 - **Results.** `F3` switches between a grid, a folding JSON tree (documents, Redis replies) and a graph view (Cypher nodes, relationships and paths). `[` and `]` move between the results of a script. `Enter` shows a whole value, or folds JSON. `Ctrl-E` exports the shown result to a file in the current directory, `sprig-<seconds>.<ext>`: press `c` for CSV, `j` JSON, `n` NDJSON or `t` TSV.
 
+![A query tab after a run: the results grid shows column names and types, three rows with the first selected, and the row count and time in the pane's title](../img/sprig/tui-grid.png)
+
 History is kept per profile in `history/<profile>` in the configuration directory (mode 0600), up to `history_size` entries; `Ctrl-Up` and `Ctrl-Down` walk it. Statements are redacted before they are written: string literals after words such as `IDENTIFIED BY`, `PASSWORD`, `SECRET`, `TOKEN` and `CREDENTIALS` become `'***'`, and words that look like API keys or session tokens (`sprig_…`, `sprigat_…`, `sprigrt_…`) become `***`. A statement whose secrets can't be found reliably is kept only as a placeholder.
 
 ### Saved queries
@@ -389,6 +395,8 @@ History is kept per profile in `history/<profile>` in the configuration director
 ### The command palette
 
 `Ctrl-K` or `Ctrl-P` opens one search over the open tabs, the screens, the tables the explorer has loaded, your saved queries and history, and commands (new tab, help, export, reload, quit). Type part of a name; `Enter` opens the choice and `Esc` closes the palette. A saved query or history entry is put in the editor, not run.
+
+![The sprig command palette with "ord" typed, listing the orders and order_items tables of shop and the Dashboard screen](../img/sprig/tui-palette.png)
 
 ### The table view
 

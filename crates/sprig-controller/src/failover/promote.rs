@@ -1,4 +1,4 @@
-//! Promotion and epochs (chapter 25, "Promotion and epochs").
+//! Promotion and epochs.
 //!
 //! ```text
 //! promote(T, Y), a tenant_promote job in Y's tier:
@@ -48,8 +48,7 @@ pub trait PromoteHooks: Send + Sync {
 
 /// Hooks for a controller in a two-tier deployment: promotions into its
 /// own DC run here; into any other DC they stop at the commit point and
-/// that DC's `tenant_promote` loop finishes them (chapter 25, "Promotion
-/// and epochs": "a `tenant_promote` job in Y's tier").
+/// that DC's `tenant_promote` loop finishes them.
 pub struct TwoTierHooks {
     /// The hooks for this DC.
     pub inner: Arc<dyn PromoteHooks>,
@@ -235,7 +234,7 @@ pub async fn promote(
                 e.home_dc, e.epoch
             )));
         }
-        // Chapter 26: the commit compares this entry's revision, so the
+        // Residency: the commit compares this entry's revision, so the
         // residency read here is the one in force at the commit point.
         if !e.residency_allows(to) {
             return Ok(Promoted::Skipped(format!(
@@ -389,8 +388,7 @@ pub async fn promote_maps(dc: &dyn MetaStore, tenant: TenantId, epoch: u64) -> R
     Ok(n)
 }
 
-/// A returning DC's side (chapter 25, "A returning server or DC stays
-/// fenced"): every map of the tenant in this tier becomes `quarantined`.
+/// A returning DC's side (it stays fenced): every map of the tenant in this tier becomes `quarantined`.
 ///
 /// # Errors
 /// The store's errors.

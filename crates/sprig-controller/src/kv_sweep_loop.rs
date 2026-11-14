@@ -1,5 +1,5 @@
-//! The `kv_sweep` loop (chapter 33, "Expiry and garbage"; chapter 40,
-//! "Expiry: lazy and active"; R6), on the DC leader, every ten seconds:
+//! The `kv_sweep` loop (active expiry and garbage collection of key-value
+//! data), on the DC leader, every ten seconds:
 //!
 //! ```text
 //! no live `kv_sweep` job in the DC → submit one, its spec the kv.* settings
@@ -7,7 +7,7 @@
 //! finished one is replaced here
 //! ```
 //!
-//! As built in R6 the job sweeps every cluster of the DC (one task per
+//! The job sweeps every cluster of the DC (one task per
 //! cluster) rather than one job per shard; the settings are read when the
 //! job is submitted.
 

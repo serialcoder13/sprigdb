@@ -1,4 +1,4 @@
-//! `language` on `Sql.Query` (chapter 37, "Languages"; tui decision T2):
+//! `language` on `Sql.Query`:
 //! Cypher and GQL reach the graph executor and MongoDB command documents
 //! the document engine, over REST and gRPC, with the native protocols'
 //! answers and privileges.

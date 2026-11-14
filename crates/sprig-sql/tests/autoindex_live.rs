@@ -1,8 +1,8 @@
-//! Chapter 13 step 12 against a real MariaDB: automatic indexes leave no
-//! drift in what dumps and schema tools read, `CREATE TABLE ... LIKE`
-//! never copies them, the `STATISTICS` filter hides them in any letter
-//! case, and the 64-index rule makes room for a user's index. Skipped
-//! unless the Compose single node is named:
+//! Automatic indexes against a real MariaDB: they leave no drift in what dumps
+//! and schema tools read, `CREATE TABLE ... LIKE` never copies them, the
+//! `STATISTICS` filter hides them in any letter case, and the 64-index rule
+//! makes room for a user's index. Skipped unless the Compose single node is
+//! named:
 //!
 //! ```sh
 //! export SPRIG_TEST_MARIADB_SINGLE=mysql://root:sprig-dev-root@127.0.0.1:13301
@@ -147,7 +147,7 @@ async fn body(c: &mut MysqlClient, schema: &str) {
     let like = index_names(c, schema, "orders_like").await;
     assert_eq!(like, ["PRIMARY", "by_status"]);
 
-    // 3. The STATISTICS filter of chapter 07 (rule 5) hides both letter
+    // 3. The name layer's STATISTICS filter hides both letter
     //    cases under information_schema's collation.
     let shown = index_names(c, schema, "orders").await;
     assert_eq!(shown.len(), 4, "{shown:?}");

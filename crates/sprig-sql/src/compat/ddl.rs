@@ -1,7 +1,6 @@
-//! DDL rules of the MySQL persona that change the statement text (chapter
-//! 28, "DDL and types"; build step 10; R4 round 3).
+//! DDL rules of the MySQL persona that change the statement text.
 //!
-//! - **`NOT NULL` on a generated column** (gaps row 49). MySQL accepts
+//! - **`NOT NULL` on a generated column.** MySQL accepts
 //!   `c INT AS (expr) [VIRTUAL | STORED] NOT NULL` (and `NULL`); MariaDB
 //!   allows neither attribute there and fails with 1064. The attribute
 //!   goes, and `NOT NULL` becomes a table check named
@@ -15,20 +14,20 @@
 //!   `ALTER TABLE ... ADD [COLUMN]`; `MODIFY` and `CHANGE` keep MariaDB's
 //!   1064. A column name longer than 54 characters keeps it too (the
 //!   check's name must fit 64).
-//! - **A database's default collation** (gaps row 58). `CREATE` or
+//! - **A database's default collation.** `CREATE` or
 //!   `ALTER DATABASE ... CHARACTER SET cs` without `COLLATE` gets MySQL
 //!   8.4's default collation of `cs` where MariaDB's differs (`utf8mb3`,
 //!   `ucs2`, `utf16`, `utf32`: `*_general_ci`). Database DDL runs on the
 //!   provisioning account's connection, which doesn't carry the session's
 //!   `character_set_collations` (the backend session gives every other
-//!   statement MySQL's defaults, chapter 06).
+//!   statement MySQL's defaults).
 
 use std::fmt::Write as _;
 
 use crate::lex::{self, LexOptions, Token, TokenKind};
 
 /// The name prefix of the checks that hold a generated column's
-/// `NOT NULL`. Not chapter 07's reserved `_sprig_`: the planner refuses
+/// `NOT NULL`. Not the name layer's reserved `_sprig_`: the planner refuses
 /// those names in client statements, and this one is the client's.
 pub const NN_PREFIX: &str = "_sprignn_";
 
@@ -392,7 +391,7 @@ pub fn database_collation(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
 }
 
 /// MySQL's `ALTER TABLE ... DROP CHECK c` as MariaDB's `DROP CONSTRAINT
-/// c` (R4 round 4; Django's schema editor removes check constraints so).
+/// c` (Django's schema editor removes check constraints so).
 /// `None` when nothing changes.
 #[must_use]
 pub fn drop_check(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {

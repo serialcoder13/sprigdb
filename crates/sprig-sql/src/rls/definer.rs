@@ -1,13 +1,12 @@
-//! Definer's policies for `SQL SECURITY DEFINER` routines (chapter 29;
-//! RLS round 6, decision RL57).
+//! Definer's policies for `SQL SECURITY DEFINER` routines.
 //!
-//! A definer routine over protected tables is pointed at the policy views
-//! (RL20) and wrapped so that, while it runs, MariaDB's policy views and
-//! write triggers apply its definer's policies instead of the caller's.
-//! The gateway puts every wrapped routine's definer context in the
-//! session's own context, under `"d"` (account → context, computed at the
-//! current auth version for every statement), so a role or policy change
-//! of the definer applies at once and nothing is redeployed:
+//! A definer routine over protected tables is pointed at the policy views and
+//! wrapped so that, while it runs, MariaDB's policy views and write triggers
+//! apply its definer's policies instead of the caller's. The gateway puts every
+//! wrapped routine's definer context in the session's own context, under `"d"`
+//! (account → context, computed at the current auth version for every
+//! statement), so a role or policy change of the definer applies at once and
+//! nothing is redeployed:
 //!
 //! ```text
 //! BEGIN
@@ -24,7 +23,7 @@
 //! error (the handler re-raises it), a `SIGNAL` of class `02` (re-raised
 //! too), and `RETURN` (the value is computed under the definer's context,
 //! then the caller's is restored). A routine without a `"d"` entry for its
-//! definer (worker-run code, RL42) keeps the caller's context: never
+//! definer (worker-run code) keeps the caller's context: never
 //! wider than before. [`unwrap`] gives the text as written back, for
 //! `SHOW CREATE`.
 

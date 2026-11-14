@@ -1,6 +1,5 @@
-//! The Admin API (`sprig.admin.v1`, chapter 37): the `Clusters` service
-//! of chapter 09 step 9 and the `DataCenters` service of chapter 23 step 7,
-//! as the REST face carries them.
+//! The Admin API (`sprig.admin.v1`): the `Clusters` and `DataCenters`
+//! services and the others below, as the REST face carries them.
 //!
 //! [`AdminService`] implements the calls; [`http`] serves them as JSON
 //! under `/admin/v1/`. Reads are answered by any controller; calls that
@@ -23,8 +22,8 @@
 //! | `Tenants.GetTenant` | `GET /admin/v1/tenants/{name}` |
 //! | `Tenants.DeleteTenant` | `DELETE /admin/v1/tenants/{name}` |
 //! | `Tenants.SuspendTenant`, `ResumeTenant` | `POST /admin/v1/tenants/{name}:suspend\|:resume` ([`crate::users`]) |
-//! | `Users.CreateUser` (interim) | `POST /admin/v1/tenants/{name}/users` ([`crate::users`]) |
-//! | `Tenants.ExportAccounts`, `ImportAccounts` (chapter 47) | `GET`, `POST /admin/v1/tenants/{name}/accounts` |
+//! | `Users.CreateUser` | `POST /admin/v1/tenants/{name}/users` ([`crate::users`]) |
+//! | `Tenants.ExportAccounts`, `ImportAccounts` | `GET`, `POST /admin/v1/tenants/{name}/accounts` |
 //! | `Tenants.MoveTenant`, `PinTenant`, `UnpinTenant`, traffic | `/admin/v1/tenants/{name}:move\|:pin\|:unpin`, `.../move`, `.../traffic`, `/admin/v1/traffic/reports` ([`dcmove`]) |
 //! | `Jobs.ListJobs`, `GetJob`, `CancelJob` | `/admin/v1/jobs[/{job_id}[:cancel]]` ([`jobs`]) |
 //! | `Settings.*` | `/admin/v1/settings[/{key}]`, `/admin/v1/tenants/{name}/settings` ([`crate::settings_admin`]) |
@@ -37,11 +36,11 @@
 //! `CreateTenant` and `DeleteTenant` write the DC's tier (the catalog's
 //! shard map) with the DC leader's token, so they too are answered only by
 //! the leader. Tenant calls are served when the controller was given a
-//! [`TenantAdmin`] (chapter 08 step 9).
+//! [`TenantAdmin`].
 //!
-//! Where the book differs: chapter 37 serves this API from every gateway
-//! on 8080/8443, as gRPC and REST generated from protobuf, with platform
-//! OIDC tokens and mutual TLS. Until the gateway's HTTP listeners and the
+//! This API is meant to be served from every gateway on 8080/8443, as gRPC
+//! and REST generated from protobuf, with platform OIDC tokens and mutual
+//! TLS. Until the gateway's HTTP listeners and the
 //! protobuf code generation exist, the controller serves the REST face on
 //! `[controller] admin_addr` (default `127.0.0.1:7480`), authenticated by
 //! an optional bearer token (`[controller] admin_token_file`).
@@ -52,10 +51,10 @@ pub mod http;
 pub mod jobs;
 pub mod mover;
 pub mod placement_admin;
-// Chapter 25 (r2close): an operator's errant_extract and node_rebuild.
+// An operator's errant_extract and node_rebuild.
 pub mod recovery;
 pub mod sharding_admin;
-// Chapter 39 (R5 round 6): sprigctl search.
+// sprigctl search.
 mod search_admin;
 pub mod txn_admin;
 pub mod types;
@@ -118,10 +117,9 @@ pub struct AdminService {
     failover: Option<Arc<crate::failover::role::FailoverRole>>,
     sharding: Option<Arc<crate::sharding::ShardingLoop>>,
     residency: Option<Arc<crate::residency::Residency>>,
-    /// Chapter 18's in-doubt transaction calls, built on first use.
+    /// The in-doubt transaction calls, built on first use.
     txn: std::sync::OnceLock<Arc<txn_admin::TxnAdmin>>,
-    /// Tenant catalog changes for `sprigctl search rebuild` (chapter 39;
-    /// R5 round 8).
+    /// Tenant catalog changes for `sprigctl search rebuild`.
     search_catalog: Option<sprig_catalog::Versioner<sprig_catalog::MariaBackend>>,
 }
 
@@ -234,7 +232,7 @@ impl AdminService {
         self.indexes()?.explain_query(tenant, fingerprint).await
     }
 
-    /// The same service with chapter 11's explain calls.
+    /// The same service with the balancer's explain calls.
     #[must_use]
     pub fn with_placement(mut self, b: Arc<crate::balancer_loop::BalancerLoop>) -> Self {
         self.placement = Some(b);
@@ -281,14 +279,14 @@ impl AdminService {
         self
     }
 
-    /// The same service with the (interim) user calls.
+    /// The same service with the user calls.
     #[must_use]
     pub fn with_users(mut self, users: Arc<dyn UserAdmin>) -> Self {
         self.users = Some(users);
         self
     }
 
-    /// `Users.CreateUser` (interim, [`crate::users`]): a user with a
+    /// `Users.CreateUser` ([`crate::users`]): a user with a
     /// password in a tenant's catalog. Any controller answers it: the
     /// change is the catalog's.
     ///
@@ -306,7 +304,7 @@ impl AdminService {
             .await
     }
 
-    /// A tenant's accounts for `sprigctl tenant export` (chapter 47).
+    /// A tenant's accounts for `sprigctl tenant export`.
     ///
     /// # Errors
     /// As [`UserAdmin::export_accounts`].
@@ -321,7 +319,7 @@ impl AdminService {
             .await
     }
 
-    /// Creates exported accounts for `sprigctl tenant import` (chapter 47).
+    /// Creates exported accounts for `sprigctl tenant import`.
     ///
     /// # Errors
     /// As [`UserAdmin::import_accounts`].
@@ -337,7 +335,7 @@ impl AdminService {
             .await
     }
 
-    /// `Tenants.SuspendTenant` (chapter 14, "Suspension"): the tenant and
+    /// `Tenants.SuspendTenant`: the tenant and
     /// its subtree refuse logins (39303), their sessions close and their
     /// background work waits. Any controller answers it: the directory
     /// write is a compare-and-swap, the auth changes are the catalogs'.
@@ -406,7 +404,7 @@ impl AdminService {
 
     /// Every settings write. `global`, `dc` and `cluster` need the leader's
     /// guard: the global leader's for `global` when this controller leads
-    /// the global tier, else the DC leader's (R0, single-etcd mode).
+    /// the global tier, else the DC leader's (single-etcd mode).
     ///
     /// # Errors
     /// 39504 off the leader for etcd scopes; as [`SettingsAdmin::write`].
@@ -525,8 +523,7 @@ impl AdminService {
     }
 
     /// `Clusters.RegisterCluster`: prechecks, then the record, its first
-    /// profile and `active` (chapter 27, "Registering an external
-    /// cluster").
+    /// profile and `active`.
     ///
     /// # Errors
     /// 39792 for a request naming another DC; 39503 for an unregistered
@@ -673,7 +670,7 @@ impl AdminService {
     }
 
     /// `Clusters.DrainCluster`: no new placements; the balancer moves the
-    /// shards away (chapter 11) and the cluster becomes `drained`.
+    /// shards away and the cluster becomes `drained`.
     ///
     /// # Errors
     /// 39504 off the leader; 39104 unknown; 39106 unless `active` (a
@@ -702,7 +699,7 @@ impl AdminService {
             }
         };
         tracing::info!(cluster = %id, "draining");
-        // An empty cluster is drained at once (r2kind: one stayed draining
+        // An empty cluster is drained at once (one used to stay draining
         // for 20 minutes); the balancer's pass finishes the others once
         // their shards have moved.
         let done = crate::drain::finish_drains(self.registry(), &*self.stores.dc, self.dc(), guard)
@@ -715,7 +712,7 @@ impl AdminService {
         Ok(self.view(stored).await)
     }
 
-    /// `Clusters.RetireCluster` (r2opfix): a `drained` cluster's record
+    /// `Clusters.RetireCluster`: a `drained` cluster's record
     /// becomes `retired`, and the monitor stops probing it. A provisioner
     /// calls it before it deletes the nodes (Kubernetes: `retire`).
     ///
@@ -757,7 +754,7 @@ impl AdminService {
         Ok(self.view(stored).await)
     }
 
-    /// `Clusters.SetClusterNodes` (r2opfix): replaces the record's nodes
+    /// `Clusters.SetClusterNodes`: replaces the record's nodes
     /// with the provisioner's current ones (a scale or a replacement). A
     /// node whose address changed, and a removed node, lose their pinned
     /// identity.

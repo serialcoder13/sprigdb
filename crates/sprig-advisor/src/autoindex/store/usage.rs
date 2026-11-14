@@ -1,4 +1,4 @@
-//! `index_usage` rows (decision O1): the user and migrated indexes whose
+//! `index_usage` rows: the user and migrated indexes whose
 //! removal automatic indexing manages.
 //!
 //! ```text

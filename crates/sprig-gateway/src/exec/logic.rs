@@ -1,22 +1,21 @@
-//! Logic declarations in a tenant session (chapter 41, "Declaring code";
-//! R7 order 1 and 2): `CREATE FUNCTION | PROCEDURE ... LANGUAGE kirun |
-//! javascript AS ...` is compiled, placed, recorded in the tenant's logic
+//! Logic declarations in a tenant session: `CREATE FUNCTION | PROCEDURE
+//! ... LANGUAGE kirun | javascript AS ...` is compiled, placed, recorded in the tenant's logic
 //! catalog and deployed into the database's shard schema by
 //! `sprig_logic::service`, on this session's own backend connection, so
-//! the routines' definer is the session's backend account (chapter 29,
-//! decision A9) and MariaDB checks its `CREATE ROUTINE` right.
+//! the routines' definer is the session's backend account and MariaDB
+//! checks its `CREATE ROUTINE` right.
 //!
 //! The client gets OK with one note per placement line (`SHOW WARNINGS`):
 //! the module, version, tier, and each reason the code runs in the engine
 //! tier.
 //!
-//! **Engine-tier calls** (R7 order 4, `sprig_logic::invoke`): a `CALL`
+//! **Engine-tier calls** (`sprig_logic::invoke`): a `CALL`
 //! goes to MariaDB as always. When the routine is an engine-tier wrapper,
 //! its first resultset is the marker row; [`Tap`] holds it back, with the
 //! wrapper's 39876, and the gateway runs the version on the native KIRun
 //! runtime. Each `Sprig.Db.*` statement runs through this same tenant
-//! session ([`PassSession::tenant_text`]): name virtualization, chapter
-//! 29's checks, the caller's backend connection and transaction. The
+//! session ([`PassSession::tenant_text`]): name virtualization, the
+//! authorization checks, the caller's backend connection and transaction. The
 //! client gets the row a compiled wrapper returns, then OK.
 
 use std::sync::Arc;
@@ -45,7 +44,7 @@ use crate::backend::{BackendSession, StmtInfo};
 use crate::pipeline::{EndOfRows, ExecCtx, ResultSink, RowFormat, RowValues, Wire};
 use crate::tenant::session::LocalWarning;
 
-/// `logic.max_call_depth`'s default (chapter 41).
+/// `logic.max_call_depth`'s default.
 const MAX_CALL_DEPTH: u32 = 8;
 
 tokio::task_local! {
@@ -53,7 +52,7 @@ tokio::task_local! {
     static LOGIC_DEPTH: u32;
 }
 
-/// `logic.function_budget_ms`'s default (chapter 41).
+/// `logic.function_budget_ms`'s default.
 const FUNCTION_BUDGET_MS: u64 = 5000;
 /// `logic.max_loop_iterations`'s default.
 const MAX_LOOP_ITERATIONS: u64 = 100_000;
@@ -164,7 +163,7 @@ impl PassSession {
 
     /// [`Self::logic_deploy`]; with `auto`, SprigDB itself runs the
     /// statement for that user (the module's owner): an automatic
-    /// rollback of a staged rollout (R7 follow-ups). Rights aren't checked
+    /// rollback of a staged rollout. Rights aren't checked
     /// then, and the columns are read as `sprig_ctl` sees them.
     #[allow(clippy::too_many_lines)] // the deploy, then the SELECT function
     pub(super) async fn logic_deploy_with(
@@ -174,7 +173,7 @@ impl PassSession {
         auto: Option<sprig_common::ids::UserId>,
     ) -> Result<Vec<String>> {
         let text_s = String::from_utf8_lossy(text);
-        // `ALTER FUNCTION f ROLLBACK [TO VERSION n]` (R7 close-out): the
+        // `ALTER FUNCTION f ROLLBACK [TO VERSION n]`: the
         // declaration comes from the catalog once it is read (below).
         let rollback = match sprig_logic::rollback::parse(&text_s) {
             Some(r) => Some(r?),
@@ -184,7 +183,7 @@ impl PassSession {
             Some(r) => r.placeholder(),
             None => sprig_logic::declare::parse(&text_s)?,
         };
-        // R9: triggers ON STREAM and ON QUEUE (`exec::msg_trigger`).
+        // Triggers ON STREAM and ON QUEUE (`exec::msg_trigger`).
         if decl.source.is_some() {
             return Box::pin(self.logic_deploy_message(cx, decl)).await;
         }
@@ -217,7 +216,7 @@ impl PassSession {
             .ok_or_else(|| {
                 SprigError::standard(1049, *b"42000", format!("Unknown database '{db}'"))
             })?;
-        // Every shard of the database (chapter 21's layout; R7 close-out):
+        // Every shard of the database:
         // a sharded database gets the routines on each, all or nothing.
         let shard_list = shard_list(ts, &self.target.cluster, &db, &row)?;
         let schema = shard_list[0].0.clone();
@@ -229,7 +228,7 @@ impl PassSession {
                 .user_id
                 .ok_or_else(|| SprigError::internal("a logic deploy without a user"))?,
         };
-        // Chapter 29's `CREATE ROUTINE` on the database: the routines are
+        // `CREATE ROUTINE` on the database: the routines are
         // created through `sprig_ctl` (below), so MariaDB doesn't check it.
         if auto.is_none() {
             let grants = crate::tenant::authz::privileges(ts, &catalog);
@@ -262,9 +261,9 @@ impl PassSession {
             SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable").with_source(e)
         })?;
         // The routines are created as `sprig_ctl` with the user as
-        // `DEFINER`, as chapter 21 creates stored programs: the session's
+        // `DEFINER`, as the DDL path creates stored programs: the session's
         // own connection can't hold `sql_mode=ORACLE` between statements on
-        // the MySQL persona (chapter 28's `sql_mode` tracking resets it).
+        // the MySQL persona (its `sql_mode` tracking resets it).
         let account = sprig_auth::authz::backend::account(tenant, user);
         let definer = format!("`{}`@`%`", account.replace('`', "``"));
         let ctl_pool = svc.locator.ctl_pool(&self.target.cluster).await?;
@@ -365,7 +364,7 @@ impl PassSession {
         if !single_shard {
             notes.push(format!("deployed on {} shards", shard_list.len()));
         }
-        // R7 order 6: `SELECT db.f(args)` through a stored function, which
+        // `SELECT db.f(args)` through a stored function, which
         // needs `SUPER` with the binary log on: created as `sprig_ctl`
         // with the deploying user as `DEFINER` (checked afterwards). A
         // failure leaves `CALL` working and says why.
@@ -414,8 +413,7 @@ impl PassSession {
     }
 }
 
-/// Every shard schema of database `db` (chapter 21's layout; R7
-/// close-out): the session's own schema (the default group's shard, where
+/// Every shard schema of database `db`: the session's own schema (the default group's shard, where
 /// a statement naming no table goes) first, then the groups'; one for an
 /// unsharded database.
 pub(super) fn shard_list(
@@ -453,7 +451,7 @@ pub(super) fn shard_list(
     }
 }
 
-// ---- engine-tier calls (R7 order 4) ----------------------------------------
+// ---- engine-tier calls -----------------------------------------------------
 
 /// A request from the KIRun run to this session: one statement.
 pub(super) type DbRequest = (DbOp, oneshot::Sender<Result<Reply>>);
@@ -842,7 +840,7 @@ impl PassSession {
         map: &dyn NameMap,
         out: &mut dyn ResultSink,
     ) -> Result<Step> {
-        // A function in a staged rollout (R7 follow-ups): its calls are
+        // A function in a staged rollout: its calls are
         // counted per version (`exec::logic_rollout`).
         let pick = self.rollout_pick(original).await;
         let called = std::time::Instant::now();
@@ -936,7 +934,7 @@ impl PassSession {
         cx: &mut ExecCtx<'_>,
         marker: &Marker,
     ) -> Result<(Arc<EngineVersion>, String, serde_json::Value)> {
-        // Chapter 41's `logic.max_call_depth`: `db.call` nests engine
+        // `logic.max_call_depth`: `db.call` nests engine
         // calls on this task.
         let depth = LOGIC_DEPTH.try_with(|d| *d).unwrap_or(0);
         if depth >= MAX_CALL_DEPTH {
@@ -1026,7 +1024,7 @@ impl PassSession {
         };
         let run = program.run(args, host, limits);
         tokio::pin!(run);
-        // Chapter 41, "Privileges and transactions": in autocommit, a call
+        // In autocommit, a call
         // that writes runs in its own transaction, opened before its first
         // write and committed at the end (rolled back on an error).
         let mut opened = false;
@@ -1104,7 +1102,7 @@ impl PassSession {
     }
 }
 
-// ---- SELECT f(constants) of engine-tier functions (R7 order 6) -------------
+// ---- SELECT f(constants) of engine-tier functions --------------------------
 
 /// Held column definitions of a `SELECT` whose result may be replaced.
 enum Held {
@@ -1214,10 +1212,9 @@ impl ResultSink for SelectTap<'_> {
 }
 
 impl PassSession {
-    /// A `SELECT` without `FROM` that may call engine-tier functions
-    /// (chapter 41, "Calling code"; R7 order 6). It runs as always; when
-    /// an engine-tier function's SQL form refuses with its mark, the
-    /// gateway runs that function for each of its calls with constant
+    /// A `SELECT` without `FROM` that may call engine-tier functions. It
+    /// runs as always; when an engine-tier function's SQL form refuses with
+    /// its mark, the gateway runs that function for each of its calls with constant
     /// arguments (MariaDB has just checked `EXECUTE` on it), puts the
     /// values in their place as literals, and runs the statement again.
     /// One function per round; calls with other arguments get the 39876.
@@ -1337,7 +1334,7 @@ impl PassSession {
     }
 }
 
-// ---- logic functions as HTTP and gRPC endpoints (R7 order 6) --------------
+// ---- logic functions as HTTP and gRPC endpoints ---------------------------
 
 /// The result row's columns: `event`, then `result` (the event's fields
 /// as a JSON object).
@@ -1364,7 +1361,7 @@ fn call_columns(charset: u16) -> Vec<ColumnDef> {
 }
 
 impl PassSession {
-    /// `Functions.Call` (chapter 37, "Logic functions as endpoints"): finds
+    /// `Functions.Call`: finds
     /// the function in the session's database, checks it is exposed to the
     /// caller's protocol (39789), maps named arguments to the signature,
     /// and runs `CALL db.name(...)` through this session, so `EXECUTE`,
@@ -1382,7 +1379,7 @@ impl PassSession {
     ) -> Result<Step> {
         // A front end's own statements may run in internal mode (the
         // document engine's, Redis's); the function's must not, so its
-        // code meets chapter 07's reserved-name check as any client does.
+        // code meets the name layer's reserved-name check as any client does.
         let internal = self
             .tenant
             .as_deref_mut()

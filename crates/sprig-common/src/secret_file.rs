@@ -1,6 +1,5 @@
-//! Start-time checks on the files that hold secrets (hardening round 2):
-//! bearer and service tokens, the workload master keys, the backends file,
-//! TLS private keys.
+//! Start-time checks on the files that hold secrets: bearer and service
+//! tokens, the workload master keys, the backends file, TLS private keys.
 //!
 //! A secret file must be a regular file (a symbolic link to one is fine,
 //! as Kubernetes mounts secrets) and must not be writable by everyone:

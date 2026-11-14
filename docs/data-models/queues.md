@@ -117,7 +117,9 @@ ch.start_consuming()
 ### Logging in
 
 - The tenant comes from a dotted user name (`acme.app`), else from `listener.amqp.tenant`, which binds the listener to one tenant so that unchanged applications can keep plain user names such as `app`. A dotted name wins over the bound tenant.
-- SASL mechanisms are `PLAIN` and, on 0-9-1, `AMQPLAIN` (`amqp.sasl_mechanisms`). `ANONYMOUS` is never accepted.
+- SASL mechanisms are `PLAIN`, on 0-9-1 `AMQPLAIN`, and `EXTERNAL` (`amqp.sasl_mechanisms`). `ANONYMOUS` is never accepted.
+- `EXTERNAL` logs in with a client certificate alone, as RabbitMQ's certificate login does. It is offered only on a connection that presented a certificate the listener verified (`listener.amqps.client_cert`). The certificate's common name is the login name (`CN=acme.billing`), or its whole subject with `amqp.cert_login_field = distinguished_name`, and only an account with `REQUIRE X509`, `REQUIRE SUBJECT` or `REQUIRE ISSUER` may log in this way. See [AMQP](../connect/amqp.md#log-in-with-a-client-certificate-external).
+- Client-certificate requirements (`REQUIRE X509`, `SUBJECT`, `ISSUER`) are checked on `PLAIN` and `AMQPLAIN` logins too, in addition to the password.
 - A refused login gets `connection.close` with 403 when the client announced `authentication_failure_close`; otherwise the socket closes.
 - `connection.update-secret` checks the new secret as a fresh login of the same user.
 
@@ -352,7 +354,8 @@ Sharding: all of a virtual host's queues live in its database's first shard, on 
 | `listener.amqps.enabled` | false | dc, global | Serve AMQP with TLS on `listener.amqps.bind` (`0.0.0.0:5671`) |
 | `listener.amqp.tenant` | empty | dc, global | Tenant of plain user names on both AMQP listeners |
 | `amqp.default_vhost_database` | `mq` | tenant, global | Database of virtual host `/` |
-| `amqp.sasl_mechanisms` | `PLAIN,AMQPLAIN,EXTERNAL` | tenant, global | Offered SASL mechanisms |
+| `amqp.sasl_mechanisms` | `PLAIN,AMQPLAIN,EXTERNAL` | tenant, global | Offered SASL mechanisms; `EXTERNAL` only with a verified client certificate |
+| `amqp.cert_login_field` | `common_name` | tenant, global | Certificate field that names the user for `EXTERNAL`: `common_name` or `distinguished_name` |
 | `amqp.heartbeat_seconds` | 60 | tenant, global | Heartbeat the server proposes |
 | `amqp.frame_max` | 131072 | dc, global | Largest frame |
 | `amqp.channel_max` | 2047 | dc, global | Channels per connection |
@@ -411,7 +414,6 @@ AMQP clients receive the AMQP reply code (0-9-1) or condition (1.0), with SprigD
 - **Stream queues and super streams** (`x-queue-type = stream`, `x-stream-offset`): 540. Use [event streams](streams.md).
 - **The RabbitMQ management HTTP API** (port 15672) and its web UI. Inspect queues with `sprig.mq_info` and `sprig.mq_browse`, `GET /v1/databases/{database}/mq`, or [Studio](../tools/studio.md).
 - **`CREATE EXCHANGE`, `CREATE QUEUE` and `BIND` in SQL for ordinary objects.** These statements declare per-tenant definitions only; declare ordinary topology from an AMQP client.
-- **SASL `EXTERNAL`** (client certificate logins), although it is listed in `amqp.sasl_mechanisms`: the AMQP listeners don't pass client certificates to the login, so it is never offered, and accounts with `REQUIRE X509`, `SUBJECT` or `ISSUER` can't log in over AMQP.
 - **`immediate` publishes**, `prefetch_size` other than 0, `basic.recover` without requeue and `channel.flow` with `active = false`: 540, as in RabbitMQ.
 - **Atomic `tx.commit` across queues.** Use SQL transactions for atomic publish and acknowledge.
 - **AMQP 1.0 transactions**, link recovery and the `second` receiver settle mode, and the 1.0 delivery-time annotations (`x-opt-delivery-time`, `x-opt-delivery-delay`).

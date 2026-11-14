@@ -1,8 +1,8 @@
-//! Error mapping on port 3306 (chapter 28, "Error mapping"; build step 5).
+//! Error mapping on port 3306.
 //!
 //! A MariaDB error reaches a MySQL persona client with MySQL 8.4's number,
 //! SQLSTATE and wording where the two servers differ. Names in the message
-//! are already logical (chapter 07). The MariaDB persona passes errors
+//! are already logical. The MariaDB persona passes errors
 //! unchanged.
 //!
 //! | MariaDB | When | MySQL 8.4 |
@@ -10,12 +10,12 @@
 //! | 1969 `max_statement_time` exceeded | always | 3024 (`HY000`) |
 //! | 4025 `CONSTRAINT ... failed` | a column-level check (`t.c`): the JSON check of a `JSON` column | 3140 (`22032`) |
 //! | 4025 | a table check | 3819 (`HY000`) |
-//! | 4025 | a `_sprignn_<c>` check: a generated column's `NOT NULL` (R4 round 3) | 1048 (`23000`) |
+//! | 4025 | a `_sprignn_<c>` check: a generated column's `NOT NULL` | 1048 (`23000`) |
 //! | 1451 without the row detail | `DROP TABLE` of a referenced table | 3730 (`HY000`) |
 //! | 1205 lock wait timeout | the statement had `NOWAIT` (the relay knows) | 3572 |
 //! | any message naming "MariaDB" | `... your MariaDB server version ...` | "MySQL" |
 //!
-//! R4 adds MySQL 8.4's wording where MariaDB 11.8's differs ([`reworded`],
+//! Also MySQL 8.4's wording where MariaDB 11.8's differs ([`reworded`],
 //! every row captured from both servers on 9 November 2026), and MySQL's
 //! key names in 1062 (`'t.PRIMARY'`), which need the statement's target
 //! table ([`dup_key_table`], [`with_dup_key_table`]):
@@ -121,7 +121,7 @@ pub fn to_mysql(e: &WireError) -> Option<WireError> {
         4025 if e.message.starts_with("CONSTRAINT ") => {
             let name = first_backquoted(&e.message)?;
             if let Some(col) = super::ddl::nn_column(&name) {
-                // A generated column's NOT NULL (chapter 28, R4 round 3).
+                // A generated column's NOT NULL.
                 Some(WireError::new(
                     1048,
                     *b"23000",
@@ -377,7 +377,7 @@ pub fn dup_key_message(message: &str, table: &str) -> Option<String> {
 }
 
 /// [`dup_key_message`] applied to an error, any kind: a backend 1062 or
-/// the router's own (chapter 19's lookup tables name the user's key).
+/// the router's own (lookup tables name the user's key).
 #[must_use]
 pub fn with_dup_key_table(e: &SprigError, table: &str) -> Option<SprigError> {
     if e.protocol().mysql_errno != 1062 {

@@ -1,5 +1,5 @@
 //! Functional key parts in `CREATE INDEX` and `ALTER TABLE ... ADD INDEX`
-//! on port 3306 (chapter 28, "Functional index parts"; R4 round 4).
+//! on port 3306.
 //!
 //! The hidden column standing for a part needs a type, which the text
 //! rewrite (`sprig_sql::compat::fxindex`) infers from the statement; in
@@ -32,7 +32,7 @@ impl PassSession {
             return Ok(None);
         }
         let (lex, _) = self.lex_opts();
-        // R4 round 5: a descending index over a foreign key's columns.
+        // A descending index over a foreign key's columns.
         if let Some((table, index)) = fxindex::drop_index_target(text, &lex) {
             return Ok(Box::pin(self.fk_desc_drop(cx, &table, &index))
                 .await
@@ -95,7 +95,7 @@ impl PassSession {
     /// key's own index when `i` was created, MariaDB dropped it and now
     /// refuses with 1553. The drop becomes `ALTER TABLE t ADD INDEX
     /// <key> (cols), DROP INDEX i`, MySQL's end state
-    /// (`fxindex::fk_indexes_kept`; R4 round 5). `None` otherwise, and
+    /// (`fxindex::fk_indexes_kept`). `None` otherwise, and
     /// when reading the table fails (the statement then runs as written).
     async fn fk_desc_drop(
         &mut self,

@@ -1,4 +1,4 @@
-//! bugfix-31 (decisions/bugfix-interim.md): stored code keeps working
+//! Stored code keeps working
 //! through the advisor's regroup and the splits, merges and moves that
 //! follow.
 //!

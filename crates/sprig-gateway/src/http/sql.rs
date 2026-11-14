@@ -1,17 +1,15 @@
-//! `Sql` and `Transactions` (chapter 37, "Transactions"; build step 6):
-//! statements from HTTP run through the gateway's executor exactly as
-//! statements from the MySQL wire do.
+//! `Sql` and `Transactions`: statements from HTTP run through the gateway's
+//! executor exactly as statements from the MySQL wire do.
 //!
 //! **Same path as the wire.** Each request opens a gateway [`Session`] (it
 //! shows in `SHOW PROCESSLIST` and answers `KILL`), opens the executor's
 //! session for the authenticated principal ([`Executor::open`], as a MySQL
 //! login does), runs `USE <database>` through [`SessionExec::init_db`],
-//! then hands each request to [`SessionExec::execute`] as a `COM_QUERY`.
-//! So name virtualization (chapter 07), privileges, workload capture
-//! (chapter 12) and error mapping are the wire's. Statements the gateway
-//! answers itself (persona variables, `KILL`, `SHOW PROCESSLIST`) go
-//! through the same answers as the MySQL front end
-//! ([`crate::mysql::answer`]).
+//! then hands each request to [`SessionExec::execute`] as a `COM_QUERY`. So
+//! name virtualization, privileges, workload capture and error mapping are
+//! the wire's. Statements the gateway answers itself (persona variables,
+//! `KILL`, `SHOW PROCESSLIST`) go through the same answers as the MySQL
+//! front end ([`crate::mysql::answer`]).
 //!
 //! **Transactions.** `Begin` keeps the session and its executor in the
 //! [`TxnRegistry`] under a handle; calls naming the handle run in it.
@@ -53,7 +51,7 @@ use crate::pipeline::{
 };
 use crate::session::{Session, SessionState, SessionTable};
 
-/// Whether the session holds `CONNECTION_ADMIN` (chapter 29), for `KILL`.
+/// Whether the session holds `CONNECTION_ADMIN`, for `KILL`.
 fn connection_admin(exec: &dyn SessionExec) -> bool {
     exec.holds_tenant_privilege(sprig_auth::authz::Action::ConnectionAdmin)
         .unwrap_or(false)
@@ -82,11 +80,11 @@ pub struct Caller {
     /// The `authorization` header, for forwarding.
     pub authorization: Option<String>,
     /// The client's DC, from the `Sprig-DC` header (gRPC metadata
-    /// `sprig-dc`), when it names a registered DC (chapter 24).
+    /// `sprig-dc`), when it names a registered DC.
     pub client_dc: Option<sprig_common::ids::DcId>,
 }
 
-/// Caps on one call's results (chapter 44, decision ST8): 0 for none.
+/// Caps on one call's results: 0 for none.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Caps {
     /// Rows kept per result.
@@ -132,7 +130,7 @@ struct Live {
     db: Option<String>,
     /// A transaction handle holds the session: a statement whose client
     /// went away is stopped (`KILL QUERY`) and the backend connection, with
-    /// the transaction, kept for the handle's next call (tui T3).
+    /// the transaction, kept for the handle's next call.
     held: bool,
 }
 
@@ -168,8 +166,7 @@ impl TxnEntry {
     }
 }
 
-/// The open transaction handles of this gateway (chapter 37's
-/// `TxnRegistry`).
+/// The open transaction handles of this gateway (the `TxnRegistry`).
 #[derive(Default)]
 pub struct TxnRegistry {
     next: AtomicU64,
@@ -285,12 +282,12 @@ pub struct SqlEngine {
     pub(crate) peers: Option<Arc<crate::peer::Peers>>,
     pub(crate) txns: TxnRegistry,
     pub(crate) draining: Arc<AtomicBool>,
-    /// Memory charges for buffered results (chapter 04 step 7).
+    /// Memory charges for buffered results.
     pub(crate) limiter: Option<Arc<crate::limits::Limiter>>,
     /// The tenant catalogs, for settings at tenant and database scope
-    /// (`vector.*`, `analytics.*`; R6 round 4).
+    /// (`vector.*`, `analytics.*`).
     pub(crate) tenants: Option<Arc<crate::tenant::TenantServices>>,
-    /// The front ends `Sql.Query`'s other languages run through (tui T2).
+    /// The front ends `Sql.Query`'s other languages run through.
     pub(crate) languages: super::lang::Languages,
 }
 
@@ -358,8 +355,8 @@ impl SqlEngine {
             backend: caller.principal.backend.clone(),
             persona: Persona::MySql84,
         });
-        // Chapter 29 (decision bugfix-interim): `SPRIG_CLAIM()` reads the
-        // verified session token's claims; Basic and API keys have none.
+        // `SPRIG_CLAIM()` reads the verified session token's claims; Basic
+        // and API keys have none.
         exec.set_claims(
             super::studio::session_claims(caller.authorization.as_deref()).map(Arc::new),
         );
@@ -455,10 +452,9 @@ impl SqlEngine {
             sql: bytes,
             attrs: QueryAttrs::default(),
         };
-        // A large statement runs on a blocking thread (chapter 04, "Large
-        // statements").
+        // A large statement runs on a blocking thread.
         let (size, threshold) = (req.size(), self.frontend.current().large_statement);
-        // Sql.Query's timeout_ms (clamped for Studio, chapter 44).
+        // Sql.Query's timeout_ms (clamped for Studio).
         let timeout = sink.timeout();
         let gone = sink.reader_gone();
         let end = crate::offload::run_for(&handle, size, threshold, async {
@@ -556,7 +552,7 @@ impl SqlEngine {
             caps.max_bytes,
             caps.timeout,
         );
-        // Studio's statements are recorded with `caller = studio` (chapter 12).
+        // Studio's statements are recorded with `caller = studio`.
         let wl_caller = (super::studio::session_client(caller.authorization.as_deref()).as_deref()
             == Some("studio"))
         .then(sprig_workload::fingerprint::Caller::studio);

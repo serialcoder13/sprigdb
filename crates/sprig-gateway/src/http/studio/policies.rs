@@ -1,6 +1,6 @@
-//! `Policies.TestAs` (chapter 44, "Row-level security: view as this
-//! user"; chapter 37 step 17; decision ST46): one read-only statement run as
-//! another user of the caller's tenant or a descendant, for Studio's tester.
+//! `Policies.TestAs` (row-level security's "view as this user"): one
+//! read-only statement run as another user of the caller's tenant or a
+//! descendant, for Studio's tester.
 //!
 //! `POST /v1/policies:testAs` `{tenant?, user, host?, database, sql}`:
 //!
@@ -24,10 +24,9 @@
 //!
 //! 6. Optional `claims` and `attributes` (JSON objects) stand in for the
 //!    user's token claims and over its attributes while the statement runs
-//!    (`SPRIG_CLAIM`, `SPRIG_USER_ATTR`; RLS round 2), and the response's
-//!    `policies` lists each policy the rewrite applied, with its predicate
-//!    as bound for this run: Studio shows it as a column of the policy
-//!    table.
+//!    (`SPRIG_CLAIM`, `SPRIG_USER_ATTR`), and the response's `policies`
+//!    lists each policy the rewrite applied, with its predicate as bound
+//!    for this run: Studio shows it as a column of the policy table.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};

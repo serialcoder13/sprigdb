@@ -315,7 +315,10 @@ mod scope_tests {
         assert!(!one.keeps("t7_d1_g1_s1", "orders"));
         assert!(!one.whole(TenantId(7)));
         assert_eq!(
-            DumpScope::tenants_named("t5_d1_g1_s1", "RENAME TABLE t7_d1_g1_s1.a TO t9_d1_g1_s1.b, t70.x"),
+            DumpScope::tenants_named(
+                "t5_d1_g1_s1",
+                "RENAME TABLE t7_d1_g1_s1.a TO t9_d1_g1_s1.b, t70.x"
+            ),
             vec![TenantId(5), TenantId(7), TenantId(9)]
         );
         assert!(s.names_whole("mysql", "ALTER TABLE `t7_d1_g1_s1`.`a` ADD c INT"));

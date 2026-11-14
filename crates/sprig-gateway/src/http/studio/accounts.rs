@@ -1,5 +1,5 @@
-//! Users and API keys for Studio's access views (chapter 44 step 13;
-//! chapter 37's `Users` and `ApiKeys`, the R0 part Studio needs).
+//! Users and API keys for Studio's access views (the parts of `Users` and
+//! `ApiKeys` Studio needs).
 //!
 //! | Route | Who | Does |
 //! |---|---|---|

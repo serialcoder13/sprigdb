@@ -1,5 +1,4 @@
-//! `sprigctl graph list|show|partition` (chapter 43 build step 30, R8
-//! round 4): a tenant's graphs as the operator sees them, read from the
+//! `sprigctl graph list|show|partition`: a tenant's graphs as the operator sees them, read from the
 //! tenant catalog (`graphs`, `objects`, the label and type rows, the
 //! indexes) and from the graph's shards.
 //!
@@ -11,7 +10,7 @@
 //! - `partition`: how the graph is cut today (`part` = `id`, hash
 //!   placement) and the share of relationships whose two ends live on
 //!   different shards, from the edge tables' `dst_rk` against the map.
-//!   The partitioning advisor of build step 25 (property scoring, label
+//!   A partitioning advisor (property scoring, label
 //!   propagation) isn't built; this is its measurement.
 
 use mysql_async::prelude::Queryable as _;
@@ -40,7 +39,7 @@ pub struct GraphRow {
     pub kind: String,
     /// `active`, ...
     pub state: String,
-    /// The table group of a native graph from round 3 on.
+    /// The table group of a native graph, when it has one.
     pub group: Option<u32>,
     /// Shards (1 for graphs without a group).
     pub shards: usize,
@@ -99,7 +98,7 @@ pub struct GraphView {
     pub shards: Vec<GraphShardRow>,
     /// Who keeps the mirrors and their state, `<mirror_mode>/<mirror_state>`
     /// (`sync/ready`, `starting/ready`, `async/ready`, `sync/building`;
-    /// R8 round 5); absent before the catalog's graph migration 3.
+    /// absent before the catalog's graph migration 3.
     #[serde(default)]
     pub mirror: Option<String>,
 }

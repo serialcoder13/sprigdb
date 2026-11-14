@@ -1,4 +1,4 @@
-//! R7 follow-ups through a live gateway (chapter 41): `Logic.TestRun`
+//! Logic tooling through a live gateway: `Logic.TestRun`
 //! over SQL, REST and gRPC; staged rollout by percentage with per-version
 //! numbers and the automatic rollback; `DROP FUNCTION | PROCEDURE |
 //! VALIDATION | SCHEDULE` with dependents.

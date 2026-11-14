@@ -1,6 +1,5 @@
-//! The no-restart soak (milestone M0.7; chapter 04 step 11, chapter 23
-//! step 9 "No restarts", chapter 37 "listener rebinding under load with no
-//! failed request"): load over the MySQL wire, REST (HTTP and HTTPS) and
+//! The no-restart soak (listeners rebind under load with no failed
+//! request): load over the MySQL wire, REST (HTTP and HTTPS) and
 //! gRPC while certificates rotate, TLS modes and minimum versions change
 //! and live settings flip, on a running gateway. It counts every request,
 //! every reconnect (a connection the gateway closed at a safe point, which

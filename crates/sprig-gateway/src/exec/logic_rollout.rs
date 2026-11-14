@@ -1,5 +1,4 @@
-//! Staged rollouts at call time (chapter 41, "Versions, rollout and
-//! rollback"; `sprig_logic::rollout`; R7 follow-ups): which version a
+//! Staged rollouts at call time (`sprig_logic::rollout`): which version a
 //! `CALL` runs, its numbers, and the automatic rollback.
 //!
 //! ```text

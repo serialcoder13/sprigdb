@@ -1,6 +1,5 @@
-//! `sprig.v1.Search` (chapter 39, "Queries"; chapter 37; build step 11):
-//! `Search.Query` over REST (`POST /v1/databases/{db}/search/{index}:query`)
-//! and gRPC.
+//! `sprig.v1.Search`: `Search.Query` over REST
+//! (`POST /v1/databases/{db}/search/{index}:query`) and gRPC.
 //!
 //! ```text
 //! Query(database, index, query_string | query, filter, limit, after, ...):
@@ -11,7 +10,7 @@
 //!   ranked hits from a copy (on a worker or in this gateway), waited for as
 //!     consistency (or a commit token) asks; facets in the same call, or,
 //!     for a caller a row policy on the object binds, over the rows it may
-//!     see (search::visible, decision S24)
+//!     see (search::visible)
 //!   from the cursor's position: re-read the hits' rows through the session;
 //!     a hit whose row the caller can't read is skipped (fetching more, up to
 //!     search.max_window, until the page is full)
@@ -537,9 +536,8 @@ async fn run(
         .unwrap_or(false);
     let facets = facet_ops(&s(body, "facets"))?;
     let analyzers = &scat::state(&cat).analyzers;
-    // Decision S24: for a caller a row policy on the object binds, facets
-    // count only the rows it may see (the copy's own counts include rows
-    // hidden from it).
+    // For a caller a row policy on the object binds, facets count only the
+    // rows it may see (the copy's own counts include rows hidden from it).
     let visible_only = visible::needs_visible(&def, sql.row_policy_binds(def.object_id));
     let mut facet_out = serde_json::Map::new();
     if visible_only && !facets.is_empty() {

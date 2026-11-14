@@ -1,4 +1,4 @@
-//! The end of a cluster's life (chapter 09, "Cluster states"; r2opfix):
+//! The end of a cluster's life:
 //! `draining` becomes `drained` once no shard map names the cluster, and a
 //! drained cluster's record is `retired` when its provisioner retires it.
 //!
@@ -8,7 +8,7 @@
 //!
 //! Before this, nothing moved a record past `draining`: a drained, retired
 //! Kubernetes cluster stayed `draining` with unreachable nodes, and `sprigctl
-//! cluster drain` on an empty cluster stayed `draining` (r2kind). Now the
+//! cluster drain` on an empty cluster stayed `draining`. Now the
 //! drain call finishes at once on an empty cluster, the balancer's pass
 //! finishes the rest when their shards have moved away, and `retire` (the
 //! Admin API's `:retire`, called by the Kubernetes provisioner before it

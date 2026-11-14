@@ -1,8 +1,8 @@
-//! Chapter 25's `failover.*` and `recovery.*` keys, and a typed snapshot.
+//! The `failover.*` and `recovery.*` keys, and a typed snapshot.
 //!
 //! `recovery.max_rebuilds_per_cluster` is the controller's scheduler key
 //! ([`crate::settings::MAX_REBUILDS_PER_CLUSTER`]) and
-//! `recovery.stability_minutes` is the balancer's (chapter 11); both are
+//! `recovery.stability_minutes` is the balancer's; both are
 //! declared once, there.
 
 use std::borrow::Cow;
@@ -121,7 +121,7 @@ key! {
     "Probe failures before a primary is lost"
 }
 key! {
-    /// `failover.observe_settle_ms` (r2opfix): how long an observed writer
+    /// `failover.observe_settle_ms`: how long an observed writer
     /// change (Kubernetes, provider failover) must hold before it is
     /// published to gateways.
     OBSERVE_SETTLE_MS: u64 = "failover.observe_settle_ms", 2000, CDG, 0, 60000,

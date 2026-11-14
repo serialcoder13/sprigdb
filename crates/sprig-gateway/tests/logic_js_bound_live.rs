@@ -1,5 +1,5 @@
 //! JavaScript computed columns, validations and after-commit triggers
-//! through a live gateway (chapter 41; jsbind, 13 Nov 2026). Each
+//! through a live gateway. Each
 //! JavaScript object has a KIRun twin doing the same thing on its own
 //! table, and the two must give the same results: generated values, which
 //! writes are refused and with what, and the audit rows a trigger writes.
@@ -461,7 +461,7 @@ async fn javascript_bound_logic_matches_kirun() {
         format!("{r:?}"),
     );
 
-    // The book's worked example 1, word for word, with its dynamic message.
+    // A JavaScript validation with a dynamic message.
     let book = "CREATE VALIDATION discount_rules ON book FOR INSERT, UPDATE
 LANGUAGE javascript AS $$
 export default function (row, old) {
@@ -477,7 +477,7 @@ $$";
     let r = sql(&mut c, book).await;
     let n = notes(&mut c).await;
     ck.check(
-        "chapter 41's JavaScript validation deploys as BEFORE triggers",
+        "the example JavaScript validation deploys as BEFORE triggers",
         r.is_ok() && n.contains("enforced by BEFORE triggers") && n.contains("tier mariadb"),
         format!("{r:?} / {n}"),
     );

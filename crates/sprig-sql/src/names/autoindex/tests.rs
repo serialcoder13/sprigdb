@@ -1,4 +1,4 @@
-//! Chapter 13 step 12: automatic indexes are invisible to schema tools and
+//! Automatic indexes are invisible to schema tools and
 //! reserved to SprigDB, and the 64-index rule.
 
 #![allow(clippy::unwrap_used)]
@@ -97,7 +97,7 @@ fn reserved_index_names_fail_with_39050() {
         assert!(matches!(e, NameError::Reserved(_)), "{sql}");
         assert_eq!(e.errno(), 39050);
     }
-    // Dropping one: only while shown (chapter 07).
+    // Dropping one: only while shown.
     let drop = ch("ALTER TABLE orders DROP INDEX sprig_auto_5be0c2a1");
     assert!(check_reserved(&drop, HIDDEN).is_err());
     assert!(check_reserved(&drop, SHOWN).is_ok());
@@ -252,7 +252,7 @@ fn the_64_index_rule() {
     );
 }
 
-// ---- hiding, end to end through the result mapper (chapter 07) ----
+// ---- hiding, end to end through the result mapper ----
 
 fn def(name: &str) -> ColumnDef {
     ColumnDef {

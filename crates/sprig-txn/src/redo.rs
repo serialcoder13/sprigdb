@@ -1,7 +1,7 @@
-//! Sprig 2PC's redo records (chapter 18, "Redo table (R3)" and "Sprig 2PC
-//! (R3)"): what a held branch on a cluster without XA wrote, kept outside
-//! its transaction so a committed branch whose transaction was lost (the
-//! holder died, the node restarted) can be replayed.
+//! Sprig 2PC's redo records: what a held branch on a cluster without XA
+//! wrote, kept outside its transaction so a committed branch whose
+//! transaction was lost (the holder died, the node restarted) can be
+//! replayed.
 //!
 //! ```text
 //! prepare:  INSERT INTO anchor.__sprig_redo (dtid, seq, …) VALUES (d, 0, …), (d, 1, …)  autocommit
@@ -250,8 +250,8 @@ pub fn delete_sql(schema: &str, dtid: Dtid) -> String {
     )
 }
 
-/// Why `sql` would not replay to the same result (chapter 18's determinism
-/// rule: what MariaDB treats as unsafe for statement-based replication),
+/// Why `sql` would not replay to the same result (by what MariaDB
+/// treats as unsafe for statement-based replication),
 /// or `None`. String literals, quoted names and comments are skipped.
 #[must_use]
 pub fn unsafe_reason(sql: &str) -> Option<&'static str> {

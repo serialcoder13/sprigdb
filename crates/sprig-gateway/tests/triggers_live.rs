@@ -1,6 +1,5 @@
-//! Triggers on streams and queues through a live private deployment
-//! (chapter 41, "Triggers on streams and queues"; chapter 45, "Exactly-once
-//! consume and write"; R9, r9triggers).
+//! Triggers on streams and queues through a live private deployment,
+//! with exactly-once consume and write.
 //!
 //! ```sh
 //! export SPRIG_TEST_TRIGGERS_GATEWAY=127.0.0.1:26306        # MySQL wire
@@ -16,7 +15,7 @@
 //! the databases `r9t_sec`, `r9t_app`, `r9t_q` and `r9t_many` of the
 //! tenant `acme` (user `acme.app`), dropped first and at the end.
 //!
-//! - **The system-tenant example of chapter 45:** three triggers on one
+//! - **The system-tenant example:** three triggers on one
 //!   stream (`sync_users` in JavaScript, `sync_users_appb` in Lua, `audit_k`
 //!   in KIRun) each run every event exactly once, while the worker running
 //!   them is killed with `kill -9` and started again.

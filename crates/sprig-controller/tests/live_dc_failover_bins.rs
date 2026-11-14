@@ -1,5 +1,4 @@
-//! DC failover with the real binaries (chapter 25, "Testing"; R2's
-//! done-when): `live_dc_failover.rs`'s twin, with `sprigdb controller`,
+//! DC failover with the real binaries: `live_dc_failover.rs`'s twin, with `sprigdb controller`,
 //! `sprigdb gateway` and `sprigdb agent` processes in place of the test's
 //! stand-ins, set up with `sprigctl` as an operator would.
 //!
@@ -69,14 +68,14 @@ const ROOT_PW: &str = "sprig-r2wire-root";
 const REPL_PW: &str = "sprig-r2wire-repl";
 const APP_PW: &str = "sprig-r2wire-app";
 const DEPLOYMENT: &str = "sprigdb-r2wire";
-/// Rule 8b: port 34306 x 100,000.
+/// A private deployment's tenant ids: its MySQL port 34306 x 100,000.
 const TENANT_BASE: u64 = 3_430_600_000;
 const T_MOVES: &str = "r2wire-moves";
 const T_PINNED: &str = "r2wire-pinned";
 const KEYS: u64 = 6;
 const DCS: [&str; 3] = ["fra1", "ams1", "wit1"];
 
-/// This agent's ports (34306, 34307, 34316-34337).
+/// This test's ports (34306, 34307, 34316-34337).
 struct Ports {
     mysql: u16,
     http: u16,
@@ -407,8 +406,7 @@ fn mariadb(net: &str, name: &str, sid: u32, master: Option<&str>) -> (OwnContain
     }
     // Each cluster logs its own writes in its own GTID domain, and the
     // standby doesn't replicate SprigDB's per-cluster schema (each
-    // cluster's controller writes its own heartbeats there): see decision
-    // W3 in decisions/r2-failover.md.
+    // cluster's controller writes its own heartbeats there).
     let domain = if master.is_none() {
         "--gtid-domain-id=1"
     } else {
@@ -422,7 +420,7 @@ fn mariadb(net: &str, name: &str, sid: u32, master: Option<&str>) -> (OwnContain
         "--replicate-wild-ignore-table=__sprig_sys.%",
         "--innodb-buffer-pool-size=64M",
         "--max-connections=400",
-        // Chapter 25: a node boots fenced; its agent unfences it.
+        // A node boots fenced; its agent unfences it.
         "--read-only=ON",
         // Above the failover's duration: a commit waiting for a standby
         // that stopped replicating never falls back to asynchronous and is
@@ -900,7 +898,7 @@ async fn scenario(fault: Fault) {
         ready(ports("fra1").ctl_tel, Duration::from_secs(120)).await,
         "ctl-fra1 ready"
     );
-    // Rule 8b: this deployment's tenant ids start at 34306 x 100,000.
+    // This deployment's tenant ids start at 34306 x 100,000.
     let next = get(&*store, "/sprig/g/ids/tenant")
         .await
         .unwrap_or_default();
@@ -953,7 +951,7 @@ async fn scenario(fault: Fault) {
             "ctl-{d} ready"
         );
     }
-    // Chapter 23 step 13: joining DCs become active once they hold their
+    // Joining DCs become active once they hold their
     // lease and latency rows exist both ways.
     let t0 = Instant::now();
     loop {
@@ -1079,7 +1077,7 @@ async fn scenario(fault: Fault) {
         )
         .await;
         let id = v["tenant"]["tenant_id"].as_u64().expect("tenant id");
-        assert!(id >= TENANT_BASE, "rule 8b ids: {id}");
+        assert!(id >= TENANT_BASE, "tenant id range: {id}");
         ids.insert(t, id);
         ctl_retry(
             &sprigctl,

@@ -21,7 +21,7 @@ tokio = { workspace = true, features = ["io-util", "net", "time"] }
 tokio-util = { workspace = true, features = ["codec"] }
 zeroize.workspace = true
 zstd.workspace = true
-# The backend client (`client`, chapter 05 step 5): TLS through rustls with
+# The backend client (`client`): TLS through rustls with
 # ring (no OpenSSL), Mozilla's roots when no CA file is given, SHA-1 and
 # SHA-256 for the auth scrambles.
 rustls.workspace = true

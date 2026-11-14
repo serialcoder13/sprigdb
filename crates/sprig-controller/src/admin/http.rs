@@ -1,6 +1,6 @@
-//! The Admin API's REST face over HTTP/1.1 (chapter 37, "REST
-//! transcoding"): JSON bodies, errors as `{code, name, message,
-//! trace_id}` with the HTTP status of the code (chapter 03's mapping), and
+//! The Admin API's REST face over HTTP/1.1: JSON bodies, errors as
+//! `{code, name, message, trace_id}` with the HTTP status of the code
+//! (the error catalogue's mapping), and
 //! `authorization: Bearer <token>` when a token is configured.
 //!
 //! Custom methods follow the `google.api.http` convention:
@@ -35,7 +35,7 @@ struct App {
     /// `[controller] gateway_token_file`: accepted on the tenant routes
     /// gateways call on their own behalf ([`authorize_gateway`]).
     gateway_token: Option<String>,
-    /// Behind the operators' guard (chapter 14, "Operators"): the caller
+    /// Behind the operators' guard: the caller
     /// comes in its header instead of the tokens above.
     guarded: bool,
 }
@@ -47,7 +47,7 @@ pub fn router(svc: Arc<AdminService>, token: Option<String>) -> Router {
 }
 
 /// [`router`], also accepting `gateway_token` on the tenant routes gateways
-/// call for Studio (decision ST12).
+/// call for Studio.
 pub fn router_with(
     svc: Arc<AdminService>,
     token: Option<String>,
@@ -147,7 +147,7 @@ fn routes(app: Arc<App>) -> Router {
             "/admin/v1/tenants/{name}/decisions/{id}",
             get(explain_decision),
         )
-        // Chapter 18: in-doubt distributed transactions.
+        // In-doubt distributed transactions.
         .route("/admin/v1/txns", get(list_txns))
         .route("/admin/v1/txns/{dtid}", get(show_txn).post(txn_method))
         .route("/admin/v1/settings", get(list_setting_keys))
@@ -207,7 +207,7 @@ pub async fn bind(addr: SocketAddr, token: Option<&str>) -> Result<TcpListener> 
 }
 
 /// Serves until `shutdown`. Handlers see the client's address as
-/// `ConnectInfo<SocketAddr>` (the guard's `client_addr`, ST47).
+/// `ConnectInfo<SocketAddr>` (the guard's `client_addr`).
 ///
 /// # Errors
 /// Internal if the server fails.
@@ -225,8 +225,7 @@ pub async fn serve(
     .map_err(|e| SprigError::internal("the Admin API server failed").with_source(e))
 }
 
-/// Serves HTTPS with `tls` until `shutdown` (chapter 37, "Admin API over
-/// TLS"); plain HTTP without it, as [`serve`].
+/// Serves HTTPS with `tls` until `shutdown`; plain HTTP without it, as [`serve`].
 ///
 /// # Errors
 /// Internal if the server fails.
@@ -360,7 +359,7 @@ fn authorize(app: &App, headers: &HeaderMap) -> Result<()> {
     }
 }
 
-/// The Admin token, or the gateways' internal credential (decision ST12):
+/// The Admin token, or the gateways' internal credential:
 /// the tenant routes Studio's views read and act through. A gateway calls
 /// them only for the caller's own tenant, after checking the caller's
 /// privileges, and records the caller as the actor.
@@ -575,7 +574,7 @@ async fn move_method(
     }
 }
 
-/// `{name}:move`, `{name}:pin` and `{name}:unpin` (chapter 24).
+/// `{name}:move`, `{name}:pin` and `{name}:unpin` (moves between DCs).
 async fn tenant_method(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
@@ -616,7 +615,7 @@ async fn tenant_method(
         }
         Some((t, "pin")) => respond(app.svc.pin_tenant_dc(t, true).await),
         Some((t, "unpin")) => respond(app.svc.pin_tenant_dc(t, false).await),
-        // Chapter 14's suspension (crate::users::suspend).
+        // Tenant suspension (crate::users::suspend).
         Some((t, "suspend")) => {
             let r = async {
                 let req: crate::users::SuspendTenantRequest = parse_required(&body)?;
@@ -723,7 +722,7 @@ async fn tenant_traffic(
     respond(r.await)
 }
 
-/// Gateways' traffic counts (chapter 24). No bearer token: counts only, on
+/// Gateways' traffic counts. No bearer token: counts only, on
 /// the controller's private Admin port (gateways hold no admin token).
 async fn traffic_report(State(app): State<Arc<App>>, body: Bytes) -> Response {
     let r = parse_required::<crate::traffic::TrafficBatch>(&body)
@@ -1084,8 +1083,8 @@ async fn get_index(
     respond(r.await)
 }
 
-/// `{index}:approve`, `:reject`, `:drop`, `:pin`, `:unpin` (and chapter
-/// 13's and 37's names `:apply`, `:dismiss`, `:freeze`, `:unfreeze`).
+/// `{index}:approve`, `:reject`, `:drop`, `:pin`, `:unpin` (and the
+/// alternative names `:apply`, `:dismiss`, `:freeze`, `:unfreeze`).
 async fn index_method(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
@@ -1209,7 +1208,7 @@ async fn show_search(
 }
 
 /// `POST /admin/v1/tenants/{name}/search/{db.index}:rebuild` (`sprigctl
-/// search rebuild`, R5 round 8).
+/// search rebuild`).
 async fn post_search(
     State(app): State<Arc<App>>,
     headers: HeaderMap,

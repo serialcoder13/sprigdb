@@ -1,5 +1,4 @@
-//! Row-level security on collections from MongoDB drivers (chapter 29,
-//! "Policies", R5; decision RL33):
+//! Row-level security on collections from MongoDB drivers:
 //!
 //! ```text
 //! {sprigCreatePolicy: "<coll>", name: "own", mode: "permissive" | "restrictive",
@@ -10,7 +9,7 @@
 //! {sprigRowSecurity: "<coll>", enable: true | false, force: true | false}
 //! ```
 //!
-//! Each becomes chapter 29's SQL statement on the collection's table, run
+//! Each becomes the matching SQL policy statement on the collection's table, run
 //! on the command's own executor session, so privileges (`ALTER` on the
 //! table), the catalog, the write triggers and the policy views are SQL's.
 //! A filter becomes SQL over `doc` and `_types` (`sprig_doc::policy`); the
@@ -105,7 +104,7 @@ fn json_lit(d: &Document) -> String {
     str_lit(&Bson::Document(d.clone()).into_relaxed_extjson().to_string())
 }
 
-/// A SQL error in MongoDB terms, keeping chapter 29's numbers (1304,
+/// A SQL error in MongoDB terms, keeping the SQL numbers (1304,
 /// 1305, 39363 to 39366) as the error code.
 fn sql_error(e: &sprig_doc::engine::SqlError) -> MongoError {
     match e.errno {

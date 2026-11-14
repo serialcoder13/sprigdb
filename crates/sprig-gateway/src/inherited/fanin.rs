@@ -1,5 +1,4 @@
-//! Fan-in reads from SQL (chapter 42, "Fan-in: reading every member's
-//! instance"):
+//! Fan-in reads from SQL, reading every member's instance:
 //!
 //! ```text
 //! SELECT ... FROM [db.]s FAN IN [WHERE tenant IN ('a', 'b') ...]
@@ -15,7 +14,7 @@
 //!   account on its cluster, become one derived table with the columns
 //!   tenant, partition_no, offset_no, ts, key, value, headers, which the
 //!   statement reads in place of `s FAN IN` (members' row-level security
-//!   doesn't bind it: Kiran's answer 5)
+//!   doesn't bind it)
 //! ```
 
 #![allow(clippy::too_many_lines, clippy::items_after_statements)]

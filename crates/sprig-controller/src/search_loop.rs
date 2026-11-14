@@ -1,5 +1,5 @@
-//! The `search_placement` loop (chapter 39, "Placement of copies"; build
-//! step 5; R5 round 6), on the DC leader, every two seconds:
+//! The `search_placement` loop (placement of search copies), on the DC
+//! leader, every two seconds:
 //!
 //! ```text
 //! each search/indexes/<tenant>/<index> record (a gateway writes it when the

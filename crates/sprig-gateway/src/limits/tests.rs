@@ -136,7 +136,7 @@ fn commits_and_rollbacks_skip_admission() {
     }
 }
 
-/// Chapter 04: the `limits.*` keys are tenant-scoped. A tenant's own value
+/// The `limits.*` keys are tenant-scoped. A tenant's own value
 /// (from its cached catalog settings) applies to that tenant only; a tenant
 /// whose catalog isn't cached, and the gateway keys, keep the dc and global
 /// values. A new settings snapshot of the tenant applies at once.

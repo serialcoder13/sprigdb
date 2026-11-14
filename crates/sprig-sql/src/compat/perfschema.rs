@@ -1,5 +1,4 @@
-//! `performance_schema` and `sys` on port 3306 (chapter 28, "Compatibility
-//! views"; build step 13; R4 round 4).
+//! `performance_schema` and `sys` on port 3306.
 //!
 //! A tenant's backend accounts hold no rights on MariaDB's own
 //! `performance_schema` (which the dev clusters run with
@@ -14,18 +13,17 @@
 //!
 //! - **From the session and MariaDB's `information_schema`:**
 //!   `session_variables`, `global_variables` and `variables_by_thread`
-//!   (MariaDB's `SESSION_VARIABLES` / `GLOBAL_VARIABLES`, names in lower
-//!   case, the persona's own values written in: version strings,
-//!   `sql_mode`, `max_execution_time`, collations in MySQL's names,
-//!   `performance_schema = ON`, ...); `session_status`, `global_status` and
-//!   `status_by_thread` (MariaDB's `SESSION_STATUS`, names in MySQL's
-//!   case, the gateway's per-session counters and `Uptime` written in,
-//!   `Threads_connected` the tenant's). `global_status` is built the same
-//!   way: the server's totals (`GLOBAL_STATUS`, which chapter 07 denies)
-//!   count every tenant's statements, so a tenant sees the server's
-//!   global-only values and its session's counters; `variables_info`
-//!   (`SYSTEM_VARIABLES`' limits).
-//! - **From the tenant's sessions** (chapter 07's `PROCESSLIST`, which the
+//!   (MariaDB's `SESSION_VARIABLES` / `GLOBAL_VARIABLES`, names in lower case,
+//!   the persona's own values written in: version strings, `sql_mode`,
+//!   `max_execution_time`, collations in MySQL's names, `performance_schema =
+//!   ON`, ...); `session_status`, `global_status` and `status_by_thread`
+//!   (MariaDB's `SESSION_STATUS`, names in MySQL's case, the gateway's
+//!   per-session counters and `Uptime` written in, `Threads_connected` the
+//!   tenant's). `global_status` is built the same way: the server's totals
+//!   (`GLOBAL_STATUS`, which the name layer denies) count every tenant's
+//!   statements, so a tenant sees the server's global-only values and its
+//!   session's counters; `variables_info` (`SYSTEM_VARIABLES`' limits).
+//! - **From the tenant's sessions** (the `PROCESSLIST` view, which the
 //!   name layer fills from the gateway's session table): `threads`,
 //!   `processlist`, `sys.session`, `sys.processlist` and their `x$` forms.
 //!   The current session's connection attributes come from the gateway:
@@ -102,8 +100,8 @@ pub struct PsSession<'a> {
     pub connect_attrs: &'a [(String, String)],
     /// The session's current database, as the client named it.
     pub current_db: Option<&'a str>,
-    /// The tenant's statement digests the user may see (R4 round 5), when
-    /// the statement reads them ([`wants_digests`]).
+    /// The tenant's statement digests the user may see, when the statement
+    /// reads them ([`wants_digests`]).
     pub digests: &'a [PsDigest],
 }
 
@@ -280,7 +278,7 @@ pub fn rewrite(
 }
 
 /// `SHOW [FULL] TABLES [{FROM | IN} db] [LIKE 'p']` in `performance_schema`
-/// or `sys` (named, or current after `USE`, R4 round 5): the catalog's
+/// or `sys` (named, or current after `USE`): the catalog's
 /// names, as MySQL lists them (`sys`' objects are views but `sys_config`).
 fn show_tables(sql: &[u8], t: &[Token], current: Option<Schema>, nbe: bool) -> Option<String> {
     let word = |k: usize, w: &[u8]| {
@@ -366,8 +364,8 @@ fn named(sql: &[u8], t: &[Token], from: usize, to: usize, expr: String) -> Strin
     format!("{expr} AS `{}`", written.replace('`', "``"))
 }
 
-/// Whether `t[from..=to]` is a whole select item without an alias (R4
-/// round 5: also [`super::jsonops`]).
+/// Whether `t[from..=to]` is a whole select item without an alias (also
+/// used by [`super::jsonops`]).
 pub(crate) fn whole_select_item(sql: &[u8], t: &[Token], from: usize, to: usize) -> bool {
     let word = |k: usize, ws: &[&[u8]]| {
         t.get(k).is_some_and(|x| {
@@ -944,7 +942,7 @@ fn variables(source: &str, global: bool, s: &PsSession<'_>, nbe: bool) -> String
             }
         }
     }
-    // MariaDB's UCA 14.0 defaults by MySQL's names (gaps row 60).
+    // MariaDB's UCA 14.0 defaults by MySQL's names.
     let mut coll = String::from("CASE VARIABLE_VALUE");
     for (m, my) in super::collation::output_pairs() {
         if my.starts_with("utf8mb4_0900_") && m != "utf8mb4_bin" {

@@ -1,5 +1,4 @@
-//! The MySQL and MariaDB front end's live settings (chapter 05,
-//! "Configuration"; Appendix B). Each is read when a connection's greeting
+//! The MySQL and MariaDB front end's live settings. Each is read when a connection's greeting
 //! is built, so a change reaches new connections only.
 //!
 //! `tls.min_version` is a listener key ([`crate::listener::settings`]):
@@ -9,7 +8,7 @@
 //! `gateway.compression` is a comma-separated string, as list values don't
 //! exist in the registry yet (like `gateway.proxy_trusted_cidrs`). The
 //! tenant scope of the per-tenant keys can't apply before the tenant is
-//! known (M0.3); they resolve at the process scopes for now.
+//! known; they resolve at the process scopes for now.
 
 use std::borrow::Cow;
 
@@ -20,8 +19,6 @@ use sprig_settings::{Apply, HardBounds, LiveSettings, Scopes, Setting, SettingCt
 
 type Text = Cow<'static, str>;
 
-/// Tenant (and every ancestor), dc and global.
-const TENANT_DC_GLOBAL: Scopes = Scopes::TREE;
 
 /// `gateway.mysql_server_version`.
 pub static MYSQL_SERVER_VERSION: Setting<Text> = Setting {
@@ -53,7 +50,7 @@ sprig_settings::register!(MARIADB_SERVER_VERSION);
 pub static MAX_ALLOWED_PACKET_BYTES: Setting<u64> = Setting {
     key: "gateway.max_allowed_packet_bytes",
     default: 67_108_864,
-    scopes: TENANT_DC_GLOBAL,
+    scopes: Scopes::PROCESS,
     hard: HardBounds::range(1024, 1 << 30),
     apply: Apply::NewSessions,
     operator_only: false,
@@ -79,7 +76,7 @@ sprig_settings::register!(MAX_CONNECT_ATTRS_BYTES);
 pub static MAX_PREPARED_PER_SESSION: Setting<u64> = Setting {
     key: "gateway.max_prepared_per_session",
     default: 1024,
-    scopes: TENANT_DC_GLOBAL,
+    scopes: Scopes::PROCESS,
     hard: HardBounds::range(0, 1_048_576),
     apply: Apply::Live,
     operator_only: false,
@@ -101,7 +98,7 @@ pub static COMPRESSION: Setting<Text> = Setting {
 };
 sprig_settings::register!(COMPRESSION);
 
-/// `gateway.relay_buffer_kb` (chapter 04).
+/// `gateway.relay_buffer_kb`.
 pub static RELAY_BUFFER_KB: Setting<u64> = Setting {
     key: "gateway.relay_buffer_kb",
     default: 256,

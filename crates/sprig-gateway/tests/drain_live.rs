@@ -1,4 +1,4 @@
-//! Drain (milestone M0.7; chapter 04 "Drain", build step 8): a gateway
+//! Drain: a gateway
 //! asked to drain through another gateway's Admin API (the peer service
 //! carries the request) finishes its in-flight work, while new requests go
 //! to the other gateway.

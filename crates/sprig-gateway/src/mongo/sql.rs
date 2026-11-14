@@ -1,13 +1,11 @@
-//! The document engine's SQL through the user's own executor session
-//! (chapter 30, "Documents on the wire"; chapter 31, "Interfaces").
+//! The document engine's SQL through the user's own executor session.
 //!
-//! A MongoDB login opens a gateway [`Session`] and the executor's session
-//! for its principal, exactly as a MySQL login or an HTTP request does, so
-//! name virtualization (chapter 07), chapter 29's privileges, the router
-//! (chapter 17) and workload capture apply to every statement the engine
-//! sends. The engine's statements run in *internal* mode
-//! ([`SessionExec::set_internal`]) so its `_sprig_p_` field columns and
-//! `__sprig_doc_meta` pass chapter 07's reserved-name check.
+//! A MongoDB login opens a gateway [`Session`] and the executor's session for
+//! its principal, exactly as a MySQL login or an HTTP request does, so name
+//! virtualization, the tenant's privileges, the router and workload capture
+//! apply to every statement the engine sends. The engine's statements run in
+//! *internal* mode ([`SessionExec::set_internal`]) so its `_sprig_p_` field
+//! columns and `__sprig_doc_meta` pass the reserved-name check.
 
 use std::net::SocketAddr;
 
@@ -27,12 +25,11 @@ use crate::pipeline::{
 };
 use crate::session::{Principal, Session, SessionState, SessionTable};
 
-/// The persona of the engine's statements: MariaDB's, whose SQL the
-/// engine writes. The MySQL 8.4 persona's compatibility layer (chapter 28:
-/// canonical JSON text in results, MySQL's integer metadata and `1062`
-/// texts, `ONLY_FULL_GROUP_BY` checks, text rewrites) is for MySQL
-/// clients, and cost about a tenth of a point read's gateway CPU (R5
-/// round 4).
+/// The persona of the engine's statements: MariaDB's, whose SQL the engine
+/// writes. The MySQL 8.4 persona's compatibility layer (canonical JSON text
+/// in results, MySQL's integer metadata and `1062` texts,
+/// `ONLY_FULL_GROUP_BY` checks, text rewrites) is for MySQL clients, and cost
+/// about a tenth of a point read's gateway CPU.
 const PERSONA: Persona = Persona::MariaDb;
 
 /// The capabilities the executor sees: a client without TLS,
@@ -47,7 +44,7 @@ fn caps() -> Caps {
 #[derive(Default)]
 struct Collect {
     columns: usize,
-    /// The columns, for binary rows (prepared statements, decision S26).
+    /// The columns, for binary rows (prepared statements).
     defs: Vec<ColumnDef>,
     binary: bool,
     rows: Rows,
@@ -219,7 +216,7 @@ fn bound(p: &Param) -> sprig_proto_mysql::command::BoundParam {
     }
 }
 
-/// Statements a session keeps prepared (decision S26); past this many the
+/// Statements a session keeps prepared; past this many the
 /// oldest are closed.
 const MAX_PREPARED: usize = 64;
 
@@ -234,13 +231,13 @@ pub struct SqlSession {
     pub in_txn: bool,
     /// The session runs at READ COMMITTED ([`Self::read_committed`]).
     read_committed: bool,
-    /// The principal's tenant name and user id (chapter 39's definers).
+    /// The principal's tenant name and user id (search definers).
     hint: Option<(String, u32)>,
     /// The engine's statements prepared in this session, by text, in
-    /// order of preparing (decision S26).
+    /// order of preparing.
     prepared: Vec<(String, crate::pipeline::StmtRef)>,
-    /// The last point find's fingerprint and its key (perf1, S147;
-    /// `super::workload`).
+    /// The last point find's fingerprint and its key
+    /// (`super::workload`).
     pub(crate) point_fp: Option<(
         super::workload::PointKey,
         sprig_workload::fingerprint::Fingerprint,
@@ -257,14 +254,13 @@ impl std::fmt::Debug for SqlSession {
 
 impl SqlSession {
     /// The gateway's workload capture of this session, for collection
-    /// table `table` of logical database `db` (chapter 12;
-    /// `Fingerprinter::mongo`).
+    /// table `table` of logical database `db` (`Fingerprinter::mongo`).
     #[must_use]
     pub fn workload(&self, db: &str, table: &str) -> Option<crate::workload::FrontCapture> {
         self.exec.workload(db, table)
     }
 
-    /// Chapter 29 (RL34): the tables whose policies bind this session, as
+    /// The tables whose policies bind this session, as
     /// MongoDB filters; `None` when it can't tell.
     #[must_use]
     pub fn row_policy_docs(&self) -> Option<std::sync::Arc<crate::tenant::rls::DocViews>> {
@@ -279,13 +275,14 @@ impl SqlSession {
         self.exec.holds_tenant_privilege(action)
     }
 
-    /// The client's known data center (chapter 24, `appName`'s `~dc`):
+    /// The client's known data center (`appName`'s `~dc`):
     /// this session's statements count as traffic from it.
     pub fn set_client_dc(&mut self, dc: Option<sprig_common::ids::DcId>) {
         self.session.client_dc = dc;
     }
 
-    /// The gateway session's id (chapter 29: internal exemptions).
+    /// The gateway session's id (for internal row-level security
+    /// exemptions).
     #[must_use]
     pub fn session_id(&self) -> sprig_common::ids::ConnId {
         self.session.id

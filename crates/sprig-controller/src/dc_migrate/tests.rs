@@ -6,7 +6,7 @@ fn d(s: &str) -> DcId {
     DcId::new(s).unwrap()
 }
 
-/// Chapter 24's worked example: 0.5 ms inside a DC, 8 ms fra1-ams1,
+/// A three-DC example: 0.5 ms inside a DC, 8 ms fra1-ams1,
 /// 160 ms fra1-sin1, 165 ms ams1-sin1.
 fn rtt(a: &str, b: &str) -> Option<f64> {
     let mut p = [a, b];
@@ -232,9 +232,9 @@ fn cooldown_doubles_per_move_back_and_is_capped() {
     assert_eq!(cooldown_until(Some(&lm(0)), 0.01, 7), Some(1_000 + 36_000));
 }
 
-/// Chapter 24's thrash test, on the pure decision: traffic that alternates
+/// A thrash test, on the pure decision: traffic that alternates
 /// between two regions every 20 minutes, evaluated every minute with the
-/// book's settings, moves the tenant at most once per cooldown.
+/// default settings, moves the tenant at most once per cooldown.
 #[test]
 fn alternating_traffic_moves_at_most_once_per_cooldown() {
     let all = [d("fra1"), d("ams1"), d("sin1")];

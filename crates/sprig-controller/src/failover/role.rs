@@ -1,4 +1,4 @@
-//! Chapter 25 in the controller role: what [`crate::serve`] starts.
+//! DC failover in the controller role: what [`crate::serve`] starts.
 //!
 //! On every controller of a DC:
 //!
@@ -116,7 +116,7 @@ pub fn traffic_key(tier: &Tier) -> Result<sprig_meta::Key> {
     tier.key("recovery/traffic")
 }
 
-/// Chapter 25 in one controller (see the module docs).
+/// DC failover in one controller (see the module docs).
 pub struct FailoverRole {
     dc: DcId,
     node: String,
@@ -221,12 +221,12 @@ impl FailoverRole {
         })
     }
 
-    /// Serves the internal routes (and `extra`, chapter 23's relay) on
+    /// Serves the internal routes (and `extra`, the relay) on
     /// `listener` until `stop`; remembers the advertised URL for
     /// `dc-observe/<dc>`.
     #[allow(clippy::needless_pass_by_value)] // the router is consumed by merge
     ///
-    /// With `tls` (`[controller] internal_tls`; hardening round 3) it
+    /// With `tls` (`[controller] internal_tls`) it
     /// serves mutual TLS and the URL is `https://`.
     pub fn serve_internal(
         self: &Arc<Self>,
@@ -597,7 +597,7 @@ impl FailoverRole {
                 role: Arc::clone(self),
                 kind: Kind::TenantPromote,
             }),
-            // Failover inside a cluster (r2next).
+            // Failover inside a cluster.
             crate::runtime::Loop::new(super::cluster::ClusterFailover::new(
                 self.dc.clone(),
                 self.node.clone(),

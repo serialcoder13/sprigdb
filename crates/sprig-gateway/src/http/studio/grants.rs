@@ -1,11 +1,11 @@
 //! What a user's `SHOW GRANTS` lines allow, as far as Studio's routes ask
-//! (chapter 29's privileges, read the way a client would read them).
+//! (the privileges, read the way a client would read them).
 //!
 //! Studio hides what a user can't do as a courtesy; the gateway decides
 //! every statement. The one place the gateway itself uses this is the
 //! indexing actions (approve, reject, freeze, drop), which go to the
-//! controller rather than through a statement: chapter 44 lets only users
-//! who could run the `CREATE INDEX` approve, so the caller needs `INDEX`,
+//! controller rather than through a statement: Studio lets only users who
+//! could run the `CREATE INDEX` approve, so the caller needs `INDEX`,
 //! `ALTER` or `ALL` on the database (or `*.*`), or `SPRIG_TENANT_ADMIN`.
 
 use serde_json::{Value, json};

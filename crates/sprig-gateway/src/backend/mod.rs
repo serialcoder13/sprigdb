@@ -1,7 +1,6 @@
-//! Backend connections (chapter 06, build steps 1-10): pools keyed by
-//! backend account and node, session-state tracking and replay, pins,
-//! writer selection, health checks and failure handling. Read routing is
-//! in [`crate::reads`].
+//! Backend connections: pools keyed by backend account and node,
+//! session-state tracking and replay, pins, writer selection, health checks
+//! and failure handling. Read routing is in [`crate::reads`].
 //!
 //! # API for executors (the relay engine and the pass-through executor)
 //!
@@ -10,7 +9,7 @@
 //! stream, finish.
 //!
 //! ```text
-//! // At login (decision D1: the target comes from sprig-auth's account):
+//! // At login (the target comes from sprig-auth's account):
 //! let mut bs: BackendSession = backends.session(account.backend.clone(), SessionOpts {
 //!     persona, found_rows, mariadb_caps, collation: handshake.collation, schema: handshake.db,
 //!     ..SessionOpts::default()
@@ -42,7 +41,7 @@
 //! bs.close().await;   // session end
 //! ```
 //!
-//! What [`BackendSession::query`] does (chapter 06's algorithms):
+//! What [`BackendSession::query`] does:
 //!
 //! 1. **Route.** A pinned session uses its held connection. A plain read
 //!    ([`StmtClass::Read`]) of an unpinned session goes through
@@ -68,18 +67,18 @@
 //!    before `query` returns, so a plain read or a prepare whose node fails
 //!    before any packet is retried once elsewhere.
 //!
-//! [`BackendSession::next`] maps a lost connection to chapter 06's errors:
-//! 39032 during a commit or an autocommit write, 1213 inside a
-//! transaction (rolled back), 39033 when other pinned state is lost, 39034
-//! once part of a result was returned, 39030 otherwise.
-//! [`BackendSession::finish`] applies session tracking (schema, allowed
-//! variables, the commit GTID for read-your-writes, unexplained changes
-//! pin `Untracked`), updates pins from the statement's effects and
-//! `SERVER_STATUS_IN_TRANS`, and either keeps the connection (pinned) or
-//! runs the captures (assigned user variables, `SHOW WARNINGS`,
-//! `FOUND_ROWS()`) and returns it to its digest bucket.
+//! [`BackendSession::next`] maps a lost connection to these errors: 39032
+//! during a commit or an autocommit write, 1213 inside a transaction
+//! (rolled back), 39033 when other pinned state is lost, 39034 once part of
+//! a result was returned, 39030 otherwise. [`BackendSession::finish`]
+//! applies session tracking (schema, allowed variables, the commit GTID for
+//! read-your-writes, unexplained changes pin `Untracked`), updates pins
+//! from the statement's effects and `SERVER_STATUS_IN_TRANS`, and either
+//! keeps the connection (pinned) or runs the captures (assigned user
+//! variables, `SHOW WARNINGS`, `FOUND_ROWS()`) and returns it to its digest
+//! bucket.
 //!
-//! Names pass through unchanged (decision D2): the schema a client names
+//! Names pass through unchanged: the schema a client names
 //! is the physical schema.
 
 pub mod charset;
@@ -182,8 +181,8 @@ impl Backends {
             packet_limits: Mutex::new(HashMap::new()),
             budgets: Mutex::new(HashMap::new()),
             kill_gates: Mutex::new(HashMap::new()),
-            // Registration (chapter 04 step 7) will say how many gateways
-            // share a DC; until then this gateway takes the whole share.
+            // Gateway registration doesn't say yet how many gateways share
+            // a DC, so this gateway takes the whole share.
             gateways_in_dc: 1,
             read_spread: std::sync::atomic::AtomicU64::new(0),
             shutdown: CancellationToken::new(),
@@ -244,7 +243,7 @@ impl Backends {
     }
 
     /// A session's backend side for a login whose statements go to
-    /// `target` (decision D3: one cluster per login).
+    /// `target` (one cluster per login).
     #[must_use]
     pub fn session(self: &Arc<Self>, target: BackendTarget, opts: SessionOpts) -> BackendSession {
         BackendSession::new(Arc::clone(self), target, opts)
@@ -315,7 +314,7 @@ impl Backends {
         )
     }
 
-    /// The node's prepared-statement budget (chapter 06 build step 9).
+    /// The node's prepared-statement budget.
     #[must_use]
     pub fn prepared_budget(&self, node: &NodeKey) -> Arc<PreparedBudget> {
         self.budget(node)
@@ -373,13 +372,13 @@ impl Backends {
         Ok(MysqlClient::connect(&node.addr, &cfg).await)
     }
 
-    /// A connection for the checks of `view`'s cluster (chapter 06,
-    /// "Health checks"): as the cluster's `sprig_gw` monitoring account,
-    /// or, where that account can't log in (not created yet; a view
-    /// without a record), as the first login's backend account, which
-    /// can't read the replication status: replicas then get no reads,
-    /// writes are unaffected. A refused `sprig_gw` is tried again after
-    /// [`GW_RETRY`]. The flag says whether the connection is `sprig_gw`'s.
+    /// A connection for the checks of `view`'s cluster: as the cluster's
+    /// `sprig_gw` monitoring account, or, where that account can't log in
+    /// (not created yet; a view without a record), as the first login's
+    /// backend account, which can't read the replication status: replicas
+    /// then get no reads, writes are unaffected. A refused `sprig_gw` is
+    /// tried again after [`GW_RETRY`]. The flag says whether the connection
+    /// is `sprig_gw`'s.
     ///
     /// # Errors
     /// 39030 if the node can't be reached; 39998 for a credential that
@@ -481,13 +480,12 @@ impl Backends {
     }
 
     /// The largest packet a client whose statements go to `target` may
-    /// send (chapter 05, "Packet limit"): `gateway`
-    /// (`gateway.max_allowed_packet_bytes`), but no more than the
-    /// cluster's smallest `max_allowed_packet` less [`PACKET_HEADROOM`]
-    /// for what the gateway adds (rewritten names, the session's sync
-    /// prefix). The first login to a cluster reads its limit when no
-    /// check has yet; one that can't be read counts as MariaDB's default,
-    /// [`UNKNOWN_BACKEND_PACKET`], and is read again after 10 s.
+    /// send: `gateway` (`gateway.max_allowed_packet_bytes`), but no more
+    /// than the cluster's smallest `max_allowed_packet` less
+    /// [`PACKET_HEADROOM`] for what the gateway adds (rewritten names, the
+    /// session's sync prefix). The first login to a cluster reads its limit
+    /// when no check has yet; one that can't be read counts as MariaDB's
+    /// default, [`UNKNOWN_BACKEND_PACKET`], and is read again after 10 s.
     pub async fn client_packet_limit(&self, target: &BackendTarget, gateway: usize) -> usize {
         let cluster = &target.cluster;
         let cached = self
@@ -544,16 +542,16 @@ impl Backends {
     /// `KILL QUERY <thread_id>` on a node, through a side connection as
     /// `target` (the session's own connection is busy).
     ///
-    /// The kills of one node run one at a time (bugfix-21). MariaDB wakes
-    /// a victim that waits on a condition by trying, for up to 2 seconds
-    /// (`SECONDS_TO_WAIT_FOR_KILL`), to lock the mutex it waits with,
-    /// while holding the victim's own locks. `SLEEP()` (and other waits)
-    /// share one mutex server-wide, so when several statements are killed
-    /// at once (a sharded statement's per-shard statements, all stopped
-    /// together), a woken victim that holds that mutex and needs its own
-    /// locks back blocks behind its killer, which spins on the mutex: 1 or
-    /// 2 of 4 such kills took 2.06 s, while one at a time each takes about
-    /// a millisecond. Connecting stays parallel; only the statement waits.
+    /// The kills of one node run one at a time. MariaDB wakes a victim that
+    /// waits on a condition by trying, for up to 2 seconds
+    /// (`SECONDS_TO_WAIT_FOR_KILL`), to lock the mutex it waits with, while
+    /// holding the victim's own locks. `SLEEP()` (and other waits) share
+    /// one mutex server-wide, so when several statements are killed at once
+    /// (a sharded statement's per-shard statements, all stopped together),
+    /// a woken victim that holds that mutex and needs its own locks back
+    /// blocks behind its killer, which spins on the mutex: 1 or 2 of 4 such
+    /// kills took 2.06 s, while one at a time each takes about a
+    /// millisecond. Connecting stays parallel; only the statement waits.
     ///
     /// # Errors
     /// 39030 if the node can't be reached; the server's error.
@@ -588,7 +586,7 @@ impl Backends {
         })
     }
 
-    /// A failure on real traffic counts at once (chapter 06).
+    /// A failure on real traffic counts at once.
     fn note_failure(&self, node: &NodeKey, kind: &'static str) {
         metrics::counter!("sprig_backend_failures_total", "cluster" => node.cluster.to_string(), "kind" => kind)
             .increment(1);
@@ -616,8 +614,8 @@ impl Backends {
 
     /// Starts the monitor of `view`'s cluster (health checks and position
     /// polling) the first time a session uses it, connecting as `target`
-    /// (interim: the first login's backend account; chapter 06 uses
-    /// `sprig_gw`, which arrives with the catalog).
+    /// (the first login's backend account, which the checks use where the
+    /// cluster's `sprig_gw` can't log in).
     fn ensure_monitor(self: &Arc<Self>, view: &Arc<ClusterView>, target: &BackendTarget) {
         let mut mons = self.monitors.lock().unwrap_or_else(PoisonError::into_inner);
         if mons.get(&view.id).is_some_and(|h| !h.is_finished()) {
@@ -645,7 +643,7 @@ pub const GW_RETRY: Duration = Duration::from_secs(60);
 
 /// What the gateway may add to a client's statement on its way to MariaDB
 /// (rewritten names, the session's sync prefix, trace context): clients
-/// are told a limit this much below the backend's, and chapter 27's
+/// are told a limit this much below the backend's, and provisioned
 /// clusters get the gateway's limit plus this much.
 pub const PACKET_HEADROOM: usize = 1 << 20;
 
@@ -690,7 +688,7 @@ mod packet_tests {
     #[test]
     fn clients_get_the_smaller_limit_less_the_headroom() {
         let gw = 64 << 20;
-        // A provisioned cluster (chapter 27): the gateway's own limit.
+        // A provisioned cluster: the gateway's own limit.
         let provisioned = usize::try_from(sprig_provision::mycnf::MAX_ALLOWED_PACKET).unwrap();
         assert_eq!(client_limit(gw, Some(provisioned)), gw);
         // MariaDB's default: 15 MiB, so rewrites still fit in 16.

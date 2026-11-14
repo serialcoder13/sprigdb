@@ -1,4 +1,4 @@
-//! The sharding loop (chapters 16 and 20): per tenant, every
+//! The sharding loop: per tenant, every
 //! `sharding.check_interval_seconds`,
 //!
 //! 1. before the tenant's first split (its default-group schemas together
@@ -88,15 +88,14 @@ pub trait SettingsSource: Send + Sync {
     fn settings(&self, tenant: TenantId) -> TenantSettings;
 
     /// `sharding.min_shards` for database `db` of `tenant` (the key has
-    /// database scope; G28). The default is the tenant's value.
+    /// database scope). The default is the tenant's value.
     fn min_shards(&self, tenant: TenantId, _db: DbId) -> u32 {
         self.settings(tenant).sharding.min_shards
     }
 }
 
-/// When a shard was born, for the merge cooldown (G28, decision
-/// bugfix-3): the commit of the job that made it, else its group's
-/// creation. A presplit shard (made with its group by the advisor's apply
+/// When a shard was born, for the merge cooldown: the commit of the job
+/// that made it, else its group's creation. A presplit shard (made with its group by the advisor's apply
 /// or by `CREATE GRAPH`) has no job; before, it counted as old, and the
 /// loop merged a presplit 4-shard group within minutes.
 #[must_use]
@@ -106,14 +105,13 @@ pub fn shard_birth(job_born: Option<u64>, group_created_ms: Option<u64>) -> Opti
 
 /// The `min_shards` a group's triggers use: the group's own value
 /// (`table_groups.min_shards`, which overrides the setting), else the
-/// largest `sharding.min_shards` among its databases (G28).
+/// largest `sharding.min_shards` among its databases.
 #[must_use]
 pub fn group_min_shards(own: Option<u32>, per_db: impl IntoIterator<Item = u32>) -> Option<u32> {
     own.or_else(|| per_db.into_iter().max())
 }
 
-/// Write load per shard, from the gateways' write sketches (chapter 20,
-/// "Write sketches"): what load splits need. Without one, `write_shares`
+/// Write load per shard, from the gateways' write sketches: what load splits need. Without one, `write_shares`
 /// stay empty and only size splits, `min_shards` and merges fire.
 pub trait WriteLoad: Send + Sync {
     /// The shard's share of its cluster's writes per minute, oldest first,
@@ -203,7 +201,7 @@ pub struct ShardingLoop {
     publish: Option<Arc<dyn sprig_advisor::sharding::apply::Publish>>,
     /// Tenants whose table groups this loop published since it started.
     published: Mutex<BTreeSet<TenantId>>,
-    /// Chapter 52: `sharding.mode = approve` holds jobs for approval.
+    /// `sharding.mode = approve` holds jobs for approval.
     pub approvals: std::sync::OnceLock<Arc<crate::approvals::ControllerApprovals>>,
 }
 
@@ -268,7 +266,7 @@ impl ShardingLoop {
         }
     }
 
-    /// Chapter 52's gate for a split, merge or move proposal: `Ok` to go
+    /// The approval gate for a split, merge or move proposal: `Ok` to go
     /// ahead (with the ticket to report the submission with, when an item
     /// tracks it), `Err(why)` to hold. Only under `approve` and
     /// `recommend` with an approvals hub.
@@ -301,7 +299,7 @@ impl ShardingLoop {
         // The item's identity leaves out a split's points: they are chosen
         // from index-dive samples and differ from one proposal to the next,
         // which made a fresh proposal supersede the approved item instead
-        // of running it (approvals round 3, live). They go in the evidence.
+        // of running it. They go in the evidence.
         let mut job = p.job.clone();
         let mut evidence = p.evidence.clone();
         if let shards::ShardJob::Split { points, .. } = &mut job {
@@ -359,7 +357,7 @@ impl ShardingLoop {
     }
 
     /// The same loop reading tenants' states from the directory in
-    /// `global` (chapter 24's `migrating` blocks shard work).
+    /// `global` (a tenant `migrating` between DCs blocks shard work).
     #[must_use]
     pub fn with_directory(mut self, global: Arc<dyn sprig_meta::MetaStore>) -> Self {
         self.directory = Some(global);
@@ -486,7 +484,7 @@ impl ShardingLoop {
             return Ok(report);
         }
         if !self.tenant_active(tenant).await? {
-            // Moving between DCs (chapter 24): no shard work until it ends.
+            // Moving between DCs: no shard work until it ends.
             report.waiting.push((format!("t{tenant}"), "tenant_move"));
             return Ok(report);
         }
@@ -536,7 +534,7 @@ impl ShardingLoop {
             p.catalog_changed(tenant).await?;
             lock(&self.published).insert(tenant);
         }
-        // Online re-keys (chapter 16): finish the catalog of a committed
+        // Online re-keys: finish the catalog of a committed
         // one, undo one that ended without a cutover.
         if groups.iter().any(|g| g.1 == "rekeying") {
             self.rekey_follow(tenant).await?;
@@ -564,10 +562,10 @@ impl ShardingLoop {
         Ok(report)
     }
 
-    /// What chapter 33's key-value rule (decision R28, R6 round 5) needs
-    /// beyond the input: each unit's database's `sharding.min_shards`, and
-    /// whether its shard (the database's default group, shard 1) is
-    /// write-hot by chapter 20's load rule.
+    /// What the key-value rule needs beyond the input: each unit's
+    /// database's `sharding.min_shards`, and whether its shard (the
+    /// database's default group, shard 1) is write-hot by the load-split
+    /// rule.
     fn kv_rule_inputs(
         &self,
         tenant: TenantId,
@@ -604,7 +602,7 @@ impl ShardingLoop {
     }
 
     /// Step 1: the advisor's first design when the first split is due.
-    #[allow(clippy::too_many_lines, clippy::many_single_char_names)] // the book's run, step by step
+    #[allow(clippy::too_many_lines, clippy::many_single_char_names)] // the advisor's run, step by step
     async fn first_design(
         &self,
         tenant: TenantId,
@@ -615,7 +613,7 @@ impl ShardingLoop {
         manual: bool,
     ) -> Result<()> {
         let now = SystemTime::now();
-        // R9 (r9scale): the whole input only when the first split can be
+        // The whole input only when the first split can be
         // due; most tenants are far below the split size.
         if !manual
             && ts.sharding.min_shards <= 1
@@ -635,7 +633,7 @@ impl ShardingLoop {
             && h != Self::advisor_holder(tenant)
         {
             // A whole-tenant job (a move, a copy-and-swap) runs: the first
-            // design waits for it (chapter 20, "Mutual exclusion").
+            // design waits for it (mutual exclusion).
             report.waiting.push((format!("t{tenant}"), "tenant_job"));
             return Ok(());
         }
@@ -660,7 +658,7 @@ impl ShardingLoop {
             Cause::MinShards
         };
         let s = ts.advisor;
-        // Decision bugfix-31: a trigger's table and the tables its body
+        // A trigger's table and the tables its body
         // names land in one group or stay; `settle` holds split couples
         // and finds the design again.
         let found = sprig_advisor::sharding::code::settle(&mut asm.input, |input| {
@@ -715,7 +713,7 @@ impl ShardingLoop {
                 mode: match s.mode {
                     AdvisorMode::On => "on",
                     // `advisor_runs.mode` has no `approve`: held runs are
-                    // recommendations until approved (chapter 52).
+                    // recommendations until approved.
                     AdvisorMode::Recommend | AdvisorMode::Approve => "recommend",
                     AdvisorMode::Off => "off",
                 },
@@ -782,7 +780,7 @@ impl ShardingLoop {
         if verdict == Verdict::Recommend
             && let Some(a) = self.approvals.get()
         {
-            // Chapter 52: the run's design is the proposal; the advisor
+            // The run's design is the proposal; the advisor
             // runs again every `advisor_retry`, so an approved design is
             // applied from a fresh run that still finds it.
             use sprig_approvals::{Action, Kind, Proposal, Verdict as Gate};
@@ -814,7 +812,7 @@ impl ShardingLoop {
                 emergency: false,
             };
             // Under `recommend` the run is advice; an approval in the
-            // inbox still applies it (chapter 52, "The modes").
+            // inbox still applies it.
             if matches!(s.mode, AdvisorMode::Approve | AdvisorMode::Recommend)
                 && let Gate::Proceed(t) = a.gate(&p, &policy).await
             {
@@ -856,7 +854,7 @@ impl ShardingLoop {
         let cat = SchemaName::catalog(tenant).to_string();
         // The groups' maps are created under the tenant's lock, so no
         // whole-tenant move runs beside the apply or starts after it
-        // without seeing them (chapters 10 and 20).
+        // without seeing them.
         let holder = Self::advisor_holder(tenant);
         let blocked = match self.jobs.lock_tenant(tenant, &holder).await? {
             Some(h) => Some(format!("job {h} holds the tenant")),
@@ -1056,7 +1054,7 @@ impl ShardingLoop {
         )
         .await
         .map_err(|e| SprigError::internal(format!("members: {e}")))?;
-        // Chapter 21's multi-shard DDL jobs hold their shards: a split,
+        // Multi-shard DDL jobs hold their shards: a split,
         // merge or move of them waits (the `group-schema` lock as built).
         let ddl_rows = sprig_catalog::store::Store::for_tenant(tenant)
             .settings_of(&mut cc, sprig_catalog::store::SettingScope::Tenant)
@@ -1240,7 +1238,7 @@ impl ShardingLoop {
             } else {
                 Admission::Wait("ddl")
             };
-            // Chapter 52: under `recommend` an approval in the inbox runs the
+            // Under `recommend` an approval in the inbox runs the
             // job. The gate is asked once the job would be admitted as under
             // `on` (so an approval isn't spent while a slot or lock is
             // busy); approved, it goes through the same submission.
@@ -1294,7 +1292,7 @@ impl ShardingLoop {
                     }
                 }
                 Admission::Recommend => {
-                    // Chapter 52: advice in the approvals inbox too (an
+                    // Advice in the approvals inbox too (an
                     // approval runs it once it would be admitted, above).
                     if !gated {
                         let _ = self
@@ -1343,7 +1341,7 @@ impl ShardingLoop {
                             .await;
                         continue;
                     };
-                    // The other side of chapter 21's exclusion and of a move
+                    // The other side of the DDL exclusion and of a move
                     // between DCs: a schema change writes its intent row, and a
                     // move its directory state, before checking for shard jobs;
                     // this job checks for them after taking its locks. One of
@@ -1495,7 +1493,7 @@ impl ShardingLoop {
 mod birth_tests {
     use super::*;
 
-    /// G28: a presplit 4-shard group (no job made its shards) on one
+    /// A presplit 4-shard group (no job made its shards) on one
     /// cluster, small and quiet, ten minutes after its creation.
     fn presplit(created_ms: Option<u64>, min_shards: Option<u32>) -> GroupStat {
         let quarter = 1u64 << 62;
@@ -1548,7 +1546,7 @@ mod birth_tests {
         let min = group_min_shards(None, [1, 4]);
         assert_eq!(min, Some(4));
         assert_eq!(merges(&presplit(Some(created), min), later), 0);
-        // The group's own value overrides the setting (chapter 15).
+        // The group's own value overrides the setting.
         assert_eq!(group_min_shards(Some(2), [4]), Some(2));
         assert_eq!(merges(&presplit(Some(created), Some(2)), later), 2);
     }

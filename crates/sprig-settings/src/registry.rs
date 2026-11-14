@@ -213,9 +213,178 @@ macro_rules! register {
     };
 }
 
+/// What the [`MARKED`] table adds to a key's declaration. Kept apart from
+/// [`Setting`], so marking a key doesn't touch its declaration (or every
+/// key's, as a new field would).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    /// Registered ahead of its code: nothing reads it yet. It stays
+    /// registered, so a stored value isn't rejected and `SET` still
+    /// checks it, but listings ([`Registry::iter`]: `SHOW SPRIG
+    /// SETTINGS`, the Admin API's key list, the generated settings page)
+    /// leave it out until it is built.
+    Unbuilt,
+    /// Read once when the process starts, though `apply` says otherwise:
+    /// a change applies at the next restart. Shown as `restart` where the
+    /// apply mode is shown.
+    Restart,
+}
+
+/// The marked keys, with why (bugfix-89's settings round, smallfix, 14 Nov
+/// 2026). Remove a key's line when it is built or made live; the
+/// `settings_honoured` test fails on a marked key something reads, and on
+/// an unread key that isn't marked.
+pub const MARKED: &[(&str, Mark, &str)] = &[
+    (
+        "auto_index.field_column_class_pct",
+        Mark::Unbuilt,
+        "chapter 13's field-column class rule",
+    ),
+    (
+        "auto_index.lookup_scatter_pct",
+        Mark::Unbuilt,
+        "chapter 13's lookup-scatter rule",
+    ),
+    (
+        "auto_index.wildcard_recommend_paths",
+        Mark::Unbuilt,
+        "chapter 13's wildcard advice",
+    ),
+    (
+        "catalog.ddl_wait_ms",
+        Mark::Unbuilt,
+        "the DDL path waits the default; no read of the key",
+    ),
+    (
+        "decisions.retention_days",
+        Mark::Unbuilt,
+        "decision-log retention",
+    ),
+    (
+        "failover.quarantine_days",
+        Mark::Unbuilt,
+        "the quarantine of a failed-over node",
+    ),
+    (
+        "graph.traversal_tier",
+        Mark::Unbuilt,
+        "chapter 43's traversal tiers",
+    ),
+    (
+        "inherit.instance_precreate",
+        Mark::Unbuilt,
+        "instance precreation",
+    ),
+    (
+        "inherit.precreate_rate",
+        Mark::Unbuilt,
+        "instance precreation",
+    ),
+    (
+        "inherit.sync_orphan_max_rows",
+        Mark::Unbuilt,
+        "the orphan sync's cap",
+    ),
+    (
+        "mover.max_pause_minutes",
+        Mark::Unbuilt,
+        "the mover's pause limit",
+    ),
+    (
+        "mover.recovery_rate_pct",
+        Mark::Unbuilt,
+        "the mover's recovery rate",
+    ),
+    (
+        "mover.throttle_p99_increase_pct",
+        Mark::Unbuilt,
+        "the mover's p99 throttle",
+    ),
+    (
+        "mover.verify_mode",
+        Mark::Unbuilt,
+        "the mover's verify modes",
+    ),
+    ("mover.xa_wait_ms", Mark::Unbuilt, "the mover's XA wait"),
+    (
+        "queue.descendant_key",
+        Mark::Unbuilt,
+        "AMQP publishing into an ancestor's exchange",
+    ),
+    (
+        "queue.descendant_publish",
+        Mark::Unbuilt,
+        "AMQP publishing into an ancestor's exchange",
+    ),
+    (
+        "recovery.max_latency_increase_pct",
+        Mark::Unbuilt,
+        "recovery throttling",
+    ),
+    (
+        "recovery.rebuild_threshold_gb",
+        Mark::Unbuilt,
+        "rebuild versus catch-up",
+    ),
+    (
+        "recovery.step_max_lag_ms",
+        Mark::Unbuilt,
+        "recovery throttling",
+    ),
+    (
+        "search.max_lag_ms",
+        Mark::Unbuilt,
+        "chapter 39's copy states (stale after lag)",
+    ),
+    (
+        "stream.sequencer_batch_ms",
+        Mark::Unbuilt,
+        "the stream sequencer's batching",
+    ),
+    (
+        "tenant.ancestry_cache_seconds",
+        Mark::Unbuilt,
+        "the ancestry cache's expiry",
+    ),
+    (
+        "tenant.copy_max_descendants",
+        Mark::Unbuilt,
+        "the tenant-copy descendant cap",
+    ),
+    (
+        "redis.sharded_pubsub_hubs",
+        Mark::Restart,
+        "the hub mesh is built when the gateway starts, and every gateway must agree on the count",
+    ),
+];
+
+/// The [`Mark`] of `key` in [`MARKED`], if any.
+#[must_use]
+pub fn mark_of(key: &str) -> Option<Mark> {
+    MARKED
+        .iter()
+        .find(|(k, _, _)| *k == key)
+        .map(|(_, m, _)| *m)
+}
+
+/// When a change to `def` applies, as listings name it: `live`,
+/// `new_sessions`, `rebind`, or `restart` for a [`Mark::Restart`] key.
+#[must_use]
+pub fn apply_name(def: &dyn AnySetting) -> &'static str {
+    if mark_of(def.key()) == Some(Mark::Restart) {
+        return "restart";
+    }
+    match def.apply() {
+        Apply::Live => "live",
+        Apply::NewSessions => "new_sessions",
+        Apply::Rebind => "rebind",
+    }
+}
+
 /// The validated set of declared keys.
 pub struct Registry {
     keys: BTreeMap<&'static str, &'static dyn AnySetting>,
+    marks: BTreeMap<&'static str, Mark>,
 }
 
 impl std::fmt::Debug for Registry {
@@ -241,7 +410,12 @@ impl Registry {
                 )));
             }
         }
-        Ok(Self { keys })
+        let marks = MARKED
+            .iter()
+            .filter(|(k, _, _)| keys.contains_key(k))
+            .map(|(k, m, _)| (*k, *m))
+            .collect();
+        Ok(Self { keys, marks })
     }
 
     /// The process-wide registry of every key registered with
@@ -263,9 +437,48 @@ impl Registry {
         self.keys.get(key).copied()
     }
 
-    /// Every declaration, ordered by key.
+    /// Every declaration that is built, ordered by key: what listings
+    /// show. [`Mark::Unbuilt`] keys are left out; [`Self::get`] and
+    /// [`Self::iter_all`] still have them.
     pub fn iter(&self) -> impl Iterator<Item = &'static dyn AnySetting> + '_ {
+        self.keys
+            .values()
+            .copied()
+            .filter(|s| self.mark(s.key()) != Some(Mark::Unbuilt))
+    }
+
+    /// Every declaration, built or not, ordered by key.
+    pub fn iter_all(&self) -> impl Iterator<Item = &'static dyn AnySetting> + '_ {
         self.keys.values().copied()
+    }
+
+    /// The key's [`Mark`], if it was registered with one.
+    #[must_use]
+    pub fn mark(&self, key: &str) -> Option<Mark> {
+        self.marks.get(key).copied()
+    }
+
+    /// Whether `key` is registered ahead of its code ([`Mark::Unbuilt`]).
+    #[must_use]
+    pub fn is_unbuilt(&self, key: &str) -> bool {
+        self.mark(key) == Some(Mark::Unbuilt)
+    }
+
+    /// When a change to `key` applies, as listings name it: `live`,
+    /// `new_sessions`, `rebind`, or `restart` for a [`Mark::Restart`] key.
+    #[must_use]
+    pub fn apply_name(&self, def: &dyn AnySetting) -> &'static str {
+        if self.mark(def.key()) == Some(Mark::Restart) {
+            return "restart";
+        }
+        apply_name(def)
+    }
+
+    /// With extra marks, for registries of test keys.
+    #[must_use]
+    pub fn with_marks(mut self, marks: &[(&'static str, Mark)]) -> Self {
+        self.marks.extend(marks.iter().copied());
+        self
     }
 }
 

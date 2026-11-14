@@ -1,5 +1,4 @@
-//! Physical names inside MariaDB (chapter 03, "Identifiers"; chapter 07,
-//! "Physical names" and "Reserved names"; writing guide 5.4).
+//! Physical names inside MariaDB.
 //!
 //! This module is the only place that knows the patterns. Anything that
 //! needs a physical schema, account or internal object name asks it, and
@@ -19,8 +18,8 @@ use std::str::FromStr;
 
 use crate::ids::{DbId, GroupId, RoleId, ShardId, TenantId, UserId};
 
-/// The per-cluster internal schema: probe tables, heartbeats, mover state
-/// (chapter 09). Never granted to tenants.
+/// The per-cluster internal schema: probe tables, heartbeats, mover state.
+/// Never granted to tenants.
 pub const SYS_SCHEMA: &str = "__sprig_sys";
 
 /// Prefix of internal tables, views, routines, triggers and events.
@@ -45,7 +44,7 @@ pub const GIPK_COLUMN: &str = "my_row_id";
 /// Database names no one may create or drop.
 pub const SYSTEM_SCHEMAS: [&str; 4] = ["information_schema", "performance_schema", "sys", "mysql"];
 
-/// Grant pattern covering every tenant schema, for `sprig_ctl` (chapter 09).
+/// Grant pattern covering every tenant schema, for `sprig_ctl`.
 pub const TENANT_SCHEMAS_GRANT_PATTERN: &str = "t%";
 
 /// Grant pattern covering every tenant catalog schema, for `sprig_gw`.
@@ -82,7 +81,7 @@ pub enum SchemaName {
         /// The shard.
         shard: ShardId,
     },
-    /// The reference tables of a database: `t<tenant>_d<db>_ref` (R1).
+    /// The reference tables of a database: `t<tenant>_d<db>_ref`.
     Reference {
         /// The tenant.
         tenant: TenantId,
@@ -183,7 +182,7 @@ impl FromStr for SchemaName {
     }
 }
 
-/// A tenant's backend account (chapter 29), without the host part.
+/// A tenant's backend account, without the host part.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AccountName {
     /// A user: `t<tenant>_u<user>`.
@@ -262,7 +261,7 @@ pub fn tenant_account_like(tenant: TenantId) -> String {
     format!("t{tenant}\\_%")
 }
 
-/// SprigDB's system accounts (chapter 09, "System accounts").
+/// SprigDB's system accounts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SystemAccount {
     /// `sprig_ctl`: controllers and workers.
@@ -350,8 +349,8 @@ pub fn doc_wildcard_index_table(collection: &str) -> String {
     format!("{INTERNAL_OBJECT_PREFIX}wx_{collection}")
 }
 
-/// Whether `name` has the `prefix`, ignoring ASCII case (chapter 07:
-/// reserved prefixes match case-insensitively).
+/// Whether `name` has the `prefix`, ignoring ASCII case (reserved
+/// prefixes match case-insensitively).
 fn has_prefix_ci(name: &str, prefix: &str) -> bool {
     name.len() >= prefix.len()
         && name.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
@@ -403,15 +402,14 @@ pub const TENANT_NAME_MIN: usize = 2;
 /// The longest tenant name, in characters (a DNS label).
 pub const TENANT_NAME_MAX: usize = 63;
 
-/// Whether `s` is a tenant name (chapter 14, "Tenant names"; chapter 23):
+/// Whether `s` is a tenant name:
 /// `^[a-z][a-z0-9-]{0,61}[a-z0-9]$`, a lowercase DNS label of 2 to 63
 /// characters that starts with a letter and doesn't end with a hyphen
 /// (tenant names appear in TLS SNI host names).
 ///
 /// The one rule for every place that meets a tenant name: creating a
 /// tenant, logins (`acme.alice`, SNI tenant endpoints, API keys), the
-/// `x-sprig-tenant` header and REST paths (decision bugfix-interim, tenant
-/// names).
+/// `x-sprig-tenant` header and REST paths.
 #[must_use]
 pub fn is_tenant_name(s: &str) -> bool {
     let b = s.as_bytes();

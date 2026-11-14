@@ -1,4 +1,4 @@
-//! The `SHOW` family (chapter 07, "SHOW statements"; build step 4).
+//! The `SHOW` family.
 //!
 //! [`classify`] reads a rewritten `SHOW` statement and says what it is;
 //! [`super::plan()`] then forwards it with a [`super::ResultMapper`] or answers it
@@ -80,7 +80,7 @@ pub enum ShowKind {
     Warnings,
     /// `SHOW ERRORS`.
     Errors,
-    /// `SHOW GRANTS` (chapter 29; scrubbed until then).
+    /// `SHOW GRANTS` (forwarded, its output scrubbed).
     Grants,
     /// A statement that fails with 1227.
     Denied,
@@ -311,7 +311,7 @@ pub fn classify(sql: &[u8], tokens: &[Token], no_backslash_escapes: bool) -> Opt
     Some(info)
 }
 
-/// `SHOW` statements chapter 07 refuses with 1227.
+/// `SHOW` statements the name layer refuses with 1227.
 fn denied(tk: &Toks<'_>, j: usize) -> bool {
     let w = |k: usize, s: &str| tk.word(k, s);
     w(j, "ENGINE")
@@ -392,7 +392,7 @@ pub fn system_databases(persona: Persona) -> &'static [&'static str] {
 
 /// The names `SHOW DATABASES` and `SCHEMATA` list, sorted: the persona's
 /// system schemas and the tenant's databases that `visible` keeps
-/// (chapter 29 decides which the user may see).
+/// (the caller decides which the user may see).
 #[must_use]
 pub fn database_names(
     map: &dyn NameMap,
@@ -413,8 +413,8 @@ pub fn database_names(
     names
 }
 
-/// `SHOW DATABASES [LIKE 'pattern']`, answered from the name map (chapter
-/// 07: databases are never listed from MariaDB, whose scan reads every
+/// `SHOW DATABASES [LIKE 'pattern']`, answered from the name map
+/// (databases are never listed from MariaDB, whose scan reads every
 /// schema on the server). `case_insensitive` follows
 /// `names.lower_case_table_names`.
 #[must_use]
@@ -489,7 +489,7 @@ fn like_at(p: &[char], v: &[char]) -> bool {
     p[pi..].iter().all(|&c| c == '%')
 }
 
-/// One session of the tenant, as the gateway knows it (chapter 04), for
+/// One session of the tenant, as the gateway knows it, for
 /// `SHOW PROCESSLIST` and `information_schema.PROCESSLIST`. Names are the
 /// client's: logical database, user name, client address.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -514,7 +514,7 @@ pub struct ProcessRow {
     pub info: Option<String>,
 }
 
-/// The tenant's sessions on the data center's gateways (chapter 04).
+/// The tenant's sessions on the data center's gateways.
 pub trait SessionSource: Send + Sync {
     /// Every session of the tenant the user may see (all of them with
     /// `PROCESS`, otherwise the user's own).
@@ -571,7 +571,7 @@ pub fn show_processlist(rows: &[ProcessRow], full: bool, persona: Persona) -> Lo
 }
 
 /// A stored routine's original text, kept by the catalog
-/// (`schema_versions`, chapter 08) when the routine was created.
+/// (`schema_versions`) when the routine was created.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutineSource {
     /// The routine's name.
@@ -581,7 +581,7 @@ pub struct RoutineSource {
     /// `sql_mode` at creation.
     pub sql_mode: String,
     /// The client's `CREATE` statement, with logical names (the `DEFINER`
-    /// as the client wrote it or as chapter 29 records it).
+    /// as the client wrote it or as account management records it).
     pub create_text: String,
     /// `character_set_client` at creation.
     pub character_set_client: String,
@@ -592,7 +592,7 @@ pub struct RoutineSource {
 }
 
 /// `SHOW CREATE PROCEDURE` or `FUNCTION` answered from the original text
-/// (chapter 07: the catalog's copy, so comments and layout survive and no
+/// (the catalog's copy, so comments and layout survive and no
 /// physical name can appear). Any physical name in the stored text is
 /// still mapped, as a safety net.
 #[must_use]

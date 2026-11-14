@@ -1,5 +1,5 @@
-//! The 3306 rules inside stored programs and views (chapter 28 step 12,
-//! R4 round 4), and 39602 `ER_SPRIG_NEEDS_GATEWAY`.
+//! The 3306 rules inside stored programs and views, and 39602
+//! `ER_SPRIG_NEEDS_GATEWAY`.
 //!
 //! MariaDB runs a view's query and a routine's, trigger's or event's body
 //! itself, so the gateway's per-statement rules never see the statements
@@ -8,26 +8,26 @@
 //! `SELECT` or `WITH`, a cursor's query, a parenthesized subquery, a
 //! view's query) goes through [`super::lateral`] and [`super::rollup`], as
 //! the same query sent on its own would. Lock names were already scoped
-//! in stored code ([`super::locks`], R4 round 3), and
+//! in stored code ([`super::locks`]), and
 //! [`super::perfschema`]'s functions are expressions.
 //!
 //! What would need the gateway while the body runs fails at `CREATE` with
 //! 39602, naming it:
 //!
-//! - a `LATERAL` the rewrite can't turn into SQL (chapter 28's gateway
-//!   apply);
+//! - a `LATERAL` the rewrite can't turn into SQL (the gateway
+//!   applies it itself);
 //! - a `performance_schema` or `sys` table (the gateway answers them from
 //!   its sessions);
-//! - a `CALL sprig.<procedure>` (queues and stream offsets, chapters 45
-//!   and 50, which the gateway runs).
+//! - a `CALL sprig.<procedure>` (queues and stream offsets, which the
+//!   gateway runs).
 //!
-//! Writes to collections (chapter 31's rule) need the catalog: the gateway
+//! Writes to collections need the catalog: the gateway
 //! resolves [`write_targets`] and refuses a collection with
-//! [`collection_write_error`] (R4 round 5).
+//! [`collection_write_error`].
 //!
-//! Not checked here: MySQL's `ONLY_FULL_GROUP_BY`, which MySQL itself applies only
-//! when the body runs (MariaDB doesn't apply it, decision T1), and
-//! `EXPLAIN` inside a body, which keeps MariaDB's columns.
+//! Not checked here: MySQL's `ONLY_FULL_GROUP_BY`, which MySQL itself applies
+//! only when the body runs (MariaDB doesn't apply it), and `EXPLAIN` inside a
+//! body, which keeps MariaDB's columns.
 
 use super::errmap::WireError;
 use crate::lex::{self, LexOptions, Token, TokenKind};
@@ -133,7 +133,7 @@ pub fn rewrite(sql: &[u8], opts: &LexOptions) -> Option<Result<Vec<u8>, WireErro
         .filter(|t| !t.kind.is_trivia())
         .collect();
     let (obj, kind_at) = object_at(sql, &t)?;
-    // Logic-layer functions (chapter 41) and loadable functions.
+    // Logic-layer functions and loadable functions.
     if t.iter().enumerate().any(|(k, _)| {
         word(sql, &t, k, b"LANGUAGE")
             && (word(sql, &t, k + 1, b"JAVASCRIPT") || word(sql, &t, k + 1, b"KIRUN"))
@@ -195,11 +195,11 @@ pub fn rewrite(sql: &[u8], opts: &LexOptions) -> Option<Result<Vec<u8>, WireErro
         let mut at = 0;
         for (s, e, rep) in &edits {
             out.extend_from_slice(&sql[at..*s]);
-            // R4 round 5 (gaps row 69): routines, triggers and events keep
-            // their comments, so the text as written rides along for
-            // `SHOW CREATE` and `information_schema` ([`restore_original`]);
-            // MariaDB drops a view's comments, and MySQL shows a view's
-            // query reprinted anyway.
+            // Routines, triggers and events keep their comments, so the text
+            // as written rides along for `SHOW CREATE` and
+            // `information_schema` ([`restore_original`]); MariaDB drops a
+            // view's comments, and MySQL shows a view's query reprinted
+            // anyway.
             if obj == Object::View {
                 out.extend_from_slice(rep.as_bytes());
             } else {
@@ -242,10 +242,10 @@ pub fn has_original(v: &[u8]) -> bool {
     v.windows(MARK_OPEN.len()).any(|w| w == MARK_OPEN)
 }
 
-/// A stored program's text (a body, or a whole `SHOW CREATE` answer) with
-/// each segment the 3306 rules rewrote at `CREATE` given back as written
-/// (R4 round 5, gaps row 69): MySQL shows routines, triggers and events
-/// as their author wrote them. `None` when `v` has no marked segment.
+/// A stored program's text (a body, or a whole `SHOW CREATE` answer) with each
+/// segment the 3306 rules rewrote at `CREATE` given back as written: MySQL
+/// shows routines, triggers and events as their author wrote them. `None` when
+/// `v` has no marked segment.
 #[must_use]
 pub fn restore_original(v: &[u8]) -> Option<Vec<u8>> {
     if !has_original(v) {
@@ -490,7 +490,7 @@ pub fn write_targets(sql: &[u8], opts: &LexOptions) -> Vec<(Option<String>, Stri
 }
 
 /// 39602 for a stored program `sql` whose body writes the collection
-/// `name` (chapter 31: such writes take the gateway's document path).
+/// `name` (such writes take the gateway's document path).
 #[must_use]
 pub fn collection_write_error(sql: &[u8], opts: &LexOptions, name: &str) -> WireError {
     let obj = object(sql, opts).unwrap_or(Object::Procedure);

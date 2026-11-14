@@ -107,12 +107,24 @@ pub fn request_body(r: &ClusterRegistration) -> Value {
 
 /// [`ClusterRegistrar`] over the controller's Admin API (`http://`, or
 /// `https://` checked against a CA bundle).
+///
+/// Registration, `:setNodes` and `:retire` are served only by the DC
+/// leader; another controller answers 39504 naming it. With a leader
+/// address template ([`Self::with_leader_template`]), such a refusal is
+/// sent again to the leader's own address, and later calls go there first
+/// until it fails or stops leading. Without one, the refusal is returned and
+/// the reconcile retries on its next pass.
 #[derive(Clone)]
 pub struct AdminRegistrar {
     host: String,
     port: u16,
     token: Option<String>,
     tls: Option<(TlsConnector, ServerName<'static>)>,
+    /// `http(s)://{leader}...:port`: where the controller named `{leader}`
+    /// serves the Admin API.
+    leader_template: Option<String>,
+    /// The leader last reached through the template.
+    leader: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl std::fmt::Debug for AdminRegistrar {
@@ -121,6 +133,7 @@ impl std::fmt::Debug for AdminRegistrar {
             .field("host", &self.host)
             .field("port", &self.port)
             .field("https", &self.tls.is_some())
+            .field("leader_template", &self.leader_template)
             .finish_non_exhaustive()
     }
 }
@@ -191,7 +204,43 @@ impl AdminRegistrar {
             port,
             token,
             tls,
+            leader_template: None,
+            leader: Arc::default(),
         })
+    }
+
+    /// Follows the DC leader: a 39504 refusal naming controller `X` is sent
+    /// again to `template` with `{leader}` replaced by `X` (the chart's
+    /// `https://{leader}.sprigdb-controller-pods.<ns>.svc:7480`, the
+    /// address each controller advertises). The scheme must match the
+    /// endpoint's, so the same CA bundle checks it.
+    ///
+    /// # Errors
+    /// `ConfigInvalid` for a template without `{leader}`, or one that isn't
+    /// `http(s)://host:port` with the endpoint's scheme.
+    pub fn with_leader_template(mut self, template: Option<String>) -> Result<Self> {
+        if let Some(t) = &template {
+            let bad = |why: &str| {
+                SprigError::new(
+                    SprigCode::ConfigInvalid,
+                    format!("controller leader address {t}: {why}"),
+                )
+            };
+            if !t.contains("{leader}") {
+                return Err(bad("expected {leader} where the controller's name goes"));
+            }
+            let scheme = if self.is_https() {
+                "https://"
+            } else {
+                "http://"
+            };
+            if !t.starts_with(scheme) {
+                return Err(bad(&format!("expected {scheme}, as the endpoint")));
+            }
+            split_endpoint(&t.replace("{leader}", "x")).ok_or_else(|| bad("no port"))?;
+        }
+        self.leader_template = template;
+        Ok(self)
     }
 
     /// Whether calls go over HTTPS.
@@ -200,18 +249,65 @@ impl AdminRegistrar {
         self.tls.is_some()
     }
 
-    async fn post(&self, path: &str, body: &Value) -> Result<(u16, Value)> {
+    /// The Admin address of the controller named `leader`, from the
+    /// template.
+    fn leader_addr(&self, leader: &str) -> Option<(String, u16)> {
+        split_endpoint(&self.leader_template.as_ref()?.replace("{leader}", leader))
+    }
+
+    /// Sends `path` to the leader: the one last reached, else the endpoint,
+    /// following its 39504 refusal to the controller it names.
+    async fn call(&self, path: &str, body: &Value) -> Result<(u16, Value)> {
+        let known = self.leader.lock().ok().and_then(|l| l.clone());
+        if let Some((host, port)) = known.as_deref().and_then(|l| self.leader_addr(l)) {
+            match self.post_to(&host, port, path, body).await {
+                Ok(r) if not_leader(&r).is_none() => return Ok(r),
+                // Gone or no longer leading: back to the endpoint.
+                _ => self.remember(None),
+            }
+        }
+        let r = self.post_to(&self.host, self.port, path, body).await?;
+        let Some(leader) = not_leader(&r) else {
+            return Ok(r);
+        };
+        let Some((host, port)) = self.leader_addr(&leader) else {
+            return Ok(r);
+        };
+        tracing::debug!(%leader, "controller admin API: following the DC leader");
+        let r = self.post_to(&host, port, path, body).await?;
+        if not_leader(&r).is_none() {
+            self.remember(Some(leader));
+        }
+        Ok(r)
+    }
+
+    fn remember(&self, leader: Option<String>) {
+        if let Ok(mut l) = self.leader.lock() {
+            *l = leader;
+        }
+    }
+
+    async fn post_to(
+        &self,
+        host: &str,
+        port: u16,
+        path: &str,
+        body: &Value,
+    ) -> Result<(u16, Value)> {
         let t = |e: &dyn std::fmt::Display| {
             SprigError::new(
                 SprigCode::MetaUnavailable,
                 format!("controller admin API: {e}"),
             )
         };
-        let tcp = TcpStream::connect((self.host.as_str(), self.port))
-            .await
-            .map_err(|e| t(&e))?;
+        let tcp = TcpStream::connect((host, port)).await.map_err(|e| t(&e))?;
         let mut send = if let Some((tls, name)) = &self.tls {
-            let s = tls.connect(name.clone(), tcp).await.map_err(|e| t(&e))?;
+            let name = if host == self.host {
+                name.clone()
+            } else {
+                ServerName::try_from(host.to_owned()).map_err(|e| t(&e))?
+            };
+            let s = tls.connect(name, tcp).await.map_err(|e| t(&e))?;
             let (send, conn) =
                 hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(s))
                     .await
@@ -233,7 +329,7 @@ impl AdminRegistrar {
         let mut b = Request::builder()
             .method(Method::POST)
             .uri(path)
-            .header(hyper::header::HOST, format!("{}:{}", self.host, self.port))
+            .header(hyper::header::HOST, format!("{host}:{port}"))
             .header(hyper::header::CONTENT_TYPE, "application/json");
         if let Some(tok) = &self.token {
             b = b.header(hyper::header::AUTHORIZATION, format!("Bearer {tok}"));
@@ -292,13 +388,13 @@ pub fn parse_response(status: u16, v: &Value) -> Result<Registered> {
 #[async_trait]
 impl ClusterRegistrar for AdminRegistrar {
     async fn register(&self, r: &ClusterRegistration) -> Result<Registered> {
-        let (status, v) = self.post("/admin/v1/clusters", &request_body(r)).await?;
+        let (status, v) = self.call("/admin/v1/clusters", &request_body(r)).await?;
         parse_response(status, &v)
     }
 
     async fn set_nodes(&self, cluster_id: &str, nodes: &[NodeSpec]) -> Result<()> {
         let (status, v) = self
-            .post(
+            .call(
                 &format!("/admin/v1/clusters/{cluster_id}:setNodes"),
                 &json!({"nodes": nodes}),
             )
@@ -308,13 +404,39 @@ impl ClusterRegistrar for AdminRegistrar {
 
     async fn retire(&self, cluster_id: &str) -> Result<()> {
         let (status, v) = self
-            .post(
+            .call(
                 &format!("/admin/v1/clusters/{cluster_id}:retire"),
                 &json!({}),
             )
             .await?;
         api_result(status, &v)
     }
+}
+
+/// `host:port` out of `http(s)://host:port[/]`.
+fn split_endpoint(endpoint: &str) -> Option<(String, u16)> {
+    let rest = endpoint
+        .strip_prefix("https://")
+        .or_else(|| endpoint.strip_prefix("http://"))?
+        .trim_end_matches('/');
+    let (h, p) = rest.rsplit_once(':')?;
+    Some((h.to_owned(), p.parse().ok()?))
+}
+
+/// The leader a 39504 answer names (`... send the request to the leader,
+/// <name>`, chapter 23); `None` for any other answer.
+fn not_leader((status, v): &(u16, Value)) -> Option<String> {
+    if *status < 300 || v["code"].as_u64() != Some(u64::from(SprigCode::NotLeader.number())) {
+        return None;
+    }
+    let msg = v["message"].as_str()?;
+    let (_, rest) = msg.split_once("send the request to the leader, ")?;
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .collect();
+    let name = name.trim_end_matches('.');
+    (!name.is_empty()).then(|| name.to_owned())
 }
 
 /// `Ok` for a 2xx answer; the API's error otherwise.
@@ -369,6 +491,157 @@ mod tests {
         );
         let e = parse_response(400, &json!({"code": 39510, "message": "no"})).unwrap_err();
         assert_eq!(e.code(), Some(SprigCode::ProvisionerUnsupported));
+    }
+
+    /// A one-answer-per-connection HTTP server: every request gets
+    /// `answer`'s status and body; `hits` counts requests by path.
+    async fn fake_controller(
+        status: u16,
+        body: Value,
+    ) -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let hits = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let h = Arc::clone(&hits);
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                // Headers, then Content-Length bytes of body.
+                let (head_end, len) = loop {
+                    let n = s.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break (0, 0);
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&buf[..i]).to_ascii_lowercase();
+                        let len = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length:"))
+                            .and_then(|v| v.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        break (i + 4, len);
+                    }
+                };
+                while head_end > 0 && buf.len() < head_end + len {
+                    let n = s.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                let line = String::from_utf8_lossy(&buf);
+                let path = line.split(' ').nth(1).unwrap_or("").to_owned();
+                h.lock().unwrap().push(path);
+                let b = body.to_string();
+                let resp = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{b}",
+                    b.len()
+                );
+                let _ = s.write_all(resp.as_bytes()).await;
+                let _ = s.shutdown().await;
+            }
+        });
+        (port, hits)
+    }
+
+    /// The Service lands on a non-leader, which answers 39504 naming the
+    /// leader; the registrar sends the call again to the leader's address
+    /// from the template, and later calls go there first (bugfix-107's
+    /// leftover: before, registration got through only when a reconcile
+    /// pass happened to land on the leader).
+    #[tokio::test]
+    async fn leader_only_calls_follow_the_dc_leader() {
+        let (leader_port, leader_hits) = fake_controller(
+            200,
+            json!({"cluster": {"cluster_id": "kind1-c1", "cluster_number": 1}}),
+        )
+        .await;
+        let (svc_port, svc_hits) = fake_controller(
+            503,
+            json!({"code": 39504, "message":
+                "this controller doesn't lead dc kind1; send the request to the leader, 127.0.0.1"}),
+        )
+        .await;
+        let r = ClusterRegistration {
+            name: "c1".into(),
+            topology: TopologyKind::SingleNode,
+            nodes: vec![],
+            secrets: SecretRefs {
+                ctl: "file:/x#a".into(),
+                repl: "file:/x#b".into(),
+            },
+            failover_driver: FailoverDriver::Operator,
+        };
+        // Without a template the refusal is returned (retried next pass).
+        let plain = AdminRegistrar::new(&format!("http://127.0.0.1:{svc_port}"), None).unwrap();
+        let e = plain.register(&r).await.unwrap_err();
+        assert_eq!(e.code(), Some(SprigCode::NotLeader));
+        assert_eq!(leader_hits.lock().unwrap().len(), 0);
+
+        let a = AdminRegistrar::new(&format!("http://127.0.0.1:{svc_port}"), None)
+            .unwrap()
+            .with_leader_template(Some(format!("http://{{leader}}:{leader_port}")))
+            .unwrap();
+        let got = a.register(&r).await.unwrap();
+        assert_eq!(got.cluster_id, "kind1-c1");
+        assert_eq!(svc_hits.lock().unwrap().len(), 2);
+        assert_eq!(leader_hits.lock().unwrap().len(), 1);
+        // The leader is remembered: the next call goes straight to it.
+        a.set_nodes("kind1-c1", &[]).await.unwrap();
+        assert_eq!(svc_hits.lock().unwrap().len(), 2);
+        assert_eq!(
+            leader_hits.lock().unwrap().last().map(String::as_str),
+            Some("/admin/v1/clusters/kind1-c1:setNodes")
+        );
+    }
+
+    #[test]
+    fn leader_names_and_templates() {
+        let nl = |m: &str| (503, json!({"code": 39504, "message": m}));
+        assert_eq!(
+            not_leader(&nl(
+                "this controller doesn't lead dc fra1; send the request to the leader, sprigdb-controller-2"
+            )),
+            Some("sprigdb-controller-2".into())
+        );
+        assert_eq!(
+            not_leader(&nl("dc fra1 has no leader yet; try again")),
+            None
+        );
+        assert_eq!(
+            not_leader(&(
+                400,
+                json!({"code": 39511, "message": "send the request to the leader, x"})
+            )),
+            None
+        );
+        let a = AdminRegistrar::new("http://ctl.ns.svc:7480", None).unwrap();
+        assert!(
+            a.clone()
+                .with_leader_template(Some("http://ctl:7480".into()))
+                .is_err()
+        );
+        assert!(
+            a.clone()
+                .with_leader_template(Some("https://{leader}.p.ns.svc:7480".into()))
+                .is_err()
+        );
+        let a = a
+            .with_leader_template(Some(
+                "http://{leader}.sprigdb-controller-pods.ns.svc:7480".into(),
+            ))
+            .unwrap();
+        assert_eq!(
+            a.leader_addr("sprigdb-controller-1"),
+            Some((
+                "sprigdb-controller-1.sprigdb-controller-pods.ns.svc".into(),
+                7480
+            ))
+        );
     }
 
     #[test]

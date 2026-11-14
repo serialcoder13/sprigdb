@@ -1,7 +1,6 @@
 //! The `auto_index` loop's view of the deployment: catalogs through their
 //! shard maps, objects and their shards from the catalog snapshot,
-//! settings resolved per object (chapter 13, "Settings scopes and
-//! budgets"), and clusters from the registry (chapter 09).
+//! settings resolved per object, and clusters from the registry.
 //!
 //! **Settings.** Per-object keys resolve through the tenant's catalog rows
 //! and the etcd mirrors ([`Layered`]); the shared cluster keys
@@ -261,8 +260,7 @@ pub fn resolve_object(
         ..d
     };
     let observe = ObserveSettings {
-        // Reads are counted as often as the advisor evaluates (decision
-        // O1): a cadence, never a period of disuse.
+        // Reads are counted as often as the advisor evaluates: a cadence, never a period of disuse.
         usage_every: secs(num(src, k::EVAL_INTERVAL_MINUTES.key, object_ctx, 60.0) * 60.0),
         ..ObserveSettings::default()
     };
@@ -317,7 +315,7 @@ impl AutoIndexEnv for ControllerEnv {
         .await?;
         let reg = Self::registry_ref()?;
         let cat = TenantCatalog::build(reg, tenant, Loaded::core(snap));
-        // R0: a tenant's shards live on its catalog's cluster.
+        // A tenant's shards live on its catalog's cluster.
         let Some(cluster) = self.locator.cluster_of(tenant).await? else {
             return Ok(out);
         };
@@ -376,8 +374,8 @@ impl AutoIndexEnv for ControllerEnv {
     }
 }
 
-/// Chapter 33's views over key-value structures (`<ns>__hash`,
-/// `<ns>__set`) and the element table each reads (R6 round 5).
+/// The views over key-value structures (`<ns>__hash`, `<ns>__set`) and the
+/// element table each reads.
 fn kv_views(cat: &TenantCatalog) -> BTreeMap<ObjectId, KvTarget> {
     let mut kv_views: BTreeMap<ObjectId, KvTarget> = BTreeMap::new();
     for o in cat.objects.iter() {

@@ -1,7 +1,5 @@
-//! The cross-tenant outbox (chapter 42, "Publishing by target tenant",
-//! "Inside a database transaction"; chapter 45, "One platform stream for
-//! every client"): a publish into another tenant's stream inside a
-//! transaction.
+//! The cross-tenant outbox: a publish into another tenant's stream inside
+//! a transaction.
 //!
 //! ```text
 //! publish(P's transaction, record r, destination d):
@@ -17,7 +15,7 @@
 //!   listed schema: rows a crashed gateway or a lost hook left
 //! forward(rows):
 //!   SELECT ... FOR UPDATE SKIP LOCKED   -- one forwarder per row at a time
-//!   d an instance of a definition: create it if needed (chapter 42); d a
+//!   d an instance of a definition: create it if needed; d a
 //!     stream: that stream
 //!   INSERT IGNORE INTO the destination's outbox (event_id := out_id, ...)
 //!   -- a second forward is a no-op: the outbox's primary key, or, once
@@ -237,7 +235,7 @@ pub async fn ensure_table(
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .insert(key);
-    // R9 (r9fwd): the tenant's feed-driven forwarder reads this table.
+    // The tenant's feed-driven forwarder reads this table.
     crate::outbox_feed::subscribe(svc, tenant).await;
     Ok(())
 }
@@ -293,10 +291,9 @@ pub fn after_request(session: u64, in_txn: bool) {
     };
     for p in taken.into_iter().flatten() {
         let Some(svc) = p.svc.upgrade() else { continue };
-        // R9 (r9fwd): with `queue.forwarder = feed` the tenant's
-        // feed-driven forwarder takes the rows in commit order; forwarding
-        // them here could pass an earlier transaction's rows. The sweeper
-        // stays the fallback.
+        // With `queue.forwarder = feed` the tenant's feed-driven forwarder
+        // takes the rows in commit order; forwarding them here could pass
+        // an earlier transaction's rows. The sweeper stays the fallback.
         let db = p
             .schema
             .parse::<sprig_common::names::SchemaName>()
@@ -344,12 +341,12 @@ pub async fn forward(
     .map(|(n, _)| n)
 }
 
-/// The feed-driven forwarder's step (R9, r9fwd; [`crate::outbox_feed`]):
-/// forwards the rows of `ids` still there, each destination's in the
-/// order of `ids` (commit order). It waits for rows a commit hook or the
-/// sweeper holds (`FOR UPDATE`, not `SKIP LOCKED`), so a row is never
-/// passed over while an earlier one is in flight. Returns (forwarded,
-/// gone, left for later: a destination backing off or unreachable).
+/// The feed-driven forwarder's step ([`crate::outbox_feed`]): forwards the
+/// rows of `ids` still there, each destination's in the order of `ids`
+/// (commit order). It waits for rows a commit hook or the sweeper holds
+/// (`FOR UPDATE`, not `SKIP LOCKED`), so a row is never passed over while
+/// an earlier one is in flight. Returns (forwarded, gone, left for later: a
+/// destination backing off or unreachable).
 ///
 /// # Errors
 /// The clusters'.
@@ -376,11 +373,11 @@ async fn forward_with(
     force: bool,
     ordered: bool,
 ) -> Result<(usize, usize)> {
-    // One forward at a time per gateway (R9, r9fwd): a forward holds a
-    // `sprig_ctl` connection in its transaction while it delivers, and the
-    // delivery takes more from the same pool (4 per cluster). Sixteen
-    // commit hooks at once held all four and waited for a fifth forever
-    // (seen live: every outbox of the cluster stopped, the sweeper too).
+    // One forward at a time per gateway: a forward holds a `sprig_ctl`
+    // connection in its transaction while it delivers, and the delivery
+    // takes more from the same pool (4 per cluster). Sixteen commit hooks
+    // at once held all four and waited for a fifth forever (seen live:
+    // every outbox of the cluster stopped, the sweeper too).
     let _slot = forward_slot().acquire().await.ok();
     let cluster = svc.locator.cluster(tenant).await?;
     let pool = svc.locator.ctl_pool(&cluster).await?;
@@ -695,11 +692,11 @@ pub async fn pending_rows(svc: &TenantServices, tenant: TenantId, schema: &str) 
     }
 }
 
-/// Before `DROP DATABASE` of one of `tenant`'s databases (lead's choice on
-/// r9fet item 23): forwards the committed rows of the outboxes in its
-/// shard schemas `schemas`, retrying every second (destinations backing
-/// off included) for up to `wait`. Rows of transactions still open aren't
-/// seen (they aren't committed; the drop waits for their locks anyway).
+/// Before `DROP DATABASE` of one of `tenant`'s databases: forwards the
+/// committed rows of the outboxes in its shard schemas `schemas`, retrying
+/// every second (destinations backing off included) for up to `wait`. Rows of
+/// transactions still open aren't seen (they aren't committed; the drop waits
+/// for their locks anyway).
 ///
 /// # Errors
 /// 39245 naming the rows still there after `wait`; the clusters'.
@@ -818,11 +815,11 @@ pub async fn before_drop_database(
         ))
         .await?;
     }
-    // The lead's choice on r9fet3's question 1: a declarer's database
-    // isn't dropped from under its live definitions (every member's
-    // instances would go with them, too easily by accident). After the
-    // outbox: its rows may be bound for those definitions' instances,
-    // which take no more publishes once the definitions are dropped.
+    // A declarer's database isn't dropped from under its live definitions
+    // (every member's instances would go with them, too easily by accident).
+    // After the outbox: its rows may be bound for those definitions'
+    // instances, which take no more publishes once the definitions are
+    // dropped.
     refuse_live_definitions(&super::state_of(&cat), &row.name)
 }
 

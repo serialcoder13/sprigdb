@@ -1,8 +1,7 @@
-//! The Kafka listener on 9092 (chapter 45, "The Kafka front end"; build
-//! steps 9, 12 and 13): [`KafkaFrontend`] runs `sprig-proto-kafka`'s
+//! The Kafka listener on 9092: [`KafkaFrontend`] runs `sprig-proto-kafka`'s
 //! broker on each connection, over this gateway's pieces:
 //!
-//! - [`identity`]: SASL PLAIN and SCRAM onto chapter 14's
+//! - [`identity`]: SASL PLAIN and SCRAM onto the gateway's
 //!   [`LoginService`](sprig_auth::mysql::LoginService);
 //! - [`cluster`]: brokers from the DC's gateway records (broker id = the
 //!   gateway's slot) and coordinator leases in etcd
@@ -69,12 +68,12 @@ key!(
     /// `kafka.sasl_mechanisms`: offered SASL mechanisms, in order. Read
     /// before login, so only the dc and global values apply.
     SASL_MECHANISMS: Text = "kafka.sasl_mechanisms", Cow::Borrowed("SCRAM-SHA-512,SCRAM-SHA-256,PLAIN"),
-    TENANT_GLOBAL, HardBounds::NONE,
+    Scopes::PROCESS, HardBounds::NONE,
     "Offered SASL mechanisms on the Kafka listener"
 );
 key!(
     /// `kafka.group_session_timeout_max_ms`.
-    GROUP_SESSION_TIMEOUT_MAX_MS: u64 = "kafka.group_session_timeout_max_ms", 300_000, TENANT_GLOBAL,
+    GROUP_SESSION_TIMEOUT_MAX_MS: u64 = "kafka.group_session_timeout_max_ms", 300_000, Scopes::PROCESS,
     HardBounds::range(6_000, 3_600_000),
     "Largest session timeout a consumer group member may ask for"
 );
@@ -217,6 +216,11 @@ impl Frontend for KafkaFrontend {
             tls: tls.is_some(),
             sni: tls.as_ref().and_then(|t| t.sni.clone()),
             client_cert: tls.as_ref().is_some_and(|t| t.client_cert),
+            client_dn: tls
+                .as_ref()
+                .filter(|t| t.client_cert)
+                .and_then(|t| t.client_dn.clone())
+                .map(|d| (d.subject, d.issuer)),
         };
         let close = conn.close_soon.clone();
         match self.broker.serve(&mut conn.stream, info, close).await {

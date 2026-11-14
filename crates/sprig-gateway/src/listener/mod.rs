@@ -1,5 +1,4 @@
-//! The listener manager (chapter 04, "Listeners", "Accept and protocol
-//! detection" and "Live listener changes"; build step 2).
+//! The listener manager.
 //!
 //! One listener per protocol, each with its own bind address, TLS mode and
 //! certificate bundle, resolved from `listener.<name>.*` ([`resolve`]).
@@ -26,7 +25,7 @@
 //! in-protocol ([`InProtocolTls`](crate::frontend::InProtocolTls)).
 //!
 //! [`live::follow`] re-applies the listeners whenever their settings change
-//! in etcd (chapter 23, "Live reconfiguration: no restarts").
+//! in etcd, with no restart.
 
 mod conn;
 pub mod live;
@@ -224,7 +223,7 @@ impl Strictness {
     /// a plaintext one meets `optional` and `off` whatever the minimum
     /// version. A connection that meets the new spec gains nothing from
     /// being closed, and closing it costs its client a reconnect and, on
-    /// HTTP/2, a `GOAWAY` race (chapter 04, "Live listener changes").
+    /// HTTP/2, a `GOAWAY` race.
     #[must_use]
     pub fn keeps(&self, accepted: &Self, tls: Option<TlsVersion>) -> bool {
         self.enabled
@@ -533,12 +532,12 @@ impl ListenerManager {
                 let client = match (spec.client_cert, &spec.client_ca) {
                     (TlsMode::Off, _) => None,
                     (_, None) => return Err("client certificates need a CA".into()),
-                    (m, Some(ca)) => Some((&**ca, m == TlsMode::Required)),
+                    (m, Some(ca)) => Some((ca, m == TlsMode::Required)),
                 };
                 let mut cfg = tls::server_config_with(cert.clone(), spec.min_tls, client)
                     .map_err(|e| e.message)?;
                 if spec.protocol == Protocol::Http {
-                    // ALPN: h2 first, then HTTP/1.1 (chapter 37).
+                    // ALPN: h2 first, then HTTP/1.1.
                     let c = Arc::make_mut(&mut cfg);
                     c.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
                 }
@@ -668,8 +667,7 @@ impl ListenerManager {
 /// connections `new` no longer allows ([`Strictness::keeps`], checked when
 /// `drain` has passed, so a MySQL session's in-protocol TLS counts) are
 /// asked to close at their next safe point then, and closed by force at
-/// twice `drain` (chapter 04: "for sessions accepted under the older
-/// generation of this name"). The others stay open.
+/// twice `drain`. The others stay open.
 fn retire(
     slot: &mut Slot,
     name: &'static str,
@@ -777,7 +775,7 @@ async fn accept_loop(
                 let Some(fe) = shared.frontends.0.get(&a.spec.protocol).cloned() else {
                     continue;
                 };
-                // Chapter 25: a returning DC admits connections in steps.
+                // A returning DC admits connections in steps.
                 if let Some(f) = crate::failover::get()
                     && let Err(wait) = f.admit(a.spec.protocol.as_str())
                 {
@@ -790,7 +788,7 @@ async fn accept_loop(
                     ));
                     continue;
                 }
-                // gateway.max_connections (chapter 04 step 7).
+                // gateway.max_connections.
                 let mut permit = None;
                 if let Some(l) = &shared.ctx.limits {
                     let Some(p) = l.try_connection() else {
@@ -804,7 +802,7 @@ async fn accept_loop(
                 tracker.spawn(conn::run(sock, peer, a, fe, shared.ctx.clone(), permit));
             }
             Err(e) => {
-                // EMFILE and friends: count, back off briefly (chapter 04).
+                // EMFILE and friends: count, back off briefly.
                 let name = active.load().as_ref().map_or("unknown", |a| a.spec.name);
                 metrics::counter!("sprig_gateway_connections_rejected_total", "listener" => name, "reason" => "accept_error").increment(1);
                 tracing::warn!(listener = name, error = %e, "accept failed");

@@ -1,5 +1,4 @@
-//! Live listener changes from the settings watch (chapter 23, "Live
-//! reconfiguration: no restarts"; chapter 04, "Live listener changes").
+//! Live listener changes from the settings watch, with no restart.
 //!
 //! [`follow`] waits on a [`LiveSettings`] subscription to the keys that
 //! shape listeners ([`LISTENER_KEYS`]), re-resolves every listener from the

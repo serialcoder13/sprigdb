@@ -1,5 +1,4 @@
-//! Process configuration: `sprigdb.toml` (chapter 03, "Configuration and
-//! settings"; writing guide 5.7).
+//! Process configuration: `sprigdb.toml`.
 //!
 //! It holds only what a process needs to start: its identity, the
 //! control-plane seeds, its own certificate, its runtime sizing and the
@@ -36,7 +35,7 @@ pub struct ProcessConfig {
     /// is implemented.
     #[serde(default)]
     pub tls: Option<TlsConfig>,
-    /// Gateway runtime sizing and the interim accounts file.
+    /// Gateway runtime sizing and the accounts file.
     #[serde(default)]
     pub gateway: GatewayConfig,
     /// Controller runtime sizing and start-up switches.
@@ -45,7 +44,7 @@ pub struct ProcessConfig {
     /// Worker runtime sizing.
     #[serde(default)]
     pub worker: RuntimeConfig,
-    /// Node agent runtime sizing and the node it fences (chapter 25).
+    /// Node agent runtime sizing and the node it fences.
     #[serde(default)]
     pub agent: AgentConfig,
     /// Kubernetes operator runtime sizing.
@@ -54,17 +53,17 @@ pub struct ProcessConfig {
     /// Telemetry until settings arrive from the control plane.
     #[serde(default)]
     pub telemetry: TelemetryConfig,
-    /// The audit spool and its sink (chapter 47).
+    /// The audit spool and its sink.
     #[serde(default)]
     pub audit: AuditConfig,
-    /// Where workers keep errant extracts (chapter 25).
+    /// Where workers keep errant extracts.
     #[serde(default)]
     pub recovery: RecoveryConfig,
 }
 
 /// `[recovery]`: where a worker writes `errant_extract`'s sealed files and
-/// the keys it seals them with (chapter 25, "Diverged transactions are
-/// extracted and reported, never merged"). Without both, extract jobs fail
+/// the keys it seals them with (diverged transactions are extracted and
+/// reported, never merged). Without both, extract jobs fail
 /// with the reason, and `node_rebuild` of a diverged node waits for an
 /// operator (`--no-extract` keeps the old data directory instead).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,23 +73,22 @@ pub struct RecoveryConfig {
     /// target comes later).
     #[serde(default)]
     pub extract_dir: Option<PathBuf>,
-    /// The master keyring file (chapter 12's format: `<version> <64 hex>`
-    /// per line); each tenant's extract key is derived from it.
+    /// The master keyring file (format: `<version> <64 hex>` per line);
+    /// each tenant's extract key is derived from it.
     #[serde(default)]
     pub extract_key_file: Option<PathBuf>,
 }
 
 /// `[audit]`: where this process spools audit events and where its
-/// shipper writes them (chapter 47, "The audit pipeline"). Without
-/// `spool_dir` the process has no pipeline and audit events go only to
-/// the log (target `sprig_audit`).
+/// shipper writes them. Without `spool_dir` the process has no pipeline
+/// and audit events go only to the log (target `sprig_audit`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuditConfig {
     /// The local spool directory (one per process).
     #[serde(default)]
     pub spool_dir: Option<PathBuf>,
-    /// The sink: a directory that receives chapter 47's object-storage
+    /// The sink: a directory that receives the audit object-storage
     /// layout (`audit/<stream>/<date>/...`). Required with `spool_dir`.
     #[serde(default)]
     pub sink_dir: Option<PathBuf>,
@@ -128,8 +126,7 @@ pub struct MetaConfig {
     #[serde(default)]
     pub global_seeds: Vec<String>,
     /// The deployment this process belongs to; must match the global
-    /// `system.deployment_id` setting (chapter 23, "Bootstrapping the first
-    /// DC"). Empty means not configured.
+    /// `system.deployment_id` setting. Empty means not configured.
     #[serde(default)]
     pub deployment_id: String,
 }
@@ -162,25 +159,24 @@ pub struct GatewayConfig {
     /// Tokio worker threads; 0 means one per CPU.
     #[serde(default)]
     pub worker_threads: usize,
-    /// Where logins come from: `catalog` (chapter 14: tenants, their
-    /// catalogs' users, logical names) or `accounts_file` (M0.2's interim
-    /// file, raw clusters, names unchanged). Unset: `accounts_file` when
+    /// Where logins come from: `catalog` (tenants, their catalogs' users,
+    /// logical names) or `accounts_file` (a stand-alone file, raw clusters,
+    /// names unchanged). Unset: `accounts_file` when
     /// [`GatewayConfig::accounts_file`] is set, else `catalog`
     /// ([`GatewayConfig::effective_login_mode`]).
     #[serde(default)]
     pub login_mode: Option<LoginModeConfig>,
-    /// Interim (M0.2, decision D1 in the plan's `decisions/m0.2-interim.md`),
-    /// used in `accounts_file` mode only: the TOML file listing the logins
-    /// the gateway accepts, each with its chapter 14 password verifier,
-    /// cluster, backend account and backend `credentials_ref` (format in
+    /// Used in `accounts_file` mode only: the TOML file listing the logins
+    /// the gateway accepts, each with its password verifier, cluster,
+    /// backend account and backend `credentials_ref` (format in
     /// `sprig_auth::accounts`). Re-read within a second of a change. Unset,
     /// or a missing file, means no accounts: every login fails with 1045.
     #[serde(default)]
     pub accounts_file: Option<PathBuf>,
-    /// Interim (chapter 14, "Backend target, interim"), used in `catalog`
-    /// mode until chapter 29's per-user backend accounts (M0.5): the TOML
-    /// file naming the backend account each tenant's sessions use, or a
-    /// default for every tenant (format in `sprig_gateway::tenant::backends`).
+    /// Used in `catalog` mode until per-user backend accounts take over:
+    /// the TOML file naming the backend account each tenant's sessions use,
+    /// or a default for every tenant (format in
+    /// `sprig_gateway::tenant::backends`).
     /// Without one, a verified catalog login fails with 39998.
     #[serde(default)]
     pub backends_file: Option<PathBuf>,
@@ -189,47 +185,45 @@ pub struct GatewayConfig {
     /// settings: a second gateway in the same DC (development, tests).
     #[serde(default)]
     pub listen_override: std::collections::BTreeMap<String, String>,
-    /// Chapter 12's sealed parameter samples: the file of versioned master
-    /// secrets the tenants' workload data keys derive from (format in
+    /// Sealed parameter samples: the file of versioned master secrets the
+    /// tenants' workload data keys derive from (format in
     /// `sprig_workload::keyring`). Unset: no samples are captured, and
     /// statistics continue.
     #[serde(default)]
     pub workload_key_file: Option<PathBuf>,
-    /// Turns chapter 12's workload capture off on this gateway (the hook
-    /// records nothing, as before M0.4): an operator's kill switch, and the
-    /// baseline of the overhead measurement.
+    /// Turns workload capture off on this gateway (the hook records
+    /// nothing): an operator's kill switch, and the baseline of the
+    /// overhead measurement.
     #[serde(default)]
     pub workload_capture_off: bool,
     /// The host other gateways, load balancers and `sprigctl` reach this
-    /// gateway at, published in its registration record (chapter 04,
-    /// "Registration records"). Unset: the hostname.
+    /// gateway at, published in its registration record. Unset: the
+    /// hostname.
     #[serde(default)]
     pub advertise_addr: Option<String>,
     /// A file holding the internal credential this gateway presents to the
     /// controllers' Admin port for calls it makes on its own behalf
-    /// (Studio's automatic-indexing and workload views, chapter 44;
-    /// decision ST12): the controller's `[controller] gateway_token_file`
-    /// or `admin_token_file`. Unset: those calls carry no credential, as in
-    /// R0, and fail against a controller that wants one.
+    /// (Studio's automatic-indexing and workload views): the controller's
+    /// `[controller] gateway_token_file` or `admin_token_file`. Unset: those
+    /// calls carry no credential, and fail against a controller that wants
+    /// one.
     #[serde(default)]
     pub controller_token_file: Option<PathBuf>,
-    /// A file holding the Admin API token Studio's operator mode uses
-    /// (chapter 44 step 17; decision ST35): calls from sessions whose login
-    /// is in `studio.operator_logins` go to the controller with it. Unset:
-    /// operator mode answers 503.
+    /// A file holding the Admin API token Studio's operator mode uses:
+    /// calls from sessions whose login is in `studio.operator_logins` go to
+    /// the controller with it. Unset: operator mode answers 503.
     #[serde(default)]
     pub operator_token_file: Option<PathBuf>,
-    /// Chapter 37, "Admin API over TLS": the CA (PEM) a controller's
+    /// The CA (PEM) a controller's
     /// HTTPS Admin API is checked against when the gateway relays to it.
     /// Unset: `[tls] ca`. The gateway presents `[tls] cert` and `key` as
     /// its client certificate when the controller asks for one.
     #[serde(default)]
     pub controller_ca_file: Option<PathBuf>,
     /// The host Kafka clients reach this gateway at, given for it in
-    /// Kafka's Metadata (chapter 45, "Brokers and metadata") and published
-    /// in its registration record, so every gateway of a DC is named by its
-    /// own public name (one per VM). Unset: the DC's
-    /// `kafka.advertised_host` for this gateway, else
+    /// Kafka's Metadata and published in its registration record, so every
+    /// gateway of a DC is named by its own public name (one per VM). Unset:
+    /// the DC's `kafka.advertised_host` for this gateway, else
     /// [`GatewayConfig::advertise_addr`].
     #[serde(default)]
     pub kafka_advertise_host: Option<String>,
@@ -239,15 +233,15 @@ pub struct GatewayConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoginModeConfig {
-    /// M0.2's interim accounts file.
+    /// The accounts file ([`GatewayConfig::accounts_file`]).
     AccountsFile,
-    /// Tenant catalogs (chapter 14).
+    /// Tenant catalogs.
     Catalog,
 }
 
 impl GatewayConfig {
     /// The login mode in force: the configured one, else `accounts_file`
-    /// when an accounts file is configured (so M0.2 configs keep working),
+    /// when an accounts file is configured (so older configs keep working),
     /// else `catalog`.
     #[must_use]
     pub fn effective_login_mode(&self) -> LoginModeConfig {
@@ -259,7 +253,7 @@ impl GatewayConfig {
     }
 }
 
-/// `[controller]`: runtime sizing plus the start-up switches of chapter 23.
+/// `[controller]`: runtime sizing plus the control plane's start-up switches.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(clippy::struct_excessive_bools)] // each bool is one key of the file
@@ -268,15 +262,14 @@ pub struct ControllerConfig {
     #[serde(default)]
     pub worker_threads: usize,
     /// Write the first DC's deployment records when the global tier has
-    /// none (chapter 23, "Bootstrapping the first DC").
+    /// none.
     #[serde(default)]
     pub bootstrap: bool,
     /// Campaign for the global leader as well as the DC leader.
     #[serde(default)]
     pub global_candidate: bool,
-    /// Where the controller serves the Admin API's REST face (chapter 37)
-    /// until the gateway's HTTP listeners serve it. Port 0 picks a free
-    /// port.
+    /// Where the controller serves the Admin API's REST face until the
+    /// gateway's HTTP listeners serve it. Port 0 picks a free port.
     #[serde(default = "default_admin_addr")]
     pub admin_addr: SocketAddr,
     /// A file holding the bearer token Admin API calls must present. Without
@@ -285,29 +278,29 @@ pub struct ControllerConfig {
     pub admin_token_file: Option<PathBuf>,
     /// A file holding the internal credential gateways present for the
     /// calls they make on their own behalf (`[gateway]
-    /// controller_token_file`; decision ST12). Accepted only on the tenant
+    /// controller_token_file`). Accepted only on the tenant
     /// routes Studio's views read and act through (indexes,
     /// recommendations, explanations, decisions, workload), never on the
     /// rest of the Admin API. Unset: only `admin_token_file` is accepted.
     #[serde(default)]
     pub gateway_token_file: Option<PathBuf>,
-    /// Chapter 12's sealed parameter samples: the same file of versioned
-    /// master secrets as the gateway's `[gateway] workload_key_file`, from
-    /// which automatic-index validation opens the samples it replays
-    /// (chapter 13). Unset: validation has no samples and falls back to
-    /// estimates and a canary.
+    /// Sealed parameter samples: the same file of versioned master
+    /// secrets as the gateway's `[gateway] workload_key_file`, from
+    /// which automatic-index validation opens the samples it replays.
+    /// Unset: validation has no samples and falls back to estimates and a
+    /// canary.
     #[serde(default)]
     pub workload_key_file: Option<PathBuf>,
     /// Development and scenario tests only: a file holding whole seconds by
-    /// which the automatic-indexing loop's clock runs ahead (chapter 13's
-    /// observation periods in minutes instead of days). Unset in
+    /// which the automatic-indexing loop's clock runs ahead (so observation
+    /// periods pass in minutes instead of days). Unset in
     /// production.
     #[serde(default)]
     pub autoindex_test_clock_file: Option<PathBuf>,
-    /// Where the controller serves chapter 25's internal services
-    /// (`Permits.Renew`, `Peer.Ping`, `Observer.ObserveDc`, and chapter
-    /// 23's relay reads) as JSON over HTTP until the mTLS gRPC port 7400
-    /// exists. Published in the controller's registration, so gateways,
+    /// Where the controller serves the internal services (`Permits.Renew`,
+    /// `Peer.Ping`, `Observer.ObserveDc`, and the relay reads) as JSON over
+    /// HTTP until the mTLS gRPC port 7400 exists. Published in the
+    /// controller's registration, so gateways,
     /// agents and other DCs' observers find it. Port 0 picks a free port.
     #[serde(default = "default_internal_addr")]
     pub internal_addr: SocketAddr,
@@ -316,38 +309,38 @@ pub struct ControllerConfig {
     /// bound address (an unspecified IP becomes the hostname).
     #[serde(default)]
     pub internal_advertise: Option<String>,
-    /// Chapter 52: a file holding the token of this DC's operators
+    /// A file holding the token of this DC's operators
     /// (`dc_operator`): it opens the `Recommendations` service for items
     /// at the `dc` level of this DC. Unset: no DC operator credential.
     #[serde(default)]
     pub dc_operator_token_file: Option<PathBuf>,
-    /// Chapter 52: the SMTP password for `approvals.smtp_username`.
+    /// The SMTP password for `approvals.smtp_username`.
     #[serde(default)]
     pub smtp_password_file: Option<PathBuf>,
-    /// Chapter 52: the secret that signs `approvals.webhook_url` events.
+    /// The secret that signs `approvals.webhook_url` events.
     #[serde(default)]
     pub approvals_webhook_secret_file: Option<PathBuf>,
-    /// Chapter 52: the CA (PEM) the SMTP server's certificate is checked
+    /// The CA (PEM) the SMTP server's certificate is checked
     /// against instead of the Mozilla roots (`smtps://` and
     /// `smtp+starttls://`).
     #[serde(default)]
     pub smtp_ca_file: Option<PathBuf>,
-    /// Chapter 52: a client certificate chain (PEM) offered to the SMTP
+    /// A client certificate chain (PEM) offered to the SMTP
     /// server, with `smtp_client_key_file`.
     #[serde(default)]
     pub smtp_client_cert_file: Option<PathBuf>,
-    /// Chapter 52: the private key (PEM) of `smtp_client_cert_file`.
+    /// The private key (PEM) of `smtp_client_cert_file`.
     #[serde(default)]
     pub smtp_client_key_file: Option<PathBuf>,
-    /// Chapter 14, "Operators": named service identities, each a file
-    /// holding the secret a gateway presents to the Admin API for the
-    /// calls it makes on its own behalf (`[gateway] controller_token_file`).
+    /// Named service identities, each a file holding the secret a gateway
+    /// presents to the Admin API for the calls it makes on its own behalf
+    /// (`[gateway] controller_token_file`).
     /// The key is the identity's name, recorded in the audit:
     /// `service_token_files = { gw-fra1 = "/etc/sprig/gw-fra1.token" }`.
     /// `gateway_token_file` is the identity named `gateway`.
     #[serde(default)]
     pub service_token_files: std::collections::BTreeMap<String, PathBuf>,
-    /// Chapter 14, "Operators": break glass. Once named operators are in
+    /// Break glass. Once named operators are in
     /// use, `admin_token_file` is refused (39310); `true` accepts it again,
     /// and every call made with it is audited as `breakglass.admin_token`.
     #[serde(default)]
@@ -358,9 +351,8 @@ pub struct ControllerConfig {
     /// address (an unspecified IP becomes the hostname).
     #[serde(default)]
     pub admin_advertise: Option<String>,
-    /// Chapter 37, "Admin API over TLS": the certificate chain (PEM) the
-    /// Admin API serves HTTPS with, with `admin_tls_key`. Unset: plain
-    /// HTTP, as before.
+    /// The certificate chain (PEM) the Admin API serves HTTPS with, with
+    /// `admin_tls_key`. Unset: plain HTTP, as before.
     #[serde(default)]
     pub admin_tls_cert: Option<PathBuf>,
     /// The private key (PEM) of `admin_tls_cert`.
@@ -370,7 +362,7 @@ pub struct ControllerConfig {
     /// Admin API then requires (mutual TLS). Unset: no client certificate.
     #[serde(default)]
     pub admin_tls_client_ca: Option<PathBuf>,
-    /// Hardening round 3: serve the internal services (`internal_addr`)
+    /// Serve the internal services (`internal_addr`)
     /// over mutual TLS with this process's `[tls]` identity: the
     /// certificate `[tls] cert` and `key`, and every client must present a
     /// certificate `[tls] ca` signed. Published in the registration, so
@@ -417,8 +409,7 @@ fn default_internal_addr() -> SocketAddr {
 }
 
 /// `[agent]`: runtime sizing and the MariaDB node the agent fences
-/// (chapter 25, "DC leases, sub-leases and self-fencing" steps 6 and 9;
-/// chapter 27's plan engine comes later).
+/// (the agent's plan engine comes later).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentConfig {
@@ -426,7 +417,7 @@ pub struct AgentConfig {
     #[serde(default)]
     pub worker_threads: usize,
     /// The cluster the node belongs to, such as `fra1-c1`. Unset: the
-    /// agent fences nothing (the chapter 27 skeleton).
+    /// agent fences nothing.
     #[serde(default)]
     pub cluster: Option<String>,
     /// The node's id in the cluster record. Unset: the cluster's node
@@ -442,8 +433,8 @@ pub struct AgentConfig {
     /// Unset: the cluster's `sprig_ctl` reference.
     #[serde(default)]
     pub credentials: Option<String>,
-    /// Where the agent's internal service listens (chapter 25
-    /// `node_rebuild`: the backup stream and rebuild calls). Unset: no
+    /// Where the agent's internal service listens (`node_rebuild`: the
+    /// backup stream and rebuild calls). Unset: no
     /// service, and the node can be neither rebuilt nor a rebuild's source.
     #[serde(default)]
     pub internal_addr: Option<SocketAddr>,
@@ -458,9 +449,9 @@ pub struct AgentConfig {
 }
 
 /// `[agent.rebuild]`: the commands and paths `node_rebuild` uses on the
-/// node's host (chapter 25, "Recovery after an outage" step 3). Every
-/// command runs after `exec_prefix`, so a node in a container is reached
-/// with `exec_prefix = ["docker", "exec", "-i", "<container>"]`.
+/// node's host. Every command runs after `exec_prefix`, so a node in a
+/// container is reached with
+/// `exec_prefix = ["docker", "exec", "-i", "<container>"]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentRebuildConfig {
@@ -558,11 +549,11 @@ pub struct TelemetryConfig {
     /// `info,sprig_meta=debug`).
     #[serde(default = "default_log_level")]
     pub bootstrap_log_level: String,
-    /// `json` or `pretty` (chapter 47).
+    /// `json` or `pretty`.
     #[serde(default)]
     pub log_format: LogFormat,
     /// Where `/metrics`, `/healthz` and `/readyz` are served until the
-    /// `listener.telemetry.*` settings take over (chapter 04).
+    /// `listener.telemetry.*` settings take over.
     #[serde(default = "default_telemetry_addr")]
     pub bootstrap_addr: SocketAddr,
 }

@@ -1,4 +1,4 @@
-//! The Admin API on the gateways (chapter 37 step 4).
+//! The Admin API on the gateways.
 //!
 //! Every gateway serves `/admin/v1/` on 8080 and 8443, over REST and gRPC.
 //! The controllers implement it: a gateway forwards each call to the DC
@@ -14,10 +14,9 @@
 //! by the controller: the caller's `authorization` must be accepted by
 //! `GET /admin/v1/dcs` there.
 //!
-//! **Where the book differs.** Chapter 37 says this step retires the
-//! controller's interim listener on 7480. It stays, as the controllers'
-//! internal Admin port that gateways forward to (bind it to a private
-//! address); clients use the gateways.
+//! **The controllers' port.** The controller's own listener on 7480 stays,
+//! as the controllers' internal Admin port that gateways forward to (bind
+//! it to a private address); clients use the gateways.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,7 +44,7 @@ pub const ADMIN_TIMEOUT: Duration = Duration::from_secs(120);
 pub struct ControllerRecord {
     /// `host:port` of the controller's Admin API.
     pub admin_addr: String,
-    /// The Admin API serves HTTPS (chapter 37, "Admin API over TLS").
+    /// The Admin API serves HTTPS.
     #[serde(default)]
     pub admin_tls: bool,
 }
@@ -77,7 +76,7 @@ pub fn set_controller_tls(
 /// `authorization` is carried over (whatever else the client sent,
 /// including its own `x-sprig-client-addr`, stays behind). With the
 /// client's address and this gateway's service secret, both go along so
-/// the controller can record the person's address (ST47).
+/// the controller can record the person's address.
 ///
 /// # Errors
 /// Internal for a URI that doesn't parse.
@@ -130,7 +129,7 @@ pub struct AdminApi {
     peers: Option<Arc<crate::peer::Peers>>,
     drain: DrainFn,
     /// `[gateway] controller_token_file`: the credential for calls this
-    /// gateway makes on its own behalf (decision ST12).
+    /// gateway makes on its own behalf.
     internal_token: Option<String>,
 }
 
@@ -256,7 +255,7 @@ impl AdminApi {
 
     /// As [`Self::forward`], for a call relayed for a client at `client`:
     /// with `[gateway] controller_token_file` configured, the controller
-    /// records `client` as the caller's address (ST47).
+    /// records `client` as the caller's address.
     ///
     /// # Errors
     /// As [`Self::forward`].

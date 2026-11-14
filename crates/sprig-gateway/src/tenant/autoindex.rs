@@ -1,21 +1,21 @@
-//! The gateway's side of chapter 13's metadata-hiding contract (build
-//! step 12), next to chapter 07's hiding in `sprig-sql`:
+//! The gateway's side of hiding automatic indexes from metadata, next to
+//! the hiding in `sprig-sql`:
 //!
 //! - [`session_flag`]: `SET @sprig_show_auto_indexes = 1|0` is kept in the
 //!   session ([`TenantSession::show_auto_indexes`]) and answered with OK;
 //!   it never reaches MariaDB. Plans then use
 //!   [`TenantSession::visibility`], so `SHOW INDEX`, `SHOW CREATE TABLE`
 //!   and `information_schema.STATISTICS` show automatic indexes, and the
-//!   session may `DROP INDEX sprig_auto_...` (chapter 07).
+//!   session may `DROP INDEX sprig_auto_...`.
 //! - [`make_room`]: the 64-index rule. Before a user statement that adds
 //!   indexes to a table already holding 64 or close to it, the gateway
 //!   drops the lowest-value automatic indexes on that table (as
 //!   `sprig_ctl`, `DROP INDEX IF EXISTS`) and marks their catalog rows
-//!   `dropped` with reason `index_limit`. Values are `est_benefit_ms_h -
-//!   est_write_ms_h` from the tenant's `auto_indexes` (chapter 13; the
-//!   table is `sprig-advisor`'s `autoindex` module, read here with plain
-//!   SQL so the gateway doesn't depend on the advisor); an index no row
-//!   explains goes first. When dropping every automatic index wouldn't
+//!   `dropped` with reason `index_limit`. Values are
+//!   `est_benefit_ms_h - est_write_ms_h` from the tenant's `auto_indexes`
+//!   (the table is `sprig-advisor`'s `autoindex` module, read here with
+//!   plain SQL so the gateway doesn't depend on the advisor); an index no
+//!   row explains goes first. When dropping every automatic index wouldn't
 //!   make room, nothing is dropped and MariaDB refuses the statement with
 //!   1069. Failures are logged and never block the user's statement.
 

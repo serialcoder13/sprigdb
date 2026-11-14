@@ -1,5 +1,5 @@
-//! A criterion-free micro benchmark of the rewrite (chapter 04's latency
-//! gate leaves the gateway well under 150 µs at p50; the rewrite's share
+//! A criterion-free micro benchmark of the rewrite (the gateway's
+//! latency gate leaves the gateway well under 150 µs at p50; the rewrite's share
 //! should stay well under 20 µs). Ignored by default; run with
 //!
 //! ```text

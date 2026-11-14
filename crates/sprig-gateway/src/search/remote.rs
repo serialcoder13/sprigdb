@@ -1,5 +1,4 @@
-//! Copies on workers, from the gateway's side (chapter 39, "Placement of
-//! copies", "Scatter-gather"; R5 round 6): the index's record in the DC
+//! Copies on workers, from the gateway's side: the index's record in the DC
 //! tier, the live search workers, and queries sent to a ready copy.
 //!
 //! ```text

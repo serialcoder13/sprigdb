@@ -1,6 +1,5 @@
-//! Substitutions (chapter 07 build step 3): `DATABASE()` and `SCHEMA()`,
-//! the account functions, and `mysql_query_attribute_string()` (chapter 05,
-//! "Query attributes").
+//! Substitutions: `DATABASE()` and `SCHEMA()`, the account functions, and
+//! `mysql_query_attribute_string()`.
 //!
 //! | Expression | Becomes |
 //! |---|---|
@@ -9,12 +8,11 @@
 //! | `USER()`, `SESSION_USER()`, `SYSTEM_USER()` | `'alice@203.0.113.7'`: user and the client's address |
 //! | `mysql_query_attribute_string('n')` (3306) | the attribute's value as a literal, or `NULL` |
 //!
-//! Substitutions are made in expressions of statements that run now. They
-//! are not made inside the bodies of stored programs and views, which keep
-//! backend names in R0 (step 12 rewrites them at `CREATE` time in R4), nor
-//! in account statements (`GRANT`, `CREATE USER`, `SET PASSWORD FOR
-//! CURRENT_USER()`, ...) and `DEFINER` clauses, where `CURRENT_USER` names
-//! an account rather than a value (chapter 29, step 9).
+//! Substitutions are made in expressions of statements that run now. They are
+//! not made inside the bodies of stored programs and views (those are rewritten
+//! at `CREATE` time), nor in account statements (`GRANT`, `CREATE USER`, `SET
+//! PASSWORD FOR CURRENT_USER()`, ...) and `DEFINER` clauses, where
+//! `CURRENT_USER` names an account rather than a value.
 
 /// A string literal holding `s` that reads back as `s` in any `sql_mode`:
 /// single quotes (strings even under `ANSI_QUOTES`), a quote doubled, and

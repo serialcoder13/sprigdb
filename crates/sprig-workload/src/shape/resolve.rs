@@ -53,6 +53,16 @@ pub trait TableResolver: Send + Sync {
     /// doesn't index and system schemas.
     fn resolve(&self, db: Option<&str>, table: &str) -> Option<ResolvedTable>;
 
+    /// The id of logical database `db` (as written; the resolver applies
+    /// `lower_case_table_names`), for the database part of a fingerprint's
+    /// id when a statement names a table outside the session's database.
+    /// `table` is a table the statement names in it: the default resolves
+    /// it, so it is `None` for an unknown table; resolvers that can look
+    /// up a database by name alone should.
+    fn database(&self, db: &str, table: &str) -> Option<DbId> {
+        self.resolve(Some(db), table).map(|t| t.db_id)
+    }
+
     /// Whether `table` has a column named `column` (lower case), to
     /// attribute unqualified columns in multi-table statements. `None`
     /// when unknown.

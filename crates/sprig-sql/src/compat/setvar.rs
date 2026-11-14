@@ -1,6 +1,5 @@
 //! `SET` of the variables the MySQL persona emulates, and the statement
-//! hints that set them (chapter 28, "Emulated system variables" and
-//! "Queries and expressions"; R4).
+//! hints that set them.
 //!
 //! | Client text (3306) | Sent to MariaDB |
 //! |---|---|
@@ -91,9 +90,8 @@ fn target_name(t: &[Token], sql: &[u8], i: &mut usize) -> Option<String> {
 
 /// Whether `sql` is a `SET` statement with a server-wide assignment:
 /// `GLOBAL`, `PERSIST` or `PERSIST_ONLY` before a variable, or
-/// `@@global.`, `@@persist.` or `@@persist_only.` (chapter 28,
-/// "Server-wide assignments"). Such an assignment needs
-/// `SYSTEM_VARIABLES_ADMIN` (chapter 29, decision bugfix-interim).
+/// `@@global.`, `@@persist.` or `@@persist_only.`. Such an assignment needs
+/// `SYSTEM_VARIABLES_ADMIN`.
 #[must_use]
 pub fn sets_global(sql: &[u8], opts: &LexOptions) -> bool {
     let has = |n: &[u8]| sql.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n));
@@ -379,9 +377,316 @@ pub fn rewrite_hints(sql: &[u8], opts: &LexOptions) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// The variables a tenant may assign with `GLOBAL` or `PERSIST`: each becomes
+/// the tenant's default, `compat.global.<variable>`, for its sessions that
+/// start afterwards.
+pub const TENANT_GLOBALS: &[&str] = &[
+    "sql_mode",
+    "time_zone",
+    "transaction_isolation",
+    "max_execution_time",
+    "wait_timeout",
+];
+
+/// The value of one server-wide assignment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GlobalValue {
+    /// A literal: a string's value, a number's text, or a bare word
+    /// (`ON`, `ANSI`).
+    Literal(String),
+    /// `DEFAULT`: back to the server's value (the tenant default removed).
+    Default,
+    /// Anything else, as written: evaluated with `SELECT`.
+    Expr(String),
+}
+
+/// One `GLOBAL`, `PERSIST` or `PERSIST_ONLY` assignment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalAssign {
+    /// The variable, lower case (`tx_isolation` reads as
+    /// `transaction_isolation`).
+    pub name: String,
+    /// Its value.
+    pub value: GlobalValue,
+}
+
+/// A `SET` statement split into its server-wide assignments and the text
+/// of the others (`SET` and them, comma-separated; `None` when there are
+/// none).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalSplit {
+    /// The server-wide assignments, in order.
+    pub globals: Vec<GlobalAssign>,
+    /// `SET <the other assignments>`, to run as a session statement.
+    pub rest: Option<String>,
+}
+
+/// `SET GLOBAL TRANSACTION <words>` as its assignment.
+fn global_transaction(words: &[Token], sql: &[u8]) -> Option<GlobalSplit> {
+    let words: Vec<String> = words
+        .iter()
+        .take_while(|tk| !(tk.kind == TokenKind::Punct && tk.bytes(sql) == b";"))
+        .map(|tk| String::from_utf8_lossy(tk.bytes(sql)).to_ascii_uppercase())
+        .collect();
+    let w: Vec<&str> = words.iter().map(String::as_str).collect();
+    let (name, value) = match w.as_slice() {
+        ["ISOLATION", "LEVEL", "READ", "UNCOMMITTED"] => {
+            ("transaction_isolation", "READ-UNCOMMITTED")
+        }
+        ["ISOLATION", "LEVEL", "READ", "COMMITTED"] => ("transaction_isolation", "READ-COMMITTED"),
+        ["ISOLATION", "LEVEL", "REPEATABLE", "READ"] => {
+            ("transaction_isolation", "REPEATABLE-READ")
+        }
+        ["ISOLATION", "LEVEL", "SERIALIZABLE"] => ("transaction_isolation", "SERIALIZABLE"),
+        ["READ", "ONLY"] => ("transaction_read_only", "ON"),
+        ["READ", "WRITE"] => ("transaction_read_only", "OFF"),
+        _ => return None,
+    };
+    Some(GlobalSplit {
+        globals: vec![GlobalAssign {
+            name: name.to_owned(),
+            value: GlobalValue::Literal(value.to_owned()),
+        }],
+        rest: None,
+    })
+}
+
+/// A `SET`'s assignments: significant-token ranges between top-level
+/// commas, after `SET` (a `;` ends them).
+fn assignments(t: &[Token], sql: &[u8]) -> Vec<(usize, usize)> {
+    let mut items = Vec::new();
+    let mut depth = 0_i32;
+    let mut start = 1;
+    let mut end = t.len();
+    for (k, tk) in t.iter().enumerate().skip(1) {
+        match (tk.kind, tk.bytes(sql)) {
+            (TokenKind::Punct, b"(") => depth += 1,
+            (TokenKind::Punct, b")") => depth -= 1,
+            (TokenKind::Punct, b",") if depth == 0 => {
+                items.push((start, k));
+                start = k + 1;
+            }
+            (TokenKind::Punct, b";") if depth == 0 => {
+                end = k;
+                break;
+            }
+            _ => {}
+        }
+    }
+    items.push((start, end));
+    items
+}
+
+/// A one-token value as a literal or `DEFAULT`; `None` for anything an
+/// expression must give.
+fn single_value(v: Token, sql: &[u8], nbe: bool) -> Option<GlobalValue> {
+    let vb = v.bytes(sql);
+    match v.kind {
+        TokenKind::String | TokenKind::NationalString => Some(GlobalValue::Literal(
+            String::from_utf8_lossy(&lex::string_value(vb, nbe)?).into_owned(),
+        )),
+        TokenKind::Word if vb.eq_ignore_ascii_case(b"DEFAULT") => Some(GlobalValue::Default),
+        TokenKind::Number | TokenKind::Word => Some(GlobalValue::Literal(
+            String::from_utf8_lossy(vb).into_owned(),
+        )),
+        _ => None,
+    }
+}
+
+/// Splits a `SET` statement with server-wide assignments ([`sets_global`])
+/// as MySQL scopes them: `GLOBAL`, `PERSIST`, `PERSIST_ONLY` and `SESSION`
+/// apply to the assignments after them until the next such word;
+/// `@@global.v` and `@@persist.v` to their own. `None` when the text isn't
+/// such a statement or can't be split (an assignment without `=`).
+#[must_use]
+pub fn split_global(sql: &[u8], opts: &LexOptions) -> Option<GlobalSplit> {
+    let tokens = lex::lex(sql, opts).ok()?;
+    let t = sig(&tokens);
+    let first = t.first()?;
+    if first.kind != TokenKind::Word || !first.bytes(sql).eq_ignore_ascii_case(b"SET") {
+        return None;
+    }
+    let word = |k: usize, w: &str| {
+        t.get(k).is_some_and(|tk| {
+            tk.kind == TokenKind::Word && tk.bytes(sql).eq_ignore_ascii_case(w.as_bytes())
+        })
+    };
+    // `SET GLOBAL TRANSACTION ISOLATION LEVEL ...` (and `READ ONLY`).
+    if (word(1, "GLOBAL") || word(1, "PERSIST") || word(1, "PERSIST_ONLY"))
+        && word(2, "TRANSACTION")
+    {
+        return global_transaction(&t[3..], sql);
+    }
+    let items = assignments(&t, sql);
+    let mut sticky_global = false;
+    let mut globals = Vec::new();
+    let mut rest: Vec<String> = Vec::new();
+    for (a, b) in items {
+        if a >= b {
+            return None;
+        }
+        let mut k = a;
+        let mut global = sticky_global;
+        if word(k, "GLOBAL") || word(k, "PERSIST") || word(k, "PERSIST_ONLY") {
+            sticky_global = true;
+            global = true;
+            k += 1;
+        } else if word(k, "SESSION") || word(k, "LOCAL") {
+            sticky_global = false;
+            global = false;
+            k += 1;
+        }
+        let target = t.get(k)?;
+        let raw = String::from_utf8_lossy(target.bytes(sql)).to_ascii_lowercase();
+        let name = match target.kind {
+            TokenKind::Word => raw.trim_matches('`').to_owned(),
+            TokenKind::SysVar => {
+                let n = raw.trim_start_matches("@@");
+                if let Some(v) = ["global.", "persist.", "persist_only."]
+                    .iter()
+                    .find_map(|p| n.strip_prefix(p))
+                {
+                    global = true;
+                    v.trim_matches('`').to_owned()
+                } else if let Some(v) = ["session.", "local."]
+                    .iter()
+                    .find_map(|p| n.strip_prefix(p))
+                {
+                    global = false;
+                    v.trim_matches('`').to_owned()
+                } else {
+                    n.trim_matches('`').to_owned()
+                }
+            }
+            // A user variable or anything else stays a session assignment.
+            _ => {
+                global = false;
+                String::new()
+            }
+        };
+        let op = t.get(k + 1)?;
+        if op.kind != TokenKind::Op || !matches!(op.bytes(sql), b"=" | b":=") {
+            return None;
+        }
+        let item_text = |from: usize| {
+            let s0 = t[from].start as usize;
+            let e0 = t[b - 1].end as usize;
+            String::from_utf8_lossy(&sql[s0..e0]).into_owned()
+        };
+        if !global {
+            // Written out with its own scope word, so a sticky GLOBAL
+            // before it in the original doesn't leak into the rest.
+            let text = item_text(k);
+            rest.push(if target.kind == TokenKind::Word {
+                format!("SESSION {text}")
+            } else {
+                text
+            });
+            continue;
+        }
+        if k + 2 >= b {
+            return None;
+        }
+        let value = if k + 3 == b {
+            single_value(t[k + 2], sql, opts.no_backslash_escapes)
+                .unwrap_or_else(|| GlobalValue::Expr(item_text(k + 2)))
+        } else {
+            GlobalValue::Expr(item_text(k + 2))
+        };
+        let name = if name == "tx_isolation" {
+            "transaction_isolation".to_owned()
+        } else {
+            name
+        };
+        globals.push(GlobalAssign { name, value });
+    }
+    Some(GlobalSplit {
+        globals,
+        rest: (!rest.is_empty()).then(|| format!("SET {}", rest.join(", "))),
+    })
+}
+
+/// The canonical form of a `transaction_isolation` value MySQL 8.4 and
+/// MariaDB accept (`READ-COMMITTED`, any case; `0` to `3`), or `None`.
+#[must_use]
+pub fn isolation_level(v: &str) -> Option<&'static str> {
+    const LEVELS: [&str; 4] = [
+        "READ-UNCOMMITTED",
+        "READ-COMMITTED",
+        "REPEATABLE-READ",
+        "SERIALIZABLE",
+    ];
+    if let Ok(n) = v.trim().parse::<usize>() {
+        return LEVELS.get(n).copied();
+    }
+    LEVELS
+        .iter()
+        .copied()
+        .find(|l| l.eq_ignore_ascii_case(v.trim()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn global_assignments_split_as_mysql_scopes_them() {
+        let sp = |s: &str| split_global(s.as_bytes(), &LexOptions::mysql84()).unwrap();
+        let lit = |n: &str, v: &str| GlobalAssign {
+            name: n.into(),
+            value: GlobalValue::Literal(v.into()),
+        };
+        assert_eq!(
+            sp("SET GLOBAL sql_mode = 'ANSI', time_zone = '+01:00'"),
+            GlobalSplit {
+                globals: vec![lit("sql_mode", "ANSI"), lit("time_zone", "+01:00")],
+                rest: None
+            }
+        );
+        assert_eq!(
+            sp(
+                "SET PERSIST wait_timeout = 60, SESSION time_zone = '+00:00', max_execution_time = 5"
+            ),
+            GlobalSplit {
+                globals: vec![lit("wait_timeout", "60")],
+                rest: Some(
+                    "SET SESSION time_zone = '+00:00', SESSION max_execution_time = 5".into()
+                )
+            }
+        );
+        assert_eq!(
+            sp("SET @x = 1, @@global.tx_isolation = DEFAULT, @@session.sql_mode = ''"),
+            GlobalSplit {
+                globals: vec![GlobalAssign {
+                    name: "transaction_isolation".into(),
+                    value: GlobalValue::Default
+                }],
+                rest: Some("SET @x = 1, @@session.sql_mode = ''".into())
+            }
+        );
+        assert_eq!(
+            sp("SET GLOBAL sql_mode = (SELECT REPLACE(@@sql_mode, 'ONLY_FULL_GROUP_BY', ''))")
+                .globals,
+            vec![GlobalAssign {
+                name: "sql_mode".into(),
+                value: GlobalValue::Expr(
+                    "(SELECT REPLACE(@@sql_mode, 'ONLY_FULL_GROUP_BY', ''))".into()
+                )
+            }]
+        );
+        assert_eq!(
+            sp("SET GLOBAL TRANSACTION ISOLATION LEVEL READ COMMITTED").globals,
+            vec![lit("transaction_isolation", "READ-COMMITTED")]
+        );
+        assert_eq!(
+            sp("set persist_only max_connections = 10;").globals,
+            vec![lit("max_connections", "10")]
+        );
+        assert!(split_global(b"SET GLOBAL x", &LexOptions::mysql84()).is_none());
+        assert_eq!(isolation_level("read-committed"), Some("READ-COMMITTED"));
+        assert_eq!(isolation_level("2"), Some("REPEATABLE-READ"));
+        assert_eq!(isolation_level("READ_COMMITTED"), None);
+    }
 
     #[test]
     fn global_assignments_are_found() {

@@ -1,13 +1,13 @@
-//! Graphs in the gateway (chapter 43, R8): finding, creating and dropping
-//! native graphs through the tenant catalog, their storage on the shard,
-//! and chapter 29's checks. Used by the Bolt front end ([`crate::bolt`])
+//! Graphs in the gateway: finding, creating and dropping native graphs
+//! through the tenant catalog, their storage on the shard, and the
+//! privilege checks. Used by the Bolt front end ([`crate::bolt`])
 //! and by `CREATE GRAPH` / `DROP GRAPH` in SQL ([`crate::exec`]).
 //!
 //! - **Catalog.** A graph is an `objects` row (kind `graph`, namespace
 //!   `graph`) and a `graphs` row, written in one versioned change; labels
 //!   and relationship types are `graph_node_sources` and
 //!   `graph_edge_sources` rows, added on first use in their own change.
-//! - **Storage** (round 3). A new graph is a sharded table group keyed by
+//! - **Storage.** A new graph is a sharded table group keyed by
 //!   `part` (numeric), presplit into `sharding.min_shards` shards (database
 //!   scope) on the tenant's cluster: a `table_groups` row (origin
 //!   `structural`), four `group_members` rows (nodes on `part`; edges,
@@ -15,8 +15,8 @@
 //!   each shard schema `t<t>_d<db>_g<group>_s<n>` the node, edge, label and
 //!   mirror tables with `__sprig_dtx`. The id counter stays in the
 //!   database's first shard schema. Splits, merges and moves of the group
-//!   are the mover's (chapter 20), like any group's. Graphs from rounds 1
-//!   and 2 stay in the first shard schema, one shard. Everything runs as the
+//!   are the mover's, like any group's. Graphs made before sharded storage
+//!   stay in the first shard schema, one shard. Everything runs as the
 //!   cluster's `sprig_ctl` account; statements run inside the Bolt
 //!   transaction (`READ COMMITTED`) through [`txn`].
 //! - **Privileges.** A graph is an object with the table actions: reading
@@ -24,7 +24,7 @@
 //!   `UPDATE`, `DELETE` `DELETE` on the graph or its database;
 //!   `CREATE GRAPH` needs `CREATE`, `DROP GRAPH` `DROP`. Without `SELECT`
 //!   on the graph, reads may rest on grants of single labels and types
-//!   (`GRANT READ ON GRAPH db.g NODES L`, decision G42): the statement
+//!   (`GRANT READ ON GRAPH db.g NODES L`): the statement
 //!   then sees only those, through `sprig_graph::access`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -95,7 +95,7 @@ impl GraphRef {
     }
 }
 
-/// Waits for a mover's hold that a graph route met (R8 round 8, G69): an
+/// Waits for a mover's hold that a graph route met: an
 /// auto-commit Bolt read waits until the hold is gone from the map cache
 /// (as `after_holds` does for writes, and the SQL router for its reads),
 /// then fails with 39424 so the session plans it again on the new map.
@@ -153,9 +153,9 @@ pub struct GatewayGraphs {
     keys: Mutex<HashMap<u64, Arc<ring::hmac::Key>>>,
     /// Shard schemas known to have `__sprig_dtx`: (cluster, schema).
     dtx_ready: Mutex<HashSet<(String, String)>>,
-    /// Chapter 18's coordinator pieces for Bolt transactions.
+    /// The transaction coordinator's pieces for Bolt transactions.
     pub(crate) coord: txn::CoordServices,
-    /// Round 5: asynchronous mirrors' mode changes and subscriptions.
+    /// Asynchronous mirrors' mode changes and subscriptions.
     pub(crate) mirrors: mirror::MirrorState,
 }
 
@@ -202,8 +202,8 @@ impl GatewayGraphs {
 
     /// The process's graph services over `svc`: one per tenant services,
     /// shared by Bolt and SQL (`GRAPH_TABLE`, graph DDL), so their caches,
-    /// pools and mirror state are made once (R8 round 6; before, each SQL
-    /// statement made its own, with a shard map cache of its own).
+    /// pools and mirror state are made once (rather than each SQL statement
+    /// making its own, with a shard map cache of its own).
     #[must_use]
     pub fn shared(svc: &Arc<TenantServices>) -> Arc<Self> {
         static ALL: Mutex<Vec<(usize, Arc<GatewayGraphs>)>> = Mutex::new(Vec::new());
@@ -218,8 +218,8 @@ impl GatewayGraphs {
         g
     }
 
-    /// The shard map cache of `tenant`'s home DC: the router's own (R8
-    /// round 6), so graph statements and SQL statements see one map.
+    /// The shard map cache of `tenant`'s home DC: the router's own, so graph
+    /// statements and SQL statements see one map.
     ///
     /// # Errors
     /// `Internal` never in practice.
@@ -254,7 +254,7 @@ impl GatewayGraphs {
         Ok(Arc::new(m))
     }
 
-    /// Chapter 18's decision table in every shard schema of `shards`
+    /// The coordinator's decision table in every shard schema of `shards`
     /// (once per schema and process): a split or move creates its new
     /// shard schemas without it, and a coordinated commit anchored there
     /// needs it before its branches open.
@@ -273,8 +273,8 @@ impl GatewayGraphs {
                 .map_err(|e| SprigError::internal(format!("cluster id {}: {e}", sh.cluster)))?;
             let pool = self.pool(&cluster).await?;
             let mut c = pool.get_conn().await.map_err(backend_error)?;
-            // With the uniqueness claim table (decision G41), which graphs
-            // made before round 4 lack.
+            // With the uniqueness claim table, which graphs made before
+            // uniqueness constraints lack.
             let r = match c
                 .query_drop(sprig_catalog::ddl::dtx_table_sql(&sh.schema))
                 .await
@@ -319,7 +319,7 @@ impl GatewayGraphs {
             ));
         };
         let map = self.shard_map(tenant, group).await?;
-        // R8 round 6: the router's view of the group (the same map cache,
+        // The router's view of the group (the same map cache,
         // schemas and epochs `Plan::Graph` shows).
         let routed = sprig_router::topology::catalog::numeric_group(
             tenant.0,
@@ -357,13 +357,13 @@ impl GatewayGraphs {
                 version: map.version,
                 shards,
                 seq: Tables::of(default_schema, def.graph_id).seq,
-                // Every grouped graph has mirror rows (decision G29); who
-                // keeps them follows `graph.mirror` (round 5).
+                // Every grouped graph has mirror rows; who keeps them
+                // follows `graph.mirror`.
                 mirrors: true,
                 mirror_async: def.mirror_async,
                 mirror_building: !def.mirrors,
-                // R8 round 8 (G69): the router plans every read step over
-                // its own group (shards, epochs and holds).
+                // The router plans every read step over its own group
+                // (shards, epochs and holds).
                 route: Some(Arc::new(routed)),
             }),
             held,
@@ -498,7 +498,7 @@ impl GatewayGraphs {
     ) -> bool {
         let Some(g) = g else { return true };
         let db_key = database_key(db, self.lctn(cat));
-        // Chapter 29: a mapped graph over a table whose policies bind the
+        // A mapped graph over a table whose policies bind the
         // session would read it unfiltered: refused.
         if a == Action::Select
             && object.is_some_and(|o| {
@@ -535,7 +535,7 @@ impl GatewayGraphs {
 
     /// The labels and types `g`'s grants on single elements of graph
     /// `graph` let it write with `a` (`INSERT` = `CREATE`, `DELETE`,
-    /// `UPDATE` = `SET PROPERTY`; round 5): `None` when they name none.
+    /// `UPDATE` = `SET PROPERTY`): `None` when they name none.
     #[must_use]
     pub fn writable(
         g: &dyn SessionGrants,
@@ -557,7 +557,7 @@ impl GatewayGraphs {
     }
 
     /// What `g`'s grants on single labels and relationship types of graph
-    /// `graph` let it read (decision G42); `None` when they give nothing.
+    /// `graph` let it read; `None` when they give nothing.
     #[must_use]
     pub fn visible(g: &dyn SessionGrants, graph: u64) -> Option<sprig_graph::access::Visible> {
         let mut v = sprig_graph::access::Visible::default();
@@ -1086,7 +1086,7 @@ impl GatewayGraphs {
     /// column of a table without a property list; each expression runs once
     /// with `LIMIT 0`), then writes the `objects` and `graphs` rows (kind
     /// `mapped`, the definition as JSON) in one change. `can_read(object)`
-    /// is chapter 29's `SELECT` check on each table. Returns the catalog
+    /// is the `SELECT` privilege check on each table. Returns the catalog
     /// version (that of the snapshot when `IF NOT EXISTS` found the graph).
     ///
     /// # Errors
@@ -1627,7 +1627,7 @@ impl GatewayGraphs {
 }
 
 impl GatewayGraphs {
-    /// Claims every existing key of new constraint `d` (decision G41),
+    /// Claims every existing key of new constraint `d`,
     /// after its `ALTER TABLE` and while writers already claim (the
     /// catalog says `building`): each shard's elements with the property
     /// columns set, in pages of 1,000 ids, as autocommit inserts on the
@@ -1872,7 +1872,7 @@ impl GwDict {
 }
 
 /// A new group id from the catalog's `sprig.next_group_id`, kept past every
-/// group id in use (as chapter 16's apply does).
+/// group id in use (as the advisor's apply does).
 async fn alloc_group_id(c: &mut mysql_async::Conn, cat: &str) -> Result<u32> {
     let cat = cat.replace('`', "``");
     c.exec_drop(

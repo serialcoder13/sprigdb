@@ -1,5 +1,5 @@
-//! The observer's side of the global decision (chapter 25, "The global
-//! failover decision", step 4).
+//! The observer's side of the global decision (step 4 of the outline in
+//! [`super::global`]).
 //!
 //! ```text
 //! ObserveDc(X): probe X failover.observer_probes times, failover.observer_probe_interval_ms
@@ -11,8 +11,7 @@
 //!   unsafe : otherwise, listing those writers
 //! ```
 //!
-//! **Where it differs from the book.** The book also asks X's gateways.
-//! Gateways hold permits only while a controller of X renews them, so
+//! **X's gateways aren't asked.** Gateways hold permits only while a controller of X renews them, so
 //! asking the controllers is enough; the probe set is in
 //! `/sprig/g/dc-observe/<dc>` ([`ObserveTargets`]), which each DC's leader
 //! keeps current (X's own tier is out of reach when X is lost).

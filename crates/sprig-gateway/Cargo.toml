@@ -9,13 +9,12 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-# Sql.Check (chapter 37, "APIs for Studio"): syntax errors with positions.
+# Sql.Check for Studio: syntax errors with positions.
 sqlparser.workspace = true
 arc-swap = "1.7"
 async-trait.workspace = true
-# HTTP on 8080/8443 and the peer service on 7403 (chapter 04 steps 4 and
-# 10, chapter 37): hyper-util's server serves HTTP/1.1 and h2 on one
-# connection; tonic runs the gRPC services; base64 for Basic credentials.
+# HTTP on 8080/8443 and the peer service on 7403: hyper-util's server
+# serves HTTP/1.1 and h2 on one connection; tonic runs the gRPC services; base64 for Basic credentials.
 base64.workspace = true
 bytes.workspace = true
 futures.workspace = true
@@ -29,21 +28,21 @@ sprig-api.workspace = true
 tonic = { workspace = true, features = ["codegen", "router", "channel", "tls-ring"] }
 metrics.workspace = true
 mysql_async.workspace = true
-# Rows for chapter 19's lookup sessions on the router's connections.
+# Rows for the lookup sessions on the router's connections.
 mysql_common.workspace = true
-# Sealed workload samples (chapter 12): randomness for nonces.
+# Sealed workload samples: randomness for nonces.
 ring.workspace = true
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sprig-auth.workspace = true
-# Chapter 52: recommendations in SQL.
+# Recommendations in SQL.
 sprig-approvals.workspace = true
-# Chapter 11's load report and chapter 20's write sketches.
+# The balancer's load report and write sketches.
 sprig-balancer.workspace = true
-# Logic declarations (chapter 41, R7).
+# Logic declarations.
 sprig-logic = { path = "../sprig-logic" }
-# MongoDB's server-side JavaScript (M4): `sprig_logic_js::mongo`.
+# MongoDB's server-side JavaScript: `sprig_logic_js::mongo`.
 sprig-logic-js.workspace = true
 sprig-catalog.workspace = true
 sprig-cluster.workspace = true
@@ -52,56 +51,56 @@ sprig-meta.workspace = true
 sprig-proto-mysql.workspace = true
 sprig-provision.workspace = true
 sprig-settings.workspace = true
-# The tenant map a cutover holds and flips (chapters 10 and 15).
+# The tenant map a cutover holds and flips.
 sprig-shard.workspace = true
-# The router (chapter 17, R1).
+# The router.
 sprig-router.workspace = true
-# Chapter 18: the session's backend connection as a transaction branch.
+# The session's backend connection as a transaction branch.
 sprig-txn.workspace = true
 sprig-sql.workspace = true
-# Typed tables and record hierarchies (chapter 32, R6).
+# Typed tables and record hierarchies.
 sprig-types = { path = "../sprig-types" }
-# Chapter 45: event streams in tenant sessions (R9).
+# Event streams in tenant sessions.
 sprig-streams = { path = "../sprig-streams" }
-# Chapter 51: sinks and connections (R9).
+# Sinks and connections.
 sprig-sinks = { path = "../sprig-sinks" }
-# Chapter 45: the Kafka codec and broker on 9092 (R9).
+# The Kafka codec and broker on 9092.
 sprig-proto-kafka = { path = "../sprig-proto-kafka" }
-# Chapter 50: AMQP 0-9-1 and 1.0 on 5672 and 5671 (R9).
+# AMQP 0-9-1 and 1.0 on 5672 and 5671.
 sprig-proto-amqp = { path = "../sprig-proto-amqp" }
-# Chapter 30 and 31 (R5): the MongoDB codec and SCRAM, the document
+# The MongoDB codec and SCRAM, the document
 # engine, and BSON (MIT).
 sprig-proto-mongo = { path = "../sprig-proto-mongo" }
 sprig-doc = { path = "../sprig-doc" }
-# Full-text search (chapter 39, R5 round 5).
+# Full-text search.
 sprig-search.workspace = true
-# The Redis front end (chapter 40, R6) over the key-value engine (chapter 33).
+# The Redis front end over the key-value engine.
 sprig-redis = { path = "../sprig-redis" }
 sprig-proto-redis = { path = "../sprig-proto-redis" }
 sprig-kv = { path = "../sprig-kv" }
-# Chapter 34 (R6): the Vectors API; chapter 36: regions for its geo filters.
+# The Vectors API, and regions for its geo filters.
 sprig-vector = { path = "../sprig-vector" }
 sprig-geo = { path = "../sprig-geo" }
-# Chapter 35 (R6): the Analytics API.
+# The Analytics API.
 sprig-dim = { path = "../sprig-dim" }
-# Change streams over the change feed (chapter 30 step 9).
+# Change streams over the change feed.
 sprig-feed.workspace = true
-# Chapter 44: Studio's embedded files and serving.
+# Studio's embedded files and serving.
 sprig-studio = { path = "../sprig-studio" }
 sprig-binlog.workspace = true
 bson = "=2.15.0"
 getrandom.workspace = true
-# Chapter 50: the queue engine behind AMQP (R9).
+# The queue engine behind AMQP.
 sprig-queues = { path = "../sprig-queues" }
-# Chapter 43: graphs and the Bolt listener on 7687 (R8).
+# Graphs and the Bolt listener on 7687.
 sprig-graph = { path = "../sprig-graph" }
 sprig-proto-bolt = { path = "../sprig-proto-bolt" }
 uuid.workspace = true
-# WebSocket change streams' Sec-WebSocket-Accept (chapter 37 step 11).
+# WebSocket change streams' Sec-WebSocket-Accept.
 sha1.workspace = true
-# Hierarchical data inheritance (chapter 42, R6).
+# Hierarchical data inheritance.
 sprig-inherit = { path = "../sprig-inherit" }
-# Chapter 12: fingerprints, the recorder, the flusher and samples.
+# Workload fingerprints, the recorder, the flusher and samples.
 sprig-workload.workspace = true
 tokio = { workspace = true, features = ["io-util"] }
 toml.workspace = true
@@ -116,15 +115,15 @@ zeroize.workspace = true
 # server's GOAWAY refused).
 h2 = "0.4"
 rcgen.workspace = true
-# Trace assertions in observe's tests (chapter 47).
+# Trace assertions in observe's tests.
 tracing-subscriber.workspace = true
 sprig-testkit.workspace = true
 sprig-meta = { workspace = true, features = ["conformance"] }
 # The live test of triggers on queues declares its queue over AMQP 0-9-1
 # (lapin, MIT; already a test client of sprig-queues).
 lapin = { version = "=4.12.3", default-features = false, features = ["default-runtime"] }
-# The live test of logic calls from MongoDB and Redis (chapter 41, R7):
-# the drivers the R5 and R6 suites use, same versions and features.
+# The live test of logic calls from MongoDB and Redis: the drivers the
+# MongoDB and Redis suites use, same versions and features.
 mongodb = { version = "=3.9.1", default-features = false, features = ["compat-3-0-0", "rustls-tls", "zstd-compression", "snappy-compression", "zlib-compression"] }
 redis = { version = "=0.27.6", default-features = false, features = ["aio", "tokio-comp"] }
 

@@ -1,8 +1,8 @@
 //! The Admin API's messages (`sprig.admin.v1.Clusters`, `DataCenters`,
-//! `Tenants` and `Settings`, chapter 37), as the REST face carries them: JSON bodies under
-//! `/admin/v1/`. `sprigctl` decodes the same types.
+//! `Tenants` and `Settings`), as the REST face carries them: JSON bodies
+//! under `/admin/v1/`. `sprigctl` decodes the same types.
 //!
-//! Until the protobuf definitions exist (chapter 37 steps 1-4), these
+//! Until the protobuf definitions exist, these
 //! serde types are the contract; records appear as they are stored in etcd
 //! (64-bit integers as JSON numbers, not proto3's strings).
 
@@ -66,8 +66,8 @@ pub struct ClusterView {
     /// pass (absent elsewhere).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_report: Option<HealthReport>,
-    /// The tuning plan as `SET GLOBAL` statements (chapter 09); empty until
-    /// tuning exists (step 10).
+    /// The tuning plan as `SET GLOBAL` statements; empty until tuning
+    /// exists.
     #[serde(default)]
     pub tuning_plan: Vec<String>,
 }
@@ -99,10 +99,10 @@ pub struct ProbeClusterRequest {
     pub full: bool,
 }
 
-/// `POST /admin/v1/clusters/{id}:setNodes`: `Clusters.SetClusterNodes`
-/// (r2opfix): the provisioner's current nodes, after a scale or a
-/// replacement. A node whose address changes, and a removed node, lose
-/// their pinned identity; the next probe pins the server now there.
+/// `POST /admin/v1/clusters/{id}:setNodes`: `Clusters.SetClusterNodes`:
+/// the provisioner's current nodes, after a scale or a replacement. A
+/// node whose address changes, and a removed node, lose their pinned
+/// identity; the next probe pins the server now there.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetClusterNodesRequest {
     /// Every node, in order.
@@ -161,7 +161,7 @@ pub struct ListDcsResponse {
 /// `GET /admin/v1/dcs/{dc}`: `DataCenters.GetDc`.
 pub type GetDcResponse = DcView;
 
-/// An error, as chapter 37 renders it for REST.
+/// An error, as the Admin API renders it for REST.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorBody {
     /// The SprigDB (or MariaDB) error number.
@@ -174,7 +174,7 @@ pub struct ErrorBody {
     pub trace_id: String,
 }
 
-// ---- Tenants (chapter 08 step 9, chapter 23 step 16) ----
+// ---- Tenants ----
 
 /// `POST /admin/v1/tenants`: create a tenant, optionally under a parent,
 /// and bootstrap its catalog.
@@ -258,11 +258,9 @@ pub struct ListTenantsResponse {
     pub tenants: Vec<TenantView>,
 }
 
-// ---- Settings (chapter 08 "Setting a value", chapter 23 "Settings: writes,
-// bounds and watches", chapter 37 `Settings`, chapter 47 "Explaining
-// settings") ----
+// ---- Settings: writes, bounds, locks and explanations ----
 
-/// Where a setting row lives, written as chapter 47's `--scope`:
+/// Where a setting row lives, written as `sprigctl settings`' `--scope`:
 /// `global`, `dc` (the serving controller's DC) or `dc:<id>`,
 /// `cluster:<id>`, `tenant:<name>`, `db:<tenant>.<db>` and
 /// `object:<tenant>.<db>.<object>`. On the wire it is that string.
@@ -312,8 +310,8 @@ impl ScopeRef {
         }
     }
 
-    /// Kept in etcd (`global`, `dc`, `cluster`, chapter 23) rather than in
-    /// a tenant's catalog (chapter 08).
+    /// Kept in etcd (`global`, `dc`, `cluster`) rather than in a tenant's
+    /// catalog.
     #[must_use]
     pub fn is_etcd(&self) -> bool {
         matches!(
@@ -465,8 +463,7 @@ fn bool_or_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<bool>, 
     }
 }
 
-/// One declared key, as the registry holds it (chapter 03, "Declaring a
-/// key").
+/// One declared key, as the registry holds it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SettingKeyView {
     /// The key.
@@ -488,7 +485,7 @@ pub struct SettingKeyView {
     /// database or object scope.
     #[serde(default)]
     pub tenant_settable: bool,
-    /// The chapter that owns it.
+    /// The number of the subsystem that owns it.
     pub owner: u8,
     /// One line of documentation.
     pub doc: String,
@@ -520,7 +517,7 @@ pub struct SettingContextQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cluster: Option<String>,
     /// The data center; the serving controller's by default (the only one
-    /// it mirrors in R0).
+    /// it mirrors).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dc: Option<String>,
 }
@@ -587,7 +584,7 @@ pub struct SettingStepView {
 
 /// The answer to `GET /admin/v1/settings/{key}` (and `{key}:explain`):
 /// the declaration, the effective value in the context, where it came
-/// from and the whole chain (chapter 47, "Explaining settings").
+/// from and the whole chain.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SettingExplanation {
     /// The key.
@@ -630,7 +627,7 @@ pub struct SetSettingRequest {
     #[serde(default)]
     pub reason: String,
     /// Who, recorded as `op:<actor>` (the bearer token doesn't name a
-    /// person in R0); `admin` without it.
+    /// person); `admin` without it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<String>,
 }
@@ -825,7 +822,7 @@ pub struct SettingWriteResponse {
     /// Narrower values the new bounds clamp or ignore.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<SettingWarningView>,
-    /// Chapter 08's summary of the warnings ("2 values will be clamped").
+    /// A summary of the warnings ("2 values will be clamped").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     /// Who it was recorded as.

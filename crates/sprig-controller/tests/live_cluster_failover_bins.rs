@@ -1,5 +1,4 @@
-//! Failover inside a cluster with the real binaries (chapter 25,
-//! "Testing"): the controller's own `cluster_failover` loop, not the
+//! Failover inside a cluster with the real binaries: the controller's own `cluster_failover` loop, not the
 //! test, decides and promotes.
 //!
 //! ```sh
@@ -12,7 +11,8 @@
 //! (so no process's endpoint discovery ever adds the shared dev etcd at
 //! 127.0.0.1:2379): `sprigdb controller` (admin 40326), `sprigdb gateway`
 //! (MySQL 40306, MariaDB 40307) and one `sprigdb agent` per MariaDB node,
-//! set up with `sprigctl`. Tenant ids start at 4,030,600,000 (rule 8b).
+//! set up with `sprigctl`. Tenant ids start at 4,030,600,000 (the MySQL
+//! port × 100,000).
 //! Containers are capped at 768 MB and removed at the end.
 //!
 //! - [`bins_primary_replica_kill9`][]: `db1` (primary, semi-sync AFTER_SYNC)
@@ -68,12 +68,12 @@ const ROOT_PW: &str = "sprig-r2next-root";
 const REPL_PW: &str = "sprig-r2next-repl";
 const APP_PW: &str = "sprig-r2next-app";
 const DEPLOYMENT: &str = "sprigdb-r2next";
-/// Rule 8b: port 40306 x 100,000.
+/// A private deployment's tenant ids: its MySQL port 40306 x 100,000.
 const TENANT_BASE: u64 = 4_030_600_000;
 const KEYS: u64 = 8;
 const DC: &str = "fra1";
 
-// This agent's ports: 40306, 40307, 40316-40337.
+// This test's ports: 40306, 40307, 40316-40337.
 const GW_MYSQL: u16 = 40306;
 const GW_MARIADB: u16 = 40307;
 const GW_HTTP: u16 = 40318;
@@ -392,7 +392,7 @@ fn mariadb(net: &str, name: &'static str, sid: u32, master: Option<&str>) -> Db 
         "--report-port=3306",
         "--innodb-buffer-pool-size=64M",
         "--max-connections=300",
-        // Chapter 25: a node boots fenced; its agent unfences it.
+        // A node boots fenced; its agent unfences it.
         "--read-only=ON",
     ]);
     if master.is_none() {
@@ -1044,7 +1044,7 @@ impl Deployment {
         )
         .await;
         let id = v["tenant"]["tenant_id"].as_u64().expect("tenant id");
-        assert!(id >= TENANT_BASE, "rule 8b ids: {id}");
+        assert!(id >= TENANT_BASE, "tenant id range: {id}");
         ctl_retry(
             &self.sprigctl,
             &[

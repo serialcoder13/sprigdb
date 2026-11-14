@@ -1,5 +1,4 @@
-//! Emulated system variables and version strings (chapter 28, "Emulated
-//! system variables"; build step 2).
+//! Emulated system variables and version strings.
 //!
 //! The persona answers the variables that say which server a client talks
 //! to, never the backend:
@@ -10,9 +9,9 @@
 //! | `version_comment` | `SprigDB <release>` | the same |
 //! | `gtid_mode` | `OFF` | (MariaDB's own: no such variable) |
 //! | `enforce_gtid_consistency` | `OFF` | (none) |
-//! | `sql_mode` (R4) | the client's view ([`super::sqlmode`]); `GLOBAL`: MySQL 8.4's default | (the backend's) |
-//! | `max_execution_time` (R4) | the session's `max_statement_time` in ms | (none) |
-//! | `terminology_use_previous` (R4) | `NONE` | (none) |
+//! | `sql_mode` | the client's view ([`super::sqlmode`]); `GLOBAL`: MySQL 8.4's default | (the backend's) |
+//! | `max_execution_time` | the session's `max_statement_time` in ms | (none) |
+//! | `terminology_use_previous` | `NONE` | (none) |
 //!
 //! Reads in a `SELECT` become literals ([`rewrite_reads`]), with the
 //! column named as the client wrote it; `SHOW VARIABLES` rows for them are
@@ -21,7 +20,7 @@
 //! Hibernate and the connectors choose dialects from that substring.
 //!
 //! The persona `sql_mode` defaults live here too; the backend session
-//! applies them at login (chapter 06's persona baseline).
+//! applies them at login as part of the persona baseline.
 
 use sprig_proto_mysql::packets::Persona;
 
@@ -68,23 +67,26 @@ pub struct PersonaVars {
     pub persona: Persona,
     /// The persona's version string (the greeting's).
     pub version: String,
-    /// 3306: the client's view of the session's `sql_mode` (R4,
-    /// [`super::sqlmode`]); `None` leaves reads to the backend.
+    /// 3306: the client's view of the session's `sql_mode`
+    /// ([`super::sqlmode`]); `None` leaves reads to the backend.
     pub sql_mode: Option<String>,
     /// 3306: `max_execution_time` in milliseconds, from the session's
-    /// `max_statement_time` (R4).
+    /// `max_statement_time`.
     pub max_execution_time: Option<u64>,
-    /// `CURRENT_ROLE()` (chapter 29, R4): `Some(None)` is `NULL`; `None`
-    /// leaves it to the backend.
+    /// `CURRENT_ROLE()`: `Some(None)` is `NULL`; `None` leaves it to the
+    /// backend.
     pub current_role: Option<Option<String>>,
     /// `max_allowed_packet`: the session's packet limit, the gateway's no
-    /// more than its cluster's (chapter 05, "Packet limit"); `None`
-    /// leaves it to the backend.
+    /// more than its cluster's; `None` leaves it to the backend.
     pub max_allowed_packet: Option<u64>,
     /// `max_connections`: a tenant session's connection limit
-    /// (`limits.tenant_connections`, chapter 04); `None` leaves it to the
-    /// backend, whose limit doesn't bound the client's sessions.
+    /// (`limits.tenant_connections`); `None` leaves it to the backend, whose
+    /// limit doesn't bound the client's sessions.
     pub max_connections: Option<u64>,
+    /// The tenant's own defaults of the translator's server-wide allow-list
+    /// (`compat.global.<variable>`, set with `SET GLOBAL`): what
+    /// `@@global.<variable>` reads answer.
+    pub tenant_globals: std::collections::BTreeMap<String, String>,
 }
 
 impl PersonaVars {
@@ -99,7 +101,16 @@ impl PersonaVars {
             current_role: None,
             max_allowed_packet: None,
             max_connections: None,
+            tenant_globals: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// With the tenant's defaults of the server-wide allow-list (variable
+    /// name to value).
+    #[must_use]
+    pub fn with_tenant_globals(mut self, g: std::collections::BTreeMap<String, String>) -> Self {
+        self.tenant_globals = g;
+        self
     }
 
     /// With the tenant's connection limit.
@@ -157,6 +168,16 @@ impl PersonaVars {
     #[must_use]
     pub fn value_at(&self, name: &str, global: bool) -> Option<std::borrow::Cow<'_, str>> {
         use std::borrow::Cow;
+        if global {
+            let n = if name == "tx_isolation" {
+                "transaction_isolation"
+            } else {
+                name
+            };
+            if let Some(v) = self.tenant_globals.get(n) {
+                return Some(Cow::Borrowed(v));
+            }
+        }
         match (self.persona, name) {
             (_, "version") => Some(Cow::Borrowed(&self.version)),
             (p, "version_comment") => Some(Cow::Borrowed(version_comment(p))),
@@ -165,7 +186,7 @@ impl PersonaVars {
             }
             // mysqldump 8.4 sets it; MySQL's default.
             (Persona::MySql84, "terminology_use_previous") => Some(Cow::Borrowed("NONE")),
-            // R4 round 4: 3306 answers `performance_schema` and `sys`
+            // 3306 answers `performance_schema` and `sys`
             // (`compat::perfschema`), so the switch reads `ON`.
             (Persona::MySql84, "performance_schema") => Some(Cow::Borrowed("ON")),
             (Persona::MySql84, "sql_mode") if global => {
@@ -314,7 +335,7 @@ pub fn rewrite_reads(
         .iter()
         .find(|&&i| tokens[i].kind == TokenKind::Word)
         .map(|&i| tokens[i].bytes(sql))?;
-    // R4: `SET @old = @@sql_mode` (mysqldump's) reads the client's view
+    // `SET @old = @@sql_mode` (mysqldump's) reads the client's view
     // too; the assignment targets themselves stay.
     let is_set = first_word.eq_ignore_ascii_case(b"SET");
     if !first_word.eq_ignore_ascii_case(b"SELECT") && !is_set {
@@ -360,9 +381,8 @@ pub fn rewrite_reads(
                     ));
                 } else if vars.persona == Persona::MySql84 && MYSQL_NAMED_COLLATIONS.contains(&name)
                 {
-                    // R4 round 3 (gaps row 60): the backend's collation
-                    // names read as MySQL's. A whole select item keeps
-                    // the name the client wrote.
+                    // The backend's collation names read as MySQL's. A
+                    // whole select item keeps the name the client wrote.
                     let written = String::from_utf8_lossy(t.bytes(sql)).into_owned();
                     let mut expr = format!("CASE {written}");
                     for (m, my) in super::collation::output_pairs() {

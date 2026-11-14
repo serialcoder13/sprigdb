@@ -259,6 +259,12 @@ pub enum AccountStmt {
         /// `USING`.
         using: Vec<AccountRef>,
     },
+    /// `SHOW CREATE USER account` (authfix2): the account's `CREATE USER`
+    /// as MySQL 8.4 or MariaDB prints it, never with a password hash.
+    ShowCreateUser {
+        /// The account.
+        account: UserSpec,
+    },
     /// `FLUSH PRIVILEGES`: a no-op.
     FlushPrivileges,
 }

@@ -1,5 +1,5 @@
-//! Automatic indexing under `auto_index.mode = approve` (chapter 52,
-//! "Appliers"; chapter 13). The evaluator and the loop park a selected
+//! Automatic indexing under `auto_index.mode = approve`: its applier. The
+//! evaluator and the loop park a selected
 //! candidate as a `recommended` row, as under `recommend`; this producer
 //! raises and refreshes an item for every such row whose object's mode is
 //! `approve` or `recommend`, and an approval rolls the row out through
@@ -215,13 +215,13 @@ impl Applier for IndexApprovals {
     }
 }
 
-/// Chapter 52's gate before automatic indexing removes an index of one
-/// object (decision AP14): an automatic index's retirement or drop, and a
-/// user or migrated index's removal.
+/// The approval gate before automatic indexing removes an index of one
+/// object: an automatic index's retirement or drop, and a user or
+/// migrated index's removal.
 ///
 /// - An automatic index is held when `auto_index.mode = approve` for the
-///   object (kind `index.drop`); `recommend` keeps retiring automatically,
-///   as chapter 13 does.
+///   object (kind `index.drop`); `recommend` keeps retiring
+///   automatically.
 /// - A user or migrated index is held when
 ///   `auto_index.retire_user_indexes = approve`, or when it is `on` and
 ///   `auto_index.mode = approve`: one switch holds every index change.

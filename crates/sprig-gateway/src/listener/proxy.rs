@@ -1,6 +1,6 @@
 //! The PROXY protocol, versions 1 (text) and 2 (binary), from load
-//! balancers in trusted CIDRs (chapter 04, "Accept and protocol detection",
-//! step 1; `gateway.proxy_protocol`, `gateway.proxy_trusted_cidrs`).
+//! balancers in trusted CIDRs (`gateway.proxy_protocol`,
+//! `gateway.proxy_trusted_cidrs`).
 //!
 //! A header is looked for only when the mode is not `off` and the peer is in
 //! a trusted CIDR; from anyone else the bytes are left to the front end.

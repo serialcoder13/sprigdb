@@ -1,9 +1,7 @@
-//! The gateway's side of `sprig.internal.v1.SearchSeed` (chapter 39,
-//! "Snapshots, seeding and rebuilds"; R5 round 6): a worker building a
+//! The gateway's side of `sprig.internal.v1.SearchSeed`: a worker building a
 //! copy from MariaDB reads the index's object a page at a time through
-//! this gateway, as the index's definer, without row-level security
-//! (decisions S6 and RL17), with names, privileges and the router as any
-//! session has them.
+//! this gateway, as the index's definer, without row-level security, with
+//! names, privileges and the router as any session has them.
 //!
 //! ```text
 //! SeedPage(tenant, index, generation, after, limit):

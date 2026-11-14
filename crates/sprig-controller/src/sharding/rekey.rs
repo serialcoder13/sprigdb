@@ -1,4 +1,4 @@
-//! Online re-keying (chapter 16, "Online re-key (R3)"; chapter 20): a
+//! Online re-keying: a
 //! table group's rows are moved to new shards routed by another key, while
 //! clients keep reading and writing.
 //!
@@ -12,7 +12,7 @@
 //!    new key, its column, the first new shard id and the job; the group
 //!    becomes `rekeying` (no split or merge touches it) and the catalog
 //!    version moves, so gateways load it.
-//! 3. **The mover job** (`rekey`, chapter 10): every shard of the group is
+//! 3. **The mover job** (`rekey`): every shard of the group is
 //!    a source; the targets are new shards of the same group on one
 //!    cluster covering the whole hash space. The mover copies every member
 //!    hashing each row again by its new key, catches up from the binlog

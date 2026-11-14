@@ -1,5 +1,4 @@
-//! The `Jobs` service (chapter 37; chapter 23, "One job scheduler for every
-//! loop"): `GET /admin/v1/jobs`, `GET /admin/v1/jobs/{job_id}` and
+//! The `Jobs` service (the one job scheduler for every loop): `GET /admin/v1/jobs`, `GET /admin/v1/jobs/{job_id}` and
 //! `POST /admin/v1/jobs/{job_id}:cancel`. Reads are answered by any
 //! controller; a cancel only by the DC leader, under its fencing compare.
 

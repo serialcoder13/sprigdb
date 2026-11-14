@@ -1,5 +1,4 @@
-//! Manual DC failover and standby set-up (chapter 25, "Manual failover";
-//! build step 11): what `sprigctl tenant failover` and `sprigctl tenant
+//! Manual DC failover and standby set-up: what `sprigctl tenant failover` and `sprigctl tenant
 //! standby` call.
 //!
 //! ```text

@@ -1,5 +1,5 @@
-//! Result mapping (chapter 07, `ResultMapper`; chapter 05, "Resultsets:
-//! relay and rewrite").
+//! Result mapping: the [`ResultMapper`] that relays and rewrites
+//! resultsets.
 //!
 //! A forwarded statement comes back through one [`ResultMapper`]:
 //!
@@ -36,7 +36,7 @@ use super::stored;
 /// A text row; `None` is SQL NULL.
 pub type TextRow = Vec<Option<Bytes>>;
 
-/// A resultset built in the gateway (chapter 05, "Synthesized").
+/// A resultset built in the gateway.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LocalAnswer {
     /// Column definitions, already logical.
@@ -143,7 +143,7 @@ pub struct ResultMapper {
     mode: Mode,
     vis: Visibility,
     /// The client's persona: on 3306, `SHOW CREATE TABLE` text is spelled
-    /// as MySQL 8.4 spells it (chapter 28).
+    /// as MySQL 8.4 spells it.
     persona: Persona,
     roles: Vec<Option<Role>>,
     fixed: Option<Vec<ColumnDef>>,
@@ -376,8 +376,8 @@ impl ResultMapper {
             }
         }
         for v in row.iter_mut().flatten() {
-            // Chapter 07 step 12: lookups in stored bodies read back as
-            // the calls the client wrote.
+            // Lookups in stored bodies read back as the calls the client
+            // wrote.
             if let std::borrow::Cow::Owned(o) = stored::restore(v) {
                 *v = Bytes::from(o);
             }
@@ -453,8 +453,8 @@ impl ResultMapper {
                 }
                 Role::Definition => Some(self.definition(&s, ctx)),
                 Role::CreateTable => {
-                    // 3306: functional key parts as MySQL writes them (R4
-                    // round 3), before their hidden columns are filtered.
+                    // 3306: functional key parts as MySQL writes them,
+                    // before their hidden columns are filtered.
                     let fx;
                     let src: &str = if self.persona == Persona::MySql84 {
                         fx = crate::compat::schema::mysql_functional_parts(&s);
@@ -484,9 +484,8 @@ impl ResultMapper {
 
     fn definition(&mut self, text: &str, ctx: &OutputCtx<'_>) -> String {
         let text = stored::restore_str(text);
-        // A definer routine's wrapper (chapter 29, RL57) and stored code
-        // pointed at row-level security's policy views read as written
-        // (RL20).
+        // A definer routine's wrapper and stored code pointed at row-level
+        // security's policy views read as written.
         let text = match crate::rls::definer::unwrap(&text) {
             std::borrow::Cow::Owned(o) => std::borrow::Cow::Owned(o),
             std::borrow::Cow::Borrowed(_) => text,
@@ -495,7 +494,7 @@ impl ResultMapper {
             std::borrow::Cow::Owned(o) => std::borrow::Cow::Owned(o),
             std::borrow::Cow::Borrowed(_) => text,
         };
-        // Lock names scoped inside stored code read as written (R4 round 3).
+        // Lock names scoped inside stored code read as written.
         let unscoped = crate::compat::locks::unscope(&text);
         let text = unscoped.as_deref().unwrap_or(&text);
         let un = unrewrite(text.as_bytes(), ctx.map, &ctx.lex);

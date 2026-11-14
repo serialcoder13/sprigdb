@@ -1,5 +1,4 @@
-//! Online builds on single nodes and primaries with replicas (chapter 13,
-//! "Rollout", `Online`).
+//! Online builds on single nodes and primaries with replicas (`Online`).
 //!
 //! ```text
 //! 1. checks: the writer is writable; every replica replicates within the lag
@@ -235,7 +234,7 @@ pub async fn build(
         return r.unwrap_or(BuildOutcome::Built(report));
     }
 
-    // 2. A field-column definition's columns first (R6 round 6): instant,
+    // 2. A field-column definition's columns first: instant,
     // replicated; MariaDB refuses them online in the index's statement.
     if let Some(sql) = crate::autoindex::kv::add_fields_sql(&t.schema, &t.table, def)
         && let Err(e) = w.mon.exec(&sql).await

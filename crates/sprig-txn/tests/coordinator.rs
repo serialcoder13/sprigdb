@@ -1,7 +1,7 @@
 //! The coordinator against a scripted backend: mode choice, the write
-//! rule, statement order on each branch, savepoints, and error mapping
-//! (chapter 18, build steps 1, 3, 4 and 5). The deterministic simulation
-//! (`sim_txn.rs`) covers crashes; the live tests real MariaDB.
+//! rule, statement order on each branch, savepoints, and error mapping.
+//! The deterministic simulation (`sim_txn.rs`) covers crashes; the live
+//! tests real MariaDB.
 
 #![allow(
     clippy::many_single_char_names,

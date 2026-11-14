@@ -779,7 +779,7 @@ fn specs_resolve_from_settings() {
     let ctx = SettingCtx::process(&dc);
     let certs = CertStore::new(Arc::new(SystemClock));
 
-    // Defaults: the R0 listeners that need TLS have no certificate yet.
+    // Defaults: the listeners that need TLS have no certificate yet.
     let res = resolve(&settings, &ctx, &certs);
     let names = |v: &[ListenerSpec]| v.iter().map(|s| s.name).collect::<Vec<_>>();
     assert_eq!(

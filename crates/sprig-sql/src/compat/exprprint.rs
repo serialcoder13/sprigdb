@@ -1,5 +1,4 @@
-//! MySQL 8.4's printing of expressions in `SHOW CREATE TABLE` (chapter 28
-//! step 10, R4 round 4; gaps rows 62 and 64).
+//! MySQL 8.4's printing of expressions in `SHOW CREATE TABLE`.
 //!
 //! MariaDB prints a generated column's, an expression default's and a
 //! check's expression with the fewest parentheses (`` `a` * `b` - 2 ``);
@@ -220,7 +219,7 @@ fn print(e: &Expr, cs: &str) -> Option<String> {
             if name.contains('.') || name.contains('`') {
                 return None;
             }
-            // R4 round 5: `jsonops` wrote a compared JSON string constant
+            // `jsonops` wrote a compared JSON string constant
             // as `json_unquote(json_extract('"x"','$'))`; MySQL prints
             // what was written, `json_extract('"x"','$')`.
             if name == "json_unquote"
@@ -362,7 +361,7 @@ mod tests {
     use super::*;
 
     /// MariaDB 11.8.9's text, and MySQL 8.4.11's for the same column
-    /// (captured R4 round 4).
+    /// (both captured from the servers).
     const PAIRS: &[(&str, &str)] = &[
         ("`a` + 1", "(`a` + 1)"),
         ("`a` * `b` - 2", "((`a` * `b`) - 2)"),
@@ -381,7 +380,7 @@ mod tests {
             "json_unquote(json_extract(`j`,'$.k'))",
             "json_unquote(json_extract(`j`,_utf8mb4'$.k'))",
         ),
-        // R4 round 5: a JSON string constant `jsonops` compared unquoted.
+        // A JSON string constant `jsonops` compared unquoted.
         (
             "json_extract(`d`,'$.\"version\"') = json_unquote(json_extract('\"stable\"','$'))",
             "(json_extract(`d`,_utf8mb4'$.\"version\"') = json_extract(_utf8mb4'\"stable\"',_utf8mb4'$'))",

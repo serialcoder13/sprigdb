@@ -1,6 +1,6 @@
-//! The shards view's routes (chapter 44 step 15; chapter 37's `Shards`
-//! service for the caller's own tenant): table groups with their keys and
-//! members, each group's shard map, and the sharding advisor's runs.
+//! The shards view's routes (the `Shards` service for the caller's own
+//! tenant): table groups with their keys and members, each group's shard
+//! map, and the sharding advisor's runs.
 //!
 //! | Route | Does |
 //! |---|---|
@@ -15,8 +15,8 @@
 //! is read-only: splitting, merging, moving and applying a run are operator
 //! actions (`sprigctl shard`, `sprigctl advisor`, operator mode).
 //!
-//! Shard maps come over the gateway's internal credential (decision ST21);
-//! without it the groups still show, with `maps_error` saying why.
+//! Shard maps come over the gateway's internal credential; without it the
+//! groups still show, with `maps_error` saying why.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

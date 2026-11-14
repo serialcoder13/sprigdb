@@ -1,4 +1,4 @@
-//! Chapter 19's lookup sessions on a distributed transaction: `DistTxn`
+//! Lookup sessions on a distributed transaction: `DistTxn`
 //! implements `sprig_shard::lookup::LookupSessions`, so lookup rows
 //! written in **Main** commit atomically with the data, through the
 //! coordinator (XA across clusters, last-resource commit with Galera).
@@ -8,11 +8,11 @@
 //! - **Main**: the coordinator's branch on the target's cluster; every
 //!   statement goes through the write rule.
 //! - **Post**: buffered, run in their own short transaction after Main
-//!   commits; failures only leave orphans for chapter 19's scan.
+//!   commits; failures only leave orphans for the orphan scan.
 //!
 //! Each shard's statements go to the cluster's writer, through one
 //! connection per cluster: on Galera one shard is never written through
-//! two nodes (chapter 19 relies on it for owner checks).
+//! two nodes (owner checks rely on it).
 //!
 //! `DistTxn` is generic over the coordinator's backend: `mysql_async`
 //! connections ([`MyBackend`]) in tests and jobs, the gateway's own
@@ -73,7 +73,7 @@ fn sql_err(e: &DbError) -> SprigError {
     }
 }
 
-/// A distributed transaction with chapter 19's Pre, Main and Post.
+/// A distributed transaction with lookup Pre, Main and Post sessions.
 pub struct DistTxn<B: TxnBackend = MyBackend> {
     txn: TxnCoordinator<B>,
     backend: Arc<B>,
@@ -210,7 +210,7 @@ where
     /// Reads lookup rows on `t` as this transaction sees them: through
     /// its Pre session on that cluster when one is open (its own claims
     /// are uncommitted there), else on a fresh connection (committed
-    /// rows; chapter 19, "Routing through lookups").
+    /// rows).
     ///
     /// # Errors
     /// The server's error.

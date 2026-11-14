@@ -1,4 +1,4 @@
-//! bugfix-39 (decisions/bugfix-interim.md): `FOR EACH TENANT` definitions
+//! `FOR EACH TENANT` definitions
 //! and `DROP DATABASE`, on the declaring side and on a member's.
 //!
 //! 1. `INCLUDING SELF`: the declarer has its own instance of the

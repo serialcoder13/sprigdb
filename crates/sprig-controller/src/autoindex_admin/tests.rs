@@ -1,4 +1,4 @@
-//! The pure half of the automatic-indexing calls: actions on chapter 13's
+//! The pure half of the automatic-indexing calls: actions on the index
 //! state machine, `{index}` references, filters, and explanations.
 
 #![allow(clippy::unwrap_used, clippy::too_many_lines)]
@@ -232,7 +232,7 @@ fn actions_follow_the_state_machine() {
         plan_action(&dismissed, Action::Reject),
         Plan::Noop(_)
     ));
-    // Route spellings, chapter 13's and 37's included.
+    // Route spellings, the alternative names included.
     for (m, a) in [
         ("approve", Action::Approve),
         ("apply", Action::Approve),

@@ -1,7 +1,5 @@
 //! The `registry` loop: probes every registered cluster and keeps its
-//! capability profile and health current (chapter 09, "Probes",
-//! "Publishing", "Health model"; chapter 23, "The reconciler pattern and
-//! the loops").
+//! capability profile and health current.
 //!
 //! ```text
 //! pass(cluster):
@@ -34,7 +32,7 @@
 //! from the published record.
 //!
 //! Heartbeats are written once per pass, before probing, rather than every
-//! `cluster.heartbeat_interval_ms`. Not yet: tuning (chapter 09 step 10).
+//! `cluster.heartbeat_interval_ms`. Not yet: tuning.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -408,7 +406,7 @@ impl ClusterMonitor {
         let nodes = d.discover(&rec).await?;
         let mut eps = Vec::new();
         // A deep probe also runs the binlog dump probe as sprig_repl, as
-        // registration does (chapter 09, "Binlog dump"); without it a
+        // registration does; without it a
         // registration-time "feed unsupported" would lapse into the
         // settings' verdict after the upgrade sustain period.
         let repl = repl_endpoints(id, &rec.secrets, &nodes, depth);
@@ -451,7 +449,7 @@ impl ClusterMonitor {
             probes.insert(i.min(probes.len()), p);
         }
         // A node must be the server the record pinned at its address; the
-        // first probe that reaches one pins it (r2opfix).
+        // first probe that reaches one pins it.
         let pins = sprig_cluster::probe::check_identity(&rec.node_identities, &mut probes);
         if !pins.is_empty() {
             let r = registry
@@ -484,7 +482,7 @@ impl ClusterMonitor {
             .increment(1);
         }
 
-        // Chapter 09: the gateways' monitoring account, at the first pass
+        // The gateways' monitoring account, at the first pass
         // after the controller starts, when the secret changes, then daily
         // (hourly after a failure).
         let due = st.gw_checked.as_ref().is_none_or(|(sec, at, ok)| {
@@ -636,7 +634,7 @@ impl ClusterMonitor {
 }
 
 /// Writes the writer's heartbeat before a pass, so replicas' lag is read
-/// from a fresh row (chapter 09, "Internal schema"). The writer is the one
+/// from a fresh row. The writer is the one
 /// the last pass saw; nothing is written before a pass has seen replicas.
 /// Every node's `sprig_repl` endpoint, in the order of `nodes`, for the
 /// binlog dump probe of a deep probe; `None` at other depths, or (with a
@@ -729,7 +727,7 @@ async fn beat(st: &mut ClusterState, eps: &[NodeEndpoint], timeout: Duration) {
     }
 }
 
-/// The `registry` loop (chapter 23's loop table): one key per cluster of
+/// The `registry` loop: one key per cluster of
 /// this DC, on the DC leader.
 #[derive(Debug, Clone)]
 pub struct RegistryLoop {

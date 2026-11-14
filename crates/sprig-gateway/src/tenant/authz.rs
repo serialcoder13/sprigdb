@@ -1,4 +1,4 @@
-//! Chapter 29 in the gateway (M0.5): privilege checks on every tenant
+//! Authorization in the gateway: privilege checks on every tenant
 //! statement, the account statements, and the per-user backend accounts.
 //!
 //! **Checks.** Each session compiles its privileges from the snapshot it
@@ -117,21 +117,21 @@ pub struct AuthzServices {
     per_user: ArcSwapOption<PerUser>,
     applied: Mutex<HashMap<(TenantId, ClusterId), u64>>,
     /// Per tenant, cluster and backend account: a hash of the account's
-    /// database-level grants this gateway last applied (bugfix-64).
+    /// database-level grants this gateway last applied.
     db_grants: Mutex<HashMap<(TenantId, ClusterId), HashMap<String, u64>>>,
     /// The snapshot versions and shard placement last compared, per
     /// tenant and cluster, and when.
     checked: Mutex<HashMap<(TenantId, ClusterId), (Checked, std::time::Instant)>>,
-    /// Per tenant: what its clusters were last reconciled at (bugfix-25).
+    /// Per tenant: what its clusters were last reconciled at.
     placed: Mutex<HashMap<TenantId, Checked>>,
     gates: Mutex<HashMap<(TenantId, ClusterId), Gate>>,
     migrating: Mutex<HashSet<TenantId>>,
     /// Tenants whose `auth` and `authz` modules this process found (or
-    /// brought) at their newest formats (decision bugfix-interim: a
-    /// catalog left at an older `auth` format refused `CREATE USER` with
-    /// 1265, its `verifiers.mechanism` lacking `scram_sha_512`).
+    /// brought) at their newest formats (a catalog left at an older `auth`
+    /// format refused `CREATE USER` with 1265, its `verifiers.mechanism`
+    /// lacking `scram_sha_512`).
     current: Mutex<HashSet<TenantId>>,
-    /// Tenants being deleted or deleted (decision bugfix-32): their
+    /// Tenants being deleted or deleted: their
     /// backend accounts are never made again here.
     gone: Mutex<HashSet<TenantId>>,
 }
@@ -158,7 +158,7 @@ impl AuthzServices {
     /// `tenant` is being deleted (or is gone): from now on [`Self::ensure`]
     /// refuses it, so no session that still runs a statement, and no new
     /// login, makes its backend accounts again after the tenant's cleanup
-    /// dropped them (decision bugfix-32).
+    /// dropped them.
     pub fn deleting(&self, tenant: TenantId) {
         lock(&self.gone).insert(tenant);
     }
@@ -229,14 +229,14 @@ impl AuthzServices {
     /// accounts, or when nothing changed since the last reconcile.
     ///
     /// Table, column and routine grants name every schema holding the
-    /// object on the cluster (bugfix-25), so the shard placement is part of
-    /// what is compared: when a split, merge, move, re-key or regroup
-    /// changes it (or the snapshot's catalog or auth version moves), the
-    /// next statement of any session of the tenant here reconciles this
-    /// cluster and every other cluster of the tenant this gateway
-    /// reconciled or the layout names. Every
-    /// `auth.reconcile_interval_seconds` a cluster is compared with
-    /// MariaDB's grants again even when nothing changed (the drift sweep).
+    /// object on the cluster, so the shard placement is part of what is
+    /// compared: when a split, merge, move, re-key or regroup changes it
+    /// (or the snapshot's catalog or auth version moves), the next
+    /// statement of any session of the tenant here reconciles this cluster
+    /// and every other cluster of the tenant this gateway reconciled or the
+    /// layout names. Every `auth.reconcile_interval_seconds` a cluster is
+    /// compared with MariaDB's grants again even when nothing changed (the
+    /// drift sweep).
     ///
     /// # Errors
     /// The cluster's (no `sprig_ctl` pool, a failed statement).
@@ -252,8 +252,8 @@ impl AuthzServices {
         }
         self.refuse_gone(cat.tenant)?;
         let placement = crate::exec::router::placement_digest(svc, cat);
-        // Chapter 29 (RL30): a changed `rls.backend_enforcement` (a global
-        // value changes no catalog version) narrows or widens grants now.
+        // A changed `rls.backend_enforcement` (a global value changes no
+        // catalog version) narrows or widens grants now.
         let digest =
             placement.as_ref().map_or(0, |p| p.0) ^ super::rls::enforcement_digest(svc, cat);
         let versions = (cat.version, cat.auth_version, digest);
@@ -316,13 +316,13 @@ impl AuthzServices {
         let Some(auth) = TenantAuth::of(cat) else {
             return Ok(());
         };
-        // Chapter 07 step 12: the name pairs stored code looks up.
+        // The name pairs stored code looks up.
         super::stored_names::sync_logged(svc, cat, cluster).await;
         let Some(engine) = engine_for(svc, cat) else {
             return Ok(());
         };
         let mut want = engine.backend_grants(cat, auth);
-        // bugfix-25: table, column and routine grants on every schema of
+        // Table, column and routine grants on every schema of
         // this cluster that holds the object.
         let names = backend::object_names(&want);
         if !names.is_empty() {
@@ -333,8 +333,8 @@ impl AuthzServices {
                 }
             }
         }
-        // Chapter 29 (RLS round 2, RL18): accounts bound by a table's
-        // policies read it only through its policy view.
+        // Accounts bound by a table's policies read it only through its
+        // policy view.
         if let Err(e) = super::rls::narrow_backend(svc, cat, cluster, &mut want).await {
             tracing::warn!(tenant = %cat.tenant, %cluster, error = %e, "row-level security grants not narrowed; MariaDB doesn't filter bound users' reads until the next reconcile");
         }
@@ -370,7 +370,7 @@ impl AuthzServices {
         let rep = backend::reconcile(&mut conn, cat.tenant, &want, &per_user.key, full).await?;
         if full {
             // Stored code created as sprig_ctl before definers were the
-            // session's account (chapter 29, "Definers of stored code").
+            // session's account.
             let state = AuthzState::of(cat).cloned().unwrap_or_default();
             let to = definers::wanted(cat, &state, auth);
             match definers::migrate(&mut conn, cat.tenant, &to).await {
@@ -391,10 +391,10 @@ impl AuthzServices {
         for acct in &rep.changed {
             svc.locator.retire_account(acct);
         }
-        // bugfix-64: an account whose database-level grants changed here is
-        // retired even when another gateway's reconcile already applied
-        // them (`rep.changed` is then empty), so this gateway's sessions
-        // pinned to its connections send `USE` again.
+        // An account whose database-level grants changed here is retired
+        // even when another gateway's reconcile already applied them
+        // (`rep.changed` is then empty), so this gateway's sessions pinned
+        // to its connections send `USE` again.
         for acct in db_grants_moved(&mut lock(&self.db_grants), &key, &want) {
             if !rep.changed.contains(&acct) {
                 svc.locator.retire_account(&acct);
@@ -417,7 +417,7 @@ impl AuthzServices {
 
 /// The accounts of `want` whose database-level grants (`mysql.db`)
 /// differ from what `seen` last recorded for `key`, and records `want`'s
-/// (bugfix-64). The first call for a key records only.
+/// The first call for a key records only.
 fn db_grants_moved(
     seen: &mut HashMap<(TenantId, ClusterId), HashMap<String, u64>>,
     key: &(TenantId, ClusterId),
@@ -448,7 +448,7 @@ fn db_grants_moved(
 }
 
 /// Where `tenant`'s tables, views and routines named in `names` are on
-/// `cluster`, and its schemas there (bugfix-25), read as `sprig_ctl` from
+/// `cluster`, and its schemas there, read as `sprig_ctl` from
 /// `information_schema`: what MariaDB's table, column and routine grants
 /// must name.
 ///
@@ -489,9 +489,9 @@ async fn placement_on(
         )
         .await
         .map_err(|e| unavailable(e.to_string()))?;
-    // R9 (r9scale): the schemas from a directory listing, then the tables
-    // one schema at a time; a LIKE on TABLE_SCHEMA lists every table of
-    // every tenant on the server (`sprig_catalog::infoschema`).
+    // The schemas from a directory listing, then the tables one schema at a
+    // time; a LIKE on TABLE_SCHEMA lists every table of every tenant on the
+    // server (`sprig_catalog::infoschema`).
     let schemas = sprig_catalog::infoschema::schemas_like(&mut conn, &like).await?;
     let in_names = names
         .iter()
@@ -555,10 +555,10 @@ impl SessionAuthz {
     }
 }
 
-/// `CURRENT_ROLE()` for the session (chapter 29, R4): the active roles,
-/// as MySQL 8.4 prints them (`` `r1`@`%`,`r2`@`%` ``, or `NONE`) or as
-/// MariaDB does (the role's name, or `NULL`: `None`). The backend's own
-/// answer would be the per-user account's, which never has a role.
+/// `CURRENT_ROLE()` for the session: the active roles, as MySQL 8.4 prints
+/// them (`` `r1`@`%`,`r2`@`%` ``, or `NONE`) or as MariaDB does (the role's
+/// name, or `NULL`: `None`). The backend's own answer would be the per-user
+/// account's, which never has a role.
 #[must_use]
 pub fn current_role(ts: &TenantSession, persona: Persona) -> Option<String> {
     let cat = ts.catalog()?;
@@ -647,10 +647,9 @@ pub fn privileges(ts: &TenantSession, cat: &TenantCatalog) -> Arc<dyn SessionGra
 }
 
 /// The privileges of `user` at `cat` with the roles active at login, for
-/// front ends without a SQL session (the Kafka listener, chapter 45): every
-/// right for a principal without a user id (operators), none when the
-/// engine is unknown. Not cached; callers cache by `(cat.version,
-/// cat.auth_version)`.
+/// front ends without a SQL session (the Kafka listener): every right for a
+/// principal without a user id (operators), none when the engine is
+/// unknown. Not cached; callers cache by `(cat.version, cat.auth_version)`.
 #[must_use]
 pub fn grants_of(
     svc: &TenantServices,
@@ -722,7 +721,7 @@ pub async fn account_statement(
             &ctx,
             Some(&cat.settings),
         ),
-        // Chapter 14: every password also gets SCRAM verifiers.
+        // Every password also gets SCRAM verifiers.
         scram_sha256_iterations: u32::try_from(svc.settings.get(
             &sprig_auth::settings::SCRAM_SHA256_ITERATIONS,
             &ctx,
@@ -783,6 +782,9 @@ pub async fn account_statement(
             if let Some(v) = auth_version {
                 let fresh = await_auth(&svc, ts.tenant, v).await;
                 if let Some(c) = fresh {
+                    // 39229: sinks whose owner lost
+                    // (or regained) access to their source.
+                    super::sink_owners::after_grants(&svc, &c, lctn).await;
                     let cluster = ts.principal.backend.cluster.clone();
                     if let Err(e) = svc.authz.ensure(&svc, &c, &cluster).await {
                         tracing::warn!(tenant = %ts.tenant, error = %e, "backend grants not applied yet; the gateway enforces the change");
@@ -858,9 +860,9 @@ pub struct CheckCtx<'a> {
     pub lctn: bool,
     /// The session's temporary tables.
     pub temp: &'a dyn Fn(Option<&str>, &str) -> bool,
-    /// Chapter 29: protected tables the statement's row-level security
-    /// rewrite covered (their policies are in the text, or MariaDB's
-    /// triggers check its writes).
+    /// Protected tables the statement's row-level security rewrite covered
+    /// (their policies are in the text, or MariaDB's triggers check its
+    /// writes).
     pub covered: &'a [sprig_common::ids::ObjectId],
 }
 
@@ -884,11 +886,10 @@ impl CheckCtx<'_> {
         else {
             return Ok(());
         };
-        // Chapter 30's retryable-write records (`decisions/r5-interim.md`
-        // D12): the document engine writes them in the write's own
-        // transaction for any user of the database. Only the engine's
-        // internal statements can name a `__sprig_` table (chapter 07),
-        // and the writes they record are checked on their collections.
+        // MongoDB retryable-write records: the document engine writes them
+        // in the write's own transaction for any user of the database. Only
+        // the engine's internal statements can name a `__sprig_` table, and
+        // the writes they record are checked on their collections.
         if name.eq_ignore_ascii_case(sprig_auth::authz::backend::DOC_SESSIONS_TABLE)
             && self.p.sees_database(&key, Some(row.db_id))
         {
@@ -1147,9 +1148,9 @@ pub struct Recheck {
     lex: LexOptions,
     current: Option<String>,
     compiled: Arc<dyn SessionGrants>,
-    /// Chapter 29: the tables the prepare-time rewrite covered.
+    /// The tables the prepare-time rewrite covered.
     covered: Vec<sprig_common::ids::ObjectId>,
-    /// Chapter 29: the row-level security context the text's predicates
+    /// The row-level security context the text's predicates
     /// were bound with, when it covers protected tables.
     rls_context: Option<String>,
 }
@@ -1208,9 +1209,9 @@ pub fn recheck(ts: &TenantSession, persona: Persona, rc: &Recheck) -> Result<()>
     if Arc::ptr_eq(&p, &rc.compiled) {
         return Ok(());
     }
-    // Chapter 29: the text's policy predicates were bound at prepare; a
-    // new role set or policy change needs a new text (MySQL's 1615, which
-    // connectors answer by preparing again).
+    // The text's policy predicates were bound at prepare; a new role set or
+    // policy change needs a new text (MySQL's 1615, which connectors answer
+    // by preparing again).
     if rc.rls_context.is_some() && rls_context(ts, &cat) != rc.rls_context {
         return Err(SprigError::standard(
             1615,
@@ -1305,11 +1306,10 @@ pub fn check_session(
     r
 }
 
-/// What a `DROP` statement removes, with `auth.grants_on_drop` resolved
-/// at each object's database (chapter 29, "Privileges of dropped
-/// objects"), read from the session's snapshot before the statement runs.
-/// Objects that don't exist (`IF EXISTS`) and temporary tables aren't
-/// listed.
+/// What a `DROP` statement removes, with `auth.grants_on_drop` resolved at
+/// each object's database, read from the session's snapshot before the
+/// statement runs. Objects that don't exist (`IF EXISTS`) and temporary
+/// tables aren't listed.
 #[must_use]
 pub fn dropped_objects(
     ts: &TenantSession,
@@ -1396,12 +1396,12 @@ pub async fn objects_dropped(ts: &TenantSession, dropped: &[Dropped]) {
     }
 }
 
-/// The live tables and views a `RENAME TABLE` or `ALTER TABLE ...
-/// RENAME` moves away from their names, read from the session's snapshot
-/// before the statement runs (chapter 29, "Renamed tables"): each once,
-/// under the name it has now. The moves are followed in order, as MariaDB
-/// applies them, so `RENAME TABLE a TO tmp, b TO a, tmp TO b` lists `a`
-/// and `b`. Sources that don't exist and temporary tables aren't listed.
+/// The live tables and views a `RENAME TABLE` or `ALTER TABLE ... RENAME`
+/// moves away from their names, read from the session's snapshot before the
+/// statement runs: each once, under the name it has now. The moves are
+/// followed in order, as MariaDB applies them, so
+/// `RENAME TABLE a TO tmp, b TO a, tmp TO b` lists `a` and `b`. Sources
+/// that don't exist and temporary tables aren't listed.
 #[must_use]
 pub fn renamed_objects(
     ts: &TenantSession,
@@ -1599,7 +1599,7 @@ pub fn filter_session_databases(ts: &TenantSession, ans: &mut LocalAnswer) {
     filter_databases(ans, &cat, &*p, lctn);
 }
 
-/// Chapter 29's settings privileges (build step 4):
+/// The settings privileges:
 ///
 /// | Operation | Needs | Refused with |
 /// |---|---|---|

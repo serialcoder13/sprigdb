@@ -202,3 +202,23 @@ tests:
       - eval_time: 20h
         alertname: BackupMissed
         exp_alerts: []
+
+  # Stream sequencers: wkr-1 has 3 lagging sequencers for 15 minutes,
+  # wkr-2 none.
+  - interval: 1m
+    input_series:
+      - series: 'sprig_stream_sequencers_lagging{instance="wkr-1"}'
+        values: '3x30'
+      - series: 'sprig_stream_sequencers_lagging{instance="wkr-2"}'
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: SprigStreamSequencersLagging
+        exp_alerts:
+          - exp_labels: { severity: ticket, instance: wkr-1 }
+            exp_annotations:
+              summary: Stream sequencers on a worker stay behind their feed
+              runbook: "The Admin API's GET /admin/v1/jobs?kind=stream_sequencer shows each sequencer's lag_ms in its progress; check the worker's load and logs, the tenant's cluster (binlog reader, slow appends) and sprig_stream_sequencer_lag_max_seconds"
+      - eval_time: 5m
+        alertname: SprigStreamSequencersLagging
+        exp_alerts: []

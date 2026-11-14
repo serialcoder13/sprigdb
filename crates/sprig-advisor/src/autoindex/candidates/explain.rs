@@ -1,5 +1,4 @@
-//! The `EXPLAIN` check of a covered candidate (chapter 13, "Merging
-//! candidates and checking existing indexes").
+//! The `EXPLAIN` check of a covered candidate.
 //!
 //! When an existing index `e` covers a candidate on paper, the candidate's
 //! fingerprints are explained with sampled parameters
@@ -12,7 +11,8 @@
 //!
 //! The statement comes bound and in physical names, as the replay harness
 //! prepares it ([`ReplayStatement::bind`](super::super::replay::ReplayStatement::bind)
-//! and chapter 07's rewriter); this module never sees or logs values.
+//! and the name rewriter, `sprig-sql::names`); this module never sees or
+//! logs values.
 
 use mysql_async::prelude::Queryable;
 use sprig_common::{Result, SprigError};

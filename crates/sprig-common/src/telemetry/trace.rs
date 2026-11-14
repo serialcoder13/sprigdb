@@ -1,4 +1,4 @@
-//! Traces (chapter 47, "Traces and redaction"; build step 3).
+//! Traces.
 //!
 //! A trace is a tree of `tracing` spans with target [`TARGET`]. The root is
 //! one statement or request on any protocol (`gateway.request`); its
@@ -19,8 +19,8 @@
 //! [`TraceExporter`], such as [`otlp::OtlpExporter`] (OTLP over HTTP with
 //! JSON, to `telemetry.otlp_endpoint`).
 //!
-//! Spans carry ids and fingerprints, never SQL text or values (chapter 47,
-//! "redact"): callers record only those, so no redaction pass runs here.
+//! Spans carry ids and fingerprints, never SQL text or values: callers
+//! record only those, so no redaction pass runs here.
 //!
 //! **Propagation.** A root span may carry a `traceparent` field (from an
 //! HTTP header or a MySQL query attribute); [`current`] gives the context
@@ -292,7 +292,7 @@ impl Tracer {
     }
 
     /// A root closed with its finished descendants (`children`, kept
-    /// with the root while it was open; perf1, S141: a process-wide map
+    /// with the root while it was open; a process-wide map
     /// of pending traces, locked at every span's close and swept at every
     /// root's, made all runtime threads contend on one lock per statement).
     fn root_closed(
@@ -361,8 +361,8 @@ pub fn tracer() -> &'static Arc<Tracer> {
 fn random_u64() -> u64 {
     // Span and trace ids and the head sample need uniqueness, not secrecy:
     // a per-thread SplitMix64 seeded once from the OS (a `getentropy`
-    // system call per id cost about 3% of a gateway's CPU per statement;
-    // R5 round 4).
+    // system call per id cost about 3% of a gateway's CPU per
+    // statement).
     thread_local! {
         static STATE: std::cell::Cell<u64> = std::cell::Cell::new(seed());
     }
@@ -612,8 +612,8 @@ pub fn current() -> Option<TraceContext> {
         .flatten()
 }
 
-/// A child span recorded without a `tracing` span (perf1, S142): the
-/// timing and attributes of one step under the innermost traced span,
+/// A child span recorded without a `tracing` span: the timing and
+/// attributes of one step under the innermost traced span,
 /// kept with that span's root and exported with its trace exactly as a
 /// `tracing` child would be, but without a registry slot, the log
 /// formatter's copy of its fields or the layers' callbacks. The gateway's

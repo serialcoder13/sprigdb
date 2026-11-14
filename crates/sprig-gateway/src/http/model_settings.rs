@@ -1,16 +1,15 @@
 //! Live `vector.*` and `analytics.*` settings for the Vectors and
-//! Analytics APIs (chapters 34 and 35, "Configuration"; R6 round 3).
+//! Analytics APIs.
 //!
 //! Read at each call from the gateway's live settings mirror, so a change
 //! applies to the next call: at the caller's tenant and database scopes
-//! (R6 round 4) when the tenant's catalog is cached here, else at the
-//! gateway's process scopes (dc, global). The limits (`vector.max_k`,
-//! `max_overfetch`, `prefilter_max_rows`, `analytics.max_groups`,
-//! `query_timeout_seconds`, `max_concurrent_per_tenant`) are capped by
-//! their dc and global value, so a tenant can lower them but not raise
-//! them (chapter 35, "Configuration"). `analytics.max_concurrent_per_gateway`
-//! is the key the router already registers (chapter 17's analytic reads
-//! share it).
+//! when the tenant's catalog is cached here, else at the gateway's process
+//! scopes (dc, global). The limits (`vector.max_k`, `max_overfetch`,
+//! `prefilter_max_rows`, `analytics.max_groups`, `query_timeout_seconds`,
+//! `max_concurrent_per_tenant`) are capped by their dc and global value, so
+//! a tenant can lower them but not raise them.
+//! `analytics.max_concurrent_per_gateway` is the key the router already
+//! registers (the router's analytic reads share it).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -285,7 +284,7 @@ fn take(c: &AtomicUsize, limit: usize) -> bool {
 }
 
 /// Admits a query of `tenant` under the limits now, waiting up to a
-/// second for a slot (chapter 35, "Admission control").
+/// second for a slot.
 ///
 /// # Errors
 /// 39780 (retryable) when no slot frees in time.
@@ -327,9 +326,9 @@ pub async fn admit(tenant: u64, limits: Analytics) -> Result<Admitted> {
 /// [`vector_auto_ann`] once this gateway's copy of the tenant's catalog
 /// holds the directory's catalog version as read now (linearizable), so a
 /// `vector.auto_ann` change made a moment ago on any gateway is seen
-/// (approvals round 3: an automatic graph was built 0.3 s after `approve`
-/// was set, before the settings cache had it). Falls back to the cached
-/// value when the directory or the catalog can't be read.
+/// (otherwise an automatic graph could be built just after `approve` was
+/// set, before the settings cache had it). Falls back to the cached value
+/// when the directory or the catalog can't be read.
 pub async fn vector_auto_ann_fresh(engine: &SqlEngine, caller: &Caller, database: &str) -> String {
     let cached = vector_auto_ann(engine, caller, database);
     if !matches!(engine.api, ApiSettingsSource::Live { .. }) {
@@ -361,9 +360,8 @@ pub async fn vector_auto_ann_fresh(engine: &SqlEngine, caller: &Caller, database
     }
 }
 
-/// Chapter 52: `vector.auto_ann` (`on`, `approve`, `recommend` or `off`)
-/// for `caller` on `database`, at the same scopes as the other `vector.*`
-/// keys.
+/// `vector.auto_ann` (`on`, `approve`, `recommend` or `off`) for `caller`
+/// on `database`, at the same scopes as the other `vector.*` keys.
 #[must_use]
 pub fn vector_auto_ann(engine: &SqlEngine, caller: &Caller, database: &str) -> String {
     if !matches!(engine.api, ApiSettingsSource::Live { .. }) {

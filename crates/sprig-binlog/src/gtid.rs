@@ -1,4 +1,4 @@
-//! MariaDB GTIDs and positions (chapter 10, "Positions").
+//! MariaDB GTIDs and positions.
 //!
 //! A MariaDB GTID is `domain-server-seq`. A position ([`GtidPos`]) holds one
 //! GTID per replication domain: the last transaction applied in that domain.
@@ -103,7 +103,7 @@ impl GtidPos {
     }
 
     /// Keeps only the domains `keep` accepts. On Galera, positions keep only
-    /// the cluster's `wsrep_gtid_domain_id` (chapter 10).
+    /// the cluster's `wsrep_gtid_domain_id`.
     pub fn retain_domains(&mut self, mut keep: impl FnMut(u32) -> bool) {
         self.domains.retain(|d, _| keep(*d));
     }

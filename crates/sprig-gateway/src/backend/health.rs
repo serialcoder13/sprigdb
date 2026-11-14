@@ -1,9 +1,9 @@
-//! Node states (chapter 06, "Health checks"; build step 7): Up, Suspect
-//! and Down from active checks and from errors on real traffic, plus what
-//! the checks and the position poller observed (role, Galera state, GTID
-//! positions, estimated lag) and whether the node is behind: lagging more
-//! than `reads.max_replica_lag_ms` (a replica) or `reads.max_galera_lag_ms`
-//! (a Galera node), so it gets no reads until it catches up.
+//! Node states: Up, Suspect and Down from active checks and from errors on
+//! real traffic, plus what the checks and the position poller observed (role,
+//! Galera state, GTID positions, estimated lag) and whether the node is
+//! behind: lagging more than `reads.max_replica_lag_ms` (a replica) or
+//! `reads.max_galera_lag_ms` (a Galera node), so it gets no reads until it
+//! catches up.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, PoisonError};

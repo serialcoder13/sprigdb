@@ -34,6 +34,9 @@ pub struct Limits {
     pub merge_unbuilt: bool,
     /// `inherit.merge`: `None` for `auto`.
     pub merge: Option<MergeMode>,
+    /// `hierarchy.max_move_rows`: the most rows one reconcile of a space
+    /// may rewrite (39715 past it; decision T29).
+    pub max_move_rows: u64,
 }
 
 impl Default for Limits {
@@ -46,6 +49,7 @@ impl Default for Limits {
             tenant_max_depth: 64,
             merge_unbuilt: false,
             merge: None,
+            max_move_rows: 100_000,
         }
     }
 }

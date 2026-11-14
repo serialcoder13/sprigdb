@@ -128,10 +128,18 @@ pub fn wanted(parent: &TenantCatalog, child: &TenantCatalog, lctn: bool) -> Vec<
     out
 }
 
+/// Columns and indexes a child's table keeps from its parent's: the
+/// layer columns, and a record hierarchy's paths and their index (decision
+/// T28; `_sprig_rk` is both).
 fn is_layer_column(name: &str) -> bool {
     matches!(
         name,
-        "_sprig_space" | "_sprig_state" | "_sprig_ovr" | "_sprig_rk"
+        "_sprig_space"
+            | "_sprig_state"
+            | "_sprig_ovr"
+            | "_sprig_rk"
+            | "_sprig_hpath"
+            | "_sprig_hdepth"
     )
 }
 

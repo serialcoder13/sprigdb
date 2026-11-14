@@ -1,9 +1,8 @@
 # sprig-proto-mysql fuzz targets
 
-cargo-fuzz targets for the MySQL and MariaDB wire codec (chapter 05 build
-step 13; chapter 46 step 4). The oracle is chapter 46's: no panic, no hang,
-bounded memory, and decode -> encode -> decode stability wherever the crate
-has an encoder.
+cargo-fuzz targets for the MySQL and MariaDB wire codec. The oracle: no
+panic, no hang, bounded memory, and decode -> encode -> decode stability
+wherever the crate has an encoder.
 
 | Target | What it feeds |
 |---|---|
@@ -55,7 +54,7 @@ in the workspace's ordinary test run.
   (`tests/golden/`) by
   `SPRIG_WRITE_FUZZ_SEEDS=1 cargo test -p sprig-proto-mysql --test golden_fuzz_replay write_fuzz_seeds`.
 - `regressions/<target>/`: every input that once failed, named for what it
-  found. Never delete one (chapter 46: fuzz targets are security controls).
+  found. Never delete one: each guards a bug that was fixed.
 
 ## Licences
 

@@ -1,6 +1,6 @@
 //! The cargo-fuzz targets' corpora and crash regressions (lexer, name
-//! rewriter, chapter 28's R0 rewrites), replayed on stable in the ordinary
-//! test run (chapter 46, step 4).
+//! rewriter, the translator's core rewrites), replayed on stable in the
+//! ordinary test run.
 //!
 //! The target bodies live in `fuzz/src/lib.rs` (the cargo-fuzz project,
 //! outside the workspace); this file includes it by path, so every
@@ -27,7 +27,8 @@ fn fuzz_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz")
 }
 
-/// Statements the seeds start from: the shapes chapters 07 and 28 handle.
+/// Statements the seeds start from: the shapes the name layer and the
+/// translator handle.
 const SEEDS: &[&str] = &[
     "SELECT * FROM billing.orders WHERE id = 1",
     "SELECT o.id, c.name FROM billing.orders o JOIN crm.customers c ON c.id = o.customer_id",

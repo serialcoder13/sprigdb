@@ -1,14 +1,14 @@
-//! Query settings and query statistics (M3, decisions S96–S99):
-//! `setQuerySettings` and `removeQuerySettings` (MongoDB 8.0, with 8.1's
-//! `comment` and 9.0's per-shape `maxTimeMS`), the `$querySettings` stage,
-//! 9.0's per-command `querySettings` field on `find`, `aggregate` and
-//! `distinct`, and the `$queryStats` stage (8.0's shape, with 9.0's write
-//! commands and `metrics.writes`).
+//! Query settings and query statistics: `setQuerySettings` and
+//! `removeQuerySettings` (MongoDB 8.0, with 8.1's `comment` and 9.0's
+//! per-shape `maxTimeMS`), the `$querySettings` stage, 9.0's per-command
+//! `querySettings` field on `find`, `aggregate` and `distinct`, and the
+//! `$queryStats` stage (8.0's shape, with 9.0's write commands and
+//! `metrics.writes`).
 //!
 //! Shapes come from [`sprig_doc::qshape`]. Settings are kept per tenant in
 //! the shape's database (hidden table `__sprig_doc_query_settings`) and read
-//! through a two-second cache per gateway (S97). Statistics are kept per
-//! gateway and tenant in memory (S98).
+//! through a two-second cache per gateway. Statistics are kept per gateway
+//! and tenant in memory.
 //!
 //! What the settings do here:
 //! - `reject: true` refuses the query with 411 `QueryRejectedBySettings`;
@@ -16,7 +16,7 @@
 //!   `max_statement_time` and answers 50 `MaxTimeMSExpired` when one runs
 //!   out;
 //! - `indexHints`, `queryFramework` and `comment` are kept and listed; the
-//!   index hints aren't applied (MariaDB's optimizer picks the index, S99).
+//!   index hints aren't applied (MariaDB's optimizer picks the index).
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -500,7 +500,7 @@ pub async fn stage_docs(
     let mine: std::collections::HashSet<&str> =
         list.iter().map(|s| s.shape_hash.as_str()).collect();
     // Shapes this gateway hasn't run since it started: the store's
-    // totals over every gateway (S137).
+    // totals over every gateway.
     let from_store: Vec<Document> = stored
         .iter()
         .filter_map(|x| stored_entry(x, now))
@@ -542,8 +542,8 @@ pub async fn stage_docs(
         .collect())
 }
 
-/// A `$queryStats` entry from the workload store (S137): its key without
-/// the driver's `client` (the store doesn't keep it), the counts of every
+/// A `$queryStats` entry from the workload store: its key without the
+/// driver's `client` (the store doesn't keep it), the counts of every
 /// gateway, `sprigSource: "workloadStore"`. `None` for a text that isn't a
 /// MongoDB shape.
 fn stored_entry(x: &super::catalog::StoredShape, now: bson::DateTime) -> Option<Document> {
@@ -597,7 +597,7 @@ fn stored_entry(x: &super::catalog::StoredShape, now: bson::DateTime) -> Option<
 pub struct Applied {
     /// 9.0's per-shape `maxTimeMS`.
     pub max_time_ms: Option<i64>,
-    /// `indexHints`' allowed indexes for the command's namespace (S135).
+    /// `indexHints`' allowed indexes for the command's namespace.
     pub index_hints: Vec<Bson>,
 }
 
@@ -684,7 +684,7 @@ fn allowed_indexes(v: Option<&Bson>, db: &str, coll: &str) -> Vec<Bson> {
         .collect()
 }
 
-/// The MariaDB index a hint names on `ns` (S135): an index name or key
+/// The MariaDB index a hint names on `ns`: an index name or key
 /// pattern, `_id_` the primary key; `$natural` none. `Err` with
 /// MongoDB's 2 `BadValue` for an index that doesn't exist.
 ///
@@ -740,7 +740,7 @@ pub async fn hint_index(
         .ok_or_else(bad)
 }
 
-/// A command's own `maxTimeMS` (S134): `find`, `aggregate`, `count`,
+/// A command's own `maxTimeMS`: `find`, `aggregate`, `count`,
 /// `distinct`, `update`, `delete` and `findAndModify`; 0 or absent is no
 /// limit, as in MongoDB.
 #[must_use]
@@ -804,7 +804,7 @@ fn count_of(reply: &Document) -> i64 {
 }
 
 /// Runs recorded per second per gateway at most (MongoDB 8.0's
-/// `internalQueryStatsRateLimit` is 100); the rest aren't counted (S98).
+/// `internalQueryStatsRateLimit` is 100); the rest aren't counted.
 const RATE_LIMIT: u32 = 1000;
 
 static WINDOW: LazyLock<Mutex<(Instant, u32)>> = LazyLock::new(|| Mutex::new((Instant::now(), 0)));

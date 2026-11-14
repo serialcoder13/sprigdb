@@ -1,6 +1,6 @@
 //! A REST or gRPC client that goes away while a statement on a sharded
-//! table runs leaves no per-shard statement behind (studio2's ST31; the
-//! single-connection case is `disconnect_live.rs`). The router runs one
+//! table runs leaves no per-shard statement behind (the single-connection
+//! case is `disconnect_live.rs`). The router runs one
 //! statement per shard (a scatter's streams, a merge, partial aggregates);
 //! when the client leaves before the first row, every one of them is
 //! stopped with `KILL QUERY`, not only the session's own connection's.
@@ -45,7 +45,7 @@ const BACKENDS: &str = "SPRIG_TEST_SHARD_BACKENDS";
 /// room for a loaded machine. It was 2.5 s while the gateway killed every
 /// shard's statement at once: MariaDB's `KILL QUERY` then sometimes took
 /// 2 s (`SECONDS_TO_WAIT_FOR_KILL`); the gateway now kills one at a time
-/// per node (bugfix-21).
+/// per node.
 const LIMIT: Duration = Duration::from_millis(1000);
 
 struct Env {

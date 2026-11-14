@@ -461,7 +461,7 @@ fn unsargable_not_indexable_and_no_objects() {
     assert_eq!(miss_of(&q, 4), &Miss::NotIndexable);
 }
 
-/// R6 round 6 (decision K3): `JSON_VALUE` in an equality qualifies (a
+/// `JSON_VALUE` in an equality qualifies (a
 /// field column can serve it); in `LIKE` it stays unsargable.
 #[test]
 fn a_json_value_equality_qualifies_and_a_like_does_not() {

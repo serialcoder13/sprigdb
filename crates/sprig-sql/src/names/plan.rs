@@ -1,4 +1,4 @@
-//! What the gateway does with a client's text (chapter 07, "Flows"): the
+//! What the gateway does with a client's text: the
 //! statement rewrite, then per statement the `SHOW` handling, the
 //! `information_schema` inline views and `CREATE TABLE ... LIKE`, each
 //! ending in a [`StmtPlan`] with its [`Action`].
@@ -46,9 +46,9 @@ pub struct PlanCtx<'a> {
     /// The tenant's sessions, for `SHOW PROCESSLIST` and
     /// `information_schema.PROCESSLIST`.
     pub sessions: Option<&'a dyn SessionSource>,
-    /// Which databases the user may see (chapter 29); all without it.
+    /// Which databases the user may see; all without it.
     pub visible: Option<&'a (dyn Fn(&LogicalDb) -> bool + Sync)>,
-    /// The session's cluster has chapter 07's name lookup (step 12): see
+    /// The session's cluster has the name lookup: see
     /// [`InfoSchemaCtx::stored_names`]. Also maps caught error text in the
     /// client's own statements ([`super::stored::top_level`]).
     pub stored_names: bool,
@@ -89,7 +89,7 @@ impl<'a> PlanCtx<'a> {
         self
     }
 
-    /// With chapter 07's name lookup on the session's cluster.
+    /// With the name lookup on the session's cluster.
     #[must_use]
     pub fn stored_names(mut self, on: bool) -> Self {
         self.stored_names = on;
@@ -110,7 +110,7 @@ impl<'a> PlanCtx<'a> {
         self
     }
 
-    /// With the databases the user may see (chapter 29): `SHOW DATABASES`
+    /// With the databases the user may see: `SHOW DATABASES`
     /// in every form and `information_schema` list only those.
     #[must_use]
     pub fn visible(mut self, f: &'a (dyn Fn(&LogicalDb) -> bool + Sync)) -> Self {
@@ -224,7 +224,7 @@ pub fn plan(sql: &[u8], ctx: &PlanCtx<'_>) -> Result<Plan, NameError> {
         let (show, mut action) = plan_statement(text, info, current.as_deref(), ctx)?;
         if let Action::Forward { mapper, sql } = &mut action {
             mapper.set_persona(ctx.rewrite.lex.persona);
-            // Chapter 38's statement comment (`/*sprig h=.. o=..*/`) is
+            // The statement comment (`/*sprig h=.. o=..*/`) is
             // kept in front of the gateway's own internal statements, so
             // the change feed reads it from the binlog; a client's
             // leading comments are dropped as before.
@@ -237,8 +237,8 @@ pub fn plan(sql: &[u8], ctx: &PlanCtx<'_>) -> Result<Plan, NameError> {
                 v.extend_from_slice(sql);
                 *sql = v;
             }
-            // Chapter 07 step 12: caught error text, where the cluster has
-            // the mapping function.
+            // Caught error text, where the cluster has the mapping
+            // function.
             if ctx.stored_names
                 && let Some(t) = super::stored::top_level(sql, &ctx.rewrite.lex, ctx.oracle)
             {
@@ -304,7 +304,7 @@ fn plan_statement(
             // DESCRIBE t is SHOW COLUMNS; EXPLAIN FOR CONNECTION and the
             // like are scrubbed.
             let word = first_word(&tokens, &text);
-            // 3306: over the MySQL-shaped COLUMNS provider (chapter 28).
+            // 3306: over the MySQL-shaped COLUMNS provider.
             if lex_opts.persona == Persona::MySql84
                 && !in_is
                 && let Some(sql) = crate::compat::schema::describe_rewrite(
@@ -349,7 +349,7 @@ fn plan_statement(
                     )));
                 }
             }
-            // Chapter 13's reserved index names (step 12).
+            // Reserved index names.
             if info.kind == StmtKind::Ddl
                 && !ctx.rewrite.internal
                 && let Some(ch) = super::autoindex::index_changes(&text, &lex_opts)
@@ -393,8 +393,7 @@ fn plan_statement(
             return Ok((None, forward(text, ResultMapper::scrub())));
         }
     }
-    // Statements whose results hold names in values (chapter 07, "Result
-    // metadata and error messages").
+    // Statements whose results hold names in values.
     let word = first_word(&tokens, &text);
     let mapper = if matches!(
         word.as_str(),
@@ -503,7 +502,7 @@ fn plan_show(
                     .to_owned(),
             });
         }
-        // 3306: MySQL's engines (gaps row 48; chapter 28, R4).
+        // 3306: MySQL's engines.
         ShowKind::Other
             if persona == Persona::MySql84 && crate::compat::schema::is_show_engines(&text) =>
         {
@@ -512,7 +511,7 @@ fn plan_show(
                 ResultMapper::scrub(),
             )
         }
-        // 3306: MySQL's collations (gaps row 54; chapter 28, R4).
+        // 3306: MySQL's collations.
         ShowKind::Other
             if persona == Persona::MySql84
                 && crate::compat::schema::show_collation_sql(&text, &|v| sql_string(v, nbe))
@@ -524,8 +523,8 @@ fn plan_show(
         }
         ShowKind::Grants | ShowKind::Other => forward(text, ResultMapper::scrub()),
         kind => {
-            // R1: a database whose tables the advisor grouped lists them
-            // from every group's schema (chapter 07, `grouped`).
+            // A database whose tables the advisor grouped lists them from
+            // every group's schema (`grouped`).
             if let Some(a) = super::grouped::listing(&info, &text, tokens, current, ctx)? {
                 return Ok((info, a));
             }
@@ -546,7 +545,7 @@ fn plan_show(
                 text = schemas_in_where(text, f, ctx);
             }
             // 3306: SHOW [FULL] COLUMNS over the MySQL-shaped COLUMNS
-            // provider (chapter 28).
+            // provider.
             if kind == ShowKind::Columns
                 && persona == Persona::MySql84
                 && let Some(sql) = crate::compat::schema::show_columns_rewrite(
@@ -560,7 +559,7 @@ fn plan_show(
                 text = sql;
             }
             // 3306: SHOW INDEX in MySQL 8.4's shape (`Visible`,
-            // `Expression`; chapter 28, R4).
+            // `Expression`).
             if kind == ShowKind::Index
                 && persona == Persona::MySql84
                 && let Some(sql) = crate::compat::schema::show_index_rewrite(

@@ -1,5 +1,5 @@
-//! `information_schema.SPRIG_SETTINGS` inlining: where it may go (chapter
-//! 07 rule 9) and the 39052 message.
+//! `information_schema.SPRIG_SETTINGS` inlining: where it may go and the
+//! 39052 message.
 
 #![allow(clippy::unwrap_used)]
 

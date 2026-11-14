@@ -1,21 +1,21 @@
 //! Validations, after-commit triggers, schedules and computed fields in a
-//! tenant session (chapter 41; R7 orders 3 and 5).
+//! tenant session.
 //!
 //! ```text
 //! CREATE VALIDATION | TRIGGER ... AFTER COMMIT | SCHEDULE:
-//!   chapter 29: TRIGGER on the table (validations, triggers), CREATE
+//!   privileges: TRIGGER on the table (validations, triggers), CREATE
 //!     ROUTINE on the database (schedules), checked here
-//!   shards: chapter 21's layout (the table's group, or every shard of the
+//!   shards: the DDL layout (the table's group, or every shard of the
 //!     database); one sprig_ctl connection per shard, every routine and
 //!     trigger written with DEFINER = the user's backend account and the
 //!     definer checked afterwards; all or nothing (sprig_logic::service)
 //!   a CHECK validation: ALTER TABLE ... ADD CONSTRAINT through this
-//!     session's own DDL path (chapter 21's engine), as if the client sent it
+//!     session's own DDL path (the DDL engine), as if the client sent it
 //!   trigger: feed subscription logic:b<binding> registered at the cluster's
 //!     binlog position now; schedule: logic/schedules/<tenant>/<module>
 //! ALTER TABLE t ADD c TYPE AS (f(args)), f a logic function: f's body as
 //!   one expression replaces the call, and the statement runs as ordinary
-//!   DDL (a generated column through chapter 21's engine)
+//!   DDL (a generated column through the DDL engine)
 //! ```
 
 use std::collections::HashMap;
@@ -66,7 +66,7 @@ impl ShardSessions for CtlShards {
         // One connection per cluster, not per shard schema: every routine
         // names its schema, and a gateway's `sprig_ctl` pool is small
         // (four), so a deploy over many shards of one cluster must not
-        // hold one connection each (it waited forever; R7 close-out).
+        // hold one connection each (it would wait forever).
         let cluster = self
             .list
             .iter()
@@ -296,13 +296,13 @@ impl PassSession {
                 {
                     return Err(denied("TRIGGER", &user_name, &t.name));
                 }
-                // Chapter 29 (RL37): an after-commit trigger's code gets the
-                // changed rows' images, as its definer: it needs SELECT on
-                // the table (as MySQL asks of a trigger reading OLD and NEW).
-                // When policies on the table bind the definer, the worker
-                // checks each event's rows against them (RL50; refused
-                // before). Validations run in the writer's own statement and
-                // see only its row, so TRIGGER stays enough for them.
+                // An after-commit trigger's code gets the changed rows'
+                // images, as its definer: it needs SELECT on the table (as
+                // MySQL asks of a trigger reading OLD and NEW). When policies
+                // on the table bind the definer, the worker checks each
+                // event's rows against them (refused before). Validations
+                // run in the writer's own statement and see only its row, so
+                // TRIGGER stays enough for them.
                 if decl.kind == Kind::Trigger && !grants.unrestricted() {
                     let on = AuthzTarget::Object {
                         db_key: &db_key,
@@ -334,7 +334,7 @@ impl PassSession {
         };
         let svc = Arc::clone(ts.services());
         let tenant = ts.tenant;
-        // Chapter 21's shards: the table's group, or every shard of the
+        // The DDL layout's shards: the table's group, or every shard of the
         // database; one shard (the template) for unsharded databases.
         let template = ts.schema_of(Some(&db));
         let layout = super::router::ddl_layout(ts);
@@ -601,7 +601,7 @@ impl PassSession {
     }
 }
 
-/// A validation's `CHECK` failure as 39863 (chapter 41). A constraint
+/// A validation's `CHECK` failure as 39863. A constraint
 /// this gateway hasn't seen yet loads the tenant's `CHECK` messages in the
 /// background, so later failures show the validation's own message.
 pub(super) fn map_validation(

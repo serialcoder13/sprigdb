@@ -1,4 +1,4 @@
--- Schemas for the chapter 07 live tests and fixture capture, as tenant
+-- Schemas for the name layer's live tests and fixture capture, as tenant
 -- 9999 with databases billing (db 1) and crm (db 2). t9999_d7_g7_s7 is a
 -- schema of the tenant's id space the name map doesn't know (a stand-in
 -- for another tenant's schema) and t9999_sprig is the tenant catalog:

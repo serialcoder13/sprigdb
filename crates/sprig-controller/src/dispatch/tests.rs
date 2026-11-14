@@ -1,6 +1,6 @@
 //! Dispatch tests: single passes on `MemStore` under paused time, and a
 //! seeded simulation of the whole scheduler with workers that crash and
-//! leaders that change (chapter 23, "Testing": a job has one owner).
+//! leaders that change: a job has one owner.
 
 // Test suites: failures are panics with a message.
 #![allow(
@@ -249,7 +249,7 @@ fn workers_need_free_slots_and_prefer_their_zone() {
     });
 }
 
-/// r9triggers: long-running consumers (stream sequencers, triggers on
+/// Long-running consumers (stream sequencers, triggers on
 /// streams and queues) have their own pool, so a ninth stream's sequencer
 /// is assigned on a worker whose eight `Other` slots are all taken.
 #[test]
@@ -311,7 +311,7 @@ fn consumer_jobs_have_their_own_pool() {
     });
 }
 
-/// R5 round 6: search copies go only to workers with the search role,
+/// Search copies go only to workers with the search role,
 /// and the copies of one index (one `spread` key) to different workers,
 /// however loaded the other worker is.
 #[test]
@@ -940,7 +940,7 @@ fn keys_for_skips_progress_of_running_jobs() {
     assert!(JobGc.keys_for(&gone).is_empty());
 }
 
-/// Chapter 14's suspension (decision bugfix-interim): a suspended tenant's
+/// Suspension: a suspended tenant's
 /// sink tasks and triggers wait queued, running ones are cancelled, a due
 /// schedule run is skipped; the tenants below it wait too; housekeeping
 /// and other tenants' jobs go on; after resume the held jobs run.

@@ -1,9 +1,8 @@
 //! `sprig-proto-mysql`: MySQL and MariaDB wire codec, server and client side, and the auth plugins.
 //!
-//! Layer: 1 foundations. Design: [chapter 05](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/05-wire-protocols.md) (Wire protocols) of the SprigDB low-level design.
+//! Layer: 1 foundations.
 //!
-//! Built so far (chapter 05 build steps 1, 2, the codec part of 10, and 11,
-//! plus command parsing):
+//! Modules:
 //!
 //! - [`codec`]: [`PacketCodec`], the tokio-util framing codec: 16 MiB
 //!   splitting and reassembly, sequence ids, the `max_packet` limit, and
@@ -20,10 +19,10 @@
 //! - [`command`]: every `COM_*` the gateway accepts, parsed without panics
 //!   and encoded, including `COM_STMT_EXECUTE` parameters, query
 //!   attributes and MariaDB's `COM_STMT_BULK_EXECUTE`;
-//! - [`error`]: ERR packet builders and the persona error maps.
-//!
-//! Not yet: the server handshake and auth plugins (steps 3 and 4), the
-//! backend client (step 5).
+//! - [`error`]: ERR packet builders and the persona error maps;
+//! - [`handshake`] and [`auth`]: the server side of the connection phase and
+//!   the server auth plugins;
+//! - [`client`]: the client side, for backend connections.
 
 // Every fallible function in this crate fails only with `ProtoError` on
 // malformed or short input (or I/O in the codec), so per-function

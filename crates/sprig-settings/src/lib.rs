@@ -59,7 +59,7 @@ pub use explain::{ExplainStep, Explanation, StepOutcome, explain_layered};
 pub use guard::{AllGuards, GuardFuture, ValueGuard};
 #[doc(hidden)]
 pub use linkme;
-pub use registry::{AnySetting, Apply, HardBounds, Registry, Scopes, Setting};
+pub use registry::{AnySetting, Apply, HardBounds, Mark, Registry, Scopes, Setting};
 pub use resolve::{
     Bounds, ClampedValue, Entry, Ignored, MemSettings, OwnedCtx, Resolved, ResolvedWatch, Settings,
     TenantNotify, TenantScope, TenantSettings, TenantSettingsBuilder, clamp_summary,

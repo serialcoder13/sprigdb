@@ -174,6 +174,7 @@ Clients that don't support MySQL 4.1 authentication get 1251.
 | Feature | Support | Notes |
 |---|---|---|
 | Prepared statements | yes | Up to `gateway.max_prepared_per_session` (1024) per session; they survive moves to other backend connections and are prepared again where needed |
+| `PREPARE`, `EXECUTE`, `EXECUTE IMMEDIATE`, `DEALLOCATE PREPARE` | yes | SQL-level prepared statements. Once the tenant has a sharded table, the gateway holds them and plans each execution afresh; errors come at `PREPARE`, and an unknown name fails with 1243. Before that they go to MariaDB, and the session keeps one backend connection. See [SQL-level prepared statements](../sql/overview.md#sql-level-prepared-statements) |
 | Multi-statements | yes | Needs `CLIENT_MULTI_STATEMENTS` or `COM_SET_OPTION`. Without it, two statements in one query fail with 1064. An error stops the remaining statements |
 | Multiple result sets, stored procedures with `CALL` | yes | |
 | `LOAD DATA LOCAL INFILE` | yes | Needs the client's local-files option and `sql.local_infile` (default `true`). Otherwise 3948 on 3306, 4166 on 3307. Into a sharded table the rows become routed inserts |
@@ -209,6 +210,8 @@ innodb_snapshot_isolation
 User variables (`SET @v = ...`) and `LAST_INSERT_ID()` follow the session too.
 
 The gateway owns `wait_timeout`, `interactive_timeout`, `net_read_timeout`, `net_write_timeout` and the `session_track_*` variables. You may set them, and `SELECT` shows your value, but they don't change the backend. `@@version`, `@@version_comment`, `@@protocol_version`, `@@max_allowed_packet` and `@@hostname` come from the persona.
+
+`SET GLOBAL` doesn't change MariaDB. With `SYSTEM_VARIABLES_ADMIN`, `SET GLOBAL` of `sql_mode`, `time_zone`, `transaction_isolation`, `max_execution_time` (3306) or `wait_timeout` sets the tenant's default for new sessions; any other variable fails with 1227. See [SET GLOBAL sets the tenant's defaults](../sql/overview.md#set-global-sets-the-tenants-defaults).
 
 Setting any other session variable works, but the session then keeps one backend connection until it ends. That is correct, but it uses more backend connections. On 3306, `innodb_snapshot_isolation` starts `OFF`, so a `REPEATABLE READ` update never fails with 1020, as in MySQL.
 
@@ -298,7 +301,8 @@ const [rows] = await conn.execute('SELECT * FROM orders WHERE id = ?', [1]);
 | 1043 | `ER_HANDSHAKE_ERROR` | TLS requested on a listener with TLS `off` | Connect without TLS, or change the listener |
 | 1045 | `ER_ACCESS_DENIED_ERROR` | Wrong credentials, or a full `caching_sha2_password` login without TLS | Check the login name `tenant.user`; use TLS |
 | 1047 | `ER_UNKNOWN_COM_ERROR` | An unsupported protocol command | |
-| 1227 | `ER_SPECIFIC_ACCESS_DENIED_ERROR` | Replication or server-administration commands | |
+| 1227 | `ER_SPECIFIC_ACCESS_DENIED_ERROR` | Replication or server-administration commands; `SET GLOBAL` without `SYSTEM_VARIABLES_ADMIN`, or of a variable a tenant can't set | |
+| 1243 | `ER_UNKNOWN_STMT_HANDLER` | `EXECUTE` or `DEALLOCATE PREPARE` of a name the session hasn't prepared | `PREPARE` it first |
 | 1251 | `ER_NOT_SUPPORTED_AUTH_MODE` | A client without 4.1 authentication | Upgrade the client |
 | 1317 | `ER_QUERY_INTERRUPTED` | `KILL QUERY` stopped the statement | |
 | 3159 | `ER_SECURE_TRANSPORT_REQUIRED` | No TLS on a listener that requires it | Enable TLS in the client |

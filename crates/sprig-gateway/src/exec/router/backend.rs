@@ -1,5 +1,5 @@
 //! The router's [`ShardBackend`] in the gateway: the session's backend
-//! connections, one per cluster, and chapter 18's coordinator.
+//! connections, one per cluster, and the transaction coordinator.
 //!
 //! ```text
 //! a coordinator transaction is open       → the cluster's branch (opened on first use:
@@ -14,7 +14,7 @@
 //!
 //! A read outside a transaction opens one [`GwStream`] per shard: a new
 //! `BackendSession` with the session's state and causal position, so the
-//! shards run in parallel and stream (chapter 17's build step 3).
+//! shards run in parallel and stream.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,7 +36,7 @@ use super::txn::{GwTxn, ensure_accounts, session_on};
 use crate::backend::{BackendSession, StmtClass, StmtInfo};
 use crate::exec::relay::{backend_error, protocol_error};
 
-/// Chapter 18's shard reference for a target.
+/// The coordinator's shard reference for a target.
 pub(super) fn shard_ref(t: &Target) -> ShardRef {
     ShardRef {
         db: DbId(t.at.db),
@@ -148,12 +148,12 @@ pub(super) struct GwBackend<'a> {
     pub implicit: bool,
     /// A multi-shard write's statement savepoint.
     pub mark: Option<StmtMark>,
-    /// The plan's INSERTs write values from chapter 19's ID blocks: their
+    /// The plan's INSERTs write values from the ID blocks: their
     /// OK packets' insert ids aren't `LAST_INSERT_ID()`.
     pub explicit_ids: bool,
-    /// `router.gather.*` (chapter 17, "Gathered reads (R3)").
+    /// `router.gather.*`: gathered reads' limits.
     pub gather: sprig_router::GatherLimits,
-    /// `fk.lock_wait_seconds` (chapter 19, R3).
+    /// `fk.lock_wait_seconds`.
     pub fk_lock_wait: u64,
 }
 
@@ -219,7 +219,7 @@ impl sprig_router::ShardBackend for GwBackend<'_> {
             }
             return r;
         }
-        // Chapter 18, decision Q37: a branch of the session's last
+        // A branch of the session's last
         // distributed commit still in phase 2 on this cluster is finished
         // before the session reads or writes there again (boxed: rare).
         if self.coord.has_straggler(&cluster) {
@@ -257,7 +257,7 @@ impl sprig_router::ShardBackend for GwBackend<'_> {
     }
 
     fn foreign_key_checks(&self) -> bool {
-        // Chapter 19: `foreign_key_checks = 0` skips the gateway's checks.
+        // `foreign_key_checks = 0` skips the gateway's checks.
         self.main
             .vars()
             .vars
@@ -459,7 +459,7 @@ impl sprig_router::ShardBackend for GwBackend<'_> {
 }
 
 /// Lookup rows as the session's transaction sees them (its own Pre
-/// sessions' uncommitted claims included; chapter 19).
+/// sessions' uncommitted claims included).
 struct TxnReader<'a>(tokio::sync::Mutex<&'a mut DistTxn<GwTxn>>);
 
 #[async_trait::async_trait]
@@ -568,7 +568,7 @@ impl ShardStream for GwStream {
     }
 }
 
-/// A gathered read's connection (chapter 17, "Gathered reads (R3)"): a
+/// A gathered read's connection: a
 /// `BackendSession` of its own on the session's cluster, with the
 /// session's state. Its temporary tables pin it to the writer; once they
 /// are dropped it goes back to its pool, otherwise it is closed.
@@ -585,7 +585,7 @@ impl sprig_router::Scratch for GwScratch {
 
     async fn run(&mut self, sql: &str, budget: &mut Budget) -> Result<ShardOutcome> {
         let r = run_on(&mut self.stream.bs, sql, budget).await?;
-        // Chapter 29 (RL28): a copy shadows its protected table on this
+        // Row-level security: a copy shadows its protected table on this
         // connection; the copy was filled through the policy views, so the
         // statement over it reads the copy, not a view.
         let schema = self.stream.bs.vars().schema.clone();

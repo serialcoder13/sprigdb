@@ -55,6 +55,28 @@ fn generate(out: &Path) {
         .expect("protoc and tonic-prost-build");
 }
 
+/// The descriptor set without protoc's bundled well-known types
+/// (`google/protobuf/*.proto`), which come from protoc's own include
+/// directory and change with its version (3.21 in CI, newer locally), while
+/// every file of ours is the same from both.
+fn own_descriptors(bytes: &[u8]) -> Option<prost_types::FileDescriptorSet> {
+    let mut set = <prost_types::FileDescriptorSet as prost::Message>::decode(bytes).ok()?;
+    set.file
+        .retain(|f| !f.name().starts_with("google/protobuf/"));
+    Some(set)
+}
+
+/// Whether the checked-in file `old` matches the regenerated `new`.
+fn current(name: &str, old: Option<&[u8]>, new: &[u8]) -> bool {
+    match old {
+        Some(old) if name == "descriptor.bin" => {
+            own_descriptors(old).is_some_and(|o| Some(o) == own_descriptors(new))
+        }
+        Some(old) => old == new,
+        None => false,
+    }
+}
+
 #[test]
 fn generated_code_is_current() {
     if !have_protoc() {
@@ -78,8 +100,11 @@ fn generated_code_is_current() {
         let path = gen_dir.join(&name);
         if regen {
             std::fs::write(&path, &new).expect("write src/gen");
-        } else if std::fs::read(&path).ok().as_deref() != Some(new.as_slice()) {
-            stale.push(name.to_string_lossy().into_owned());
+        } else {
+            let name = name.to_string_lossy().into_owned();
+            if !current(&name, std::fs::read(&path).ok().as_deref(), &new) {
+                stale.push(name);
+            }
         }
     }
     let _ = std::fs::remove_dir_all(&scratch);

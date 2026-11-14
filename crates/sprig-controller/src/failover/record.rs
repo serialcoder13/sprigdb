@@ -1,5 +1,4 @@
-//! The DC failover record, `/sprig/g/failovers/<failover_id>` (chapter
-//! 25, "Data structures and storage"), and the verdicts observers send.
+//! The DC failover record, `/sprig/g/failovers/<failover_id>`, and the verdicts observers send.
 
 use std::collections::BTreeMap;
 
@@ -16,7 +15,7 @@ pub fn failover_key(id: &str) -> Result<Key> {
     Tier::Global.key(&format!("failovers/{id}"))
 }
 
-/// The failover record's states (chapter 25, "State machines").
+/// The failover record's states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailoverState {
@@ -86,8 +85,8 @@ pub struct Vote {
     pub unsafe_writers: Vec<String>,
 }
 
-/// The diverged-transaction report of a returning copy (chapter 25,
-/// "Diverged transactions are extracted and reported, never merged").
+/// The diverged-transaction report of a returning copy (diverged
+/// transactions are extracted and reported, never merged).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ErrantReport {
     /// How many transactions only the returning copy committed.
@@ -105,7 +104,7 @@ pub struct ErrantReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub statements: Vec<String>,
     /// The `errant_extract` job's sealed row images, once written and
-    /// verified (r2close).
+    /// verified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extract: Option<sprig_cluster::failover::extract::ExtractSummary>,
 }

@@ -1,5 +1,4 @@
-//! Triggers on streams and queues in a tenant session (chapter 41,
-//! "Triggers on streams and queues"; R9, r9triggers).
+//! Triggers on streams and queues in a tenant session.
 //!
 //! **Declaring.** `CREATE [OR REPLACE] TRIGGER g ON STREAM [db.]s` or `ON
 //! QUEUE [db.]q`, `LANGUAGE javascript | lua | kirun AS ...`: the source
@@ -150,7 +149,7 @@ impl PassSession {
                 )
                 || grants.allows(a, sprig_auth::authz::Target::Database { db_key: &db_key })
         };
-        // Code: CREATE ROUTINE on the trigger's database (chapter 29).
+        // Code: CREATE ROUTINE on the trigger's database.
         {
             let db_key = database_key(&db, lctn);
             if !grants.unrestricted()
@@ -176,7 +175,7 @@ impl PassSession {
             SprigError::new(SprigCode::CatalogUnavailable, "catalog unreachable").with_source(e)
         })?;
         let source_db = src.db.clone().unwrap_or_else(|| db.clone());
-        // R9 (r9next): `ON STREAM s FAN IN` reads every member instance of
+        // `ON STREAM s FAN IN` reads every member instance of
         // the inherited stream `s` below this tenant.
         let mut fanin_def = None;
         let (source_db_row, object_id, stream_def) = match src.kind {
@@ -237,7 +236,7 @@ impl PassSession {
                 if !allows(sprig_auth::authz::Action::Select, &sdb, &def.name) {
                     return Err(denied(ts, "SELECT", &sdb, &def.name));
                 }
-                // Chapter 29 (RL36, RL44): a change topic carries its table's
+                // A change topic carries its table's
                 // rows, so its table's SELECT decides, not the name's; when
                 // the table's policies bind the definer, each run gets only
                 // the records they show.
@@ -405,12 +404,12 @@ impl PassSession {
         };
         let guard = self.change_topic_guard(&req).await;
         let reply = if let Err(r) = guard {
-            // Chapter 29 (RL36): the definer may no longer read the change
+            // The definer may no longer read the change
             // topic's table (a grant change since deploy): the trigger
             // waits, its records neither run nor dead-letter.
             r
         } else if let Some(rp) = &req.replay {
-            // RC11: a dead letter's replay.
+            // A dead letter's replay.
             self.run_replay(cx, &req, rp).await
         } else if req.record.is_some() {
             let filter = guard.ok().flatten();
@@ -418,7 +417,7 @@ impl PassSession {
         } else {
             self.run_queue_trigger(cx, &req).await
         };
-        // Chapter 42 (R9): an inherited trigger lacking a privilege waits
+        // An inherited trigger lacking a privilege waits
         // for the grant (39242) instead of failing its records.
         let reply = match self.tenant.as_deref() {
             Some(ts) => {
@@ -455,7 +454,7 @@ impl PassSession {
         }))
     }
 
-    /// Chapter 29 (RL36, RL44): a trigger on a change topic runs while its
+    /// A trigger on a change topic runs while its
     /// definer (this session) may `SELECT` the topic's table; otherwise a
     /// transient failure (`Err`), so the runner retries with backoff and
     /// the record is neither run nor dead-lettered. `Ok(Some(topic))`
@@ -517,7 +516,7 @@ impl PassSession {
         }
     }
 
-    /// Chapter 29 (RL44): record `r` of change topic `topic` as this
+    /// Record `r` of change topic `topic` as this
     /// session (the definer) may see it: its value through the topic's
     /// filter, `None` when the definer's policies hide it.
     async fn filtered_value(
@@ -632,7 +631,7 @@ impl PassSession {
         };
         let run = program.run(args, host, limits);
         tokio::pin!(run);
-        // Chapter 42 (R9): a statement the definer may not run fails the
+        // A statement the definer may not run fails the
         // run with that error, whatever the code did with it, so an
         // inherited trigger can wait for the grant (39242).
         let mut denied: Option<SprigError> = None;
@@ -678,7 +677,7 @@ impl PassSession {
         Ok(Vec::new())
     }
 
-    /// A dead letter's replay (RC11): its event with the active version, in
+    /// A dead letter's replay: its event with the active version, in
     /// a transaction that moves its marker in the replay group from 0 to 1
     /// (39877 when a repeat finds it moved: `Moved`), outside the trigger's
     /// own position.
@@ -741,7 +740,7 @@ impl PassSession {
             return RunReply::failed(&SprigError::internal("a stream run without a record"));
         };
         let stream_name = format!("{}.{}", req.source.db_name, req.source.name);
-        // Chapter 29 (RL44): a change record the definer's policies hide is
+        // A change record the definer's policies hide is
         // passed over (its offset committed, the code not run); one whose
         // row became visible or hidden reads as an insert or a delete.
         let mut shown = None;
@@ -770,7 +769,7 @@ impl PassSession {
         }
         let c = Commit {
             group: offsets::logic_group(req.source.binding_id),
-            // A fan-in trigger's position is on the member's instance (R9).
+            // A fan-in trigger's position is on the member's instance.
             instance: req.instance_tenant,
             stream: if req.instance_tenant == 0 {
                 req.source.object_id
@@ -962,7 +961,7 @@ impl PassSession {
             }
         };
         let mut reply = with_id(RunReply::failed(&failure));
-        // Chapter 42 (R9): an inherited trigger whose sprig_inherited lost a
+        // An inherited trigger whose sprig_inherited lost a
         // privilege waits for the grant (39242, marked by `on_run`): its
         // message goes back without counting, never to the dead letters.
         if self

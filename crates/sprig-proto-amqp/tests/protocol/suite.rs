@@ -121,7 +121,7 @@ async fn env_with(mut cfg: Config) -> Env {
                     let svc = svc.clone();
                     let cfg = cfg.clone();
                     tokio::spawn(async move {
-                        let info = ConnInfo { peer, tls: false, sni: None, cert_login: None };
+                        let info = ConnInfo { peer, tls: false, sni: None, cert_login: None, client_dn: None };
                         let _ = serve(s, info, &svc, cfg, CancellationToken::new()).await;
                     });
                 }

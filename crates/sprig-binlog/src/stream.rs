@@ -1,5 +1,4 @@
-//! [`BinlogStream`]: a GTID-positioned binlog dump from one MariaDB node
-//! (chapter 10, "The binlog client").
+//! [`BinlogStream`]: a GTID-positioned binlog dump from one MariaDB node.
 
 use std::fmt;
 use std::time::Duration;
@@ -26,8 +25,8 @@ pub struct BinlogSource {
     /// Password.
     pub password: String,
     /// TLS; `None` is plain text, for development servers only. Sources
-    /// built from a cluster's credentials always have it (chapter 27: no
-    /// plain-text connections to managed clusters).
+    /// built from a cluster's credentials always have it (managed clusters
+    /// take no plain-text connections).
     pub tls: Option<BinlogTls>,
 }
 
@@ -122,7 +121,7 @@ impl BinlogSource {
 pub struct StreamOptions {
     /// The replica `server_id` the stream presents. It must differ from every
     /// real server's and from other streams' on the same node: MariaDB ends
-    /// an older dump with the same id. Chapter 10 allocates these from
+    /// an older dump with the same id. The mover allocates these from
     /// `mover.server_id_base` (4000000000).
     pub server_id: u32,
     /// `@master_heartbeat_period`: the server sends a heartbeat after this
@@ -149,7 +148,7 @@ pub struct StreamOptions {
     /// Ask for a non-blocking dump (`BINLOG_DUMP_NON_BLOCK`): at the end of
     /// the binlog the server ends the dump, and [`BinlogStream::next`]
     /// returns [`Event::DumpEnd`] instead of waiting for new events. The
-    /// capability probe (chapter 09, "Binlog dump") reads this way.
+    /// capability probe reads this way.
     pub non_blocking: bool,
 }
 

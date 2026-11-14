@@ -1,5 +1,4 @@
-//! Nearest neighbours on the MySQL persona (chapter 36, "Nearest
-//! neighbours", `nearest()`; R6 round 3).
+//! Nearest neighbours on the MySQL persona.
 //!
 //! `SELECT ... FROM t [WHERE w] ORDER BY ST_Distance(col, <SRID 4326
 //! point>) LIMIT k` on one table ([`sprig_sql::compat::geo::knn`]) runs

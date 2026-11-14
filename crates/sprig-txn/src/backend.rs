@@ -1,5 +1,5 @@
-//! The seams between the coordinator and MariaDB (chapter 18,
-//! "Interfaces"; chapter 46, "Deterministic simulation").
+//! The seams between the coordinator and MariaDB, which let the
+//! deterministic simulation stand in for real servers.
 //!
 //! The coordinator and the resolver reach MariaDB only through these
 //! traits:
@@ -13,7 +13,7 @@
 //! - [`ClusterAdmin`]: out-of-band, autocommit work on a cluster: `XA
 //!   RECOVER`, finishing detached branches, `KILL`, and decision rows.
 //! - [`AnchorLocator`]: where an anchor's decision rows live now, from the
-//!   current shard map (chapter 15).
+//!   current shard map.
 
 use std::fmt;
 use std::sync::Arc;
@@ -223,7 +223,7 @@ pub trait BranchConn: Send + 'static {
     /// connection broke.
     async fn control(&mut self, ctl: &[Ctl]) -> DbResult<()>;
 
-    /// Sprig 2PC (R3): from now on, record every write this connection
+    /// Sprig 2PC: from now on, record every write this connection
     /// runs, with its replay context, for a held branch's redo
     /// ([`crate::redo`]); `Savepoint` and `RollbackTo` keep the record in
     /// step. Returns whether the connection can (the default can't: such
@@ -238,14 +238,14 @@ pub trait BranchConn: Send + 'static {
     /// recording.
     ///
     /// # Errors
-    /// A statement that doesn't replay to the same result (chapter 18's
-    /// determinism rule): the reason.
+    /// A statement that doesn't replay to the same result: the
+    /// reason.
     fn take_redo(&mut self) -> Result<Vec<crate::redo::RedoStmt>, String> {
         Ok(Vec::new())
     }
 }
 
-/// What the coordinator needs to know about a cluster (chapter 09's
+/// What the coordinator needs to know about a cluster (its
 /// capability profile).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ClusterCaps {
@@ -265,7 +265,7 @@ pub trait TxnBackend: Send + Sync + 'static {
     fn caps(&self, cluster: &ClusterId) -> ClusterCaps;
 
     /// A pinned connection to the cluster's writer, as the session's
-    /// backend account (chapter 06 replays session state).
+    /// backend account (the gateway replays session state).
     ///
     /// # Errors
     /// When no connection can be had.
@@ -274,7 +274,7 @@ pub trait TxnBackend: Send + Sync + 'static {
     /// Out-of-band operations.
     fn admin(&self) -> Arc<dyn ClusterAdmin>;
 
-    /// Sprig 2PC's relay fence (decision Q36): the tenant's connections to
+    /// Sprig 2PC's relay fence: the tenant's connections to
     /// `cluster` pass through the writer node's agent relay, which keeps a
     /// held branch's connection open when its gateway goes away and fences
     /// the tenant until the branch is recovered. The coordinator then lets
@@ -334,7 +334,7 @@ pub trait ClusterAdmin: Send + Sync {
     /// Deletes a decision row (resolver only).
     async fn delete_decision(&self, cluster: &ClusterId, schema: &str, dtid: Dtid) -> DbResult<()>;
 
-    /// Sprig 2PC's prepare (R3): a held branch's redo rows, in one
+    /// Sprig 2PC's prepare: a held branch's redo rows, in one
     /// autocommit transaction (the table is created when missing).
     async fn insert_redo(
         &self,
@@ -349,7 +349,7 @@ pub trait ClusterAdmin: Send + Sync {
     }
 
     /// [`Self::insert_redo`] for a held branch whose connection is backend
-    /// thread `holder`. On a relay-fenced cluster (decision Q36) this goes
+    /// thread `holder`. On a relay-fenced cluster this goes
     /// to the writer node's agent, which registers the holder before it
     /// writes the rows, so the holder's loss from then on fences the
     /// tenant until the rows are recovered. Elsewhere it is
@@ -367,7 +367,7 @@ pub trait ClusterAdmin: Send + Sync {
         self.insert_redo(cluster, schema, dtid, gtrid, stmts).await
     }
 
-    /// Where a held branch's redo stands (decision Q37: a session settles
+    /// Where a held branch's redo stands (a session settles
     /// its own phase-2 stragglers before it reads the cluster again).
     async fn redo_state(
         &self,
@@ -402,7 +402,7 @@ pub trait ClusterAdmin: Send + Sync {
         Ok(())
     }
 
-    /// Sprig 2PC (R3): makes sure `schema` has its redo table before a
+    /// Sprig 2PC: makes sure `schema` has its redo table before a
     /// held branch opens there. A branch whose transaction began before
     /// the table was created can't insert its `done` marker into it
     /// (1412, table definition changed), so the table must exist first.

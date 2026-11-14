@@ -30,6 +30,8 @@ Open `/studio`. The page **Sign in to SprigDB** asks for:
 
 Select **Sign in**. If your tenant requires a second factor, Studio asks for the 6-digit code from your authenticator app next.
 
+![The Sign in to SprigDB page, with the User field filled in as acme.app and an empty Password field](../img/studio/sign-in.png)
+
 Studio refuses to send a password over plain HTTP from another computer: the sign-in button is turned off and the page says to use `https`. Signing in over HTTP from the gateway's own machine (`127.0.0.1`) is allowed, which is how local development works.
 
 You see exactly what your grants allow. Studio calls the same public API any client would, with your own token.
@@ -58,9 +60,15 @@ You see exactly what your grants allow. Studio calls the same public API any cli
 | **Tabs** | Everything you have open: query tabs, tables and pages. `Left` and `Right` move between tabs; `Delete` or a middle click closes one |
 | **Status bar** | Whether you're connected, the tenant and database, the gateway and its data centre, and your login |
 
+After you sign in, the **Welcome** tab greets you, lists your databases, and shows who you are signed in as, your session limits, your privileges and the gateway you reached.
+
+![Studio's Welcome tab: the activity bar and database tree on the left, the list of databases, and a panel showing the signed-in user, session limits, privileges and gateway](../img/studio/home.png)
+
 ### The command palette
 
-Press `Ctrl+K` (`⌘+K` on a Mac), or `Ctrl+P`, or select the search box. Type part of a name to find pages, open tabs, databases, tables, settings and commands such as **New query tab**, **Switch theme** and **Sign out**. `Up` and `Down` choose, `Enter` opens, and `Escape` closes.
+Press `Ctrl+K` (`⌘+K` on a Mac), or `Ctrl+P`, or select the search box. Type part of a name to find pages, open tabs, databases, the tables and other objects of databases you have opened in the tree, and commands such as **New query tab**, **Switch theme** and **Sign out**. `Up` and `Down` choose, `Enter` opens, and `Escape` closes.
+
+![The command palette open over the workspace, with "ord" typed and matches for the orders and order_items tables and the order_total function and procedure](../img/studio/palette.png)
 
 Try it now: press `Ctrl+K`, type `new`, and press `Enter` to open a query tab.
 
@@ -96,21 +104,39 @@ What to notice:
 - **Cancel** stops a running statement. Statements also stop at `studio.statement_timeout_ms` (30 seconds by default).
 - A result holds up to `studio.max_result_rows` (10,000) rows in the browser. **Fetch more** continues, and **Export CSV** or **Export NDJSON** downloads every row.
 
+The query below joins `orders` to `customers` and groups by country. Its result opens as a grid; **Chart** draws the same rows as a bar or line chart, with the first column as the categories.
+
+![A query tab with a JOIN and GROUP BY query on the retail database, and its result grid of orders and average order value by country](../img/studio/query.png)
+
+![The same result shown as a bar chart, with countries along the bottom and bars for orders and avg_order](../img/studio/query-chart.png)
+
 Statements you run in Studio don't count toward [automatic indexing](../concepts/automatic-indexing.md), so exploring doesn't build indexes.
 
 ## 4. Browse and edit a table
 
-In the **Explorer**, expand `shop` (use **Refresh** if it isn't there yet) and choose `orders`. The table's page opens with tabs: **Data**, **Columns**, **Indexes**, **Relations**, **Triggers**, **Policies**, **Inheritance**, **Shards** and **Definition**.
+In the **Explorer**, expand `shop` (use **Refresh** if it isn't there yet) and choose `orders`. The table's page opens with tabs: **Data**, **Columns**, **Indexes**, **Relations**, **Triggers**, **Policies**, **Inheritance**, **Shards** and **Definition**. Choosing the database itself opens its page, which lists its tables, functions and procedures with their estimated rows.
+
+![The explorer with the retail database expanded to show its tables and functions, and the database's page listing each object with its kind and estimated rows](../img/studio/explorer.png)
 
 **Data** shows 100 rows at a time in primary-key order.
 
-To filter, pick a **Column**, an operator and a **Value** in the filter bar and apply it, for example `status` `=` `paid`. Or switch to **</> WHERE** and type the clause yourself.
+![The Data tab of the orders table: the filter bar above a grid of rows, and the bar below with the pending-changes count, Apply, Reset, paging, Add row, Delete row and Import](../img/studio/table-data.png)
+
+To filter, pick a **Column**, an operator and a **Value** in the filter bar and select **Filter**, for example `status` `=` `paid`. **Condition** adds another condition, and **Clear** shows every row again. Or switch to **</> WHERE** and type the clause yourself.
 
 To edit:
 
 1. Double-click a cell (or press `Enter` or `F2`), type a new value, and press `Enter`. `Escape` drops the edit.
 2. **Add row** and **Delete row** stage new and deleted rows the same way.
 3. The bar counts the changes pending. **Apply** shows the statements Studio will run; **Run them** runs them all in one transaction.
+
+Changed cells are highlighted, and a row marked for deletion is struck through:
+
+![The orders grid with two edited cells highlighted, one row struck through for deletion, and 3 changes pending in the bar below](../img/studio/staged-edits.png)
+
+**Apply** shows the statements first, with **Run them** and **Cancel**:
+
+![The statements Studio will run in one transaction: two UPDATE statements and a DELETE, each naming its row by every column as it was read](../img/studio/staged-preview.png)
 
 Each statement names its row by every column as you read it. If someone changed the row since, nothing is overwritten: Studio says **Someone changed these rows since you read them** and shows the original, the current and your version. Choose **Keep mine (save against current)** or **Take current**.
 
@@ -120,7 +146,9 @@ A table without a primary key is read-only here.
 
 Every statement you run is kept in your **History** (the clock in the activity bar). Choose an entry to open it in a query tab.
 
-To keep a query, press `Ctrl+S` (`⌘+S`) in its tab and give it a name. It appears under **Saved queries** (the star).
+To keep a query, press `Ctrl+S` (`⌘+S`) in its tab, or select **Save**, and give it a name. It appears under **Saved queries** (the star), and the tab takes its name.
+
+![The Saved queries panel listing a query named Orders by country, open in its own tab with its result](../img/studio/saved-queries.png)
 
 Both lists are stored per user in your tenant's catalog, not in the browser. They follow you to another browser, and the [`sprig`](../tools/sprig.md) shell shows the same ones. History keeps up to `studio.history_max` (500) runs per user.
 
@@ -142,7 +170,9 @@ Forms in Studio never write behind your back: each one builds the SQL statement 
 
 ### Settings
 
-Choose **Settings** (the gear at the bottom of the activity bar). It lists every setting at a **Scope**: the tenant, a database or a table, with the effective value, where it comes from (in bold when it is set at this scope) and the bounds in force.
+Choose **Settings** (the gear at the bottom of the activity bar). It lists every setting at a **Scope**: the tenant, a database or a table, with the effective value, where it comes from (in bold when it is set at this scope) and the bounds in force. Type in **Filter keys** to narrow the list.
+
+![The Settings page at database scope for retail, filtered to studio. keys, showing each key's effective value, source and bounds with Set and Lock buttons](../img/studio/settings.png)
 
 Try it: choose the scope **database**, the database `shop`, then **Set** on `studio.max_result_rows`. Enter `500` and select **Set**. Studio shows the statement:
 

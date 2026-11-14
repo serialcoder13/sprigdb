@@ -1,5 +1,5 @@
-//! One accepted connection, up to the front end (chapter 04, "Accept and
-//! protocol detection", `connection_task` steps 1, 2 and 4).
+//! One accepted connection, up to the front end: the PROXY header, TLS and
+//! the hand-over to the protocol's front end.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -118,7 +118,7 @@ async fn prepare(
     let _ = sock.set_nodelay(true);
 
     let (stream, in_protocol_tls) = if !speaks_first {
-        // The MySQL family negotiates TLS after the greeting (chapter 05).
+        // The MySQL family negotiates TLS after the greeting.
         (MaybeTls::Plain(sock), InProtocolTls::for_mode(spec.tls))
     } else if spec.tls == TlsMode::Off {
         (MaybeTls::Plain(sock), InProtocolTls::NotOffered)
@@ -192,7 +192,7 @@ pub(super) async fn refuse_too_many(mut sock: TcpStream, protocol: Protocol, tls
     let _ = sock.shutdown().await;
 }
 
-/// Refuses a connection while the DC returns from an outage (chapter 25):
+/// Refuses a connection while the DC returns from an outage:
 /// MySQL gets 39531 in place of the greeting, HTTP a 503 with
 /// `Retry-After`.
 pub(super) async fn refuse_admission(

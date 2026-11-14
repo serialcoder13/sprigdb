@@ -1,6 +1,5 @@
-//! The `change_exchange` loop (chapter 50, "Change feed to an exchange";
-//! chapter 29, RLS round 5, decision RL52), on the DC leader, every two
-//! seconds:
+//! The `change_exchange` loop (a change feed to an exchange), on the DC
+//! leader, every two seconds:
 //!
 //! ```text
 //! each active feed subscription of kind `change_exchange` (one per table
