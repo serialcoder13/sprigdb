@@ -244,6 +244,10 @@ async fn metadata(
         .collect())
 }
 
+/// One fused hit: the chunk id, its score, and its ranks (from 1) in the
+/// full-text and vector lists.
+pub type Fused = (Vec<u8>, f64, Option<usize>, Option<usize>);
+
 /// Fuses the two lists into hits (pure, for tests): reciprocal rank with
 /// the keyword list weighted, at most [`MAX_PER_PAGE`] per page, `limit`
 /// hits. `page_of` names each id's page.
@@ -254,7 +258,7 @@ pub fn fuse<'a>(
     keyword_weight: f64,
     page_of: impl Fn(&[u8]) -> &'a str,
     limit: usize,
-) -> Vec<(Vec<u8>, f64, Option<usize>, Option<usize>)> {
+) -> Vec<Fused> {
     let mut ids: Vec<Vec<u8>> = Vec::new();
     let mut index = |id: &Vec<u8>| -> usize {
         if let Some(i) = ids.iter().position(|x| x == id) {
@@ -285,7 +289,7 @@ impl DocsService {
     /// Runs a search for a caller of `tenant` (see the module docs).
     ///
     /// # Errors
-    /// Request errors; 39825 when docs are unavailable; the backend's.
+    /// Request errors; 39989 when docs are unavailable; the backend's.
     pub async fn search(
         &self,
         tenant: Option<TenantId>,
@@ -297,7 +301,7 @@ impl DocsService {
             Ok(rep) if rep.hits.is_empty() => (rep.mode, "empty"),
             Ok(rep) => (rep.mode, "ok"),
             Err(e) if e.code() == Some(SprigCode::AdminRequestInvalid) => ("none", "invalid"),
-            Err(e) if e.code() == Some(SprigCode::SearchUnavailable) => ("none", "unavailable"),
+            Err(e) if e.code() == Some(SprigCode::DocsUnavailable) => ("none", "unavailable"),
             Err(_) => ("none", "error"),
         };
         metrics::counter!("sprig_docs_search_total", "result" => result).increment(1);

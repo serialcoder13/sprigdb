@@ -43,6 +43,10 @@ const PRE_AUTH: [&str; 10] = [
     "endSessions",
 ];
 
+/// How long a quiet client's session keeps its backend connection
+/// after a point read before it goes back to the pool.
+const KEEP_IDLE: Duration = Duration::from_millis(100);
+
 /// Commands whose replies are never compressed.
 const NEVER_COMPRESSED: [&str; 7] = [
     "hello",
@@ -179,9 +183,23 @@ pub async fn serve(shared: Arc<Shared>, mut conn: ClientConn) -> Result<()> {
             let msg = if let Some(m) = again.take() {
                 Some(m)
             } else {
-                tokio::select! {
-                    m = codec::read_message(&mut stream) => m.map_err(|e| codec_err(&e))?,
-                    () = close.cancelled() => return Ok(()),
+                // A backend connection kept between point reads goes back
+                // to its pool once the client has been quiet for
+                // `KEEP_IDLE`.
+                let read = codec::read_message(&mut stream);
+                tokio::pin!(read);
+                let mut kept = st.sql.as_ref().is_some_and(SqlSession::holds_idle);
+                loop {
+                    tokio::select! {
+                        m = &mut read => break m.map_err(|e| codec_err(&e))?,
+                        () = close.cancelled() => return Ok(()),
+                        () = tokio::time::sleep(KEEP_IDLE), if kept => {
+                            kept = false;
+                            if let Some(s) = st.sql.as_mut() {
+                                s.release_idle();
+                            }
+                        }
+                    }
                 }
             };
             let Some(msg) = msg else { return Ok(()) };

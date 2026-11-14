@@ -9,7 +9,7 @@ source: the gateway's OpenAPI document (/v1/openapi.json)
 
 The gateway's REST API, as `/v1/openapi.json` describes it on every gateway. Requests authenticate with `Authorization: Bearer <token or API key>` (or HTTP Basic where allowed) and act with the caller's own rights. Statements stream as NDJSON from `POST /v1/databases/{database}/sql:query`. The same services are available over gRPC.
 
-89 operations in 25 services.
+90 operations in 26 services.
 
 ## sprig.admin.v1.Recommendations
 
@@ -82,6 +82,12 @@ The gateway's REST API, as `/v1/openapi.json` describes it on every gateway. Req
 | POST | `/v1/cursors/{cursor}:close` | `Cursors.Close` | Closes the cursor and kills its statement |
 | POST | `/v1/cursors/{cursor}:fetch` | `Cursors.Fetch` | The next page; done closes the cursor (39934 unknown, 39935 expired) |
 | POST | `/v1/databases/{database}/cursors` | `Cursors.Open` | Runs a read and keeps its stream for paging (first result only): skip rows, then the first page; the stream waits between fetches and closes after studio.cursor_idle_seconds |
+
+## sprig.v1.Docs
+
+| Method | Path | Operation | Description |
+|---|---|---|---|
+| POST | `/v1/docs:search` | `Docs.Search` | Searches the product documentation of this release (any signed-in user): full-text and embedding hits fused, at most two per page ({query, audience, limit, version}) |
 
 ## sprig.v1.Exports
 

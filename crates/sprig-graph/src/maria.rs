@@ -45,12 +45,12 @@ use crate::ast::{Dir, Entity, Schema};
 use crate::catalog::{Tables, backend_error};
 use crate::mirror::MirrorGate;
 use sprig_router::graph_route::{
-    EDGE_COLS, HopOp, Lit, Route, RouteSpec, ScanOp, Targets, plan_route,
+    CmpOp, EDGE_COLS, FarNodes, HopOp, Lit, Route, RouteSpec, ScanOp, Targets, plan_route,
 };
 
 use crate::store::{
-    EdgeKey, EdgeRow, GraphStore, IdKind, IndexDef, Link, NodeRow, Reach, Scan, SchemaCounts,
-    StoreStats, rk_of,
+    EdgeKey, EdgeRow, FarLink, FarRead, GraphStore, IdKind, IndexDef, Link, NodeRow, Reach, Scan,
+    SchemaCounts, StoreStats, rk_of,
 };
 
 /// Labels and relationship types of a graph, and how new ones are made.
@@ -1038,6 +1038,63 @@ impl<'c> MariaStore<'c> {
         Ok(out)
     }
 
+    /// One hop's links from `from` in `dir` (one direction), with the far
+    /// nodes joined as `far` asks (`None`: links alone).
+    async fn links_with(
+        &mut self,
+        from: &[u64],
+        types: &[u32],
+        dir: Dir,
+        far: Option<FarNodes>,
+    ) -> Result<Vec<FarLink>> {
+        if from.is_empty() {
+            return Ok(Vec::new());
+        }
+        if dir == Dir::Both {
+            return Err(SprigError::internal("links take one direction"));
+        }
+        let out = dir == Dir::Out;
+        // Incoming: the mirrors when fresh (one statement on the
+        // destinations' shards), else the `rev` key on every shard.
+        let mirror = !out && self.read_mirrors().await;
+        let targets = if out || mirror {
+            Targets::ByKey(from.to_vec())
+        } else {
+            Targets::All(from.to_vec())
+        };
+        let with_far = far.as_ref().is_some_and(|f| f.join);
+        let with_rel = far.as_ref().is_some_and(|f| f.rel_keys.is_some());
+        let op = HopOp::Links {
+            out,
+            mirror,
+            types: types.to_vec(),
+            far,
+        };
+        let mut v = Vec::new();
+        for (_, rows) in self.route(op, targets, false).await? {
+            for mut r in rows {
+                let l = Link {
+                    src: u64_col(r.take(0)),
+                    dst: u64_col(r.take(1)),
+                    src_rk: u64_col(r.take(2)),
+                    dst_rk: u64_col(r.take(3)),
+                    id: u64_col(r.take(4)),
+                    rtype: u32::try_from(u64_col(r.take(5))).unwrap_or(0),
+                };
+                let n = if with_far { node_at(&mut r, 6) } else { None };
+                let at = if with_far { 11 } else { 6 };
+                // A mirror's edge on another cluster: no columns.
+                let rel = if with_rel {
+                    json_col(r.take(at)).map(|p| (p, json_col(r.take(at + 1))))
+                } else {
+                    None
+                };
+                v.push((l, n, rel));
+            }
+        }
+        Ok(v)
+    }
+
     /// Mirror rows of edges into `dsts` (on the destinations' shards):
     /// `(source hash, edge id)`.
     async fn mirrors_into(&mut self, dsts: &[u64], types: &[u32]) -> Result<Vec<(u64, u64)>> {
@@ -1227,40 +1284,55 @@ impl GraphStore for MariaStore<'_> {
     }
 
     async fn links(&mut self, from: &[u64], types: &[u32], dir: Dir) -> Result<Vec<Link>> {
-        if from.is_empty() {
-            return Ok(Vec::new());
-        }
-        if dir == Dir::Both {
-            return Err(SprigError::internal("links take one direction"));
-        }
-        let out = dir == Dir::Out;
-        // Incoming: the mirrors when fresh (one statement on the
-        // destinations' shards), else the `rev` key on every shard.
-        let mirror = !out && self.read_mirrors().await;
-        let targets = if out || mirror {
-            Targets::ByKey(from.to_vec())
-        } else {
-            Targets::All(from.to_vec())
+        Ok(self
+            .links_with(from, types, dir, None)
+            .await?
+            .into_iter()
+            .map(|(l, _, _)| l)
+            .collect())
+    }
+
+    async fn links_far(
+        &mut self,
+        from: &[u64],
+        types: &[u32],
+        dir: Dir,
+        far: &FarRead<'_>,
+    ) -> Result<Vec<FarLink>> {
+        let num = |f: &[(String, CmpOp, f64)]| -> Vec<(String, CmpOp, String)> {
+            f.iter()
+                .filter(|(_, _, x)| x.is_finite())
+                .map(|(k, op, x)| (k.clone(), *op, format!("{x:?}")))
+                .collect()
         };
-        let op = HopOp::Links {
-            out,
-            mirror,
-            types: types.to_vec(),
+        let far = FarNodes {
+            rel_keys: far.rel_keys.map(<[String]>::to_vec),
+            rel_filter: num(far.rel_filter),
+            keys: far.keys.map(<[String]>::to_vec),
+            filter: far
+                .filter
+                .iter()
+                .filter(|(_, _, x)| x.is_finite())
+                .map(|(k, op, x)| (k.clone(), *op, format!("{x:?}")))
+                .collect(),
+            only: far.only.to_vec(),
+            join: far.join,
         };
-        let mut v = Vec::new();
-        for (_, rows) in self.route(op, targets, false).await? {
-            for mut r in rows {
-                v.push(Link {
-                    src: u64_col(r.take(0)),
-                    dst: u64_col(r.take(1)),
-                    src_rk: u64_col(r.take(2)),
-                    dst_rk: u64_col(r.take(3)),
-                    id: u64_col(r.take(4)),
-                    rtype: u32::try_from(u64_col(r.take(5))).unwrap_or(0),
-                });
-            }
-        }
-        Ok(v)
+        let rows = self.links_with(from, types, dir, Some(far)).await?;
+        Ok(rows
+            .into_iter()
+            .map(|(l, n, r)| {
+                (
+                    l,
+                    n.map(|mut n| {
+                        n.props = drop_nulls(n.props);
+                        n.types = n.types.map(drop_nulls);
+                        n
+                    }),
+                    r.map(|(p, t)| (drop_nulls(p), t.map(drop_nulls))),
+                )
+            })
+            .collect())
     }
 
     fn late_props(&self) -> bool {
@@ -1268,6 +1340,15 @@ impl GraphStore for MariaStore<'_> {
     }
 
     async fn nodes_part(&mut self, ids: &[u64], keys: Option<&[String]>) -> Result<Vec<NodeRow>> {
+        self.nodes_where(ids, keys, &[]).await
+    }
+
+    async fn nodes_where(
+        &mut self,
+        ids: &[u64],
+        keys: Option<&[String]>,
+        filter: &[(String, CmpOp, f64)],
+    ) -> Result<Vec<NodeRow>> {
         let Some(keys) = keys else {
             return self.nodes(ids).await;
         };
@@ -1276,6 +1357,11 @@ impl GraphStore for MariaStore<'_> {
         }
         let op = HopOp::NodesPart {
             keys: keys.to_vec(),
+            filter: filter
+                .iter()
+                .filter(|(_, _, x)| x.is_finite())
+                .map(|(k, op, x)| (k.clone(), *op, format!("{x:?}")))
+                .collect(),
         };
         let rows = self.route(op, Targets::ByKey(ids.to_vec()), false).await?;
         Ok(nodes_of(rows)

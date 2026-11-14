@@ -641,11 +641,12 @@ pub fn swap(
                 && !func
                 && let Some(view) = lookup.view(schema.as_deref(), &table)
             {
-                let alias_at = if t.word(last + 1, "AS") { last + 2 } else { last + 1 };
-                let layer = t
-                    .toks
-                    .get(alias_at)
-                    .is_some_and(|x| x.kind.is_ident_like())
+                let alias_at = if t.word(last + 1, "AS") {
+                    last + 2
+                } else {
+                    last + 1
+                };
+                let layer = t.toks.get(alias_at).is_some_and(|x| x.kind.is_ident_like())
                     && val(&t, alias_at) == MERGED_LAYER_ALIAS;
                 let view = choose(view, layer);
                 let tok = t.toks[last];

@@ -107,7 +107,11 @@ impl LogicLoop {
                 cx.clock.as_ref(),
                 NewJob {
                     kind: TRIGGER_KIND.into(),
-                    class: JobClass::Other,
+                    // A long-running consumer that mostly waits, like a
+                    // stream sequencer: the consumers' pool, so a worker
+                    // runs more than `Other`'s 8 bindings and they never
+                    // starve scheduled runs.
+                    class: JobClass::Consumer,
                     tenant_id: None,
                     clusters: Vec::new(),
                     priority: 0,

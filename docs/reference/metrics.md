@@ -9,7 +9,7 @@ source: the metric macros in the source tree, and docs/metrics-help.toml
 
 Every metric SprigDB records, as exported on each process's telemetry port (`/metrics`, Prometheus text) and through OTLP. Counters end in `_total`; durations are histograms in seconds.
 
-444 metrics in 51 groups.
+451 metrics in 52 groups.
 
 ## `sprig_advisor_*`
 
@@ -244,6 +244,17 @@ Every metric SprigDB records, as exported on each process's telemetry port (`/me
 | `sprig_doc_path_publish_seconds` | histogram | - | sprig-gateway | Time a document write waited for a new document path to be published as a typed column before continuing. Unit: seconds. |
 | `sprig_doc_ttl_deleted_total` | counter | `cluster` | sprig-worker | Documents deleted by TTL indexes because their date field was older than the index's `expireAfterSeconds`; `cluster` is the cluster that held them. Unit: count. |
 | `sprig_doc_ttl_passes_total` | counter | - | sprig-worker | Passes of the worker's TTL task over the collections that have TTL indexes, one every `doc.ttl_interval_seconds`. Unit: count. |
+
+## `sprig_docs_*`
+
+| Metric | Type | Labels | Recorded by | Description |
+|---|---|---|---|---|
+| `sprig_docs_load_seconds` | histogram | - | sprig-controller | Time the controller took to load the docs pack into one cluster's `__sprig_docs`: delete, insert in batches, read back and verify. Unit: seconds. |
+| `sprig_docs_pack_info` | gauge | `sha`, `version` | sprig-controller | The docs pack the controller verified and loads; `version` is its release, `sha` the first bytes of its SHA-256. Always 1. Unit: 0 or 1. |
+| `sprig_docs_search_degraded_total` | counter | - | sprig-gateway | Docs searches answered by keywords only because the gateway's embedding model couldn't be loaded or run (`docs.model_dir`). Unit: count. |
+| `sprig_docs_search_seconds` | histogram | `mode` | sprig-gateway | Duration of docs searches on this gateway; `mode` is `hybrid` (full-text and embedding), `keyword` (full-text only) or `sql` (a statement on the `sprig_docs` database). Unit: seconds. |
+| `sprig_docs_search_total` | counter | `result` | sprig-gateway | Docs searches and `sprig_docs` statements; `result` is `ok`, `empty`, `invalid`, `refused` (a write), `unavailable` (no cluster has the docs) or `error`. Unit: count. |
+| `sprig_docs_verify_failures_total` | counter | - | sprig-controller | Times the docs rows on a cluster didn't match the pack: edited rows found at start, or rows that didn't read back after a load. Each is reloaded. Unit: count. |
 
 ## `sprig_feed_*`
 
@@ -527,6 +538,7 @@ Every metric SprigDB records, as exported on each process's telemetry port (`/me
 | Metric | Type | Labels | Recorded by | Description |
 |---|---|---|---|---|
 | `sprig_rls_feed_events_filtered_total` | counter | `protocol` | sprig-gateway, sprig-sinks, sprig-worker | Change events withheld from a reader by row-level security; `protocol` is where they were read, such as `kafka` or `trigger`. Unit: count. |
+| `sprig_rls_merged_reads_total` | counter | - | sprig-gateway | - |
 | `sprig_rls_reprepares_total` | counter | - | sprig-gateway | Prepared statements prepared again because the row-level security policies they depend on changed. Unit: count. |
 | `sprig_rls_rewrites_total` | counter | `protocol` | sprig-gateway | Statements rewritten to apply row-level security policies; `protocol` is the front end. Unit: count. |
 
@@ -602,7 +614,7 @@ Every metric SprigDB records, as exported on each process's telemetry port (`/me
 | `sprig_sink_fanin_queue_gets_total` | counter | - | sprig-gateway | Reads of members' queues by fan-in sinks. Unit: count. |
 | `sprig_sink_fanin_regroups_total` | counter | - | sprig-controller | Times the controller changed a fan-in sink's task count. Unit: count. |
 | `sprig_sink_inflight_bytes` | gauge | - | sprig-sinks | Bytes of records a sink task holds in flight, limited by `sink.max_inflight_bytes`. Unit: bytes. |
-| `sprig_sink_paused` | gauge | `reason` | sprig-sinks | Whether a sink task paused itself after failing for `sink.pause_after_minutes`; `reason` is `failures`. Unit: 0 or 1. |
+| `sprig_sink_paused` | gauge | `reason` | sprig-sinks | Whether a sink task is paused: `reason` is `failures` (it paused itself after failing for `sink.pause_after_minutes`, 39222) or `owner_privilege` (its owner lost access to its source, 39229). Unit: 0 or 1. |
 | `sprig_sink_platform_connection_opens_total` | counter | `result` | sprig-sinks | Failed opens of platform connections by sinks; `result` is `not_granted` or `secret_unavailable`. Unit: count. |
 | `sprig_sink_queue_dead_lease_release_failures_total` | counter | - | sprig-sinks | Times a queue sink couldn't give back the messages leased by a dead predecessor task; they return after their lease instead. Unit: count. |
 | `sprig_sink_queue_dead_leases_released_total` | counter | - | sprig-sinks | Times a queue sink gave back the messages leased by a dead predecessor task. Unit: count. |

@@ -176,6 +176,10 @@ pub async fn run_stream(
         late: super::ex_late(store_late, q),
         seen_nodes: std::collections::HashMap::new(),
         seen_rels: std::collections::HashMap::new(),
+        prefetch: std::collections::HashMap::new(),
+        push: std::collections::HashMap::new(),
+        only: std::collections::HashMap::new(),
+        profile: false,
     };
     let mut clauses = q.parts[0].clauses.clone();
     // SKIP and LIMIT apply to the whole stream, not to each page.

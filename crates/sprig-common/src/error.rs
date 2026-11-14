@@ -1075,6 +1075,10 @@ sprig_codes! {
     ShellUnreachable = 39987, "ER_SPRIG_SHELL_UNREACHABLE", "SprigShellUnreachable", SQLSTATE_GENERAL, false;
     /// sprig: a password login over plain HTTP to another host.
     ShellInsecureTransport = 39988, "ER_SPRIG_SHELL_INSECURE_TRANSPORT", "SprigShellInsecureTransport", SQLSTATE_GENERAL, false;
+    /// Docs search can't be answered: docs are turned off (`docs.enabled`),
+    /// no cluster has this release's docs pack loaded yet, or (for
+    /// `sprig_docs.embed`) the embedding model isn't available.
+    DocsUnavailable = 39989, "ER_SPRIG_DOCS_UNAVAILABLE", "SprigDocsUnavailable", SQLSTATE_RETRY, true;
     /// `sprigdb.toml` or its environment overrides are invalid. Raised only at
     /// process start; never reaches a client.
     ConfigInvalid = 39998, "ER_SPRIG_CONFIG_INVALID", "SprigConfigInvalid", SQLSTATE_GENERAL, false;
@@ -1408,6 +1412,7 @@ fn sprig_protocol(code: SprigCode) -> ProtocolError {
         | SprigCode::AdmissionBackoff
         | SprigCode::FeedHandoffPending
         | SprigCode::SearchUnavailable
+        | SprigCode::DocsUnavailable
         | SprigCode::SearchWaitTimeout
         | SprigCode::SearchIndexNotReady
         | SprigCode::ShardMapUnavailable

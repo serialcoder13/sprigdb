@@ -499,7 +499,8 @@ mod tests {
         };
         assert_eq!(
             sql,
-            golden("WITH `__sprig_l0` AS (SELECT `id`, `name`, `colour`, `price`, `region` FROM \
+            golden(
+                "WITH `__sprig_l0` AS (SELECT `id`, `name`, `colour`, `price`, `region` FROM \
              `products` WHERE `_sprig_space` = 1 AND `_sprig_state` IN ('own', 'orphan')), \
              `__sprig_p1` AS (SELECT `id`, `name`, `colour`, `price`, `region` FROM \
              `__sprig_l0` WHERE TRUE AND (region = 'IN')), `__sprig_l1` AS (SELECT p.`id`, \
@@ -521,7 +522,8 @@ mod tests {
              c.`name`, c.`colour`, c.`price`, c.`region` FROM `products` c WHERE \
              c.`_sprig_space` = 12 AND c.`_sprig_state` IN ('own', 'orphan') AND NOT EXISTS \
              (SELECT 1 FROM `__sprig_p2` p WHERE c.`id` = p.`id`)) SELECT `id`, `name`, \
-             `colour`, `price`, `region` FROM `__sprig_l2`")
+             `colour`, `price`, `region` FROM `__sprig_l2`"
+            )
         );
     }
 

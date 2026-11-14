@@ -261,6 +261,41 @@ impl GraphStore for MemStore {
             .collect())
     }
 
+    async fn nodes_where(
+        &mut self,
+        ids: &[u64],
+        keys: Option<&[String]>,
+        filter: &[(String, sprig_router::graph_route::CmpOp, f64)],
+    ) -> Result<Vec<NodeRow>> {
+        use sprig_router::graph_route::CmpOp;
+        let mut rows = self.nodes(ids).await?;
+        // As MariaDB does it: a JSON number against the number; anything
+        // else (missing, strings) fails.
+        rows.retain(|n| {
+            filter.iter().all(|(k, op, x)| {
+                n.props
+                    .get(k)
+                    .and_then(serde_json::Value::as_f64)
+                    .is_some_and(|v| match op {
+                        CmpOp::Lt => v < *x,
+                        CmpOp::Le => v <= *x,
+                        CmpOp::Gt => v > *x,
+                        CmpOp::Ge => v >= *x,
+                        CmpOp::Eq => (v - *x).abs() == 0.0,
+                    })
+            })
+        });
+        let Some(keys) = keys else { return Ok(rows) };
+        Ok(rows
+            .into_iter()
+            .map(|mut n| {
+                n.props = only(&n.props, keys);
+                n.types = n.types.as_ref().map(|t| only(t, keys));
+                n
+            })
+            .collect())
+    }
+
     async fn edges_part(
         &mut self,
         at: &[(u64, u64)],

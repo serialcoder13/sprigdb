@@ -210,8 +210,24 @@ fn missing_grants_split_into_blocking_and_advisories() {
             "sprig_ctl can't manage tenant schemas: GRANT ALL ON `t%`.* TO sprig_ctl WITH GRANT OPTION"
         ]
     );
-    assert_eq!(a.len(), 2, "{a:#?}");
-    assert!(a[0].starts_with("sprig_ctl lacks privileges; what needs them is disabled: GRANT PROCESS, CONNECTION ADMIN"), "{a:#?}");
+    assert_eq!(a.len(), 3, "{a:#?}");
+    // The docs schema is an advisory: only docs search needs it.
+    assert!(
+        a[0].starts_with("sprig_ctl can't manage __sprig_docs; docs search is off"),
+        "{a:#?}"
+    );
+    assert!(
+        a[0].ends_with("GRANT ALL ON `\\_\\_sprig\\_docs`.* TO sprig_ctl WITH GRANT OPTION"),
+        "{a:#?}"
+    );
+    assert!(a[1].starts_with("sprig_ctl lacks privileges; what needs them is disabled: GRANT PROCESS, CONNECTION ADMIN"), "{a:#?}");
+    // With the grant, the advisory goes.
+    for x in &mut p {
+        let pr = x.result.as_mut().unwrap().privileges.as_mut().unwrap();
+        pr.docs_schema_all = true;
+    }
+    let (_, a) = run(TopologyKind::PrimaryReplica, &p, &tls(3));
+    assert!(!a.iter().any(|l| l.contains("__sprig_docs")), "{a:#?}");
 }
 
 #[test]

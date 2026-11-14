@@ -269,8 +269,8 @@ pub async fn run(c: &mut Conn, name: &str, body: &Document) -> Result<Document, 
     // which the command answers with.
     let js = super::serverjs::scope_for(c, name, body).await;
     // The command's state is boxed once; the task-local scopes around it
-    // move only the box (S149 step 2: moving the whole state through each
-    // scope was about 9% of a point read's gateway CPU in `memmove`).
+    // move only the box (moving the whole state through each scope was
+    // about 9% of a point read's gateway CPU, in `memmove`).
     let r = sprig_doc::serverjs::scope(
         js.clone(),
         sprig_doc::collation::scope(coll, Box::pin(run_inner(c, name, body))),

@@ -846,7 +846,7 @@ impl PassSession {
         let Some(cat) = ts.catalog().cloned() else {
             return Ok(None);
         };
-        if !RlsState::of(&cat).is_some_and(|s| s.any_enabled()) {
+        if !RlsState::of(&cat).is_some_and(RlsState::any_enabled) {
             return Ok(None);
         }
         let p = crate::tenant::authz::privileges(ts, &cat);
@@ -857,7 +857,7 @@ impl PassSession {
             return Ok(None);
         }
         let mut values = SessionValues::of(ts, &cat);
-        crate::tenant::rls::bind_tree(ts, &cat, &rls, &mut values).await?;
+        Box::pin(crate::tenant::rls::bind_tree(ts, &cat, &rls, &mut values)).await?;
         let lctn = ts.lower_case_table_names();
         let none = std::collections::HashSet::new();
         let temp = |_: Option<&str>, _: &str| false;

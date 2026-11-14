@@ -1539,6 +1539,10 @@ what_to_do = "Check the address, port and TLS settings of the profile, and that 
 meaning = "`sprig` refused to send a password over plain HTTP to a host other than this machine, before sending anything."
 what_to_do = "Use `https` (port 8443 by default). If the network is trusted, pass `--allow-insecure-http` or set `allow_insecure_http = true` in the profile."
 
+[ER_SPRIG_DOCS_UNAVAILABLE]
+meaning = "Docs search (the REST call, the `sprig_docs` database or `sprig_docs.embed`) can't be answered: docs are turned off, no cluster has this release's docs pack loaded yet, or the embedding model isn't available to `sprig_docs.embed`."
+what_to_do = "Retry shortly after an upgrade: the controller loads the pack into every cluster at start. If it lasts, check `docs.enabled`, that the controller found a valid pack (`docs.pack_path`, the `docs.pack.unavailable` event) and that `sprig_ctl` may manage `__sprig_docs`; for `sprig_docs.embed`, check `docs.embed_queries` and `docs.model_dir`."
+
 [ER_SPRIG_CONFIG_INVALID]
 meaning = "A configuration value is invalid: `sprigdb.toml` or its environment overrides at process start, a secret file, a peer or etcd setting, or an input such as an API key name. Processes refuse to start with it."
 what_to_do = "Fix the key the message names in `sprigdb.toml` or the environment, then start the process again; for API input, correct the field."
@@ -1651,9 +1655,6 @@ meaning = "Closed before the handshake."
 
 [ER_SPRIG_STUDIO_VERSION_MISMATCH]
 meaning = "Studio needs a newer API (409)."
-
-[ER_SPRIG_DOCS_UNAVAILABLE]
-meaning = "The docs pack isn't loaded or failed verification."
 
 [ER_SPRIG_AI_NOT_CONFIGURED]
 meaning = "No provider or model is configured for the role."

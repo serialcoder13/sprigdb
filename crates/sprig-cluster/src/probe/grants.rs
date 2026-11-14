@@ -6,7 +6,7 @@
 //! accounts are expected to hold their privileges directly.
 
 use serde::{Deserialize, Serialize};
-use sprig_common::names::{SYS_SCHEMA, TENANT_SCHEMAS_GRANT_PATTERN};
+use sprig_common::names::{DOCS_SCHEMA, SYS_SCHEMA, TENANT_SCHEMAS_GRANT_PATTERN};
 
 /// What a grant applies to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,6 +210,10 @@ fn tokenize(s: &str) -> Option<Vec<Tok>> {
     Some(out)
 }
 
+/// What `sprig_ctl` needs to own `__sprig_docs`, the docs pack's schema.
+pub const DOCS_CTL_GRANT: &str =
+    "GRANT ALL ON `\\_\\_sprig\\_docs`.* TO sprig_ctl WITH GRANT OPTION";
+
 /// Privilege facts about the probing account (`sprig_ctl` in production).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)] // one flag per privilege, by design
@@ -220,6 +224,11 @@ pub struct PrivilegeInfo {
     pub tenant_schemas_grant_option: bool,
     /// `ALL` on `__sprig_sys` or globally.
     pub sys_schema_all: bool,
+    /// `ALL ... WITH GRANT OPTION` on `__sprig_docs` or globally: the
+    /// controller loads the docs pack there and grants the docs-reader
+    /// account `SELECT`. Without it docs search is off on the cluster.
+    #[serde(default)]
+    pub docs_schema_all: bool,
     /// `CREATE USER`.
     pub create_user: bool,
     /// `PROCESS`.
@@ -274,6 +283,7 @@ impl PrivilegeInfo {
                     p.tenant_schemas_all |= all;
                     p.tenant_schemas_grant_option |= all && *grant_option;
                     p.sys_schema_all |= all;
+                    p.docs_schema_all |= all && *grant_option;
                     p.create_user |= has("CREATE USER");
                     p.process |= has("PROCESS");
                     p.connection_admin |= has("CONNECTION ADMIN");
@@ -292,6 +302,7 @@ impl PrivilegeInfo {
                         p.tenant_schemas_grant_option |= *grant_option;
                     }
                     p.sys_schema_all |= all && like(pattern, SYS_SCHEMA);
+                    p.docs_schema_all |= all && *grant_option && like(pattern, DOCS_SCHEMA);
                     p.read_mysql_db |= has("SELECT") && like(pattern, "mysql");
                 }
                 GrantTarget::Table(db, table) => {
@@ -317,6 +328,9 @@ impl PrivilegeInfo {
             out.push(
                 "GRANT ALL ON `\\_\\_sprig\\_sys`.* TO sprig_ctl WITH GRANT OPTION".to_owned(),
             );
+        }
+        if !self.docs_schema_all {
+            out.push(DOCS_CTL_GRANT.to_owned());
         }
         let globals = [
             (self.create_user, "CREATE USER"),
@@ -392,6 +406,7 @@ mod tests {
             "GRANT CREATE USER, PROCESS, CONNECTION ADMIN, SLAVE MONITOR, BINLOG MONITOR, BINLOG ADMIN, READ_ONLY ADMIN, SET USER ON *.* TO `sprig_ctl`@`%` REQUIRE SSL",
             "GRANT ALL PRIVILEGES ON `t%`.* TO `sprig_ctl`@`%` WITH GRANT OPTION",
             "GRANT ALL PRIVILEGES ON `\\_\\_sprig\\_sys`.* TO `sprig_ctl`@`%` WITH GRANT OPTION",
+            "GRANT ALL PRIVILEGES ON `\\_\\_sprig\\_docs`.* TO `sprig_ctl`@`%` WITH GRANT OPTION",
             "GRANT SELECT ON `mysql`.`db` TO `sprig_ctl`@`%`",
         ]);
         assert!(p.tenant_schemas_all && p.tenant_schemas_grant_option);
@@ -416,6 +431,32 @@ mod tests {
         assert!(fixes.contains("WITH GRANT OPTION"));
         assert!(fixes.contains("CONNECTION ADMIN"));
         assert!(!fixes.contains("PROCESS"));
+    }
+
+    #[test]
+    fn the_docs_schema_needs_all_with_grant_option() {
+        let base = [
+            "GRANT ALL PRIVILEGES ON `t%`.* TO `sprig_ctl`@`%` WITH GRANT OPTION",
+            "GRANT ALL PRIVILEGES ON `\\_\\_sprig\\_sys`.* TO `sprig_ctl`@`%` WITH GRANT OPTION",
+        ];
+        let p = priv_info(&base);
+        assert!(!p.docs_schema_all);
+        assert!(p.missing_ctl_grants().iter().any(|g| g == DOCS_CTL_GRANT));
+        let mut with = base.to_vec();
+        with.push("GRANT ALL PRIVILEGES ON `__sprig_docs`.* TO `sprig_ctl`@`%`");
+        assert!(!priv_info(&with).docs_schema_all, "no GRANT OPTION");
+        with.pop();
+        with.push(
+            "GRANT ALL PRIVILEGES ON `\\_\\_sprig\\_docs`.* TO `sprig_ctl`@`%` WITH GRANT OPTION",
+        );
+        let p = priv_info(&with);
+        assert!(p.docs_schema_all);
+        assert!(!p.missing_ctl_grants().iter().any(|g| g == DOCS_CTL_GRANT));
+        // `__sprig_sys` alone doesn't cover it.
+        assert!(!like("\\_\\_sprig\\_sys", DOCS_SCHEMA));
+        // An old profile without the field reads as not granted.
+        let old: PrivilegeInfo = serde_json::from_str(r#"{"tenant_schemas_all":true,"tenant_schemas_grant_option":true,"sys_schema_all":true,"create_user":true,"process":true,"connection_admin":true,"slave_monitor":true,"binlog_monitor":true,"binlog_admin":true,"read_only_admin":true,"set_user":true,"replication_slave":true,"read_mysql_db":true,"super_priv":false,"sql_log_bin_settable":null,"osu_method_settable":null}"#).unwrap();
+        assert!(!old.docs_schema_all);
     }
 
     #[test]

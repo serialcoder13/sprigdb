@@ -1183,6 +1183,16 @@ impl SessionExec for PassSession {
         Box::pin(PassSession::point_read(self, cx, stmt, params)).await
     }
 
+    fn holds_idle(&self) -> bool {
+        self.bs.as_ref().is_some_and(BackendSession::holds_kept)
+    }
+
+    fn release_idle(&mut self) {
+        if let Some(bs) = self.bs.as_mut() {
+            bs.release_kept();
+        }
+    }
+
     async fn init_db(&mut self, cx: &mut ExecCtx<'_>, schema: &str) -> Result<()> {
         if self.tenant.is_some() {
             let r = self.tenant_init_db(cx, schema).await;

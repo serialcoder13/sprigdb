@@ -98,38 +98,44 @@ impl CatalogGate {
         let mut c = ep.pool.get_conn().await.map_err(backend_error)?;
         let schema = ep.store.schema().to_owned();
         let none = BTreeMap::new();
-        // Not serving the graph at all: scatter without asking further.
-        let rows = mirror::read_pos(&mut c, &schema, self.graph).await?;
-        if !mirror::fresh(&rows, layout, &none) {
-            return Ok(false);
-        }
         // The target: every transaction committed on the shards' clusters
         // before the statement (their binlog positions now), and the
         // session's causal target, so the mirrors never hide a committed
-        // edge.
-        let mut targets = self.targets.clone();
-        let mut asked: HashSet<&str> = HashSet::new();
-        for s in &layout.shards {
-            if !asked.insert(s.cluster.as_str()) {
-                continue;
+        // edge. The first positions are read at the same time (one round
+        // trip, not two): positions only grow, so ones read before the
+        // target that reach it are fresh, and ones that don't are read
+        // again.
+        let target = async {
+            let mut targets = self.targets.clone();
+            let mut asked: HashSet<&str> = HashSet::new();
+            for s in &layout.shards {
+                if !asked.insert(s.cluster.as_str()) {
+                    continue;
+                }
+                let cluster = ClusterId::new(&s.cluster)
+                    .map_err(|e| SprigError::internal(format!("cluster id {}: {e}", s.cluster)))?;
+                let pool = self.graphs.pool(&cluster).await?;
+                let mut pc = pool.get_conn().await.map_err(backend_error)?;
+                let now: Option<String> = pc
+                    .query_first("SELECT @@gtid_binlog_pos")
+                    .await
+                    .map_err(backend_error)?;
+                // Both positions: `reached` keeps each domain's highest.
+                let t = targets.entry(s.cluster.clone()).or_default();
+                if !t.is_empty() {
+                    t.push(',');
+                }
+                t.push_str(&now.unwrap_or_default());
             }
-            let cluster = ClusterId::new(&s.cluster)
-                .map_err(|e| SprigError::internal(format!("cluster id {}: {e}", s.cluster)))?;
-            let pool = self.graphs.pool(&cluster).await?;
-            let mut pc = pool.get_conn().await.map_err(backend_error)?;
-            let now: Option<String> = pc
-                .query_first("SELECT @@gtid_binlog_pos")
-                .await
-                .map_err(backend_error)?;
-            // Both positions: `reached` keeps each domain's highest.
-            let t = targets.entry(s.cluster.clone()).or_default();
-            if !t.is_empty() {
-                t.push(',');
-            }
-            t.push_str(&now.unwrap_or_default());
-        }
+            Ok::<_, SprigError>(targets)
+        };
+        let (targets, first) =
+            futures::join!(target, mirror::read_pos(&mut c, &schema, self.graph));
+        let targets = targets?;
+        let mut rows = first?;
+        // The first read also tells whether the applier serves the graph
+        // at all (else scatter without waiting).
         loop {
-            let rows = mirror::read_pos(&mut c, &schema, self.graph).await?;
             if mirror::fresh(&rows, layout, &targets) {
                 return Ok(true);
             }
@@ -138,6 +144,7 @@ impl CatalogGate {
                 return Ok(false);
             }
             tokio::time::sleep(Duration::from_millis(15)).await;
+            rows = mirror::read_pos(&mut c, &schema, self.graph).await?;
         }
     }
 }

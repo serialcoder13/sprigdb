@@ -385,6 +385,103 @@
         "description": "The DeleteVectorsResponse message as JSON (proto3 mapping)",
         "type": "object"
       },
+      "DocsSearchHit": {
+        "properties": {
+          "audience": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "bm25_rank": {
+            "nullable": true,
+            "type": "integer"
+          },
+          "chunk_id": {
+            "type": "string"
+          },
+          "heading_path": {
+            "type": "string"
+          },
+          "page": {
+            "type": "string"
+          },
+          "score": {
+            "type": "number"
+          },
+          "text": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "vector_rank": {
+            "nullable": true,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "chunk_id",
+          "page",
+          "title",
+          "heading_path",
+          "audience",
+          "text",
+          "score"
+        ],
+        "type": "object"
+      },
+      "DocsSearchReply": {
+        "properties": {
+          "hits": {
+            "items": {
+              "$ref": "#/components/schemas/DocsSearchHit"
+            },
+            "type": "array"
+          },
+          "mode": {
+            "enum": [
+              "hybrid",
+              "keyword"
+            ],
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "mode",
+          "hits"
+        ],
+        "type": "object"
+      },
+      "DocsSearchRequest": {
+        "properties": {
+          "audience": {
+            "enum": [
+              "user",
+              "dba",
+              "operator"
+            ],
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
       "DrillRequest": {
         "description": "The DrillRequest message as JSON (proto3 mapping)",
         "type": "object"
@@ -4198,6 +4295,47 @@
         },
         "tags": [
           "sprig.v1.Vectors"
+        ]
+      }
+    },
+    "/v1/docs:search": {
+      "post": {
+        "operationId": "Docs.Search",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DocsSearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocsSearchReply"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "Searches the product documentation of this release (any signed-in user): full-text and embedding hits fused, at most two per page ({query, audience, limit, version})",
+        "tags": [
+          "sprig.v1.Docs"
         ]
       }
     },

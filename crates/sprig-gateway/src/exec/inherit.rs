@@ -235,7 +235,7 @@ async fn copy_states(
     };
     if !known && !out.0.is_empty() {
         svc.authz.relations_changed(cat.tenant);
-        if let Err(e) = svc.authz.ensure(&svc, cat, &cluster).await {
+        if let Err(e) = Box::pin(svc.authz.ensure(&svc, cat, &cluster)).await {
             tracing::warn!(tenant = %cat.tenant, error = %e, "backend grants after a new copy not reconciled yet");
         }
     }
@@ -554,10 +554,7 @@ impl sprig_inherit::Runner for InhRunner<'_, '_, '_> {
             sprig_inherit::RowCmd::Delete => &[Cmd::Select, Cmd::Delete],
         };
         let session = self.gw.cx.session.id;
-        self.gw
-            .sess
-            .rls_predicate(session, db, table, qual, cmds)
-            .await
+        Box::pin(self.gw.sess.rls_predicate(session, db, table, qual, cmds)).await
     }
 
     async fn commit(&mut self, change: &InheritChange) -> Result<()> {
@@ -615,7 +612,7 @@ impl sprig_inherit::Runner for InhRunner<'_, '_, '_> {
             && let Some(cat) = ts.catalog().cloned()
         {
             svc.authz.relations_changed(ts.tenant);
-            if let Err(e) = svc.authz.ensure(&svc, &cat, &cluster).await {
+            if let Err(e) = Box::pin(svc.authz.ensure(&svc, &cat, &cluster)).await {
                 tracing::warn!(tenant = %ts.tenant, error = %e, "backend grants after a new share view not reconciled yet");
             }
         }

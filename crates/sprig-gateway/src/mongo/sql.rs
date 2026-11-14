@@ -506,6 +506,18 @@ impl SqlSession {
         Ok(sink)
     }
 
+    /// Whether the session keeps a backend connection between statements
+    /// (after a point read).
+    #[must_use]
+    pub fn holds_idle(&self) -> bool {
+        self.exec.holds_idle()
+    }
+
+    /// Returns the backend connection kept between statements to its pool.
+    pub fn release_idle(&mut self) {
+        self.exec.release_idle();
+    }
+
     /// The session's shared half: its kill flags, for the stall guard
     /// ([`crate::offload::run_for`]).
     #[must_use]

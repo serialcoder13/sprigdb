@@ -127,6 +127,64 @@ pub struct ScanOp {
     pub limit: Option<usize>,
 }
 
+/// The far nodes a [`HopOp::Links`] statement joins: after the six link
+/// columns come `id, rk, labels, props, _types` of the far node, `NULL`s
+/// when it lives on a shard of another cluster (the caller reads those by
+/// id). Shard schemas on one cluster are one server, so the join reaches
+/// every far node there in the same round trip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FarNodes {
+    /// Property keys to read (`None`: all; empty: none).
+    pub keys: Option<Vec<String>>,
+    /// Numeric comparisons the far nodes must pass, as in
+    /// [`HopOp::NodesPart`]: links to a joined far node that fails one
+    /// are left out.
+    pub filter: Vec<(String, CmpOp, String)>,
+    /// When not empty: only links to these far nodes (the ids a `v IN
+    /// list` of the clause allows).
+    pub only: Vec<u64>,
+    /// Join the far nodes (else no node columns).
+    pub join: bool,
+    /// The relationships' properties too: `props, _types` of these keys
+    /// (`Some(&[])`: all of them) as the last two columns; `None`: no
+    /// such columns. Incoming hops through the mirrors join the edges
+    /// from the shard schemas of the statement's cluster (`NULL`s for
+    /// edges elsewhere).
+    pub rel_keys: Option<Vec<String>>,
+    /// Numeric comparisons of the relationships' properties, as `filter`
+    /// is of the far nodes'.
+    pub rel_filter: Vec<(String, CmpOp, String)>,
+}
+
+/// A numeric comparison of a pushed-down filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmpOp {
+    /// `<`.
+    Lt,
+    /// `<=`.
+    Le,
+    /// `>`.
+    Gt,
+    /// `>=`.
+    Ge,
+    /// `=`.
+    Eq,
+}
+
+impl CmpOp {
+    /// The SQL operator.
+    #[must_use]
+    pub fn sql(self) -> &'static str {
+        match self {
+            Self::Lt => "<",
+            Self::Le => "<=",
+            Self::Gt => ">",
+            Self::Ge => ">=",
+            Self::Eq => "=",
+        }
+    }
+}
+
 /// What a route reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HopOp {
@@ -161,6 +219,9 @@ pub enum HopOp {
         mirror: bool,
         /// Type ids (empty: any).
         types: Vec<u32>,
+        /// The far nodes too, joined from every shard schema on the
+        /// statement's cluster ([`FarNodes`]); `None`: links alone.
+        far: Option<FarNodes>,
     },
     /// Nodes by id with only some of their properties (a late read):
     /// `id, rk, labels`, then `props` and `_types` as objects of `keys`
@@ -168,6 +229,10 @@ pub enum HopOp {
     NodesPart {
         /// The property keys.
         keys: Vec<String>,
+        /// Numeric comparisons the nodes must pass (a superset the
+        /// gateway rechecks): `(key, op, number)`, the number as its
+        /// decimal text.
+        filter: Vec<(String, CmpOp, String)>,
     },
     /// Edges by id (routed by their sources' hashes) with only some of
     /// their properties, as [`HopOp::NodesPart`] reads nodes.
@@ -314,9 +379,36 @@ fn types_filter(alias: &str, types: &[u32]) -> String {
 /// hex literals. A key with `"` or `\` in it can't be a path, and is
 /// left out (callers read every property for such keys).
 fn part_cols(alias: &str, keys: &[String]) -> String {
+    part_exprs(&format!("{alias}.props"), &format!("{alias}._types"), keys)
+}
+
+/// `JSON_VALUE(<props>, '$."k"') <op> <v>`, or `None` for a key that
+/// can't be a path or a value that isn't a decimal number.
+fn number_filter(props: &str, k: &str, op: CmpOp, v: &str) -> Option<String> {
+    let number = !v.is_empty()
+        && v.chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '-' | '.' | 'e' | 'E' | '+'));
+    if k.contains(['"', '\\']) || !number {
+        return None;
+    }
+    Some(format!(
+        "JSON_VALUE({props}, {}) {} {v}",
+        Lit::Str(format!("$.\"{k}\"")).sql(),
+        op.sql()
+    ))
+}
+
+/// [`part_cols`] over the expressions `props` and `types`.
+fn part_exprs(props: &str, types: &str, keys: &[String]) -> String {
+    let (p, t) = part_pair(props, types, keys);
+    format!("{p}, {t}")
+}
+
+/// [`part_exprs`] as its two expressions.
+fn part_pair(props: &str, types: &str, keys: &[String]) -> (String, String) {
     let keys: Vec<&String> = keys.iter().filter(|k| !k.contains(['"', '\\'])).collect();
     if keys.is_empty() {
-        return "NULL, NULL".into();
+        return ("NULL".into(), "NULL".into());
     }
     let obj = |col: &str| {
         let mut s = String::from("JSON_OBJECT(");
@@ -326,7 +418,7 @@ fn part_cols(alias: &str, keys: &[String]) -> String {
             }
             let _ = write!(
                 s,
-                "{}, JSON_EXTRACT({alias}.{col}, {})",
+                "{}, JSON_EXTRACT({col}, {})",
                 Lit::Str((*k).clone()).sql(),
                 Lit::Str(format!("$.\"{k}\"")).sql()
             );
@@ -334,7 +426,7 @@ fn part_cols(alias: &str, keys: &[String]) -> String {
         s.push(')');
         s
     };
-    format!("{}, {}", obj("props"), obj("_types"))
+    (obj(props), obj(types))
 }
 
 /// The routing hash of node id `id` in `group` (the numeric key class;
@@ -421,27 +513,175 @@ fn statement(spec: &RouteSpec, i: usize, ids: &[u64]) -> Option<String> {
                 types_filter("e", types)
             )
         }
-        HopOp::Links { out, mirror, types } => {
-            if *mirror && !*out {
-                format!(
-                    "SELECT m.src, m.dst, m.src_rk, m._sprig_rk, m.id, m.type FROM {} m \
-                     WHERE m.dst IN ({id_list}){}",
+        HopOp::Links {
+            out,
+            mirror,
+            types,
+            far,
+        } => {
+            // (alias, far end, its hash, the link columns, the table)
+            let (a, far_col, far_rk, cols, tbl) = if *mirror && !*out {
+                (
+                    "m",
+                    "m.src",
+                    "m.src_rk",
+                    "m.src, m.dst, m.src_rk, m._sprig_rk, m.id, m.type",
                     t(GraphTable::Mirrors),
-                    types_filter("m", types)
+                )
+            } else if *out {
+                (
+                    "e",
+                    "e.dst",
+                    "e.dst_rk",
+                    "e.src, e.dst, e._sprig_rk, e.dst_rk, e.id, e.type",
+                    edges.clone(),
                 )
             } else {
-                format!(
-                    "SELECT e.src, e.dst, e._sprig_rk, e.dst_rk, e.id, e.type FROM {edges} e \
-                     WHERE e.{} IN ({id_list}){}",
-                    if *out { "src" } else { "dst" },
-                    types_filter("e", types)
+                (
+                    "e",
+                    "e.src",
+                    "e._sprig_rk",
+                    "e.src, e.dst, e._sprig_rk, e.dst_rk, e.id, e.type",
+                    edges.clone(),
                 )
+            };
+            let near = if *out { "src" } else { "dst" };
+            let plain = format!(
+                "SELECT {cols} FROM {tbl} {a} WHERE {a}.{near} IN ({id_list}){}",
+                types_filter(a, types)
+            );
+            let Some(far) = far else {
+                return Some(plain);
+            };
+            let cluster = &g.shards[i].cluster;
+            let local: Vec<(usize, &crate::topology::ShardLoc)> = g
+                .shards
+                .iter()
+                .enumerate()
+                .filter(|(_, sh)| &sh.cluster == cluster)
+                .collect();
+            // The range condition of shard `j` on hash column `rk`.
+            let range = |j: usize, rk: &str| {
+                let mut c = format!("{rk} >= {}", g.shards[j].lo);
+                if let Some(next) = g.shards.get(j + 1) {
+                    let _ = write!(c, " AND {rk} < {}", next.lo);
+                }
+                c
+            };
+            let co = |v: &[String]| {
+                if v.len() == 1 {
+                    v[0].clone()
+                } else {
+                    format!("COALESCE({})", v.join(", "))
+                }
+            };
+            let mut select = cols.to_owned();
+            let mut joins = String::new();
+            let mut conds: Vec<String> = Vec::new();
+            if far.join {
+                // Every shard of this statement's cluster, joined by range.
+                let (mut ids, mut labels, mut props, mut tys) =
+                    (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+                for (j, sh) in &local {
+                    let _ = write!(
+                        joins,
+                        " LEFT JOIN {} n{j} ON n{j}.id = {far_col} AND {}",
+                        table(&sh.schema, spec.graph, GraphTable::Nodes),
+                        range(*j, far_rk)
+                    );
+                    ids.push(format!("n{j}.id"));
+                    labels.push(format!("n{j}.labels"));
+                    props.push(format!("n{j}.props"));
+                    tys.push(format!("n{j}._types"));
+                }
+                let (fid, fprops, ftypes) = (co(&ids), co(&props), co(&tys));
+                let pcols = match &far.keys {
+                    None => format!("{fprops}, {ftypes}"),
+                    Some(keys) => part_exprs(&fprops, &ftypes, keys),
+                };
+                let _ = write!(select, ", {fid}, {far_rk}, {}, {pcols}", co(&labels));
+                for (k, op, v) in &far.filter {
+                    if let Some(c) = number_filter(&fprops, k, *op, v) {
+                        conds.push(format!("({fid} IS NULL OR {c})"));
+                    }
+                }
             }
+            if far.rel_keys.is_some() || !far.rel_filter.is_empty() {
+                // The edge row: the statement's own, or (mirrors) joined
+                // from the edge's source shard.
+                let (eid, eprops, etypes) = if a == "e" {
+                    (None, "e.props".to_owned(), "e._types".to_owned())
+                } else {
+                    let (mut ids, mut props, mut tys) = (Vec::new(), Vec::new(), Vec::new());
+                    for (j, sh) in &local {
+                        let _ = write!(
+                            joins,
+                            " LEFT JOIN {} r{j} ON r{j}.id = m.id AND {}",
+                            table(&sh.schema, spec.graph, GraphTable::Edges),
+                            range(*j, "m.src_rk")
+                        );
+                        ids.push(format!("r{j}.id"));
+                        props.push(format!("r{j}.props"));
+                        tys.push(format!("r{j}._types"));
+                    }
+                    (Some(co(&ids)), co(&props), co(&tys))
+                };
+                if let Some(keys) = &far.rel_keys {
+                    let (p, t) = if keys.is_empty() {
+                        (eprops.clone(), etypes.clone())
+                    } else {
+                        part_pair(&eprops, &etypes, keys)
+                    };
+                    // A mirror whose edge isn't on this cluster: NULLs.
+                    match &eid {
+                        Some(id) => {
+                            let _ = write!(
+                                select,
+                                ", IF({id} IS NULL, NULL, {p}), IF({id} IS NULL, NULL, {t})"
+                            );
+                        }
+                        None => {
+                            let _ = write!(select, ", {p}, {t}");
+                        }
+                    }
+                }
+                for (k, op, v) in &far.rel_filter {
+                    if let Some(c) = number_filter(&eprops, k, *op, v) {
+                        conds.push(match &eid {
+                            Some(id) => format!("({id} IS NULL OR {c})"),
+                            None => c,
+                        });
+                    }
+                }
+            }
+            if !far.only.is_empty() {
+                conds.push(format!("{far_col} IN ({})", ids_list(&far.only)));
+            }
+            let mut sql = format!(
+                "SELECT {select} FROM {tbl} {a}{joins} WHERE {a}.{near} IN ({id_list}){}",
+                types_filter(a, types)
+            );
+            for c in conds {
+                let _ = write!(sql, " AND {c}");
+            }
+            sql
         }
-        HopOp::NodesPart { keys } => format!(
-            "SELECT n.id, n._sprig_rk, n.labels, {} FROM {nodes} n WHERE n.id IN ({id_list})",
-            part_cols("n", keys)
-        ),
+        HopOp::NodesPart { keys, filter } => {
+            let mut sql = format!(
+                "SELECT n.id, n._sprig_rk, n.labels, {} FROM {nodes} n WHERE n.id IN ({id_list})",
+                part_cols("n", keys)
+            );
+            // Numbers compare as doubles (a JSON number's text against a
+            // number): exact for the integers callers push (|x| < 2^52);
+            // a non-number gives a superset or the same rows as Cypher's
+            // null.
+            for (k, op, v) in filter {
+                if let Some(c) = number_filter("n.props", k, *op, v) {
+                    let _ = write!(sql, " AND {c}");
+                }
+            }
+            sql
+        }
         HopOp::EdgesPart { keys } => format!(
             "SELECT e.src, e.type, e.dst, e.id, e.dst_rk, e._sprig_rk, {} FROM {edges} e \
              WHERE e.id IN ({id_list})",
