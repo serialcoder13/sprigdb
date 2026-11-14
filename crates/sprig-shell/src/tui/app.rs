@@ -782,9 +782,32 @@ impl App {
         out
     }
 
+    /// What the palette shows for `q`: the best matches, or for
+    /// `?question` the `ASK` statement to put in the editor (it runs, and
+    /// proposes a query without running it, when the user runs it).
+    #[must_use]
+    pub fn palette_shown(&self, q: &str, limit: usize) -> Vec<PalItem> {
+        if let Some(question) = q.strip_prefix('?') {
+            let question = question.trim();
+            if question.is_empty() {
+                return vec![PalItem {
+                    label: "Ask the assistant: type a question".to_owned(),
+                    hint: "ASK · nothing runs".to_owned(),
+                    action: PalAction::Insert("ASK '';".to_owned()),
+                }];
+            }
+            return vec![PalItem {
+                label: format!("Ask: {question}"),
+                hint: "ASK · nothing runs".to_owned(),
+                action: PalAction::Insert(format!("{};", crate::ask::statement(question, None))),
+            }];
+        }
+        palette::filter(&self.palette_items(), q, limit)
+    }
+
     fn palette_key(&mut self, q: &str, sel: usize, k: KeyEvent) -> Vec<Effect> {
         let mut q = q.to_owned();
-        let shown = palette::filter(&self.palette_items(), &q, 50);
+        let shown = self.palette_shown(&q, 50);
         let mut sel = sel.min(shown.len().saturating_sub(1));
         match k.code {
             KeyCode::Esc => {
@@ -2114,7 +2137,7 @@ impl App {
                 )],
             ),
             Dialog::Palette(q, sel) => {
-                let shown = palette::filter(&self.palette_items(), q, 14);
+                let shown = self.palette_shown(q, 14);
                 let mut l = vec![Line::from(vec![
                     Span::styled("› ", theme::accent()),
                     Span::raw(q.clone()),
@@ -2227,7 +2250,7 @@ fn help_lines() -> Vec<Line<'static>> {
         "Dashboard     1-6 or Left/Right views, r refresh, k kill, q kill query",
         "Admin         sprigctl commands; Up/Down history",
         "Inbox         a approve, w window, i ignore, s snooze, c comment",
-        "Ctrl-K, Ctrl-P search tabs, tables, saved queries, history, commands",
+        "Ctrl-K, Ctrl-P search everything; ?question writes an ASK (runs nothing)",
         "Ctrl-S        save the editor's text under a name",
         "Enter, r      (explorer) open a table's view, or run a SELECT on it",
         "Table view    / filter, = by cell, e edit, o add, d delete, n p page",

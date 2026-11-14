@@ -1619,3 +1619,26 @@ async fn indexed_far_conjuncts_answer_as_whole_reads() {
         }
     }
 }
+
+/// A one-hop pattern predicate between bound ends answers as matching
+/// the pattern does, whichever side it expands from.
+#[tokio::test]
+async fn one_hop_predicates_expand_from_the_smaller_side() {
+    for shards in [1, 4] {
+        let mut s = social(shards).await;
+        for (pred, walk) in [
+            (
+                "MATCH (a:Person), (b:Person) WHERE (a)-[:KNOWS]-(b) RETURN a.name AS a, b.name AS b ORDER BY a, b",
+                "MATCH (a:Person)-[:KNOWS]-(b:Person) RETURN DISTINCT a.name AS a, b.name AS b ORDER BY a, b",
+            ),
+            (
+                "MATCH (a:Person {name: 'Alice'}), (b:Person) WHERE NOT (b)-[:KNOWS]->(a) RETURN b.name AS b ORDER BY b",
+                "MATCH (a:Person {name: 'Alice'}), (b:Person) WHERE NOT EXISTS { MATCH (b)-[:KNOWS]->(a) } RETURN b.name AS b ORDER BY b",
+            ),
+        ] {
+            let x = q(&mut s, pred).await;
+            let y = q(&mut s, walk).await;
+            assert_eq!(show(&x), show(&y), "{pred} on {shards} shard(s)");
+        }
+    }
+}

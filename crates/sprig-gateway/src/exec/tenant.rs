@@ -592,6 +592,10 @@ impl PassSession {
         if let Some(step) = Box::pin(self.tenant_docs(cx, text, more, format, out)).await? {
             return Ok(step);
         }
+        // `ASK '<question>'`: answered by an assistant, never sent on.
+        if let Some(step) = Box::pin(self.tenant_ask(cx, text, more, format, out)).await? {
+            return Ok(step);
+        }
         // Inherited messaging objects (`FOR EACH TENANT`), before the logic
         // declarations and the stream layer see them.
         if let Some(step) =
@@ -854,6 +858,53 @@ impl PassSession {
             };
         }
 
+        // Global lookup indexes: `SPRIG SHOW|REBUILD|DROP LOOKUP INDEX`.
+        if let Some(stmt) = crate::tenant::lookups_sql::parse_bytes(text) {
+            if sandbox {
+                return self.fail(out, &must_reset()).await;
+            }
+            let current = self.current_logical();
+            let Some(ts) = self.tenant.as_deref_mut() else {
+                return Err(SprigError::internal("no tenant"));
+            };
+            let cat = match ts.refresh().await {
+                Ok(c) => c,
+                Err(e) => return self.fail(out, &e).await,
+            };
+            let r = Box::pin(crate::tenant::lookups_sql::execute(
+                ts,
+                &cat,
+                current.as_deref(),
+                &stmt,
+                charset,
+            ))
+            .await;
+            if let Some(ts) = self.tenant.as_deref_mut() {
+                // Its own publishes: the session reads them next.
+                let _ = ts.refresh().await;
+            }
+            let s = status(self.status());
+            return match r {
+                Ok(crate::tenant::lookups_sql::LookupAnswer::Ok { affected }) => {
+                    let mut ok = OkPacket::new(s);
+                    ok.affected_rows = affected;
+                    out.ok(ok).await?;
+                    Ok(Step {
+                        errored: false,
+                        status: Some(s),
+                    })
+                }
+                Ok(crate::tenant::lookups_sql::LookupAnswer::Rows(ans)) => {
+                    send_local(out, &ans, format, s).await?;
+                    Ok(Step {
+                        errored: false,
+                        status: Some(s),
+                    })
+                }
+                Err(e) => self.fail(out, &e).await,
+            };
+        }
+
         // SHOW SPRIG RECOMMENDATIONS, SPRIG APPROVE|IGNORE|
         // SNOOZE RECOMMENDATION.
         if let Some(parsed) = sprig_sql::rec_stmt::parse(text, &lex) {
@@ -998,6 +1049,25 @@ impl PassSession {
                 &owned
             }
             Some(Err(e)) => return self.fail(out, &e).await,
+        };
+        // ...and `information_schema.SPRIG_LOOKUP_INDEXES`.
+        let lookups_owned;
+        let text: &Bytes = if text
+            .windows(20)
+            .any(|w| w.eq_ignore_ascii_case(b"SPRIG_LOOKUP_INDEXES"))
+        {
+            let view =
+                crate::tenant::lookups_sql::view_sql(ts, &cat, lex.no_backslash_escapes).await;
+            match settings_sql::inline_named(text, &lex, "SPRIG_LOOKUP_INDEXES", || view) {
+                None => text,
+                Some(Ok(t)) => {
+                    lookups_owned = Bytes::from(t);
+                    &lookups_owned
+                }
+                Some(Err(e)) => return self.fail(out, &e).await,
+            }
+        } else {
+            text
         };
         // 3306: MySQL-only executable comments whose body MariaDB
         // understands, and `CAST(? AS JSON)`.
@@ -1772,6 +1842,22 @@ impl PassSession {
             }
             super::router::FkDdl::Fail(e) => return Ok(Route::Done(self.fail(out, &e).await?)),
         };
+        // A unique key on a sharded table without the distribution key
+        // gets a global lookup index after the shards' DDL; a dropped key
+        // loses its lookup first.
+        let lookup_adds = match self.lookup_ddl_plan(&physical, &logical).await {
+            super::router::LookupDdl::Keep => None,
+            super::router::LookupDdl::Fail(e) => {
+                return Ok(Route::Done(self.fail(out, &e).await?));
+            }
+            super::router::LookupDdl::Drop(d) => {
+                if let Err(e) = self.lookup_ddl_drop(&d).await {
+                    return Ok(Route::Done(self.fail(out, &e).await?));
+                }
+                None
+            }
+            super::router::LookupDdl::Build(a) => Some(a),
+        };
         // Auto-indexing's 64-index rule: room for the user's indexes.
         let (lex, _) = self.lex_opts();
         if let Some(ts) = self.tenant.as_deref() {
@@ -1798,6 +1884,7 @@ impl PassSession {
             _ => None,
         };
         let ctl_pool = ctl.clone();
+        let undo_pool = ctl.clone();
         let ctl = MariaExecutor::new(ctl);
         let req = DdlRequest {
             tenant,
@@ -1875,6 +1962,48 @@ impl PassSession {
                 }
                 None => svc.ddl.execute(&req, &exec).await,
             }
+        };
+        // The lookups of the keys the statement added; a failed build
+        // drops the shards' new keys again, so the statement changes nothing.
+        let result = match (result, lookup_adds) {
+            (Ok(outcome), Some(adds)) => match self.lookup_ddl_build(&adds).await {
+                Ok(()) => Ok(outcome),
+                Err(u) => {
+                    for (sql, logical_sql) in &u.undo {
+                        let Some(bs) = self.bs.as_mut() else { break };
+                        let undo_req = DdlRequest {
+                            tenant,
+                            statement: stmt.clone(),
+                            sql,
+                            logical_sql,
+                            current_db: current.as_deref(),
+                            user,
+                            lower_case_table_names: lctn,
+                        };
+                        let exec = GatewayDdl::new(bs, MariaExecutor::new(undo_pool.clone()))
+                            .checked_by(undo_pool.clone());
+                        let layout = self.tenant.as_deref().and_then(super::router::ddl_layout);
+                        let r = match layout {
+                            Some(layout) => {
+                                let sharded = crate::tenant::ddl::ShardedDdl::new(
+                                    exec,
+                                    layout,
+                                    Arc::clone(&svc.locator),
+                                    tenant,
+                                    user,
+                                );
+                                svc.ddl.execute(&undo_req, &sharded).await
+                            }
+                            None => svc.ddl.execute(&undo_req, &exec).await,
+                        };
+                        if let Err(e) = r {
+                            tracing::warn!(error = %e, sql, "undoing a unique key after its lookup failed");
+                        }
+                    }
+                    Err(u.error)
+                }
+            },
+            (r, _) => r,
         };
         if result.as_ref().is_ok_and(|o| o.version.is_some())
             && !dropped.is_empty()

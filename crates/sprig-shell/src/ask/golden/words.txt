@@ -1,0 +1,2 @@
+That needs a table of exchange rates, which this tenant doesn't have.
+Notes: No query: the assistant answered in words.

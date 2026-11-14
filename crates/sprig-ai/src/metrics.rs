@@ -15,6 +15,11 @@
 //! - `sprig_ai_feedback_total{role,vote}`: thumbs up or down on answers.
 //! - `sprig_ai_payloads_purged_total`: exact payloads dropped after
 //!   `ai.audit_payload_days` (their hashes stay).
+//! - `sprig_ai_mcp_requests_total{method,result}`: MCP requests;
+//!   `result` is `ok`, `error` or `refused` (signed out, turned off,
+//!   malformed).
+//! - `sprig_ai_mcp_tool_calls_total{role,tool,result}`: MCP tool calls;
+//!   `result` is `ok`, `error`, `denied`, `proposed` or `limited`.
 
 use std::time::Duration;
 
@@ -101,4 +106,30 @@ pub fn feedback(role: Role, vote: &'static str) {
 /// Payloads dropped by the retention purge.
 pub fn payloads_purged(n: u64) {
     metrics::counter!("sprig_ai_payloads_purged_total").increment(n);
+}
+
+/// One MCP request; `method` is one of [`crate::mcp::METHODS`] or `other`.
+pub fn mcp_request(method: &str, result: &'static str) {
+    let method = crate::mcp::METHODS
+        .iter()
+        .find(|m| **m == method)
+        .copied()
+        .unwrap_or("other");
+    metrics::counter!(
+        "sprig_ai_mcp_requests_total",
+        "method" => method,
+        "result" => result
+    )
+    .increment(1);
+}
+
+/// One MCP tool call.
+pub fn mcp_tool_call(role: Role, tool: &str, result: &'static str) {
+    metrics::counter!(
+        "sprig_ai_mcp_tool_calls_total",
+        "role" => role.as_str(),
+        "tool" => tool.to_owned(),
+        "result" => result
+    )
+    .increment(1);
 }

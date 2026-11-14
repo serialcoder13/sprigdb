@@ -1,0 +1,13 @@
+-- Query 1 of 2 (database shop)
+SELECT id, total FROM orders WHERE total > 100;
+
+The orders over 100.
+Notes: Reads only. Statement 1 of 2 in one proposal.
+Sources: table: shop.orders
+
+-- Query 2 of 2 (database shop)
+DELETE FROM orders WHERE total = 0;
+
+Then removes the empty ones.
+Notes: Changes data, schema or settings, or isn't a plain query: review it before you run it. Statement 2 of 2 in one proposal.
+Sources: table: shop.orders

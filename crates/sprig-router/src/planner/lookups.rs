@@ -352,7 +352,10 @@ pub(super) fn update_releases(
         let value = value_of(&a.value, l.class, part).ok_or_else(|| {
             Rejection::new(
                 Reason::Lookup,
-                format!("an UPDATE setting a lookup index's column to a non-literal: {}", a.value),
+                format!(
+                    "an UPDATE setting a lookup index's column to a non-literal: {}",
+                    a.value
+                ),
             )
         })?;
         let mut items = vec![read_expr(&l.column, Some(part))];
@@ -490,7 +493,14 @@ pub(super) fn delete_releases(
                 .zip(&l.index.owner_pk)
                 .map(|(n, c)| read_expr(n, Some(c.class))),
         );
-        let reads = locked_reads(from.clone(), d.selection.clone(), &items, rel, entry, shards)?;
+        let reads = locked_reads(
+            from.clone(),
+            d.selection.clone(),
+            &items,
+            rel,
+            entry,
+            shards,
+        )?;
         out.push(Release {
             lookup: Arc::clone(l),
             reads,

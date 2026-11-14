@@ -346,6 +346,9 @@ impl Exec<'_> {
     ) -> Result<Option<HashSet<usize>>> {
         let plain_node = |n: &NodePat| n.labels.is_none() && n.props.is_none();
         let plain_rel = |r: &RelPat| r.var.is_none() && r.props.is_none() && r.range.is_none();
+        if let [(r1, end)] = p.steps.as_slice() {
+            return self.one_hop_between(rows, p, r1, end).await;
+        }
         let [(r1, mid), (r2, end)] = p.steps.as_slice() else {
             return Ok(None);
         };
@@ -416,6 +419,85 @@ impl Exec<'_> {
             if l.iter()
                 .any(|(mid, e1)| back.get(mid).is_some_and(|es| es.iter().any(|e2| e2 != e1)))
             {
+                hits.insert(i);
+            }
+        }
+        Ok(Some(hits))
+    }
+
+    /// A one-hop pattern predicate between two bound nodes (LDBC IC7's
+    /// `not((liker)-[:KNOWS]-(person))`): one hop from whichever side has
+    /// fewer distinct nodes, and a row hits when its other end is among
+    /// the far nodes. Expanding from every liker read all their friends
+    /// to find one person. `None` when the pattern isn't of that shape.
+    async fn one_hop_between(
+        &mut self,
+        rows: &[Row],
+        p: &PathPattern,
+        rp: &RelPat,
+        end: &NodePat,
+    ) -> Result<Option<HashSet<usize>>> {
+        let plain = |n: &NodePat| n.labels.is_none() && n.props.is_none();
+        if p.kind != PathKind::Normal
+            || p.var.is_some()
+            || !plain(&p.start)
+            || !plain(end)
+            || rp.var.is_some()
+            || rp.props.is_some()
+            || rp.range.is_some()
+        {
+            return Ok(None);
+        }
+        let (Some(sv), Some(ev)) = (&p.start.var, &end.var) else {
+            return Ok(None);
+        };
+        if rows.iter().any(|r| {
+            !matches!(
+                (r.get(sv), r.get(ev)),
+                (
+                    Some(Value::Node(_) | Value::Null),
+                    Some(Value::Node(_) | Value::Null)
+                )
+            )
+        }) {
+            return Ok(None);
+        }
+        let pairs: Vec<Option<(u64, u64)>> = rows
+            .iter()
+            .map(|r| match (r.get(sv), r.get(ev)) {
+                (Some(Value::Node(a)), Some(Value::Node(b))) => Some((a.id, b.id)),
+                _ => None,
+            })
+            .collect();
+        let Some(types) = self.type_ids(rp).await? else {
+            return Ok(Some(HashSet::new()));
+        };
+        let mut starts: Vec<u64> = pairs.iter().flatten().map(|x| x.0).collect();
+        let mut ends: Vec<u64> = pairs.iter().flatten().map(|x| x.1).collect();
+        starts.sort_unstable();
+        starts.dedup();
+        ends.sort_unstable();
+        ends.dedup();
+        let from_end = ends.len() < starts.len();
+        self.plan
+            .push("PatternPredicate: one hop from the side with fewer nodes".into());
+        let mut links = HashMap::new();
+        let near = if from_end {
+            self.level_links(&ends, &types, rp, rp.dir.reverse(), &mut links)
+                .await?
+        } else {
+            self.level_links(&starts, &types, rp, rp.dir, &mut links)
+                .await?
+        };
+        let reach: HashMap<u64, HashSet<u64>> = near
+            .into_iter()
+            .map(|(n, v)| (n, v.into_iter().map(|(f, _)| f).collect()))
+            .collect();
+        let mut hits = HashSet::new();
+        for (i, pr) in pairs.iter().enumerate() {
+            let Some((a, b)) = pr else { continue };
+            let (from, to) = if from_end { (b, a) } else { (a, b) };
+            if reach.get(from).is_some_and(|s| s.contains(to)) {
                 hits.insert(i);
             }
         }

@@ -24,12 +24,15 @@
 //!   SPRIG SETTINGS` and `ALTER TENANT <name>`.
 //! - [`pin_stmt`]: sharding pins and advice: `SPRIG PIN`, `SPRIG UNPIN`, `SPRIG
 //!   SHOW ADVICE` and `SPRIG SHOW PINS`.
+//! - [`ask_stmt`]: `ASK '<question>'`, a question for an AI assistant.
 //! - [`compat`]: the MySQL/MariaDB translator: executable comments, emulated
 //!   variables, the collation map, the persona-shaped `information_schema`
 //!   providers and `SHOW` rewrites, result metadata and error mapping on 3306.
 
 pub mod access;
 pub mod account_stmt;
+// `ASK`: a question for an AI assistant.
+pub mod ask_stmt;
 pub mod compat;
 pub mod lex;
 pub mod names;

@@ -25,6 +25,15 @@ pub fn disabled() -> SprigError {
     )
 }
 
+/// 39991: `ai.mcp.enabled` is off.
+#[must_use]
+pub fn mcp_disabled() -> SprigError {
+    SprigError::new(
+        SprigCode::AiDisabled,
+        "the MCP server is turned off for this tenant (ai.mcp.enabled)",
+    )
+}
+
 /// 39992: a daily budget is used up; `which` is `tenant` or `user`.
 #[must_use]
 pub fn budget_exceeded(which: &str, limit: u64) -> SprigError {

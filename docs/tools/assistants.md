@@ -21,7 +21,9 @@ Every assistant follows the same rules:
 - What leaves SprigDB passes **one gate**: by default, schema and statistics only, never rows.
 - Every call is **audited and budgeted**, and you can see exactly what was sent.
 
-Nothing is sent anywhere until an operator configures a provider and a tenant administrator turns the assistants on. SprigDB doesn't host models: you use a provider you choose. Studio's chat panel isn't part of this release; the assistants are reached through the API described here.
+Nothing is sent anywhere until an operator configures a provider and a tenant administrator turns the assistants on. SprigDB doesn't host models: you use a provider you choose. Studio's chat panel isn't part of this release; the assistants are reached through the API described here, the [`ASK` statement](#ask-in-sql) and [`sprig ask`](sprig.md#sprig-ask).
+
+Outside AI agents, such as Claude Code, can use the same tools as you through the [MCP server](mcp.md).
 
 ## Setting up
 
@@ -134,6 +136,42 @@ The tools each assistant may call, all as you:
 - **DBA assistant:** workload fingerprints, indexes and automatic indexes, settings (`SHOW SPRIG SETTINGS`), shards and advisor runs, the row-level security tester (counts only), logic compiles (dry runs), and SprigDB's decisions about your tenant.
 
 A tool call outside the assistant's role, or with invalid input, is refused; three refusals in one turn stop it with 39996.
+
+## ASK in SQL
+
+`ASK` puts a question to an assistant from any SQL client, on the MySQL and MariaDB ports or through `Sql.Query` over REST and gRPC. It returns the proposed query and an explanation, and **never runs the query**.
+
+```sql
+ASK 'question' [IN DATABASE db_name] [ROLE data | dba]
+```
+
+- The data specialist answers unless you say `ROLE dba`.
+- The assistant works with the session's current database, or the one `IN DATABASE` names.
+- `IN DATABASE` and `ROLE` may come in either order. Adjacent string literals are joined.
+- `ASK` is recognized only when a string literal follows the word, so a table, column or variable named `ask` works as before.
+- Run `ASK` as a plain statement: a server-side prepared statement can't carry it.
+
+```sql
+ASK 'top 10 customers by revenue this year';
+ASK 'why is SELECT * FROM orders WHERE total > 100 slow?' IN DATABASE shop ROLE dba;
+```
+
+The answer has one row for each proposed statement:
+
+| Column | Holds |
+|---|---|
+| `query` | One statement, without a trailing `;`. `NULL` when the assistant answered in words |
+| `database` | The database the assistant meant it for, or `NULL` |
+| `explanation` | Why, in a few sentences; the whole answer when there is no query |
+| `notes` | `Reads only.`, or a reminder to review a statement that changes things; the estimate; `Statement 1 of 2 in one proposal.` when one proposal held several statements; a note when the answer was cut off at `ai.max_output_tokens` |
+| `sources` | What the answer drew on, such as `table: shop.orders` or a docs page |
+| `conversation_id` | The stored conversation |
+
+`ASK` is one chat turn as you, with the same checks in the same order as the chat API: `ai.enabled` (39991), a tenant login (39792), the assistant's model (39990), and the budgets (39992). It uses the same tools, egress rules, budgets and audit. The conversation is kept like a chat's, so `GET /v1/ai/conversations/{conversation_id}` shows what was sent. A refusal is 39994, and a provider failure is 39993.
+
+The query comes from the assistant's SQL proposals. When it made none, it comes from the SQL code blocks in its answer. A proposal holding several statements becomes several rows, so `query` always holds exactly one statement. Tile and glossary proposals aren't shown by `ASK`.
+
+To run an answer, copy the query, or use [`sprig ask --run`](sprig.md#sprig-ask). In the TUI, press Ctrl-K and type `?` and your question: the `ASK` statement goes into the editor, and you run it like any other statement.
 
 ## Conversations and what was sent
 

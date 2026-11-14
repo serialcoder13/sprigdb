@@ -340,6 +340,37 @@ sprig -o json approvals list
 
 Ids look like `t42.17` (a tenant's item), `dc.mum1.3` (a data centre's) or `g.5` (global). Where the deployment doesn't serve recommendations, the inbox says so instead of failing.
 
+## sprig ask
+
+`sprig ask` puts a question to an [AI assistant](assistants.md) with the [`ASK` statement](assistants.md#ask-in-sql), and prints the query it proposes with its explanation. Nothing runs unless you add `--run`.
+
+```sh
+sprig -d shop ask "top 10 customers by revenue this year"
+sprig -d shop ask "why is the order report slow?" --role dba
+sprig -d shop ask "orders over 100 this week" --run
+sprig -d shop -o json ask "orders per day"       # the ASK rows, as JSON
+```
+
+| Option | Meaning |
+|---|---|
+| `--role data \| dba` | Which assistant answers (default `data`) |
+| `--run` | Run each proposed query after printing it |
+
+The answer prints each query, then its explanation, notes and sources:
+
+```text
+-- Query (database shop)
+SELECT c.id, c.name, SUM(o.total) AS revenue FROM customers c JOIN orders o ON o.customer_id = c.id WHERE o.created_at >= '2026-01-01' GROUP BY c.id, c.name ORDER BY revenue DESC LIMIT 10;
+
+Sums each customer's orders since 1 January and keeps the ten largest.
+Notes: Reads only.
+Sources: table: shop.customers; table: shop.orders
+```
+
+Standard error then says that nothing ran, and names the conversation (`GET /v1/ai/conversations/{id}` shows what was sent). With `-o`, the rows of the `ASK` result are printed in that format instead of the text.
+
+With `--run`, each query runs in the database the assistant named, through the transport you chose. A read runs at once. Anything else (a write, DDL, an account statement, anything that isn't a plain read) asks first on a terminal; in a script it needs `--yes`, or it isn't run and the command exits with 6 (39982). `ASK` itself never runs anything.
+
 ## Operator commands
 
 `sprig admin` runs `sprigctl` with the same arguments, so every command, flag and output is `sprigctl`'s own (see [sprigctl](sprigctl.md)). The profile supplies the Admin API: its `admin_url` and `admin_token_file` reach `sprigctl` as `SPRIGCTL_ENDPOINT` and `SPRIGCTL_TOKEN_FILE`, unless those are already set.
@@ -395,6 +426,8 @@ History is kept per profile in `history/<profile>` in the configuration director
 ### The command palette
 
 `Ctrl-K` or `Ctrl-P` opens one search over the open tabs, the screens, the tables the explorer has loaded, your saved queries and history, and commands (new tab, help, export, reload, quit). Type part of a name; `Enter` opens the choice and `Esc` closes the palette. A saved query or history entry is put in the editor, not run.
+
+Start the search with `?` to ask an assistant instead: `?top 10 customers` offers `Ask: top 10 customers`, and `Enter` puts `ASK 'top 10 customers';` in the editor. Run it like any statement; the result shows the proposed query and its explanation, and nothing else runs (see [ASK in SQL](assistants.md#ask-in-sql)).
 
 ![The sprig command palette with "ord" typed, listing the orders and order_items tables of shop and the Dashboard screen](../img/sprig/tui-palette.png)
 

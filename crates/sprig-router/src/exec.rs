@@ -1890,7 +1890,6 @@ async fn lookups_before(
     Ok(())
 }
 
-
 /// A statement a foreign-key action planned, run inside
 /// the write that caused it: no transaction or savepoint of its own.
 ///

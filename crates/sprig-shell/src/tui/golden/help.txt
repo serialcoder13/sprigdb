@@ -19,7 +19,7 @@
 │       │Dashboard     1-6 or Left/Right views, r refresh, k kill, q kill query            │       │
 │       │Admin         sprigctl commands; Up/Down history                                  │       │
 │       │Inbox         a approve, w window, i ignore, s snooze, c comment                  │       │
-│       │Ctrl-K, Ctrl-P search tabs, tables, saved queries, history, commands              │       │
+│       │Ctrl-K, Ctrl-P search everything; ?question writes an ASK (runs nothing)          │       │
 │       │Ctrl-S        save the editor's text under a name                                 │       │
 │       │Enter, r      (explorer) open a table's view, or run a SELECT on it               │       │
 │       │Table view    / filter, = by cell, e edit, o add, d delete, n p page              │       │

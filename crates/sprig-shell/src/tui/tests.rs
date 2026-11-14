@@ -493,6 +493,23 @@ fn html_snapshots() {
 }
 
 #[test]
+fn a_question_mark_in_the_palette_writes_an_ask() {
+    let mut a = app();
+    a.tabs[0].editor.set_text("");
+    a.on_key(ctrl('k'));
+    for c in "?top 5 customers".chars() {
+        a.on_key(key(KeyCode::Char(c)));
+    }
+    let shown = a.palette_shown("?top 5 customers", 14);
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].label, "Ask: top 5 customers");
+    let fx = a.on_key(key(KeyCode::Enter));
+    // Written into the editor, not run.
+    assert!(fx.is_empty());
+    assert_eq!(a.tabs[0].editor.text(), "ASK 'top 5 customers';");
+}
+
+#[test]
 fn ctrl_s_saves_and_the_palette_finds_saved_queries_and_history() {
     let mut a = app();
     a.on_key(ctrl('s'));

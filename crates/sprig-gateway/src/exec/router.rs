@@ -34,6 +34,7 @@ mod fk_ddl;
 pub(super) mod graph;
 mod ids;
 pub(crate) mod layout;
+mod lookup_ddl;
 mod sql_prepare;
 mod txn;
 mod write_forms;
@@ -71,6 +72,7 @@ use crate::tenant::names::Accounts;
 pub(super) use self::binary::param_lit;
 pub(super) use self::fk_ddl::FkDdl;
 pub(crate) use self::layout::ShardingExtension;
+pub(super) use self::lookup_ddl::LookupDdl;
 
 /// The longest a statement waits for a mover's hold.
 const MAX_HOLD_WAIT: Duration = Duration::from_secs(10);

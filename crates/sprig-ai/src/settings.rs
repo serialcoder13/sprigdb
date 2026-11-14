@@ -14,6 +14,9 @@
 //! | `ai.timeout_seconds` | `120` | global |
 //! | `ai.max_output_tokens` | `16000` | global |
 //! | `ai.audit_payload_days` | `30` | tenant, global |
+//! | `ai.mcp.enabled` | `false` | tenant, global |
+//! | `ai.mcp.tools` | `read` | tenant, global |
+//! | `ai.mcp.calls_per_minute` | `120` | tenant, global |
 //!
 //! Values are read through [`Lookup`], which the gateway implements over a
 //! caller's tenant (and database) context; [`TurnSettings::read`] reads
@@ -138,6 +141,63 @@ key!(
     AUDIT_PAYLOAD_DAYS: u64 = "ai.audit_payload_days", 30, TENANT_GLOBAL, HardBounds::range(0, 3650), false,
     "Days the exact payloads sent to the AI provider are kept with the conversation; 0 keeps only their hashes"
 );
+
+key!(
+    /// `ai.mcp.enabled`.
+    MCP_ENABLED: bool = "ai.mcp.enabled", false, TENANT_GLOBAL, HardBounds::NONE, false,
+    "Turn on the MCP server (/v1/mcp) for the tenant, so outside AI agents can use the assistants' tools as the signed-in user; ai.enabled must be on too"
+);
+key!(
+    /// `ai.mcp.tools`.
+    MCP_TOOLS: Text = "ai.mcp.tools", Cow::Borrowed("read"), TENANT_GLOBAL, HardBounds::NONE, false,
+    "The tools MCP clients may call, comma-separated: tool names, read (every read tool of the role) and propose (every proposal tool of the role)"
+);
+key!(
+    /// `ai.mcp.calls_per_minute`.
+    MCP_CALLS_PER_MINUTE: u64 = "ai.mcp.calls_per_minute", 120, TENANT_GLOBAL,
+    HardBounds::range(1, 100_000), false,
+    "MCP tool calls one user may make per minute; more are refused until the minute is over"
+);
+
+/// What the MCP server reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpSettings {
+    /// `ai.enabled`.
+    pub ai_enabled: bool,
+    /// `ai.mcp.enabled`.
+    pub enabled: bool,
+    /// `ai.mcp.tools`.
+    pub tools: String,
+    /// `ai.mcp.calls_per_minute`.
+    pub calls_per_minute: u64,
+}
+
+impl McpSettings {
+    /// Reads them from `l` (a tenant's context).
+    #[must_use]
+    pub fn read(l: &dyn Lookup) -> Self {
+        Self {
+            ai_enabled: l.flag(&ENABLED),
+            enabled: l.flag(&MCP_ENABLED),
+            tools: l.text(&MCP_TOOLS),
+            calls_per_minute: l.number(&MCP_CALLS_PER_MINUTE),
+        }
+    }
+
+    /// `Ok` when both `ai.enabled` and `ai.mcp.enabled` are on.
+    ///
+    /// # Errors
+    /// 39991, naming the key that is off.
+    pub fn check(&self) -> sprig_common::Result<()> {
+        if !self.ai_enabled {
+            return Err(crate::error::disabled());
+        }
+        if !self.enabled {
+            return Err(crate::error::mcp_disabled());
+        }
+        Ok(())
+    }
+}
 
 /// Where values come from: a caller's settings context, a live snapshot,
 /// or the defaults.
@@ -278,6 +338,10 @@ mod tests {
         let a = TurnSettings::read(&Defaults, Role::Triage);
         assert_eq!(a.effort, Effort::Low);
         assert!(!a.share_data);
+        let m = McpSettings::read(&Defaults);
+        assert!(!m.enabled && !m.ai_enabled);
+        assert_eq!(m.tools, "read");
+        assert_eq!(m.check().unwrap_err().protocol().mysql_errno, 39991);
         let reg = sprig_settings::Registry::global().unwrap();
         for k in [
             "ai.enabled",
@@ -286,6 +350,9 @@ mod tests {
             "ai.effort.triage",
             "ai.budget.user_tokens_day",
             "ai.audit_payload_days",
+            "ai.mcp.enabled",
+            "ai.mcp.tools",
+            "ai.mcp.calls_per_minute",
         ] {
             assert!(reg.get(k).is_some(), "{k}");
         }

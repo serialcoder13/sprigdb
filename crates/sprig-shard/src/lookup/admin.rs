@@ -27,8 +27,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
-use mysql_async::prelude::Queryable;
 use mysql_async::Conn;
+use mysql_async::prelude::Queryable;
 use sprig_common::ids::{ClusterId, DbId, GroupId, ObjectId, TenantId};
 use sprig_common::{Result, SprigCode, SprigError};
 
@@ -124,8 +124,8 @@ pub async fn owner_shape(c: &mut Conn, schema: &str, table: &str) -> Result<Owne
             continue;
         }
         let sql_type = match &collation {
-            Some(coll) if matches!(class, crate::key::KeyClass::String { .. }) => {
-                format!("{column_type} COLLATE {coll}")
+            Some(collation_name) if matches!(class, crate::key::KeyClass::String { .. }) => {
+                format!("{column_type} COLLATE {collation_name}")
             }
             _ => column_type,
         };
@@ -151,7 +151,9 @@ pub async fn owner_shape(c: &mut Conn, schema: &str, table: &str) -> Result<Owne
     let mut keys: BTreeMap<String, (bool, bool, Vec<String>)> = BTreeMap::new();
     for (index, non_unique, column, sub_part) in stats {
         out.indexes.insert(index.to_ascii_lowercase());
-        let e = keys.entry(index).or_insert((non_unique == 0, false, Vec::new()));
+        let e = keys
+            .entry(index)
+            .or_insert((non_unique == 0, false, Vec::new()));
         e.1 |= sub_part.is_some();
         e.2.push(column.to_ascii_lowercase());
     }
@@ -235,7 +237,11 @@ impl Admin<'_> {
     ///
     /// # Errors
     /// Catalog and etcd errors.
-    pub async fn lookup_group(&self, cat: &mut Conn, owner_map: &ShardMap) -> Result<Arc<ShardMap>> {
+    pub async fn lookup_group(
+        &self,
+        cat: &mut Conn,
+        owner_map: &ShardMap,
+    ) -> Result<Arc<ShardMap>> {
         for _ in 0..5 {
             let found: Option<u32> = cat
                 .query_first(
@@ -253,18 +259,16 @@ impl Admin<'_> {
                     Err(e) => return Err(e),
                 },
             };
-            match self.maps.load(self.tenant, g).await {
-                Ok((m, _)) => return Ok(Arc::new(m)),
-                Err(_) => {
-                    let clusters = clusters_of(&[owner_map]);
-                    let n = u32::try_from(clusters.len()).unwrap_or(1).max(1);
-                    let m = ShardMap::presplit(self.tenant, g, 0, n, &clusters)?;
-                    // A concurrent creator's map wins; read it back.
-                    let _ = self.maps.create(&m).await;
-                    let (m, _) = self.maps.load(self.tenant, g).await?;
-                    return Ok(Arc::new(m));
-                }
+            if let Ok((m, _)) = self.maps.load(self.tenant, g).await {
+                return Ok(Arc::new(m));
             }
+            let clusters = clusters_of(&[owner_map]);
+            let n = u32::try_from(clusters.len()).unwrap_or(1).max(1);
+            let m = ShardMap::presplit(self.tenant, g, 0, n, &clusters)?;
+            // A concurrent creator's map wins; read it back.
+            let _ = self.maps.create(&m).await;
+            let (m, _) = self.maps.load(self.tenant, g).await?;
+            return Ok(Arc::new(m));
         }
         Err(SprigError::internal("the lookup group couldn't be made"))
     }
@@ -464,9 +468,7 @@ impl Admin<'_> {
             .host
             .pools(&clusters_of(&[&owner_map, &lookup_map]))
             .await?;
-        let shape = self
-            .shape_of(&pools, DbId(db), &owner_map, &table)
-            .await?;
+        let shape = self.shape_of(&pools, DbId(db), &owner_map, &table).await?;
         let col = |c: &str| {
             shape
                 .columns
@@ -537,7 +539,12 @@ impl Admin<'_> {
         let (mut l, placement, pools) = self.load(&mut cat, &rec).await?;
         if l.state == LookupState::Public {
             if !LookupCatalog
-                .set_state(&mut cat, l.id, LookupState::Public, LookupState::Backfilling)
+                .set_state(
+                    &mut cat,
+                    l.id,
+                    LookupState::Public,
+                    LookupState::Backfilling,
+                )
                 .await?
             {
                 return Err(SprigError::new(

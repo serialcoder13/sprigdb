@@ -666,6 +666,20 @@ pub fn inline_view(
     lex: &sprig_sql::lex::LexOptions,
     view: impl FnOnce() -> Result<String>,
 ) -> Option<Result<Vec<u8>>> {
+    inline_named(text, lex, "SPRIG_SETTINGS", view)
+}
+
+/// [`inline_view`] for SprigDB's view `information_schema.<name>`
+/// (`SPRIG_LOOKUP_INDEXES` uses it too).
+///
+/// # Errors
+/// As [`inline_view`].
+pub fn inline_named(
+    text: &[u8],
+    lex: &sprig_sql::lex::LexOptions,
+    name: &str,
+    view: impl FnOnce() -> Result<String>,
+) -> Option<Result<Vec<u8>>> {
     use sprig_sql::lex::{TokenKind, ident_value};
     let tokens = sprig_sql::lex::lex(text, lex).ok()?;
     let sig: Vec<&sprig_sql::lex::Token> = tokens.iter().filter(|t| !t.kind.is_trivia()).collect();
@@ -677,7 +691,7 @@ pub fn inline_view(
     for i in 0..sig.len().saturating_sub(2) {
         if is(sig[i], "information_schema")
             && sig[i + 1].bytes(text) == b"."
-            && is(sig[i + 2], "SPRIG_SETTINGS")
+            && is(sig[i + 2], name)
         {
             const NOT_ALIAS: &[&str] = &[
                 "WHERE",
@@ -729,7 +743,7 @@ pub fn inline_view(
         out.extend_from_slice(&text[at..s]);
         out.extend_from_slice(derived.as_bytes());
         if !aliased {
-            out.extend_from_slice(b" AS `SPRIG_SETTINGS`");
+            out.extend_from_slice(format!(" AS `{name}`").as_bytes());
         }
         at = e;
     }

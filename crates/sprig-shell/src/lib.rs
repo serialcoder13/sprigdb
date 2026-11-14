@@ -7,6 +7,7 @@
 
 pub mod admin;
 pub mod api;
+pub mod ask;
 pub mod cli;
 pub mod dash;
 pub mod error;

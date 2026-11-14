@@ -14,6 +14,7 @@
 //! Every proposal and advisor run is a decision in the tenant's log.
 
 mod graphs;
+mod lookups;
 mod ops;
 mod rekey;
 pub use graphs::{GraphIndexRow, GraphPartition, GraphRow, GraphShardRow, GraphView};
@@ -203,6 +204,8 @@ pub struct ShardingLoop {
     published: Mutex<BTreeSet<TenantId>>,
     /// `sharding.mode = approve` holds jobs for approval.
     pub approvals: std::sync::OnceLock<Arc<crate::approvals::ControllerApprovals>>,
+    /// When each tenant's workload was last read for lookup proposals.
+    lookup_runs: Mutex<HashMap<TenantId, Instant>>,
 }
 
 impl std::fmt::Debug for ShardingLoop {
@@ -263,6 +266,7 @@ impl ShardingLoop {
             publish: None,
             published: Mutex::new(BTreeSet::new()),
             approvals: std::sync::OnceLock::new(),
+            lookup_runs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -558,6 +562,11 @@ impl ShardingLoop {
                 &mut report,
             )
             .await?;
+        }
+        // Global lookup indexes: stopped builds, and the advisor's
+        // proposals for reads that scatter by a unique column.
+        if let Err(e) = self.lookup_tick(tenant, &home, &ts).await {
+            tracing::warn!(tenant = %tenant, error = %e, "lookup indexes: the tick failed");
         }
         Ok(report)
     }

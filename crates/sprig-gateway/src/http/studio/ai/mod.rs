@@ -9,6 +9,7 @@
 //! | `GET /v1/ai/glossary?status=` | The tenant glossary (`accepted`, `proposed` or `all`) |
 //! | `POST /v1/ai/glossary` | Adds or replaces an accepted term `{term, definition, sql?, tables?}` (tenant administrators) |
 //! | `POST /v1/ai/glossary/{term}:accept`, `:reject`, `:delete` | Decides a proposal, or deletes a term (tenant administrators) |
+//! | `POST`, `DELETE /v1/mcp` | The MCP server: the tenant assistants' tools for outside agents ([`mcp`]) |
 //!
 //! **Who.** Every route runs as the signed-in caller (a Studio session,
 //! Basic or an API key). `dba` and `data` turns need a tenant login and
@@ -28,8 +29,10 @@
 //! recent feedback ([`sprig_ai::glossary::prompt`],
 //! [`sprig_ai::feedback::prompt`]).
 
+pub mod ask;
 pub mod chat;
 pub mod host;
+pub mod mcp;
 
 #[cfg(test)]
 mod tests;

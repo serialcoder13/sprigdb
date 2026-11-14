@@ -1149,6 +1149,60 @@
         ],
         "type": "object"
       },
+      "McpMessage": {
+        "properties": {
+          "error": {
+            "properties": {
+              "code": {
+                "type": "integer"
+              },
+              "data": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "id": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ]
+          },
+          "jsonrpc": {
+            "enum": [
+              "2.0"
+            ],
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "result": {
+            "additionalProperties": true,
+            "type": "object"
+          }
+        },
+        "required": [
+          "jsonrpc"
+        ],
+        "type": "object"
+      },
       "MfaRequest": {
         "properties": {
           "challenge": {
@@ -5520,6 +5574,125 @@
         "summary": "Deletes the caller's saved query {name}",
         "tags": [
           "sprig.v1.Library"
+        ]
+      }
+    },
+    "/v1/mcp": {
+      "delete": {
+        "operationId": "Ai.McpEndSession",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Mcp-Session-Id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Ended"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpMessage"
+                }
+              }
+            },
+            "description": "No such session"
+          }
+        },
+        "summary": "Ends an MCP session (Mcp-Session-Id)",
+        "tags": [
+          "sprig.v1.Ai"
+        ]
+      },
+      "post": {
+        "operationId": "Ai.Mcp",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "role",
+            "required": false,
+            "schema": {
+              "enum": [
+                "data",
+                "dba"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Mcp-Session-Id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "MCP-Protocol-Version",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Mcp-Method",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Mcp-Name",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/McpMessage"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpMessage"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/McpMessage"
+                }
+              }
+            },
+            "description": "An error"
+          }
+        },
+        "summary": "The MCP server (protocol revisions 2026-07-28, stateless, and 2025-03-26 to 2025-11-25, with sessions): one JSON-RPC request or notification (initialize, server/discover, tools/list, tools/call, ping). Tools run as the caller; proposals are returned, never run. Needs ai.enabled and ai.mcp.enabled (39991). Notifications are answered 202 with no body",
+        "tags": [
+          "sprig.v1.Ai"
         ]
       }
     },

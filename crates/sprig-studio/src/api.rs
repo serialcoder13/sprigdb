@@ -84,7 +84,44 @@ fn ai_paths() -> Value {
         "/v1/ai/glossary/{term}": {"post": with_params(op("Ai.GlossaryAction", "sprig.v1.Ai",
             "{term}:accept or :reject a proposed term, or {term}:delete a term (tenant administrators)",
             None, "JsonReply"), &[p("term")])},
+        "/v1/mcp": mcp_path(),
     })
+}
+
+/// The MCP server: JSON-RPC over Streamable HTTP.
+fn mcp_path() -> Value {
+    let h = |name: &str| json!({"name": name, "in": "header", "required": false, "schema": {"type": "string"}});
+    let role = json!({"name": "role", "in": "query", "required": false,
+        "schema": {"type": "string", "enum": ["data", "dba"]}});
+    let mut post = op(
+        "Ai.Mcp",
+        "sprig.v1.Ai",
+        "The MCP server (protocol revisions 2026-07-28, stateless, and 2025-03-26 to 2025-11-25, with \
+         sessions): one JSON-RPC request or notification (initialize, server/discover, tools/list, \
+         tools/call, ping). Tools run as the caller; proposals are returned, never run. Needs \
+         ai.enabled and ai.mcp.enabled (39991). Notifications are answered 202 with no body",
+        Some("McpMessage"),
+        "McpMessage",
+    );
+    post["parameters"] = json!([
+        role,
+        h("Mcp-Session-Id"),
+        h("MCP-Protocol-Version"),
+        h("Mcp-Method"),
+        h("Mcp-Name")
+    ]);
+    post["responses"]["default"]["content"] = json!({"application/json": {
+        "schema": {"$ref": "#/components/schemas/McpMessage"}}});
+    let delete = json!({
+        "operationId": "Ai.McpEndSession",
+        "tags": ["sprig.v1.Ai"],
+        "summary": "Ends an MCP session (Mcp-Session-Id)",
+        "parameters": [h("Mcp-Session-Id")],
+        "responses": {"204": {"description": "Ended"},
+            "default": {"description": "No such session", "content": {"application/json": {
+                "schema": {"$ref": "#/components/schemas/McpMessage"}}}}},
+    });
+    json!({"post": post, "delete": delete})
 }
 
 /// Docs search over the release's documentation.
@@ -437,6 +474,11 @@ fn ai_schemas() -> Value {
             "proposal_id": string, "outcome": {"type": "string", "enum": ["accepted", "dismissed", "failed"]},
             "note": string}), &[]),
         "AiRecorded": s(json!({"recorded": boolean}), &["recorded"]),
+        "McpMessage": s(json!({"jsonrpc": {"type": "string", "enum": ["2.0"]},
+            "id": {"oneOf": [{"type": "string"}, {"type": "integer"}]}, "method": string,
+            "params": obj, "result": obj,
+            "error": s(json!({"code": int, "message": string, "data": obj}), &["code", "message"])}),
+            &["jsonrpc"]),
         "AiGlossaryTerm": s(json!({"term": string, "definition": string, "sql": string,
             "tables": {"type": "array", "items": string}}), &["term", "definition"]),
         "AiGlossary": s(json!({"terms": {"type": "array", "items": s(json!({"term": string,

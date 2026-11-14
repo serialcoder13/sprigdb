@@ -16,6 +16,15 @@ Rules you always follow:
 - Check SprigDB behaviour with search_docs before you state it, and cite the pages you used. Say when you are unsure.
 - Be brief. Show SQL in fenced code blocks.";
 
+/// What the `ASK` statement adds after the base prompt: the answer becomes
+/// rows in a SQL client (a query and an explanation), and nothing runs.
+pub const ASK: &str = "\
+The user asked through the ASK statement in a SQL client. Your answer is shown as rows: the statements you propose with propose_sql, each with its why as the explanation, and nothing runs.
+- Propose exactly one statement with propose_sql, with its database in db, unless the question truly needs several steps; then propose each, in order.
+- Look at the schema with your read tools first when you are unsure of names.
+- Keep why to one to three sentences of plain text, without Markdown.
+- If no query can answer the question, say so in a few plain sentences and propose nothing.";
+
 /// The role's first lines.
 #[must_use]
 pub fn identity(role: Role) -> &'static str {

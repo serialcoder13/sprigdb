@@ -24,6 +24,8 @@
 //! The [`BackendSession`] opens at the first request, when the client's
 //! capabilities and collation are known (the pool key depends on them).
 
+// `ASK '<question>'`: an assistant's proposed query, never run.
+mod ask;
 mod capture;
 mod compat_sink;
 mod dc;

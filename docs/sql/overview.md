@@ -241,6 +241,8 @@ The rules:
 | `information_schema.SPRIG_SETTINGS`, `information_schema.SPRIG_ROW_POLICIES` | SprigDB's views | [information_schema and SHOW](information-schema.md#sprigdbs-information_schema-views) |
 | `EXPLAIN FORMAT=SPRIG` | Distributed plans | [EXPLAIN and workload](explain-and-workload.md#explain-formatsprig) |
 | `SHOW SPRIG RECOMMENDATIONS`, `SPRIG APPROVE \| IGNORE \| SNOOZE RECOMMENDATION` | Decide on recommendations | [EXPLAIN and workload](explain-and-workload.md#recommendations) |
+| **AI assistants** | | |
+| `ASK 'question' [IN DATABASE db] [ROLE data \| dba]` | A proposed query and its explanation, never run | [AI assistants](../tools/assistants.md#ask-in-sql) |
 
 ## Graphs in SQL
 

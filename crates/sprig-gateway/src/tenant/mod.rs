@@ -28,6 +28,7 @@ pub mod backends;
 pub mod ddl;
 pub mod ddl_owners;
 pub mod locator;
+pub mod lookups_sql;
 pub mod names;
 pub mod password;
 pub mod pins_sql;

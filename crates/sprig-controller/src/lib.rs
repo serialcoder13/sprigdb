@@ -734,8 +734,10 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
     let ai_admin = Arc::new(ai_admin::AiAdmin::new(
         Arc::clone(&stores.global),
         match &cfg.controller.workload_key_file {
-            Some(p) => Some(Arc::new(sprig_workload::keyring::MasterKeyring::from_file(p)?)
-                as Arc<dyn sprig_ai::keys::AiKeyring>),
+            Some(p) => Some(
+                Arc::new(sprig_workload::keyring::MasterKeyring::from_file(p)?)
+                    as Arc<dyn sprig_ai::keys::AiKeyring>,
+            ),
             None => None,
         },
     )?);

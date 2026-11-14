@@ -293,6 +293,7 @@ pub fn command() -> Command {
                 ),
         )
         .subcommand(crate::inbox::command())
+        .subcommand(crate::ask::command())
         .subcommand(
             Command::new("admin")
                 .about("Every sprigctl command: sprig admin <sprigctl arguments>")
@@ -721,6 +722,14 @@ async fn run(m: &ArgMatches) -> ExitCode {
         }
         Some(("stream" | "queue", _)) => {
             return crate::msg::cli(&mut runner, m, format_of(m)).await;
+        }
+        Some(("ask", sub)) => {
+            // Text unless -o asks for rows.
+            let rows = m.get_one::<String>("format").is_some();
+            let mut w = Writer::new(std::io::BufWriter::new(std::io::stdout()), format_of(m));
+            return exit(
+                crate::ask::cli(&mut runner, m, sub, &mut w, rows, &mut crate::term::confirm).await,
+            );
         }
         _ => {}
     }

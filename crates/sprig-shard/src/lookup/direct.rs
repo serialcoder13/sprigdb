@@ -391,7 +391,8 @@ async fn locked_chunk(oc: &mut Conn, sql: &str, prm: Vec<Value>) -> Result<Vec<R
     let mut tries = 0;
     loop {
         oc.query_drop("BEGIN").await.map_err(db_err)?;
-        let r: std::result::Result<Vec<Row>, _> = oc.exec(sql, Params::Positional(prm.clone())).await;
+        let r: std::result::Result<Vec<Row>, _> =
+            oc.exec(sql, Params::Positional(prm.clone())).await;
         match r {
             Ok(rows) => {
                 oc.query_drop("COMMIT").await.map_err(db_err)?;
@@ -459,17 +460,20 @@ async fn backfill(
                 .map(|r| (nv..nv + np).map(|i| r[i].clone()).collect());
             for (t, batch) in batches {
                 let mut c = conn(pools, &t.cluster).await?;
-                let sql = l.insert_sql(&t.schema, true);
-                for ins in batch {
-                    c.exec_drop(&sql, Params::Positional(ins))
-                        .await
-                        .map_err(db_err)?;
-                    if c.affected_rows() == 1 {
-                        report.inserted += 1;
-                    } else {
-                        report.skipped += 1;
-                    }
-                }
+                // One multi-row INSERT IGNORE per lookup shard and chunk.
+                let one = l.insert_sql(&t.schema, true);
+                let (head, tuple) = one
+                    .rsplit_once(" VALUES ")
+                    .ok_or_else(|| SprigError::internal("lookup insert without VALUES"))?;
+                let n = batch.len() as u64;
+                let sql = format!("{head} VALUES {}", vec![tuple; batch.len()].join(", "));
+                let prm: Vec<Value> = batch.into_iter().flatten().collect();
+                c.exec_drop(&sql, Params::Positional(prm))
+                    .await
+                    .map_err(db_err)?;
+                let inserted = c.affected_rows();
+                report.inserted += inserted;
+                report.skipped += n.saturating_sub(inserted);
             }
             LookupCatalog.touch(catalog, l.id).await?;
         }
@@ -576,7 +580,10 @@ async fn verify(
         loop {
             let (cond, prm) = after_cond(l, after.as_ref());
             let rows: Vec<Row> = oc
-                .exec(owner_select(l, &o, &cond, chunk, false), Params::Positional(prm))
+                .exec(
+                    owner_select(l, &o, &cond, chunk, false),
+                    Params::Positional(prm),
+                )
                 .await
                 .map_err(db_err)?;
             if rows.is_empty() {
@@ -586,8 +593,7 @@ async fn verify(
                 .last()
                 .map(|r| (nv..nv + np).map(|i| r[i].clone()).collect());
             // Owner rows by lookup shard: (values, primary key, hash).
-            let mut by_shard: BTreeMap<Target, Vec<(Vec<Value>, Vec<Value>, Value)>> =
-                BTreeMap::new();
+            let mut by_shard: BTreeMap<Target, Vec<OwnerRow>> = BTreeMap::new();
             for r in &rows {
                 let vals: Vec<Value> = (0..nv).map(|i| r[i].clone()).collect();
                 if vals.contains(&Value::NULL) {
@@ -702,6 +708,9 @@ async fn verify(
     }
     Ok(repaired)
 }
+
+/// An owner row a verification reads: values, primary key, routing hash.
+type OwnerRow = (Vec<Value>, Vec<Value>, Value);
 
 /// An owner's primary key and hash as one comparable text.
 fn owner_key(pk: &[Value], rk: u64) -> String {

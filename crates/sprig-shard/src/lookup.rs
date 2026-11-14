@@ -531,6 +531,30 @@ fn lookup_unavailable(e: SprigError) -> SprigError {
     )
 }
 
+/// Points our own lookup row at the owner's current routing hash.
+async fn rehash_own(
+    t: &mut dyn LookupSessions,
+    s: &Target,
+    l: &LookupIndex,
+    v: &[KeyValueOwned],
+    owner: &OwnerRef,
+) -> Result<()> {
+    let mut upd = vec![Value::UInt(owner.rk.0)];
+    upd.extend(values(v)?);
+    t.pre(
+        s,
+        &format!(
+            "UPDATE {} SET owner_rk = ?, prev_rk = NULL WHERE {}",
+            fq(s, &l.physical()),
+            l.value_where()
+        ),
+        params(upd),
+    )
+    .await
+    .map_err(lookup_unavailable)?;
+    Ok(())
+}
+
 #[allow(clippy::many_single_char_names)] // the algorithm's names: t, p, l, v
 /// Claims value `v` of lookup `l` for `owner` inside transaction `t`
 /// (`claim`). Call it before Main writes the owner row; claims
@@ -599,19 +623,7 @@ pub async fn claim(
         // Our own row under an old routing hash (a rebuild after a
         // re-key): it names us, so it only needs the new hash. An owner
         // check at the old hash could find this very row.
-        let mut upd = vec![Value::UInt(owner.rk.0)];
-        upd.extend(values(v)?);
-        t.pre(
-            &s,
-            &format!(
-                "UPDATE {} SET owner_rk = ?, prev_rk = NULL WHERE {}",
-                fq(&s, &l.physical()),
-                l.value_where()
-            ),
-            params(upd),
-        )
-        .await
-        .map_err(lookup_unavailable)?;
+        rehash_own(t, &s, l, v, owner).await?;
         return Ok(ClaimResult::Reclaimed);
     }
     // The owner check: a locking read in Main on the holder's shard waits
@@ -880,7 +892,10 @@ impl LookupCatalog {
             )
             .await
             .map_err(crate::groups::db_err)?;
-        Ok(rows.into_iter().filter_map(LookupRecord::from_row).collect())
+        Ok(rows
+            .into_iter()
+            .filter_map(LookupRecord::from_row)
+            .collect())
     }
 
     /// Adds `n` to `conflicts`.

@@ -889,6 +889,7 @@ pub async fn handle(
         (_, p) if messaging::is_messaging_path(p) => messaging::route(core, info, req).await,
         (_, p) if library::is_library_path(p) => library::route(core, info, req).await,
         (_, p) if ai::is_ai_path(p) => ai::route(core, info, req).await,
+        (_, ai::mcp::PATH) => Ok(ai::mcp::route(core, info, req).await),
         ("POST", "/v1/policies:testAs") => policies::test_as(core, info, req).await,
         ("POST", crate::docs::http::PATH) => {
             return Ok(crate::docs::http::search(core, info, req).await);

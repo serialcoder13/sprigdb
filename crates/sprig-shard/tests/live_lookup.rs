@@ -184,9 +184,11 @@ async fn run(s: Setup, label: &str) {
         .unwrap();
     let mut l = lookup_def();
     LookupCatalog.insert(&mut cat, &l).await.unwrap();
-    let report = direct::build(&pools0, &mut cat, &s.placement, &mut l, 100, || async { Ok(()) })
-        .await
-        .unwrap();
+    let report = direct::build(&pools0, &mut cat, &s.placement, &mut l, 100, || async {
+        Ok(())
+    })
+    .await
+    .unwrap();
     assert_eq!(l.state, LookupState::Public);
     assert_eq!(report.rows, 0);
 
@@ -651,9 +653,11 @@ async fn live_lookup_build_backfill_and_auto() {
         Some(77),
     );
     LookupCatalog.insert(&mut cat, &auto).await.unwrap();
-    let rep = direct::build(&p, &mut cat, &s.placement, &mut auto, 64, || async { Ok(()) })
-        .await
-        .unwrap();
+    let rep = direct::build(&p, &mut cat, &s.placement, &mut auto, 64, || async {
+        Ok(())
+    })
+    .await
+    .unwrap();
     assert_eq!(rep.inserted, 299);
     let rks = lookup::route(&reader, &s.placement, &auto, &[vec![text("VIP")]])
         .await

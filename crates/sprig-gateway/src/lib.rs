@@ -393,6 +393,8 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         Arc::clone(&stores.global),
         ctx.config.gateway.workload_key_file.as_deref(),
     );
+    // `ASK` in SQL runs its turn and tools through the HTTP core.
+    http::studio::ai::ask::install(Arc::clone(&core));
     let http_fe = Arc::new(http::HttpFrontend::new(Arc::clone(&core)));
     // Kafka on 9092: catalog logins only, since topics are
     // a tenant's streams.
