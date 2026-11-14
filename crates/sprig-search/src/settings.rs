@@ -1,7 +1,6 @@
-//! `search.*` settings (chapter 39, "Configuration"), registered here so
+//! `search.*` settings, registered here so
 //! every process that runs search (gateways, workers with the search
-//! role) reads the same keys. Process scope (dc and global) for now
-//! (decision S8).
+//! role) reads the same keys. Process scope (dc and global) for now.
 
 use std::borrow::Cow;
 
@@ -83,9 +82,8 @@ key!(
 );
 
 key!(
-    /// `search.copies` (R5 round 6): copies of each index on workers with
-    /// the search role; 0 keeps a copy in each gateway that uses the index
-    /// (decision S1's mode).
+    /// `search.copies`: copies of each index on workers with
+    /// the search role; 0 keeps a copy in each gateway that uses the index.
     COPIES: u64 = "search.copies", 2, HardBounds::range(0, 8),
     "Copies per partition, on different workers"
 );

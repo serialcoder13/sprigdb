@@ -1,4 +1,4 @@
-//! Search index definitions (chapter 39, "Catalog tables"; build step 1):
+//! Search index definitions:
 //! what a search index covers, as the catalog keeps it and every front end
 //! creates it: SQL's `CREATE SEARCH INDEX` ([`crate::ddl`]), MongoDB's
 //! `createSearchIndexes` ([`IndexDef::from_atlas`]) and `text` indexes

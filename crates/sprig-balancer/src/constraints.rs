@@ -1,5 +1,4 @@
-//! Hard constraints and `feasible()` (chapter 11, "Constraints"; build
-//! steps 4 and 9), and the co-write rule that binds groups into units.
+//! Hard constraints and `feasible()`, and the co-write rule that binds groups into units.
 //!
 //! Every cluster that fails a constraint is returned with the first
 //! [`Blocker`] found, so placement errors and `sprigctl explain placement`
@@ -69,7 +68,7 @@ pub enum Blocker {
     /// Shard schemas after the move above
     /// `placement.max_shard_schemas_per_cluster`.
     SchemaCap,
-    /// Chapter 09 reports the cluster over its table budget.
+    /// The cluster's tuning reports it over its table budget.
     TableBudget,
     /// Table-cache misses keep rising after tuning.
     CacheThrashing,
@@ -184,8 +183,8 @@ impl Feasibility {
     }
 }
 
-/// Checks every cluster of `view` for `unit` (chapter 11's hard
-/// constraints 1 to 7; constraint 8, co-writes, is in [`unit_of`]).
+/// Checks every cluster of `view` for `unit` against the hard
+/// constraints; the co-write rule is in [`unit_of`].
 #[must_use]
 pub fn feasible(view: &FleetView, unit: &Unit, purpose: Purpose, now: Timestamp) -> Feasibility {
     feasible_in(view, &view.loads(), unit, purpose, now)

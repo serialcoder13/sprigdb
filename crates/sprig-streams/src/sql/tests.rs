@@ -17,6 +17,7 @@ struct Mock {
     filtered: bool,
     change_topic: bool,
     tables: HashMap<String, TableInfo>,
+    lags: HashMap<StreamId, u64>,
 }
 
 fn slot(shard: u32) -> PhysSlot {
@@ -84,6 +85,9 @@ impl Host for Mock {
     async fn unsubscribe(&mut self, def: &StreamDef) -> Result<()> {
         self.unsubscribed.push(def.id);
         Ok(())
+    }
+    async fn lags(&mut self) -> HashMap<StreamId, u64> {
+        self.lags.clone()
     }
 }
 
@@ -282,11 +286,21 @@ async fn create_publish_read_drop() {
     handle("DROP STREAM IF EXISTS nope", &cx(&state), &mut m)
         .await
         .unwrap();
-    let Handled::Rows { rows, .. } = handle("SHOW STREAMS", &cx(&state), &mut m).await.unwrap()
+    let Handled::Rows { columns, rows } =
+        handle("SHOW STREAMS", &cx(&state), &mut m).await.unwrap()
     else {
         panic!()
     };
     assert_eq!(rows[0][0].as_deref(), Some("order_events"));
+    // r9feed2: the sequencer's lag, NULL while none runs it.
+    assert_eq!(columns.last().map(String::as_str), Some("Lag_ms"));
+    assert_eq!(rows[0].last(), Some(&None));
+    m.lags.insert(def.id, 1250);
+    let Handled::Rows { rows, .. } = handle("SHOW STREAMS", &cx(&state), &mut m).await.unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(rows[0].last(), Some(&Some("1250".to_owned())));
 }
 
 #[tokio::test]

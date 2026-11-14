@@ -1,4 +1,4 @@
-//! The data plane end to end (chapter 45 build steps 10 and 11): Produce,
+//! The data plane end to end: Produce,
 //! Fetch, ListOffsets and OffsetForLeaderEpoch through the broker, with the
 //! crate's own client, over [`MemData`].
 

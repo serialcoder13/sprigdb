@@ -1,6 +1,6 @@
-//! `sprig-search`: full-text search with Tantivy (chapter 39).
+//! `sprig-search`: full-text search with Tantivy.
 //!
-//! Layer: 2 data layer. Design: [chapter 39](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/39-search.md) (Full-text search) of the SprigDB low-level design.
+//! Layer: 2 data layer.
 //!
 //! - [`def`], index definitions (SQL, Atlas, MongoDB `text`);
 //! - [`ddl`], `CREATE`, `ALTER`, `DROP` and `SHOW SEARCH INDEX`, search

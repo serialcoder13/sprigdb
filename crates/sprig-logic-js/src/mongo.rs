@@ -1,6 +1,5 @@
-//! MongoDB's server-side JavaScript on SprigDB's QuickJS (chapter 30,
-//! "Server-side JavaScript"; decision S110): the code of `$where`,
-//! `$function` and `$accumulator`.
+//! MongoDB's server-side JavaScript on SprigDB's QuickJS: the code of
+//! `$where`, `$function` and `$accumulator`.
 //!
 //! **One runtime per operation per thread.** A MongoDB operation calls
 //! its code once per document, so compiling and building a runtime per

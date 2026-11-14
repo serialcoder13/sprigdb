@@ -456,7 +456,7 @@ async fn maintain_migrates_rolls_up_and_retains_through_a_locator() {
     .await;
 }
 
-/// Decision X34: a fingerprint row recorded before R6 round 6 (shape
+/// A fingerprint row recorded with an older shape (shape
 /// version 1, `json_path` without `func` and `cmp`) is rewritten with this
 /// build's shape the next time a gateway records the statement; a row of
 /// the current or a newer version is left alone.
@@ -466,7 +466,7 @@ async fn an_old_shape_version_row_is_rewritten() {
         let t = WorkloadTables::new(&schema);
         let (fp, n) = new_fp("SELECT k FROM db0 WHERE JSON_VALUE(v, '$.email') = 'a@b.c'");
         assert!(!fp.shape.all_unsargable(), "{}", fp.shape.to_json());
-        // The row as a build before R6 round 6 wrote it.
+        // The row as a build before shape version 2 wrote it.
         let mut old: serde_json::Value = serde_json::from_str(&fp.shape.to_json()).unwrap();
         old["v"] = 1.into();
         for p in old["predicates"].as_array_mut().unwrap() {

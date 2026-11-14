@@ -10,21 +10,21 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-# Chapter 11's sprig_balancer_* metrics.
+# The sprig_balancer_* metrics.
 metrics.workspace = true
 mysql_async.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# Chapter 08: owners' crates depend on sprig-catalog, never the reverse. The
+# Owners' crates depend on sprig-catalog, never the reverse. The
 # `decisions` table is this crate's migration module.
 sprig-catalog.workspace = true
 sprig-common.workspace = true
 # Recommendations live in the DC tier (`/sprig/dc/<dc>/recommendations/`).
 sprig-meta.workspace = true
-# Chapter 10's `Mover`: the real executor of planned moves.
+# The `Mover`: the real executor of planned moves.
 sprig-mover.workspace = true
 sprig-settings.workspace = true
-# Chapter 15's shard maps and schema names (chapter 20).
+# Shard maps and schema names.
 sprig-shard.workspace = true
 tokio.workspace = true
 tracing.workspace = true

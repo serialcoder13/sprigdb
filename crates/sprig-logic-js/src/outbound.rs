@@ -1,6 +1,5 @@
-//! Outbound calls from engine-tier code (chapter 41, "The fallback
-//! runtime", Outbound): `Sprig.Http.Fetch` reaches only hosts on
-//! `logic.outbound_allowlist`.
+//! Outbound calls from engine-tier code: `Sprig.Http.Fetch` reaches only
+//! hosts on `logic.outbound_allowlist`.
 //!
 //! ```text
 //! fetch(url):

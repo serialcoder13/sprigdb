@@ -1,10 +1,9 @@
-//! The `db` interface of the fallback tier (chapter 41, "The `db`
-//! interface"; build step 13 in part): what `Sprig.Db.*` hands to its
+//! The `db` interface of the fallback tier: what `Sprig.Db.*` hands to its
 //! host, and how statements are checked and bound before they leave.
 //!
 //! The host runs each statement as the caller would: in the gateway,
 //! through the tenant session's own pipeline (name virtualization,
-//! chapter 29's privilege checks, the session's backend connection and
+//! privilege checks, the session's backend connection and
 //! transaction), never through `sprig_ctl`. So a caller without rights on
 //! a table gets the same 1142 from engine-tier code as from a client
 //! statement or a compiled routine.
@@ -115,8 +114,8 @@ pub trait DbBridge: Send + Sync {
     async fn exec(&self, op: DbOp) -> Result<Reply>;
 
     /// One log line of the code (`console.log`, `ctx.log`, Lua `log`).
-    /// Hosts that report a run's logs keep them (a test run, R7
-    /// follow-ups); the default drops them (they also go to tracing).
+    /// Hosts that report a run's logs keep them (a test run);
+    /// the default drops them (they also go to tracing).
     fn log(&self, _line: &str) {}
 }
 
@@ -409,7 +408,7 @@ pub fn shape_of(sql: &str) -> Shape {
 /// `db.call(name, ...args)`: a `CALL` of the logic function `name`
 /// (`fn` or `db.fn`, plain names only), each argument a literal. It runs
 /// through the caller's session like any statement, so `EXECUTE` is
-/// checked and an engine-tier callee runs nested (chapter 41's
+/// checked and an engine-tier callee runs nested (up to
 /// `logic.max_call_depth`).
 ///
 /// # Errors

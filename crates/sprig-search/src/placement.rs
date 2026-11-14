@@ -1,5 +1,4 @@
-//! Where copies live (chapter 39, "Placement of copies", "Partitions and
-//! copies"; build step 5; R5 round 6).
+//! Where copies live.
 //!
 //! Records in the DC tier:
 //!
@@ -26,7 +25,7 @@
 //!   on failure; none ready → wait (39824) ; none at all → 39825
 //! ```
 //!
-//! Partitions are the index's key-hash buckets (decision S2), so a copy is
+//! Partitions are the index's key-hash buckets, so a copy is
 //! the whole index and a worker loss costs one copy, served meanwhile by
 //! the other.
 

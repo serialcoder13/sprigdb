@@ -1,7 +1,6 @@
-//! The workload tables of the tenant catalog (chapter 12, "Data structures
-//! and storage"; Appendix C; build step 4), as the `workload` migration
+//! The workload tables of the tenant catalog, as the `workload` migration
 //! module, with the writes the flusher makes, the rollup and retention
-//! job, and the reader chapter 13 uses.
+//! job, and the reader automatic indexing uses.
 //!
 //! The module registers with `sprig-catalog`'s migrator
 //! ([`WORKLOAD_MODULE`]); tenant bootstrap migrates it with the core
@@ -22,12 +21,12 @@
 //! merge and the deletes are one transaction per batch of 500, so a rerun
 //! is idempotent.
 //!
-//! **Day rows** *(choice, beyond the chapter)*: rolled-up hours older than
-//! [`DAY_AFTER_DAYS`] (7) are merged into one row per UTC day, stored with
-//! `bucket_start` at midnight, `gateway_id = 0` and `part =`
-//! [`DAY_PART`] (65535), so a 30-day window reads at most 7 × 24 + 23
-//! rows per fingerprint. Readers sum whatever rows fall in the window; a
-//! window that starts inside a day older than 7 days gets the whole day.
+//! **Day rows** *(choice)*: rolled-up hours older than [`DAY_AFTER_DAYS`]
+//! (7) are merged into one row per UTC day, stored with `bucket_start` at
+//! midnight, `gateway_id = 0` and `part =` [`DAY_PART`] (65535), so a
+//! 30-day window reads at most 7 × 24 + 23 rows per fingerprint. Readers
+//! sum whatever rows fall in the window; a window that starts inside a day
+//! older than 7 days gets the whole day.
 //!
 //! **Retention** ([`WorkloadTables::retain`]): stats older than
 //! `workload.retention_days`, expired samples, samples past
@@ -55,7 +54,7 @@ use crate::window::FpWindowStats;
 /// The module name in the catalog's format records.
 pub const MODULE: &str = "workload";
 
-/// `workload_fingerprints` (chapter 12, Appendix C).
+/// `workload_fingerprints`.
 pub const DDL_FINGERPRINTS: &str = "CREATE TABLE IF NOT EXISTS workload_fingerprints (
   fingerprint_id  BIGINT UNSIGNED NOT NULL,
   kind            ENUM('sql','mongo','redis','kv','vector','search','analytics','api',
@@ -77,7 +76,7 @@ pub const DDL_FINGERPRINTS: &str = "CREATE TABLE IF NOT EXISTS workload_fingerpr
   KEY by_last_seen (last_seen)
 ) ENGINE=InnoDB";
 
-/// `workload_stats` (chapter 12, Appendix C).
+/// `workload_stats`.
 pub const DDL_STATS: &str = "CREATE TABLE IF NOT EXISTS workload_stats (
   fingerprint_id   BIGINT UNSIGNED  NOT NULL,
   bucket_start     DATETIME         NOT NULL,
@@ -104,7 +103,7 @@ pub const DDL_STATS: &str = "CREATE TABLE IF NOT EXISTS workload_stats (
   KEY by_bucket (bucket_start)
 ) ENGINE=InnoDB";
 
-/// `workload_samples` (chapter 12; not in Appendix C yet).
+/// `workload_samples`.
 pub const DDL_SAMPLES: &str = "CREATE TABLE IF NOT EXISTS workload_samples (
   fingerprint_id BIGINT UNSIGNED NOT NULL,
   sample_id      BIGINT UNSIGNED NOT NULL,
@@ -129,13 +128,13 @@ pub static WORKLOAD_MIGRATIONS: &[Migration] = &[Migration {
 }];
 
 /// The module, for [`Migrator::new`](sprig_catalog::Migrator::new) and
-/// chapter 08's `BootstrapHooks.modules`.
+/// the catalog's `BootstrapHooks.modules`.
 pub const WORKLOAD_MODULE: Module = Module {
     name: MODULE,
     migrations: WORKLOAD_MIGRATIONS,
 };
 
-/// Rows per multi-row statement (chapter 12: "batched 500 per statement").
+/// Rows per multi-row statement.
 pub const BATCH: usize = 500;
 
 /// `part` of a day row (module docs).
@@ -292,7 +291,7 @@ pub struct WorkloadTables {
 
 /// The stats columns after the key, in table order.
 /// `insert_fingerprints`' update of a row recorded with an older shape
-/// version (decision X34). MariaDB assigns left to right, so
+/// version. MariaDB assigns left to right, so
 /// `shape_version` goes last: the conditions before it read the stored
 /// version.
 const REWRITE_OLD_SHAPE: &str = "\
@@ -384,8 +383,8 @@ impl WorkloadTables {
     /// First sightings: `INSERT IGNORE INTO workload_fingerprints`, 500
     /// rows per statement. A row already there whose `shape_version` is
     /// older than [`SHAPE_VERSION`] gets this build's shape, `object_ids`
-    /// and `stmt_type` (decision X34: a fingerprint first recorded before
-    /// R6 round 6 gains its `JSON_PATH` predicates' `func` and `cmp`, so
+    /// and `stmt_type` (a fingerprint first recorded with shape version 1
+    /// gains its `JSON_PATH` predicates' `func` and `cmp`, so
     /// automatic indexing can propose field columns for it). Rows of the
     /// same or a newer version, and `first_seen`, `last_seen` and `flags`,
     /// are left alone. Returns the affected-row count: 1 per row inserted,
@@ -614,7 +613,7 @@ impl WorkloadTables {
 
     /// One fingerprint's stats per bucket in `[from, to)` (seconds since the
     /// epoch), merged over gateways and parts, oldest first: Studio's
-    /// latency series (chapter 44, `Workload.Series`).
+    /// latency series (`Workload.Series`).
     ///
     /// # Errors
     /// The catalog's errors; 39999 for a malformed row.
@@ -645,7 +644,7 @@ impl WorkloadTables {
         Ok(out.into_iter().collect())
     }
 
-    /// Chapter 12's `WorkloadStore::window` over one catalog: every
+    /// `WorkloadStore::window` over one catalog: every
     /// fingerprint with runs in buckets starting in `[from, to)`, its
     /// counters merged (sums, maxima, histograms and session sets), with
     /// its text and shape. Samples are not included (see

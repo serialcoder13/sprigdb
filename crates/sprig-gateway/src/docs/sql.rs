@@ -299,10 +299,11 @@ pub fn render(text: &[u8], analysis: &Analysis, version: &str, embeds: &[Vec<f32
         match (e, analysis.kind) {
             (Edit::Chunks { .. }, Kind::Describe) => out.push_str(&table::qualified(table::CHUNKS)),
             (Edit::Chunks { aliased, .. }, Kind::Read) => {
-                out.push_str(&format!(
-                    "(SELECT * FROM {} WHERE version = {lit})",
-                    table::qualified(table::CHUNKS)
-                ));
+                out.push_str("(SELECT * FROM ");
+                out.push_str(&table::qualified(table::CHUNKS));
+                out.push_str(" WHERE version = ");
+                out.push_str(&lit);
+                out.push(')');
                 if !aliased {
                     out.push_str(" AS `chunks`");
                 }
@@ -313,7 +314,9 @@ pub fn render(text: &[u8], analysis: &Analysis, version: &str, embeds: &[Vec<f32
                     .next()
                     .map(|v| table::vector_text(v))
                     .unwrap_or_default();
-                out.push_str(&format!("VEC_FromText('{v}')"));
+                out.push_str("VEC_FromText('");
+                out.push_str(&v);
+                out.push_str("')");
             }
         }
         at = range.end;

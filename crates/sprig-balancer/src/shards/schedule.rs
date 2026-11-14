@@ -1,12 +1,12 @@
-//! Scheduling split, merge and move proposals (chapter 20, "Scheduling and
-//! limits", "Mutual exclusion", "Dampers against thrash").
+//! Scheduling split, merge and move proposals: limits, mutual exclusion
+//! and dampers against thrash.
 //!
 //! [`admit`] is the guardrail check against running jobs: the tenant's job
 //! limit, copy slots per cluster, lock conflicts (a job already holds one
 //! of the shards, or the tenant moves whole), and the failed-job backoff.
 //! [`build_spec`] turns an admitted proposal into the mover's hash-range
 //! [`JobSpec`] with new shard ids, and [`decision`] the decision-log row
-//! that records it, the same way placement records moves (chapter 11).
+//! that records it, the same way placement records moves.
 
 use std::collections::BTreeMap;
 
@@ -70,7 +70,7 @@ pub enum Admission {
     Wait(&'static str),
 }
 
-/// Failed jobs' shards wait 1 h, doubling, at most 24 h (chapter 20).
+/// Failed jobs' shards wait 1 h, doubling, at most 24 h.
 #[derive(Debug, Clone, Default)]
 pub struct Backoff {
     until: BTreeMap<(TenantId, u32, u32), (u64, u32)>,
@@ -104,7 +104,7 @@ impl Backoff {
     }
 }
 
-/// Chapter 20's `schedule()` check for one proposal against `running`
+/// The `schedule()` check for one proposal against `running`
 /// (unfinished jobs), with `cluster` the proposal's cluster.
 #[must_use]
 pub fn admit(
@@ -171,7 +171,7 @@ fn not_allowed(m: impl Into<String>) -> SprigError {
 }
 
 /// The mover job for `p` on `map`: new shard ids from `next`, children on
-/// the source cluster (R1), schemas of databases `dbs`, sources retired
+/// the source cluster, schemas of databases `dbs`, sources retired
 /// after `retire_ms`.
 ///
 /// # Errors

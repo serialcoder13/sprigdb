@@ -423,6 +423,20 @@ impl Host for GwHost<'_> {
             .dc_store();
         sprig_streams::runtime::unsubscribe(dc, self.cat.tenant, def.id).await
     }
+
+    async fn lags(&mut self) -> std::collections::HashMap<sprig_streams::StreamId, u64> {
+        let Some(ts) = self.ts() else {
+            return std::collections::HashMap::new();
+        };
+        let dc = ts.services().locator.dc_store();
+        // A read error leaves the column NULL: SHOW STREAMS still answers.
+        sprig_streams::runtime::instance_lag::of_tenant(dc.as_ref(), self.cat.tenant)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::debug!(error = %e, "stream sequencers' lag not read");
+                std::collections::HashMap::new()
+            })
+    }
 }
 
 /// The tenant's streams at `cat`.

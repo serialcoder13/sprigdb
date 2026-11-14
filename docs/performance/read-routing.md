@@ -72,16 +72,16 @@ Read-your-writes covers commits made through the same gateway. If your applicati
 
 | Setting | Type | Default | Scopes | Meaning |
 |---|---|---|---|---|
-| `reads.max_replica_lag_ms` | int | 1000 | object to global | A replica further behind gets no reads |
-| `reads.max_galera_lag_ms` | int | 1000 | object to global | A Galera node further behind the most advanced node gets no reads until it catches up |
+| `reads.max_replica_lag_ms` | int | 1000 | cluster, dc, global | A replica further behind gets no reads |
+| `reads.max_galera_lag_ms` | int | 1000 | cluster, dc, global | A Galera node further behind the most advanced node gets no reads until it catches up |
 | `reads.gtid_wait_timeout_ms` | int | 100 | object to global | How long a read may wait for a replica to catch up before it reruns on the writer (0: never wait) |
-| `reads.galera_sync_wait_timeout_ms` | int | 300 | object to global | Sync check before a Galera read whose write isn't confirmed on the node |
-| `reads.galera_unconfirmed` | text | `check` | object to global | `check` or `writer`, for a Galera read whose write no polled position shows yet |
+| `reads.galera_sync_wait_timeout_ms` | int | 300 | cluster, dc, global | Sync check before a Galera read whose write isn't confirmed on the node |
+| `reads.galera_unconfirmed` | text | `check` | cluster, dc, global | `check` or `writer`, for a Galera read whose write no polled position shows yet |
 | `reads.replica_position_poll_ms` | int | 250 | cluster, dc, global | How often positions are polled |
-| `reads.causal_scope` | text | `tenant_gateway` | tenant, global | `session` or `tenant_gateway` |
+| `reads.causal_scope` | text | `tenant_gateway` | cluster, dc, global | `session` or `tenant_gateway` |
 | `reads.routing` | text | `auto` | object, database, tenant, global | `auto`, or `writer` to keep every read on the writer |
 
-"Object to global" means object, database, tenant, cluster, data centre and global. Lowering `reads.max_replica_lag_ms` sends more reads to the writer; raising it lets reads without a causal target see older data. A read with a causal target is never served stale, whatever the lag limit.
+"Object to global" means object, database, tenant, cluster, data centre and global. Operators set the cluster, data-centre and global values with `sprigctl settings set`; a tenant can't change them. Lowering `reads.max_replica_lag_ms` sends more reads to the writer; raising it lets reads without a causal target see older data. A read with a causal target is never served stale, whatever the lag limit.
 
 ## Keep reads on the writer
 

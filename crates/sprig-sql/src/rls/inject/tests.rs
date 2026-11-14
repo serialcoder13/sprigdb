@@ -413,3 +413,62 @@ fn differential_corpus() {
     eprintln!("{} pairs, {refused} refused", lines.len());
     std::fs::write(out, lines.join("\n")).unwrap();
 }
+
+/// `Mock`, whose `orders` references under `__sprig_lyr` are layers of
+/// merged views the caller filtered (chapter 42).
+struct Merged;
+
+impl Resolver for Merged {
+    fn mentions(&self, word: &str) -> bool {
+        Mock.mentions(word)
+    }
+
+    fn protected(&self, db: Option<&str>, table: &str) -> Option<usize> {
+        Mock.protected(db, table)
+    }
+
+    fn predicate(&self, key: usize, cmds: &[Cmd], qual: &str) -> Result<String, SprigError> {
+        Mock.predicate(key, cmds, qual)
+    }
+
+    fn merged_layer(&self, key: usize, alias: &str) -> bool {
+        key == 1 && alias == "__sprig_lyr"
+    }
+}
+
+#[test]
+fn merged_view_layers_are_left_to_the_merged_filter() {
+    let lex = LexOptions::mariadb();
+    // Only merged-view layers: nothing edited, the table reported merged.
+    let sql = "SELECT * FROM (SELECT * FROM (WITH l AS (SELECT id FROM orders `__sprig_lyr` \
+               WHERE x = 1) SELECT id FROM l) AS `__sprig_m` WHERE (`__sprig_m`.owner = 'u1')) \
+               AS orders";
+    let i = inject(sql, &lex, &Merged).unwrap().unwrap();
+    assert_eq!(i.sql, sql);
+    assert_eq!(i.merged, vec![1]);
+    assert!(i.filtered.is_empty());
+    // A reference under any other alias, or a write target, is filtered.
+    let i = inject(
+        "SELECT o.id FROM orders o, orders `__sprig_lyr` WHERE o.id = `__sprig_lyr`.id",
+        &lex,
+        &Merged,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(i.sql.contains("`o`.owner = 'u1'"), "{}", i.sql);
+    assert_eq!((i.filtered, i.merged), (vec![1], vec![1]));
+    let i = inject(
+        "UPDATE orders `__sprig_lyr` SET a = 1 WHERE id = 2",
+        &lex,
+        &Merged,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(i.sql.contains("`__sprig_lyr`.locked = 0"), "{}", i.sql);
+    assert!(i.merged.is_empty());
+    // The plain resolver never skips a reference.
+    let i = inject("SELECT id FROM orders `__sprig_lyr`", &lex, &Mock)
+        .unwrap()
+        .unwrap();
+    assert!(i.sql.contains("owner = 'u1'") && i.merged.is_empty());
+}

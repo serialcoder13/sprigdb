@@ -1,5 +1,4 @@
-//! Engine threads and the synchronous `db` of the script runtimes
-//! (chapter 41, "The fallback runtime": threads; build step 12 in part).
+//! Engine threads and the synchronous `db` of the script runtimes.
 //!
 //! QuickJS and Lua are synchronous interpreters: a `db.sql` call must
 //! return its rows to the code that made it, with no `await`. So a
@@ -327,8 +326,8 @@ pub fn fetch_request(url: &str, init: &Value) -> outbound::Request {
     }
 }
 
-/// How a script's return value becomes the call's event (chapter 41's
-/// result row: `event`, then the event's fields):
+/// How a script's return value becomes the call's event (the
+/// function's result row: `event`, then the event's fields):
 ///
 /// - `sprig.event(name, fields)` → that event;
 /// - a function declared `RETURNS t` (`scalar`) → `output {value}`;

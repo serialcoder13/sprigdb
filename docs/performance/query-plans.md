@@ -182,7 +182,7 @@ id	sku	qty
 
 4. **Keep small, read-mostly tables out of sharded groups.** Pin tables such as `countries` and `currencies` `UNSHARDED` (or `REFERENCE`) so the advisor leaves them in the database's default group; see [Pins](sharding-advisor.md#pin-a-tables-place). Copies of reference tables on every cluster aren't built yet, so a `REFERENCE` pin currently behaves like `UNSHARDED`.
 
-5. **Let a global lookup index find the shard.** When a table is often read by a unique column other than its key (an order number, an email address), a lookup index maps each value to its shard. `EXPLAIN FORMAT=SPRIG` then shows a top `Lookup` row, and the statement runs only on the shards that hold the values. Automatic indexing considers a lookup index when a statement scatters in more than `auto_index.lookup_scatter_pct` (80%) of its runs.
+5. **Let a global lookup index find the shard.** When a table is often read by a unique column other than its key (an order number, an email address), a lookup index maps each value to its shard. `EXPLAIN FORMAT=SPRIG` then shows a top `Lookup` row, and the statement runs only on the shards that hold the values. Automatic indexing doesn't propose lookup indexes yet.
 
 6. **Keep key values literal and of the key's type.** Compare an integer key with an integer, not a string.
 

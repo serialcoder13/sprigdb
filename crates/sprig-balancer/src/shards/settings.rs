@@ -1,10 +1,9 @@
-//! Chapter 20's `sharding.*` keys, declared next to the code (chapter 03,
-//! "Declaring a key"), and [`ShardingSettings`], a typed snapshot for one
-//! tenant.
+//! The `sharding.*` keys, declared next to the code, and
+//! [`ShardingSettings`], a typed snapshot for one tenant.
 //!
-//! `sharding.min_shards` belongs to chapter 15 and is declared here until
-//! the crate that owns pre-splitting reads it, as other crates do for keys
-//! of chapters without code yet.
+//! `sharding.min_shards` is declared here until the crate that owns
+//! pre-splitting reads it, as other crates do for keys whose owner has no
+//! code yet.
 
 use std::borrow::Cow;
 use std::time::Duration;
@@ -100,7 +99,7 @@ key! {
     "Retired shards kept fenced before drop"
 }
 key! {
-    /// `sharding.min_shards` (chapter 15).
+    /// `sharding.min_shards` (pre-splitting).
     MIN_SHARDS: u32 = "sharding.min_shards", 1, TENANT_DB, 1, 4096, 15,
     "Pre-split count per group"
 }
@@ -113,7 +112,7 @@ pub enum ShardingMode {
     On,
     /// Proposals are logged as recommendations; nothing runs.
     Recommend,
-    /// Proposals wait for an approval (chapter 52), then run as under `on`.
+    /// Proposals wait for an approval, then run as under `on`.
     Approve,
     /// Nothing is evaluated.
     Off,
@@ -161,8 +160,7 @@ pub struct ShardingSettings {
     pub max_copies_per_cluster: u32,
 }
 
-/// One key over the etcd scopes and, when given, a tenant's own rows
-/// (RL3, r2harden).
+/// One key over the etcd scopes and, when given, a tenant's own rows.
 pub(crate) fn layered<T: sprig_settings::SettingValue>(
     s: &MemSettings<'_>,
     rows: Option<&TenantSettings>,
@@ -184,7 +182,7 @@ fn hours(h: f64) -> Duration {
 }
 
 impl ShardingSettings {
-    /// The bands' rule (chapter 20, "Configuration"): the merge size stays
+    /// The bands' rule: the merge size stays
     /// below a quarter of the split size whatever is configured, so splits
     /// and merges can't chase each other.
     #[must_use]
@@ -200,7 +198,7 @@ impl ShardingSettings {
     }
 
     /// [`Self::resolve`] with the tenant's own catalog rows (tenant,
-    /// database, ancestors) layered over the etcd scopes (RL3, r2harden):
+    /// database, ancestors) layered over the etcd scopes:
     /// what a gateway would resolve.
     #[must_use]
     pub fn resolve_with(

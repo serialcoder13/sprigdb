@@ -55,6 +55,10 @@ pub struct LogicEnv {
     pub locator: Arc<ShardMapLocator>,
     /// Binlog sources for the feed.
     pub clusters: Arc<RegistryClusters>,
+    /// The worker's shared reader, keeping each tenant whole (R9,
+    /// r9feed2): after-commit triggers and search copies read through it,
+    /// one dump per cluster however many bindings and indexes.
+    pub feed: Arc<dyn Clusters>,
     /// The runner's settings, following the worker's live settings
     /// ([`crate::settings::WorkerSettings::run_opts`]).
     pub opts: RunOpts,
@@ -422,7 +426,8 @@ impl LogicTrigger {
         let tail = TenantTail::start(
             tenant,
             start,
-            Arc::clone(&env.clusters) as Arc<dyn Clusters>,
+            // R9 (r9feed2): through the worker's shared reader.
+            Arc::clone(&env.feed),
             Arc::new(MetaPlacement::new(Arc::clone(&env.dc))),
             Arc::new(CatalogResolver::new(Arc::new(Catalogs(Arc::clone(
                 &env.locator,

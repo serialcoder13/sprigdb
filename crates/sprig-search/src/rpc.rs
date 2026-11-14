@@ -1,5 +1,5 @@
-//! The messages between a gateway and a copy (chapter 39, "Interfaces":
-//! `sprig.internal.v1.SearchPartition`), carried as JSON inside the gRPC
+//! The messages between a gateway and a copy
+//! (`sprig.internal.v1.SearchPartition`), carried as JSON inside the gRPC
 //! messages, and the work a copy does for one.
 //!
 //! ```text

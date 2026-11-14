@@ -1,4 +1,4 @@
-//! `sprigctl space` (chapter 42, "Interfaces" and "Observability"):
+//! `sprigctl space`:
 //!
 //! - `list` and `show [space]` read the tenant's catalog directly,
 //!   `--catalog mysql://...@host:port/t<tenant>_sprig` (an operator's
@@ -9,7 +9,7 @@
 //!   layer state;
 //! - `create`, `share` and `unshare` send `CREATE SPACE`, `CREATE SHARE`
 //!   and `DROP SHARE` through a gateway as the user in `--gateway
-//!   mysql://tenant.user:password@host:port`, so chapter 29's privileges
+//!   mysql://tenant.user:password@host:port`, so the user's privileges
 //!   and every check of the SQL path apply.
 
 use std::collections::BTreeMap;

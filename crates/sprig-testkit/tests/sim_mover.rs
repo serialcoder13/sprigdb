@@ -11,7 +11,7 @@ use std::time::Duration;
 use sprig_testkit::sim::Sim;
 use sprig_testkit::sim::mover::{
     run_idle_move, run_move, run_move_streams, run_move_streams_shared, run_move_triggers,
-    run_move_xa, run_move_xa_no_drain, xa,
+    run_move_triggers_shared, run_move_xa, run_move_xa_no_drain, xa,
 };
 
 #[test]
@@ -42,6 +42,18 @@ fn a_trigger_runs_each_change_once_across_moves_and_worker_kills() {
         .seeds(100)
         .max_time(Duration::from_secs(3600))
         .run(|w| async move { run_move_triggers(w).await.map_err(Into::into) });
+}
+
+/// The same, with the trigger reading through the shared per-cluster
+/// reader (R9, r9feed2): detached by its tiny buffer, it comes back through
+/// the ring, a replay or a catch-up dump, and follows the move. Every
+/// client change still runs exactly once.
+#[test]
+fn a_trigger_on_the_shared_reader_runs_each_change_once() {
+    Sim::new("mover-triggers-shared")
+        .seeds(100)
+        .max_time(Duration::from_secs(3600))
+        .run(|w| async move { run_move_triggers_shared(w).await.map_err(Into::into) });
 }
 
 /// A change topic's sequencer runs on the tenant's feed while the tenant

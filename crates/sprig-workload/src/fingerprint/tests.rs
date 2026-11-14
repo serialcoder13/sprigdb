@@ -69,7 +69,7 @@ fn scratch_print() {
     }
 }
 
-/// bugfix-24 (ST48): statements carrying passwords or a connection's
+/// Regression: statements carrying passwords or a connection's
 /// credentials keep no literals, so none is ever sampled.
 #[test]
 fn credentials_and_passwords_are_sensitive() {

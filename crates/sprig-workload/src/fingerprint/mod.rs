@@ -1,5 +1,4 @@
-//! SQL fingerprints: the normalizer and the digest (chapter 12, "SQL
-//! fingerprints"; build step 1).
+//! SQL fingerprints: the normalizer and the digest.
 //!
 //! [`normalize`] reads one statement through `sprig-sql`'s persona-aware
 //! lexer and writes its normalized text:
@@ -61,21 +60,21 @@ pub type FingerprintId = sprig_common::ids::Fingerprint;
 pub enum FpKind {
     /// A SQL statement (MySQL and MariaDB ports, SQL over HTTP).
     Sql = 1,
-    /// A MongoDB query shape (R5).
+    /// A MongoDB query shape.
     Mongo = 2,
-    /// A Redis command pattern (R6).
+    /// A Redis command pattern.
     Redis = 3,
-    /// A key-value API pattern (R6).
+    /// A key-value API pattern.
     Kv = 4,
-    /// A vector API pattern (R6).
+    /// A vector API pattern.
     Vector = 5,
-    /// A search request (R5).
+    /// A search request.
     Search = 6,
-    /// An Analytics API pattern (R6).
+    /// An Analytics API pattern.
     Analytics = 7,
-    /// An HTTP/REST or gRPC call (R6).
+    /// An HTTP/REST or gRPC call.
     Api = 8,
-    /// A logic-layer invocation (R7).
+    /// A logic-layer invocation.
     Logic = 9,
     /// A transaction footprint.
     Txn = 10,
@@ -147,7 +146,7 @@ impl FrontEnd {
     }
 }
 
-/// The logic function a `db.*` call ran in (chapter 41). Part of the id.
+/// The logic function a `db.*` call ran in. Part of the id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Caller {
     /// The function's id.
@@ -157,9 +156,8 @@ pub struct Caller {
 }
 
 impl Caller {
-    /// The reserved function id of statements run from Studio (chapter
-    /// 44; chapter 12: "recorded with `caller = studio` in their own
-    /// statistics bucket"). No logic function has it: function ids are
+    /// The reserved function id of statements run from Studio, so they are
+    /// recorded in their own statistics bucket. No logic function has it: function ids are
     /// allocated from 1 upwards.
     pub const STUDIO_FUNCTION_ID: u64 = u64::MAX;
 
@@ -191,7 +189,7 @@ pub struct FpFlags {
     pub other: bool,
     /// The reserved "unparsed" fingerprint of its kind.
     pub unparsed: bool,
-    /// Registered at deploy time, with no runtime counts (chapter 41).
+    /// Registered at deploy time, with no runtime counts.
     pub r#static: bool,
 }
 
@@ -315,7 +313,7 @@ impl<'a> SqlCtx<'a> {
     }
 }
 
-/// A fingerprinted request (chapter 12, "Interfaces"): its id, normalized
+/// A fingerprinted request: its id, normalized
 /// text and shape, shared by every execution, plus this execution's
 /// literals.
 #[derive(Debug, Clone)]
@@ -351,7 +349,7 @@ pub struct Fingerprint {
     pub list_slots: Vec<u32>,
 }
 
-/// The id of a normalized text (chapter 12): `xxh3_64(kind byte ‖ db_id as
+/// The id of a normalized text: `xxh3_64(kind byte ‖ db_id as
 /// u32 LE ‖ caller_fn_id as u64 LE (0 if none) ‖ text)`.
 #[must_use]
 pub fn digest(kind: FpKind, db_id: DbId, caller_fn_id: Option<u64>, text: &str) -> FingerprintId {

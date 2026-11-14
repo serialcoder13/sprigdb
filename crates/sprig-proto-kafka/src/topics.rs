@@ -1,9 +1,9 @@
 //! Topics as the broker sees them, and the [`Topics`] trait that maps
-//! Kafka's topic administration onto stream DDL (chapter 45 build step 13).
+//! Kafka's topic administration onto stream DDL.
 //!
 //! A Kafka topic is a stream (`streams` in the tenant catalog). The
 //! gateway implements [`Topics`]; until `sprig-streams`' catalog API is in,
-//! it uses the interim in-memory adapter [`crate::mem::MemTopics`].
+//! it uses the temporary in-memory adapter [`crate::mem::MemTopics`].
 //!
 //! **Topic configs.** Four Kafka configs map onto stream settings:
 //!
@@ -340,7 +340,7 @@ pub struct Principal {
     pub user: String,
     /// The user id in the tenant catalog, if any.
     pub user_id: Option<u64>,
-    /// The identity layer's own principal (the gateway keeps chapter 14's
+    /// The identity layer's own principal (the gateway keeps its
     /// `Principal` here, to run statements as the user).
     pub handle: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 }
@@ -356,7 +356,7 @@ impl std::fmt::Debug for Principal {
 }
 
 /// Topic administration over streams. Every call carries the principal,
-/// so the implementation checks chapter 29's privileges (`CREATE`, `ALTER`,
+/// so the implementation checks privileges (`CREATE`, `ALTER`,
 /// `DROP` on the database or stream, `SELECT` to see a topic).
 #[async_trait]
 pub trait Topics: Send + Sync + 'static {

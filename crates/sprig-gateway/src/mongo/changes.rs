@@ -39,6 +39,9 @@
 //! - **Pre- and post-images** (R5 round 4): `whenAvailable` and
 //!   `required` follow the collection's `changeStreamPreAndPostImages`
 //!   option (`null`, or the stream fails with 280, when it is off).
+//! - **One dump per cluster** (R9, r9feed2): every stream's tail reads
+//!   through the gateway's shared reader ([`feed_parts`]), not a binlog
+//!   dump of its own.
 //!
 //! Not built: `startAtOperationTime` (the feed can't position by time yet),
 //! `shardCollection` events, and the k-way merge across clusters (R1 keeps
@@ -46,7 +49,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -62,6 +65,8 @@ use sprig_common::{CancellationToken, Result, SprigCode, SprigError};
 use sprig_doc::agg::{self, AggLimits};
 use sprig_feed::binlog::{BinlogTxns, SERVER_ID_BASE};
 use sprig_feed::names::{CatalogPools, CatalogResolver, Resolver};
+use sprig_feed::shared::{Kept, SharedFeed, SharedOpts};
+use sprig_feed::source::DumpScope;
 use sprig_feed::{
     ChangeEvent, Clusters, DdlKind, FeedItem, MetaPlacement, Op, PlacementView, ResumeToken,
     StartAt, TailOptions, TenantTail, TxnSource,
@@ -196,6 +201,23 @@ impl Clusters for GatewayClusters {
         }
     }
 
+    async fn open_scope(
+        &self,
+        cluster: &ClusterId,
+        scope: Arc<DumpScope>,
+        from: &GtidPos,
+    ) -> Result<Box<dyn TxnSource>> {
+        let (src, _) = self.access(cluster).await?;
+        let id = self.next_server_id.fetch_add(1, Ordering::Relaxed);
+        match BinlogTxns::connect_scope(&src, scope, from, id).await {
+            Ok(t) => Ok(Box::new(t)),
+            Err(e) => {
+                self.forget(cluster);
+                Err(e)
+            }
+        }
+    }
+
     async fn position(&self, cluster: &ClusterId) -> Result<GtidPos> {
         let (_, pool) = self.access(cluster).await?;
         let mut c = pool.get_conn().await.map_err(|e| {
@@ -244,30 +266,48 @@ impl ChangeFeed {
         dc: Arc<dyn MetaStore>,
         catalogs: Arc<dyn CatalogLocator>,
     ) -> Result<Self> {
+        let (clusters, placement, names) = feed_parts(global, dc, catalogs)?;
         Ok(Self {
-            clusters: Arc::new(GatewayClusters::new(ClusterRegistry::new(
-                global,
-                Arc::clone(&dc),
-            )?)),
-            placement: Arc::new(MetaPlacement::new(dc)),
-            names: Arc::new(CatalogResolver::new(Arc::new(Catalogs(catalogs)))),
+            clusters,
+            placement,
+            names,
         })
     }
 }
 
-/// The feed's parts as [`ChangeFeed::new`] builds them, for other
-/// consumers in the gateway (chapter 39's search runtimes).
+/// The feed's parts: binlog sources, placement and names.
+pub(crate) type FeedParts = (Arc<dyn Clusters>, Arc<dyn PlacementView>, Arc<dyn Resolver>);
+
+/// The gateway's feed parts, one set per process, for every change
+/// consumer in it: MongoDB change streams, the HTTP, gRPC and WebSocket
+/// change streams, Redis keyspace notifications, the change exchange and
+/// chapter 39's search runtimes. Their tails read through one shared
+/// reader (R9, r9feed2: `sprig_feed::shared`, a view keeping each tenant
+/// whole), so the gateway keeps one binlog dump per cluster however many
+/// streams it serves. The first call's stores are the process's.
 ///
 /// # Errors
 /// The registry's.
-#[allow(clippy::type_complexity)]
 pub(crate) fn feed_parts(
     global: Arc<dyn MetaStore>,
     dc: Arc<dyn MetaStore>,
     catalogs: Arc<dyn CatalogLocator>,
-) -> Result<(Arc<dyn Clusters>, Arc<dyn PlacementView>, Arc<dyn Resolver>)> {
-    let f = ChangeFeed::new(global, dc, catalogs)?;
-    Ok((f.clusters, f.placement, f.names))
+) -> Result<FeedParts> {
+    static PARTS: OnceLock<FeedParts> = OnceLock::new();
+    if let Some(p) = PARTS.get() {
+        return Ok(p.clone());
+    }
+    let inner: Arc<dyn Clusters> = Arc::new(GatewayClusters::new(ClusterRegistry::new(
+        global,
+        Arc::clone(&dc),
+    )?));
+    let shared = SharedFeed::new(inner, SharedOpts::default());
+    let parts: FeedParts = (
+        shared.view(Kept::All),
+        Arc::new(MetaPlacement::new(dc)),
+        Arc::new(CatalogResolver::new(Arc::new(Catalogs(catalogs)))),
+    );
+    Ok(PARTS.get_or_init(|| parts).clone())
 }
 
 /// `fullDocument` and `fullDocumentBeforeChange`.

@@ -13,25 +13,25 @@ publish.workspace = true
 arc-swap.workspace = true
 async-trait.workspace = true
 metrics.workspace = true
-# The workload tables in the tenant catalog (chapter 12 step 4).
+# The workload tables in the tenant catalog.
 mysql_async.workspace = true
-# AES-256-GCM and HKDF-SHA256 for sealed parameter samples (step 6).
+# AES-256-GCM and HKDF-SHA256 for sealed parameter samples.
 ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# Chapter 08: owners' crates depend on sprig-catalog, never the reverse.
+# Owners' crates depend on sprig-catalog, never the reverse.
 # The workload tables are this crate's migration module.
 sprig-catalog.workspace = true
 sprig-common.workspace = true
 sprig-proto-mysql.workspace = true
-# The `workload.*` keys (chapter 12, "Configuration").
+# The `workload.*` keys.
 sprig-settings.workspace = true
-# The persona-aware lexer (chapter 07): fingerprints reuse its tokens.
+# The persona-aware lexer: fingerprints reuse its tokens.
 sprig-sql.workspace = true
 sqlparser.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-# xxh3_64 for fingerprint ids (chapter 12).
+# xxh3_64 for fingerprint ids.
 twox-hash.workspace = true
 zeroize.workspace = true
 

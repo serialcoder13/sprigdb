@@ -1,4 +1,4 @@
-//! The golden corpora (chapter 12, "Testing"): normalized texts in
+//! The golden corpora: normalized texts in
 //! `tests/fixtures/normalize.txt` and shapes in `tests/fixtures/shapes.txt`.
 //!
 //! Format: `@` lines set options for the cases after them (`mysql` or

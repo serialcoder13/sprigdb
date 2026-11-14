@@ -1,12 +1,12 @@
-//! The shape's public types: what the advisor and the indexer read
-//! (chapter 12, "Data structures and storage", the `shape` JSON).
+//! The shape's public types: what the advisor and the indexer read (the
+//! `shape` JSON).
 //!
 //! These types are a stable contract with `sprig-advisor` and with the
 //! `workload_fingerprints.shape` column. Fields are only ever added (with
 //! `#[serde(default)]`), never renamed or removed, within one
 //! [`SHAPE_VERSION`].
 //!
-//! Columns are referred to by **name only** (chapter 12, "Security notes"):
+//! Columns are referred to by **name only**:
 //! lower case, unquoted. Tables are referred to by the alias the statement
 //! uses ([`TableRef::alias`]), and through it by their catalog
 //! [`ObjectId`].
@@ -20,15 +20,14 @@ use sprig_common::ids::{DbId, ObjectId};
 /// The version of the shape format, stored in `shape_version` and in the
 /// JSON as `"v"`.
 ///
-/// 2 (decision X34): `json_path` predicates carry `func` and `cmp` (R6
-/// round 6, decision K3). Version 1 rows are rewritten when a gateway
+/// 2: `json_path` predicates carry `func` and `cmp`. Version 1 rows are rewritten when a gateway
 /// sees their statement again
 /// ([`WorkloadTables::insert_fingerprints`](crate::store::WorkloadTables::insert_fingerprints)).
 pub const SHAPE_VERSION: u16 = 2;
 
 /// What a statement does with which columns: the predicates, joins, order,
 /// grouping and selected columns that automatic indexing designs indexes
-/// from (chapter 13, "Candidate generation").
+/// from.
 ///
 /// One shape is shared by every execution of a fingerprint. Literal
 /// values are never in it: a [`Predicate`]'s `args` index the execution's
@@ -82,8 +81,8 @@ pub struct Shape {
     #[serde(default, skip_serializing_if = "is_false")]
     pub partial: bool,
     /// The slot of the outermost `LIMIT`'s row count, when it is a literal
-    /// or `?`: a parameter sample gives its value (chapter 13's cost model
-    /// uses `LIMIT k`).
+    /// or `?`: a parameter sample gives its value (automatic indexing's
+    /// cost model uses `LIMIT k`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit_arg: Option<u32>,
 }
@@ -122,9 +121,8 @@ impl Shape {
         self.tables.iter().find(|t| t.alias == alias)
     }
 
-    /// The fingerprint's **main object** (chapter 12, "Configuration": data
-    /// settings resolve on it): the first write target, else the first base
-    /// table the catalog knows.
+    /// The fingerprint's **main object** (data settings resolve on it): the
+    /// first write target, else the first base table the catalog knows.
     #[must_use]
     pub fn main_table(&self) -> Option<&TableRef> {
         let target = self
@@ -153,10 +151,10 @@ impl Shape {
             .filter(move |p| p.column.table.as_deref() == Some(alias))
     }
 
-    /// Whether every predicate is unsargable (chapter 13's trigger records
-    /// a reason and makes no candidate). False when there are none, and
+    /// Whether every predicate is unsargable (automatic indexing's trigger
+    /// records a reason and makes no candidate). False when there are none, and
     /// when one is a field path an index on a field column could serve
-    /// ([`PredOp::is_field_sargable`], R6 round 6).
+    /// ([`PredOp::is_field_sargable`]).
     #[must_use]
     pub fn all_unsargable(&self) -> bool {
         !self.predicates.is_empty()
@@ -234,7 +232,7 @@ impl StmtType {
     }
 
     /// Whether automatic indexing considers this type at all: reads and
-    /// the `WHERE` clauses of writes (chapter 13, "Trigger evaluation").
+    /// the `WHERE` clauses of writes.
     #[must_use]
     pub const fn is_indexable(self) -> bool {
         matches!(
@@ -317,8 +315,7 @@ pub struct Predicate {
     pub args: Vec<u32>,
 }
 
-/// A predicate's operator (chapter 12, "Extracting predicates and
-/// columns"). In the JSON, `"op"` plus the variant's fields.
+/// A predicate's operator. In the JSON, `"op"` plus the variant's fields.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum PredOp {
@@ -363,13 +360,13 @@ pub enum PredOp {
         /// The JSON path, as written in the statement.
         path: String,
         /// The function, upper case: `JSON_VALUE`, `JSON_EXTRACT`,
-        /// `JSON_QUERY`, or `->` and `->>` (R6 round 6; absent in shapes
-        /// recorded before).
+        /// `JSON_QUERY`, or `->` and `->>` (absent in shapes recorded
+        /// before shape version 2).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         func: Option<String>,
         /// The condition as it would be on a column (`eq`, `in`, `range`,
         /// `is_null`, ...), so a field column over the path can be judged
-        /// like a column (R6 round 6, decision K3).
+        /// like a column.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cmp: Option<Box<PredOp>>,
     },
@@ -398,8 +395,7 @@ impl PredOp {
 
     /// `JSON_VALUE(col, '<path>')` in `=`, `IN`, `IS NULL` or a range: a
     /// field column of the expression's type with an index serves it,
-    /// since MariaDB 11.8 substitutes the column for the expression (R6
-    /// round 6, decision K3).
+    /// since MariaDB 11.8 substitutes the column for the expression.
     #[must_use]
     pub fn is_field_sargable(&self) -> bool {
         match self {
@@ -408,7 +404,7 @@ impl PredOp {
                 cmp: Some(c),
                 ..
             } => {
-                // A MongoDB condition on a path without arrays (S130)
+                // A MongoDB condition on a path without arrays
                 // is served by a document index's field columns.
                 (f == "JSON_VALUE" || f == crate::fingerprint::mongo::FUNC_SCALAR)
                     && matches!(
@@ -455,8 +451,8 @@ pub enum Unsargable {
     /// The column is given another collation: `name COLLATE utf8mb4_bin
     /// = ?`.
     Collation,
-    /// `LIKE '%word'` or `LIKE '_x'`: no fixed prefix. Chapter 13 turns a
-    /// repeated one into a search-index recommendation.
+    /// `LIKE '%word'` or `LIKE '_x'`: no fixed prefix. Automatic indexing
+    /// turns a repeated one into a search-index recommendation.
     LeadingWildcard,
     /// The column is part of an arithmetic or other expression: `a + 1 =
     /// ?`, `a = b + c` on one table.
@@ -591,8 +587,7 @@ pub enum SortDir {
     Desc,
 }
 
-/// What a write statement changes, for write cost (chapter 13, "Cost
-/// model").
+/// What a write statement changes, for write cost.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Writes {
     /// The kind of write.

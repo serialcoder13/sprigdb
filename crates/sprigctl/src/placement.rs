@@ -1,5 +1,5 @@
 //! `sprigctl explain placement <tenant>` and `sprigctl explain decision
-//! <id> --tenant <tenant>` (chapter 11, build step 7), over the Admin
+//! <id> --tenant <tenant>`, over the Admin
 //! API's `GET /admin/v1/tenants/{name}/placement` and
 //! `GET /admin/v1/tenants/{name}/decisions/{id}`.
 
@@ -66,7 +66,7 @@ pub(crate) async fn run(
     Ok(())
 }
 
-/// Adds chapter 11's `tenant pin` and `tenant unpin` to the tenant group.
+/// Adds `tenant pin` and `tenant unpin` to the tenant group.
 pub(crate) fn add_pin_cmds(g: Command) -> Command {
     g.subcommand(pin_cmd()).subcommand(unpin_cmd())
 }
@@ -120,7 +120,7 @@ pub(crate) async fn pin(
     )
 }
 
-/// Chapter 24's DC pin (`POST /admin/v1/tenants/{name}:pin|:unpin`): a
+/// The DC pin (`POST /admin/v1/tenants/{name}:pin|:unpin`): a
 /// tenant pinned to a cluster is pinned to its DC too. Best effort: a
 /// controller without DC moves says so and the cluster pin still holds.
 async fn dc_pin(c: &AdminClient, name: &str, op: &str) {

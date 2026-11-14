@@ -22,7 +22,7 @@ use sprig_binlog::GtidPos;
 use sprig_common::ids::DbId;
 use sprig_common::{CancellationToken, Result, SprigCode, SprigError};
 use sprig_feed::names::StaticResolver;
-use sprig_feed::{MetaPlacement, ResumeToken, StartAt, TailOptions, TenantTail};
+use sprig_feed::{Clusters, MetaPlacement, ResumeToken, StartAt, TailOptions, TenantTail};
 use sprig_logic::triggers::{self, Applied, Apply, Filter, Outcomes, RunOpts, Stats, TriggerEvent};
 use sprig_meta::Tier;
 
@@ -155,11 +155,13 @@ impl Outcomes for SimOut {
 
 /// The trigger's worker: runs the binding over the feed, killed at random,
 /// started again from its checkpoint, until the checkpoint reaches the
-/// goal.
-#[allow(clippy::too_many_lines)]
+/// goal. With `shared` the feed reads through a shared reader (R9,
+/// r9feed2), a new one for each worker that starts after a kill.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(super) async fn trigger_worker(
     world: World,
     clusters: Arc<SimClusters>,
+    shared: bool,
     tier: Tier,
     faults: bool,
     goal: Goal,
@@ -214,10 +216,15 @@ pub(super) async fn trigger_worker(
                 },
                 StartAt::After,
             );
+        let source: Arc<dyn Clusters> = if shared {
+            super::streams::shared_view(&clusters)
+        } else {
+            clusters.clone()
+        };
         let tail = match TenantTail::start(
             TENANT,
             start,
-            clusters.clone(),
+            source,
             placement.clone(),
             names.clone(),
             tail_opts.clone(),

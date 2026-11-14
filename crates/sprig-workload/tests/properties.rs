@@ -1,5 +1,5 @@
 //! Property tests and a seeded fuzz test of the normalizer, digest and
-//! shape extractor (chapter 12, "Testing"):
+//! shape extractor:
 //!
 //! - normalization is idempotent;
 //! - the id is stable across whitespace, comments and literal values

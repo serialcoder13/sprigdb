@@ -1,6 +1,5 @@
-//! Full-text search through a running gateway (chapter 39, "Testing";
-//! chapter 48's R5 done-when "search results are complete within
-//! `search.max_lag_ms` and survive the loss of a worker").
+//! Full-text search through a running gateway: search results are
+//! complete within `search.max_lag_ms` and survive the loss of a worker.
 //!
 //! ```sh
 //! deploy/compose/gateway-dev.sh up          # a gateway with the search service
@@ -205,7 +204,7 @@ async fn c_complete() {
     }
 }
 
-/// R5 round 6: copies on workers survive the loss of one. With
+/// Copies on workers survive the loss of one. With
 /// `SPRIG_TEST_SEARCH_KILL` (a shell command that kills, with `kill -9`, a
 /// search worker holding a copy of `docs_text`), rows are written while
 /// searches run before, during and after the kill: every search answers

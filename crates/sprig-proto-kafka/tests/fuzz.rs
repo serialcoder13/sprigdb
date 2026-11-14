@@ -1,4 +1,4 @@
-//! Fuzz-style decoder tests (chapter 45 build step 8): random bytes,
+//! Fuzz-style decoder tests: random bytes,
 //! truncations and bit flips must never panic or allocate beyond the
 //! input, and whatever decodes must re-encode to something that decodes to
 //! the same message.

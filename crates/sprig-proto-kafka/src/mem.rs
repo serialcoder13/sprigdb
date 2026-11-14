@@ -1,6 +1,6 @@
 //! In-memory implementations of the broker's traits: for tests, and as the
-//! gateway's **interim adapter** for topics until `sprig-streams`' catalog
-//! API (chapter 45 build step 2) lands.
+//! gateway's **temporary adapter** for topics until `sprig-streams`'
+//! catalog API lands.
 //!
 //! [`MemTopics`] keeps topics per tenant in this process only: they are not
 //! streams yet (nothing is created in MariaDB), other gateways don't see
@@ -28,7 +28,7 @@ fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Topics in memory, per tenant (interim adapter; see the module docs).
+/// Topics in memory, per tenant (temporary adapter; see the module docs).
 #[derive(Debug)]
 pub struct MemTopics {
     topics: std::sync::Mutex<HashMap<u64, BTreeMap<String, TopicInfo>>>,

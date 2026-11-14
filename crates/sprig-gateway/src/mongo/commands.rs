@@ -268,10 +268,13 @@ pub async fn run(c: &mut Conn, name: &str, body: &Document) -> Result<Document, 
     // Server-side JavaScript: its scope, and the first error its code met,
     // which the command answers with.
     let js = super::serverjs::scope_for(c, name, body).await;
-    let r = Box::pin(sprig_doc::serverjs::scope(
+    // The command's state is boxed once; the task-local scopes around it
+    // move only the box (S149 step 2: moving the whole state through each
+    // scope was about 9% of a point read's gateway CPU in `memmove`).
+    let r = sprig_doc::serverjs::scope(
         js.clone(),
-        sprig_doc::collation::scope(coll, run_inner(c, name, body)),
-    ))
+        sprig_doc::collation::scope(coll, Box::pin(run_inner(c, name, body))),
+    )
     .await;
     match js.and_then(|s| s.take_error()) {
         Some(e) => Err(e),
@@ -730,11 +733,11 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
     let mut tries = 0u64;
     let r = super::workload::scoped(
         wl.as_ref(),
-        sprig_doc::hint::scope(hint, async {
+        sprig_doc::hint::scope(hint, Box::pin(async {
             loop {
                 let r = match (&lsid, txn_number) {
                     (Some(l), Some(n)) if super::retry::applies(name, body) => {
-                        super::retry::run(c, &mut s, name, body, &db, l, n).await
+                        Box::pin(super::retry::run(c, &mut s, name, body, &db, l, n)).await
                     }
                     _ => {
                         // MongoDB 9.0's per-operation memory limit.
@@ -762,7 +765,7 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
                     _ => break r,
                 }
             }
-        }),
+        })),
     )
     .await;
     let r = if max_time_ms.is_some() {

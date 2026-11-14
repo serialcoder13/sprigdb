@@ -1,41 +1,34 @@
 //! `sprigctl`: the operator command-line tool.
 //!
-//! Layer 4 (binaries). Design: the writing guide's 5.10 (command groups),
-//! chapter 47 (Operations, "sprigctl reference") and chapter 09 (Clusters,
-//! "Interfaces") of the SprigDB low-level design.
+//! Layer 4 (binaries).
 //!
-//! Implemented, over the Admin API (chapter 37), never etcd:
-//! - `sprigctl dc register|list|show` (chapter 23 step 7);
-//! - `sprigctl cluster register|list|show|probe|drain` (chapter 09 step 9,
-//!   chapter 27 step 1);
-//! - `sprigctl tenant create|list|show|delete` (chapter 08 step 9, chapter
-//!   23 step 16): `create <name> [--under <parent>] [--cluster <id>]`
+//! Implemented, over the Admin API, never etcd:
+//! - `sprigctl dc register|list|show`;
+//! - `sprigctl cluster register|list|show|probe|drain`;
+//! - `sprigctl tenant create|list|show|delete`: `create <name> [--under <parent>] [--cluster <id>]`
 //!   bootstraps the tenant's catalog and returns once it is active;
 //!   `delete` removes a leaf tenant (it asks for the name unless `--yes`);
 //!   `settings <name> [--all]` lists the tenant's setting rows;
 //!   `export <name> --to <dir>` and `import <dir> --into <tenant>` copy a
 //!   tenant (schemas, rows, users and grants, settings) and verify it
-//!   (chapter 47 step 8, see [`export`]);
+//!   (see [`export`]);
 //!   `user add <tenant> <user> --password ...` creates a user in the
-//!   tenant's catalog (interim, until chapter 29's `CREATE USER`);
+//!   tenant's catalog (a stopgap from before SQL `CREATE USER`);
 //! - `sprigctl settings list|describe|get|set|reset|bounds|lock|unlock`
-//!   (alias `config`; chapter 08 steps 7-8, chapter 23 step 8, chapter 47
-//!   step 5): see where a value comes from and change it at any of the six
+//!   (alias `config`): see where a value comes from and change it at any of the six
 //!   scopes (see [`settings`]);
 //! - `sprigctl tenant move <tenant> --to <dc>` and `sprigctl tenant
-//!   traffic <tenant>` (chapter 24 steps 3 and 4): see [`dcmove`];
+//!   traffic <tenant>`: see [`dcmove`];
 //! - `sprigctl shard move <tenant> --to <cluster>` and `sprigctl job
-//!   list|show|cancel|cutover` (chapter 10 step 11): see [`mover`];
+//!   list|show|cancel|cutover`: see [`mover`];
 //! - `sprigctl index list|show|recommendations|approve|reject|drop|pin|unpin`
-//!   and `sprigctl explain query <fingerprint>` (chapter 13 step 13): see
-//!   [`index`]; `sprigctl explain decision|placement` (chapter 11 step
-//!   7): see [`placement`].
+//!   and `sprigctl explain query <fingerprint>`: see [`index`];
+//!   `sprigctl explain decision|placement`: see [`placement`].
 //!
-//! - `sprigctl logic compile|deploy|list|show` (chapter 41, R7): see
-//!   [`logic`].
-//! - `sprigctl check no-restart` (chapter 47 step 6): settings, listener
+//! - `sprigctl logic compile|deploy|list|show`: see [`logic`].
+//! - `sprigctl check no-restart`: settings, listener
 //!   and certificate changes under load with no restart; see [`check`].
-//! - `sprigctl txn list|show|resolve` (chapter 18): in-doubt distributed
+//! - `sprigctl txn list|show|resolve`: in-doubt distributed
 //!   transactions; see [`txn`].
 //!
 //! Every other command group is hidden, and prints "not available in this version",
@@ -60,10 +53,10 @@ mod graph;
 mod index;
 mod inherit;
 mod search;
-// Chapter 52: approvals and recommendations.
+// Approvals and recommendations.
 mod logic;
 mod mover;
-// Chapter 14: named operators, login and tokens.
+// Named operators, login and tokens.
 mod operator;
 mod placement;
 mod recommendations;
@@ -73,7 +66,7 @@ mod settings;
 mod sharding;
 mod sink;
 mod space;
-// Chapter 14's tenant suspension (bugfix-interim).
+// Tenant suspension.
 mod suspend;
 mod txn;
 
@@ -199,14 +192,14 @@ fn tenant_group() -> Command {
         );
     g = placement::add_pin_cmds(g);
     g = suspend::add_cmds(g);
-    // Chapter 24's moves between DCs and traffic (crate::dcmove).
+    // Moves between DCs and traffic (crate::dcmove).
     g = g
         .subcommand(dcmove::move_command())
         .subcommand(dcmove::traffic_command())
-        // Chapter 25's manual failover and standbys (crate::failover).
+        // Manual failover and standbys (crate::failover).
         .subcommand(failover::failover_command())
         .subcommand(failover::standby_command())
-        // Chapter 26's residency (crate::residency).
+        // Residency (crate::residency).
         .subcommand(residency::residency_command());
     for &sub in TENANT_LATER {
         g = g.subcommand(
@@ -264,7 +257,7 @@ fn dc_group() -> Command {
                 .about("Show a DC and its current leader")
                 .arg(dc_arg()),
         )
-        // Chapter 23 step 13: the DC lifecycle.
+        // The DC lifecycle.
         .subcommand(
             Command::new("drain")
                 .about("Take no new tenants; the DC is retired once migration empties it")
@@ -362,7 +355,7 @@ fn cluster_group() -> Command {
                 .about("Retire a drained cluster's record; probes stop")
                 .arg(id()),
         )
-        // HD24: a registration's node addresses change (a bundle moving
+        // A registration's node addresses change (a bundle moving
         // from one VM to three) without an alias host.
         .subcommand(
             Command::new("set-nodes")
@@ -387,7 +380,7 @@ fn cluster_group() -> Command {
                         .help("The --node list is the whole set, in order (the writer first)"),
                 ),
         )
-        // Chapter 25 (r2close): recovery jobs for a diverged or broken node.
+        // Recovery jobs for a diverged or broken node.
         .subcommand(
             Command::new("extract")
                 .about("Extract a diverged former writer's transactions (row images, sealed) to the workers' extract store")
@@ -674,7 +667,7 @@ fn client(m: &ArgMatches) -> Result<AdminClient, Failed> {
                 .trim()
                 .to_owned(),
         ),
-        // Chapter 14: the login session `sprigctl login` keeps for this
+        // The login session `sprigctl login` keeps for this
         // endpoint.
         None => operator::session_token(endpoint),
     };

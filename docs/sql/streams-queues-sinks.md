@@ -416,7 +416,7 @@ ALTER SINK [db_name.]sink_name SET SCRIPT AS $$ body $$
 
 An operation the sink's state doesn't allow fails with 39232 `ER_SPRIG_SINK_STATE`. **Privileges:** `SPRIG_SINK_ADMIN`.
 
-**When the owner loses access.** A sink reads with its owner's rights. If the owner loses `SELECT` on the source (a `REVOKE`, a revoked role), or its account is locked or dropped, the sink pauses: `SHOW SINKS` shows `paused` with a `Reason` that starts with `39229 ER_SPRIG_SINK_OWNER_PRIVILEGE_LOST` and names the cause. The gateway checks when an account or grant statement commits, and each task checks before its batches, at most once a second. When the owner can read the source again, the sink resumes by itself from where it stopped; or give it an owner who can, with `OWNER TO`, and `RESUME` it. Fan-in sinks aren't checked this way. See [Sinks](../data-models/sinks.md#retries-dead-letters-and-pausing).
+**When the owner loses access.** A sink reads with its owner's rights. If the owner loses `SELECT` on the source (a `REVOKE`, a revoked role), or its account is locked or dropped, the sink pauses; a fan-in sink also pauses when its owner loses `SPRIG_FAN_IN`: `SHOW SINKS` shows `paused` with a `Reason` that starts with `39229 ER_SPRIG_SINK_OWNER_PRIVILEGE_LOST` and names the cause. The gateway checks when an account or grant statement commits, and each task checks before its batches, at most once a second. When the owner can read the source again, the sink resumes by itself from where it stopped; or give it an owner who can, with `OWNER TO`, and `RESUME` it. While it is paused, the worker's `sprig_sink_paused{reason="owner_privilege"}` gauge is 1, and the `SprigSinkPaused` alert fires after 5 minutes. See [Sinks](../data-models/sinks.md#retries-dead-letters-and-pausing).
 
 ```sql
 REVOKE SELECT ON shop.* FROM etl;   -- etl's sinks on shop pause with 39229
@@ -609,7 +609,7 @@ SHOW INHERITED DEFINITIONS;
 | 39226 | `ER_SPRIG_SINK_QUOTA` | Over `sink.max_per_tenant` or a throughput quota |
 | 39227 | `ER_SPRIG_SINK_FENCED` | A task's epoch moved on; the old worker stops |
 | 39228 | `ER_SPRIG_SINK_PLATFORM_IDENTITY_DENIED` | The worker's cloud identity isn't allowed (`sink.platform_identity`) |
-| 39229 | `ER_SPRIG_SINK_OWNER_PRIVILEGE_LOST` | A sink's pause reason: the owner lost `SELECT` on the source, or was locked or dropped; it resumes when access returns |
+| 39229 | `ER_SPRIG_SINK_OWNER_PRIVILEGE_LOST` | A sink's pause reason: the owner lost `SELECT` on the source (or `SPRIG_FAN_IN`, for a fan-in sink), or was locked or dropped; it resumes when access returns |
 | 39230 | `ER_SPRIG_SINK_DISABLED` | `sink.enabled` is off, or the kind isn't in `sink.allowed_kinds` |
 | 39231 | `ER_SPRIG_SINK_FORMAT_UNSUPPORTED` | A format or compression the target can't produce |
 | 39232 | `ER_SPRIG_SINK_STATE` | An operation the sink's state doesn't allow |

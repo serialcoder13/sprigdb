@@ -1,5 +1,4 @@
-//! Named operators (chapter 14, "Operators"; chapter 47, "sprigctl
-//! reference"):
+//! Named operators:
 //!
 //! - `sprigctl login [--name N] [--code C | --recovery-code R]`: password
 //!   (`--password-file`, `SPRIGCTL_PASSWORD` or a prompt), then a TOTP code;

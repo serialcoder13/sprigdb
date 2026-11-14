@@ -1,5 +1,5 @@
-//! `sprigctl index` and `sprigctl explain query` (chapter 13, "`recommend`
-//! mode" and the interfaces for people; chapter 47's reference), over the
+//! `sprigctl index` and `sprigctl explain query` (`recommend`
+//! mode and the interfaces for people), over the
 //! Admin API's automatic-indexing calls.
 //!
 //! ```text
@@ -11,7 +11,7 @@
 //! sprigctl index drop <index> --tenant acme [--reason ...] --yes
 //! sprigctl index pin <index> --tenant acme [--off]                 (alias freeze)
 //! sprigctl index unpin <index> --tenant acme
-//! sprigctl index restore <index> --tenant acme                     (decision O1)
+//! sprigctl index restore <index> --tenant acme
 //! sprigctl explain query <fingerprint> --tenant acme
 //! ```
 //!

@@ -1,8 +1,8 @@
-//! The Admin API client (chapter 47, "sprigctl reference"; chapter 37).
+//! The Admin API client.
 //!
 //! JSON over HTTP/1.1 to `--endpoint`. Errors come back as `{code, name,
 //! message, trace_id}`. An `https://` endpoint (a controller with
-//! `[controller] admin_tls_cert`, chapter 37 "Admin API over TLS") is
+//! `[controller] admin_tls_cert`) is
 //! checked against `--ca-file`, and `--client-cert` and `--client-key` are
 //! presented when the controller requires a client certificate.
 

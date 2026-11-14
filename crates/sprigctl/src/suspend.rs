@@ -1,5 +1,5 @@
 //! `sprigctl tenant suspend <name> --reason …` and `sprigctl tenant resume
-//! <name>` (chapter 14, "Suspension"): `POST
+//! <name>`: `POST
 //! /admin/v1/tenants/{name}:suspend` and `:resume`.
 
 use std::fmt::Write as _;

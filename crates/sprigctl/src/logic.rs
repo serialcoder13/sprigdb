@@ -1,4 +1,4 @@
-//! `sprigctl logic` (chapter 41, "Declaring code"; R7 order 1):
+//! `sprigctl logic`:
 //!
 //! - `compile <file>`: compiles a KIRun definition offline and prints its
 //!   IR, placement and PL/SQL (what `EXPLAIN FUNCTION ... FORMAT=SQL`
@@ -20,7 +20,7 @@
 //!
 //! - `rollback <name> --db <db> [--to-version n] [--procedure] --gateway
 //!   <url>`: sends `ALTER FUNCTION | PROCEDURE ... ROLLBACK [TO VERSION n]`
-//!   through a gateway (R7 close-out) and prints the notes.
+//!   through a gateway and prints the notes.
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use mysql_async::prelude::Queryable;
@@ -520,7 +520,7 @@ async fn dead_letters(m: &ArgMatches, out: Output) -> Result<(), Failed> {
             let binding = m.get_one::<u64>("binding").copied();
             if verb == "replay" {
                 // After-commit triggers' dead letters, and those of
-                // triggers on streams and queues (RC11), go back to their
+                // triggers on streams and queues, go back to their
                 // jobs, which run them in order with the active version.
                 let (n, left) = store
                     .replay_dead_letters(&mut c, binding, &ids)

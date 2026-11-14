@@ -1,5 +1,4 @@
-//! The shape extractor (chapter 12, "Extracting predicates and columns";
-//! build step 2).
+//! The shape extractor: predicates and columns.
 //!
 //! [`extract`] turns one SQL statement into a [`Shape`]: its tables, the
 //! predicates of the top-level `AND` conjuncts of every `WHERE` and `ON`,

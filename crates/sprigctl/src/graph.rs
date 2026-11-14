@@ -1,4 +1,4 @@
-//! `sprigctl graph list|show|partition` (chapter 43 build step 30), over
+//! `sprigctl graph list|show|partition`, over
 //! the Admin API's `/admin/v1/tenants/{name}/graphs`.
 //!
 //! ```text

@@ -821,6 +821,54 @@ impl PassSession {
         Ok(())
     }
 
+    /// The session's policy predicate on table `db.table` for `cmds`, its
+    /// columns qualified with `qual` and the session's values bound: the
+    /// filter on an inheritable table's merged records (chapter 29, "Data
+    /// inheritance"; decision rlsinherit). `None` when the table's policies
+    /// don't bind the session (or an internal exempt session).
+    ///
+    /// # Errors
+    /// The policy's (39364), the subtree binding's.
+    pub(super) async fn rls_predicate(
+        &mut self,
+        session: sprig_common::ids::ConnId,
+        db: &str,
+        table: &str,
+        qual: &str,
+        cmds: &[sprig_sql::rls::Cmd],
+    ) -> Result<Option<String>> {
+        if crate::tenant::rls::is_exempt(session) {
+            return Ok(None);
+        }
+        let (lex, _) = self.lex_opts();
+        let Some(ts) = self.tenant.as_deref() else {
+            return Ok(None);
+        };
+        let Some(cat) = ts.catalog().cloned() else {
+            return Ok(None);
+        };
+        if !RlsState::of(&cat).is_some_and(|s| s.any_enabled()) {
+            return Ok(None);
+        }
+        let p = crate::tenant::authz::privileges(ts, &cat);
+        let Some(rls) = p.row_policies() else {
+            return Ok(None);
+        };
+        if rls.is_empty() {
+            return Ok(None);
+        }
+        let mut values = SessionValues::of(ts, &cat);
+        crate::tenant::rls::bind_tree(ts, &cat, &rls, &mut values).await?;
+        let lctn = ts.lower_case_table_names();
+        let none = std::collections::HashSet::new();
+        let temp = |_: Option<&str>, _: &str| false;
+        let r = Resolve::new(&cat, &rls, None, lctn, &temp, &values, lex, &none);
+        let Some(k) = sprig_sql::rls::Resolver::protected(&r, Some(db), table) else {
+            return Ok(None);
+        };
+        sprig_sql::rls::Resolver::predicate(&r, k, cmds, qual).map(Some)
+    }
+
     /// The rewrite before planning (see the module docs): the text to plan
     /// instead, if it changed.
     ///

@@ -150,7 +150,7 @@ fn lock(r: &Arc<Mutex<StreamRun>>) -> std::sync::MutexGuard<'_, StreamRun> {
 /// A worker process's shared reader over the clusters' binlog models, with
 /// buffers and a ring small enough that the sequencer's subscription is
 /// detached, returns through the ring, and needs catch-up dumps.
-fn shared_view(clusters: &Arc<SimClusters>) -> Arc<dyn Clusters> {
+pub(super) fn shared_view(clusters: &Arc<SimClusters>) -> Arc<dyn Clusters> {
     let feed = SharedFeed::new(
         Arc::clone(clusters) as Arc<dyn Clusters>,
         SharedOpts {

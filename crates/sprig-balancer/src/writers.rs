@@ -1,6 +1,5 @@
-//! Galera writer weights (chapter 11, "Scheduling, guardrails and
-//! recommendations"; chapter 09's writer choice): when one node's flow
-//! control or `Threads_running` exceeds 1.5 times its peers' average for
+//! Galera writer weights (for the cluster's writer choice): when one
+//! node's flow control or `Threads_running` exceeds 1.5 times its peers' average for
 //! 10 minutes, its weight drops by 0.25 (floor 0.25), recovering by 0.25
 //! per hour.
 

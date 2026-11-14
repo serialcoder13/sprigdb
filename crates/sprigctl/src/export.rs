@@ -1,5 +1,5 @@
-//! `sprigctl tenant export` and `sprigctl tenant import` (chapter 47,
-//! "Logical export"; build step 8).
+//! `sprigctl tenant export` and `sprigctl tenant import`
+//! (a logical export).
 //!
 //! An export is a directory:
 //!
@@ -33,7 +33,7 @@
 //!
 //! Not carried yet: triggers, stored routines and events (listed in the
 //! manifest's `skipped`), automatic indexes (left out by design: the
-//! target's own loop decides), and other data models (R5 on).
+//! target's own loop decides), and other data models.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -754,8 +754,8 @@ pub(crate) async fn export(c: &AdminClient, sub: &ArgMatches, out: Output) -> Re
 
     let mut conn = connect(sub, &arg(sub, "user")).await?;
     let mut skipped = Vec::new();
-    // One snapshot for every table (R0: a tenant's schemas live on one
-    // cluster, behind one pinned backend connection).
+    // One snapshot for every table (the export assumes a tenant's schemas
+    // live on one cluster, behind one pinned backend connection).
     conn.query_drop("START TRANSACTION WITH CONSISTENT SNAPSHOT")
         .await
         .map_err(sql_err("START TRANSACTION"))?;

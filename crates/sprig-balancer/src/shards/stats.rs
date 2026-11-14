@@ -1,5 +1,5 @@
-//! Shard sizes and size histograms on MariaDB (chapter 20, "Data
-//! structures": sizes; "Choosing split points": index dives).
+//! Shard sizes and size histograms on MariaDB (sizes, and index dives
+//! for split points).
 //!
 //! - **Size**: `DATA_LENGTH + INDEX_LENGTH` from `information_schema.TABLES`,
 //!   summed over the shard's schemas.

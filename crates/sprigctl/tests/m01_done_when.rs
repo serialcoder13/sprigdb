@@ -1,4 +1,4 @@
-//! M0.1's "done when" check (chapter 48), end to end against the Compose
+//! Cluster registration and capability profiles, end to end against the Compose
 //! stack (`deploy/compose`, `docker compose --profile all up -d`):
 //!
 //! 1. `sprigctl cluster register` accepts the Galera cluster, the primary

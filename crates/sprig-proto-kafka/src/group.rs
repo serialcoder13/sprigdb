@@ -1,5 +1,4 @@
-//! The consumer group coordinator: Kafka's classic group protocol (chapter
-//! 45, "Consumer groups", build step 12).
+//! The consumer group coordinator: Kafka's classic group protocol.
 //!
 //! A gateway coordinates a group while it holds the group's lease
 //! ([`Leases`]); FindCoordinator sends members there. Membership,
@@ -120,7 +119,7 @@ pub struct CommittedOffset {
 pub struct StoreError(pub String);
 
 /// The durable part of consumer groups: `stream_groups` and
-/// `stream_offsets` in the tenant catalog (chapter 45).
+/// `stream_offsets` in the tenant catalog.
 #[async_trait]
 pub trait GroupStore: Send + Sync + 'static {
     /// Writes offsets, replacing earlier ones of the same partitions.
@@ -154,7 +153,7 @@ pub trait GroupStore: Send + Sync + 'static {
     async fn delete_group(&self, tenant: u64, group: &str) -> Result<(), StoreError>;
 }
 
-/// The coordinator leases of groups (chapter 45's etcd key
+/// The coordinator leases of groups (etcd key
 /// `/sprig/dc/<dc_id>/stream-groups/<tenant_id>/<group>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaseState {

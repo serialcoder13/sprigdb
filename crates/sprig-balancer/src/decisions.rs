@@ -1,4 +1,4 @@
-//! The decision log (chapter 11, "The decision log"; build step 1): the
+//! The decision log: the
 //! `decisions` table in each tenant's catalog schema, the [`DecisionLog`]
 //! interface every component writes through, the retention job, and the
 //! reads behind `sprigctl explain decision`.
@@ -6,14 +6,14 @@
 //! The table is the `decisions` migration module ([`DECISIONS_MODULE`]),
 //! registered with `sprig-catalog`'s migrator by whoever bootstraps tenant
 //! catalogs, as `sprig-advisor` does for its tables. Decisions are not
-//! versioned catalog state (chapter 08 reads them on demand), so writes are
+//! versioned catalog state (they are read on demand), so writes are
 //! plain statements.
 //!
 //! Implementations:
 //!
 //! - [`CatalogDecisionLog`] writes to the tenant's catalog through a
 //!   [`CatalogLocator`], buffering up to [`BUFFER_LIMIT`] decisions per
-//!   process while a catalog is unreachable (chapter 11, "Failure handling");
+//!   process while a catalog is unreachable;
 //! - [`MemDecisionLog`] keeps them in memory (tests and the fleet
 //!   simulator).
 //!
@@ -35,7 +35,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 /// The module name in the catalog's format records.
 pub const MODULE: &str = "decisions";
 
-/// `decisions` (chapter 11, Appendix C).
+/// The `decisions` table.
 pub const DDL_DECISIONS: &str = "CREATE TABLE IF NOT EXISTS decisions (
   decision_id   BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   decided_at    DATETIME(6)     NOT NULL,
@@ -70,7 +70,7 @@ pub static DECISIONS_MIGRATIONS: &[Migration] = &[Migration {
 }];
 
 /// The module, for [`Migrator::new`](sprig_catalog::Migrator::new) and
-/// chapter 08's `BootstrapHooks.modules`.
+/// the catalog's `BootstrapHooks.modules`.
 pub const DECISIONS_MODULE: Module = Module {
     name: MODULE,
     migrations: DECISIONS_MIGRATIONS,
@@ -212,7 +212,7 @@ pub struct DecisionRow {
     pub updated_at_us: i64,
 }
 
-/// Where decisions go (chapter 11's interface).
+/// Where decisions go.
 #[async_trait::async_trait]
 pub trait DecisionLog: Send + Sync {
     /// Records `d` in `tenant`'s log; returns its id (0 when buffered).

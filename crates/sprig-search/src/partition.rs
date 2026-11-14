@@ -1,6 +1,5 @@
 //! One partition of a search index: a Tantivy index with one writer, its
-//! reader, and the feed position committed with it (chapter 39,
-//! "Indexing from the feed"; build step 4).
+//! reader, and the feed position committed with it.
 //!
 //! Every change is delete-then-add by `_key`: Tantivy applies a delete
 //! only to documents added before it, so replaying events after a crash is

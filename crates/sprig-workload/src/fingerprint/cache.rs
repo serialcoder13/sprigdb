@@ -3,7 +3,7 @@
 //!
 //! Shapes cost a parse (tens of microseconds), so each is extracted once,
 //! on the first sight of its fingerprint on this gateway, and shared by
-//! every later execution. The cache also detects collisions (chapter 12):
+//! every later execution. The cache also detects collisions:
 //! the same id with a different text gets the id of seed 1 and the
 //! `collision` flag.
 
@@ -19,8 +19,8 @@ use super::{
 };
 use crate::shape::{ExtractCtx, Shape, StmtType, TableResolver, extract};
 
-/// The database part of a SQL fingerprint's id, and its `db_id` (chapter
-/// 12): the database of the first table the statement names (CTEs
+/// The database part of a SQL fingerprint's id, and its `db_id`: the
+/// database of the first table the statement names (CTEs
 /// aside). The normalized text already names every table with its
 /// database, so the same statement from sessions with different default
 /// databases, or none, is one fingerprint. A statement that names no
@@ -65,7 +65,7 @@ pub const DEFAULT_CACHE_ENTRIES: usize = 200_000;
 
 type Shard = Mutex<HashMap<(TenantId, u64), Arc<Known>>>;
 
-/// Fingerprints SQL statements (chapter 12, `Fingerprinter::sql`). One per
+/// Fingerprints SQL statements (`Fingerprinter::sql`). One per
 /// gateway, shared by every session.
 pub struct SqlFingerprinter {
     shards: Box<[Shard]>,
@@ -133,8 +133,7 @@ impl SqlFingerprinter {
             .sum()
     }
 
-    /// Fingerprints one statement of `tenant` (chapter 12, "SQL
-    /// fingerprints"). `sql` is the statement as the client sent it, with
+    /// Fingerprints one statement of `tenant`. `sql` is the statement as the client sent it, with
     /// logical names. Never fails: a statement that can't be lexed gets the
     /// reserved "unparsed" fingerprint.
     pub fn sql(

@@ -1,4 +1,4 @@
-//! Load collection (chapter 11, "Load signals"; build step 2).
+//! Load collection.
 //!
 //! - **Gateway reports.** Each gateway counts, per shard, statements, busy
 //!   microseconds (statement latency), rows written and rows read, and
@@ -54,7 +54,7 @@ pub struct LoadReport {
     pub at_ms: u64,
     /// Every shard it served since it started.
     pub shards: Vec<ShardLoad>,
-    /// Chapter 20's write sketches: the completed minutes of the last few,
+    /// The write sketches: the completed minutes of the last few,
     /// the most written shards of each ([`crate::shards::sketch`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sketches: Vec<WriteSketch>,
@@ -69,7 +69,7 @@ impl sprig_meta::Versioned for LoadReport {
 }
 
 /// Where a gateway's report lives in its DC tier, under its registration
-/// lease: `gateway-load/<gateway_id>` (R1: written with the registration
+/// lease: `gateway-load/<gateway_id>` (written with the registration
 /// record when a minute completes, not sent over port 7400).
 #[must_use]
 pub fn report_key(gateway: &str) -> String {
@@ -83,7 +83,7 @@ pub const REPORT_PREFIX: &str = "gateway-load/";
 #[derive(Debug, Default)]
 pub struct LoadAccumulator {
     inner: Mutex<BTreeMap<ShardKey, ShardLoad>>,
-    /// Chapter 20's write sketches.
+    /// The write sketches.
     sketches: WriteSketches,
 }
 
@@ -131,7 +131,7 @@ impl LoadAccumulator {
         }
     }
 
-    /// The write sketches (chapter 20): the router counts its writes here.
+    /// The write sketches: the router counts its writes here.
     #[must_use]
     pub fn sketches(&self) -> &WriteSketches {
         &self.sketches
@@ -293,7 +293,7 @@ impl LoadCollector {
     }
 
     /// Gateways that reported within two periods of `now_ms`, over
-    /// `expected` (chapter 11: no plan if under half arrived).
+    /// `expected` (no plan if under half arrived).
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn coverage(&self, now_ms: u64, period: Duration, expected: usize) -> f64 {

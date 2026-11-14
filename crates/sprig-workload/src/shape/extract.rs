@@ -31,8 +31,8 @@ use super::types::{
 use crate::fingerprint::{LiteralKind, Normalized};
 
 /// Deepest parenthesis and `CASE` nesting sent to sqlparser-rs; deeper
-/// statements take the fallback (as in `sprig-sql`'s AST path, decision
-/// N1: sqlparser-rs recurses several kilobytes of stack per level).
+/// statements take the fallback (as in `sprig-sql`'s AST path:
+/// sqlparser-rs recurses several kilobytes of stack per level).
 const MAX_NESTING: usize = 12;
 /// Most significant tokens sent to sqlparser-rs (after list tails are
 /// blanked).
@@ -870,8 +870,7 @@ impl Ex<'_> {
                 };
                 let list_slot =
                     slots.len() == 1 && self.norm.list_slots.binary_search(&slots[0]).is_ok();
-                // A wrapped column in a list: `JSON_VALUE(v, '$.x') IN (...)`
-                // (R6 round 6).
+                // A wrapped column in a list: `JSON_VALUE(v, '$.x') IN (...)`.
                 if all_const && cols.is_empty() && !*negated && !matches!(&**expr, Expr::Tuple(_)) {
                     self.wrapped(expr, &PredOp::In { list: list_slot }, slots);
                     return;
@@ -1437,9 +1436,9 @@ impl Ex<'_> {
                 for parts in &s.columns {
                     if let Some(c) = self.col(parts) {
                         self.pred(&c, PredOp::Vector, slots.clone());
-                        // The distance function, for chapter 13's vector
-                        // candidates (R6 round 3): which metric an index
-                        // would need.
+                        // The distance function, for automatic indexing's
+                        // vector candidates: which metric an index would
+                        // need.
                         self.pred(
                             &c,
                             PredOp::Unsargable {

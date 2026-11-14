@@ -1,5 +1,4 @@
-//! The flusher (chapter 12, "In-memory aggregation and flushing", steps 1
-//! and 2; build step 4): a background task per gateway that writes the
+//! The flusher: a background task per gateway that writes the
 //! recorder's first sightings, open buckets, closed buckets and sealed
 //! samples to each tenant's catalog, off the statement path.
 //!
@@ -256,8 +255,7 @@ impl Flusher {
         period.min(to_end)
     }
 
-    /// Flushes until `shutdown`, then once more (chapter 04, "Drain" step
-    /// 5).
+    /// Flushes until `shutdown`, then once more (as the gateway drains).
     pub async fn run(self: Arc<Self>, shutdown: CancellationToken) {
         let mut seed = self.now_secs() ^ u64::from(self.gateway_id).rotate_left(32);
         loop {

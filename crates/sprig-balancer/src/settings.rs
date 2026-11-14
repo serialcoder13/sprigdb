@@ -1,11 +1,12 @@
-//! Chapter 11's settings, declared next to the code (chapter 03, "Declaring
-//! a key"), and typed snapshots of them: [`BalancerSettings`] for a DC,
-//! [`ClusterLimits`] per cluster and [`TenantKnobs`] per tenant.
+//! The balancer's settings, declared next to the code, and typed snapshots
+//! of them: [`BalancerSettings`] for a DC, [`ClusterLimits`] per cluster
+//! and [`TenantKnobs`] per tenant.
 //!
-//! Three keys belong to other chapters and are declared here until their
+//! Three keys belong to other subsystems and are declared here until their
 //! crates exist, as `sprig-controller` does for the mover's slot key:
 //! `migration.auto_size_limit_gb` and `migration.max_cooldown_days`
-//! (chapter 24) and `recovery.stability_minutes` (chapter 25).
+//! (moves between DCs) and `recovery.stability_minutes` (failover
+//! recovery).
 
 use std::borrow::Cow;
 use std::time::Duration;
@@ -53,7 +54,7 @@ pub static MODE: Setting<Cow<'static, str>> = Setting {
 };
 sprig_settings::register!(MODE);
 
-/// `balancer.provision_mode`: `recommend` or `auto` (R2).
+/// `balancer.provision_mode`: `recommend` or `auto`.
 pub static PROVISION_MODE: Setting<Cow<'static, str>> = Setting {
     key: "balancer.provision_mode",
     default: Cow::Borrowed("recommend"),
@@ -246,19 +247,19 @@ key! {
     "Decision log retention"
 }
 key! {
-    /// `migration.auto_size_limit_gb` (chapter 24): larger shards and
+    /// `migration.auto_size_limit_gb`: larger shards and
     /// tenants need approval to move.
     AUTO_SIZE_LIMIT_GB: u64 = "migration.auto_size_limit_gb", 200, TENANT_DC_GLOBAL, 0, 1_000_000, 24,
     "Larger tenants and shards need approval to move"
 }
 key! {
-    /// `migration.max_cooldown_days` (chapter 24): the cap on a doubled
+    /// `migration.max_cooldown_days`: the cap on a doubled
     /// cooldown.
     MAX_COOLDOWN_DAYS: u64 = "migration.max_cooldown_days", 7, TENANT_DC_GLOBAL, 0, 3650, 24,
     "Cooldown cap"
 }
 key! {
-    /// `recovery.stability_minutes` (chapter 25).
+    /// `recovery.stability_minutes` (failover recovery).
     RECOVERY_STABILITY_MINUTES: u64 = "recovery.stability_minutes", 60, OPS, 0, 10_080, 25,
     "Healthy time before a recovered cluster receives shards by rebalancing"
 }
@@ -271,7 +272,7 @@ pub enum BalancerMode {
     Auto,
     /// Plans are written as `recommended` decisions; no job.
     Recommend,
-    /// Plans wait for an approval (chapter 52); the controller turns an
+    /// Plans wait for an approval; the controller turns an
     /// approved tenant's moves into `auto` for one run.
     Approve,
     /// Plans are written as `dry_run` decisions; nothing runs.
@@ -421,7 +422,7 @@ impl Default for BalancerSettings {
     }
 }
 
-/// Bytes in a GB (the book's GB is 2^30 bytes).
+/// Bytes in a GB (a GB here is 2^30 bytes).
 pub const GB: f64 = 1_073_741_824.0;
 
 fn pct(p: u32) -> f64 {
@@ -561,7 +562,7 @@ impl TenantKnobs {
     }
 
     /// [`Self::resolve`] with the tenant's own catalog rows layered over
-    /// the etcd scopes (RL3, r2harden).
+    /// the etcd scopes.
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn resolve_with(

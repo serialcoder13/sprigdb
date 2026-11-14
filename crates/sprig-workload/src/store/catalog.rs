@@ -1,5 +1,5 @@
-//! The workload store over tenant catalogs: chapter 12's `WorkloadStore`
-//! for its readers (chapter 13's trigger evaluation and validation), and
+//! The workload store over tenant catalogs: `WorkloadStore` for its
+//! readers (automatic indexing's trigger evaluation and validation), and
 //! the rollup and retention run for one tenant.
 
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use crate::keyring::TenantKeyring;
 use crate::samples::{OpenedSample, SealedSample, open};
 use crate::window::FpWindowStats;
 
-/// Chapter 12's `WorkloadStore`: what the advisor, placement and
+/// The `WorkloadStore`: what the advisor, placement and
 /// `sprigctl explain query` read.
 #[async_trait]
 pub trait WorkloadStore: Send + Sync {
@@ -140,8 +140,7 @@ impl WorkloadStore for CatalogWorkloadStore {
     }
 }
 
-/// The rollup and retention job for one tenant (chapter 12, step 4 of
-/// "In-memory aggregation and flushing"): migrates the module if needed,
+/// The rollup and retention job for one tenant: migrates the module if needed,
 /// merges closed buckets, then applies retention. `now` is the wall
 /// clock. Idempotent: run it from a controller loop every few minutes.
 ///

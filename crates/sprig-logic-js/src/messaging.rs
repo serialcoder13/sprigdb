@@ -1,8 +1,7 @@
-//! Publishing and consuming from logic code (chapter 41, "The `db`
-//! interface"; R9): `db.publish`, `db.commitOffset` and `db.mq.publish |
-//! get | ack | nack` in JavaScript and Lua, `Sprig.Db.Publish`,
-//! `Sprig.Db.CommitOffset` and `Sprig.Mq.Publish | Get | Ack | Nack` in
-//! KIRun.
+//! Publishing and consuming from logic code: `db.publish`,
+//! `db.commitOffset` and `db.mq.publish | get | ack | nack` in JavaScript
+//! and Lua, `Sprig.Db.Publish`, `Sprig.Db.CommitOffset` and
+//! `Sprig.Mq.Publish | Get | Ack | Nack` in KIRun.
 //!
 //! Each is one statement the host runs through the caller's session, as
 //! every `db` call is, so it is inside the caller's transaction and under
@@ -10,10 +9,10 @@
 //!
 //! | Call | Statement |
 //! |---|---|
-//! | `db.publish(stream, key, value, headers?)` | `INSERT INTO [db.]stream (key, value, headers) VALUES (...)`: an outbox row (chapter 45) |
-//! | `db.publish(stream, key, value, headers, {tenant: 't'})` | `INSERT INTO [db.]stream FOR TENANT t (...) VALUES (...)`: into member `t`'s instance of an inherited stream (chapter 42); KIRun's `tenant` parameter |
-//! | `db.commitOffset(group, stream, partition, offset)` | `CALL sprig.commit_offset(...)` (chapter 45) |
-//! | `db.mq.publish(exchange, routingKey, body, props?)` | `CALL sprig.mq_publish(...)`: an outbox row inside a transaction (chapter 50) |
+//! | `db.publish(stream, key, value, headers?)` | `INSERT INTO [db.]stream (key, value, headers) VALUES (...)`: an outbox row |
+//! | `db.publish(stream, key, value, headers, {tenant: 't'})` | `INSERT INTO [db.]stream FOR TENANT t (...) VALUES (...)`: into member `t`'s instance of an inherited stream; KIRun's `tenant` parameter |
+//! | `db.commitOffset(group, stream, partition, offset)` | `CALL sprig.commit_offset(...)` |
+//! | `db.mq.publish(exchange, routingKey, body, props?)` | `CALL sprig.mq_publish(...)`: an outbox row inside a transaction |
 //! | `db.mq.get(queue, {max, leaseMs})` | `CALL sprig.mq_get(...)` |
 //! | `db.mq.ack(token)`, `db.mq.nack(token, requeue)` | `CALL sprig.mq_ack(...)`, `sprig.mq_nack(...)` |
 //!
@@ -177,7 +176,7 @@ pub fn op(op: MsgOp, args: &[Value], default_db: Option<&str>) -> Result<DbOp> {
                 Value::Object(o) => Value::String(Value::Object(o).to_string()),
                 _ => return Err(bad(op, "headers must be an object of strings")),
             };
-            // Chapter 42 (R9): `{tenant: 't'}` (or KIRun's `tenant`) names
+            // `{tenant: 't'}` (or KIRun's `tenant`) names
             // the member whose instance of an inherited stream gets it.
             let tenant = match arg(4) {
                 Value::Null => None,

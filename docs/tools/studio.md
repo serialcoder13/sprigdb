@@ -31,7 +31,7 @@ sprigctl settings set studio.session_idle_minutes 15 --scope tenant --tenant acm
 | `studio.path` | text | `/studio` | dc, global | The mount path; a value under `/v1`, `/admin` or `/.well-known`, or `/`, falls back to `/studio`. The Studio that ships with SprigDB is built for `/studio`, so keep the default |
 | `studio.allow_insecure_http` | bool | `false` | dc, global | Allow sign-in over plain HTTP from another computer |
 | `studio.public_origins` | text | empty | dc, global | Extra origins for the Origin check, comma-separated, for a reverse proxy in front of the gateway |
-| `studio.map_tile_url` | text | empty | tenant, dc, global | A base-map tile server; its origin is added to the Content-Security-Policy |
+| `studio.map_tile_url` | text | empty | dc, global | A base-map tile server; its origin is added to the Content-Security-Policy |
 
 Studio's files are built into the `sprigdb` binary. A binary built without them answers 503 with a page saying so (39932 `ER_SPRIG_STUDIO_NOT_BUILT`).
 

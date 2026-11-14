@@ -182,19 +182,28 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         sprig_controller::catalogs::RegistryPools::new(registry_logic.clone(), None)
             .budget("logic_shards", 16),
     );
+    let registry_clusters = Arc::new(logic::RegistryClusters::new(
+        registry_logic.clone(),
+        Arc::clone(&pools),
+    ));
+    // R9 (r9feed, r9feed2): one shared binlog reader per cluster for this
+    // worker's feed consumers: stream sequencers, the queue forwarder,
+    // after-commit triggers and search copies.
+    let shared_feed = sprig_feed::shared::SharedFeed::new(
+        Arc::clone(&registry_clusters) as Arc<dyn sprig_feed::Clusters>,
+        sprig_feed::shared::SharedOpts::default(),
+    );
     let env = logic::LogicEnv {
         dc: dc_logic.clone(),
-        registry: registry_logic.clone(),
+        registry: registry_logic,
         pools: shard_pools,
         locator: Arc::new(sprig_controller::catalogs::ShardMapLocator::new(
             dc_logic.clone(),
             Arc::clone(&pools),
             sprig_controller::catalogs::default_naming(),
         )),
-        clusters: Arc::new(logic::RegistryClusters::new(
-            registry_logic,
-            Arc::clone(&pools),
-        )),
+        clusters: registry_clusters,
+        feed: shared_feed.view(sprig_feed::shared::Kept::All),
         opts: live.run_opts(),
         settings: live.clone(),
         // Set below, once the gateways are known (RL50).
@@ -215,12 +224,6 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         locator: Arc::clone(&env.locator),
         clusters: Arc::clone(&env.clusters) as Arc<dyn sprig_feed::Clusters>,
     };
-    // R9 (r9feed): one shared binlog reader per cluster for this worker's
-    // internal consumers: stream sequencers and the queue forwarder.
-    let shared_feed = sprig_feed::shared::SharedFeed::new(
-        Arc::clone(&env.clusters) as Arc<dyn sprig_feed::Clusters>,
-        sprig_feed::shared::SharedOpts::default(),
-    );
     // Chapter 45's stream sequencers, on the logic jobs' pools and the
     // shared reader.
     let streams_env = streams::StreamsEnv::from_logic(&env, &shared_feed);
@@ -269,7 +272,8 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             dc_id: cfg.node.dc.clone(),
             dc: dc_logic.clone(),
             registry: registry_search,
-            clusters: Arc::clone(&env.clusters) as Arc<dyn sprig_feed::Clusters>,
+            // R9 (r9feed2): search copies read through the shared reader.
+            clusters: Arc::clone(&env.feed),
             locator: Arc::clone(&env.locator),
             gateways: Arc::clone(&msg_env.gateways),
             tls: cfg

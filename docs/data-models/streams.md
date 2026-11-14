@@ -442,10 +442,10 @@ Sharding:
 | `stream.produce_wait_ms` | 2000 | tenant, global | How long a Kafka produce waits for offsets |
 | `stream.descendant_publish` | off | object, database, tenant, global | Let descendants' own sessions publish with `IN TENANT` |
 | `stream.descendant_key` | origin | object, database, tenant, global | `origin`: a descendant's key must be its tenant name; `any`: no check |
-| `kafka.sasl_mechanisms` | `SCRAM-SHA-512,SCRAM-SHA-256,PLAIN` | tenant, global | Offered SASL mechanisms |
+| `kafka.sasl_mechanisms` | `SCRAM-SHA-512,SCRAM-SHA-256,PLAIN` | dc, global | Offered SASL mechanisms |
 | `kafka.fetch_max_wait_ms` | 500 | tenant, global | Cap on a fetch's wait |
 | `kafka.group_initial_rebalance_delay_ms` | 3000 | dc, global | Delay of an empty group's first rebalance |
-| `kafka.group_session_timeout_max_ms` | 300000 | tenant, global | Largest session timeout a member may ask for |
+| `kafka.group_session_timeout_max_ms` | 300000 | dc, global | Largest session timeout a member may ask for |
 | `kafka.advertised_host` | empty | dc, global | Host in Kafka Metadata; empty for the gateway's address |
 | `listener.kafka.enabled` | false | dc, global | Serve the Kafka listener |
 | `listener.kafka.bind` | `0.0.0.0:9092` | dc, global | Address and port |

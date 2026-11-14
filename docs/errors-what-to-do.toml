@@ -9,7 +9,7 @@ what_to_do = "Reconnect: your load balancer or driver should pick another gatewa
 
 [ER_SPRIG_TENANT_CONNECTION_LIMIT]
 meaning = "The tenant already has `limits.tenant_connections` sessions open on this gateway (over HTTP: `api.txn.max_open_per_tenant` open transactions), so the new session or transaction was refused."
-what_to_do = "Close idle connections or shrink the application's connection pool, then retry. If the load is legitimate, raise `limits.tenant_connections` (or `api.txn.max_open_per_tenant`) for the tenant, or spread clients over more gateways."
+what_to_do = "Close idle connections or shrink the application's connection pool, then retry. If the load is legitimate, raise `limits.tenant_connections` for the tenant (or `api.txn.max_open_per_tenant` for the data centre), or spread clients over more gateways."
 
 [ER_SPRIG_ADMISSION_TIMEOUT]
 meaning = "The statement waited longer than `limits.queue_timeout_ms` for an admission slot because the tenant or user already had `limits.tenant_active_statements` or `limits.user_active_statements` statements running on this gateway."
@@ -272,7 +272,7 @@ meaning = "The sink tried to use the worker's own cloud identity (instance metad
 what_to_do = "Give the connection explicit credentials, or ask an operator to allow platform identity with `sink.platform_identity`."
 
 [ER_SPRIG_SINK_OWNER_PRIVILEGE_LOST]
-meaning = "A sink paused because its owner can no longer read its source: the owner lost `SELECT` on the stream, queue or table (after a `REVOKE`, a role change or a dropped grant), its account was locked, or it was dropped. The sink's state is `paused` and its reason starts with this code and says why, for example `the owner 'etl'@'%' lost SELECT on shop.orders`. Nothing is delivered while it is paused; records wait in the source."
+meaning = "A sink paused because its owner can no longer read its source: the owner lost `SELECT` on the stream, queue or table (after a `REVOKE`, a role change or a dropped grant), its account was locked, or it was dropped. A fan-in sink's owner also needs `SPRIG_FAN_IN`. The sink's state is `paused` and its reason starts with this code and says why, for example `the owner 'etl'@'%' lost SELECT on shop.orders`. Nothing is delivered while it is paused; records wait in the source."
 what_to_do = "Give the owner read access again (`GRANT SELECT ON ...`, or `ALTER USER ... ACCOUNT UNLOCK`): the sink resumes by itself within seconds, from where it stopped. Or make another account that can read the source the owner with `ALTER SINK ... OWNER TO`, then `ALTER SINK ... RESUME`. `SHOW SINKS` shows the state and the reason."
 
 [ER_SPRIG_SINK_DISABLED]

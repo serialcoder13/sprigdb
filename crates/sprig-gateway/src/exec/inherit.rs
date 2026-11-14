@@ -504,6 +504,26 @@ impl sprig_types::Runner for InhRunner<'_, '_, '_> {
 
 #[async_trait]
 impl sprig_inherit::Runner for InhRunner<'_, '_, '_> {
+    async fn row_filter(
+        &mut self,
+        db: &str,
+        table: &str,
+        qual: &str,
+        cmd: sprig_inherit::RowCmd,
+    ) -> Result<Option<String>> {
+        use sprig_sql::rls::Cmd;
+        let cmds: &[Cmd] = match cmd {
+            sprig_inherit::RowCmd::Select => &[Cmd::Select],
+            sprig_inherit::RowCmd::Update => &[Cmd::Select, Cmd::Update],
+            sprig_inherit::RowCmd::Delete => &[Cmd::Select, Cmd::Delete],
+        };
+        let session = self.gw.cx.session.id;
+        self.gw
+            .sess
+            .rls_predicate(session, db, table, qual, cmds)
+            .await
+    }
+
     async fn commit(&mut self, change: &InheritChange) -> Result<()> {
         let Some(ts) = self.gw.sess.tenant.as_deref_mut() else {
             return Err(SprigError::internal("no tenant"));

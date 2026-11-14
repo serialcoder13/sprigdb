@@ -214,6 +214,12 @@ pub trait Host: Send {
     /// # Errors
     /// The DC tier's.
     async fn unsubscribe(&mut self, def: &StreamDef) -> Result<()>;
+    /// The tenant's running sequencers' lag in ms, by stream (`SHOW
+    /// STREAMS`' `Lag_ms`; R9, r9feed2). By default none: the column is
+    /// `NULL`.
+    async fn lags(&mut self) -> std::collections::HashMap<StreamId, u64> {
+        std::collections::HashMap::new()
+    }
 }
 
 /// The statement's context.
@@ -325,7 +331,7 @@ pub async fn handle(sql: &str, cx: &Ctx<'_>, host: &mut dyn Host) -> Result<Hand
         Stmt::Create(c) => create(&c, cx, host).await,
         Stmt::Alter(a) => alter(&a, cx, host).await,
         Stmt::Drop { if_exists, name } => drop_stream(&name, if_exists, cx, host).await,
-        Stmt::Show { db } => show(db.as_deref(), cx, host),
+        Stmt::Show { db } => show(db.as_deref(), cx, host).await,
         Stmt::Insert(i) => match stream_of(cx, host, &i.target) {
             Some((db, s)) => publish(sql, &i, &db, &s, cx, host),
             None => Ok(Handled::NotStream),
@@ -622,14 +628,25 @@ async fn drop_stream(
     Ok(Handled::Ok { affected: 0 })
 }
 
-fn show(db: Option<&str>, cx: &Ctx<'_>, host: &mut dyn Host) -> Result<Handled> {
+/// `SHOW STREAMS`: one row per stream the session may read. `Lag_ms` is
+/// its sequencer's lag (chapter 45, "Lag per instance"), `NULL` while no
+/// sequencer runs it.
+async fn show(db: Option<&str>, cx: &Ctx<'_>, host: &mut dyn Host) -> Result<Handled> {
     let db_name = db.or(cx.current).ok_or_else(no_db)?;
     let id = host.db_id(db_name).ok_or_else(|| unknown_db(db_name))?;
-    let rows = cx
+    let shown: Vec<&std::sync::Arc<StreamDef>> = cx
         .state
         .of_db(id)
         .filter(|s| s.state == StreamState::Active)
         .filter(|s| host.allowed(Privilege::Select, db_name, None, &s.name))
+        .collect();
+    let lags = if shown.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        host.lags().await
+    };
+    let rows = shown
+        .into_iter()
         .map(|s| {
             vec![
                 Some(s.name.clone()),
@@ -638,14 +655,23 @@ fn show(db: Option<&str>, cx: &Ctx<'_>, host: &mut dyn Host) -> Result<Handled> 
                 Some(s.cleanup.as_str().to_owned()),
                 s.source_name.clone(),
                 Some(s.key_spec.join(",")),
+                lags.get(&s.id).map(u64::to_string),
             ]
         })
         .collect();
     Ok(Handled::Rows {
-        columns: ["Stream", "Kind", "Partitions", "Cleanup", "Source", "Key"]
-            .iter()
-            .map(|c| (*c).to_owned())
-            .collect(),
+        columns: [
+            "Stream",
+            "Kind",
+            "Partitions",
+            "Cleanup",
+            "Source",
+            "Key",
+            "Lag_ms",
+        ]
+        .iter()
+        .map(|c| (*c).to_owned())
+        .collect(),
         rows,
     })
 }

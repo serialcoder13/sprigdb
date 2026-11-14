@@ -113,6 +113,8 @@ Normalization:
 - `IN (?, ?, …)` becomes `IN (...)`, and `VALUES (…), (…)` becomes `VALUES (...)`;
 - the text is cut at `workload.max_text_bytes` (4096).
 
+The id hashes the normalized text with the database of the first table the statement names, so a statement that qualifies its tables (`shop.orders`) has one fingerprint whatever the session's default database is.
+
 For each fingerprint SprigDB keeps hourly statistics (`workload.bucket_minutes`) for `workload.retention_days` (30): executions, errors, a latency histogram, rows sent and, for sampled executions, rows examined. Fingerprints whose p95 latency passes `workload.watch_p95_ms` are **watched**: SprigDB probes some of their executions (`workload.examined_sample_rate`) and keeps sealed parameter samples (`workload.sample_rate`, `workload.capture_samples`). A tenant keeps at most `workload.max_fingerprints_per_tenant` (10,000); the rest count as "other". See the [settings reference](../reference/settings.md#workload).
 
 ### Reading fingerprints in SQL

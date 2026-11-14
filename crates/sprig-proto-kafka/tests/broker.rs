@@ -1,6 +1,5 @@
 //! The broker front end end to end, over in-memory streams, with the
-//! crate's own client and in-memory identity, topics, groups and leases
-//! (chapter 45 build steps 9, 12 and 13).
+//! crate's own client and in-memory identity, topics, groups and leases.
 
 #![allow(
     clippy::unwrap_used,

@@ -1,6 +1,5 @@
-//! The schema-creation rate limit (chapter 11, "Placing new shards"; build
-//! step 9): new shard schemas are created on one cluster at most
-//! `placement.max_schema_creates_per_minute` at a time. Pre-splits, tenant
+//! The schema-creation rate limit: new shard schemas are created on one
+//! cluster at most `placement.max_schema_creates_per_minute` at a time. Pre-splits, tenant
 //! bootstraps and rebalancing waves queue behind it, because mass DDL
 //! leaves `InnoDB` flushing for minutes (the month-1 spike saw reads on the
 //! whole server fall from about 15,000 to under 1,000 per second).

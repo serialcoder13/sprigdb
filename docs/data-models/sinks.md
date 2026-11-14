@@ -514,7 +514,7 @@ List, replay or discard dead letters over REST or with `sprigctl sink dead-lette
 
 **Pausing.** When a sink's batches have failed destination-wide for `sink.pause_after_minutes` (15), the sink moves from `failing` to `paused` with reason `ER_SPRIG_SINK_PAUSED` (39222) and stops reading. With `sink.auto_resume` on (default), one lane sends a probe every `sink.probe_interval_seconds` (60); the first success resumes the whole sink.
 
-**Owner lost access.** A sink reads with its owner's rights, so it pauses when the owner can no longer read the source: the owner loses `SELECT` on the stream, queue or `CHANGES OF` table (a `REVOKE`, a role revoked, a grant dropped), its account is locked, or it is dropped. The sink moves to `paused` with a reason that starts with `39229 ER_SPRIG_SINK_OWNER_PRIVILEGE_LOST` and says why:
+**Owner lost access.** A sink reads with its owner's rights, so it pauses when the owner can no longer read the source: the owner loses `SELECT` on the stream, queue or `CHANGES OF` table (a `REVOKE`, a role revoked, a grant dropped), its account is locked, or it is dropped. A [fan-in sink](#fan-in-sinks)'s owner needs `SPRIG_FAN_IN` as well as `SELECT` on the inherited stream or queue, so losing either pauses it the same way. The sink moves to `paused` with a reason that starts with `39229 ER_SPRIG_SINK_OWNER_PRIVILEGE_LOST` and says why:
 
 ```text
 39229 ER_SPRIG_SINK_OWNER_PRIVILEGE_LOST: the owner 'etl'@'%' lost SELECT on shop.orders; the sink resumes once the owner can read its source again
@@ -522,7 +522,7 @@ List, replay or discard dead letters over REST or with `sprigctl sink dead-lette
 
 Two checks catch it. The gateway checks the tenant's sinks when an account or grant statement commits, and pauses them at once. Each sink task also checks its owner before a batch, at most once a second, which catches changes made any other way. Nothing is delivered while the sink is paused; records wait in the source, subject to its retention.
 
-The sink **resumes by itself** once the owner can read the source again, for example after `GRANT SELECT ON shop.orders TO etl` or `ALTER USER etl ACCOUNT UNLOCK`: the grant statement sets it running, and a paused task that finds access restored resumes too. It continues from where it stopped. To hand the sink to another account instead, run `ALTER SINK ... OWNER TO` with an account that can read the source, then `ALTER SINK ... RESUME`. A `RESUME` while the owner still can't read the source pauses the sink again at its next check. A sink a user paused with `ALTER SINK ... PAUSE` is never resumed this way. The pause and the resume are logged by the gateway or worker (`SprigSinkPaused`, with code 39229); `SHOW SINKS` shows the state and reason. Fan-in sinks, which read members' instances under `SPRIG_FAN_IN`, aren't checked this way.
+The sink **resumes by itself** once the owner can read the source again, for example after `GRANT SELECT ON shop.orders TO etl` or `ALTER USER etl ACCOUNT UNLOCK`: the grant statement sets it running, and a paused task that finds access restored resumes too. It continues from where it stopped. To hand the sink to another account instead, run `ALTER SINK ... OWNER TO` with an account that can read the source, then `ALTER SINK ... RESUME`. A `RESUME` while the owner still can't read the source pauses the sink again at its next check. A sink a user paused with `ALTER SINK ... PAUSE` is never resumed this way. The pause and the resume are logged by the gateway or worker, with code 39229, and `SHOW SINKS` shows the state and reason. While the sink is paused, its worker sets `sprig_sink_paused{reason="owner_privilege"}` to 1, which raises the `SprigSinkPaused` alert after 5 minutes; see [Monitoring](../operate/monitoring.md#alert-rules).
 
 **Source lost.** If a sink's position falls below a stream's retained log start, the sink goes to `failed` with `ER_SPRIG_SINK_SOURCE_LOST` (39223). It never skips data by itself: run `ALTER SINK ... RESET TO` to choose where to continue.
 
@@ -599,7 +599,7 @@ Metrics, from workers, include:
 | `sprig_sink_dead_lettered_total` | counter | `target`, `reason` |
 | `sprig_sink_delivery_seconds` | histogram | `target`: a batch's round trip |
 | `sprig_sink_end_to_end_seconds` | histogram | `target`: source commit to delivery |
-| `sprig_sink_paused` | gauge | `reason` (`failures` only: a sink paused for its owner's access shows in `SHOW SINKS`, not here) |
+| `sprig_sink_paused` | gauge | `reason`: `failures` (paused with 39222) or `owner_privilege` (paused with 39229); 1 while a sink of the worker is paused. The `SprigSinkPaused` alert fires on it |
 | `sprig_sink_tasks` | gauge | `state` |
 | `sprig_sink_destination_refused_total` | counter | `reason` (allowlist, residency, identity) |
 
@@ -697,7 +697,7 @@ A fan-in sink lives in the tenant that declared the inherited stream or queue, o
 | 39220 | `ER_SPRIG_SINK_SCRIPT_FAILED` | A script error or malformed result |
 | 39221 | `ER_SPRIG_SINK_DELIVERY_FAILED` | The destination refused or failed; the message carries its status or code |
 | 39222 | `ER_SPRIG_SINK_PAUSED` | Paused after `sink.pause_after_minutes` of failures |
-| 39229 | `ER_SPRIG_SINK_OWNER_PRIVILEGE_LOST` | Paused: the owner lost `SELECT` on the source, or was locked or dropped. Resumes by itself when access returns |
+| 39229 | `ER_SPRIG_SINK_OWNER_PRIVILEGE_LOST` | Paused: the owner lost `SELECT` on the source (or `SPRIG_FAN_IN`, for a fan-in sink), or was locked or dropped. Resumes by itself when access returns |
 | 39223 | `ER_SPRIG_SINK_SOURCE_LOST` | The position fell behind the source's retention, or the queue was replaced |
 | 39224 | `ER_SPRIG_SINK_SCHEMA_MISMATCH` | The destination table doesn't fit under the schema policy |
 | 39226 | `ER_SPRIG_SINK_QUOTA` | Over `sink.max_per_tenant` |

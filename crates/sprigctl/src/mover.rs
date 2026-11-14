@@ -1,9 +1,9 @@
 //! `sprigctl shard move` and `sprigctl job list|show|cancel|cutover`
-//! (chapter 10, build step 11), over the Admin API's
+//! over the Admin API's
 //! `/admin/v1/mover/jobs`.
 //!
-//! R0 moves a tenant's whole placement unit (its catalog and every
-//! database's shard schema, which R0 keeps on one cluster):
+//! A move takes a tenant's whole placement unit (its catalog and every
+//! database's shard schema, kept on one cluster):
 //!
 //! ```text
 //! sprigctl shard move acme --to dc-a-c2 [--manual] [--verify off] [--wait]

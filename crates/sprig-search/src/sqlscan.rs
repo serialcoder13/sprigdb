@@ -1,5 +1,4 @@
-//! Finding search calls in SQL text (chapter 39, "Translating queries";
-//! build step 9): `MATCH (columns) AGAINST ('text' [modifier])` and
+//! Finding search calls in SQL text: `MATCH (columns) AGAINST ('text' [modifier])` and
 //! `sprig_search('index', 'query' [, options])`, with their byte spans,
 //! the clause each sits in, and the tables named after `FROM` and `JOIN`.
 //!

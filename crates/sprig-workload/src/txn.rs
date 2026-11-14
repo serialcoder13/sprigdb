@@ -1,5 +1,4 @@
-//! Transaction footprints (chapter 12, "Transaction footprints"; build step
-//! 7).
+//! Transaction footprints.
 //!
 //! A session keeps a [`TxnTracker`]. Each statement inside an explicit
 //! transaction adds its fingerprint and the table groups and tables it
@@ -8,11 +7,11 @@
 //! fingerprint, with text such as `TXN WRITE d1.g1 d2.g1` (groups sorted),
 //! which the recorder counts like any other: its latency is the
 //! transaction's duration, its shard and cluster counts the transaction's.
-//! Placement (chapter 11) reads the co-write rates from these.
+//! Placement reads the co-write rates from these.
 //!
-//! In R0 every logical database has one table group (decision N4), so the
-//! gateway passes the database's default group; the router (R1) passes the
-//! groups it routed to.
+//! An unsharded logical database has one table group, so the gateway
+//! passes the database's default group; the router passes the groups it
+//! routed to.
 
 use std::fmt::Write as _;
 use std::sync::Arc;

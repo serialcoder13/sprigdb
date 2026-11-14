@@ -1,4 +1,4 @@
-//! Search DDL in SQL (chapter 39, "DDL"; build step 1).
+//! Search DDL in SQL.
 //!
 //! ```sql
 //! CREATE SEARCH INDEX [IF NOT EXISTS] name ON [db.]object (
@@ -664,7 +664,7 @@ fn create_analyzer(p: &mut P) -> Result<SearchDdl> {
     })
 }
 
-/// `FULLTEXT` keys inside a `CREATE TABLE`, taken out of it (R5 round 6):
+/// `FULLTEXT` keys inside a `CREATE TABLE`, taken out of it:
 /// the statement without them, the table, and each key's name and columns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateTableFulltext {

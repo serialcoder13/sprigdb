@@ -1153,8 +1153,9 @@ pub struct Variant {
     /// Run a change topic's sequencer on the tenant's feed too, killed
     /// and overlapped at random (the stream invariant).
     pub streams: bool,
-    /// The sequencer reads through the shared per-cluster reader
-    /// (`sprig_feed::shared`) with tiny buffers and ring, so
+    /// The sequencer (and the trigger) reads through the shared
+    /// per-cluster reader (`sprig_feed::shared`) with tiny buffers and
+    /// ring, so
     /// its subscription is detached, comes back through the ring, and
     /// falls back to catch-up dumps (the same stream invariant).
     pub shared_feed: bool,
@@ -1171,6 +1172,26 @@ pub async fn run_move_triggers(world: World) -> std::result::Result<(), String> 
         world,
         Variant {
             triggers: true,
+            ..Variant::default()
+        },
+    )
+    .await
+}
+
+/// [`run_move_triggers`] with the trigger's feed reading through the
+/// shared per-cluster reader (R9, r9feed2), with tiny buffers and ring:
+/// its subscription is detached, comes back through the ring, a replay or
+/// a catch-up dump, and follows the move. Every change must still run
+/// exactly once.
+///
+/// # Errors
+/// The first broken invariant.
+pub async fn run_move_triggers_shared(world: World) -> std::result::Result<(), String> {
+    run_move_with(
+        world,
+        Variant {
+            triggers: true,
+            shared_feed: true,
             ..Variant::default()
         },
     )
@@ -1408,6 +1429,7 @@ async fn run_move_with(world: World, variant: Variant) -> std::result::Result<()
         tokio::spawn(logic::trigger_worker(
             world.clone(),
             feed_clusters.clone(),
+            variant.shared_feed,
             tier.clone(),
             sc.faults,
             feed_goal.clone(),

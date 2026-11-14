@@ -88,7 +88,7 @@ impl Normalized {
     }
 }
 
-/// Normalizes one statement (chapter 12, "SQL fingerprints"). `sql` is the
+/// Normalizes one statement. `sql` is the
 /// statement's text as the client sent it (one statement; a trailing `;`
 /// is ignored), `current_db` the session's logical database. Never fails:
 /// a statement that can't be lexed comes back with
@@ -700,7 +700,7 @@ impl Walker<'_> {
         if !quoted
             && (info.kw == Kw::Identified
                 || info.kw == Kw::None && w.len() >= 8 && contains_password(w)
-                // Chapter 51's `CREDENTIALS (k = 'v', ...)` (bugfix-24).
+                // A sink connection's `CREDENTIALS (k = 'v', ...)`.
                 || info.kw == Kw::None && w.eq_ignore_ascii_case(b"CREDENTIALS"))
         {
             self.sensitive = true;

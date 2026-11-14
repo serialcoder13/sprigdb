@@ -626,7 +626,7 @@ fn context(e: &SettingExplanation) -> String {
     }
 }
 
-/// `sprigctl settings get`: chapter 47's explanation, narrowest scope
+/// `sprigctl settings get`: the explanation, narrowest scope
 /// first.
 #[must_use]
 pub(crate) fn settings_get(e: &SettingExplanation) -> String {

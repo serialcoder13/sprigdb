@@ -150,9 +150,9 @@ cat /mnt/audit/audit/tenant-42/2026-11-12/*.jsonl \
 | Setting | Type | Default | Scopes | Meaning |
 |---|---|---|---|---|
 | `audit.spool_max_mb` | int | 512 | dc, global (operator only) | Local spool size before account and admin changes fail closed |
-| `audit.retention_days` | int, 1 to 36500 | 365 | dc, global (operator only); a tenant value is accepted but not read | Days of audit files kept in the sink |
+| `audit.retention_days` | int, 1 to 36500 | 365 | dc, global (operator only) | Days of audit files kept in the sink |
 
-Each process that writes to the sink runs a retention pass a minute after it starts and then hourly. The pass removes whole day directories (`audit/<stream>/<date>`) older than `audit.retention_days`, oldest first and at most 100 per pass, coming back after 10 seconds while more are due, so a record is kept at least that many days. The value applies to every stream alike, read at the process's data centre (or global) scope. `sprig_audit_retention_removed_total` counts the day directories removed. If your sink storage has its own lifecycle rules, keep them no shorter than this setting.
+Each process that writes to the sink runs a retention pass a minute after it starts and then hourly. The pass removes whole day directories (`audit/<stream>/<date>`) older than `audit.retention_days`, oldest first and at most 100 per pass, coming back after 10 seconds while more are due, so a record is kept at least that many days. The value applies to every stream alike. `sprig_audit_retention_removed_total` counts the day directories removed. If your sink storage has its own lifecycle rules, keep them no shorter than this setting.
 
 | Metric | Meaning |
 |---|---|
@@ -164,7 +164,7 @@ Each process that writes to the sink runs a retention pass a minute after it sta
 
 ## Not supported yet
 
-- Tenant-level `audit.retention_days`: the setting accepts a tenant value, but retention reads only the data-centre and global scopes, so every tenant's stream is kept for the same time.
+- Retention per tenant: `audit.retention_days` is set per data centre or globally, so every tenant's stream is kept for the same time.
 - An S3 or other object-storage sink; the sink is a directory.
 - Auditing of data access (statements that read or change rows).
 

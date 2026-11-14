@@ -1,5 +1,4 @@
-//! `sprigctl tenant move` and `sprigctl tenant traffic` (chapter 24, build
-//! steps 3 and 4), over `/admin/v1/tenants/{name}:move`, `.../move` and
+//! `sprigctl tenant move` and `sprigctl tenant traffic`, over `/admin/v1/tenants/{name}:move`, `.../move` and
 //! `.../traffic`.
 //!
 //! ```text

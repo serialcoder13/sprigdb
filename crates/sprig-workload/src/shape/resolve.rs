@@ -2,7 +2,7 @@
 //! catalog objects and physical tables.
 //!
 //! Shapes work on logical names, as the client wrote them. Only the
-//! gateway knows the tenant's catalog and schema mapping (chapter 07), so
+//! gateway knows the tenant's catalog and schema mapping, so
 //! it hands the extractor a [`TableResolver`].
 
 use sprig_common::ids::{DbId, ObjectId};
@@ -10,12 +10,12 @@ use sprig_common::ids::{DbId, ObjectId};
 /// A table the resolver knows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedTable {
-    /// The catalog object (chapter 08).
+    /// The catalog object.
     pub object_id: ObjectId,
     /// Its logical database.
     pub db_id: DbId,
-    /// Where it lives in MariaDB, when the caller knows: in R0 the
-    /// database's only shard schema.
+    /// Where it lives in MariaDB, when the caller knows: for an unsharded
+    /// database, its only shard schema.
     pub physical: Option<PhysicalTable>,
 }
 
@@ -24,7 +24,7 @@ pub struct ResolvedTable {
 pub struct PhysicalTable {
     /// The shard schema, `t<tenant>_d<db>_g<group>_s<shard>`.
     pub schema: String,
-    /// The table name (table names are never translated, chapter 07).
+    /// The table name (table names are never translated).
     pub table: String,
 }
 
