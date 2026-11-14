@@ -303,6 +303,12 @@ impl PassSession {
             .ok_or_else(|| SprigError::internal("no user"))?;
         let tenant = ts.tenant;
         let svc = Arc::clone(ts.services());
+        // An inheritable table's rows are layer rows: overrides and hide
+        // markers are checked as updates and deletes (RL65).
+        let layered = cat
+            .ext
+            .get::<sprig_inherit::InheritState>(sprig_inherit::MODULE)
+            .is_some_and(|st| st.object(object).is_some());
         let template = ts.schema_of(Some(&db.name));
         let layout = super::router::ddl_layout(ts);
         let list: Vec<(String, ClusterId)> = match (&layout, &template) {
@@ -430,7 +436,7 @@ impl PassSession {
                 lex: lex_opts,
                 physical: &physical,
             };
-            let mut stmts = spec.statements()?;
+            let mut stmts = spec.statements_for(layered)?;
             if views {
                 // The context function, its caller's right to run it, then
                 // the views.
@@ -661,8 +667,15 @@ impl PassSession {
                     extra.push_str(&c);
                 }
             }
-            // Last: whether the visible-columns view has the merged-layer
-            // term.
+            // Then whether the insert trigger checks layer rows by their
+            // state (RL65), and last whether the visible-columns view has
+            // the merged-layer term.
+            extra.push_str(&format!(
+                ", (SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = {s} \
+                 AND TRIGGER_NAME = {} AND ACTION_STATEMENT LIKE '%`\\_sprig\\_state`%')",
+                q(&names[0]),
+                s = q(schema),
+            ));
             extra.push_str(&format!(
                 ", (SELECT COUNT(*) FROM information_schema.VIEWS WHERE TABLE_SCHEMA = {s} AND \
                  TABLE_NAME = {} AND VIEW_DEFINITION LIKE {})",
@@ -752,9 +765,14 @@ impl PassSession {
                     }
                 }
             }
-            let merged_term = cell(6 + element_tables.len() * 5)
+            let layer_checks = cell(6 + element_tables.len() * 5)
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(0);
+            let merged_term = cell(7 + element_tables.len() * 5)
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
+            // Triggers from before RL65 check an override as an insert.
+            let triggers_ok = triggers_ok && (!triggers || inheritable == (layer_checks > 0));
             let views_ok = views_ok && elements_ok && (!views || !inheritable || merged_term > 0);
             if !triggers_ok || !views_ok {
                 complete = false;

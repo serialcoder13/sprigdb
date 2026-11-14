@@ -1,0 +1,8 @@
+data: {"id":"chatcmpl-4","object":"chat.completion.chunk","created":1763100003,"model":"qwen3:8b","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Thinking about the plan."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-4","object":"chat.completion.chunk","created":1763100003,"model":"qwen3:8b","choices":[{"index":0,"delta":{"content":"The plan reads every row of"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-4","object":"chat.completion.chunk","created":1763100003,"model":"qwen3:8b","choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":90,"completion_tokens":64,"total_tokens":154}}
+
+data: [DONE]
+

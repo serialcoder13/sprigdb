@@ -6168,6 +6168,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "sprig-ai"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "futures",
+ "getrandom 0.3.4",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "metrics",
+ "mysql_async",
+ "proptest",
+ "ring",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sprig-catalog",
+ "sprig-common",
+ "sprig-meta",
+ "sprig-settings",
+ "sprig-workload",
+ "sqlparser 0.63.0",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "uuid",
+ "webpki-roots 1.0.11",
+ "zeroize",
+]
+
+[[package]]
 name = "sprig-api"
 version = "0.0.1"
 dependencies = [
@@ -7414,6 +7448,7 @@ dependencies = [
  "mimalloc",
  "serde_json",
  "sprig-agent",
+ "sprig-ai",
  "sprig-common",
  "sprig-controller",
  "sprig-docs",

@@ -97,6 +97,10 @@ pub struct Scan {
     pub limit: Option<usize>,
     /// Paging (streamed results): only ids above this one, in id order.
     pub after: Option<u64>,
+    /// Only these property keys (`None`: all), as
+    /// [`GraphStore::nodes_part`] reads them; stores without late reads
+    /// give all.
+    pub keys: Option<Vec<String>>,
 }
 
 /// One row of a reach (CTE) call.
@@ -164,6 +168,19 @@ pub struct FarRead<'a> {
 /// A link [`GraphStore::links_far`] gives: the link, its far node when
 /// read, and its relationship's properties and types when read.
 pub type FarLink = (Link, Option<NodeRow>, Option<(Json, Option<Json>)>);
+
+/// One trail [`GraphStore::trails`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrailRow {
+    /// The origin.
+    pub origin: u64,
+    /// The end node.
+    pub end: u64,
+    /// Its routing hash.
+    pub end_rk: u64,
+    /// The edges, in order.
+    pub rels: Vec<u64>,
+}
 
 /// Which id counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -338,6 +355,21 @@ pub trait GraphStore: Send {
             .into_iter()
             .map(|l| (l, None, None))
             .collect())
+    }
+
+    /// Every trail of `min..=max` hops over `types` in `dir` from each of
+    /// `seeds` (node, routing hash), in one statement where the store
+    /// can (`None`: it can't, and the caller walks level by level).
+    async fn trails(
+        &mut self,
+        seeds: &[(u64, u64)],
+        types: &[u32],
+        dir: Dir,
+        min: u32,
+        max: u32,
+    ) -> Result<Option<Vec<TrailRow>>> {
+        let _ = (seeds, types, dir, min, max);
+        Ok(None)
     }
 
     /// Edges by id whose sources' routing hashes are known: `(src_rk,

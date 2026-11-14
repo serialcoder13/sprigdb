@@ -1543,6 +1543,34 @@ what_to_do = "Use `https` (port 8443 by default). If the network is trusted, pas
 meaning = "Docs search (the REST call, the `sprig_docs` database or `sprig_docs.embed`) can't be answered: docs are turned off, no cluster has this release's docs pack loaded yet, or the embedding model isn't available to `sprig_docs.embed`."
 what_to_do = "Retry shortly after an upgrade: the controller loads the pack into every cluster at start. If it lasts, check `docs.enabled`, that the controller found a valid pack (`docs.pack_path`, the `docs.pack.unavailable` event) and that `sprig_ctl` may manage `__sprig_docs`; for `sprig_docs.embed`, check `docs.embed_queries` and `docs.model_dir`."
 
+[ER_SPRIG_AI_NOT_CONFIGURED]
+meaning = "The assistant has no model: `ai.model.<role>` is empty or names a provider that doesn't exist, or the provider's record can't be used (its base URL is invalid, or its key doesn't open with this process's master key file)."
+what_to_do = "An operator sets `ai.model.<role>` to `provider/model` (for example `anthropic/claude-opus-5-5`) after adding the provider. If the message names the key, check that the process has the master key file the key was sealed with, or set the key again."
+
+[ER_SPRIG_AI_DISABLED]
+meaning = "The AI assistants are turned off for the tenant (`ai.enabled` is off, the default)."
+what_to_do = "A tenant admin turns on `ai.enabled` once an operator has configured a provider. Decide `ai.share_data` at the same time: it stays off unless you want rows and results sent to the provider."
+
+[ER_SPRIG_AI_BUDGET_EXCEEDED]
+meaning = "The tenant's (`ai.budget.tenant_tokens_day`) or the user's (`ai.budget.user_tokens_day`) daily AI token budget is used up, so the turn stopped before calling the model. Tokens counted are input read or written uncached and output; budgets reset at 00:00 UTC."
+what_to_do = "Wait for the next UTC day, or ask a tenant admin to raise the budget the message names. Shorter conversations and fewer tool rounds use fewer tokens."
+
+[ER_SPRIG_AI_PROVIDER_ERROR]
+meaning = "The AI provider failed: it couldn't be reached, answered with an error, broke off its answer, or the turn ran past `ai.timeout_seconds`. Network errors, rate limits, overloads and server errors were already retried twice."
+what_to_do = "Retry the message; the draft is kept. If it repeats, the message says what the provider answered: an authentication error means the provider's key must be set again, a rate limit or overload means waiting, and a timeout may need a higher `ai.timeout_seconds`."
+
+[ER_SPRIG_AI_REFUSED]
+meaning = "The model declined the request; its explanation, when the provider gives one, is in the message."
+what_to_do = "Rephrase the request, or ask for something narrower. Refusals aren't retried automatically."
+
+[ER_SPRIG_AI_EGRESS_DENIED]
+meaning = "The request would have sent rows or values (a result, a sample) to the AI provider while `ai.share_data` is off for the tenant or database."
+what_to_do = "Leave the data out, or ask a tenant admin to turn on `ai.share_data` for the database if sending rows to the provider is acceptable."
+
+[ER_SPRIG_AI_TOOL_DENIED]
+meaning = "The model kept calling tools its assistant may not use, or with input that doesn't fit the tool (three refusals in one turn), so the turn was stopped."
+what_to_do = "Ask again more specifically, or switch to the assistant that has the tool (the data specialist runs queries; the DBA assistant reads workload and indexes). If it repeats with a given model, report it with the conversation."
+
 [ER_SPRIG_CONFIG_INVALID]
 meaning = "A configuration value is invalid: `sprigdb.toml` or its environment overrides at process start, a secret file, a peer or etcd setting, or an input such as an API key name. Processes refuse to start with it."
 what_to_do = "Fix the key the message names in `sprigdb.toml` or the environment, then start the process again; for API input, correct the field."
@@ -1655,27 +1683,6 @@ meaning = "Closed before the handshake."
 
 [ER_SPRIG_STUDIO_VERSION_MISMATCH]
 meaning = "Studio needs a newer API (409)."
-
-[ER_SPRIG_AI_NOT_CONFIGURED]
-meaning = "No provider or model is configured for the role."
-
-[ER_SPRIG_AI_DISABLED]
-meaning = "`ai.enabled` (or `ai.functions.enabled`, `ai.mcp.enabled`) is off for the tenant."
-
-[ER_SPRIG_AI_BUDGET_EXCEEDED]
-meaning = "The tenant's or user's daily token budget is used up."
-
-[ER_SPRIG_AI_PROVIDER_ERROR]
-meaning = "The AI provider failed or timed out."
-
-[ER_SPRIG_AI_REFUSED]
-meaning = "The model declined the request."
-
-[ER_SPRIG_AI_EGRESS_DENIED]
-meaning = "The request would send row data and `ai.share_data` is off."
-
-[ER_SPRIG_AI_TOOL_DENIED]
-meaning = "A tool outside the role, or an invalid tool input, was refused."
 
 [ER_SPRIG_EMBEDDING_FAILED]
 meaning = "An embedded column or retrieval index can't be filled (dimension, model)."

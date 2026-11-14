@@ -1515,3 +1515,28 @@ async fn top_rows_of_a_chunked_match() {
         }
     }
 }
+
+/// A far node pattern with an indexed property restricts the hop to the
+/// nodes the index finds; the answers stay those of whole reads.
+#[tokio::test]
+async fn indexed_far_maps_answer_as_whole_reads() {
+    for shards in [1, 4] {
+        let mut whole = social(shards).await;
+        let mut late = social(shards).await.with_late_reads();
+        for s in [&mut whole, &mut late] {
+            q(s, "CREATE INDEX FOR (n:Product) ON (n.name)").await;
+        }
+        for c in [
+            "MATCH (a:Person)-[:BOUGHT]->(p:Product {name: 'Pen'}) RETURN a.name ORDER BY a.name",
+            "MATCH (x:Product {name: 'Desk'}) WITH x.name AS nm
+             MATCH (a:Person)-[:BOUGHT]->(p:Product {name: nm}) RETURN a.name, p.price ORDER BY a.name",
+            "MATCH (a:Person)-[:BOUGHT]->(p:Product {name: 'Nothing'}) RETURN count(*) AS c",
+            "UNWIND ['Pen', 'Lamp'] AS nm MATCH (a:Person)-[:BOUGHT]->(p:Product {name: nm})
+             RETURN nm, a.name ORDER BY nm, a.name",
+        ] {
+            let a = q(&mut whole, c).await;
+            let b = q(&mut late, c).await;
+            assert_eq!(show(&a), show(&b), "{c} on {shards} shard(s)");
+        }
+    }
+}

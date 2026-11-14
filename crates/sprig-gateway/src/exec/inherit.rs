@@ -298,7 +298,18 @@ impl PassSession {
             return Ok(None);
         }
         let state = cat.ext.get::<InheritState>(sprig_inherit::MODULE);
-        if !sprig_inherit::maybe_inherit(text, state) {
+        // A change stream's visibility probe (RL64; `inherit_probe`).
+        let probe = super::inherit_probe::parse(text);
+        if let Some(None) = probe {
+            let e = SprigError::standard(
+                1064,
+                *b"42000",
+                "You have an error in your SQL syntax: a visibility probe isn't a client statement",
+            );
+            return Ok(Some(self.fail(out, &e).await?));
+        }
+        let probe = probe.flatten();
+        if probe.is_none() && !sprig_inherit::maybe_inherit(text, state) {
             return Ok(None);
         }
         let Ok(sql) = std::str::from_utf8(text) else {
@@ -391,7 +402,21 @@ impl PassSession {
                 },
                 migrated,
             };
-            let h = Box::pin(sprig_inherit::handle(sql, &ctx, &mut runner)).await;
+            let h = match &probe {
+                Some(req) => {
+                    let col =
+                        |n: &str| crate::pipeline::text_column(n, runner.gw.cx.proto.collation);
+                    Box::pin(super::inherit_probe::run(
+                        &ctx,
+                        &mut runner,
+                        req,
+                        (col("i"), col("v")),
+                    ))
+                    .await
+                    .map(Handled::Rows)
+                }
+                None => Box::pin(sprig_inherit::handle(sql, &ctx, &mut runner)).await,
+            };
             if let Some(ts) = runner.gw.sess.tenant.as_deref_mut() {
                 (ts.types.internal, ts.types.typed_plan) = saved;
             }

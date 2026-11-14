@@ -11,6 +11,8 @@ publish.workspace = true
 [dependencies]
 clap.workspace = true
 sprig-agent.workspace = true
+# The AI assistants' core; linked for its `ai.*` settings until a role uses it.
+sprig-ai.workspace = true
 sprig-common.workspace = true
 sprig-controller.workspace = true
 sprig-docs = { path = "../sprig-docs" }

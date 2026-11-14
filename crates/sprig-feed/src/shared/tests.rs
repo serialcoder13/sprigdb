@@ -490,3 +490,164 @@ async fn a_new_whole_tenant_just_behind_the_hub_is_replayed_without_a_catch_up_d
     assert_eq!(take(&mut r, 1).await, vec![(11, 1)]);
     assert_eq!(feed.stats(&c).unwrap().catchups, 0);
 }
+
+/// r9feed2: change streams resuming together after a gateway's restart,
+/// each a little behind the hub, before the ring's start too: replays
+/// chain (one under way is extended), and each subscription gets every
+/// group of its tenant once, in order, with no catch-up dump.
+#[tokio::test]
+async fn replays_chain_for_whole_tenants_resuming_behind_the_hub() {
+    let groups: Vec<RawTxn> = (1..=30)
+        .map(|s| {
+            let mut t = txn(s, &["t1_d1_g1_s1"]);
+            for tenant in [2, 3, 4] {
+                t.rows
+                    .push(row_in(&format!("t{tenant}_d1_g1_s1"), "orders"));
+            }
+            t
+        })
+        .collect();
+    let fake = Fake::with(groups);
+    let opts = SharedOpts {
+        gather: Duration::ZERO,
+        ..SharedOpts::default()
+    };
+    let feed = SharedFeed::new(Arc::new(fake.clone()), opts);
+    let outbox = feed.view(Kept::Tables(vec!["__sprig_qo".to_owned()].into()));
+    let all = feed.view(Kept::All);
+    let c = cluster();
+    // The hub starts at 10 (its ring starts there) and reads to 30.
+    let mut q = outbox.open(&c, TenantId(1), &at(10)).await.unwrap();
+    assert_eq!(take(&mut q, 20).await.len(), 20);
+    // Three streams resume at once, behind the hub, two before its ring.
+    let mut w2 = all.open(&c, TenantId(2), &at(4)).await.unwrap();
+    let mut w3 = all.open(&c, TenantId(3), &at(25)).await.unwrap();
+    let mut w4 = all.open(&c, TenantId(4), &at(0)).await.unwrap();
+    for (w, from) in [(&mut w2, 4), (&mut w3, 25), (&mut w4, 0)] {
+        let seqs: Vec<u64> = take(w, 30 - from).await.iter().map(|x| x.0).collect();
+        assert_eq!(seqs, ((from as u64 + 1)..=30).collect::<Vec<_>>());
+        assert!(quiet(w, 200).await, "a group twice");
+    }
+    assert!(quiet(&mut q, 200).await, "tenant 1 got a group twice");
+    assert_eq!(fake.catchup_opens(), 0, "no catch-up dump");
+    // New groups reach everyone once.
+    let mut g31 = txn(31, &["t1_d1_g1_s1"]);
+    for tenant in [2, 3, 4] {
+        g31.rows
+            .push(row_in(&format!("t{tenant}_d1_g1_s1"), "orders"));
+    }
+    fake.push(g31);
+    for w in [&mut q, &mut w2, &mut w3, &mut w4] {
+        assert_eq!(take(w, 1).await, vec![(31, 1)]);
+    }
+    // A Tables subscription from before the ring still takes a catch-up
+    // dump: the replay didn't put groups before the ring into it.
+    let mut late = outbox.open(&c, TenantId(1), &at(2)).await.unwrap();
+    let seqs: Vec<u64> = take(&mut late, 29).await.iter().map(|x| x.0).collect();
+    assert_eq!(seqs, (3..=31).collect::<Vec<_>>());
+    assert_eq!(fake.catchup_opens(), 1);
+}
+
+/// A small deterministic generator for the stress test below.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self, n: u64) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 33) % n.max(1)
+    }
+}
+
+/// r9feed2: whole-tenant subscriptions start at random points a little
+/// behind a busy hub (replays, chained), read slowly (detached, back
+/// through the ring or a catch-up dump), with a small ring. Each gets every
+/// group of its tenant after its start once, in order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn whole_tenants_starting_behind_a_busy_hub_get_every_group_once() {
+    for seed in 1..=8u64 {
+        let fake = Fake::with(Vec::new());
+        let opts = SharedOpts {
+            sub_channel: 3,
+            ring_groups: 25,
+            max_catchup: 2,
+            gather: Duration::ZERO,
+            ..SharedOpts::default()
+        };
+        let feed = SharedFeed::new(Arc::new(fake.clone()), opts);
+        let all = feed.view(Kept::All);
+        let c = cluster();
+        let total = 240u64;
+        let pusher = {
+            let fake = fake.clone();
+            tokio::spawn(async move {
+                let mut r = Lcg(seed);
+                for s in 1..=total {
+                    let mut t = RawTxn::new(g(s), at(s - 1), 0);
+                    for tenant in 1..=6 {
+                        if r.next(3) == 0 {
+                            t.rows
+                                .push(row_in(&format!("t{tenant}_d1_g1_s1"), "orders"));
+                        }
+                    }
+                    if t.rows.is_empty() {
+                        t.rows.push(row_in("t9_d1_g1_s1", "orders"));
+                    }
+                    fake.push(t);
+                    if r.next(4) == 0 {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                }
+            })
+        };
+        let mut readers = Vec::new();
+        let mut r = Lcg(seed * 7919);
+        for i in 0..14u64 {
+            tokio::time::sleep(Duration::from_millis(r.next(15))).await;
+            let tenant = 1 + r.next(6);
+            let last = fake.last();
+            let from = last.saturating_sub(r.next(30));
+            let mut src = all.open(&c, TenantId(tenant), &at(from)).await.unwrap();
+            let slow = r.next(3) == 0;
+            readers.push(tokio::spawn(async move {
+                let mut got = Vec::new();
+                // Idle positions keep coming: stop 2 s after the last group.
+                let mut quiet_since = tokio::time::Instant::now();
+                loop {
+                    if quiet_since.elapsed() > Duration::from_secs(2) {
+                        return (i, tenant, from, got);
+                    }
+                    match tokio::time::timeout(Duration::from_secs(3), src.next()).await {
+                        Ok(Ok(SourceItem::Txn(t))) => {
+                            quiet_since = tokio::time::Instant::now();
+                            got.push(t.gtid.seq);
+                            if slow && t.gtid.seq % 5 == i % 5 {
+                                tokio::time::sleep(Duration::from_millis(3)).await;
+                            }
+                        }
+                        Ok(Ok(SourceItem::Idle { .. })) => {}
+                        Ok(Err(e)) => panic!("reader {i}: {e}"),
+                        Err(_) => return (i, tenant, from, got),
+                    }
+                }
+            }));
+        }
+        pusher.await.unwrap();
+        let groups = fake.groups.lock().unwrap().clone();
+        for h in readers {
+            let (i, tenant, from, got) = h.await.unwrap();
+            let schema = format!("t{tenant}_d1_g1_s1");
+            let want: Vec<u64> = groups
+                .iter()
+                .filter(|t| t.gtid.seq > from && t.rows.iter().any(|r| r.table.schema == schema))
+                .map(|t| t.gtid.seq)
+                .collect();
+            assert_eq!(
+                got, want,
+                "seed {seed}, reader {i} (tenant {tenant} from {from})"
+            );
+        }
+    }
+}

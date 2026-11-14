@@ -192,10 +192,10 @@ fn writes(level: usize) -> &'static [&'static str] {
 fn policies(t: usize) -> Vec<&'static str> {
     let mut v = vec![
         "CREATE POLICY p_alice ON docs FOR SELECT, UPDATE, DELETE TO alice USING (owner = 'alice')",
+        // No INSERT policy: an UPDATE or DELETE of an inherited record
+        // writes an override or a hide marker, which MariaDB's triggers
+        // check with UPDATE's and DELETE's policies (RL65).
         "CREATE POLICY p_bob ON docs FOR SELECT, UPDATE, DELETE TO bob USING (owner = 'bob')",
-        // An UPDATE or DELETE of an inherited record writes an override or
-        // hide row, which MariaDB's triggers check as an INSERT.
-        "CREATE POLICY p_ins ON docs FOR INSERT TO alice, bob WITH CHECK (TRUE)",
     ];
     match t {
         0 => v.push(
@@ -762,17 +762,6 @@ async fn no_read_path_returns_an_inherited_row_a_policy_hides() {
                             wrong.push(format!("{at}: counted {n}, want {w}"));
                         }
                     }
-                    // Found by this suite, older than it: a DELETE inside
-                    // a transaction on a record hierarchy shared to a child
-                    // tenant fails with 1305 whatever the policies.
-                    (Got::Refused(msg), Must::Count(Cmd::Delete)) if msg.contains("1305") => {
-                        *refused
-                            .entry(format!(
-                                "{p:?}: {}",
-                                msg.chars().take(90).collect::<String>()
-                            ))
-                            .or_default() += 1;
-                    }
                     (Got::Refused(msg), Must::SubsetOrRefused) => {
                         *refused
                             .entry(format!(
@@ -793,6 +782,36 @@ async fn no_read_path_returns_an_inherited_row_a_policy_hides() {
         leaks.join("\n")
     );
     assert!(wrong.is_empty(), "wrong answers:\n{}", wrong.join("\n"));
+
+    // RL66: a DELETE inside a transaction on the shared record hierarchy
+    // (it failed with 1305, `SAVEPOINT sprig_types does not exist`, with or
+    // without policies).
+    for (level, user, id) in [
+        (3, "app", 12),
+        (1, "app", 12),
+        (2, "alice", 10),
+        (3, "bob", 2),
+    ] {
+        let mut c = f.session(&e.mysql, level, user).await;
+        must(&mut c, "BEGIN").await;
+        let r = try_exec(&mut c, &format!("DELETE FROM docs WHERE id = {id}")).await;
+        let n = c.affected_rows();
+        must(&mut c, "ROLLBACK").await;
+        assert!(
+            r.is_ok(),
+            "DELETE in a transaction, {user}@{}: {r:?}",
+            LEVEL_NAME[level]
+        );
+        eprintln!(
+            "DELETE in a transaction, {user}@{}: {n} row(s)",
+            LEVEL_NAME[level]
+        );
+    }
+
+    // RL65: an UPDATE or DELETE of an inherited record is governed by the
+    // UPDATE and DELETE policies, never INSERT's. `wdocs` in b, shared to
+    // b1; alice writes at b1, where every record is inherited.
+    write_combinations(&f, &mut app[1], &format!("rlsi_{tag}{pid}_wb")).await;
 
     // Vector search over an inherited table (read through from a), where
     // the inheritance layer takes a VECTOR column.
@@ -893,6 +912,70 @@ async fn no_read_path_returns_an_inherited_row_a_policy_hides() {
     );
     assert!(keys(&kb).contains(&51), "bob@b missed his record: {kb:?}");
 
+    // RL64: a delete reaches a subscriber only for a record it could see.
+    // In a, alice's records 60-63; c gives 60 to bob and hides 61, then a
+    // deletes 60, 61 and 62 and c gives 63 to bob. alice at c saw 62 and 63
+    // only, so she gets their deletes and nothing of 60 or 61 (before,
+    // a's row passing c's policies sent her a delete of each).
+    for id in 60..=63 {
+        must(
+            &mut app[0],
+            &format!(
+                "INSERT INTO docs (id, parent_id, owner, visible, tier) VALUES ({id}, 1, \
+                 'alice', 1, 1)"
+            ),
+        )
+        .await;
+    }
+    let want_c: BTreeSet<i64> = [60, 61, 62, 63].into();
+    let mut seen_c = BTreeSet::new();
+    for _ in 0..60 {
+        let mut c = f.session(&e.mysql, 3, "app").await;
+        seen_c = ids(&mut c, "SELECT id FROM docs WHERE id BETWEEN 60 AND 63")
+            .await
+            .unwrap_or_default();
+        if seen_c == want_c {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(seen_c, want_c, "60-63 at c");
+    {
+        let mut c = f.session(&e.mysql, 3, "app").await;
+        must(&mut c, "UPDATE docs SET owner = 'bob' WHERE id = 60").await;
+        must(&mut c, "DELETE FROM docs WHERE id = 61").await;
+    }
+    let mut s_alice = open_stream(&e, &e.t[2], "alice", &db).await;
+    let mut s_eve = open_stream(&e, &e.t[2], "eve", &db).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    must(&mut app[0], "DELETE FROM docs WHERE id IN (60, 61, 62)").await;
+    {
+        let mut c = f.session(&e.mysql, 3, "app").await;
+        must(&mut c, "UPDATE docs SET owner = 'bob' WHERE id = 63").await;
+    }
+    let ka = stream_keys(&mut s_alice, 12).await;
+    let ke = stream_keys(&mut s_eve, 1).await;
+    eprintln!("delete streams: alice@c {ka:?}; eve@c {ke:?}");
+    let deleted: BTreeSet<i64> = ka
+        .iter()
+        .filter(|(op, _)| op == "delete")
+        .map(|(_, k)| *k)
+        .collect();
+    let leaked: Vec<i64> = keys(&ka)
+        .into_iter()
+        .filter(|k| [60, 61].contains(k))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "alice@c got events of records she never saw: {ka:?}"
+    );
+    assert_eq!(
+        deleted,
+        BTreeSet::from([62, 63]),
+        "alice@c's deletes: {ka:?}"
+    );
+    assert!(ke.is_empty(), "eve@c got events: {ke:?}");
+
     // Cleanup, best effort: rows below a, shares bottom first, users, the
     // space, the databases.
     for level in (1..LEVELS).rev() {
@@ -903,7 +986,14 @@ async fn no_read_path_returns_an_inherited_row_a_policy_hides() {
         let _ = try_exec(&mut c, "SPRIG RESET docs").await;
         let _ = try_exec(&mut c, "SPRIG RESET vdocs").await;
     }
-    for (lv, sh) in [(1, "vbc"), (0, "vab"), (1, "bc"), (1, "bb"), (0, "ab")] {
+    for (lv, sh) in [
+        (1, "wb"),
+        (1, "vbc"),
+        (0, "vab"),
+        (1, "bc"),
+        (1, "bb"),
+        (0, "ab"),
+    ] {
         let q = format!("DROP SHARE IF EXISTS rlsi_{tag}{pid}_{sh}");
         let _ = try_exec(&mut app[lv], &q).await;
     }
@@ -915,4 +1005,130 @@ async fn no_read_path_returns_an_inherited_row_a_policy_hides() {
         }
         let _ = try_exec(c, &format!("DROP DATABASE IF EXISTS `{db}`")).await;
     }
+}
+
+/// RL65's policy combinations: `alice` at `b1` updates and deletes records
+/// she inherits from `b`, under each set of policies on `wdocs`.
+async fn write_combinations(f: &Fixture<'_>, app_b: &mut mysql_async::Conn, share: &str) {
+    for q in [
+        "CREATE TABLE wdocs (id INT PRIMARY KEY, owner VARCHAR(20) NOT NULL, body VARCHAR(20) \
+         NOT NULL DEFAULT 'x')",
+        "ALTER TABLE wdocs SPRIG INHERITABLE KEY (id)",
+        "INSERT INTO wdocs (id, owner) VALUES (1, 'alice'), (2, 'alice'), (3, 'alice'), (4, \
+         'alice'), (5, 'bob'), (6, 'alice')",
+    ] {
+        must(app_b, q).await;
+    }
+    must(
+        app_b,
+        &format!("CREATE SHARE {share} ON wdocs TO SPACE `{}`", f.b1),
+    )
+    .await;
+    must(app_b, "ALTER TABLE wdocs ENABLE ROW LEVEL SECURITY").await;
+    let cases: [(&str, &[&str]); 4] = [
+        (
+            "SELECT and UPDATE",
+            &[
+                "CREATE POLICY w_s ON wdocs FOR SELECT TO alice USING (owner = 'alice')",
+                "CREATE POLICY w_u ON wdocs FOR UPDATE TO alice USING (owner = 'alice')",
+            ],
+        ),
+        (
+            "SELECT and UPDATE WITH CHECK",
+            &[
+                "CREATE POLICY w_s ON wdocs FOR SELECT TO alice USING (owner = 'alice')",
+                "CREATE POLICY w_u ON wdocs FOR UPDATE TO alice USING (owner = 'alice') WITH \
+                 CHECK (owner = 'alice')",
+            ],
+        ),
+        (
+            "SELECT and DELETE",
+            &[
+                "CREATE POLICY w_s ON wdocs FOR SELECT TO alice USING (owner = 'alice')",
+                "CREATE POLICY w_d ON wdocs FOR DELETE TO alice USING (owner = 'alice')",
+            ],
+        ),
+        (
+            "SELECT and INSERT",
+            &[
+                "CREATE POLICY w_s ON wdocs FOR SELECT TO alice USING (owner = 'alice')",
+                "CREATE POLICY w_i ON wdocs FOR INSERT TO alice WITH CHECK (TRUE)",
+            ],
+        ),
+    ];
+    // (statement, what it must do): Ok(n) rows affected, or Err(code).
+    let steps: [&[(&str, Result<u64, &str>)]; 4] = [
+        &[
+            // An override, with no INSERT policy; then the override again.
+            ("UPDATE wdocs SET body = 'u1' WHERE id = 1", Ok(1)),
+            ("UPDATE wdocs SET body = 'u2' WHERE id = 1", Ok(1)),
+            // No DELETE policy: nothing to delete.
+            ("DELETE FROM wdocs WHERE id = 2", Ok(0)),
+        ],
+        &[
+            // WITH CHECK, checked by MariaDB on the override.
+            ("UPDATE wdocs SET owner = 'bob' WHERE id = 3", Err("39363")),
+            ("UPDATE wdocs SET body = 'c2' WHERE id = 3", Ok(1)),
+        ],
+        &[
+            // A hide marker, and a hide marker over an override.
+            ("DELETE FROM wdocs WHERE id = 4", Ok(1)),
+            ("DELETE FROM wdocs WHERE id = 1", Ok(1)),
+            // No UPDATE policy: nothing to update.
+            ("UPDATE wdocs SET body = 'no' WHERE id = 6", Ok(0)),
+        ],
+        &[
+            // An INSERT policy alone gives neither.
+            ("UPDATE wdocs SET body = 'i' WHERE id = 6", Ok(0)),
+            ("DELETE FROM wdocs WHERE id = 6", Ok(0)),
+        ],
+    ];
+    let mut failures = Vec::new();
+    for ((name, pols), steps) in cases.iter().zip(steps) {
+        for p in ["w_s", "w_u", "w_d", "w_i"] {
+            let _ = try_exec(app_b, &format!("DROP POLICY IF EXISTS {p} ON wdocs")).await;
+        }
+        for p in *pols {
+            must(app_b, p).await;
+        }
+        let mut c = f.session(&f.e.mysql, 2, "alice").await;
+        for (sql, want) in steps {
+            let r = c.query_drop(*sql).await;
+            let got = match r {
+                Ok(()) => Ok(c.affected_rows()),
+                Err(e) => Err(e.to_string()),
+            };
+            let ok = match (&got, want) {
+                (Ok(n), Ok(w)) => n == w,
+                (Err(msg), Err(code)) => msg.contains(code),
+                _ => false,
+            };
+            eprintln!("write combination {name}: {sql}: {got:?}");
+            if !ok {
+                failures.push(format!("{name}: {sql}: {got:?}, want {want:?}"));
+            }
+        }
+    }
+    // What the writes left: at b1, 1 and 4 hidden, 3's body changed; at b,
+    // nothing.
+    let mut app_b1 = f.session(&f.e.mysql, 2, "app").await;
+    let at_b1 = ids(&mut app_b1, "SELECT id FROM wdocs").await;
+    let body3: Option<String> = app_b1
+        .query_first("SELECT body FROM wdocs WHERE id = 3")
+        .await
+        .unwrap_or(None);
+    let at_b = ids(app_b, "SELECT id FROM wdocs").await;
+    if at_b1 != Ok(BTreeSet::from([2, 3, 5, 6])) || body3.as_deref() != Some("c2") {
+        failures.push(format!(
+            "b1 after the writes: {at_b1:?}, body of 3 {body3:?}"
+        ));
+    }
+    if at_b != Ok(BTreeSet::from([1, 2, 3, 4, 5, 6])) {
+        failures.push(format!("b after the writes: {at_b:?}"));
+    }
+    assert!(
+        failures.is_empty(),
+        "writes to inherited records:\n{}",
+        failures.join("\n")
+    );
 }

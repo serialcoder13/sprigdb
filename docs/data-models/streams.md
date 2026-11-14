@@ -92,7 +92,7 @@ DROP STREAM IF EXISTS shop.order_events;
 - `SET (...)` and `RESET (...)` (also written `SPRIG SET` and `SPRIG RESET`) accept `stream.retention_hours`, `stream.retention_bytes`, `stream.max_message_bytes`, `stream.compaction_lag_minutes` and `stream.tombstone_hours`. Any other key, or a value outside the key's bounds, is error 1231.
 - `ALTER STREAM` needs `ALTER`, and `DROP STREAM` needs `DROP`, on the stream or its database.
 - `DROP DATABASE` drops the database's streams first.
-- `SHOW STREAMS [FROM | IN db]` lists the streams you may read, with the columns `Stream`, `Kind` (`events` or `changes`), `Partitions`, `Cleanup`, `Source` and `Key`.
+- `SHOW STREAMS [FROM | IN db]` lists the streams you may read, with the columns `Stream`, `Kind` (`events` or `changes`), `Partitions`, `Cleanup`, `Source`, `Key` and `Lag_ms` (how far the stream's sequencer is behind, in milliseconds; `NULL` while none is running).
 
 ## Records, keys and partitions
 

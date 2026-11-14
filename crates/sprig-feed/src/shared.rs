@@ -35,10 +35,12 @@
 //!   the hub started under `gather` ago and delivered nothing → it moves
 //!     its start back to from (a worker's restart: every sequencer comes
 //!     back at once, each from its own checkpoint)
-//!   a new subscription keeping its tenant whole, within the ring's reach
-//!     → the dump reopens wider at from and reads those groups again;
-//!     everyone skips what they had (r9feed2: a stream or trigger that
-//!     read the cluster's position a moment before the hub read on)
+//!   a new subscription keeping its tenant whole, up to REPLAY_GROUPS
+//!     behind → the dump reopens wider at from and reads those groups
+//!     again (a replay under way is extended); everyone skips what they
+//!     had, the ring keeps what it held (r9feed2: a stream or trigger that
+//!     read the cluster's position a moment before the hub read on, or a
+//!     gateway's streams resuming after its restart)
 //!   else → a private catch-up dump for the tenant alone (at most
 //!     `max_catchup` per cluster; the others wait for one), which hands
 //!     over to the hub as soon as the ring covers its position
@@ -117,6 +119,22 @@ pub enum Kept {
     /// Everything: rows of every schema of the tenant (its catalog too),
     /// its DDL and statement-format DML.
     All,
+}
+
+/// Groups (of any tenant) a replay reads again at most: about a second of
+/// a busy cluster's binlog, read without waiting for anyone.
+pub const REPLAY_GROUPS: u64 = 20_000;
+
+/// How many groups `from` is behind `pos`, by GTID sequence numbers (the
+/// most over `pos`'s domains; a domain `from` lacks: `u64::MAX`).
+fn behind(from: &GtidPos, pos: &GtidPos) -> u64 {
+    pos.iter()
+        .map(|g| {
+            from.get(g.domain)
+                .map_or(u64::MAX, |f| g.seq.saturating_sub(f.seq))
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// Whether group `g` lies after `from` (a domain `from` lacks: yes).
@@ -585,13 +603,13 @@ impl Hub {
         }
         // A new subscription keeping its tenant whole, a little behind the
         // hub (it read the cluster's position, or its checkpoint, a moment
-        // before the hub read on): the dump reopens wider anyway, so it
-        // reopens at `from` and reads those groups again instead of
-        // opening a catch-up dump (r9feed2). Within the ring's reach and
-        // `max_backlog` groups only, one replay at a time.
-        let near = from.reached(&st.ring_start)
-            && st.ring.iter().filter(|e| after(from, &e.gtid)).count() <= opts.max_backlog;
-        if first && whole && near && st.rewind.is_none() && st.replay_until.is_none() {
+        // before the hub read on; or a gateway's change streams resuming
+        // after a restart): the dump reopens wider anyway, so it reopens
+        // at `from` and reads those groups again instead of opening a
+        // catch-up dump (r9feed2). Up to `REPLAY_GROUPS` groups back; a
+        // replay under way is extended (each subscription skips what it
+        // had).
+        if first && whole && st.rewind.is_none() && behind(from, &pos) <= REPLAY_GROUPS {
             let r = match &st.replay {
                 Some(r) => older(r, from),
                 None => from.clone(),
@@ -769,7 +787,13 @@ impl Hub {
                         st.replay_until = Some(until);
                         s
                     } else {
-                        self.scope(&mut st, &pos, false)
+                        // During a replay the ring has nothing of a tenant
+                        // added now before where the replay ends.
+                        let since = match &st.replay_until {
+                            Some(u) => newer(u, &pos),
+                            None => pos.clone(),
+                        };
+                        self.scope(&mut st, &since, false)
                     };
                     scope = Some(s);
                 } else if scope.is_none() {

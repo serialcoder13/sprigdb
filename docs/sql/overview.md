@@ -103,7 +103,12 @@ Schema changes go through SprigDB's catalog, so every gateway sees a new definit
 
 `PREPARE`, `EXECUTE`, `EXECUTE IMMEDIATE` and `DEALLOCATE PREPARE` (or `DROP PREPARE`) work on every tenant. On a tenant whose tables are all unsharded, they go to MariaDB unchanged, and the session then keeps one backend connection until it ends, since SprigDB can't replay a statement MariaDB holds. Once a tenant has a sharded table, the gateway holds the statements itself, so they work across shards, clusters and moves:
 
-```sql
+```sql test
+CREATE TABLE orders (id INT PRIMARY KEY, customer_id INT, total DECIMAL(10,2));
+CREATE TABLE order_items (order_id INT, sku VARCHAR(20));
+INSERT INTO orders VALUES (1, 42, 10.00), (2, 43, 20.50);
+INSERT INTO order_items VALUES (1001, 'A-1'), (1001, 'B-7');
+
 PREPARE orders_of FROM 'SELECT id, total FROM orders WHERE customer_id = ?';
 SET @c = 42;
 EXECUTE orders_of USING @c;
@@ -111,6 +116,15 @@ EXECUTE orders_of USING 43;
 DEALLOCATE PREPARE orders_of;
 
 EXECUTE IMMEDIATE 'SELECT COUNT(*) FROM order_items WHERE order_id = ?' USING 1001;
+```
+
+```text output
+id	total
+1	10.00
+id	total
+2	20.50
+COUNT(*)
+2
 ```
 
 How the gateway runs them:
@@ -141,13 +155,20 @@ On one MariaDB server, `SET GLOBAL` changes the server for everyone. In SprigDB,
 | `max_execution_time` | `compat.global.max_execution_time` | Milliseconds, 0 to 4294967295. 3306 only: on 3307 it fails with 1193, as MariaDB has no such variable |
 | `wait_timeout` | `compat.global.wait_timeout` | Seconds, 1 to 31536000 |
 
-```sql
+```sql test
 SET GLOBAL time_zone = '+01:00';
 SET GLOBAL sql_mode = 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION';
 SET GLOBAL TRANSACTION ISOLATION LEVEL READ COMMITTED;
 SET @@global.wait_timeout = 600;
-SET GLOBAL time_zone = DEFAULT;    -- remove the tenant's default
 SELECT @@global.time_zone;         -- the tenant's default, or the server's
+-- remove the tenant's defaults, so new sessions get the server's again
+SET GLOBAL time_zone = DEFAULT, sql_mode = DEFAULT,
+    transaction_isolation = DEFAULT, wait_timeout = DEFAULT;
+```
+
+```text output
+@@global.time_zone
++01:00
 ```
 
 As on MySQL, a global value changes the sessions that start afterwards, not the session that set it or other open sessions. New SQL sessions of the tenant on every gateway, on 3306, on 3307 and over HTTP, start with the defaults before their first statement; a session that runs `COM_RESET_CONNECTION` gets them again. A default the other port can't take, such as a MariaDB-only `sql_mode` name in a 3306 session, is left out of that session and logged by the gateway. `@@global.<variable>` reads the tenant's value. `SET PERSIST` and `SET PERSIST_ONLY` do the same as `SET GLOBAL`, since the defaults are stored in the tenant's catalog anyway. `DEFAULT` removes the tenant's value, so new sessions get the server's again.

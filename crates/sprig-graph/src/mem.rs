@@ -255,7 +255,7 @@ impl GraphStore for MemStore {
             .into_iter()
             .map(|mut n| {
                 n.props = only(&n.props, keys);
-                n.types = n.types.as_ref().map(|t| only(t, keys));
+
                 n
             })
             .collect())
@@ -290,7 +290,7 @@ impl GraphStore for MemStore {
             .into_iter()
             .map(|mut n| {
                 n.props = only(&n.props, keys);
-                n.types = n.types.as_ref().map(|t| only(t, keys));
+
                 n
             })
             .collect())
@@ -307,7 +307,7 @@ impl GraphStore for MemStore {
             .into_iter()
             .map(|mut e| {
                 e.props = only(&e.props, keys);
-                e.types = e.types.as_ref().map(|t| only(t, keys));
+
                 e
             })
             .collect())
@@ -339,7 +339,13 @@ impl GraphStore for MemStore {
             {
                 continue;
             }
-            out.push(n.clone());
+            let mut n = n.clone();
+            if self.late
+                && let Some(keys) = &s.keys
+            {
+                n.props = only(&n.props, keys);
+            }
+            out.push(n);
             if s.limit.is_some_and(|l| out.len() >= l) {
                 break;
             }

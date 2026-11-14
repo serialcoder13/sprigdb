@@ -50,7 +50,7 @@ use sprig_router::graph_route::{
 
 use crate::store::{
     EdgeKey, EdgeRow, FarLink, FarRead, GraphStore, IdKind, IndexDef, Link, NodeRow, Reach, Scan,
-    SchemaCounts, StoreStats, rk_of,
+    SchemaCounts, StoreStats, TrailRow, rk_of,
 };
 
 /// Labels and relationship types of a graph, and how new ones are made.
@@ -1007,6 +1007,7 @@ impl<'c> MariaStore<'c> {
             })
             .collect();
         ScanOp {
+            keys: s.keys.clone(),
             label: s.label,
             index,
             props,
@@ -1229,7 +1230,14 @@ impl GraphStore for MariaStore<'_> {
         };
         let op = HopOp::Scan(self.scan_op(s));
         let rows = self.route(op, targets, false).await?;
-        Ok(merge_nodes(nodes_of(rows), s.limit))
+        let mut v = merge_nodes(nodes_of(rows), s.limit);
+        if s.keys.is_some() {
+            for n in &mut v {
+                n.props = drop_nulls(std::mem::take(&mut n.props));
+                n.types = n.types.take().map(drop_nulls);
+            }
+        }
+        Ok(v)
     }
 
     async fn nodes(&mut self, ids: &[u64]) -> Result<Vec<NodeRow>> {
@@ -1337,6 +1345,65 @@ impl GraphStore for MariaStore<'_> {
 
     fn late_props(&self) -> bool {
         true
+    }
+
+    async fn trails(
+        &mut self,
+        seeds: &[(u64, u64)],
+        types: &[u32],
+        dir: Dir,
+        min: u32,
+        max: u32,
+    ) -> Result<Option<Vec<TrailRow>>> {
+        // One statement needs every shard on one server; incoming steps
+        // need fresh mirrors (or a single shard).
+        let first = self.layout.shards.first().map(|s| s.cluster.clone());
+        if first.is_none()
+            || self
+                .layout
+                .shards
+                .iter()
+                .any(|s| Some(&s.cluster) != first.as_ref())
+        {
+            return Ok(None);
+        }
+        let inn = dir != Dir::Out;
+        let mirror = inn && self.many();
+        if mirror && !self.read_mirrors().await {
+            return Ok(None);
+        }
+        let mut out = Vec::new();
+        for chunk in seeds.chunks(1000) {
+            self.stats.cte_queries += 1;
+            let op = HopOp::Trails {
+                seeds: chunk.to_vec(),
+                types: types.to_vec(),
+                out: dir != Dir::In,
+                inn,
+                mirror,
+                min,
+                max,
+            };
+            for (_, rows) in self.route(op, Targets::Shard(0), false).await? {
+                for mut r in rows {
+                    let path: String = match r.take::<MyValue, _>(4) {
+                        Some(MyValue::Bytes(b)) => String::from_utf8_lossy(&b).into_owned(),
+                        _ => String::new(),
+                    };
+                    out.push(TrailRow {
+                        origin: u64_col(r.take(0)),
+                        end: u64_col(r.take(1)),
+                        end_rk: u64_col(r.take(2)),
+                        rels: path
+                            .split(',')
+                            .filter(|x| !x.is_empty())
+                            .filter_map(|x| x.parse().ok())
+                            .collect(),
+                    });
+                }
+            }
+        }
+        Ok(Some(out))
     }
 
     async fn nodes_part(&mut self, ids: &[u64], keys: Option<&[String]>) -> Result<Vec<NodeRow>> {

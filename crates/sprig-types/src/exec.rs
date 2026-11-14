@@ -221,8 +221,22 @@ impl HierChange {
     }
 }
 
-/// The savepoint a plan inside a client's transaction uses.
+/// The prefix of the savepoint a plan inside a client's transaction uses.
+/// Each bracket adds a number of its own (`sprig_types_7`): a plan can run
+/// inside another plan's bracket (a hierarchy's type plan runs the
+/// inheritance layer's delete), and with one shared name the inner
+/// `RELEASE` dropped the outer savepoint too, so the outer one failed with
+/// 1305 (decision RL66).
 pub const SAVEPOINT: &str = "sprig_types";
+
+/// A savepoint name no other open bracket of the process uses.
+fn savepoint_name() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    format!(
+        "{SAVEPOINT}_{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
 
 /// The isolation of a plan's own transaction ([`Txn`]), for the next
 /// transaction only.
@@ -259,7 +273,9 @@ pub const SNAPSHOT_ISOLATION_ON: &str = "SET SESSION innodb_snapshot_isolation =
 /// that opened no snapshot does (bugfix-54).
 #[derive(Debug)]
 pub struct Txn {
-    nested: bool,
+    /// The savepoint inside the client's transaction; `None` for the
+    /// bracket's own `BEGIN ... COMMIT`.
+    savepoint: Option<String>,
     /// The check was on and is off for the plan.
     snapshot_off: bool,
 }
@@ -270,25 +286,27 @@ impl Txn {
     /// # Errors
     /// The backend's.
     pub async fn begin(r: &mut dyn Runner) -> Result<Self> {
-        let nested = r.in_transaction();
         let mut snapshot_off = false;
-        if nested {
+        let savepoint = if r.in_transaction() {
             if r.snapshot_isolation().await? {
                 r.exec(SNAPSHOT_ISOLATION_OFF).await?;
                 snapshot_off = true;
             }
-            if let Err(e) = r.exec(&format!("SAVEPOINT {SAVEPOINT}")).await {
+            let name = savepoint_name();
+            if let Err(e) = r.exec(&format!("SAVEPOINT {name}")).await {
                 if snapshot_off {
                     restore_snapshot(r).await;
                 }
                 return Err(e);
             }
+            Some(name)
         } else {
             r.exec(PLAN_ISOLATION).await?;
             r.exec("BEGIN").await?;
-        }
+            None
+        };
         Ok(Self {
-            nested,
+            savepoint,
             snapshot_off,
         })
     }
@@ -301,16 +319,16 @@ impl Txn {
     pub async fn end<T>(self, r: &mut dyn Runner, result: Result<T>) -> Result<T> {
         let out = match result {
             Ok(v) => {
-                let close = if self.nested {
-                    r.exec(&format!("RELEASE SAVEPOINT {SAVEPOINT}")).await
+                let close = if let Some(sp) = &self.savepoint {
+                    r.exec(&format!("RELEASE SAVEPOINT {sp}")).await
                 } else {
                     r.exec("COMMIT").await
                 };
                 close.map(|_| v)
             }
             Err(e) => {
-                let undo = if self.nested {
-                    format!("ROLLBACK TO SAVEPOINT {SAVEPOINT}")
+                let undo = if let Some(sp) = &self.savepoint {
+                    format!("ROLLBACK TO SAVEPOINT {sp}")
                 } else {
                     "ROLLBACK".to_owned()
                 };

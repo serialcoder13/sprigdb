@@ -33,6 +33,8 @@ sprig-txn = { path = "crates/sprig-txn" }
 sprig-mover = { path = "crates/sprig-mover" }
 # The change feed (chapter 38); the mover writes its handoff records.
 sprig-feed = { path = "crates/sprig-feed" }
+# The AI assistants' core: providers, tools, the egress gate, budgets, audit.
+sprig-ai = { path = "crates/sprig-ai" }
 
 # Third-party crates. Every licence must be on deny.toml's allow-list (chapter 03).
 async-trait = "0.1"

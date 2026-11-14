@@ -645,9 +645,36 @@ impl Exec<'_> {
                     "full scan"
                 }
             ));
+            // Read late, the scan reads only what the clause is known to
+            // need of the node (nothing for `MATCH (n) RETURN count(n)`);
+            // a property map or a join on the rows' values needs it all.
+            let keys: Option<Vec<String>> =
+                if self.late && pat.start.props.is_none() && join.is_none() {
+                    match self.need_of(pat.start.var.as_ref(), None) {
+                        None => Some(Vec::new()),
+                        Some(super::late::Need::All) => None,
+                        Some(super::late::Need::Keys(ks)) => {
+                            Some(ks.into_iter().filter(|k| !k.starts_with('\u{1}')).collect())
+                        }
+                    }
+                } else {
+                    None
+                };
+            scan.keys.clone_from(&keys);
             let found = self.store.scan(&scan).await?;
             self.check_rows(found.len())?;
-            let nodes: Vec<Arc<Node>> = found.iter().map(|r| self.node_val(r)).collect();
+            let nodes: Vec<Arc<Node>> = match keys.as_deref() {
+                None => found.iter().map(|r| self.node_val(r)).collect(),
+                Some([]) => found.iter().map(|r| self.bare_node(r)).collect(),
+                Some(k) => found
+                    .iter()
+                    .map(|r| {
+                        let n = self.merged_node(r, Some(k));
+                        self.seen_nodes.insert(n.id, Arc::clone(&n));
+                        n
+                    })
+                    .collect(),
+            };
             let by_key: Option<(&RowJoin, HashMap<crate::value::Key, Vec<usize>>)> =
                 join.as_ref().map(|j| {
                     let mut m: HashMap<crate::value::Key, Vec<usize>> = HashMap::new();
@@ -916,6 +943,80 @@ impl Exec<'_> {
             out.entry(near).or_default().push((self.rel_val(&e), far));
         }
         Ok(out)
+    }
+
+    /// A far node pattern `(v:L {k: e})` with an index on `L.k`: the
+    /// nodes it can be, found through the index for every row's value of
+    /// `e`, restrict `v` ([`Exec::only`]) so the hop reads only links to
+    /// them (LDBC IC6's `(post)-[:HAS_TAG]->(t:Tag {id: knownTagId})`
+    /// read every tag of every post).
+    async fn only_by_index(
+        &mut self,
+        np: &NodePat,
+        pe: &Expr,
+        cur: &[(Row, Arc<Node>)],
+    ) -> Result<()> {
+        const MAX: usize = 10_000;
+        let (Some(v), Expr::Map(m), Some(label)) =
+            (&np.var, pe, np.labels.as_ref().and_then(|l| l.required()))
+        else {
+            return Ok(());
+        };
+        if self.only.contains_key(v) || cur.first().is_some_and(|(r, _)| r.contains_key(v)) {
+            return Ok(());
+        }
+        let label = label.to_owned();
+        let indexed: Vec<String> = self
+            .store
+            .indexes()
+            .iter()
+            .filter(|d| {
+                d.entity == crate::ast::Entity::Node
+                    && d.token == label
+                    && d.props.len() == 1
+                    && d.state == "online"
+            })
+            .map(|d| d.props[0].clone())
+            .collect();
+        let Some((k, e)) = m.iter().find(|(k, _)| indexed.contains(k)) else {
+            return Ok(());
+        };
+        let rows: Vec<Row> = cur.iter().map(|(r, _)| r.clone()).collect();
+        if !is_const(e) && !row_bound(e, &rows) {
+            return Ok(());
+        }
+        let mut vals: Vec<Json> = Vec::new();
+        for r in rows.iter().take(if is_const(e) { 1 } else { usize::MAX }) {
+            let Some(j) = scan_json(&eval(e, r, self.params)?) else {
+                return Ok(());
+            };
+            if !vals.contains(&j) {
+                vals.push(j);
+            }
+            if vals.len() > MAX {
+                return Ok(());
+            }
+        }
+        let Some(lid) = self.store.label_id(&label, false).await? else {
+            self.only.insert(v.clone(), Vec::new());
+            return Ok(());
+        };
+        let scan = Scan {
+            label: Some(lid),
+            props_eq: vec![(k.clone(), vals)],
+            limit: Some(MAX + 1),
+            keys: self.late.then(Vec::new),
+            ..Scan::default()
+        };
+        let found = self.store.scan(&scan).await?;
+        if found.len() > MAX {
+            return Ok(());
+        }
+        let mut ids: Vec<u64> = found.iter().map(|n| n.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        self.only.insert(v.clone(), ids);
+        Ok(())
     }
 
     /// For each conjunct `v IN list` of `w` whose `v` the rows don't bind
@@ -1397,6 +1498,7 @@ impl Exec<'_> {
                     let mut need = HashMap::new();
                     super::late::needs(pe, true, &mut need);
                     self.late_cur(&mut cur, &need).await?;
+                    self.only_by_index(np, pe, &cur).await?;
                     Some(match pe {
                         Expr::Map(m) => {
                             super::late::Need::Keys(m.iter().map(|(k, _)| k.clone()).collect())
@@ -1686,6 +1788,47 @@ impl Exec<'_> {
             for (o, t) in &live {
                 done.entry(*o).or_default().push(t.clone());
                 total += 1;
+            }
+        }
+        // Trails that bind no relationship or path: one recursive CTE over
+        // the shards' schemas where the store can (one server), instead of
+        // a statement per level. An unbounded pattern asks for one hop
+        // more: a trail that long means the pattern went past
+        // `graph.max_hops`.
+        if self.late && !track && rp.var.is_none() && rp.props.is_none() && !live.is_empty() {
+            let seeds: Vec<(u64, u64)> = origins.iter().map(|o| (o.id, o.rk)).collect();
+            let ask = if unbounded { max + 1 } else { max };
+            if let Some(found) = self
+                .store
+                .trails(&seeds, &types, rp.dir, min.max(1), ask)
+                .await?
+            {
+                self.plan
+                    .push("VarExpand: trails in one recursive CTE over the shards' schemas".into());
+                for t in found {
+                    if unbounded && t.rels.len() > max as usize {
+                        return Err(budget_error(
+                            "hops",
+                            format!(
+                                "an unbounded pattern went past graph.max_hops = {}",
+                                self.b.max_hops
+                            ),
+                        ));
+                    }
+                    total += 1;
+                    if total > self.b.max_rows {
+                        return Err(budget_error(
+                            "rows",
+                            format!("more than graph.max_rows = {} paths", self.b.max_rows),
+                        ));
+                    }
+                    done.entry(t.origin).or_default().push(Trail {
+                        end: t.end,
+                        rels: t.rels,
+                        nodes: vec![],
+                    });
+                }
+                live.clear();
             }
         }
         let mut level = 0u32;

@@ -142,7 +142,7 @@ const ORIGIN: &str = "`_sprig_o`";
 pub const LAYER_ALIAS: &str = sprig_sql::rls::views::MERGED_LAYER_ALIAS;
 
 /// [`LAYER_ALIAS`], quoted.
-const C: &str = "`__sprig_lyr`";
+pub(crate) const C: &str = "`__sprig_lyr`";
 
 impl ViewSql<'_> {
     fn key_pred(&self, alias: Option<&str>) -> String {

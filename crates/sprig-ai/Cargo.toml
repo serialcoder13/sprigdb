@@ -1,0 +1,58 @@
+[package]
+name = "sprig-ai"
+description = "SprigDB: the AI assistants' core: providers, tools, the egress gate, budgets and audit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+# Sealed provider keys travel as base64 in their etcd records.
+base64.workspace = true
+bytes.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+# The providers' HTTP client: hyper 1.x over HTTP/1.1, plain for local
+# servers (Ollama, vLLM) and rustls with the Mozilla roots for the rest.
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+metrics.workspace = true
+mysql_async.workspace = true
+# AES-256-GCM for provider keys, HMAC-SHA256 for stable placeholders.
+ring.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The SHA-256 of every payload sent to a provider.
+sha2.workspace = true
+# The `ai` catalog module.
+sprig-catalog.workspace = true
+sprig-common.workspace = true
+# Provider records in the global tier.
+sprig-meta.workspace = true
+sprig-settings.workspace = true
+# The master keyring that provider keys are sealed with (purpose `ai`).
+sprig-workload.workspace = true
+# `run_query` and `explain` inputs are checked to be reads before they
+# reach the tool host.
+sqlparser.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "time", "sync", "macros"] }
+tokio-rustls.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+webpki-roots = "1"
+zeroize.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
+# The adapter tests' in-process provider: hyper's server side.
+hyper = { workspace = true, features = ["server", "http1"] }
+hyper-util = { workspace = true, features = ["server", "tokio", "http1"] }
+
+[lints]
+workspace = true

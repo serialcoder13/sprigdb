@@ -515,19 +515,16 @@ fn shown(p: &Pending, seen: &[Vec<bool>], full: bool) -> Option<WatchEvent> {
 }
 
 /// An inheritable object's event `p` as the subscriber sees it
-/// ([`inherit::decide`]).
+/// ([`inherit::decide`]); `was_visible`: its record just before the change
+/// (RL64).
 fn mapped_event(
     p: &Pending,
     m: &inherit::Mapped,
     mapper: &inherit::Mapper,
-    seen: &[Vec<bool>],
     records: &HashMap<String, inherit::Record>,
     full: bool,
+    was_visible: bool,
 ) -> Option<WatchEvent> {
-    let v = |i: Option<usize>| i.is_some_and(|i| seen[p.table].get(i).copied().unwrap_or(false));
-    if !v(p.probe) {
-        return None;
-    }
     let e = &p.event;
     let mut out = WatchEvent {
         resume_token: e.token.to_hex(),
@@ -536,7 +533,7 @@ fn mapped_event(
         ..WatchEvent::default()
     };
     let rec = records.get(&inherit::key_id(&e.table, &m.key));
-    inherit::decide(mapper, e, m, rec, v(p.before), v(p.after), full, &mut out).then_some(out)
+    inherit::decide(mapper, e, m, rec, was_visible, full, &mut out).then_some(out)
 }
 
 /// Whether the event is one the stream watches.
@@ -612,6 +609,8 @@ async fn run(
     let mut tail = own_feed(tail);
     let mut last = first;
     let mut quiet = tokio::time::Instant::now();
+    // What the stream last knew of inherited records' visibility (RL64).
+    let mut known = inherit::Seen::default();
     loop {
         let until = quiet + heartbeat;
         let items = match gather(&mut tail, &mut above, until, tx).await? {
@@ -684,7 +683,10 @@ async fn run(
                         imgs.len() - 1
                     };
                     let (mut before, mut after, mut probe) = (None, None, None);
+                    // An inheritable object's layer images aren't its
+                    // records: they aren't checked (RL64).
                     match e.op {
+                        _ if inherited.is_some() => {}
                         Op::Insert => after = image(e.after.as_ref()).map(|m| push(Some(m))),
                         Op::Delete => before = image(e.before.as_ref()).map(|m| push(Some(m))),
                         Op::Update => {
@@ -693,7 +695,7 @@ async fn run(
                         }
                         Op::Ddl(_) | Op::Truncate => probe = Some(push(None)),
                     }
-                    if inherited.is_some() && probe.is_none() {
+                    if inherited.is_some() {
                         probe = Some(push(None));
                     }
                     pending.push(Pending {
@@ -731,12 +733,67 @@ async fn run(
         } else {
             inherit::read(core, caller, &spec.database, &keys).await?
         };
-        let mut sent = 0u64;
-        for p in &pending {
-            let ev = match (&p.mapped, &mapper) {
-                (Some(m), Some(mapper)) => {
-                    mapped_event(p, m, mapper, &seen, &records, spec.full_document)
+        // Records gone from the subscriber's view whose key the stream
+        // doesn't know: were they visible before the change (RL64)? A
+        // probe per event (by its index in `pending`).
+        let readable = |p: &Pending| {
+            p.probe
+                .is_some_and(|i| seen[p.table].get(i).copied().unwrap_or(false))
+        };
+        if let Some(m) = &mapper {
+            known.at(m.version());
+        }
+        let mut probes = crate::exec::inherit_probe::ProbeRequest {
+            db: spec.database.clone(),
+            probes: Vec::new(),
+        };
+        let mut probe_of: HashMap<usize, usize> = HashMap::new();
+        for (j, p) in pending.iter().enumerate() {
+            let Some(m) = &p.mapped else { continue };
+            let id = inherit::key_id(&p.event.table, &m.key);
+            if !readable(p) || records.contains_key(&id) || known.get(&id).is_some() {
+                continue;
+            }
+            probe_of.insert(j, probes.probes.len());
+            probes.probes.push(inherit::probe_item(&p.event, m));
+        }
+        let before = if probes.probes.is_empty() {
+            Vec::new()
+        } else {
+            match inherit::probe(core, caller, &probes).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(error = %e, "a change stream's visibility probes failed");
+                    vec![Some(false); probes.probes.len()]
                 }
+            }
+        };
+        let mut sent = 0u64;
+        for (j, p) in pending.iter().enumerate() {
+            let ev = match (&p.mapped, &mapper) {
+                (Some(m), Some(mapper)) if readable(p) => {
+                    let id = inherit::key_id(&p.event.table, &m.key);
+                    let now = records.contains_key(&id);
+                    // Known, else probed; a change the subscriber's view
+                    // doesn't read leaves the key unknown and sends no
+                    // delete (the change it reads comes as its own event).
+                    let was = match known.get(&id) {
+                        Some(v) => Some(v),
+                        None if now => Some(false),
+                        None => probe_of
+                            .get(&j)
+                            .and_then(|i| before.get(*i).copied())
+                            .unwrap_or(Some(false)),
+                    };
+                    match was {
+                        Some(was) => {
+                            known.set(id, now);
+                            mapped_event(p, m, mapper, &records, spec.full_document, was)
+                        }
+                        None => None,
+                    }
+                }
+                (Some(_), Some(_)) => None,
                 _ => shown(p, &seen, spec.full_document),
             };
             if let Some(ev) = ev {

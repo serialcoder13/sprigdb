@@ -581,20 +581,18 @@ async fn triggers_search_and_change_streams_share_one_dump_per_process() {
     );
 
     // 4. Change streams: each document once, in order.
-    let deadline = tokio::time::sleep(Duration::from_secs(120));
-    tokio::pin!(deadline);
+    // After 120 s every follower stops and reports what it saw.
+    {
+        let stop = Arc::clone(&stop_streams);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(120)).await;
+            stop.store(true, Ordering::Relaxed);
+        });
+    }
     let mut failures = Vec::new();
     let mut resumes = 0u64;
     for (name, f) in followers {
-        let r = tokio::select! {
-            r = f => r.unwrap(),
-            () = &mut deadline => {
-                stop_streams.store(true, Ordering::Relaxed);
-                failures.push(format!("{name}: not complete in time"));
-                continue;
-            }
-        };
-        let (seen, n) = r;
+        let (seen, n) = f.await.unwrap();
         resumes += n;
         let colls: Vec<String> = if name.ends_with(".*") {
             (0..streams).map(|k| format!("c{k}")).collect()
@@ -605,9 +603,14 @@ async fn triggers_search_and_change_streams_share_one_dump_per_process() {
             let got = seen.get(&c).cloned().unwrap_or_default();
             let want: Vec<i64> = (0..docs as i64).collect();
             if got != want {
+                let mut sorted = got.clone();
+                sorted.sort_unstable();
+                sorted.dedup();
                 failures.push(format!(
-                    "{name} {c}: {} events, first differences {:?}",
+                    "{name} {c}: {} events ({} distinct, last {:?}), first differences {:?}",
                     got.len(),
+                    sorted.len(),
+                    got.last(),
                     got.iter()
                         .zip(&want)
                         .filter(|(a, b)| a != b)

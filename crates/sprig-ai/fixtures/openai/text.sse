@@ -1,0 +1,12 @@
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1763100000,"model":"gpt-5.1","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1763100000,"model":"gpt-5.1","choices":[{"index":0,"delta":{"content":"A gateway speaks "},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1763100000,"model":"gpt-5.1","choices":[{"index":0,"delta":{"content":"every client protocol."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1763100000,"model":"gpt-5.1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1763100000,"model":"gpt-5.1","choices":[],"usage":{"prompt_tokens":1500,"completion_tokens":40,"total_tokens":1540,"prompt_tokens_details":{"cached_tokens":1024}}}
+
+data: [DONE]
+

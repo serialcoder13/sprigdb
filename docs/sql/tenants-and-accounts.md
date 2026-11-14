@@ -455,7 +455,7 @@ Shows the `CREATE USER` statement for an account, as MySQL 8.4 prints it on 3306
 
 Your own account (`SHOW CREATE USER CURRENT_USER()`) needs no privilege. Another account needs `CREATE USER` (else 1142 on the MySQL persona, 1044 on the MariaDB persona), and an account that doesn't exist fails with 1396.
 
-```sql
+```sql test
 CREATE USER 'ledger'@'%' IDENTIFIED BY 's3cret-Passw0rd'
     REQUIRE SUBJECT '/O=Acme/CN=ledger' AND ISSUER '/O=Acme/CN=Acme client CA';
 SHOW CREATE USER ledger;
@@ -463,7 +463,8 @@ SHOW CREATE USER ledger;
 
 On 3306:
 
-```text
+```text output
+CREATE USER for ledger@%
 CREATE USER `ledger`@`%` IDENTIFIED WITH 'caching_sha2_password' REQUIRE SUBJECT '/O=Acme/CN=ledger' ISSUER '/O=Acme/CN=Acme client CA' PASSWORD EXPIRE DEFAULT ACCOUNT UNLOCK PASSWORD HISTORY DEFAULT PASSWORD REUSE INTERVAL DEFAULT PASSWORD REQUIRE CURRENT DEFAULT
 ```
 
@@ -488,6 +489,7 @@ FLUSH PRIVILEGES;
 FLUSH TABLES;
 -- remove the account and role the examples on this page created
 DROP USER reporter;
+DROP USER ledger;
 DROP ROLE reporting;
 ```
 
