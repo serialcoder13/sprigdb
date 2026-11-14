@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 DOCS = Path(__file__).resolve().parent.parent
-SITE = "https://serialcoder13.github.io/sprigdb/docs/"
+SITE = "https://modlix-india.github.io/sprigdb/docs/"
 SECTIONS = [
     ("concepts", "Concepts"),
     ("get-started", "Get started"),

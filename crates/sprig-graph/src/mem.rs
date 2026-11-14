@@ -1,10 +1,9 @@
 //! An in-memory [`GraphStore`] with any number of shards, for tests: the
-//! executor's results on 1 shard and on 4 must agree (chapter 43,
-//! "Testing"), and cross-shard frontier expansion is exercised without a
+//! executor's results on 1 shard and on 4 must agree, and cross-shard frontier expansion is exercised without a
 //! sharded fleet.
 //!
-//! Shards own equal ranges of the routing hash (chapter 15's initial
-//! split). [`MemStore::reach`] behaves like the CTE: it expands only nodes
+//! Shards own equal ranges of the routing hash (as a shard map's initial
+//! split does). [`MemStore::reach`] behaves like the CTE: it expands only nodes
 //! whose `rk` is in the shard's range and returns boundary nodes without
 //! expanding them.
 

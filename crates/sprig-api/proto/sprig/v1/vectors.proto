@@ -1,7 +1,7 @@
-// sprig.v1: the Vectors API (chapter 34, "Vectors API"; chapter 37).
+// sprig.v1: the Vectors API.
 // A standalone index is a table of one logical database holding an id, a
 // vector, metadata (a JSON object, filtered with MongoDB's query language)
-// and, for geo indexes, a location (chapter 36). Calls run in the caller's
+// and, for geo indexes, a location. Calls run in the caller's
 // session, with its privileges.
 syntax = "proto3";
 
@@ -63,7 +63,7 @@ message CreateVectorIndexRequest {
   uint32 m = 5;
   // auto (default), on or off.
   string ann_mode = 6;
-  // Items carry locations (chapter 36).
+  // Items carry locations.
   bool geo = 7;
 }
 
@@ -125,7 +125,7 @@ message DeleteVectorsResponse {
   uint64 deleted = 1;
 }
 
-// A location filter (chapter 36): a circle (center and radius_m), a box
+// A location filter: a circle (center and radius_m), a box
 // (south_west and north_east), or a polygon (three or more vertices).
 message GeoFilter {
   LatLng center = 1;
@@ -135,7 +135,7 @@ message GeoFilter {
   repeated LatLng polygon = 5;
 }
 
-// Fusion with a full-text search (chapter 39); not offered in this release.
+// Fusion with a full-text search; not offered in this release.
 message HybridText {
   string search_index = 1;
   string query = 2;
@@ -152,7 +152,7 @@ message SearchVectorsRequest {
   bool exact = 5;
   // A MongoDB query on the metadata, Extended JSON.
   string filter = 6;
-  // A type and its subtypes (chapter 32); not offered in this release.
+  // A type and its subtypes; not offered in this release.
   string type = 7;
   GeoFilter geo = 8;
   HybridText text = 9;

@@ -1,5 +1,4 @@
-//! Indexes and uniqueness constraints (chapter 43, "Indexes and
-//! constraints"; build step 15): the rules every store follows, the
+//! Indexes and uniqueness constraints: the rules every store follows, the
 //! values an index column holds, and `SHOW INDEXES` / `SHOW CONSTRAINTS`.
 //!
 //! - **Names.** An index and a constraint share one namespace per graph;
@@ -195,7 +194,7 @@ pub fn index_value(j: &Json, kind: IndexKind) -> Option<String> {
 /// `_types`): [`index_value`], except that a value `_types` names (a byte
 /// array or a temporal value, both stored as text) is `t<type>:<text>`
 /// rather than `s<text>`, so a string equal to a byte array's base64 or
-/// to a date's ISO text is another key (R8 round 9, decision G77). The
+/// to a date's ISO text is another key. The
 /// index columns [`crate::catalog::Tables::index_ddl`] adds compute the
 /// same text in MariaDB.
 #[must_use]
@@ -219,7 +218,7 @@ pub fn prop_index_value(
 /// 2^63, which `9223372036854775807e0` also rounds to in MariaDB.
 const INT_FLOAT_BOUND: f64 = 9_223_372_036_854_775_808.0;
 
-/// The normalized key of a number (decision G19, round 3): integers as
+/// The normalized key of a number: integers as
 /// their decimal digits, floats with an integral value inside the 64-bit
 /// range as that integer (so `1` and `1.0` are one key, as Neo4j's
 /// equality says), other floats as their shortest text (what the gateway
@@ -250,7 +249,7 @@ pub fn numeric_key(n: &serde_json::Number) -> String {
 pub const MAX_CLAIM: usize = 512;
 
 /// The claim key of an element's `props` (with its `_types`) under
-/// uniqueness constraint `d` (decision G41: the cross-shard claim table):
+/// uniqueness constraint `d` (for the cross-shard claim table):
 /// the typed index texts of its properties ([`prop_index_value`]) joined
 /// by `0x1f`, or `None` when a property is missing or of a type the
 /// constraint doesn't index (then nothing is claimed, as Neo4j checks
@@ -502,7 +501,7 @@ mod tests {
             Some("btrue")
         );
         assert_eq!(index_value(&Json::from(1), IndexKind::Text), None);
-        // G19: integral floats are their integer; other floats keep their
+        // Integral floats are their integer; other floats keep their
         // shortest text; equality stays exact past 2^53.
         let key = |j: Json| index_value(&j, IndexKind::Range).expect("number");
         assert_eq!(key(Json::from(1.0)), "n1");

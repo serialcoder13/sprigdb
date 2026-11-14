@@ -1,6 +1,5 @@
 //! One job's state machine: prepare, watermark copy with catch-up,
-//! verification, the cutover and what follows (chapter 10, "Algorithms",
-//! "State machines"; build steps 4 to 8).
+//! verification, the cutover and what follows.
 //!
 //! The engine owns the job's stream and its one ordered apply lane. Every
 //! target transaction carries the applied source position and the copy
@@ -10,7 +9,7 @@
 //! Uncommitted work is simply read again, which the idempotent applier
 //! tolerates.
 //!
-//! The invariant (chapter 10, "The watermark copy"): at every applied
+//! The invariant of the watermark copy: at every applied
 //! position `p`, each row present in the target equals the source row at
 //! `p`, though rows may be missing until the copy is done.
 
@@ -34,7 +33,7 @@ use crate::model::{
 use crate::record::{Claim, CutoverStep, VerifyCursor, wall_ms};
 use crate::settings::MoverSettings;
 
-/// The job's only stream in R0.
+/// The job's only stream.
 const STREAM: u16 = 0;
 /// How often operator fields (cancel, manual go) are re-read.
 const CANCEL_CHECK: Duration = Duration::from_secs(1);
@@ -47,7 +46,7 @@ const STREAM_BUFFER: usize = 256;
 /// Consecutive failures before a job gives up and rolls back.
 const MAX_FAILURES: u32 = 200;
 /// How often a `Continuous` job records its source's triggers and events
-/// on its target (RL12).
+/// on its target.
 const RECORD_OBJECTS_EVERY: Duration = Duration::from_secs(30);
 
 /// A `Continuous` job's pump that runs this long is dropped (its source
@@ -121,7 +120,7 @@ pub struct Engine {
     pending_keys: std::collections::HashMap<TableId, (usize, HashSet<KeyBytes>)>,
     /// The last batch op touching each (table name, key): tables of one
     /// name in different source schemas share a target table in a merge
-    /// (chapter 20), so their ops on one key keep the source's order.
+    /// so their ops on one key keep the source's order.
     pending_names: std::collections::HashMap<(String, KeyBytes), usize>,
     pending_rows: usize,
     pending_since: Option<Instant>,
@@ -147,9 +146,8 @@ pub struct Engine {
     xa_open: Vec<(String, GtidPos, Vec<RowChange>)>,
     /// The feed handoff of the cutover attempt in progress (`G`, `H`).
     handoff: Option<HandoffPos>,
-    /// Re-resolves the job's settings: a running job follows changes
-    /// (chapter 10, "Configuration": changes apply live), checked with the
-    /// job record every second.
+    /// Re-resolves the job's settings: a running job follows changes live,
+    /// checked with the job record every second.
     settings_source: Option<SettingsSource>,
 }
 
@@ -556,7 +554,7 @@ impl Engine {
         Ok(seq)
     }
 
-    /// One `DBLog` chunk (chapter 10, "The watermark copy").
+    /// One `DBLog` chunk of the watermark copy.
     async fn copy_chunk(&mut self, t: &Arc<TableMeta>) -> Result<()> {
         let id = t.id();
         let after: Option<Row> = self
@@ -706,7 +704,7 @@ impl Engine {
                             // committed up to it: with nothing else pending
                             // (an idle tenant, or writers paused), commit the
                             // position alone, or the copy waits forever
-                            // (found by chapter 24's move tests).
+                            // (found by the tests of moves between DCs).
                             self.flush(wm_hit).await?;
                         }
                         Ok(())
@@ -1004,8 +1002,8 @@ impl Engine {
             }
             self.ticks.pop_front();
             self.set_lag(now.saturating_duration_since(at));
-            // The source was seen: its tick is applied (chapter 25's
-            // `source_seen_at` for a standby).
+            // The source was seen: its tick is applied (`source_seen_at`
+            // for a standby).
             if self.claim.rec.spec.cutover == CutoverMode::Continuous {
                 self.claim.rec.progress.source_seen_ms = Some(wall_ms(self.clock.wall()));
             }
@@ -1052,7 +1050,7 @@ impl Engine {
     // ---- throttling ------------------------------------------------------
 
     /// Waits, catching up, while the source or target is busy, catch-up
-    /// lags, or the copy runs above its rate (chapter 10, "Throttling").
+    /// lags, or the copy runs above its rate.
     async fn throttle(&mut self) -> Result<()> {
         loop {
             let reason = self.throttle_reason().await?;
@@ -1373,7 +1371,7 @@ impl Engine {
         self.cutover().await
     }
 
-    /// `Continuous` (chapter 10, r2close): after `ready` the target keeps
+    /// `Continuous`: after `ready` the target keeps
     /// applying the source's changes, with lag ticks, until the job is
     /// cancelled (rolled back: targets dropped) or stopped by
     /// [`crate::Mover::cut_over`] (`done`: the target keeps what it applied,
@@ -1381,7 +1379,7 @@ impl Engine {
     /// shard map are never touched). A stop needs nothing from the source,
     /// so a standby whose home DC is lost stops at once.
     async fn streaming(&mut self) -> Result<Step> {
-        // RL12 (r2harden): when the source's triggers and events were last
+        // When the source's triggers and events were last
         // recorded on the target for a promotion.
         let mut recorded: Option<std::time::Instant> = None;
         loop {
@@ -1436,7 +1434,7 @@ impl Engine {
         }
     }
 
-    /// RL12 (r2harden): records the statements a cutover would run (the
+    /// Records the statements a cutover would run (the
     /// source's triggers and events) on a `Continuous` job's target, for
     /// a promotion that can't reach the source. Bounded by 2 s; a source
     /// or target that doesn't answer keeps the last record.
@@ -1457,10 +1455,10 @@ impl Engine {
         }
     }
 
-    /// The cutover (chapter 10, "Cutover"). Every failure before the commit
+    /// The cutover. Every failure before the commit
     /// aborts: the hold is cleared first (so a commit still in flight can't
     /// land afterwards), then the sources are unfenced.
-    #[allow(clippy::too_many_lines)] // the chapter's nine steps, in order
+    #[allow(clippy::too_many_lines)] // the cutover's nine steps, in order
     async fn cutover(&mut self) -> Result<Step> {
         let s = self.settings.clone();
         let swap = self.claim.rec.kind == JobKind::CopySwapDdl;
@@ -1492,7 +1490,7 @@ impl Engine {
             self.env.maps.hold(self.job, self.token, until_ms).await?;
             // 2. Gateways drain open transactions; keep applying meanwhile.
             self.pump(Until::For(s.txn_grace), Some(reserve_at)).await?;
-            // 2b. Prepared distributed-transaction branches (chapter 18):
+            // 2b. Prepared distributed-transaction branches:
             // finish them now, or a prepared branch's metadata locks stall
             // the rename fence until it times out.
             self.drain_prepared(reserve_at, "before the fence").await?;
@@ -1525,7 +1523,7 @@ impl Engine {
             // committed by its own coordinator or by the controller's
             // resolver loop between the fence and the drain, and the drain
             // then finds nothing to do; G from the fence would miss that
-            // commit, a lost acknowledged write (bugfix-50).
+            // commit, a lost acknowledged write.
             self.drain_prepared(reserve_at, "after the fence").await?;
             let fenced = crate::io::Fenced {
                 receipt: fenced.receipt,
@@ -1610,7 +1608,7 @@ impl Engine {
         }
     }
 
-    /// Chapter 18's `drain_prepared` on the source, given half the time
+    /// The resolver's `drain_prepared` on the source, given half the time
     /// left before `reserve_at`: a branch still prepared afterwards aborts
     /// the attempt (it is retried after `mover.cutover_retry_seconds`).
     async fn drain_prepared(&self, reserve_at: Instant, when: &str) -> Result<crate::io::Drained> {
@@ -1638,7 +1636,7 @@ impl Engine {
     }
 
     /// The commit point: the flip, with the feed handoff when this attempt
-    /// read `H` (chapter 10, "The feed handoff").
+    /// read `H`.
     async fn commit_map(&self, to: &ClusterId) -> Result<CommitOutcome> {
         match &self.handoff {
             Some(h) => {
@@ -1848,7 +1846,7 @@ impl Engine {
         // swapped-out table.
         self.env.source.drop_schemas().await?;
         // A deleted tenant: its accounts and name rows on the source go
-        // too (chapter 08, "Deleting a tenant").
+        // too.
         if self.claim.rec.purge_tenant {
             self.env.source.purge_tenant().await?;
         }

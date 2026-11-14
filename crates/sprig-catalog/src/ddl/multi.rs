@@ -1,7 +1,7 @@
-//! Multi-shard DDL jobs (chapter 21, R1): one statement applied to every
+//! Multi-shard DDL jobs: one statement applied to every
 //! shard of a table group, all or nothing.
 //!
-//! The R0 engine's three phases stay; phase 2 fans out:
+//! The single-shard engine's three phases stay; phase 2 fans out:
 //!
 //! ```text
 //! prepare: marks + intent row; the intent also records the shard set
@@ -64,7 +64,7 @@ pub struct ShardRef {
 /// the reconciler can finish or undo it on every one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShardSet {
-    /// The schema the statement was written for (chapter 07's rewrite).
+    /// The schema the statement was written for (by the statement rewrite).
     pub template: String,
     /// The physical statement, for the template.
     pub sql: String,
@@ -113,8 +113,7 @@ impl ShardSet {
 }
 
 /// The multi-shard DDL jobs among `rows` (a tenant catalog's settings)
-/// that change any of `schemas`: chapter 20's `group-schema` lock as
-/// built in R1. A split, merge or move of those shards waits while this
+/// that change any of `schemas`: the mover's `group-schema` lock. A split, merge or move of those shards waits while this
 /// is not empty; a DDL job waits for running mover jobs on its shards.
 #[must_use]
 pub fn jobs_on_shards(rows: &[crate::store::SettingRow], schemas: &[SchemaName]) -> Vec<JobId> {
@@ -204,8 +203,8 @@ fn unsupported(msg: impl Into<String>) -> SprigError {
     SprigError::new(SprigCode::DdlUnsupported, msg.into())
 }
 
-/// The shards of `fan`, or `None` when the statement stays R0's (the
-/// template alone).
+/// The shards of `fan`, or `None` when the statement stays single-shard
+/// (the template alone).
 async fn shard_set(
     tenant: TenantId,
     fan: &Fanout,
@@ -483,7 +482,7 @@ where
     }
 
     /// Phase 2 of a multi-shard job (module docs).
-    #[allow(clippy::too_many_lines)] // the chapter's sequence, in order
+    #[allow(clippy::too_many_lines)] // the job's sequence, in order
     pub(super) async fn apply_shards(
         &self,
         tenant: TenantId,
@@ -503,7 +502,7 @@ where
             .map(|s| shard_stmt(tpl, &template, s))
             .collect();
         let mapped = |e: SprigError| map_names(e, tenant, &plan.names);
-        // Chapter 21, "DDL during moves": never beside a split, merge or
+        // Never beside a split, merge or
         // shard move of these shards. The intent row is written; a shard
         // job admitted from now on waits for it (`jobs_on_shards`).
         if let Err(e) = exec.wait_for_shard_jobs(tenant, &shards).await {

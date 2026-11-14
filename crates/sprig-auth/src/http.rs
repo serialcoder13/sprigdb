@@ -1,6 +1,5 @@
-//! HTTP authentication on 8080 and 8443 (chapter 14, "HTTP on 8080 and
-//! 8443"; build step 11), as a library: the HTTP front end (chapter 37,
-//! milestone M0.7) calls [`HttpAuth::authenticate`] once per request with
+//! HTTP authentication on 8080 and 8443, as a library: the HTTP front end
+//! calls [`HttpAuth::authenticate`] once per request with
 //! the request's `Authorization`, `Host` and `x-sprig-tenant` headers, the
 //! client address and whether it arrived over TLS, and gets back the
 //! [`Principal`] or an [`HttpAuthError`] with the status, the
@@ -10,7 +9,7 @@
 //! |---|---|
 //! | `Basic` base64(`user:password`) | Like Redis `AUTH`: the fast cache (`SHA256(SHA256(password))`), else the `caching_sha2_password` verifiers on a hashing slot; then the MySQL login's policy order (temporary lock, credentials, suspension, `ACCOUNT LOCK`, TLS requirement, expiry: HTTP has no sandbox mode, so an expired password is refused with 1862) |
 //! | `Bearer sprig_<tenant>_<key_id>_<secret>` | API key ([`crate::apikey`]): `SHA256(secret)` in constant time; revocation, expiry, `allowed_cidrs`; the user live, with the `api_key` method; temporary lock, `ACCOUNT LOCK`, TLS requirement, suspension |
-//! | `Bearer` anything else | 401 until SprigDB tokens (R2) and external JWTs (R6) |
+//! | `Bearer` anything else | 401 (SprigDB tokens and external JWTs are not checked here) |
 //!
 //! **The tenant.** For Basic: the `Host` header (or TLS SNI) under
 //! `listener.tenant_sni_suffixes` names it, then the user is the whole
@@ -63,7 +62,7 @@ pub struct HttpRequest<'a> {
     /// TLS).
     pub tls: bool,
     /// The client presented a certificate the listener verified
-    /// (`REQUIRE X509`, authfix2).
+    /// (`REQUIRE X509`).
     pub client_cert: bool,
     /// That certificate's subject and issuer (`REQUIRE SUBJECT`, `ISSUER`).
     pub client_dn: Option<&'a crate::mysql::ClientDn>,
@@ -251,7 +250,7 @@ impl HttpAuth {
             Some(t) if host.is_none() && !t.is_empty() => format!("{t}.{user}"),
             _ => user.to_owned(),
         };
-        // Residency (chapter 26): a tenant pinned elsewhere is decided in
+        // Residency: a tenant pinned elsewhere is decided in
         // an allowed DC, or refused (39302).
         let mut login = self
             .svc

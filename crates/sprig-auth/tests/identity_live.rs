@@ -1,7 +1,7 @@
-//! Chapter 14 steps 5–10 end to end, against two running gateways
-//! (milestone M0.5): lockout with automatic unlock, password expiry and
-//! policy, failure delays and the address limit through both personas;
-//! revocation timed across two gateway processes.
+//! Account policies end to end, against two running gateways: lockout
+//! with automatic unlock, password expiry and policy, failure delays and
+//! the address limit through both personas; revocation timed across two
+//! gateway processes.
 //!
 //! Skipped unless `SPRIG_IDENTITY_LIVE=1`. Needs, besides the Compose
 //! stack:
@@ -18,7 +18,7 @@
 //! The address-limit case runs last: it leaves 127.0.0.1 refused on A for
 //! `auth.ip_block_seconds` (300 s by default).
 //!
-//! Account changes are made the way chapter 29's statements will make
+//! Account changes are made the way the MySQL account statements make
 //! them: through `sprig_auth::admin` on the tenant's catalog, as auth
 //! changes. Every measured time is printed with `IDENTITY:` in front.
 
@@ -145,7 +145,7 @@ impl World {
                 key: key.to_owned(),
                 change,
                 principal: sprig_catalog::Principal::Operator("identity-live".into()),
-                reason: "chapter 14 live test".into(),
+                reason: "identity live test".into(),
             })
             .await
             .unwrap();

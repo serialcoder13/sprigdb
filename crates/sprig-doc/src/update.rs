@@ -1,6 +1,5 @@
-//! Update operators with MongoDB semantics, applied in the gateway
-//! (chapter 31, "Writes and updates", the read-modify-write path; build
-//! step 9).
+//! Update operators with MongoDB semantics, applied in the gateway (the
+//! read-modify-write path).
 //!
 //! Supported: replacements; `$set`, `$unset`, `$inc`, `$mul`, `$min`,
 //! `$max`, `$rename`, `$currentDate`, `$setOnInsert`, `$push` (with

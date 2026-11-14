@@ -1,4 +1,4 @@
-//! Typed access to the catalog's four tables (chapter 08, build step 2).
+//! Typed access to the catalog's four tables.
 //!
 //! [`Store`] is bound to one catalog schema and runs on any `mysql_async`
 //! connection or transaction ([`Queryable`]), so the same calls serve
@@ -20,7 +20,7 @@
 //!   inside [`change`](crate::version::Versioner::change), or the current
 //!   committed version for an unversioned commit ([`Store::versions`]).
 //! - Nothing here checks privileges, bounds or `sprig.` keys: those are
-//!   the callers' (chapter 08 step 7, chapter 29).
+//!   the callers' (the setting writer and the privilege checks).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -119,13 +119,13 @@ sql_enum! {
         Trigger = "trigger",
         /// Events.
         Event = "event",
-        /// Types (chapter 32).
+        /// Types.
         Type = "type",
-        /// Search indexes (chapter 39).
+        /// Search indexes.
         SearchIndex = "search_index",
-        /// Logic validations, triggers after commit and schedules (41).
+        /// Logic validations, triggers after commit and schedules.
         Logic = "logic",
-        /// Property graphs (chapter 43).
+        /// Property graphs.
         Graph = "graph",
     }
 }
@@ -139,9 +139,9 @@ sql_enum! {
         View = "view",
         /// A sequence.
         Sequence = "sequence",
-        /// A document collection (chapter 31).
+        /// A document collection.
         Collection = "collection",
-        /// A key-value namespace, Redis databases included (33, 40).
+        /// A key-value namespace, Redis databases included.
         KvNamespace = "kv_namespace",
         /// A stored procedure.
         Procedure = "procedure",
@@ -169,8 +169,7 @@ sql_enum! {
 }
 
 impl ObjectKind {
-    /// The namespace objects of this kind live in (chapter 08,
-    /// "Namespaces").
+    /// The namespace objects of this kind live in.
     #[must_use]
     pub const fn namespace(self) -> Namespace {
         match self {
@@ -198,15 +197,15 @@ impl ObjectKind {
 pub struct ObjectFlags(u8);
 
 impl ObjectFlags {
-    /// The invisible primary key was added (chapter 07).
+    /// The invisible primary key was added.
     pub const GIPK_ADDED: ObjectFlags = ObjectFlags(1);
     /// A system-versioned table.
     pub const SYSTEM_VERSIONED: ObjectFlags = ObjectFlags(2);
-    /// Inheritable by descendants (chapter 42).
+    /// Inheritable by descendants.
     pub const INHERITABLE: ObjectFlags = ObjectFlags(4);
-    /// A Redis database (`kv_namespace`, chapter 40).
+    /// A Redis database (`kv_namespace`).
     pub const REDIS: ObjectFlags = ObjectFlags(8);
-    /// Row-level security on (chapter 29).
+    /// Row-level security on.
     pub const RLS: ObjectFlags = ObjectFlags(16);
 
     const NAMES: [(ObjectFlags, &'static str); 5] = [
@@ -384,7 +383,7 @@ pub struct ObjectRow {
     pub schema_version: u64,
     /// Flags.
     pub flags: ObjectFlags,
-    /// The DDL job working on the object (chapter 21).
+    /// The DDL job working on the object.
     pub pending_job_id: Option<JobId>,
     /// Creation time (UTC).
     pub created_at: SystemTime,
@@ -458,7 +457,7 @@ pub struct SchemaVersionRow {
     pub create_sql: Option<String>,
     /// SHA-256 of `create_sql`.
     pub create_sql_hash: Option<[u8; 32]>,
-    /// The DDL job (chapter 21).
+    /// The DDL job.
     pub ddl_job_id: Option<JobId>,
     /// The user who ran it.
     pub applied_by: Option<UserId>,
@@ -1677,8 +1676,7 @@ impl fmt::Debug for CatalogEndpoint {
 }
 
 /// Finds a tenant's catalog. In production the catalog is shard 0 of
-/// table group 0 in the tenant's home DC (chapter 08, "Where the catalog
-/// lives"), resolved through the shard map; tests and single-cluster
+/// table group 0 in the tenant's home DC, resolved through the shard map; tests and single-cluster
 /// development use [`StaticLocator`].
 #[async_trait::async_trait]
 pub trait CatalogLocator: Send + Sync + 'static {
@@ -1690,7 +1688,7 @@ pub trait CatalogLocator: Send + Sync + 'static {
         self.writer(tenant).await
     }
     /// The mover job holding the catalog's shard map for a cutover, if one
-    /// does (chapter 10, "Cutover"): catalog migrations wait for it, as
+    /// does: catalog migrations wait for it, as
     /// the cutover may rename the catalog's tables away. The default knows
     /// of no holds.
     async fn held_by(&self, _tenant: TenantId) -> Result<Option<String>> {

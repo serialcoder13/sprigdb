@@ -1,5 +1,4 @@
-//! Query filters: parsing into a predicate tree and the MongoDB matcher
-//! (chapter 31, "Filter translation" and "Recheck"; build step 7).
+//! Query filters: parsing into a predicate tree and the MongoDB matcher.
 //!
 //! The same tree feeds the SQL translator ([`crate::translate`]) and the
 //! recheck, which runs every candidate MariaDB returns through
@@ -128,11 +127,9 @@ pub enum FieldOp {
     Not(Vec<FieldOp>),
     /// `$mod [divisor, remainder]`.
     Mod(i64, i64),
-    /// `$geoWithin`, `$geoIntersects`, `$near`, `$nearSphere` (chapter
-    /// 36, R6 round 3).
+    /// `$geoWithin`, `$geoIntersects`, `$near`, `$nearSphere`.
     Geo(Box<crate::geo::GeoOp>),
-    /// `$bitsAllSet`, `$bitsAnySet`, `$bitsAllClear`, `$bitsAnyClear`
-    /// (M3, decision S95).
+    /// `$bitsAllSet`, `$bitsAnySet`, `$bitsAllClear`, `$bitsAnyClear`.
     Bits(crate::validate::bits::Bits),
 }
 
@@ -174,9 +171,9 @@ pub enum Pred {
     },
     /// `$expr`, evaluated by the aggregation evaluator.
     Expr(Bson),
-    /// `$jsonSchema` (M3, decision S90), on the whole document.
+    /// `$jsonSchema`, on the whole document.
     JsonSchema(std::sync::Arc<crate::validate::schema::Schema>),
-    /// `$where` (M4, decision S110): server-side JavaScript per document.
+    /// `$where`: server-side JavaScript per document.
     Where(crate::serverjs::Where),
     /// Always true (`{}`, `$comment`).
     True,
@@ -398,7 +395,7 @@ fn parse_ops(d: &Document) -> Result<Vec<FieldOp>, MongoError> {
                 FieldOp::Mod(dv, rm)
             }
             "$comment" => continue,
-            // Chapter 36 (R6 round 3); `$maxDistance` and `$minDistance`
+            // `$maxDistance` and `$minDistance`
             // belong to a sibling `$near`.
             "$geoWithin" | "$within" | "$geoIntersects" | "$near" | "$nearSphere" => {
                 FieldOp::Geo(Box::new(crate::geo::parse(k, v, d)?))
@@ -535,7 +532,7 @@ pub struct Values<'a> {
     /// Some branch of the path was missing.
     pub missing: bool,
     /// A leaf was named by position (`"a.0"`): MongoDB takes it whole,
-    /// arrays included (S136).
+    /// arrays included.
     pub positional: bool,
 }
 
@@ -573,7 +570,7 @@ fn walk<'a>(v: &'a Bson, rest: &[&str], out: &mut Values<'a>) {
                 if rest.len() == 1 {
                     // A positional path's last part (`"a.0"`) names the
                     // element itself: MongoDB compares an array there
-                    // whole, without trying its elements (S93, S136).
+                    // whole, without trying its elements.
                     out.leaves.push(x);
                     out.vals.push(x);
                     out.positional = true;

@@ -1,6 +1,6 @@
 //! `sprig-mover`: copy, catch-up, apply and cutover.
 //!
-//! Layer: 2 operations. Design: [chapter 10](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/10-mover.md) (The mover) of the SprigDB low-level design.
+//! Layer: 2 operations.
 //!
 //! The mover copies a shard's schemas between clusters while clients keep
 //! writing, then switches ownership with a write hold of at most
@@ -13,30 +13,29 @@
 //! 4. cutover: hold the tenant's map, fence the source, apply up to the
 //!    fence position, raise the epoch on the map, release.
 //!
-//! What is here (chapter 10 build steps 3 to 8, 10 and 11; steps 1 and 2
-//! are `sprig-binlog`):
+//! What is here (the binlog client is `sprig-binlog`):
 //!
 //! - [`api`]: [`Mover`] (submit, status, cancel, list, manual cutover) and
-//!   the job types, which the balancer (chapter 11) codes against;
+//!   the job types, which the balancer codes against;
 //! - [`record`]: job records, claims, leases, tokens, shard locks and copy
 //!   slots in the DC tier, and [`MetaMover`], the [`Mover`] on them;
 //! - [`engine`]: one job's state machine;
 //! - [`io`]: the seams the engine talks through, so the deterministic
 //!   simulation (`sprig-testkit::sim::mover`) runs the same engine;
 //! - [`mysql`]: the production source, stream and target on MariaDB;
-//! - [`maps`]: the cutover's hold and commit on chapter 15's tenant map;
+//! - [`maps`]: the cutover's hold and commit on the whole-tenant map;
 //! - [`home`]: the same for a move between data centers, whose commit is
-//!   the home change of chapter 24;
-//! - [`route`] and [`groupmaps`] (R1, chapter 20): hash-range jobs (split,
+//!   the tenant's home change;
+//! - [`route`] and [`groupmaps`]: hash-range jobs (split,
 //!   merge, shard move) route rows by `_sprig_rk` into new shard schemas,
 //!   and cut over on the table group's shard map;
 //! - [`worker`]: the job runtime a worker role runs;
 //! - [`settings`]: the `mover.*` keys.
 //!
-//! R0 moves a tenant's whole placement unit (its catalog and every
-//! database's shard schema, which R0 keeps on one cluster), keeping the
-//! schema names; copy-and-swap is table scope. Split, merge, re-key and
-//! reference copies are later releases.
+//! A whole-tenant move takes the tenant's whole placement unit (its
+//! catalog and every database's shard schema, on one cluster while the
+//! tenant isn't sharded), keeping the schema names; copy-and-swap is table
+//! scope; split, merge, shard move and re-key are hash-range jobs.
 
 pub mod api;
 pub mod engine;

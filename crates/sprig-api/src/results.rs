@@ -1,4 +1,4 @@
-//! SQL results over HTTP (chapter 37, `Sql`): their proto form and its
+//! SQL results over HTTP (`Sql`): their proto form and its
 //! JSON.
 //!
 //! A cell is the MySQL text-protocol form of the value, exactly what a

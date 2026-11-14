@@ -1,7 +1,7 @@
 //! Decimal128 arithmetic for the transcendental expressions (M1): `$exp`,
 //! `$ln`, `$log`, `$log10`, `$pow`, `$sqrt`, the trigonometric family and
 //! the degree/radian conversions on decimals, to MongoDB's 34 significant
-//! digits (decision S36).
+//! digits.
 //!
 //! Values are worked in fixed point with 90 decimal places on big
 //! integers, then rounded half-even to 34 digits as the IEEE 754 decimal

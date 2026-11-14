@@ -1,5 +1,5 @@
 //! Sinks over a change topic whose owner a table's row-level security
-//! binds (chapter 29, "Change feed consumers"; RLS round 5, decision RL44).
+//! binds.
 //!
 //! ```text
 //! each batch the stream source reads:

@@ -1,5 +1,4 @@
-//! Filter translation to SQL (chapter 31, "Filter translation"; build
-//! step 7). Each node becomes SQL plus an exactness: `Exact` SQL selects
+//! Filter translation to SQL. Each node becomes SQL plus an exactness: `Exact` SQL selects
 //! exactly the matching documents; a `Superset` keeps every match and
 //! some others, which the recheck drops.
 //!
@@ -56,7 +55,7 @@ impl SqlPred {
 
 impl SqlPred {
     /// The key of a point condition (`_id = X'..'` alone), which the engine
-    /// runs as a prepared statement (decision S26).
+    /// runs as a prepared statement.
     #[must_use]
     pub fn point_key(&self) -> Option<Vec<u8>> {
         let hex = self.sql.strip_prefix("_id = X'")?.strip_suffix('\'')?;
@@ -128,7 +127,7 @@ fn negate(inner: &SqlPred) -> SqlPred {
 }
 
 fn field(path: &str, op: &FieldOp, m: &CollMeta) -> SqlPred {
-    // A collation (chapter 31) compares strings as `utf8mb4_bin` doesn't:
+    // A collation compares strings as `utf8mb4_bin` doesn't:
     // nothing is pushed down, the gateway rechecks every candidate.
     if !valid_path(path) || crate::collation::active().is_some() {
         return SqlPred::t();
@@ -260,7 +259,7 @@ fn field(path: &str, op: &FieldOp, m: &CollMeta) -> SqlPred {
         FieldOp::Type(_) | FieldOp::ElemMatch(_) | FieldOp::Mod(..) | FieldOp::Bits(_) => {
             SqlPred::t()
         }
-        // Chapter 36 (R6 round 3): a box on a `2dsphere` index's columns.
+        // A box on a `2dsphere` index's columns.
         FieldOp::Geo(g) => SqlPred::sup(crate::geo::prefilter(path, g, m)),
     }
 }
@@ -601,7 +600,7 @@ mod tests {
         translate(&parse(&f).unwrap(), m)
     }
 
-    /// Decision S26: only a lone `_id` equality is a point; the engine's
+    /// Only a lone `_id` equality is a point; the engine's
     /// text fallback writes the same statement.
     #[test]
     fn point_keys_and_bound_text() {

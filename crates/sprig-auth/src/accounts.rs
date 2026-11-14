@@ -1,22 +1,21 @@
-//! Interim accounts for M0.2: logins from a TOML file (decision D1 in the
-//! plan's `decisions/m0.2-interim.md`).
+//! File accounts: logins from a TOML file, a stopgap from before the
+//! tenant catalog held the verifier tables.
 //!
-//! Chapter 14's verifier tables live in the tenant catalog, which arrives in
-//! M0.3. Until chapter 14 step 4 lands, the gateway reads
-//! `[gateway] accounts_file` and asks an [`AccountStore`] for each login.
-//! The file and [`FileAccounts`] are then removed.
+//! In this mode the gateway reads `[gateway] accounts_file` and asks an
+//! [`AccountStore`] for each login. The file and [`FileAccounts`] go once
+//! the gateway reads every login from the catalog.
 //!
 //! ```toml
 //! [[account]]
 //! user = "app"
-//! # Chapter 14's verifier formats. At least one of the two. A MySQL hash
+//! # The verifier formats. At least one of the two. A MySQL hash
 //! # whose salt holds control characters can be given as "0x" and the hex of
 //! # authentication_string (SELECT HEX(authentication_string) ...).
 //! caching_sha2_password = "$A$005$<20 salt bytes><43-character digest>"
 //! mysql_native_password = "*<40 hex digits>"       # optional
 //! cluster = "dc-a-c1"                              # a registered cluster id
 //! backend_user = "root"
-//! # A credentials_ref (chapter 27): file:<path>[#section] or env:<VAR>[#section].
+//! # A credentials_ref: file:<path>[#section] or env:<VAR>[#section].
 //! # A relative file path is relative to this file's directory.
 //! backend_credentials = "file:backend-creds.toml#app"
 //! ```
@@ -47,13 +46,13 @@ use crate::verifier::{CachingSha2Verifier, NativeVerifier, decode_hex};
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The longest user name: MariaDB's limit, the larger of the two personas'
-/// (chapter 14, "Tenants and users": 32 through 3306, 80 through 3307).
+/// (32 through 3306, 80 through 3307).
 pub const MAX_USER_LEN: usize = 80;
 
-/// Where a login's statements go (decision D3: one cluster per login).
+/// Where a login's statements go (one cluster per login).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendTarget {
-    /// A cluster registered in the DC tier (chapter 09).
+    /// A cluster registered in the DC tier.
     pub cluster: ClusterId,
     /// The MariaDB account the gateway connects as.
     pub user: String,
@@ -84,7 +83,7 @@ impl BackendTarget {
 /// One login account.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Account {
-    /// The login name, as the client sends it (no tenant prefix in M0.2).
+    /// The login name, as the client sends it (no tenant prefix).
     pub user: String,
     /// The `caching_sha2_password` verifier.
     pub caching_sha2: Option<CachingSha2Verifier>,
@@ -95,9 +94,9 @@ pub struct Account {
 }
 
 impl Account {
-    /// Checks a clear-text password (chapter 14, "MySQL logins" step 2, full
-    /// path): the `caching_sha2_password` verifier when there is one, else
-    /// the native one. CPU-heavy: call it off the async runtime.
+    /// Checks a clear-text password (the full path): the
+    /// `caching_sha2_password` verifier when there is one, else the native one.
+    /// CPU-heavy: call it off the async runtime.
     #[must_use]
     pub fn verify_password(&self, password: &[u8]) -> bool {
         match (&self.caching_sha2, &self.native) {
@@ -125,8 +124,8 @@ impl Account {
     }
 }
 
-/// Answers "which account is this login name?" (interim; chapter 14's
-/// `Authenticator` replaces it in M0.3).
+/// Answers "which account is this login name?" for the accounts file;
+/// catalog logins don't use it.
 pub trait AccountStore: Send + Sync {
     /// The account for `user`, or `None`, in which case the front end runs
     /// the decoy exchange and refuses with 1045.

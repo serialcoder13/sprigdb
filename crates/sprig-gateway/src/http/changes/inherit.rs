@@ -85,9 +85,7 @@ impl Mapper {
             .await
             .ok()?;
         let st = cat.ext.get::<InheritState>(sprig_inherit::MODULE)?;
-        if st.objects().next().is_none() {
-            return None;
-        }
+        st.objects().next()?;
         let space = caller
             .principal
             .user_id
@@ -184,6 +182,7 @@ impl Mapper {
 
     /// A parent tenant's event: its root space's layer rows of a table this
     /// tenant inherits.
+    #[allow(clippy::wrong_self_convention)] // "from" the parent tenants
     fn from_above(&self, st: &InheritState, e: &ChangeEvent) -> Class {
         if matches!(e.op, Op::Ddl(_) | Op::Truncate) || e.table.starts_with("__sprig") {
             return Class::Drop;

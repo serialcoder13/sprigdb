@@ -171,7 +171,7 @@ async fn hash_range_jobs_lock_their_shards_and_the_tenant() {
 }
 
 /// No worker runs a paused job, so a cancel there used to be recorded and
-/// never acted on: it now sends the job to `rolling_back` (the R0 fixes),
+/// never acted on: it now sends the job to `rolling_back`,
 /// which a worker claims.
 #[tokio::test]
 async fn a_cancelled_paused_job_rolls_back() {
@@ -194,7 +194,7 @@ async fn a_cancelled_paused_job_rolls_back() {
 }
 
 /// Copy slots are freed whatever `mover.max_copies_per_cluster` is now: a
-/// slot taken under a larger value isn't left behind (the R0 fixes).
+/// slot taken under a larger value isn't left behind.
 #[tokio::test]
 async fn slots_are_freed_beyond_the_current_maximum() {
     let s = store();
@@ -221,7 +221,7 @@ async fn slots_are_freed_beyond_the_current_maximum() {
     assert!(s.take_slot(&c, &b, 2, lease).await.unwrap());
 }
 
-/// Chapter 20's exclusion in the other direction (R1 integration): a
+/// Mutual exclusion in the other direction: a
 /// whole-tenant move never starts beside a split, merge or shard move of
 /// the tenant, and a tenant with table groups doesn't move whole.
 #[tokio::test]
@@ -307,7 +307,7 @@ async fn whole_tenant_moves_wait_for_shard_jobs_and_refuse_sharded_tenants() {
 }
 
 /// The advisor's first design holds the tenant lock while it creates the
-/// groups' maps (chapter 16): no move and no split starts meanwhile.
+/// groups' maps: no move and no split starts meanwhile.
 #[tokio::test]
 async fn the_tenant_lock_keeps_moves_out_while_held() {
     let js = store();

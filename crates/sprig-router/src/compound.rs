@@ -1,10 +1,11 @@
-//! Compound statements keyed by one distribution key (chapter 40's guarded
-//! batches on a sharded Redis database or key-value namespace; R6 round 4).
+//! Compound statements keyed by one distribution key (the Redis front
+//! end's guarded batches on a sharded Redis database or key-value
+//! namespace).
 //!
 //! The planner can't parse `BEGIN NOT ATOMIC ... END`, so a compound
 //! statement over sharded tables is refused (39420). The key-value front
 //! ends send one such statement per command, every table in it one of
-//! chapter 33's tables of a single key: the key table and its element
+//! the key-value tables of a single key: the key table and its element
 //! tables, grouped by the advisor on `_sprig_dk`. [`plan_keyed_compound`]
 //! routes it to that key's shard without parsing it: it finds the
 //! qualified table names and the `_sprig_dk = X'…'` literals in the text,

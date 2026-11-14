@@ -1,5 +1,5 @@
-//! Unique lookups under concurrent inserts and deletes, live (chapter 19,
-//! "Unique lookups: the consistent-lookup algorithm").
+//! Unique lookups under concurrent inserts and deletes, live: the
+//! consistent-lookup algorithm.
 //!
 //! A tenant with `customers` sharded by `id` over two shards and a unique
 //! key on `email` (`utf8mb4_uca1400_ai_ci`) that doesn't include the key,
@@ -17,10 +17,10 @@
 //!
 //! Runs on the single node, and (with `SPRIG_TEST_MARIADB_GALERA`) with the
 //! lookup shards and one owner shard on Galera, each shard written through
-//! one node (its writer, as chapter 09 chooses it) and the two lookup
+//! one node (its writer) and the two lookup
 //! shards through different nodes. Writing one shard through two nodes at
 //! once is not safe: the owner check's share lock is local to its node, and
-//! the test then finds duplicate owners (chapter 19, "As built").
+//! the test then finds duplicate owners.
 
 #![allow(
     clippy::unwrap_used,
@@ -522,7 +522,7 @@ async fn live_unique_lookup_concurrent() {
         let nodes: Vec<&str> = g.split(',').map(str::trim).collect();
         if nodes.len() >= 2 {
             // One Galera cluster; each shard has one writer node, the same
-            // for every gateway (chapter 09's writer choice). The cluster
+            // for every gateway. The cluster
             // ids name the shard's writer: lookup shard 1 and owner shard 2
             // write through node 1, lookup shard 2 through node 2.
             let ga = ClusterId::new("r1shard-galera-n1").unwrap();
@@ -543,8 +543,8 @@ async fn live_unique_lookup_concurrent() {
 
 /// Build over existing rows: a real duplicate across shards fails the
 /// build with 1062 and drops the lookup; without it the back-fill makes it
-/// public. An automatic (non-unique) lookup from chapter 13's hook builds
-/// the same way and routes to every owner of a value.
+/// public. An automatic (non-unique) lookup from automatic indexing's hook
+/// builds the same way and routes to every owner of a value.
 #[tokio::test(flavor = "multi_thread")]
 async fn live_lookup_build_backfill_and_auto() {
     let Ok(single) = std::env::var("SPRIG_TEST_MARIADB_SINGLE") else {

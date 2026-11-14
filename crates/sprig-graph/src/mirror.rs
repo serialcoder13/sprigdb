@@ -1,5 +1,4 @@
-//! Asynchronous mirrors (chapter 43, "Mirrors and freshness"; build step
-//! 14; R8 round 5).
+//! Asynchronous mirrors.
 //!
 //! Under `graph.mirror = async` a grouped graph's mirror rows
 //! (`__sprig_gm_<graph>`, on each edge's destination shard) are kept by the

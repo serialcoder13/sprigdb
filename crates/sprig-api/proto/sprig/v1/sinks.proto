@@ -1,9 +1,8 @@
-// sprig.v1: dry runs of sinks and connections (chapter 51, "Testing
-// connections and sinks"; chapter 37). Each call runs the statement Studio
+// sprig.v1: dry runs of sinks and connections. Each call runs the statement Studio
 // would run, as the caller, and answers its rows.
 //
-// The REST forms are Studio's routes (chapter 44's additions to the data
-// API, not this file's annotations): POST
+// The REST forms are Studio's routes (additions to the data API, not this
+// file's annotations): POST
 // /v1/databases/{database}/sinks/{sink}:test with {"sample": n}, and POST
 // /v1/databases/{database}/connections/{connection}:test with
 // {"platform", "write", "to"}. Both answer {columns, rows}.

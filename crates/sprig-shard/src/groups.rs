@@ -1,6 +1,6 @@
-//! Table groups, members and co-location (chapter 15, "Table groups",
-//! "Catalog tables", "Co-location safety"), and the catalog module that
-//! owns chapter 15's and chapter 19's tables.
+//! Table groups, members and co-location safety, and the `sharding`
+//! catalog module that owns their tables and those of ID blocks, lookups,
+//! foreign keys and pins.
 
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Row};
@@ -15,7 +15,7 @@ use crate::key::{GroupKind, KeyClass, KeySpec, MemberRouting};
 /// The catalog module's name.
 pub const MODULE: &str = "sharding";
 
-/// `table_groups` (chapter 15).
+/// `table_groups`.
 pub const DDL_TABLE_GROUPS: &str = "CREATE TABLE IF NOT EXISTS table_groups (
   group_id         INT UNSIGNED NOT NULL,
   kind             ENUM('default','sharded','lookup','reference') NOT NULL,
@@ -33,7 +33,7 @@ pub const DDL_TABLE_GROUPS: &str = "CREATE TABLE IF NOT EXISTS table_groups (
   UNIQUE KEY uk_name (name)
 ) ENGINE=InnoDB";
 
-/// `group_members` (chapter 15).
+/// `group_members`.
 pub const DDL_GROUP_MEMBERS: &str = "CREATE TABLE IF NOT EXISTS group_members (
   object_id        BIGINT UNSIGNED NOT NULL,
   group_id         INT UNSIGNED NOT NULL,
@@ -53,7 +53,7 @@ pub const DDL_GROUP_MEMBERS: &str = "CREATE TABLE IF NOT EXISTS group_members (
   KEY by_group (group_id, db_id)
 ) ENGINE=InnoDB";
 
-/// `reference_tables` (chapter 15).
+/// `reference_tables`.
 pub const DDL_REFERENCE_TABLES: &str = "CREATE TABLE IF NOT EXISTS reference_tables (
   object_id        BIGINT UNSIGNED NOT NULL,
   cluster_id       VARCHAR(64) NOT NULL,
@@ -66,8 +66,8 @@ pub const DDL_REFERENCE_TABLES: &str = "CREATE TABLE IF NOT EXISTS reference_tab
   KEY by_cluster (cluster_id)
 ) ENGINE=InnoDB";
 
-/// The module's migrations: chapter 15's tables, then chapter 19's, then
-/// the pins of chapter 16.
+/// The module's migrations: the group tables, then sequences, lookups and
+/// foreign keys, then pins and ID blocks.
 pub static SHARDING_MIGRATIONS: &[Migration] = &[
     Migration {
         format: 1,
@@ -78,7 +78,7 @@ pub static SHARDING_MIGRATIONS: &[Migration] = &[
     Migration {
         format: 2,
         phase: Phase::Expand,
-        name: "sequences, lookup_indexes and foreign_keys (chapter 19)",
+        name: "sequences, lookup_indexes and foreign_keys",
         statements: &[
             crate::ids::DDL_SEQUENCES,
             crate::lookup::DDL_LOOKUP_INDEXES,
@@ -88,13 +88,13 @@ pub static SHARDING_MIGRATIONS: &[Migration] = &[
     Migration {
         format: 3,
         phase: Phase::Expand,
-        name: "group_pins (chapter 16's SPRIG PIN)",
+        name: "group_pins (SPRIG PIN)",
         statements: &[crate::pins::DDL_GROUP_PINS],
     },
     Migration {
         format: 4,
         phase: Phase::Expand,
-        name: "sequence_blocks (chapter 19's leased ID blocks)",
+        name: "sequence_blocks (leased ID blocks)",
         statements: &[crate::ids::DDL_SEQUENCE_BLOCKS],
     },
 ];
@@ -125,7 +125,7 @@ pub enum GroupState {
     Active,
     /// Members back-filling, lookups building.
     Preparing,
-    /// An online re-key (R3).
+    /// An online re-key.
     Rekeying,
     /// Its members left.
     Retired,
@@ -218,7 +218,7 @@ pub struct GroupMember {
     pub off_class_seen: bool,
 }
 
-/// The comparison type MySQL picks for `a = b` (chapter 17 resolves it).
+/// The comparison type MySQL picks for `a = b` (the router resolves it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CmpType {
     /// Exact integer comparison.
@@ -253,7 +253,7 @@ pub struct Comparison {
 }
 
 /// Whether `cmp` between members `a` and `b` of group `g` holds only for
-/// rows on the same shard (chapter 15, `colocation_safe`).
+/// rows on the same shard.
 #[must_use]
 pub fn colocation_safe(cmp: &Comparison, g: &TableGroup, a: &GroupMember, b: &GroupMember) -> bool {
     if a.group != g.id || b.group != g.id {

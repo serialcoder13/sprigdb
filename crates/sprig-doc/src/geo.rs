@@ -1,7 +1,7 @@
-//! MongoDB's geospatial query operators on documents (chapter 36,
-//! "MongoDB operators"; R6 round 3): `$geoWithin`, `$geoIntersects`,
-//! `$near`, `$nearSphere` and the `$geoNear` stage's geometry, on the
-//! sphere MongoDB uses (radius 6,378,100 m, great-circle edges).
+//! MongoDB's geospatial query operators on documents: `$geoWithin`,
+//! `$geoIntersects`, `$near`, `$nearSphere` and the `$geoNear` stage's
+//! geometry, on the sphere MongoDB uses (radius 6,378,100 m, great-circle
+//! edges).
 //!
 //! - Stored locations are GeoJSON (`Point`, `MultiPoint`, `LineString`,
 //!   `MultiLineString`, `Polygon`, `MultiPolygon`, `GeometryCollection`)
@@ -829,9 +829,8 @@ pub fn is_2dsphere(i: &crate::meta::IndexDef) -> bool {
     i.extra.contains_key("2dsphereIndexVersion")
 }
 
-/// The side table of a `2dsphere` path's lines and polygons (R5 round 6,
-/// R33's other half): one row per document whose value at the path isn't
-/// a point, with a latitude and longitude box holding it on the sphere.
+/// The side table of a `2dsphere` path's lines and polygons: one row per
+/// document whose value at the path isn't a point, with a latitude and longitude box holding it on the sphere.
 #[must_use]
 pub fn side_table(table: &str, path: &str) -> String {
     let mut k = table.as_bytes().to_vec();

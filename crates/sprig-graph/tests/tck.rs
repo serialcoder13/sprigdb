@@ -1,11 +1,11 @@
-//! The openCypher TCK (chapter 43, "Testing"; build step 29) through a
+//! The openCypher TCK through a
 //! small Gherkin runner of our own, on the in-memory store with 1 and 4
 //! shards (the MariaDB store answers as memory does: the differential and
 //! store tests show it).
 //!
 //! The feature files (Apache-2.0) are test data, not part of the
 //! repository: `SPRIG_TCK_DIR` names the `tck/features` folder of an
-//! openCypher checkout (round 3 used tag `2024.3`, commit
+//! openCypher checkout (tested with tag `2024.3`, commit
 //! `677cbafabb8c3c5eed458fd3b1ec0daec8d67d23`). Without it the test skips.
 //!
 //! A scenario passes when every step does: setup queries run, the query's

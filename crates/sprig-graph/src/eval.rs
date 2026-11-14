@@ -1,4 +1,4 @@
-//! The gateway evaluator (chapter 43 build step 10): Cypher expressions
+//! The gateway evaluator: Cypher expressions
 //! over one binding row, with three-valued logic, `null` propagation and
 //! the function library (scalar, list, string and math functions; the
 //! aggregates are in [`crate::exec`]).
@@ -25,7 +25,7 @@ fn unsupported(what: impl std::fmt::Display) -> SprigError {
 }
 
 fn arith_err(msg: &str) -> SprigError {
-    // Neo4j's code for arithmetic errors (R8 round 8; 39909 in SQL).
+    // Neo4j's code for arithmetic errors (39909 in SQL).
     SprigError::new(
         SprigCode::GraphPropertyType,
         format!("[Neo.ClientError.Statement.ArithmeticError] {msg}"),

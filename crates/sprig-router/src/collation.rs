@@ -1,7 +1,6 @@
-//! The collation table the ordered merge needs (chapter 17, "Ordered
-//! merge"): per collation id, whether it is `PAD SPACE` and the weight of
-//! one space at levels 1 to 3, as `WEIGHT_STRING(' ' COLLATE c LEVEL k)`
-//! returns it.
+//! The collation table the ordered merge needs: per collation id, whether it is
+//! `PAD SPACE` and the weight of one space at levels 1 to 3, as
+//! `WEIGHT_STRING(' ' COLLATE c LEVEL k)` returns it.
 //!
 //! Captured on 8 November 2026 from MariaDB 11.8.9 for every collation of
 //! `utf8mb4`, `utf8mb3`, `latin1`, `ascii` and `binary` (496 ids). The
@@ -592,7 +591,7 @@ fn cmp_with_spaces(rest: &[u8], space: &[u8]) -> Ordering {
 }
 
 /// A level's weights with trailing space weights removed (`PAD SPACE`),
-/// for equality and hashing (chapter 15's weight-level trim).
+/// for equality and hashing (the weight-level trim).
 #[must_use]
 pub fn trim_level<'a>(w: &'a [u8], pad_space: bool, space: &[u8]) -> &'a [u8] {
     if !pad_space || space.is_empty() {

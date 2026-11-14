@@ -756,12 +756,11 @@ pub(crate) fn parse_fields(
     Ok(out)
 }
 
-/// Bytes a group costs besides its list-like accumulators (decision
-/// S72): its key, and a fixed share per accumulator, as MongoDB counts a
+/// Bytes a group costs besides its list-like accumulators: its key, and a fixed share per accumulator, as MongoDB counts a
 /// group's memory.
 const GROUP_OVERHEAD: usize = 64;
 
-/// A streaming `$group` (M5, decision S72): documents go in one at a
+/// A streaming `$group`: documents go in one at a
 /// time with their group key; [`Grouper::finish`] gives the groups in
 /// first-seen order. Memory is the keys plus the accumulators' state,
 /// checked against `doc.agg_stage_memory_bytes` after every document.

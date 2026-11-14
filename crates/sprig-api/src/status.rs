@@ -1,10 +1,10 @@
-//! Error mapping (chapter 37, "Errors"; build step 5).
+//! Error mapping.
 //!
 //! Every error leaves the HTTP listeners in one of two forms, built from the
 //! same [`SprigError`]:
 //!
-//! - **gRPC:** a `Status` whose code comes from chapter 37's table
-//!   ([`SprigError::protocol`]), whose message is MySQL's text, and whose
+//! - **gRPC:** a `Status` whose code comes from the error's protocol
+//!   mapping ([`SprigError::protocol`]), whose message is MySQL's text, and whose
 //!   `grpc-status-details-bin` holds a `google.rpc.Status` with an
 //!   `ErrorInfo` (`reason`: the `ER_SPRIG_*` name, or `MYSQL_ERROR` for a
 //!   MariaDB or standard error; metadata `mysql_errno`, `sqlstate` and, for

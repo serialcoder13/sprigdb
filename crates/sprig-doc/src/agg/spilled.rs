@@ -1,5 +1,4 @@
-//! The in-gateway stages over sequences that may live on disk (M5,
-//! decisions S72–S76).
+//! The in-gateway stages over sequences that may live on disk.
 //!
 //! With `allowDiskUse` (the gateway's [`crate::spill::scope`]):
 //! - streaming stages run a chunk at a time over a spilled input;
@@ -173,7 +172,7 @@ pub fn run_stage_seq(
         }
         "$bucketAuto" => bucket_auto_seq(seq, stage, arg, lim),
         "$setWindowFields" => window_seq(seq, stage, arg, lim),
-        // M7 (S87): `$densify` sorts on disk.
+        // `$densify` sorts on disk.
         "$densify" => {
             if let DocSeq::Mem(v) = &seq
                 && size_of(v) <= lim.stage_bytes
@@ -240,7 +239,7 @@ fn key_bytes(d: &Document) -> &[u8] {
 }
 
 /// A `$group`-like stage: in memory while its groups fit, else sorted by
-/// group key on disk and accumulated one group at a time (S72).
+/// group key on disk and accumulated one group at a time.
 fn group_seq(
     seq: DocSeq,
     key: &dyn Fn(&Document) -> Result<Bson, MongoError>,
@@ -466,7 +465,7 @@ fn window_seq(
 /// Index of a document in its partition, in the slim copies (M7).
 const SLIM_INDEX: &str = "__sprig_window_i";
 
-/// One `$setWindowFields` partition being collected (M7, decision S85).
+/// One `$setWindowFields` partition being collected.
 /// It stays in memory while it fits the stage's memory. Past it, with
 /// `allowDiskUse`, its documents go to a spill file and only slim copies
 /// stay in memory: the top-level fields the stage's expressions read

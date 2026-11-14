@@ -34,7 +34,8 @@ pub struct SinksEnv {
     pools: Arc<dyn ClusterPools>,
     locator: Arc<ShardMapLocator>,
     keyring: Option<Arc<dyn SinkKeyring>>,
-    secret_dir: PathBuf,
+    /// `SPRIG_SINK_SECRET_DIR`, which overrides `sink.platform_secret_dir`.
+    secret_dir: Option<PathBuf>,
     worker: String,
     /// The worker's live settings (global `sink.*`).
     settings: crate::settings::WorkerSettings,
@@ -156,6 +157,11 @@ impl RlsCatalogs {
                     name: name.clone(),
                 },
                 sprig_sinks::job::OwnerRead::Object(id) => ReadSource::Object(*id),
+                sprig_sinks::job::OwnerRead::InDatabase { db, name } => ReadSource::InDatabase {
+                    db: db.clone(),
+                    name: name.clone(),
+                },
+                sprig_sinks::job::OwnerRead::FanIn => ReadSource::FanIn,
             })
             .collect();
         Ok(lost_read(
@@ -251,10 +257,7 @@ impl SinksEnv {
             pools: Arc::clone(&env.pools),
             locator: Arc::clone(&env.locator),
             keyring,
-            secret_dir: std::env::var_os("SPRIG_SINK_SECRET_DIR").map_or_else(
-                || PathBuf::from("/etc/sprigdb/platform-secrets"),
-                PathBuf::from,
-            ),
+            secret_dir: std::env::var_os("SPRIG_SINK_SECRET_DIR").map(PathBuf::from),
             worker: worker.to_owned(),
             settings: env.settings.clone(),
             peer: None,
@@ -313,7 +316,13 @@ impl SinkEnv for SinksEnv {
     }
 
     fn secret_dir(&self) -> PathBuf {
-        self.secret_dir.clone()
+        self.secret_dir.clone().unwrap_or_else(|| {
+            PathBuf::from(
+                self.settings
+                    .get(&sprig_sinks::settings::PLATFORM_SECRET_DIR)
+                    .as_ref(),
+            )
+        })
     }
 
     fn worker_id(&self) -> String {

@@ -24,132 +24,24 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use sprig_docs::reference::SettingDoc;
+use sprig_settings::registry::{MARKED, Mark};
 
-/// Registered keys nothing reads yet (setfix's audit, 13 Nov 2026;
-/// decisions/bugfix-interim.md): registered ahead of their code, kept for
-/// the design's sake until each is built or unregistered.
-const KNOWN_UNREAD: &[(&str, &str)] = &[
-    (
-        "search.max_lag_ms",
-        "copy states (stale after lag) not built",
-    ),
-    ("queue.descendant_publish", "AMQP publishing up not built"),
-    ("queue.descendant_key", "AMQP publishing up not built"),
-    (
-        "sink.kafka.offsets_topic",
-        "read only through the sink.* option merge, by key",
-    ),
-    ("amqp.cert_login_field", "registered ahead of its code"),
-    (
-        "auto_index.field_column_class_pct",
-        "registered ahead of its code",
-    ),
-    (
-        "auto_index.lookup_scatter_pct",
-        "registered ahead of its code",
-    ),
-    (
-        "auto_index.wildcard_recommend_paths",
-        "registered ahead of its code",
-    ),
-    ("decisions.retention_days", "registered ahead of its code"),
-    ("failover.quarantine_days", "registered ahead of its code"),
-    ("graph.traversal_tier", "registered ahead of its code"),
-    ("inherit.instance_precreate", "registered ahead of its code"),
-    ("inherit.precreate_rate", "registered ahead of its code"),
-    (
-        "inherit.sync_orphan_max_rows",
-        "registered ahead of its code",
-    ),
-    ("mover.max_pause_minutes", "registered ahead of its code"),
-    ("mover.recovery_rate_pct", "registered ahead of its code"),
-    (
-        "mover.throttle_p99_increase_pct",
-        "registered ahead of its code",
-    ),
-    ("mover.verify_mode", "registered ahead of its code"),
-    ("mover.xa_wait_ms", "registered ahead of its code"),
-    (
-        "recovery.max_latency_increase_pct",
-        "registered ahead of its code",
-    ),
-    (
-        "recovery.rebuild_threshold_gb",
-        "registered ahead of its code",
-    ),
-    ("recovery.step_max_lag_ms", "registered ahead of its code"),
-    ("sink.platform_secret_dir", "registered ahead of its code"),
-    ("stream.sequencer_batch_ms", "registered ahead of its code"),
-    (
-        "tenant.ancestry_cache_seconds",
-        "registered ahead of its code",
-    ),
-    (
-        "tenant.copy_max_descendants",
-        "registered ahead of its code",
-    ),
-];
+/// Listed keys nothing reads in a way the scan sees. Keys registered ahead
+/// of their code aren't listed here: they are marked `Unbuilt` in
+/// `sprig_settings::registry::MARKED` (bugfix-89's round, smallfix), which
+/// hides them from the listings, and the test checks that nothing reads
+/// them.
+const KNOWN_UNREAD: &[(&str, &str)] = &[(
+    "sink.kafka.offsets_topic",
+    "read only through the sink.* option merge, by key",
+)];
 
-/// Keys tenants may set whose reading files show no tenant context: real
-/// gaps (read at dc and global only, so a tenant's value does nothing), and
-/// keys read per tenant in a way the scan can't see.
+/// Keys tenants may set whose reading files show no tenant context, each
+/// read per tenant in a way the scan can't see. Real gaps (read at dc and
+/// global only, so a tenant's value does nothing) aren't allowed here: the
+/// declaration is narrowed or the read made per tenant (bugfix-89's round,
+/// smallfix); the test fails on an entry that doesn't start "not a gap".
 const KNOWN_TENANT_GAPS: &[(&str, &str)] = &[
-    ("amqp.heartbeat_seconds", "gap: read at dc and global only"),
-    ("amqp.sasl_mechanisms", "gap: read at dc and global only"),
-    ("amqp10.legacy_addresses", "gap: read at dc and global only"),
-    ("amqp10.link_credit", "gap: read at dc and global only"),
-    (
-        "api.stream.heartbeat_seconds",
-        "gap: read at dc and global only",
-    ),
-    (
-        "api.stream.max_per_tenant",
-        "gap: read at dc and global only",
-    ),
-    ("api.txn.idle_timeout_ms", "gap: read at dc and global only"),
-    ("api.txn.max_lifetime_ms", "gap: read at dc and global only"),
-    (
-        "api.txn.max_open_per_tenant",
-        "gap: read at dc and global only",
-    ),
-    ("audit.retention_days", "gap: read at dc and global only"),
-    ("catalog.ddl_wait_ms", "gap: read at dc and global only"),
-    (
-        "control.tenant_jobs_per_hour",
-        "gap: read at dc and global only",
-    ),
-    (
-        "gateway.max_allowed_packet_bytes",
-        "gap: read at dc and global only",
-    ),
-    (
-        "gateway.max_prepared_per_session",
-        "gap: read at dc and global only",
-    ),
-    (
-        "kafka.group_session_timeout_max_ms",
-        "gap: read at dc and global only",
-    ),
-    ("kafka.sasl_mechanisms", "gap: read at dc and global only"),
-    ("studio.map_tile_url", "gap: read at dc and global only"),
-    (
-        "telemetry.trace_sample_ratio",
-        "gap: read at dc and global only",
-    ),
-    ("telemetry.trace_slow_ms", "gap: read at dc and global only"),
-    (
-        "workload.max_in_list_values",
-        "gap: read at dc and global only",
-    ),
-    (
-        "workload.max_samples_per_fingerprint",
-        "gap: read at dc and global only",
-    ),
-    ("workload.max_text_bytes", "gap: read at dc and global only"),
-    (
-        "workload.sample_retention_days",
-        "gap: read at dc and global only",
-    ),
     (
         "sink.auto_resume",
         "not a gap: the sink.* option merge reads the tenant's rows",
@@ -472,10 +364,30 @@ fn registered_settings_are_honoured_as_declared() {
     assert!(docs.len() > 300, "{} keys", docs.len());
     let src = sources();
 
+    // Marked keys: unbuilt ones are hidden from the listing, restart-only
+    // ones shown.
+    let listed: BTreeSet<&str> = docs.iter().map(|d| d.key.as_str()).collect();
+    let unbuilt: Vec<&str> = MARKED
+        .iter()
+        .filter(|(_, m, _)| *m == Mark::Unbuilt)
+        .map(|(k, _, _)| *k)
+        .collect();
+    for (k, m, _) in MARKED {
+        match m {
+            Mark::Unbuilt => assert!(!listed.contains(k), "{k} is marked unbuilt but listed"),
+            Mark::Restart => assert!(listed.contains(k), "{k} is marked restart but not listed"),
+        }
+    }
+    let keys: Vec<&str> = listed
+        .iter()
+        .copied()
+        .chain(unbuilt.iter().copied())
+        .collect();
+
     // Where each key is declared.
     let mut decls: BTreeMap<&str, Decl> = BTreeMap::new();
-    for d in &docs {
-        let lit = format!("\"{}\"", d.key);
+    for key in &keys {
+        let lit = format!("\"{key}\"");
         'files: for (fi, (_, t)) in src.iter().enumerate() {
             if !t.contains("register!(") {
                 continue;
@@ -485,7 +397,7 @@ fn registered_settings_are_honoured_as_declared() {
                     && (t.contains(&format!("register!({ident})")) || t.contains("register!($"))
                 {
                     decls.insert(
-                        &d.key,
+                        key,
                         Decl {
                             file: fi,
                             ident,
@@ -500,15 +412,20 @@ fn registered_settings_are_honoured_as_declared() {
 
     let mut unread = BTreeSet::new();
     let mut tenant_gaps = BTreeSet::new();
-    for d in &docs {
-        let Some(decl) = decls.get(d.key.as_str()) else {
+    let mut unbuilt_read = BTreeSet::new();
+    for key in &keys {
+        let Some(decl) = decls.get(key) else {
             // Declared in a way this scan doesn't read (counted below).
             continue;
         };
-        let lit = format!("\"{}\"", d.key);
-        // Files that name the setting other than to declare it.
+        let lit = format!("\"{key}\"");
+        // Files that name the setting other than to declare it (the
+        // MARKED table names keys too).
         let mut readers = Vec::new();
-        for (fi, (_, t)) in src.iter().enumerate() {
+        for (fi, (path, t)) in src.iter().enumerate() {
+            if path.ends_with("sprig-settings/src/registry.rs") {
+                continue;
+            }
             let mut n = 0;
             for at in find_word(t, &decl.ident) {
                 let before = &t[at.saturating_sub(10)..at];
@@ -529,6 +446,15 @@ fn registered_settings_are_honoured_as_declared() {
                 readers.push(fi);
             }
         }
+        if unbuilt.contains(key) {
+            if !readers.is_empty() {
+                unbuilt_read.insert((*key).to_owned());
+            }
+            continue;
+        }
+        let Some(d) = docs.iter().find(|d| d.key == *key) else {
+            continue;
+        };
         if readers.is_empty() {
             unread.insert(d.key.clone());
             continue;
@@ -566,6 +492,16 @@ fn registered_settings_are_honoured_as_declared() {
              no longer a gap {gone:?} (remove them from the list)"
         );
     };
+    assert!(
+        unbuilt_read.is_empty(),
+        "marked unbuilt but read: {unbuilt_read:?} (remove them from sprig_settings::registry::MARKED)"
+    );
+    for (k, why) in KNOWN_TENANT_GAPS {
+        assert!(
+            why.starts_with("not a gap"),
+            "{k}: a real tenant-scope gap; narrow the declaration or read it per tenant"
+        );
+    }
     check("unread settings", &unread, KNOWN_UNREAD);
     check(
         "tenant-settable settings read only at process scope",

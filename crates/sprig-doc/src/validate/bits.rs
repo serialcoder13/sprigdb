@@ -1,5 +1,5 @@
-//! `$bitsAllSet`, `$bitsAnySet`, `$bitsAllClear` and `$bitsAnyClear`
-//! (M3, decision S95): the bit positions of a mask given as a number, an
+//! `$bitsAllSet`, `$bitsAnySet`, `$bitsAllClear` and `$bitsAnyClear`:
+//! the bit positions of a mask given as a number, an
 //! array of positions or BinData, tested against whole numbers (as 64-bit
 //! two's complement, sign-extended past bit 63) and BinData (little-endian,
 //! missing bytes clear). Other values never match.

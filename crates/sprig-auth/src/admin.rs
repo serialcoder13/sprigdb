@@ -1,7 +1,7 @@
 //! Account changes as library calls: creating a user with a password,
 //! setting a password (dual passwords, history), locking, expiring and
-//! dropping (chapter 14, "Setting a password"). `CREATE USER` and the other
-//! account statements (chapter 29) and `sprigctl` call these.
+//! dropping. `CREATE USER` and the other account statements and
+//! `sprigctl` call these.
 //!
 //! Every call is one auth change ([`Versioner::change_with`] with
 //! [`VersionKind::Auth`]): the rows commit with a new auth version, which
@@ -23,12 +23,12 @@
 //!
 //! These calls don't check the password policy: [`crate::policy::change_password`]
 //! does, then calls [`set_password`]. [`AccountOps`] wraps them with audit
-//! events and the acting administrator (step 6). The caller's privileges
-//! are chapter 29's.
+//! events and the acting administrator. The caller's privileges are
+//! checked by the authorization layer, not here.
 //!
 //! [`backfill_scram`] adds the SCRAM verifiers a password set before they
 //! existed lacks, at a login that saw the clear password ("upgrade on
-//! login", chapter 14).
+//! login").
 
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -49,7 +49,7 @@ use crate::store::{
 };
 use crate::verifier::{CachingSha2Verifier, DEFAULT_CACHING_SHA2_ROUNDS, NativeVerifier};
 
-/// The longest user name and host, in characters (chapter 14).
+/// The longest user name and host, in characters.
 pub const MAX_NAME: usize = 255;
 
 /// A user to create.
@@ -73,8 +73,8 @@ pub struct NewUser {
     pub account_locked: bool,
     /// Created expired (`PASSWORD EXPIRE`).
     pub password_expired: bool,
-    /// 0, or the ancestor tenant creating it (chapter 14, "Management from
-    /// above").
+    /// 0, or the ancestor tenant creating it (managing the tenant from
+    /// above).
     pub created_by_tenant: u64,
     /// Hashing and stored mechanisms.
     pub hashing: Hashing,
@@ -422,7 +422,7 @@ where
     }
 }
 
-/// Sets `user`'s password (chapter 14, "Setting a password").
+/// Sets `user`'s password.
 ///
 /// # Errors
 /// 1396 if the user doesn't exist or is dropped; the change's errors.
@@ -479,7 +479,7 @@ pub async fn set_password(
 
 /// Adds the SCRAM verifiers missing from the password generation of
 /// `verifier_id` (the `caching_sha2_password` or `mysql_native_password`
-/// verifier `password` just matched at a login): chapter 14's "upgrade on
+/// verifier `password` just matched at a login): the "upgrade on
 /// login" for passwords set before SCRAM verifiers were stored, or
 /// imported as hashes. A new verifier takes the salt and iterations of the
 /// same kind in the user's other live slot, if there is one, so dual
@@ -691,7 +691,7 @@ pub async fn set_require(
     .await
 }
 
-/// `ATTRIBUTE '{...}'` or `COMMENT '...'` (chapter 29's
+/// `ATTRIBUTE '{...}'` or `COMMENT '...'` (read by
 /// `SPRIG_USER_ATTR()`): `patch`, a JSON object, merged into the user's
 /// `attributes` as MySQL 8.4 merges `user_attributes.metadata` (RFC 7396:
 /// a `null` value removes its key).
@@ -847,14 +847,14 @@ pub async fn find_user(
         .map(|u| u.user_id))
 }
 
-/// Account changes with their audit events (chapter 14 step 6,
-/// "Management from above", and step 10): the calls above, made on behalf
+/// Account changes with their audit events, possibly by an administrator
+/// of an ancestor tenant: the calls above, made on behalf
 /// of an actor, each emitting one event to the sink, kept in the target
 /// tenant's stream and, when the actor belongs to another (ancestor)
 /// tenant, in the actor's too. A user created by an ancestor's
 /// administrator records the ancestor in `created_by_tenant`.
 ///
-/// Chapter 29's account statements (`CREATE USER`, `ALTER USER`, `DROP
+/// The MySQL account statements (`CREATE USER`, `ALTER USER`, `DROP
 /// USER` after `USE TENANT`) and the Admin API call these.
 pub struct AccountOps<'a> {
     /// The catalog writer path.

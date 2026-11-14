@@ -1,4 +1,4 @@
-//! Login rate limits (chapter 14, "Rate limits"; build step 7).
+//! Login rate limits.
 //!
 //! | Scope | Rule | Response |
 //! |---|---|---|
@@ -7,7 +7,7 @@
 //!
 //! Hashing CPU slots (39301 after a 2 s wait) are in [`crate::mysql`].
 //!
-//! Both limiters live in gateway memory, per process, as the chapter says:
+//! Both limiters live in gateway memory, per process:
 //! an attacker spreading guesses over many gateways meets the account
 //! lockout ([`crate::policy`]), which is shared through the catalog.
 //! Delays are timers (`tokio::time::sleep`) that block no thread, and they

@@ -1,5 +1,5 @@
-//! Planning statements with `GRAPH_TABLE` (chapter 17's `Plan::Graph`,
-//! R8 round 6; the plan's types and binding are in [`crate::graph`]).
+//! Planning statements with `GRAPH_TABLE` (`Plan::Graph`; the plan's
+//! types and binding are in [`crate::graph`]).
 //!
 //! ```text
 //! plan_graph(sql with placeholders, nonce, calls, steps):
@@ -381,7 +381,7 @@ fn numeric_filter(e: &str, test: &str) -> String {
 }
 
 /// The outer statement's filters on each call's columns, as Cypher
-/// conditions (R8 round 7, decision G61): in the top `SELECT`, a conjunct
+/// conditions: in the top `SELECT`, a conjunct
 /// of `WHERE` or of an inner join's `ON` of the forms `g.c <op> n`
 /// (`=`, `<>`, `<`, `<=`, `>`, `>=`, either side), `g.c BETWEEN n AND m`,
 /// `g.c IN (n, …)` and `g.c IS NOT NULL`, with `n` an integer and `g.c` a

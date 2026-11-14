@@ -1,4 +1,4 @@
-//! Live Bolt tests through a gateway (chapter 43, R8), with this
+//! Live Bolt tests through a gateway, with this
 //! workspace's own Bolt client (no Neo4j driver crate is in the local
 //! cache).
 //!
@@ -11,14 +11,14 @@
 //!   `SPRIG_TEST_NEO4J_PASSWORD` (user `neo4j`): a reference Neo4j 5. It
 //!   runs one corpus on both and compares the answers.
 //!
-//! - `round_two_end_to_end` (R8 round 2) checks signed bookmarks,
+//! - `round_two_end_to_end` checks signed bookmarks,
 //!   streamed results, constraints and concurrent `MERGE` under one; with
 //!   `SPRIG_TEST_BOLT_REPL_USER` (a `tenant.user` whose tenant lives on a
 //!   primary with replicas) and `SPRIG_TEST_GW_METRICS` (the gateway's
 //!   `/metrics` URL) it also checks that `mode: "r"` reads wait on a
 //!   replica for the session's bookmark.
 //!
-//! - Round 3: `sharded_graph_split_and_move` (also `SPRIG_TEST_SPRIGCTL`
+//! - `sharded_graph_split_and_move` (also `SPRIG_TEST_SPRIGCTL`
 //!   and `SPRIGCTL_ENDPOINT`: two splits and two moves across clusters
 //!   under concurrent writes), `mapped_graphs_graph_table_and_gql` (mapped
 //!   graphs, `GRAPH_TABLE`, GQL forms), `bolt_sessions_in_processlist_and_kill`;
@@ -167,7 +167,7 @@ const CORPUS: &[&str] = &[
     "MATCH (p:Person) OPTIONAL MATCH (p)-[b:BOUGHT]->(x) RETURN p.name, x.name, b.qty ORDER BY p.name, x.name",
     "MATCH (p:Product) RETURN sum(p.price) AS s, avg(p.price) AS a, min(p.name) AS mn, max(p.price) AS mx",
     "MATCH (p:Product) RETURN collect(p.name) AS names",
-    // Round 3: GQL's `IS` labels, chained comparisons and their
+    // GQL's `IS` labels, chained comparisons and their
     // precedence, `truncate`, `ORDER BY` after `DISTINCT`.
     "MATCH (n IS Person)-[IS KNOWS]->(m IS Person) RETURN n.name, m.name ORDER BY n.name",
     "MATCH (p:Person) WHERE 20 < p.age <= 35 RETURN p.name ORDER BY p.name",
@@ -198,7 +198,7 @@ const CORPUS: &[&str] = &[
     "RETURN [x IN range(1, 6) WHERE x % 2 = 0 | x * 10] AS a, all(x IN [1, 2] WHERE x > 0) AS b, any(x IN [1, 2] WHERE x > 1) AS c",
     "MATCH (n:Person) WHERE n.age >= 30 RETURN n.name ORDER BY n.age DESC SKIP 1",
     "MATCH (a:Person {name: 'Alice'}) RETURN a {.name, .age} AS m",
-    // Round 2: map projections, subqueries, FOREACH.
+    // Map projections, subqueries, FOREACH.
     "MATCH (p:Person) RETURN p {.name, k: size(p.name), .nope} AS m ORDER BY m.name",
     "MATCH (p:Person {name: 'Bob'}) RETURN p {.*} AS m",
     "MATCH (p:Person) CALL { WITH p MATCH (p)-[:BOUGHT]->(x) RETURN count(x) AS n } RETURN p.name, n ORDER BY p.name",
@@ -613,7 +613,7 @@ async fn differential_against_neo4j() {
         eprintln!("skipped: SPRIG_TEST_BOLT_* and SPRIG_TEST_NEO4J_ADDR / _PASSWORD not set");
         return;
     };
-    // `SPRIG_TEST_BOLT_DIFF_DB` names another graph (round 3: one in a
+    // `SPRIG_TEST_BOLT_DIFF_DB` names another graph (for example one in a
     // database whose `sharding.min_shards` is 4).
     let diff_db = env("SPRIG_TEST_BOLT_DIFF_DB").unwrap_or_else(|| "r8graphs_g.diff".into());
     let db = [("db", PackValue::String(diff_db.clone()))];
@@ -696,12 +696,11 @@ fn plan_details(p: &PackValue, out: &mut Vec<String>) {
     }
 }
 
-/// R8 round 8 (G64, decision G69): Bolt hops are router routes. On the
-/// differential's graph (`SPRIG_TEST_BOLT_DIFF_DB`, 4 shards over two
-/// clusters in the round's runs), `EXPLAIN` shows the router's group and
+/// Bolt hops are router routes. On the differential's graph
+/// (`SPRIG_TEST_BOLT_DIFF_DB`, for example 4 shards over two clusters),
+/// `EXPLAIN` shows the router's group and
 /// every shard with its cluster, `PROFILE` the routes each step ran, and
-/// `sprig_router_graph_routes_total` counts them. Before this round
-/// neither the lines nor the metric existed.
+/// `sprig_router_graph_routes_total` counts them.
 #[tokio::test]
 async fn bolt_hops_are_router_routes() {
     let (Some(addr), Some(user), Some(pw), Some(diff_db)) = (
@@ -856,7 +855,7 @@ async fn run_pull(
     (recs, fail)
 }
 
-/// R8 round 8 against Neo4j 5.26: Bolt 5.8 is negotiated; `CALL { } IN
+/// Against Neo4j 5.26: Bolt 5.8 is negotiated; `CALL { } IN
 /// TRANSACTIONS` (reads and writes, `ON ERROR CONTINUE | BREAK | FAIL`,
 /// `REPORT STATUS`, the refusal inside an explicit transaction); byte
 /// arrays as parameters, properties and results; and a row error after
@@ -949,7 +948,7 @@ async fn round_eight_against_neo4j() {
     eprintln!("round eight: {same} statements identical to Neo4j 5.26 over Bolt 5.8");
 }
 
-/// R8 round 9 against Neo4j 5.26 (decisions G76 and G77): a batched
+/// Against Neo4j 5.26: a batched
 /// `CALL` after a write is Neo4j's syntax error; writes after one roll
 /// back on a later failure while its batches stay; a uniqueness key
 /// carries the value's type (a string equal to a byte array's base64, or
@@ -979,7 +978,7 @@ async fn round_nine_against_neo4j() {
     let _ = run_pull(&mut n, "DROP CONSTRAINT r9_u IF EXISTS", vec![], &[]).await;
     let bytes = || vec![("b", PackValue::Bytes(vec![1, 2, 255]))];
     let cases: &[(&str, bool)] = &[
-        // G76: refused after a write, nothing written.
+        // Refused after a write, nothing written.
         (
             "CREATE (:Outer) WITH 1 AS one UNWIND [1] AS i CALL (i) { CREATE (:B9) } IN TRANSACTIONS RETURN 1",
             false,
@@ -1020,7 +1019,7 @@ async fn round_nine_against_neo4j() {
             "UNWIND [1] AS i CALL (i) { CREATE (:B9) } IN TRANSACTIONS WITH i UNWIND [2] AS j CALL (j) { CREATE (:C9) } IN TRANSACTIONS RETURN count(*) AS c",
             false,
         ),
-        // G77: the value's type is part of the uniqueness key.
+        // The value's type is part of the uniqueness key.
         (
             "CREATE CONSTRAINT r9_u FOR (x:U9) REQUIRE x.k IS UNIQUE",
             false,
@@ -1117,7 +1116,7 @@ async fn metric(url: &str, name: &str) -> f64 {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // one walk over the round-two features
+#[allow(clippy::too_many_lines)] // one walk over many features
 async fn round_two_end_to_end() {
     let (Some(addr), Some(user), Some(pw)) = (
         env("SPRIG_TEST_BOLT_ADDR"),
@@ -1422,8 +1421,8 @@ fn sprigctl_try(bin: &str, args: &[&str]) -> Option<serde_json::Value> {
 
 /// Where the split and move tests move their second and third shards:
 /// `SPRIG_TEST_MOVE_TO` (comma-separated cluster ids), by default the two
-/// other dev clusters. R8 round 6 ran them with `dc-a-c2,dc-a-c2` while
-/// the dev Galera cluster was degraded.
+/// other dev clusters (`dc-a-c2,dc-a-c2` works while the dev Galera
+/// cluster is degraded).
 fn move_targets() -> Vec<String> {
     env("SPRIG_TEST_MOVE_TO").map_or_else(
         || vec!["dc-a-c2".to_owned(), "dc-a-c3".to_owned()],
@@ -1488,7 +1487,7 @@ fn graph_shards(bin: &str, tenant: &str, group: &str) -> (u64, Vec<(u64, String)
     (id, shards)
 }
 
-/// Round 3 (decision G25 steps 1–4): a graph is a sharded table group the
+/// A graph is a sharded table group the
 /// mover splits and moves like any other. Answers before, during and after
 /// two splits and two moves (across the three dev clusters) stay the same,
 /// and writes running throughout all land exactly once.
@@ -1688,7 +1687,7 @@ async fn sharded_graph_split_and_move() {
     assert_eq!(count(&o), all - touching);
 }
 
-/// Round 3: a mapped graph over SQL tables (`CREATE PROPERTY GRAPH`),
+/// A mapped graph over SQL tables (`CREATE PROPERTY GRAPH`),
 /// read through Bolt and through `GRAPH_TABLE` in SQL; `GRAPH_TABLE` over a
 /// native graph; GQL's forms through Bolt. Answers are checked against the
 /// same question in plain SQL.
@@ -1812,7 +1811,7 @@ async fn mapped_graphs_graph_table_and_gql() {
         .await
         .expect("gql");
     assert_eq!(got.records.len(), 3, "{:?}", rows(&got));
-    // GRAPH_TABLE in SQL, the chapter's example, against plain SQL.
+    // GRAPH_TABLE in SQL against plain SQL.
     let pgq: Vec<(String, f64)> = s
         .query(
             "SELECT g.name, SUM(g.total) AS spent FROM GRAPH_TABLE (shop
@@ -1870,7 +1869,7 @@ async fn mapped_graphs_graph_table_and_gql() {
     s.disconnect().await.expect("bye");
 }
 
-/// Round 3: a Bolt session shows in `SHOW PROCESSLIST` with its running
+/// A Bolt session shows in `SHOW PROCESSLIST` with its running
 /// statement; `KILL QUERY` stops the statement (`Terminated`) and the
 /// session carries on; `KILL` closes the connection.
 #[tokio::test]
@@ -1986,10 +1985,9 @@ fn int0(r: &Rows) -> i64 {
     r.records[0][0].as_int().expect("an integer")
 }
 
-/// Round 4 through a gateway: uniqueness across the shards of a graph
-/// spread over the three dev clusters (G32, decision G41: the claim
-/// table, its back-fill, concurrent `MERGE`), per-label read grants
-/// (decision G42) and `sprigctl graph`.
+/// Through a gateway: uniqueness across the shards of a graph spread over
+/// the three dev clusters (the claim table, its back-fill, concurrent
+/// `MERGE`), per-label read grants and `sprigctl graph`.
 ///
 /// Needs the end-to-end variables plus `SPRIG_TEST_SPRIGCTL`;
 /// `SPRIG_TEST_TENANT` (default `acme`); `SPRIG_TEST_R4_MOVES=0` skips
@@ -2320,7 +2318,7 @@ fn mirror_view(ctl: &str, tenant: &str, graph: &str) -> (String, u64, u64, usize
     )
 }
 
-/// Round 5 (decision G47): `graph.mirror = async` (the default). A new
+/// `graph.mirror = async` (the default). A new
 /// grouped graph goes `starting` then `async` once the worker's applier
 /// serves it; writers then keep no mirrors, and the applier does. While a
 /// writer runs a chain of `MERGE`s, a second session given each write's
@@ -2372,7 +2370,7 @@ async fn round_five_async_mirrors() {
             "sharding.min_shards",
             "2",
             "--reason",
-            "r8five async mirrors",
+            "graph async mirrors live test",
         ],
     );
     {
@@ -2640,7 +2638,7 @@ async fn round_five_async_mirrors() {
     }
 }
 
-/// Round 5 (decision G50): per-label and per-type write grants, through a
+/// Per-label and per-type write grants, through a
 /// gateway, on a graph over several shards. A writer holding `READ` on
 /// the graph's labels plus `CREATE`, `DELETE` and `SET PROPERTY` on label
 /// `Doc` and `CREATE` on type `REF` (no graph-wide write) may write
@@ -2815,7 +2813,7 @@ async fn round_five_label_write_grants() {
     s.disconnect().await.expect("bye");
 }
 
-/// Round 5 (decision G47): the applier's worker killed (`kill -9`) while
+/// The applier's worker killed (`kill -9`) while
 /// a writer runs and restarted later. While it is down, readers given the
 /// writer's bookmarks find every new relationship (they scatter once the
 /// positions go stale); after the restart the job resumes at its
@@ -2866,7 +2864,7 @@ async fn round_five_applier_kill() {
             "sharding.min_shards",
             "4",
             "--reason",
-            "r8five applier kill",
+            "graph applier kill live test",
         ],
     );
     {
@@ -2962,7 +2960,7 @@ async fn round_five_applier_kill() {
     assert_eq!(rels, u64::try_from(k - 1).unwrap_or(0));
 }
 
-/// R8 round 10 (the official LDBC run on OCI: 8 concurrent IC
+/// From the official LDBC run on OCI (8 concurrent IC
 /// statements held every runtime worker in polls of 0.9-2.9 s, and the
 /// watchdog stopped one). Heavy graph statements, more of them than the
 /// gateway has runtime workers, each one long sort that doesn't yield;

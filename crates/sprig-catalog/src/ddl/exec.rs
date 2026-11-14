@@ -1,8 +1,8 @@
 //! The physical side of the DDL path: statements on the tenant's cluster
 //! ([`DdlExecutor`]) and what the reconciler reads there.
 //!
-//! An executor is bound to one tenant's cluster (R0 keeps every database
-//! of a tenant on the catalog's cluster). The gateway passes one that runs
+//! An executor is bound to one tenant's cluster (the default placement
+//! keeps every database of a tenant on the catalog's cluster). The gateway passes one that runs
 //! on the session's backend account; the controller and tests use
 //! [`MariaExecutor`] over a pool, and unit tests [`MemExecutor`](super::mem::MemExecutor).
 //!
@@ -67,9 +67,9 @@ pub enum Effect {
         name: String,
     },
     /// Re-creates an object from its own `SHOW CREATE` text, read on
-    /// another shard (chapter 21's undo of a replaced routine, view or
-    /// event): `CREATE OR REPLACE` with the definer as written, which
-    /// executors must not change.
+    /// another shard (the undo of a replaced routine, view or event):
+    /// `CREATE OR REPLACE` with the definer as written, which executors
+    /// must not change.
     Restore {
         /// Its kind.
         kind: ObjectKind,
@@ -172,8 +172,8 @@ pub trait DdlExecutor: Send + Sync {
         Ok(false)
     }
 
-    /// The shard schemas a statement on `target` in database `db` changes
-    /// (chapter 21). The default is R0's placement: the database's default
+    /// The shard schemas a statement on `target` in database `db` changes.
+    /// The default is the single-cluster placement: the database's default
     /// group, from `databases.options.shards`, all on this executor's
     /// cluster. Executors that know table groups (the gateway, from the
     /// shard maps) return a table's group shards, and every shard schema
@@ -197,9 +197,8 @@ pub trait DdlExecutor: Send + Sync {
         None
     }
 
-    /// Waits while a split, merge or shard move (chapter 20) holds one of
-    /// `shards`, the shards a multi-shard job is about to change (chapter
-    /// 21, "DDL during moves"). The engine calls it after the job's intent
+    /// Waits while a split, merge or shard move holds one of `shards`, the
+    /// shards a multi-shard job is about to change. The engine calls it after the job's intent
     /// row is written, so a split admitted later sees the job and waits;
     /// one admitted earlier is seen here. The default has no mover jobs to
     /// wait for.

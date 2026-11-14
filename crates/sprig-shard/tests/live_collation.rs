@@ -1,4 +1,4 @@
-//! Collation conformance against a live MariaDB (chapter 15, "Testing").
+//! Collation conformance against a live MariaDB.
 //!
 //! For every supported collation, a corpus built from the weight-string
 //! spike's pieces and traps (plus case, accent, space and ignorable

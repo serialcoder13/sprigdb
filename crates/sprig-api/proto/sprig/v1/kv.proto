@@ -1,7 +1,7 @@
-// sprig.v1: the key-value API (chapter 33, "Interfaces"; chapter 37). A
+// sprig.v1: the key-value API. A
 // namespace is a table of one logical database; string keys are read and
 // written with versions, preconditions and expiry, and `Exec` runs one
-// Redis command (chapter 40) on the namespace, so structures are reachable
+// Redis command on the namespace, so structures are reachable
 // too. Calls run in the caller's session, with its privileges.
 syntax = "proto3";
 
@@ -49,7 +49,7 @@ service KeyValue {
     };
   }
   // Keys whose location is inside a circle, box or polygon, or the
-  // nearest ones to a point (chapter 36; R6 round 3).
+  // nearest ones to a point.
   rpc GeoSearch(KvGeoSearchRequest) returns (KvGeoSearchResponse) {
     option (google.api.http) = {
       post: "/v1/databases/{database}/namespaces/{namespace}:geoSearch"
@@ -97,7 +97,7 @@ message KvPutRequest {
   bool if_exists = 8;
   // Expire after this many ms; 0 for none.
   int64 ttl_ms = 9;
-  // The key's location (chapter 36); unset keeps none.
+  // The key's location; unset keeps none.
   LatLng location = 10;
 }
 

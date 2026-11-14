@@ -1,7 +1,6 @@
 //! The job's [`ChangeStream`] on `sprig-binlog`: groups events into
 //! committed transactions, keeps the job's tables and watermarks, sorts
-//! `QUERY` events, and converts binlog values to the applier's (chapter 10,
-//! "The binlog client", "Filtering and routing").
+//! `QUERY` events, and converts binlog values to the applier's.
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -1,6 +1,6 @@
-//! A deterministic simulation of the sink runtime (chapter 51, "Testing":
-//! per-key order under random outcomes, poison splitting, dead letters,
-//! pausing and probing, exactly-once under worker kills).
+//! A deterministic simulation of the sink runtime (per-key order under
+//! random outcomes, poison splitting, dead letters, pausing and probing,
+//! exactly-once under worker kills).
 //!
 //! Each seed runs a task over an in-memory stream of three partitions
 //! against an in-memory destination that fails at random: destination-wide

@@ -1,6 +1,6 @@
 //! MongoDB's `$jsonSchema` (draft 4 with BSON types): parsing, matching,
 //! and the detailed `errInfo` MongoDB 5.0+ reports for a document that
-//! fails (decision S90).
+//! fails.
 //!
 //! A schema is parsed once into [`Schema`], a list of keywords in the
 //! order MongoDB evaluates and reports them: the string and number

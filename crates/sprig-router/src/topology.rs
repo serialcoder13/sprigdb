@@ -1,15 +1,15 @@
 //! What the router knows about a tenant's layout: which tables are sharded,
 //! by which key, in which table group, and where each shard lives.
 //!
-//! [`Topology`] is the router's own small interface to chapter 15's
+//! [`Topology`] is the router's own small interface to the sharding
 //! layout. [`StaticTopology`] serves it from memory: the gateway builds one
 //! per tenant with [`catalog::build`] from the catalog's table groups and
 //! members and `sprig-shard`'s shard maps; unit tests build one from a JSON
-//! description ([`TopologyFile`]). Keys normalize and hash with chapter
-//! 15's `sprig-shard` (`hash_key`: the one normalizer, then `xxh3_64`), so
+//! description ([`TopologyFile`]). Keys normalize and hash with
+//! `sprig-shard` (`hash_key`: the one normalizer, then `xxh3_64`), so
 //! rows the router writes sit where splits, moves and the feed expect them;
-//! a shard owns the hashes from its `lo` up to the next shard's (chapter
-//! 15's range entries).
+//! a shard owns the hashes from its `lo` up to the next shard's (the shard
+//! map's range entries).
 
 pub mod catalog;
 
@@ -24,7 +24,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 pub enum KeyClass {
     /// An integer column: values route by their integer value.
     Int,
-    /// A string under a collation (chapter 15's weight normalization).
+    /// A string under a collation (weight normalization).
     Str {
         /// The collation id.
         collation: u16,
@@ -47,7 +47,7 @@ pub struct ShardLoc {
     /// The range's epoch (raised by every split, merge and move).
     pub epoch: u64,
     /// While a mover cutover holds the range: when the hold ends (ms since
-    /// the Unix epoch). New work waits for it (chapter 10, "Cutover").
+    /// the Unix epoch). New work waits for it.
     pub held_until_ms: Option<u64>,
 }
 
@@ -66,14 +66,14 @@ pub struct Group {
     pub version: u64,
     /// The key class.
     pub key_class: KeyClass,
-    /// Chapter 15's key specification for the class.
+    /// The key specification for the class.
     pub spec: sprig_shard::KeySpec,
     /// Shards, by `lo` ascending; the first has `lo` 0.
     pub shards: Vec<ShardLoc>,
 }
 
 impl Group {
-    /// The shard that owns key value `v` (chapter 15's `hash_key`), or
+    /// The shard that owns key value `v` (`hash_key`), or
     /// `None` when the value doesn't normalize (39405: scatter instead).
     #[must_use]
     pub fn shard_of(&self, v: &KeyValue) -> Option<usize> {
@@ -104,7 +104,7 @@ impl Group {
         self.id == o.id && self.db == o.db
     }
 
-    /// The routing hash of key value `v` (chapter 15's `hash_key`).
+    /// The routing hash of key value `v` (`hash_key`).
     #[must_use]
     pub fn hash_of(&self, v: &KeyValue) -> Option<u64> {
         let kv = match (self.key_class, v) {
@@ -165,7 +165,7 @@ pub struct TableEntry {
     pub kind: TableKind,
     /// Its group (for reference tables, a group of the shards' clusters).
     pub group: Arc<Group>,
-    /// Its unique lookup indexes (chapter 19) the router maintains and
+    /// Its unique lookup indexes the router maintains and
     /// routes through: one value column each.
     pub lookups: Vec<Arc<LookupRef>>,
     /// A maintained lookup index the router can't follow (several value
@@ -174,25 +174,25 @@ pub struct TableEntry {
     pub lookup_gap: bool,
     /// The visible columns in order, lowercase, from the stored definition
     /// (empty when unknown): an `INSERT` without a column list gets one,
-    /// so the router can add `_sprig_rk` (chapter 15).
+    /// so the router can add `_sprig_rk`.
     pub columns: Vec<String>,
     /// Writes add `_sprig_rk` (the member is `filling` or later).
     pub fill_rk: bool,
-    /// A parent member (chapter 15): no key column of its own; its rows
+    /// A parent member: no key column of its own; its rows
     /// go where their parent row is, through this foreign key.
     pub parent: Option<ParentLink>,
-    /// Its `AUTO_INCREMENT` column, which takes chapter 19's ID blocks
+    /// Its `AUTO_INCREMENT` column, which takes the gateway's ID blocks
     /// (every member of a sharded group with one).
     pub auto_inc: Option<AutoInc>,
     /// Its primary key's columns, lowercase (empty when unknown): limited
-    /// `UPDATE` and `DELETE` (R3) name the rows they change by it.
+    /// `UPDATE` and `DELETE` name the rows they change by it.
     pub primary: Vec<String>,
     /// How each primary-key column's values read back
     /// ([`crate::fk::ValClass`]), matching `primary`.
     pub primary_classes: Vec<crate::fk::ValClass>,
 }
 
-/// A sharded table's `AUTO_INCREMENT` column (chapter 19, "ID blocks"):
+/// A sharded table's `AUTO_INCREMENT` column:
 /// inserts take its values from the gateway's block of the table's
 /// `sequences` row, never from a shard's own counter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,8 +206,7 @@ pub struct AutoInc {
     pub seq: u64,
 }
 
-/// How a parent member's row finds its shard (chapter 15, "Table groups";
-/// chapter 17, "INSERT routing"): through a declared foreign key to a
+/// How a parent member's row finds its shard: through a declared foreign key to a
 /// member of the same group and database, whose row holds the routing
 /// hash.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,18 +226,17 @@ pub struct ParentLink {
     /// rows that collide share a parent and a shard: upserts and
     /// `REPLACE` are exact per shard.
     pub upsert_safe: bool,
-    /// The parent's public unique lookup (chapter 19) on its one
+    /// The parent's public unique lookup on its one
     /// referenced column, when it has one: parents are found through it
     /// instead of by asking every shard.
     pub lookup: Option<Arc<LookupRef>>,
     /// The referenced columns hold a unique key of the parent, so a join
     /// on the foreign key pairs each row with its own parent: such a join
-    /// is co-located (chapter 15's `colocation_safe`, through a parent
-    /// chain).
+    /// is co-located (`colocation_safe`, through a parent chain).
     pub parent_unique: bool,
 }
 
-/// A unique lookup index of a sharded table (chapter 19), as the router
+/// A unique lookup index of a sharded table, as the router
 /// uses it: writes claim and release its values in the write's
 /// transaction (`sprig_txn::lookup::DistTxn`), and reads, updates and
 /// deletes with an equality on its column go to the shards its rows
@@ -306,7 +304,7 @@ impl TableEntry {
 /// A tenant's layout as the router reads it.
 pub trait Topology: Send + Sync {
     /// The table `table` of the logical database whose default schema (the
-    /// one chapter 07's rewrite writes) is `schema`. Both lowercase.
+    /// one the tenant name rewrite writes) is `schema`. Both lowercase.
     fn table(&self, schema: &str, table: &str) -> Option<&TableEntry>;
 
     /// Whether `sql` may name a table this topology knows: a cheap word
@@ -314,13 +312,13 @@ pub trait Topology: Send + Sync {
     fn mentions(&self, sql: &str) -> bool;
 
     /// The foreign keys the gateway keeps in the logical database whose
-    /// default schema is `schema` (chapter 19, R3), if any.
+    /// default schema is `schema`, if any.
     fn fk_graph(&self, schema: &str) -> Option<Arc<crate::fk::FkGraph>> {
         let _ = schema;
         None
     }
 
-    /// Sharded group `id`, whatever its members are (R8 round 6: a
+    /// Sharded group `id`, whatever its members are (a
     /// graph's group has no table the router plans, but `Plan::Graph`
     /// shows its shards and the gateway's graph store reads them).
     fn group(&self, id: u32) -> Option<Arc<Group>> {
@@ -390,8 +388,8 @@ impl StaticTopology {
     }
 
     /// Every shard of the sharded tables under the default schema
-    /// `schema`, each schema once, by group and then shard: where chapter
-    /// 21 deploys a database's routines, events and views (added by r1ddl).
+    /// `schema`, each schema once, by group and then shard: where schema
+    /// changes deploy a database's routines, events and views.
     #[must_use]
     pub fn shards_under(&self, schema: &str) -> Vec<ShardLoc> {
         let schema = schema.to_ascii_lowercase();
@@ -511,7 +509,7 @@ pub struct ShardFile {
 /// One table of a [`TenantFile`].
 #[derive(Debug, Clone, Deserialize)]
 pub struct TableFile {
-    /// The database's default schema, as chapter 07 rewrites names.
+    /// The database's default schema, as the tenant name rewrite writes it.
     pub schema: String,
     /// Table name.
     pub table: String,

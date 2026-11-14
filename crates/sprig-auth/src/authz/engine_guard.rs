@@ -1,10 +1,10 @@
-//! The engine-switch guard (chapter 29, "Choosing the engine"): a change
+//! The engine-switch guard: a change
 //! of `auth.authorizer`, at any scope, is refused unless every live
 //! gateway reports that it knows the engine.
 //!
 //! Gateways advertise the engines they know ([`super::authorizer::KNOWN`])
 //! in their registration record, `/sprig/dc/<dc_id>/gateways/<id>`
-//! (chapter 04), field `authorizers`. The record is bound to the gateway's
+//! field `authorizers`. The record is bound to the gateway's
 //! lease, so the records listed are the live gateways. A record without
 //! the field comes from a build older than the guard, which knows
 //! `mysql_grants` only.
@@ -13,7 +13,7 @@
 //! and catalog scopes) call it for every `Set` of a key, so SQL's
 //! `SPRIG SET`, the Admin API and `sprigctl settings set` all pass through
 //! it. It looks at every DC in `/sprig/g/dcs/` (and its own) through the
-//! DC tier it is given, which reaches every DC in single-etcd mode (R0).
+//! DC tier it is given, which reaches every DC in single-etcd mode.
 //! A failure to read the records refuses the change. A name this build
 //! doesn't know either is left to the key's bounds (39080), so the guard
 //! only speaks for engines the writer's own build has.

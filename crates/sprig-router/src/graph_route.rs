@@ -1,5 +1,5 @@
-//! Graph hops as router routes (chapter 43's `Step::Shard(RouteSpec)`,
-//! chapter 17's `RouteSpec`; R8 round 8, decision G69).
+//! Graph hops as router routes (the graph store's
+//! `Step::Shard(RouteSpec)`).
 //!
 //! The native graph store ([`sprig-graph`'s `MariaStore`]) no longer
 //! decides which shards a hop reads or writes the statements itself: each
@@ -18,7 +18,7 @@
 //!   targets Shard(i)           → one shard (a recursive CTE burst on the frontier's shard)
 //! plan_route(spec) → Route { plan: Pass(target) | Read(Scatter, targets), held_until_ms }
 //!   each Target: cluster, shard id, the statement with that shard's physical names,
-//!   ShardAt (group, db, lo, schema) for chapter 18's branches
+//!   ShardAt (group, db, lo, schema) for the transaction's branches
 //! ```
 //!
 //! `GRAPH_TABLE` statements and Bolt statements therefore share one
@@ -199,7 +199,7 @@ impl HopOp {
     }
 }
 
-/// A graph step for the router to plan (chapter 17's `RouteSpec`).
+/// A graph step for the router to plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteSpec {
     /// The graph's table group as the router's map cache has it.
@@ -278,8 +278,8 @@ fn types_filter(alias: &str, types: &[u32]) -> String {
     format!(" AND {alias}.type IN ({})", ids_list(&t))
 }
 
-/// The routing hash of node id `id` in `group` (chapter 15's numeric
-/// class; `part` = `id`).
+/// The routing hash of node id `id` in `group` (the numeric key class;
+/// `part` = `id`).
 #[must_use]
 pub fn node_hash(group: &Group, id: u64) -> Option<u64> {
     group.hash_of(&KeyValue::Int(i128::from(id)))

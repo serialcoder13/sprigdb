@@ -6,7 +6,6 @@ use sprig_settings::{Apply, HardBounds, Scopes, Setting};
 
 type Text = Cow<'static, str>;
 
-
 /// `reads.routing`: `auto` or `writer`.
 pub static ROUTING: Setting<Text> = Setting {
     key: "reads.routing",

@@ -1,5 +1,5 @@
 //! Executor tests over the in-memory store, on 1 shard and on 4: both must
-//! give the same answers (chapter 43, "Testing").
+//! give the same answers.
 
 use std::collections::BTreeMap;
 
@@ -727,7 +727,7 @@ async fn indexes_and_uniqueness_constraints() {
     }
 }
 
-/// G19 (round 3): `1` and `1.0` are one value for uniqueness and index
+/// `1` and `1.0` are one value for uniqueness and index
 /// lookups, as Neo4j's equality says; `'1'` is another.
 #[tokio::test]
 async fn numeric_keys_are_equal_across_integer_and_float() {
@@ -822,7 +822,7 @@ async fn temporal_and_spatial_values() {
     assert_eq!(show(&o), ["2021-05-01|2"]);
 }
 
-/// Round 3: GQL's forms (labels with `IS`, `FILTER`, `LET`, `FOR`,
+/// GQL's forms (labels with `IS`, `FILTER`, `LET`, `FOR`,
 /// `INSERT`, `NEXT`, `OFFSET`, `TRAIL`) answer as their Cypher.
 #[tokio::test]
 async fn gql_forms_answer_as_their_cypher() {
@@ -858,7 +858,7 @@ async fn gql_forms_answer_as_their_cypher() {
     }
 }
 
-/// Round 4 (G44): one search from a start node to many ends gives the same
+/// One search from a start node to many ends gives the same
 /// lengths as one bidirectional search per pair, on 1 and 4 shards.
 #[tokio::test]
 async fn shortest_paths_to_many_ends_match_pairwise_searches() {
@@ -906,7 +906,7 @@ async fn shortest_paths_to_many_ends_match_pairwise_searches() {
 }
 
 /// `CALL tx.getMetaData()` returns the Bolt transaction's `tx_metadata`
-/// (the drivers' testkit, R8), an empty map without one.
+/// (the drivers' testkit), an empty map without one.
 #[tokio::test]
 async fn tx_get_metadata_returns_the_transaction_metadata() {
     let mut s = MemStore::new(1);
@@ -934,7 +934,7 @@ async fn tx_get_metadata_returns_the_transaction_metadata() {
 }
 
 /// Neo4j's `CartesianProduct` notification: disconnected patterns of one
-/// `MATCH`, never connected ones (the drivers' testkit, R8).
+/// `MATCH`, never connected ones (the drivers' testkit).
 #[test]
 fn cartesian_product_notifications() {
     let notes = |text: &str| {
@@ -978,7 +978,7 @@ async fn explain_and_profile_plans() {
     assert!(plain.plan.is_none() && !plain.profiled && plain.notifications.is_empty());
 }
 
-/// R8 round 8: `CALL { } IN TRANSACTIONS`, reads and writes, with
+/// `CALL { } IN TRANSACTIONS`, reads and writes, with
 /// Neo4j 5.26's answers (checked on the reference): batches commit on their
 /// own; a failed batch rolls back and `ON ERROR` decides what follows.
 #[tokio::test]
@@ -1043,7 +1043,7 @@ async fn call_in_transactions_batches_and_errors() {
     }
 }
 
-/// R8 round 8: a read's top `RETURN` evaluates rows as Neo4j's lazy
+/// A read's top `RETURN` evaluates rows as Neo4j's lazy
 /// results do. `run_lazy` answers the rows before a row's error with the
 /// error after them; rows past `LIMIT` are never evaluated; `run` still
 /// fails the statement.
@@ -1078,7 +1078,7 @@ async fn row_errors_come_after_the_rows_before_them() {
     );
 }
 
-/// R8 round 8: byte arrays are values, properties (stored with a `bytes`
+/// Byte arrays are values, properties (stored with a `bytes`
 /// type entry) and comparable, as in Neo4j.
 #[tokio::test]
 async fn byte_arrays_are_values_and_properties() {
@@ -1113,7 +1113,7 @@ async fn byte_arrays_are_values_and_properties() {
     );
 }
 
-/// R8 round 8 (the drivers' testkit): a temporal function takes another
+/// From the drivers' testkit: a temporal function takes another
 /// temporal value and keeps the parts it needs, as Neo4j 5.26 answers.
 #[tokio::test]
 async fn temporal_functions_take_other_temporal_values() {
@@ -1143,7 +1143,7 @@ async fn temporal_functions_take_other_temporal_values() {
     );
 }
 
-/// R8 round 9 (decision G76), as Neo4j 5.26 answers: a batched `CALL`
+/// As Neo4j 5.26 answers: a batched `CALL`
 /// after a write of the same query is a syntax error; writes after it
 /// are allowed, and a failure there leaves the committed batches.
 #[tokio::test]
@@ -1200,7 +1200,7 @@ async fn call_in_transactions_after_a_write_is_refused() {
     }
 }
 
-/// R8 round 9 (decision G77): a uniqueness key carries the value's
+/// A uniqueness key carries the value's
 /// type, so a string equal to a byte array's base64 (or to a date's ISO
 /// text) is another key, as in Neo4j 5.26.
 #[tokio::test]
@@ -1244,7 +1244,7 @@ async fn unique_keys_carry_the_value_type() {
     );
 }
 
-/// R8 round 10 (LDBC IC1, IS7, IC10, IC14): the official queries' forms,
+/// LDBC IC1, IS7, IC10 and IC14: the official queries' forms,
 /// each answer checked against neo4j:5.26.0-community on the same graph.
 #[tokio::test]
 async fn ldbc_forms_answer_as_neo4j_does() {
@@ -1310,7 +1310,7 @@ async fn ldbc_forms_answer_as_neo4j_does() {
                 ],
             ),
             // IS7 and IC1: Neo4j 5.26's simple CASE compares with `=`, so
-            // `WHEN null` never matches (Neo4j 4.4 matched it; G79).
+            // `WHEN null` never matches (Neo4j 4.4 matched it).
             (
                 "RETURN CASE null WHEN null THEN 1 ELSE 2 END AS a, CASE 2 WHEN null THEN 1 WHEN 2 THEN 3 END AS b",
                 &["2|3"],

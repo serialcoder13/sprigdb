@@ -1,12 +1,12 @@
-//! Token signing keys (chapter 14, "SprigDB tokens and sessions": keys).
+//! Token signing keys.
 //!
-//! **Where the book differs (decision ST18).** The chapter gives each DC
+//! **Per gateway, not per DC.** The intended design gives each DC
 //! one Ed25519 key pair, made by the DC leader and kept in the DC's secret
 //! store. SprigDB has no secret store yet, so each *gateway* makes its own
 //! key pair in memory at start and publishes only the public key, at
 //! `/sprig/g/token-keys/<dc_id>/<id>` in the global tier. Every gateway in
-//! every DC verifies with public keys read from there, as the chapter has
-//! it; no private key ever leaves the process that made it, and none is
+//! every DC verifies with public keys read from there, as with per-DC
+//! keys; no private key ever leaves the process that made it, and none is
 //! shared. A gateway restart makes a new pair; tokens its old key signed
 //! keep verifying, because the old public key stays published until
 //! `verify_until`.
@@ -21,7 +21,7 @@
 //! - **Unknown kid:** one read of `token-keys/<kid>`; a key not found is
 //!   remembered for 5 s, so forged kids can't make every request read etcd.
 //!   Deleting a key's record makes every token it signed fail within the
-//!   cache's 10 minutes (chapter 14's "a DC's signing key leaked").
+//!   cache's 10 minutes (the remedy for a leaked signing key).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};

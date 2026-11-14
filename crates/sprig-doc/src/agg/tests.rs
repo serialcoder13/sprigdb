@@ -150,7 +150,7 @@ fn projection_and_sort() {
     assert_eq!(docs[1], doc! {"v": [5, 1]});
 }
 
-/// bugfix-58 (S114's leftover): a document's metadata survives `$project`
+/// Regression: a document's metadata survives `$project`
 /// and `$replaceRoot`, as in MongoDB 8.0.34 (checked there with
 /// `textScore` and, with `featureFlagRankFusionFull`, `score`); `$group`
 /// drops it, as there.

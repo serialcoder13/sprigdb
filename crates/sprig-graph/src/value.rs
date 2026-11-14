@@ -1,7 +1,6 @@
-//! Cypher values and their semantics (chapter 43, "Values"; build step
-//! 10): equality and comparison with `null`, the global sort order, keys
+//! Cypher values and their semantics: equality and comparison with `null`, the global sort order, keys
 //! for grouping and `DISTINCT`, and properties to and from the stored JSON
-//! with chapter 31's type map.
+//! with the document engine's `_types` map.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -100,11 +99,11 @@ pub enum Value {
     Duration(Dur),
     /// A `POINT`.
     Point(Point),
-    /// A byte array (Neo4j's `byte[]`; Bolt's bytes; R8 round 8).
+    /// A byte array (Neo4j's `byte[]`; Bolt's bytes).
     Bytes(Vec<u8>),
 }
 
-/// About how many bytes `v` holds (R8 round 10, decision G81): the
+/// About how many bytes `v` holds: the
 /// statement memory budget counts these. A node, relationship or path is
 /// shared by the rows that hold it, so each holder counts its share
 /// (its size over its reference count).
@@ -545,7 +544,7 @@ pub fn type_error(msg: impl Into<String>) -> SprigError {
 }
 
 // ----------------------------------------------------------------------
-// Properties as stored: JSON plus chapter 31's type map.
+// Properties as stored: JSON plus the document engine's `_types` map.
 // ----------------------------------------------------------------------
 
 /// Checks that `v` may be stored as a property: Neo4j's property types

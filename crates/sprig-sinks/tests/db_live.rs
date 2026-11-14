@@ -1,7 +1,7 @@
-//! Live tests of the database targets (chapter 51, "Database target",
-//! "Testing") against PostgreSQL 16, MariaDB 11.8 and MySQL 8.4 in the
-//! containers `r9sinks-pg` (127.0.0.1:25432), `r9sinks-mariadb` (23337) and
-//! `r9sinks-mysql` (23336). Skipped unless `SPRIG_SINKS_DB_LIVE=1`.
+//! Live tests of the database targets against PostgreSQL 16, MariaDB 11.8 and
+//! MySQL 8.4 in the containers `r9sinks-pg` (127.0.0.1:25432),
+//! `r9sinks-mariadb` (23337) and `r9sinks-mysql` (23336). Skipped unless
+//! `SPRIG_SINKS_DB_LIVE=1`.
 //!
 //! ```sh
 //! docker run -d --name r9sinks-pg --memory 768m -e POSTGRES_PASSWORD=sinkpw \

@@ -30,10 +30,10 @@ num-bigint = "=0.4.8"
 num-integer = "=0.1.47"
 num-traits = "=0.2.19"
 sprig-proto-mongo = { path = "../sprig-proto-mongo" }
-# Geodesy and S2 for the geo operators (chapter 36, R6 round 3).
+# Geodesy and S2 for the geo operators.
 sprig-geo = { path = "../sprig-geo" }
 # Heavy steps off the runtime's workers, and the active collation as a
-# task-local value (R5 round 4).
+# task-local value.
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"] }
 # Logs writes that fail validation under `validationAction: warn` (M3).
 tracing.workspace = true

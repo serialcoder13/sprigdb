@@ -1,6 +1,6 @@
-//! SQL text helpers: literals, identifiers and JSON paths (chapter 31,
-//! "Security notes"). Values go into SQL only as escaped literals built
-//! here; field paths become JSON path literals only after a strict check.
+//! SQL text helpers: literals, identifiers and JSON paths. Values go into
+//! SQL only as escaped literals built here; field paths become JSON path
+//! literals only after a strict check.
 
 use std::fmt::Write as _;
 

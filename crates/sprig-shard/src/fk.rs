@@ -1,6 +1,5 @@
-//! Foreign keys across table groups (chapter 19, "Foreign keys across
-//! groups"): the catalog's `foreign_keys` rows and the helpers the DDL
-//! path uses to fill them.
+//! Foreign keys across table groups: the catalog's `foreign_keys` rows and
+//! the helpers the DDL path uses to fill them.
 //!
 //! A foreign key whose two ends sit on the same shard (one group, the child
 //! following its parent's key) stays in MariaDB (`native`). One that
@@ -133,7 +132,7 @@ impl FkState {
     }
 }
 
-/// One `foreign_keys` row (chapter 19).
+/// One `foreign_keys` row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignKey {
     /// `fk_id`.

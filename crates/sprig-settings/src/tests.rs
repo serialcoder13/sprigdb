@@ -461,7 +461,7 @@ fn marked_keys_are_hidden_or_restart_only() {
     .with_marks(&[(NOT_YET.key, Mark::Unbuilt), (POOL_SIZE.key, Mark::Restart)]);
     assert!(reg.get(NOT_YET.key).is_some());
     assert!(reg.is_unbuilt(NOT_YET.key));
-    let listed: Vec<&str> = reg.iter().map(|d| d.key()).collect();
+    let listed: Vec<&str> = reg.iter().map(AnySetting::key).collect();
     assert_eq!(listed, [MFA_REQUIRED.key, MAX_PER_TABLE.key, POOL_SIZE.key]);
     assert_eq!(reg.iter_all().count(), 4);
     assert_eq!(reg.apply_name(&POOL_SIZE), "restart");

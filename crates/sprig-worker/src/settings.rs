@@ -229,6 +229,13 @@ impl WorkerSettings {
     pub fn job_budget(&self) -> Duration {
         Duration::from_millis(self.get(&sprig_logic::settings::JOB_BUDGET_MS))
     }
+
+    /// `logic.job_budget_ms` for `tenant` (its own rows too, as
+    /// [`Self::trigger_budget_for`]).
+    #[must_use]
+    pub fn job_budget_for(&self, tenant: TenantId) -> Duration {
+        Duration::from_millis(self.tenant_get(tenant, &sprig_logic::settings::JOB_BUDGET_MS))
+    }
 }
 
 #[cfg(test)]

@@ -1,6 +1,5 @@
-//! Token sessions (chapter 14, "SprigDB tokens and sessions"; Appendix C's
-//! `token_sessions`): where a session lives, so any gateway can verify,
-//! refresh and end it.
+//! Token sessions (the catalog's `token_sessions`): where a session lives, so
+//! any gateway can verify, refresh and end it.
 //!
 //! [`CatalogSessions`] keeps them in the tenant catalog's `token_sessions`
 //! (the auth module's format 4):
@@ -46,7 +45,7 @@ use crate::mysql::{LoginService, LoginSource, Principal, locked, temp_locked};
 use crate::store::{AT, AuthStore, RequireTls, col, exec_count, map_err, micros, opt_time, time};
 use sprig_proto_mysql::Persona;
 
-/// `token_sessions` (chapter 14, Appendix C): the auth module's format 4.
+/// `token_sessions`: the auth module's format 4.
 pub const DDL_TOKEN_SESSIONS: &str = "CREATE TABLE IF NOT EXISTS token_sessions (
   session_id      BINARY(16)      NOT NULL,
   user_id         INT UNSIGNED    NOT NULL,
@@ -183,7 +182,7 @@ pub struct NewSession {
     pub expires_at: SystemTime,
     /// Now.
     pub now: SystemTime,
-    /// For an impersonation session (chapter 14 step 14): who acts, why.
+    /// For an impersonation session: who acts, why.
     pub impersonator: Option<Impersonator>,
 }
 

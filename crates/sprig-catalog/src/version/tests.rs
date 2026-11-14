@@ -286,7 +286,7 @@ async fn settle_closes_a_gap_and_is_a_no_op_otherwise() {
     c.rollback().await.unwrap();
 }
 
-/// Decision PF1: a change rolled back on purpose (nothing to write) leaves
+/// A change rolled back on purpose (nothing to write) leaves
 /// no gap, so `Freshness::Latest` loaders don't wait for it; an abandoned
 /// one (a crash) still does, until the next change or `settle`.
 #[tokio::test(start_paused = true)]

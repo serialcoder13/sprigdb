@@ -95,7 +95,7 @@ fn templates_match_paths() {
     assert_eq!(m.vars["database"], "my db");
 }
 
-/// The operator routes (decision OP12): custom methods on the collection
+/// The operator routes: custom methods on the collection
 /// and on one operator don't fall into each other's templates.
 #[test]
 fn operator_routes_match() {

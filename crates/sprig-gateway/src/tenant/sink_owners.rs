@@ -48,6 +48,8 @@ pub fn changes(cat: &TenantCatalog, lctn: bool) -> Vec<(SinkId, SinkState, Optio
             .map(|r| match r {
                 OwnerRead::Named { db, name } => ReadSource::Named { db, name },
                 OwnerRead::Object(id) => ReadSource::Object(id),
+                OwnerRead::InDatabase { db, name } => ReadSource::InDatabase { db, name },
+                OwnerRead::FanIn => ReadSource::FanIn,
             })
             .collect();
         if reads.is_empty() {

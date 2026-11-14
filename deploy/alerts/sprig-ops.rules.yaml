@@ -55,6 +55,16 @@ groups:
           summary: Metadata caches are more than 2 s stale
           runbook: "Gateways see metadata changes late: check etcd latency and leader changes (EtcdNoLeader) and the gateways' connections to etcd"
 
+  - name: sprig-sinks
+    rules:
+      - alert: SprigSinkPaused
+        expr: max by (instance, reason) (sprig_sink_paused) > 0
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: A sink is paused ({{ $labels.reason }})
+          runbook: "SHOW SINKS (or sprigctl sink list) shows the paused sink and its reason. reason=failures (39222): the destination kept failing for sink.pause_after_minutes; fix the destination, and the sink probes and resumes on its own. reason=owner_privilege (39229): the sink's owner lost SELECT on the source, or was dropped or locked; grant it back (or ALTER SINK ... OWNER), and the sink resumes within seconds"
+
   - name: sprig-audit
     rules:
       - alert: AuditSpoolFilling

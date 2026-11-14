@@ -1,4 +1,4 @@
-//! Transaction handles (chapter 37, "Data structures and storage").
+//! Transaction handles.
 //!
 //! A handle is `transactions/<h>`, where `h` is the base64url (no padding)
 //! of a small protobuf: the owner's DC and gateway id, the session it names

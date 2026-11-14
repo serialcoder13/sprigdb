@@ -1,6 +1,5 @@
-//! `MATCH`: start points, hops, variable-length expansion and shortest
-//! paths (chapter 43, "From patterns to joins", "Variable-length paths",
-//! "Frontier expansion across shards", "Shortest paths").
+//! `MATCH`: start points, hops, variable-length expansion (with frontier
+//! expansion across shards) and shortest paths.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -64,7 +63,7 @@ fn prop_eq(e: &Expr) -> Option<(&str, &str, &Expr)> {
     }
 }
 
-/// The conjuncts the matcher picks start points with (R8 round 10): the
+/// The conjuncts the matcher picks start points with: the
 /// `WHERE`'s own, `e = v.k` turned into `v.k = e`, and the `v.k IN [e1,
 /// e2]` a disjunction implies when each of its branches holds a `v.k =
 /// e` (LDBC IC14's `(a.id = x AND b.id = y) OR (a.id = y AND b.id =
@@ -169,7 +168,7 @@ impl Exec<'_> {
         mult_ok: bool,
     ) -> Result<Vec<Row>> {
         // No incoming rows, no matches: a `MATCH` after one that found
-        // nothing must not scan for its first node (R8 round 10: IS7's
+        // nothing must not scan for its first node (LDBC IS7's
         // `OPTIONAL MATCH (m)-...` after an empty `MATCH` read every node
         // of the graph, 2-6 s and a gigabyte, before answering no rows).
         if rows.is_empty() {
@@ -200,8 +199,8 @@ impl Exec<'_> {
             rows = self.match_pattern(rows, p, &conj, mult_ok, &others).await?;
             self.check_rows(rows.len())?;
             // The WHERE's conjuncts whose variables are all bound now
-            // filter before the next pattern expands every row (R8 round
-            // 10: IC3's `MATCH (friend)<-[:HAS_CREATOR]-(message),
+            // filter before the next pattern expands every row (LDBC
+            // IC3's `MATCH (friend)<-[:HAS_CREATOR]-(message),
             // (message)-[:IS_LOCATED_IN]->(country) WHERE <date range on
             // message>` expanded all 190,000 messages twice). The whole
             // WHERE is still checked at the end.
@@ -375,7 +374,7 @@ impl Exec<'_> {
         Ok(true)
     }
 
-    /// How good a node is as the start point (chapter 43, step 1).
+    /// How good a node is as the start point.
     pub(super) fn score(np: &NodePat, rows: &[Row], conj: &[Expr]) -> u32 {
         let Some(v) = &np.var else {
             return u32::from(np.labels.is_some()) * 10 + u32::from(np.props.is_some()) * 80;
@@ -571,7 +570,7 @@ impl Exec<'_> {
             };
             // Properties that depend on the incoming rows (`UNWIND $rows AS
             // r MATCH (n:L {k: r.k})`): one scan for every row's values, a
-            // superset each row rechecks (round 3).
+            // superset each row rechecks.
             if let Some(pe) = &pat.start.props
                 && !is_const(pe)
                 && scan.props_eq.is_empty()
@@ -608,7 +607,7 @@ impl Exec<'_> {
             // Equalities with values of the incoming rows (`WHERE n.k =
             // r.x`, or what a disjunction implies): one scan for every
             // row's values, then each row meets only the nodes its own
-            // value finds (R8 round 10).
+            // value finds.
             let mut rows = rows;
             let join = self
                 .row_pushdown(&pat.start, conj, &mut rows, &mut scan)
@@ -1371,7 +1370,7 @@ impl Exec<'_> {
     async fn shortest(&mut self, rows: Vec<Row>, pat: &PathPattern) -> Result<Vec<Row>> {
         // Ends given in the pattern itself (IC14's `allShortestPaths((a:Person
         // {id: 1})-[:KNOWS*0..]-(b:Person {id: 2}))`): each is matched
-        // first, as a node pattern of its own (R8 round 10).
+        // first, as a node pattern of its own.
         let unbound = |np: &NodePat, rows: &[Row]| {
             np.var
                 .as_ref()
@@ -1434,7 +1433,7 @@ impl Exec<'_> {
             "ShortestPath{}: bidirectional breadth-first search, tier gateway",
             if all { " (all)" } else { "" }
         ));
-        // IC1's shape (decision G44): many rows from one start node to
+        // LDBC IC1's shape: many rows from one start node to
         // different ends, a bounded `shortestPath`. One breadth-first
         // search from the start serves them all, instead of one
         // bidirectional search per row.
@@ -1716,7 +1715,7 @@ impl Exec<'_> {
 /// A path: its nodes and relationships in order.
 type Path = (Vec<Arc<Node>>, Vec<Arc<Rel>>);
 
-/// Ends per start node from which one search serves every row (G44).
+/// Ends per start node from which one search serves every row.
 const MANY_TARGETS: usize = 2;
 
 /// Every path from `m` back to its side's origin through the

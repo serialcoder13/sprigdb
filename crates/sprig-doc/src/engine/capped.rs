@@ -1,5 +1,4 @@
-//! Capped collections and tailable cursors (M7, 12 November 2026;
-//! `decisions/r5-interim.md` S81–S85).
+//! Capped collections and tailable cursors.
 //!
 //! - **Storage.** A capped collection's table has two more columns:
 //!   `_seq`, an `AUTO_INCREMENT` insertion sequence with a unique key (the
@@ -922,7 +921,7 @@ impl Engine {
     /// `convertToCapped`: `ns` becomes a capped collection of `size` bytes
     /// holding its newest documents; its secondary indexes and other
     /// options go, as in MongoDB. Built as a copy into a temporary
-    /// collection, a drop and a rename: not atomic (decision S83).
+    /// collection, a drop and a rename: not atomic.
     ///
     /// # Errors
     /// 26 without `ns`; 72 and 2 for the size.

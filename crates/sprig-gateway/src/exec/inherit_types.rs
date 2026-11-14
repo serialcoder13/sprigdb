@@ -81,6 +81,7 @@ pub(crate) struct Follow {
 /// the child's discriminator here: it changes only with the child's table
 /// ([`Follow`]).
 #[must_use]
+#[allow(clippy::too_many_lines)] // one walk over the tables, in order
 pub(crate) fn wanted_types(
     parent: &TenantCatalog,
     child: &TenantCatalog,

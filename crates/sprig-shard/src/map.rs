@@ -1,9 +1,8 @@
-//! The R0 tenant map: `shardmaps/<tenant>/0` (chapter 15, "Shard maps in
-//! etcd", "Epochs"; chapter 10, "Cutover").
+//! The whole-tenant map: `shardmaps/<tenant>/0`.
 //!
-//! In R0 a tenant's catalog and every database live on one cluster, and
-//! the catalog's map (one range, `lo = 0`) is what gateways route the whole
-//! tenant by (decision N4). The mover changes it three ways, each a
+//! While a tenant isn't sharded, its catalog and every database live on
+//! one cluster, and the catalog's map (one range, `lo = 0`) is what
+//! gateways route the whole tenant by. The mover changes it three ways, each a
 //! compare-and-put on the key's `mod_revision`:
 //!
 //! - [`hold`]: every range `Held` by the job until `hold_until_ms`; gateways
@@ -48,7 +47,8 @@ pub struct Placement {
 }
 
 impl Placement {
-    /// The placement a map describes (its first range: R0 maps have one).
+    /// The placement a map describes (its first range: whole-tenant maps
+    /// have one).
     ///
     /// # Errors
     /// `Internal` for a map without ranges.
@@ -84,7 +84,7 @@ impl Placement {
     }
 }
 
-/// Checks the R0 invariants: at least one range, the first at `lo = 0`,
+/// Checks the whole-tenant map's invariants: at least one range, the first at `lo = 0`,
 /// starts strictly increasing, shard ids unique, a held range names its
 /// job and deadline.
 ///
@@ -191,7 +191,7 @@ pub fn flip(map: &mut ShardMap, job: &str, to: &ClusterId) -> Result<u64> {
     Ok(map.ranges.first().map_or(0, |r| r.epoch))
 }
 
-/// Reads and writes tenants' R0 maps in one DC tier.
+/// Reads and writes tenants' whole-tenant maps in one DC tier.
 #[derive(Clone)]
 pub struct TenantMaps {
     dc: Arc<dyn MetaStore>,

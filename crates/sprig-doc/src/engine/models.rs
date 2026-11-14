@@ -1,4 +1,4 @@
-//! The engine's model operations from R6 round 3 (chapters 34 and 36):
+//! The engine's model operations:
 //! `find` with `$near` or `$nearSphere`, the `$geoNear` stage, `2dsphere`
 //! index columns, search indexes and the `$vectorSearch` stage.
 //!
@@ -21,7 +21,7 @@
 //! is exact: an approximate graph over a collection needs a side table
 //! (MariaDB refuses a vector index on a generated column: 1252).
 //!
-//! **Approximate vectors (R5 round 5, decision R33).** Each vector index
+//! **Approximate vectors.** Each vector index
 //! has a side table `__sprig_doc_vx_<hash>` (`_id`, the vector, the
 //! document's `_v`) with MariaDB's HNSW `VECTOR INDEX`. It is kept in step
 //! on read, not on write: before an approximate search, rows whose `_v`
@@ -156,7 +156,7 @@ pub fn meta_value(arg: &Bson, root: Option<&Bson>) -> Bson {
         (Some("vectorSearchScore" | "textScore" | "searchScore"), Some(Bson::Document(d))) => {
             d.get(SCORE_FIELD).cloned().unwrap_or(Bson::Null)
         }
-        // M4 (decisions S114, S115): the fused score of `$rankFusion` and
+        // The fused score of `$rankFusion` and
         // `$scoreFusion`, else a search's own score (MongoDB 8.x's
         // unified `score`).
         (Some("score"), Some(Bson::Document(d))) => d
@@ -384,7 +384,7 @@ impl Engine {
                 &m.table,
                 pred,
                 &sqlp,
-                self.cfg.max_sort_bytes,
+                self.max_sort_bytes(),
                 super::capped::KeyOrder::of(m),
             )
             .await?;
@@ -484,7 +484,7 @@ impl Engine {
         Ok(Some(match name.as_str() {
             "$geoNear" => self.geo_near(sql, ns, spec).await?,
             "$vectorSearch" => self.vector_search(sql, ns, spec).await?,
-            // Chapter 39 (R5 round 5).
+            // Full-text search.
             "$search" => self.search_stage(sql, ns, spec).await?,
             "$searchMeta" => self.search_meta_stage(sql, ns, spec).await?,
             _ => {
@@ -579,7 +579,7 @@ impl Engine {
                 &m.table,
                 &pred,
                 &sqlp,
-                self.cfg.max_sort_bytes,
+                self.max_sort_bytes(),
                 super::capped::KeyOrder::of(&m),
             )
             .await?;
@@ -696,7 +696,7 @@ impl Engine {
                 "latestDefinition": def}
             })
             .collect();
-        // Chapter 39: full-text search indexes.
+        // Full-text search indexes.
         if let Some(t) = &self.text {
             for i in t.list(sql, ns).await? {
                 if i.kind != crate::text::TextKind::Search || name.is_some_and(|n| n != i.name) {
@@ -737,7 +737,7 @@ impl Engine {
         for s in specs {
             let t = s.get_str("type").unwrap_or("search");
             if t == "search" {
-                // Chapter 39 (R5 round 5): full-text search indexes.
+                // Full-text search indexes.
                 let hook = self.text.as_ref().ok_or_else(|| {
                     MongoError::new(
                         code::SPRIG_DOC_FEATURE_UNSUPPORTED,
@@ -993,7 +993,7 @@ impl Engine {
         let dist = vx.distance_sql(&q);
         let cond = format!("{} AND ({})", vx.valid_sql(), sqlp.sql);
         let cx = AggExpr { now: now_date() };
-        // R33: approximate, from the side table's HNSW index.
+        // Approximate, from the side table's HNSW index.
         if !exact {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let nc = spec.get("numCandidates").and_then(num).unwrap_or(0.0) as usize;
@@ -1176,7 +1176,7 @@ impl Engine {
         Ok(n)
     }
 
-    /// Approximate `$vectorSearch` (R33): `None` when the index is too
+    /// Approximate `$vectorSearch`: `None` when the index is too
     /// small for it (the exact search runs).
     #[allow(clippy::too_many_arguments)]
     async fn vector_ann(
@@ -1333,7 +1333,7 @@ impl Engine {
         sql.exec(&geo::drop_columns_sql(&ns.db, &m.table, p))
             .await
             .map_err(|e| mongo_error(&e))?;
-        // Its lines' and polygons' side table (R5 round 6).
+        // Its lines' and polygons' side table.
         let _ = sql
             .exec(&format!(
                 "DROP TABLE IF EXISTS {}.{}",
@@ -1346,8 +1346,8 @@ impl Engine {
 }
 
 impl Engine {
-    /// `m` with the side tables of `pred`'s geo paths synced (R5 round 6:
-    /// lines and polygons skipped by their boxes), for one translation;
+    /// `m` with the side tables of `pred`'s geo paths synced (lines and
+    /// polygons skipped by their boxes), for one translation;
     /// `None` when no `2dsphere` path is queried.
     ///
     /// # Errors

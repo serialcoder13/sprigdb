@@ -933,9 +933,9 @@ async fn table_grants(e: &mut Env, ops: usize) {
         "a second structural change ran while the first was open"
     );
     exec(&mut u1, "COMMIT").await;
-    let (waited, _) = waiter.await.unwrap();
-    eprintln!("table-grant user: the second move waited {waited:?} for the first's commit");
-    assert!(waited >= Duration::from_millis(1400), "{waited:?}");
+    let (blocked, _) = waiter.await.unwrap();
+    eprintln!("table-grant user: the second move waited {blocked:?} for the first's commit");
+    assert!(blocked >= Duration::from_millis(1400), "{blocked:?}");
     let mut rng = Rng(77);
     check_all(e, t, &mut rng, 6, "after the serialized moves").await;
     // Concurrent writers: two table-grant sessions at the root, two app

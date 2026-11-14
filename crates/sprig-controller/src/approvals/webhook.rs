@@ -116,7 +116,8 @@ pub struct Webhooks {
     keyring: Option<Arc<dyn SinkKeyring>>,
     live: Option<LiveSettings>,
     dc: DcId,
-    secret_dir: PathBuf,
+    /// `SPRIG_SINK_SECRET_DIR`, which overrides `sink.platform_secret_dir`.
+    secret_dir: Option<PathBuf>,
     webhook_secret: Option<String>,
     targets: Mutex<BTreeMap<Dest, (Instant, Arc<WebhookTarget>)>>,
 }
@@ -160,10 +161,7 @@ impl Webhooks {
             keyring,
             live,
             dc,
-            secret_dir: std::env::var_os("SPRIG_SINK_SECRET_DIR").map_or_else(
-                || PathBuf::from("/etc/sprigdb/platform-secrets"),
-                PathBuf::from,
-            ),
+            secret_dir: std::env::var_os("SPRIG_SINK_SECRET_DIR").map(PathBuf::from),
             webhook_secret,
             targets: Mutex::new(BTreeMap::new()),
         }
@@ -395,7 +393,17 @@ impl SinkEnv for Webhooks {
     }
 
     fn secret_dir(&self) -> PathBuf {
-        self.secret_dir.clone()
+        if let Some(d) = &self.secret_dir {
+            return d.clone();
+        }
+        let key = &sprig_sinks::settings::PLATFORM_SECRET_DIR;
+        PathBuf::from(
+            match &self.live {
+                Some(l) => l.get(key, &sprig_settings::SettingCtx::process(&self.dc)),
+                None => key.default.clone(),
+            }
+            .as_ref(),
+        )
     }
 
     fn worker_id(&self) -> String {

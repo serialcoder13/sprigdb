@@ -314,7 +314,7 @@ fn creates_and_eo_tables() {
     );
 }
 
-/// R9 (r9more): a fan-in sink's rows carry their member in
+/// A fan-in sink's rows carry their member in
 /// `_sprig_tenant`, which leads the key of a table the sink creates.
 #[test]
 fn fan_in_rows_carry_their_member() {
@@ -354,7 +354,7 @@ fn fan_in_rows_carry_their_member() {
 
 #[test]
 fn fan_in_and_queues_are_seen_keyed() {
-    // R9 (r9tests): exactly-once fan-in into databases goes by seen keys.
+    // Exactly-once fan-in into databases goes by seen keys.
     use crate::model::SourceSpec as S;
     let fan_in = S::FanIn {
         def_tenant: 1,

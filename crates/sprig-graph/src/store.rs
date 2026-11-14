@@ -1,9 +1,8 @@
-//! What the executor needs from storage (chapter 43, "Native graph
-//! tables"): the [`GraphStore`] trait over one native graph's node, edge
+//! What the executor needs from storage: the [`GraphStore`] trait over one native graph's node, edge
 //! and label tables, implemented over MariaDB ([`crate::maria`]) and in
 //! memory for tests ([`crate::mem`]).
 //!
-//! The trait keeps the chapter's shard dimension: nodes carry the routing
+//! The trait keeps the shard dimension: nodes carry the routing
 //! hash `rk` of `part`, edges live on their source's shard with `dst_rk`,
 //! and [`GraphStore::reach`] is one shard's recursive CTE, which stops at
 //! boundary nodes (an `rk` outside the shard) for the gateway to continue.
@@ -173,7 +172,7 @@ pub fn not_implicit() -> sprig_common::SprigError {
     )
 }
 
-/// The routing hash of a node's `part` (chapter 15's numeric class).
+/// The routing hash of a node's `part` (the shard map's numeric class).
 #[must_use]
 pub fn rk_of(part: u64) -> u64 {
     // The spec of one numeric part never fails to build.
@@ -274,8 +273,8 @@ pub trait GraphStore: Send {
     /// Every relationship type, by name.
     fn all_types(&self) -> Vec<String>;
 
-    /// `EXPLAIN`'s lines for how the router plans this graph's steps (R8
-    /// round 8, G69): its group and shards and each step's rule; none for
+    /// `EXPLAIN`'s lines for how the router plans this graph's steps: its
+    /// group and shards and each step's rule; none for
     /// stores the router doesn't plan (in memory, mapped graphs).
     fn explain_routes(&self) -> Vec<String> {
         Vec::new()
@@ -287,7 +286,7 @@ pub trait GraphStore: Send {
         Vec::new()
     }
 
-    /// `CALL { } IN TRANSACTIONS` (R8 round 8): whether the statement may
+    /// `CALL { } IN TRANSACTIONS`: whether the statement may
     /// commit batches of its own, checked before the first batch. Only an
     /// auto-commit statement may (Neo4j's rule).
     ///

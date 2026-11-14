@@ -1,4 +1,4 @@
-//! The executor (chapter 17, "Scatter" to "Lookup joins"): runs a plan's
+//! The executor: runs a plan's
 //! per-shard statements through a [`ShardBackend`] and combines the
 //! answers into one result.
 //!
@@ -127,14 +127,14 @@ pub trait ShardBackend: Send {
     /// statement savepoint instead of their own transaction).
     fn in_transaction(&self) -> bool;
 
-    /// `fk.lock_wait_seconds` (chapter 19): how long a foreign-key probe
+    /// `fk.lock_wait_seconds`: how long a foreign-key probe
     /// waits for a row lock (`… LOCK IN SHARE MODE WAIT n`); `None` waits
     /// as the connection's `innodb_lock_wait_timeout` says.
     fn fk_lock_wait(&self) -> Option<u64> {
         None
     }
 
-    /// Before a multi-shard write on `targets`: chapter 18's write rule,
+    /// Before a multi-shard write on `targets`: the transaction write rule,
     /// then an implicit transaction (autocommit) or a statement savepoint.
     /// The default runs `BEGIN` or `SAVEPOINT __sprig_stmt` on the first
     /// target's cluster (backends without a coordinator, tests).
@@ -188,7 +188,7 @@ pub trait ShardBackend: Send {
     }
 
     /// A connection of its own on the session's cluster, with the
-    /// session's state, for a gathered read (R3); it serves inside a
+    /// session's state, for a gathered read; it serves inside a
     /// transaction too (it reads only its own temporary tables). `None`
     /// when the backend can't open one (the statement is refused as
     /// before).
@@ -211,7 +211,7 @@ pub trait ShardBackend: Send {
         false
     }
 
-    /// Chapter 19's `claim` of one value an inserted row holds, in the
+    /// The unique lookup `claim` of one value an inserted row holds, in the
     /// write's transaction (after [`Self::begin_write`]). The default
     /// refuses: a backend without lookup sessions can't keep them exact.
     ///
@@ -225,7 +225,7 @@ pub trait ShardBackend: Send {
         ))
     }
 
-    /// Chapter 19's `release` of a value a deleted row held (buffered
+    /// The unique lookup `release` of a value a deleted row held (buffered
     /// until the transaction commits).
     ///
     /// # Errors
@@ -244,13 +244,13 @@ pub trait ShardBackend: Send {
     }
 
     /// `@@foreign_key_checks` of the session: when off, the gateway's
-    /// foreign-key checks and actions are skipped (chapter 19).
+    /// foreign-key checks and actions are skipped.
     fn foreign_key_checks(&self) -> bool {
         true
     }
 
-    /// The routing hashes of the rows holding `probe`'s values (chapter
-    /// 19's `route`), as the session's transaction sees them.
+    /// The routing hashes of the rows holding `probe`'s values (the lookup's
+    /// `route`), as the session's transaction sees them.
     ///
     /// # Errors
     /// 39461 when a lookup shard is unreachable; the default refuses.
@@ -264,7 +264,7 @@ pub trait ShardBackend: Send {
 }
 
 /// One shard statement on a backend connection of its own, read row by
-/// row (chapter 17's `ShardStream`).
+/// row.
 #[async_trait::async_trait]
 pub trait ShardStream: Send {
     /// Sends `sql`; the result's column definitions, or `None` for an OK
@@ -534,7 +534,7 @@ pub async fn execute_to(
 }
 
 /// A statement the planner gathers: a gathered read or an analytic read
-/// (chapter 17, "Analytic reads (R3)", the selection rule):
+/// (the selection rule):
 /// `router.analytics.mode = prefer` or the hint `/*+ SPRIG_ANALYTICS */`
 /// tries the analytic read first and gathers when its guard refuses;
 /// `fallback` (the default) gathers first and reads analytically when the
@@ -894,8 +894,8 @@ async fn run_read(
         .checked_sub(plan.hidden)
         .ok_or_else(|| SprigError::internal("fewer columns than hidden ones"))?;
     let at = |c: ColRef| c.index(ncols, plan.hidden);
-    // A sort or group-by of many rows runs off the runtime's worker (G40,
-    // decision bugfix-1): `router.max_statement_memory_mb` allows millions.
+    // A sort or group-by of many rows runs off the runtime's worker:
+    // `router.max_statement_memory_mb` allows millions.
     let n = rows.len();
     let rows = sprig_common::cpu::heavy(n, || -> Result<Vec<Row>> {
         Ok(match plan.kind {
@@ -1786,7 +1786,7 @@ fn info_numbers(info: &str) -> Vec<(String, u64)> {
     out
 }
 
-/// Chapter 19 before a write's rows: the deleted rows' values are read
+/// Unique lookups before a write's rows: the deleted rows' values are read
 /// (locked) and released, the inserted rows' values claimed.
 async fn lookups_before(
     w: &WritePlan,
@@ -1857,7 +1857,7 @@ async fn lookups_before(
     Ok(())
 }
 
-/// A statement a foreign-key action planned (chapter 19, R3), run inside
+/// A statement a foreign-key action planned, run inside
 /// the write that caused it: no transaction or savepoint of its own.
 ///
 /// # Errors
@@ -1891,7 +1891,7 @@ pub(crate) async fn run_nested(
     }
 }
 
-/// R3's limited DML: the rows the write changes, read in order and
+/// Limited DML: the rows the write changes, read in order and
 /// locked, then each shard's statement naming its rows by primary key
 /// (shards without rows run nothing).
 async fn limited_targets(
@@ -2154,7 +2154,7 @@ pub fn explain_graph(g: &crate::graph::GraphPlan) -> Output {
     }
 }
 
-/// `Plan::Graph`'s rows (R8 round 6): per call its graph, Cypher, tiers
+/// `Plan::Graph`'s rows: per call its graph, Cypher, tiers
 /// and shards, and the key joins that narrow the outer read.
 fn graph_rows(rows: &mut ExplainRows, g: &crate::graph::GraphPlan) {
     let top = rows.push(

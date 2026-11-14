@@ -1,0 +1,21 @@
+[package]
+name = "sprig-embed"
+description = "SprigDB's local text embedding: bge-small-en-v1.5 on the CPU, with candle"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+candle-core.workspace = true
+candle-nn.workspace = true
+candle-transformers.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokenizers.workspace = true
+
+[lints]
+workspace = true

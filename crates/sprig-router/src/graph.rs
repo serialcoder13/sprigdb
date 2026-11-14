@@ -1,12 +1,11 @@
-//! `GRAPH_TABLE` in SQL as a router plan (chapter 17's `Plan::Graph`,
-//! chapter 43's SQL/PGQ; R8 round 6, decision G52).
+//! `GRAPH_TABLE` in SQL (SQL/PGQ) as a router plan (`Plan::Graph`).
 //!
 //! ```text
 //! before the pipeline (gateway):
 //!   find(sql)                       → each GRAPH_TABLE (g MATCH … COLUMNS (…)): span, graph, Cypher, columns
 //!   with_placeholders(sql, nonce)   → each one replaced by a placeholder derived table:
 //!                                     (SELECT NULL AS `c1`, … FROM DUAL WHERE sprig_graph_table_pending(nonce, i))
-//!   the statement runs through chapter 07's rewrite and the other steps; the
+//!   the statement runs through the name rewrite and the other steps; the
 //!   graph text never does (it isn't SQL), nor do the rows (they may be 16 MB)
 //! in the router path (gateway, after the pipeline):
 //!   planner::plan_graph(sql, …)     → Plan::Graph(GraphPlan) (or Explain of it): the calls, the
@@ -52,7 +51,7 @@ pub struct GraphCall {
     pub cypher: String,
     /// The output column names.
     pub columns: Vec<String>,
-    /// `MATCH <pattern>`, before the call's own `WHERE` (R8 round 7).
+    /// `MATCH <pattern>`, before the call's own `WHERE`.
     pub head: String,
     /// The call's own condition, in Cypher.
     pub cond: Option<String>,
@@ -62,7 +61,7 @@ pub struct GraphCall {
 
 impl GraphCall {
     /// The Cypher read with `extra` conditions (Cypher, from the outer
-    /// statement's filters, R8 round 7) added to its `WHERE`; the call's
+    /// statement's filters) added to its `WHERE`; the call's
     /// own [`Self::cypher`] when there are none.
     #[must_use]
     pub fn cypher_with(&self, extra: &[String]) -> String {
@@ -493,7 +492,7 @@ pub fn param_spans(sql: &str) -> Vec<(usize, usize)> {
 }
 
 /// `sql` (a statement with `GRAPH_TABLE`) with each `?` replaced by its
-/// value (R8 round 7, decision G63): `sql_lits[i]` outside the calls,
+/// value: `sql_lits[i]` outside the calls,
 /// `cypher_lits[i]` inside a call's pattern, condition or columns. `None`
 /// when the counts differ.
 #[must_use]
@@ -610,13 +609,12 @@ pub fn rows_sql(columns: &[String], rows: &[Vec<GraphLit>]) -> String {
     s
 }
 
-/// A call's rows as a session temporary table (R8 round 7, decision
-/// G62): the `CREATE TEMPORARY TABLE … AS` statement, typed as the rows'
-/// derived table would be, and the `INSERT`s that fill it, each at most
-/// `chunk` bytes of SQL text. The table is created from one row per kind
-/// of value each column holds (the longest string, the integer with the
-/// most digits, a float, a boolean, `NULL`), which MariaDB types as it
-/// types the union of all the rows' literals.
+/// A call's rows as a session temporary table: the `CREATE TEMPORARY TABLE …
+/// AS` statement, typed as the rows' derived table would be, and the `INSERT`s
+/// that fill it, each at most `chunk` bytes of SQL text. The table is created
+/// from one row per kind of value each column holds (the longest string, the
+/// integer with the most digits, a float, a boolean, `NULL`), which MariaDB
+/// types as it types the union of all the rows' literals.
 #[must_use]
 pub fn temp_table_sql(
     name: &str,
@@ -694,7 +692,7 @@ pub struct GraphStep {
     pub call: usize,
     /// `db.graph`.
     pub graph: String,
-    /// The graph's table group, when it is a sharded group (round 3 on).
+    /// The graph's table group, when it is a sharded group.
     pub group: Option<u32>,
     /// Its shards: from the topology's group, or the one schema of a graph
     /// from rounds 1 and 2 or a mapped graph.
@@ -719,7 +717,7 @@ pub struct KeyJoin {
     pub group: Arc<Group>,
 }
 
-/// A statement with `GRAPH_TABLE` (chapter 17's `Plan::Graph`).
+/// A statement with `GRAPH_TABLE` (`Plan::Graph`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphPlan {
     /// The placeholders' nonce.
@@ -735,7 +733,7 @@ pub struct GraphPlan {
     /// Graph columns joined to routing keys.
     pub keys: Vec<KeyJoin>,
     /// Per call, the outer statement's filters on its columns, as Cypher
-    /// conditions added to its read (R8 round 7; see
+    /// conditions added to its read (see
     /// `planner::graph::pushed_filters`).
     pub filters: Vec<Vec<String>>,
     /// The outer statement planned with empty graph rows (EXPLAIN; the
@@ -873,7 +871,7 @@ fn shards_of(group: &Group, r: &CallRows, column: usize) -> Option<BTreeSet<u32>
             }
             _ => return None,
         };
-        // Not `shard_of`: a read's keys aren't write load (chapter 20).
+        // Not `shard_of`: a read's keys aren't write load.
         let i = group.route(group.hash_of(&v)?);
         set.insert(group.shards.get(i)?.shard);
     }

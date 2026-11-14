@@ -1,5 +1,4 @@
-//! Repairs the reconciler makes through the DDL path (chapter 08,
-//! "Reconciler"): finishing or rolling back jobs whose process died, and
+//! Repairs the reconciler makes through the DDL path: finishing or rolling back jobs whose process died, and
 //! adopting objects created outside SprigDB.
 //!
 //! ```text
@@ -130,7 +129,7 @@ impl<B: DdlBackend> DdlEngine<B>
 where
     B::Tx: DdlTx,
 {
-    /// Whether `intent`'s job was abandoned by its engine (bugfix-38):
+    /// Whether `intent`'s job was abandoned by its engine:
     /// this engine's job that no longer runs here, or another engine's
     /// whose process its [`OwnerCheck`](super::OwnerCheck) finds gone.
     async fn abandoned(&self, intent: &DdlIntent, now: SystemTime) -> bool {
@@ -153,8 +152,8 @@ where
     /// jobs of `tenant` their engine abandoned, other than `me`, that
     /// `exec` reaches and in whose schemas no DDL runs: a DDL waiting for
     /// a target such a job holds goes ahead within a second instead of
-    /// failing with 39071 until the reconciler's `catalog.stuck_state_minutes`
-    /// (bugfix-38). Returns how many were resolved.
+    /// failing with 39071 until the reconciler's
+    /// `catalog.stuck_state_minutes`. Returns how many were resolved.
     ///
     /// # Errors
     /// The catalog's, when it can't be read; a job that fails to resolve
@@ -479,8 +478,8 @@ where
         Ok(r?.and_then(|r| r.create_sql))
     }
 
-    /// Adopts objects found in `db`'s schema with no catalog row (chapter
-    /// 08: "Table created outside SprigDB: adopt it"): one versioned
+    /// Adopts objects found in `db`'s schema with no catalog row (a table
+    /// created outside SprigDB is adopted): one versioned
     /// change inserting them `active` at schema version 1, with
     /// `SHOW CREATE` as their history. Internal (`__sprig_`) objects and
     /// names that gained a row meanwhile are skipped. Returns the version,

@@ -40,7 +40,7 @@ fn presplit_matches_the_worked_example() {
             .shard
             .0
     };
-    // Chapter 15's example numbers shards 2..5 (after shard 1); here 1..4.
+    // Four ranges, shards 1..4.
     assert_eq!(route(42), 1);
     assert_eq!(route(7), 2);
     assert_eq!(route(1002), 3);

@@ -1,6 +1,5 @@
-//! The sink model (chapter 51, "Interfaces" and "Data structures"):
-//! connections, sinks, tasks, and the records, batches and outcomes the
-//! runtime moves between sources and targets.
+//! The sink model: connections, sinks, tasks, and the records, batches
+//! and outcomes the runtime moves between sources and targets.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -114,7 +113,7 @@ text_enum!(
 );
 
 text_enum!(
-    /// `sinks.state` (chapter 51, "State machines").
+    /// `sinks.state`.
     SinkState {
         /// Being created.
         Creating = "creating",
@@ -281,8 +280,7 @@ pub enum SourceSpec {
         objects: Vec<(u64, String)>,
     },
     /// `FROM STREAM s FAN IN [UNDER t]`: every member's instance of an
-    /// inherited stream definition below the sink's tenant (chapter 51,
-    /// "Fan-in sinks").
+    /// inherited stream definition below the sink's tenant.
     FanIn {
         /// The declaring tenant.
         def_tenant: u64,
@@ -298,8 +296,7 @@ pub enum SourceSpec {
         under: Option<u64>,
     },
     /// `FROM QUEUE q FAN IN [UNDER t]`: every member's instance of an
-    /// inherited queue definition below the sink's tenant (chapter 51,
-    /// "Fan-in sinks"; R9, r9queue).
+    /// inherited queue definition below the sink's tenant.
     FanInQueue {
         /// The declaring tenant.
         def_tenant: u64,
@@ -496,8 +493,7 @@ impl SinkDef {
         }
     }
 
-    /// The consumer group of a stream source (chapter 51, "Where positions
-    /// live").
+    /// The consumer group of a stream source.
     #[must_use]
     pub fn group(&self) -> String {
         format!("__sprig_sink_{}", self.id.0)
@@ -539,7 +535,7 @@ pub struct TaskRow {
     pub delivered: u64,
 }
 
-/// Where a record came from (chapter 51's `Position`).
+/// Where a record came from.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "src", rename_all = "snake_case")]
 pub enum Position {
@@ -565,7 +561,7 @@ pub enum Position {
     },
     /// A change event.
     Change {
-        /// Chapter 38's event id (cluster, GTID, row).
+        /// The change event's id (cluster, GTID, row).
         event: String,
         /// The feed token to resume after it.
         token: String,
@@ -594,9 +590,9 @@ impl Position {
                 // of their own. Keyed by the partition alone, member A's
                 // offset 7 and member B's offset 7 of partition 0 were one
                 // entry, so settling B's could commit A's partition past
-                // records A hadn't delivered, lost after a crash (R9,
-                // r9tests). A plain stream task keeps the partition alone
-                // (destination offset rows are keyed by it).
+                // records A hadn't delivered, lost after a crash. A
+                // plain stream task keeps the partition alone (destination
+                // offset rows are keyed by it).
                 let unit = if stream & (1 << 62) == 0 {
                     u64::from(*partition)
                 } else {
@@ -675,7 +671,7 @@ impl ChangeOp {
     }
 }
 
-/// One record on its way out (chapter 51's `SinkRecord`).
+/// One record on its way out.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SinkRecord {
     /// The record key.
@@ -796,8 +792,7 @@ pub fn bytes_json_text(b: &[u8]) -> Value {
     }
 }
 
-/// The idempotency key of a stream record (chapter 51, "Idempotency
-/// keys").
+/// The idempotency key of a stream record.
 #[must_use]
 pub fn stream_key(stream: u64, partition: u32, offset: u64, epoch: u32) -> String {
     format!("s/{stream}/{partition}/{offset}/{epoch}")

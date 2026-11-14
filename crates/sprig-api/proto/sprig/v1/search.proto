@@ -1,4 +1,4 @@
-// sprig.v1: the Search API (chapter 39, "Queries"; chapter 37). A search
+// sprig.v1: the Search API. A search
 // index on a table or collection is queried by name; hits are re-read
 // through the caller's session, so a caller only ever gets keys, rows and
 // highlights of rows it may SELECT (privileges and row-level security).
@@ -44,7 +44,7 @@ message SearchQueryRequest {
   // stale_ok (the default, search.default_consistency), own_writes or
   // latest.
   string consistency = 10;
-  // A commit token from a write (own_writes); served as latest (S5).
+  // A commit token from a write (own_writes); served as latest.
   string commit_token = 11;
   // Each hit's row: a table's columns as a JSON object, a collection's
   // document as relaxed Extended JSON.

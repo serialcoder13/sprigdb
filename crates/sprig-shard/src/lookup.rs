@@ -1,7 +1,6 @@
 //! Lookup indexes: unique keys across shards and automatic global lookup
-//! indexes (chapter 19, "Unique lookups", "Routing through lookups",
-//! "Building, back-filling and dropping", "Automatic global lookup
-//! indexes").
+//! indexes, routing through them, and building, back-filling and dropping
+//! them.
 //!
 //! A lookup table maps a value to the routing hash of the row that owns
 //! it. It is a member of the tenant's lookup group, sharded by the hash of
@@ -12,8 +11,8 @@
 //! only orphans, which route to nothing. No step needs cross-cluster
 //! atomicity, so it works on Galera and without XA.
 //!
-//! The mechanism lives here so the router (chapter 17) and distributed
-//! transactions (chapter 18) share one implementation: the caller supplies
+//! The mechanism lives here so the router and distributed transactions
+//! share one implementation: the caller supplies
 //! the sessions through [`LookupSessions`] (its `DistTxn`), and the
 //! placement of lookup and owner shards through [`LookupPlacement`].
 //! [`direct::DirectTxn`] is a plain implementation over `mysql_async`
@@ -36,7 +35,7 @@ use crate::shardmap::ShardMap;
 
 pub mod direct;
 
-/// `lookup_indexes` (chapter 19), in `t<tenant>_sprig`.
+/// `lookup_indexes`, in `t<tenant>_sprig`.
 pub const DDL_LOOKUP_INDEXES: &str = "CREATE TABLE IF NOT EXISTS lookup_indexes (
   lookup_id     BIGINT UNSIGNED NOT NULL,
   object_id     BIGINT UNSIGNED NOT NULL,
@@ -55,8 +54,8 @@ pub const DDL_LOOKUP_INDEXES: &str = "CREATE TABLE IF NOT EXISTS lookup_indexes 
   UNIQUE KEY uk_name (object_id, index_name)
 ) ENGINE=InnoDB";
 
-/// `foreign_keys` (chapter 19). Created with the module; the router
-/// enforces `gateway` and `reference` rows (`sprig-router::fk`, R3; rows
+/// `foreign_keys`. Created with the module; the router enforces `gateway`
+/// and `reference` rows (`sprig-router::fk`; rows
 /// in [`crate::fk`]).
 pub const DDL_FOREIGN_KEYS: &str = "CREATE TABLE IF NOT EXISTS foreign_keys (
   fk_id            BIGINT UNSIGNED NOT NULL,
@@ -123,7 +122,7 @@ pub enum LookupOrigin {
     UniqueKey,
     /// A primary key without the distribution key.
     PrimaryKey,
-    /// Automatic indexing proposed it for a scatter query (chapter 13).
+    /// Automatic indexing proposed it for a scatter query.
     Auto,
     /// The child columns of a cross-group foreign key.
     FkChild,
@@ -178,7 +177,7 @@ pub struct LookupIndex {
     pub group: GroupId,
     /// Its state.
     pub state: LookupState,
-    /// The automatic index (chapter 13) behind an `auto` lookup.
+    /// The automatic index behind an `auto` lookup.
     pub auto_index_id: Option<u64>,
 }
 
@@ -369,7 +368,7 @@ impl LookupPlacement for MapPlacement {
 }
 
 /// The sessions of one transaction, as the lookup algorithm needs them.
-/// The router's `DistTxn` (chapter 18) implements it; so does
+/// The router's `DistTxn` implements it; so does
 /// [`direct::DirectTxn`].
 #[async_trait::async_trait]
 pub trait LookupSessions: Send {
@@ -509,9 +508,9 @@ fn lookup_unavailable(e: SprigError) -> SprigError {
     )
 }
 
-#[allow(clippy::many_single_char_names)] // the chapter's names: t, p, l, v
+#[allow(clippy::many_single_char_names)] // the algorithm's names: t, p, l, v
 /// Claims value `v` of lookup `l` for `owner` inside transaction `t`
-/// (chapter 19, `claim`). Call it before Main writes the owner row; claims
+/// (`claim`). Call it before Main writes the owner row; claims
 /// of one statement go in `lookup_id` order.
 ///
 /// # Errors
@@ -656,8 +655,7 @@ pub trait LookupReader: Send + Sync {
     async fn read(&self, t: &Target, sql: &str, params: Params) -> Result<Vec<Row>>;
 }
 
-/// The routing hashes of the owners of `values` (chapter 19, "Routing
-/// through lookups"): `owner_rk` and, while an owner moves, `prev_rk`.
+/// The routing hashes of the owners of `values`: `owner_rk` and, while an owner moves, `prev_rk`.
 /// The router runs the original predicate on the shards of these hashes.
 ///
 /// # Errors
@@ -793,12 +791,12 @@ impl LookupCatalog {
     }
 }
 
-/// The hook automatic indexing (chapter 13) calls when it proposes a global
+/// The hook automatic indexing calls when it proposes a global
 /// lookup for a scatter query: an `auto`, non-unique lookup named
 /// `sprig_auto_<8 hex>`, in state `building`. The build itself
-/// ([`direct::build`]) is the same as for unique lookups; chapter 13 then
-/// watches it for `auto_index.observe_days` and drops it ([`direct::drop`])
-/// unless p95 improved by `auto_index.min_improvement_pct`.
+/// ([`direct::build`]) is the same as for unique lookups; automatic
+/// indexing then watches it for `auto_index.observe_days` and drops it
+/// ([`direct::drop`]) unless p95 improved by `auto_index.min_improvement_pct`.
 #[must_use]
 pub fn propose_auto_lookup(
     id: LookupId,

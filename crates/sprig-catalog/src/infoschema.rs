@@ -1,4 +1,4 @@
-//! `information_schema` reads that open one schema at a time (R9, r9scale).
+//! `information_schema` reads that open one schema at a time.
 //!
 //! MariaDB answers a `TABLES`, `VIEWS` or `TRIGGERS` query by listing
 //! databases and then each database's tables. It reads only the named

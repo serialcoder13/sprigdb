@@ -135,8 +135,8 @@ pub mod logic_peer_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// R9 (r9queue): statements of a sink task in a session as the sink's
-        /// owner (chapter 51): a script sink's read-only `db` reads, each in a
+        /// Statements of a sink task in a session as the sink's owner: a script
+        /// sink's read-only `db` reads, each in a
         /// read-only transaction, and a queue source's sprig.mq_get, mq_ack and
         /// mq_nack calls.
         pub async fn sink_sql(
@@ -181,8 +181,8 @@ pub mod logic_peer_server {
             &self,
             request: tonic::Request<super::RunTriggerRequest>,
         ) -> std::result::Result<tonic::Response<super::RunTriggerReply>, tonic::Status>;
-        /// R9 (r9queue): statements of a sink task in a session as the sink's
-        /// owner (chapter 51): a script sink's read-only `db` reads, each in a
+        /// Statements of a sink task in a session as the sink's owner: a script
+        /// sink's read-only `db` reads, each in a
         /// read-only transaction, and a queue source's sprig.mq_get, mq_ack and
         /// mq_nack calls.
         async fn sink_sql(

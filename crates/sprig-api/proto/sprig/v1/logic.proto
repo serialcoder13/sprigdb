@@ -1,5 +1,5 @@
-// sprig.v1: the logic layer's own calls (chapter 41; chapter 44's logic
-// editors). `TestRun` runs a function, procedure or trigger body against
+// sprig.v1: the logic layer's own calls (for Studio's logic editors).
+// `TestRun` runs a function, procedure or trigger body against
 // given inputs in a sandbox that never writes: its statements run in the
 // caller's session (rights and row policies apply) inside a transaction
 // that is always rolled back; `fetch` is answered by mocks, never sent.

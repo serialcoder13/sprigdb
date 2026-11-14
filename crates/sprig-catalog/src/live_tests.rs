@@ -354,7 +354,7 @@ async fn live_migrations_are_idempotent_concurrent_and_recorded() {
             lock_timeout: Duration::from_secs(1),
             ..MigrateOpts::default()
         };
-        // R9 (r9scale): a run with nothing to apply reads the format and
+        // A run with nothing to apply reads the format and
         // returns without the lock.
         let r = Migrator::new(&[])
             .unwrap()
@@ -480,7 +480,7 @@ async fn live_a_crash_between_statements_and_record_reruns_safely() {
     .await;
 }
 
-/// Chapter 10, "Cutover" (found in R9's live move): a migration run
+/// Found in a live tenant move: a migration run
 /// against a catalog whose tables a rename fence moved away must not
 /// recreate them empty; it waits (39070) until the catalog is unfenced.
 #[tokio::test]
@@ -554,7 +554,7 @@ async fn live_a_fenced_catalog_is_not_migrated() {
 
 #[tokio::test]
 async fn live_live_names_allow_many_tombstones() {
-    // Chapter 08, open question 4: a unique key on a PERSISTENT generated
+    // A unique key on a PERSISTENT generated
     // column that is NULL for many rows.
     with_schema("live_names", |pool, schema| async move {
         migrate(&pool, &schema).await;

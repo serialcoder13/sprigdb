@@ -1,28 +1,26 @@
-//! The auth tables of the tenant catalog (chapter 14, "Catalog tables";
-//! build step 1), as the `auth` migration module, with typed rows and
+//! The auth tables of the tenant catalog, as the `auth` migration module, with typed rows and
 //! access.
 //!
 //! The module registers with `sprig-catalog`'s migrator ([`AUTH_MODULE`],
 //! or through [`AuthExtension`](crate::cache::AuthExtension)), so every
 //! tenant catalog gets these tables with its own: `sprig-auth` depends on
-//! `sprig-catalog`, never the reverse (chapter 08, "Tables owned by other
-//! chapters").
+//! `sprig-catalog`, never the reverse.
 //!
 //! Format 1 creates `users`, `verifiers` and `login_state` exactly as
-//! Appendix C defines them, plus the user id counter
+//! the catalog's schema defines them, plus the user id counter
 //! `sprig.next_user_id`; format 2 adds `api_keys`, format 3 adds
 //! `scram_sha_512` to `verifiers.mechanism`, and format 4 adds
 //! `token_sessions` ([`crate::token`]), format 5 `user_factors`
-//! ([`crate::mfa`]). The other chapter 14 tables (`oidc_issuers`,
-//! `claim_mappings`)
-//! arrive as later expand migrations with the steps that use them.
+//! ([`crate::mfa`]). The other identity tables (`oidc_issuers`,
+//! `claim_mappings`) arrive as later expand migrations with the features
+//! that use them.
 //!
 //! **Versioning.** `users` and `verifiers` are versioned by the tenant's
 //! auth version ([`VersionKind::Auth`](sprig_catalog::VersionKind)).
 //! `verifiers` has no `changed_version` column, so every change of a
 //! user's verifiers also rewrites the user's row with the change's
 //! version ([`AuthStore::touch_user`]); the cache reloads a changed user's
-//! verifiers with it. `login_state` is not versioned (chapter 08: read on
+//! verifiers with it. `login_state` is not versioned (it is read on
 //! demand); only lock transitions bump the auth version, and the cache
 //! re-reads every locked row on each load.
 //!
@@ -44,7 +42,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 /// The module name in the catalog's format records.
 pub const MODULE: &str = "auth";
 
-/// `users` (chapter 14, Appendix C). Exactly the appendix's columns.
+/// `users`, with exactly the catalog schema's columns.
 pub const DDL_USERS: &str = "CREATE TABLE IF NOT EXISTS users (
   user_id            INT UNSIGNED  NOT NULL,
   name               VARCHAR(255)  NOT NULL COLLATE utf8mb4_bin,
@@ -79,7 +77,7 @@ pub const DDL_USERS: &str = "CREATE TABLE IF NOT EXISTS users (
   UNIQUE KEY uk_account (live_name, host)
 ) ENGINE=InnoDB";
 
-/// `verifiers` (chapter 14, Appendix C).
+/// `verifiers`.
 pub const DDL_VERIFIERS: &str = "CREATE TABLE IF NOT EXISTS verifiers (
   verifier_id     BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   user_id         INT UNSIGNED    NOT NULL,
@@ -98,7 +96,7 @@ pub const DDL_VERIFIERS: &str = "CREATE TABLE IF NOT EXISTS verifiers (
   KEY k_user (user_id, slot, mechanism)
 ) ENGINE=InnoDB";
 
-/// `login_state` (chapter 14, Appendix C).
+/// `login_state`.
 pub const DDL_LOGIN_STATE: &str = "CREATE TABLE IF NOT EXISTS login_state (
   user_id              INT UNSIGNED      NOT NULL,
   consecutive_failures INT UNSIGNED      NOT NULL DEFAULT 0,
@@ -161,15 +159,15 @@ pub static AUTH_MIGRATIONS: &[Migration] = &[
     },
 ];
 
-/// `REQUIRE SUBJECT` and `REQUIRE ISSUER` (wireup, 13 Nov): the client
+/// `REQUIRE SUBJECT` and `REQUIRE ISSUER`: the client
 /// certificate's subject and issuer, in MySQL's `/C=../O=../CN=..` form.
 pub const ALTER_USERS_REQUIRE_DN: &str = "ALTER TABLE users \
   ADD COLUMN IF NOT EXISTS require_subject VARCHAR(1024) NULL, \
   ADD COLUMN IF NOT EXISTS require_issuer VARCHAR(1024) NULL";
 
-/// Format 3: `scram_sha_512` joins `verifiers.mechanism` (chapter 14,
-/// "SCRAM verifiers"). A new last `ENUM` member: MariaDB changes only the
-/// table's metadata, and rerunning it changes nothing.
+/// Format 3: `scram_sha_512` joins `verifiers.mechanism`. A new last `ENUM`
+/// member: MariaDB changes only the table's metadata, and rerunning it changes
+/// nothing.
 pub const ALTER_VERIFIERS_SCRAM_SHA_512: &str = "ALTER TABLE verifiers MODIFY mechanism
   ENUM('caching_sha2_password','mysql_native_password',
        'scram_sha_256','scram_sha_1','scram_sha_512') NOT NULL";
@@ -319,7 +317,7 @@ sql_enum! {
 
 sql_enum! {
     /// `verifiers.login_form`: which login name a SCRAM-SHA-1 verifier was
-    /// computed over (chapter 14, "Verifier formats").
+    /// computed over.
     LoginForm {
         /// Any form (every mechanism but SCRAM-SHA-1).
         Any = "any",
@@ -431,9 +429,9 @@ pub struct UserRow {
     pub auth_methods: AuthMethods,
     /// The account's MySQL plugin (`caching_sha2_password` by default).
     pub plugin: String,
-    /// MongoDB authentication database (R5).
+    /// MongoDB authentication database.
     pub mongo_db: Option<String>,
-    /// Chapter 42's home space.
+    /// The home space (data inheritance).
     pub home_space_id: u64,
     /// `REQUIRE NONE | SSL | X509`.
     pub require_tls: RequireTls,
@@ -458,7 +456,7 @@ pub struct UserRow {
     pub password_lock_minutes: Option<i32>,
     /// Resource limits.
     pub limits: AccountLimits,
-    /// `ATTRIBUTE` / `COMMENT` JSON, for `SPRIG_USER_ATTR()` (chapter 29).
+    /// `ATTRIBUTE` / `COMMENT` JSON, for `SPRIG_USER_ATTR()`.
     pub attributes: Option<serde_json::Value>,
     /// How the user was created.
     pub source: UserSource,
@@ -1110,8 +1108,7 @@ impl AuthStore {
     }
 
     /// The user's login state, locked for update (`SELECT ... FOR UPDATE`)
-    /// in the caller's transaction: the failure counter's read (chapter 14,
-    /// "Counter writes").
+    /// in the caller's transaction: the failure counter's read.
     ///
     /// # Errors
     /// As [`login_state`](Self::login_state).
@@ -1208,7 +1205,7 @@ impl AuthStore {
             .transpose()
     }
 
-    /// Writes a login state row (step 5's counters use it; tests too).
+    /// Writes a login state row (the lockout counters use it; tests too).
     ///
     /// # Errors
     /// 39070 or a backend error.

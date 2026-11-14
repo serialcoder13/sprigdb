@@ -1,4 +1,4 @@
-//! Live tests of schema changes across shards (chapter 21, R1) on the
+//! Live tests of schema changes across shards on the
 //! Compose clusters: a hand-made four-shard table group, shards 1 and 2 on
 //! the single node (also the catalog's cluster), shards 3 and 4 on the
 //! replication primary, changed through [`DdlEngine`] and a
@@ -14,7 +14,7 @@
 //! - a sequence of changes under a light write load (4 writers), with no
 //!   client errors.
 //!
-//! Tenant `3_130_600_001` (r1ddl's range, brief rule 8b); everything it
+//! Tenant `3_130_600_001` (an id no other live test uses); everything it
 //! creates is dropped by exact name. Skipped without
 //! `SPRIG_TEST_MARIADB_SINGLE` and `SPRIG_TEST_MARIADB_REPLICATION`.
 

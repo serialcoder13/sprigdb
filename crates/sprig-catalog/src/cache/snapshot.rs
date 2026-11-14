@@ -1,6 +1,5 @@
 //! [`TenantCatalog`]: one tenant's catalog at one version, immutable and
-//! shared through `Arc` (chapter 08, "Interfaces" and "Cache load and
-//! invalidation").
+//! shared through `Arc`.
 //!
 //! A snapshot is built from a full load ([`TenantCatalog::build`]) or
 //! derived from the previous one by an incremental load
@@ -13,7 +12,7 @@
 //!   load after a purge agrees);
 //! - empty settings rows (resets kept until purge) are left out;
 //! - internal `sprig.` rows are not settings; `sprig.ancestry` sets the
-//!   ancestry (chapter 08 step 6 writes it).
+//!   ancestry (the ancestry copy writes it).
 //!
 //! Rows committed without a version (transient states such as `creating`,
 //! "Intermediate states commit without a version") are seen by an
@@ -37,7 +36,7 @@ use crate::store::{
     DatabaseRow, DbState, Namespace, ObjectRow, ObjectState, SettingScope, Snapshot,
 };
 
-/// The internal key holding the ancestry (chapter 08, "Internal keys").
+/// The internal key holding the ancestry.
 pub const ANCESTRY_KEY: &str = "sprig.ancestry";
 
 /// Estimated per-entry overhead of an index, for the memory bound.
@@ -207,7 +206,7 @@ pub struct TenantCatalog {
     pub settings: Arc<TenantSettings>,
     /// Ancestors, root first, parent last (`sprig.ancestry`).
     pub ancestry: Arc<[TenantRef]>,
-    /// Other chapters' modules.
+    /// Other crates' modules.
     pub ext: ExtensionStates,
     core_bytes: usize,
 }

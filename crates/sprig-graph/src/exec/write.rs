@@ -1,4 +1,4 @@
-//! Writes (chapter 43, "Writes and transactions"; build step 13):
+//! Writes:
 //! `CREATE`, `MERGE`, `SET`, `REMOVE`, `[DETACH] DELETE`, inside the
 //! caller's transaction.
 //!

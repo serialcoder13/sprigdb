@@ -1,9 +1,9 @@
-//! The document engine's operations over SQL (chapter 31, "Writes and
-//! updates", "Planning and sorting"; build steps 4, 5, 8, 9 and 12).
+//! The document engine's operations over SQL: writes, updates, planning
+//! and sorting.
 //!
 //! The engine never holds a connection: every operation takes a
 //! [`SqlRunner`], which the gateway implements over the user's own
-//! executor session (logical names, chapter 29's privileges, the router
+//! executor session (logical names, privileges, the router
 //! and transactions). A [`CursorPlan`] is resumable between batches
 //! without a connection: a keyset position on `_id`, or a buffer of
 //! results sorted in the gateway.
@@ -73,7 +73,7 @@ pub struct Done {
 /// Rows: one `Option<bytes>` per column.
 pub type Rows = Vec<Vec<Option<Vec<u8>>>>;
 
-/// A value bound to a `?` of [`SqlRunner::query_bound`] (decision S26).
+/// A value bound to a `?` of [`SqlRunner::query_bound`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Param {
     /// SQL `NULL`.
@@ -153,12 +153,12 @@ pub trait SqlRunner: Send {
         0
     }
     /// The session's tenant name and user id, when it has a user: the
-    /// definer of a search index created through it (chapter 39).
+    /// definer of a search index created through it.
     fn principal_hint(&self) -> Option<(String, u32)> {
         None
     }
     /// Runs a statement returning rows, with `?` placeholders bound to
-    /// `params` (decision S26). The gateway's sessions keep the statement
+    /// `params`. The gateway's sessions keep the statement
     /// prepared and send only the values; other runners inline them.
     async fn query_bound(&mut self, sql: &str, params: &[Param]) -> Result<Rows, SqlError> {
         self.query(&inline(sql, params)).await
@@ -168,7 +168,7 @@ pub trait SqlRunner: Send {
         self.exec(&inline(sql, params)).await
     }
     /// Whether row-level security policies on object `object` bind the
-    /// session (chapter 29; decision S24: search counts and facets then
+    /// session (search counts and facets then
     /// cover only the rows it may see). `None`: unknown, taken as bound.
     fn row_policy_binds(&self, _object: u64) -> Option<bool> {
         None
@@ -198,7 +198,7 @@ pub fn mongo_error(e: &SqlError) -> MongoError {
     m
 }
 
-/// Engine settings (chapter 31, "Configuration").
+/// Engine settings.
 #[derive(Debug, Clone, Copy)]
 pub struct EngineConfig {
     /// `doc.type_map`.
@@ -214,11 +214,25 @@ pub struct EngineConfig {
     /// Rows per internal read.
     pub chunk_rows: usize,
     /// `vector.ann_min_rows`: a vector index with at least this many
-    /// vectors answers approximate `$vectorSearch` from its side table
-    /// (chapter 34, decision R33).
+    /// vectors answers approximate `$vectorSearch` from its side table.
     pub vector_ann_min_rows: u64,
     /// How often a vector side table is brought up to date (ms).
     pub vector_sync_ms: u64,
+}
+
+/// Live values of `doc.agg_stage_memory_bytes` and `doc.max_sort_bytes`
+/// for every engine in the process (0: the engine's own [`EngineConfig`]).
+/// The gateway sets them from its settings before each `find` and
+/// `aggregate`, so the keys apply live.
+static AGG_STAGE_LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static MAX_SORT_LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Sets the live `doc.agg_stage_memory_bytes` and `doc.max_sort_bytes`
+/// (0 for either: back to each engine's configuration).
+pub fn set_memory_limits(agg_stage_bytes: usize, max_sort_bytes: usize) {
+    use std::sync::atomic::Ordering::Relaxed;
+    AGG_STAGE_LIVE.store(agg_stage_bytes, Relaxed);
+    MAX_SORT_LIVE.store(max_sort_bytes, Relaxed);
 }
 
 impl Default for EngineConfig {
@@ -273,7 +287,8 @@ pub fn hlc_now() -> u64 {
 
 static FEED_HLC: AtomicU64 = AtomicU64::new(0);
 
-/// Chapter 38's statement comment for a whole-document replacement:
+/// The statement comment for a whole-document replacement, which the
+/// change feed reads:
 /// `/*sprig h=<HLC> o=r*/`, the HLC in the feed's layout (seconds in the
 /// high 32 bits, a counter in the low 32), never going backwards.
 #[must_use]
@@ -504,7 +519,7 @@ pub struct Engine {
     pub cfg: EngineConfig,
     /// Collection metadata.
     pub catalog: Arc<dyn DocCatalog>,
-    /// Text and search indexes (chapter 39); `None`: `$text` and `$search`
+    /// Text and search indexes; `None`: `$text` and `$search`
     /// are refused.
     pub text: Option<Arc<dyn crate::text::TextSearch>>,
 }
@@ -516,6 +531,25 @@ impl Default for Engine {
 }
 
 impl Engine {
+    /// `doc.agg_stage_memory_bytes`: the live value, else the
+    /// configuration's.
+    #[must_use]
+    pub fn agg_stage_bytes(&self) -> usize {
+        match AGG_STAGE_LIVE.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => self.cfg.agg_stage_bytes,
+            n => n,
+        }
+    }
+
+    /// `doc.max_sort_bytes`: the live value, else the configuration's.
+    #[must_use]
+    pub fn max_sort_bytes(&self) -> usize {
+        match MAX_SORT_LIVE.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => self.cfg.max_sort_bytes,
+            n => n,
+        }
+    }
+
     /// An engine with `cfg`, keeping metadata in each database's hidden
     /// table ([`TableCatalog`]).
     #[must_use]
@@ -533,7 +567,7 @@ impl Engine {
         }
     }
 
-    /// With the gateway's text and search indexes (chapter 39).
+    /// With the gateway's text and search indexes.
     #[must_use]
     pub fn with_text(mut self, t: Arc<dyn crate::text::TextSearch>) -> Self {
         self.text = Some(t);
@@ -564,8 +598,8 @@ impl Engine {
     /// SQL errors (privileges).
     pub async fn ensure_db(&self, sql: &mut dyn SqlRunner, db: &str) -> Result<(), MongoError> {
         check_db_name(db)?;
-        // Retryable-write records live next to the collections (chapter
-        // 30); creating their table also tells whether the database exists.
+        // Retryable-write records live next to the collections; creating
+        // their table also tells whether the database exists.
         match sql.exec(&crate::sessions::table_sql(db)).await {
             Ok(_) => {}
             Err(e) if e.is(1049) => {
@@ -622,7 +656,7 @@ impl Engine {
                 ));
             }
         }
-        // Schema validation (M3, decision S90).
+        // Schema validation.
         crate::validate::check_create(&options)?;
         self.ensure_db(sql, &ns.db).await?;
         let table = meta::table_name(&ns.coll);
@@ -689,13 +723,13 @@ impl Engine {
         ))
         .await
         .map_err(|e| mongo_error(&e))?;
-        // Chapter 34 (R33): the vector indexes' side tables.
+        // The vector indexes' side tables.
         self.drop_vector_sides(sql, ns, &m.table, None).await;
         // M7: a capped collection's totals row.
         if capped::Cap::of(&m.options).is_some() {
             capped::forget(sql, &ns.db, &m.uuid).await;
         }
-        // `2dsphere` side tables (R5 round 6).
+        // `2dsphere` side tables.
         for i in m.indexes.iter().filter(|i| crate::geo::is_2dsphere(i)) {
             if let Some((p, _)) = i.key.first() {
                 let _ = sql
@@ -843,7 +877,7 @@ impl Engine {
         let mut m = self.meta_or_create(sql, ns).await?;
         let mut rows: Vec<Rendered> = Vec::new();
         let mut paths = BTreeSet::new();
-        // Schema validation (M3, decision S90).
+        // Schema validation.
         let rules = crate::validate::Rules::of(&m.options)?;
         let ns_text = ns.to_string();
         // M7: a capped collection's documents, with their BSON sizes.
@@ -892,7 +926,7 @@ impl Engine {
         // One multi-row INSERT when every document rendered; on a
         // duplicate, row by row to attribute the error.
         if all_good && !good.is_empty() {
-            // Decision S26: one document runs prepared.
+            // One document runs prepared.
             let done = if let [(s, _)] = good.as_slice() {
                 let stmt = format!(
                     "INSERT INTO {}.{} (_id, doc, _types, _v) VALUES (?, ?, ?, ?)",
@@ -982,7 +1016,7 @@ impl Engine {
         ns: &Ns,
         spec: FindSpec,
     ) -> Result<CursorPlan, MongoError> {
-        // Chapter 39: `$text`.
+        // `$text`.
         if let Some((t, rest)) = crate::text::split_text(&spec.filter)? {
             return Box::pin(self.find_text(sql, ns, &spec, t, &rest)).await;
         }
@@ -1008,7 +1042,7 @@ impl Engine {
         let Some(m) = self.meta(sql, ns).await? else {
             return Ok(CursorPlan::from_docs(ns.clone(), Vec::new()));
         };
-        // M5 (S80): `$indexStats.accesses`.
+        // `$indexStats.accesses`.
         crate::usage::note(
             sql.tenant(),
             &ns.db,
@@ -1017,7 +1051,7 @@ impl Engine {
             &spec.filter,
             spec.sort.as_ref(),
         );
-        // Chapter 36 (R6 round 3): `$near` sorts by distance.
+        // `$near` sorts by distance.
         models::check_near(&pred, true)?;
         if let Some((path, near)) = models::near_of(&pred) {
             return Box::pin(self.find_near(sql, ns, &spec, &pred, &path, &near, &m)).await;
@@ -1065,7 +1099,7 @@ impl Engine {
                 &m.table,
                 &pred,
                 &sqlp,
-                self.cfg.max_sort_bytes,
+                self.max_sort_bytes(),
                 capped::KeyOrder::of(&m),
             )
             .await?;
@@ -1089,12 +1123,12 @@ impl Engine {
     }
 
     /// A find by `_id` alone, answered as BSON bytes built straight from
-    /// the stored JSON (R5 round 8, decision D35's third part): `None` when
+    /// the stored JSON: `None` when
     /// `filter` isn't a point condition here (the caller plans the find as
     /// usual), `Some(None)` when nothing matches, else the document's
-    /// bytes. The statement is S26's prepared point read, through the
-    /// caller's session as every engine statement (chapter 29's privileges
-    /// and row policies apply). The recheck of decision D4 is left out: the
+    /// bytes. The statement is the prepared point read, through the
+    /// caller's session as every engine statement (privileges and row
+    /// policies apply). The recheck against the filter is left out: the
     /// row was found by its encoded `_id`, the whole condition, and equal
     /// keys are equal values in MongoDB's comparison.
     ///
@@ -1239,7 +1273,7 @@ impl Engine {
         with_v: bool,
         order: capped::KeyOrder,
     ) -> Result<Vec<(Vec<u8>, Document, Option<String>)>, MongoError> {
-        // Decision S26: a point read by `_id` runs prepared, with the key
+        // A point read by `_id` runs prepared, with the key
         // bound.
         let point = after.is_none().then(|| sqlp.point_key()).flatten();
         // The key column: `_id`, or a capped collection's `_seq` (M7),
@@ -1537,7 +1571,7 @@ impl Engine {
                 &m.table,
                 &pred,
                 &sqlp,
-                self.cfg.max_sort_bytes,
+                self.max_sort_bytes(),
                 capped::KeyOrder::of(&m),
             )
             .await?;
@@ -1597,7 +1631,7 @@ impl Engine {
         crate::usage::note(sql.tenant(), &ns.db, &ns.coll, &m, q, sort);
         let gm = self.geo_sides(sql, ns, &m, &pred).await?;
         let sqlp = translate(&pred, gm.as_ref().unwrap_or(&m));
-        // Schema validation (M3, decision S90).
+        // Schema validation.
         let rules = crate::validate::Rules::of(&m.options)?;
         let now = now_date();
         let cx = ApplyCx {
@@ -1608,7 +1642,7 @@ impl Engine {
         };
         let mut out = UpdateOutcome::default();
         // A single update keeps the `_v` its first read saw: the first
-        // write needs no second read (R5 round 4).
+        // write needs no second read.
         let targets: Vec<(Document, Option<String>)> = if multi {
             self.scan(
                 sql,
@@ -1711,7 +1745,7 @@ impl Engine {
                     &m.table,
                     pred,
                     sqlp,
-                    self.cfg.max_sort_bytes,
+                    self.max_sort_bytes(),
                     capped::KeyOrder::of(m),
                 )
                 .await?;
@@ -1769,7 +1803,7 @@ impl Engine {
         for attempt in 0..=self.cfg.update_retry_max {
             // Another writer changed the document between this one's read
             // and its write: the first retry is at once, later ones after
-            // a short, jittered pause (R5 round 8: under YCSB A's hot keys,
+            // a short, jittered pause (under YCSB A's hot keys,
             // immediate retries ran out of attempts and failed with 112).
             if attempt >= 2 {
                 let base = 1u64 << (attempt - 2).min(5);
@@ -1815,7 +1849,7 @@ impl Engine {
             let s = json::to_stored(&new, &self.opts())?;
             // A document's BSON is at most 13 times its stored JSON (a
             // decimal `0` in an array: 2 bytes of JSON, 25 of BSON), so
-            // only a large one is serialized to be measured (R5 round 8).
+            // only a large one is serialized to be measured.
             if s.doc.len().saturating_mul(13) > 16 * 1024 * 1024
                 && bson::to_vec(&new).map_or(0, |b| b.len()) > 16 * 1024 * 1024
             {
@@ -1825,16 +1859,15 @@ impl Engine {
                 ));
             }
             self.register_arrays(sql, ns, m, &array_paths(&new)).await?;
-            // A replacement carries chapter 38's statement comment, so
-            // change streams report it as `replace` (decisions/r5-interim.md
-            // D14); other updates stay plain.
+            // A replacement carries the statement comment, so change
+            // streams report it as `replace`; other updates stay plain.
             let hint = if matches!(spec, UpdateSpec::Replace(_)) {
                 replace_comment()
             } else {
                 String::new()
             };
-            // Decision S26: a plain update runs prepared; a replacement keeps
-            // its comment in the text (the change feed reads it, D21).
+            // A plain update runs prepared; a replacement keeps its comment
+            // in the text (the change feed reads it).
             let bound = match v.parse::<i64>() {
                 Ok(old_v) if hint.is_empty() => Some(old_v),
                 _ => None,
@@ -2001,7 +2034,7 @@ impl Engine {
                     "Index keys cannot be empty.",
                 ));
             }
-            // Chapter 39: a `text` index is a search index.
+            // A `text` index is a search index.
             if crate::text::is_text_key(key) {
                 let t = self.text.as_ref().ok_or_else(|| {
                     MongoError::new(
@@ -2014,7 +2047,7 @@ impl Engine {
                 text_made += 1;
                 continue;
             }
-            // Chapter 36 (R6 round 3): a single-path `2dsphere` index.
+            // A single-path `2dsphere` index.
             let geo_path = Self::geo_key(key)?;
             let mut pattern = Vec::new();
             for (p, v) in key {
@@ -2057,7 +2090,7 @@ impl Engine {
                 continue;
             }
             let unique = s.get_bool("unique").unwrap_or(false);
-            // An automatic index (chapter 13) never conflicts: the user's
+            // An automatic index never conflicts: the user's
             // index is made beside it, and automatic indexing retires its
             // own as redundant.
             if let Some(ex) = m.indexes.iter().find(|i| i.name == name && !i.is_auto()) {
@@ -2179,8 +2212,8 @@ impl Engine {
         self.list_indexes_with(sql, ns, false).await
     }
 
-    /// `listIndexes`, with automatic indexes (chapter 13) when `show_auto`
-    /// (the command's `showAutoIndexes: true`, decision S131); they are
+    /// `listIndexes`, with automatic indexes when `show_auto` (the
+    /// command's `showAutoIndexes: true`); they are
     /// hidden otherwise, as `SHOW INDEX` hides SQL ones.
     ///
     /// # Errors
@@ -2229,7 +2262,7 @@ impl Engine {
             .collect();
         let before = m.indexes.len() + 1 + text_names.len();
         let names: Vec<String> = match which {
-            // Chapter 13: `*` leaves automatic indexes alone.
+            // `*` leaves automatic indexes alone.
             Bson::String(s) if s == "*" => m
                 .indexes
                 .iter()
@@ -2304,7 +2337,7 @@ impl Engine {
             sql.exec(&meta::drop_index_sql(&ns.db, &m.table, &idx))
                 .await
                 .map_err(|e| mongo_error(&e))?;
-            // Chapter 36 (R6 round 3): a `2dsphere` index's columns.
+            // A `2dsphere` index's columns.
             self.drop_geo_columns(sql, ns, &m, &idx).await?;
             if crate::geo::is_2dsphere(&idx) {
                 continue;
@@ -2399,10 +2432,10 @@ impl Engine {
         use crate::spill::{self, DocSeq, SeqBuilder};
         let now = now_date();
         let lim = AggLimits {
-            stage_bytes: self.cfg.agg_stage_bytes,
+            stage_bytes: self.agg_stage_bytes(),
             now,
         };
-        // Chapters 34 and 36 (R6 round 3): `$geoNear`, `$vectorSearch` and
+        // `$geoNear`, `$vectorSearch` and
         // `$listSearchIndexes` read the collection themselves.
         let first = if ns.coll.is_empty() {
             None
@@ -2446,7 +2479,7 @@ impl Engine {
         } else {
             pipeline
         };
-        // Chapter 39: `$text` in the first `$match`.
+        // `$text` in the first `$match`.
         let mut first = first;
         if first.is_none()
             && !ns.coll.is_empty()
@@ -2491,7 +2524,7 @@ impl Engine {
                     let gm = self.geo_sides(sql, ns, &m, &pred).await?;
                     let sqlp = translate(&pred, gm.as_ref().unwrap_or(&m));
                     if spill::in_scope() {
-                        // M5 (S75): the read itself goes to disk past the
+                        // The read itself goes to disk past the
                         // stage limit, as MongoDB streams it; blocking
                         // stages still answer 292 without `allowDiskUse`.
                         self.scan_seq(sql, ns, &m.table, &pred, &sqlp, capped::KeyOrder::of(&m))
@@ -2504,7 +2537,7 @@ impl Engine {
                                 &m.table,
                                 &pred,
                                 &sqlp,
-                                self.cfg.agg_stage_bytes.saturating_mul(4),
+                                self.agg_stage_bytes().saturating_mul(4),
                                 capped::KeyOrder::of(&m),
                             )
                             .await?,
@@ -2524,7 +2557,7 @@ impl Engine {
             // time into a builder that spills.
             if matches!(name, "$lookup" | "$graphLookup") && (spill::in_scope() || !seq.is_mem()) {
                 let batch = if name == "$lookup" { 500 } else { 100 };
-                let mut out = SeqBuilder::new(self.cfg.agg_stage_bytes);
+                let mut out = SeqBuilder::new(self.agg_stage_bytes());
                 let mut it = seq.into_iter_docs()?;
                 loop {
                     let chunk: Vec<Document> = crate::heavy::run(crate::heavy::HEAVY_DOCS, || {
@@ -2628,7 +2661,7 @@ impl Engine {
                 continue;
             }
             // `$out` and `$merge` write every document; a spilled input
-            // is read back here (decision S75).
+            // is read back here.
             let mut docs = crate::heavy::run(crate::heavy::HEAVY_DOCS, || seq.into_vec())?;
             docs = match name {
                 "$graphLookup" => {
@@ -2716,7 +2749,7 @@ impl Engine {
         sqlp: &SqlPred,
         order: capped::KeyOrder,
     ) -> Result<crate::spill::DocSeq, MongoError> {
-        let mut out = crate::spill::SeqBuilder::new(self.cfg.agg_stage_bytes);
+        let mut out = crate::spill::SeqBuilder::new(self.agg_stage_bytes());
         let mut last: Option<Vec<u8>> = None;
         let cx = AggExpr { now: now_date() };
         loop {
@@ -2748,7 +2781,7 @@ impl Engine {
         }
     }
 
-    /// `find` with `$text` (chapter 39): the scored matches, sorted,
+    /// `find` with `$text`: the scored matches, sorted,
     /// skipped, limited and projected, from a buffer.
     async fn find_text(
         &self,
@@ -3193,5 +3226,5 @@ mod diag;
 pub mod fusion;
 
 /// `$near`, `$geoNear`, `2dsphere` columns, search indexes and
-/// `$vectorSearch` (chapters 34 and 36, R6 round 3).
+/// `$vectorSearch`.
 pub mod models;

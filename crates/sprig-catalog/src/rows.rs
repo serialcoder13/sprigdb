@@ -1,5 +1,4 @@
-//! Settings rows inside a change, over any catalog backend (chapter 08,
-//! build steps 6 and 7).
+//! Settings rows inside a change, over any catalog backend.
 //!
 //! The ancestry copy ([`crate::ancestry`]) and setting writes
 //! ([`crate::settings`]) read and write `settings` rows inside the

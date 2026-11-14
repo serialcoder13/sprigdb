@@ -1,8 +1,7 @@
-//! Comparison keys and values for analytic reads (chapter 17, "Analytic
-//! reads (R3)"): what DataFusion compares, groups and sorts is never a
-//! MariaDB value itself but a key whose plain byte or number order is
-//! MariaDB's order for that column, and what it returns for a column is the
-//! shard's own text bytes.
+//! Comparison keys and values for analytic reads: what DataFusion compares,
+//! groups and sorts is never a MariaDB value itself but a key whose plain byte
+//! or number order is MariaDB's order for that column, and what it returns for
+//! a column is the shard's own text bytes.
 //!
 //! | Column | Key | Exact because |
 //! |---|---|---|

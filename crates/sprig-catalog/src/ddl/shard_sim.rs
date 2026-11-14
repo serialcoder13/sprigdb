@@ -1,6 +1,5 @@
-//! The multi-shard DDL state machine under crashes (chapter 21,
-//! "Testing"): a simulated tenant whose tables live on several shards of
-//! a table group, changed through [`DdlEngine`] while the simulation
+//! The multi-shard DDL state machine under crashes: a simulated tenant
+//! whose tables live on several shards of a table group, changed through [`DdlEngine`] while the simulation
 //! injects a crash at every step (before each shard, during each undo,
 //! before publishing), refusals on one shard (a `CHECK` that a shard's rows
 //! violate), and lost connections before or after a statement took effect.
@@ -84,7 +83,7 @@ struct State {
 struct Sim {
     st: Mutex<State>,
     group: Vec<SchemaName>,
-    /// Shards a simulated split holds (chapter 20's shard locks).
+    /// Shards a simulated split holds (the mover's shard locks).
     held: Mutex<Vec<SchemaName>>,
 }
 
@@ -1113,9 +1112,8 @@ async fn a_running_job_holds_its_shards_for_splits() {
     assert!(jobs_on_shards(&env.snap().await.settings, &[shard(2)]).is_empty());
 }
 
-/// Chapter 21 open question 10 (R1 integration): a schema change waits
-/// for a split that holds one of its shards, and refuses when the wait
-/// runs out, changing nothing.
+/// A schema change waits for a split that holds one of its shards, and
+/// refuses when the wait runs out, changing nothing.
 #[tokio::test]
 async fn a_change_refuses_while_a_split_holds_a_shard() {
     let env = Env::new(3).await;
@@ -1152,7 +1150,7 @@ async fn a_change_waits_for_a_split_and_holds_its_shards_meanwhile() {
         tokio::spawn(async move { engine.execute(&req(stmt, &sql), &*sim).await.map(|_| ()) })
     };
     // While it waits, its intent row holds the shards: a new split of
-    // any of them would wait for it (chapter 20's side).
+    // any of them would wait for it (the mover's side).
     let mut seen = false;
     for _ in 0..20 {
         let rows = env.snap().await.settings;

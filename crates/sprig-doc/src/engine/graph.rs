@@ -16,7 +16,7 @@ use crate::agg::{AggLimits, GraphSpec};
 impl Engine {
     /// `$graphLookup` over `docs`: the searches of up to [`BATCH`] input
     /// documents run in step, each level one read of the `from`
-    /// collection for all of them (M5, decision S77); each search takes
+    /// collection for all of them; each search takes
     /// the documents its own level filter matches.
     pub(super) async fn graph_lookup(
         &self,

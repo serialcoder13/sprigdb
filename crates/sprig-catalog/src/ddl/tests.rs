@@ -254,7 +254,7 @@ async fn the_whole_life_of_a_database_and_a_table() {
     assert_eq!(env.exec.names(&s, ObjectKind::Table), ["orders"]);
     assert!(
         env.exec.has_object(&s, ObjectKind::Table, "__sprig_dtx"),
-        "CREATE DATABASE made chapter 18's decision table"
+        "CREATE DATABASE made the distributed-transaction decision table"
     );
     assert!(
         env.object("__sprig_dtx").is_none(),
@@ -408,7 +408,7 @@ async fn existence_errors_and_notes_read_like_mariadb() {
         .unwrap();
     assert_eq!(o.notes[0].code, 1007);
     assert_eq!(o.version, None);
-    // Decision PF6: the no-op names the committed version it read, so the
+    // The no-op names the committed version it read, so the
     // session's next statement reads at least that snapshot.
     assert_eq!(o.seen, Some(before));
     let e = env
@@ -581,7 +581,7 @@ async fn a_refused_statement_rolls_back_without_a_version() {
 
     // CREATE DATABASE whose schema is made but whose second statement (the
     // transactions' decision table) is refused: the new schema goes too
-    // (r2close; r2kind's leftover left such schemas behind).
+    // (they used to be left behind).
     env.exec.inject(Fault::Pass);
     env.exec.inject(Fault::Refuse(SprigError::backend(
         1142,
@@ -757,7 +757,7 @@ impl OwnerCheck for AllGone {
 
 #[tokio::test]
 async fn a_job_its_engine_abandoned_is_resolved_by_the_next_ddl_at_once() {
-    // bugfix-38: the next DDL on the target would wait `ddl_wait`, then
+    // The next DDL on the target would wait `ddl_wait`, then
     // fail with 39071 until the reconciler, 15 minutes later.
     let patient = |env: &Env| {
         env.engine().with_opts(DdlOpts {
@@ -921,7 +921,7 @@ impl JobExecutors for OneCluster {
 
 #[tokio::test]
 async fn the_janitor_resolves_an_abandoned_job_without_another_ddl() {
-    // bugfix-38: nothing else touches the table; the job still goes
+    // Nothing else touches the table; the job still goes
     // within seconds, not after the reconciler's 15 minutes.
     let Env { v, exec } = billing_with_orders().await;
     let exec = Arc::new(exec);

@@ -1,8 +1,7 @@
-//! Data-group shard maps and the routing lookup (chapter 15, "Shard maps
-//! in etcd", "Hashing and routing", "Pre-splitting").
+//! Data-group shard maps and the routing lookup.
 //!
-//! The record in etcd is `sprig_catalog::placement::ShardMap` (chapter
-//! 23's JSON form, range starts as decimal strings) at
+//! The record in etcd is `sprig_catalog::placement::ShardMap` (its JSON
+//! form, range starts as decimal strings) at
 //! `/sprig/dc/<dc>/shardmaps/<tenant>/<group>`. [`ShardMap`] is its parsed
 //! form: starts as `u64`, so [`ShardMap::route`] is a binary search.
 //! [`ShardMapStore`] reads and writes maps with compare-and-put on the
@@ -139,7 +138,7 @@ impl ShardMap {
 
     /// A new group's map with `n` ranges of equal width,
     /// `lo[i] = floor(i · 2^64 / n)`, range `i` on `clusters[i mod len]`,
-    /// shards `1..=n`, epochs 1 (chapter 15, "Pre-splitting").
+    /// shards `1..=n`, epochs 1 (pre-splitting).
     ///
     /// # Errors
     /// `Internal` for `n = 0` or no clusters.
@@ -248,7 +247,7 @@ impl ShardMap {
     }
 }
 
-/// Routes one key: normalize, hash, binary search (chapter 15, `route`).
+/// Routes one key: normalize, hash, binary search.
 ///
 /// # Errors
 /// What normalization returns. A map whose digest isn't `spec`'s is

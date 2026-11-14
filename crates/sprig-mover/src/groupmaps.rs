@@ -1,6 +1,5 @@
-//! [`MapIo`] on a table group's shard map (chapter 15, "Shard maps in
-//! etcd"; chapter 20): the hold, commit and release of a split, merge or
-//! shard move.
+//! [`MapIo`] on a table group's shard map: the hold, commit and release of
+//! a split, merge or shard move.
 //!
 //! The job's source shards are ranges of the group's map. A hold marks
 //! each `HELD` with the holder text `<job uuid>#<owner token>` and the
@@ -10,7 +9,7 @@
 //! as the job that made them (so a retried commit after a lost reply, or a
 //! successor worker, can tell the cutover committed). `map_version` and
 //! `next_shard_id` rise. The feed's handoff record for the group is written
-//! in the same etcd transaction (chapter 38, "Ownership history").
+//! in the same etcd transaction.
 //!
 //! [`MapState`] for such a job: before the commit, the sources' cluster
 //! and epoch, and their hold; after it, the targets' cluster and epoch,
@@ -43,7 +42,7 @@ pub struct GroupMapIo {
     sources: Vec<u32>,
     targets: Vec<(u32, HashRange)>,
     to: ClusterId,
-    /// A re-key's new `key_spec_digest`, written by the flip (chapter 16):
+    /// A re-key's new `key_spec_digest`, written by the flip:
     /// gateways route the new shards by the new key from then on.
     new_digest: Option<u64>,
 }

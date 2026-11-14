@@ -1,10 +1,9 @@
-//! The directory's versions, for invalidation (chapter 08, "Cache load and
-//! invalidation"; chapter 23, "Watches, caching and epochs in gateways").
+//! The directory's versions, for invalidation.
 //!
 //! The directory entry `/sprig/g/tenants/<tenant_id>` carries
 //! `catalog_version` and `auth_version`, allocated there before a catalog
 //! change commits, so a cache that follows it never misses an
-//! invalidation. Directory entries are single keys: chapter 23 reads them
+//! invalidation. Directory entries are single keys: gateways read them
 //! through rather than caching them lazily, and gateways don't mirror the
 //! whole directory.
 //!
@@ -188,7 +187,7 @@ impl std::fmt::Debug for DirectoryWatch {
 const WATCH_WAIT: Duration = Duration::from_secs(2);
 
 impl DirectoryWatch {
-    /// Starts watching `tenants/` in `store`, the global tier (in R0's
+    /// Starts watching `tenants/` in `store`, the global tier (in
     /// single-etcd mode the same etcd as the DC tier; tests may pass a
     /// private tier standing in for it, as [`DirectoryAllocator`] does).
     ///

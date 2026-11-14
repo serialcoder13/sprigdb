@@ -1,4 +1,4 @@
-//! Where collection metadata lives (chapter 31, "Catalog tables").
+//! Where collection metadata lives.
 //!
 //! The engine reads and changes a collection's metadata ([`CollMeta`]:
 //! table, uuid, path registry, indexes, options) only through a
@@ -6,12 +6,12 @@
 //!
 //! - the gateway's implementation keeps it in the tenant catalog's
 //!   `collections`, `doc_indexes` and `promoted_fields`, changed through
-//!   chapter 08's versioned changes and read from the gateway's cached
+//!   the catalog's versioned changes and read from the gateway's cached
 //!   snapshot, so a command costs no metadata read
 //!   (`sprig_gateway::mongo::catalog`);
 //! - [`TableCatalog`] keeps it in a hidden table `__sprig_doc_meta` in
 //!   each logical database, read at the start of every command. It was
-//!   R5's interim storage (`decisions/r5-interim.md`, D1); it remains for
+//!   the first storage; it remains for
 //!   the engine's tests straight on MariaDB, and the gateway reads it once
 //!   per database to migrate old collections into the catalog.
 
@@ -70,7 +70,7 @@ pub trait DocCatalog: Send + Sync + Debug {
     ) -> Result<(), MongoError>;
 
     /// Adds `paths` to the path registry, or marks it full, before a
-    /// write that holds them commits (chapter 31's `check_flags`).
+    /// write that holds them commits.
     async fn add_array_paths(
         &self,
         sql: &mut dyn SqlRunner,

@@ -1,4 +1,4 @@
-//! A hand-made two-shard tenant, routed live (chapter 15): the shard maps
+//! A hand-made two-shard tenant, routed live: the shard maps
 //! live in etcd and reach the code through `ShardMapCache`; shard 1 is on
 //! the single node, shard 2 on the replication primary.
 //!

@@ -1,4 +1,4 @@
-//! R8 round 6 (`Plan::Graph`, decision G52): `GRAPH_TABLE` joined with
+//! `Plan::Graph`: `GRAPH_TABLE` joined with
 //! sharded SQL tables whose shards sit on two clusters, through a gateway,
 //! compared with the same statements on one unsharded MariaDB.
 //!
@@ -353,7 +353,7 @@ async fn graph_table_joins_sharded_tables_on_two_clusters() {
             "sharding.min_shards",
             "2",
             "--reason",
-            "r8six graph_table",
+            "graph_table live test",
         ],
     );
     g.query_drop("DROP GRAPH IF EXISTS r8six_gt.g")
@@ -459,7 +459,7 @@ async fn graph_table_joins_sharded_tables_on_two_clusters() {
             compared += 1;
         }
     }
-    // R8 round 7 (G61): integer filters on graph columns go into the
+    // Integer filters on graph columns go into the
     // Cypher; every answer still equals the reference.
     let filtered = [
         "SELECT x.pid, x.fid, o.id FROM {G} AS x JOIN orders o ON o.cust = x.fid WHERE x.fid > 10 AND x.pid <= 40 ORDER BY x.pid, x.fid, o.id",
@@ -496,7 +496,7 @@ async fn graph_table_joins_sharded_tables_on_two_clusters() {
         ex.contains("|GraphFilter|") && ex.contains("valueType(f.id)"),
         "{ex}"
     );
-    // R8 round 7 (G63): `?` in a prepared GRAPH_TABLE statement, inside
+    // `?` in a prepared GRAPH_TABLE statement, inside
     // the call (a Cypher value) and outside it (a SQL value).
     let pq = format!(
         "SELECT x.pid, x.fid, o.id FROM {} AS x JOIN orders o ON o.cust = x.fid WHERE o.id > ? ORDER BY x.pid, x.fid, o.id",
@@ -596,7 +596,7 @@ async fn graph_table_joins_sharded_tables_on_two_clusters() {
     }
 }
 
-/// R8 round 7 (decision G62): a `GRAPH_TABLE` statement that reads no
+/// A `GRAPH_TABLE` statement that reads no
 /// distributed table takes rows past the 16 MB inline limit from session
 /// temporary tables instead of failing with 39903.
 #[tokio::test]
@@ -649,7 +649,7 @@ async fn graph_table_rows_past_the_inline_limit() {
         t.elapsed()
     );
     assert_eq!(got, vec![format!("{N}|{}|1|{N}", N * LEN)]);
-    // Ordered rows with a filter that the graph applies (G61).
+    // Ordered rows with a filter that the graph applies.
     let got = rows(
         &mut g,
         "SELECT x.id, LENGTH(x.s) FROM GRAPH_TABLE (r8seven_big.g MATCH (n IS Big) \

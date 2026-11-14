@@ -1,4 +1,4 @@
-//! Spilling to disk (M5, decisions S72–S76): `allowDiskUse` for the
+//! Spilling to disk: `allowDiskUse` for the
 //! in-gateway stages.
 //!
 //! - **Where:** spill files live in one directory per gateway process,
@@ -157,7 +157,7 @@ fn sanitize(owner: &str) -> String {
 }
 
 /// Sets the spill directory and caps, creates this process's directory,
-/// and removes the directories of gateways that are gone (S74). Returns
+/// and removes the directories of gateways that are gone. Returns
 /// this process's directory.
 ///
 /// # Errors
@@ -827,7 +827,7 @@ fn sort_buf(buf: &mut Vec<Document>, cmp: &Cmp, limit: Option<usize>) {
 
 /// Sorts `input` stably by `cmp`, keeping the first `limit` documents:
 /// in memory while the documents held fit `budget` bytes, else as sorted
-/// runs on disk merged on reading (S73). `stage` names the 292 when the
+/// runs on disk merged on reading. `stage` names the 292 when the
 /// command may not spill.
 ///
 /// # Errors

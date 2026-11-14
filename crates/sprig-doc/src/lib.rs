@@ -1,13 +1,13 @@
 //! `sprig-doc`: the document engine.
 //!
-//! Layer: 2 data layer. Design: [chapter 31](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/31-documents.md) (Documents) of the SprigDB low-level design.
+//! Layer: 2 data layer.
 //!
 //! - [`json`]: JSON rendering, the type map and the way back to BSON;
 //! - [`keyenc`]: the order-preserving `_id` encoding and MongoDB's
 //!   comparison order;
-//! - [`sessions`]: retryable-write records (chapter 30);
+//! - [`sessions`]: retryable-write records;
 //! - [`geo`]: `$geoWithin`, `$geoIntersects`, `$near`, `$geoNear` and
-//!   `2dsphere` columns (chapter 36, R6 round 3).
+//!   `2dsphere` columns.
 
 // MongoDB operator and type names fill the docs; the matcher and
 // translator mirror MongoDB's single-letter notation (p, v, d, k) and
@@ -21,11 +21,11 @@
 
 pub mod agg;
 pub mod catalog;
-/// Collations (chapter 31, R5 round 4).
+/// Collations.
 pub mod collation;
 pub mod engine;
 pub mod filter;
-/// MongoDB's geospatial operators (chapter 36, R6 round 3).
+/// MongoDB's geospatial operators.
 pub mod geo;
 pub mod heavy;
 /// Index hints as MariaDB `FORCE INDEX` (M6).
@@ -44,7 +44,7 @@ pub mod sessions;
 /// Spilling to disk: `allowDiskUse` (M5).
 pub mod spill;
 pub mod sql;
-/// `$text`, `$search` and `$searchMeta` (chapter 39, R5 round 5).
+/// `$text`, `$search` and `$searchMeta`.
 pub mod text;
 pub mod translate;
 pub mod update;

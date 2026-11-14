@@ -1,4 +1,4 @@
-//! The graph executor (chapter 43, "Algorithms"; build steps 9–13): runs
+//! The graph executor: runs
 //! a parsed statement over a [`GraphStore`] under the budgets.
 //!
 //! Each clause turns a table of binding rows into the next:
@@ -37,7 +37,7 @@ use crate::eval::{Params, Row, eval};
 use crate::store::{EdgeRow, GraphStore, NodeRow};
 use crate::value::{Key, Node, Rel, Value, props_from_json};
 
-/// The traversal budgets of one statement (chapter 43, "Configuration").
+/// The traversal budgets of one statement.
 #[derive(Debug, Clone)]
 pub struct Budgets {
     /// `graph.max_hops`.
@@ -97,7 +97,7 @@ pub struct Output {
     pub profiled: bool,
     /// Neo4j's notifications for the statement (see [`notifications`]).
     pub notifications: Vec<Notification>,
-    /// A read's final `RETURN` failed on a row (R8 round 8): `rows` are
+    /// A read's final `RETURN` failed on a row: `rows` are
     /// the rows before it, and the error comes after them, as Neo4j's lazy
     /// results give it (on `PULL`, after the first records).
     pub late_error: Option<Arc<SprigError>>,
@@ -248,7 +248,7 @@ pub fn budget_error(reason: &'static str, detail: impl std::fmt::Display) -> Spr
 /// Runs `q` over `store`.
 ///
 /// # Errors
-/// 39900–39909 as the chapter lists; the store's errors.
+/// 39900–39909 for graph statement errors; the store's errors.
 pub async fn run(
     store: &mut dyn GraphStore,
     q: &Query,
@@ -260,7 +260,7 @@ pub async fn run(
 
 /// [`run`], but a read's top `RETURN` that fails on a row answers the
 /// rows before it with the error in [`Output::late_error`] (Bolt: records,
-/// then the failure on `PULL`, as Neo4j's lazy results; R8 round 8).
+/// then the failure on `PULL`, as Neo4j's lazy results).
 ///
 /// # Errors
 /// As [`run`].
@@ -361,7 +361,7 @@ pub(crate) fn clauses_write(cs: &[Clause]) -> bool {
 }
 
 /// The plan `EXPLAIN` shows: one line per clause and hop, with its tier
-/// (`EXPLAIN FORMAT=SPRIG` of `GRAPH_TABLE` shows them too, R8 round 6).
+/// (`EXPLAIN FORMAT=SPRIG` of `GRAPH_TABLE` shows them too).
 #[must_use]
 pub fn explain(q: &Query) -> Vec<String> {
     let mut out = Vec::new();
@@ -416,10 +416,10 @@ enum Lifted {
     Subquery(SubqueryKind, Query),
     /// A list comprehension, quantifier or `reduce` with a pattern
     /// predicate or subquery inside, which depends on its own variable
-    /// (R8 round 10, LDBC IC10 and IC14).
+    /// (LDBC IC10 and IC14).
     Deep(Expr),
     /// `startNode(r)` (`true`) or `endNode(r)`: the node, read from the
-    /// store (R8 round 10, LDBC IC14).
+    /// store (LDBC IC14).
     EndNode(Expr, bool),
 }
 
@@ -495,7 +495,7 @@ pub(crate) struct Exec<'a> {
     late_error: Option<SprigError>,
 }
 
-/// The variables of `row` that none of `rest` names (R8 round 10): what
+/// The variables of `row` that none of `rest` names: what
 /// the rest of the query part never reads, so rows needn't carry it. A
 /// name counts as used when it appears anywhere in the clauses' syntax
 /// tree (as a variable, a pattern's name, or even a string), and nothing
@@ -513,7 +513,7 @@ fn dead_vars(row: Option<&Row>, rest: &[Clause]) -> Vec<String> {
 }
 
 /// Whether duplicates of rows coming out of a `MATCH` can't change the
-/// result (chapter 43's `Mult`): the next clause is `WITH`/`RETURN
+/// result: the next clause is `WITH`/`RETURN
 /// DISTINCT`, or aggregates only with duplicate-insensitive aggregates.
 fn dup_insensitive(rest: &[Clause]) -> bool {
     let Some(Clause::With(p) | Clause::Return(p)) = rest.first() else {
@@ -563,7 +563,7 @@ impl Exec<'_> {
     /// Rough memory of a binding table: 96 bytes a value.
     /// `graph.max_memory_mb` over `rows`: each row's slots and what its
     /// values hold ([`crate::value::approx_bytes`]), from a sample of up to
-    /// 64 rows spread over them (R8 round 10, decision G81; before, 96
+    /// 64 rows spread over them (before, 96
     /// bytes a slot, which missed the elements' properties, so one LDBC
     /// statement could hold a gigabyte).
     pub(crate) fn check_memory(&self, rows: &[Row]) -> Result<()> {
@@ -784,8 +784,8 @@ impl Exec<'_> {
                     .collect()
             }
             Lifted::Subquery(SubqueryKind::Collect, q) if comprehension(q).is_some() => {
-                // A pattern comprehension for every row at once (R8 round
-                // 10, IC14): one match over all rows, each tagged, then
+                // A pattern comprehension for every row at once (LDBC
+                // IC14): one match over all rows, each tagged, then
                 // the map expression and the results grouped back.
                 let Some((patterns, where_, map)) = comprehension(q) else {
                     return Ok(Vec::new());
@@ -1174,7 +1174,7 @@ impl Exec<'_> {
         Ok((next, new_cols))
     }
 
-    /// `CALL { } IN TRANSACTIONS` (R8 round 8): the rows in batches of
+    /// `CALL { } IN TRANSACTIONS`: the rows in batches of
     /// `OF n ROWS` (1,000), each batch's subquery run and committed on its
     /// own transaction; a failed batch rolls back, then `ON ERROR` decides:
     /// `FAIL` ends the statement (earlier batches stay committed, as in
@@ -1340,7 +1340,7 @@ impl Exec<'_> {
                 }
                 Clause::Unwind { expr, alias } => {
                     // Variables no later clause names are dropped before
-                    // each row is copied once per element (R8 round 10:
+                    // each row is copied once per element (LDBC
                     // IC9's `WITH collect(f) AS friends UNWIND friends AS
                     // friend` copied the whole list into every row).
                     let dead = dead_vars(rows.first(), &clauses[i + 1..]);
@@ -1723,7 +1723,7 @@ impl Exec<'_> {
                 None
             };
             // Items with a pattern predicate or subquery, for every row at
-            // once (R8 round 10: IC7's `RETURN ..., not((liker)-[:KNOWS]-
+            // once (LDBC IC7's `RETURN ..., not((liker)-[:KNOWS]-
             // (person))` ran one search per row, thousands of round trips).
             let mut rows = rows;
             let mut pre: Vec<Option<std::vec::IntoIter<Value>>> = Vec::with_capacity(items.len());
@@ -1794,7 +1794,7 @@ impl Exec<'_> {
                 }
                 a.1.cmp(&b.1)
             };
-            // ORDER BY ... LIMIT n (R8 round 10, LDBC IC9): only the first
+            // ORDER BY ... LIMIT n (LDBC IC9): only the first
             // SKIP + LIMIT rows are put in order.
             let top = self
                 .const_int(p.limit.as_ref(), "LIMIT")?

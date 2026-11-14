@@ -1,14 +1,14 @@
-//! Where a tenant's catalog lives (chapter 08, "Where the catalog lives").
+//! Where a tenant's catalog lives.
 //!
 //! The catalog is a shard of reserved table group 0:
 //! `/sprig/dc/<dc_id>/shardmaps/<tenant_id>/0` in the tenant's home DC
 //! tier maps the whole range to `t<tenant>_sprig` on one cluster. The
-//! record is chapter 15's shard map in chapter 23's JSON form: one range at
+//! record is an ordinary shard map in its JSON form: one range at
 //! `lo = "0"` with `hi: null` (2^64), so every gateway uses one code path
 //! for the catalog and for data groups.
 //!
-//! Tenant bootstrap (step 9) writes it once, guarded by `Missing`, and the
-//! mover rewrites it when it moves the catalog (chapter 10).
+//! Tenant bootstrap writes it once, guarded by `Missing`, and the
+//! mover rewrites it when it moves the catalog.
 
 use serde::{Deserialize, Serialize};
 use sprig_common::Result;
@@ -24,9 +24,9 @@ pub const CATALOG_GROUP: u32 = 0;
 pub enum MapRole {
     /// The tenant's home DC.
     Home,
-    /// A standby DC (chapter 25).
+    /// A standby DC.
     Standby,
-    /// Kept after a failover until reconciled (chapter 25).
+    /// Kept after a failover until reconciled.
     Quarantined,
 }
 
@@ -57,8 +57,7 @@ pub struct MapRange {
     /// Serving or held.
     pub state: RangeState,
     /// The mover job holding the range (while `Held`) or that last moved
-    /// it (after its cutover committed): the job id's canonical text
-    /// (chapter 10, "Cutover").
+    /// it (after its cutover committed): the job id's canonical text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
     /// While `Held`: gateways release queued statements by then, in
@@ -67,7 +66,7 @@ pub struct MapRange {
     pub hold_until_ms: Option<u64>,
 }
 
-/// A shard map record (chapter 23, "DC tier"; chapter 15).
+/// A shard map record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShardMap {
     /// The tenant.

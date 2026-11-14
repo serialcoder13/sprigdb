@@ -1,5 +1,4 @@
-//! Lockout and password policies (chapter 14, "Lockout and password
-//! policies"; build step 5).
+//! Lockout and password policies.
 //!
 //! **Lockout.** Failed-login tracking is on when the account's
 //! `FAILED_LOGIN_ATTEMPTS` (else `auth.failed_login_attempts`) and its lock
@@ -220,8 +219,8 @@ pub trait LoginStateStore: Send + Sync + 'static {
     ) -> Result<bool>;
 
     /// Stores the SCRAM verifiers missing from the password generation of
-    /// `verifier_id`, which `password` just matched at a login (chapter 14,
-    /// "SCRAM verifiers": upgrade on login). Returns the mechanisms added,
+    /// `verifier_id`, which `password` just matched at a login (upgrade on
+    /// login). Returns the mechanisms added,
     /// comma-separated, or `None` if nothing was missing. The default
     /// stores nothing (stores without a catalog writer).
     ///

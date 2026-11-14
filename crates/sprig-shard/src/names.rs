@@ -1,8 +1,7 @@
-//! Physical schema names (chapter 15, "Physical schemas").
+//! Physical schema names.
 //!
-//! The patterns live in `sprig_common::names`; these are the chapter's
-//! named helpers, plus picking a tenant's schemas out of a cluster's
-//! database list.
+//! The patterns live in `sprig_common::names`; these are named helpers,
+//! plus picking a tenant's schemas out of a cluster's database list.
 
 use sprig_common::ids::{DbId, GroupId, ShardId, TenantId};
 use sprig_common::names::SchemaName;
@@ -13,7 +12,7 @@ pub fn shard_schema(t: TenantId, db: DbId, g: GroupId, s: ShardId) -> String {
     SchemaName::shard(t, db, g, s).to_string()
 }
 
-/// `t<tenant>_d<db>_ref` (R1).
+/// `t<tenant>_d<db>_ref`.
 #[must_use]
 pub fn reference_schema(t: TenantId, db: DbId) -> String {
     SchemaName::reference(t, db).to_string()

@@ -1,12 +1,12 @@
-//! Chapter 17's settings (`router.*`), declared next to the code (chapter
-//! 03, "Declaring a key"), and [`RouterConfig`], what one statement reads.
+//! The router's settings (`router.*`), declared next to the code, and
+//! [`RouterConfig`], what one statement reads.
 //!
-//! Only the keys the router uses are registered: R1's, and R3's
+//! Only the keys the router uses are registered: the core routing keys,
 //! `router.gather.*` for gathered reads and `router.analytics.*` (with
-//! chapter 35's `analytics.datafusion_memory_mb` and
-//! `analytics.max_concurrent_per_gateway`) for analytic reads; the cluster-local fallback,
-//! pull-out subqueries, backend statement caching and shadow mode wait for
-//! their code. Scopes follow the chapter's table: **T** is tenant, dc and
+//! `analytics.datafusion_memory_mb` and
+//! `analytics.max_concurrent_per_gateway`) for analytic reads; the
+//! cluster-local fallback, pull-out subqueries, backend statement caching
+//! and shadow mode wait for their code. Scopes: **T** is tenant, dc and
 //! global; **G** is dc and global (one value per gateway).
 
 use sprig_settings::{Apply, HardBounds, Scopes, Setting, SettingCtx};
@@ -65,34 +65,34 @@ key! {
 }
 
 key! {
-    /// `router.gather.max_rows` (R3): rows a gathered read may copy; 0
+    /// `router.gather.max_rows`: rows a gathered read may copy; 0
     /// turns gathered reads off (the statements are refused with 39420 as
     /// before).
     GATHER_MAX_ROWS = "router.gather.max_rows", TENANT_DC, 100_000, 0, 100_000_000,
     "Rows a gathered read may copy (0: off)"
 }
 key! {
-    /// `router.gather.max_concurrent` (R3): gathered reads one gateway
+    /// `router.gather.max_concurrent`: gathered reads one gateway
     /// runs at once (read when the first one runs).
     GATHER_MAX_CONCURRENT = "router.gather.max_concurrent", GATEWAY, 4, 1, 1024,
     "Gathered reads per gateway at once"
 }
 
 key! {
-    /// `router.analytics.max_rows` (R3): rows an analytic read may read
-    /// from the shards (chapter 17, "Analytic reads (R3)").
+    /// `router.analytics.max_rows`: rows an analytic read may read
+    /// from the shards.
     ANALYTICS_MAX_ROWS = "router.analytics.max_rows", TENANT_DC, 50_000_000, 1, 10_000_000_000,
     "Rows an analytic read may read from the shards"
 }
 key! {
-    /// `router.analytics.spill_mb` (R3): disk an analytic read's sorts and
+    /// `router.analytics.spill_mb`: disk an analytic read's sorts and
     /// aggregates may spill to; 0 refuses (39421) instead of spilling.
     ANALYTICS_SPILL_MB = "router.analytics.spill_mb", TENANT_DC, 4096, 0, 1_048_576,
     "Disk an analytic read may spill to (0: none)"
 }
 
-/// `router.analytics.mode` (R3): `off`, `fallback` or `prefer` (chapter
-/// 17, "Analytic reads (R3)", the selection rule).
+/// `router.analytics.mode`: `off`, `fallback` or `prefer` (which gathered
+/// reads run as analytic reads).
 pub static ANALYTICS_MODE: Setting<std::borrow::Cow<'static, str>> = Setting {
     key: "router.analytics.mode",
     default: std::borrow::Cow::Borrowed("fallback"),
@@ -105,8 +105,8 @@ pub static ANALYTICS_MODE: Setting<std::borrow::Cow<'static, str>> = Setting {
 };
 sprig_settings::register!(ANALYTICS_MODE);
 
-/// `analytics.datafusion_memory_mb` (chapter 35's key, used from R3 by
-/// chapter 17's analytic reads): DataFusion's memory pool per statement.
+/// `analytics.datafusion_memory_mb` (an `analytics.*` key the router's
+/// analytic reads use too): DataFusion's memory pool per statement.
 pub static DATAFUSION_MEMORY_MB: Setting<u64> = Setting {
     key: "analytics.datafusion_memory_mb",
     default: 1024,
@@ -119,7 +119,7 @@ pub static DATAFUSION_MEMORY_MB: Setting<u64> = Setting {
 };
 sprig_settings::register!(DATAFUSION_MEMORY_MB);
 
-/// `analytics.max_concurrent_per_gateway` (chapter 35's key): analytic
+/// `analytics.max_concurrent_per_gateway` (an `analytics.*` key): analytic
 /// reads one gateway runs at once (read when the first one runs).
 pub static ANALYTICS_MAX_CONCURRENT: Setting<u64> = Setting {
     key: "analytics.max_concurrent_per_gateway",
@@ -133,7 +133,7 @@ pub static ANALYTICS_MAX_CONCURRENT: Setting<u64> = Setting {
 };
 sprig_settings::register!(ANALYTICS_MAX_CONCURRENT);
 
-/// `fk.lock_wait_seconds` (chapter 19, R3): how long a foreign-key probe
+/// `fk.lock_wait_seconds`: how long a foreign-key probe
 /// waits for a row lock (`LOCK IN SHARE MODE WAIT n`) before 1205.
 pub static FK_LOCK_WAIT_SECONDS: Setting<u64> = Setting {
     key: "fk.lock_wait_seconds",
@@ -147,7 +147,7 @@ pub static FK_LOCK_WAIT_SECONDS: Setting<u64> = Setting {
 };
 sprig_settings::register!(FK_LOCK_WAIT_SECONDS);
 
-/// What the router reads for one tenant: chapter 17's keys, resolved.
+/// What the router reads for one tenant: its keys, resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouterConfig {
     /// `router.max_parallel_shards`.
@@ -166,7 +166,7 @@ pub struct RouterConfig {
     pub gather_max_rows: u64,
     /// `router.gather.max_concurrent`.
     pub gather_max_concurrent: usize,
-    /// `fk.lock_wait_seconds` (chapter 19).
+    /// `fk.lock_wait_seconds`.
     pub fk_lock_wait_seconds: u64,
     /// Analytic reads (`router.analytics.*`, `analytics.*`).
     pub analytics: crate::analytics::AnalyticsLimits,

@@ -1,5 +1,4 @@
-//! `AUTO_INCREMENT` values from ID blocks (chapter 19, "ID blocks";
-//! chapter 17, "INSERT routing").
+//! `AUTO_INCREMENT` values from ID blocks.
 //!
 //! Every member of a sharded group with an `AUTO_INCREMENT` column takes
 //! its values from the gateway's block of the table's `sequences` row, so

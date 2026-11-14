@@ -1,5 +1,5 @@
-//! The Kafka target (chapter 51, "Kafka target"; build step 10): a
-//! producer on `sprig-proto-kafka`'s codec, written in-house.
+//! The Kafka target: a producer on `sprig-proto-kafka`'s codec, written
+//! in-house.
 //!
 //! ```text
 //! connect(broker): the address checked by the destination rules
@@ -95,7 +95,7 @@ const API_END_TXN: i16 = 26;
 
 /// Kafka's `Utils.murmur2` (seed `0x9747b28c`), bit for bit: the default
 /// partitioner's hash, so a key lands on the partition Java producers and
-/// chapter 45's streams choose.
+/// SprigDB's streams choose.
 #[must_use]
 #[allow(
     clippy::cast_possible_wrap,
@@ -383,7 +383,7 @@ async fn with_timeout<T>(
 }
 
 /// The version of `api` to use: our highest within the broker's range.
-/// `TEST CONNECTION` on a Kafka connection (R9, r9tests): its options,
+/// `TEST CONNECTION` on a Kafka connection: its options,
 /// then each bootstrap broker in turn until one answers (TCP, TLS,
 /// `ApiVersions`, SASL), then a metadata call naming the brokers. Nothing
 /// is produced. Steps as `(step, Ok(detail) | Err(reason))`.

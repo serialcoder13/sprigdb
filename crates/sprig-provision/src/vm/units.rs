@@ -57,7 +57,7 @@ fn sprig_role(out: &mut String, desc: &str, role: &str, watchdog: &str, extra: &
         out,
         "[Unit]\n\
          Description=SprigDB {desc}\n\
-         Documentation=https://github.com/serialcoder13/sprigdb\n\
+         Documentation=https://github.com/modlix-india/sprigdb\n\
          After=network-online.target\n\
          Wants=network-online.target\n\
          \n\
@@ -150,7 +150,7 @@ pub fn unit(u: Unit) -> String {
                 s,
                 "[Unit]\n\
                  Description=SprigDB node agent\n\
-                 Documentation=https://github.com/serialcoder13/sprigdb\n\
+                 Documentation=https://github.com/modlix-india/sprigdb\n\
                  After=network-online.target\n\
                  Wants=network-online.target\n\
                  Before=mariadb.service\n\

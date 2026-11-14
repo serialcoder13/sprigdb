@@ -1,5 +1,4 @@
-//! `$text`, `$search` and `$searchMeta` (chapter 39, "Translating
-//! queries", MongoDB; R5 round 5).
+//! `$text`, `$search` and `$searchMeta`.
 //!
 //! Search indexes live outside the engine: the gateway's search service
 //! keeps them ([`TextSearch`]) and answers a call with keys and scores.
@@ -145,7 +144,7 @@ pub trait TextSearch: Send + Sync + Debug {
         call: TextCall,
     ) -> Result<TextHits, MongoError>;
 
-    /// What a search runs on, for `explain` (decision S25): the index, its
+    /// What a search runs on, for `explain`: the index, its
     /// copies and the parsed query; with `execute`, the copy's hit count
     /// and time too, unless a row policy binds the session.
     async fn plan(
@@ -294,7 +293,7 @@ impl Engine {
         mut text: Document,
         rest: &Document,
     ) -> Result<Vec<Document>, MongoError> {
-        // `$caseSensitive` and `$diacriticSensitive` (M3, decision S101):
+        // `$caseSensitive` and `$diacriticSensitive`:
         // the index matches without case and diacritics, then the matches
         // are filtered as MongoDB does.
         let case = matches!(text.remove("$caseSensitive"), Some(Bson::Boolean(true)));
@@ -320,7 +319,7 @@ impl Engine {
         Ok(docs)
     }
 
-    /// MongoDB's `explain` of a search (decision S25): `find` with
+    /// MongoDB's `explain` of a search: `find` with
     /// `$text`, or `aggregate` whose first stage is `$search`,
     /// `$searchMeta` or a `$match` with `$text`. `None` for other
     /// commands. `verbosity` other than `queryPlanner` runs the search and

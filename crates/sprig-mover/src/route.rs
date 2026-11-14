@@ -1,5 +1,4 @@
-//! Hash-range routing for split, merge and shard-move jobs (chapter 10,
-//! "Filtering and routing"; chapter 20).
+//! Hash-range routing for split, merge and shard-move jobs.
 //!
 //! A job whose spec routes by hash range (`Routing::HashRange`) reads one
 //! or more shard schemas of a table group on one cluster and writes new
@@ -12,7 +11,7 @@
 //! - a **shard move** reads one shard and writes one shard, with a new id,
 //!   on another cluster.
 //!
-//! Every member table carries `_sprig_rk` (chapter 15), so routing reads one
+//! Every member table carries `_sprig_rk`, so routing reads one
 //! `BIGINT UNSIGNED` from the row image: the mover never normalizes keys.
 //! [`ShardRoute::route_ops`] turns the engine's apply operations on source
 //! tables into operations on target tables. An upsert also deletes its keys
@@ -22,7 +21,7 @@
 //! position, each key is in at most one target, the one its current row
 //! routes to (the engine's invariant, per target).
 //!
-//! A **re-key** (chapter 16, `Routing::Rekey`) reads every shard of a
+//! A **re-key** (`Routing::Rekey`) reads every shard of a
 //! group and writes new shards of the same group covering the whole hash
 //! space: each row is hashed again under the new key from its own columns
 //! ([`RekeyRoute`]), its `_sprig_rk` is replaced by the new hash, and the
@@ -59,7 +58,7 @@ pub const RK_PREV_COLUMN: &str = "_sprig_rk_prev";
 /// the new key's hash recomputed from the row.
 pub type RekeyDigest = (String, RowDigest, Option<u64>, Option<u64>, Option<u64>);
 
-/// A re-key's routing (chapter 16): the new key and the columns each
+/// A re-key's routing: the new key and the columns each
 /// member supplies it from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RekeyRoute {
@@ -865,7 +864,7 @@ mod tests {
         );
     }
 
-    /// G31: the decision table the source lists for a shard schema is
+    /// Regression: the decision table the source lists for a shard schema is
     /// created in every new shard schema of a split.
     #[test]
     fn every_new_shard_schema_gets_the_decision_table() {

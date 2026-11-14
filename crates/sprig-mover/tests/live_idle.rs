@@ -1,5 +1,4 @@
-//! An idle tenant moves, and cancel works in every state (chapter 10,
-//! "Testing"; the R0 fixes before the 72-hour soak).
+//! An idle tenant moves, and cancel works in every state.
 //!
 //! Needs the Compose stack with its three clusters registered in etcd
 //! (`deploy/compose/gateway-dev.sh up`):

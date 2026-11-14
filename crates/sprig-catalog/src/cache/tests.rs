@@ -791,7 +791,7 @@ async fn a_lagging_replica_hands_over_to_the_writer() {
     assert!(replica >= 2 && writer >= 1, "{replica} {writer}");
 }
 
-/// Decision PF4: the directory moves before the catalog commits, so a
+/// The directory moves before the catalog commits, so a
 /// reader asking for the new version polls the committed version with a
 /// small read and loads in full once, when it is there.
 #[tokio::test]

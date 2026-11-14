@@ -1,4 +1,4 @@
-//! Object formats of the S3 target (chapter 51, "S3 target", Formats):
+//! Object formats of the S3 target:
 //! JSON Lines, CSV (RFC 4180) and Parquet, with gzip or zstd for the text
 //! formats (Parquet compresses its pages with zstd).
 //!

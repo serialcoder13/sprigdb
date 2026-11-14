@@ -1,6 +1,5 @@
 //! Compact JWS with `EdDSA` (Ed25519, RFC 8037) for SprigDB access tokens
-//! and export tickets (chapter 14, "SprigDB tokens and sessions"; chapter
-//! 44, "Exports").
+//! and export tickets.
 //!
 //! A token is `base64url(header) . base64url(payload) . base64url(sig)`;
 //! the header is `{"alg":"EdDSA","kid":...,"typ":...}`. Only `EdDSA` is
@@ -16,7 +15,7 @@ use sprig_common::{Result, SprigError};
 pub const ALG: &str = "EdDSA";
 /// `typ` of access tokens.
 pub const TYP_ACCESS: &str = "JWT";
-/// `typ` of export tickets (chapter 44).
+/// `typ` of export tickets.
 pub const TYP_EXPORT: &str = "sprig-export";
 /// Longest token accepted (a few hundred bytes in practice).
 pub const MAX_TOKEN_BYTES: usize = 8192;

@@ -1,5 +1,4 @@
-//! Bolt bookmarks (chapter 43, "Bolt front end", bookmarks; decision G9's
-//! follow-up): `SB1:` and base64url of {tenant, commit time, per-cluster
+//! Bolt bookmarks: `SB1:` and base64url of {tenant, commit time, per-cluster
 //! GTID positions}, then `.` and base64url of an HMAC-SHA256 tag.
 //!
 //! The key is the tenant's bookmark secret in its catalog (`graph_keys`),

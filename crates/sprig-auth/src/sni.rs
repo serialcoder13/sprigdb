@@ -1,5 +1,4 @@
-//! `listener.tenant_sni_suffixes` (chapter 04, "Configuration"; chapter
-//! 14, "Finding the tenant"): the DNS suffixes under which a TLS server
+//! `listener.tenant_sni_suffixes`: the DNS suffixes under which a TLS server
 //! name names a tenant, so `app` connecting to `acme.db.example.com` logs
 //! in to tenant `acme` without a dotted user name.
 //!

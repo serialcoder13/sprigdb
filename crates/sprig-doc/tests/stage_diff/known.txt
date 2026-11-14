@@ -1,5 +1,4 @@
-// Known differences from MongoDB 8.0.34 (decisions S60–S89 in
-// sprigdb-plan/decisions/r5-interim.md). One case name per line, then why.
+// Known differences from MongoDB 8.0.34. One case name per line, then why.
 win.addToSet#119 $addToSet over a whole partition comes out in MongoDB's hash-set order, which SprigDB doesn't reproduce; the members are the same
 win.sum.f#194 $stdDevSamp over a sliding window: one document differs in the last bit (MongoDB adds and removes values; SprigDB sums each window exactly)
 win.cov.S#268 covariance with decimals: last digits differ (MongoDB's running means mix double and decimal rounding)

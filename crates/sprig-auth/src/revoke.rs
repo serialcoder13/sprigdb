@@ -1,19 +1,18 @@
-//! The auth change feed: revocation (chapter 14, "Caching and
-//! revocation"; build step 8).
+//! The auth change feed: revocation.
 //!
 //! A drop, a lock, a password change or any other auth change commits with
 //! a new auth version in the tenant's directory entry. Every gateway's
 //! directory watch sees the entry move and its catalog cache reloads the
 //! tenant: at once when sessions here pin it, otherwise at the next login,
 //! which asks for the directory's version (`Freshness::Latest`). That is
-//! the path a setting change takes to every gateway (M0.3 measured 73 ms to
+//! the path a setting change takes to every gateway (measured at 73 ms to
 //! a second gateway).
 //!
 //! [`AuthChanges`] follows the cache's catalog load feed
 //! ([`TenantCache::loads`](sprig_catalog::TenantCache::loads)) and turns
 //! each load whose auth version moved into one [`AuthChange`]: the new
-//! snapshot (with every auth module's state, so chapter 29's privilege
-//! cache can follow it too) and the users it revokes, found by comparing
+//! snapshot (with every auth module's state, so the authorization
+//! privilege cache can follow it too) and the users it revokes, found by comparing
 //! the old and new [`TenantAuth`]:
 //!
 //! | Change | [`RevokeReason`] | Sessions close |

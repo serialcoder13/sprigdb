@@ -1,4 +1,4 @@
-//! Collations (chapter 31, "Collations"; R5 round 4).
+//! Collations.
 //!
 //! A command's `collation` option (`find`, `aggregate`, `count`,
 //! `distinct`, the writes' statements, `findAndModify`) changes how

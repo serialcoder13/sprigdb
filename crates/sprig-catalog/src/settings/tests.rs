@@ -1,7 +1,7 @@
-//! Setting writes (chapter 08 step 7) over the in-memory catalog and a
-//! `MemStore` directory: each check and its error, where bounds come from,
-//! the row a write leaves, warnings and decisions, and the M0.3 "done
-//! when" at the library level: an object-scope change takes effect within
+//! Setting writes over the in-memory catalog and a `MemStore` directory:
+//! each check and its error, where bounds come from, the row a write
+//! leaves, warnings and decisions, and, at the library level, that an
+//! object-scope change takes effect within
 //! seconds, and a value outside its bounds is refused.
 
 #![allow(clippy::unwrap_used, clippy::too_many_lines)]
@@ -74,7 +74,7 @@ static MAX_DATABASES: Setting<u64> = Setting {
 };
 
 /// A key in the process-wide registry of this test binary, for the
-/// `Settings` (whose registry is the global one) in the "done when" test.
+/// `Settings` (whose registry is the global one) in the object-scope end-to-end test.
 static OBJECT_LIMIT: Setting<u32> = Setting {
     key: "test_catalog.object_limit",
     default: 10,
@@ -748,9 +748,8 @@ impl CatalogSource for Via {
     }
 }
 
-/// M0.3 "done when", at the library level: "a setting changed at object
-/// scope takes effect within seconds, and a value outside its bounds is
-/// refused". A gateway-like reader holds a catalog cache invalidated by
+/// At the library level: a setting changed at object scope takes effect
+/// within seconds, and a value outside its bounds is refused. A gateway-like reader holds a catalog cache invalidated by
 /// the directory and a `ResolvedWatch` on the object's key; a write at
 /// object scope wakes it with the new value; a value outside the tenant's
 /// bounds is refused and changes nothing.

@@ -1,14 +1,14 @@
 //! `sprig-sinks`: continuous delivery from SprigDB sources to outside
-//! systems (chapter 51, R9).
+//! systems.
 //!
-//! Layer: 2 data layer. Design: [chapter 51](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/51-sinks.md) (Sinks) of the SprigDB low-level design.
+//! Layer: 2 data layer.
 //!
 //! - [`model`]: connections, sinks, tasks, records, batches, outcomes;
 //! - [`runtime`]: the task pipeline: lanes, batches, retries with full
 //!   jitter, poison splitting, dead letters, pause and probe, settling.
 
-// Statements and request texts read best as format!; the chapter's
-// pseudocode names are kept.
+// Statements and request texts read best as format!; short
+// single-letter names are kept where they mirror the algorithm.
 #![allow(
     clippy::many_single_char_names,
     clippy::format_push_string,

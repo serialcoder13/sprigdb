@@ -1,7 +1,7 @@
-//! Second factors (chapter 14 step 13, "Second factors"; R2): TOTP with
+//! Second factors: TOTP with
 //! recovery codes, kept in the tenant catalog's `user_factors` (the auth
-//! module's format 5), and the account lookups chapter 14's challenge and
-//! impersonation (step 14) need.
+//! module's format 5), and the account lookups the second-factor
+//! challenge and impersonation need.
 //!
 //! ```text
 //! enrol(user):    a 20-byte seed, sealed (AES-256-GCM under the tenant's
@@ -20,7 +20,7 @@
 //!
 //! Seeds are sealed with a per-tenant key the caller supplies
 //! ([`FactorKeys`]): the gateway derives it from its tenant-data-key file
-//! (chapter 14, "Tenant data keys"; open question 8), so no seed is ever
+//! (the tenant data keys), so no seed is ever
 //! stored in the clear and a catalog copy alone can't produce codes.
 
 use std::net::IpAddr;
@@ -41,7 +41,7 @@ use crate::cache::TenantAuth;
 use crate::mysql::{CatalogLogins, Principal, locked, temp_locked};
 use crate::store::{AT, AuthStore, RequireTls, exec_count, map_err, micros};
 
-/// `user_factors` (chapter 14, Appendix C): the auth module's format 5.
+/// `user_factors`: the auth module's format 5.
 pub const DDL_USER_FACTORS: &str = "CREATE TABLE IF NOT EXISTS user_factors (
   factor_id       BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   user_id         INT UNSIGNED    NOT NULL,

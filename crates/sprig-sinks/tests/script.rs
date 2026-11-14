@@ -1,4 +1,4 @@
-//! Script sinks (chapter 51, "Script sinks", "Testing"): JavaScript, KIRun
+//! Script sinks: JavaScript, KIRun
 //! and Lua scripts driven through the runtime against an in-process HTTP
 //! server, and the read-only `db` handle against MariaDB.
 //!

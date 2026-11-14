@@ -18,7 +18,7 @@ fn round_trip(d: &Document) -> (String, Option<String>) {
         s.doc,
         s.types
     );
-    // R5 round 8: the direct writer gives the same bytes.
+    // The direct writer gives the same bytes.
     assert_eq!(
         to_raw(&s.doc, s.types.as_deref()).unwrap(),
         bson::to_vec(d).unwrap(),
@@ -28,7 +28,7 @@ fn round_trip(d: &Document) -> (String, Option<String>) {
     (s.doc, s.types)
 }
 
-/// R5 round 8: `to_raw` equals `to_bson` then `bson::to_vec` on text SQL
+/// `to_raw` equals `to_bson` then `bson::to_vec` on text SQL
 /// may have written: MariaDB's spacing, escapes, a name twice, numbers of
 /// every width, deep nesting and long objects.
 #[test]

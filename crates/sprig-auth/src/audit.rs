@@ -1,17 +1,16 @@
-//! Audit events of logins and account changes (chapter 14,
-//! "Observability"; build step 10).
+//! Audit events of logins and account changes.
 //!
 //! Every login decision ([`crate::mysql`], [`crate::http`]) and every
 //! account change ([`crate::admin`], [`crate::policy`]) builds an
 //! [`AuditEvent`] and hands it to the process's [`AuditSink`]. Events carry
 //! the tenant, the user, the acting administrator when different (an
-//! ancestor's, chapter 14 "Management from above"), the client address, the
+//! ancestor's, managing the tenant from above), the client address, the
 //! gateway, the protocol and the outcome, never a secret: passwords,
 //! scrambles and verifiers never reach this module.
 //!
 //! [`LogAudit`] writes each event as one JSON line through `tracing` with
 //! target `sprig_audit`, so a log shipper can split them from the rest,
-//! and hands it to the process's chapter 47 audit pipeline
+//! and hands it to the process's audit pipeline
 //! ([`sprig_common::audit`]) when one is installed (`[audit] spool_dir`),
 //! which spools it and ships it to the audit sink; [`MemoryAudit`] keeps
 //! them for tests. Both sides of a
@@ -54,7 +53,7 @@ impl Actor {
     }
 }
 
-/// The event names (chapter 14, "Observability").
+/// The event names.
 pub mod events {
     /// A login was accepted.
     pub const LOGIN_SUCCEEDED: &str = "auth.login_succeeded";
@@ -79,7 +78,7 @@ pub mod events {
     pub const HANDOFF: &str = "auth.handoff";
     /// An address was refused for too many failed logins.
     pub const RATE_LIMITED: &str = "auth.rate_limited";
-    /// `GRANT` of privileges (chapter 29: every grant change is audited;
+    /// `GRANT` of privileges (every grant change is audited;
     /// `detail` is the statement as parsed, never a secret).
     pub const PRIVILEGES_GRANTED: &str = "authz.privileges_granted";
     /// `REVOKE` of privileges, or `REVOKE ALL PRIVILEGES, GRANT OPTION`.

@@ -1,7 +1,7 @@
-//! [`TargetIo`] on a MariaDB cluster's writer: the applier (chapter 10,
-//! "The applier"), position rows with fencing tokens, verification reads,
-//! and the cutover's target steps. A copy-and-swap target writes a shadow
-//! table in the source's schema and swaps it in by rename.
+//! [`TargetIo`] on a MariaDB cluster's writer: the applier, position rows
+//! with fencing tokens, verification reads, and the cutover's target steps.
+//! A copy-and-swap target writes a shadow table in the source's schema and
+//! swaps it in by rename.
 
 use std::sync::Arc;
 
@@ -26,7 +26,7 @@ use crate::route::ShardRoute;
 /// 1091, 1146, 1305, 1360), duplicate foreign key (1826).
 const ALREADY_APPLIED: &[u16] = &[
     1007, 1008, 1050, 1051, 1060, 1061, 1091, 1146, 1304, 1305, 1359, 1360, 1826,
-    // RL12: an event that exists already, or not at all (stream DDL).
+    // An event that exists already, or not at all (stream DDL).
     1537, 1539,
 ];
 
@@ -37,7 +37,7 @@ pub struct MysqlTarget {
     job: JobId,
     swap: Option<DdlTransform>,
     source: Arc<MysqlSource>,
-    /// A hash-range job's routing (chapter 20): target schemas are new
+    /// A hash-range job's routing: target schemas are new
     /// shard schemas, rows go by `_sprig_rk`.
     route: Option<Arc<ShardRoute>>,
     /// A job standby's tenant: its copy stays read-only for the tenant's
@@ -91,7 +91,7 @@ impl MysqlTarget {
     }
 
     /// The target of a job standby (`Continuous`) of `tenant`: its copy is
-    /// read-only for the tenant's accounts until the promotion (RF10).
+    /// read-only for the tenant's accounts until the promotion.
     #[must_use]
     pub fn with_standby(mut self, tenant: sprig_common::ids::TenantId) -> Self {
         self.standby = Some(tenant);
@@ -395,7 +395,7 @@ impl TargetIo for MysqlTarget {
             );
         }
         // A standby's copy is read-only for the tenant's accounts until its
-        // promotion (decision RF10): the grants just created lose their
+        // promotion: the grants just created lose their
         // write privileges, recorded for the promotion to restore.
         if let Some(tenant) = self.standby {
             let (revoked, killed) = super::standby::fence(&mut c, tenant).await?;
@@ -567,7 +567,7 @@ impl TargetIo for MysqlTarget {
                 format!("DDL on {}.{} during its copy-and-swap", d.schema, d.table),
             ));
         }
-        // RL12 (r2harden): triggers and events aren't created by the
+        // Triggers and events aren't created by the
         // stream (they would fire on the applied rows, or run on the copy);
         // the cutover creates them from the source, and a standby records
         // them for its promotion. Drops still apply.
@@ -581,8 +581,8 @@ impl TargetIo for MysqlTarget {
             let mut c = self.conn().await?;
             let runs: Vec<(String, String)> = match &self.route {
                 // DDL on a split or merged shard runs on each target, its
-                // schema name rewritten (DDL of the group is chapter 21's
-                // job and waits for movers; this covers what slips by).
+                // schema name rewritten (the group's own DDL is a separate
+                // job that waits for movers; this covers what slips by).
                 Some(r) => {
                     let stmts = vec![format!("USE {}", quote(db)), stmt.to_owned()];
                     r.rewrite_statements(&stmts)
@@ -769,7 +769,7 @@ impl TargetIo for MysqlTarget {
                 None => triggers,
             };
             for q in triggers {
-                // RL12: an event of a split or merged group would run on
+                // An event of a split or merged group would run on
                 // every shard; only whole-tenant moves carry events.
                 if self.route.is_some()
                     && super::sql::program_ddl(q) == Some(super::sql::ProgramDdl::CreateEvent)
@@ -821,7 +821,7 @@ impl TargetIo for MysqlTarget {
                     .await
                     .map_err(|e| db_err("drop a trigger", &e))?;
             }
-            // RL12: events go back to disabled, as `prepare` made them.
+            // Events go back to disabled, as `prepare` made them.
             let events: Vec<String> = c
                 .exec(
                     "SELECT EVENT_NAME FROM information_schema.EVENTS WHERE EVENT_SCHEMA = ? \

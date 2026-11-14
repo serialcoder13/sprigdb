@@ -658,7 +658,7 @@ async fn run(
                             e.token = t;
                         }
                     }
-                    let mut mapped = None;
+                    let mut inherited = None;
                     if !own && mapper.is_none() {
                         continue;
                     }
@@ -666,7 +666,7 @@ async fn run(
                         match m.classify(&mut e, own) {
                             inherit::Class::Plain => {}
                             inherit::Class::Drop => continue,
-                            inherit::Class::Inherit(x) => mapped = Some(x),
+                            inherit::Class::Inherit(x) => inherited = Some(x),
                         }
                     }
                     if !wanted(spec, &e) {
@@ -696,7 +696,7 @@ async fn run(
                         }
                         Op::Ddl(_) | Op::Truncate => probe = Some(push(None)),
                     }
-                    if mapped.is_some() && probe.is_none() {
+                    if inherited.is_some() && probe.is_none() {
                         probe = Some(push(None));
                     }
                     pending.push(Pending {
@@ -705,7 +705,7 @@ async fn run(
                         before,
                         after,
                         probe,
-                        mapped,
+                        mapped: inherited,
                     });
                 }
                 FeedItem::TxnEnd { token } | FeedItem::Progress { token } => {

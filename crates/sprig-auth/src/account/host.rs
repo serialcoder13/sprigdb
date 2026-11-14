@@ -1,5 +1,4 @@
-//! Host patterns and account matching order (chapter 14, "Account
-//! matching").
+//! Host patterns and account matching order.
 //!
 //! A login name's accounts are sorted once at cache load and the first
 //! whose host matches the client address wins:
@@ -118,7 +117,7 @@ impl HostPattern {
         }
     }
 
-    /// Orders two accounts' hosts for matching (chapter 14): `Less` means
+    /// Orders two accounts' hosts for matching: `Less` means
     /// `a` is tried first. `a_text` and `b_text` break ties.
     #[must_use]
     pub fn match_order(a: &HostPattern, a_text: &str, b: &HostPattern, b_text: &str) -> Ordering {

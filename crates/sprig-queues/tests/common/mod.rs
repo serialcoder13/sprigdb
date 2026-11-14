@@ -95,6 +95,7 @@ pub async fn server_with(settings: QueueSettings) -> Server {
                     tls: false,
                     sni: None,
                     cert_login: None,
+                    client_dn: None,
                 };
                 let _ = serve(s, info, &svc, Config::default(), CancellationToken::new()).await;
             });
@@ -143,6 +144,7 @@ pub async fn server_on(
                     tls: false,
                     sni: None,
                     cert_login: None,
+                    client_dn: None,
                 };
                 let _ = serve(s, info, &svc, Config::default(), CancellationToken::new()).await;
             });

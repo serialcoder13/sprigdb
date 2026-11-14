@@ -1,6 +1,5 @@
-//! A dropped database's sinks and connections (chapter 51, "Dropping a
-//! database"; bugfix-34): `DROP DATABASE` takes them with it, as chapter
-//! 08 says it takes every object of the database.
+//! A dropped database's sinks and connections: `DROP DATABASE` takes them
+//! with it, as it takes every object of the database.
 //!
 //! The gateway removes each sink's DC index entry and applies each
 //! [`Change`] in a versioned catalog change, as `DROP SINK` and `DROP

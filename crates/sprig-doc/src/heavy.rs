@@ -1,5 +1,4 @@
-//! Large in-gateway steps off the runtime's worker threads (decision
-//! bugfix-1, G40; R5 round 4).
+//! Large in-gateway steps off the runtime's worker threads.
 //!
 //! Sorting, grouping, unwinding and joining a large set of documents is
 //! synchronous work that doesn't yield: on a tokio worker it holds every

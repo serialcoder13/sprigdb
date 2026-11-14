@@ -1,15 +1,14 @@
-//! MongoDB query shapes (M3, decisions S96–S98): the shape of a `find`,
+//! MongoDB query shapes: the shape of a `find`,
 //! `aggregate`, `distinct` or `count`, and of the write commands, as
 //! `$queryStats` and query settings key them. Literal values become type
-//! placeholders (`"?number"`, `"?string"` ...), the spelling chapter 12
-//! uses for MongoDB shapes; field names, operators, sort and projection
+//! placeholders (`"?number"`, `"?string"` ...); field names, operators, sort and projection
 //! specs stay.
 //!
 //! The shape follows MongoDB 8.0's `debugQueryShape` (a filter's clauses
 //! as `{path: {$op: placeholder}}`, several under `$and`), and its hash is
 //! SHA-256 over the shape's BSON. MongoDB's own hash covers an internal
 //! serialization, so the hash strings differ from MongoDB's for the same
-//! query (S96); they are stable across SprigDB gateways and versions.
+//! query; they are stable across SprigDB gateways and versions.
 
 use base64::Engine as _;
 use bson::{Bson, Document, doc};

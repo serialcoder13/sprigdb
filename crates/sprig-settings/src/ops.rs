@@ -4,9 +4,10 @@
 //! ready). They live here, not in `sprig-common`, because declaring a key
 //! needs this crate.
 //!
-//! R0 resolves them at dc scope for the process: a tenant-scope
-//! `telemetry.trace_sample_ratio` or `telemetry.trace_slow_ms` is stored
-//! and explained but not yet applied per statement.
+//! They are resolved at dc scope for the process, and declared so (dc and
+//! global): the tracer and the audit pipeline are per process, so a tenant
+//! value would do nothing (bugfix-89's round narrowed `trace_sample_ratio`,
+//! `trace_slow_ms` and `audit.retention_days` from tenant scope).
 
 use std::borrow::Cow;
 

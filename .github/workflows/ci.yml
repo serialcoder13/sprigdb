@@ -169,6 +169,10 @@ jobs:
         run: docker compose --profile single up -d --wait --wait-timeout 300
       - run: SPRIG_STUDIO_DIST=$PWD/studio/dist cargo build --locked -p sprigdb -p sprigctl
       - name: Start the gateway (catalog mode) and prepare Studio's fixtures
+        # Only the single profile is up (Studio's fixtures use dc-a-c1), so
+        # up registers only dc-a-single.
+        env:
+          SPRIG_GATEWAY_SKIP_CLUSTERS: dc-a-repl,dc-a-galera
         run: |
           deploy/compose/gateway-dev.sh up
           deploy/compose/studio/e2e.sh setup

@@ -1,16 +1,15 @@
-//! Every statement of chapter 29's catalog store
-//! (`sprig_auth::authz::store::AuthzStore`) against a real MariaDB (H10
-//! follow-up, bugfix3): a grant passing 11 values for 10 placeholders
-//! broke every `GRANT` for an hour and no unit test saw it, because only
-//! MariaDB checks placeholders against values and columns against the
-//! table.
+//! Every statement of the authorization catalog store
+//! (`sprig_auth::authz::store::AuthzStore`) against a real MariaDB: a grant
+//! passing 11 values for 10 placeholders broke every `GRANT` for an hour and no
+//! unit test saw it, because only MariaDB checks placeholders against values
+//! and columns against the table.
 //!
 //! ```sh
 //! SPRIG_TEST_MARIADB_SINGLE=mysql://root:sprig-dev-root@127.0.0.1:13301 \
 //!   cargo test -p sprig-auth --test authz_store_live -- --nocapture
 //! ```
 //!
-//! The test migrates chapter 14's `auth` and chapter 29's `authz` modules
+//! The test migrates the `auth` and `authz` catalog modules
 //! into its own scratch schema `__sprig_test_authz_store_<pid>_<n>` and
 //! drops it afterwards, also when it fails. Without the variable it is
 //! skipped with a message.

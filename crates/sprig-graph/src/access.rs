@@ -1,5 +1,5 @@
-//! Per-label and per-type read grants (chapter 43, "Security notes";
-//! chapter 29's `GraphElement`; decision G42): a [`GraphStore`] that shows
+//! Per-label and per-type read grants (the `GraphElement` privilege
+//! target): a [`GraphStore`] that shows
 //! only what a reader may see, for a reader whose grants name single
 //! labels and relationship types rather than the whole graph.
 //!
@@ -14,7 +14,7 @@
 //!   hidden nodes. The store reports one shard, so the executor never
 //!   treats a node as a boundary node.
 //! - `db.labels()` and `db.relationshipTypes()` list only readable names.
-//! - **Writes** (round 5, decision G50): a writer without a graph-wide
+//! - **Writes**: a writer without a graph-wide
 //!   `INSERT`, `DELETE` or `UPDATE` may hold it for single labels and
 //!   types ([`Writable`]; `GRANT CREATE|DELETE|SET PROPERTY ON GRAPH g
 //!   NODES L`). Every write is then checked here before it runs: a new
@@ -48,7 +48,7 @@ pub struct Visible {
 }
 
 /// What a writer may write, by label or type name, for the actions it
-/// doesn't hold graph-wide (round 5).
+/// doesn't hold graph-wide.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Writable {
     /// `CREATE` everywhere (the graph-wide `INSERT`).

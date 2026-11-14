@@ -1,5 +1,4 @@
-//! TTL indexes (chapter 31, "Index kinds, origins and TTL"; wireup, 13 Nov
-//! 2026): the checks of `createIndexes` and `collMod`, and the deletes of
+//! TTL indexes: the checks of `createIndexes` and `collMod`, and the deletes of
 //! the TTL monitor (`sprig_worker::doc_ttl`), as MongoDB 8.0 does them.
 //!
 //! - **Which documents expire.** A document expires when the indexed field

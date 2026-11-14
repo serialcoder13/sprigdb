@@ -1,22 +1,20 @@
-//! Collection metadata and DDL (chapter 31, "Data structures and storage";
-//! build steps 4 and 6).
+//! Collection metadata and DDL.
 //!
-//! **Interim storage (R5 interim decision).** Chapter 31 keeps
-//! collections, indexes and field columns in the tenant catalog
-//! (`collections`, `doc_indexes`, `promoted_fields`), published to every
-//! gateway through catalog versions. Until that module exists, each
+//! **Hidden-table storage.** The gateway keeps collections, indexes and
+//! field columns in the tenant catalog (`collections`, `doc_indexes`,
+//! `promoted_fields`), published to every gateway through catalog
+//! versions (see [`crate::catalog`]). Without the catalog, each
 //! logical database keeps one hidden table, `__sprig_doc_meta`, with a row
 //! per collection: its table, uuid, the path registry (`array_paths`), its
 //! indexes and options. The engine reads the row at the start of every
 //! command, so a gateway never plans on a stale registry, and adds a new
 //! array path in its own committed statement *before* the write that
-//! needs it, which is chapter 31's publish-before-commit rule without the
+//! needs it, which is the catalog's publish-before-commit rule without the
 //! catalog round.
 //!
-//! The collection table has chapter 31's columns. An index on a path adds
-//! three `VIRTUAL INVISIBLE` field columns (a *pair* in the chapter's
-//! terms, with a string and a number value column) and one MariaDB index
-//! over them:
+//! An index on a path adds three `VIRTUAL INVISIBLE` field columns to the
+//! collection table (a type class, then a *pair* of a string and a number
+//! value column) and one MariaDB index over them:
 //!
 //! ```text
 //! _sprig_p_<slug>_c  TINYINT UNSIGNED   type class in MongoDB order (20 = null or missing)
@@ -64,7 +62,7 @@ pub fn meta_table_sql(db: &str) -> String {
 pub const META_COLUMNS: &str =
     "coll, table_name, HEX(coll_uuid), array_paths, arrays_full, indexes, options, next_index";
 
-/// One index (chapter 31's `doc_indexes` row).
+/// One index (a `doc_indexes` row).
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndexDef {
     /// Index id; 0 is `_id`.
@@ -84,7 +82,7 @@ pub struct IndexDef {
     /// Options passed through to `listIndexes` as given.
     pub extra: Document,
     /// The MariaDB index's name when it isn't `sprig_dix_<id>`: an
-    /// automatic index's `sprig_auto_<8 hex>` (chapter 13, S131).
+    /// automatic index's `sprig_auto_<8 hex>`.
     pub mariadb: Option<String>,
     /// The automatic index (`auto_indexes.index_id`) behind an `auto` one.
     pub auto_index_id: Option<u64>,
@@ -99,7 +97,7 @@ impl IndexDef {
             .unwrap_or_else(|| format!("sprig_dix_{}", self.id))
     }
 
-    /// An index made by automatic indexing (chapter 13): hidden from
+    /// An index made by automatic indexing: hidden from
     /// `listIndexes` unless asked, never dropped by `dropIndexes: "*"`.
     #[must_use]
     pub fn is_auto(&self) -> bool {
@@ -110,7 +108,7 @@ impl IndexDef {
     #[must_use]
     pub fn key_doc(&self) -> Document {
         let mut d = Document::new();
-        // A `2dsphere` index (chapter 36, R6 round 3) keys its one path
+        // A `2dsphere` index keys its one path
         // by the type's name.
         let geo = crate::geo::is_2dsphere(self);
         for (p, dir) in &self.key {
@@ -213,7 +211,7 @@ pub struct CollMeta {
     /// Past `doc.max_array_paths`: every path counts as an array path.
     pub arrays_full: bool,
     /// Registered array paths not yet confirmed loaded by every gateway
-    /// (chapter 31, `check_flags`): a write holding one waits for the
+    /// (`check_flags`): a write holding one waits for the
     /// confirmation first. `*` stands for `arrays_full`. Always empty in
     /// the hidden-table storage, which is read per command.
     pub pending_paths: BTreeSet<String>,
@@ -437,8 +435,8 @@ pub fn create_table_sql(db: &str, table: &str) -> String {
     )
 }
 
-/// The SQL class expression of a scalar path (chapter 31, "`_id`
-/// encoding and type classes").
+/// The SQL class expression of a scalar path (see [`crate::keyenc`] for
+/// the type classes).
 #[must_use]
 pub fn class_expr(path: &str) -> String {
     let parts: Vec<&str> = path.split('.').collect();
@@ -467,8 +465,7 @@ pub fn add_columns_sql(db: &str, table: &str, path: &str) -> String {
 }
 
 /// The three `ADD COLUMN IF NOT EXISTS` clauses of `path`'s field columns,
-/// joined by `, ` (automatic indexing builds them like a user index,
-/// chapter 13, S131).
+/// joined by `, ` (automatic indexing builds them like a user index).
 #[must_use]
 pub fn add_columns_clause(path: &str) -> String {
     let parts: Vec<&str> = path.split('.').collect();

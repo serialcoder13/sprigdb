@@ -1,4 +1,4 @@
-//! The rejection catalogue (chapter 17, "Statements R1 rejects"): a
+//! The rejection catalogue: a
 //! statement the router can't plan exactly fails with
 //! `ER_SPRIG_STATEMENT_NOT_DISTRIBUTABLE` (39420) naming one of these
 //! reasons, and never returns an answer that differs from one unsharded
@@ -51,17 +51,16 @@ pub enum Reason {
     Parse,
     /// An uncorrelated subquery over shards (pull-out comes later).
     Subquery,
-    /// An `INSERT` row without a key value (ID blocks, chapter 19, come
-    /// later).
+    /// An `INSERT` row without a key value.
     AutoIncrement,
     /// An `INSERT` key value that isn't a literal of the key's class.
     InsertKey,
     /// Shards on several clusters where a write or a join with an
-    /// unsharded table needs one (distributed transactions, chapter 18).
+    /// unsharded table needs one (distributed transactions).
     CrossCluster,
     /// Shards answered with different result columns.
     SchemaSkew,
-    /// A write form that would leave a unique lookup index (chapter 19)
+    /// A write form that would leave a unique lookup index
     /// unmaintained: an upsert, `INSERT IGNORE`, a non-literal value, an
     /// `UPDATE` of a lookup or primary-key column, a limited `DELETE`.
     Lookup,
@@ -72,11 +71,11 @@ pub enum Reason {
     Routine,
     /// MariaDB `FULLTEXT` relevance compared across shards.
     FulltextRelevance,
-    /// A gathered read (R3) the session can't run: the guard's reason is
+    /// A gathered read the session can't run: the guard's reason is
     /// in the detail.
     Gather,
     /// A write form that would leave a foreign key the gateway keeps
-    /// (chapter 19, R3) unchecked: a non-literal key value, `INSERT
+    /// unchecked: a non-literal key value, `INSERT
     /// IGNORE` or an upsert on a child, `REPLACE` on a parent, a
     /// multi-table write over such tables.
     ForeignKey,

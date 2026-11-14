@@ -40,8 +40,8 @@ fn p(sql: &str) -> Plan {
     plan(sql, &cx)
 }
 
-/// Why R1's operators refuse `sql`: the rejection, or the reason a
-/// gathered read (R3) records for it.
+/// Why the router's operators refuse `sql`: the rejection, or the reason
+/// a gathered read records for it.
 fn reason(sql: &str) -> Reason {
     match p(sql) {
         Plan::Reject(r) => r.reason,
@@ -732,7 +732,7 @@ fn bound_values_render_into_the_text() {
     assert!(render_params("SELECT ?, ?, ?, ?", &p).is_none());
 }
 
-/// H9 (bugfix3): a prepare's metadata text names one shard's schema for
+/// Regression: a prepare's metadata text names one shard's schema for
 /// every sharded table (its group's lowest shard on the session's
 /// cluster, else the lowest), keeps placeholders and reference tables,
 /// and says where to prepare it.
@@ -777,7 +777,7 @@ fn metadata_sql_names_one_shard_per_table() {
     assert!(metadata_sql("SELECT * FROM countries WHERE id = ?", &cx("c1")).is_none());
 }
 
-/// R8 round 7: tables of two groups on different clusters are prepared
+/// Tables of two groups on different clusters are prepared
 /// on a cluster holding a shard of each (the differential's prepared joins
 /// of `orders` and `products` got 1146 when the metadata text was prepared
 /// on the session's cluster, which had no `products` shard), and the text
@@ -828,8 +828,8 @@ fn metadata_sql_prepares_where_every_table_has_a_shard() {
     assert!(metadata_sql("SELECT * FROM products p JOIN tags t ON t.tag = p.pid", &cx).is_none());
 }
 
-/// bugfix3: 0 in a key column without `AUTO_INCREMENT` is a value, routed
-/// like any other (r2harden's tenant G got 39420 for `id = 0`).
+/// Regression: 0 in a key column without `AUTO_INCREMENT` is a value,
+/// routed like any other (`id = 0` used to get 39420).
 #[test]
 fn a_zero_key_without_auto_increment_is_a_value() {
     let t = pass("INSERT INTO orders (id, cid) VALUES (5, 0)");
@@ -845,7 +845,7 @@ fn a_zero_key_without_auto_increment_is_a_value() {
     }
 }
 
-/// bugfix prepfix: a SQL-level `EXECUTE … USING` runs its statement's text
+/// Regression: a SQL-level `EXECUTE … USING` runs its statement's text
 /// with the values written in ([`ParamLit::sql`], as the gateway's
 /// `sql_prepare` renders them), planned like the client's own statement:
 /// the same shard as the literal text, a reference table's copy, an

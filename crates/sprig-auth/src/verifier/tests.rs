@@ -80,7 +80,7 @@ fn mysql_84_caching_sha2_vectors_verify_and_round_trip() {
         assert!(!v.verify(b""), "{pw}");
         assert_eq!(v.to_bytes(), stored, "{pw}");
         // Recomputing with MySQL's salt gives MySQL's string: all 20 salt
-        // bytes are used (chapter 14 open question 1).
+        // bytes are used.
         let salt: [u8; SALT_LEN] = stored[7..27].try_into().unwrap();
         let again = CachingSha2Verifier::with_salt(pw.as_bytes(), salt, 5000).unwrap();
         assert_eq!(again.to_bytes(), stored, "{pw}");

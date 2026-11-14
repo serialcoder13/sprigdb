@@ -1,4 +1,4 @@
-//! The privilege model (chapter 29, "The model"; build step 1): actions as
+//! The privilege model: actions as
 //! stable bits, the levels a grant sits at, and the MySQL and MariaDB
 //! privilege names.
 //!
@@ -10,11 +10,11 @@
 //! **Tenant scoping.** Server-wide privileges (`SUPER`, `FILE`, `RELOAD`,
 //! replication, ...) mean nothing inside a tenant; [`parse_privilege`]
 //! reports them as [`PrivName::Dropped`] and the statement drops them with
-//! warning 39350 (chapter 29, "Tenant scoping of `*.*`").
+//! warning 39350.
 
 use std::fmt;
 
-/// One action (chapter 29's action table). The discriminant is the bit.
+/// One action. The discriminant is the bit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u8)]
 pub enum Action {
@@ -54,7 +54,7 @@ pub enum Action {
     DropRole = 16,
     /// `ROLE_ADMIN`: grant and revoke any role.
     RoleAdmin = 17,
-    /// The extension `WATCH` (change streams, R5).
+    /// The extension `WATCH` (change streams).
     Watch = 18,
     /// `SHOW DATABASES`, tenant-scoped.
     ShowDatabases = 19,
@@ -74,20 +74,20 @@ pub enum Action {
     SettingsAdmin = 26,
     /// `SPRIG_TENANT_ADMIN`: manage this tenant and its subtree.
     TenantAdmin = 27,
-    /// The extension `BYPASS RLS` (R4).
+    /// The extension `BYPASS RLS`.
     BypassRls = 28,
     /// `CONNECTION_ADMIN` (MariaDB `CONNECTION ADMIN`), tenant-scoped.
     ConnectionAdmin = 29,
-    /// `SYSTEM_VARIABLES_ADMIN`, over chapter 28's allow-list.
+    /// `SYSTEM_VARIABLES_ADMIN`, over the allow-listed system variables.
     SystemVariablesAdmin = 30,
     /// `SET_ANY_DEFINER` (MariaDB `SET USER`): any tenant account as
     /// `DEFINER`.
     SetAnyDefiner = 31,
-    /// `SPRIG_SINK_ADMIN`: create, alter and drop sinks and connections
-    /// (chapter 51); granted by name only.
+    /// `SPRIG_SINK_ADMIN`: create, alter and drop sinks and connections;
+    /// granted by name only.
     SinkAdmin = 32,
     /// `SPRIG_FAN_IN`: read every member's instance of an inherited
-    /// definition, as fan-in readers and sinks do (chapters 42, 51);
+    /// definition, as fan-in readers and sinks do;
     /// granted by name only.
     FanIn = 33,
 }
@@ -280,7 +280,7 @@ impl ActionSet {
     }
 }
 
-/// The level of a grant (`privileges.level`, the R0 subset).
+/// The level of a grant (`privileges.level`, the levels supported so far).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Level {
     /// `*.*`: the tenant.
@@ -291,7 +291,7 @@ pub enum Level {
     Object,
     /// `db.t (c)`: one column.
     Column,
-    /// One label or relationship type of a graph (chapter 43, R8):
+    /// One label or relationship type of a graph:
     /// `GRANT READ ON GRAPH db.g NODES L`.
     GraphElement,
 }
@@ -344,7 +344,7 @@ pub const TENANT_ACTIONS: ActionSet = ActionSet(u64::MAX >> 30);
 /// Actions of `ALL [PRIVILEGES] ON *.*`: everything tenant-scoped but
 /// `GRANT OPTION`, `SPRIG_TENANT_ADMIN`, `BYPASS RLS`, `SPRIG_SINK_ADMIN` and
 /// `SPRIG_FAN_IN`, which are always
-/// granted by name (chapter 29: the bootstrap admin holds `ALL` and
+/// granted by name (the bootstrap admin holds `ALL` and
 /// `SPRIG_TENANT_ADMIN`).
 pub const ALL_TENANT: ActionSet = ActionSet(
     TENANT_ACTIONS.0
@@ -356,7 +356,7 @@ pub const ALL_TENANT: ActionSet = ActionSet(
 );
 
 /// Actions grantable at the database level (MySQL's `db` table, and the
-/// extension `WATCH`, chapter 29: `GRANT WATCH ON shop.* TO ...`).
+/// extension `WATCH`: `GRANT WATCH ON shop.* TO ...`).
 pub const DATABASE_ACTIONS: ActionSet = ActionSet::of(&[
     Action::Watch,
     Action::Select,
@@ -434,7 +434,7 @@ pub const fn grantable_at(level: Level, object: ObjectType) -> ActionSet {
         (Level::Object, ObjectType::Table) => TABLE_ACTIONS,
         (Level::Object, _) => ROUTINE_ACTIONS,
         (Level::Column, _) => COLUMN_ACTIONS,
-        // Read, and per-label writes since R8 round 5.
+        // Read, and per-label writes.
         (Level::GraphElement, _) => ActionSet::of(&[
             Action::Select,
             Action::Insert,

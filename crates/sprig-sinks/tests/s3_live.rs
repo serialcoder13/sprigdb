@@ -1,4 +1,4 @@
-//! The S3 target against MinIO (chapter 51, "Testing"): `r9sinks-minio`
+//! The S3 target against MinIO: `r9sinks-minio`
 //! (quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z) on 127.0.0.1:29000.
 //! Skipped unless `SPRIG_SINKS_S3_LIVE=1`. Every test uses its own prefix
 //! in the bucket `r9sinks`.
@@ -227,7 +227,7 @@ async fn every_format_and_compression_and_conditional_writes() {
         return;
     }
     let c = setup().await;
-    // Conditional writes on MinIO (open question 7).
+    // Conditional writes on MinIO.
     let k = format!("{}probe.txt", unique("cond"));
     assert!(matches!(
         c.put_object(&k, Bytes::from_static(b"a"), "text/plain", true)

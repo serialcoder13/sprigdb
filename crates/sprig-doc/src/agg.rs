@@ -1,5 +1,4 @@
-//! The aggregation subset that runs in the gateway (chapter 31,
-//! "Aggregation, search and joins"; build step 11): the expression
+//! The aggregation subset that runs in the gateway: the expression
 //! evaluator, projections, sorting, and the stages after the leading
 //! `$match`/`$sort`/`$skip`/`$limit` that the engine pushes into SQL.
 //!
@@ -181,7 +180,7 @@ pub fn eval(e: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
                     ),
                 ));
             }
-            // `{$meta: "vectorSearchScore"}` (chapter 34, R6 round 3).
+            // `{$meta: "vectorSearchScore"}`.
             if op == "$meta" {
                 return Ok(crate::engine::models::meta_value(
                     arg,
@@ -215,9 +214,9 @@ fn op_eval(op: &str, arg: &Bson, vars: &Vars) -> Result<Bson, MongoError> {
     };
     Ok(match op {
         "$literal" => arg.clone(),
-        // Server-side JavaScript (M4, decision S110).
+        // Server-side JavaScript.
         "$function" => crate::serverjs::function(arg, vars)?,
-        // A uniform double in [0, 1) (R5 round 4).
+        // A uniform double in [0, 1).
         "$rand" => {
             use std::hash::{BuildHasher, Hasher};
             let mut h = std::collections::hash_map::RandomState::new().build_hasher();
@@ -924,7 +923,7 @@ pub fn value_truthy(v: &Bson) -> bool {
     }
 }
 
-// --- `let` variables (chapter 31, R5 round 4) --------------------------------
+// --- `let` variables ---------------------------------------------------------
 
 /// The values of a command's `let` option: each expression evaluated once
 /// (against an empty document, with `$$NOW`), as MongoDB does.
@@ -1481,8 +1480,8 @@ pub fn parse_sort(d: &Document) -> Result<SortSpec, MongoError> {
             Some(1) => Ok((k.clone(), 1)),
             Some(-1) => Ok((k.clone(), -1)),
             _ => match v {
-                // A `$meta` key sorts by the score the search stage left
-                // (chapter 39), whatever the key's name.
+                // A `$meta` key sorts by the score the search stage left,
+                // whatever the key's name.
                 Bson::Document(m) if m.contains_key("$meta") => {
                     Ok((crate::engine::models::SCORE_FIELD.to_owned(), -1))
                 }
@@ -1872,7 +1871,7 @@ const META_FIELDS: [&str; 4] = [
 
 /// `out` with `from`'s metadata fields, which `$project` and `$replaceRoot`
 /// keep as MongoDB keeps a document's metadata apart from its fields
-/// (bugfix-58: `{$meta: "score"}` after a `$project` that names neither).
+/// (`{$meta: "score"}` after a `$project` that names neither).
 fn keep_meta(from: &Document, mut out: Document) -> Document {
     for f in META_FIELDS {
         if let Some(v) = from.get(f)

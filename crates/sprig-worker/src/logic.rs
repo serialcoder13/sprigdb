@@ -687,7 +687,7 @@ impl JobHandler for LogicSchedule {
             &schema,
             module_id,
             run,
-            env.settings.job_budget(),
+            env.settings.job_budget_for(tenant),
         )
         .await;
         // The pooled sprig_ctl connection mustn't keep the context.

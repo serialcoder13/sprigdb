@@ -116,7 +116,7 @@ async fn live_engine_on_mariadb() {
     )
     .await;
     assert_eq!(got, vec![docs[0].clone()]);
-    // R5 round 8: a point read's BSON written from the stored JSON is the
+    // A point read's BSON written from the stored JSON is the
     // document's own; a miss is `Some(None)`; other filters aren't points.
     for d in &docs {
         let raw = e
@@ -363,7 +363,7 @@ async fn live_engine_on_mariadb() {
     e.drop_database(&mut s, db).await.unwrap();
 }
 
-/// R33: approximate `$vectorSearch` from the side table's HNSW index,
+/// Approximate `$vectorSearch` from the side table's HNSW index,
 /// validated by recall against the exact search, and kept in step with
 /// inserts, updates and deletes. Uses `r5search_vxtest`, dropped at the end.
 #[tokio::test]

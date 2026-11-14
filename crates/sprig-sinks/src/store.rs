@@ -1,20 +1,19 @@
-//! The `sinks` catalog module (chapter 51, "Catalog tables"; build step
-//! 2): `sink_connections`, `sink_secrets`, `sinks`, `sink_tasks` and
-//! `sink_usage` in `t<tenant>_sprig`, their migration, the snapshot loader
-//! ([`SinksExtension`]) and the writes the statements and tasks make.
+//! The `sinks` catalog module: `sink_connections`, `sink_secrets`, `sinks`,
+//! `sink_tasks` and `sink_usage` in `t<tenant>_sprig`, their migration, the
+//! snapshot loader ([`SinksExtension`]) and the writes the statements and tasks
+//! make.
 //!
-//! **As built, against the book:**
+//! **Storage notes:**
 //! - Sinks and connections have no `objects` row yet (as streams and
 //!   queues have none): their ids come from the object counter, and
 //!   privileges are checked by name (`SPRIG_SINK_ADMIN` on `*.*`).
 //! - `sinks.source_ids` holds the whole source (`{"kind": "stream", "id":
 //!   41, "name": ..., "partitions": 12}`), `target` the target with its
 //!   script, `connection_ids` the references (tenant or platform), and two
-//!   columns are added: `transform_name` (the logic function by name) and
+//!   more columns hold `transform_name` (the logic function by name) and
 //!   `options` (the `WITH (...)` values).
 //! - `sink_usage` holds `GRANT USAGE ON [PLATFORM] CONNECTION c TO u`, by
-//!   connection name and user id (chapter 29's grants have no connection
-//!   object yet).
+//!   connection name and user id (grants have no connection object yet).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -782,8 +781,7 @@ impl SinksStore {
     }
 
     /// Claims task `task_no` for `worker`: creates its row or bumps its
-    /// epoch, and returns the new epoch (chapter 51: "bumped on every
-    /// claim").
+    /// epoch, and returns the new epoch (bumped on every claim).
     pub async fn claim_task<Q: Queryable + Send>(
         &self,
         q: &mut Q,
@@ -817,7 +815,7 @@ impl SinksStore {
         e.map(TaskEpoch).ok_or_else(|| bad("task row vanished"))
     }
 
-    /// The task's last claim (R9, r9tests): its epoch, worker and source
+    /// The task's last claim: its epoch, worker and source
     /// part, read before a new claim (a queue task's dead predecessor).
     pub async fn task_claim<Q: Queryable + Send>(
         &self,

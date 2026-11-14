@@ -1,5 +1,5 @@
-//! `find` with `allowDiskUse` (M7, decision S86): a sort past
-//! `doc.max_sort_bytes` spills as `$sort` does (M5's external sort), and a
+//! `find` with `allowDiskUse`: a sort past `doc.max_sort_bytes` spills
+//! as `$sort` does (the external sort of [`crate::spill`]), and a
 //! `limit` keeps only `skip + limit` documents while sorting.
 
 use std::sync::Arc;
@@ -35,7 +35,7 @@ impl Engine {
         let limit = (spec.limit > 0).then(|| usize::try_from(spec.limit).unwrap_or(usize::MAX));
         let keep = limit.map(|l| l.saturating_add(skip));
         let cmp: Cmp = Arc::new(move |a, b| agg::cmp_docs(a, b, &sort));
-        let budget = self.cfg.max_sort_bytes;
+        let budget = self.max_sort_bytes();
         let sorted = crate::heavy::run(crate::heavy::HEAVY_DOCS, || {
             spill::sort_seq(seq.into_iter_docs()?, cmp, keep, budget, "Sort")
         })?;

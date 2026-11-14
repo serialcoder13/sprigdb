@@ -285,7 +285,7 @@ pub(crate) fn densify(
     Ok(out)
 }
 
-/// `$densify` over an input that may be on disk (M7, decision S87): the
+/// `$densify` over an input that may be on disk: the
 /// input sorted on disk as in memory (by partition, then the field;
 /// `bounds: "full"` by the field alone), then the same single pass, its
 /// output collected into a builder that spills.

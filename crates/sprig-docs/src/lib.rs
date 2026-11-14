@@ -1,5 +1,4 @@
-//! `sprig-docs`: SprigDB's product documentation (chapter 55, "Product
-//! documentation and the docs pack"; the AI integration plan).
+//! `sprig-docs`: SprigDB's product documentation as data.
 //!
 //! - [`reference`]: the generated reference pages (`docs/reference/*.md`),
 //!   rendered from plain data so this crate depends on nothing in the
@@ -8,9 +7,17 @@
 //!   tree's metric macros) and writes or checks the pages.
 //! - [`metrics_scan`]: finds every `counter!`, `gauge!` and `histogram!`
 //!   named `sprig_*` in the source, with its labels.
+//! - The docs pack, which makes the pages searchable offline:
+//!   - [`page`] reads `docs/` and each page's front matter;
+//!   - [`chunk`] cuts a page into chunks and finds exact identifiers;
+//!   - [`pack`] is the reproducible pack file, written and verified;
+//!   - [`search`] is in-process BM25, cosine and reciprocal-rank fusion.
 //!
-//! The docs pack (chunking, embeddings, the pack file) comes next, in this
-//! crate, so the gateway can read packs without linking the generator.
+//!   Embeddings come from `sprig-embed`; this crate has no model.
 
+pub mod chunk;
 pub mod metrics_scan;
+pub mod pack;
+pub mod page;
 pub mod reference;
+pub mod search;

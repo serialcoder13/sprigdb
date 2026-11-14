@@ -1,5 +1,4 @@
-//! Password verifiers for the MySQL mechanisms (chapter 14, "Verifier
-//! formats"; build step 2).
+//! Password verifiers for the MySQL mechanisms.
 //!
 //! ```text
 //! caching_sha2_password (70 chars):  "$A$" || RRR || "$" || salt || digest
@@ -17,7 +16,7 @@
 //! MySQL 8.4 server produced. An empty password has an empty verifier, as in
 //! MySQL.
 //!
-//! The scramble checks are the server side of chapter 05's plugin exchange:
+//! The scramble checks are the server side of the auth plugin exchange:
 //! [`verify_scramble`] for the `caching_sha2_password` fast path and
 //! [`verify_native_scramble`] for `mysql_native_password`. Every comparison
 //! of secret-derived bytes is constant-time.
@@ -37,7 +36,7 @@ use zeroize::Zeroize;
 
 use crate::crypt;
 
-/// `auth.caching_sha2_rounds`' default (chapter 14) and MySQL's
+/// `auth.caching_sha2_rounds`' default and MySQL's
 /// `caching_sha2_password_digest_rounds` default.
 pub const DEFAULT_CACHING_SHA2_ROUNDS: u32 = 5000;
 
@@ -98,7 +97,7 @@ impl CachingSha2Verifier {
     /// [`MAX_CACHING_SHA2_ROUNDS`]).
     ///
     /// The salt is drawn from the crypt-base64 alphabet (`./0-9A-Za-z`,
-    /// 120 bits over 20 bytes): a subset of chapter 14's range, so the
+    /// 120 bits over 20 bytes): a subset of the allowed salt bytes, so the
     /// verifier is printable and needs no escaping in TOML or SQL.
     ///
     /// # Errors
@@ -146,7 +145,7 @@ impl CachingSha2Verifier {
     /// password.
     ///
     /// # Errors
-    /// 39998 if `stored` is not in chapter 14's format.
+    /// 39998 if `stored` is not in the stored verifier format.
     pub fn parse(stored: &[u8]) -> Result<Self> {
         if stored.is_empty() {
             return Ok(Self(Sha2Repr::Empty));
@@ -219,7 +218,7 @@ impl CachingSha2Verifier {
         }
     }
 
-    /// Checks a clear-text password (the full path, chapter 14 step 2):
+    /// Checks a clear-text password (the full path):
     /// recomputes the digest with the stored salt and rounds and compares
     /// in constant time. CPU-heavy; see the module notes.
     #[must_use]
@@ -388,11 +387,10 @@ pub(crate) fn decode_hex(hex: &str, out: &mut [u8]) -> Option<()> {
     Some(())
 }
 
-/// The `caching_sha2_password` fast-path cache value, `SHA256(SHA256(password))`
-/// (chapter 14, "Gateway caches"). It is password-equivalent for the fast
-/// path, so it lives in gateway memory only: it is zeroized on drop and
-/// `Debug` hides it. There is no `PartialEq`: compare through
-/// [`verify_scramble`], which is constant-time.
+/// The `caching_sha2_password` fast-path cache value, `SHA256(SHA256(password))`.
+/// It is password-equivalent for the fast path, so it lives in gateway memory
+/// only: it is zeroized on drop and `Debug` hides it. There is no `PartialEq`:
+/// compare through [`verify_scramble`], which is constant-time.
 #[derive(Clone)]
 pub struct FastCacheValue([u8; 32]);
 
@@ -426,14 +424,13 @@ impl FastCacheValue {
     }
 }
 
-/// Checks a `caching_sha2_password` fast-path response (chapter 05,
-/// "Authentication plugins", step 3): the client sent
+/// Checks a `caching_sha2_password` fast-path response: the client sent
 /// `SHA256(password) XOR SHA256(SHA256(SHA256(password)) || nonce)`, so
 /// `candidate = response XOR SHA256(stage2 || nonce)` must hash to `stage2`.
 ///
 /// `nonce` is the 20-byte scramble the server sent (without the greeting's
 /// trailing NUL). A response that isn't 32 bytes fails; the empty password
-/// takes chapter 05's step 2 instead.
+/// takes the empty-password path instead.
 #[must_use]
 pub fn verify_scramble(nonce: &[u8], client_response: &[u8], stage2: &FastCacheValue) -> bool {
     let Ok(response) = <&[u8; 32]>::try_from(client_response) else {
@@ -451,7 +448,7 @@ pub fn verify_scramble(nonce: &[u8], client_response: &[u8], stage2: &FastCacheV
     bool::from(check.ct_eq(&stage2.0))
 }
 
-/// Checks a `mysql_native_password` response (chapter 05): the client sent
+/// Checks a `mysql_native_password` response: the client sent
 /// `SHA1(password) XOR SHA1(nonce || SHA1(SHA1(password)))`, so
 /// `candidate = response XOR SHA1(nonce || stored)` must hash to `stored`.
 ///
@@ -518,10 +515,9 @@ pub fn native_scramble(password: &[u8], nonce: &[u8]) -> Vec<u8> {
     out
 }
 
-/// The decoy check for an unknown account (chapter 14, "MySQL logins" step
-/// 1): the same SHA-256 crypt work as a real full authentication at the
-/// default cost, always failing, so timing doesn't reveal which accounts
-/// exist.
+/// The decoy check for an unknown account: the same SHA-256 crypt work as a
+/// real full authentication at the default cost, always failing, so timing
+/// doesn't reveal which accounts exist.
 #[must_use]
 pub fn decoy_verify(password: &[u8]) -> bool {
     const DECOY_SALT: &[u8; SALT_LEN] = b"sprigdb-decoy-salt..";

@@ -752,7 +752,7 @@ impl S3Client {
 
     /// `CreateBucket` (tests and setup; an existing bucket of ours is fine).
     ///
-    /// `HeadBucket` (`TEST CONNECTION`, R9 r9tests): the answer's status,
+    /// `HeadBucket` (`TEST CONNECTION`): the answer's status,
     /// nothing written.
     ///
     /// # Errors

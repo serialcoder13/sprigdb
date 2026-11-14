@@ -1,16 +1,15 @@
-//! A tenant's residency policies for sink destinations (chapter 51,
-//! "Destinations, allowlist and residency"; chapter 26), read from the
+//! A tenant's residency policies for sink destinations, read from the
 //! directory entries of the tenant and its ancestors. Workers check every
 //! connection a task opens; gateways check at `CREATE` and `ALTER
-//! CONNECTION` (R9, r9more).
+//! CONNECTION`.
 
 use serde_json::Value;
 use sprig_common::Result;
 use sprig_common::ids::TenantId;
 use sprig_meta::MetaStore;
 
-/// A tenant's residency for sink destinations (chapter 51, "Destinations,
-/// allowlist and residency"; chapter 26): [`sprig_residency::destinations`]
+/// A tenant's residency for sink destinations:
+/// [`sprig_residency::destinations`]
 /// behind this crate's [`crate::policy::Residency`] trait. A tenant with a
 /// residency block but no readable policy anywhere on its path admits
 /// nothing (fail closed). No block on the path: unpinned.

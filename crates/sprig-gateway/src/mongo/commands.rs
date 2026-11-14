@@ -1814,7 +1814,7 @@ async fn exec(
                 ))
                 .await?;
                 let lim = sprig_doc::agg::AggLimits {
-                    stage_bytes: engine.cfg.agg_stage_bytes,
+                    stage_bytes: engine.agg_stage_bytes(),
                     now: bson::DateTime::now(),
                 };
                 for st in &pipeline[1..] {
@@ -1834,7 +1834,7 @@ async fn exec(
                 // `$currentOp` and `$listSessions`, then the
                 // in-gateway stages.
                 let lim = sprig_doc::agg::AggLimits {
-                    stage_bytes: engine.cfg.agg_stage_bytes,
+                    stage_bytes: engine.agg_stage_bytes(),
                     now: bson::DateTime::now(),
                 };
                 for st in &pipeline[1..] {
@@ -1860,7 +1860,7 @@ async fn exec(
                     });
                 }
                 let lim = sprig_doc::agg::AggLimits {
-                    stage_bytes: engine.cfg.agg_stage_bytes,
+                    stage_bytes: engine.agg_stage_bytes(),
                     now: bson::DateTime::now(),
                 };
                 for st in &pipeline[1..] {

@@ -1,4 +1,4 @@
-//! The routing hashes a plan used, for chapter 20's write sketches.
+//! The routing hashes a plan used, for the split advisor's write sketches.
 //!
 //! While [`capture`] runs a planning call, every key value the planner
 //! routes ([`crate::topology::Group::shard_of`]) is noted with its group,

@@ -1,5 +1,5 @@
-//! The auth module in the gateway's catalog cache (chapter 14, "Gateway
-//! caches": `TenantAuth`, per tenant and auth version).
+//! The auth module in the gateway's catalog cache (`TenantAuth`, per
+//! tenant and auth version).
 //!
 //! [`AuthExtension`] is `sprig-auth`'s [`CatalogExtension`]: it registers
 //! the auth migrations ([`AUTH_MIGRATIONS`]) and, versioned by
@@ -23,7 +23,7 @@
 //! which only password changes read, from the catalog) and temporary
 //! locks. A verifier that doesn't parse is left out and logged; the
 //! account then fails its logins as with a wrong password. SCRAM-SHA-1
-//! verifiers arrive with chapter 14 step 15.
+//! verifiers are not loaded yet.
 
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -176,7 +176,7 @@ pub struct TenantAuth {
     locks: Arc<HashMap<UserId, TempLock>>,
     /// API keys by visible id (revoked ones too, until they're deleted).
     api_keys: Arc<HashMap<String, Arc<ApiKey>>>,
-    /// Live token sessions by id (chapter 14; [`crate::token`]).
+    /// Live token sessions by id ([`crate::token`]).
     sessions: Arc<HashMap<[u8; 16], Arc<TokenSession>>>,
     bytes: usize,
 }
@@ -355,8 +355,8 @@ impl TenantAuth {
         self.api_keys.get(key_id)
     }
 
-    /// Every API key, revoked or not, in no order (Studio's key list,
-    /// chapter 44).
+    /// Every API key, revoked or not, in no order (Studio's key
+    /// list).
     pub fn api_keys(&self) -> impl Iterator<Item = &Arc<ApiKey>> {
         self.api_keys.values()
     }
@@ -391,7 +391,7 @@ impl TenantAuth {
     }
 
     /// The account a login as `name` from `ip` uses: the first in matching
-    /// order whose host matches (chapter 14, "Account matching").
+    /// order whose host matches.
     #[must_use]
     pub fn match_account(&self, name: &str, ip: IpAddr) -> Option<&Arc<AuthUser>> {
         self.accounts(name).iter().find(|u| u.host.matches(ip))

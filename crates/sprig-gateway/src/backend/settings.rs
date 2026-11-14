@@ -19,7 +19,6 @@ use crate::reads::settings as reads;
 
 type Text = Cow<'static, str>;
 
-
 macro_rules! key {
     ($NAME:ident, $t:ty, $key:literal, $default:expr, $scopes:expr, $hard:expr, $doc:literal) => {
         #[doc = concat!("`", $key, "`: ", $doc, ".")]

@@ -1,6 +1,6 @@
 //! `sprig-docs-gen`: writes SprigDB's generated reference pages
 //! (`docs/reference/*.md`) from the code, or checks they're current
-//! (chapter 55, "Interfaces"; decision AI16).
+//! (`docs/README.md`, "Keeping the reference current").
 //!
 //! ```text
 //! cargo run -p sprig-docs-gen -- [--root <repo>] [--check]

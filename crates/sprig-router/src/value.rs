@@ -251,7 +251,7 @@ pub fn cmp_weights(collation: u16, a: &[&[u8]; 3], b: &[&[u8]; 3]) -> Option<Ord
     let info = collation::info(collation)?;
     for l in 0..3 {
         // MariaDB ignores trailing space weights on levels 2 and 3 even
-        // under NO PAD (chapter 15's collation table).
+        // under NO PAD.
         match collation::cmp_level(a[l], b[l], info.pad_space || l > 0, info.space[l]) {
             Ordering::Equal => {}
             o => return Some(o),

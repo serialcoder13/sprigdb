@@ -1,7 +1,6 @@
-//! The GQL subset (chapter 43, "Language surface"; build step 7), as built
-//! in round 3: GQL's forms that differ from Cypher are rewritten into the
-//! Cypher the parser already reads, before parsing, so both languages share
-//! one parser, one executor and one set of answers. Neo4j 5 reads `IS`
+//! The GQL subset: GQL's forms that differ from Cypher are rewritten into
+//! the Cypher the parser already reads, before parsing, so both languages
+//! share one parser, one executor and one set of answers. Neo4j 5 reads `IS`
 //! label expressions too, and Cypher 25 the rest, so the forms are accepted
 //! in every statement.
 //!

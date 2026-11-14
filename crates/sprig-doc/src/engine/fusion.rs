@@ -1,5 +1,4 @@
-//! Hybrid search ranking (chapter 39, "Hybrid ranking"; decisions S114
-//! and S115): `$rankFusion` (MongoDB 8.0) and `$scoreFusion` (8.3) over
+//! Hybrid search ranking: `$rankFusion` (MongoDB 8.0) and `$scoreFusion` (8.3) over
 //! input pipelines of `$search`, `$vectorSearch`, `$geoNear`, `$match`,
 //! `$sort`, `$skip`, `$limit` (and `$sample`, `$score`).
 //!

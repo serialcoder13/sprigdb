@@ -1,6 +1,6 @@
-//! The webhook target against an in-process HTTP server (chapter 51,
-//! "Testing": a server that refuses, stalls, resets mid-request, returns
-//! 5xx, 429 with `Retry-After`, 413 and partial failures).
+//! The webhook target against an in-process HTTP server (a server that
+//! refuses, stalls, resets mid-request, returns 5xx, 429 with
+//! `Retry-After`, 413 and partial failures).
 //!
 //! The server checks every request's signature and authentication, records
 //! the idempotency keys it accepted, and injects the faults. The target

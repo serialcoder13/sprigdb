@@ -1,4 +1,4 @@
-//! The authorization interface (chapter 29, "Pluggable authorization"):
+//! The authorization interface (pluggable authorization):
 //! what the gateway asks of an authorization engine, and the default
 //! engine, [`MysqlGrants`] (MySQL 8.4's grant model, the rest of this
 //! module tree).
@@ -31,8 +31,7 @@
 //! [`super::AuthzExtension`], so its rows arrive in every snapshot at the
 //! auth version. Engines that refine rather than replace MySQL grants
 //! (a Supabase-style engine adds row predicates to them) wrap
-//! [`MysqlGrants`] and delegate. Chapter 29 sketches a Supabase-style and
-//! a Firebase-style engine.
+//! [`MysqlGrants`] and delegate.
 
 use std::any::Any;
 use std::collections::BTreeSet;
@@ -78,7 +77,7 @@ pub struct Subject<'a> {
     pub roles: &'a [RoleId],
 }
 
-/// A settings operation (chapter 08) to authorize.
+/// A settings operation to authorize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsOp<'a> {
     /// Values or bounds of a descendant tenant.
@@ -126,7 +125,7 @@ pub enum SettingsDenied {
 
 /// Rows of one table a statement may see or change: a boolean SQL
 /// expression over the table's columns, with the session's values (its
-/// user, token claims, ...) already bound as literals, as chapter 29's
+/// user, token claims, ...) already bound as literals, as the
 /// row-level-security rewrite injects it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowFilter {
@@ -197,7 +196,7 @@ pub trait SessionGrants: Send + Sync + std::fmt::Debug {
     /// Whether database `db_key` is listed and may be `USE`d.
     fn sees_database(&self, db_key: &str, db: Option<DbId>) -> bool;
 
-    /// Settings privileges (chapter 29, "Settings").
+    /// Settings privileges.
     ///
     /// # Errors
     /// What the operation lacked.
@@ -213,15 +212,15 @@ pub trait SessionGrants: Send + Sync + std::fmt::Debug {
         None
     }
 
-    /// The session's row-level security in chapter 29's model (the
+    /// The session's row-level security in the built-in model (the
     /// policies the gateway's rewrite injects), for engines that use it;
     /// `None` for an engine without it.
     fn row_policies(&self) -> Option<std::sync::Arc<super::rls::SessionRls>> {
         None
     }
 
-    /// Grants on single labels and relationship types of graph `graph`
-    /// (chapter 43, R8): (relationship type?, name, actions). The graph
+    /// Grants on single labels and relationship types of graph `graph`:
+    /// (relationship type?, name, actions). The graph
     /// layer reads them when the graph or its database doesn't give the
     /// action, and hides what they don't cover.
     fn graph_elements(&self, graph: ObjectId) -> Vec<(bool, String, ActionSet)> {
@@ -254,12 +253,12 @@ pub trait Authorizer: Send + Sync + std::fmt::Debug {
     fn session(&self, cat: &TenantCatalog, subject: &Subject<'_>) -> Arc<dyn SessionGrants>;
 
     /// The backend-account derivation hook: the MariaDB grants every
-    /// per-user account of the tenant should hold at `cat` (chapter 29,
-    /// "Backend accounts and grants"), which the reconciler applies.
+    /// per-user account of the tenant should hold at `cat`, which the
+    /// reconciler applies.
     fn backend_grants(&self, cat: &TenantCatalog, auth: &TenantAuth) -> BackendState;
 
     /// [`Self::backend_grants`] for one cluster, whose tables, views and
-    /// routines are where `here` says (bugfix-25): table, column and
+    /// routines are where `here` says: table, column and
     /// routine grants name every schema holding the object there. An
     /// engine that doesn't place them answers [`Self::backend_grants`].
     fn backend_grants_on(
@@ -507,7 +506,7 @@ impl Authorizer for MysqlGrants {
         let resolve = |d: &str, n: &str| relation(cat, d, n);
         let mut c =
             CompiledPrivileges::compile_at(state_of(cat), &resolve, subject.user, subject.roles);
-        // Chapter 29: the protected tables that bind the session.
+        // The protected tables that bind the session.
         c.rls = Arc::new(super::rls::compile(cat, &c, subject.user));
         Arc::new(c)
     }
@@ -536,7 +535,7 @@ impl Authorizer for MysqlGrants {
         dropped: &[Dropped],
     ) -> Result<Option<u64>> {
         let v = apply_ops(catalog, cat, &drop_plan(state_of(cat), cat, dropped)).await?;
-        // Chapter 29: a dropped table's policies go with it, as in
+        // A dropped table's policies go with it, as in
         // PostgreSQL.
         let w = forget_policies(catalog, cat, dropped).await?;
         Ok(v.max(w))
@@ -604,8 +603,8 @@ async fn apply_ops(
     }
 }
 
-/// What renaming `renamed` does to the rows of `state` (chapter 29 P6,
-/// MySQL's rule): a renamed table's or view's grants stay with its old
+/// What renaming `renamed` does to the rows of `state` (MySQL's
+/// rule): a renamed table's or view's grants stay with its old
 /// name, so its object and column rows become grants held by that name
 /// ([`DropOp::KeepByName`]). Done before the statement runs: a row held by
 /// name applies to whatever relation has the name, so before the rename it
@@ -1160,7 +1159,7 @@ mod tests {
         );
     }
 
-    /// bugfix-19: a `db.*` grant reaches every schema of the database
+    /// Regression: a `db.*` grant reaches every schema of the database
     /// (groups the advisor makes later, splits, the reference schema), not
     /// only the default group's first shard; a `*.*` grant stays the
     /// tenant's pattern.
@@ -1465,8 +1464,8 @@ mod tests {
                 }
                 _ => None,
             })
-            // Internal grants a writer gets in every shard schema: chapter
-            // 18's redo marker table and chapter 31's retry records.
+            // Internal grants a writer gets in every shard schema: the
+            // 2PC redo marker table and the document retry records.
             .filter(|n| n != "__sprig_redo" && n != backend::DOC_SESSIONS_TABLE)
             .collect();
         assert_eq!(names, BTreeSet::from(["orders".to_owned()]));

@@ -115,6 +115,7 @@ impl crate::shape::TableResolver for Dbs {
 /// session's default database. Now a statement that names its tables is
 /// keyed on the first table's database, whatever the session's is.
 #[test]
+#[allow(clippy::many_single_char_names)]
 fn a_qualified_statement_is_one_fingerprint_whatever_the_default_database() {
     use sprig_common::ids::TenantId;
     let f = SqlFingerprinter::new(1024);
@@ -128,7 +129,12 @@ fn a_qualified_statement_is_one_fingerprint_whatever_the_default_database() {
     let b = f.sql(t, q, &retail, &Dbs);
     let c = f.sql(t, q, &shop, &Dbs);
     // The unqualified form in a `retail` session is the same statement.
-    let d = f.sql(t, b"SELECT id FROM orders WHERE customer_id = 7", &retail, &Dbs);
+    let d = f.sql(
+        t,
+        b"SELECT id FROM orders WHERE customer_id = 7",
+        &retail,
+        &Dbs,
+    );
     assert_eq!(a.id, b.id);
     assert_eq!(a.id, c.id);
     assert_eq!(a.id, d.id);
@@ -153,6 +159,11 @@ fn a_qualified_statement_is_one_fingerprint_whatever_the_default_database() {
         lower_case_table_names: true,
         ..retail
     };
-    let e = f.sql(t, b"SELECT id FROM RETAIL.orders WHERE customer_id = 1", &lc, &Dbs);
+    let e = f.sql(
+        t,
+        b"SELECT id FROM RETAIL.orders WHERE customer_id = 1",
+        &lc,
+        &Dbs,
+    );
     assert_eq!(e.db_id, DbId(2));
 }

@@ -1,5 +1,4 @@
-//! Read-only standby copies (chapter 25, "Standbys"; decision RF10,
-//! r2last).
+//! Read-only standby copies.
 //!
 //! A `Continuous` job (a job standby) copies the tenant's backend accounts
 //! and grants with its schemas, so a promoted copy works at once. Until the
@@ -18,7 +17,7 @@
 //! The record lives with the copy, not in etcd: the promotion runs in the
 //! copy's DC, which is the one that answers when the home DC is lost.
 //!
-//! **Triggers and events (RL12, r2harden).** A copy carries the tenant's
+//! **Triggers and events.** A copy carries the tenant's
 //! views and routines from its start (the stream applies their later
 //! changes) and its events disabled, but no triggers: they would fire on
 //! the rows the job applies. A move creates triggers and enables events at
@@ -39,7 +38,7 @@ use sprig_common::{Result, SprigError};
 /// The record of revoked privileges, one row per grant.
 pub const GRANTS_TABLE: &str = "`__sprig_sys`.`__sprig_standby_grants`";
 
-/// The statements a promotion runs on the copy (RL12), in order.
+/// The statements a promotion runs on the copy, in order.
 pub const OBJECTS_TABLE: &str = "`__sprig_sys`.`__sprig_standby_objects`";
 
 /// Creates [`OBJECTS_TABLE`].
@@ -377,7 +376,7 @@ pub async fn restore(c: &mut Conn, tenant: TenantId) -> Result<usize> {
             Err(e) => return Err(err("restore a grant", &e)),
         }
     }
-    // RL12: the tenant's triggers and events, now that nothing applies
+    // The tenant's triggers and events, now that nothing applies
     // rows to the copy any more.
     let (made, failed) = create_objects(c, tenant).await?;
     if made + failed > 0 {
@@ -447,7 +446,7 @@ pub async fn forget(c: &mut Conn, tenant: TenantId) -> Result<()> {
     }
 }
 
-/// The statements recorded for `tenant`'s promotion (RL12).
+/// The statements recorded for `tenant`'s promotion.
 ///
 /// # Errors
 /// A statement failed (a missing table is none).

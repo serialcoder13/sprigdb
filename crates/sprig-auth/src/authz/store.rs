@@ -1,15 +1,14 @@
-//! Chapter 29's catalog tables (build step 1): `roles`, `role_edges` and
+//! The authorization catalog tables: `roles`, `role_edges` and
 //! `privileges`, as the `authz` migration module, with typed rows and
 //! access.
 //!
-//! The module is separate from chapter 14's `auth` module so each chapter
-//! numbers its own formats. Format 1 creates the three tables exactly as
-//! the chapter's DDL defines them, then gives every live user that existed
-//! before (users created through the Admin API or `sprigctl` before M0.5,
-//! who could do everything in their tenant) `ALL PRIVILEGES` and
+//! The module is separate from the `auth` module so each numbers its own
+//! formats. Format 1 creates the three tables, then gives every live user
+//! that existed before (users created through the Admin API or `sprigctl`
+//! before authorization existed, who could do everything in their tenant) `ALL PRIVILEGES` and
 //! `SPRIG_TENANT_ADMIN` on `*.*` `WITH GRANT OPTION`, so nothing they could
 //! do stops working. `row_policies` and `foreign_grants` arrive with the
-//! steps that use them.
+//! features that use them.
 //!
 //! **Rows.** Unused key parts are `0` or `''`, never `NULL`. Grants on a
 //! database keep its *name* in `name_pattern` (`db_id` 0): MySQL keeps
@@ -35,7 +34,7 @@ use super::privilege::{ALL_TENANT, Action, ActionSet, Level};
 /// The module name in the catalog's format records.
 pub const MODULE: &str = "authz";
 
-/// `roles` (chapter 29).
+/// `roles`.
 pub const DDL_ROLES: &str = "CREATE TABLE IF NOT EXISTS roles (
   role_id      INT UNSIGNED NOT NULL AUTO_INCREMENT,
   kind         ENUM('sql','mongo','builtin','combined','mediated','share') NOT NULL,
@@ -51,7 +50,7 @@ pub const DDL_ROLES: &str = "CREATE TABLE IF NOT EXISTS roles (
   UNIQUE KEY uk_role_members (members_hash)
 ) ENGINE=InnoDB";
 
-/// `role_edges` (chapter 29).
+/// `role_edges`.
 pub const DDL_ROLE_EDGES: &str = "CREATE TABLE IF NOT EXISTS role_edges (
   grantee_tenant_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
   grantee_kind ENUM('user','role') NOT NULL,
@@ -66,7 +65,7 @@ pub const DDL_ROLE_EDGES: &str = "CREATE TABLE IF NOT EXISTS role_edges (
   KEY k_edges_role (role_id)
 ) ENGINE=InnoDB";
 
-/// `privileges` (chapter 29).
+/// `privileges`.
 pub const DDL_PRIVILEGES: &str = "CREATE TABLE IF NOT EXISTS privileges (
   priv_id      BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   grantee_tenant_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
@@ -104,8 +103,8 @@ const GRANT_EXISTING: &str = "INSERT IGNORE INTO privileges
   SELECT 0, 'user', user_id, 'tenant', 4026531839, UTC_TIMESTAMP(3)
   FROM users WHERE state = 'active'";
 
-/// The data step of format 2 (decision bugfix-interim, WATCH): change
-/// streams need `WATCH` from now on (chapters 29 and 38), so every grant
+/// The data step of format 2: change streams need `WATCH` from now on,
+/// so every grant
 /// that held `SELECT` before gets `WATCH` at the same level, and every
 /// partial revoke that cut `SELECT` cuts `WATCH` too. Nothing that worked
 /// stops working; grants made after it follow the design. Column grants
@@ -134,7 +133,7 @@ pub static AUTHZ_MIGRATIONS: &[Migration] = &[
 ];
 
 /// The `authz` module, for [`Migrator::new`](sprig_catalog::Migrator::new).
-/// It needs chapter 14's `auth` module first (format 1 reads `users`).
+/// It needs the `auth` module first (format 1 reads `users`).
 pub const AUTHZ_MODULE: Module = Module {
     name: MODULE,
     migrations: AUTHZ_MIGRATIONS,
@@ -175,7 +174,7 @@ impl Grantee {
     }
 }
 
-/// Where a privilege row points (the R0 levels).
+/// Where a privilege row points (the supported levels).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PrivTarget {
     /// `*.*`.
@@ -199,7 +198,7 @@ pub enum PrivTarget {
         /// case-insensitively).
         column: String,
     },
-    /// A MySQL partial revoke (`auth.partial_revokes`, R4): the actions
+    /// A MySQL partial revoke (`auth.partial_revokes`): the actions
     /// a tenant-level (`*.*`) grant of the same grantee doesn't give on
     /// this database, by its name key. A `database` row with `restriction
     /// = 1`.
@@ -216,9 +215,9 @@ pub enum PrivTarget {
         column: Option<String>,
     },
     /// One label (`NODES L`) or relationship type (`RELATIONSHIPS T`) of a
-    /// graph (chapter 43, R8): a `graph_element` row with the graph in
+    /// graph: a `graph_element` row with the graph in
     /// `object_id`, bit 31 of `element` set for relationship types, and
-    /// the label or type's name in `name_pattern` (decision G42: by name,
+    /// the label or type's name in `name_pattern` (by name,
     /// so a grant may name a label no node carries yet, as in Neo4j).
     GraphElement {
         /// The database.
@@ -328,7 +327,7 @@ impl PrivTarget {
     }
 }
 
-/// A `privileges` row (the R0 levels, this tenant's grantees).
+/// A `privileges` row (the supported levels, this tenant's grantees).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrivRow {
     /// The id.
@@ -366,7 +365,7 @@ pub struct EdgeRow {
 }
 
 /// Everything the module stores for one tenant (this tenant's grantees,
-/// the R0 levels and SQL roles).
+/// the supported levels and SQL roles).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AuthzRows {
     /// SQL roles.
@@ -452,7 +451,8 @@ impl AuthzStore {
     }
 
     /// Every row the gateway uses: SQL roles, this tenant's role edges and
-    /// privileges at the R0 levels. Rows of later releases are skipped.
+    /// privileges at the supported levels. Rows this build doesn't know are
+    /// skipped.
     ///
     /// # Errors
     /// 39070, a backend error, or `Internal` for a malformed row.

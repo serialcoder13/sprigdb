@@ -1,4 +1,4 @@
-//! The `sink.*` settings (chapter 51, "Configuration"), registered here.
+//! The `sink.*` settings, registered here.
 //! `WITH (...)` on a sink sets a key at the sink's object scope.
 //!
 //! Not registered: `sink.region_tags` (the built-in table is used).
@@ -70,7 +70,7 @@ key!(
     HardBounds::range(1, 3600), false, "How often a fan-in sink looks for new member instances"
 );
 key!(
-    /// `sink.queue_lease_ms` (R9, r9queue): how long a queue source holds
+    /// `sink.queue_lease_ms`: how long a queue source holds
     /// each message it took before it returns to the queue unsettled (a
     /// worker that died, a batch still retrying).
     QUEUE_LEASE_MS: u64 = "sink.queue_lease_ms", 300_000, Scopes::DATA,

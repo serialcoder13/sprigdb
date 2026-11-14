@@ -1,7 +1,7 @@
-//! The `caching_sha2_password` fast cache (chapter 14, "Gateway caches").
+//! The `caching_sha2_password` fast cache.
 //!
 //! In gateway memory only: an account's `SHA256(SHA256(password))`, filled
-//! after a full authentication succeeded, so later logins take chapter 05's
+//! after a full authentication succeeded, so later logins take the plugin's
 //! fast path (one scramble check, no SHA-256 crypt). Entries expire after
 //! `auth.fast_cache_ttl_hours` (24 by default).
 //!
@@ -10,7 +10,7 @@
 //!   up to two per account (primary and secondary password). Verifier ids
 //!   are never reused, so a password change makes the old entries
 //!   unreachable at once; they age out or are pruned on the next fill.
-//! - **Interim file accounts** (decision D1): keyed by user name and bound
+//! - **File accounts** (the TOML accounts file): keyed by user name and bound
 //!   to the account's verifiers ([`Account::verifier_key`]); a changed
 //!   verifier misses.
 
@@ -160,7 +160,7 @@ impl FastCache {
             .retain(|k, _| !matches!(k, Key::Catalog(f) if f.tenant == tenant && f.user == user));
     }
 
-    // ---- interim file accounts ----
+    // ---- file accounts ----
 
     /// The cached value for `account`, if one was filled under its current
     /// verifiers and hasn't expired.
@@ -181,7 +181,7 @@ impl FastCache {
 
     /// The fast path in one call: whether `client_response` to `nonce`
     /// matches the cached value. `false` on a miss or a mismatch; either way
-    /// the caller falls through to the full path (chapter 05, step 3).
+    /// the caller falls through to the full path.
     #[must_use]
     pub fn verify_scramble(&self, account: &Account, nonce: &[u8], client_response: &[u8]) -> bool {
         Self::check(self.get(account), nonce, client_response)

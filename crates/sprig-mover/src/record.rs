@@ -1,5 +1,5 @@
 //! Job records in the DC tier, claims, leases, tokens, shard locks and
-//! copy slots (chapter 10, "Job record", "Jobs and workers"; build step 3).
+//! copy slots.
 //!
 //! ```text
 //! /sprig/dc/<dc>/mover/jobs/<job_id>                 the record (JSON, below)
@@ -8,11 +8,10 @@
 //! /sprig/dc/<dc>/mover/slots/copy/<cluster>/<n>      the job id, on the worker's lease
 //! ```
 //!
-//! **Decision, against the book.** Chapter 10 puts records at `jobs/`,
-//! where chapter 23's job scheduler (being built alongside) keeps its own,
-//! differently shaped records and dispatches them. Until mover jobs run
-//! through that scheduler, they live under `mover/` so neither side
-//! misreads the other's records.
+//! **Why `mover/`.** The job scheduler keeps its own, differently shaped
+//! records under `jobs/` and dispatches them. Until mover jobs run through
+//! that scheduler, they live under `mover/` so neither side misreads the
+//! other's records.
 //!
 //! A submit creates the record and the shard lock in one transaction, so
 //! two jobs never hold one shard. The lock lives as long as the job, not a
@@ -64,7 +63,7 @@ pub enum VerifyCursor {
     Done,
 }
 
-/// The job record (chapter 10, "Job record").
+/// The job record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JobRecord {
     /// The job.
@@ -125,12 +124,12 @@ pub struct JobRecord {
     /// commit ([`JobRecord::retain_until`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retain_from_ms: Option<u64>,
-    /// The tenant was deleted (chapter 08, "Deleting a tenant"): cleaning
+    /// The tenant was deleted: cleaning
     /// also removes the tenant's backend accounts and `__sprig_names` rows
     /// on the source cluster, whose gateways no longer will.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub purge_tenant: bool,
-    /// Chapter 11's decision row.
+    /// The balancer's decision row.
     #[serde(default)]
     pub decision_id: Option<u64>,
     /// Created, ms since the epoch.
@@ -197,9 +196,9 @@ impl JobRecord {
         self.lock_rels().swap_remove(0)
     }
 
-    /// Every shard lock this job holds: the tenant's (shard 0) for an R0
-    /// job; one per source shard, `g<group>s<shard>`, for a hash-range job
-    /// (chapter 20), whose shard ids are per group.
+    /// Every shard lock this job holds: the tenant's (shard 0) for a
+    /// whole-tenant job; one per source shard, `g<group>s<shard>`, for a
+    /// hash-range job, whose shard ids are per group.
     #[must_use]
     pub fn lock_rels(&self) -> Vec<String> {
         match self.spec.group() {
@@ -368,13 +367,14 @@ impl JobStore {
     /// Creates a job and its shard lock.
     ///
     /// # Errors
-    /// 39131 if the shard is locked; `Internal` for a spec R0 can't run.
+    /// 39131 if the shard is locked; `Internal` for a spec the mover can't
+    /// run.
     pub async fn create(&self, spec: JobSpec) -> Result<JobRecord> {
         check_spec(&spec)?;
         if spec.group().is_none() {
-            // A whole-tenant job (chapter 20, "Mutual exclusion"): never
-            // beside a split, merge or shard move of the tenant, and no
-            // move of a tenant whose tables are in table groups (R1).
+            // A whole-tenant job: never beside a split, merge or shard move
+            // of the tenant, and no move of a tenant whose tables are in
+            // table groups.
             self.check_whole_tenant(&spec).await?;
         }
         let now = self.now_ms();
@@ -533,7 +533,8 @@ impl JobStore {
 
     /// Refuses a whole-tenant job while a hash-range job of the tenant
     /// holds a shard (39470), and a move of a tenant with table groups
-    /// (39472): R1 moves only the catalog's map, not the groups' maps.
+    /// (39472): a whole-tenant move changes only the catalog's map, not
+    /// the groups' maps.
     async fn check_whole_tenant(&self, spec: &JobSpec) -> Result<()> {
         // The permanent refusal first: it says what to do instead.
         if matches!(spec.kind, JobKind::MoveShard | JobKind::TenantMigration) {
@@ -557,7 +558,7 @@ impl JobStore {
 
     /// Takes the tenant's whole-tenant lock (`mover/shard-locks/<tenant>/0`)
     /// for `holder`, a non-job owner such as the advisor applying a first
-    /// design (chapter 16): no whole-tenant move and no hash-range job
+    /// design: no whole-tenant move and no hash-range job
     /// starts while it is held. Taking a lock `holder` already holds
     /// succeeds. Returns the other holder when the lock is taken.
     ///
@@ -650,12 +651,11 @@ impl JobStore {
         Ok(r.succeeded.then_some(r.revision))
     }
 
-    /// Ends a deleted tenant's retention now (chapter 08, "Deleting a
-    /// tenant"): the job's cleaning then drops the retained source and
-    /// purges the tenant's accounts and name rows on that cluster
-    /// ([`JobRecord::purge_tenant`]). Only for a `retaining` job no worker
-    /// owns (workers hand such jobs back while they wait). `false` if the
-    /// job isn't one, or changed meanwhile.
+    /// Ends a deleted tenant's retention now: the job's cleaning then drops
+    /// the retained source and purges the tenant's accounts and name rows
+    /// on that cluster ([`JobRecord::purge_tenant`]). Only for a
+    /// `retaining` job no worker owns (workers hand such jobs back while
+    /// they wait). `false` if the job isn't one, or changed meanwhile.
     ///
     /// # Errors
     /// The store's errors.
@@ -1072,7 +1072,7 @@ fn check_spec(spec: &JobSpec) -> Result<()> {
     }
 }
 
-/// Checks a hash-range job (chapter 20): sources on one cluster, targets
+/// Checks a hash-range job: sources on one cluster, targets
 /// on one cluster, adjacent source ranges covered exactly by the targets.
 fn check_reshard(spec: &JobSpec) -> Result<()> {
     let bad = |m: &str| Err(SprigError::internal(format!("unsupported job: {m}")));

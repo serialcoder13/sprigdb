@@ -1,5 +1,4 @@
-//! Ancestry and ancestors' settings in a catalog (chapter 08, "Ancestry and
-//! ancestors' settings"; build step 6, the catalog side).
+//! Ancestry and ancestors' settings in a catalog (the catalog side).
 //!
 //! A catalog knows its ancestry from `sprig.ancestry` (ancestors' ids and
 //! names, root first, parent last) and holds a read-only copy of every
@@ -8,7 +7,7 @@
 //! is unreachable. `sprig.ancestor_versions` records, per ancestor, the
 //! `settings_version` its copy is at.
 //!
-//! [`apply`] is the commit of chapter 08's `tree_settings` reconcile:
+//! [`apply`] is the commit of the `tree_settings` reconcile:
 //!
 //! ```text
 //! change(d, Catalog):                          // one version for the batch
@@ -24,9 +23,8 @@
 //! The directory side (walking parent links, watching `settings_version`,
 //! reading ancestors' catalogs) is `sprig-controller::tree_settings`.
 //!
-//! Ancestry modes (`tenant.ancestry_mode`, decided 7 November 2026): only
-//! `copy` is implemented, and `auto` behaves as `copy`. TODO(chapter 08
-//! step 18): `shared` (one tree-settings record per ancestor per DC),
+//! Ancestry modes (`tenant.ancestry_mode`): only `copy` is implemented,
+//! and `auto` behaves as `copy`. TODO: `shared` (one tree-settings record per ancestor per DC),
 //! `reference` (gateways read ancestors' rows from their home DC; 39085
 //! when unreachable with a cold cache), `auto`'s size and residency rules
 //! (`tenant.copy_max_descendants`), the residency check (39086) and mode

@@ -1,4 +1,4 @@
-//! `TRANSFORM f` (chapter 51, "Transforms"; R9, r9more): a deployed logic
+//! `TRANSFORM f`: a deployed logic
 //! function `f(record) → record | [records] | null`, run on each record
 //! after `WHERE` and columns, in the sink's worker on the fallback tier
 //! (QuickJS, KIRun or Lua from `sprig-logic-js`), whatever tier the
@@ -103,7 +103,7 @@ pub async fn source_of(
 }
 
 /// [`source_of`] for version `version` of the function (`None`: the
-/// active one): `transform_version` pins a sink to one (R9, r9fwd).
+/// active one): `transform_version` pins a sink to one.
 ///
 /// # Errors
 /// The catalog's.
@@ -148,8 +148,8 @@ pub async fn source_at(
     }
 }
 
-/// Whether a version's recorded signature says `DETERMINISTIC` (R9,
-/// r9fwd: `CREATE FUNCTION ... DETERMINISTIC` records it).
+/// Whether a version's recorded signature says `DETERMINISTIC`
+/// (`CREATE FUNCTION ... DETERMINISTIC` records it).
 #[must_use]
 pub fn is_deterministic(sig: &Value) -> bool {
     sig.get("deterministic").and_then(Value::as_bool) == Some(true)

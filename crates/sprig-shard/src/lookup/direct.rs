@@ -1,11 +1,11 @@
 //! A plain [`LookupSessions`] over `mysql_async` pools, and the lookup
 //! jobs built on it: build with back-fill and verification, drop, and the
-//! orphan scan (chapter 19, "Building, back-filling and dropping").
+//! orphan scan.
 //!
 //! [`DirectTxn`] keeps one Pre and one Main connection per cluster and
 //! commits in the fixed order: every Pre, then Main, then the buffered
 //! Post statements in autocommit. Its Main commit is local per cluster; a
-//! Main spanning clusters needs chapter 18's `DistTxn` (XA), which
+//! Main spanning clusters needs the router's `DistTxn` (XA), which
 //! implements the same trait.
 
 use std::collections::{BTreeMap, HashMap};
@@ -29,7 +29,7 @@ use crate::normalize::{Normalizer, StdNormalizer};
 /// Pools by cluster.
 pub type Pools = Arc<HashMap<ClusterId, Pool>>;
 
-/// A pool that keeps idle connections (chapter 03's rule: a pool with
+/// A pool that keeps idle connections (a pool with
 /// `min = 0` needs an idle TTL, or it closes every returned connection).
 #[must_use]
 pub fn pool(url: &str, max: usize) -> Option<Pool> {
@@ -234,14 +234,14 @@ pub struct BuildReport {
     pub skipped: u64,
 }
 
-#[allow(clippy::many_single_char_names, clippy::too_many_lines)] // the chapter's steps, in order
-/// Builds `l` (chapter 19, `build`): creates the table on every lookup
+#[allow(clippy::many_single_char_names, clippy::too_many_lines)] // the build's steps, in order
+/// Builds `l`: creates the table on every lookup
 /// shard, `write_only`, back-fills every owner shard in primary-key
 /// chunks of `chunk` rows, checks that every owner's value points at it
 /// (else a real duplicate: drops `l` and fails with 1062), then `public`.
 /// `catalog` is a connection to the tenant catalog; `wait_gateways` is
 /// called after `write_only` and must return once every gateway has the
-/// catalog version that shows it (chapter 08).
+/// catalog version that shows it.
 ///
 /// # Errors
 /// 1062 on a real duplicate; MariaDB's errors.
@@ -363,7 +363,7 @@ where
 
 /// Hashes values read back from MariaDB, as the gateway would hash the
 /// same values from a client: strings by the column's collation, numbers
-/// exactly. Supports the classes lookups use in R1: numeric, string,
+/// exactly. Supports the classes lookups use: numeric, string,
 /// binary.
 fn hash_values(
     spec: &crate::key::KeySpec,
@@ -495,8 +495,8 @@ pub async fn drop_lookup(
         .map_err(db_err)
 }
 
-#[allow(clippy::many_single_char_names, clippy::too_many_lines)] // one pass, in the chapter's order
-/// The orphan scan (chapter 19): reads each lookup shard in chunks of 100
+#[allow(clippy::many_single_char_names, clippy::too_many_lines)] // one pass, in order
+/// The orphan scan: reads each lookup shard in chunks of 100
 /// rows; per row, locks it `FOR UPDATE`, checks its owner `LOCK IN SHARE
 /// MODE`, and deletes it with the full guard if the owner is gone.
 /// Returns the number of orphans removed.

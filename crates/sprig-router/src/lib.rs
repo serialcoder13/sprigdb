@@ -1,8 +1,8 @@
 //! `sprig-router`: the distributed planner and executor.
 //!
-//! Layer: 2 execution. Design: [chapter 17](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/17-router.md) (Router) of the SprigDB low-level design.
+//! Layer: 2 execution.
 //!
-//! The gateway hands the router each statement after chapter 07's name
+//! The gateway hands the router each statement after the tenant name
 //! rewrite. [`planner::plan`] decides which shards run what:
 //!
 //! - **Pass**: every sharded table on one shard of one cluster; the
@@ -17,32 +17,32 @@
 //! - **Write**: multi-row `INSERT` split by shard, multi-shard `UPDATE`
 //!   and `DELETE`, in one transaction (or a statement savepoint).
 //! - **Explain**: `EXPLAIN FORMAT=SPRIG`.
-//! - **Gather** (R3): a `SELECT` none of the above splits exactly (window
+//! - **Gather**: a `SELECT` none of the above splits exactly (window
 //!   functions, subqueries, set operations, joins of several groups or on
 //!   any condition) runs once on the session's cluster, over temporary
 //!   copies of the rows it reads ([`gather`]).
-//! - **Analytic reads** (R3): a gathered `SELECT` the analytic guard
+//! - **Analytic reads**: a gathered `SELECT` the analytic guard
 //!   accepts runs in DataFusion over streams of the shards' rows instead,
 //!   on keys that compare as MariaDB compares ([`analytics`]).
-//! - **Graph** (R8 round 6): a statement with `GRAPH_TABLE` ([`graph`]):
+//! - **Graph**: a statement with `GRAPH_TABLE` ([`graph`]):
 //!   the graph calls run first, then the statement with their rows as
 //!   derived tables plans again; literal rows join inside each shard.
-//!   Each hop of a graph read is a router route too ([`graph_route`], R8
-//!   round 8): Bolt and `GRAPH_TABLE` share this planner.
+//!   Each hop of a graph read is a router route too ([`graph_route`]):
+//!   Bolt and `GRAPH_TABLE` share this planner.
 //! - **Reject**: `ER_SPRIG_STATEMENT_NOT_DISTRIBUTABLE` (39420) with a
 //!   reason code; never a different answer.
 //!
 //! [`exec::execute`] runs a plan through the gateway's [`exec::ShardBackend`]
 //! ([`exec::execute_to`] streams a scatter's rows). [`topology`] is the
-//! router's interface to chapter 15: the gateway builds it from the
+//! router's interface to sharding: the gateway builds it from the
 //! catalog's table groups and `sprig-shard`'s shard maps
 //! ([`topology::catalog`]). Prepared statements are parsed once
 //! ([`planner::parse_template`]) and planned per execution with their
 //! parameters ([`planner::plan_prepared`]).
 
-// Short names (a, b, e, q, s, t) follow the SQL and the book's pseudocode.
+// Short names (a, b, e, q, s, t) follow the SQL.
 #![allow(clippy::many_single_char_names)]
-// The planner and executor follow the book step by step.
+// The planner and executor are long step-by-step functions.
 #![allow(clippy::too_many_lines)]
 
 pub mod analytics;
@@ -82,6 +82,5 @@ pub use topology::{StaticTopology, Topology, TopologyFile};
 pub const MAX_ROUTE_VALUES: usize = 1024;
 /// `router.lookup_batch_size`'s default.
 pub const LOOKUP_BATCH: usize = 256;
-/// What a fenced or retired source shard returns (chapter 17,
-/// `STALE_MAP_CODES`): 1142, 1044, 1146.
+/// What a fenced or retired source shard returns: 1142, 1044, 1146.
 pub const STALE_MAP_CODES: [u16; 3] = [1142, 1044, 1146];

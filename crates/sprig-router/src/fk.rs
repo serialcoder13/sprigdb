@@ -1,5 +1,4 @@
-//! Foreign keys across groups (chapter 19, "Foreign keys across groups";
-//! R3): the gateway keeps the keys MariaDB can't, because the two ends sit
+//! Foreign keys across groups: the gateway keeps the keys MariaDB can't, because the two ends sit
 //! on different shards.
 //!
 //! ```text
@@ -166,7 +165,7 @@ impl FkRef {
 /// be planned from it alone).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FkGraph {
-    /// The database's default schema (chapter 07's rewrite names it).
+    /// The database's default schema (the tenant name rewrite names it).
     pub default_schema: String,
     /// The tables at either end of a key.
     pub tables: Vec<TableEntry>,
@@ -485,8 +484,8 @@ fn not_distributed(detail: impl Into<String>) -> SprigError {
     SprigError::new(SprigCode::FkActionNotDistributed, detail)
 }
 
-/// Runs `work` before its write's rows (chapter 19's child and parent
-/// checks and R3's cascading actions); `depth` counts cascade levels.
+/// Runs `work` before its write's rows (the child and parent checks and
+/// the cascading actions); `depth` counts cascade levels.
 ///
 /// # Errors
 /// 1452, 1451, 39462 (an action past 15 levels, or one the router can't

@@ -1,21 +1,19 @@
-//! [`GraphStore`] over MariaDB (chapter 43, "Native graph tables",
-//! "Variable-length paths", "Writes and transactions"; build steps 3, 11
-//! and 14): one native graph's tables in each of its shard schemas, on the
+//! [`GraphStore`] over MariaDB: one native graph's tables in each of its shard schemas, on the
 //! caller's connections and transaction.
 //!
-//! - **Shards** ([`GraphShards`]). A graph from round 3 is a sharded table
+//! - **Shards** ([`GraphShards`]). A grouped graph is a sharded table
 //!   group keyed by `part` (= `id`): node, label and mirror rows live on the
 //!   shard of their node's routing hash, edges on their source's shard.
-//!   Graphs from rounds 1 and 2 are one shard in the database's first shard
-//!   schema. [`ShardConns`] hands out the connection of each shard's
-//!   cluster inside the statement's transaction (the gateway's is chapter
-//!   18's coordinator; [`OneConn`] is one connection for every shard).
+//!   Graphs made before grouped graphs are one shard in the database's
+//!   first shard schema. [`ShardConns`] hands out the connection of each shard's
+//!   cluster inside the statement's transaction (the gateway's is the
+//!   distributed-transaction coordinator; [`OneConn`] is one connection for every shard).
 //! - A hop is one statement per batch and shard: outgoing edges by the
 //!   clustered `(src, ...)` key on the source's shard, the far node
 //!   left-joined when it is local; incoming edges through the mirrors on the
 //!   destination's shard, then the edges by id on their sources' shards (or
 //!   the `rev` key when the graph has one shard).
-//! - [`GraphStore::reach`] is the chapter's recursive CTE with an origin
+//! - [`GraphStore::reach`] is a recursive CTE with an origin
 //!   column, `CYCLE o, id RESTRICT`, `max_recursive_iterations` and the
 //!   shard's range: nodes outside it are boundary nodes, returned but not
 //!   expanded (incoming searches recurse over the mirrors).
@@ -23,7 +21,7 @@
 //!   destination's shard, whatever the shard count, so splits carry them
 //!   with no rebuild. Under `sync` (and until the worker's applier serves
 //!   the graph) writers keep it in their own transaction; under `async`
-//!   (round 5, [`crate::mirror`]) the applier keeps it from the feed, and
+//!   ([`crate::mirror`]) the applier keeps it from the feed, and
 //!   a statement reads through mirrors only when its [`MirrorGate`] says
 //!   the applier has reached the session's causal target; otherwise
 //!   incoming hops scatter the `rev` key, and write statements always do.
@@ -180,7 +178,7 @@ pub struct GraphShards {
     pub seq: String,
     /// Mirror rows are kept for every edge.
     pub mirrors: bool,
-    /// The mirrors are the applier's (`graph.mirror = async`, round 5):
+    /// The mirrors are the applier's (`graph.mirror = async`):
     /// writers don't write them, and readers use them only after the
     /// statement's [`MirrorGate`] says they are fresh.
     pub mirror_async: bool,
@@ -189,7 +187,7 @@ pub struct GraphShards {
     /// them yet.
     pub mirror_building: bool,
     /// The router's own view of the group (its map cache: shards, epochs,
-    /// holds), which plans every read step (R8 round 8, G69); `None`: made
+    /// holds), which plans every read step; `None`: made
     /// from `shards` ([`Self::group`]).
     pub route: Option<Arc<sprig_router::topology::Group>>,
 }
@@ -280,8 +278,8 @@ fn numeric_spec() -> sprig_shard::KeySpec {
     sprig_shard::KeySpec::new(vec![sprig_shard::KeyClass::Numeric]).expect("a numeric key spec")
 }
 
-/// Waits for a mover's hold on a range a route reads (chapter 10,
-/// "Cutover"): the gateway's waits for the hold to end in its map cache.
+/// Waits for a mover's hold on a range a route reads (during a cutover):
+/// the gateway's waits for the hold to end in its map cache.
 #[async_trait]
 pub trait HoldWait: Send + Sync {
     /// Waits until the hold ending at `until_ms` is gone, then answers an
@@ -316,7 +314,7 @@ pub trait ShardConns: Send {
     fn wrote(&mut self, _at: &ShardLoc, _sql: &str) {}
 
     /// Whether the statement may commit batches of its own (`CALL { } IN
-    /// TRANSACTIONS`, R8 round 8): an auto-commit statement's connections.
+    /// TRANSACTIONS`): an auto-commit statement's connections.
     fn batches(&self) -> bool {
         false
     }
@@ -332,8 +330,8 @@ pub trait ShardConns: Send {
 }
 
 /// `sql` with each `?` placeholder outside quotes replaced by its value
-/// as an SQL literal: the text a held branch records for redo (chapter
-/// 18's Sprig 2PC).
+/// as an SQL literal: the text a held branch records for redo (Sprig
+/// 2PC).
 #[must_use]
 pub fn inline_params(sql: &str, params: &Params) -> String {
     let vals: &[MyValue] = match params {
@@ -400,7 +398,7 @@ pub struct MariaStore<'c> {
     gate: Option<Arc<dyn MirrorGate>>,
     /// The gate's answer, asked once per statement.
     mirror_ok: Option<bool>,
-    /// The group the router plans every read step over (G69).
+    /// The group the router plans every read step over.
     group: Arc<sprig_router::topology::Group>,
     /// Who waits for a mover's hold a route meets (auto-commit reads);
     /// `None`: the statement runs on the map it has.
@@ -548,7 +546,7 @@ impl<'c> MariaStore<'c> {
         self
     }
 
-    /// Plans `op` over `targets` with the router (G69) and runs its
+    /// Plans `op` over `targets` with the router and runs its
     /// statements in order: per statement, the shard's index in the layout
     /// and its rows. `write`: on the write connection (locking reads).
     async fn route(
@@ -726,9 +724,9 @@ impl<'c> MariaStore<'c> {
         dup_error(d, what, id)
     }
 
-    /// Uniqueness claims are kept (decision G41) for every grouped graph,
-    /// whatever its shard count, so splits and moves carry them; graphs
-    /// from rounds 1 and 2 are one schema, where MariaDB's `UNIQUE` index
+    /// Uniqueness claims are kept for every grouped graph, whatever its
+    /// shard count, so splits and moves carry them; graphs made before
+    /// grouped graphs are one schema, where MariaDB's `UNIQUE` index
     /// is exact.
     fn claims_kept(&self) -> bool {
         self.layout.group != 0
@@ -750,8 +748,7 @@ impl<'c> MariaStore<'c> {
     }
 
     /// Claims `key` of constraint `d` for element `owner` (on the shard of
-    /// `owner_rk`), in the statement's transaction (decision G41, chapter
-    /// 19's `claim` with Pre joined to Main): insert the claim row; when
+    /// `owner_rk`), in the statement's transaction: insert the claim row; when
     /// one is there, share-lock it (the duplicate-key error already holds
     /// a shared lock, so writers queued on one key never deadlock taking
     /// it exclusively) and check its owner with an exclusive read on
@@ -946,7 +943,7 @@ impl<'c> MariaStore<'c> {
         Ok(n)
     }
 
-    /// The router's scan step for `s` (G69): an index on the label and a
+    /// The router's scan step for `s`: an index on the label and a
     /// pushed-down property replaces the label join; property equalities
     /// push down as a superset the gateway rechecks.
     fn scan_op(&self, s: &Scan) -> ScanOp {
@@ -1726,7 +1723,7 @@ impl GraphStore for MariaStore<'_> {
     }
 }
 
-/// The commit check of chapter 43: nodes removed with a plain `DELETE`
+/// The commit check: nodes removed with a plain `DELETE`
 /// must have no relationships left (39906): outgoing edges on each node's
 /// shard; incoming ones through the mirrors there, the `rev` key of a
 /// one-shard graph, or every shard.

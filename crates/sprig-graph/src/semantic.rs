@@ -1,5 +1,4 @@
-//! Compile-time semantic checks (chapter 43 build step 5, the binder;
-//! decision G43): the errors openCypher requires before a statement runs,
+//! Compile-time semantic checks (the binder): the errors openCypher requires before a statement runs,
 //! as Neo4j raises them (`Neo.ClientError.Statement.SyntaxError`, 39900).
 //!
 //! - **Variables.** A name used as a node, a relationship and a path, or
@@ -109,7 +108,7 @@ fn is_element(k: Kind) -> bool {
 
 fn check_clauses(clauses: &[Clause], s: &mut Scope) -> Result<()> {
     for (i, c) in clauses.iter().enumerate() {
-        // R8 round 9 (decision G76): as Neo4j 5.26, a batched `CALL` may
+        // As Neo4j 5.26, a batched `CALL` may
         // not follow a write of the same query (those writes would belong
         // to no batch). An earlier batched `CALL` committed its own.
         let batched = |c: &Clause| matches!(c, Clause::Subquery { batch: Some(_), .. });

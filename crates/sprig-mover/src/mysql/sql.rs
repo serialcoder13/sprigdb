@@ -1,6 +1,6 @@
-//! Statement text the MariaDB side of the mover sends (chapter 10, "The
-//! watermark copy", "The applier", "Verification"). Pure, so it is unit
-//! tested without a server.
+//! Statement text the MariaDB side of the mover sends: the watermark copy,
+//! the applier and verification. Pure, so it is unit tested without a
+//! server.
 
 use sprig_common::names::quote;
 
@@ -127,7 +127,7 @@ pub fn range(
 
 /// The digest expression of a row: the first 16 hex digits of the MD5 of
 /// the copied columns and their null flags, as an unsigned integer
-/// (chapter 10, "Verification"). Columns are compared as bytes, so mixed
+/// for verification. Columns are compared as bytes, so mixed
 /// character sets can't fail the `CONCAT_WS`.
 #[must_use]
 pub fn digest_expr(t: &TableMeta) -> String {
@@ -242,7 +242,7 @@ pub fn deletes(t: &TableMeta, table: &str, keys: &[Row]) -> Vec<(String, Vec<Val
         .collect()
 }
 
-/// The upsert of a watermark row (chapter 10, `__sprig_watermark`).
+/// The upsert of a watermark row (`__sprig_watermark`).
 pub const WATERMARK_UPSERT: &str = "INSERT INTO `__sprig_sys`.`__sprig_watermark` \
      (job_id, stream, kind, seq, written_at) VALUES (?, ?, ?, ?, NOW(6)) \
      ON DUPLICATE KEY UPDATE seq = VALUES(seq), written_at = VALUES(written_at)";
@@ -260,15 +260,15 @@ pub const POS_DDL: &str = "CREATE TABLE IF NOT EXISTS `__sprig_sys`.`__sprig_mov
      gtid_pos VARCHAR(2048) NOT NULL, copy_state JSON NOT NULL, \
      updated_at DATETIME(6) NOT NULL, PRIMARY KEY (job_id, stream, target)) ENGINE=InnoDB";
 
-/// The target's XA table (prepared groups are held in memory in R0; the
-/// table is created for chapter 18's later use).
+/// The target's XA table (prepared groups are held in memory for now; the
+/// table is created for later use).
 pub const XA_DDL: &str = "CREATE TABLE IF NOT EXISTS `__sprig_sys`.`__sprig_mover_xa` (\
      job_id BINARY(16) NOT NULL, stream SMALLINT UNSIGNED NOT NULL, \
      target SMALLINT UNSIGNED NOT NULL, xid VARBINARY(140) NOT NULL, \
      prepare_gtid VARCHAR(64) NOT NULL, changes LONGBLOB NOT NULL, \
      PRIMARY KEY (job_id, stream, target, xid)) ENGINE=InnoDB";
 
-/// The applier session (chapter 10, "The applier").
+/// The applier session.
 pub const APPLIER_SESSION: &[&str] = &[
     "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO,NO_ENGINE_SUBSTITUTION'",
     "SET SESSION foreign_key_checks = 0",
@@ -377,7 +377,7 @@ pub fn classify(sql: &str) -> QueryKind {
     }
 }
 
-/// A stored program a DDL statement creates or changes (RL12, r2harden).
+/// A stored program a DDL statement creates or changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProgramDdl {
     /// `CREATE [OR REPLACE] TRIGGER` (or `ALTER`: none in MariaDB).
@@ -392,7 +392,7 @@ pub enum ProgramDdl {
 /// event. The stream doesn't apply creations: a trigger on a copy would
 /// fire on the rows the applier writes (their effects arrive as rows of
 /// their own), and an event would run there. The cutover creates them
-/// from the source (chapter 10, step 6); a standby records them for its
+/// from the source (cutover step 6); a standby records them for its
 /// promotion.
 #[must_use]
 pub fn program_ddl(sql: &str) -> Option<ProgramDdl> {

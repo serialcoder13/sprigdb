@@ -1,4 +1,4 @@
-//! ID blocks for `AUTO_INCREMENT` and sequences (chapter 19, "ID blocks").
+//! ID blocks for `AUTO_INCREMENT` and sequences.
 //!
 //! While a group has one shard MariaDB's own counter is used. From the
 //! first split each `AUTO_INCREMENT` column has a `sequences` row in the
@@ -21,7 +21,7 @@ use tokio::sync::Mutex;
 
 use crate::groups::db_err;
 
-/// `sequences` (chapter 19), in `t<tenant>_sprig`.
+/// `sequences`, in `t<tenant>_sprig`.
 pub const DDL_SEQUENCES: &str = "CREATE TABLE IF NOT EXISTS sequences (
   seq_id        BIGINT UNSIGNED NOT NULL,
   object_id     BIGINT UNSIGNED NOT NULL,
@@ -39,7 +39,7 @@ pub const DDL_SEQUENCES: &str = "CREATE TABLE IF NOT EXISTS sequences (
   UNIQUE KEY uk_object (object_id, column_name)
 ) ENGINE=InnoDB";
 
-/// `sequence_blocks` (chapter 19), in `t<tenant>_sprig`: the blocks
+/// `sequence_blocks`, in `t<tenant>_sprig`: the blocks
 /// gateways hold and may still use, each under a lease. Rows whose lease
 /// ended are deleted at the next fetch of the sequence.
 pub const DDL_SEQUENCE_BLOCKS: &str = "CREATE TABLE IF NOT EXISTS sequence_blocks (
@@ -310,8 +310,7 @@ impl<S: SequenceSource> BlockAllocator<S> {
         b.floor = b.floor.max(n);
     }
 
-    /// An explicit value `v` is about to be written (chapter 19,
-    /// "Explicit values"). This gateway's later values are above it. Unless
+    /// An explicit value `v` is about to be written. This gateway's later values are above it. Unless
     /// `v` lies in a block this gateway holds (then no other gateway can
     /// generate it), the source checks it: at or above `next_value` it is
     /// raised past it; inside a block another gateway may still use, the

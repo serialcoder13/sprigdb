@@ -1,5 +1,4 @@
-//! An LDBC-SNB-shaped workload through Bolt (chapter 43, "Testing"; R8's
-//! done-when, decision G25 step 5). The official LDBC data generator and
+//! An LDBC-SNB-shaped workload through Bolt. The official LDBC data generator and
 //! driver are downloads that need approval, so this test generates a
 //! social network of its own with the SNB schema's shape: persons in
 //! cities, `KNOWS` with a skewed degree, posts and comments with creators
@@ -7,7 +6,7 @@
 //! interactive short reads IS1–IS7 and the complex reads IC1, IC2, IC9 and
 //! IC13 (simplified to this schema) with random parameters, checks every
 //! answer against the in-memory executor over the same data, and reports
-//! latency percentiles against chapter 43's budgets (any 39903 fails the
+//! latency percentiles under the default budgets (any 39903 fails the
 //! test).
 //!
 //! Needs `SPRIG_TEST_BOLT_ADDR`, `SPRIG_TEST_BOLT_USER`,

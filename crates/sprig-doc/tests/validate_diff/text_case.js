@@ -1,4 +1,4 @@
-// $text with $caseSensitive / $diacriticSensitive (M3, decision S100): run with
+// $text with $caseSensitive / $diacriticSensitive (M3): run with
 // mongosh against MongoDB 8.0 and against a SprigDB gateway; the outputs must be equal
 // (9 of 9 on 12 Nov 2026). Uses and drops the database m3_text.
 const d = db.getSiblingDB("m3_text");

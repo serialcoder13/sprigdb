@@ -1,5 +1,5 @@
-//! Normalization: key values to canonical bytes (chapter 15,
-//! "Normalization", "Values from different models").
+//! Normalization: key values to canonical bytes, including values from
+//! different models.
 //!
 //! A key part becomes `tag (1 byte) ‖ length (u32 BE) ‖ payload`, and a
 //! composite key concatenates its parts. Equal values under MySQL's exact
@@ -37,7 +37,7 @@ pub const TAG_TIMESTAMP: u8 = 0x21;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct NormOutcome {
     /// A value was of another class than its key part and was hashed under
-    /// its own tag (chapter 15, "Values from different models").
+    /// its own tag.
     pub off_class: bool,
 }
 

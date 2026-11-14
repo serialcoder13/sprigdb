@@ -1,5 +1,4 @@
-//! The order-preserving key encoding and MongoDB's comparison order
-//! (chapter 31, "`_id` encoding and type classes"; build step 3).
+//! The order-preserving key encoding and MongoDB's comparison order.
 //!
 //! A key is a class byte, then a body, so `memcmp` gives MongoDB's order.
 //! Classes, in MongoDB order: MinKey 10, undefined 15, null 20, numbers

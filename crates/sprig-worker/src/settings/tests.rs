@@ -163,12 +163,16 @@ async fn tenant_rows_win_for_that_tenants_jobs() {
             vec![
                 row("logic.trigger_max_attempts", serde_json::json!(7)),
                 row("mover.cutover_max_hold_ms", serde_json::json!(900)),
+                row("logic.job_budget_ms", serde_json::json!(1500)),
             ],
         ),
     );
     // The tenant's trigger: its own value; any other tenant: the global.
     assert_eq!(s.run_opts_for(t).max_attempts, 7);
     assert_eq!(s.run_opts_for(TenantId(78)).max_attempts, 3);
+    // A scheduled run's budget (smallfix: read per tenant, as declared).
+    assert_eq!(s.job_budget_for(t), Duration::from_millis(1500));
+    assert_eq!(s.job_budget_for(TenantId(78)), Duration::from_secs(300));
     // The mover: the tenant's value over the dc's.
     let snap = s.snapshot();
     let rows = scopes.cached(t);

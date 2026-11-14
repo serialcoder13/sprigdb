@@ -332,7 +332,7 @@ pub async fn send(
         .map_err(|e| format!("{host}:{port}: {e}"))
 }
 
-/// A TLS listener for [`axum::serve`] (see the module notes). Wrap it in
+/// A TLS listener for [`axum::serve()`] (see the module notes). Wrap it in
 /// `axum::serve::ListenerExt::tap_io` to get the client's address as
 /// `ConnectInfo<SocketAddr>`.
 #[derive(Debug)]
