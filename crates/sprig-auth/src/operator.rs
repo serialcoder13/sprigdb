@@ -1,8 +1,8 @@
-//! Platform operators' credentials (chapter 14, "Operators"): the pieces
+//! Platform operators' credentials: the pieces
 //! the controller's operator directory builds on, kept here beside the
 //! tenant users' verifiers, API keys and second factors they reuse.
 //!
-//! - **Passwords** are chapter 14's `caching_sha2_password` verifier
+//! - **Passwords** are the `caching_sha2_password` verifier
 //!   (SHA-256 crypt) at [`PASSWORD_ROUNDS`], ten times a tenant user's
 //!   default: operators log in rarely and hold the platform.
 //! - **Second factors** are [`crate::mfa`]'s TOTP, with seeds sealed under

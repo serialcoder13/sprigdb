@@ -1,4 +1,4 @@
-//! Live dashboards (chapter 53, "Live dashboards"): what each view reads,
+//! Live dashboards: what each view reads,
 //! as tables, for the TUI's Dashboard tab and `sprig top --once`.
 //!
 //! Every view reads only what the user may: tenant users get sessions,

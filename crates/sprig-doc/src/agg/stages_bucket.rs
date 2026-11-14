@@ -1,6 +1,6 @@
-//! `$bucket` and `$bucketAuto` (M2, 12 Nov 2026), with MongoDB 8.0's
-//! errors and `$bucketAuto`'s granularities (the Renard and E series,
-//! 1-2-5 and powers of two).
+//! `$bucket` and `$bucketAuto`, with MongoDB 8.0's errors and
+//! `$bucketAuto`'s granularities (the Renard and E series, 1-2-5 and
+//! powers of two).
 
 use std::cmp::Ordering;
 
@@ -92,7 +92,7 @@ pub(crate) fn sort_by_id(out: &mut [Document]) {
     });
 }
 
-/// A parsed `$bucket` (split out for the spilling version, M5).
+/// A parsed `$bucket` (split out for the spilling version).
 pub(crate) struct BucketSpec {
     gb: Bson,
     b: Vec<Bson>,
@@ -426,7 +426,7 @@ pub(crate) fn bucket_auto(
     let mut out = Vec::new();
     for (a, b, min, max) in sp.plan(&sorted) {
         // MongoDB 8.0 accumulates a bucket's documents in input order,
-        // not in value order (M5: `$push` showed it).
+        // not in value order (`$push` showed it).
         let mut idx: Vec<usize> = vals[a..b].iter().map(|(_, k)| *k).collect();
         idx.sort_unstable();
         let ds = idx.into_iter().map(|k| Ok(docs[k].clone()));
@@ -437,7 +437,7 @@ pub(crate) fn bucket_auto(
     Ok(out)
 }
 
-/// A parsed `$bucketAuto` (split out for the spilling version, M5).
+/// A parsed `$bucketAuto` (split out for the spilling version).
 pub(crate) struct AutoSpec {
     gb: Bson,
     nbuckets: i32,

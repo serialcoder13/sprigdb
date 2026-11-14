@@ -35,6 +35,10 @@
 //!   the hub started under `gather` ago and delivered nothing → it moves
 //!     its start back to from (a worker's restart: every sequencer comes
 //!     back at once, each from its own checkpoint)
+//!   a new subscription keeping its tenant whole, within the ring's reach
+//!     → the dump reopens wider at from and reads those groups again;
+//!     everyone skips what they had (r9feed2: a stream or trigger that
+//!     read the cluster's position a moment before the hub read on)
 //!   else → a private catch-up dump for the tenant alone (at most
 //!     `max_catchup` per cluster; the others wait for one), which hands
 //!     over to the hub as soon as the ring covers its position
@@ -318,6 +322,14 @@ struct HubState {
     whole: HashMap<TenantId, usize>,
     /// Tenants the open dump keeps whole, and since when.
     scope_whole: HashMap<TenantId, GtidPos>,
+    /// A new subscription keeping a tenant whole started a little behind
+    /// `pos`: the wider dump reopens here instead (r9feed2), and reads the
+    /// groups up to `pos` again.
+    replay: Option<GtidPos>,
+    /// Reading groups again up to here: each subscription skips what it
+    /// had, and the ring keeps what it held (tenants added by the replay
+    /// count as kept whole from here).
+    replay_until: Option<GtidPos>,
 }
 
 impl HubState {
@@ -350,7 +362,7 @@ impl HubState {
     /// before `pos` yet, and an idle position would make its tail skip
     /// them (found in r9feed's live run).
     fn idle_fanout(&mut self, pos: &GtidPos) {
-        if self.rewind.is_some() || self.reopen != Reopen::No {
+        if self.rewind.is_some() || self.replay.is_some() || self.reopen != Reopen::No {
             return;
         }
         for s in self.subs.values_mut() {
@@ -362,6 +374,19 @@ impl HubState {
                 s.from = pos.clone();
             }
         }
+    }
+
+    /// The dump read up to `pos`. A replay doesn't move `self.pos` back
+    /// (subscriptions from there on are served as before); it ends once
+    /// `pos` reaches where it began.
+    fn advance(&mut self, pos: &GtidPos) {
+        if self.replay_until.as_ref().is_some_and(|u| pos.reached(u)) {
+            self.replay_until = None;
+        }
+        self.pos = Some(match (&self.pos, &self.replay_until) {
+            (Some(p), Some(_)) => newer(p, pos),
+            _ => pos.clone(),
+        });
     }
 
     /// Asks for a reopen (a stronger request is never weakened).
@@ -451,7 +476,9 @@ impl Hub {
     }
 
     /// Starts listening at `from` if the hub can serve it (see the module
-    /// docs); `first` allows moving a gathering hub's start back.
+    /// docs); `first` allows moving a gathering hub's start back, or a
+    /// replay.
+    #[allow(clippy::too_many_lines)] // the cases of the module docs, in order
     fn attach(
         self: &Arc<Self>,
         tenant: TenantId,
@@ -471,6 +498,8 @@ impl Hub {
             st.started = Some(Instant::now());
             st.delivered = false;
             st.rewind = None;
+            st.replay = None;
+            st.replay_until = None;
             st.reopen = Reopen::No;
             st.scope_whole.clear();
             st.register(
@@ -548,6 +577,36 @@ impl Hub {
                 tx,
                 Arc::clone(&detached),
             );
+            return Attach::Live {
+                rx,
+                backlog: VecDeque::new(),
+                detached,
+            };
+        }
+        // A new subscription keeping its tenant whole, a little behind the
+        // hub (it read the cluster's position, or its checkpoint, a moment
+        // before the hub read on): the dump reopens wider anyway, so it
+        // reopens at `from` and reads those groups again instead of
+        // opening a catch-up dump (r9feed2). Within the ring's reach and
+        // `max_backlog` groups only, one replay at a time.
+        let near = from.reached(&st.ring_start)
+            && st.ring.iter().filter(|e| after(from, &e.gtid)).count() <= opts.max_backlog;
+        if first && whole && near && st.rewind.is_none() && st.replay_until.is_none() {
+            let r = match &st.replay {
+                Some(r) => older(r, from),
+                None => from.clone(),
+            };
+            st.replay = Some(r);
+            st.want(Reopen::Scope);
+            self.wake.notify_one();
+            st.register(
+                tenant,
+                kept.clone(),
+                from.clone(),
+                tx,
+                Arc::clone(&detached),
+            );
+            metrics::counter!("sprig_feed_resumes_total", "tier" => "replay").increment(1);
             return Attach::Live {
                 rx,
                 backlog: VecDeque::new(),
@@ -656,6 +715,8 @@ impl Hub {
                         st.running = false;
                         st.pos = Some(pos.clone());
                         st.rewind = None;
+                        st.replay = None;
+                        st.replay_until = None;
                         st.reopen = Reopen::No;
                         st.reset_ring(&pos);
                         st.scope_whole.clear();
@@ -666,6 +727,12 @@ impl Hub {
                     empty_since = None;
                 }
                 if let Some(r) = st.rewind.take() {
+                    // A pending replay goes with it: the ring starts again.
+                    let r = match st.replay.take() {
+                        Some(b) => older(&r, &b),
+                        None => r,
+                    };
+                    st.replay_until = None;
                     tracing::info!(cluster = %self.cluster, from = %pos, to = %r, "shared feed reader moves its start back");
                     pos = older(&pos, &r);
                     st.pos = Some(pos.clone());
@@ -676,11 +743,34 @@ impl Hub {
                     scope = Some(s);
                     st.reopen = Reopen::No;
                 } else if st.reopen != Reopen::No {
-                    if std::mem::take(&mut st.reopen) == Reopen::Tables {
-                        st.reset_ring(&pos);
-                    }
+                    let why = std::mem::take(&mut st.reopen);
+                    let back = st.replay.take();
                     src = None;
-                    let s = self.scope(&mut st, &pos, false);
+                    let s = if why == Reopen::Tables {
+                        // The ring starts again where the dump reopens, so
+                        // the groups read again fill it.
+                        if let Some(b) = back {
+                            pos = older(&pos, &b);
+                        }
+                        st.replay_until = None;
+                        st.reset_ring(&pos);
+                        self.scope(&mut st, &pos, false)
+                    } else if let Some(b) = back {
+                        // Read again from `b`: the ring keeps what it has,
+                        // so tenants this reopen adds count as kept whole
+                        // from where the hub was.
+                        let until = match st.replay_until.take() {
+                            Some(u) => newer(&u, &pos),
+                            None => pos.clone(),
+                        };
+                        let s = self.scope(&mut st, &until, false);
+                        tracing::debug!(cluster = %self.cluster, from = %b, until = %until, "shared feed reader reads a few groups again for a new whole tenant");
+                        pos = older(&pos, &b);
+                        st.replay_until = Some(until);
+                        s
+                    } else {
+                        self.scope(&mut st, &pos, false)
+                    };
                     scope = Some(s);
                 } else if scope.is_none() {
                     let s = self.scope(&mut st, &pos, true);
@@ -777,7 +867,10 @@ impl Hub {
                     }
                     st.delivered |= sent;
                     let after_pos = t.after();
-                    if !parts.is_empty() {
+                    // A replay's groups are in the ring already (as the
+                    // old scope kept them), or weren't kept.
+                    let again = st.replay_until.as_ref().is_some_and(|u| !after(u, &t.gtid));
+                    if !parts.is_empty() && !again {
                         let bytes = parts.iter().map(|(_, p)| approx_bytes(p)).sum();
                         st.ring_bytes += bytes;
                         st.ring.push_back(RingEntry {
@@ -795,14 +888,14 @@ impl Hub {
                         }
                     }
                     pos = after_pos;
-                    st.pos = Some(pos.clone());
+                    st.advance(&pos);
                     drop(st);
                     metrics::counter!("sprig_feed_shared_groups_total", "cluster" => label.clone())
                         .increment(1);
                 }
                 Ok(SourceItem::Idle { pos: p }) => {
                     pos = p;
-                    self.lock().pos = Some(pos.clone());
+                    self.lock().advance(&pos);
                 }
                 Err(e) if fatal(&e) => {
                     tracing::warn!(cluster = %self.cluster, error = %e, "shared feed reader: history lost");

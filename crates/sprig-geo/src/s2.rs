@@ -1,7 +1,7 @@
-//! S2 cells (chapter 36, "S2 index and query"): cell ids on the Hilbert
-//! curve over the cube's six faces, written from the S2 geometry
-//! library's published definitions (the quadratic projection, the 30-level
-//! Hilbert numbering with its four orientations), and a simple covering.
+//! S2 cells: cell ids on the Hilbert curve over the cube's six faces,
+//! written from the S2 geometry library's published definitions (the
+//! quadratic projection, the 30-level Hilbert numbering with its four
+//! orientations), and a simple covering.
 //!
 //! - [`leaf`]: the level-30 cell of a location, the value a `_sprig_s2`
 //!   column stores. Nearby points share prefixes; a cell at any level is one
@@ -9,8 +9,8 @@
 //! - [`cover`]: cells covering a region given by its bounding cap, chosen
 //!   level by level from the faces down: every cell whose bounding cap
 //!   meets the region's is kept, until the next level would pass
-//!   `max_cells`. It is chapter 36's third fallback (cover a bounding cap,
-//!   rely on the exact test): correct, scanning somewhat more than S2's
+//!   `max_cells`. It covers a bounding cap and relies on the exact test:
+//!   correct, scanning somewhat more than S2's
 //!   own coverer.
 
 use std::sync::OnceLock;

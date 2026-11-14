@@ -327,7 +327,7 @@ fn step(
     }
 }
 
-/// Chapter 08's worked example as the API answers it.
+/// An example explanation, as the API answers it.
 fn explanation() -> SettingExplanation {
     SettingExplanation {
         key: "auto_index.max_per_table".into(),

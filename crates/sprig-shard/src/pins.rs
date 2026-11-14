@@ -1,6 +1,6 @@
-//! Sharding pins (chapter 16, "Interfaces"; build step 8): the
-//! `group_pins` catalog table, the conflict rules (39410) and the R1 rule
-//! that a split group's tables keep their key (39411).
+//! Sharding pins: the `group_pins` catalog table, the conflict rules
+//! (39410) and the rule that a split group's tables keep their key
+//! (39411).
 //!
 //! A pin fixes one table's place in every design the advisor makes:
 //!
@@ -8,14 +8,14 @@
 //! |---|---|
 //! | `SHARD KEY (cols)` | routes by exactly `cols`: a column member on them, the root of a group keyed by them when no parent's group has that key |
 //! | `COLOCATE WITH p ON (cols)` | is a column member of `p`'s group, its `cols` holding the group's key |
-//! | `REFERENCE` | is a reference table; in R1 it stays unsharded (no reference copies yet) |
+//! | `REFERENCE` | is a reference table; for now it stays unsharded (no reference copies yet) |
 //! | `UNSHARDED` | stays in its database's default group |
 //!
 //! Pins can be set before the first design exists, so they have their own
 //! table rather than living only on `group_members` rows; once a pinned
 //! table is a member placed as its pin says, `group_members.pinned` is 1
 //! too, and a group whose root is pinned by `SHARD KEY` has `origin =
-//! 'pinned'` (chapter 15).
+//! 'pinned'`.
 //!
 //! Conflict rules ([`check_pin`]), 39410 `ER_SPRIG_PIN_CONFLICT`:
 //!
@@ -30,9 +30,9 @@
 //!    `UNSHARDED` or `REFERENCE`, and a new `SHARD KEY` must match their
 //!    columns (rule 3 again).
 //!
-//! 39411 `ER_SPRIG_PIN_NEEDS_REKEY`: in R1, a table in a group with more than
-//! one shard takes only a pin that matches its current place; anything else
-//! needs the online re-key (R3).
+//! 39411 `ER_SPRIG_PIN_NEEDS_REKEY`: a table in a group with more than one
+//! shard takes only a pin that matches its current place; anything else
+//! needs the online re-key.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -45,7 +45,7 @@ use crate::collation::{self, collation_by_name};
 use crate::groups::db_err;
 use crate::key::{KeyClass, KeySpec, MemberRouting};
 
-/// `group_pins` (chapter 15's `sharding` module, format 3): one row per
+/// `group_pins` (the `sharding` catalog module, format 3): one row per
 /// pinned table.
 pub const DDL_GROUP_PINS: &str = "CREATE TABLE IF NOT EXISTS group_pins (
   object_id        BIGINT UNSIGNED NOT NULL,
@@ -75,7 +75,7 @@ pub enum PinKind {
         /// Its columns holding the key, lower case, in key order.
         columns: Vec<String>,
     },
-    /// `REFERENCE` (unsharded in R1).
+    /// `REFERENCE` (unsharded for now).
     Reference,
     /// `UNSHARDED`.
     Unsharded,
@@ -586,7 +586,7 @@ fn reaches(p: &Pin, target: ObjectId, by_object: &BTreeMap<ObjectId, &Pin>) -> b
     }
 }
 
-/// Chapter 16's conflict rules and the R1 re-key rule for `new` (see the
+/// The conflict rules and the re-key rule for `new` (see the
 /// module docs).
 ///
 /// # Errors

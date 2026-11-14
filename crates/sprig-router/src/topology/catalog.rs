@@ -1,10 +1,9 @@
-//! A tenant's layout from the catalog (chapter 15, "Catalog tables") and
-//! the shard maps (chapter 15, "Shard maps in etcd"): what the gateway
-//! builds the router's [`StaticTopology`] from.
+//! A tenant's layout from the catalog and the shard maps in etcd: what
+//! the gateway builds the router's [`StaticTopology`] from.
 //!
 //! The inputs are plain data, so the router depends on neither the catalog
-//! cache nor etcd: per table, its logical database, the schema chapter
-//! 07's rewrite names it in, and its membership (a column member of a
+//! cache nor etcd: per table, its logical database, the schema the
+//! tenant name rewrite names it in, and its membership (a column member of a
 //! sharded group, a parent member, or a reference table with the clusters
 //! holding a copy); per sharded group, its key spec and its current
 //! [`ShardMap`]. Each `(group, database)` pair becomes one [`Group`]
@@ -31,8 +30,7 @@ use super::{
     TableKind, even_ranges,
 };
 
-/// A `lookup_indexes` row of a table (chapter 19), with its lookup group's
-/// map.
+/// A `lookup_indexes` row of a table, with its lookup group's map.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogLookup {
     /// `lookup_id`.
@@ -78,8 +76,7 @@ pub enum Membership {
         create_sql: Option<String>,
         /// Its lookup indexes.
         lookups: Vec<CatalogLookup>,
-        /// Its `rk_state` is `filling` or later: writes carry `_sprig_rk`
-        /// (chapter 15).
+        /// Its `rk_state` is `filling` or later: writes carry `_sprig_rk`.
         fill_rk: bool,
         /// A parent member's `parent_fk`: the constraint (in `create_sql`)
         /// that reaches its parent.
@@ -96,11 +93,11 @@ pub enum Membership {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogTable {
     /// Its object id (`objects.object_id`): an `AUTO_INCREMENT` column's
-    /// `sequences` row has it as `seq_id` (chapter 19). 0 when unknown.
+    /// `sequences` row has it as `seq_id`. 0 when unknown.
     pub object: u64,
     /// Its logical database.
     pub db: u32,
-    /// The schema chapter 07's rewrite names the database by (its default
+    /// The schema the tenant name rewrite names the database by (its default
     /// group's first shard, `t<tenant>_d<db>_g<group>_s<shard>`).
     pub default_schema: String,
     /// The table name.
@@ -226,7 +223,7 @@ impl TableShape {
         self.visible.iter().position(|v| *v == c)
     }
 
-    /// Column `col`'s type and its key class (chapter 15's classes:
+    /// Column `col`'s type and its key class (the key classes:
     /// integers and decimals, strings under their collation, binary
     /// strings); `None` for other types or an unknown collation.
     #[must_use]
@@ -286,9 +283,9 @@ impl TableShape {
     #[must_use]
     pub fn unique_keys_hold(&self, col: &str) -> bool {
         let c = col.to_ascii_lowercase();
-        // Chapter 33's key-value tables: `_sprig_dk` is a function of the
+        // Key-value tables: `_sprig_dk` is a function of the
         // key `k` (the hash tag or the first segments), so a unique key
-        // holding `k` holds the distribution key too (R6 round 4).
+        // holding `k` holds the distribution key too.
         let dk_of_k = c == "_sprig_dk";
         self.unique_keys
             .iter()
@@ -376,7 +373,7 @@ pub fn build(tenant: u64, groups: &[CatalogGroup], tables: &[CatalogTable]) -> S
     build_with_fks(tenant, groups, tables, &[])
 }
 
-/// [`build`], with the tenant's `foreign_keys` rows (chapter 19): the keys
+/// [`build`], with the tenant's `foreign_keys` rows: the keys
 /// the gateway keeps (`gateway` and `reference`, `validating` or
 /// `enforced`) between two tables it knows become each database's
 /// [`crate::fk::FkGraph`]. A key with an end the router doesn't know (an
@@ -446,7 +443,7 @@ pub fn build_with_fks(
                     }
                 }
                 fill = *fill_rk;
-                // Chapter 19: a sharded member's AUTO_INCREMENT column
+                // A sharded member's AUTO_INCREMENT column
                 // takes ID blocks, whatever the group's shard count.
                 if t.object != 0 {
                     auto_inc = shape.as_ref().and_then(|s| {
@@ -768,7 +765,7 @@ fn lookup_ref(
 }
 
 /// Group `g` as database `db` sees it, keyed by an integer (a graph's
-/// `part`, R8 round 6): its shards with their schemas, clusters and
+/// `part`): its shards with their schemas, clusters and
 /// epochs, for [`StaticTopology::insert_group`].
 #[must_use]
 pub fn numeric_group(tenant: u64, db: u32, g: &CatalogGroup) -> Group {
@@ -852,7 +849,7 @@ mod tests {
 
     #[test]
     fn key_value_unique_keys_hold_the_distribution_key() {
-        // Chapter 33's element table: `_sprig_dk` derives from `k`.
+        // A key-value element table: `_sprig_dk` derives from `k`.
         let s = TableShape::parse(
             "CREATE TABLE `__sprig_ke_db0` (\n  `k` varbinary(1024) NOT NULL,\n  `g` bigint(20) unsigned NOT NULL,\n  `o` bigint(20) NOT NULL,\n  `e` varbinary(2024) NOT NULL DEFAULT '',\n  `v` longblob DEFAULT NULL,\n  `_sprig_dk` varbinary(1024) NOT NULL DEFAULT '' INVISIBLE,\n  `_sprig_rk` bigint(20) unsigned DEFAULT NULL INVISIBLE,\n  PRIMARY KEY (`k`,`g`,`o`,`e`),\n  KEY `_sprig_rk` (`_sprig_rk`)\n) ENGINE=InnoDB",
         );

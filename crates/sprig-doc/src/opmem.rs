@@ -1,4 +1,4 @@
-//! MongoDB 9.0's per-operation memory limit (M3, decision S99): the
+//! MongoDB 9.0's per-operation memory limit: the
 //! gateway runs a command inside [`scope`] with
 //! `mongo.max_operation_memory_bytes`, and the in-gateway stages report
 //! the bytes they hold to [`check`]; past the limit the command fails with

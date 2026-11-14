@@ -1,5 +1,4 @@
-//! Destinations, the allowlist and residency (chapter 51, "Destinations,
-//! allowlist and residency"; build step 4):
+//! Destinations, the allowlist and residency:
 //!
 //! ```text
 //! check_destination(tenant T, host h, port n):
@@ -13,13 +12,13 @@
 //!  5. record e's tags in sink_connections.residency_tags
 //! ```
 //!
-//! Entries are chapter 41's forms (`host`, `host:port`, `*.domain`, an
-//! address), written as a JSON list of strings or of `{"host": ...,
-//! "tags": {...}}` objects, or as comma-separated text. Without a port an
+//! Entries are `host`, `host:port`, `*.domain` or an address, written as
+//! a JSON list of strings or of `{"host": ..., "tags": {...}}` objects, or
+//! as comma-separated text. Without a port an
 //! entry allows 80 and 443, plus the default port of the connection's kind
 //! (5432, 3306, 9092 or 9093) for database and Kafka connections.
 //!
-//! The residency policy is chapter 26's expression over tags; the caller
+//! The residency policy is an expression over tags; the caller
 //! evaluates it ([`Residency`]), so this crate needs no controller types.
 
 use std::net::{IpAddr, SocketAddr};
@@ -219,7 +218,7 @@ pub fn is_internal(ip: IpAddr) -> bool {
     }
 }
 
-/// The built-in region table (chapter 51): tags for cloud endpoints whose
+/// The built-in region table: tags for cloud endpoints whose
 /// names state their region. `None` for other hosts.
 #[must_use]
 pub fn region_tags(host: &str, options: Option<&Map<String, Value>>) -> Option<Map<String, Value>> {
@@ -313,8 +312,8 @@ pub fn region_of(region: &str) -> Option<Map<String, Value>> {
     Some(m)
 }
 
-/// A tenant's residency policy, evaluated by the caller (chapter 26's
-/// expressions over tags).
+/// A tenant's residency policy, evaluated by the caller (an expression
+/// over tags).
 pub trait Residency: Send + Sync {
     /// Whether the tenant is pinned (has a policy).
     fn pinned(&self) -> bool;

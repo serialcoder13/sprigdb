@@ -1,5 +1,4 @@
-//! `SHOW GRANTS` (chapter 29, "Rendering `SHOW GRANTS`"; build step 3's
-//! basic form, exact per-persona text is step 9).
+//! Rendering `SHOW GRANTS`.
 //!
 //! ```text
 //! "GRANT <tenant static privileges | USAGE> ON *.* TO a [WITH GRANT OPTION]"
@@ -42,7 +41,7 @@ fn account(a: &AccountRef, role: bool, persona: Persona) -> String {
 }
 
 /// `names` with the extension `WATCH` after the static names, when `set`
-/// holds it and isn't `ALL PRIVILEGES` (database level; chapter 29).
+/// holds it and isn't `ALL PRIVILEGES` (database level).
 fn with_watch(mut names: Vec<&'static str>, set: ActionSet) -> Vec<&'static str> {
     if set.has(Action::Watch) && names != ["ALL PRIVILEGES"] {
         names.push("WATCH");
@@ -347,8 +346,8 @@ fn render_one(
             with_option(set)
         ));
     }
-    // Graph elements (chapter 43): Neo4j's forms, `READ`, and since round
-    // 5 `CREATE`, `DELETE`, `SET PROPERTY {*}`.
+    // Graph elements: Neo4j's forms, `READ`, `CREATE`, `DELETE`,
+    // `SET PROPERTY {*}`.
     for ((db, g, rels, name), set) in &elements {
         let mut privs = Vec::new();
         for (a, n) in [
@@ -548,9 +547,9 @@ fn mysql_tail(row: &crate::store::UserRow, s: &mut String) {
     }
 }
 
-/// `SHOW CREATE USER`'s line for `row` (authfix2), as MySQL 8.4 (3306) or
+/// `SHOW CREATE USER`'s line for `row`, as MySQL 8.4 (3306) or
 /// MariaDB 11.8 (3307) prints it, measured against both. No password hash
-/// or verifier is ever printed (chapter 14, "Never shown"): 3306 prints
+/// or verifier is ever printed: 3306 prints
 /// `IDENTIFIED WITH '<plugin>'` alone, 3307 no `IDENTIFIED` clause.
 #[must_use]
 pub fn create_user(row: &crate::store::UserRow, persona: Persona) -> String {

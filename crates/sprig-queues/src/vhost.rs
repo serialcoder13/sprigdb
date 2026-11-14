@@ -1,5 +1,5 @@
-//! One connection's view of a vhost: the [`Vhost`] methods (chapter 50,
-//! declare semantics, publishing, consuming, settling). Replies and texts
+//! One connection's view of a vhost: the [`Vhost`] methods
+//! (declare semantics, publishing, consuming, settling). Replies and texts
 //! follow RabbitMQ's, as `sprig-proto-amqp`'s in-memory engine does, so
 //! the same protocol tests pass against both.
 

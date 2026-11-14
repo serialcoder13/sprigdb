@@ -1,5 +1,4 @@
-//! Spilling to disk through a live gateway (M5, 12 Nov 2026; decisions
-//! S72–S77).
+//! Spilling to disk through a live gateway.
 //!
 //! - `spill_matches_mongodb`: a generated collection of about 12 MB, with
 //!   the gateway's `doc.agg_stage_memory_bytes` and MongoDB 8.0.34's stage
@@ -12,7 +11,7 @@
 //! - `group_over_100_mb` (with `SPRIG_TEST_SPILL_BIG=1`, against a gateway
 //!   at the default 100 MB): a `$group` holding about 150 MB answers 292
 //!   with `allowDiskUse: false` (what every `$group` past 100 MB did before
-//!   M5) and the right groups with it.
+//!   spilling) and the right groups with it.
 //!
 //! Variables: `SPRIG_TEST_MONGO_URI` (the gateway; skipped without it),
 //! `SPRIG_TEST_MONGO_REF_URI` (MongoDB 8.0.34), `SPRIG_TEST_SPILL_DIR` (the
@@ -161,8 +160,7 @@ fn pipelines() -> Vec<(&'static str, Vec<Document>, bool)> {
         (
             "window",
             // (A running `$sum` of doubles differs in the last bit even in
-            // memory: MongoDB's growing windows don't sum as `$group` does,
-            // an M2 difference, S61.)
+            // memory: MongoDB's growing windows don't sum as `$group` does.)
             vec![
                 doc! {"$setWindowFields": {"partitionBy": "$h", "sortBy": {"f": 1}, "output": {"r": {"$rank": {}}, "run": {"$sum": "$v", "window": {"documents": ["unbounded", "current"]}}, "mov": {"$avg": "$v", "window": {"documents": [-2, 2]}}}}},
                 doc! {"$project": {"s": 0}},

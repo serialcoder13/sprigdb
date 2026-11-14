@@ -1,5 +1,5 @@
-//! The `MetaStore` conformance suite (chapter 23, "Testing": one suite
-//! against `MemStore` and `EtcdStore`).
+//! The `MetaStore` conformance suite: one suite
+//! against `MemStore` and `EtcdStore`.
 //!
 //! Every case runs against both stores, so they behave the same wherever
 //! SprigDB relies on it: versions and revisions, guarded transactions,

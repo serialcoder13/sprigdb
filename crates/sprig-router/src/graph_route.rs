@@ -1,5 +1,5 @@
-//! Graph hops as router routes (chapter 43's `Step::Shard(RouteSpec)`,
-//! chapter 17's `RouteSpec`; R8 round 8, decision G69).
+//! Graph hops as router routes (the graph store's
+//! `Step::Shard(RouteSpec)`).
 //!
 //! The native graph store ([`sprig-graph`'s `MariaStore`]) no longer
 //! decides which shards a hop reads or writes the statements itself: each
@@ -18,7 +18,7 @@
 //!   targets Shard(i)           → one shard (a recursive CTE burst on the frontier's shard)
 //! plan_route(spec) → Route { plan: Pass(target) | Read(Scatter, targets), held_until_ms }
 //!   each Target: cluster, shard id, the statement with that shard's physical names,
-//!   ShardAt (group, db, lo, schema) for chapter 18's branches
+//!   ShardAt (group, db, lo, schema) for the transaction's branches
 //! ```
 //!
 //! `GRAPH_TABLE` statements and Bolt statements therefore share one
@@ -149,6 +149,32 @@ pub enum HopOp {
         /// Type ids (empty: any).
         types: Vec<u32>,
     },
+    /// One hop's links without properties or far nodes: `src, dst,
+    /// src_rk, dst_rk, id, type` of the edges whose near end is one of the
+    /// ids. Outgoing reads the edges on the sources' shards by key;
+    /// incoming reads the mirrors on the destinations' shards by key
+    /// (`mirror`), or scatters the edges' `rev` key.
+    Links {
+        /// Outgoing (`src` is near).
+        out: bool,
+        /// Incoming through the mirrors.
+        mirror: bool,
+        /// Type ids (empty: any).
+        types: Vec<u32>,
+    },
+    /// Nodes by id with only some of their properties (a late read):
+    /// `id, rk, labels`, then `props` and `_types` as objects of `keys`
+    /// alone (a key a node lacks is `null` in them); no keys: neither.
+    NodesPart {
+        /// The property keys.
+        keys: Vec<String>,
+    },
+    /// Edges by id (routed by their sources' hashes) with only some of
+    /// their properties, as [`HopOp::NodesPart`] reads nodes.
+    EdgesPart {
+        /// The property keys.
+        keys: Vec<String>,
+    },
     /// Mirror rows `(id, src_rk)` of edges into the ids, on the
     /// destinations' shards.
     Mirrors {
@@ -190,6 +216,11 @@ impl HopOp {
             Self::Scan(_) => "scan",
             Self::Expand { out: true, .. } => "expand_out",
             Self::Expand { out: false, .. } => "expand_in",
+            Self::Links { out: true, .. } => "links_out",
+            Self::Links { mirror: true, .. } => "links_in_mirror",
+            Self::Links { .. } => "links_in",
+            Self::NodesPart { .. } => "nodes_part",
+            Self::EdgesPart { .. } => "edges_part",
             Self::Mirrors { .. } => "mirrors",
             Self::EdgesWithSrc => "edges_with_src",
             Self::Edges => "edges",
@@ -199,7 +230,7 @@ impl HopOp {
     }
 }
 
-/// A graph step for the router to plan (chapter 17's `RouteSpec`).
+/// A graph step for the router to plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteSpec {
     /// The graph's table group as the router's map cache has it.
@@ -278,8 +309,36 @@ fn types_filter(alias: &str, types: &[u32]) -> String {
     format!(" AND {alias}.type IN ({})", ids_list(&t))
 }
 
-/// The routing hash of node id `id` in `group` (chapter 15's numeric
-/// class; `part` = `id`).
+/// `props` and `_types` columns holding only `keys` (`NULL, NULL` for
+/// none): `JSON_OBJECT` of each key's `JSON_EXTRACT`, names and paths as
+/// hex literals. A key with `"` or `\` in it can't be a path, and is
+/// left out (callers read every property for such keys).
+fn part_cols(alias: &str, keys: &[String]) -> String {
+    let keys: Vec<&String> = keys.iter().filter(|k| !k.contains(['"', '\\'])).collect();
+    if keys.is_empty() {
+        return "NULL, NULL".into();
+    }
+    let obj = |col: &str| {
+        let mut s = String::from("JSON_OBJECT(");
+        for (i, k) in keys.iter().enumerate() {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            let _ = write!(
+                s,
+                "{}, JSON_EXTRACT({alias}.{col}, {})",
+                Lit::Str((*k).clone()).sql(),
+                Lit::Str(format!("$.\"{k}\"")).sql()
+            );
+        }
+        s.push(')');
+        s
+    };
+    format!("{}, {}", obj("props"), obj("_types"))
+}
+
+/// The routing hash of node id `id` in `group` (the numeric key class;
+/// `part` = `id`).
 #[must_use]
 pub fn node_hash(group: &Group, id: u64) -> Option<u64> {
     group.hash_of(&KeyValue::Int(i128::from(id)))
@@ -362,6 +421,32 @@ fn statement(spec: &RouteSpec, i: usize, ids: &[u64]) -> Option<String> {
                 types_filter("e", types)
             )
         }
+        HopOp::Links { out, mirror, types } => {
+            if *mirror && !*out {
+                format!(
+                    "SELECT m.src, m.dst, m.src_rk, m._sprig_rk, m.id, m.type FROM {} m \
+                     WHERE m.dst IN ({id_list}){}",
+                    t(GraphTable::Mirrors),
+                    types_filter("m", types)
+                )
+            } else {
+                format!(
+                    "SELECT e.src, e.dst, e._sprig_rk, e.dst_rk, e.id, e.type FROM {edges} e \
+                     WHERE e.{} IN ({id_list}){}",
+                    if *out { "src" } else { "dst" },
+                    types_filter("e", types)
+                )
+            }
+        }
+        HopOp::NodesPart { keys } => format!(
+            "SELECT n.id, n._sprig_rk, n.labels, {} FROM {nodes} n WHERE n.id IN ({id_list})",
+            part_cols("n", keys)
+        ),
+        HopOp::EdgesPart { keys } => format!(
+            "SELECT e.src, e.type, e.dst, e.id, e.dst_rk, e._sprig_rk, {} FROM {edges} e \
+             WHERE e.id IN ({id_list})",
+            part_cols("e", keys)
+        ),
         HopOp::Mirrors { types } => format!(
             "SELECT m.id, m.src_rk FROM {} m WHERE m.dst IN ({id_list}){}",
             t(GraphTable::Mirrors),

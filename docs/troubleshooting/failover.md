@@ -130,7 +130,7 @@ The gateway's permit lapsed: it couldn't renew it from its data centre's control
 
 ### A returning data centre is slow to take traffic
 
-After an outage, a returning data centre stays fenced for tenants that failed over, reports their diverged transactions, and then takes traffic back in steps: `recovery.traffic_steps_pct` (`10,25,50,100`), each for `recovery.step_minutes` (5), admitting `recovery.admission_connects_per_second` (200) new connections per gateway at the first step. A step pauses when replica lag passes `recovery.step_max_lag_ms` or live p99 rises more than `recovery.max_latency_increase_pct`. This is deliberate; clients get 39531 and retry.
+After an outage, a returning data centre stays fenced for tenants that failed over, reports their diverged transactions, and then takes traffic back in steps: `recovery.traffic_steps_pct` (`10,25,50,100`), each for `recovery.step_minutes` (5), admitting `recovery.admission_connects_per_second` (200) new connections per gateway at the first step and proportionally more at each later step. The steps advance on time alone, so a full return takes about three steps' time (15 minutes with the defaults). This is deliberate; clients get 39531 and retry. To return faster, lower `recovery.step_minutes` or use fewer steps.
 
 ## Split-brain protection
 
@@ -153,7 +153,7 @@ SprigDB prevents two writers with these rules. When you troubleshoot, don't work
 - If nothing diverged, it rejoins as a replica, with `read_only` on.
 - If it has transactions the new writer never received (it accepted writes that weren't replicated before it failed), it is kept out of the cluster, the transactions are reported in the failover record, and an alert is raised. With `failover.mode = auto`, SprigDB then extracts the diverged transactions and rebuilds the node from a healthy replica.
 
-A node that is far behind is rebuilt instead of replaying binlog when more than `recovery.rebuild_threshold_gb` (50 GB) would have to be replayed.
+A node is never rebuilt just because it is far behind; one with nothing diverged replays the binlog however long that takes.
 
 **Confirm.** `sprigctl cluster show <id>` shows the node's state. `sprig_controller_diverged_writers_total` and `sprig_controller_diverged_transactions_total` count what was found.
 
@@ -171,7 +171,7 @@ A node that is far behind is rebuilt instead of replaying binlog when more than 
    sprigctl cluster extract-open <file>.extract --key-file <extract-key-file>
    ```
 
-   Extracts are kept for `failover.quarantine_days` (30).
+   Extracts aren't deleted automatically. Remove them from the workers' `[recovery] extract_dir` when you no longer need them.
 
 3. Rebuild the node from a replica's backup and attach it to the writer:
 

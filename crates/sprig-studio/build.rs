@@ -1,4 +1,4 @@
-//! Embeds Studio's built files (chapter 44, "Serving: `sprig-studio`").
+//! Embeds Studio's built files.
 //!
 //! Reads `SPRIG_STUDIO_DIST` (default: `studio/dist` at the workspace root),
 //! the output of `pnpm build` in `studio/`, which already holds `.br` and

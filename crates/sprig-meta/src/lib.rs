@@ -1,34 +1,32 @@
 //! `sprig-meta`: the `MetaStore` trait, the only way to etcd.
 //!
-//! Layer 1 (foundations). Design: chapter 23 (Control plane) of the SprigDB
-//! low-level design, with the key layout in Appendix D.
+//! Layer 1 (foundations).
 //!
 //! Consensus is needed only for a few facts (shard owners, leaders, leases,
 //! jobs), and etcd provides them. Everything goes through the small
 //! [`MetaStore`] trait so that openraft could replace etcd later.
 //!
 //! What exists:
-//! - [`MetaStore`] and its types (step 1);
+//! - [`MetaStore`] and its types;
 //! - [`MemStore`]: deterministic, in memory, with revisions, history,
-//!   leases on an injectable clock, watches and fault injection (step 1);
-//! - [`Tier`] and [`Key`] for the key layout, and versioned [`Record`]s
-//!   (step 1);
-//! - [`EtcdStore`]: paging, transactions, watches, leases and mutual TLS
-//!   (step 2), with single-etcd mode ([`etcd::connect_tiers`]);
+//!   leases on an injectable clock, watches and fault injection;
+//! - [`Tier`] and [`Key`] for the key layout, and versioned [`Record`]s;
+//! - [`EtcdStore`]: paging, transactions, watches, leases and mutual TLS,
+//!   with single-etcd mode ([`etcd::connect_tiers`]);
 //! - [`session`] and [`elect`]: lease-backed sessions, election with
-//!   fencing tokens and guarded transactions (step 3);
-//! - [`bootstrap`]: the first DC's deployment records (step 7, this
-//!   crate's part);
+//!   fencing tokens and guarded transactions;
+//! - [`bootstrap`]: the first DC's deployment records (this crate's
+//!   part);
 //! - [`cache`]: full ([`Mirror`]) and lazy ([`LazyCache`]) caches fed by
-//!   watches (step 4);
+//!   watches;
 //! - `conformance` (feature `conformance`): one suite every store must
 //!   pass, run here against `MemStore` and, when `SPRIG_TEST_ETCD` names an
 //!   etcd, against `EtcdStore`.
 //!
 //! - [`dclease`] and [`permit`]: DC leases, the permits gateways, agents
-//!   and workers hold under them, and the watchdog (chapter 25, step 7).
+//!   and workers hold under them, and the watchdog.
 //!
-//! Discovery (step 9) is [`discovery`].
+//! Discovery is [`discovery`].
 
 pub mod bootstrap;
 pub mod cache;

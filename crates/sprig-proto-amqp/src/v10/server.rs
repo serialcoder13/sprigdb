@@ -1,4 +1,4 @@
-//! The AMQP 1.0 server front end (chapter 50 step 14): the SASL layer,
+//! The AMQP 1.0 server front end: the SASL layer,
 //! `open`, sessions with their windows, links with credit, drain and
 //! settlement modes, transfers in both directions, dispositions and
 //! outcomes, RabbitMQ 4's address format v2, the anonymous terminus, and
@@ -12,8 +12,8 @@
 //!
 //! Not served, as in RabbitMQ 4: transactions (a coordinator target),
 //! link recovery (resuming unsettled state), and `rcv-settle-mode =
-//! second`. The HTTP-over-AMQP management node (`/management`, step 15)
-//! is not built yet; attaching to it is refused with `amqp:not-found`.
+//! second`. The HTTP-over-AMQP management node (`/management`) is not
+//! built yet; attaching to it is refused with `amqp:not-found`.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
@@ -866,7 +866,7 @@ impl Conn<'_> {
     }
 
     /// The client receives from us: a consuming link. `fan_in`: the link
-    /// property `x-sprig-fan-in` was true (chapter 50, "Fan-in consumers").
+    /// property `x-sprig-fan-in` was true (a fan-in consumer).
     #[allow(clippy::too_many_arguments)]
     async fn attach_out(
         &mut self,

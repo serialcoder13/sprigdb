@@ -1,4 +1,4 @@
-# M0.7's private control-plane stack (chapters 04, 23, 37): one etcd and one
+# The soak's private control-plane stack: one etcd and one
 # MariaDB, for tests that change dc-scope listener, TLS and gateway
 # settings, drain gateways and run load. Those changes would hit every
 # gateway of the shared dev stack's dc-a, so they run here, in a DC of
@@ -16,7 +16,7 @@ services:
       - --name=etcd-0
       - --data-dir=/etcd-data
       # Keep only the last hour of revisions (as deploy/compose-vm): without it
-      # etcd's database grows with every write (about 0.7 MB/h in the M0.7 soak).
+      # etcd's database grows with every write (about 0.7 MB/h in the soak).
       - --auto-compaction-mode=periodic
       - --auto-compaction-retention=1h
       - --listen-client-urls=http://0.0.0.0:2379

@@ -1,9 +1,8 @@
-# M0.5 isolation suite
+# SQL isolation suite
 
-Milestone M0.5's "done when" for authorization (chapter 48): the isolation
-suite passes, and a revoked privilege is refused within seconds on every
-gateway. The suite is `crates/sprig-testkit/tests/m05_isolation.rs`
-(chapter 29 build step 6, chapter 46 build step 4); this directory runs it
+The authorization gate: the isolation suite passes, and a revoked privilege
+is refused within seconds on every gateway. The suite is
+`crates/sprig-testkit/tests/m05_isolation.rs`; this directory runs it
 against the development gateway.
 
 ```sh
@@ -28,7 +27,7 @@ MariaDB):
   `information_schema.SCHEMATA`) show a user only databases it holds a
   privilege in, and a statement prepared before a `REVOKE` is refused at
   its next execute;
-- stored code can't break out (chapter 29, "Definers of stored code"):
+- stored code can't break out (definers of stored code):
   tenant A's `SQL SECURITY DEFINER` procedure running dynamic SQL against
   B's shard schema, B's catalog and `mysql.user`, a trigger, a function
   called from a view, and an event are all refused by MariaDB, and every
@@ -42,7 +41,7 @@ MariaDB):
   with `drop` its `CREATE TABLE` and any access to a table the
   administrator re-creates get 1142; a database value wins over the
   tenant's;
-- renamed tables (chapter 29, tenant A, both personas): a user with table
+- renamed tables (tenant A, both personas): a user with table
   and column grants on `rn_live` reaches the new `rn_live` and not
   `rn_old` after a `pt-online-schema-change` swap (`RENAME TABLE rn_live
   TO rn_old, rn_new TO rn_live`), a three-way swap exchanges the names'
@@ -69,6 +68,6 @@ gateways): 301 checks, 0 failures; a `REVOKE` was refused on the second
 gateway 112 to 186 ms after it was sent. With the grants-on-drop cases
 (pluggable authorization, the same day): 333 checks, 0 failures; a
 `REVOKE` was refused on the second gateway 36 to 37 ms after it was sent.
-With the rename cases (9 November 2026, agent authz3's own two gateways on
+With the rename cases (9 November 2026, two separate gateways on
 14406/14407 and 14416/14417): 379 checks, 0 failures; a `REVOKE` was
 refused on the second gateway 126 and 161 ms after it was sent.

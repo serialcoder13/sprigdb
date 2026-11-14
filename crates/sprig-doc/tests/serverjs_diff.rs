@@ -1,5 +1,5 @@
-//! The server-side JavaScript differential test (M4, 12 Nov 2026):
-//! `$where`, `$function` and `$accumulator`.
+//! The server-side JavaScript differential test: `$where`, `$function`
+//! and `$accumulator`.
 //!
 //! `tests/serverjs_diff/cases.json` holds the cases and the answers
 //! MongoDB 8.0.34 gave (recorded by `tests/serverjs_diff/gen_cases.js` on

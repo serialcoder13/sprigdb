@@ -44,6 +44,11 @@ use crate::tenant::session::TenantSession;
 pub struct InheritSession {
     /// `USE SPACE`; `None`: the user's home space.
     pub space: Option<SpaceId>,
+    /// The statement running is one this layer generated (a rewritten read
+    /// or a plan's statement): only then are references under
+    /// [`sprig_inherit::view::LAYER_ALIAS`] the layers of merged views it
+    /// filtered (chapter 29, "Data inheritance").
+    pub generated: bool,
 }
 
 /// The record-hierarchy locks the session's transaction holds (decision
@@ -216,8 +221,23 @@ async fn copy_states(
             }
         }
     }
-    if let Ok(mut c) = cache.lock() {
-        c.insert(cat.tenant.0, (Instant::now(), cat.version, out.clone()));
+    // A copy appeared: accounts row-level security narrowed to single
+    // relations need SELECT on its table (rlsinherit).
+    let known = match cache.lock() {
+        Ok(mut c) => {
+            let known = c
+                .get(&cat.tenant.0)
+                .is_some_and(|(_, _, st)| out.0.keys().all(|k| st.0.contains_key(k)));
+            c.insert(cat.tenant.0, (Instant::now(), cat.version, out.clone()));
+            known
+        }
+        Err(_) => true,
+    };
+    if !known && !out.0.is_empty() {
+        svc.authz.relations_changed(cat.tenant);
+        if let Err(e) = svc.authz.ensure(&svc, cat, &cluster).await {
+            tracing::warn!(tenant = %cat.tenant, error = %e, "backend grants after a new copy not reconciled yet");
+        }
     }
     out
 }
@@ -420,11 +440,13 @@ impl PassSession {
                 if let Some(ts) = self.tenant.as_deref_mut() {
                     ts.types.internal = true;
                     ts.types.typed_plan = false;
+                    ts.inherit.generated = true;
                 }
                 let text = Bytes::from(sql.into_bytes());
                 let r = Box::pin(self.tenant_text(cx, &text, attrs, more, format, out)).await;
                 if let Some(ts) = self.tenant.as_deref_mut() {
                     ts.types.internal = false;
+                    ts.inherit.generated = false;
                 }
                 r.map(Some)
             }
@@ -467,14 +489,28 @@ struct InhRunner<'s, 'c, 'x> {
     migrated: bool,
 }
 
+impl InhRunner<'_, '_, '_> {
+    fn generated(&mut self, on: bool) {
+        if let Some(ts) = self.gw.sess.tenant.as_deref_mut() {
+            ts.inherit.generated = on;
+        }
+    }
+}
+
 #[async_trait]
 impl sprig_types::Runner for InhRunner<'_, '_, '_> {
     async fn query(&mut self, sql: &str) -> Result<Rows> {
-        self.gw.query(sql).await
+        self.generated(true);
+        let r = self.gw.query(sql).await;
+        self.generated(false);
+        r
     }
 
     async fn exec(&mut self, sql: &str) -> Result<Done> {
-        self.gw.exec(sql).await
+        self.generated(true);
+        let r = self.gw.exec(sql).await;
+        self.generated(false);
+        r
     }
 
     fn in_transaction(&self) -> bool {
@@ -504,6 +540,26 @@ impl sprig_types::Runner for InhRunner<'_, '_, '_> {
 
 #[async_trait]
 impl sprig_inherit::Runner for InhRunner<'_, '_, '_> {
+    async fn row_filter(
+        &mut self,
+        db: &str,
+        table: &str,
+        qual: &str,
+        cmd: sprig_inherit::RowCmd,
+    ) -> Result<Option<String>> {
+        use sprig_sql::rls::Cmd;
+        let cmds: &[Cmd] = match cmd {
+            sprig_inherit::RowCmd::Select => &[Cmd::Select],
+            sprig_inherit::RowCmd::Update => &[Cmd::Select, Cmd::Update],
+            sprig_inherit::RowCmd::Delete => &[Cmd::Select, Cmd::Delete],
+        };
+        let session = self.gw.cx.session.id;
+        self.gw
+            .sess
+            .rls_predicate(session, db, table, qual, cmds)
+            .await
+    }
+
     async fn commit(&mut self, change: &InheritChange) -> Result<()> {
         let Some(ts) = self.gw.sess.tenant.as_deref_mut() else {
             return Err(SprigError::internal("no tenant"));
@@ -552,7 +608,18 @@ impl sprig_inherit::Runner for InhRunner<'_, '_, '_> {
                 other => other.to_string(),
             };
             SprigError::new(SprigCode::BackendUnavailable, msg).with_source(e)
-        })
+        })?;
+        // A share view was made: accounts row-level security narrowed to
+        // single relations need SELECT on it (rlsinherit).
+        if let Some(ts) = self.gw.sess.tenant.as_deref()
+            && let Some(cat) = ts.catalog().cloned()
+        {
+            svc.authz.relations_changed(ts.tenant);
+            if let Err(e) = svc.authz.ensure(&svc, &cat, &cluster).await {
+                tracing::warn!(tenant = %ts.tenant, error = %e, "backend grants after a new share view not reconciled yet");
+            }
+        }
+        Ok(())
     }
 
     async fn child_tenant(&mut self, name: &str) -> Result<Option<TenantId>> {

@@ -1,5 +1,4 @@
-//! The failover-flapping damper (chapter 25, "Damping failover flapping";
-//! chapter 47's thrash catalogue).
+//! The failover-flapping damper.
 //!
 //! ```text
 //! may_fail_over(c):
@@ -76,7 +75,7 @@ impl FlapDamper {
         }
     }
 
-    /// The book's defaults: 2 sources, 30 minutes.
+    /// The defaults: 2 sources, 30 minutes.
     #[must_use]
     pub fn defaults() -> Self {
         Self::new(2, Duration::from_secs(30 * 60))
@@ -154,7 +153,7 @@ mod tests {
 
     #[test]
     fn a_writer_stalling_every_ten_minutes_fails_over_once_per_interval() {
-        // Chapter 25's flapping scenario: a 4 s stall every 10 minutes, seen
+        // The flapping scenario: a 4 s stall every 10 minutes, seen
         // by probes and gateways; two hours give at most 4 failovers.
         let mut d = FlapDamper::defaults();
         let t0 = Instant::now();

@@ -1,4 +1,4 @@
-//! Live tests of the MariaDB store (chapter 43 build steps 3 and 11):
+//! Live tests of the MariaDB store:
 //! the same statements on MariaDB and in memory give the same answers, the
 //! recursive CTE runs, budgets hold, and the commit check refuses dangling
 //! relationships. Skipped unless `SPRIG_TEST_MARIADB_SINGLE` names a
@@ -66,7 +66,8 @@ impl Live {
         self.run_gated(text, b, None).await
     }
 
-    /// [`Self::run_with`] with a mirror gate (round 5's read statements).
+    /// [`Self::run_with`] with a mirror gate (read statements under async
+    /// mirrors).
     async fn run_gated(
         &self,
         text: &str,
@@ -356,7 +357,7 @@ async fn maria_and_memory_agree() {
     live.cleanup().await;
 }
 
-/// G19 (round 3): MariaDB's index column computes the same normalized
+/// MariaDB's index column computes the same normalized
 /// number as `schema::index_value`, so a unique constraint treats `1` and
 /// `1.0` as one value, and lookups by either find both.
 async fn numeric_keys(live: &Live) {
@@ -446,7 +447,7 @@ async fn numeric_keys(live: &Live) {
     );
 }
 
-/// Round 3: a graph over four shard schemas with mirrors gives the same
+/// A graph over four shard schemas with mirrors gives the same
 /// answers as memory; incoming hops and incoming variable-length searches
 /// go through the mirrors; writes keep one mirror per edge; the commit
 /// check sees edges on other shards.
@@ -586,7 +587,7 @@ async fn four_shards_with_mirrors_agree_with_memory() {
     live.cleanup().await;
 }
 
-/// Round 4 (G32, decision G41): on a graph over four shard schemas, a
+/// On a graph over four shard schemas, a
 /// uniqueness constraint holds across shards through the claim table:
 /// duplicates on other shards are refused, `MERGE` matches the holder,
 /// `SET` and `DELETE` release keys, a relationship constraint works the
@@ -884,7 +885,7 @@ async fn insert_events(live: &Live) -> Vec<sprig_graph::mirror::EdgeChange> {
     out
 }
 
-/// Round 5 (`graph.mirror = async`): writers on four shard schemas keep no
+/// `graph.mirror = async`: writers on four shard schemas keep no
 /// mirrors; reads without a fresh gate scatter and still equal memory; the
 /// applier's batches (also replayed, and with deletes seen before their
 /// inserts, as two clusters' streams can be) leave exactly one mirror per
@@ -1063,8 +1064,8 @@ async fn compare_gated(live: &Live, mem: &mut MemStore, qs: &[&str], gate: bool,
     }
 }
 
-/// R8 round 10 (the official LDBC run's 20th index failed with MariaDB
-/// 1117, "Table definition is too large"): forty indexes on one node
+/// The official LDBC run's 20th index failed with MariaDB 1117 ("Table
+/// definition is too large"). Forty indexes on one node
 /// table, on the same few properties of many labels, plus a text index
 /// and a uniqueness constraint, all created and all used.
 #[tokio::test]

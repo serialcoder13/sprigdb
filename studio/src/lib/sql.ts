@@ -1,6 +1,5 @@
-// SQL text helpers for the editor and the forms (chapter 44, "Editors and
-// completion", "Settings, users and the tenant tree"). The gateway parses
-// and decides everything; these only split text into statements, find the
+// SQL text helpers for the editor and the forms. The gateway parses and
+// decides everything; these only split text into statements, find the
 // one under the cursor, classify it for confirmations (studio.confirm_writes)
 // and quote names and literals in the statements forms generate.
 

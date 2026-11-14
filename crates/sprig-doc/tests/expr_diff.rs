@@ -1,4 +1,4 @@
-//! The aggregation-expression differential test (M1, 12 Nov 2026).
+//! The aggregation-expression differential test.
 //!
 //! `tests/expr_diff/cases.json` holds expression cases and the answers
 //! MongoDB 8.0.34 gave for them (recorded by `tests/expr_diff/gen_cases.js`

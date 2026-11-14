@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generates sprig-shard's collation weight tables (chapter 15, "Strings").
+"""Generates sprig-shard's collation weight tables.
 
 The tables are read out of MariaDB itself: for every code point, the
 weight string of that one character at every level of every supported

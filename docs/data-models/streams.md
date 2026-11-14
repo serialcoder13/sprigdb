@@ -21,7 +21,7 @@ A stream belongs to one database of one tenant, like a table. In MariaDB it is t
 | Log | Sequenced records: partition, offset, timestamp, key, value, headers | The database's default shard |
 | Checkpoints | Each partition's next offset and log start, and the stream's leader epoch | Beside the log |
 
-A publish is a plain insert into the outbox, inside your transaction. A background **sequencer**, running in a `sprigdb worker`, reads committed outbox rows from the change feed in commit order, gives each record its partition offset and appends it to the log. Records become readable a few tens of milliseconds after the commit. Rolled-back records never appear, and offsets have no gaps except those that compaction leaves.
+A publish is a plain insert into the outbox, inside your transaction. A background **sequencer**, running in a `sprigdb worker`, reads committed outbox rows from the change feed in commit order, gives each record its partition offset and appends it to the log. It appends in batches, each written when its oldest record has waited 10 ms or it holds 1,000 records. Records become readable a few tens of milliseconds after the commit. Rolled-back records never appear, and offsets have no gaps except those that compaction leaves.
 
 The log is partitioned by day, so time retention drops whole day partitions rather than deleting rows. Every stream has its own sequencer. When the tenant moves to another cluster, its streams move with it and keep their offsets.
 
@@ -440,13 +440,12 @@ Sharding:
 | `stream.tombstone_hours` | 24 | object, database, tenant, global | How long tombstones stay on compacted streams |
 | `stream.change_topic` | false | object, database, tenant | Keep a change topic for the table |
 | `stream.produce_wait_ms` | 2000 | tenant, global | How long a Kafka produce waits for offsets |
-| `stream.sequencer_batch_ms` | 10 | dc, global | Batching window of a sequencer |
 | `stream.descendant_publish` | off | object, database, tenant, global | Let descendants' own sessions publish with `IN TENANT` |
 | `stream.descendant_key` | origin | object, database, tenant, global | `origin`: a descendant's key must be its tenant name; `any`: no check |
-| `kafka.sasl_mechanisms` | `SCRAM-SHA-512,SCRAM-SHA-256,PLAIN` | tenant, global | Offered SASL mechanisms |
+| `kafka.sasl_mechanisms` | `SCRAM-SHA-512,SCRAM-SHA-256,PLAIN` | dc, global | Offered SASL mechanisms |
 | `kafka.fetch_max_wait_ms` | 500 | tenant, global | Cap on a fetch's wait |
 | `kafka.group_initial_rebalance_delay_ms` | 3000 | dc, global | Delay of an empty group's first rebalance |
-| `kafka.group_session_timeout_max_ms` | 300000 | tenant, global | Largest session timeout a member may ask for |
+| `kafka.group_session_timeout_max_ms` | 300000 | dc, global | Largest session timeout a member may ask for |
 | `kafka.advertised_host` | empty | dc, global | Host in Kafka Metadata; empty for the gateway's address |
 | `listener.kafka.enabled` | false | dc, global | Serve the Kafka listener |
 | `listener.kafka.bind` | `0.0.0.0:9092` | dc, global | Address and port |

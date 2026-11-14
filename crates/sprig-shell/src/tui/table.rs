@@ -6,8 +6,7 @@
 //!   cell"). Edits are staged: changed cells amber, new rows green, deleted
 //!   rows red and struck through. `a` applies them in one transaction after
 //!   showing the statements, `r` resets, `y` copies them as SQL.
-//! - **Concurrency.** As in Studio (chapter 44, "Editing with optimistic
-//!   concurrency"): each UPDATE or DELETE names its row by every column as
+//! - **Concurrency.** Optimistic, as in Studio: each UPDATE or DELETE names its row by every column as
 //!   read (`<=>`, NULL-safe), so a row changed meanwhile matches nothing.
 //!   Any such conflict rolls the whole transaction back and shows the row as
 //!   it is now; `t` takes the current values and keeps the edits.
@@ -51,9 +50,9 @@ pub enum Sub {
     Triggers,
     /// Row-level security policies.
     Policies,
-    /// Inheritance (chapter 42).
+    /// Inheritance.
     Inheritance,
-    /// The table group and shards (chapter 15).
+    /// The table group and shards.
     Shards,
     /// `SHOW CREATE`.
     Ddl,

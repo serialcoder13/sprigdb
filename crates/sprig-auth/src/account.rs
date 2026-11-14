@@ -1,5 +1,4 @@
-//! Tenant resolution and account matching (chapter 14, "Finding the
-//! tenant" and "Account matching"; build step 3).
+//! Tenant resolution and account matching.
 //!
 //! ```text
 //! resolve(login_name, sni):
@@ -14,7 +13,7 @@
 //! failure is [`None`], and the login runs the decoy exchange, so a probe
 //! can't tell a missing tenant from a wrong password.
 //!
-//! Decisions where the chapter is open (recorded for review):
+//! Choices made here:
 //! - The SNI prefix must be exactly one label that is a valid tenant name;
 //!   `a.acme.<suffix>` names no tenant. SNI is compared in lower case (DNS
 //!   names are case-insensitive); a dotted login name is not (`ACME.alice`
@@ -23,15 +22,14 @@
 //!   user part, so `acme.alice` and `alice` on a tenant endpoint have the
 //!   same limit; the whole login name is capped at 255 characters.
 //! - A tenant can take logins while `active`, `migrating` or
-//!   `failing_over` (chapter 08: during a move, logins use cached
+//!   `failing_over` (during a move, logins use cached
 //!   verifiers); `creating`, `fenced`, `deleting` and unknown states name
 //!   no tenant.
 //! - Suspension (the tenant or any ancestor) is reported with 39303 only
 //!   after the credentials verified, so the status doesn't reveal the
-//!   tenant to someone without a password (the chapter's pseudo-code checks
-//!   it during resolution).
+//!   tenant to someone without a password.
 //!
-//! Connection attributes never name a tenant (chapter 05: attributes are
+//! Connection attributes never name a tenant (attributes are
 //! hints, never a security control).
 
 pub mod host;
@@ -49,11 +47,11 @@ use crate::store::LoginForm;
 
 pub use host::HostPattern;
 
-/// The longest login name, in characters (chapter 14, "Name limits").
+/// The longest login name, in characters.
 pub const MAX_LOGIN_NAME: usize = 255;
 
 /// Whether `s` is a tenant name: the one rule of
-/// [`sprig_common::names::is_tenant_name`] (chapter 14), which creating a
+/// [`sprig_common::names::is_tenant_name`], which creating a
 /// tenant checks too, so every tenant that can be created can be logged in
 /// to.
 #[must_use]
@@ -73,7 +71,7 @@ pub struct ParsedLogin {
     pub form: LoginForm,
 }
 
-/// Splits a login (chapter 14, "Finding the tenant"): the tenant from SNI
+/// Splits a login: the tenant from SNI
 /// on tenant endpoints (`sni` ends with `.` + one of `sni_suffixes`; the
 /// user is the whole login name), else from a dotted login name. `None`
 /// when no tenant can be named: the caller runs the decoy.
@@ -134,8 +132,8 @@ pub struct TenantInfo {
     pub suspended: bool,
 }
 
-/// A tenant's residency as logins see it (chapter 26; chapter 14,
-/// "Credential residency"): the directory entry's `residency` block.
+/// A tenant's residency as logins see it (credential residency): the
+/// directory entry's `residency` block.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TenantResidency {
     /// The allowed DCs; empty: none (a block without a readable set fails
@@ -174,7 +172,7 @@ impl TenantResidency {
 }
 
 /// Finds tenants by name: `tenant-names/<name>` and `tenants/<id>` in the
-/// global tier (chapter 23).
+/// global tier.
 #[async_trait::async_trait]
 pub trait TenantDirectory: Send + Sync + 'static {
     /// The tenant named `name`, or `None` if there is none.
@@ -184,7 +182,7 @@ pub trait TenantDirectory: Send + Sync + 'static {
     /// 39301.
     async fn lookup(&self, name: &str) -> Result<Option<TenantInfo>>;
 
-    /// The residency of the tenant named `name` (chapter 26); `None` for a
+    /// The residency of the tenant named `name`; `None` for a
     /// tenant without one, or no such tenant. Directories that don't know
     /// residency have none.
     ///
@@ -260,7 +258,7 @@ impl Versioned for NameRecord {
     const V: u32 = 1;
 }
 
-/// The fields of `tenants/<id>` logins read (chapter 23).
+/// The fields of `tenants/<id>` logins read.
 #[derive(Debug, Deserialize, serde::Serialize)]
 struct EntryRecord {
     #[serde(default)]
@@ -272,7 +270,7 @@ struct EntryRecord {
     /// Tenant ids root first, self included: `"/1/42/77/"`.
     #[serde(default)]
     path: String,
-    /// Chapter 26's block, read leniently.
+    /// The residency block, read leniently.
     #[serde(default)]
     residency: serde_json::Value,
 }

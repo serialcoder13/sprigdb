@@ -1,5 +1,4 @@
-//! Backend accounts and grants per shard schema (chapter 29, "Backend
-//! accounts and grants" and "Reconciler"; build step 5), the R0 form.
+//! Backend accounts and grants per shard schema, and their reconciler.
 //!
 //! Every live user of a tenant has its own MariaDB account
 //! `t<tenant>_u<user>@'%'`, granted only on the tenant's own shard
@@ -10,7 +9,7 @@
 //! |---|---|
 //! | `*.*` | `` ON `t42\_d%`.* ``: every shard and reference schema of the tenant, now and later; never `t42_sprig` |
 //! | `db.*` | `` ON `t42\_d1\_%`.* ``: every group, shard and reference schema of the database, now and later, with the `*.*` actions too (MariaDB uses the most specific matching database row only) |
-//! | `db.t` | `` ON `t42_d1_g4_s2`.`t` `` per schema holding `t` on the cluster: its group's shards there, a reference copy, the default group's schema (bugfix-25) |
+//! | `db.t` | `` ON `t42_d1_g4_s2`.`t` `` per schema holding `t` on the cluster: its group's shards there, a reference copy, the default group's schema |
 //! | `db.t (c)` | the column, per schema holding `t` |
 //! | `db.t` held by name (a dropped table's, `auth.grants_on_drop = keep`) | as `db.t` while a table of that name exists; before that only if it includes `CREATE` (MariaDB refuses others on a missing table), so the user can create it again |
 //! | `db.f` (routine) | `` ON FUNCTION `t42_d1_g1_s1`.`f` `` per schema holding `f` on the cluster |
@@ -22,17 +21,17 @@
 //! Only data and object actions reach MariaDB (`SELECT` ... `TRIGGER`,
 //! `EXECUTE`, `CREATE ROUTINE`, `EVENT`, `LOCK TABLES`, temporary tables);
 //! management actions (`GRANT OPTION`, `CREATE USER`, settings, ...) stay
-//! in the gateway. Object DDL runs on the session's own backend account in
-//! R0, so `CREATE`, `ALTER`, `DROP` and `INDEX` are mirrored as well.
+//! in the gateway. Object DDL runs on the session's own backend account,
+//! so `CREATE`, `ALTER`, `DROP` and `INDEX` are mirrored as well.
 //!
-//! **Roles (R0).** A user's account gets its own privileges plus those of
+//! **Roles.** A user's account gets its own privileges plus those of
 //! every role granted to it, active or not; the gateway enforces which
 //! roles are active. MariaDB roles and combined roles (one active role per
-//! MariaDB session) arrive with build step 7.
+//! MariaDB session) are not used yet.
 //!
-//! **Credentials (R0).** Accounts have a password derived from a secret
+//! **Credentials.** Accounts have a password derived from a secret
 //! only gateways hold, `HMAC-SHA256(secret, account)`, and `REQUIRE SSL`,
-//! instead of the chapter's certificate subject: the dev and test clusters
+//! instead of a certificate subject: the dev and test clusters
 //! don't verify client certificates. Nothing stores the passwords.
 //!
 //! ```text
@@ -272,7 +271,7 @@ impl BackendTarget {
 pub type BackendState = BTreeMap<String, BTreeMap<BackendTarget, ActionSet>>;
 
 /// Where the tenant's tables, views and routines are on the cluster being
-/// reconciled (bugfix-25): MariaDB has no patterns for table, column and
+/// reconciled: MariaDB has no patterns for table, column and
 /// routine grants, so each needs every schema holding the object. A
 /// regroup moves a table into its group's own schemas, and splits, merges,
 /// moves and re-keys put it in new ones; the gateway reads what the
@@ -437,7 +436,7 @@ pub fn desired_on(
                 per_grantee.push(own);
             }
             compiled_tenant = t_bits;
-            // Partial revokes (R4): a restricted database gets its own
+            // Partial revokes: a restricted database gets its own
             // rows without the cut actions, which win over the tenant
             // pattern row as the more specific match.
             let cut = super::compile::restrictions(&per_grantee);
@@ -613,8 +612,8 @@ pub(crate) fn db_row_for(
         .map(|(_, a)| a)
 }
 
-/// The gateway's own temporary tables (chapter 17, "Gathered reads"; the
-/// analytic reads' column probes): they are created by a connection of
+/// The gateway's own temporary tables (gathered reads and the analytic
+/// reads' column probes): they are created by a connection of
 /// the session's backend account in the schema the statement names, so
 /// every database row of the account carries `CREATE TEMPORARY TABLES`,
 /// and the tenant's pattern row exists for schemas no other row covers.
@@ -635,14 +634,13 @@ fn scratch_grants(grants: &mut BTreeMap<BackendTarget, ActionSet>, tenant_patter
     }
 }
 
-/// Chapter 30's retryable-write records (R5, `decisions/r5-interim.md`
-/// D12): a MongoDB write and its record in the database's
+/// MongoDB retryable-write records: a MongoDB write and its record in the database's
 /// `__sprig_doc_sessions` commit in one MariaDB transaction on the
 /// session's own account, so a user who may write some table of a schema
 /// but whose schema-level grants don't cover the records table gets
 /// `SELECT`, `INSERT`, `UPDATE` and `DELETE` on it there (with `CREATE`,
 /// so the grant holds before the table exists and the engine may create
-/// it). Clients never reach the table: chapter 07 refuses `__sprig_`
+/// it). Clients never reach the table: name checks refuse `__sprig_`
 /// names outside the gateway's internal statements.
 pub const DOC_SESSIONS_TABLE: &str = "__sprig_doc_sessions";
 
@@ -685,7 +683,7 @@ fn doc_session_grants(grants: &mut BTreeMap<BackendTarget, ActionSet>, tenant_pa
     }
 }
 
-/// Chapter 18's Sprig 2PC (R3): a held branch commits with a marker row in
+/// Sprig 2PC: a held branch commits with a marker row in
 /// its schema's `__sprig_redo` (`sprig_txn::redo::REDO_TABLE`), inserted by
 /// the session's own account inside the branch's transaction. A user whose
 /// grants in a schema are table-level only, without `INSERT` on the

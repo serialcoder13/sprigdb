@@ -1,5 +1,4 @@
-//! Tantivy queries from the AST (chapter 39, "Translating queries",
-//! "Scatter-gather with global BM25"; build step 7).
+//! Tantivy queries from the AST, scored with global BM25.
 //!
 //! Text is analyzed with each field's query analyzer; synonyms become an
 //! OR of terms. Fuzzy and prefix terms are **expanded once**, over every

@@ -1,4 +1,4 @@
-// NDJSON decoding (chapter 37: Sql.Query streams one JSON message per line).
+// NDJSON decoding (Sql.Query streams one JSON message per line).
 // Bytes arrive in arbitrary chunks; a line may span chunks, and UTF-8
 // sequences may be split.
 

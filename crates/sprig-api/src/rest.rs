@@ -1,4 +1,4 @@
-//! The REST face (chapter 37, "REST transcoding"; build step 3).
+//! The REST face: transcoding REST requests to the RPCs.
 //!
 //! Every RPC's `google.api.http` rule is one row of [`ROUTES`]; a test reads
 //! the `.proto` files and fails if the table and the annotations disagree,
@@ -11,11 +11,10 @@
 //! `{name=prefix/*}` matches `prefix/<segment>`, and a custom method is a
 //! `:verb` suffix on the last segment (`/v1/{transaction=transactions/*}:commit`).
 //!
-//! **Where the book differs.** Chapter 37 generates an axum handler per rule
-//! with a code generator. R0 has few data RPCs and the admin RPCs forward
-//! to one place, so the gateway dispatches through this table instead; the
-//! effect (REST and gRPC calling the same implementation, routes from the
-//! protos) is the same.
+//! **Dispatch.** There is no generated handler per rule: the data RPCs are
+//! few and the admin RPCs forward to one place, so the gateway dispatches
+//! through this table. REST and gRPC still call the same implementation,
+//! and the routes still come from the protos.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;

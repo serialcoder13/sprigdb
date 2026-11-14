@@ -1,5 +1,5 @@
-//! A tenant's residency for destinations that aren't DCs (chapter 51,
-//! "Destinations, allowlist and residency"; chapter 52's webhooks): the
+//! A tenant's residency for destinations that aren't DCs (sink
+//! destinations and approval webhooks): the
 //! policies of the tenant and its ancestors, read from their directory
 //! entries, each evaluated against a destination's tags as if they were a
 //! DC's. The one copy that sink workers, gateways (`CREATE CONNECTION`)

@@ -1,4 +1,4 @@
-//! Schema validation (chapter 31, "Schema validation"; decisions S90–S94):
+//! Schema validation:
 //! a collection's `validator` (query operators and `$jsonSchema`), its
 //! `validationLevel` (`off`, `moderate`, `strict`, and MongoDB 9.0's
 //! `constraint`) and `validationAction` (`error`, `warn`, and 8.1's
@@ -13,7 +13,7 @@
 //!
 //! `bypassDocumentValidation: true` on a command runs its writes inside
 //! [`bypass`]; the engine then skips the rules, except on a collection at
-//! level `constraint` (S92).
+//! level `constraint`.
 
 pub mod bits;
 pub mod schema;
@@ -332,7 +332,7 @@ pub fn check_options(options: &Document) -> Result<(), MongoError> {
 }
 
 /// The option `collMod`'s `prepareConstraintValidationLevel` leaves on a
-/// collection (decision S92).
+/// collection.
 pub const PREPARED: &str = "prepareConstraintValidationLevel";
 
 #[allow(clippy::needless_pass_by_value)]

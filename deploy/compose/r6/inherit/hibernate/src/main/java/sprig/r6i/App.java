@@ -1,4 +1,4 @@
-// R6 Hibernate check (chapter 42): ddl-auto=validate over an inheritable
+// Inheritable-table Hibernate check: ddl-auto=validate over an inheritable
 // table (products, created by ../flyway), then JPA writes and reads in the
 // root space and in a child space (the connection's init SQL sets
 // @sprig_space). One JSON line per check.

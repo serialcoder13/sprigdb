@@ -1,4 +1,4 @@
-//! The engine's RabbitMQ features through `lapin` (chapter 50 steps 6–8):
+//! The engine's RabbitMQ features through `lapin`:
 //! delayed messages, queue TTL, consumer timeouts, single active consumer,
 //! consumer priorities, `reject-publish`, quorum delivery limits, and
 //! privileges. In process by default; against a gateway with
@@ -442,7 +442,7 @@ async fn privileges_are_checked() {
     );
 }
 
-/// Live only: chapter 29's grants on a gateway. `SPRIG_AMQP_RO_USER` holds
+/// Live only: privilege grants on a gateway. `SPRIG_AMQP_RO_USER` holds
 /// `SELECT, DELETE ON mq.*` only; `SPRIG_AMQP_NONE_USER` nothing (both
 /// with `SPRIG_AMQP_RO_PASSWORD`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

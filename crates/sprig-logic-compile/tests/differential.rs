@@ -1,4 +1,4 @@
-//! The differential suite (chapter 41, "Testing"; chapter 46): KIRun
+//! The differential suite: KIRun
 //! functions compiled to PL/SQL and run in MariaDB, against the reference
 //! interpreter running the same IR, and against the fallback tier running
 //! the same definition on the native `kirun` runtime

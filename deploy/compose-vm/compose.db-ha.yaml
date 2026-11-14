@@ -1,10 +1,10 @@
 # MariaDB high availability across three VMs (RUNBOOK.md, "MariaDB high
-# availability"; hardening round 3): one MariaDB node per VM, a primary and
+# availability"): one MariaDB node per VM, a primary and
 # two replicas with semi-synchronous replication that waits AFTER_SYNC, and
 # a SprigDB agent next to each node. The three nodes are one SprigDB cluster
 # (topology primary_replica); when the primary is lost, the DC leader
 # promotes the replica holding every acknowledged commit and repoints the
-# other (chapter 25, "Primary + replicas, driven by SprigDB").
+# other.
 #
 # On every VM, with compose.yaml and compose.ha.yaml:
 #
@@ -27,7 +27,7 @@ services:
       # What a promoted node is known as to the others: its private address.
       - --report-host=${SPRIG_PRIVATE_HOST:-mariadb-1}
       - --report-port=${SPRIG_BACKEND_PORT:-3306}
-      # Chapter 25: a node boots fenced; its agent unfences the writer.
+      # A node boots fenced; its agent unfences the writer.
       - --read-only=ON
       - --rpl-semi-sync-slave-enabled=ON
       - --rpl-semi-sync-master-enabled=OFF
@@ -35,7 +35,7 @@ services:
       - --innodb-log-file-size=${MARIADB_REDO_SIZE:-1G}
       - --max-connections=${MARIADB_MAX_CONNECTIONS:-1000}
 
-  # The node agent (chapter 25, "DC leases, sub-leases and self-fencing"):
+  # The node agent:
   # holds the writer lease for its node, fences it when it may not write,
   # and reports whether mysqld answers, which the controllers' failover
   # reads. It reaches its node at the address in the cluster record.

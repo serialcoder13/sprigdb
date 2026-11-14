@@ -1,5 +1,4 @@
-//! One query AST for every front end, and its parsers (chapter 39,
-//! "Translating queries"; build step 7).
+//! One query AST for every front end, and its parsers.
 //!
 //! - [`parse_query_string`]: `sprig_search()` and Atlas `queryString`:
 //!   terms (OR by default), `"phrases"` with `~slop`, `+must`, `-not`,
@@ -112,8 +111,7 @@ pub enum SearchQuery {
     /// A score multiplier.
     Boost(Box<SearchQuery>, f32),
     /// Documents whose encoded key (`_key`) is one of these: the gateway
-    /// restricts counts and facets to the rows a caller may see (decision
-    /// S24). Never parsed from a client's query.
+    /// restricts counts and facets to the rows a caller may see. Never parsed from a client's query.
     Keys(Vec<crate::schema::Key>),
 }
 

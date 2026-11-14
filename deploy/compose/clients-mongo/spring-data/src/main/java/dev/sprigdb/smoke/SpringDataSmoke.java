@@ -32,7 +32,7 @@ import org.springframework.data.mongodb.repository.support.MongoRepositoryFactor
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
- * SprigDB's smoke suite for Spring Data MongoDB (chapter 46: authentication, CRUD through the
+ * SprigDB's smoke suite for Spring Data MongoDB (authentication, CRUD through the
  * template and repositories, types, indexes, aggregation, transactions, errors, metadata).
  * SPRIG_MONGO_URI names the endpoint (a tenant login on the gateway, or a MongoDB server). A plain
  * program (no test framework): each check prints PASS or FAIL with its reason, and the exit code

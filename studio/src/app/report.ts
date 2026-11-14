@@ -1,5 +1,5 @@
-// Client errors go only to the gateway that served Studio (chapter 44:
-// kind, message, stack, route; never data values).
+// Client errors go only to the gateway that served Studio (the kind,
+// message, stack, route; never data values).
 
 let sent = 0;
 

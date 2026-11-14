@@ -31,7 +31,7 @@
 //! tenants' locks are held. Once p commits, the copy worker brings each
 //! tenant's paths up to date ([`crate::copy::Maintainer::on_keys`]).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use sprig_catalog::TenantCatalog;
@@ -119,13 +119,11 @@ async fn below_tenants(
         let mut above = Vec::new();
         let mut unbroken = true;
         for b in &t.ancestors[pos + 1..] {
-            match out.iter().position(|(x, _)| x.tenant == *b) {
-                Some(i) => above.push(i),
-                None => {
-                    unbroken = false;
-                    break;
-                }
-            }
+            let Some(i) = out.iter().position(|(x, _)| x.tenant == *b) else {
+                unbroken = false;
+                break;
+            };
+            above.push(i);
         }
         if !unbroken {
             continue;
@@ -191,8 +189,8 @@ struct Reader<'a> {
     below: &'a [(Below, Arc<TenantCatalog>)],
     /// (tenant index, space, key) → its layer row.
     rows: HashMap<(usize, u64, String), LayerRow>,
-    /// The session's root view: key → its parent (`None`: absent).
-    top: HashMap<String, Option<Option<String>>>,
+    /// The session's root view: key → its link there.
+    top: HashMap<String, Link>,
     /// Keys read everywhere.
     read: BTreeSet<String>,
 }
@@ -227,7 +225,7 @@ impl Reader<'_> {
                 .query(&format!("SELECT {k}, {p} FROM ({view}) AS `__sprig_x`"))
                 .await?;
             for key in chunk {
-                self.top.insert(key.clone(), None);
+                self.top.insert(key.clone(), Link::Absent);
             }
             for row in &rows.rows {
                 let key = self.lit(
@@ -242,7 +240,7 @@ impl Reader<'_> {
                     .cloned()
                     .flatten()
                     .map(|v| self.lit(v.as_slice()));
-                self.top.insert(key, Some(parent));
+                self.top.insert(key, Link::Parent(parent));
             }
             // Each tenant's layer rows, committed.
             for (i, (b, _)) in self.below.iter().enumerate() {
@@ -320,11 +318,7 @@ impl Reader<'_> {
         if let Some(l) = self.own_link(stack, k) {
             return l;
         }
-        match self.top.get(k) {
-            None => Link::Unknown,
-            Some(None) => Link::Absent,
-            Some(Some(p)) => Link::Parent(p.clone()),
-        }
+        self.top.get(k).cloned().unwrap_or(Link::Unknown)
     }
 }
 
@@ -416,10 +410,9 @@ pub(crate) async fn check(
                 if rd.own_link(&stack, &w.key).is_some() {
                     continue;
                 }
-                let Some(Some(q)) = rd.top.get(&w.key).cloned() else {
-                    continue;
-                };
-                let Some(q) = q else {
+                // A top row, or none in the session's view: nothing to
+                // walk.
+                let Some(Link::Parent(Some(q))) = rd.top.get(&w.key).cloned() else {
                     continue;
                 };
                 w.parent = Some(q.clone());
@@ -571,7 +564,7 @@ pub(crate) async fn before_unshare(
     carried: &[crate::unshare::Carried],
 ) -> Result<()> {
     let me = ctx.cat.tenant;
-    let mut seen = BTreeMap::new();
+    let mut seen = BTreeSet::new();
     for c in carried {
         let Some(o) = ctx.state.object(c.object).filter(|o| super::has_paths(o)) else {
             continue;
@@ -579,10 +572,7 @@ pub(crate) async fn before_unshare(
         let mut tree = r.tree_tables(me, &c.db, &c.table).await?;
         tree.retain(|t| t.tenant != me && t.ancestors.contains(&me));
         for t in tree {
-            if seen
-                .insert((t.tenant, c.table.to_lowercase()), ())
-                .is_some()
-            {
+            if !seen.insert((t.tenant, c.table.to_lowercase())) {
                 continue;
             }
             let cat = r.tenant_catalog(t.tenant).await?;
@@ -651,6 +641,7 @@ impl ConnRunner {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)] // `map_err(conn_err)`
 fn conn_err(e: mysql_async::Error) -> SprigError {
     match &e {
         mysql_async::Error::Server(s) => {

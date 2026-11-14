@@ -125,7 +125,7 @@ pub mod condition {
     pub const TRANSFER_LIMIT_EXCEEDED: &str = "amqp:link:transfer-limit-exceeded";
 }
 
-/// Chapter 50's error numbers.
+/// The queue engine's error numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(missing_docs)]
 pub enum MqCode {

@@ -1,9 +1,8 @@
-//! What the executor needs from storage (chapter 43, "Native graph
-//! tables"): the [`GraphStore`] trait over one native graph's node, edge
+//! What the executor needs from storage: the [`GraphStore`] trait over one native graph's node, edge
 //! and label tables, implemented over MariaDB ([`crate::maria`]) and in
 //! memory for tests ([`crate::mem`]).
 //!
-//! The trait keeps the chapter's shard dimension: nodes carry the routing
+//! The trait keeps the shard dimension: nodes carry the routing
 //! hash `rk` of `part`, edges live on their source's shard with `dst_rk`,
 //! and [`GraphStore::reach`] is one shard's recursive CTE, which stops at
 //! boundary nodes (an `rk` outside the shard) for the gateway to continue.
@@ -112,6 +111,37 @@ pub struct Reach {
     pub depth: u32,
 }
 
+/// One hop's link without properties ([`GraphStore::links`]): an edge's
+/// ends, their routing hashes, its id and type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Link {
+    /// Source node.
+    pub src: u64,
+    /// Destination node.
+    pub dst: u64,
+    /// The source's routing hash (where the edge lives).
+    pub src_rk: u64,
+    /// The destination's routing hash.
+    pub dst_rk: u64,
+    /// `id`.
+    pub id: u64,
+    /// Type id.
+    pub rtype: u32,
+}
+
+impl From<&EdgeRow> for Link {
+    fn from(e: &EdgeRow) -> Self {
+        Self {
+            src: e.src,
+            dst: e.dst,
+            src_rk: e.src_rk,
+            dst_rk: e.dst_rk,
+            id: e.id,
+            rtype: e.rtype,
+        }
+    }
+}
+
 /// Which id counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdKind {
@@ -128,6 +158,10 @@ pub struct StoreStats {
     pub shard_queries: u64,
     /// Of which recursive CTEs.
     pub cte_queries: u64,
+    /// Time spent waiting for shard statements, in microseconds.
+    pub sql_us: u64,
+    /// Rows the shard statements returned.
+    pub sql_rows: u64,
 }
 
 /// A property index or uniqueness constraint of a native graph.
@@ -173,7 +207,7 @@ pub fn not_implicit() -> sprig_common::SprigError {
     )
 }
 
-/// The routing hash of a node's `part` (chapter 15's numeric class).
+/// The routing hash of a node's `part` (the shard map's numeric class).
 #[must_use]
 pub fn rk_of(part: u64) -> u64 {
     // The spec of one numeric part never fails to build.
@@ -211,6 +245,51 @@ pub trait GraphStore: Send {
         types: &[u32],
         dir: Dir,
     ) -> Result<Vec<(EdgeRow, Option<NodeRow>)>>;
+
+    /// One hop from `from` as links only: no properties and no far
+    /// nodes (breadth-first searches and trail enumeration read only
+    /// ids; the elements they keep are read afterwards).
+    async fn links(&mut self, from: &[u64], types: &[u32], dir: Dir) -> Result<Vec<Link>> {
+        Ok(self
+            .expand(from, types, dir)
+            .await?
+            .iter()
+            .map(|(e, _)| Link::from(e))
+            .collect())
+    }
+
+    /// Whether hops may read links and far nodes without properties,
+    /// reading properties late ([`GraphStore::nodes_part`]); stores that
+    /// say no answer every read with whole rows.
+    fn late_props(&self) -> bool {
+        false
+    }
+
+    /// Nodes by id with only `keys` of their properties (`Some(&[])`:
+    /// none, just ids and labels; `None`: all). A node without one of
+    /// the keys simply lacks it.
+    async fn nodes_part(&mut self, ids: &[u64], keys: Option<&[String]>) -> Result<Vec<NodeRow>> {
+        let _ = keys;
+        self.nodes(ids).await
+    }
+
+    /// Edges by `(src_rk, id)` with only `keys` of their properties, as
+    /// [`GraphStore::nodes_part`].
+    async fn edges_part(
+        &mut self,
+        at: &[(u64, u64)],
+        keys: Option<&[String]>,
+    ) -> Result<Vec<EdgeRow>> {
+        let _ = keys;
+        self.edges_at(at).await
+    }
+
+    /// Edges by id whose sources' routing hashes are known: `(src_rk,
+    /// id)` (routed to their shards; [`GraphStore::edges`] otherwise).
+    async fn edges_at(&mut self, keys: &[(u64, u64)]) -> Result<Vec<EdgeRow>> {
+        let ids: Vec<u64> = keys.iter().map(|(_, id)| *id).collect();
+        self.edges(&ids).await
+    }
 
     /// One shard's recursive CTE: from `seeds` (origin, node) on `shard`,
     /// up to `hops` hops over `types` in `dir`, each node once per origin
@@ -274,8 +353,8 @@ pub trait GraphStore: Send {
     /// Every relationship type, by name.
     fn all_types(&self) -> Vec<String>;
 
-    /// `EXPLAIN`'s lines for how the router plans this graph's steps (R8
-    /// round 8, G69): its group and shards and each step's rule; none for
+    /// `EXPLAIN`'s lines for how the router plans this graph's steps: its
+    /// group and shards and each step's rule; none for
     /// stores the router doesn't plan (in memory, mapped graphs).
     fn explain_routes(&self) -> Vec<String> {
         Vec::new()
@@ -287,7 +366,7 @@ pub trait GraphStore: Send {
         Vec::new()
     }
 
-    /// `CALL { } IN TRANSACTIONS` (R8 round 8): whether the statement may
+    /// `CALL { } IN TRANSACTIONS`: whether the statement may
     /// commit batches of its own, checked before the first batch. Only an
     /// auto-commit statement may (Neo4j's rule).
     ///

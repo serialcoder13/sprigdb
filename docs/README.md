@@ -64,6 +64,20 @@ docs/tests/run-examples.py            # every page; or name pages
 
 Each page runs in a fresh database as `acme.app`. A failing example names its page and line. The `pdf/` and `tests/` folders are tooling and are skipped.
 
+## Building the docs pack
+
+The docs pack is these pages cut into chunks, each with its exact identifiers (error codes, error names, SQLSTATEs, setting keys) and an embedding from a small local model, BAAI/bge-small-en-v1.5. It lets Studio, the assistants and users search the docs offline. Building it twice from the same pages and model gives the same bytes.
+
+```sh
+scripts/fetch-embed-model.sh            # the model, pinned and checked, into target/models/
+cargo run --release -p sprig-docs-gen --no-default-features --bin docs-pack -- \
+    --model target/models/bge-small-en-v1.5 [--version 0.9.0] [--check-repro]
+cargo run --release -p sprig-docs-gen --no-default-features --bin docs-pack -- \
+    eval --model target/models/bge-small-en-v1.5
+```
+
+The pack goes to `target/docs/sprig-docs-<version>.pack`; the tool prints its chunk count, size and SHA-256. `eval` runs the questions in `tests/retrieval-golden.toml` through keyword, vector and hybrid search and reports recall@5 for each. Set `SPRIG_EMBED_MODEL_DIR` to the model directory to run the model's tests in `sprig-embed`.
+
 ## Building the website and the PDF
 
 ```sh

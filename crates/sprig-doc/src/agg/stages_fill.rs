@@ -1,4 +1,4 @@
-//! `$densify` and `$fill` (M2, 12 Nov 2026), with MongoDB 8.0's errors.
+//! `$densify` and `$fill`, with MongoDB 8.0's errors.
 //!
 //! `$densify` follows MongoDB's streaming order: `bounds: "full"` sorts by
 //! the field alone and each partition's sequence starts at the global
@@ -285,7 +285,7 @@ pub(crate) fn densify(
     Ok(out)
 }
 
-/// `$densify` over an input that may be on disk (M7, decision S87): the
+/// `$densify` over an input that may be on disk: the
 /// input sorted on disk as in memory (by partition, then the field;
 /// `bounds: "full"` by the field alone), then the same single pass, its
 /// output collected into a builder that spills.

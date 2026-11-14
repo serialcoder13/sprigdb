@@ -46,8 +46,8 @@ fn the_most_advanced_replica_is_chosen() {
 #[test]
 fn the_choice_is_by_received_not_applied() {
     // r2 applied more, but r3 received (acknowledged) more and applied it
-    // all in the drain: r3. Before r2drain the applied position chose r2
-    // and lost 1-101-96..100.
+    // all in the drain: r3. Before the relay-log safe drain the applied
+    // position chose r2 and lost 1-101-96..100.
     let states = [
         st("r2", "1-101-95", Some(0)),
         lagging("r3", "1-101-100", "1-101-100", None),

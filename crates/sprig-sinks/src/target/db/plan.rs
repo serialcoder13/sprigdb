@@ -1,6 +1,6 @@
 //! Planning a batch into row operations, and the SQL of both dialects
-//! (chapter 51, "Database target": upsert with the version guard, deletes,
-//! append, the offsets and seen-keys tables, schema policies).
+//! (upsert with the version guard, deletes, append, the offsets and
+//! seen-keys tables, schema policies).
 
 // `ops` and `opts` read best side by side.
 #![allow(clippy::similar_names)]
@@ -337,7 +337,7 @@ fn plan_rows(records: &[SinkRecord], opts: &DbOpts, _d: Dialect) -> DbResult<Vec
             .map(|m| mapped(&m, opts).into_iter().map(|(c, _)| c).collect())
             .unwrap_or_default();
         // A fan-in sink's record carries its member in `_sprig_tenant`,
-        // part of the key: equal keys of two members are two rows (R9).
+        // part of the key: equal keys of two members are two rows.
         let member = crate::source::record_member(r);
         if member.is_some() && !key_cols.is_empty() {
             key_cols.insert(0, TENANT_COL.to_owned());

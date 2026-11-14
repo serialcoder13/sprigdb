@@ -1,6 +1,6 @@
 #!/bin/bash
 # Starts, and health-checks, one node of the dev Galera cluster
-# (compose.yaml, services galera-1 to galera-3; chapter 27; bugfix-41):
+# (compose.yaml, services galera-1 to galera-3):
 #
 #   sprig-galera-start.sh first|join [mariadbd options...]   # entrypoint
 #   sprig-galera-start.sh health                             # healthcheck
@@ -13,10 +13,10 @@
 #    doesn't know its position. Started like that, every node offered
 #    00000000-...:-1, and the primary component that Galera's pc.recovery
 #    restored from gvwstate.dat got an all-zero state UUID ("Quorum: No node
-#    with complete state"), which no node can join again later (decision
-#    HD1). So the position is first recovered from InnoDB, as Galera's
-#    galera_recovery script does (mariadbd --wsrep-recover), and the server
-#    starts with --wsrep-start-position: the nodes agree on the real UUID.
+#    with complete state"), which no node can join again later. So the
+#    position is first recovered from InnoDB, as Galera's galera_recovery
+#    script does (mariadbd --wsrep-recover), and the server starts with
+#    --wsrep-start-position: the nodes agree on the real UUID.
 # 2. When all three leave cleanly at the same time, none is marked
 #    safe_to_bootstrap and gvwstate.dat is gone, so nobody formed a primary
 #    component and every node aborted after pc.wait_prim_timeout, over and

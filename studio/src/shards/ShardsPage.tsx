@@ -186,7 +186,7 @@ function Advisor() {
   );
 }
 
-/** The shards view (chapter 44 step 15; chapters 15 and 16): table groups
+/** The shards view: table groups
  * with their keys and members, each group's shard map, and the sharding
  * advisor's runs. Read-only: splits, merges, moves and applying a run are
  * operator actions. */

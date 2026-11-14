@@ -1,4 +1,4 @@
-//! The native Bolt client (chapter 53, "--protocol"): the workspace's own
+//! The native Bolt client (`--protocol bolt`): the workspace's own
 //! `sprig_proto_bolt::client::BoltClient`. Results come back as rows whose
 //! cells are text, or JSON for nodes, relationships and paths
 //! (`{"$node"}`, `{"$rel"}`, `{"$path"}`), which the graph view draws.

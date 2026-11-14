@@ -1,5 +1,5 @@
-// Roles and row-level security policies as statements (chapter 29, "Row-level
-// security"; chapter 44 step 18): built by the forms, shown before they run.
+// Roles and row-level security policies as statements: built by the forms,
+// shown before they run.
 
 const ident = (s: string) => `\`${s.replace(/`/g, '``')}\``;
 const account = (s: string) => {
@@ -8,7 +8,7 @@ const account = (s: string) => {
   return `'${u.replace(/'/g, "''")}'@'${(h ?? '%').replace(/'/g, "''")}'`;
 };
 
-/** Chapter 29's session functions a policy may call. */
+/** The session functions a policy may call. */
 export const POLICY_FUNCTIONS = [
   'CURRENT_USER()',
   'SPRIG_USER_ID()',
@@ -65,7 +65,7 @@ export interface PolicyForm {
   check: string;
 }
 
-/** `CREATE POLICY ...` as chapter 29 writes it. */
+/** `CREATE POLICY ...` in its canonical form. */
 export function createPolicy(f: PolicyForm): string {
   if (!f.name || !f.table) throw new Error('name the policy and its table');
   const to = f.to.trim() ? f.to.split(',').map((x) => (x.trim().toUpperCase() === 'PUBLIC' ? 'PUBLIC' : ident(x.trim()))).join(', ') : 'PUBLIC';

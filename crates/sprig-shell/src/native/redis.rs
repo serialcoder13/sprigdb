@@ -1,4 +1,4 @@
-//! The native Redis client (chapter 53, "--protocol"): RESP3 after
+//! The native Redis client (`--protocol redis`): RESP3 after
 //! `HELLO 3 AUTH user password` (RESP2 replies are read too). Replies come
 //! back as JSON documents: strings, numbers, arrays, maps as objects; an
 //! error reply is the statement's error.

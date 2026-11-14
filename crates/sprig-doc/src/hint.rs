@@ -1,4 +1,4 @@
-//! Index hints (M6, decision S135): `hint` on `find`, `count`,
+//! Index hints: `hint` on `find`, `count`,
 //! `distinct` and `aggregate`, and `indexHints` from query settings,
 //! applied as MariaDB's `FORCE INDEX` on the collection table's reads.
 //!

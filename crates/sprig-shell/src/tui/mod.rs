@@ -1,4 +1,4 @@
-//! The full-screen TUI (chapter 53, "The TUI"): the runtime that carries
+//! The full-screen TUI: the runtime that carries
 //! out [`app::Effect`]s and feeds [`app::Msg`]s back.
 //!
 //! Statements run in tasks holding their tab's [`Runner`]; `Ctrl-C` aborts

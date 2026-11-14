@@ -1,5 +1,4 @@
-//! Queues from SQL (chapter 50, "SQL, logic, MongoDB and HTTP";
-//! build steps 9 and 10): `CALL sprig.mq_publish(...)`, `mq_get`,
+//! Queues from SQL: `CALL sprig.mq_publish(...)`, `mq_get`,
 //! `mq_ack` and `mq_nack`.
 //!
 //! The gateway evaluates the arguments in the session (so any expression
@@ -51,16 +50,16 @@ pub enum MqCall {
     /// `sprig.mq_publish(exchange, routing_key, body, properties [, mandatory [, vhost]])`.
     Publish,
     /// `sprig.mq_get(queue [, max [, lease_ms [, vhost [, lease_tag]]]])`.
-    /// With a lease tag (R9, r9tests), the messages are held under the
+    /// With a lease tag, the messages are held under the
     /// tag rather than the session, so `mq_release` can give them back.
     Get,
     /// `sprig.mq_ack(token)`.
     Ack,
     /// `sprig.mq_nack(token, requeue)`.
     Nack,
-    /// `sprig.mq_info(queue [, vhost])`: ready, consumers, unacked (ST50);
+    /// `sprig.mq_info(queue [, vhost])`: ready, consumers, unacked;
     /// with no queue (`mq_info()`, `mq_info(NULL, vhost)`), one row per
-    /// queue the user may read (ST66).
+    /// queue the user may read.
     Info,
     /// `sprig.mq_browse(queue [, max [, vhost]])`: messages, not consumed.
     Browse,
@@ -70,7 +69,7 @@ pub enum MqCall {
     /// moves up to `max` messages (a dead-letter queue's, say) to an
     /// exchange, with their own routing key when `routing_key` is NULL.
     Republish,
-    /// `sprig.mq_release(queue, lease_tag [, vhost])` (R9, r9tests): every
+    /// `sprig.mq_release(queue, lease_tag [, vhost])`: every
     /// message of `queue` held under `lease_tag` (by `mq_get`'s fifth
     /// argument) goes back to the queue at once, as when an AMQP
     /// connection closes. A queue sink's new task gives back a dead
@@ -277,7 +276,7 @@ pub fn body_bytes(d: &Delivery) -> Bytes {
     convert::to_091(d).map(|(_, b)| b).unwrap_or_default()
 }
 
-/// `mq_info`'s answer (R9, ST50).
+/// `mq_info`'s answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct QueueInfo {
     /// Ready messages.
@@ -319,7 +318,7 @@ impl std::fmt::Debug for SqlVhost {
 /// AMQP connections' process counter.
 pub const SQL_CONN_BIT: u64 = 1 << 62;
 
-/// Lease tags' connection keys (R9, r9tests): this bit and a hash of the
+/// Lease tags' connection keys: this bit and a hash of the
 /// tag. Unlike a session's or an AMQP connection's key, a tag's key means
 /// the same on every gateway, so the owner matches it whatever link the
 /// get came over ([`crate::owner`]'s `conn_lost`).
@@ -566,7 +565,7 @@ impl SqlVhost {
         self.v.wake.notify_one();
     }
 
-    /// The feed-driven forwarder's step (R9, r9fwd): forwards the outbox
+    /// The feed-driven forwarder's step: forwards the outbox
     /// rows of `ids` still there, in the order of `ids` (commit order),
     /// waiting for every destination's confirm, then deletes them. Rows
     /// already gone (the polling forwarder's fallback, an earlier attempt)
@@ -628,7 +627,7 @@ impl SqlVhost {
         self.get_tagged(queue, max, lease_ms, None).await
     }
 
-    /// [`Self::get`] with an optional lease tag (R9, r9tests): the
+    /// [`Self::get`] with an optional lease tag: the
     /// messages are held under the tag's key ([`lease_tag_conn`]), not the
     /// session's, so [`Self::release_tag`] can return them later from any
     /// session on any gateway.
@@ -721,11 +720,11 @@ impl SqlVhost {
         Ok((e, q))
     }
 
-    /// `mq_info` (R9, ST50): ready messages, consumers, and messages
+    /// `mq_info`: ready messages, consumers, and messages
     /// delivered but not yet acknowledged (stored minus ready, read a
     /// moment apart).
     ///
-    /// bugfix-66 (R9 item 123): when the queue's owner can't answer (its
+    /// When the queue's owner can't answer (its
     /// slot failed: an owner lease it couldn't take or reach, an owner that
     /// keeps moving, a relay that broke), the owner is asked once more,
     /// then the answer comes from the store: every stored message ready,
@@ -778,7 +777,7 @@ impl SqlVhost {
     }
 
     /// `mq_info` for every durable queue of the vhost the user may read
-    /// (`CALL sprig.mq_info(NULL [, vhost])`; ST66), in name order: one call
+    /// (`CALL sprig.mq_info(NULL [, vhost])`), in name order: one call
     /// answers a page of queues. Queues the user may not read are left out,
     /// and so is a queue dropped while the call runs.
     ///
@@ -825,7 +824,7 @@ impl SqlVhost {
 
     /// Whether the session's user may consume the queue `t` names (the
     /// right `mq_get` checks: read, which for a queue is `SELECT` and
-    /// `DELETE` on it or its database). R9 (r9tests): an acknowledgement
+    /// `DELETE` on it or its database). An acknowledgement
     /// by a user granted only the queue is settled by its owner.
     #[must_use]
     pub fn may_consume(&self, t: &TokenData) -> bool {
@@ -837,7 +836,7 @@ impl SqlVhost {
             .allowed(&self.cx.principal, &self.v.r, Perm::Read, "queue", &q.name)
     }
 
-    /// `mq_release` (R9, r9tests): every message of `queue` held under
+    /// `mq_release`: every message of `queue` held under
     /// lease tag `tag` goes back to the queue now, its delivery count
     /// raised as when its lease ends. Checked as a read of the queue (the
     /// right `mq_get` needs). The owner applies it after the commands
@@ -860,7 +859,7 @@ impl SqlVhost {
         Ok(())
     }
 
-    /// `mq_purge` (R9, ST50): removes the ready messages; delivered ones
+    /// `mq_purge`: removes the ready messages; delivered ones
     /// stay until settled (RabbitMQ's `queue.purge`).
     ///
     /// # Errors
@@ -870,7 +869,7 @@ impl SqlVhost {
         self.cv.purge_queue(&self.cx, queue).await
     }
 
-    /// `mq_browse` (R9, ST50): up to `max` stored messages of `queue`, in
+    /// `mq_browse`: up to `max` stored messages of `queue`, in
     /// delivery order, without delivering or locking them (those already
     /// delivered and not yet acknowledged are included; a browse is a
     /// read of the store, not of the owner's memory).
@@ -942,7 +941,7 @@ impl SqlVhost {
 
     /// Acknowledges a delivery with its owner, outside any transaction
     /// (the owner deletes the message): a fan-in queue sink's settle of a
-    /// member's message (chapter 51, R9, r9queue).
+    /// member's message.
     pub fn ack(&self, t: &TokenData) {
         if let Some(h) = self.v.slot_of(t.id.queue) {
             let _ = h.send(Cmd::Settle(
@@ -976,7 +975,7 @@ impl SqlVhost {
     /// Returns a delivery as a failed one (`Requeue { failed: true }`): it
     /// goes back to its position and its `x-delivery-count` rises, so the
     /// queue's delivery limit and a trigger's `logic.trigger_max_attempts`
-    /// (chapter 41, R9) see the failure. `mq_nack` with requeue doesn't
+    /// see the failure. `mq_nack` with requeue doesn't
     /// count, as RabbitMQ's `nack` doesn't.
     pub fn fail(&self, t: &TokenData) {
         if let Some(h) = self.v.slot_of(t.id.queue) {
@@ -1093,10 +1092,10 @@ mod tests {
 
     #[test]
     fn parses_studio_calls() {
-        // R9 (r9cluster, ST50): queue pages' calls.
+        // The studio's queue pages' calls.
         let p = |s: &str| parse_call(s).map(|c| (c.call, c.args.len()));
         assert_eq!(p("CALL sprig.mq_info('q')"), Some((MqCall::Info, 1)));
-        // ST66: every queue of a vhost in one call.
+        // Every queue of a vhost in one call.
         assert_eq!(p("CALL sprig.mq_info()"), Some((MqCall::Info, 0)));
         assert_eq!(
             p("CALL sprig.mq_info(NULL, 'shop')"),

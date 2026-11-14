@@ -1,9 +1,9 @@
-//! The sink statements in a tenant session (chapter 51, build steps 2–4,
-//! 15 and 18): the checks, the catalog change, the DC index entry the
-//! controller starts tasks from, and the `SHOW` results. The gateway
+//! The sink statements in a tenant session: the checks, the catalog
+//! change, the DC index entry the controller starts tasks from, and the
+//! `SHOW` results. The gateway
 //! implements [`Host`]; nothing here knows its session types.
 //!
-//! Checks, in order (chapter 51, "Security notes"):
+//! Checks, in order:
 //! - creating, altering or dropping sinks and connections needs
 //!   `SPRIG_SINK_ADMIN` (granted by name only; 39212);
 //! - naming a connection needs `USAGE` on it, its ownership, or
@@ -120,7 +120,7 @@ pub trait Host: Send {
         false
     }
     /// The live logic function `name` of `db`: its runtime and source text
-    /// (`TRANSFORM`, R9). `None`: no such function.
+    /// (`TRANSFORM`). `None`: no such function.
     ///
     /// # Errors
     /// The catalog's.
@@ -129,8 +129,8 @@ pub trait Host: Send {
     }
     /// Version `version` (`None`: the active one) of the live logic
     /// function `name` of `db`: its runtime, version, source and recorded
-    /// signature (`TRANSFORM` with `transform_version` and `EXACTLY ONCE`,
-    /// R9 r9fwd). The default asks [`Self::function_source`] and knows no
+    /// signature (`TRANSFORM` with `transform_version` and `EXACTLY
+    /// ONCE`). The default asks [`Self::function_source`] and knows no
     /// version or signature.
     ///
     /// # Errors
@@ -170,14 +170,14 @@ pub trait Host: Send {
         Ok(None)
     }
 
-    /// The durable queue `name` of database `db` (its vhost): its id
-    /// (R9, r9queue). `None` when there is none, or this host can't tell.
+    /// The durable queue `name` of database `db` (its vhost): its id.
+    /// `None` when there is none, or this host can't tell.
     fn queue(&self, _db: u32, _name: &str) -> Option<u64> {
         None
     }
 
     /// What `TEST CONNECTION` and `TEST SINK` open connections and read
-    /// sources through, as a sink task would (R9, r9tests). `None`: this
+    /// sources through, as a sink task would. `None`: this
     /// host can't run them.
     fn sink_env(&self) -> Option<Arc<dyn crate::job::SinkEnv>> {
         None
@@ -185,7 +185,7 @@ pub trait Host: Send {
 
     /// Up to `n` messages of queue `queue` in database `db`, browsed (not
     /// taken, not locked) with the session's rights, as sink records
-    /// (`TEST SINK`, R9 r9tests).
+    /// (`TEST SINK`).
     ///
     /// # Errors
     /// The queue engine's; by default, that this host has none.
@@ -207,8 +207,8 @@ pub trait Host: Send {
     }
 
     /// The `FOR EACH TENANT` queue definition `db.name` a fan-in sink of
-    /// this tenant may read (`SPRIG_FAN_IN` checked), and `UNDER t`'s id
-    /// (R9, r9queue); `partitions` is 0.
+    /// this tenant may read (`SPRIG_FAN_IN` checked), and `UNDER t`'s id;
+    /// `partitions` is 0.
     ///
     /// # Errors
     /// `UNDER` names no tenant below this one; the catalog's.
@@ -425,7 +425,7 @@ pub async fn handle(sql: &str, h: &mut dyn Host) -> Result<Handled> {
 }
 
 /// Handles one parsed statement (also how an inherited connection or sink
-/// is deployed in a member, R9: built from its definition, so credentials
+/// is deployed in a member: built from its definition, so credentials
 /// never become statement text).
 ///
 /// # Errors
@@ -840,7 +840,7 @@ pub async fn handle_stmt(st: Stmt, h: &mut dyn Host) -> Result<Handled> {
         Stmt::TestSink { name, sample } => test_sink(h, &name, sample).await,
         Stmt::TestNewConnection(c) => test_new_connection(h, c).await,
         Stmt::TestNewSink { def, sample } => {
-            // ST69: CREATE SINK's rights and checks, then TEST SINK's dry
+            // CREATE SINK's rights and checks, then TEST SINK's dry
             // run of the definition; nothing is saved.
             need_admin(h)?;
             let (_, db_name) = db_of(h, def.name.db.as_deref())?;
@@ -899,7 +899,7 @@ pub async fn handle_stmt(st: Stmt, h: &mut dyn Host) -> Result<Handled> {
 }
 
 /// Target options known to be numbers.
-/// `EXACTLY ONCE` for a fan-in sink (R9, r9tests): into databases only,
+/// `EXACTLY ONCE` for a fan-in sink: into databases only,
 /// by the records' member-prefixed idempotency keys in the destination's
 /// `__sprig_sink_seen`; Kafka and S3 keep positions per partition, which
 /// fan-in tasks don't have (39217). Other targets are refused later.
@@ -922,7 +922,7 @@ fn no_env() -> sprig_common::SprigError {
     )
 }
 
-/// `TEST [PLATFORM] CONNECTION` (R9, r9tests; [`crate::probe`]): the
+/// `TEST [PLATFORM] CONNECTION` ([`crate::probe`]): the
 /// rights to name the connection in a sink, then each step's result.
 async fn test_connection(
     h: &mut dyn Host,
@@ -948,7 +948,7 @@ async fn test_connection(
     Ok(step_rows(steps))
 }
 
-/// `TEST CREATE CONNECTION ...` (ST68; [`crate::probe::test_definition`]):
+/// `TEST CREATE CONNECTION ...` ([`crate::probe::test_definition`]):
 /// `CREATE CONNECTION`'s rights and checks (options, credential names, the
 /// allowlist and residency of its hosts), then `TEST CONNECTION`'s steps
 /// with the given credentials; nothing is saved or sealed.
@@ -1003,7 +1003,7 @@ fn step_rows(steps: Vec<crate::probe::Step>) -> Handled {
     }
 }
 
-/// `TEST SINK` (R9, r9tests; [`crate::probe`]): `SPRIG_SINK_ADMIN` or the
+/// `TEST SINK` ([`crate::probe`]): `SPRIG_SINK_ADMIN` or the
 /// sink's ownership; a stream source also needs `SELECT` on it (the sample
 /// is read for the caller), a queue is browsed with the caller's rights.
 async fn test_sink(h: &mut dyn Host, name: &grammar::QName, sample: u32) -> Result<Handled> {
@@ -1097,7 +1097,7 @@ async fn publish_index(h: &mut dyn Host, def: &SinkDef) -> Result<()> {
         .get("partitions_per_task")
         .and_then(|v| v.parse().ok())
         .unwrap_or(per_task);
-    // R9 (r9last): a fan-in sink starts with one task; the controller's
+    // A fan-in sink starts with one task; the controller's
     // `sinks` loop counts its member instances and regroups it before
     // the first task starts.
     let fan_in = match &def.source {
@@ -1223,7 +1223,7 @@ async fn create_sink(h: &mut dyn Host, c: grammar::CreateSink) -> Result<Handled
 
 /// `CREATE SINK`'s definition, every check made (the source's and
 /// connections' rights, the transform, the target), with id 0: what
-/// `CREATE SINK` saves and `TEST CREATE SINK` dry-runs (ST69).
+/// `CREATE SINK` saves and `TEST CREATE SINK` dry-runs.
 #[allow(clippy::too_many_lines)] // one arm per source and target
 async fn sink_def(h: &mut dyn Host, c: grammar::CreateSink) -> Result<SinkDef> {
     let (db, dbname) = db_of(h, c.name.db.as_deref())?;
@@ -1286,8 +1286,8 @@ async fn sink_def(h: &mut dyn Host, c: grammar::CreateSink) -> Result<SinkDef> {
             }
         }
         grammar::SourceAst::Queue(q) => {
-            // A durable queue of the database's vhost (chapter 50), which
-            // the sink consumes: SELECT and DELETE on it (R9, r9queue).
+            // A durable queue of the database's vhost, which the sink
+            // consumes: SELECT and DELETE on it.
             let (qdb, qdbname) = db_of(h, q.db.as_deref().or(Some(&dbname)))?;
             let id = h.queue(qdb, &q.name).ok_or_else(|| {
                 err(
@@ -1353,8 +1353,7 @@ async fn sink_def(h: &mut dyn Host, c: grammar::CreateSink) -> Result<SinkDef> {
             }
         }
         grammar::SourceAst::Changes(ts) => {
-            // Read through each table's change topic (chapter 45), which
-            // must be on.
+            // Read through each table's change topic, which must be on.
             let mut objects = Vec::new();
             for t in ts {
                 let (tdb, tdbname) = db_of(h, t.db.as_deref().or(Some(&dbname)))?;
@@ -1388,8 +1387,8 @@ async fn sink_def(h: &mut dyn Host, c: grammar::CreateSink) -> Result<SinkDef> {
         }
     };
     // TRANSFORM f: a live JavaScript, KIRun or Lua function of the sink's
-    // database whose text uses no data or outside calls (R9, r9more).
-    // R9 (r9fwd): `transform_version = n` pins a version, and `EXACTLY
+    // database whose text uses no data or outside calls.
+    // `transform_version = n` pins a version, and `EXACTLY
     // ONCE` needs the version declared `DETERMINISTIC`.
     if let Some(f) = &c.transform {
         let pinned = grammar::options_map(&c.options)
@@ -1823,7 +1822,6 @@ mod fan_in_guarantee_tests {
 
     #[test]
     fn exactly_once_fan_in_goes_to_databases_only() {
-        // R9 (r9tests).
         let conn = ConnName {
             name: "c".into(),
             platform: false,

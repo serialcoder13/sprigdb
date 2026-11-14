@@ -1,10 +1,9 @@
-//! The `workload.*` keys (chapter 12, "Configuration"; Appendix B),
-//! declared next to the code that reads them (chapter 03, "Declaring a
-//! key"). Names, defaults and scopes are the chapter's: **data** keys take
+//! The `workload.*` keys, declared next to the code that reads them.
+//! Scopes: **data** keys take
 //! global, tenant, database and object; **tenant** keys global and
 //! tenant; **gw** keys global and dc.
 //!
-//! How M0.4 reads them *(choice)*: the gateway builds its
+//! How they are read *(choice)*: the gateway builds its
 //! [`RecorderConfig`] from the global and dc values ([`recorder_config`])
 //! when it starts and again whenever a `workload.*` key changes (it
 //! follows the settings and swaps the recorder's configuration), so the

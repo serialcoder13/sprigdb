@@ -1,4 +1,4 @@
-//! Direct reply-to (chapter 50, "RPC and direct reply-to"): the
+//! Direct reply-to for RPC: the
 //! `amq.rabbitmq.reply-to` pseudo-queue, which stores nothing.
 //!
 //! A requester consumes `amq.rabbitmq.reply-to` (0-9-1, `no_ack`) or
@@ -11,7 +11,7 @@
 //! only from a connection of the requester's own tenant: the key is shared
 //! by the data center's gateways, so a name that leaked to another tenant
 //! would otherwise carry that tenant's message into the requester's
-//! connection (the lead's choice on r9queues2's decision 7).
+//! connection.
 //!
 //! Replies for a requester on another gateway go over the peer service
 //! (7403): gateways that share the key ([`DirectReplyTo::with_key`]) check

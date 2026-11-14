@@ -1,5 +1,5 @@
-//! The gateway's public REST API, as `sprig` uses it (chapter 37; chapter
-//! 53, "Signing in" and "Running statements").
+//! The gateway's public REST API, as `sprig` uses it to sign in and run
+//! statements.
 
 use std::fmt::Write as _;
 
@@ -18,7 +18,7 @@ pub enum Auth {
     None,
     /// `Bearer <token>`: a session token or an API key.
     Bearer(String),
-    /// HTTP Basic: user and password (chapter 14's Basic path).
+    /// HTTP Basic: user and password.
     Basic(String, String),
 }
 
@@ -49,7 +49,7 @@ impl std::fmt::Debug for Tokens {
     }
 }
 
-/// Caps sent with each statement (chapter 37, decision ST22).
+/// Caps sent with each statement: rows, cell bytes and time.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Caps {
     /// Rows per result; 0: none.
@@ -66,7 +66,7 @@ pub struct DataClient {
     http: HttpClient,
     /// How calls authenticate.
     pub auth: Auth,
-    /// `x-sprig-tenant` (chapter 29's `USE TENANT` over HTTP).
+    /// `x-sprig-tenant` (`USE TENANT` over HTTP).
     pub tenant: Option<String>,
 }
 
@@ -126,7 +126,7 @@ fn u64_of(v: &Value, k: &str) -> u64 {
     }
 }
 
-/// A column from chapter 37's JSON.
+/// A column from the REST API's JSON.
 #[must_use]
 pub fn column_from(v: &Value) -> Column {
     Column {
@@ -136,7 +136,7 @@ pub fn column_from(v: &Value) -> Column {
     }
 }
 
-/// A row from chapter 37's JSON: strings (base64 for binary columns) and
+/// A row from the REST API's JSON: strings (base64 for binary columns) and
 /// nulls.
 #[must_use]
 pub fn row_from(v: &Value) -> Vec<Option<String>> {
@@ -337,7 +337,7 @@ impl DataClient {
             .await
     }
 
-    /// `Sql.Query` with its `language` (chapter 37, "Languages"):
+    /// `Sql.Query` with its `language`:
     /// `sql`, `cypher`, `gql`, or `mongo` with `text` a MongoDB command
     /// document as JSON. Only SQL takes several statements and a handle.
     ///

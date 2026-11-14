@@ -1,4 +1,4 @@
-//! Array and set expressions (M1): `$indexOfArray`, `$range`, `$zip`,
+//! Array and set expressions: `$indexOfArray`, `$range`, `$zip`,
 //! `$sortArray`, `$firstN`/`$lastN`/`$maxN`/`$minN` as expressions,
 //! `$allElementsTrue`, `$anyElementTrue`, `$setDifference`,
 //! `$setEquals`, `$setIsSubset`, and `$map`/`$filter`/`$reduce` with

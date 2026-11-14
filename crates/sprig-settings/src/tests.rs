@@ -1,5 +1,5 @@
-//! Resolution and write-check tests, including chapter 08's worked example
-//! and chapter 14's `a → b → c` tenant tree.
+//! Resolution and write-check tests, including the layered example
+//! (global, tenant, table) and the `a → b → c` tenant tree.
 
 use std::borrow::Cow;
 
@@ -141,10 +141,10 @@ fn chapter_08_example() {
     );
 }
 
-/// Chapter 14's worked example: `a` (the platform) → `b` (a client) → `c`
+/// The tenant tree `a` (the platform) → `b` (a client) → `c`
 /// (its sub-client).
 #[test]
-#[allow(clippy::many_single_char_names)] // the names of the book's example
+#[allow(clippy::many_single_char_names)] // the tree's tenant names
 fn ancestor_chain_a_b_c() {
     let reg = registry();
     let mut s = MemSettings::new(&reg);
@@ -446,7 +446,7 @@ static NOT_YET: Setting<u32> = Setting {
     doc: "A key registered ahead of its code, for the marks test",
 };
 
-/// bugfix-89's round (smallfix): a key registered ahead of its code stays
+/// A key registered ahead of its code stays
 /// registered (a stored value and `SET` are still checked) but listings
 /// leave it out; a key read only at start is shown as `restart`.
 #[test]
@@ -461,7 +461,7 @@ fn marked_keys_are_hidden_or_restart_only() {
     .with_marks(&[(NOT_YET.key, Mark::Unbuilt), (POOL_SIZE.key, Mark::Restart)]);
     assert!(reg.get(NOT_YET.key).is_some());
     assert!(reg.is_unbuilt(NOT_YET.key));
-    let listed: Vec<&str> = reg.iter().map(|d| d.key()).collect();
+    let listed: Vec<&str> = reg.iter().map(AnySetting::key).collect();
     assert_eq!(listed, [MFA_REQUIRED.key, MAX_PER_TABLE.key, POOL_SIZE.key]);
     assert_eq!(reg.iter_all().count(), 4);
     assert_eq!(reg.apply_name(&POOL_SIZE), "restart");

@@ -1,4 +1,4 @@
-//! `sprigctl settings` (alias `config`, chapter 47's name): see and change
+//! `sprigctl settings` (alias `config`): see and change
 //! settings at every scope over the Admin API's `Settings` service.
 //!
 //! ```text
@@ -12,7 +12,7 @@
 //! ```
 //!
 //! Targets are `--tenant`, `--db`, `--object`, `--cluster` and the global
-//! `--dc`; `--scope` also takes chapter 47's one-word form
+//! `--dc`; `--scope` also takes a one-word form
 //! (`--scope object:acme.shop.orders`, `--scope dc:mum1`). `get` is also
 //! `explain`, `reset` also `unset`. Writes record `op:<actor>`, the actor
 //! being `--actor`, `SPRIGCTL_ACTOR` or `USER`, with `--reason`.
@@ -271,7 +271,7 @@ pub(crate) fn escape(s: &str) -> String {
     out
 }
 
-/// The query of `settings get`: the targets, or a chapter 47 `--scope`.
+/// The query of `settings get`: the targets, or a one-word `--scope`.
 pub(crate) fn get_query(m: &ArgMatches, sub: &ArgMatches) -> Result<String, Failed> {
     let s = |n: &str| sub.get_one::<String>(n).cloned();
     let (mut tenant, mut db, mut object, mut cluster) =

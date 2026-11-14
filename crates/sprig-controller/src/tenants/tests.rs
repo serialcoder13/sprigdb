@@ -900,7 +900,7 @@ async fn live_catalog_schemas_are_never_reused() {
     .await;
 }
 
-/// `tenant.id_min..=tenant.id_max` (ctlfix, 9 Nov): only tenant-shaped
+/// `tenant.id_min..=tenant.id_max`: only tenant-shaped
 /// schemas inside the range raise the id counter, so another deployment's
 /// schemas on the same servers no longer pull this one's ids into its
 /// range, and a used-up range refuses with 39080.

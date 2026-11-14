@@ -1,4 +1,4 @@
-//! The S3 target against MinIO (chapter 51, "Testing"): `r9sinks-minio`
+//! The S3 target against MinIO: `r9sinks-minio`
 //! (quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z) on 127.0.0.1:29000.
 //! Skipped unless `SPRIG_SINKS_S3_LIVE=1`. Every test uses its own prefix
 //! in the bucket `r9sinks`.
@@ -227,7 +227,7 @@ async fn every_format_and_compression_and_conditional_writes() {
         return;
     }
     let c = setup().await;
-    // Conditional writes on MinIO (open question 7).
+    // Conditional writes on MinIO.
     let k = format!("{}probe.txt", unique("cond"));
     assert!(matches!(
         c.put_object(&k, Bytes::from_static(b"a"), "text/plain", true)
@@ -375,8 +375,8 @@ async fn multipart_and_failed_completion_and_sweep() {
     assert!(e.retryable);
     eprintln!("failed completion: {}", e.message);
     assert!(c.head_object(&key).await.unwrap().is_none());
-    // MinIO lists multipart uploads only for an exact object name (open
-    // question 11): by prefix it finds none.
+    // MinIO lists multipart uploads only for an exact object name: by prefix
+    // it finds none.
     assert!(c.list_uploads(&prefix).await.unwrap().is_empty());
     assert_eq!(c.list_uploads(&key).await.unwrap().len(), 1);
     eprintln!("MinIO: ListMultipartUploads by prefix finds nothing; by exact key finds the upload");

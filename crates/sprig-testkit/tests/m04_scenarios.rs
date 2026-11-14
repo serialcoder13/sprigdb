@@ -1,9 +1,8 @@
-//! Milestone M0.4's scenario suite (chapter 48, "M0.4"; chapter 13 build
-//! step 14), through the real gateway and the real controller, on one
-//! reference topology per run.
+//! The automatic-indexing scenario suite, through the real gateway and the
+//! real controller, on one reference topology per run.
 //!
-//! The tenant's statements go through the gateway as `<tenant>.app`; chapter
-//! 12 records them in the tenant's catalog; the controller's `auto_index`
+//! The tenant's statements go through the gateway as `<tenant>.app`; workload
+//! capture records them in the tenant's catalog; the controller's `auto_index`
 //! loop evaluates, validates (replica, Galera RSU or estimate-and-canary,
 //! by the cluster), builds, observes and drops. The test only generates
 //! load, changes settings with `SPRIG SET`, and reads the catalog's
@@ -12,32 +11,32 @@
 //! Scenarios, scaled down (tables of 30,000 to 100,000 rows; Galera tables
 //! are filled 25,000 rows per transaction):
 //!
-//! 1. **Worked example 1** (`orders`): `customer_id = ? AND status IN (...)
+//! 1. **Orders** (`orders`): `customer_id = ? AND status IN (...)
 //!    ORDER BY created_at DESC LIMIT ?` with a user index on `created_at`
 //!    and status updates: an index starting with `customer_id` is proposed,
 //!    validated and built.
-//! 2. **Worked example 2** (`events`): F1 and F2 get one merged index
-//!    `(account_id, kind, created_at)`; F4 (`LOWER(source) = ?`) gets no
-//!    candidate, and its skipped row says `function:LOWER`.
-//! 3. **Worked example 3, the `ORDER BY ... LIMIT` trap** (`t`): `(c)` for
+//! 2. **Events** (`events`): the range query and the count on `account_id`
+//!    and `kind` get one merged index `(account_id, kind, created_at)`;
+//!    `LOWER(source) = ?` gets no candidate, and its skipped row says `function:LOWER`.
+//! 3. **The `ORDER BY ... LIMIT` trap** (`t`): `(c)` for
 //!    a range on `c` sends `d = 1 ORDER BY c LIMIT 10` through the whole
 //!    index: rejected for the regression; the covering retry `(c, d)` is
 //!    accepted and built.
 //! 4. **A user-created equivalent retires ours** (`v`): after `(a)` is
 //!    built, the user creates `(a, b)`: ours is retired as `superseded`.
 //! 5. **Unused, user and migrated indexes** (`u`): `(a)` is built, then its
-//!    query stops; after 400 reads that don't use it (decision O1, by reads,
+//!    query stops; after 400 reads that don't use it (judged by reads,
 //!    never days) it is ignored, and after 400 more dropped as `unused`.
 //!    The user index and the migrated one (an `index_origins` row, as a
-//!    dump replay records it in R4) are untouched: `retire_user_indexes` is
+//!    dump replay records it) are untouched: `retire_user_indexes` is
 //!    `off` on `u` here.
 //!
-//! [`usage_based_removal_on_one_topology`] is decision O1's own scenario:
+//! [`usage_based_removal_on_one_topology`] is the usage-based removal scenario:
 //! automatic and user indexes removed by reads, `recommend`, the primary
 //! key, `UNIQUE` and foreign-key indexes never touched, and
 //! `sprigctl index restore`.
 //!
-//! Worked example 4 is a MongoDB collection (R5) and is not in M0.4.
+//! MongoDB collections are not covered here.
 //!
 //! The controller must run with `SPRIGDB_CONTROLLER_AUTOINDEX_TEST_CLOCK_FILE`
 //! naming the file in `SPRIG_TEST_M04_CLOCK_FILE` (the auto-index loop's
@@ -135,7 +134,7 @@ async fn catalog(c: &Cfg) -> Conn {
         .unwrap()
 }
 
-#[allow(dead_code)] // the clock no longer decides removal (decision O1)
+#[allow(dead_code)] // the clock no longer decides removal; reads do
 fn set_clock(c: &Cfg, secs: u64) {
     std::fs::write(&c.clock_file, format!("{secs}\n")).unwrap();
     println!(
@@ -314,7 +313,7 @@ async fn show_index(c: &Cfg, db: &str, table: &str, show_auto: bool) -> Vec<Stri
     names
 }
 
-/// The shard schema of logical database `db` (R0: one shard per
+/// The shard schema of logical database `db` (one shard per
 /// database), from the catalog: `t<tenant>_d<db>_...`.
 async fn physical(c: &Cfg, db: &str) -> String {
     let s = format!("t{}_sprig", c.tenant_id);
@@ -454,7 +453,7 @@ async fn round(
                 .await;
             r.tolerate();
         }
-        // Writes: inserts and status updates (worked example 1's write mix).
+        // Writes: inserts and status updates (the orders write mix).
         g.exec_drop(
             "INSERT INTO orders (customer_id, status, created_at, total, note) \
              VALUES (?, 'open', NOW(), ?, 'n')",
@@ -656,8 +655,7 @@ async fn chapter_13_scenarios_on_one_topology() {
     )
     .await;
     // A user index and a migrated one on u; the migrated origin is what a
-    // dump replay records (chapter 13 "Index origins"; the import path is
-    // R4), written here as that path will.
+    // dump replay records, written here as the import path will.
     ddl(&mut g, "CREATE INDEX idx_u_b ON u (b)").await;
     ddl(&mut g, "CREATE INDEX ix_u_mig ON u (pad(16))").await;
     {
@@ -786,7 +784,7 @@ async fn chapter_13_scenarios_on_one_topology() {
     report["examples"]["ex2"]["skipped"] = json!(skips);
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
 
-    // Done-when 1: each worked example built within one trigger window
+    // Check 1: each scenario's index built within one trigger window
     // (1 hour here).
     for k in ["ex1", "ex2", "trap", "u", "v"] {
         let (s, _) = done
@@ -794,12 +792,12 @@ async fn chapter_13_scenarios_on_one_topology() {
             .unwrap_or_else(|| panic!("{k}: no index built on {}: {rows:#?}", c.topology));
         assert!(*s < 3600.0, "{k}: {s} s");
     }
-    // Example 2: F4 is explained, never indexed.
+    // Events: `LOWER(source)` is explained, never indexed.
     assert!(
         skips.iter().any(|(_, r)| r == "function:LOWER"),
         "no function:LOWER skip on events: {skips:?}"
     );
-    // Done-when 2: the trap's (c) was rejected for a regression, and its
+    // Check 2: the trap's (c) was rejected for a regression, and its
     // covering retry accepted.
     let tv = validations_on(&c, &db, "t").await;
     assert!(
@@ -864,7 +862,7 @@ async fn chapter_13_scenarios_on_one_topology() {
     assert_eq!(sup.drop_reason.as_deref(), Some("superseded"));
     report["supersede"] = json!({"index": sup.name, "state": sup.state, "seconds": sup_s.round()});
 
-    // ---- Phase 3: unused dropped by reads (decision O1), others kept -----
+    // ---- Phase 3: unused dropped by reads, others kept -------------------
     // Light traffic on u that never uses (a): primary-key reads and the
     // user index. 400 reads judge it (database scope), 400 more while it
     // is IGNORED drop it; no clock is moved.
@@ -877,7 +875,7 @@ async fn chapter_13_scenarios_on_one_topology() {
     )
     .await;
     // The user and migrated indexes of u are left alone here (their own
-    // removal is the O1 scenario's): retire_user_indexes off on u.
+    // removal is the usage-based removal scenario's): retire_user_indexes off on u.
     ddl(
         &mut g,
         "ALTER TABLE u SPRIG SET (auto_index.retire_user_indexes = 'off', \
@@ -891,7 +889,7 @@ async fn chapter_13_scenarios_on_one_topology() {
     while t3.elapsed() < Duration::from_secs(15 * 60) {
         round(&mut g, &mut rng, &mut load, n, &mut first).await;
         // Writes to a: an index on a table nobody writes is kept, and the
-        // query (a) served is remembered until they cost more (decision O1).
+        // query (a) served is remembered until they cost more.
         g.query_drop(format!(
             "UPDATE u SET a = {} WHERE id = {}",
             rng.next(3000),
@@ -966,9 +964,9 @@ async fn chapter_13_scenarios_on_one_topology() {
     let _ = g.disconnect().await;
 }
 
-// ---- Decision O1: index removal judged by usage, never by days ----------
+// ---- Index removal judged by usage, never by days -----------------------
 
-/// An `index_usage` row: a user or migrated index under decision O1.
+/// An `index_usage` row: a user or migrated index under usage-based removal.
 #[derive(Debug, Clone)]
 struct UsageRowT {
     table: String,
@@ -1053,7 +1051,7 @@ fn sprigctl(c: &Cfg, args: &[&str]) -> (bool, String) {
     (out.status.success(), text)
 }
 
-/// Decision O1, live: an automatic index and a user index that serve no
+/// Usage-based removal, live: an automatic index and a user index that serve no
 /// reads are made `IGNORED`, watched for `usage_sample_reads` reads and
 /// dropped; a used user index, the primary key, a `UNIQUE` index and a
 /// foreign key's index are never touched; `retire_user_indexes =
@@ -1067,7 +1065,7 @@ fn sprigctl(c: &Cfg, args: &[&str]) -> (bool, String) {
 /// at database scope and `recommend` on table `w` (the dev stack may hold
 /// `recommend` at global scope, for other tenants' sake).
 #[tokio::test]
-#[ignore = "needs the dev gateway and a controller with decision O1 (deploy/compose/m04/run.sh o1)"]
+#[ignore = "needs the dev gateway and a controller with usage-based index removal (deploy/compose/m04/run.sh o1)"]
 async fn usage_based_removal_on_one_topology() {
     let Some(c) = cfg() else { return };
     let db = unique_ident("o1");
@@ -1159,7 +1157,7 @@ async fn usage_based_removal_on_one_topology() {
     loop {
         assert!(
             Instant::now() < deadline,
-            "O1 scenario timed out (see the log)"
+            "usage-based removal scenario timed out (see the log)"
         );
         // Load: u's reads by b (idx_u_b) and by id; by a until its index
         // exists and has served a while; writes; w and x by id.
@@ -1202,7 +1200,7 @@ async fn usage_based_removal_on_one_topology() {
             reads += 5 + u64::from(a_query);
         }
         // w and x are written (their unused indexes cost something); r,
-        // read-only, never is: its unused index is kept (Kiran, O1).
+        // read-only, never is: its unused index is kept.
         for t in ["w", "x"] {
             g.query_drop(format!(
                 "UPDATE {t} SET b = {} WHERE id = {}",
@@ -1292,7 +1290,7 @@ async fn usage_based_removal_on_one_topology() {
             a_query = false;
             // The query (a) served is remembered (a periodic job, as far as
             // the rule knows) and still in the workload store, so its
-            // savings count until the writes cost more (decision O1).
+            // savings count until the writes cost more.
             ddl(
                 &mut g,
                 "ALTER TABLE u SPRIG SET (auto_index.maintenance_cost_ms = 10)",

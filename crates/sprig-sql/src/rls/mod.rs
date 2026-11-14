@@ -4,7 +4,7 @@
 //!   `ALTER TABLE ... ROW LEVEL SECURITY`;
 //! - [`expr`]: policy expressions, validated when a policy is created and
 //!   rendered for each table reference with the session's values bound;
-//! - [`inject`]: the statement rewrite that puts every protected table's
+//! - [`inject`](mod@inject): the statement rewrite that puts every protected table's
 //!   predicate into the statement before it is planned and routed.
 
 pub mod definer;

@@ -1,4 +1,4 @@
-//! `sprigctl gateway list|show|drain` (chapter 04, "Drain"; chapter 37's
+//! `sprigctl gateway list|show|drain` (the Admin API's
 //! `Gateways` service): the DC's registered gateways, and draining one.
 //! Any gateway answers; a drain reaches the named gateway through the peer
 //! service, which then finishes its work, closes its listeners and exits.

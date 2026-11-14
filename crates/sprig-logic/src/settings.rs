@@ -1,5 +1,5 @@
-//! Chapter 41's settings for the fallback tier, declared next to the code
-//! (chapter 03, "Declaring a key"), and the limits one call reads.
+//! The settings for the fallback tier, declared next to the code, and the
+//! limits one call reads.
 
 use std::borrow::Cow;
 use std::time::Duration;

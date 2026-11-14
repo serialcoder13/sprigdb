@@ -39,13 +39,13 @@ fn yaml_scalar(s: &str) -> String {
     }
 }
 
-/// Markdown table cell text: design-book references removed, pipes
+/// Markdown table cell text: chapter citations removed, pipes
 /// escaped, newlines flattened.
 fn cell(s: &str) -> String {
     public(s).replace('|', "\\|").replace('\n', " ")
 }
 
-/// `s` without references to the design book's chapters, which are not
+/// `s` without chapter citations, which point at text that is not
 /// published: "(chapter 52)", "(chapter 51, …)", "Chapter 52's ", "chapter 13's ".
 #[must_use]
 pub fn public(s: &str) -> String {
@@ -478,8 +478,8 @@ pub fn cli_page(tool: &str, intro: &str, commands: &[CommandHelp]) -> String {
     out.push_str("\n\n");
     for c in commands {
         let depth = c.path.split(' ').count().clamp(1, 4);
-        // Help texts cite the design book in places; keep the indentation
-        // and drop those references.
+        // Help texts cite chapters in places; keep the indentation and
+        // drop those citations.
         let help: Vec<String> = c
             .help
             .trim_end()

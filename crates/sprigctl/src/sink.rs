@@ -1,4 +1,4 @@
-//! `sprigctl sink` (chapter 51, "`sprigctl` and the admin API"; R9):
+//! `sprigctl sink`:
 //!
 //! - `list [--db d]`, `show <db.sink>`, `pause | resume <db.sink>`,
 //!   `reset <db.sink> --to latest|earliest|snapshot|<time>`, and
@@ -15,7 +15,7 @@
 //!   values never pass through here: only `file:<path>` references.
 //!
 //! - `test <db.sink> [--sample n]` and `connections test <db.c>
-//!   [--platform] [--write [--to target]]` (R9, r9last): `TEST SINK` and
+//!   [--platform] [--write [--to target]]`: `TEST SINK` and
 //!   `TEST [PLATFORM] CONNECTION ... [WRITE [TO 'target']]` through the
 //!   gateway, as Studio runs them; the rows printed as for `list`.
 
@@ -252,7 +252,7 @@ async fn exec(gw: &str, sql: &str) -> Result<(), Failed> {
     Ok(())
 }
 
-/// `sprigctl sink test`'s statement (R9, r9last).
+/// `sprigctl sink test`'s statement.
 fn test_sink_sql(sink: &str, sample: Option<u32>) -> String {
     match sample {
         Some(n) => format!("TEST SINK {} WITH SAMPLE {n}", ident(sink)),
@@ -260,7 +260,7 @@ fn test_sink_sql(sink: &str, sample: Option<u32>) -> String {
     }
 }
 
-/// `sprigctl sink connections test`'s statement (R9, r9last).
+/// `sprigctl sink connections test`'s statement.
 fn test_connection_sql(name: &str, platform: bool, write: bool, to: Option<&str>) -> String {
     let mut sql = format!(
         "TEST {}CONNECTION {}",
@@ -573,7 +573,7 @@ pub(crate) async fn run(sub: &ArgMatches, out: Output) -> Result<(), Failed> {
 mod test_statements {
     use super::*;
 
-    /// R9 (r9last): the wrappers send the statements Studio runs.
+    /// The wrappers send the statements Studio runs.
     #[test]
     fn sink_and_connection_tests() {
         assert_eq!(test_sink_sql("shop.out", None), "TEST SINK `shop`.`out`");

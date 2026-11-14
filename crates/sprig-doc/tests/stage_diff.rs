@@ -1,5 +1,5 @@
-//! The aggregation-stage differential test (M2, 12 Nov 2026): window
-//! functions, accumulators and the stages `$setWindowFields`, `$bucket`,
+//! The aggregation-stage differential test: window functions,
+//! accumulators and the stages `$setWindowFields`, `$bucket`,
 //! `$bucketAuto`, `$densify`, `$fill`, `$redact`, `$documents` and
 //! `$graphLookup`.
 //!

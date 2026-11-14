@@ -1,6 +1,5 @@
-//! `sprigctl shard list|split|merge|move` for table groups (chapter 20,
-//! build step 7) and `sprigctl advisor run|show|apply` (chapter 16, build
-//! step 7), over the Admin API's `/admin/v1/tenants/{name}/shards` and
+//! `sprigctl shard list|split|merge|move` for table groups and
+//! `sprigctl advisor run|show|apply`, over the Admin API's `/admin/v1/tenants/{name}/shards` and
 //! `/admin/v1/tenants/{name}/advisor`.
 //!
 //! ```text
@@ -8,7 +7,7 @@
 //! sprigctl shard split acme 3 4 [--at 0x9000000000000000] [--ways 3]
 //! sprigctl shard merge acme 3 6 7
 //! sprigctl shard move acme 3 4 --to dc-a-c2      # one shard of group 3
-//! sprigctl shard move acme --to dc-a-c2          # the whole tenant (R0)
+//! sprigctl shard move acme --to dc-a-c2          # the whole tenant
 //! sprigctl shard rekey acme 3 --key customer_id [--member events=cust] [--shards 4] [--to dc-a-c2]
 //! sprigctl advisor run acme
 //! sprigctl advisor show acme [run]

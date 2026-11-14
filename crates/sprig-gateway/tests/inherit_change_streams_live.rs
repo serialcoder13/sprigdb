@@ -24,7 +24,8 @@
     clippy::unwrap_used,
     clippy::expect_used,
     missing_docs,
-    clippy::too_many_lines
+    clippy::too_many_lines,
+    clippy::many_single_char_names
 )]
 
 use std::time::Duration;
@@ -241,7 +242,7 @@ async fn change_streams_carry_merged_records() {
         "update 3 parent_id",
     ];
     assert_eq!(r, want_root, "the root's stream");
-    let want_s1 = vec![
+    let want_s1 = [
         "insert 1 body,n,parent_id",
         "insert 2 body,n,parent_id",
         "update 2 body,n,parent_id",
@@ -253,7 +254,7 @@ async fn change_streams_carry_merged_records() {
         "delete 100",
     ];
     assert_eq!(s, want_s1, "s1's stream");
-    let want_b = vec![
+    let want_b = [
         "insert 1 body,n,parent_id",
         "insert 2 body,n,parent_id",
         "update 2 body",

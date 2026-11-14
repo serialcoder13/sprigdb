@@ -1,6 +1,5 @@
-//! The settings check of milestone M0.3 (chapter 48: "a setting changed at
-//! object scope takes effect on every gateway within seconds, and a value
-//! outside its bounds is refused"; chapter 08, build step 8).
+//! The settings check: a setting changed at object scope takes effect on
+//! every gateway within seconds, and a value outside its bounds is refused.
 //!
 //! Tenant A sets a key on one table with SQL, `ALTER TABLE t SPRIG SET (k =
 //! v)`, and every observer (a second session on the same endpoint, plus
@@ -421,7 +420,7 @@ async fn object_setting_live_and_bounded() {
     )
     .await;
     let _ = exec(&mut writer, &format!("DROP DATABASE IF EXISTS {db}")).await;
-    assert!(failed.is_empty(), "M0.3 settings:\n{}", failed.join("\n"));
+    assert!(failed.is_empty(), "settings check:\n{}", failed.join("\n"));
 }
 
 /// A URL without its password, for messages.

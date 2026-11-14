@@ -1,4 +1,4 @@
-//! The sparse log latency histogram (chapter 12, "Latency histogram").
+//! The sparse log latency histogram.
 //!
 //! Bucket `i` (0 to 95) counts latencies up to 10 µs × 2^(i/4); bucket 95
 //! also counts anything slower (from about 141 s). Each bucket is 19% wider

@@ -1,4 +1,4 @@
-//! The Analytics API through a gateway (chapters 35 and 37): models and
+//! The Analytics API through a gateway: models and
 //! queries over REST and gRPC on one port, compared with the same data's
 //! `GROUP BY ... WITH ROLLUP` over the SQL API.
 //!
@@ -316,7 +316,7 @@ async fn analytics_over_rest_and_grpc() {
         totals: true,
         ..pb::AnalyticsQuery::default()
     };
-    // A stream since R6 round 4: the plan first, then the rows.
+    // A stream: the plan first, then the rows.
     let (plan, got, _) = grpc_rows(ac.query(gq.clone()).await.unwrap().into_inner()).await;
     assert_eq!(plan, "per_level");
     assert_eq!(got, want);
@@ -354,7 +354,7 @@ async fn analytics_over_rest_and_grpc() {
         .collect();
     assert_eq!(have, want);
 
-    // Streaming (R6 round 4): 4,000 more sales over every day of 2025, by
+    // Streaming: 4,000 more sales over every day of 2025, by
     // region and day: over 2,000 rows, so several messages and lines, the
     // same rows as the one-reply JSON.
     let mut more = Vec::new();

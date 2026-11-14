@@ -1,8 +1,7 @@
-//! The catalog DDL and the migration framework (chapter 08, build step 1;
-//! "Bootstrap, DDL and migrations").
+//! The catalog DDL and the migration framework.
 //!
 //! A catalog's tables come from *modules*: the core module [`CORE`] owns
-//! the four tables of chapter 08, and every crate that keeps tables in the
+//! the catalog's four core tables, and every crate that keeps tables in the
 //! catalog (auth, sharding, the data models, logic, ...) registers its own
 //! module with its own migrations, so `sprig-catalog` never depends on its
 //! users.
@@ -23,15 +22,15 @@
 //! format for a module is below `compat` gets 39073
 //! `ER_SPRIG_CATALOG_FORMAT_TOO_NEW` ([`check_readable`]).
 //!
-//! **Gating.** Upgrade orchestration (step 12) decides how far each module
+//! **Gating.** Upgrade orchestration decides how far each module
 //! may go and passes it as a [`Ceiling`]: expand to `F` once every
 //! registered component reads `F`, contract to `F` after
 //! `catalog.contract_delay_days` with no older reader registered. The
 //! migrator itself applies whatever the ceilings allow, in order, and stops
 //! a module at the first migration its ceiling refuses.
 //!
-//! **Where state lives.** In the catalog's internal keys (chapter 08,
-//! "Internal keys"): `sprig.catalog_format` holds every module's
+//! **Where state lives.** In the catalog's internal keys:
+//! `sprig.catalog_format` holds every module's
 //! [`ModuleFormat`] (one row to read for the format check), and
 //! `sprig.migration.<module>` holds the module's format and the history of
 //! applied migrations (format, phase, name, time, who).
@@ -44,8 +43,7 @@
 //! idempotent. Migrations only move forward.
 //!
 //! **Fenced catalogs.** A tenant move's cutover may fence the catalog by
-//! renaming its tables to `__sprig_f_<hex16>` (chapter 09, "Fencing
-//! primitives"; chapter 10, "Cutover"). The renamed catalog looks empty,
+//! renaming its tables to `__sprig_f_<hex16>`. The renamed catalog looks empty,
 //! so a run would create a second, empty set of tables under the old
 //! names and the unfence could not rename the real ones back. A run
 //! therefore refuses a schema holding fenced tables (39070, retryable),
@@ -66,7 +64,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 
 use crate::sql::{map_err, rfc3339, timed, to_datetime};
 
-/// The core module: the four tables chapter 08 owns.
+/// The core module: the catalog's four core tables.
 pub const CORE: &str = "catalog";
 
 /// Internal key holding every module's [`ModuleFormat`].
@@ -78,8 +76,7 @@ pub fn migration_key(module: &str) -> String {
     format!("sprig.migration.{module}")
 }
 
-/// `databases` (chapter 08, Appendix C). `IF NOT EXISTS` keeps the
-/// statement idempotent; the columns are exactly the appendix's.
+/// `databases`. `IF NOT EXISTS` keeps the statement idempotent.
 pub const DDL_DATABASES: &str = "CREATE TABLE IF NOT EXISTS `databases` (
   db_id             INT UNSIGNED    NOT NULL,
   name              VARCHAR(64)     NOT NULL,
@@ -97,7 +94,7 @@ pub const DDL_DATABASES: &str = "CREATE TABLE IF NOT EXISTS `databases` (
   KEY k_changed (changed_version)
 ) ENGINE=InnoDB";
 
-/// `objects` (chapter 08, Appendix C).
+/// `objects`.
 pub const DDL_OBJECTS: &str = "CREATE TABLE IF NOT EXISTS objects (
   object_id         BIGINT UNSIGNED NOT NULL,
   db_id             INT UNSIGNED    NOT NULL,
@@ -122,7 +119,7 @@ pub const DDL_OBJECTS: &str = "CREATE TABLE IF NOT EXISTS objects (
   KEY k_parent (parent_id), KEY k_changed (changed_version)
 ) ENGINE=InnoDB";
 
-/// `settings` (chapter 08, Appendix C).
+/// `settings`.
 pub const DDL_SETTINGS: &str = "CREATE TABLE IF NOT EXISTS settings (
   scope_kind        ENUM('tenant','database','object','ancestor') NOT NULL,
   scope_id          BIGINT UNSIGNED NOT NULL,
@@ -136,7 +133,7 @@ pub const DDL_SETTINGS: &str = "CREATE TABLE IF NOT EXISTS settings (
   KEY k_version (version)
 ) ENGINE=InnoDB";
 
-/// `schema_versions` (chapter 08, Appendix C).
+/// `schema_versions`.
 pub const DDL_SCHEMA_VERSIONS: &str = "CREATE TABLE IF NOT EXISTS schema_versions (
   object_id         BIGINT UNSIGNED NOT NULL,
   version           BIGINT UNSIGNED NOT NULL,
@@ -152,7 +149,7 @@ pub const DDL_SCHEMA_VERSIONS: &str = "CREATE TABLE IF NOT EXISTS schema_version
 
 /// The internal keys every catalog starts with: both versions at 0,
 /// nothing purged, id counters at 1. Existing rows are kept, so the
-/// statement is idempotent. Bootstrap (step 9) adds `sprig.bootstrap`,
+/// statement is idempotent. Bootstrap adds `sprig.bootstrap`,
 /// `sprig.ancestry` and `sprig.ancestor_versions`.
 pub const INSERT_INTERNAL_KEYS: &str = "INSERT INTO settings
   (scope_kind, scope_id, setting_key, value, bounds, set_by, set_at, version) VALUES
@@ -278,7 +275,8 @@ pub struct ModuleHistory {
     pub history: Vec<HistoryEntry>,
 }
 
-/// How far one module may go, per phase (step 12 computes it).
+/// How far one module may go, per phase (upgrade orchestration computes
+/// it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ceiling {
     /// Highest format an expand may reach.
@@ -490,8 +488,7 @@ impl Migrator {
     /// decides) when anything is missing, unreadable or behind. Every
     /// per-tenant loop runs its module's migrations each pass, so at
     /// 10,000 tenants the full run's lock and its three
-    /// `information_schema` reads came hundreds of times a second (R9,
-    /// r9scale).
+    /// `information_schema` reads came hundreds of times a second.
     async fn up_to_date(&self, conn: &mut Conn, schema: &str) -> Option<FormatState> {
         let raw: Option<Vec<u8>> = conn
             .exec_first(

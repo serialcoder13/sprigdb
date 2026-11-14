@@ -67,6 +67,8 @@ pub mod dc;
 // Automatic moves between DCs.
 pub mod dc_migrate;
 pub mod dispatch;
+// The docs pack in every cluster's __sprig_docs.
+pub mod docs_loader;
 pub mod drain;
 pub mod failover;
 pub mod inherit_loop;
@@ -600,6 +602,19 @@ pub async fn serve(ctx: RoleContext, stores: Stores, clock: Arc<dyn Clock>) -> R
         )))))
         .with_loop(Loop::new(doc_ttl_loop::DocTtlLoop))
         .with_loop(Loop::new(sinks_loop::SinksLoop::default()))
+        // The docs pack on every cluster, with its own connections.
+        .with_loop(Loop::new(docs_loader::DocsLoader::new(
+            Arc::new(docs_loader::RegistryDocs::new(
+                ClusterRegistry::new(Arc::clone(&stores.global), Arc::clone(&stores.dc))?,
+                RegistryPools::new(
+                    ClusterRegistry::new(Arc::clone(&stores.global), Arc::clone(&stores.dc))?,
+                    Some(Arc::clone(&monitor)),
+                )
+                .budget("docs", 1),
+            )),
+            Some((settings.live.clone(), dc.clone())),
+            docs_loader::PackSource::Settings,
+        )))
         // Approvals: escalation, auto-apply, appliers, expiry, gauges.
         .with_loop(Loop::new(
             approvals::ApprovalsLoop::new(Arc::clone(&approvals)).with_notifier(Arc::clone(&notifier)),

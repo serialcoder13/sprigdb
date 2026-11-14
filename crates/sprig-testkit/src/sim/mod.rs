@@ -1,5 +1,4 @@
-//! Deterministic simulation (chapter 46, "Deterministic simulation"; build
-//! step 2).
+//! Deterministic simulation.
 //!
 //! # How it works
 //!
@@ -62,8 +61,7 @@
 //! printed as a warning. Simulation code in this crate uses `biased`
 //! selects.
 //!
-//! **Decision, against the book.** Chapter 46 picks madsim. Its
-//! replacement crates trail the versions SprigDB pins (madsim-etcd-client
+//! **Why not madsim.** madsim's replacement crates trail the versions SprigDB pins (madsim-etcd-client
 //! 0.7 wraps etcd-client 0.18, SprigDB uses 0.21), nothing simulates
 //! `mysql_async`, and madsim needs `--cfg madsim` across the whole
 //! dependency graph. Every component SprigDB simulates already sits behind
@@ -450,7 +448,7 @@ pub struct RunOutcome {
     pub virtual_time: Duration,
 }
 
-/// A stored failing case (chapter 46, "Data structures and storage").
+/// A stored failing case.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RegressionCase {
     /// The suite.

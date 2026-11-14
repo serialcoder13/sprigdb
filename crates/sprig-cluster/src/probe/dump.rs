@@ -1,5 +1,4 @@
-//! The binlog dump probe (chapter 09, "Binlog dump"; chapter 27,
-//! "Registering an external cluster", step 5).
+//! The binlog dump probe, run when an external cluster is registered.
 //!
 //! The variable checks in [`super::feed`] say what the server is configured
 //! to do; this probe says whether the change feed's reader can actually
@@ -19,14 +18,14 @@
 //! doesn't speak, and a TLS failure (a server without TLS, a certificate
 //! the credential's CA doesn't sign, or a plain-text source refused by
 //! `require_secure_transport`). The reader uses the endpoint's TLS: the
-//! credential's `tls` and `ca_file` (r2opfix). Compressed binlogs (`log_bin_compress`) decode
+//! credential's `tls` and `ca_file`. Compressed binlogs (`log_bin_compress`) decode
 //! and pass, and so do encrypted ones (`encrypt_binlog = ON`): the server
 //! decrypts the events before sending them, and the stream skips the
 //! file's `START_ENCRYPTION` event it sends first (measured on 12.3).
 //!
 //! **Server id.** A dump presents a replica `server_id`, and MariaDB ends
 //! an older dump with the same id. Mover and feed streams take ids from
-//! `mover.server_id_base` (4000000000) upwards, held in etcd (chapter 10);
+//! `mover.server_id_base` (4000000000) upwards, held in etcd;
 //! the probe uses a random id in `[4200000000, 4290000000)`, which they
 //! never reach, so it can't end a real stream.
 

@@ -6,7 +6,7 @@ import { defineConfig, passthroughImageService } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
 export default defineConfig({
-  site: 'https://serialcoder13.github.io',
+  site: 'https://modlix-india.github.io',
   base: '/sprigdb',
   // No sharp: its libvips binary is LGPL-3.0 (brief rule 14). Images are
   // shipped pre-sized.
@@ -18,7 +18,7 @@ export default defineConfig({
         'A multi-tenant database gateway over MariaDB: MySQL, MariaDB, MongoDB, Redis and graph clients, automatic sharding and indexing, across data centres.',
       logo: { src: './src/assets/mascot.webp', alt: 'Sprig, the SprigDB axolotl' },
       favicon: '/favicon.png',
-      social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/serialcoder13/sprigdb' }],
+      social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/modlix-india/sprigdb' }],
       customCss: ['./src/styles/sprig.css'],
       lastUpdated: false,
       sidebar: [

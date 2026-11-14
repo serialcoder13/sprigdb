@@ -2,7 +2,7 @@
 //!
 //! Pure functions: they run the same on live rows and on the 11.8 and 12.3
 //! fixtures. Anything unexpected parses to "unknown" rather than failing,
-//! because MariaDB output is untrusted input (chapter 03).
+//! because MariaDB output is untrusted input.
 
 use std::collections::BTreeMap;
 
@@ -242,7 +242,7 @@ pub struct GaleraStatus {
     pub sync_wait: u32,
     /// `wsrep_cluster_state_uuid`: the cluster's history. All zeros means
     /// the cluster lost its identity (seen after every node crashed at
-    /// once, decision HD1), and no node can join it. `None` from captures
+    /// once), and no node can join it. `None` from captures
     /// that predate the field.
     #[serde(default)]
     pub state_uuid: Option<String>,
@@ -257,7 +257,7 @@ impl GaleraStatus {
             && self.local_state == GaleraLocalState::Synced
     }
 
-    /// The cluster's state UUID is all zeros (decision HD1): it still
+    /// The cluster's state UUID is all zeros: it still
     /// serves, but a node that leaves can't rejoin until the cluster is
     /// bootstrapped again with a fresh UUID.
     #[must_use]
@@ -316,7 +316,7 @@ pub struct BinlogFacts {
     /// `binlog_storage_engine` (12.3+): `innodb` when the binlog lives in
     /// `InnoDB`. Empty or absent means files.
     pub storage_engine: Option<String>,
-    /// `binlog_annotate_row_events`: comments reach the binlog (chapter 38).
+    /// `binlog_annotate_row_events`: comments reach the binlog.
     /// `None` when the server didn't report it.
     #[serde(default)]
     pub annotate_row_events: Option<bool>,
@@ -399,7 +399,8 @@ impl ReplicaChannel {
     }
 }
 
-/// Routine limits (feed `compiled_logic`, chapter 41).
+/// Routine limits (feed `compiled_logic`, for business logic compiled to
+/// routines).
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct RoutineLimits {
     /// `stored_program_cache`.
@@ -447,7 +448,7 @@ pub struct ServerFacts {
     /// `@@server_id`.
     pub server_id: u32,
     /// `@@hostname` (a pod's name on Kubernetes): with `server_id`, the
-    /// identity the record pins (r2opfix; MariaDB has no `server_uuid`).
+    /// identity the record pins (MariaDB has no `server_uuid`).
     #[serde(default)]
     pub hostname: String,
     /// `lower_case_table_names`.
@@ -469,8 +470,8 @@ pub struct ServerFacts {
 }
 
 impl ServerFacts {
-    /// The identity a cluster record pins for a node: `<hostname>#<server_id>`
-    /// (r2opfix); empty when the probe didn't read the host name.
+    /// The identity a cluster record pins for a node: `<hostname>#<server_id>`;
+    /// empty when the probe didn't read the host name.
     #[must_use]
     pub fn identity(&self) -> String {
         if self.hostname.is_empty() {

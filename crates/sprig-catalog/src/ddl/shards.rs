@@ -1,20 +1,19 @@
-//! Schema changes across shards (chapter 21, R1): the text-level pieces
-//! the DDL path needs when one statement changes several shard schemas.
+//! Schema changes across shards: the text-level pieces the DDL path needs
+//! when one statement changes several shard schemas.
 //!
-//! - [`for_shard`] turns the statement chapter 07 rewrote for the
-//!   database's template schema into the same statement for another shard.
+//! - [`for_shard`] turns the statement rewritten for the database's
+//!   template schema into the same statement for another shard.
 //! - [`TableDef`] reads `SHOW CREATE TABLE` into its items (columns, keys,
 //!   constraints) and table options; [`TableDef::comparable`] is the form
 //!   shards are compared in (no `AUTO_INCREMENT=n`, no automatic
-//!   `sprig_auto_*` indexes, which chapter 13 builds shard by shard).
+//!   `sprig_auto_*` indexes, which are built shard by shard).
 //! - [`undo_alter`] computes the `ALTER TABLE` clauses that turn a shard's
 //!   new definition back into its old one, or says the change removed
 //!   data (a dropped column), so it can only roll forward.
 //! - [`undo_statement`] is the inverse of any one physical statement.
 //! - [`with_algorithm`] names the algorithm of an `ALTER TABLE`, `CREATE
 //!   INDEX`, so MariaDB refuses rather than silently
-//!   choosing a blocking one ([`Method`], chapter 21's "Choosing a method
-//!   per shard").
+//!   choosing a blocking one ([`Method`]).
 
 use std::fmt::Write as _;
 
@@ -251,8 +250,7 @@ impl TableDef {
     }
 
     /// The form shards are compared in: no `AUTO_INCREMENT=n` and no
-    /// `sprig_auto_*` index (automatic indexes are built shard by shard,
-    /// chapter 13).
+    /// `sprig_auto_*` index (automatic indexes are built shard by shard).
     #[must_use]
     pub fn comparable(&self) -> String {
         let mut d = self.clone();
@@ -376,7 +374,7 @@ fn option_tokens(options: &str) -> Vec<String> {
     out
 }
 
-/// An automatic index (chapter 13): built shard by shard, never part of a
+/// An automatic index: built shard by shard, never part of a
 /// schema change.
 fn automatic(k: &ItemKind) -> bool {
     matches!(k, ItemKind::Key(n) if n.to_ascii_lowercase().starts_with("sprig_auto_"))
@@ -500,8 +498,7 @@ pub fn undo_statement(
 
 // ---- algorithms ----
 
-/// How MariaDB runs a table change on a shard (chapter 21, "Choosing a
-/// method per shard"), tried in this order.
+/// How MariaDB runs a table change on a shard, tried in this order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Method {

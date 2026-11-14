@@ -1,4 +1,4 @@
-//! Sink tasks (chapter 51, R9) on chapter 23's job runtime: `sink_task`,
+//! Sink tasks on the job runtime: `sink_task`,
 //! one job per task of a sink, long-running, submitted by the controller's
 //! `sinks` loop from the DC's sink index. The job body is
 //! [`sprig_sinks::job::run_sink_task`]; this module gives it the worker's
@@ -34,19 +34,20 @@ pub struct SinksEnv {
     pools: Arc<dyn ClusterPools>,
     locator: Arc<ShardMapLocator>,
     keyring: Option<Arc<dyn SinkKeyring>>,
-    secret_dir: PathBuf,
+    /// `SPRIG_SINK_SECRET_DIR`, which overrides `sink.platform_secret_dir`.
+    secret_dir: Option<PathBuf>,
     worker: String,
     /// The worker's live settings (global `sink.*`).
     settings: crate::settings::WorkerSettings,
-    /// The DC's gateways (queue sources, the script `db` handle; R9).
+    /// The DC's gateways (queue sources, the script `db` handle).
     peer: Option<Arc<dyn sprig_sinks::peer::SinkPeer>>,
-    /// Chapter 29 (RL31): tenant catalogs for sink owners' checks.
+    /// Tenant catalogs for sink owners' checks.
     rls: Option<Arc<RlsCatalogs>>,
 }
 
-/// Tenant catalogs with chapter 14's and 29's modules (users, grants,
-/// row-level security), cached two seconds per tenant: what a change
-/// sink's owner may see, checked before each batch (decision RL31).
+/// Tenant catalogs with the identity and authorization modules (users,
+/// grants, row-level security), cached two seconds per tenant: what a change
+/// sink's owner may see, checked before each batch.
 pub(crate) struct RlsCatalogs {
     source: sprig_catalog::cache::MariaSource,
     cache: std::sync::Mutex<
@@ -126,7 +127,7 @@ impl RlsCatalogs {
             .any(|o| r.tables.contains_key(&sprig_common::ids::ObjectId(*o))))
     }
 
-    /// Chapter 51 (39229, authfix2): why sink owner `owner` can no longer
+    /// Why (error 39229) sink owner `owner` can no longer
     /// read `sources`, from the tenant's catalog (at most 2 s old).
     pub(crate) async fn owner_lost(
         &self,
@@ -156,6 +157,11 @@ impl RlsCatalogs {
                     name: name.clone(),
                 },
                 sprig_sinks::job::OwnerRead::Object(id) => ReadSource::Object(*id),
+                sprig_sinks::job::OwnerRead::InDatabase { db, name } => ReadSource::InDatabase {
+                    db: db.clone(),
+                    name: name.clone(),
+                },
+                sprig_sinks::job::OwnerRead::FanIn => ReadSource::FanIn,
             })
             .collect();
         Ok(lost_read(
@@ -166,8 +172,8 @@ impl RlsCatalogs {
         ))
     }
 
-    /// The `@sprig_rls` context of user `user` (chapter 29's JSON, as the
-    /// gateway builds it for a session; RL42): what MariaDB's policy views
+    /// The `@sprig_rls` context of user `user` (the row-level security JSON, as
+    /// the gateway builds it for a session): what MariaDB's policy views
     /// and write triggers apply while worker-run code of that definer runs.
     /// `None` when the tenant has no row-level security. Claims are absent
     /// (no token) and the subtree sets empty, so policies naming them show
@@ -226,8 +232,8 @@ impl std::fmt::Debug for SinksEnv {
 
 impl SinksEnv {
     /// The logic jobs' catalogs and pools, the global tier, and the key
-    /// file (`[gateway] workload_key_file`, the master secrets chapter 12
-    /// and 51 derive their keys from). `SPRIG_SINK_SECRET_DIR` overrides
+    /// file (`[gateway] workload_key_file`, the master secrets that workload
+    /// credentials and sink secrets derive their keys from). `SPRIG_SINK_SECRET_DIR` overrides
     /// `sink.platform_secret_dir`.
     #[must_use]
     pub fn new(
@@ -251,10 +257,7 @@ impl SinksEnv {
             pools: Arc::clone(&env.pools),
             locator: Arc::clone(&env.locator),
             keyring,
-            secret_dir: std::env::var_os("SPRIG_SINK_SECRET_DIR").map_or_else(
-                || PathBuf::from("/etc/sprigdb/platform-secrets"),
-                PathBuf::from,
-            ),
+            secret_dir: std::env::var_os("SPRIG_SINK_SECRET_DIR").map(PathBuf::from),
             worker: worker.to_owned(),
             settings: env.settings.clone(),
             peer: None,
@@ -262,7 +265,7 @@ impl SinksEnv {
         }
     }
 
-    /// Statements as sinks' owners go through `gateways` (R9, r9queue).
+    /// Statements as sinks' owners go through `gateways`.
     #[must_use]
     pub fn with_peer(mut self, gateways: Arc<dyn sprig_sinks::peer::SinkPeer>) -> Self {
         self.peer = Some(gateways);
@@ -313,7 +316,13 @@ impl SinkEnv for SinksEnv {
     }
 
     fn secret_dir(&self) -> PathBuf {
-        self.secret_dir.clone()
+        self.secret_dir.clone().unwrap_or_else(|| {
+            PathBuf::from(
+                self.settings
+                    .get(&sprig_sinks::settings::PLATFORM_SECRET_DIR)
+                    .as_ref(),
+            )
+        })
     }
 
     fn worker_id(&self) -> String {
@@ -328,7 +337,7 @@ impl SinkEnv for SinksEnv {
     ) -> Result<bool> {
         match &self.rls {
             Some(r) => r.binds(tenant, owner, objects).await,
-            // RL36: without the catalogs the owner can't be checked, so a
+            // Without the catalogs the owner can't be checked, so a
             // change sink doesn't run (fail closed, not open).
             None => Err(sprig_common::SprigError::new(
                 sprig_common::SprigCode::RlsUnsupported,
@@ -376,7 +385,7 @@ impl JobHandler for SinkTask {
             u32::try_from(cx.spec["task"].as_u64().ok_or("spec.task is missing")?)
                 .map_err(|_| "spec.task is out of range")?,
         );
-        // R9 (r9last): a fan-in task's group count (the index's `tasks`
+        // A fan-in task's group count (the index's `tasks`
         // when it was submitted); 1 for jobs from before grouping.
         let of = cx.spec["of"]
             .as_u64()
@@ -399,6 +408,6 @@ impl JobHandler for SinkTask {
     }
 }
 
-// The residency of sink destinations moved to `sprig-sinks` (R9, r9more),
+// The residency of sink destinations moved to `sprig-sinks`,
 // where gateways use it at `CREATE CONNECTION` too.
 pub use sprig_sinks::residency::{PolicyResidency, residency_of};

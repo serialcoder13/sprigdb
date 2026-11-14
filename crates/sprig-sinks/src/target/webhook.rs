@@ -1,4 +1,4 @@
-//! The webhook target (chapter 51, "Webhook target"; build step 9).
+//! The webhook target.
 //!
 //! ```text
 //! deliver(batch):
@@ -385,7 +385,7 @@ impl Endpoint {
     }
 
     /// [`Self::send`] with another method (`OPTIONS` for `TEST
-    /// CONNECTION`, R9 r9tests).
+    /// CONNECTION`).
     async fn send_method(
         &self,
         method: hyper::Method,
@@ -648,8 +648,8 @@ impl WebhookTarget {
         Value::Object(m)
     }
 
-    /// The body a request for `recs` would carry (R9, r9last: `TEST
-    /// SINK`'s payload preview).
+    /// The body a request for `recs` would carry (`TEST SINK`'s payload
+    /// preview).
     #[must_use]
     pub fn preview_body(&self, recs: &[SinkRecord]) -> Vec<u8> {
         self.body(recs)
@@ -852,7 +852,7 @@ impl WebhookTarget {
         }
     }
 
-    /// Chapter 51's classes, from the response.
+    /// The batch outcome class, from the response.
     fn classify(
         &self,
         status: StatusCode,
@@ -895,7 +895,7 @@ impl WebhookTarget {
     }
 }
 
-/// Chapter 52's approval events through a webhook connection: one JSON
+/// Approval events through a webhook connection: one JSON
 /// body per event, outside any sink. The connection keeps every rule a
 /// sink's has (the destination checks, TLS and its CA, the authentication)
 /// and signs the body with its `signing_secret`.
@@ -948,7 +948,7 @@ impl WebhookTarget {
 
     /// POSTs one JSON `body` with `Sprig-Event: event` and the
     /// idempotency key `idem`, signed and authenticated as the connection
-    /// says; chapter 51's classes of the answer (an OAuth2 token is
+    /// says; the outcome class of the answer (an OAuth2 token is
     /// refreshed once on 401).
     ///
     /// # Errors
@@ -1014,7 +1014,7 @@ impl WebhookTarget {
 }
 
 impl WebhookTarget {
-    /// `TEST CONNECTION` (R9, r9tests): an `OPTIONS` request to the
+    /// `TEST CONNECTION`: an `OPTIONS` request to the
     /// connection's URL with its authentication, nothing posted. The
     /// answer's status; 401 and 403 after an OAuth2 refresh mean the
     /// credentials were refused.
@@ -1179,8 +1179,7 @@ mod tests {
 
     #[test]
     fn standard_webhooks_test_vector() {
-        // The Standard Webhooks specification's example (the secret is the
-        // one chapter 51's examples use).
+        // The Standard Webhooks specification's example.
         let sig = standard_signature(
             "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw",
             "msg_p5jXN8AQM9LWM0D4loKWxJek",

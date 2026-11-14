@@ -1,12 +1,11 @@
-//! Redis keyspace notifications from the change feed (chapter 40, "Pub/sub
-//! and keyspace notifications"; RLS round 5, decision RL51).
+//! Redis keyspace notifications from the change feed.
 //!
 //! ```text
 //! a connection subscribes to a pattern or a __key... channel (Session):
 //!   watch(tenant): one task per tenant on this gateway, unless running
 //! the task, while Hub::keyspace_interest(tenant) holds (checked every 5 s
 //! and at each transaction's end):
-//!   tail the tenant's feed from now (chapter 38's TenantTail)
+//!   tail the tenant's feed from now (TenantTail)
 //!   keep the row changes of the Redis databases' tables
 //!   (<redis.logical_database>.db<n>, __sprig_ke_db<n>, __sprig_kz_db<n>)
 //!   whose statement isn't marked o=k (a Redis command this gateway family
@@ -14,8 +13,8 @@
 //!   at each transaction's end, per key in first-change order: its events
 //!   (below), published under this gateway's flags for the tenant to this
 //!   gateway's own subscribers (each gateway tails for its own), each
-//!   checked per subscriber when delivered (RL46: SELECT on the key table
-//!   and its key policies)
+//!   checked per subscriber when delivered (SELECT on the key table and
+//!   its key policies)
 //! events of one key's changes in one transaction:
 //!   key row deleted: expired (x) when its expiry had passed at the commit,
 //!                    else del (g)
@@ -340,8 +339,8 @@ fn record(keys: &mut Vec<KeyChanges>, e: &ChangeEvent, db: u32, elem: bool, zset
     }
 }
 
-/// The tail as the loop reads it: in a task of its own (decision r9-131),
-/// so the subscriber check's wait never cancels a read half-way.
+/// The tail as the loop reads it: in a task of its own, so the subscriber
+/// check's wait never cancels a read half-way.
 type Feed = sprig_feed::pump::Pump<FeedItem>;
 
 fn feed_of(tail: TenantTail) -> Feed {
@@ -458,7 +457,7 @@ mod tests {
         })
     }
 
-    /// Decision r9-131: the subscriber check's wait (5 s) fires while the
+    /// Regression: the subscriber check's wait (5 s) fires while the
     /// tail waits on a new table's catalog lookup (6 s here): no change
     /// may be lost, so no notification is.
     #[tokio::test(start_paused = true)]

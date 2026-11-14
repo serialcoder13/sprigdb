@@ -1,5 +1,5 @@
-//! The internal schema `__sprig_sys` and the tables this chapter owns
-//! (chapter 09, "Internal schema"). Chapter 10 owns three more.
+//! The internal schema `__sprig_sys` and the cluster's own tables in it.
+//! The mover owns three more.
 
 use sprig_common::names::{SYS_SCHEMA, internal_object, quote};
 
@@ -31,8 +31,8 @@ pub fn scratch(suffix: &str) -> String {
     )
 }
 
-/// The statements that create the schema and this chapter's tables. Each is
-/// idempotent.
+/// The statements that create the schema and the cluster's own tables.
+/// Each is idempotent.
 #[must_use]
 pub fn ddl() -> [String; 3] {
     [

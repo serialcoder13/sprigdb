@@ -135,8 +135,7 @@ An index stops at `recommended` instead of being built when:
 
 - `auto_index.mode` is `recommend` or `approve` for its table;
 - it came from the fast large-scan trigger on a table larger than `auto_index.scan_recommend_above_gb` (100 GB);
-- the rollout finds no safe way to build it (for example, a large table on a Galera cluster);
-- it is advice that is never applied automatically, such as a wildcard document index or a search index.
+- the rollout finds no safe way to build it (for example, a large table on a Galera cluster).
 
 With `auto_index.recommend_validate` on (the default) and a validation node available, a recommendation has already been built on a replica and replayed, so its evidence includes measured before-and-after latencies. Otherwise the evidence is an estimate.
 
@@ -437,11 +436,10 @@ Retirement is cautious. The index is first made `IGNORED`, which is instant and 
 |---|---|---|---|
 | `auto_index.vector_ann` | text | `recommend` | `on`, `approve`, `recommend` or `off` for approximate-nearest-neighbour vector indexes |
 | `auto_index.vector_min_recall` | float | 0.95 | Recall at k needed to accept an ANN index |
-| `auto_index.lookup_scatter_pct` | float | 80 | Share of a statement's runs that scatter before a global lookup index is considered |
-| `auto_index.field_column_class_pct` | float | 99 | Share of one value type a document path needs for a single typed column |
-| `auto_index.wildcard_recommend_paths` | int | 50 | Distinct filtered document paths that trigger a wildcard index recommendation |
 
-On collections, automatic indexing indexes document paths (shown as paths, such as `status, qty`, rather than columns). Paths that cross arrays get no index yet.
+On collections, automatic indexing indexes document paths (shown as paths, such as `status, qty`, rather than columns), up to three paths per index. Each path is indexed as a value-type column plus a number and a string column, whatever mix of types its values have. Paths that cross arrays get no index yet.
+
+Automatic indexing doesn't yet propose global lookup indexes for statements that scatter over shards, or wildcard indexes for collections filtered on many different paths.
 
 ## Your own indexes and the 64-index limit
 

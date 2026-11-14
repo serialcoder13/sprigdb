@@ -28,7 +28,7 @@ interface KeyRow {
   created_at_ms: string;
 }
 
-/** A statement shown before it runs (chapter 44: no second path). */
+/** A statement shown before it runs (Studio has no second path around SQL). */
 function Pending({ sql, onDone, then }: { sql: string[]; onDone: (msg: string, ok: boolean) => void; then?: () => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   return (
@@ -478,7 +478,7 @@ function Tenants() {
   );
 }
 
-/** Users, grants, API keys and the tenant tree (chapter 44 step 13). */
+/** Users, grants, API keys and the tenant tree. */
 export function AccessPage() {
   const { tenant = '', area = 'users' } = useParams();
   const base = `/t/${encodeURIComponent(tenant)}/access`;

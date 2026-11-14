@@ -1,6 +1,6 @@
 //! `sprig-dim`: dimensional models and the Analytics API compiler.
 //!
-//! Layer: 2 data layer. Design: [chapter 35](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/35-dimensional.md) (Dimensional models) of the SprigDB low-level design.
+//! Layer: 2 data layer.
 //!
 //! A compiler onto the one execution layer, not an engine: a query becomes
 //! SQL with partial aggregates the caller's session runs (one shard, or

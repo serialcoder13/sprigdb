@@ -1,7 +1,6 @@
-//! Deploying a version into one shard schema (chapter 41, "Deployment and
-//! removal"; build step 10 in part).
+//! Deploying a version into one shard schema.
 //!
-//! Until chapter 21's schema-change engine exists, a version deploys into
+//! Until the schema-change engine exists, a version deploys into
 //! a single-shard database, on the deploying session's own backend
 //! connection:
 //!
@@ -14,13 +13,12 @@
 //!   every routine's DEFINER must be `who`, else drop them all: 39367
 //! ```
 //!
-//! Running as the session's account keeps decision A9 (stored code runs as
+//! Running as the session's account keeps the rule that stored code runs as
 //! the user who created it) without naming a definer: MariaDB records the
 //! creating account, checks its `CREATE ROUTINE` and `ALTER ROUTINE`
 //! rights, and the routines read data with that account's rights only.
-//! Packages and procedures need no `SUPER` with the binary log on
-//! (`decisions/spike-plsql-target.md`); the generator emits no stored
-//! functions.
+//! Packages and procedures need no `SUPER` with the binary log on;
+//! the generator emits no stored functions.
 //!
 //! The **wrapper** is an ordinary procedure with the logical name, so a
 //! client's `CALL db.name(args)` works through the existing CALL path: it
@@ -222,7 +220,7 @@ fn wrapper_body(w: &WrapperSpec<'_>, entry: &str) -> String {
         select.push(format!("{v} AS {}", bq(n)));
     }
     let secs = w.budget_ms.max(1) as f64 / 1000.0;
-    // Chapter 41, "Privileges and transactions": a call in autocommit runs
+    // Privileges and transactions: a call in autocommit runs
     // in its own transaction, rolled back on an error, as the engine tier
     // and `Functions.Call` run theirs.
     format!(
@@ -360,7 +358,7 @@ pub fn plan_compiled(schema: &str, p: &plsql::Plsql, w: &WrapperSpec<'_>) -> Pla
 /// at the end of its 39876 message.
 pub const SELECT_MARK: &str = "[sprig ";
 
-/// `SELECT db.f(args)` (R7 order 6): a stored function under the logical
+/// `SELECT db.f(args)`: a stored function under the logical
 /// name, beside the wrapper procedure of the same name (MariaDB keeps
 /// functions and procedures apart).
 ///
@@ -691,7 +689,7 @@ pub async fn drop_objects(
     Ok(())
 }
 
-/// Sessions on every shard schema a deploy reaches (chapter 21): one per
+/// Sessions on every shard schema a deploy reaches: one per
 /// schema, in the order the deploy visits them.
 #[async_trait]
 pub trait ShardSessions: Send {
@@ -705,7 +703,7 @@ pub trait ShardSessions: Send {
 }
 
 /// Deploys `plan` (written for its own schema) on every shard schema of
-/// `shards`, all or nothing (chapter 21's rule for routines): when a shard
+/// `shards`, all or nothing (the rule for routines): when a shard
 /// fails, what was created on it and on the shards before it is dropped,
 /// latest first, and the shard's error returned. Returns the definer.
 ///

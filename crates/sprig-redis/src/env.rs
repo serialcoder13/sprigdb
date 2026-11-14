@@ -11,7 +11,7 @@ use bytes::Bytes;
 use crate::fabric::{Interest, Mesh, PublishMsg};
 use crate::pubsub::{Hub, Waits};
 
-/// The settings a connection reads (chapter 40, "Configuration").
+/// The settings a connection reads.
 #[derive(Debug, Clone)]
 pub struct Config {
     /// `redis.server_version`.
@@ -99,19 +99,19 @@ pub struct Env {
     pub gateway_id: String,
     /// Running scripts, for `SCRIPT KILL` and `FUNCTION KILL`.
     pub scripts: crate::lua::Running,
-    /// The hubs across gateways (chapter 40); unset, pub/sub and wake-ups
+    /// The hubs across gateways; unset, pub/sub and wake-ups
     /// stay on this gateway.
     mesh: OnceLock<Arc<Mesh>>,
-    /// `FCALL` of logic-layer functions (chapter 41); unset, only Lua
+    /// `FCALL` of logic-layer functions; unset, only Lua
     /// library functions are found.
     logic: OnceLock<Arc<dyn crate::logic::LogicCalls>>,
     /// `CONFIG SET notify-keyspace-events` per tenant on this gateway,
     /// over [`Config::notify_keyspace_events`].
     keyspace: Mutex<std::collections::HashMap<String, String>>,
-    /// Who may see a keyspace notification (chapter 29, RL46); unset,
+    /// Who may see a keyspace notification (row-level security); unset,
     /// every subscriber does.
     key_filter: OnceLock<Arc<dyn crate::keyspace::KeyFilter>>,
-    /// The notifications from the change feed (RL51); unset, none.
+    /// The notifications from the change feed; unset, none.
     keyspace_feed: OnceLock<Arc<dyn crate::keyspace::KeyspaceFeed>>,
 }
 
@@ -176,7 +176,7 @@ impl Env {
     }
 
     /// Installs the notifications from the change feed (the gateway does,
-    /// once; RL51).
+    /// once).
     pub fn set_keyspace_feed(&self, f: Arc<dyn crate::keyspace::KeyspaceFeed>) {
         let _ = self.keyspace_feed.set(f);
     }

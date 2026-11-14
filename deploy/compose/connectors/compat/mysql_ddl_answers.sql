@@ -1,5 +1,5 @@
--- R4 round 6 (gaps rows 67 and 78): MySQL's answers to DDL that MariaDB
--- answers differently, found by Sequelize's and Rails' suites.
+-- MySQL's answers to DDL that MariaDB answers differently, found by
+-- Sequelize's and Rails' suites.
 DROP TABLE IF EXISTS c_md6_fc, c_md6_fc2, c_md6_fp, c_md6_ct, c_md6_my, c_md6_my2, c_md6_dn, c_md6_nl, c_md6_mu;
 DROP PROCEDURE IF EXISTS c_md6_p;
 -- A column's utf8mb4_bin reads back as written; text columns' types.
@@ -40,7 +40,7 @@ SHOW CREATE TABLE c_md6_mu;
 -- KILL QUERY of the session's own statement interrupts the KILL.
 KILL QUERY CONNECTION_ID();
 SELECT 'after kill';
--- A stored program records the creating session's character sets (row 67).
+-- A stored program records the creating session's character sets.
 SET NAMES latin1;
 CREATE PROCEDURE c_md6_p() SELECT 1;
 SET NAMES utf8mb4;

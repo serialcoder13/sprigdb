@@ -1,4 +1,4 @@
-//! Per-collection latencies and per-index use (M5, decisions S79–S80):
+//! Per-collection latencies and per-index use:
 //! what `$collStats.latencyStats` and `$indexStats.accesses` report, kept
 //! in the gateway's memory since its start, as `mongod` keeps them since
 //! its own.

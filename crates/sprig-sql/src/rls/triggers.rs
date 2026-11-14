@@ -10,6 +10,8 @@
 //! {"b": 0|1,              BYPASS RLS at tenant level
 //!  "x": [object ids],     tables with security on that don't bind the session
 //!  "p": [policy ids],     the policies that apply to the session
+//!  "m": [object ids],     this statement's merged-view layers (policy
+//!                         views only; absent from most statements)
 //!  "s": {"user", "uid", "tid", "htid", "space", "claims", "attrs", "sub", "man"}}
 //! ```
 //!
@@ -39,6 +41,13 @@ use crate::lex::LexOptions;
 
 /// The user variable holding the session's context.
 pub const CONTEXT_VAR: &str = "sprig_rls";
+
+/// The context's key listing the tables the current statement reads only
+/// as layers of merged views the gateway filtered with the
+/// session's policies on the merged records: their policy views let every
+/// row through for that statement. Triggers never read it, so writes stay
+/// checked.
+pub const MERGED_LAYERS_KEY: &str = "m";
 
 /// A policy as the triggers need it.
 #[derive(Debug, Clone, Copy)]
@@ -310,13 +319,18 @@ impl TriggerSpec<'_> {
                 v.join(", ")
             }
         };
+        // Views only, never the triggers: a statement reading the table as
+        // the layers of a merged view that the gateway filtered
+        // on the merged records names it in "m" (MERGED_LAYERS_KEY).
         let view = |name: String, all: bool| {
             format!(
                 "CREATE OR REPLACE ALGORITHM = MERGE DEFINER = {definer} SQL SECURITY DEFINER \
-                 VIEW {v} AS SELECT {cols} FROM {qual} WHERE COALESCE({guard} OR {ok}, FALSE)",
+                 VIEW {v} AS SELECT {cols} FROM {qual} WHERE COALESCE({guard} OR \
+                 JSON_CONTAINS({ctx}, '{o}', '$.{MERGED_LAYERS_KEY}') OR {ok}, FALSE)",
                 v = quote(&name),
                 cols = list(all),
                 guard = self.guard(ctx),
+                o = self.object,
             )
         };
         let mut views = vec![view(super::views::view_name(from, self.object), false)];

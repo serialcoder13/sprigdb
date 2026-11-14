@@ -1,14 +1,14 @@
-# M0.3 harness: two tenants, schema tools, leaks and settings
+# Tenant harness: two tenants, schema tools, leaks and settings
 
-This directory holds the harness for milestone M0.3's "done when" (chapter 48):
+This directory holds the tenant harness. It checks that:
 
 1. Two tenants on one cluster each run the same schema-tool suite (Flyway, Hibernate schema validation, `mysqldump`) and see only their own objects.
 2. No physical name appears in any result, error or `SHOW` output in the leak suite.
 3. A setting changed at object scope takes effect on every gateway within seconds, and a value outside its bounds is refused.
 
-The design comes from chapter 07 ("Testing", build step 10), chapter 08 (build step 8) and chapter 46. The harness reuses the connector matrix's patterns and images (`../connectors/README.md`).
+The harness reuses the connector matrix's patterns and images (`../connectors/README.md`).
 
-Until the gateway serves M0.3's tenants, the harness runs in **baseline** mode against direct MariaDB. There the two tenants are two plain MariaDB users, each with grants on its own database prefix. That proves the scripts. The leak verdicts are n/a in baseline, because no physical names exist.
+Until the gateway serves these tenants, the harness runs in **baseline** mode against direct MariaDB. There the two tenants are two plain MariaDB users, each with grants on its own database prefix. That proves the scripts. The leak verdicts are n/a in baseline, because no physical names exist.
 
 ## Run it
 
@@ -110,7 +110,7 @@ Persona `mariadb` runs `hibernate-mariadb` (MariaDB Connector/J 3.5.11). Persona
 
 ### Dumps (`sql/suite.sh dump`, the connector matrix's CLI images)
 
-Persona `mysql` uses `mysqldump` 8.4 and persona `mariadb` uses `mariadb-dump` 11.8. The options are `--single-transaction --routines --triggers --hex-blob --no-tablespaces`. For `mysqldump` they add `--column-statistics=0 --set-gtid-purged=OFF`: `COLUMN_STATISTICS` is the translator's job (M0.5), and GTIDs and tablespaces need privileges a tenant doesn't have.
+Persona `mysql` uses `mysqldump` 8.4 and persona `mariadb` uses `mariadb-dump` 11.8. The options are `--single-transaction --routines --triggers --hex-blob --no-tablespaces`. For `mysqldump` they add `--column-statistics=0 --set-gtid-purged=OFF`: `COLUMN_STATISTICS` is the translator's job, and GTIDs and tablespaces need privileges a tenant doesn't have.
 
 | Check | What it asserts |
 |---|---|
@@ -136,7 +136,7 @@ Each tenant runs these checks in turn. Every answer is also scanned for physical
 
 ### The leak suite (`crates/sprig-testkit/tests/m03_leaks.rs`)
 
-This is a Rust test (ignored by default, gated on environment variables like the repository's other live tests). Each tenant's connections go through a TCP proxy inside the test, and every byte the server sends is scanned with chapter 07's detector: the handshake, OK and error packets, column definitions, rows and session-state changes. The detector is `sprig_sql::names::physical_name_leaks`, ported byte for byte, with a unit test against chapter 07's examples. Column definitions (`schema`, `table`, `org_table`, `name`, `org_name`) are also checked field by field. Each tenant runs:
+This is a Rust test (ignored by default, gated on environment variables like the repository's other live tests). Each tenant's connections go through a TCP proxy inside the test, and every byte the server sends is scanned with the physical-name detector: the handshake, OK and error packets, column definitions, rows and session-state changes. The detector is `sprig_sql::names::physical_name_leaks`, ported byte for byte, with a unit test against its examples. Column definitions (`schema`, `table`, `org_table`, `name`, `org_name`) are also checked field by field. Each tenant runs:
 
 - **Setup:** a database with FK-linked tables, a unique key, a trigger, a view, a procedure, a function, a view whose table is dropped, and a private vault holding a secret marker.
 - **Results:** `USE`, `DATABASE()`, unqualified and joined `SELECT`, the view, the function, `CALL` with an OUT parameter, and `CURRENT_USER()`.
@@ -152,7 +152,7 @@ This is a Rust test (ignored by default, gated on environment variables like the
   - the broken view (1356);
   - syntax errors that echo the statement;
   - an ambiguous column;
-  - `information_schema.SPRIG_SETTINGS` inside `CREATE VIEW` and `CREATE TABLE ... SELECT` (39051 through the gateway, chapter 07 rule 9; reading it is fine).
+  - `information_schema.SPRIG_SETTINGS` inside `CREATE VIEW` and `CREATE TABLE ... SELECT` (39051 through the gateway; reading it is fine).
 - **The other tenant's names:** its vault (use, select, `SHOW TABLES FROM`) and its database.
 - **Prepared statements:** the prepare response carries column definitions, and a prepare fails on an unknown table.
 - **Physical names typed by hand:** `USE`, `SELECT`, `SHOW TABLES FROM` and a backquoted form. The names are the cluster's real `t<id>_...` schemas with `SPRIG_M03_BACKEND`, or made-up ones otherwise. The reply must not echo them.
@@ -182,7 +182,7 @@ Its variables are `SPRIG_TEST_M03_BASELINE=1`, `SPRIG_TEST_M03_BACKEND` (the rea
 
 ### Settings (`crates/sprig-testkit/tests/m03_settings.rs`)
 
-This test uses chapter 08's SQL (build step 8) and the key `reads.max_replica_lag_ms`, whose scopes are all six and whose hard bounds are 0 to 86,400,000. Tenant A creates `m03_settings.hot` and `.cold`, then:
+This test uses the `SPRIG SET` settings statements and the key `reads.max_replica_lag_ms`, whose scopes are all six and whose hard bounds are 0 to 86,400,000. Tenant A creates `m03_settings.hot` and `.cold`, then:
 
 | Check | What it asserts |
 |---|---|
@@ -206,8 +206,8 @@ Today, `gateway-dev.sh` can't start one next to the first on the same etcd. The 
 
 `expected.txt` lists every outcome other than `pass`, by mode, persona, suite, connector and check, with the reason. It works like `../connectors/expected.toml`: an unexpected pass counts as a difference too. Today's entries are:
 
-- **Hibernate with MySQL Connector/J, `schema_validate`: fail (baseline only).** `DatabaseMetaData.getSQLKeywords()` reads `information_schema.KEYWORDS WHERE RESERVED = 1`, which MariaDB lacks, so Hibernate can't resolve a dialect. The rest of the check passes after a restart without validation. Through the gateway's 3306, chapter 28's translator (M0.5) answers `KEYWORDS` with MySQL 8.4's list and the check passes.
-- **`mysqldump`'s `dump_all` on persona `mysql`: fail (both modes).** `mysqldump` 8.4 dumps the `mysql` database first. It holds back every database `SHOW DATABASES` lists until it reaches `mysql`, and if `mysql` never comes it writes nothing and still exits 0. Neither a tenant (through either port) nor a plain MariaDB user sees `mysql`, and MySQL 8.4 does the same for a user who can't see it. `dump_listed` checks the workaround, `--databases` with the `SHOW DATABASES` list. See `decisions/mysql-persona-gaps.md` row 12 in the design repository.
+- **Hibernate with MySQL Connector/J, `schema_validate`: fail (baseline only).** `DatabaseMetaData.getSQLKeywords()` reads `information_schema.KEYWORDS WHERE RESERVED = 1`, which MariaDB lacks, so Hibernate can't resolve a dialect. The rest of the check passes after a restart without validation. Through the gateway's 3306, the translator answers `KEYWORDS` with MySQL 8.4's list and the check passes.
+- **`mysqldump`'s `dump_all` on persona `mysql`: fail (both modes).** `mysqldump` 8.4 dumps the `mysql` database first. It holds back every database `SHOW DATABASES` lists until it reaches `mysql`, and if `mysql` never comes it writes nothing and still exits 0. Neither a tenant (through either port) nor a plain MariaDB user sees `mysql`, and MySQL 8.4 does the same for a user who can't see it. `dump_listed` checks the workaround, `--databases` with the `SHOW DATABASES` list.
 - **Baseline only:**
   - The leak checks are n/a: no physical names exist.
   - The settings checks are n/a: MariaDB has no `SPRIG SET`.
@@ -221,9 +221,9 @@ Today, `gateway-dev.sh` can't start one next to the first on the same etcd. The 
 | gateway (13307) | `mariadb` | 66 | 66 | 0 | 0 | 0 |
 | gateway (13306) | `mysql` | 78 | 74 | 4 | 0 | 0 |
 
-After M0.5 (8 November 2026, a gateway on 16306 and 16307 in catalog mode, tenants `translator` and `translatorb`): persona `mysql` 78 checks, 76 pass, 2 expected failures (`dump_all`), 0 differences; persona `mariadb` 66 checks, 66 pass. Hibernate with MySQL Connector/J now validates on 3306.
+On 8 November 2026 (a gateway on 16306 and 16307 in catalog mode, tenants `translator` and `translatorb`): persona `mysql` 78 checks, 76 pass, 2 expected failures (`dump_all`), 0 differences; persona `mariadb` 66 checks, 66 pass. Hibernate with MySQL Connector/J now validates on 3306.
 
-In baseline the n/a checks are `dump_leaks`, `isolation_leaks` and the leak suite's `leaks` for each tenant, plus the four settings checks. The expected failures on persona `mysql` are Connector/J's `schema_validate` (baseline only since M0.5) and `mysqldump`'s `dump_all`, once per tenant. The gateway runs used `SPRIG_M03_BACKEND`. A full run takes 15 to 25 s.
+In baseline the n/a checks are `dump_leaks`, `isolation_leaks` and the leak suite's `leaks` for each tenant, plus the four settings checks. The expected failures on persona `mysql` are Connector/J's `schema_validate` (baseline only) and `mysqldump`'s `dump_all`, once per tenant. The gateway runs used `SPRIG_M03_BACKEND`. A full run takes 15 to 25 s.
 
 ## Memory and containers
 
@@ -249,4 +249,4 @@ These come on top of the contract (tenants `acme` and `globex` on the single nod
 
 ## CI
 
-The job `m03` in `.github/workflows/ci.yml` runs the baseline, starts the gateway, creates the tenants, and runs both ports. It stays disabled (`if: false`) until the gateway serves M0.3's tenants.
+The job `m03` in `.github/workflows/ci.yml` runs the baseline, starts the gateway, creates the tenants, and runs both ports. It stays disabled (`if: false`) until the gateway serves these tenants.

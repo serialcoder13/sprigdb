@@ -1,21 +1,19 @@
-//! [`GraphStore`] over MariaDB (chapter 43, "Native graph tables",
-//! "Variable-length paths", "Writes and transactions"; build steps 3, 11
-//! and 14): one native graph's tables in each of its shard schemas, on the
+//! [`GraphStore`] over MariaDB: one native graph's tables in each of its shard schemas, on the
 //! caller's connections and transaction.
 //!
-//! - **Shards** ([`GraphShards`]). A graph from round 3 is a sharded table
+//! - **Shards** ([`GraphShards`]). A grouped graph is a sharded table
 //!   group keyed by `part` (= `id`): node, label and mirror rows live on the
 //!   shard of their node's routing hash, edges on their source's shard.
-//!   Graphs from rounds 1 and 2 are one shard in the database's first shard
-//!   schema. [`ShardConns`] hands out the connection of each shard's
-//!   cluster inside the statement's transaction (the gateway's is chapter
-//!   18's coordinator; [`OneConn`] is one connection for every shard).
+//!   Graphs made before grouped graphs are one shard in the database's
+//!   first shard schema. [`ShardConns`] hands out the connection of each shard's
+//!   cluster inside the statement's transaction (the gateway's is the
+//!   distributed-transaction coordinator; [`OneConn`] is one connection for every shard).
 //! - A hop is one statement per batch and shard: outgoing edges by the
 //!   clustered `(src, ...)` key on the source's shard, the far node
 //!   left-joined when it is local; incoming edges through the mirrors on the
 //!   destination's shard, then the edges by id on their sources' shards (or
 //!   the `rev` key when the graph has one shard).
-//! - [`GraphStore::reach`] is the chapter's recursive CTE with an origin
+//! - [`GraphStore::reach`] is a recursive CTE with an origin
 //!   column, `CYCLE o, id RESTRICT`, `max_recursive_iterations` and the
 //!   shard's range: nodes outside it are boundary nodes, returned but not
 //!   expanded (incoming searches recurse over the mirrors).
@@ -23,7 +21,7 @@
 //!   destination's shard, whatever the shard count, so splits carry them
 //!   with no rebuild. Under `sync` (and until the worker's applier serves
 //!   the graph) writers keep it in their own transaction; under `async`
-//!   (round 5, [`crate::mirror`]) the applier keeps it from the feed, and
+//!   ([`crate::mirror`]) the applier keeps it from the feed, and
 //!   a statement reads through mirrors only when its [`MirrorGate`] says
 //!   the applier has reached the session's causal target; otherwise
 //!   incoming hops scatter the `rev` key, and write statements always do.
@@ -51,8 +49,8 @@ use sprig_router::graph_route::{
 };
 
 use crate::store::{
-    EdgeKey, EdgeRow, GraphStore, IdKind, IndexDef, NodeRow, Reach, Scan, SchemaCounts, StoreStats,
-    rk_of,
+    EdgeKey, EdgeRow, GraphStore, IdKind, IndexDef, Link, NodeRow, Reach, Scan, SchemaCounts,
+    StoreStats, rk_of,
 };
 
 /// Labels and relationship types of a graph, and how new ones are made.
@@ -180,7 +178,7 @@ pub struct GraphShards {
     pub seq: String,
     /// Mirror rows are kept for every edge.
     pub mirrors: bool,
-    /// The mirrors are the applier's (`graph.mirror = async`, round 5):
+    /// The mirrors are the applier's (`graph.mirror = async`):
     /// writers don't write them, and readers use them only after the
     /// statement's [`MirrorGate`] says they are fresh.
     pub mirror_async: bool,
@@ -189,7 +187,7 @@ pub struct GraphShards {
     /// them yet.
     pub mirror_building: bool,
     /// The router's own view of the group (its map cache: shards, epochs,
-    /// holds), which plans every read step (R8 round 8, G69); `None`: made
+    /// holds), which plans every read step; `None`: made
     /// from `shards` ([`Self::group`]).
     pub route: Option<Arc<sprig_router::topology::Group>>,
 }
@@ -280,8 +278,8 @@ fn numeric_spec() -> sprig_shard::KeySpec {
     sprig_shard::KeySpec::new(vec![sprig_shard::KeyClass::Numeric]).expect("a numeric key spec")
 }
 
-/// Waits for a mover's hold on a range a route reads (chapter 10,
-/// "Cutover"): the gateway's waits for the hold to end in its map cache.
+/// Waits for a mover's hold on a range a route reads (during a cutover):
+/// the gateway's waits for the hold to end in its map cache.
 #[async_trait]
 pub trait HoldWait: Send + Sync {
     /// Waits until the hold ending at `until_ms` is gone, then answers an
@@ -316,7 +314,7 @@ pub trait ShardConns: Send {
     fn wrote(&mut self, _at: &ShardLoc, _sql: &str) {}
 
     /// Whether the statement may commit batches of its own (`CALL { } IN
-    /// TRANSACTIONS`, R8 round 8): an auto-commit statement's connections.
+    /// TRANSACTIONS`): an auto-commit statement's connections.
     fn batches(&self) -> bool {
         false
     }
@@ -332,8 +330,8 @@ pub trait ShardConns: Send {
 }
 
 /// `sql` with each `?` placeholder outside quotes replaced by its value
-/// as an SQL literal: the text a held branch records for redo (chapter
-/// 18's Sprig 2PC).
+/// as an SQL literal: the text a held branch records for redo (Sprig
+/// 2PC).
 #[must_use]
 pub fn inline_params(sql: &str, params: &Params) -> String {
     let vals: &[MyValue] = match params {
@@ -400,7 +398,7 @@ pub struct MariaStore<'c> {
     gate: Option<Arc<dyn MirrorGate>>,
     /// The gate's answer, asked once per statement.
     mirror_ok: Option<bool>,
-    /// The group the router plans every read step over (G69).
+    /// The group the router plans every read step over.
     group: Arc<sprig_router::topology::Group>,
     /// Who waits for a mover's hold a route meets (auto-commit reads);
     /// `None`: the statement runs on the map it has.
@@ -548,7 +546,7 @@ impl<'c> MariaStore<'c> {
         self
     }
 
-    /// Plans `op` over `targets` with the router (G69) and runs its
+    /// Plans `op` over `targets` with the router and runs its
     /// statements in order: per statement, the shard's index in the layout
     /// and its rows. `write`: on the write connection (locking reads).
     async fn route(
@@ -567,8 +565,9 @@ impl<'c> MariaStore<'c> {
             h.wait(until).await?;
         }
         self.note(&r);
-        let mut out = Vec::with_capacity(r.targets().len());
-        for t in r.targets() {
+        let ts = r.targets();
+        let mut idx = Vec::with_capacity(ts.len());
+        for t in ts {
             let i = self
                 .layout
                 .shards
@@ -580,13 +579,49 @@ impl<'c> MariaStore<'c> {
                         "a graph route names a shard the statement's map doesn't have; retry",
                     )
                 })?;
+            idx.push(i);
+        }
+        // A read's statements for shards on the same cluster go as one
+        // `UNION ALL` statement (one round trip per cluster and step, not
+        // per shard), in shard order; a recursive CTE (`SET STATEMENT ...
+        // FOR WITH RECURSIVE`) and locking reads go alone.
+        let mut runs: Vec<Vec<usize>> = Vec::new();
+        for (k, t) in ts.iter().enumerate() {
+            let alone = write || t.sql.starts_with("SET ");
+            match runs.iter_mut().find(|run| {
+                !alone && ts[run[0]].cluster == t.cluster && !ts[run[0]].sql.starts_with("SET ")
+            }) {
+                Some(run) => run.push(k),
+                None => runs.push(vec![k]),
+            }
+        }
+        let mut out = Vec::with_capacity(runs.len());
+        for run in runs {
+            let i = idx[run[0]];
+            let sql = if run.len() == 1 {
+                ts[run[0]].sql.clone()
+            } else {
+                let mut s = String::new();
+                for (n, k) in run.iter().enumerate() {
+                    if n > 0 {
+                        s.push_str(" UNION ALL ");
+                    }
+                    s.push('(');
+                    s.push_str(&ts[*k].sql);
+                    s.push(')');
+                }
+                s
+            };
             self.stats.shard_queries += 1;
             let at = self.layout.shards[i].clone();
             let conn = self.conns.conn(&at, write).await?;
-            let rows = conn
-                .exec(t.sql.as_str(), Params::Empty)
-                .await
-                .map_err(backend_error)?;
+            let t0 = std::time::Instant::now();
+            // Text protocol: each statement's text is new (its ids are
+            // written in), so a prepared statement would cost a second
+            // round trip and a server-side prepare every time.
+            let rows: Vec<Row> = conn.query(sql).await.map_err(backend_error)?;
+            self.stats.sql_us += u64::try_from(t0.elapsed().as_micros()).unwrap_or(u64::MAX);
+            self.stats.sql_rows += rows.len() as u64;
             out.push((i, rows));
         }
         Ok(out)
@@ -668,7 +703,7 @@ impl<'c> MariaStore<'c> {
             from.sort_unstable();
             from.dedup();
             let mut by_near: HashMap<u64, Vec<(u64, u64)>> = HashMap::new();
-            for (e, _) in self.expand(&from, types, dir).await? {
+            for e in self.links(&from, types, dir).await? {
                 let (near, far, rk) = if dir == Dir::In {
                     (e.dst, e.src, e.src_rk)
                 } else {
@@ -726,9 +761,9 @@ impl<'c> MariaStore<'c> {
         dup_error(d, what, id)
     }
 
-    /// Uniqueness claims are kept (decision G41) for every grouped graph,
-    /// whatever its shard count, so splits and moves carry them; graphs
-    /// from rounds 1 and 2 are one schema, where MariaDB's `UNIQUE` index
+    /// Uniqueness claims are kept for every grouped graph, whatever its
+    /// shard count, so splits and moves carry them; graphs made before
+    /// grouped graphs are one schema, where MariaDB's `UNIQUE` index
     /// is exact.
     fn claims_kept(&self) -> bool {
         self.layout.group != 0
@@ -750,8 +785,7 @@ impl<'c> MariaStore<'c> {
     }
 
     /// Claims `key` of constraint `d` for element `owner` (on the shard of
-    /// `owner_rk`), in the statement's transaction (decision G41, chapter
-    /// 19's `claim` with Pre joined to Main): insert the claim row; when
+    /// `owner_rk`), in the statement's transaction: insert the claim row; when
     /// one is there, share-lock it (the duplicate-key error already holds
     /// a shared lock, so writers queued on one key never deadlock taking
     /// it exclusively) and check its owner with an exclusive read on
@@ -946,7 +980,7 @@ impl<'c> MariaStore<'c> {
         Ok(n)
     }
 
-    /// The router's scan step for `s` (G69): an index on the label and a
+    /// The router's scan step for `s`: an index on the label and a
     /// pushed-down property replaces the label join; property equalities
     /// push down as a superset the gateway rechecks.
     fn scan_op(&self, s: &Scan) -> ScanOp {
@@ -1022,6 +1056,15 @@ impl<'c> MariaStore<'c> {
             }
         }
         Ok(out)
+    }
+}
+
+/// A partial read's object without its `null` members: stored
+/// properties are never null, so a `null` is a key the element lacks.
+fn drop_nulls(j: Json) -> Json {
+    match j {
+        Json::Object(m) => Json::Object(m.into_iter().filter(|(_, v)| !v.is_null()).collect()),
+        other => other,
     }
 }
 
@@ -1181,6 +1224,109 @@ impl GraphStore for MariaStore<'_> {
             }
         }
         Ok(out)
+    }
+
+    async fn links(&mut self, from: &[u64], types: &[u32], dir: Dir) -> Result<Vec<Link>> {
+        if from.is_empty() {
+            return Ok(Vec::new());
+        }
+        if dir == Dir::Both {
+            return Err(SprigError::internal("links take one direction"));
+        }
+        let out = dir == Dir::Out;
+        // Incoming: the mirrors when fresh (one statement on the
+        // destinations' shards), else the `rev` key on every shard.
+        let mirror = !out && self.read_mirrors().await;
+        let targets = if out || mirror {
+            Targets::ByKey(from.to_vec())
+        } else {
+            Targets::All(from.to_vec())
+        };
+        let op = HopOp::Links {
+            out,
+            mirror,
+            types: types.to_vec(),
+        };
+        let mut v = Vec::new();
+        for (_, rows) in self.route(op, targets, false).await? {
+            for mut r in rows {
+                v.push(Link {
+                    src: u64_col(r.take(0)),
+                    dst: u64_col(r.take(1)),
+                    src_rk: u64_col(r.take(2)),
+                    dst_rk: u64_col(r.take(3)),
+                    id: u64_col(r.take(4)),
+                    rtype: u32::try_from(u64_col(r.take(5))).unwrap_or(0),
+                });
+            }
+        }
+        Ok(v)
+    }
+
+    fn late_props(&self) -> bool {
+        true
+    }
+
+    async fn nodes_part(&mut self, ids: &[u64], keys: Option<&[String]>) -> Result<Vec<NodeRow>> {
+        let Some(keys) = keys else {
+            return self.nodes(ids).await;
+        };
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let op = HopOp::NodesPart {
+            keys: keys.to_vec(),
+        };
+        let rows = self.route(op, Targets::ByKey(ids.to_vec()), false).await?;
+        Ok(nodes_of(rows)
+            .into_iter()
+            .map(|mut n| {
+                n.props = drop_nulls(n.props);
+                n.types = n.types.map(drop_nulls);
+                n
+            })
+            .collect())
+    }
+
+    async fn edges_part(
+        &mut self,
+        at: &[(u64, u64)],
+        keys: Option<&[String]>,
+    ) -> Result<Vec<EdgeRow>> {
+        let Some(keys) = keys else {
+            return self.edges_at(at).await;
+        };
+        if at.is_empty() {
+            return Ok(Vec::new());
+        }
+        let op = HopOp::EdgesPart {
+            keys: keys.to_vec(),
+        };
+        let rows = self.route(op, Targets::ByHash(at.to_vec()), false).await?;
+        Ok(rows
+            .into_iter()
+            .flat_map(|(_, rs)| rs)
+            .map(|mut r| {
+                let mut e = edge_at(&mut r, 0);
+                e.props = drop_nulls(e.props);
+                e.types = e.types.map(drop_nulls);
+                e
+            })
+            .collect())
+    }
+
+    async fn edges_at(&mut self, keys: &[(u64, u64)]) -> Result<Vec<EdgeRow>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = self
+            .route(HopOp::Edges, Targets::ByHash(keys.to_vec()), false)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .flat_map(|(_, rs)| rs)
+            .map(|mut r| edge_at(&mut r, 0))
+            .collect())
     }
 
     async fn reach(
@@ -1726,7 +1872,7 @@ impl GraphStore for MariaStore<'_> {
     }
 }
 
-/// The commit check of chapter 43: nodes removed with a plain `DELETE`
+/// The commit check: nodes removed with a plain `DELETE`
 /// must have no relationships left (39906): outgoing edges on each node's
 /// shard; incoming ones through the mirrors there, the `rev` key of a
 /// one-shard graph, or every shard.

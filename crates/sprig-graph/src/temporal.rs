@@ -1,10 +1,9 @@
-//! Temporal and spatial values (chapter 43, "Values"; build steps 10 and
-//! 19): Neo4j's `Date`, `LocalTime`, `Time`, `LocalDateTime`, `DateTime`,
+//! Temporal and spatial values: Neo4j's `Date`, `LocalTime`, `Time`, `LocalDateTime`, `DateTime`,
 //! `Duration` and `Point`, their constructors and accessors, arithmetic,
 //! comparison and text forms.
 //!
 //! - **Stored** as ISO 8601 strings (points as `{"srid", "x", "y"[, "z"]}`
-//!   objects) with a `_types` entry naming the type (chapter 31's map), so
+//!   objects) with a `_types` entry naming the type, so
 //!   they read back as themselves.
 //! - **Text** follows Neo4j: seconds always shown, fractions without
 //!   trailing zeros, `Z` for UTC, a named zone after its offset
@@ -696,7 +695,7 @@ fn convert(kind: &str, v: &Value) -> Option<Value> {
     })
 }
 
-/// `<kind>.truncate(unit, value [, map])` (round 3): the value cut down to
+/// `<kind>.truncate(unit, value [, map])`: the value cut down to
 /// `unit` (`millennium`, `century`, `decade`, `year`, `weekYear`,
 /// `quarter`, `month`, `week`, `day`, `hour`, `minute`, `second`,
 /// `millisecond`, `microsecond`), then the map's fields on top, as Neo4j
@@ -886,7 +885,7 @@ fn temporal_from_map(kind: &str, m: &BTreeMap<String, Value>) -> Result<Value> {
 }
 
 /// `datetime({epochSeconds, ...})` and `datetime({epochMillis, ...})`
-/// (R8 round 10, LDBC IC10): the instant, in `timezone` when given (else
+/// (LDBC IC10): the instant, in `timezone` when given (else
 /// UTC); other fields given with it replace that part of the wall clock,
 /// and `millisecond`, `microsecond` or `nanosecond` the whole fraction, as
 /// Neo4j 5.26 does. Only `datetime` takes them; the epoch must be an
@@ -1595,7 +1594,7 @@ mod tests {
 
     #[test]
     fn utc_is_a_named_zone() {
-        // Neo4j keeps `[UTC]` (the Go driver's testkit run, R8); `Z` and
+        // Neo4j keeps `[UTC]` (seen in the Go driver's testkit); `Z` and
         // offsets stay offsets.
         let Value::DateTime(z) = p("datetime", "1976-06-13T12:34:56[UTC]") else {
             panic!("datetime");

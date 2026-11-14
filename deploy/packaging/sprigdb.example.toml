@@ -1,4 +1,4 @@
-# /etc/sprigdb/sprigdb.toml: the small process file (chapter 23). The
+# /etc/sprigdb/sprigdb.toml: the small process file. The
 # Ansible role writes the real one.
 [node]
 dc = "fra1"

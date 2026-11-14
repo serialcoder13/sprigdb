@@ -216,7 +216,7 @@ impl<S> MaybeTls<S> {
             sni: conn.server_name().map(str::to_owned),
             // rustls hands back peer certificates only after verifying them
             // against the listener's client verifier
-            // (`listener.<name>.client_cert`, wireup).
+            // (`listener.<name>.client_cert`).
             client_cert: conn.peer_certificates().is_some_and(|c| !c.is_empty()),
             client_dn: conn
                 .peer_certificates()

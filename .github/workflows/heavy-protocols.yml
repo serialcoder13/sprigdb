@@ -1,16 +1,15 @@
-# Heavy client suites of the non-SQL protocols, too big for a laptop
-# (decisions/r4-interim.md, "Kiran's answer on heavy suites": "CI is the
-# place"; chapter 46, "Compatibility suites"). Nightly and on demand. Each job
-# starts a SprigDB stack (.github/actions/sprig-stack: Compose, a release
-# gateway in catalog mode, tenant acme, login acme.app / sprig-dev-app) with
-# the protocol's listener (deploy/compose/ci/listeners.sh), starts a pinned
-# reference server, runs the suite on the reference and then through
-# SprigDB, and compares the two (deploy/compose/ci/outcomes.py): a job fails
-# only on a difference its expected file doesn't list, or on a listed one
-# that has gone away. Every download happens on the runner, every version is
-# pinned (images by tag, packages by version, repositories by tag or commit).
+# Heavy client suites of the non-SQL protocols, too big for a laptop.
+# Nightly and on demand. Each job starts a SprigDB stack
+# (.github/actions/sprig-stack: Compose, a release gateway in catalog mode,
+# tenant acme, login acme.app / sprig-dev-app) with the protocol's listener
+# (deploy/compose/ci/listeners.sh), starts a pinned reference server, runs
+# the suite on the reference and then through SprigDB, and compares the two
+# (deploy/compose/ci/outcomes.py): a job fails only on a difference its
+# expected file doesn't list, or on a listed one that has gone away. Every
+# download happens on the runner, every version is pinned (images by tag,
+# packages by version, repositories by tag or commit).
 #
-#   amqp      RabbitMQ 4.1.0 reference: pika scenarios (r9final's 21), the
+#   amqp      RabbitMQ 4.1.0 reference: pika scenarios (21 of them), the
 #             amqp091-go integration tests, Java and .NET client scenarios,
 #             PerfTest (deploy/compose/clients-amqp)
 #   kafka     Apache Kafka 3.9.0 reference: kafka-python, the Java client
@@ -124,8 +123,8 @@ jobs:
 
   mongoose:
     # Each Mongoose test creates its own collections and indexes, so through
-    # SprigDB the suite is DDL-bound (decisions/r5-interim.md, round 4: about
-    # 2.4 s per DDL on a laptop): 8 shards of the test files, each well
+    # SprigDB the suite is DDL-bound (about 2.4 s per DDL on a laptop): 8
+    # shards of the test files, each well
     # inside GitHub's 6-hour job limit.
     name: R5 Mongoose 8.24.8 shard ${{ matrix.shard }}/8 (MongoDB 8.0.34 and SprigDB)
     if: >-

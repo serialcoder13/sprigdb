@@ -17,7 +17,7 @@ export interface ResultItem {
   affected?: string;
   info?: string;
   warnings?: number;
-  /** The statement's language (chapter 37): graphs get a graph view,
+  /** The statement's language: graphs get a graph view,
    * documents a JSON tree. */
   language?: QueryLanguage;
   /** The collection a MongoDB result came from (for editing documents). */
@@ -46,7 +46,7 @@ export function ResultView({
   const tree = !!b0 && lang === 'mongo';
   // The view the user picked, else the one the result suits. Worked out on
   // every render: rows stream in after the first one, so a graph found
-  // later still opens as a graph (round 7, ST73).
+  // later still opens as a graph.
   const [picked, setMode] = useState<'grid' | 'chart' | 'graph' | 'tree' | null>(null);
   const mode = picked ?? (graphable ? 'graph' : tree ? 'tree' : 'grid');
   const [exportError, setExportError] = useState<string | null>(null);

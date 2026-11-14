@@ -1,6 +1,6 @@
 //! The MariaDB model inside a simulation: writes to a semi-sync primary
 //! under faults, then the primary is lost and a replica promoted
-//! (chapters 25 and 27). Checked:
+//! as failover does. Checked:
 //!
 //! 1. no phantom rows: the new primary holds only rows a client wrote;
 //! 2. an acknowledged write missing after the failover is listed among

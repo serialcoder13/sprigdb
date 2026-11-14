@@ -1,6 +1,5 @@
-//! The state machine, as pure functions over [`Recommendation`]s (chapter
-//! 52, "The gate", "Ignore", "Snooze", "Escalation and auto-apply", "State
-//! machines"). Every store applies these under its own atomicity, so the
+//! The state machine, as pure functions over [`Recommendation`]s:
+//! the gate, ignore, snooze, escalation and auto-apply. Every store applies these under its own atomicity, so the
 //! catalog, etcd and memory stores behave the same.
 
 use std::time::Duration;
@@ -246,7 +245,7 @@ pub fn ignore_covers(rec: &Recommendation, score: f64, now: Micros) -> bool {
     in_time && score < ig.score * ig.factor
 }
 
-/// The gate's decision for proposal `p` (chapter 52, "The gate").
+/// The gate's decision for proposal `p`.
 ///
 /// `same_target` holds the live items with the same kind and target (any
 /// fingerprint); `ignored` the newest ignored item with `p`'s fingerprint.
@@ -633,8 +632,8 @@ impl TickChange {
     }
 }
 
-/// Runs the timers of one item at `now` (chapter 52, "Escalation and
-/// auto-apply"). Returns the change made, if any; the store writes it.
+/// Runs the timers of one item at `now` (escalation and
+/// auto-apply). Returns the change made, if any; the store writes it.
 pub fn tick(r: &mut Recommendation, now: Micros, applying_timeout: Duration) -> Option<TickChange> {
     let change = match r.state {
         State::Snoozed if r.snooze_until_us.is_some_and(|u| u <= now) => {

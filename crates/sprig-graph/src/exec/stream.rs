@@ -1,5 +1,4 @@
-//! Streamed results (chapter 43, "Bolt front end", streaming; decision
-//! G4's follow-up): rows go to a [`RowSink`] as they are found, so a
+//! Streamed results: rows go to a [`RowSink`] as they are found, so a
 //! client's pace bounds memory instead of the whole answer.
 //!
 //! A statement streams when its rows don't depend on each other: one read
@@ -159,6 +158,7 @@ pub async fn run_stream(
         return Ok(out);
     };
     sink.columns(&cols).await?;
+    let store_late = store.late_props();
     let mut ex = Exec {
         store,
         params,
@@ -173,6 +173,9 @@ pub async fn run_stream(
         late_ok: false,
         returning: false,
         late_error: None,
+        late: super::ex_late(store_late, q),
+        seen_nodes: std::collections::HashMap::new(),
+        seen_rels: std::collections::HashMap::new(),
     };
     let mut clauses = q.parts[0].clauses.clone();
     // SKIP and LIMIT apply to the whole stream, not to each page.

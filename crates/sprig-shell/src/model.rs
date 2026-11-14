@@ -1,5 +1,4 @@
-//! Results as the shell sees them, whatever the transport (chapter 53,
-//! "Crate layout": `ResultEvent`).
+//! Results as the shell sees them, whatever the transport (`ResultEvent`).
 
 use serde_json::Value;
 

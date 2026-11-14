@@ -345,8 +345,7 @@ fn unreachable_recommend() -> BuildOutcome {
 }
 
 /// Sprig builds running on the cluster's writer (any controller's).
-/// The DDL job holding `object` (its `objects.pending_job_id`, chapter
-/// 21), if any: builds wait until the schema change has published.
+/// The DDL job holding `object` (its `objects.pending_job_id`), if any: builds wait until the schema change has published.
 async fn schema_change_on<Q: Queryable + Send>(
     store: &AutoIndexStore,
     q: &mut Q,

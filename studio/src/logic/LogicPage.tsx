@@ -1,10 +1,10 @@
-// The logic editors (chapter 44 step 26, "Logic editors"): KIRun functions
+// The logic editors: KIRun functions
 // in @fincity/kirun-ui, JavaScript and Lua in Monaco. "Check" is
 // Logic.Compile, a dry run showing the tier and each reason where it
 // applies (Monaco markers for script lines, the step's name for KIRun),
 // and the generated PL/SQL for users with ALTER ROUTINE. Deploy, rollback,
 // rollout stages and drops are the statements a SQL client would run, shown
-// before they run. Test runs (round 6) are Logic.TestRun, of the deployed
+// before they run. Test runs are Logic.TestRun, of the deployed
 // versions or of the editor's draft, with inputs, snapshot rows and fetch
 // mocks, always rolled back; a CALL that keeps its changes stays as a
 // second choice. Logs poll Logic.TailLogs; dead letters are replayed or
@@ -645,7 +645,7 @@ function TestRun({ db, detail }: Readonly<{ db: string; detail: ModuleDetail }>)
   );
 }
 
-/** The round-4 path, kept for "keep its changes": `CALL db.f(args)` in a
+/** The older path, kept for "keep its changes": `CALL db.f(args)` in a
  * transaction handle, committed after the statement was shown. */
 function CallAndKeep({ db, name, params }: Readonly<{ db: string; name: string; params: { name: string; type: string; sql?: string }[] }>) {
   const [values, setValues] = useState<Record<string, string>>({});

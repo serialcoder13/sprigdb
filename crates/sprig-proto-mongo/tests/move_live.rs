@@ -1,5 +1,5 @@
 //! A tenant with MongoDB databases moved between clusters under writes
-//! (chapter 10's mover, chapter 31's hidden tables; R5 round 6).
+//! (the mover, with the document layer's hidden tables).
 //!
 //! Before the fix, the mover left a database's `__sprig_doc_*` tables
 //! behind: after the move the next write to a database created before it

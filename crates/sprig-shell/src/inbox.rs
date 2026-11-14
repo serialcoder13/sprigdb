@@ -1,6 +1,6 @@
-//! The approvals inbox (chapter 53, "Approvals inbox"; chapter 52).
+//! The approvals inbox.
 //!
-//! Operators (a profile with `admin_url`) use chapter 52's `Recommendations`
+//! Operators (a profile with `admin_url`) use the admin API's `Recommendations`
 //! service: `GET /admin/v1/recommendations?open=true` and `POST
 //! /admin/v1/recommendations/{id}:{action}`. Tenant users use its SQL:
 //! `SHOW SPRIG RECOMMENDATIONS` and `SPRIG APPROVE | IGNORE | SNOOZE
@@ -71,7 +71,7 @@ impl InboxAction {
         }
     }
 
-    /// Chapter 52's action body.
+    /// The admin API's action body.
     ///
     /// # Errors
     /// 39985 for input that doesn't parse.
@@ -119,7 +119,7 @@ impl InboxAction {
         Ok(b)
     }
 
-    /// The SQL form, for tenant users (chapter 52, "SQL").
+    /// The SQL form, for tenant users.
     ///
     /// # Errors
     /// 39983 for windows and comments, which SQL doesn't carry; 39985.

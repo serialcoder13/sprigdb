@@ -1,4 +1,4 @@
-//! The KIRun front end (chapter 41, "KIRun front end"): a definition's
+//! The KIRun front end: a definition's
 //! JSON, its expressions and its step graph, lowered to the IR.
 //!
 //! The model and the expression grammar follow KIRun's open-source

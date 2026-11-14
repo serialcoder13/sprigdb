@@ -1,5 +1,4 @@
-//! [`Settings`]: six-scope resolution for a process, memoized, with watches
-//! (chapter 08, "Setting resolution" and "Live application"; build step 5).
+//! [`Settings`]: six-scope resolution for a process, memoized, with watches.
 //!
 //! A gateway holds one [`Settings`] over its [`LiveSettings`] (the etcd
 //! scopes). Tenant, database, object and ancestor rows come with each call,

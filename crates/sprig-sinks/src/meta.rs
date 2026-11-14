@@ -1,5 +1,4 @@
-//! What sinks keep in etcd (chapter 51, "etcd keys"; build steps 5 and
-//! 18):
+//! What sinks keep in etcd:
 //!
 //! - `/sprig/dc/<dc>/sinks/<tenant>/<sink>`: the sink index the
 //!   controller's `sinks` loop reads to start one `sink_task` job per task
@@ -38,7 +37,7 @@ pub struct SinkIndex {
     pub tasks: u32,
     /// Bumps with the definition, so the loop can tell a change.
     pub definition_ver: u64,
-    /// A fan-in sink's grouping (R9, r9last): the controller's `sinks`
+    /// A fan-in sink's grouping: the controller's `sinks`
     /// loop counts the definition's member instances and sets `tasks`
     /// from it ([`fanin_tasks`]); each task reads the members
     /// [`fanin_task_of`] gives it.
@@ -50,8 +49,7 @@ impl Versioned for SinkIndex {
     const V: u32 = 1;
 }
 
-/// How a fan-in sink's member instances are split into tasks (chapter
-/// 51, "Fan-in sinks"; R9, r9last).
+/// How a fan-in sink's member instances are split into tasks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FanInGroups {
     /// The definition's declaring tenant.
@@ -546,7 +544,7 @@ mod tests {
         assert_eq!(c.tenant_view().as_object().unwrap().len(), 2);
     }
 
-    /// R9 (r9last): fan-in tasks by instance partitions, members spread
+    /// Fan-in tasks by instance partitions, members spread
     /// evenly, and an index entry written before grouping still reads.
     #[test]
     fn fan_in_groups() {

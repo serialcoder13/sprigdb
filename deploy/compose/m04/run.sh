@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# M0.4's scenario suite on the three reference topologies (chapter 48, M0.4;
-# chapter 13 build step 14). See README.md.
+# The automatic-indexing scenario suite on the three reference topologies.
+# See README.md.
 #
 #   deploy/compose/m04/run.sh setup              # settings, tenants, restart
 #   deploy/compose/m04/run.sh single|replication|galera
 #   deploy/compose/m04/run.sh all                # the three, one at a time
-#   deploy/compose/m04/run.sh o1 single|replication|galera  # decision O1's scenario
+#   deploy/compose/m04/run.sh o1 single|replication|galera  # usage-based removal scenario
 #   deploy/compose/m04/run.sh drift              # drift.sh as acme.app
 #   deploy/compose/m04/run.sh teardown           # settings and tenants removed
 #
@@ -32,7 +32,7 @@ results=deploy/compose/m04/results
 clock=$root/$state/autoindex-clock
 say() { echo "m04: $*"; }
 
-# Recorder settings the gateway reads at start (chapter 12).
+# Recorder settings the gateway reads at start.
 workload_settings=(
   "workload.bucket_minutes 1"
   "workload.watch_p95_ms 0"

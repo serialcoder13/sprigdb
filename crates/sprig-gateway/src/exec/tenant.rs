@@ -588,6 +588,10 @@ impl PassSession {
         if let Some(step) = Box::pin(self.tenant_sinks(cx, text, more, format, out)).await? {
             return Ok(step);
         }
+        // The read-only `sprig_docs` database, before the name layer.
+        if let Some(step) = Box::pin(self.tenant_docs(cx, text, more, format, out)).await? {
+            return Ok(step);
+        }
         // Inherited messaging objects (`FOR EACH TENANT`), before the logic
         // declarations and the stream layer see them.
         if let Some(step) =

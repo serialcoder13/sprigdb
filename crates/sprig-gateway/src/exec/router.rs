@@ -545,6 +545,13 @@ fn savepoint_stmt(text: &str) -> Option<SpStmt> {
 impl PassSession {
     /// The session's tenant layout and the map cache it came from; `None`
     /// for a tenant without sharded or reference tables.
+    /// Whether the tenant's statements go through the router (it has
+    /// grouped tables): MongoDB's point reads take the general path then
+    /// (`exec::point`).
+    pub(super) async fn routes(&self) -> bool {
+        self.router_layout().await.is_some()
+    }
+
     async fn router_layout(&self) -> Option<(Arc<TenantLayout>, ShardMapCache)> {
         let ts = self.tenant.as_deref()?;
         let cat = ts.catalog()?;

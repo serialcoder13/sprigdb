@@ -1,18 +1,18 @@
-//! `sprig-vector`: vector search (chapter 34).
+//! `sprig-vector`: vector search.
 //!
-//! Layer: 2 data layer. Design: [chapter 34](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/34-vector.md) (Vectors) of the SprigDB low-level design.
+//! Layer: 2 data layer.
 //!
 //! A translator onto the one execution layer, not an engine: every
 //! statement runs through the caller's [`sprig_kv::SqlRunner`] (in the
 //! gateway, the user's executor session), so names, privileges and the
 //! router apply, and a sharded table's `ORDER BY distance LIMIT n` runs on
-//! each shard and is merged by distance in the gateway (chapter 17).
+//! each shard and is merged by distance in the gateway.
 //!
 //! - [`index`]: standalone indexes (Vectors API): table, definition in the
 //!   table comment, the HNSW graph on and off.
 //! - [`items`]: upserts and deletes, dimension checks, `dotProduct`
-//!   normalization, metadata stored as chapter 31 stores documents.
-//! - [`plan`]: chapter 34's planner (exact, prefiltered exact, ANN, ANN
+//!   normalization, metadata stored as the document store stores documents.
+//! - [`plan`]: the planner (exact, prefiltered exact, ANN, ANN
 //!   with over-fetch).
 //! - [`search`]: running a plan: the per-shard SQL, residual filters with
 //!   MongoDB's semantics, re-queries, scores; automatic graphs.

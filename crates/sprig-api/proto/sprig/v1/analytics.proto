@@ -1,4 +1,4 @@
-// sprig.v1: the Analytics API (chapter 35, "Analytics query"; chapter 37).
+// sprig.v1: the Analytics API.
 // A model is a semantic layer over a logical database's tables: facts with
 // measures, dimensions with levels. Queries compile to SQL with partial
 // aggregates; the gateway adds subtotals with GROUPING() bits. Calls run in
@@ -12,7 +12,7 @@ import "google/protobuf/struct.proto";
 
 // Dimensional models and their queries.
 service Analytics {
-  // Creates a model (chapter 35's document as JSON).
+  // Creates a model (its definition document as JSON).
   rpc CreateModel(ModelRequest) returns (ModelInfo) {
     option (google.api.http) = {
       post: "/v1/databases/{database}/models"
@@ -46,7 +46,7 @@ service Analytics {
   }
   // Runs a query: detail rows, subtotals after their groups, the grand
   // total last. A stream of results of at most 1,000 rows each; the first
-  // carries the plan (R6 round 4). REST returns one JSON reply, or NDJSON
+  // carries the plan. REST returns one JSON reply, or NDJSON
   // lines with `Accept: application/x-ndjson`.
   rpc Query(AnalyticsQuery) returns (stream AnalyticsResult) {
     option (google.api.http) = {
@@ -74,7 +74,7 @@ message ModelRequest {
   string database = 1;
   // The model's name; taken from the definition when empty.
   string model = 2;
-  // The definition, JSON (chapter 35, "Model definition").
+  // The definition, JSON.
   google.protobuf.Struct definition = 3;
 }
 

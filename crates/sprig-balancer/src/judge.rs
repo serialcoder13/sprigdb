@@ -1,4 +1,4 @@
-//! Whether one move is worth making (chapter 11, "Judging a move"): the
+//! Whether one move is worth making: the
 //! benefit a move brings against what it costs, both in points of `full`
 //! (0.01 is one percent of a cluster), with the reasons in plain words for
 //! the decision log.

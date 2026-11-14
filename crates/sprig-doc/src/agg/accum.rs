@@ -1,5 +1,5 @@
 //! Accumulators of `$group`, `$bucket`, `$bucketAuto` and
-//! `$setWindowFields` (M2, 12 Nov 2026): `$sum`, `$avg`, `$min`, `$max`,
+//! `$setWindowFields`: `$sum`, `$avg`, `$min`, `$max`,
 //! `$first`, `$last`, `$push`, `$addToSet`, `$count`, `$mergeObjects`,
 //! `$stdDevPop`, `$stdDevSamp`, `$top`, `$bottom`, `$topN`, `$bottomN`,
 //! `$firstN`, `$lastN`, `$maxN`, `$minN`, `$median`, `$percentile`, and
@@ -747,7 +747,7 @@ pub(crate) fn parse_fields(
                 format!("The field '{k}' must be an accumulator object"),
             ));
         };
-        // Server-side JavaScript (M4): `crate::serverjs::GroupJs`.
+        // Server-side JavaScript: `crate::serverjs::GroupJs`.
         if op == "$accumulator" {
             continue;
         }
@@ -756,12 +756,11 @@ pub(crate) fn parse_fields(
     Ok(out)
 }
 
-/// Bytes a group costs besides its list-like accumulators (decision
-/// S72): its key, and a fixed share per accumulator, as MongoDB counts a
+/// Bytes a group costs besides its list-like accumulators: its key, and a fixed share per accumulator, as MongoDB counts a
 /// group's memory.
 const GROUP_OVERHEAD: usize = 64;
 
-/// A streaming `$group` (M5, decision S72): documents go in one at a
+/// A streaming `$group`: documents go in one at a
 /// time with their group key; [`Grouper::finish`] gives the groups in
 /// first-seen order. Memory is the keys plus the accumulators' state,
 /// checked against `doc.agg_stage_memory_bytes` after every document.
@@ -839,7 +838,7 @@ impl<'a, 'j> Grouper<'a, 'j> {
                 over_error(self.stage, self.lim.stage_bytes)
             });
         }
-        // MongoDB 9.0's per-operation limit (M3).
+        // MongoDB 9.0's per-operation limit.
         crate::opmem::check(self.bytes, self.stage)
     }
 

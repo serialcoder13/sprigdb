@@ -1,5 +1,4 @@
-//! An Analytics query (chapter 35, "Analytics query") and its compilation
-//! to SQL (chapter 35, "Compiling a query").
+//! An Analytics query and its compilation to SQL.
 //!
 //! ```text
 //! SELECT <level keys> AS k1.., <partial aggregates> AS p1..
@@ -112,7 +111,7 @@ pub fn unknown(m: impl Into<String>) -> SprigError {
 }
 
 impl Query {
-    /// Parses chapter 35's JSON.
+    /// Parses the query's JSON.
     ///
     /// # Errors
     /// 39751 for unknown names or shapes.
@@ -202,7 +201,7 @@ impl Query {
 }
 
 impl Query {
-    /// Back to chapter 35's JSON (`Drill` returns it).
+    /// Back to the query's JSON (`Drill` returns it).
     #[must_use]
     pub fn to_json(&self) -> Value {
         let op = |o: Op| match o {
@@ -311,7 +310,7 @@ fn time_key(level: &str, t: &str, fsm: u8) -> Option<String> {
         "fiscal_year" => format!("YEAR({t} - INTERVAL {} MONTH)", fsm - 1),
         "quarter" => format!("(YEAR({t}) * 10 + QUARTER({t}))"),
         // Not `EXTRACT(YEAR_MONTH ...)`: the router's parser can't read it,
-        // so a sharded fact's query would be refused (R6 round 4).
+        // so a sharded fact's query would be refused.
         "month" => format!("(YEAR({t}) * 100 + MONTH({t}))"),
         "week" => format!("YEARWEEK({t}, 3)"),
         "day" => format!("DATE({t})"),

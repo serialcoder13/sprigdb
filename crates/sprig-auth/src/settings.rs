@@ -1,6 +1,6 @@
-//! The `auth.*` keys this crate reads (chapter 14, "Configuration").
+//! The `auth.*` keys this crate reads.
 //! Scopes "tree": tenant (and every ancestor), dc and global, resolved
-//! through the tenant's snapshot (chapter 08); "process": dc and global.
+//! through the tenant's snapshot; "process": dc and global.
 //! All live.
 //!
 //! Keys of later steps (tokens, second factors, impersonation, SCRAM-SHA-1,
@@ -83,7 +83,7 @@ sprig_settings::register!(MYSQL_NATIVE_PASSWORD);
 
 auth_key!(
     /// `auth.scram_sha256_iterations`: PBKDF2 iterations of new
-    /// SCRAM-SHA-256 verifiers (chapter 14, "SCRAM verifiers").
+    /// SCRAM-SHA-256 verifiers.
     SCRAM_SHA256_ITERATIONS: u64 = "auth.scram_sha256_iterations", 15_000, Scopes::TREE,
     HardBounds::range(5_000, 1_000_000),
     "PBKDF2 iterations of new SCRAM-SHA-256 verifiers"
@@ -203,9 +203,8 @@ auth_key!(
 );
 
 auth_key!(
-    /// `auth.mfa_required`: who must have a second factor for HTTP logins
-    /// (chapter 14 step 13): `off`, `admins` (holders of
-    /// `SPRIG_TENANT_ADMIN`) or `all`. A covered user without a factor
+    /// `auth.mfa_required`: who must have a second factor for HTTP logins:
+    /// `off`, `admins` (holders of `SPRIG_TENANT_ADMIN`) or `all`. A covered user without a factor
     /// signs in only to enrol one.
     MFA_REQUIRED: Cow<'static, str> = "auth.mfa_required", Cow::Borrowed("off"), Scopes::TREE,
     HardBounds::one_of(&["off", "admins", "all"]),
@@ -222,7 +221,7 @@ auth_key!(
 
 auth_key!(
     /// `auth.impersonation`: administrators above may impersonate users
-    /// here (chapter 14 step 14).
+    /// here.
     IMPERSONATION: Cow<'static, str> = "auth.impersonation", Cow::Borrowed("on"), Scopes::TREE,
     HardBounds::one_of(&["on", "off"]),
     "Allow administrators above to impersonate users here"

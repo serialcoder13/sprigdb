@@ -437,7 +437,7 @@ public final class Check {
         }
     }
 
-    // --- chapter 05 matrix items ------------------------------------------------
+    // --- protocol feature checks ------------------------------------------------
 
     /** The file LOAD DATA LOCAL INFILE sends, and what the table must hold afterwards. */
     static final String INFILE = "1,héllo 🌱\n2,\"quoted, comma\"\n3,\\N\n";

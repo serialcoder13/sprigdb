@@ -44,6 +44,10 @@ pub const GIPK_COLUMN: &str = "my_row_id";
 /// Database names no one may create or drop.
 pub const SYSTEM_SCHEMAS: [&str; 4] = ["information_schema", "performance_schema", "sys", "mysql"];
 
+/// The read-only database every session sees the product documentation
+/// in; no tenant database can take the name.
+pub const DOCS_DATABASE: &str = "sprig_docs";
+
 /// Grant pattern covering every tenant schema, for `sprig_ctl`.
 pub const TENANT_SCHEMAS_GRANT_PATTERN: &str = "t%";
 
@@ -381,11 +385,13 @@ pub fn is_gateway_variable(name: &str) -> bool {
 }
 
 /// Whether a logical database name is reserved: `t` followed by digits and
-/// `_`, or a system schema. Reserving `t<digits>_` guarantees that such a
-/// token in backend output is a physical name.
+/// `_`, a system schema, or [`DOCS_DATABASE`]. Reserving `t<digits>_`
+/// guarantees that such a token in backend output is a physical name.
 #[must_use]
 pub fn is_reserved_database(name: &str) -> bool {
-    if SYSTEM_SCHEMAS.iter().any(|s| s.eq_ignore_ascii_case(name)) {
+    if SYSTEM_SCHEMAS.iter().any(|s| s.eq_ignore_ascii_case(name))
+        || name.eq_ignore_ascii_case(DOCS_DATABASE)
+    {
         return true;
     }
     let b = name.as_bytes();
@@ -634,6 +640,8 @@ mod tests {
             "mysql",
             "INFORMATION_SCHEMA",
             "sys",
+            "sprig_docs",
+            "SPRIG_DOCS",
         ] {
             assert!(is_reserved_database(r), "{r:?}");
         }

@@ -1,6 +1,5 @@
-//! The MongoDB wire codec (chapter 30, "Framing and compression"; build
-//! step 1): `OP_MSG`, `OP_QUERY` and `OP_REPLY` for the legacy handshake,
-//! and `OP_COMPRESSED` with snappy, zlib and zstd.
+//! The MongoDB wire codec: `OP_MSG`, `OP_QUERY` and `OP_REPLY` for the
+//! legacy handshake, and `OP_COMPRESSED` with snappy, zlib and zstd.
 //!
 //! ```text
 //! OP_MSG  : header(16) | flagBits u32 | section* | [CRC-32C u32 if bit 0]

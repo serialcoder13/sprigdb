@@ -9,8 +9,8 @@ pub struct KillRequest {
     /// The tenant of the caller; 0 for an operator.
     #[prost(uint64, tag = "3")]
     pub tenant_id: u64,
-    /// The caller's user: until chapter 29's privileges, a session may kill
-    /// only sessions of its own user.
+    /// The caller's user: without wider privileges, a session may kill only
+    /// sessions of its own user.
     #[prost(string, tag = "4")]
     pub user: ::prost::alloc::string::String,
 }
@@ -212,8 +212,8 @@ pub mod gateway_peer_client {
             self
         }
         /// KILL \[QUERY\] for a session whose id names this gateway's slot. The
-        /// caller has already checked that its user may kill the session's user
-        /// (chapter 29); this gateway checks the tenant.
+        /// caller has already checked that its user may kill the session's user;
+        /// this gateway checks the tenant.
         pub async fn kill(
             &mut self,
             request: impl tonic::IntoRequest<super::KillRequest>,
@@ -284,8 +284,7 @@ pub mod gateway_peer_client {
                 .insert(GrpcMethod::new("sprig.internal.v1.GatewayPeer", "Drain"));
             self.inner.unary(req, path, codec).await
         }
-        /// A transaction-handle call that landed on another gateway (chapter 37,
-        /// "Transactions"), forwarded with the caller's credentials.
+        /// A transaction-handle call that landed on another gateway, forwarded with the caller's credentials.
         pub async fn forward(
             &mut self,
             request: impl tonic::IntoRequest<super::ForwardRequest>,
@@ -307,9 +306,9 @@ pub mod gateway_peer_client {
                 .insert(GrpcMethod::new("sprig.internal.v1.GatewayPeer", "Forward"));
             self.inner.unary(req, path, codec).await
         }
-        /// A login of a tenant whose residency (chapter 26) doesn't allow the
-        /// calling gateway's DC: this gateway, in an allowed DC, decides it
-        /// (chapter 14, "Credential residency") and returns the principal only.
+        /// A login of a tenant whose residency doesn't allow the calling
+        /// gateway's DC: this gateway, in an allowed DC, decides it (credentials
+        /// stay in allowed DCs) and returns the principal only.
         pub async fn handoff_login(
             &mut self,
             request: impl tonic::IntoRequest<super::HandoffLoginRequest>,
@@ -352,8 +351,8 @@ pub mod gateway_peer_server {
     #[async_trait]
     pub trait GatewayPeer: std::marker::Send + std::marker::Sync + 'static {
         /// KILL \[QUERY\] for a session whose id names this gateway's slot. The
-        /// caller has already checked that its user may kill the session's user
-        /// (chapter 29); this gateway checks the tenant.
+        /// caller has already checked that its user may kill the session's user;
+        /// this gateway checks the tenant.
         async fn kill(
             &self,
             request: tonic::Request<super::KillRequest>,
@@ -371,15 +370,14 @@ pub mod gateway_peer_server {
             &self,
             request: tonic::Request<super::DrainRequest>,
         ) -> std::result::Result<tonic::Response<super::DrainReply>, tonic::Status>;
-        /// A transaction-handle call that landed on another gateway (chapter 37,
-        /// "Transactions"), forwarded with the caller's credentials.
+        /// A transaction-handle call that landed on another gateway, forwarded with the caller's credentials.
         async fn forward(
             &self,
             request: tonic::Request<super::ForwardRequest>,
         ) -> std::result::Result<tonic::Response<super::ForwardReply>, tonic::Status>;
-        /// A login of a tenant whose residency (chapter 26) doesn't allow the
-        /// calling gateway's DC: this gateway, in an allowed DC, decides it
-        /// (chapter 14, "Credential residency") and returns the principal only.
+        /// A login of a tenant whose residency doesn't allow the calling
+        /// gateway's DC: this gateway, in an allowed DC, decides it (credentials
+        /// stay in allowed DCs) and returns the principal only.
         async fn handoff_login(
             &self,
             request: tonic::Request<super::HandoffLoginRequest>,
@@ -744,7 +742,7 @@ pub struct QueueOpen {
     #[prost(string, tag = "7")]
     pub from_gateway: ::prost::alloc::string::String,
 }
-/// A message in its stored parts (chapter 50, "Message encoding").
+/// A message in its stored parts.
 #[allow(clippy::all)]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct QueueMessage {
@@ -1125,7 +1123,7 @@ pub mod queue_peer_client {
         }
         /// One queue's relay: a gateway that doesn't own the queue opens one
         /// stream per queue to the owner's gateway. The first frame is `open`.
-        /// The stream carries chapter 50's Enqueue flow (messages in, confirms
+        /// The stream carries the Enqueue flow (messages in, confirms
         /// out) and Attach flow (credit and settlements in, deliveries out), and
         /// gets and queue operations, in one order.
         pub async fn relay(
@@ -1197,7 +1195,7 @@ pub mod queue_peer_server {
             + 'static;
         /// One queue's relay: a gateway that doesn't own the queue opens one
         /// stream per queue to the owner's gateway. The first frame is `open`.
-        /// The stream carries chapter 50's Enqueue flow (messages in, confirms
+        /// The stream carries the Enqueue flow (messages in, confirms
         /// out) and Attach flow (credit and settlements in, deliveries out), and
         /// gets and queue operations, in one order.
         async fn relay(
@@ -2624,7 +2622,8 @@ pub mod search_seed_client {
             self
         }
         /// One page of the index's object, read by the index's definer without
-        /// row-level security (decisions S6 and RL17): request_json and
+        /// row-level security (hits are filtered when re-read through the
+        /// caller's session): request_json and
         /// reply_json are sprig_search::copy::{SeedRequest, SeedReply}.
         pub async fn seed_page(
             &mut self,
@@ -2663,7 +2662,8 @@ pub mod search_seed_server {
     #[async_trait]
     pub trait SearchSeed: std::marker::Send + std::marker::Sync + 'static {
         /// One page of the index's object, read by the index's definer without
-        /// row-level security (decisions S6 and RL17): request_json and
+        /// row-level security (hits are filtered when re-read through the
+        /// caller's session): request_json and
         /// reply_json are sprig_search::copy::{SeedRequest, SeedReply}.
         async fn seed_page(
             &self,

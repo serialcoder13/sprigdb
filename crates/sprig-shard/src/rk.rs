@@ -1,10 +1,9 @@
-//! The invisible `_sprig_rk` column (chapter 15, "The `_sprig_rk`
-//! column", "Filling and back-filling `_sprig_rk`").
+//! The invisible `_sprig_rk` column.
 //!
 //! It holds a row's routing hash, computed from its own key or copied
 //! from its parent. These are the statements that add it, fill it and
 //! back-fill it; the gateway fills it on writes through the router
-//! (chapter 17) and the `backfill_rk` mover job runs the back-fill.
+//! and the `backfill_rk` mover job runs the back-fill.
 
 use sprig_common::names::quote;
 
@@ -115,7 +114,7 @@ pub fn misrouted_count_sql(table: &str, lo: u64, hi: Option<u64>) -> String {
 /// The routing hash of key values read from MariaDB (text or binary
 /// protocol, or a binlog row image) under `spec`: what `_sprig_rk` holds
 /// for a row whose key columns hold `vals`. The advisor's back-fill and
-/// the mover's re-key (chapter 16) hash rows with it.
+/// the mover's re-key hash rows with it.
 ///
 /// # Errors
 /// 39400 for a value the class can't take; 39405 for one that can't be

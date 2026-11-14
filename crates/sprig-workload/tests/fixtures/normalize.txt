@@ -1,4 +1,4 @@
-# Golden corpus of the SQL normalizer (chapter 12, "SQL fingerprints").
+# Golden corpus of the SQL normalizer.
 # See tests/golden.rs for the format. Rewrite with SPRIG_BLESS=1 and review.
 
 # sysbench oltp_* (sysbench 1.0 lua scripts)

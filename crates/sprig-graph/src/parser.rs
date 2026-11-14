@@ -1,4 +1,4 @@
-//! The Cypher parser for the subset of chapter 43's table (build step 6):
+//! The Cypher parser for SprigDB's Cypher subset:
 //! a hand-written lexer and recursive-descent parser into [`crate::ast`].
 //! Every error is 39900 (`Neo.ClientError.Statement.SyntaxError`) with the
 //! offset and what was expected.
@@ -245,7 +245,7 @@ fn utf8_len(b: u8) -> usize {
 /// # Errors
 /// 39900 with the offset.
 pub fn parse(src: &str) -> Result<Query> {
-    // GQL's forms become Cypher first (round 3, `crate::gql`).
+    // GQL's forms become Cypher first (`crate::gql`).
     let rewritten = crate::gql::rewrite(src)?;
     let src = rewritten.as_str();
     let toks = lex(src)?;
@@ -1717,7 +1717,7 @@ impl Parser {
             Tok::Sym("[") => {
                 self.bump();
                 // Pattern comprehension: [p = (a)-[..]-(b) WHERE .. | ..]
-                // (R8 round 10, LDBC IC14), run as the `COLLECT { }`
+                // (LDBC IC14), run as the `COLLECT { }`
                 // subquery it is equivalent to.
                 if let Some(e) = self.pattern_comprehension()? {
                     return Ok(e);

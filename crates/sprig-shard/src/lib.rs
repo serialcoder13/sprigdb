@@ -1,15 +1,15 @@
 //! `sprig-shard`: table groups, key normalization and hashing, and shard
 //! maps.
 //!
-//! Layer: 2 operations. Design: [chapter 15](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/15-sharding.md) (Sharding model) of the SprigDB low-level design.
+//! Layer: 2 operations.
 //!
-//! What exists is build step 1, the R0 pieces the mover (chapter 10) needs:
+//! The pieces the mover needs:
 //!
 //! - [`names`]: physical schema names of shards, reference schemas and
 //!   catalogs (`shard_schema`, `reference_schema`, `catalog_schema`), and
 //!   listing a tenant's schemas among a cluster's databases;
-//! - [`map`]: the R0 tenant map. In R0 every database of a tenant lives on
-//!   its catalog's cluster (one default group per database, its schema
+//! - [`map`]: the whole-tenant map. While a tenant isn't sharded, every
+//!   database of the tenant lives on its catalog's cluster (one default group per database, its schema
 //!   `t<tenant>_d<db>_g<group>_s<shard>` with ids from the catalog's
 //!   counters, recorded in `databases.options.shards`), so the one map a
 //!   gateway routes by is the catalog's `shardmaps/<tenant>/0`. The mover
@@ -18,10 +18,10 @@
 //!   compare-and-put on the key's `mod_revision`.
 //!
 //! - [`home`]: a tenant's home DC in the directory, and the commit point
-//!   of a move between DCs (chapter 24): both DCs' maps and the directory
+//!   of a move between DCs: both DCs' maps and the directory
 //!   entry in one transaction (single-etcd mode).
 //!
-//! R1 (chapters 15 and 19):
+//! Sharding:
 //!
 //! - [`key`], [`normalize`], [`collation`], [`hash`]: key specs and
 //!   values, canonical bytes, collation weights computed in Rust, and
@@ -31,18 +31,17 @@
 //! - [`groups`]: table groups and members in the catalog (the `sharding`
 //!   catalog module), `colocation_safe`;
 //! - [`rk`]: the `_sprig_rk` column's statements;
-//! - [`reference`]: reference-table copy states and read decisions;
-//! - [`ids`]: ID blocks for `AUTO_INCREMENT` (chapter 19);
+//! - [`reference`](mod@reference): reference-table copy states and read decisions;
+//! - [`ids`]: ID blocks for `AUTO_INCREMENT`;
 //! - [`lookup`]: unique and automatic lookup indexes, the consistent-lookup
-//!   claim and release, routing through lookups, build and orphan scan
-//!   (chapter 19).
+//!   claim and release, routing through lookups, build and orphan scan.
 //! - [`fk`]: foreign keys across groups, the `foreign_keys` rows the
-//!   router enforces (chapter 19, R3).
-//! - [`pins`]: chapter 16's sharding pins (`SPRIG PIN`): the `group_pins`
+//!   router enforces.
+//! - [`pins`]: sharding pins (`SPRIG PIN`): the `group_pins`
 //!   table, the conflict rules (39410) and the split-group rule (39411).
-//! - [`colocate`]: chapter 22's SQL part: the type map from SQL types to
+//! - [`colocate`]: joins across data models, the SQL part: the type map from SQL types to
 //!   key classes, MySQL's comparison type for `a = b`, and `colocated`
-//!   under SQL's or MongoDB's rules (added by r1close).
+//!   under SQL's or MongoDB's rules.
 
 pub mod collation;
 pub mod colocate;

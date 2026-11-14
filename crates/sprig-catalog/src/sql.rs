@@ -34,7 +34,7 @@ pub(crate) fn map_err(e: mysql_async::Error) -> SprigError {
     }
 }
 
-/// Runs `fut` with a deadline (chapter 03: every network await has one).
+/// Runs `fut` with a deadline (every network await has one).
 /// A timeout is 39070, retryable.
 pub(crate) async fn timed<T>(
     limit: Duration,

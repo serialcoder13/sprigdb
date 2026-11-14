@@ -1,4 +1,4 @@
-//! Chapter 52's metrics (`sprig_approvals_*`). Names are literals in the
+//! The approvals metrics (`sprig_approvals_*`). Names are literals in the
 //! macros so `deploy/dashboards/gen.py --check` finds them.
 
 use std::collections::BTreeMap;

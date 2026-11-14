@@ -1,4 +1,4 @@
-//! The `stream.*` keys this crate reads (chapter 45, "Configuration").
+//! The `stream.*` keys this crate reads.
 //!
 //! Registered here: the keys the core uses, and `stream.produce_wait_ms`
 //! (Kafka's produce). `stream.change_snapshot` (no snapshots yet) and
@@ -74,8 +74,7 @@ key!(
 );
 key!(
     /// `stream.sequencer_lag_alert_seconds`: a stream sequencer further
-    /// behind than this counts in `sprig_stream_sequencers_lagging`
-    /// (decision r9-132).
+    /// behind than this counts in `sprig_stream_sequencers_lagging`.
     SEQUENCER_LAG_ALERT_SECONDS: u64 = "stream.sequencer_lag_alert_seconds", 60, Scopes::PROCESS,
     HardBounds::range(1, 86_400),
     "Lag past which a stream sequencer counts as lagging"
@@ -88,7 +87,7 @@ key!(
 );
 
 /// `stream.produce_wait_ms`: how long a Kafka produce waits for its
-/// records' offsets (chapter 45, "Produce").
+/// records' offsets.
 pub static PRODUCE_WAIT_MS: Setting<u64> = Setting {
     key: "stream.produce_wait_ms",
     default: 2000,

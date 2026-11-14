@@ -1,11 +1,11 @@
 # Sequelize v6.37.7 (mysql integration tests): tests that pass on MySQL 8.4.11 and not through 3306 (tab, reason).
-# Measured 12 Nov 2026 (R4 round 5, r4five), "supports schemas" tests left out by run.sh: MySQL 8.4.11 1804 pass,
+# Measured 12 Nov 2026 (first run), "supports schemas" tests left out by run.sh: MySQL 8.4.11 1804 pass,
 # 2 fail; gateway 1801 pass, 5 fail. Both fail "primary key should add, read & remove" and "fails with incorrect
 # database credentials (1)" (the test connects to 127.0.0.1 inside the container).
-# 12 Nov 2026 (bugfix-38): the "supports schemas" tests run again (run.sh no longer leaves them out); through
+# 12 Nov 2026 (after a DDL-job fix): the "supports schemas" tests run again (run.sh no longer leaves them out); through
 # a debug gateway 1803 pass, 5 fail: the three then listed here, "fails with incorrect database credentials (1)", and
 # "groupedLimit ... [Flaky] works with computed order" (row order of a tie; upstream marks it flaky).
-# 12 Nov 2026 (R4 round 6, r4six), all tests: MySQL 8.4.11 1809 pass, 2 fail; gateway 1808 pass, 3 fail. MyISAM's
-# descending key parts (1178) and the missing referenced table (1824) now answer as on MySQL (decisions X25, X27);
+# 12 Nov 2026 (later run), all tests: MySQL 8.4.11 1809 pass, 2 fail; gateway 1808 pass, 3 fail. MyISAM's
+# descending key parts (1178) and the missing referenced table (1824) now answer as on MySQL;
 # the one difference left is below.
-[MYSQL] Model constructor should allow the user to specify indexes in options	its FULLTEXT index becomes a search index (chapter 39, R5) and the next ADD INDEX fails with 1061 Duplicate key name 'models_field_c'; not investigated (R5)
+[MYSQL] Model constructor should allow the user to specify indexes in options	its FULLTEXT index becomes a search index and the next ADD INDEX fails with 1061 Duplicate key name 'models_field_c'; not investigated

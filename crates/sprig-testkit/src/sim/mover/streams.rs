@@ -1,6 +1,5 @@
-//! A stream sequencer under simulation (chapter 45, "Testing": crash the
-//! sequencer at every step; no record lost, duplicated in the log, or out
-//! of order per key; R9).
+//! A stream sequencer under simulation: crash the sequencer at every step;
+//! no record lost, duplicated in the log, or out of order per key.
 //!
 //! The real sequencer (`sprig_streams::Sequencer`) keeps a change topic of
 //! table `a` with four partitions, reading the real tenant feed over the two
@@ -151,7 +150,7 @@ fn lock(r: &Arc<Mutex<StreamRun>>) -> std::sync::MutexGuard<'_, StreamRun> {
 /// A worker process's shared reader over the clusters' binlog models, with
 /// buffers and a ring small enough that the sequencer's subscription is
 /// detached, returns through the ring, and needs catch-up dumps.
-fn shared_view(clusters: &Arc<SimClusters>) -> Arc<dyn Clusters> {
+pub(super) fn shared_view(clusters: &Arc<SimClusters>) -> Arc<dyn Clusters> {
     let feed = SharedFeed::new(
         Arc::clone(clusters) as Arc<dyn Clusters>,
         SharedOpts {
@@ -336,7 +335,7 @@ fn key_of(what: &str) -> Option<i64> {
     what[i..].split(',').next()?.trim().parse().ok()
 }
 
-/// Chapter 45's invariant: per partition, the records are the verified
+/// The stream invariant: per partition, the records are the verified
 /// changes of `a` with that partition's keys, in commit order, at offsets
 /// from 0 without gaps or duplicates, with epochs that never go down.
 pub(super) fn check_stream(

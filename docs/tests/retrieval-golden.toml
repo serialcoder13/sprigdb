@@ -1,0 +1,359 @@
+# Retrieval golden set for the docs pack.
+#
+# Each question is one a user, DBA or operator might ask, with the page under
+# docs/ that answers it (`page`), optionally the part of the heading path the
+# answering chunk must have (`heading`), text it must contain (`contains`,
+# for an identifier asked about), and other pages that answer it just as well
+# (`also`). A question counts as answered when a chunk that matches is
+# among the top five hits.
+#
+#   cargo run --release -p sprig-docs-gen --no-default-features --bin docs-pack -- \
+#       eval --model target/models/bge-small-en-v1.5
+#
+# Change an answer only when the docs move; don't tune the answers to the search.
+
+# ---- error codes ----
+
+[[question]]
+kind = "error-code"
+q = "what does error 39420 mean"
+contains = "39420"
+page = "reference/errors.md"
+also = ["troubleshooting/sharding-and-moves.md", "performance/query-plans.md"]
+
+[[question]]
+kind = "error-code"
+q = "ER_SPRIG_MOVE_SOURCE_DIVERGED"
+contains = "ER_SPRIG_MOVE_SOURCE_DIVERGED"
+page = "reference/errors.md"
+also = ["troubleshooting/sharding-and-moves.md"]
+
+[[question]]
+kind = "error-code"
+q = "my app gets 39001 too many connections for the tenant"
+contains = "39001"
+page = "reference/errors.md"
+also = ["performance/limits-and-timeouts.md", "troubleshooting/connections.md"]
+
+[[question]]
+kind = "error-code"
+q = "error 39303 tenant suspended when logging in"
+contains = "39303"
+page = "reference/errors.md"
+also = ["troubleshooting/connections.md", "security/tenant-administration.md", "concepts/tenants-and-databases.md"]
+
+[[question]]
+kind = "error-code"
+q = "what is ER_SPRIG_ROUTER_MEMORY_LIMIT and how do I avoid it"
+contains = "ER_SPRIG_ROUTER_MEMORY_LIMIT"
+page = "reference/errors.md"
+also = ["performance/limits-and-timeouts.md", "performance/query-plans.md"]
+
+[[question]]
+kind = "error-code"
+q = "why can't I create a table whose name starts with __sprig_"
+contains = "__sprig_"
+page = "reference/errors.md"
+also = ["sql/information-schema.md"]
+
+[[question]]
+kind = "error-code"
+q = "MongoDB driver reports codeName SprigShardMoved"
+contains = "SprigShardMoved"
+page = "reference/errors.md"
+also = ["troubleshooting/reading-errors.md"]
+
+[[question]]
+kind = "error-code"
+q = "driver shows a negative error number like -26116"
+contains = "-26116"
+page = "troubleshooting/reading-errors.md"
+heading = "Negative error numbers"
+
+[[question]]
+kind = "error-code"
+q = "which SprigDB errors are safe to retry"
+page = "troubleshooting/reading-errors.md"
+also = ["reference/errors.md"]
+
+# ---- settings ----
+
+[[question]]
+kind = "setting"
+q = "what does auto_index.mode do and what values can it take"
+contains = "auto_index.mode"
+page = "reference/settings.md"
+also = ["performance/automatic-indexing.md", "concepts/automatic-indexing.md"]
+
+[[question]]
+kind = "setting"
+q = "default of limits.tenant_connections"
+contains = "limits.tenant_connections"
+page = "reference/settings.md"
+also = ["performance/limits-and-timeouts.md"]
+
+[[question]]
+kind = "setting"
+q = "reads.max_replica_lag_ms"
+contains = "reads.max_replica_lag_ms"
+page = "reference/settings.md"
+also = ["performance/read-routing.md"]
+
+[[question]]
+kind = "setting"
+q = "how long can a move hold writes during cutover, mover.cutover_max_hold_ms"
+contains = "mover.cutover_max_hold_ms"
+page = "reference/settings.md"
+also = ["troubleshooting/sharding-and-moves.md", "operate/backups-and-moves.md"]
+
+[[question]]
+kind = "setting"
+q = "require TLS for every user of a tenant"
+page = "security/accounts-and-logins.md"
+also = ["reference/settings.md", "security/tls.md"]
+
+[[question]]
+kind = "setting"
+q = "how do I change a setting for one table only"
+page = "sql/settings.md"
+also = ["concepts/settings-and-scopes.md"]
+
+[[question]]
+kind = "setting"
+q = "a wider scope locked a setting, how do I unlock it"
+page = "concepts/settings-and-scopes.md"
+also = ["sql/settings.md", "reference/errors.md"]
+
+[[question]]
+kind = "setting"
+q = "turn on the Kafka listener"
+contains = "listener.kafka.enabled"
+page = "connect/kafka.md"
+heading = "Enable the listener"
+
+# ---- how-tos ----
+
+[[question]]
+kind = "how-to"
+q = "how do I shard a table by customer"
+page = "concepts/shards-and-table-groups.md"
+also = ["sql/sharding.md", "performance/sharding-advisor.md"]
+
+[[question]]
+kind = "how-to"
+q = "pin a table to a distribution key so the advisor keeps it"
+page = "sql/sharding.md"
+also = ["performance/sharding-advisor.md"]
+
+[[question]]
+kind = "how-to"
+q = "create my first tenant and its administrator"
+page = "get-started/first-tenant.md"
+
+[[question]]
+kind = "how-to"
+q = "move a tenant to another cluster"
+page = "operate/backups-and-moves.md"
+also = ["operate/data-centres.md"]
+
+[[question]]
+kind = "how-to"
+q = "cancel a shard move that is stuck"
+page = "troubleshooting/sharding-and-moves.md"
+also = ["reference/sprigctl.md", "operate/backups-and-moves.md"]
+
+[[question]]
+kind = "how-to"
+q = "approve or dismiss an index recommendation"
+page = "performance/automatic-indexing.md"
+also = ["concepts/approvals.md", "concepts/automatic-indexing.md"]
+
+[[question]]
+kind = "how-to"
+q = "create a row-level security policy so users only see their own rows"
+page = "security/row-level-security.md"
+also = ["sql/row-level-security.md"]
+
+[[question]]
+kind = "how-to"
+q = "create an API key for a script"
+page = "security/api-keys-and-tokens.md"
+
+[[question]]
+kind = "how-to"
+q = "drain a cluster and retire it"
+page = "operate/clusters.md"
+also = ["reference/sprigctl.md"]
+
+[[question]]
+kind = "how-to"
+q = "upgrade SprigDB without downtime, in which order do I restart the roles"
+page = "operate/upgrades.md"
+
+[[question]]
+kind = "how-to"
+q = "back up etcd and the secrets"
+page = "operate/backups-and-moves.md"
+
+[[question]]
+kind = "how-to"
+q = "install SprigDB on Kubernetes with the Helm chart"
+page = "operate/deploy-kubernetes.md"
+
+[[question]]
+kind = "how-to"
+q = "send table changes to a webhook or another system"
+page = "data-models/sinks.md"
+also = ["concepts/change-feed.md", "sql/streams-queues-sinks.md"]
+
+[[question]]
+kind = "how-to"
+q = "create a full-text search index in SQL"
+page = "data-models/search.md"
+also = ["sql/search-and-vectors.md"]
+
+# ---- concepts ----
+
+[[question]]
+kind = "concept"
+q = "what is a table group and a distribution key"
+page = "concepts/shards-and-table-groups.md"
+
+[[question]]
+kind = "concept"
+q = "how does automatic indexing decide to build an index"
+page = "concepts/automatic-indexing.md"
+also = ["performance/automatic-indexing.md"]
+
+[[question]]
+kind = "concept"
+q = "how are settings resolved across scopes"
+page = "concepts/settings-and-scopes.md"
+also = ["sql/settings.md", "reference/settings.md"]
+
+[[question]]
+kind = "concept"
+q = "how do reads get routed to replicas and what is read-your-writes"
+page = "performance/read-routing.md"
+also = ["concepts/clusters-and-data-centres.md"]
+
+[[question]]
+kind = "concept"
+q = "what is data inheritance between parent and child tenants"
+page = "data-models/inheritance.md"
+also = ["sql/inheritance.md"]
+
+[[question]]
+kind = "concept"
+q = "how does SprigDB keep data in a region for residency"
+page = "security/residency.md"
+
+[[question]]
+kind = "concept"
+q = "what are the MySQL and MariaDB personas"
+page = "connect/mysql-and-mariadb.md"
+also = ["sql/overview.md"]
+
+[[question]]
+kind = "concept"
+q = "how do distributed transactions across shards work"
+page = "concepts/shards-and-table-groups.md"
+also = ["troubleshooting/sharding-and-moves.md"]
+
+# ---- protocols ----
+
+[[question]]
+kind = "protocol"
+q = "which MongoDB authentication mechanisms are supported"
+page = "connect/mongodb.md"
+heading = "Authentication"
+
+[[question]]
+kind = "protocol"
+q = "connect redis-cli to SprigDB with a tenant user"
+page = "connect/redis.md"
+also = ["data-models/key-value.md"]
+
+[[question]]
+kind = "protocol"
+q = "how is SprigDB's Redis different from a real Redis server"
+page = "connect/redis.md"
+heading = "How it differs from a Redis server"
+
+[[question]]
+kind = "protocol"
+q = "Kafka clients can't reach the brokers behind a load balancer, advertised host"
+page = "connect/kafka.md"
+
+[[question]]
+kind = "protocol"
+q = "are Kafka topics stored as streams"
+page = "connect/kafka.md"
+also = ["data-models/streams.md"]
+
+[[question]]
+kind = "protocol"
+q = "do MongoDB change streams work"
+page = "data-models/documents.md"
+also = ["connect/mongodb.md", "concepts/change-feed.md"]
+
+[[question]]
+kind = "protocol"
+q = "query a graph with Cypher over Bolt"
+page = "data-models/graphs.md"
+also = ["connect/bolt-and-cypher.md"]
+
+[[question]]
+kind = "protocol"
+q = "use queues from RabbitMQ clients over AMQP"
+page = "data-models/queues.md"
+also = ["connect/amqp.md"]
+
+[[question]]
+kind = "protocol"
+q = "run SQL over the REST API with a transaction"
+page = "connect/rest-and-grpc.md"
+
+# ---- troubleshooting ----
+
+[[question]]
+kind = "troubleshooting"
+q = "caching_sha2_password fails on the first login"
+page = "troubleshooting/connections.md"
+also = ["get-started/connect-from-code.md", "connect/mysql-and-mariadb.md"]
+
+[[question]]
+kind = "troubleshooting"
+q = "writes pause for a moment at the end of a shard move"
+page = "troubleshooting/sharding-and-moves.md"
+heading = "Write pauses at cutover"
+
+[[question]]
+kind = "troubleshooting"
+q = "my query is slow because it scatters to every shard"
+page = "troubleshooting/performance.md"
+also = ["performance/query-plans.md"]
+
+[[question]]
+kind = "troubleshooting"
+q = "failover didn't happen when the primary died"
+page = "troubleshooting/failover.md"
+also = ["operate/failover.md"]
+
+[[question]]
+kind = "troubleshooting"
+q = "my address is blocked after too many failed logins"
+page = "troubleshooting/connections.md"
+also = ["security/accounts-and-logins.md"]
+
+[[question]]
+kind = "troubleshooting"
+q = "automatic indexing isn't creating any index"
+page = "troubleshooting/performance.md"
+also = ["performance/automatic-indexing.md"]
+
+[[question]]
+kind = "troubleshooting"
+q = "replica lag is high and reads go to the writer"
+page = "troubleshooting/performance.md"
+also = ["performance/read-routing.md"]

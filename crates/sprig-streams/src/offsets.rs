@@ -1,17 +1,17 @@
 //! Committing a consumer group's offset inside the caller's transaction
-//! (chapter 45, "Exactly-once consume and write"; build step 15):
-//! `sprig.commit_offset` from SQL, `db.commitOffset` from logic, and the
-//! position of a trigger on a stream (chapter 41).
+//! (exactly-once consume and write): `sprig.commit_offset` from SQL,
+//! `db.commitOffset` from logic, and the position of a trigger on a
+//! stream.
 //!
 //! `stream_offsets` lives in the tenant catalog, which a tenant's backend
-//! accounts can't reach (chapter 29 grants them only shard schemas). So
+//! accounts can't reach (they are granted only shard schemas). So
 //! the write is a procedure in the catalog, [`PROCEDURE`], created by
 //! `sprig_ctl` with `SQL SECURITY DEFINER`, which the session calls on its
 //! own backend connection, inside its transaction. The right to call it
 //! comes from a MariaDB role per tenant, [`role`], holding only `EXECUTE`
 //! on that procedure; the gateway grants the role to an account the first
 //! time it commits an offset, and activates it (`SET ROLE`) for the one
-//! call. The reconciler of chapter 29 reads and revokes only grants made
+//! call. The grants reconciler reads and revokes only grants made
 //! directly to `t<tenant>_u<user>` accounts, so it leaves the role alone.
 //!
 //! ```text
@@ -33,7 +33,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 /// The procedure's name in `t<tenant>_sprig`.
 pub const PROCEDURE: &str = "__sprig_commit_offset";
 
-/// The fan-in reader's procedure (R9): [`PROCEDURE`] with the member whose
+/// The fan-in reader's procedure: [`PROCEDURE`] with the member whose
 /// instance the position is on (`stream_offsets.instance_tenant_id`).
 pub const PROCEDURE_FAN_IN: &str = "__sprig_commit_offset_fi";
 
@@ -45,7 +45,7 @@ pub const LOGIC_GROUP_PREFIX: &str = "__sprig_logic_";
 pub const MOVED_ERRNO: u16 = 39877;
 
 /// The consumer group of the trigger on a stream with binding `binding`
-/// (chapter 41: `__sprig_logic_<binding id>`).
+/// (`__sprig_logic_<binding id>`).
 #[must_use]
 pub fn logic_group(binding: u64) -> String {
     format!("{LOGIC_GROUP_PREFIX}{binding}")
@@ -148,7 +148,7 @@ pub fn procedure_for(schema: &str, c: &Commit) -> String {
 pub struct Commit {
     /// The consumer group.
     pub group: String,
-    /// The member whose instance `stream` is (a fan-in reader, R9); 0 for
+    /// The member whose instance `stream` is (a fan-in reader); 0 for
     /// the tenant's own stream.
     pub instance: u64,
     /// The stream.
@@ -324,7 +324,7 @@ pub async fn positions<Q: Queryable + Send>(
 }
 
 /// [`positions`] on member `instance`'s instance `stream` (a fan-in
-/// reader, R9; 0 for the tenant's own stream).
+/// reader; 0 for the tenant's own stream).
 ///
 /// # Errors
 /// The backend's.

@@ -1,4 +1,4 @@
-//! Live tests through the MongoDB Rust driver (chapter 30, "Testing").
+//! Live tests through the MongoDB Rust driver.
 //!
 //! - `SPRIG_TEST_MONGO_URI`: a SprigDB gateway's MongoDB listener, with a
 //!   tenant login, such as
@@ -755,7 +755,7 @@ async fn corpus(db: &Database) -> Vec<(String, Bson)> {
     out
 }
 
-/// Change streams (chapter 30 step 9): the events of a few writes, with
+/// Change streams: the events of a few writes, with
 /// the resume token and times masked.
 async fn stream_corpus(db: &Database) -> Vec<(String, Bson)> {
     use futures_util::StreamExt;
@@ -780,7 +780,7 @@ async fn stream_corpus(db: &Database) -> Vec<(String, Bson)> {
     c.update_one(doc! {"_id": 1}, doc! {"$inc": {"a": 1}, "$pop": {"t": 1}})
         .await
         .unwrap();
-    // A replacement: a `replace` event (r5-interim D14).
+    // A replacement: a `replace` event.
     c.replace_one(doc! {"_id": 1}, doc! {"r": 1, "s": "x"})
         .await
         .unwrap();
@@ -804,7 +804,7 @@ async fn stream_corpus(db: &Database) -> Vec<(String, Bson)> {
         ] {
             // updateLookup: MongoDB reads the document when it sends the
             // event (null here, as it is deleted by then); SprigDB sends
-            // the document as that update left it (r5-interim D14).
+            // the document as that update left it.
             if k == "fullDocument" && e.get_str("operationType") == Ok("update") {
                 continue;
             }
@@ -849,7 +849,7 @@ fn write_view(d: &Document) -> Bson {
     Bson::Document(o)
 }
 
-/// Retryable writes (chapter 30 step 7): the same `lsid` and `txnNumber`
+/// Retryable writes: the same `lsid` and `txnNumber`
 /// sent twice answer the same and write once; an older `txnNumber` is
 /// refused with 225. Needs a replica set on the reference side.
 async fn retry_corpus(db: &Database) -> Vec<(String, Bson)> {
@@ -932,7 +932,7 @@ async fn retry_corpus(db: &Database) -> Vec<(String, Bson)> {
     for (name, cmd) in steps {
         run(name, cmd, &mut s).await;
     }
-    // bulkWrite as a retryable write (r5-interim D17): sent twice with
+    // bulkWrite as a retryable write: sent twice with
     // one txnNumber, it runs once and answers the same.
     let admin = client.database("admin");
     let ns = format!("{}.retry", db.name());
@@ -1009,7 +1009,7 @@ fn bulk_view(d: &Document) -> Bson {
     Bson::Document(o)
 }
 
-/// MongoDB 8.0's `bulkWrite` (r5-interim D17): mixed ops over two
+/// MongoDB 8.0's `bulkWrite`: mixed ops over two
 /// collections, ordered and unordered, `errorsOnly`, refusals.
 async fn bulk_corpus(db: &Database) -> Vec<(String, Bson)> {
     let admin = db.client().database("admin");

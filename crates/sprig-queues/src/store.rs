@@ -1,4 +1,4 @@
-//! What the queue owner keeps durable (chapter 50, "Shard tables"): the
+//! What the queue owner keeps durable: the
 //! [`MsgStore`] boundary, served by MariaDB ([`crate::maria::MariaStore`],
 //! the `__sprig_q*` tables of a shard schema) and by memory
 //! ([`crate::memstore::MemStore`]: temporary queues, tests and the
@@ -316,7 +316,7 @@ pub trait MsgStore: Send + Sync + 'static {
     async fn outbox_done(&self, ids: &[MsgId]) -> Result<(), StoreError>;
 
     /// Messages stored for `queue` (ready and delivered, not yet
-    /// acknowledged), all lanes: `mq_info`'s count (R9, ST50). The
+    /// acknowledged), all lanes: `mq_info`'s count. The
     /// default reads lane 0 through [`MsgStore::load`].
     async fn stored(&self, queue: u64) -> Result<u64, StoreError> {
         Ok(self.load(queue, 0, None, 100_000).await?.len() as u64)

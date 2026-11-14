@@ -1,4 +1,4 @@
-//! The generated code in `src/gen/` matches the protos (chapter 37 step 1).
+//! The generated code in `src/gen/` matches the protos.
 //!
 //! Building the workspace needs no `protoc`: the prost and tonic output is
 //! checked in. This test regenerates it into a scratch directory with

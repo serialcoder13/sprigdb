@@ -1,20 +1,44 @@
 [package]
 name = "sprig-docs-gen"
-description = "Writes and checks SprigDB's generated reference docs (docs/reference/, chapter 55)"
+description = "Writes and checks SprigDB's generated reference docs (docs/reference/), and builds and evaluates the docs pack"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+default-run = "sprig-docs-gen"
 
+# Two binaries:
+# - sprig-docs-gen writes and checks docs/reference/ from the code, so it
+#   links the gateway (feature `reference`, on by default);
+# - docs-pack builds and evaluates the docs pack and needs only the docs and
+#   the embedding model:
+#   `cargo run --release -p sprig-docs-gen --no-default-features --bin docs-pack`.
+#
 # settings.md comes from the server binary itself (`sprigdb docs-settings`,
 # tested in crates/sprigdb/tests/docs_settings.rs), not from this crate.
+[[bin]]
+name = "sprig-docs-gen"
+path = "src/main.rs"
+required-features = ["reference"]
+
+[[bin]]
+name = "docs-pack"
+path = "src/bin/docs-pack.rs"
+
+[features]
+default = ["reference"]
+reference = ["dep:sprig-common", "dep:sprig-gateway"]
+
 [dependencies]
+serde.workspace = true
 serde_json.workspace = true
-sprig-common.workspace = true
-sprig-docs = { path = "../sprig-docs" }
-sprig-gateway.workspace = true
+sprig-common = { workspace = true, optional = true }
+sprig-docs.workspace = true
+sprig-embed.workspace = true
+sprig-gateway = { workspace = true, optional = true }
+toml.workspace = true
 
 [lints]
 workspace = true

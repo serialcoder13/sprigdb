@@ -1,4 +1,4 @@
-//! The binlog reader over TLS (r2opfix), against a server that refuses
+//! The binlog reader over TLS, against a server that refuses
 //! plain text (`require_secure_transport = ON`, an account `REQUIRE SSL`).
 //!
 //! `SPRIG_TEST_BINLOG_TLS` is `mysql://<repl user>:<pw>@host:port` of such

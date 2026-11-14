@@ -1,5 +1,4 @@
-//! Relay-log safe drains (chapter 25; decisions/r2-failover.md, "Relay-log
-//! safe drains (r2drain)").
+//! Relay-log safe drains.
 //!
 //! MariaDB discards a replica's relay log when its SQL thread is started
 //! while its IO thread is stopped (under `MASTER_USE_GTID` it then restarts

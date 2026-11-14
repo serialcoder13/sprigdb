@@ -18,7 +18,7 @@ sha1.workspace = true
 sprig-common.workspace = true
 sprig-kv = { path = "../sprig-kv" }
 sprig-proto-redis = { path = "../sprig-proto-redis" }
-# Lua scripts and functions run on SprigDB's one Lua runtime (chapter 41).
+# Lua scripts and functions run on SprigDB's one Lua runtime.
 sprig-logic-js.workspace = true
 mlua = { version = "=0.12.2", features = ["lua51", "vendored", "serialize"] }
 tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
@@ -30,7 +30,7 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros"] }
 # The differential suite's client (BSD-3-Clause), against a reference Redis.
 redis = { version = "=0.27.6", default-features = false, features = ["aio", "tokio-comp"] }
-# The key-value geo test's oracle: WGS 84 distances (chapter 36).
+# The key-value geo test's oracle: WGS 84 distances.
 sprig-geo = { path = "../sprig-geo" }
 
 [lints]

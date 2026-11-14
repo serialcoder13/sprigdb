@@ -1,14 +1,13 @@
-//! Change streams over the API (chapter 37, "Change streams"; chapter 38;
-//! build step 11; RLS round 5, decision RL45): `Changes.Watch` over gRPC
-//! streaming, and `GET /v1/databases/{db}/changes` as Server-Sent Events
-//! (`Accept: text/event-stream`), WebSocket (`Upgrade: websocket`, HTTP/1.1)
-//! or NDJSON (anything else).
+//! Change streams over the API: `Changes.Watch` over gRPC streaming, and
+//! `GET /v1/databases/{db}/changes` as Server-Sent Events (`Accept:
+//! text/event-stream`), WebSocket (`Upgrade: websocket`, HTTP/1.1) or
+//! NDJSON (anything else).
 //!
 //! ```text
 //! watch(caller, database, objects, start_after | Last-Event-ID | now):
 //!   every requested table: SELECT, then WATCH (the image check below, no
-//!     image), else 1142 naming the missing one (chapters 29 and 38)
-//!   tail the tenant's feed (chapter 38's TenantTail) from the token or now
+//!     image), else 1142 naming the missing one
+//!   tail the tenant's feed (TenantTail) from the token or now
 //!   per batch of feed events (up to 256, or what arrived within 20 ms):
 //!     events of the database (of `objects` when given; internal tables never)
 //!     the images checked in one session of the caller (exec::rls_images):
@@ -27,7 +26,7 @@
 //! stream on (heartbeats carry it), so a resumed stream never sees it
 //! either.
 //!
-//! Limits (RLS round 5, decision RL53): at most `api.stream.max_per_tenant`
+//! Limits: at most `api.stream.max_per_tenant`
 //! open streams per tenant on a gateway (39780 past it); a client more than
 //! `api.stream.max_buffered_events` behind gets 39790 and the stream ends
 //! (it resumes from its last token); heartbeats every
@@ -132,7 +131,7 @@ pub struct WatchSpec {
     pub full_document: bool,
 }
 
-/// One event (or heartbeat) as chapter 37's `ChangeEvent`.
+/// One event (or heartbeat) as the API's `ChangeEvent`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WatchEvent {
     /// Resume after it.
@@ -210,7 +209,7 @@ type FeedParts = (
 );
 
 /// The feed's parts, one set per process (also the Redis keyspace
-/// notifications', RL51).
+/// notifications').
 pub(crate) fn feed(svc: &crate::tenant::TenantServices) -> Result<FeedParts> {
     static F: OnceLock<FeedParts> = OnceLock::new();
     if let Some(f) = F.get() {
@@ -320,8 +319,7 @@ pub async fn open(
             "No database selected".to_owned(),
         ));
     }
-    // 1. SELECT, then WATCH (chapters 29 and 38), on every requested
-    //    table.
+    // 1. SELECT, then WATCH, on every requested table.
     if !spec.objects.is_empty() {
         let mut req = ImagesRequest {
             tables: spec
@@ -372,7 +370,7 @@ pub async fn open(
         },
     )
     .await?;
-    // Chapter 42 (decision T30): the parent tenants' changes reach this
+    // Data inheritance: the parent tenants' changes reach this
     // tenant's view through read-through edges, without an event in its
     // own feed; their feeds are tailed from now.
     let above = inherit::ancestor_tails(&svc, tenant, &clusters, &placement, &names).await;
@@ -395,7 +393,7 @@ pub async fn open(
     } else {
         spec.start_after.clone()
     };
-    // One slot more than the buffer: the slow-consumer error's (RL53).
+    // One slot more than the buffer: the slow-consumer error's.
     let (tx, rx) = mpsc::channel(limits.change_buffer.max(16) + 1);
     let core = Arc::clone(core);
     tokio::spawn(async move {
@@ -445,8 +443,7 @@ struct Pending {
     /// DDL and truncate, and an inheritable object's events: the
     /// privilege alone.
     probe: Option<usize>,
-    /// An inheritable object's event, mapped to the subscriber's space
-    /// (chapter 42, decision T30).
+    /// An inheritable object's event, mapped to the subscriber's space.
     mapped: Option<inherit::Mapped>,
 }
 
@@ -554,9 +551,9 @@ fn wanted(spec: &WatchSpec, e: &sprig_feed::ChangeEvent) -> bool {
                 .any(|o| o.eq_ignore_ascii_case(&e.table)))
 }
 
-/// The stream's own feed as the loop reads it: in a task of its own
-/// (decision r9-131). `TenantTail::next` isn't cancel-safe, and the batch
-/// window, the heartbeat and the parent tenants' feeds race it below.
+/// The stream's own feed as the loop reads it: in a task of its own.
+/// `TenantTail::next` isn't cancel-safe, and the batch window, the
+/// heartbeat and the parent tenants' feeds race it below.
 pub(super) type OwnFeed = sprig_feed::pump::Pump<FeedItem>;
 
 fn own_feed(tail: TenantTail) -> OwnFeed {
@@ -633,7 +630,7 @@ async fn run(
             }
             Batch::Items(items) => items,
         };
-        // Chapters 29 and 38: every event needs WATCH on its table too.
+        // Every event needs WATCH on its table too.
         let mut req = ImagesRequest {
             watch: true,
             ..ImagesRequest::default()
@@ -658,7 +655,7 @@ async fn run(
                             e.token = t;
                         }
                     }
-                    let mut mapped = None;
+                    let mut inherited = None;
                     if !own && mapper.is_none() {
                         continue;
                     }
@@ -666,7 +663,7 @@ async fn run(
                         match m.classify(&mut e, own) {
                             inherit::Class::Plain => {}
                             inherit::Class::Drop => continue,
-                            inherit::Class::Inherit(x) => mapped = Some(x),
+                            inherit::Class::Inherit(x) => inherited = Some(x),
                         }
                     }
                     if !wanted(spec, &e) {
@@ -696,7 +693,7 @@ async fn run(
                         }
                         Op::Ddl(_) | Op::Truncate => probe = Some(push(None)),
                     }
-                    if mapped.is_some() && probe.is_none() {
+                    if inherited.is_some() && probe.is_none() {
                         probe = Some(push(None));
                     }
                     pending.push(Pending {
@@ -705,7 +702,7 @@ async fn run(
                         before,
                         after,
                         probe,
-                        mapped,
+                        mapped: inherited,
                     });
                 }
                 FeedItem::TxnEnd { token } | FeedItem::Progress { token } => {
@@ -1070,7 +1067,7 @@ fn ws_parse(buf: &[u8]) -> Option<(u8, Vec<u8>, usize)> {
 mod tests {
     use super::*;
 
-    /// Decision r9-131: the 20 ms batch window, a short heartbeat and a
+    /// Regression: the 20 ms batch window, a short heartbeat and a
     /// parent tenant's items all fire while the own tail waits on a new
     /// table's catalog lookup (30 ms here). Every change of the own feed
     /// must still come once, in order.

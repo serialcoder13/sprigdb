@@ -1,4 +1,4 @@
-//! Golden vectors (chapter 15, "Hashing and routing"): `tests/vectors.txt`
+//! Golden vectors: `tests/vectors.txt`
 //! pins the normalized bytes and `xxh3_64` of fixed values. A changed line
 //! fails: routing hashes of stored rows must never change.
 //!
@@ -101,9 +101,8 @@ fn golden_vectors() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/vectors.txt");
     let got: Vec<String> = CASES.iter().map(|c| line(c)).collect();
     if std::env::var("SPRIG_REGEN_VECTORS").as_deref() == Ok("1") {
-        let mut text = String::from(
-            "# class\tvalue\tnormalized bytes\txxh3_64 (chapter 15); never edit by hand\n",
-        );
+        let mut text =
+            String::from("# class\tvalue\tnormalized bytes\txxh3_64; never edit by hand\n");
         for l in &got {
             text.push_str(l);
             text.push('\n');

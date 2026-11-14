@@ -1,2 +1,2 @@
-// Known differences from MongoDB 8.0.34 (M3). One case name per line, then why.
+// Known differences from MongoDB 8.0.34. One case name per line, then why.
 q#584  "a.0" over an array of documents: MongoDB reports "field was missing" while SprigDB considers a[0]; both refuse the document.

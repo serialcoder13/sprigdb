@@ -1,8 +1,8 @@
 //! `sprig-cluster`: the cluster registry, probes, topology drivers, fencing primitives and `BackendExecutor`, the one way into MariaDB.
 //!
-//! Layer: 1 foundations. Design: [chapter 09](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/09-clusters.md) (Clusters) of the SprigDB low-level design.
+//! Layer: 1 foundations.
 //!
-//! What exists (chapter 09, build steps 1-8):
+//! What exists:
 //! - [`record`] and [`registry`]: the cluster record, the registry over
 //!   [`MetaStore`](sprig_meta::MetaStore) with global id allocation,
 //!   compare-and-set writes, events and watches;
@@ -21,12 +21,12 @@
 //!   choice ([`driver::galera`]);
 //! - [`fence`]: `RevokeKill` and `Rename` shard fences, receipts, unfence;
 //! - [`sys`]: the internal schema `__sprig_sys`;
-//! - [`settings`]: the `cluster.*` keys these steps use;
-//! - [`failover`]: chapter 25's cluster failover per topology (primary +
+//! - [`settings`]: the `cluster.*` keys these modules use;
+//! - [`failover`]: cluster failover per topology (primary +
 //!   replicas, Galera quorum, single node, external) and the flapping
 //!   damper.
 //!
-//! Step 9, the Admin API's `Clusters` service and `sprigctl cluster`, is in
+//! The Admin API's `Clusters` service and `sprigctl cluster` are in
 //! `sprig-controller::admin` and `sprigctl`; the controller's `registry`
 //! loop (`sprig-controller::monitor`) runs the probes and publishes.
 //!
@@ -34,9 +34,9 @@
 //! which needs a binlog read at the horizon), the dump probe in the
 //! controller's `registry` loop (it calls [`probe::Prober::probe_cluster`],
 //! which has no `sprig_repl` endpoint; registration runs it), live
-//! tuning through the agent and operator (step 12, R2; [`tuning`] has
-//! steps 10 and 11). Failover (step 13) is [`failover`], as plain
-//! functions rather than `FailoverHooks` (see there).
+//! tuning through the agent and operator ([`tuning`] has the plan and its
+//! hysteresis). Failover is [`failover`], as plain functions rather than
+//! `FailoverHooks` (see there).
 
 pub mod driver;
 pub mod failover;

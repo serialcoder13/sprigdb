@@ -1,5 +1,4 @@
-//! The consumer group coordinator: Kafka's classic group protocol (chapter
-//! 45, "Consumer groups", build step 12).
+//! The consumer group coordinator: Kafka's classic group protocol.
 //!
 //! A gateway coordinates a group while it holds the group's lease
 //! ([`Leases`]); FindCoordinator sends members there. Membership,
@@ -120,7 +119,7 @@ pub struct CommittedOffset {
 pub struct StoreError(pub String);
 
 /// The durable part of consumer groups: `stream_groups` and
-/// `stream_offsets` in the tenant catalog (chapter 45).
+/// `stream_offsets` in the tenant catalog.
 #[async_trait]
 pub trait GroupStore: Send + Sync + 'static {
     /// Writes offsets, replacing earlier ones of the same partitions.
@@ -154,7 +153,7 @@ pub trait GroupStore: Send + Sync + 'static {
     async fn delete_group(&self, tenant: u64, group: &str) -> Result<(), StoreError>;
 }
 
-/// The coordinator leases of groups (chapter 45's etcd key
+/// The coordinator leases of groups (etcd key
 /// `/sprig/dc/<dc_id>/stream-groups/<tenant_id>/<group>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaseState {
@@ -625,7 +624,7 @@ impl Group {
 /// The coordinator of every group this gateway holds the lease of.
 pub struct Coordinator {
     groups: std::sync::Mutex<HashMap<GroupKey, Arc<Mutex<Group>>>>,
-    /// Each group's writer of its durable row (r9more): rows are written
+    /// Each group's writer of its durable row: rows are written
     /// off the group's lock and off the timer loop, one group's writes in
     /// order, so a slow catalog write never holds up a rebalance.
     writers: std::sync::Mutex<HashMap<GroupKey, Arc<Writer>>>,
@@ -1416,7 +1415,7 @@ mod tests {
         }
     }
 
-    /// r9more: a group's row write that hangs (a catalog row lock, a slow
+    /// Regression: a group's row write that hangs (a catalog row lock, a slow
     /// backend) held the shared timer loop, so a new group's first join
     /// waited for it (36.6 s measured with kafka-python against a held
     /// row lock). Now the other group's join completes after its own

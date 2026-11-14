@@ -1,4 +1,4 @@
-//! The generated protobuf code (chapter 37 step 1). Do not edit `src/gen/`
+//! The generated protobuf code. Do not edit `src/gen/`
 //! by hand: change the `.proto` files under `proto/` and run
 //! `SPRIG_API_REGEN=1 cargo test -p sprig-api --test codegen`.
 
@@ -10,7 +10,8 @@
     rust_2018_idioms
 )]
 
-/// `sprig.v1`: the data services (`Sql`, `Transactions` in R0).
+/// `sprig.v1`: the data services (`Sql`, `Transactions` and the other
+/// data APIs).
 pub mod v1 {
     include!("gen/sprig.v1.rs");
 }
@@ -26,7 +27,7 @@ pub mod internal {
 }
 
 /// `sprig.internal.logic.v1`: workers running triggers on streams and
-/// queues through a gateway (chapter 41, R9), on 7403.
+/// queues through a gateway, on 7403.
 pub mod logic_peer {
     include!("gen/sprig.internal.logic.v1.rs");
 }

@@ -1,5 +1,5 @@
-//! The sequencer job and what it needs around the [`Sequencer`] (chapter
-//! 45, "Sequencing and offsets", "Retention and compaction").
+//! The sequencer job and what it needs around the [`Sequencer`]
+//! (sequencing, offsets, retention and compaction).
 //!
 //! ```text
 //! CREATE STREAM (gateway) → feed subscription stream:<id>, kind `stream`
@@ -8,7 +8,7 @@
 //! worker: run_job:
 //!   load the stream's row; gone or dropping → end
 //!   Sequencer over a MariaLog on the tenant's cluster now, its feed a
-//!     TenantTail that keeps the stream's outbox (chapter 38's filter rule 1
+//!     TenantTail that keeps the stream's outbox (the feed's default filter
 //!     would drop __sprig_ tables)
 //!   every second: progress (the job runtime's lease: a lost job is cancelled)
 //!   every minute: retention and compaction (crate::retention), with the
@@ -338,7 +338,7 @@ pub trait JobEnv: Send + Sync {
     }
 }
 
-/// Where a job reports progress (chapter 23's job runtime).
+/// Where a job reports progress (the job runtime).
 #[async_trait::async_trait]
 pub trait Report: Send + Sync {
     /// Reports progress; `false` when the job was lost.
@@ -472,14 +472,14 @@ pub async fn run_job(
                 });
                 // Lag per instance stays in the progress record (`lag_ms`);
                 // the gauges are this worker's worst lag and the count over
-                // the threshold (decision r9-132).
+                // the threshold.
                 lag::export(false);
                 if !report.progress(p).await {
                     stop.cancel();
                 }
                 // DROP STREAM removes the subscription first: stop at once,
-                // so the job's slot is free within a second (r9triggers;
-                // the catalog check below runs only every minute).
+                // so the job's slot is free within a second (the catalog
+                // check below runs only every minute).
                 if subscription_gone(&subs, tenant, id).await {
                     tracing::info!(stream = id.0, "stream's subscription dropped; its sequencer stops");
                     stop.cancel();
@@ -514,8 +514,8 @@ pub async fn run_job(
     })
 }
 
-/// The lag of this worker's stream sequencers as bounded series (R9,
-/// feedcancel; decision r9-132, replacing r9feed's gauge per instance):
+/// The lag of this worker's stream sequencers as bounded series (they
+/// replace an earlier gauge per instance):
 ///
 /// - `sprig_stream_sequencer_lag_max_seconds`: the worst lag of the
 ///   sequencers running here (0 with none);
@@ -629,6 +629,98 @@ pub mod lag {
     }
 }
 
+/// Each running sequencer's lag (`lag_ms` in its job's progress record,
+/// the lag per instance), for `SHOW STREAMS`.
+///
+/// The DC's jobs are listed at most once a second per process, whatever
+/// the number of sessions asking: a job's progress changes once a second
+/// anyway.
+pub mod instance_lag {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, PoisonError};
+    use std::time::{Duration, Instant};
+
+    use serde_json::Value;
+    use sprig_common::Result;
+    use sprig_common::ids::TenantId;
+    use sprig_meta::{ListOpts, MetaStore};
+
+    use super::JOB_KIND;
+    use crate::model::StreamId;
+
+    type Lags = Arc<HashMap<(TenantId, StreamId), u64>>;
+
+    /// How long a listing serves.
+    pub const FRESH: Duration = Duration::from_secs(1);
+
+    fn cache() -> &'static Mutex<Option<(Instant, Lags)>> {
+        static C: std::sync::OnceLock<Mutex<Option<(Instant, Lags)>>> = std::sync::OnceLock::new();
+        C.get_or_init(|| Mutex::new(None))
+    }
+
+    /// `(tenant, stream, lag_ms)` of a job record, when it is a running
+    /// sequencer's.
+    #[must_use]
+    pub fn of_job(job: &Value) -> Option<(TenantId, StreamId, u64)> {
+        if job["kind"].as_str() != Some(JOB_KIND) || job["state"].as_str() != Some("running") {
+            return None;
+        }
+        Some((
+            TenantId(job["spec"]["tenant"].as_u64()?),
+            StreamId(job["spec"]["stream"].as_u64()?),
+            job["progress"]["lag_ms"].as_u64()?,
+        ))
+    }
+
+    async fn list(dc: &dyn MetaStore) -> Result<Lags> {
+        let prefix = dc.tier().key("jobs/")?;
+        let mut out = HashMap::new();
+        let mut opts = ListOpts::default();
+        loop {
+            let page = dc.list(&prefix, opts.clone()).await?;
+            for kv in &page.kvs {
+                if let Ok(v) = serde_json::from_slice::<Value>(&kv.value)
+                    && let Some((t, s, lag)) = of_job(&v)
+                {
+                    out.insert((t, s), lag);
+                }
+            }
+            if !page.more {
+                return Ok(Arc::new(out));
+            }
+            opts.at = Some(page.revision);
+            opts.after = page.kvs.last().map(|kv| kv.key.clone());
+        }
+    }
+
+    /// `tenant`'s running sequencers' lag, by stream; a stream without a
+    /// running sequencer (just created, or between workers) is missing.
+    ///
+    /// # Errors
+    /// The DC tier's.
+    pub async fn of_tenant(dc: &dyn MetaStore, tenant: TenantId) -> Result<HashMap<StreamId, u64>> {
+        let hit = cache()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() < FRESH)
+            .map(|(_, l)| Arc::clone(l));
+        let lags = if let Some(l) = hit {
+            l
+        } else {
+            let l = list(dc).await?;
+            *cache().lock().unwrap_or_else(PoisonError::into_inner) =
+                Some((Instant::now(), Arc::clone(&l)));
+            l
+        };
+        Ok(lags
+            .iter()
+            .filter(|((t, _), _)| *t == tenant)
+            .map(|((_, s), l)| (*s, *l))
+            .collect())
+    }
+}
+
 /// Whether stream `id`'s subscription is gone or no longer active (a read
 /// error counts as present: the minute's catalog check still runs).
 async fn subscription_gone(subs: &Subscriptions, tenant: TenantId, id: StreamId) -> bool {
@@ -688,6 +780,24 @@ async fn maintain_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn show_streams_reads_running_sequencers_lag_from_their_jobs() {
+        let job = |kind: &str, state: &str| {
+            json!({"kind": kind, "state": state, "spec": {"tenant": 7, "stream": 41},
+                   "progress": {"stream": 41, "lag_ms": 1250}})
+        };
+        assert_eq!(
+            instance_lag::of_job(&job(JOB_KIND, "running")),
+            Some((TenantId(7), StreamId(41), 1250))
+        );
+        assert_eq!(instance_lag::of_job(&job(JOB_KIND, "queued")), None);
+        assert_eq!(instance_lag::of_job(&job("search_copy", "running")), None);
+        // A sequencer that hasn't reported yet.
+        let fresh = json!({"kind": JOB_KIND, "state": "running",
+                           "spec": {"tenant": 7, "stream": 41}, "progress": null});
+        assert_eq!(instance_lag::of_job(&fresh), None);
+    }
 
     #[test]
     fn lag_series_are_the_worst_and_the_count_over_the_threshold() {

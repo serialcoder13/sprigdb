@@ -452,7 +452,7 @@ function c_conn_attrs(): string
     return '_client_name=mysqlnd';
 }
 
-// --- chapter 05 matrix items ----------------------------------------------------
+// --- protocol feature checks ----------------------------------------------------
 
 const INFILE = "1,héllo 🌱\n2,\"quoted, comma\"\n3,\\N\n";
 const INFILE_ROWS = '1=héllo 🌱|2=quoted, comma|3=NULL';

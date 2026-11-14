@@ -134,7 +134,7 @@ $endif$
   #line(length: 100%, stroke: 0.6pt + accent)
   #text(size: 10pt)[$date$]
   #linebreak()
-  #text(size: 9pt, fill: quiet)[Apache License 2.0 · https://github.com/serialcoder13/sprigdb]
+  #text(size: 9pt, fill: quiet)[Apache License 2.0 · https://github.com/modlix-india/sprigdb]
 ]
 
 #set page(numbering: "i")

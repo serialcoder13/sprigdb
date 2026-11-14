@@ -1,5 +1,5 @@
-//! `sprigctl tenant failover` and `sprigctl tenant standby` (chapter 25,
-//! "Manual failover"; build step 11), over
+//! `sprigctl tenant failover` and `sprigctl tenant standby`
+//! (manual failover), over
 //! `/admin/v1/tenants/{name}:failover`, `/admin/v1/failovers:all`,
 //! `/admin/v1/tenants/{name}/failovers` and `/admin/v1/tenants/{name}:standby`.
 //!

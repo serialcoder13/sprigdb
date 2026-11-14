@@ -1,4 +1,4 @@
-//! The command line (chapter 53, "Command line" and "Exit codes").
+//! The command line and its exit codes.
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;

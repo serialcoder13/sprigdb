@@ -1,4 +1,4 @@
-//! `sprigctl tenant residency` (chapter 26, "Interfaces"), over
+//! `sprigctl tenant residency`, over
 //! `/admin/v1/tenants/{name}:residency` and
 //! `/admin/v1/tenants/{name}/residency`.
 //!
@@ -10,8 +10,8 @@
 //! sprigctl tenant residency acme --policy '' --apply               # remove it
 //! ```
 //!
-//! The book spells this `sprigctl tenant settings acme set
-//! residency.policy ...`; tenant settings live in the tenant catalog, while
+//! This is not `sprigctl tenant settings acme set
+//! residency.policy ...`: tenant settings live in the tenant catalog, while
 //! residency must be readable by every DC from the directory, so it has its
 //! own call. Without `--apply` nothing changes: the plan for the tenant and
 //! every descendant is printed.

@@ -1,4 +1,4 @@
-// Settings statements (chapter 08, "Setting a value"; chapter 44 step 11).
+// Settings statements.
 // Studio generates the same statements a SQL client would and shows them
 // before they run; the gateway checks types, bounds and privileges
 // (39080-39084).

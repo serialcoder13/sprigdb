@@ -1,5 +1,4 @@
-// Operator sign-in end to end (chapter 14 "Operators", chapter 44 "Operator
-// mode"; decisions OP10 and OP12): the first sign-in enrols TOTP from the
+// Operator sign-in end to end: the first sign-in enrols TOTP from the
 // QR code's link and shows the recovery codes once; a later sign-in takes a
 // TOTP code, another a recovery code, which then can't be used again; the
 // session token works on the gateway's own /admin/v1/operators routes;

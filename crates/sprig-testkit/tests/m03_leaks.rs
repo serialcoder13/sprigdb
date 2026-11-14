@@ -1,6 +1,5 @@
-//! The gateway-level leak suite of milestone M0.3 (chapter 48: "no
-//! physical name appears in any result, error or `SHOW` output in the leak
-//! suite"; chapter 07, "Testing" and build step 10).
+//! The gateway-level leak suite: no physical name appears in any result,
+//! error or `SHOW` output.
 //!
 //! Two tenants run the same corpus through one endpoint: result sets,
 //! column metadata, errors (unknown table, duplicate key, FK violations,
@@ -9,7 +8,7 @@
 //! `PROCESSLIST`, `EXPLAIN` and prepared statements. Every connection runs
 //! through a small TCP proxy inside the test, and every byte the server
 //! sends (handshake, OK and error packets, column definitions, rows,
-//! session-state changes) is scanned with chapter 07's detector
+//! session-state changes) is scanned with the name leak detector
 //! (`sprig_sql::names::physical_name_leaks`, ported below). The leak
 //! suite therefore needs plaintext: the dev gateway's listeners accept it
 //! (TLS `optional`).
@@ -19,7 +18,7 @@
 //! list, or kills the other's session.
 //!
 //! ```sh
-//! # Through the gateway (milestone M0.3's dev tenants):
+//! # Through the gateway (the dev tenants):
 //! SPRIG_TEST_M03_A=mysql://acme.app:sprig-dev-app@127.0.0.1:13307 \
 //! SPRIG_TEST_M03_B=mysql://globex.app:sprig-dev-app@127.0.0.1:13307 \
 //!   cargo test -p sprig-testkit --test m03_leaks -- --ignored --nocapture
@@ -65,7 +64,7 @@ const BASELINE: &str = "SPRIG_TEST_M03_BASELINE";
 const BACKEND: &str = "SPRIG_TEST_M03_BACKEND";
 const REPORT: &str = "SPRIG_TEST_M03_REPORT";
 
-// --- the detector (chapter 07) ---------------------------------------------------
+// --- the detector ----------------------------------------------------------------
 
 /// `sprig_sql::names::physical_name_leaks`, ported byte for byte (the
 /// testkit doesn't depend on `sprig-sql`): every `t<digits>_` not preceded
@@ -317,7 +316,7 @@ async fn run(conn: &mut Conn, wire: &Wire, sql: &str) -> Outcome {
     }
     for chunk in wire.take() {
         out.leaks.extend(physical_name_leaks(&chunk));
-        // Chapter 07 step 12: the name lookup inside stored bodies never
+        // The name lookup inside stored bodies never
         // shows (SHOW CREATE, definitions, generated column names).
         if chunk.windows(13).any(|w| w == b"__sprig_names") {
             out.leaks.push("__sprig_names".into());
@@ -363,8 +362,8 @@ const SETUP: &[&str] = &[
     "CREATE DATABASE {vault}",
     "CREATE TABLE {vault}.secrets (id INT PRIMARY KEY, v VARCHAR(80))",
     "INSERT INTO {vault}.secrets VALUES (1, '{secret}')",
-    // Account functions and DATABASE() inside views and stored code
-    // (chapter 07 step 12, R4): they run inside MariaDB as the backend
+    // Account functions and DATABASE() inside views and stored code:
+    // they run inside MariaDB as the backend
     // account, in the physical schema.
     "CREATE VIEW {db}.v_who AS SELECT CURRENT_USER(), USER() AS u, SESSION_USER() AS su, \
      DATABASE() AS d, CURRENT_USER AS cu2",
@@ -378,7 +377,7 @@ const SETUP: &[&str] = &[
      SET NEW.name = IF(NEW.name = 'who', CONCAT_WS('|', CURRENT_USER(), SESSION_USER(), DATABASE()), NEW.name)",
     "CREATE EVENT {db}.ev_who ON SCHEDULE EVERY 1 DAY DISABLE \
      DO INSERT INTO {db}.audit (msg) VALUES (CONCAT_WS('|', CURRENT_USER(), USER(), DATABASE()))",
-    // Caught error text inside stored code (chapter 07 step 12, R4): the
+    // Caught error text inside stored code: the
     // diagnostics area holds MariaDB's physical names.
     "CREATE TABLE {db}.diag (id INT PRIMARY KEY, v VARCHAR(400))",
     "CREATE FUNCTION {db}.f_diag() RETURNS VARCHAR(600) DETERMINISTIC BEGIN \
@@ -483,8 +482,8 @@ const CORPUS: &[(&str, &str, Expect)] = &[
         Expect::Any,
     ),
     ("show grants", "SHOW GRANTS", Expect::Any),
-    // Account functions and DATABASE() inside views and stored code
-    // (chapter 07 step 12, R4). `$` before a value keeps the output scrub
+    // Account functions and DATABASE() inside views and stored code.
+    // `$` before a value keeps the output scrub
     // from mapping it (it isn't a name boundary there) while the detector
     // still sees a `t<digits>_` after it: these pass only if MariaDB itself
     // computed the logical name.
@@ -660,7 +659,7 @@ const CORPUS: &[(&str, &str, Expect)] = &[
         "SELECT CONCAT('$', u, '$', d) FROM {db}.t_dflt",
         Expect::Any,
     ),
-    // Caught error text (chapter 07 step 12, R4): `GET DIAGNOSTICS` in
+    // Caught error text: `GET DIAGNOSTICS` in
     // stored code and in the client's own statements, and `SQLERRM` under
     // `sql_mode=ORACLE`. `$` keeps the output scrub off, as above.
     (
@@ -782,7 +781,7 @@ const CORPUS: &[(&str, &str, Expect)] = &[
     ("oracle call", "CALL {db}.p_ora", Expect::Any),
     ("oracle mode off", "SET sql_mode = DEFAULT", Expect::Ok),
     ("oracle: text", "SELECT CONCAT('$', @to)", Expect::Ok),
-    // Account statements (chapter 29, M0.5): grantees, grant targets and
+    // Account statements: grantees, grant targets and
     // errors name logical databases and tenant users only.
     (
         "show grants for current_user",
@@ -1033,7 +1032,7 @@ const CORPUS: &[(&str, &str, Expect)] = &[
         Expect::Err,
     ),
     // SprigDB's settings view is literal rows: never stored in a definition
-    // (chapter 07 rule 9: 39051 through the gateway; MariaDB has no such
+    // (39051 through the gateway; MariaDB has no such
     // table, so baseline fails too). Reading it is fine (an error in
     // baseline). A procedure body isn't checked here: plain MariaDB would
     // store it unchecked.
@@ -1251,8 +1250,8 @@ async fn leak_suite() {
                 _ => None,
             },
         });
-        // A prepared `GET DIAGNOSTICS` through the binary protocol
-        // (chapter 07 step 12): the caught text it stores.
+        // A prepared `GET DIAGNOSTICS` through the binary protocol: the
+        // caught text it stores.
         t.wire.take();
         let diag = async {
             let st = t
@@ -1568,7 +1567,7 @@ async fn leak_suite() {
             ));
         }
     }
-    assert!(failed.is_empty(), "M0.3 leak suite:\n{}", failed.join("\n"));
+    assert!(failed.is_empty(), "leak suite:\n{}", failed.join("\n"));
 }
 
 /// Statements MariaDB refuses to a user without SUPER while binary logging

@@ -1,5 +1,4 @@
-//! A small HTTP/1.1 client over TCP or rustls (chapter 53, "Crate
-//! layout").
+//! A small HTTP/1.1 client over TCP or rustls.
 //!
 //! One request per connection at a time; up to two idle connections are
 //! kept for reuse, so dashboards don't open a connection per poll. A

@@ -139,7 +139,7 @@ fn facets_and_window() {
     assert_eq!(e.code(), Some(SprigCode::SearchWindowExceeded));
 }
 
-/// Decision S24: counts and facets restricted to a key set (the rows a
+/// Counts and facets restricted to a key set (the rows a
 /// caller may see) count only those keys.
 #[test]
 fn keys_restrict_counts_and_facets() {
@@ -204,7 +204,7 @@ fn collections_and_dynamic_text() {
     assert_eq!(ix.count(&parse_mongo_text("-cafe"), 50).unwrap(), 0);
 }
 
-// ---- The global scoring property (chapter 39, "Testing") ----
+// ---- The global scoring property ----
 
 const WORDS: [&str; 12] = [
     "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet",
@@ -256,7 +256,7 @@ proptest! {
 
 #[test]
 fn local_scores_differ_where_global_agree() {
-    // The worked example's shape: a term rarer in one partition.
+    // A term rarer in one partition.
     let mut docs = Vec::new();
     for i in 0..60 {
         let t = if i % 3 == 0 { "shoe sock" } else { "sock" };

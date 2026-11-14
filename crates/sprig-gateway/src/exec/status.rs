@@ -125,6 +125,21 @@ impl SessionStatus {
 impl super::PassSession {
     /// Counts a request in the session's status before it runs, as MySQL
     /// counts at dispatch.
+    /// [`Self::count_request`] for an execute of `stmt` that took the
+    /// point-read path (`exec::point`), which has no [`Request`].
+    ///
+    /// [`Request`]: crate::pipeline::Request
+    pub(super) fn count_execute(
+        &mut self,
+        stmt: crate::pipeline::StmtRef,
+        session: &crate::session::Session,
+    ) {
+        self.status.local_questions = session.local_questions;
+        self.status.local_selects = session.local_selects;
+        let s = self.stmts.get_mut(stmt).ok().map(|s| &s.sql);
+        self.status.command("Com_stmt_execute", s.map(|b| &b[..]));
+    }
+
     pub(super) fn count_request(
         &mut self,
         req: &crate::pipeline::Request,

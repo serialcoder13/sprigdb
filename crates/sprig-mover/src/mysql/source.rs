@@ -1,5 +1,5 @@
-//! [`SourceIo`] on a MariaDB cluster's writer (chapter 10, "Preparing",
-//! "The watermark copy", "Cutover"; chapter 09, "Fencing primitives").
+//! [`SourceIo`] on a MariaDB cluster's writer: preparing, the watermark
+//! copy, the cutover and the fences.
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -22,7 +22,7 @@ use super::{ClusterAccess, db_err};
 use crate::io::{ChangeStream, Counter, Drained, Fenced, Load, PreparedDrain, SourceIo};
 use crate::model::{ColumnMeta, Row, RowDigest, TableMeta, Value, Watermark};
 
-/// The names lookup of chapter 07 step 12, as
+/// The names lookup table, as
 /// `sprig_sql::names::stored::setup_sql` creates it (idempotent).
 const NAMES_SETUP: [&str; 3] = [
     "CREATE TABLE IF NOT EXISTS `__sprig_sys`.`__sprig_names` (`name` VARCHAR(80) NOT NULL PRIMARY KEY, \
@@ -35,7 +35,7 @@ const NAMES_SETUP: [&str; 3] = [
 ];
 
 /// A view's statements for the target: `USE`, then its `CREATE OR
-/// REPLACE`. A view reading chapter 07's names lookup needs the lookup on
+/// REPLACE`. A view reading the names lookup needs the lookup on
 /// the target before MariaDB accepts it (the gateway writes its rows
 /// there), so the first such view brings [`NAMES_SETUP`].
 fn push_view(out: &mut Vec<String>, schema: &str, create: &str) {
@@ -64,10 +64,10 @@ pub struct MysqlSource {
     /// The tables last listed, `(schema, table)`: a fence's planned receipt
     /// and counters map fenced names back with them.
     known: Mutex<Vec<(String, String)>>,
-    /// Chapter 18's resolver, which finishes the tenant's prepared
+    /// The distributed-transaction resolver, which finishes the tenant's prepared
     /// branches at cutover; `None` leaves them to block the fence.
     drain: Option<Arc<dyn PreparedDrain>>,
-    /// A re-key's source (chapter 16): digests leave `_sprig_rk` out.
+    /// A re-key's source: digests leave `_sprig_rk` out.
     rekey: bool,
 }
 
@@ -107,14 +107,13 @@ fn digest_of(t: &TableMeta, r: MyRow) -> RowDigest {
     }
 }
 
-/// Internal tables that move with their shard: chapter 41's
-/// exactly-once markers of after-commit triggers (`__sprig_ldone`), which
-/// must stay in the same schema as the writes they commit with, and
-/// chapter 50's queue tables (messages, owner state, delayed messages and
-/// the queue outbox), and chapter 42's cross-tenant outbox
-/// (`__sprig_xo`), whose rows commit with the shard's writes; and the
-/// queue forward ledger (`__sprig_qf`, R9 r9fwd), which commits with the
-/// owners' enqueues.
+/// Internal tables that move with their shard: the exactly-once markers
+/// of after-commit triggers (`__sprig_ldone`), which must stay in the
+/// same schema as the writes they commit with, and the queue tables
+/// (messages, owner state, delayed messages and the queue outbox), and the
+/// cross-tenant outbox (`__sprig_xo`), whose rows commit with the shard's
+/// writes; and the queue forward ledger (`__sprig_qf`), which commits with
+/// the owners' enqueues.
 pub const MOVED_INTERNAL: &[&str] = &[
     "__sprig_ldone",
     "__sprig_qm",
@@ -126,24 +125,24 @@ pub const MOVED_INTERNAL: &[&str] = &[
 ];
 
 /// Prefixes of internal tables that move with their shard like user
-/// tables: chapter 45's stream outboxes (`__sprig_eo_<stream>`), stream
+/// tables: the stream outboxes (`__sprig_eo_<stream>`), stream
 /// logs (`__sprig_sl_<stream>`) and their checkpoints (`__sprig_sl_ckpt`),
 /// whose rows commit with the shard's writes and the sequencer's position;
-/// and chapter 43's native graph tables: nodes (`__sprig_gn_<graph>`),
+/// and the native graph tables: nodes (`__sprig_gn_<graph>`),
 /// edges (`__sprig_ge_`), label rows (`__sprig_gl_`) and mirrors
 /// (`__sprig_gm_`), routed by `_sprig_rk` like a group's tables, and the id
 /// counter (`__sprig_gq_`, copied whole with its default-group schema),
 /// and the uniqueness claims (`__sprig_gu_`, routed by the claim's hash);
-/// and chapter 33's key-value element tables (`__sprig_ke_<ns>`,
+/// and the key-value element tables (`__sprig_ke_<ns>`,
 /// `__sprig_kz_<ns>`), grouped with their key table on `_sprig_dk`, every
 /// row carrying its key's `_sprig_rk`; and the engines' tables in each
 /// logical database's default-group schema, which commit with the
-/// database's writes: chapter 31's document engine (`__sprig_doc_`:
+/// database's writes: the document engine (`__sprig_doc_`:
 /// retryable-write records and transaction outcomes, search index
-/// definitions, vector side tables), chapter 40's scripts
-/// (`__sprig_redis_`), chapter 35's models (`__sprig_dim_`) and chapter
-/// 42's broadcast logs and retry lists (`__sprig_ib_`, `__sprig_ibr_`).
-/// Chapter 42's materialized copies (`__sprig_ih_`) stay behind: a target
+/// definitions, vector side tables), Redis scripts (`__sprig_redis_`),
+/// models (`__sprig_dim_`) and the inheritance broadcast logs and retry
+/// lists (`__sprig_ib_`, `__sprig_ibr_`). The inheritance materialized
+/// copies (`__sprig_ih_`) stay behind: a target
 /// without them reads through and seeds them again.
 pub const MOVED_INTERNAL_PREFIXES: &[&str] = &[
     "__sprig_doc_",
@@ -228,14 +227,14 @@ impl MysqlSource {
     }
 
     /// Finishes the tenant's prepared distributed-transaction branches
-    /// through `drain` at cutover (chapter 18's `drain_prepared`).
+    /// through `drain` at cutover (the resolver's `drain_prepared`).
     #[must_use]
     pub fn with_drain(mut self, drain: Option<Arc<dyn PreparedDrain>>) -> Self {
         self.drain = drain;
         self
     }
 
-    /// The source of a re-key (chapter 16): verification digests leave
+    /// The source of a re-key: verification digests leave
     /// `_sprig_rk` out, since the re-key replaces it.
     #[must_use]
     pub fn with_rekey(mut self, on: bool) -> Self {
@@ -376,7 +375,7 @@ impl MysqlSource {
         }
     }
 
-    /// Statements that create schema `s`'s events (RL12, r2harden): as the
+    /// Statements that create schema `s`'s events: as the
     /// source has them (`as_source`, the cutover's; `CREATE OR REPLACE`),
     /// or disabled (a copy's start). Each runs under the event's own
     /// `sql_mode`, time zone and character set.
@@ -432,7 +431,7 @@ impl MysqlSource {
     }
 
     /// Creation statements of the schemas' views and routines, and the
-    /// tenant's backend accounts with their grants (until chapter 29's
+    /// tenant's backend accounts with their grants (until the accounts
     /// reconciler creates them on the target).
     #[allow(clippy::too_many_lines)]
     async fn object_statements(&self, schemas: &[String]) -> Result<Vec<String>> {
@@ -449,11 +448,10 @@ impl MysqlSource {
             return Ok(out);
         }
         for s in schemas {
-            // Chapter 18: every shard schema anchors the decisions of the
-            // coordinated transactions that start on it, so each new shard
-            // schema (a move, split, merge, re-key or standby, on any
-            // cluster) gets `__sprig_dtx` before it serves (G31, decision
-            // bugfix-2). Its rows aren't copied.
+            // Every shard schema anchors the decisions of the coordinated
+            // transactions that start on it, so each new shard schema (a
+            // move, split, merge, re-key or standby, on any cluster) gets
+            // `__sprig_dtx` before it serves. Its rows aren't copied.
             if matches!(
                 s.parse::<sprig_common::names::SchemaName>(),
                 Ok(sprig_common::names::SchemaName::Shard { .. })
@@ -513,7 +511,7 @@ impl MysqlSource {
                     }
                 }
             }
-            // Chapter 10, prepare step 3 (RL12): events, disabled until the
+            // Events, disabled until the
             // cutover (or a standby's promotion) enables them.
             out.extend(self.event_statements(s, false).await?);
         }
@@ -531,7 +529,7 @@ impl MysqlSource {
                 continue;
             };
             if h.is_empty() {
-                continue; // roles: chapter 29's reconciler
+                continue; // roles: the accounts reconciler's
             }
             let who = format!("'{}'@'{}'", u.replace('\'', ""), h.replace('\'', ""));
             if let Ok(r) = self
@@ -636,7 +634,7 @@ impl SourceIo for MysqlSource {
                     }
                 }
             }
-            // Step 6's `ALTER EVENT ... ENABLE` (RL12): each event as the
+            // Cutover step 6's `ALTER EVENT ... ENABLE`: each event as the
             // source has it, enabled or not, replacing the disabled copy.
             out.extend(self.event_statements(&s, true).await?);
         }
@@ -913,7 +911,7 @@ impl SourceIo for MysqlSource {
 mod tests {
     use super::internal;
 
-    /// Engine tables in a database's schema move with it (R5 round 6: a
+    /// Engine tables in a database's schema move with it (without this, a
     /// tenant move left MongoDB databases without `__sprig_doc_sessions`,
     /// and their next write failed with 1146); the mover's own tables and
     /// fences don't.

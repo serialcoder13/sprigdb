@@ -1,10 +1,10 @@
-//! Definers of stored code (chapter 29, "Definers of stored code").
+//! Definers of stored code.
 //!
 //! MariaDB runs a `SQL SECURITY DEFINER` routine, every trigger, every
-//! event and a `SQL SECURITY DEFINER` view with its definer's rights. R0
+//! event and a `SQL SECURITY DEFINER` view with its definer's rights. SprigDB
 //! creates stored programs as the cluster's `sprig_ctl` account (binary
 //! logging refuses them from accounts without `SUPER`, error 1419), so
-//! before M0.5's fix their definer was `sprig_ctl`, which holds `ALL` on
+//! before the fix their definer was `sprig_ctl`, which holds `ALL` on
 //! every tenant's schemas: dynamic SQL in a procedure or event body (which
 //! the gateway never sees) could read any tenant. Now every stored program
 //! names the creating session's backend account as `DEFINER` (the gateway
@@ -140,7 +140,7 @@ pub async fn foreign(conn: &mut Conn, tenant: TenantId) -> Result<Vec<StoredObje
     let like = format!("t{tenant}\\_d%");
     // Routines and events come from mysql.proc and mysql.event. Triggers
     // and views are read one schema at a time: a LIKE on their schema
-    // reads every table of every tenant on the server (R9, r9scale;
+    // reads every table of every tenant on the server (see
     // `sprig_catalog::infoschema`).
     let mut rows: Vec<(String, String, String, String)> = conn
         .exec(

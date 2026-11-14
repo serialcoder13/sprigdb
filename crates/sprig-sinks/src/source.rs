@@ -1,4 +1,4 @@
-//! Source readers (chapter 51, build step 6).
+//! Source readers.
 //!
 //! - [`StreamSource`]: a stream or change topic, read from its log with
 //!   `sprig-streams`' `LogReader`, positions in the consumer group
@@ -10,7 +10,7 @@
 //!   original idempotency keys; they settle on their own (they are below
 //!   the group's offsets).
 //!
-//! - [`QueueSource`] (R9, r9queue): a durable queue, consumed through a
+//! - [`QueueSource`]: a durable queue, consumed through a
 //!   gateway's queue engine as the sink's owner ([`crate::peer`]):
 //!   `sprig.mq_get` holds each message for `sink.queue_lease_ms`, a
 //!   delivered record is acknowledged (`mq_ack`), and a record that fails
@@ -79,7 +79,7 @@ pub struct StreamSource {
     catalog: Pool,
     catalog_schema: String,
     log: LogReader,
-    /// The member whose instance `stream` is (a fan-in sink, R9); 0 for
+    /// The member whose instance `stream` is (a fan-in sink); 0 for
     /// the sink's own tenant's stream.
     instance: u64,
     stream: StreamId,
@@ -135,7 +135,7 @@ impl StreamSource {
     }
 
     /// [`Self::open`] over member `instance`'s instance `stream` (a fan-in
-    /// sink, chapter 51): `shard` is the member's cluster, the positions
+    /// sink): `shard` is the member's cluster, the positions
     /// are the sink's, in its own catalog, with `instance_tenant_id`.
     ///
     /// # Errors
@@ -156,7 +156,7 @@ impl StreamSource {
         let log = LogReader { schema: log_schema };
         let store = StreamsStore::new(catalog_schema.clone());
         let mut c = catalog.get_conn().await.map_err(backend)?;
-        // `stream_offsets.instance_tenant_id` (R9) before the first read.
+        // `stream_offsets.instance_tenant_id` before the first read.
         if !migrated()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -374,18 +374,18 @@ impl SourceReader for StreamSource {
 }
 
 // ----------------------------------------------------------------------
-// Fan-in sources (chapter 51, "Fan-in sinks").
+// Fan-in sources.
 // ----------------------------------------------------------------------
 
 /// The header naming a record's member.
 pub const TENANT_HEADER: &str = "x-sprig-tenant";
 
 /// Marks a fan-in task's position stream ids: bit 62 plus the member
-/// instance's slot in the task (R9, r9queue). Slots are numbered as
+/// instance's slot in the task. Slots are numbered as
 /// members join and are never reused within a task, so positions of two
-/// members never collide, for any 64-bit tenant and stream ids. (r9final
-/// packed the member's id and the stream id into it, which capped tenant
-/// ids at 2^38.) Positions of fan-in tasks live only in the task: a
+/// members never collide, for any 64-bit tenant and stream ids. (Packing
+/// the member's id and the stream id into it instead would cap tenant ids
+/// at 2^38.) Positions of fan-in tasks live only in the task: a
 /// member instance's offsets are stored with its own stream id and
 /// `instance_tenant_id`.
 pub const FANIN_SLOT_FLAG: u64 = 1 << 62;
@@ -695,12 +695,12 @@ impl SourceReader for FanInSource {
 }
 
 // ----------------------------------------------------------------------
-// Queue sources (chapter 51; R9, r9queue).
+// Queue sources.
 // ----------------------------------------------------------------------
 
 /// The queue id and message id (hex) a delivery token names, read
 /// without checking its MAC (the gateway checks it at settle time).
-/// Chapter 50's layout: `q1.` and base64url of tenant (8 bytes), database
+/// The queue engine's layout: `q1.` and base64url of tenant (8 bytes), database
 /// (4), queue (8), lane (2), class (1), sequence (8), message id (16),
 /// owner epoch (8), then 16 bytes of MAC.
 #[must_use]
@@ -751,12 +751,12 @@ pub struct QueueSource {
     lease_ms: u64,
     seed: u64,
     idle_ms: u64,
-    /// `ordering = queue` (r9fanin): before reading on, wait until no
+    /// `ordering = queue`: before reading on, wait until no
     /// message of the queue is held by an earlier task's lease.
     queue_order: bool,
     /// Earlier leases are out of the way (or `queue_order` is off).
     leases_clear: bool,
-    /// This task's lease tag (R9, r9tests): `mq_get` holds its messages
+    /// This task's lease tag: `mq_get` holds its messages
     /// under it, so a later task can give them back with `mq_release`.
     tag: Option<String>,
     /// A dead earlier task's lease tag, released before the first read.
@@ -799,10 +799,9 @@ impl QueueSource {
     }
 
     /// Takes messages under lease tag `tag`, and first gives back those a
-    /// dead earlier task held under `release` (R9, r9tests: chapter 51,
-    /// "Queue sources after a crash"): they return to the queue at once
+    /// dead earlier task held under `release`: they return to the queue at once
     /// instead of after `sink.queue_lease_ms`. The sink's own queue, and
-    /// (R9, r9last) a member's instance read by a fan-in task.
+    /// a member's instance read by a fan-in task.
     #[must_use]
     pub fn with_lease_tag(mut self, tag: String, release: Option<String>) -> Self {
         self.tag = Some(tag);
@@ -855,8 +854,7 @@ impl QueueSource {
         }
     }
 
-    /// `ordering = queue` (chapter 51, "What \"in order\" means per
-    /// source"; r9fanin): the task reads on only once no message is held
+    /// `ordering = queue`: the task reads on only once no message is held
     /// by an earlier task's lease, so a message a dead task held never
     /// comes after later ones. The sink's own queue only: a fan-in queue
     /// source reads members' instances, whose order is per member.
@@ -891,7 +889,7 @@ impl QueueSource {
             let r = self.run(op.clone()).await?;
             let res = r.results.into_iter().next().unwrap_or_default();
             let unacked = if let Some(e) = &res.error {
-                // Said once per wait (r9tests found a refusal hidden here).
+                // Said once per wait (a refusal could hide here otherwise).
                 if now_first {
                     tracing::warn!(queue = %self.queue, code = e.code, error = %e.message, "queue sink (ordering = queue): mq_info failed; asking again every 500 ms until the lease ends");
                     now_first = false;
@@ -920,8 +918,8 @@ impl QueueSource {
                 tracing::debug!(queue = %self.queue, unacked, "queue sink (ordering = queue): waiting for earlier leases");
             }
             // Asked again every 500 ms, also after a failed mq_info (a
-            // grant not seen yet, a gateway restarting): r9tests found a
-            // single early refusal made the task wait out the whole lease.
+            // grant not seen yet, a gateway restarting): a single
+            // early refusal used to make the task wait out the whole lease.
             let step = Duration::from_millis(500);
             tokio::time::sleep(step.min(end - now)).await;
         }
@@ -935,7 +933,7 @@ impl QueueSource {
     }
 
     /// Gives a get's messages back to their queue at once (requeued), as
-    /// if their lease had ended (R9, r9last). Failures are logged: the
+    /// if their lease had ended. Failures are logged: the
     /// messages then return after their lease.
     async fn requeue(&self, res: &crate::peer::SqlResult) {
         use crate::peer::{SqlOp, quote};
@@ -1000,7 +998,7 @@ impl QueueSource {
 }
 
 /// The id of the queue a get's messages came from, when it isn't the
-/// sink's own queue (R9, r9last): its delivery tokens name the queue.
+/// sink's own queue: its delivery tokens name the queue.
 fn replaced_queue(at: &QueueAt, res: &crate::peer::SqlResult) -> Option<u64> {
     let QueueAt::Own { id, .. } = at else {
         return None;
@@ -1048,8 +1046,8 @@ fn queue_record(
     ))
 }
 
-/// A message browsed with `mq_browse` (`TEST SINK`'s samples, R9
-/// r9tests): the record a queue sink would make of it, without a delivery
+/// A message browsed with `mq_browse` (`TEST SINK`'s samples):
+/// the record a queue sink would make of it, without a delivery
 /// token; its position names the message's sequence number.
 #[must_use]
 pub fn browsed_record(
@@ -1214,7 +1212,7 @@ impl SourceReader for QueueSource {
             return Err(e.error());
         }
         if let Some(other) = replaced_queue(&self.at, &res) {
-            // R9 (r9last): the sink's queue was dropped and another made
+            // The sink's queue was dropped and another made
             // under its name (a dropped definition's member instance whose
             // sink lived on). Its messages aren't this sink's: back to
             // that queue at once, and the sink's source is lost.
@@ -1425,7 +1423,7 @@ mod fan_in_tests {
 
     #[tokio::test]
     async fn members_beyond_2_38_and_own_changes_untagged() {
-        // R9 (r9queue): any 64-bit member id.
+        // Any 64-bit member id.
         let big = (1u64 << 40) + 3;
         let settled = Arc::new(Mutex::new(Vec::new()));
         let mut s = FanInSource::open(
@@ -1539,7 +1537,7 @@ mod queue_order_tests {
         .with_queue_order(order)
     }
 
-    /// r9fanin: with `ordering = queue` a task reads nothing while an
+    /// With `ordering = queue` a task reads nothing while an
     /// earlier task's leases hold messages; without it, it reads at once.
     #[tokio::test(start_paused = true)]
     async fn ordering_queue_waits_out_earlier_leases() {
@@ -1591,7 +1589,8 @@ mod replaced_queue_tests {
     use base64::Engine as _;
     use std::sync::{Arc, Mutex};
 
-    /// A delivery token of queue `queue` (chapter 50's layout, MAC zeros).
+    /// A delivery token of queue `queue` (the queue engine's layout, MAC
+    /// zeros).
     fn token(queue: u64, msg: u8) -> String {
         let mut b = Vec::new();
         b.extend_from_slice(&1u64.to_be_bytes()); // tenant
@@ -1667,7 +1666,7 @@ mod replaced_queue_tests {
         )
     }
 
-    /// R9 (r9last): a queue sink whose queue was dropped and made again
+    /// A queue sink whose queue was dropped and made again
     /// under its name (another id) takes nothing from it: the messages go
     /// back at once and the source is lost (39223). Before, a dropped
     /// definition's member sink kept reading the member's new queue and

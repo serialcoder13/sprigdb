@@ -1,4 +1,4 @@
-//! The M2 stage corpus through a live gateway (12 Nov 2026): every case
+//! The aggregation-stage corpus through a live gateway: every case
 //! of `crates/sprig-doc/tests/stage_diff/cases.json` (recorded from
 //! MongoDB 8.0.34) is run through the MongoDB driver as
 //! `aggregate([{$documents: docs}, ...pipeline])` (`$graphLookup` reads
@@ -252,7 +252,7 @@ async fn diagnostic_stages_have_mongodb_shapes() {
         eprintln!("{who}: {s:?}");
         shapes.push(s);
     }
-    // The fields SprigDB promises (chapter 30) are present.
+    // The fields SprigDB promises are present.
     let sprig = &shapes[0];
     let has = |name: &str, fields: &[&str]| {
         let keys = sprig

@@ -1,6 +1,6 @@
-//! The native MongoDB client (chapter 53, "--protocol"): `OP_MSG` and
+//! The native MongoDB client (`--protocol mongo`): `OP_MSG` and
 //! SCRAM-SHA-256 from `sprig-proto-mongo`, and a parser for the `mongosh`
-//! subset Studio accepts (chapter 44): a call chain rooted at `db`,
+//! subset Studio accepts: a call chain rooted at `db`,
 //! literals, and the helpers `ObjectId`, `ISODate`, `NumberLong`,
 //! `NumberInt`, `NumberDecimal`. Input is parsed, never evaluated.
 

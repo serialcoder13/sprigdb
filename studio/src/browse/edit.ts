@@ -1,9 +1,8 @@
-// Statements for browse edits (chapter 44, "Editing with optimistic
-// concurrency"). Each UPDATE or DELETE names the row by its key and requires
-// every column read to still hold the value read (`<=>`, NULL-safe), so a
-// row someone else changed meanwhile matches nothing: 0 rows affected is a
-// conflict. Approximate numbers compare by their text form, which is what
-// the API returned.
+// Statements for browse edits, with optimistic concurrency. Each UPDATE or
+// DELETE names the row by its key and requires every column read to still
+// hold the value read (`<=>`, NULL-safe), so a row someone else changed
+// meanwhile matches nothing: 0 rows affected is a conflict. Approximate
+// numbers compare by their text form, which is what the API returned.
 
 import type { Cell, Column } from '../api/types';
 import { ident, qualified, sqlValue } from '../lib/sql';
@@ -73,7 +72,7 @@ export function rereadFor(t: TableRef, original: Cell[]): string {
   return `SELECT * FROM ${qualified(t.db, t.table)} WHERE ${where}`;
 }
 
-/** Keyset paging (chapter 44, "Browsing"): rows after `after` in key order,
+/** Keyset paging: rows after `after` in key order,
  * within `filter` (a WHERE expression from the filter bar) when given. */
 export function pageQuery(
   t: { db: string; table: string; keyNames: string[] },

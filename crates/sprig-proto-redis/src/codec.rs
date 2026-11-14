@@ -1,4 +1,4 @@
-//! Requests and replies on the wire (chapter 40, "Interfaces").
+//! Requests and replies on the wire.
 //!
 //! Requests are RESP arrays of bulk strings ("multibulk") or inline
 //! commands (a line of space-separated words, as `telnet` and

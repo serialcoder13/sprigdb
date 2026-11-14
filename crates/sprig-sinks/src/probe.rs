@@ -1,6 +1,5 @@
-//! `TEST CONNECTION` and `TEST SINK` (chapter 51, "Testing connections and
-//! sinks"; R9, r9tests): dry runs a gateway answers as statements, so
-//! Studio reaches them through `Sql.Query` like any other.
+//! `TEST CONNECTION` and `TEST SINK`: dry runs a gateway answers as
+//! statements, so Studio reaches them through `Sql.Query` like any other.
 //!
 //! ```text
 //! TEST [PLATFORM] CONNECTION c
@@ -11,9 +10,9 @@
 //!                 webhook: options, OPTIONS on the URL with its authentication
 //!   every address is resolved through the destination allowlist and the
 //!   tenant's residency first, as a sink's would be; nothing is written
-//! TEST CREATE CONNECTION ...   (ST68) the same steps for a definition that
+//! TEST CREATE CONNECTION ...   the same steps for a definition that
 //!   isn't saved, with its credentials as given (never stored)
-//! TEST SINK s [WITH SAMPLE n]   (and TEST CREATE SINK ... [WITH SAMPLE n], ST69)
+//! TEST SINK s [WITH SAMPLE n]   (and TEST CREATE SINK ... [WITH SAMPLE n])
 //!   the last n records of the source (stream: the newest of each
 //!   partition; queue: browsed, not taken), through WHERE, columns and
 //!   TRANSFORM, shown as they would be delivered; nothing is delivered and
@@ -70,7 +69,7 @@ pub struct DryRow {
     pub headers: String,
     /// Why it failed.
     pub detail: Option<String>,
-    /// What the target would send for it (R9, r9last): its own encoding
+    /// What the target would send for it: its own encoding
     /// ([`crate::target::preview`]); for `deliver` rows only.
     pub payload: Option<String>,
 }
@@ -145,7 +144,7 @@ pub async fn test_connection(
 }
 
 /// [`test_connection`], and with `write` (`TEST CONNECTION c WRITE [TO
-/// 'target']`, R9 r9last) a marked test record written once the checks
+/// 'target']`) a marked test record written once the checks
 /// pass ([`write_steps`]).
 ///
 /// # Errors
@@ -202,7 +201,7 @@ pub async fn test_connection_with(
     Ok(out)
 }
 
-/// `TEST CREATE CONNECTION ...` (ST68): [`test_connection`]'s steps for a
+/// `TEST CREATE CONNECTION ...`: [`test_connection`]'s steps for a
 /// definition that isn't saved, opened with the credentials as given
 /// (never sealed or stored, dropped when the test ends) under the same
 /// destination allowlist and residency a saved connection's are. The
@@ -264,7 +263,7 @@ pub async fn test_definition(
     Ok(out)
 }
 
-/// `TEST CONNECTION ... WRITE [TO 'target']` (R9, r9last).
+/// `TEST CONNECTION ... WRITE [TO 'target']`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Write {
     /// `TO 'target'`: a topic, an object key prefix or a table.
@@ -310,7 +309,7 @@ fn test_record(id: &str) -> SinkRecord {
     }
 }
 
-/// `TEST CONNECTION c WRITE [TO 'target']` (R9, r9last): one marked test
+/// `TEST CONNECTION c WRITE [TO 'target']`: one marked test
 /// record, written as a sink would write it and removed again where the
 /// target allows:
 ///
@@ -576,8 +575,8 @@ fn shown(r: &SinkRecord, outcome: &'static str, detail: Option<String>) -> DryRo
     }
 }
 
-/// The target context a sink's payload preview is built in (R9,
-/// r9last): its first connection opened as a task opens it (sealed
+/// The target context a sink's payload preview is built in: its first
+/// connection opened as a task opens it (sealed
 /// credentials, allowlist, residency); nothing is sent.
 async fn preview_ctx(
     env: &dyn SinkEnv,

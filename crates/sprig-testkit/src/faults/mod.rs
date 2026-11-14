@@ -1,5 +1,4 @@
-//! Fault injection and Jepsen-style checking (chapter 46, "Fault injection
-//! and Jepsen-style checking"; build step 3).
+//! Fault injection and Jepsen-style checking.
 //!
 //! One trait, [`Faults`], injects faults wherever a test runs:
 //!
@@ -104,7 +103,7 @@ impl LinkFault {
     }
 }
 
-/// Injects faults (chapter 46, "Interfaces"). Every method returns once the
+/// Injects faults. Every method returns once the
 /// fault is in force; [`Faults::heal`] undoes one, [`Faults::heal_all`]
 /// every fault this injector made.
 #[async_trait::async_trait]

@@ -1,5 +1,4 @@
-//! Unique lookup indexes in plans (chapter 19, "Unique lookups", "Routing
-//! through lookups"; chapter 17, "INSERT routing", "UPDATE and DELETE"):
+//! Unique lookup indexes in plans:
 //!
 //! - a single-table read, `UPDATE` or `DELETE` over every shard with an
 //!   equality (`c = v`, `c IN (...)`) on a public lookup's column becomes
@@ -285,7 +284,7 @@ fn owner_rk(g: &Group, key: Option<&Expr>) -> R<u64> {
 }
 
 /// An `UPDATE` must leave lookup values and primary keys alone (a changed
-/// value would need a claim and a release; R1 refuses it).
+/// value would need a claim and a release, so it is refused).
 pub(super) fn check_update(entry: &TableEntry, assigns: &dyn Fn(&str) -> bool) -> R<()> {
     for l in &entry.lookups {
         if assigns(&l.column) || l.pk.iter().any(|c| assigns(c)) {
@@ -702,7 +701,7 @@ mod tests {
         assert_eq!(decode_read(Some(b"6"), s), None);
     }
 
-    /// Chapter 15 (R1 integration): once a member is `filling`, every
+    /// Once a member is `filling`, every
     /// INSERT carries the row's routing hash in `_sprig_rk`; a positional
     /// INSERT gets the visible column list first.
     #[test]

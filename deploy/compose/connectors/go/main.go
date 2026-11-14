@@ -576,7 +576,7 @@ func checkConnAttrs() (string, error) {
 	return "sprig_check=" + v, nil
 }
 
-// --- chapter 05 matrix items --------------------------------------------------
+// --- protocol feature checks --------------------------------------------------
 
 const (
 	infileData = "1,héllo 🌱\n2,\"quoted, comma\"\n3,\\N\n"

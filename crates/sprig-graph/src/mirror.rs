@@ -1,5 +1,4 @@
-//! Asynchronous mirrors (chapter 43, "Mirrors and freshness"; build step
-//! 14; R8 round 5).
+//! Asynchronous mirrors.
 //!
 //! Under `graph.mirror = async` a grouped graph's mirror rows
 //! (`__sprig_gm_<graph>`, on each edge's destination shard) are kept by the
@@ -210,7 +209,7 @@ pub async fn write_pos<Q: Queryable + Send>(
     }
     let t = format!("{}.{POS_TABLE}", quote(catalog));
     let mut sql = format!(
-        "INSERT INTO {t} (graph_id, shard_id, cluster, epoch, gtid_pos, applied_at) VALUES "
+        "{NO_BINLOG}INSERT INTO {t} (graph_id, shard_id, cluster, epoch, gtid_pos, applied_at) VALUES "
     );
     let mut params: Vec<mysql_async::Value> = Vec::new();
     for (k, (shard, cluster, epoch, pos)) in rows.iter().enumerate() {
@@ -225,16 +224,34 @@ pub async fn write_pos<Q: Queryable + Send>(
         " ON DUPLICATE KEY UPDATE cluster = VALUES(cluster), epoch = VALUES(epoch), \
          gtid_pos = VALUES(gtid_pos), applied_at = VALUES(applied_at)",
     );
-    q.exec_drop(sql, params).await.map_err(backend_error)?;
+    if let Err(e) = q.exec_drop(sql.as_str(), params.clone()).await {
+        // Without `BINLOG ADMIN` (or `SUPER`): logged, as before.
+        tracing::debug!(error = %e, "graph mirror positions written to the binlog");
+        q.exec_drop(sql.replacen(NO_BINLOG, "", 1), params)
+            .await
+            .map_err(backend_error)?;
+    }
     let keep: Vec<String> = rows.iter().map(|r| r.0.to_string()).collect();
-    q.query_drop(format!(
-        "DELETE FROM {t} WHERE graph_id = {graph} AND shard_id NOT IN ({})",
+    let del = format!(
+        "{NO_BINLOG}DELETE FROM {t} WHERE graph_id = {graph} AND shard_id NOT IN ({})",
         keep.join(", ")
-    ))
-    .await
-    .map_err(backend_error)?;
+    );
+    if q.query_drop(del.as_str()).await.is_err() {
+        q.query_drop(del.replacen(NO_BINLOG, "", 1))
+            .await
+            .map_err(backend_error)?;
+    }
     Ok(())
 }
+
+/// Position writes stay out of the binlog. A reader's freshness target is
+/// the binlog position when it starts; were the applier's own position
+/// writes logged, that position would always be one transaction past the
+/// applier's latest row, so every read with an incoming hop waited for its
+/// next write (about half a second, G84). The rows are read only on the
+/// catalog's writer; a new writer after a failover has older rows (or
+/// none) until the applier's next write, and reads scatter meanwhile.
+const NO_BINLOG: &str = "SET STATEMENT sql_log_bin = 0 FOR ";
 
 /// Deletes every position row of `graph` (it was dropped, or its mirrors
 /// went back to `sync`).

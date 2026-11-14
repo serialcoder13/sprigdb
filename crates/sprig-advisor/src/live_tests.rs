@@ -151,7 +151,7 @@ async fn json_hb_format_on_11_8() {
         assert!(throttle.admit(1, &plan));
         assert!(!throttle.admit(1, &plan));
         analyze(&mut c, &plan).await.unwrap();
-        // analyze_sample_percentage is per session (open question 2).
+        // analyze_sample_percentage is per session.
         let pct: f64 = c
             .query_first("SELECT @@session.analyze_sample_percentage")
             .await

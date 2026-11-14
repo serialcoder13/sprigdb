@@ -1,5 +1,5 @@
-//! Queues across gateways in one process (chapter 50, "The queue owner";
-//! the `QueuePeer` relay): several engines share the in-memory catalog,
+//! Queues across gateways in one process (the queue owner's
+//! `QueuePeer` relay): several engines share the in-memory catalog,
 //! leases, temporary-queue registry and placement, and reach each other's
 //! owners through [`MemPeers`]. Real AMQP clients (`lapin`) connect to
 //! each gateway's front end.
@@ -159,6 +159,7 @@ impl Net {
                         tls: false,
                         sni: None,
                         cert_login: None,
+                        client_dn: None,
                     };
                     let _ = serve(s, info, &svc, Config::default(), close).await;
                 });
@@ -717,7 +718,7 @@ async fn the_owner_follows_its_consumers_without_redelivering() {
     let _ = cc.close(200, "bye".into()).await;
 }
 
-/// R9 (r9tests): messages taken by `mq_get` under a lease tag go back to
+/// Messages taken by `mq_get` under a lease tag go back to
 /// the queue at once when `mq_release` names the tag, through any gateway:
 /// gets through B (relayed to the owner), the release through C. Messages
 /// held by a session without a tag, or under another tag, stay held.

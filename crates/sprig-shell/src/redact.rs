@@ -1,4 +1,4 @@
-//! Redaction of secrets in statements (chapter 53, "Redaction").
+//! Redaction of secrets in statements.
 //!
 //! Applied before a statement goes into history or a log, or is shown in a
 //! status line. Strings after the words that introduce secrets become

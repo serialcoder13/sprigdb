@@ -334,7 +334,7 @@ fn index_commands_parse() {
         sub.get_one::<String>("fingerprint").unwrap(),
         "9c41d2e07b3a5f18"
     );
-    // Chapter 11's explain calls (crate::placement).
+    // The placement explain calls (crate::placement).
     let m = matches(&["explain", "decision", "17", "--tenant", "acme"]);
     let (cmd, sub) = sub_of(&m);
     assert_eq!(
@@ -548,7 +548,7 @@ async fn index_calls_over_the_admin_api() {
         "{e}"
     );
 
-    // Actions, chapter 13's spellings included.
+    // Actions, aliases included.
     for (m, a) in [
         ("approve", Action::Approve),
         ("apply", Action::Approve),

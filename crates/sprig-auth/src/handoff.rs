@@ -1,5 +1,4 @@
-//! Credential residency: handing a login to an allowed DC (chapter 14,
-//! "Credential residency"; build step 9).
+//! Credential residency: handing a login to an allowed DC.
 //!
 //! Gateways outside a pinned tenant's allowed DCs never load its
 //! credentials. They hand the login to a gateway in the nearest allowed DC
@@ -24,15 +23,15 @@
 //!   → decide → HandoffResult { principal fields | the refusal packet }
 //! ```
 //!
-//! **Transport.** Chapter 14 runs this over `GatewayPeer.HandoffLogin` on
-//! port 7403 with mutual TLS (chapter 04): the gateway's `PeerHandoff`
+//! **Transport.** This runs over `GatewayPeer.HandoffLogin` on port 7403
+//! with mutual TLS: the gateway's `PeerHandoff`
 //! implements [`HandoffTarget`] over it, and [`LocalPeers`] (tests: DCs as
 //! in-process services) in process. The messages ([`HandoffStart`],
 //! [`PrincipalWire`]) are serde types carried as JSON in the gRPC
 //! messages. A handoff costs one WAN round trip: the whole exchange
 //! happens at the source, and only the decision crosses.
 //!
-//! **Wiring (R2, chapter 26).** [`LoginService::begin`] (and
+//! **Wiring.** [`LoginService::begin`] (and
 //! [`LoginService::begin_http`]) read the tenant's residency from the
 //! directory *before* anything of its credentials is loaded, and pick the
 //! flow: the local [`crate::MysqlLogin`], [`RelayLogin`], or [`DenyLogin`]
@@ -98,7 +97,7 @@ pub struct HandoffStart {
     pub tls: bool,
     /// A verified client certificate at the source.
     pub client_cert: bool,
-    /// Its subject and issuer (`REQUIRE SUBJECT`, `ISSUER`; authfix2).
+    /// Its subject and issuer (`REQUIRE SUBJECT`, `ISSUER`).
     /// Absent from a source that predates them, which then hands off as
     /// it did: such accounts are refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -174,7 +173,7 @@ pub enum HandoffResult {
     Refused(ErrPacket),
 }
 
-/// Reaches gateways of other DCs (chapter 04's `GatewayPeer`).
+/// Reaches gateways of other DCs (the gateway's `GatewayPeer` service).
 #[async_trait]
 pub trait HandoffTarget: Send + Sync + 'static {
     /// Decides the login `start` with `password` in DC `dc`.
@@ -499,8 +498,8 @@ impl LoginService {
         }
     }
 
-    /// Starts one MySQL login, routed by the tenant's residency (chapter
-    /// 26): decided here, relayed to an allowed DC, or refused.
+    /// Starts one MySQL login, routed by the tenant's residency: decided
+    /// here, relayed to an allowed DC, or refused.
     pub async fn begin(self: &Arc<Self>, req: LoginRequest) -> ResidentLogin {
         self.begin_as(req, false).await
     }
@@ -651,7 +650,7 @@ impl LoginFlow for ResidentLogin {
 }
 
 /// What a principal's backend credential crosses as when it isn't a
-/// `file:` or `env:` reference (chapter 29's derived per-user passwords):
+/// `file:` or `env:` reference (the derived per-user backend passwords):
 /// the source gateway derives its own.
 const UNRESOLVED: &str = "env:SPRIG_HANDOFF_UNRESOLVED";
 
@@ -797,7 +796,7 @@ mod tests {
         let wire = serde_json::to_string(&start).unwrap();
         let back: HandoffStart = serde_json::from_str(&wire).unwrap();
         assert_eq!(back.request(), req);
-        // A source from before authfix2 sends no names: the target reads
+        // A source from before names were handed off sends none: the target reads
         // none, and a SUBJECT/ISSUER account is refused there.
         let old = wire
             .replace(",\"client_subject\":\"/O=Acme/CN=alice\"", "")
@@ -860,7 +859,7 @@ mod tests {
         })
     }
 
-    /// Chapter 26's wiring: `begin` reads the residency first and picks the
+    /// The residency wiring: `begin` reads the residency first and picks the
     /// flow; the source never loads the tenant's catalog; the target
     /// refuses a handoff it isn't allowed to decide.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

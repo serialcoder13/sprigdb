@@ -16,7 +16,7 @@
 //!    privileges, policies and session functions apply. Because only tenant
 //!    administrators may test, and an administrator's own view of a tenant
 //!    they administer is the whole tenant, the result is never wider than
-//!    the caller's view (step 4 of the chapter's algorithm).
+//!    the caller's view.
 //! 4. Capped at `studio.max_result_rows` and `studio.statement_timeout_ms`
 //!    at the user's tenant and database.
 //! 5. Audited as `studio.view_as` (caller, user, tenant, rows, a hash of

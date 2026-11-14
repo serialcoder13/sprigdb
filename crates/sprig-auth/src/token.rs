@@ -1,5 +1,4 @@
-//! SprigDB tokens and sessions (chapter 14, "SprigDB tokens and sessions";
-//! build step 12), as Studio's login uses them (chapter 44).
+//! SprigDB tokens and sessions, as Studio's login uses them.
 //!
 //! ```text
 //! login(principal):  token_sessions row (sid, SHA256(refresh), expires_at)
@@ -14,8 +13,8 @@
 //! logout:            revoke (an auth change: every gateway refuses at once)
 //! ```
 //!
-//! The access token keeps the `sprigat_` prefix of R0's opaque tokens
-//! (decision ST17), so `Core::caller` tells it from an API key and secret
+//! The access token keeps the `sprigat_` prefix of the earlier opaque
+//! tokens, so `Core::caller` tells it from an API key and secret
 //! scanners find it. Export tickets are JWS of `typ: sprig-export` signed
 //! with the same keys ([`Tokens::sign_ticket`]).
 
@@ -76,7 +75,7 @@ pub struct Claims {
     pub iat: u64,
     /// Expires at, Unix seconds.
     pub exp: u64,
-    /// Impersonation (chapter 14 step 14): the administrator acting.
+    /// Impersonation: the administrator acting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub act: Option<Act>,
 }
@@ -271,10 +270,10 @@ impl Tokens {
     }
 
     /// Starts a session with the methods `amr` (`pwd`, `otp`, `rec`), and
-    /// for an impersonation the administrator acting (chapter 14 steps 13
-    /// and 14). An impersonation session has no refresh token: its access
-    /// token lives `limits.access_ttl` (the impersonation's length) and the
-    /// session row is checked on every use, so it can still be revoked.
+    /// for an impersonation the administrator acting. An impersonation session
+    /// has no refresh token: its access token lives `limits.access_ttl` (the
+    /// impersonation's length) and the session row is checked on every use, so
+    /// it can still be revoked.
     ///
     /// # Errors
     /// The store's.
@@ -561,7 +560,7 @@ impl Tokens {
         self.store.revoke(&claims.ten, sid, now).await
     }
 
-    /// Signs an export ticket (chapter 44: `typ: sprig-export`).
+    /// Signs an export ticket (`typ: sprig-export`).
     ///
     /// # Errors
     /// `Internal`.

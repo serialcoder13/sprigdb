@@ -1,5 +1,5 @@
-//! One sink task in a worker (chapter 51, "Record pipeline", "Task
-//! placement"; build steps 5 and 15): the `sink_task` job body.
+//! One sink task in a worker (its record pipeline and task placement):
+//! the `sink_task` job body.
 //!
 //! ```text
 //! run_sink_task(tenant, sink, task):
@@ -82,14 +82,14 @@ pub trait SinkEnv: Send + Sync {
         None
     }
     /// The DC's gateways, for statements as the sink's owner (queue
-    /// sources, the script `db` handle; R9, r9queue). `None`: none here.
+    /// sources, the script `db` handle). `None`: none here.
     fn peer(&self) -> Option<Arc<dyn crate::peer::SinkPeer>> {
         None
     }
-    /// Chapter 29 (decision RL31): whether row-level security policies on
-    /// any of tables `objects` now bind user `owner` (the sink would export
-    /// rows its owner can't see). By default `false`: workers without the
-    /// tenant catalog rely on the gateway's pause (RL25).
+    /// Whether row-level security policies on any of tables `objects` now bind
+    /// user `owner` (the sink would export rows its owner can't see). By
+    /// default `false`: workers without the tenant catalog rely on the
+    /// gateway's pause.
     ///
     /// # Errors
     /// The catalog's.
@@ -101,10 +101,10 @@ pub trait SinkEnv: Send + Sync {
     ) -> Result<bool> {
         Ok(false)
     }
-    /// Chapter 51 (39229, authfix2): why the sink's owner `owner` can no
-    /// longer read `sources` (dropped, locked, or `SELECT` lost), or
-    /// `None` while it can. By default `None`: workers without the tenant
-    /// catalog leave it to the gateway's check at grant changes.
+    /// Why (39229) the sink's owner `owner` can no longer read `sources`
+    /// (dropped, locked, or `SELECT` lost), or `None` while it can. By default
+    /// `None`: workers without the tenant catalog leave it to the gateway's
+    /// check at grant changes.
     ///
     /// # Errors
     /// The catalog's.
@@ -118,13 +118,12 @@ pub trait SinkEnv: Send + Sync {
     }
 }
 
-/// The start of the pause reason row-level security gives a sink (RL25,
-/// RL31): a running task stops at once, not after its buffered records.
+/// The start of the pause reason row-level security gives a sink: a
+/// running task stops at once, not after its buffered records.
 pub const RLS_PAUSE: &str = "ER_SPRIG_RLS_UNSUPPORTED";
 
 /// The start of the pause reason when the sink's owner can no longer read
-/// its source (chapter 51, "Owner lost access"; authfix2): the sink
-/// resumes by itself once the owner can again.
+/// its source: the sink resumes by itself once the owner can again.
 pub const OWNER_PAUSE: &str = "39229 ER_SPRIG_SINK_OWNER_PRIVILEGE_LOST";
 
 /// What a sink reads, for its owner's `SELECT` (39229): by database and
@@ -141,11 +140,20 @@ pub enum OwnerRead {
     },
     /// A table (`CHANGES OF t`).
     Object(u64),
+    /// A fan-in sink's stream or queue, by database name and name.
+    InDatabase {
+        /// The database's name.
+        db: String,
+        /// The name.
+        name: String,
+    },
+    /// `SPRIG_FAN_IN`, which a fan-in sink's owner needs besides `SELECT`.
+    FanIn,
 }
 
-/// The sources `def`'s owner must be able to read (chapter 51, "Owner
-/// lost access"). Fan-in sinks read other tenants' instances under
-/// `SPRIG_FAN_IN` and are left out.
+/// The sources `def`'s owner must be able to read. A fan-in sink's owner needs
+/// `SPRIG_FAN_IN` and `SELECT` on the definition's name (the members'
+/// instances are read under those).
 #[must_use]
 pub fn owner_reads(def: &SinkDef) -> Vec<OwnerRead> {
     match &def.source {
@@ -161,7 +169,13 @@ pub fn owner_reads(def: &SinkDef) -> Vec<OwnerRead> {
             .iter()
             .map(|(id, _)| OwnerRead::Object(*id))
             .collect(),
-        _ => Vec::new(),
+        SourceSpec::FanIn { db, name, .. } | SourceSpec::FanInQueue { db, name, .. } => vec![
+            OwnerRead::FanIn,
+            OwnerRead::InDatabase {
+                db: db.clone(),
+                name: name.clone(),
+            },
+        ],
     }
 }
 
@@ -196,8 +210,8 @@ async fn run_as(
     })
 }
 
-/// The script `db` handle of a script sink in this worker (R9, r9queue):
-/// reads through a gateway as the sink's owner. `None` for other targets
+/// The script `db` handle of a script sink in this worker: reads through
+/// a gateway as the sink's owner. `None` for other targets
 /// or without gateways.
 async fn script_db(
     env: &dyn SinkEnv,
@@ -476,14 +490,14 @@ struct CatalogControl {
     epoch: TaskEpoch,
     definition_ver: u64,
     delivered: AtomicU64,
-    /// Chapter 29 (RL31): a change sink's owner and tables, checked before
-    /// each batch (every poll).
+    /// A change sink's owner and tables, checked before each batch (every
+    /// poll).
     rls: Option<(Arc<dyn SinkEnv>, TenantId, u32, Vec<u64>)>,
-    /// R9 (r9last): a grouped fan-in task's check of its sink's task
-    /// count (see [`Regroup`]).
+    /// A grouped fan-in task's check of its sink's task count (see
+    /// [`Regroup`]).
     regroup: Option<Regroup>,
-    /// Chapter 51 (39229, authfix2): the owner's access to the source,
-    /// checked at most every second before a batch.
+    /// The owner's access to the source (39229), checked at most every
+    /// second before a batch.
     owner: Option<OwnerCheck>,
 }
 
@@ -571,8 +585,8 @@ impl CatalogControl {
 }
 
 /// The directive that stops a task, from its sink's catalog state: gone,
-/// redefined, failed, dropping, or paused by row-level security (RL25,
-/// RL31: a running task stops at once, its buffered records undelivered).
+/// redefined, failed, dropping, or paused by row-level security (a
+/// running task stops at once, its buffered records undelivered).
 fn stop_directive(
     state: Option<&(SinkState, Option<String>, u64)>,
     definition_ver: u64,
@@ -591,7 +605,7 @@ fn stop_directive(
 }
 
 impl CatalogControl {
-    /// RL31: whether policies now bind the sink's owner on its tables; if
+    /// Whether policies now bind the sink's owner on its tables; if
     /// so the sink is paused (state `paused`, reason 39366), as the
     /// gateway's policy statements do.
     async fn rls_bound(&self, c: &mut mysql_async::Conn) -> Result<bool> {
@@ -618,8 +632,8 @@ impl CatalogControl {
 }
 
 impl CatalogControl {
-    /// Chapter 51 (39229, authfix2): a sink paused because its owner lost
-    /// access resumes once the owner can read its source again
+    /// A sink paused (39229) because its owner lost access resumes once
+    /// the owner can read its source again
     /// (`Some(Run)`), else stays paused (`Some(Stop)`: the controller
     /// starts the task again a few seconds later, which checks again). A
     /// running sink whose owner lost access is paused (`Some(Stop)`).
@@ -638,11 +652,14 @@ impl CatalogControl {
         );
         if paused {
             if check.lost(true).await?.is_some() {
+                // Still paused: shown wherever its task is started again.
+                metrics::gauge!("sprig_sink_paused", "reason" => "owner_privilege").set(1.0);
                 return Ok(Some(Directive::Stop));
             }
             self.store
                 .set_state(c, self.sink, SinkState::Running, None)
                 .await?;
+            metrics::gauge!("sprig_sink_paused", "reason" => "owner_privilege").set(0.0);
             tracing::info!(tenant = %check.tenant, sink = self.sink.0, "sink resumed: its owner can read its source again");
             return Ok(Some(Directive::Run));
         }
@@ -667,6 +684,9 @@ impl CatalogControl {
                 0,
             )
             .await?;
+        // `reason="owner_privilege"`, so operators can alert on 39229
+        // pauses apart from the failures ones (SprigSinkPaused).
+        metrics::gauge!("sprig_sink_paused", "reason" => "owner_privilege").set(1.0);
         tracing::warn!(tenant = %check.tenant, sink = self.sink.0, reason = %why, code = 39229, "SprigSinkPaused: the sink's owner lost access to its source");
         Ok(Some(Directive::Stop))
     }
@@ -677,14 +697,14 @@ impl Control for CatalogControl {
     async fn poll(&self) -> Result<Directive> {
         let mut c = self.conn().await?;
         let state = self.store.state_of(&mut c, self.sink).await?;
-        // Chapter 51 (39229): the owner's access, before anything runs.
+        // The owner's access (39229), before anything runs.
         if let Some(d) = self.owner_directive(&mut c, state.as_ref()).await? {
             return Ok(d);
         }
         if let Some(d) = stop_directive(state.as_ref(), self.definition_ver) {
             return Ok(d);
         }
-        // RL31: row-level security now binds the owner (checked each poll,
+        // Row-level security now binds the owner (checked each poll,
         // so before each batch is cut).
         if self.rls_bound(&mut c).await? {
             return Ok(Directive::Stop);
@@ -824,7 +844,7 @@ impl Control for CatalogControl {
 }
 
 /// Opens one connection: options, credentials, destination rules (also
-/// chapter 52's approval webhooks through a tenant's connection).
+/// approval webhooks through a tenant's connection).
 ///
 /// # Errors
 /// 39210 for a connection that is gone; 39216 for credentials that don't
@@ -961,7 +981,7 @@ pub(crate) async fn load_transform(
     let budget = Duration::from_millis(opts.u64("transform_budget_ms", 50)?);
     // `transform_version = n` pins a version (0 or absent: the active
     // one, followed at each task start); `EXACTLY ONCE` needs it
-    // `DETERMINISTIC` (R9, r9fwd).
+    // `DETERMINISTIC`.
     let version = opts.u64("transform_version", 0)?;
     crate::transform::Transform::load_at(
         &mut c,
@@ -1016,7 +1036,7 @@ pub async fn run_sink_task(
     run_sink_task_of(env, tenant, sink, task_no, 1, cancel).await
 }
 
-/// [`run_sink_task`] for task `task_no` of `of` (R9, r9last): a fan-in
+/// [`run_sink_task`] for task `task_no` of `of`: a fan-in
 /// sink's task reads the member instances [`crate::meta::fanin_task_of`]
 /// gives it, and stops when the sink's index entry has another count.
 ///
@@ -1043,7 +1063,7 @@ pub async fn run_sink_task_of(
         return Ok(TaskEnd::Stopped);
     }
     let def = Arc::new(def);
-    // `sink.tenant_bytes_per_sec` is one budget across workers (R9).
+    // `sink.tenant_bytes_per_sec` is one budget across workers.
     crate::runtime::ensure_quota_sharing(env.dc(), env.worker_id());
     let opts = resolve_opts(&mut c, &cat_schema, &def).await?;
     let opts = match env.settings() {
@@ -1082,7 +1102,7 @@ pub async fn run_sink_task_of(
     let parts = task_partitions(partitions_n, k, task_no.0);
     // `START AT LATEST` (the default) means from the sink's creation, not
     // from its task's first start: the task starts seconds later under load,
-    // and records published in between were skipped (r9fanin; the dead
+    // and records published in between were skipped (the dead
     // letter step of `fan_in_sink_end_to_end` lost all three).
     let start = instance_start(
         def.start_at,
@@ -1157,9 +1177,9 @@ pub async fn run_sink_task_of(
         sink,
     )
     .await?;
-    // Chapter 29 (RL44): a change topic's records reach a sink whose owner
-    // the table's policies bind only as the owner may see them, filtered
-    // batch by batch through the topic's SQL read as the owner.
+    // A change topic's records reach a sink whose owner the table's
+    // policies bind only as the owner may see them, filtered batch by batch
+    // through the topic's SQL read as the owner.
     let source: Box<dyn crate::runtime::SourceReader> = match change_source {
         Some(object) => Box::new(crate::rls_filter::FilteredChanges {
             inner: Box::new(source),
@@ -1191,8 +1211,8 @@ pub async fn run_sink_task_of(
         epoch,
         definition_ver: def.definition_ver,
         delivered: AtomicU64::new(0),
-        // RL44: `FROM STREAM t.changes` is filtered for its owner (above)
-        // instead of paused when t's policies bind the owner (RL36).
+        // `FROM STREAM t.changes` is filtered for its owner (above)
+        // instead of paused when t's policies bind the owner.
         rls: None,
         regroup: None,
         owner: OwnerCheck::new(&env, tenant, &def),
@@ -1225,10 +1245,9 @@ pub async fn run_sink_task_of(
     end
 }
 
-/// Lists and opens a fan-in sink's member instances (chapter 51,
-/// "Fan-in sinks"): the DC's `inherit-instances/` index, members below the
-/// sink's tenant (and `UNDER t`), members whose residency sets
-/// `deny_remote_access` left out.
+/// Lists and opens a fan-in sink's member instances: the DC's
+/// `inherit-instances/` index, members below the sink's tenant (and `UNDER t`),
+/// members whose residency sets `deny_remote_access` left out.
 struct EnvFanIn {
     env: Arc<dyn SinkEnv>,
     tenant: u64,
@@ -1242,7 +1261,7 @@ struct EnvFanIn {
     /// When the sink was created (ms): instances made later start at
     /// their beginning, so the records that made them aren't missed.
     sink_created_ms: u64,
-    /// This task's group: (task, of) (R9, r9last).
+    /// This task's group: (task, of).
     task_group: (u32, u32),
 }
 
@@ -1362,8 +1381,8 @@ impl crate::source::FanInOpener for EnvFanIn {
     }
 }
 
-/// A queue sink's `ordering` option: `queue` (strict queue order, chapter
-/// 51) or `key` (the default: one routing key's messages in order, lanes
+/// A queue sink's `ordering` option: `queue` (strict queue order) or
+/// `key` (the default: one routing key's messages in order, lanes
 /// in parallel).
 ///
 /// # Errors
@@ -1429,8 +1448,8 @@ pub fn instance_start(
     }
 }
 
-/// `CHANGES OF t, ...`: the tables' change topics (`t.changes`, chapter
-/// 45) of the sink's own tenant, read as one source.
+/// `CHANGES OF t, ...`: the tables' change topics (`t.changes`) of the sink's
+/// own tenant, read as one source.
 struct EnvChanges {
     env: Arc<dyn SinkEnv>,
     tenant: u64,
@@ -1441,9 +1460,8 @@ struct EnvChanges {
     start: crate::model::StartAt,
     sink: SinkId,
     sink_created_ms: u64,
-    /// Chapter 29 (RLS round 5, RL50): the sink's owner, whose view of
-    /// each change topic the records are filtered to while the table's
-    /// policies bind it.
+    /// The sink's owner, whose view of each change topic the records are
+    /// filtered to while the table's policies bind it.
     owner: u32,
     /// The owner on a gateway (the filter's reads).
     run_as: Option<crate::peer::RunAs>,
@@ -1512,10 +1530,9 @@ impl crate::source::FanInOpener for EnvChanges {
             self.sink,
         )
         .await?;
-        // Chapter 29 (RLS round 5, RL50): each table's change topic is
-        // filtered batch by batch for the owner while the table's policies
-        // bind it, as `FROM STREAM t.changes` is (RL44); before, the sink
-        // was paused (RL14, RL25, RL31).
+        // Each table's change topic is filtered batch by batch for the
+        // owner while the table's policies bind it, as `FROM STREAM
+        // t.changes` is, instead of the sink being paused.
         let (topic, object) =
             crate::rls_filter::topic_of(&self.cat_pool, &self.cat_schema, m.stream).await?;
         let object = object.ok_or_else(|| {
@@ -1555,8 +1572,8 @@ async fn run_fan_in_task(
 ) -> Result<TaskEnd> {
     let (cat_pool, cat_schema) = env.catalog(tenant).await?;
     let created = sink_created_at(&mut c, &cat_schema, sink).await?;
-    // R9 (r9last): a fan-in queue task takes its members' messages under
-    // a lease tag, as a queue task does (r9tests), and gives back a dead
+    // A fan-in queue task takes its members' messages under a lease
+    // tag, as a queue task does, and gives back a dead
     // predecessor's in each member it opens.
     let me = env.worker_id();
     let (my_lease, release) = if matches!(def.source, SourceSpec::FanInQueue { .. }) {
@@ -1622,7 +1639,7 @@ async fn run_fan_in_task(
     // Stream instances compare in milliseconds (their records and their
     // creation carry ms): whole seconds made an instance created earlier in
     // the sink's creation second look newer than the sink, and it was read
-    // from its start (r9fanin). Change topics' records carry their commit
+    // from its start. Change topics' records carry their commit
     // time in whole seconds, so a record committed in the sink's creation
     // second counts there.
     let sink_created_ms = fan_in_created_ms(created, false);
@@ -1720,8 +1737,8 @@ async fn run_fan_in_task(
         epoch,
         definition_ver: def.definition_ver,
         delivered: AtomicU64::new(0),
-        // RL50: a `CHANGES OF` sink is filtered for its owner (EnvChanges)
-        // instead of paused when its tables' policies bind the owner (RL31).
+        // A `CHANGES OF` sink is filtered for its owner (EnvChanges)
+        // instead of paused when its tables' policies bind the owner.
         rls: None,
         regroup: match &def.source {
             SourceSpec::FanIn { .. } | SourceSpec::FanInQueue { .. } => Some(Regroup {
@@ -1765,8 +1782,8 @@ async fn run_fan_in_task(
     end
 }
 
-/// Lists and opens a fan-in queue sink's member instances (chapter 51,
-/// "Fan-in sinks"; R9, r9queue): the DC's `inherit-instances/` index of
+/// Lists and opens a fan-in queue sink's member instances: the DC's
+/// `inherit-instances/` index of
 /// the queue definition, members below the sink's tenant (and `UNDER t`),
 /// members denying remote access left out; each read through a gateway
 /// as the sink's owner (`FanInGet`).
@@ -1781,10 +1798,10 @@ struct EnvFanInQueue {
     queue: String,
     lease_ms: u64,
     seed: u64,
-    /// This task's group: (task, of) (R9, r9last).
+    /// This task's group: (task, of).
     task_group: (u32, u32),
     /// This task's lease tag, and a dead predecessor's to give back in
-    /// each member (R9, r9last).
+    /// each member.
     tag: String,
     release: Option<String>,
 }
@@ -1900,8 +1917,8 @@ impl crate::source::FanInOpener for EnvFanInQueue {
     }
 }
 
-/// The lease tag a queue sink's task takes its messages under (R9,
-/// r9tests): `mq_get`'s fifth argument, one per task claim.
+/// The lease tag a queue sink's task takes its messages under:
+/// `mq_get`'s fifth argument, one per task claim.
 #[must_use]
 pub fn lease_tag(sink: SinkId, task_no: TaskNo, epoch: TaskEpoch) -> String {
     format!("sink/{}/{}/{}", sink.0, task_no.0, epoch.0)
@@ -1925,7 +1942,7 @@ async fn worker_lease(dc: &dyn MetaStore, worker: &str) -> Option<i64> {
 }
 
 /// The lease tag of a queue task's predecessor whose worker process is
-/// gone (R9, r9tests), so the new task gives its messages back at once:
+/// gone, so the new task gives its messages back at once:
 /// the predecessor recorded its worker's registration lease when it
 /// claimed the task, and that worker's registration is now missing
 /// (`reg` is `Some(None)`) or bound to another lease (a new process under
@@ -1948,7 +1965,7 @@ pub fn dead_lease_tag(
     Some(lease_tag(sink, task_no, *epoch))
 }
 
-/// A queue sink's task (R9, r9queue): the sink's own durable queue,
+/// A queue sink's task: the sink's own durable queue,
 /// consumed through a gateway as its owner (see `source::QueueSource`).
 #[allow(clippy::too_many_arguments)]
 async fn run_queue_task(
@@ -1973,7 +1990,7 @@ async fn run_queue_task(
         )
     })?;
     let who = run_as(env.as_ref(), tenant, &def, &opts).await?;
-    // R9 (r9tests): the task's predecessor, and whether its worker process
+    // The task's predecessor, and whether its worker process
     // is gone (its etcd registration expired, or a new process took the
     // worker's id): its leased messages are then given back at once.
     let me = env.worker_id();
@@ -2039,7 +2056,7 @@ async fn run_queue_task(
         opts.u64("queue_lease_ms", 300_000)?.max(1000),
         sink.0,
     );
-    // `ordering = queue` (r9fanin): queue order, one lane, and earlier
+    // `ordering = queue`: queue order, one lane, and earlier
     // tasks' leases waited out before reading on.
     let queue_order = queue_ordering(&opts)?;
     if queue_order {
@@ -2088,7 +2105,7 @@ async fn run_queue_task(
             settings,
             seed: None,
             // No DEAD LETTER TO: the queue's own dead-lettering (a reject
-            // without requeue), as chapter 51 says.
+            // without requeue).
             reject_via_source: def.dead_letter.is_none(),
         },
         cancel,
@@ -2211,13 +2228,33 @@ mod tests {
             owner_reads(&d),
             vec![OwnerRead::Object(7), OwnerRead::Object(8)]
         );
+        // A fan-in sink: SPRIG_FAN_IN and SELECT on the definition's name.
+        d.source = SourceSpec::FanIn {
+            def_tenant: 1,
+            def_object: 5,
+            db: "app".into(),
+            name: "events".into(),
+            partitions: 1,
+            under: None,
+        };
+        assert_eq!(
+            owner_reads(&d),
+            vec![
+                OwnerRead::FanIn,
+                OwnerRead::InDatabase {
+                    db: "app".into(),
+                    name: "events".into()
+                }
+            ]
+        );
         assert!(owner_pause_reason("x").starts_with("39229 ER_SPRIG_SINK_OWNER_PRIVILEGE_LOST: x"));
     }
 
     #[test]
     fn a_sink_paused_by_row_level_security_stops_its_task() {
         let st = |s: SinkState, r: Option<&str>| (s, r.map(str::to_owned), 3u64);
-        // Before RL31 a running task kept delivering (`Run`).
+        // A sink paused by row-level security stops its running task
+        // (it used to keep delivering, `Run`).
         assert_eq!(
             stop_directive(
                 Some(&st(
@@ -2251,7 +2288,7 @@ mod tests {
         assert_eq!(unquote("12"), "12");
     }
 
-    /// r9fanin: a member's instance made earlier in the second the fan-in
+    /// Regression: a member's instance made earlier in the second the fan-in
     /// sink was made in is read from the sink's creation under `LATEST`,
     /// not from its start (whole seconds made it look newer than the sink,
     /// and `fan_in_sink_end_to_end` got 5 records from before the sink).
@@ -2274,7 +2311,7 @@ mod tests {
             instance_start(StartAt::Earliest, 1_794_000_000_300, sink),
             StartAt::Earliest
         );
-        // `ordering` of queue sinks (r9fanin).
+        // `ordering` of queue sinks.
         let o = |v: &str| {
             Opts(
                 [("ordering".to_owned(), v.to_owned())]
@@ -2290,7 +2327,7 @@ mod tests {
 
     #[test]
     fn a_dead_predecessors_lease_tag() {
-        // R9 (r9tests): give back a predecessor's leases only when its
+        // Give back a predecessor's leases only when its
         // worker process is gone.
         let (s, t) = (SinkId(7), TaskNo(0));
         let prev = |lease: Value| {

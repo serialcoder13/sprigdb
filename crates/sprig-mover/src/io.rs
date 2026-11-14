@@ -1,10 +1,10 @@
-//! The seams between the mover's logic and the outside world (chapter 10;
-//! chapter 46, "Deterministic simulation").
+//! The seams between the mover's logic and the outside world, so a
+//! deterministic simulation can stand in for it.
 //!
 //! The engine ([`crate::engine`]) talks to MariaDB only through
 //! [`SourceIo`], [`ChangeStream`] and [`TargetIo`], and to the shard map
 //! only through [`MapIo`]. Production implements them on `mysql_async`,
-//! `sprig-binlog`, chapter 09's fences and chapter 15's map
+//! `sprig-binlog`, the cluster fences and the tenant map
 //! ([`crate::mysql`], [`crate::maps`]); the simulation in `sprig-testkit`
 //! implements the MariaDB side on a model, with faults at every call, and
 //! uses the production [`MapIo`] on its simulated etcd.
@@ -35,15 +35,15 @@ pub trait ChangeStream: Send {
 /// What a source fence returned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fenced {
-    /// The fence's receipt, opaque to the engine (chapter 09's
-    /// `FenceReceipt` in production), kept in the job record so any
+    /// The fence's receipt, opaque to the engine (a `FenceReceipt` in
+    /// production), kept in the job record so any
     /// worker can unfence.
     pub receipt: serde_json::Value,
     /// `G`: the source position no write to the shard follows.
     pub pos: GtidPos,
 }
 
-/// Load the throttle looks at (chapter 10, "Throttling").
+/// Load the throttle looks at.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Load {
     /// The writer's `Threads_running`.
@@ -111,8 +111,7 @@ pub trait SourceIo: Send + Sync {
     /// worker can undo a fence whose worker crashed before recording the
     /// real receipt (undoing a planned receipt skips what isn't fenced).
     async fn plan_fence(&self) -> Result<serde_json::Value>;
-    /// Fences the schemas against writes (chapter 09), by `deadline` from
-    /// now.
+    /// Fences the schemas against writes, by `deadline` from now.
     async fn fence(&self, deadline: Duration) -> Result<Fenced>;
     /// Extends a writes fence to reads (cutover step 7). A no-op for a
     /// rename fence, which already blocks both.
@@ -139,7 +138,7 @@ pub trait SourceIo: Send + Sync {
         Ok(())
     }
     /// Finishes every prepared distributed-transaction branch of the job's
-    /// tenant on the source cluster, within `within` (chapter 18's
+    /// tenant on the source cluster, within `within` (the resolver's
     /// `drain_prepared`, cutover steps 2b and 3b). The default finishes
     /// nothing: a source without a resolver leaves prepared branches to
     /// block the fence, which then aborts the attempt.
@@ -152,7 +151,7 @@ pub trait SourceIo: Send + Sync {
     }
 }
 
-/// What a drain of prepared branches did (chapter 18's `DrainReport`).
+/// What a drain of prepared branches did (the resolver's `DrainReport`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Drained {
     /// Branches committed (their transaction's decision was commit).
@@ -174,7 +173,7 @@ impl Drained {
     }
 }
 
-/// The resolver as the mover reaches it (chapter 18): implemented over
+/// The resolver as the mover reaches it: implemented over
 /// `sprig_txn::Resolver` where the worker builds the mover, so this crate
 /// doesn't depend on the transaction crate.
 #[async_trait::async_trait]
@@ -261,7 +260,7 @@ pub trait TargetIo: Send + Sync {
     }
     /// Drops what [`Self::finalize`] created (an aborted cutover).
     async fn unfinalize(&self, triggers: &[String]) -> Result<()>;
-    /// RL12 (r2harden): a standby's target keeps the statements
+    /// A standby's target keeps the statements
     /// [`Self::finalize`] would run (the source's triggers and events), so
     /// its promotion can create them when the source is lost. Targets that
     /// aren't standbys record nothing.
@@ -289,8 +288,7 @@ pub enum CommitOutcome {
     Unknown,
 }
 
-/// The feed handoff a cutover commits with the flip (chapter 10, "The feed
-/// handoff"; chapter 38).
+/// The feed handoff a cutover commits with the flip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandoffPos {
     /// `G`: the source position no write to the tenant follows.
@@ -329,7 +327,7 @@ pub enum Released {
 }
 
 /// The shard map side of a cutover: the hold, the single commit point
-/// (chapter 10's `CutoverCommit`), and the release. Holds name the job and
+/// (`CutoverCommit`), and the release. Holds name the job and
 /// its owner's fencing token, so a worker that lost the job can't clear or
 /// commit its successor's hold.
 #[async_trait::async_trait]
@@ -343,7 +341,7 @@ pub trait MapIo: Send + Sync {
     async fn commit(&self, job: JobId, token: u64, to: &ClusterId) -> Result<CommitOutcome>;
     /// [`Self::commit`], recording `handoff` for the change feed in the
     /// same commit. The default records nothing (moves between data
-    /// centers, R2).
+    /// centers).
     async fn commit_handoff(
         &self,
         job: JobId,

@@ -1,4 +1,4 @@
-//! ID blocks across two gateways, live (chapter 19, "ID blocks").
+//! ID blocks across two gateways, live.
 //!
 //! Two `BlockAllocator`s with their own connection pools ("gateways") take
 //! values for one sequence from 16 tasks each; every value must be unique,

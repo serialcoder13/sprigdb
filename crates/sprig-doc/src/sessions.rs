@@ -1,4 +1,4 @@
-//! Retryable-write records (chapter 30, "Retryable writes, exactly once").
+//! Retryable-write records.
 //!
 //! Each logical database that holds collections keeps one hidden table,
 //! `__sprig_doc_sessions`, next to its collections, so a record commits
@@ -9,10 +9,9 @@
 //! `FOR UPDATE`, answers the statements already done from it, and runs
 //! only the others.
 //!
-//! The name starts `__sprig_doc_` (not chapter 30's
-//! `__sprig_mongo_sessions`) because chapter 08's DDL lets only the
-//! document engine's `__sprig_doc_` names through (`decisions/r5-interim.md`,
-//! D12).
+//! The name starts `__sprig_doc_` (not `__sprig_mongo_sessions`) because
+//! the gateway's DDL lets only the document engine's `__sprig_doc_` names
+//! through.
 
 use std::collections::BTreeMap;
 
@@ -45,7 +44,7 @@ pub fn table_sql(db: &str) -> String {
 
 /// The row of `(lsid, uid)`, locked for the transaction; with
 /// `Record::aborted` and `Record::committed` it also settles a
-/// transaction's outcome (chapter 30, "Sessions and transactions").
+/// transaction's outcome.
 #[must_use]
 pub fn select_sql(db: &str, lsid: &[u8], uid: &[u8; 32]) -> String {
     format!(

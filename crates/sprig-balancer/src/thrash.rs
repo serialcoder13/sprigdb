@@ -1,4 +1,4 @@
-//! Ping-pong detection (chapter 11, "Thrash: ping-pong and flapping"): a
+//! Ping-pong detection: a
 //! shard moved back to a cluster it left within 7 days counts in
 //! `sprig_balancer_moves_reverted_total`, and doubles that shard's
 //! cooldown, capped at `migration.max_cooldown_days`.

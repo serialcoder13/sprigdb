@@ -1,9 +1,8 @@
-//! Calling an engine-tier version (chapter 41, "Calling code"; build step
-//! 15 in part): the same `CALL db.name(…)` a compiled version answers.
+//! Calling an engine-tier version: the same `CALL db.name(…)` a compiled version answers.
 //!
 //! An engine-tier version's wrapper ([`crate::deploy::engine_wrapper`])
 //! lets MariaDB do what it does for any `CALL`: resolve the name in the
-//! session's schema, check `EXECUTE` (chapter 29), and convert the
+//! session's schema, check `EXECUTE`, and convert the
 //! arguments to the declared parameter types. It then returns one
 //! **marker** row, `__sprig_engine, module, version, args`, and fails with
 //! 39876. The gateway sees the marker, drops it and the error, runs the
@@ -346,12 +345,12 @@ pub fn scalar(event: &str, result: &Value) -> Result<Value> {
     })
 }
 
-// ---- calls from other protocols (R7 order 6) -------------------------------
+// ---- calls from other protocols --------------------------------------------
 
 /// The statement text of a call from outside SQL starts with this; the
 /// rest is the [`FunctionCall`] as JSON. Each front end sends it through
 /// a tenant session, which finds the function, checks its exposure, and
-/// runs `CALL db.name(...)` (chapter 41, "Calling code").
+/// runs `CALL db.name(...)`.
 pub const CALL_PREFIX: &str = "/* sprig function call */ ";
 
 /// A call of a logic function from HTTP, gRPC, MongoDB or Redis.
@@ -423,7 +422,7 @@ impl FunctionCall {
     }
 
     /// Redis's `FCALL name numkeys key... arg...` of a logic function
-    /// exposed to `redis` (chapter 40's front end calls this after its own
+    /// exposed to `redis` (the Redis front end calls this after its own
     /// Lua libraries miss): the keys bind the leading parameters, then the
     /// arguments, all as text. `name` may be `db.name`; otherwise the
     /// front end sets [`Self::db`] to its logical database.
@@ -461,7 +460,7 @@ impl FunctionCall {
     }
 }
 
-// ---- SELECT f(constants) of engine-tier functions (R7 order 6) -------------
+// ---- SELECT f(constants) of engine-tier functions --------------------------
 
 /// One call of a function with constant arguments in a `SELECT` without
 /// `FROM`.

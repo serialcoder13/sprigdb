@@ -875,6 +875,10 @@ pub struct Resolve<'a> {
     /// name.
     elements: RefCell<HashMap<usize, (String, String)>>,
     cache: RefCell<HashMap<(usize, Vec<Cmd>, String), String>>,
+    /// A statement the inheritance layer generated (internal mode): its
+    /// references under [`sprig_inherit::view::LAYER_ALIAS`] are layers of
+    /// merged views it filtered ([`Resolver::merged_layer`]).
+    merged_layers: bool,
 }
 
 /// The prefixes of a key-value namespace's element and sorted-set tables.
@@ -944,7 +948,17 @@ impl<'a> Resolve<'a> {
             keys: RefCell::new(Vec::new()),
             elements: RefCell::new(HashMap::new()),
             cache: RefCell::new(HashMap::new()),
+            merged_layers: false,
         }
+    }
+
+    /// Honours the inheritance layer's merged-view layer references; only
+    /// for statements the gateway generated (internal mode), never a
+    /// client's text.
+    #[must_use]
+    pub fn with_merged_layers(mut self, on: bool) -> Self {
+        self.merged_layers = on;
+        self
     }
 
     fn table(&self, key: usize) -> Option<Arc<TableRls>> {
@@ -1026,6 +1040,22 @@ impl<'a> Resolve<'a> {
 impl Resolver for Resolve<'_> {
     fn mentions(&self, word: &str) -> bool {
         self.names.contains(word) || self.tainted.contains(word)
+    }
+
+    fn merged_layer(&self, key: usize, alias: &str) -> bool {
+        if !self.merged_layers || alias != sprig_inherit::view::LAYER_ALIAS {
+            return false;
+        }
+        if self.elements.borrow().contains_key(&key) {
+            return false;
+        }
+        let Some(o) = self.keys.borrow().get(key).copied() else {
+            return false;
+        };
+        self.cat
+            .ext
+            .get::<sprig_inherit::InheritState>(sprig_inherit::MODULE)
+            .is_some_and(|st| st.object(o).is_some())
     }
 
     fn refused_relation(&self, _db: Option<&str>, name: &str) -> bool {

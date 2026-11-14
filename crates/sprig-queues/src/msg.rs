@@ -1,7 +1,8 @@
 //! Messages between the front ends' form ([`Message`]) and rows
-//! ([`StoredMsg`], [`OutboxRow`]): a message keeps its source encoding
-//! (chapter 50, "Message encoding"); what the engine reads from it
-//! (headers, priority, TTL) is parsed again when a row is loaded.
+//! ([`StoredMsg`](crate::store::StoredMsg),
+//! [`OutboxRow`](crate::store::OutboxRow)): a message keeps its source
+//! encoding; what the engine reads from it (headers, priority, TTL) is
+//! parsed again when a row is loaded.
 
 use std::sync::Arc;
 

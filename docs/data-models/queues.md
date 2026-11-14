@@ -354,9 +354,9 @@ Sharding: all of a virtual host's queues live in its database's first shard, on 
 | `listener.amqps.enabled` | false | dc, global | Serve AMQP with TLS on `listener.amqps.bind` (`0.0.0.0:5671`) |
 | `listener.amqp.tenant` | empty | dc, global | Tenant of plain user names on both AMQP listeners |
 | `amqp.default_vhost_database` | `mq` | tenant, global | Database of virtual host `/` |
-| `amqp.sasl_mechanisms` | `PLAIN,AMQPLAIN,EXTERNAL` | tenant, global | Offered SASL mechanisms; `EXTERNAL` only with a verified client certificate |
-| `amqp.cert_login_field` | `common_name` | tenant, global | Certificate field that names the user for `EXTERNAL`: `common_name` or `distinguished_name` |
-| `amqp.heartbeat_seconds` | 60 | tenant, global | Heartbeat the server proposes |
+| `amqp.sasl_mechanisms` | `PLAIN,AMQPLAIN,EXTERNAL` | dc, global | Offered SASL mechanisms; `EXTERNAL` only with a verified client certificate |
+| `amqp.cert_login_field` | `common_name` | dc, global | Certificate field that names the user for `EXTERNAL`: `common_name` or `distinguished_name` |
+| `amqp.heartbeat_seconds` | 60 | dc, global | Heartbeat the server proposes |
 | `amqp.frame_max` | 131072 | dc, global | Largest frame |
 | `amqp.channel_max` | 2047 | dc, global | Channels per connection |
 | `amqp.max_message_bytes` | 16777216 | object, database, tenant, cluster, dc, global | Largest message |
@@ -364,8 +364,8 @@ Sharding: all of a virtual host's queues live in its database's first shard, on 
 | `amqp.consumer_timeout_ms` | 1800000 | object, database, tenant, cluster, dc, global | Unacknowledged delivery limit; 0 is none |
 | `amqp.max_unacked_per_consumer` | 65535 | tenant, global | Cap for prefetch 0 |
 | `amqp.quota_publish_bytes_per_sec` | 0 | tenant, global | Publish quota; 0 is none |
-| `amqp10.link_credit` | 256 | tenant, global | Credit granted to AMQP 1.0 publishing links |
-| `amqp10.legacy_addresses` | false | object, database, tenant, global | Accept bare queue names and AMQP address v1 forms |
+| `amqp10.link_credit` | 256 | dc, global | Credit granted to AMQP 1.0 publishing links |
+| `amqp10.legacy_addresses` | false | dc, global | Accept bare queue names and AMQP address v1 forms |
 | `queue.default_type` | `classic` | object, database, tenant, global | Queue type when none is declared |
 | `queue.delivery_limit_default` | 20 | object, database, tenant, global | Quorum queues' delivery limit |
 | `queue.confirm_mode` | `commit` | object, database, tenant, global | Confirm after the commit, or after a replica applied it (`replica`) |
@@ -418,7 +418,7 @@ AMQP clients receive the AMQP reply code (0-9-1) or condition (1.0), with SprigD
 - **Atomic `tx.commit` across queues.** Use SQL transactions for atomic publish and acknowledge.
 - **AMQP 1.0 transactions**, link recovery and the `second` receiver settle mode, and the 1.0 delivery-time annotations (`x-opt-delivery-time`, `x-opt-delivery-delay`).
 - **Lanes** (`x-sprig-lanes`): accepted and stored, but every queue is served as one lane.
-- **Publishing up the tenant tree.** A descendant's own sessions can't publish into an ancestor's exchange, although `queue.descendant_publish` and `queue.descendant_key` are registered settings.
+- **Publishing up the tenant tree.** A descendant's own sessions can't publish into an ancestor's exchange.
 - **Publishing from MongoDB** clients.
 
 ## Related

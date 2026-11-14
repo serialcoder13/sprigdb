@@ -1,13 +1,13 @@
-//! Credentials (chapter 51, "Credentials"; build step 3):
+//! Credentials:
 //!
 //! ```text
 //! seal(tenant T, connection c, name n, value v):
-//!   (kv, K) := keyring.current_for("sink", T)        -- chapter 14, with a purpose
+//!   (kv, K) := keyring.current_for("sink", T)        -- a per-purpose tenant key
 //!   nonce := 12 random bytes
 //!   sealed := nonce ‖ AES-256-GCM(K, nonce, v, aad = "sprigsk1" ‖ T ‖ c ‖ n ‖ version)
 //! ```
 //!
-//! The keyring is chapter 12's master-secret file (`MasterKeyring`), which
+//! The keyring is the master-secret file (`MasterKeyring`), which
 //! derives a tenant key per purpose with HKDF; sink credentials use the
 //! purpose `sink`, so their key opens nothing else. Values are opened only
 //! in sink workers, into zeroized buffers.
@@ -138,7 +138,7 @@ pub fn open(
 }
 
 /// The credentials each connection type takes, and which it needs
-/// (chapter 51: 39216 for any other, or a missing one).
+/// (39216 for any other, or a missing one).
 #[must_use]
 pub fn allowed_credentials(kind: crate::model::ConnKind) -> &'static [&'static str] {
     use crate::model::ConnKind;

@@ -1,6 +1,5 @@
-//! Script sinks (chapter 51, "Script sinks", "Script sink runtime"; build
-//! steps 14 and 19): the delivery code is a JavaScript, KIRun or Lua
-//! function the tenant writes, run on chapter 41's runtimes
+//! Script sinks: the delivery code is a JavaScript, KIRun or Lua
+//! function the tenant writes, run on the logic runtimes
 //! (`sprig-logic-js`: QuickJS, native KIRun, the shared Lua 5.1 runtime).
 //!
 //! ```text
@@ -110,8 +109,7 @@ pub trait ReadSession: Send {
     async fn end(self: Box<Self>);
 }
 
-/// The read-only `db` handle of script sinks (Kiran, 9 November 2026,
-/// answer 6): reads as the sink's owner.
+/// The read-only `db` handle of script sinks: reads as the sink's owner.
 #[async_trait]
 pub trait ReadOnlyDb: Send + Sync {
     /// Opens a session: one read-only transaction for one batch attempt.
@@ -1106,7 +1104,7 @@ impl std::fmt::Debug for ScriptTarget {
     }
 }
 
-/// A script target for `ctx` (chapter 51's `TO SCRIPT`).
+/// A script target for `ctx` (`TO SCRIPT`).
 ///
 /// # Errors
 /// 39218 for a sink that isn't a script sink or has no source; 39861 for

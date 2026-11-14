@@ -1,5 +1,5 @@
 #!/bin/bash
-# Tests galera-start.sh's bootstrap decision (bugfix-41) without Docker:
+# Tests galera-start.sh's bootstrap decision without Docker:
 #
 #   deploy/compose/mariadb/galera-start-test.sh
 #
@@ -71,7 +71,8 @@ case_ peer_other_cluster join decide galera-1 $U 26 0 -- \
 # No record of this node itself.
 case_ own_missing join decide galera-1 $U 26 0 -- \
     galera-2 $U 26 5 galera-3 $U 26 5
-# The all-zero UUID never bootstraps by rule 2 (HD1's procedure instead).
+# The all-zero UUID never bootstraps by rule 2 (it needs a manual
+# re-bootstrap with a fresh identity instead).
 case_ nil_uuid join decide galera-1 00000000-0000-0000-0000-000000000000 26 0 -- \
     galera-1 $U 26 5 galera-2 $U 26 5 galera-3 $U 26 5
 # Marked safe_to_bootstrap (the last to leave): bootstraps, whatever the node.

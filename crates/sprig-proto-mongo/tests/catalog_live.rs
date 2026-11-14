@@ -1,4 +1,4 @@
-//! Collections in the tenant catalog (chapter 31, "Catalog tables"):
+//! Collections in the tenant catalog:
 //! metadata survives moving from `__sprig_doc_meta` to the catalog, and
 //! one gateway sees another's collections, indexes and array paths.
 //!

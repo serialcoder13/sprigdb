@@ -1,5 +1,4 @@
-//! Capacity, utilization and pressure (chapter 11, "Capacity, utilization
-//! and pressure"; build step 3), over the in-memory fleet view.
+//! Capacity, utilization and pressure, over the in-memory fleet view.
 //!
 //! ```text
 //! u[c][d]    = Σ load[s][d] for shards s on c  /  cap[c][d]
@@ -12,7 +11,7 @@
 //!
 //! The `schemas` dimension is the fuller of tables over
 //! `placement.max_tables_per_cluster` and shard schemas over
-//! `placement.max_shard_schemas_per_cluster` (build step 9). A capacity
+//! `placement.max_shard_schemas_per_cluster`. A capacity
 //! dimension that is 0 (not declared) is left out of `full`.
 //!
 //! Times are whole seconds since the Unix epoch ([`Timestamp`]), so the
@@ -195,7 +194,7 @@ pub struct Capacity {
     pub threads: f64,
 }
 
-/// What per-shard loads miss, from chapter 09's probes.
+/// What per-shard loads miss, from the cluster probes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Pressure {
     /// Mean `Threads_running`.
@@ -243,7 +242,7 @@ pub enum ClusterState {
     Unavailable,
 }
 
-/// Capability flags the constraints read (chapter 09's `Derived`).
+/// Capability flags the constraints read (the cluster's `Derived`).
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClusterCaps {
@@ -282,7 +281,7 @@ pub struct ClusterView {
     pub replica_dcs: Vec<DcId>,
     /// Capability flags.
     pub caps: ClusterCaps,
-    /// Chapter 09's tuning reports "over table budget".
+    /// The cluster's tuning reports "over table budget".
     pub over_table_budget: bool,
     /// `sprig_cluster_table_cache_misses_total` keeps rising after tuning.
     pub cache_misses_rising: bool,
@@ -496,7 +495,7 @@ impl ShardView {
 pub struct TenantView {
     /// The tenant.
     pub id: TenantId,
-    /// DCs its data may live in; `None` means anywhere (chapter 26).
+    /// DCs its data may live in; `None` means anywhere.
     pub allowed_dcs: Option<BTreeSet<DcId>>,
     /// Features its objects use.
     pub needs: BTreeSet<String>,
@@ -533,7 +532,7 @@ impl TenantView {
     }
 }
 
-/// Co-writing transactions between two groups of one tenant (chapter 12's
+/// Co-writing transactions between two groups of one tenant (the workload's
 /// `txn` fingerprints).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct CoWrite {

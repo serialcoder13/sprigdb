@@ -1,6 +1,6 @@
-//! G31: a shard schema the mover makes on another cluster has chapter 18's
-//! decision table, so the first coordinated write anchored there works
-//! (decision bugfix-2).
+//! Regression: a shard schema the mover makes on another cluster has the
+//! distributed transactions' decision table, so the first coordinated
+//! write anchored there works.
 //!
 //! Needs the Compose stack's clusters (no etcd, no worker: the test drives
 //! the job's source and target directly, as the mover's preparing step
@@ -13,12 +13,12 @@
 //! A shard schema `t<id>_d1_g1_s1` with a table and `__sprig_dtx` is made
 //! on `dc-a-c1` (13301); the target on `dc-a-c2` (13311) prepares the job
 //! (schemas, tables, object statements); then a coordinated write runs on
-//! the new schema as chapter 18's anchor branch does: an XA branch that
+//! the new schema as a distributed transaction's anchor branch does: an XA branch that
 //! writes a row and its decision row, prepared and committed. Before the
 //! fix the decision insert failed with 1146.
 //!
 //! The tenant id is 1,000,000,000 above every `t<id>_` schema on the three
-//! clusters at the start (rule 8f), checked free on each; the test drops only its own
+//! clusters at the start, checked free on each; the test drops only its own
 //! two schemas, by exact name.
 
 #![allow(clippy::unwrap_used, clippy::too_many_lines)]
@@ -157,7 +157,8 @@ async fn a_moved_shard_schema_takes_coordinated_writes() {
         let objects = source.objects().await.unwrap();
         target.prepare(&tables, &objects).await.unwrap();
 
-        // The coordinated write chapter 18's anchor branch makes.
+        // The coordinated write a distributed transaction's anchor branch
+        // makes.
         let mut t = pools[1].get_conn().await.unwrap();
         let xid = format!("'bugfix1-{tenant}'");
         t.query_drop(format!("XA START {xid}")).await.unwrap();

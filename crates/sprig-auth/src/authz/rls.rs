@@ -1,8 +1,7 @@
-//! Row-level security's catalog and per-session view (chapter 29,
-//! "Row-level security"; build steps 21 and 22).
+//! Row-level security's catalog and per-session view.
 //!
-//! - **Tables** (module `rls`, in `t<tenant>_sprig`): `row_policies` as
-//!   the chapter defines it, and `row_security`, one row per object whose
+//! - **Tables** (module `rls`, in `t<tenant>_sprig`): `row_policies`
+//!   and `row_security`, one row per object whose
 //!   security was ever switched: `enabled`, `forced`, and the auth version
 //!   whose MariaDB write checks (triggers) are deployed (`checks_version`,
 //!   against `changed_version`, which every policy change of the object
@@ -44,7 +43,7 @@ use super::store::Grantee;
 /// The module name in the catalog's format records.
 pub const MODULE: &str = "rls";
 
-/// `row_policies` (chapter 29).
+/// `row_policies`.
 pub const DDL_ROW_POLICIES: &str = "CREATE TABLE IF NOT EXISTS row_policies (
   policy_id    INT UNSIGNED NOT NULL AUTO_INCREMENT,
   object_id    BIGINT UNSIGNED NOT NULL,
@@ -120,7 +119,7 @@ pub struct PolicyRow {
     /// `WITH CHECK`.
     pub check_expr: Option<String>,
     /// `USING` as a MongoDB filter (extended JSON), for collections'
-    /// policies made by `sprigCreatePolicy` (decision RL33).
+    /// policies made by `sprigCreatePolicy`.
     pub using_mongo: Option<String>,
     /// `WITH CHECK` as a MongoDB filter.
     pub check_mongo: Option<String>,
@@ -508,7 +507,7 @@ pub struct NewPolicy<'a> {
     pub using_expr: Option<&'a str>,
     /// `WITH CHECK`.
     pub check_expr: Option<&'a str>,
-    /// `USING` as a MongoDB filter (RL33).
+    /// `USING` as a MongoDB filter.
     pub using_mongo: Option<&'a str>,
     /// `WITH CHECK` as a MongoDB filter.
     pub check_mongo: Option<&'a str>,
@@ -860,7 +859,7 @@ pub const CTX_FUNCTION: &str = "__sprig_rls_ctx";
 
 /// The prefixes of a key-value namespace's element tables
 /// (`sprig_sql::rls::triggers::KV_ELEMENT_PREFIXES`): their policy views
-/// apply the key table's policies (decision RL55).
+/// apply the key table's policies.
 pub const KV_ELEMENT_PREFIXES: [&str; 2] = ["__sprig_ke_", "__sprig_kz_"];
 
 /// The policy view of table `table` (object `object`;
@@ -877,7 +876,7 @@ pub fn policy_view(table: &str, object: ObjectId) -> String {
 }
 
 /// The policy view of table `table` with every column, invisible ones too
-/// (`sprig_sql::rls::views::hidden_view_name`, decision RL28): tables with
+/// (`sprig_sql::rls::views::hidden_view_name`): tables with
 /// invisible columns have it next to [`policy_view`].
 #[must_use]
 pub fn policy_view_hidden(table: &str, object: ObjectId) -> String {
@@ -902,7 +901,7 @@ fn relation_of(cat: &TenantCatalog, db_key: &str, name_key: &str) -> Option<(DbI
 
 /// The protected tables that bind each backend account, as MariaDB sees
 /// it: an account holds the rights of every role granted to its user,
-/// active or not (chapter 29, "Backend accounts"), so a table binds the
+/// active or not, so a table binds the
 /// account only when it binds the user with every granted role active.
 /// Accounts not bound by any table are left out.
 #[must_use]
@@ -932,12 +931,12 @@ pub fn backend_bound(
 }
 
 /// Narrows the wanted backend grants `want` for row-level security's
-/// policy views (`rls.backend_enforcement = views`; decision RL18).
+/// policy views (`rls.backend_enforcement = views`).
 /// `physical` lists the relations (schema, name) of the tenant's
 /// databases with protected tables on the cluster being reconciled,
 /// `bound` is [`backend_bound`], and `definers` the (account, lower-case
 /// view name) pairs of policy views' definers, which keep reading their
-/// table itself (a view reads it with its definer's rights; RL19).
+/// table itself (a view reads it with its definer's rights).
 ///
 /// ```text
 /// for each account a, database D, schema s of D holding table T's view:
@@ -972,7 +971,7 @@ pub fn narrow(
     // Protected tables with a view, per database: (object, name lower).
     // A key-value namespace's element tables (`__sprig_ke_<t>`,
     // `__sprig_kz_<t>`) count as the key table's, under their own names
-    // and views (RLS round 6, decision RL55); where they don't exist they
+    // and views; where they don't exist they
     // match no relation.
     let mut protected: HashMap<DbId, Vec<(ObjectId, String)>> = HashMap::new();
     let mut names: HashMap<(ObjectId, String), String> = HashMap::new();
@@ -1105,7 +1104,7 @@ pub fn narrow(
                         continue;
                     }
                     let vkey = BackendTarget::Table(schema.clone(), pview.clone());
-                    // RL28: the all-columns view of a table with invisible
+                    // The all-columns view of a table with invisible
                     // columns gets the same rights.
                     let hview = policy_view_hidden(&spelled_name, *object);
                     let hkey =
@@ -1427,7 +1426,7 @@ mod tests {
         assert_eq!(db_row_for(u1, &s), Some(all.minus(sel)));
         assert_eq!(u1.get(&t(&s, "Docs")).copied(), Some(refs));
         assert_eq!(u1.get(&t(&s, "__sprig_rls_Docs")).copied(), Some(all));
-        // RL28: the all-columns view (a table with invisible columns) too.
+        // The all-columns view (a table with invisible columns) too.
         assert_eq!(u1.get(&t(&s, "__sprig_rlsh_Docs")).copied(), Some(all));
         assert_eq!(u1.get(&t(&s, "notes")).copied(), Some(sel));
         assert_eq!(u1.get(&t(&s, "__sprig_redo")).copied(), Some(sel));
@@ -1478,7 +1477,7 @@ mod tests {
 
     #[test]
     fn bound_accounts_read_key_value_elements_through_their_views() {
-        // RL55: a protected key-value namespace's element tables lose
+        // A protected key-value namespace's element tables lose
         // SELECT for bound accounts, their views get it.
         use super::super::backend::{BackendState, BackendTarget, db_row_for};
         use super::super::privilege::ActionSet;
@@ -1522,7 +1521,7 @@ mod tests {
             "__sprig_rlsh___sprig_kz_db0",
         ];
         // Before the element views exist: the element tables stay readable
-        // (the gateway's rewrite filters them, RL35).
+        // (the gateway's rewrite filters them).
         let mut before = want.clone();
         narrow(
             &mut before,

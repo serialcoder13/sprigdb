@@ -76,20 +76,20 @@ pub struct ServerConfig {
     pub semisync_timeout: Duration,
     /// `rpl_semi_sync_master_enabled` (primary side).
     pub semisync_master: bool,
-    /// `read_only` at boot (chapter 27 boots fenced).
+    /// `read_only` at boot (provisioned servers boot fenced).
     pub read_only_on_boot: bool,
     /// `binlog_storage_engine = innodb` (MariaDB 12.3+): `XA PREPARE` is not
     /// binlogged, so it takes no GTID and replicas never see the prepared
     /// branch; `XA COMMIT` logs the whole transaction as one ordinary group
     /// and `XA ROLLBACK` logs nothing (measured on 12.3.3). Semi-sync
-    /// `AFTER_SYNC` doesn't exist with it (chapter 09), so a prepare never
+    /// `AFTER_SYNC` doesn't exist with it, so a prepare never
     /// waits for an ack. Off (the classic file binlog) by default, as on
     /// the Compose servers.
     pub binlog_in_innodb: bool,
 }
 
 impl ServerConfig {
-    /// A server with MariaDB 11.8's defaults and chapter 27's semi-sync
+    /// A server with MariaDB 11.8's defaults and the provisioned semi-sync
     /// timeout (10 s).
     #[must_use]
     pub fn new(name: &str, server_id: u32, domain_id: u32) -> Self {
@@ -2250,7 +2250,7 @@ impl Model {
 
     /// Promotes a replica to primary: it applies what its relay log holds
     /// (`drain`) or drops it, stops replicating, and turns semi-sync
-    /// (primary side) on as chapter 25 does. Returns the GTIDs it dropped.
+    /// (primary side) on as failover does. Returns the GTIDs it dropped.
     ///
     /// # Panics
     /// Only if the model's own state is inconsistent (a bug).
@@ -2325,7 +2325,7 @@ impl Model {
     }
 
     /// GTIDs in `old`'s binlog that `new` doesn't have: what a failover
-    /// from `old` to `new` lost (chapter 25's diverged transactions).
+    /// from `old` to `new` lost (its diverged transactions).
     #[must_use]
     pub fn lost_gtids(&self, old: &str, new: &str) -> Vec<Gtid> {
         let have: BTreeSet<Gtid> = self.gtids(new).into_iter().collect();

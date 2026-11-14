@@ -1,6 +1,5 @@
-# A one-DC development deployment on top of compose.yaml (chapter 23,
-# "Bootstrapping the first DC"; single-etcd mode: one etcd serves both the
-# DC tier and the global tier).
+# A one-DC development deployment on top of compose.yaml (single-etcd mode:
+# one etcd serves both the DC tier and the global tier).
 #
 #   docker compose up -d etcd
 #   cargo run -p sprigdb -- --config deploy/compose/sprigdb.dev.toml controller
@@ -24,8 +23,8 @@ deployment_id = "sprigdb-dev"
 # The first controller to start writes the deployment id, dcs/dc-a (active)
 # and ids/tenant, once; later starts find them and only verify the id.
 bootstrap = true
-# Chapter 12's sealed parameter samples, the gateway's file: automatic-index
-# validation opens the samples it replays with it (chapter 13).
+# Sealed parameter samples, the gateway's file: automatic-index validation
+# opens the samples it replays with it.
 workload_key_file = "deploy/compose/workload-keys.dev"
 
 [telemetry]

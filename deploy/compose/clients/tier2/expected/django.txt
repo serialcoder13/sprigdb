@@ -1,5 +1,5 @@
 # Django 5.2.8: tests that pass on MySQL 8.4.11 and not through 3306 (tab, reason).
-# Measured 12 Nov 2026 (R4 round 5, r4five) on the modules introspection,
+# Measured 12 Nov 2026 on the modules introspection,
 # inspectdb, backends and schema: none (gateway 317 pass, 0 fail, 148 skip;
 # MySQL 8.4.11 316 / 1 / 148, its one failure backends' test_unicode_password).
 # The CI job runs Django's whole suite; add what it finds here.

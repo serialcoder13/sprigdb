@@ -1,8 +1,8 @@
 //! Building a `RegisterCluster` request from `sprigctl cluster register`'s
-//! flags and its `-f` file (chapter 09, "Interfaces"; chapter 27,
-//! "External registration").
+//! flags and its `-f` file (also for external
+//! registration).
 //!
-//! The file is TOML, with chapter 27's fields:
+//! The file is TOML, with these fields:
 //!
 //! ```toml
 //! dc = "fra1"
@@ -22,8 +22,8 @@
 //! rpo_seconds = 0
 //! ```
 //!
-//! Flags override the file. Chapter 27 writes the file in YAML; SprigDB
-//! reads TOML, like `sprigdb.toml` and `--declare`.
+//! Flags override the file. It is TOML rather than YAML, like
+//! `sprigdb.toml` and `--declare`.
 
 use serde::Deserialize;
 use sprig_cluster::record::{Capacity, Declared, NodeSpec, SecretRefs, TopologyKind};
@@ -83,7 +83,7 @@ pub(crate) struct RegisterFlags {
     pub(crate) dry_run: bool,
 }
 
-/// A topology name: chapter 27's spellings and the record's.
+/// A topology name: the file's spellings and the record's.
 ///
 /// # Errors
 /// For anything else.
@@ -111,7 +111,7 @@ fn node(i: usize, spec: &str) -> Result<NodeSpec, String> {
     })
 }
 
-/// `sprigctl cluster set-nodes` (HD24): the record's nodes after the
+/// `sprigctl cluster set-nodes`: the record's nodes after the
 /// changes `specs` asks for (`[id=]host:port`, as `register --node`): a
 /// node named there gets the new address (its zone kept), a new id is
 /// added at the end, and with `only` the list is exactly `specs`, in that
@@ -393,7 +393,7 @@ mod tests {
         }
     }
 
-    /// HD24: a round-1 bundle's `mariadb-1:3306` moves to VM 1's private
+    /// A bundle's `mariadb-1:3306` moves to VM 1's private
     /// address; the replica keeps its address and zone.
     #[test]
     fn set_nodes_changes_named_addresses_only() {

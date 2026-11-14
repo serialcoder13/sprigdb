@@ -1,6 +1,5 @@
 //! Languages: splitting input into statements, classifying them, and
-//! finding destructive ones (chapter 53, "Running statements" and
-//! "Destructive statements").
+//! finding destructive ones.
 //!
 //! The SQL lexer here also drives highlighting, completion and redaction,
 //! so comments, strings and quoted names are never mistaken for keywords.
@@ -354,8 +353,7 @@ pub fn classify_sql(stmt: &str) -> Class {
     }
 }
 
-/// Why a statement is destructive, or `None` (chapter 53, "Destructive
-/// statements").
+/// Why a statement is destructive, or `None`.
 #[must_use]
 pub fn destructive(stmt: &str, lang: Lang) -> Option<String> {
     match lang {

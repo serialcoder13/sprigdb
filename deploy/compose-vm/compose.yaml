@@ -1,5 +1,5 @@
-# SprigDB on one VM with Docker Compose (hardening rounds 1 and 2; chapter
-# 27, "Compose on VMs"), or the first of three VMs with compose.ha.yaml.
+# SprigDB on one VM with Docker Compose, or the first of three VMs with
+# compose.ha.yaml.
 # Production bundle: TLS on every client listener, mutual TLS to etcd,
 # secrets from files, healthchecks, memory limits, log rotation, named
 # volumes, `restart: unless-stopped`.
@@ -58,7 +58,7 @@ x-sprigdb: &sprigdb
     SPRIGDB_META_DC_SEEDS: '${SPRIG_ETCD_SEEDS:-["https://etcd:2379"]}'
     SPRIGDB_TELEMETRY_LOG_FORMAT: json
     SPRIGDB_TELEMETRY_BOOTSTRAP_LOG_LEVEL: ${SPRIG_LOG_LEVEL:-info}
-    # Full-text index copies (chapter 39) and the audit spool (chapter 47)
+    # Full-text index copies and the audit spool
     # live on each role's data volume, not in the container's /tmp.
     SPRIG_SEARCH_DIR: /var/lib/sprigdb/search
     SPRIGDB_AUDIT_SPOOL_DIR: /var/lib/sprigdb/audit-spool

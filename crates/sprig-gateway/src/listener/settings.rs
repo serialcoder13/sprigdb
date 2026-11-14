@@ -38,7 +38,7 @@ pub struct ListenerKeys {
     pub tls: &'static Setting<Text>,
     /// `listener.<name>.cert`.
     pub cert: &'static Setting<Text>,
-    /// `listener.<name>.client_cert` (wireup, 13 Nov).
+    /// `listener.<name>.client_cert`.
     pub client_cert: &'static Setting<Text>,
 }
 

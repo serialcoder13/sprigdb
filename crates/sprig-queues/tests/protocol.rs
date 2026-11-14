@@ -1,4 +1,4 @@
-//! `sprig-proto-amqp`'s protocol suite (chapter 50 step 21) against the
+//! `sprig-proto-amqp`'s protocol suite against the
 //! queue engine: the AMQP front ends over [`QueueEngine`] with the
 //! in-memory catalog, leases and message store. The suite is the same
 //! file the in-memory engine runs (`sprig-proto-amqp/tests/protocol/

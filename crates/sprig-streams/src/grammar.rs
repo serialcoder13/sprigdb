@@ -1,5 +1,5 @@
-//! The stream statements (chapter 45, "SQL"), recognized on chapter 07's
-//! lexer before the name plan:
+//! The stream statements, recognized on the SQL lexer before the name
+//! plan:
 //!
 //! ```text
 //! CREATE STREAM [IF NOT EXISTS] name

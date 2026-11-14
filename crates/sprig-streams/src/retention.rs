@@ -1,5 +1,4 @@
-//! Retention and compaction (chapter 45, "Retention and compaction"; build
-//! step 7). The sequencer job of each log shard runs [`maintain`] every
+//! Retention and compaction. The sequencer job of each log shard runs [`maintain`] every
 //! minute:
 //!
 //! ```text

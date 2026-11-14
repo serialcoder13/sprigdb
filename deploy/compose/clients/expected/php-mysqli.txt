@@ -3,8 +3,8 @@
 # (summarize.py). Test ids are run-tests.php's JUnit names.
 
 # Statements of several MiB: they OOM-killed a 768 MB MySQL 8.4 reference
-# (r4close, 10 November) and would send 16 MiB and more to the shared
-# development clusters through a gateway (gaps row 30; r4-interim C1).
+# (10 November) and would send 16 MiB and more to the shared development
+# clusters through a gateway, whose backends accept only 16 MiB.
 * exclude *mysqli_fetch_array_large.phpt* :: large statements (see above)
 * exclude *mysqli_insert_packet_overflow.phpt* :: large statements (see above)
 * exclude *mysqli_real_connect_compression_error.phpt* :: large statements (see above)
@@ -15,52 +15,52 @@
 * exclude *bug74021.phpt* :: large statements (see above)
 * exclude *bug73800.phpt* :: large statements (see above)
 
-# Measured on 10 November 2026 (r4close): MySQL 8.4.11 and MariaDB 11.8.9
+# Measured on 10 November 2026: MySQL 8.4.11 and MariaDB 11.8.9
 # containers as root, and a debug gateway built from the tree (47406/47407)
 # on the shared dev cluster dc-a-c1, tenant r4close. `flaky` lines are tests
 # that met the shared cluster's outages during that run; rerun them.
-gateway-mysql fail *bug55283.phpt* :: not investigated (r4close): --
+gateway-mysql fail *bug55283.phpt* :: not investigated: --
 gateway-mysql fail *mysqli_change_user.phpt* :: tenant login: USER() shows the user's name (app), not the login (r4close.app)
-gateway-mysql flaky *mysqli_change_user_set_names.phpt* :: collation defaults after COM_CHANGE_USER; passed through 3306 in R4 round 4 (r4four), flaky until CI confirms
-gateway-mysql fail *mysqli_connect.phpt* :: gaps row 59 (decision D4): a failed plaintext login needs the RSA exchange the gateway doesn't offer; mysqlnd reports 2006 where MySQL answers 1045 (r4two)
-gateway-mysql fail *mysqli_connect_oo.phpt* :: gaps row 59, as mysqli_connect.phpt
-gateway-mysql fail *mysqli_connect_oo_defaults.phpt* :: tenant model: USER() names the tenant's user (`app`), not the login name `r4two.app` (r4two)
-gateway-mysql fail *mysqli_execute_query.phpt* :: not investigated (r4close): --
-gateway-mysql flaky *mysqli_fetch_field_flags.phpt* :: times out (120 s): dozens of CREATE TABLEs through the shared dev controller's catalog are slower than run-tests allows (r4two, 10 November)
+gateway-mysql flaky *mysqli_change_user_set_names.phpt* :: collation defaults after COM_CHANGE_USER; passed through 3306 in one run, flaky until CI confirms
+gateway-mysql fail *mysqli_connect.phpt* :: a failed plaintext login needs the RSA exchange the gateway doesn't offer; mysqlnd reports 2006 where MySQL answers 1045
+gateway-mysql fail *mysqli_connect_oo.phpt* :: a failed plaintext login needs the RSA exchange the gateway doesn't offer, as mysqli_connect.phpt
+gateway-mysql fail *mysqli_connect_oo_defaults.phpt* :: tenant model: USER() names the tenant's user (`app`), not the login name `r4two.app`
+gateway-mysql fail *mysqli_execute_query.phpt* :: not investigated: --
+gateway-mysql flaky *mysqli_fetch_field_flags.phpt* :: times out (120 s): dozens of CREATE TABLEs through the shared dev controller's catalog are slower than run-tests allows (10 November)
 gateway-mysql fail *mysqli_get_client_stats.phpt* :: tenant model: the test's DROP TABLE of a FEDERATED table needs FEDERATED ADMIN
-gateway-mysql fail *mysqli/tests/mysqli_info.phpt* :: not investigated (r4close): 001+ [010] Expecting string/any_non_empty, got NULL/
-gateway-mysql fail *mysqli_more_results.phpt* :: not investigated (r4close): [004]
-gateway-mysql fail *mysqli_real_connect.phpt* :: gaps row 59, as mysqli_connect.phpt
-gateway-mysql fail *mysqli_real_connect_pconn.phpt* :: gaps row 59, as mysqli_connect.phpt
-gateway-mysql fail *mysqli_expire_password.phpt* :: gaps row 59 (decision D4): the test's new user logs in over plaintext with a password not yet in the gateway's caching_sha2_password cache, which needs the RSA exchange; mysqlnd reports 2006 (R4 round 5, r4five: reproduced, not load as r4four thought)
-gateway-mysql fail *mysqli_report.phpt* :: not investigated (r4close): 001- Warning: mysqli_multi_query(): (%d/%d): You have an error in your SQL syntax; check the manual that corresponds to your %s server version for the
-gateway-mysql fail *mysqli_report_new.phpt* :: decision D4, as mysqli_connect
-gateway-mysql fail *mysqli_stmt_get_result.phpt* :: not investigated (r4close): --
-gateway-mysql flaky *mysqli_stmt_get_result_bit.phpt* :: times out (120 s): 46 CREATE TABLEs through the shared dev controller's catalog (r4two, 10 November)
-gateway-mysql fail *mysqli_thread_id.phpt* :: KILL of another session's id (gaps rows 32-33)
-gateway-mariadb fail *bug55283.phpt* :: not investigated (r4close): --
+gateway-mysql fail *mysqli/tests/mysqli_info.phpt* :: not investigated: 001+ [010] Expecting string/any_non_empty, got NULL/
+gateway-mysql fail *mysqli_more_results.phpt* :: not investigated: [004]
+gateway-mysql fail *mysqli_real_connect.phpt* :: a failed plaintext login needs the RSA exchange the gateway doesn't offer, as mysqli_connect.phpt
+gateway-mysql fail *mysqli_real_connect_pconn.phpt* :: a failed plaintext login needs the RSA exchange the gateway doesn't offer, as mysqli_connect.phpt
+gateway-mysql fail *mysqli_expire_password.phpt* :: the test's new user logs in over plaintext with a password not yet in the gateway's caching_sha2_password cache, which needs the RSA exchange; mysqlnd reports 2006 (reproduced: not caused by load)
+gateway-mysql fail *mysqli_report.phpt* :: not investigated: 001- Warning: mysqli_multi_query(): (%d/%d): You have an error in your SQL syntax; check the manual that corresponds to your %s server version for the
+gateway-mysql fail *mysqli_report_new.phpt* :: a failed plaintext login needs the RSA exchange the gateway doesn't offer, as mysqli_connect
+gateway-mysql fail *mysqli_stmt_get_result.phpt* :: not investigated: --
+gateway-mysql flaky *mysqli_stmt_get_result_bit.phpt* :: times out (120 s): 46 CREATE TABLEs through the shared dev controller's catalog (10 November)
+gateway-mysql fail *mysqli_thread_id.phpt* :: KILL of another session's id: the gateway kills only the user's own sessions
+gateway-mariadb fail *bug55283.phpt* :: not investigated: --
 gateway-mariadb fail *mysqli_change_user.phpt* :: tenant login: USER() shows the user's name (app), not the login (r4close.app)
-gateway-mariadb fail *mysqli_change_user_old.phpt* :: not investigated (r4close): 001+ [015] Expecting user r4close.app, got user() app@127.0.0.1
+gateway-mariadb fail *mysqli_change_user_old.phpt* :: not investigated: 001+ [015] Expecting user r4close.app, got user() app@127.0.0.1
 *-mariadb fail *mysqli_change_user_set_names.phpt* :: fails on plain MariaDB 11.8.9 too: 001+ [015] Expecting collation to be utf8mb4_uca1400_ai_ci got utf8mb4_general_ci
 baseline-mariadb fail *mysqli_class_mysqli_interface.phpt* :: plain MariaDB 11.8.9 only: --
-gateway-mariadb fail *mysqli_connect.phpt* :: gaps row 59 (decision D4): a failed plaintext login needs the RSA exchange the gateway doesn't offer; mysqlnd reports 2006 where the server answers 1045 (r4two)
-gateway-mariadb fail *mysqli_connect_oo.phpt* :: gaps row 59 (decision D4): a failed plaintext login needs the RSA exchange the gateway doesn't offer; mysqlnd reports 2006 where the server answers 1045 (r4two)
-gateway-mariadb fail *mysqli_connect_oo_defaults.phpt* :: not investigated (r4close): --
-gateway-mariadb fail *mysqli_execute_query.phpt* :: not investigated (r4close): --
+gateway-mariadb fail *mysqli_connect.phpt* :: a failed plaintext login needs the RSA exchange the gateway doesn't offer; mysqlnd reports 2006 where the server answers 1045
+gateway-mariadb fail *mysqli_connect_oo.phpt* :: a failed plaintext login needs the RSA exchange the gateway doesn't offer; mysqlnd reports 2006 where the server answers 1045
+gateway-mariadb fail *mysqli_connect_oo_defaults.phpt* :: not investigated: --
+gateway-mariadb fail *mysqli_execute_query.phpt* :: not investigated: --
 *-mariadb fail *mysqli_fetch_field.phpt* :: fails on plain MariaDB 11.8.9 too: --
 *-mariadb fail *mysqli_fetch_field_oo.phpt* :: fails on plain MariaDB 11.8.9 too: --
 *-mariadb fail *mysqli_fetch_fields.phpt* :: fails on plain MariaDB 11.8.9 too: --
 *-mariadb fail *mysqli_field_seek.phpt* :: fails on plain MariaDB 11.8.9 too: --
 *-mariadb fail *mysqli_get_charset.phpt* :: fails on plain MariaDB 11.8.9 too: 001+ [012] Cannot fetch Id/Number, test will fail
 gateway-mariadb fail *mysqli_get_client_stats.phpt* :: tenant model: the test's DROP TABLE of a FEDERATED table needs FEDERATED ADMIN
-gateway-mariadb fail *mysqli/tests/mysqli_info.phpt* :: not investigated (r4close): 001+ [010] Expecting string/any_non_empty, got NULL/
-gateway-mariadb fail *mysqli_more_results.phpt* :: not investigated (r4close): [004]
-gateway-mariadb fail *mysqli_real_connect.phpt* :: gaps row 59 (decision D4): a failed plaintext login needs the RSA exchange the gateway doesn't offer; mysqlnd reports 2006 where the server answers 1045 (r4two)
-gateway-mariadb fail *mysqli_real_connect_pconn.phpt* :: gaps row 59 (decision D4): a failed plaintext login needs the RSA exchange the gateway doesn't offer; mysqlnd reports 2006 where the server answers 1045 (r4two)
-gateway-mariadb fail *mysqli_report.phpt* :: not investigated (r4close): 001- Warning: mysqli_multi_query(): (%d/%d): You have an error in your SQL syntax; check the manual that corresponds to your %s server version for the
-gateway-mariadb fail *mysqli_report_new.phpt* :: decision D4, as mysqli_connect
+gateway-mariadb fail *mysqli/tests/mysqli_info.phpt* :: not investigated: 001+ [010] Expecting string/any_non_empty, got NULL/
+gateway-mariadb fail *mysqli_more_results.phpt* :: not investigated: [004]
+gateway-mariadb fail *mysqli_real_connect.phpt* :: a failed plaintext login needs the RSA exchange the gateway doesn't offer; mysqlnd reports 2006 where the server answers 1045
+gateway-mariadb fail *mysqli_real_connect_pconn.phpt* :: a failed plaintext login needs the RSA exchange the gateway doesn't offer; mysqlnd reports 2006 where the server answers 1045
+gateway-mariadb fail *mysqli_report.phpt* :: not investigated: 001- Warning: mysqli_multi_query(): (%d/%d): You have an error in your SQL syntax; check the manual that corresponds to your %s server version for the
+gateway-mariadb fail *mysqli_report_new.phpt* :: a failed plaintext login needs the RSA exchange the gateway doesn't offer, as mysqli_connect
 *-mariadb fail *mysqli_stmt_get_result.phpt* :: fails on plain MariaDB 11.8.9 too: --
 *-mariadb fail *mysqli_stmt_get_result_metadata_fetch_field.phpt* :: fails on plain MariaDB 11.8.9 too: --
 *-mariadb fail *mysqli_thread_id.phpt* :: fails on plain MariaDB 11.8.9 too: 001+ [042] [1927] Connection was killed
-# The five mysqli_fetch_field* tests of gaps row 58 pass on 3306 since R4
-# round 3 (r4three, 11 November): utf8mb3 columns get utf8mb3_general_ci.
+# The five mysqli_fetch_field* tests pass on 3306 since 11 November:
+# utf8mb3 columns get utf8mb3_general_ci.

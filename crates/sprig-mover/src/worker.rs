@@ -1,6 +1,6 @@
-//! The job runtime a worker runs (chapter 10, "Jobs and workers"; build
-//! step 3): scan the DC tier's jobs, claim runnable ones nobody owns, run
-//! each in its own task, and stop them all if the worker's lease is lost.
+//! The job runtime a worker runs: scan the DC tier's jobs, claim runnable
+//! ones nobody owns, run each in its own task, and stop them all if the
+//! worker's lease is lost.
 
 use std::collections::HashMap;
 use std::sync::Arc;

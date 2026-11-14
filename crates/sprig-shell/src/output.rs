@@ -1,4 +1,4 @@
-//! Output formats of the CLI (chapter 53, "Command line"): table, JSON,
+//! Output formats of the CLI: table, JSON,
 //! NDJSON, CSV and TSV, written as results stream in.
 //!
 //! - **table** buffers one result to size its columns, as `mysql` does;

@@ -1,5 +1,4 @@
-//! `graph_mirror` (chapter 43, "Mirrors and freshness"; build step 14; R8
-//! round 5, decision G47): one long-running job per tenant
+//! `graph_mirror` (graph mirrors and their freshness): one long-running job per tenant
 //! (`spec: {"tenant": <id>}`), keeping the asynchronous mirrors of the
 //! tenant's grouped graphs ([`sprig_graph::mirror`]).
 //!

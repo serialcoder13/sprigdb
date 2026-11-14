@@ -1,9 +1,8 @@
-//! PL/SQL generation (chapter 41, "Code generation"): one version's
+//! PL/SQL generation: one version's
 //! helper package and entry procedure, in MariaDB's `sql_mode=ORACLE`
 //! dialect.
 //!
-//! Rules the generator keeps, each measured on MariaDB 11.8 (chapter 41
-//! and `decisions/spike-plsql-target.md`):
+//! Rules the generator keeps, each measured on MariaDB 11.8:
 //!
 //! - a package spec is created before its body, and helpers called from
 //!   the procedure are in the spec;
@@ -13,7 +12,7 @@
 //! - a routine variable or parameter passed bare to `JSON_OBJECT`,
 //!   `JSON_ARRAY` or `JSON_ARRAY_APPEND` is embedded as a JSON string,
 //!   whatever its type (measured again for this build: `BIGINT` 7 becomes
-//!   `"7"`). So every value is embedded through [`embed`]: numbers as
+//!   `"7"`). So every value is embedded through `embed`: numbers as
 //!   `(v + 0)`, JSON as `JSON_EXTRACT(v, '$')`, booleans as a JSON literal;
 //! - `JSON_EXTRACT` returns JSON `null` as the text `null`; paths map it
 //!   to SQL `NULL` with `JSON_TYPE`, because `NULLIF(…, 'null')` also

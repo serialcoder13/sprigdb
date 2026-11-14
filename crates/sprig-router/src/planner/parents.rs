@@ -1,5 +1,4 @@
-//! Inserts into parent members (chapter 15, "Table groups" and "Filling
-//! and back-filling `_sprig_rk`"; chapter 17, "INSERT routing").
+//! Inserts into parent members.
 //!
 //! A parent member (`order_items`) has no key column: its rows go where
 //! their parent row (`orders`) is, through the declared foreign key, and
@@ -17,7 +16,8 @@
 //!   Rows whose parent is nowhere go to the first shard without a hash,
 //!   so MariaDB's foreign-key check answers for them exactly as an
 //!   unsharded table would; with `foreign_key_checks = 0` they are
-//!   refused (chapter 19's orphanage isn't built).
+//!   refused (there is no orphanage table for rows whose parent is
+//!   missing yet).
 //!
 //! The foreign-key check on the shard is what makes this safe: a child row
 //! can only commit next to its parent, so a parent that moved or vanished

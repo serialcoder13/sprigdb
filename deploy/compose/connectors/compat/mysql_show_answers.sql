@@ -1,4 +1,4 @@
--- R4 round 7 (decision X36): MySQL's ALTER TABLE OK info line, SHOW
+-- MySQL's ALTER TABLE OK info line, SHOW
 -- PROCEDURE and FUNCTION STATUS's Language column, and SHOW CREATE
 -- TRIGGER's head as MySQL rebuilds it (backquoted names). Run with -vv.
 DROP TABLE IF EXISTS c_x7_t, c_x7_t2;

@@ -191,7 +191,7 @@ If no replica has caught up, the gateway waits up to `reads.gtid_wait_timeout_ms
 - Find why the replica lags: a long transaction or large batch on the writer, a replica with less I/O or CPU, or `slave_parallel_threads` set too low on MariaDB.
 - Break large writes into batches of a few thousand rows.
 - If the gateway reads no positions at all, check that the monitoring account `sprig_gw` exists on every node. Without it, gateways can't read replication positions and send no reads to replicas; `sprigctl cluster register` reports it as a failed precheck.
-- To trade freshness for load, raise `reads.max_replica_lag_ms` for a table whose readers tolerate it. To keep a table's reads exact and on the writer, set `reads.routing = 'writer'` for it.
+- To trade freshness for load, an operator can raise `reads.max_replica_lag_ms` for the cluster, if its readers tolerate older data. To keep a table's reads exact and on the writer, set `reads.routing = 'writer'` for it.
 
 ## Timeouts and caps
 

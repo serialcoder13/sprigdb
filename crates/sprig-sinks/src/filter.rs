@@ -1,5 +1,5 @@
-//! `WHERE`, `COLUMNS` and `EXCEPT COLUMNS` (chapter 51, "Sinks", step 2b of
-//! the pipeline). The condition is parsed with sqlparser (MySQL dialect)
+//! `WHERE`, `COLUMNS` and `EXCEPT COLUMNS`, the pipeline's filtering step.
+//! The condition is parsed with sqlparser (MySQL dialect)
 //! when the sink is created and evaluated in the worker on each record:
 //!
 //! - stream and queue records see `key`, `value`, `headers`, `ts`, with
@@ -408,7 +408,7 @@ pub struct SinkPrepare {
     pub condition: Option<Condition>,
     /// `COLUMNS` / `EXCEPT COLUMNS`.
     pub projection: Option<Projection>,
-    /// `TRANSFORM f` (R9, r9more).
+    /// `TRANSFORM f`.
     pub transform: Option<std::sync::Arc<crate::transform::Transform>>,
 }
 

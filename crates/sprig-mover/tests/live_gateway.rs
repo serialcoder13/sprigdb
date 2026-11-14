@@ -1,6 +1,5 @@
 //! A tenant moves around every topology pair under sysbench load, through
-//! a gateway that honours the cutover's hold and follows the move
-//! (milestone M0.6, done-when 1 and 3).
+//! a gateway that honours the cutover's hold and follows the move.
 //!
 //! ```sh
 //! deploy/compose/gateway-dev.sh up          # etcd, clusters, controller

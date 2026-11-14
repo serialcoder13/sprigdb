@@ -1,4 +1,4 @@
-//! The MongoDB 8.1–8.3 expressions SprigDB enables (M1, 12 Nov 2026),
+//! The MongoDB 8.1–8.3 expressions SprigDB enables,
 //! checked against the examples in MongoDB's documentation: the reference
 //! server of the differential test (`expr_diff.rs`) is 8.0 and refuses
 //! them.
@@ -483,8 +483,8 @@ fn concat_arrays_and_set_union_in_group() {
     assert_eq!(out[1].get_array("all").unwrap(), &Vec::<Bson>::new());
 }
 
-/// The cost of the correctly rounded trigonometric functions (decision
-/// S36): `cargo test --release -p sprig-doc --test expr_83 -- --ignored
+/// The cost of the correctly rounded trigonometric functions:
+/// `cargo test --release -p sprig-doc --test expr_83 -- --ignored
 /// --nocapture trig_cost`.
 #[test]
 #[ignore = "timing, run by hand"]
@@ -506,7 +506,7 @@ fn trig_cost() {
     }
 }
 
-/// The correctly rounded trigonometry (S36) stays within one unit in the
+/// The correctly rounded trigonometry stays within one unit in the
 /// last place of the platform's functions, over a spread of arguments.
 #[test]
 fn trig_within_one_ulp_of_libm() {

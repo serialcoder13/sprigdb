@@ -1,5 +1,5 @@
-//! Triggers on streams and queues (chapter 41, "Triggers on streams and
-//! queues", "Events go on streams, work goes on queues"; R9):
+//! Triggers on streams and queues (events go on streams, work goes on
+//! queues):
 //!
 //! ```sql
 //! CREATE TRIGGER sync_users ON STREAM security.user_events LANGUAGE javascript AS $$
@@ -38,7 +38,7 @@
 //!
 //! **Every trigger version runs in the engine tier** (QuickJS, the native
 //! KIRun runtime, Lua), in a gateway, through the definer's own session:
-//! name virtualization, chapter 29's checks, `db.publish` and `db.mq.*`
+//! name virtualization, privilege checks, `db.publish` and `db.mq.*`
 //! all work as for a client. JavaScript and Lua code gets one argument,
 //! `ctx` (also the global `ctx`): `ctx.record {stream, partition, offset,
 //! key, value, headers, timestamp}` or `ctx.message {queue, exchange,
@@ -79,7 +79,7 @@ pub const DDL_MESSAGE_SOURCES: &str = "CREATE TABLE IF NOT EXISTS logic_message_
   KEY by_module (module_id)
 ) ENGINE=InnoDB";
 
-/// Migration 4 (R9, r9queue): a fan-in trigger's definition is named by
+/// Migration 4: a fan-in trigger's definition is named by
 /// `fanin_declarer` and `object_id` = [`FANIN_SOURCE_FLAG`] | the
 /// definition's object id, so any 64-bit declarer id works. Earlier rows
 /// packed the declarer into `object_id` (declarers below 2^38); the two
@@ -284,7 +284,7 @@ impl MsgIndex {
 }
 
 // ---------------------------------------------------------------------------
-// Fan-in triggers (chapter 41, "Fan-in triggers"; R9, r9next):
+// Fan-in triggers:
 // `CREATE TRIGGER g ON STREAM s FAN IN` in tenant P runs once, in P, as P's
 // definer, over every member instance of the stream definition `s` below
 // P. Its source row's `object_id` carries the definition
@@ -301,7 +301,7 @@ pub const FANIN_SOURCE_FLAG: u64 = 1 << 62;
 const FANIN_OBJECT_BITS: u32 = 24;
 
 /// A fan-in trigger's source `object_id` for its definition's object id
-/// `object` (the declarer goes into `fanin_declarer`, R9 r9queue); `None`
+/// `object` (the declarer goes into `fanin_declarer`); `None`
 /// for an id that doesn't fit below the flag.
 #[must_use]
 pub fn fanin_source_id(object: u64) -> Option<u64> {
@@ -628,7 +628,7 @@ impl Deployed {
     }
 }
 
-/// `__sprig_logic_<binding>` (chapter 45's consumer group of a trigger).
+/// `__sprig_logic_<binding>` (a trigger's consumer group on a stream).
 #[must_use]
 pub fn sprig_streams_group(binding: u64) -> String {
     format!("__sprig_logic_{binding}")
@@ -965,7 +965,7 @@ pub struct RunRequest {
     pub lease_ms: u64,
     /// `logic.trigger_budget_ms`.
     pub budget_ms: u64,
-    /// A fan-in trigger's run (R9): the member whose instance `record` is
+    /// A fan-in trigger's run: the member whose instance `record` is
     /// from; its position is the trigger's, with `instance_tenant_id`. 0
     /// for the tenant's own stream.
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -974,13 +974,13 @@ pub struct RunRequest {
     /// source row's id names the definition).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub instance_stream: u64,
-    /// A dead letter's replay (RC11): the event to run, outside the
+    /// A dead letter's replay: the event to run, outside the
     /// consumer group's position.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay: Option<ReplayRun>,
 }
 
-/// A dead letter's replay run (RC11, R9): the stored event, run once with
+/// A dead letter's replay run: the stored event, run once with
 /// the active version in a transaction that moves the dead letter's own
 /// marker (group [`replay_group`], "stream" = the dead letter's id) from 0
 /// to 1, so a repeat finds it moved.
@@ -1081,7 +1081,7 @@ pub fn error_number(e: &SprigError) -> u16 {
 
 /// Whether a run's failure is the infrastructure's, not the code's: it is
 /// retried for as long as it lasts and never counts toward
-/// `logic.trigger_max_attempts` (decision T3 of R7).
+/// `logic.trigger_max_attempts`.
 #[must_use]
 pub fn transient(e: &SprigError) -> bool {
     if e.retryable && e.code() != Some(SprigCode::LogicTriggerPositionMoved) {
@@ -1148,7 +1148,7 @@ mod tests {
             fanin_declarer: 0,
         };
         assert_eq!(row.fanin_definition(), Some((26_306_000_002, 77)));
-        // Now: any 64-bit declarer (r9queue).
+        // Now: any 64-bit declarer.
         row.object_id = fanin_source_id(77).unwrap();
         row.fanin_declarer = (1 << 40) + 5;
         assert_eq!(row.fanin_definition(), Some(((1 << 40) + 5, 77)));

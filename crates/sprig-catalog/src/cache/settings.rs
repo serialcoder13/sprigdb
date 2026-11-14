@@ -1,4 +1,4 @@
-//! The gateway cache's keys (chapter 08, "Configuration"). All are live;
+//! The gateway cache's keys. All are live;
 //! scopes dc and global.
 
 use sprig_settings::{Apply, HardBounds, Scopes, Setting};

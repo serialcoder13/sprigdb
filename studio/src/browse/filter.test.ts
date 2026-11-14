@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { filterSql } from './filter';
 import { pageQuery } from './edit';
 
-describe('filter bar SQL (decision R2)', () => {
+describe('filter bar SQL', () => {
   it('joins conditions with AND and quotes names and values', () => {
     expect(
       filterSql([

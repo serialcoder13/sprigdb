@@ -1,4 +1,4 @@
-//! Operator mode (chapter 53, "Operator mode"): `sprig admin ...` runs
+//! Operator mode: `sprig admin ...` runs
 //! `sprigctl` with the same arguments, so every command, flag and output is
 //! `sprigctl`'s own; the profile supplies `--endpoint` and `--token-file`
 //! through `SPRIGCTL_ENDPOINT` and `SPRIGCTL_TOKEN_FILE` unless they are
@@ -209,7 +209,7 @@ impl AdminApi {
                         .to_owned(),
                 )
             }
-            // Chapter 14: the operator's login session, kept by `sprig
+            // The operator's login session, kept by `sprig
             // admin login` (`sprigctl login`) for this endpoint.
             None => sprigctl_session(&url),
         };

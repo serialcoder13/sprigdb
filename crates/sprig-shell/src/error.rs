@@ -1,5 +1,4 @@
-//! The shell's errors and exit codes (chapter 53, "Exit codes" and
-//! "Errors").
+//! The shell's errors and exit codes.
 //!
 //! Server errors keep their number and name; the shell's own are 39980–39988.
 //! Each error falls in one exit class, and a run exits with the class of
@@ -9,7 +8,7 @@ use std::fmt;
 
 use sprig_common::SprigCode;
 
-/// The shell's own error numbers (chapter 53, "Errors").
+/// The shell's own error numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellCode {
     /// 39980: profiles file unreadable or invalid, or no such profile.
@@ -62,7 +61,7 @@ impl ShellCode {
     }
 }
 
-/// Exit classes (chapter 53, "Exit codes").
+/// Exit classes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ExitClass {
     /// 0.

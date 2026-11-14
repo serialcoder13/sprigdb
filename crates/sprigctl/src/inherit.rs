@@ -1,11 +1,10 @@
-//! `sprigctl inherit` (chapter 42, "Foreign keys, groups and tree-wide
-//! ids"; inheritance plan step 7): what a tenant inherits and what holds
+//! `sprigctl inherit`: what a tenant inherits and what holds
 //! its deletes back, through a gateway as the user in `--gateway
-//! mysql://tenant.user:password@host:port`, so chapter 29's privileges
+//! mysql://tenant.user:password@host:port`, so the user's privileges
 //! decide what is shown:
 //!
 //! - `check TABLE`: ids of `TABLE` that more than one tenant of its tree
-//!   holds as its own (`SPRIG CHECK IDS`, decision IG2);
+//!   holds as its own (`SPRIG CHECK IDS`);
 //! - `tables`: each inheritable table's origin tenant, how many levels up
 //!   it is, the columns this tenant added, its foreign-key group and its
 //!   shares (`SHOW INHERITABLE TABLES`);

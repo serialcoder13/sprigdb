@@ -1,4 +1,4 @@
-//! The targets (chapter 51, build steps 9–14) and what they share: an
+//! The targets and what they share: an
 //! opened connection ([`Conn`]: options, credentials as handles, the
 //! destination rules), resolved options ([`Opts`]), TLS client settings.
 
@@ -308,8 +308,8 @@ pub fn tls_config(conn: &Conn, alpn: &[&[u8]]) -> Result<Arc<rustls::ClientConfi
     Ok(Arc::new(cfg))
 }
 
-/// What `ctx`'s target would send for record `r` (R9, r9last: `TEST
-/// SINK`'s payload preview), built by the target's own encoding and sent
+/// What `ctx`'s target would send for record `r` (`TEST SINK`'s payload
+/// preview), built by the target's own encoding and sent
 /// nowhere: a webhook's request body; a Kafka record's topic, key, value
 /// and headers; an S3 object's content before compression (Parquet as its
 /// size and columns); a database sink's row operation. `Err` with the
@@ -467,7 +467,7 @@ mod preview_tests {
         }
     }
 
-    /// R9 (r9last): `TEST SINK`'s payload preview is the target's own
+    /// `TEST SINK`'s payload preview is the target's own
     /// encoding: an S3 JSON line, a database row operation, a script's
     /// refusal; nothing is sent.
     #[test]

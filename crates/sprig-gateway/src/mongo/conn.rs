@@ -895,9 +895,11 @@ impl Conn {
             }
         }
         let r = match name.as_str() {
-            "hello" | "isMaster" | "ismaster" => self.hello(&body, false).await,
-            "saslStart" => self.sasl_start(&body).await,
-            "saslContinue" => self.sasl_continue(&body).await,
+            // Boxed, as `run` is: this future stays small, and
+            // creating it (once per command) copies little.
+            "hello" | "isMaster" | "ismaster" => Box::pin(self.hello(&body, false)).await,
+            "saslStart" => Box::pin(self.sasl_start(&body)).await,
+            "saslContinue" => Box::pin(self.sasl_continue(&body)).await,
             "logout" => {
                 self.principal = None;
                 if let Some(s) = self.sql.take() {

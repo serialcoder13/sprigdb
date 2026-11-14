@@ -1,7 +1,7 @@
-//! JavaScript functions on QuickJS (chapter 41, "The fallback runtime";
-//! build step 12): `CREATE FUNCTION ... LANGUAGE javascript AS $$ … $$`
-//! runs here when placement puts it in the engine tier, which, until the
-//! JavaScript front end of the compiler exists, is always.
+//! JavaScript functions on QuickJS:
+//! `CREATE FUNCTION ... LANGUAGE javascript AS $$ … $$` runs here when
+//! placement puts it in the engine tier, which, until the JavaScript front
+//! end of the compiler exists, is always.
 //!
 //! **Two forms of body.** A body with `export` or `import` statements is
 //! a module whose default export is the function (`import { db } from
@@ -290,7 +290,7 @@ impl Counting {
 
 // SAFETY: every block comes from `RustAllocator`, which meets the trait's
 // rules (aligned blocks with a size header, `usable_size` reading it); this
-// only counts and refuses. A vetted opt-out of `unsafe_code` (chapter 03):
+// only counts and refuses. A vetted opt-out of the `unsafe_code` lint:
 // rquickjs's allocator trait is unsafe by nature, and counting here is the
 // only way to stop code that catches QuickJS's out-of-memory error.
 #[allow(unsafe_code)]

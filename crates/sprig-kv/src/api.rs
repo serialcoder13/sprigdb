@@ -1,6 +1,6 @@
-//! The `KeyValue` operations over string keys (chapter 33, "Operations"),
-//! for the REST and gRPC API. Structures are reached through `Exec`, which
-//! runs a Redis command (chapter 40) on the namespace.
+//! The `KeyValue` operations over string keys, for the REST and gRPC API.
+//! Structures are reached through `Exec`, which runs a Redis command on
+//! the namespace.
 //!
 //! Each operation is one MariaDB transaction through the caller's
 //! [`SqlRunner`]: lock the key row, check the precondition and the type,
@@ -86,7 +86,7 @@ async fn read_row(
     lock: bool,
 ) -> Result<(i64, Option<KeyRow>), SprigError> {
     // One table, the key and its distribution key in the condition, so a
-    // sharded namespace's router sends it to one shard (R6 round 3); an
+    // sharded namespace's router sends it to one shard; an
     // absent key returns no row, and expiries are computed in SQL.
     let rows = s
         .query(&format!(
@@ -205,7 +205,7 @@ pub async fn put(
 }
 
 /// [`put`] that also sets the key's location `(lat, lng)` in the same
-/// transaction (R6 round 3; the namespace's location columns must exist,
+/// transaction (the namespace's location columns must exist,
 /// [`crate::geo::ddl`]).
 ///
 /// # Errors
@@ -430,8 +430,8 @@ pub async fn scan(
     Ok((entries, next))
 }
 
-/// Read-only SQL relations over a namespace's structures (chapter 33,
-/// "Values and the SQL view"): `<ns>__hash`, `<ns>__list`, `<ns>__set`
+/// Read-only SQL relations over a namespace's structures:
+/// `<ns>__hash`, `<ns>__list`, `<ns>__set`
 /// and `<ns>__zset`, joined to live key rows.
 #[must_use]
 pub fn view_ddl(ns: &Namespace) -> Vec<String> {

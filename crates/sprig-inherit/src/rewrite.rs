@@ -21,7 +21,7 @@ use sqlparser::parser::{Parser, ParserOptions};
 use crate::grammar::{Name, unsupported};
 use crate::plan::{Ctx, Resolved};
 use crate::view::ViewSql;
-use crate::{Handled, Runner, upstream};
+use crate::{Handled, RowCmd, Runner, upstream};
 
 /// Parses one statement.
 ///
@@ -104,6 +104,23 @@ impl VisitorMut for Replacer<'_, '_> {
     fn pre_visit_query(&mut self, q: &mut Query) -> ControlFlow<()> {
         if let Some(w) = &q.with {
             for c in &w.cte_tables {
+                // A CTE named like an inheritable object: its own body would
+                // read the layer table, every space's rows (MariaDB resolves
+                // a non-recursive CTE's own name there to the table).
+                if !self.ctx.from_types
+                    && matches!(
+                        self.ctx.resolve(&Name {
+                            db: None,
+                            name: c.alias.name.value.clone(),
+                        }),
+                        Ok(Some(_))
+                    )
+                {
+                    self.error = Some(unsupported(
+                        "a CTE named like an inheritable object: rename the CTE",
+                    ));
+                    return ControlFlow::Break(());
+                }
                 self.ctes.insert(c.alias.name.value.to_lowercase());
             }
         }
@@ -273,16 +290,65 @@ pub(crate) fn view_of(
     r: &Resolved,
     origin: bool,
     keys: Option<Vec<String>>,
-) -> Result<String> {
+) -> Result<(String, String)> {
     let chain = ctx.chain(&r.obj, ctx.space, &r.prefix)?;
-    Ok(ViewSql {
+    let v = ViewSql {
         o: &r.obj,
         layer: r.layer.clone(),
         keys,
         origin,
         derived: r.derived.clone(),
-    }
-    .view(&chain))
+    };
+    Ok((v.view(&chain), v.output_columns()))
+}
+
+/// The qualifier of a filtered merged view's rows.
+const MERGED: &str = "`__sprig_m`";
+
+/// `view` (a merged view of `res`, whose columns are `columns`) as the
+/// session may see it:
+/// its records filtered by the session's row-level security policies on
+/// `res`'s table, evaluated on the merged values (chapter 29, "Data
+/// inheritance"; decision rlsinherit). Inherited rows, from a parent space,
+/// a parent tenant's share view or a materialized copy, pass the same
+/// policies as the space's own. The layer references inside are left to
+/// this filter ([`crate::view::LAYER_ALIAS`]).
+///
+/// # Errors
+/// The runner's; [`replace_refs`]'s for a policy's subqueries.
+pub(crate) async fn filtered(
+    ctx: &Ctx<'_>,
+    r: &mut dyn Runner,
+    res: &Resolved,
+    view: String,
+    columns: &str,
+    cmd: RowCmd,
+) -> Result<String> {
+    let Some(p) = r
+        .row_filter(&res.db_name, &res.obj.table, MERGED, cmd)
+        .await?
+    else {
+        return Ok(view);
+    };
+    // A policy's subqueries on inheritable objects read the session space's
+    // merged views, not every space's layer rows; unfiltered by their own
+    // policies, since policies never recurse (MariaDB's policy views still
+    // apply theirs, decision RL23).
+    let names_inheritable = crate::grammar::identifiers(p.as_bytes(), &ctx.lex)
+        .iter()
+        .any(|i| ctx.state.objects().any(|o| o.table.eq_ignore_ascii_case(i)));
+    let p = if names_inheritable {
+        let mut stmt = parse_one(&format!("SELECT {p}"))?;
+        match Box::pin(replace_refs_with(&mut stmt, ctx, r, false)).await? {
+            Some(t) => t.strip_prefix("SELECT ").map_or(p, str::to_owned),
+            None => p,
+        }
+    } else {
+        p
+    };
+    Ok(format!(
+        "SELECT {columns} FROM ({view}) AS {MERGED} WHERE ({p})"
+    ))
 }
 
 fn is_literal(e: &Expr) -> bool {
@@ -384,6 +450,18 @@ pub(crate) async fn replace_refs(
     ctx: &Ctx<'_>,
     r: &mut dyn Runner,
 ) -> Result<Option<String>> {
+    replace_refs_with(stmt, ctx, r, true).await
+}
+
+/// [`replace_refs`]; `filter`: each merged view is [`filtered`] by the
+/// session's policies (every read a client asked for), else not (a
+/// policy's own subqueries).
+async fn replace_refs_with(
+    stmt: &mut Statement,
+    ctx: &Ctx<'_>,
+    r: &mut dyn Runner,
+    filter: bool,
+) -> Result<Option<String>> {
     let origin = stmt.to_string().to_uppercase().contains("SPRIG_ORIGIN");
     if origin {
         alias_origin_items(stmt);
@@ -433,7 +511,10 @@ pub(crate) async fn replace_refs(
     let mut text = stmt.to_string();
     for rf in v.refs.iter().rev() {
         upstream::ensure(ctx, r, &rf.r).await?;
-        let view = view_of(ctx, &rf.r, origin, pushed_keys(stmt, rf))?;
+        let (mut view, columns) = view_of(ctx, &rf.r, origin, pushed_keys(stmt, rf))?;
+        if filter {
+            view = filtered(ctx, r, &rf.r, view, &columns, RowCmd::Select).await?;
+        }
         text = text.replace(&rf.placeholder, &format!("({view})"));
     }
     metrics::counter!("sprig_inherit_reads_total", "mode" => "read_through")

@@ -1,4 +1,4 @@
-# Expected outcomes of the M0.3 harness other than `pass` (README.md).
+# Expected outcomes of the tenant harness other than `pass` (README.md).
 #
 #   mode      persona  suite      connector          check            status  reason
 #
@@ -12,7 +12,7 @@
 # so against MariaDB directly Hibernate can't resolve a dialect and validation
 # fails before it looks at a table. The rest of the check runs after a restart
 # without validation and must pass. Through the gateway the translator answers
-# KEYWORDS with MySQL 8.4's list (chapter 28, M0.5), and the check passes.
+# KEYWORDS with MySQL 8.4's list, and the check passes.
 baseline  mysql    hibernate  hibernate          schema_validate  fail    MySQL Connector/J reads information_schema.KEYWORDS.RESERVED, which MariaDB lacks
 
 # Baseline: direct MariaDB has no physical names to leak, so the leak checks
@@ -30,7 +30,7 @@ baseline  *        settings   -                  object_only      n/a     MariaD
 # back every database SHOW DATABASES lists until it reaches `mysql`, and if
 # `mysql` never comes it writes nothing and still says "Dump completed".
 # Neither a tenant through the gateway nor a plain MariaDB user sees
-# `mysql`, and MySQL 8.4 behaves the same for a user who can't see it
-# (decisions/mysql-persona-gaps.md row 12). dump_listed passes with the
-# workaround, --databases with SHOW DATABASES's list.
+# `mysql`, and MySQL 8.4 behaves the same for a user who can't see it.
+# dump_listed passes with the workaround, --databases with SHOW DATABASES's
+# list.
 *         mysql    dump       -                  dump_all         fail    mysqldump 8.4 --all-databases dumps nothing unless SHOW DATABASES lists mysql

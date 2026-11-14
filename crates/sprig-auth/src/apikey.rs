@@ -1,4 +1,4 @@
-//! API keys (chapter 14, "HTTP on 8080 and 8443"; build step 11).
+//! API keys for HTTP on 8080 and 8443.
 //!
 //! A key is `sprig_<tenant>_<key_id>_<secret>`: the tenant name (a visible
 //! prefix for secret scanners), a 12-character base32 id, and 256 bits of
@@ -17,7 +17,7 @@
 //! `allowed_cidrs` when set, and the user live with the `api_key` method,
 //! then the user's statuses as for a token (temporary lock, `ACCOUNT
 //! LOCK`, TLS requirement, suspension). `scopes` limit what the key may do
-//! on top of the user's grants; chapter 29 applies them.
+//! on top of the user's grants; the authorization layer applies them.
 
 use std::fmt::Write as _;
 use std::net::IpAddr;
@@ -38,7 +38,7 @@ use crate::store::{
     opt_time, time,
 };
 
-/// `api_keys` (chapter 14, Appendix C): the auth module's format 2.
+/// `api_keys`: the auth module's format 2.
 pub const DDL_API_KEYS: &str = "CREATE TABLE IF NOT EXISTS api_keys (
   key_id          CHAR(12)        NOT NULL,
   user_id         INT UNSIGNED    NOT NULL,
@@ -73,7 +73,7 @@ pub struct ApiKeyRow {
     pub name: String,
     /// `SHA256(secret)`.
     pub secret_sha256: [u8; 32],
-    /// Limits on top of the user's grants (chapter 29), as stored.
+    /// Limits on top of the user's grants, as stored.
     pub scopes: serde_json::Value,
     /// Client addresses allowed, as host patterns (`10.0.0.0/8`); `None`
     /// for any.
@@ -306,7 +306,7 @@ async fn insert<Q: Queryable + Send>(store: &AuthStore, q: &mut Q, r: &ApiKeyRow
 pub struct NewApiKey {
     /// A name for people.
     pub name: String,
-    /// Scopes on top of the user's grants (chapter 29); `[]` for none.
+    /// Scopes on top of the user's grants; `[]` for none.
     pub scopes: Vec<String>,
     /// Client addresses allowed (host patterns, `10.0.0.0/8`); empty for
     /// any.

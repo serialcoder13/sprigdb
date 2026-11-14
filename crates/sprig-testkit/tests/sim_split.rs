@@ -1,4 +1,4 @@
-//! Split and merge under deterministic simulation (chapter 20, "Testing"):
+//! Split and merge under deterministic simulation:
 //! a shard splits in two and the halves merge back under client load,
 //! while workers crash at every job state, etcd partitions, streams drop,
 //! target commits fail or lose their reply, fences fail or stall and

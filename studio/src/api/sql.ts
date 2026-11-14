@@ -1,4 +1,4 @@
-// SQL over the data API (chapter 37): Sql.Execute (buffered), Sql.Query
+// SQL over the data API: Sql.Execute (buffered), Sql.Query
 // (NDJSON, decoded in a worker), Transactions.
 
 import { useSession, refresh } from '../auth/session';
@@ -86,15 +86,15 @@ export interface QueryCaps {
   maxRows?: number;
   maxBytes?: number;
   timeoutMs?: number;
-  /** `language` on Sql.Query (chapter 37, "Languages"): `sql` when absent. */
+  /** `language` on Sql.Query: `sql` when absent. */
   language?: QueryLanguage;
 }
 
 /** Documents come back as canonical Extended JSON, so the JSON tree shows
- * each number's exact BSON type (int32, int64, double; Studio round 5). */
+ * each number's exact BSON type (int32, int64, double). */
 export const MONGO_OUTPUT = 'canonical_ejson';
 
-/** The languages Sql.Query runs (chapter 37, bugfix4). */
+/** The languages Sql.Query runs. */
 export type QueryLanguage = 'sql' | 'cypher' | 'gql' | 'mongo';
 
 export function query(db: string | null | undefined, sql: string, h: StreamHandlers, caps: QueryCaps = {}): Running {
@@ -180,7 +180,7 @@ export function query(db: string | null | undefined, sql: string, h: StreamHandl
   };
 }
 
-/** One statement's verdict from Sql.Check (chapter 37). */
+/** One statement's verdict from Sql.Check. */
 export interface CheckedStatement {
   start: number;
   end: number;

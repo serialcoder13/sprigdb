@@ -1,5 +1,4 @@
-//! Pub/sub and wake-ups across gateways (chapter 40, "Pub/sub and keyspace
-//! notifications", "Blocking commands"): the hubs.
+//! Pub/sub and wake-ups across gateways: the hubs.
 //!
 //! ```text
 //! hub(tenant, hub key) = rendezvous over the DC's ready gateways

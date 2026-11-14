@@ -1,4 +1,4 @@
-//! The graph executor (chapter 43, "Algorithms"; build steps 9–13): runs
+//! The graph executor: runs
 //! a parsed statement over a [`GraphStore`] under the budgets.
 //!
 //! Each clause turns a table of binding rows into the next:
@@ -19,6 +19,7 @@
 //! `max_memory_mb`) are checked after every step; past one, the statement
 //! fails with 39903 naming it, never with a truncated answer.
 
+mod late;
 mod matcher;
 mod stream;
 mod write;
@@ -37,7 +38,7 @@ use crate::eval::{Params, Row, eval};
 use crate::store::{EdgeRow, GraphStore, NodeRow};
 use crate::value::{Key, Node, Rel, Value, props_from_json};
 
-/// The traversal budgets of one statement (chapter 43, "Configuration").
+/// The traversal budgets of one statement.
 #[derive(Debug, Clone)]
 pub struct Budgets {
     /// `graph.max_hops`.
@@ -97,7 +98,7 @@ pub struct Output {
     pub profiled: bool,
     /// Neo4j's notifications for the statement (see [`notifications`]).
     pub notifications: Vec<Notification>,
-    /// A read's final `RETURN` failed on a row (R8 round 8): `rows` are
+    /// A read's final `RETURN` failed on a row: `rows` are
     /// the rows before it, and the error comes after them, as Neo4j's lazy
     /// results give it (on `PULL`, after the first records).
     pub late_error: Option<Arc<SprigError>>,
@@ -248,7 +249,7 @@ pub fn budget_error(reason: &'static str, detail: impl std::fmt::Display) -> Spr
 /// Runs `q` over `store`.
 ///
 /// # Errors
-/// 39900–39909 as the chapter lists; the store's errors.
+/// 39900–39909 for graph statement errors; the store's errors.
 pub async fn run(
     store: &mut dyn GraphStore,
     q: &Query,
@@ -260,7 +261,7 @@ pub async fn run(
 
 /// [`run`], but a read's top `RETURN` that fails on a row answers the
 /// rows before it with the error in [`Output::late_error`] (Bolt: records,
-/// then the failure on `PULL`, as Neo4j's lazy results; R8 round 8).
+/// then the failure on `PULL`, as Neo4j's lazy results).
 ///
 /// # Errors
 /// As [`run`].
@@ -280,6 +281,7 @@ async fn run_with(
     budgets: &Budgets,
     lazy: bool,
 ) -> Result<Output> {
+    let store_late = store.late_props();
     let mut ex = Exec {
         store,
         params,
@@ -294,6 +296,9 @@ async fn run_with(
         late_ok: lazy && q.explain == Explain::None && q.parts.len() == 1 && !has_writes(q),
         returning: false,
         late_error: None,
+        late: ex_late(store_late, q),
+        seen_nodes: HashMap::new(),
+        seen_rels: HashMap::new(),
     };
     if q.explain == Explain::Explain {
         let mut plan = explain(q);
@@ -324,6 +329,12 @@ async fn run_with(
             "shard statements: {}, of which recursive CTEs: {}",
             s.shard_queries, s.cte_queries
         ));
+        p.push(format!(
+            "time: {} ms in all, {} ms waiting for {} shard rows",
+            ex.started.elapsed().as_millis(),
+            s.sql_us / 1000,
+            s.sql_rows
+        ));
         p.extend(ex.store.routes());
         p
     });
@@ -338,6 +349,12 @@ async fn run_with(
         notifications: notifications(q),
         late_error: ex.late_error.take().map(Arc::new),
     })
+}
+
+/// Whether `q` reads properties late: a read-only statement on a store
+/// that allows it.
+pub(crate) fn ex_late(store_late: bool, q: &Query) -> bool {
+    store_late && !has_writes(q)
 }
 
 /// Whether a statement writes (or changes the schema).
@@ -361,7 +378,7 @@ pub(crate) fn clauses_write(cs: &[Clause]) -> bool {
 }
 
 /// The plan `EXPLAIN` shows: one line per clause and hop, with its tier
-/// (`EXPLAIN FORMAT=SPRIG` of `GRAPH_TABLE` shows them too, R8 round 6).
+/// (`EXPLAIN FORMAT=SPRIG` of `GRAPH_TABLE` shows them too).
 #[must_use]
 pub fn explain(q: &Query) -> Vec<String> {
     let mut out = Vec::new();
@@ -416,10 +433,10 @@ enum Lifted {
     Subquery(SubqueryKind, Query),
     /// A list comprehension, quantifier or `reduce` with a pattern
     /// predicate or subquery inside, which depends on its own variable
-    /// (R8 round 10, LDBC IC10 and IC14).
+    /// (LDBC IC10 and IC14).
     Deep(Expr),
     /// `startNode(r)` (`true`) or `endNode(r)`: the node, read from the
-    /// store (R8 round 10, LDBC IC14).
+    /// store (LDBC IC14).
     EndNode(Expr, bool),
 }
 
@@ -493,9 +510,15 @@ pub(crate) struct Exec<'a> {
     returning: bool,
     /// The error it met.
     late_error: Option<SprigError>,
+    /// Hops read no properties; clauses read what they need
+    /// ([`late`]).
+    pub(crate) late: bool,
+    /// The best-read copy of each node and relationship read late.
+    pub(crate) seen_nodes: HashMap<u64, Arc<Node>>,
+    pub(crate) seen_rels: HashMap<u64, Arc<Rel>>,
 }
 
-/// The variables of `row` that none of `rest` names (R8 round 10): what
+/// The variables of `row` that none of `rest` names: what
 /// the rest of the query part never reads, so rows needn't carry it. A
 /// name counts as used when it appears anywhere in the clauses' syntax
 /// tree (as a variable, a pattern's name, or even a string), and nothing
@@ -513,7 +536,7 @@ fn dead_vars(row: Option<&Row>, rest: &[Clause]) -> Vec<String> {
 }
 
 /// Whether duplicates of rows coming out of a `MATCH` can't change the
-/// result (chapter 43's `Mult`): the next clause is `WITH`/`RETURN
+/// result: the next clause is `WITH`/`RETURN
 /// DISTINCT`, or aggregates only with duplicate-insensitive aggregates.
 fn dup_insensitive(rest: &[Clause]) -> bool {
     let Some(Clause::With(p) | Clause::Return(p)) = rest.first() else {
@@ -563,7 +586,7 @@ impl Exec<'_> {
     /// Rough memory of a binding table: 96 bytes a value.
     /// `graph.max_memory_mb` over `rows`: each row's slots and what its
     /// values hold ([`crate::value::approx_bytes`]), from a sample of up to
-    /// 64 rows spread over them (R8 round 10, decision G81; before, 96
+    /// 64 rows spread over them (before, 96
     /// bytes a slot, which missed the elements' properties, so one LDBC
     /// statement could hold a gigabyte).
     pub(crate) fn check_memory(&self, rows: &[Row]) -> Result<()> {
@@ -606,6 +629,7 @@ impl Exec<'_> {
                 .map(|l| self.store.label_name(*l).unwrap_or_else(|| format!("#{l}")))
                 .collect(),
             props: props_from_json(&r.props, r.types.as_ref()),
+            partial: None,
         })
     }
 
@@ -622,6 +646,7 @@ impl Exec<'_> {
                 .type_name(e.rtype)
                 .unwrap_or_else(|| format!("#{}", e.rtype)),
             props: props_from_json(&e.props, e.types.as_ref()),
+            partial: None,
         })
     }
 
@@ -724,6 +749,7 @@ impl Exec<'_> {
     /// rows, a comprehension over them once for all the rows' elements.
     /// Slots are written into `rows` and removed again.
     pub(crate) async fn eval_rows(&mut self, e: &Expr, rows: &mut [Row]) -> Result<Vec<Value>> {
+        self.late(rows, &[e]).await?;
         let mut pats = Vec::new();
         let lifted = if has_deep(e) {
             self.lift_patterns(e, &mut pats)
@@ -784,8 +810,8 @@ impl Exec<'_> {
                     .collect()
             }
             Lifted::Subquery(SubqueryKind::Collect, q) if comprehension(q).is_some() => {
-                // A pattern comprehension for every row at once (R8 round
-                // 10, IC14): one match over all rows, each tagged, then
+                // A pattern comprehension for every row at once (LDBC
+                // IC14): one match over all rows, each tagged, then
                 // the map expression and the results grouped back.
                 let Some((patterns, where_, map)) = comprehension(q) else {
                     return Ok(Vec::new());
@@ -1174,7 +1200,7 @@ impl Exec<'_> {
         Ok((next, new_cols))
     }
 
-    /// `CALL { } IN TRANSACTIONS` (R8 round 8): the rows in batches of
+    /// `CALL { } IN TRANSACTIONS`: the rows in batches of
     /// `OF n ROWS` (1,000), each batch's subquery run and committed on its
     /// own transaction; a failed batch rolls back, then `ON ERROR` decides:
     /// `FAIL` ends the statement (earlier batches stay committed, as in
@@ -1340,10 +1366,11 @@ impl Exec<'_> {
                 }
                 Clause::Unwind { expr, alias } => {
                     // Variables no later clause names are dropped before
-                    // each row is copied once per element (R8 round 10:
+                    // each row is copied once per element (LDBC
                     // IC9's `WITH collect(f) AS friends UNWIND friends AS
                     // friend` copied the whole list into every row).
                     let dead = dead_vars(rows.first(), &clauses[i + 1..]);
+                    self.late(&mut rows, &[expr]).await?;
                     let mut out = Vec::new();
                     for mut r in rows {
                         let v = self.eval_full(expr, &r).await?;
@@ -1386,7 +1413,9 @@ impl Exec<'_> {
                     self.returning = std::mem::take(&mut self.late_ok);
                     let r = self.project(rows, p, &scope).await;
                     self.returning = false;
-                    let (cols, out) = r?;
+                    let (cols, mut out) = r?;
+                    // What the statement returns is read in full.
+                    self.late_rows(&mut out).await?;
                     return Ok((cols, out));
                 }
                 Clause::Create(pats) => {
@@ -1609,6 +1638,92 @@ impl Exec<'_> {
 
     /// `WITH` / `RETURN`: the column names and rows.
     #[allow(clippy::too_many_lines)] // grouping, sorting and paging in one place
+    /// The first `n` of `rows` in `p`'s order (ties in input order),
+    /// with what `items` read of them: the sort keys (and the items they
+    /// name by alias) are read and evaluated for every row, the rest of
+    /// the items only for the rows kept.
+    async fn top_rows(
+        &mut self,
+        rows: Vec<Row>,
+        items: &[(Expr, String)],
+        p: &Projection,
+        n: usize,
+    ) -> Result<Vec<Row>> {
+        let mut rows = rows;
+        let order: Vec<&Expr> = p.order.iter().map(|(e, _)| e).collect();
+        // Items the sort keys name by alias.
+        let mut named: Vec<usize> = Vec::new();
+        for e in &order {
+            e.walk(&mut |x| {
+                if let Expr::Var(v) = x
+                    && let Some(i) = items.iter().position(|(_, a)| a == v)
+                    && !named.contains(&i)
+                {
+                    named.push(i);
+                }
+            });
+        }
+        // What the keys read of an alias, the item's variable needs; an
+        // item that isn't a variable is read whole when the keys read
+        // its alias's properties.
+        let order_need = late::needs_of(&order);
+        let mut need = order_need.clone();
+        for &i in &named {
+            let (e, alias) = &items[i];
+            match (e, order_need.get(alias)) {
+                (Expr::Var(v), Some(n)) => late::add(&mut need, v, n.clone()),
+                (Expr::Var(_), None) => {}
+                (other, n) => late::needs(other, n.is_none(), &mut need),
+            }
+        }
+        self.late_needs(&mut rows, &need).await?;
+        let mut keyed: Vec<(Vec<Value>, usize, Row)> = Vec::with_capacity(rows.len());
+        for (pos, r) in rows.into_iter().enumerate() {
+            let ks = if named.is_empty() {
+                let mut ks = Vec::with_capacity(order.len());
+                for e in &order {
+                    ks.push(self.eval_full(e, &r).await?);
+                }
+                ks
+            } else {
+                let mut m = r.clone();
+                for &i in &named {
+                    let v = self.eval_full(&items[i].0, &r).await?;
+                    m.insert(items[i].1.clone(), v);
+                }
+                let mut ks = Vec::with_capacity(order.len());
+                for e in &order {
+                    ks.push(self.eval_full(e, &m).await?);
+                }
+                ks
+            };
+            keyed.push((ks, pos, r));
+        }
+        let cmp = |a: &(Vec<Value>, usize, Row), b: &(Vec<Value>, usize, Row)| {
+            for (i, (_, asc)) in p.order.iter().enumerate() {
+                let o = a.0[i].order(&b.0[i]);
+                let o = if *asc { o } else { o.reverse() };
+                if o != std::cmp::Ordering::Equal {
+                    return o;
+                }
+            }
+            a.1.cmp(&b.1)
+        };
+        match n {
+            0 => keyed.clear(),
+            n if n < keyed.len() => {
+                keyed.select_nth_unstable_by(n - 1, cmp);
+                keyed.truncate(n);
+                keyed.sort_unstable_by(cmp);
+            }
+            _ => keyed.sort_unstable_by(cmp),
+        }
+        let mut kept: Vec<Row> = keyed.into_iter().map(|(_, _, r)| r).collect();
+        let exprs: Vec<&Expr> = items.iter().map(|(e, _)| e).collect();
+        self.late(&mut kept, &exprs).await?;
+        Ok(kept)
+    }
+
     async fn project(
         &mut self,
         rows: Vec<Row>,
@@ -1636,6 +1751,66 @@ impl Exec<'_> {
         }
         items.extend(p.items.iter().cloned());
         let cols: Vec<String> = items.iter().map(|(_, a)| a.clone()).collect();
+        // ORDER BY ... LIMIT over plain items: sort keys first, then the
+        // items only for the rows kept (late materialization).
+        let topk = if !p.distinct
+            && !p.order.is_empty()
+            && self.late
+            && !items.iter().any(|(e, _)| e.has_aggregate() || has_deep(e))
+            && !p.order.iter().any(|(e, _)| has_deep(e))
+        {
+            match self.const_int(p.limit.as_ref(), "LIMIT")? {
+                Some(l) => Some(
+                    self.const_int(p.skip.as_ref(), "SKIP")?
+                        .unwrap_or(0)
+                        .saturating_add(l),
+                ),
+                None => None,
+            }
+        } else {
+            None
+        };
+        if let Some(n) = topk {
+            let rows = self.top_rows(rows, &items, p, n).await?;
+            let mut out: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
+            for r in &rows {
+                let mut vals = Vec::with_capacity(items.len());
+                for (e, _) in &items {
+                    vals.push(self.eval_full(e, r).await?);
+                }
+                out.push(vals);
+            }
+            let skip = self.const_int(p.skip.as_ref(), "SKIP")?.unwrap_or(0);
+            return Ok((cols, out.into_iter().skip(skip).collect()));
+        }
+        // The properties the items and sort keys read, for all rows at
+        // once.
+        let mut rows = rows;
+        {
+            let exprs: Vec<&Expr> = items
+                .iter()
+                .map(|(e, _)| e)
+                .chain(p.order.iter().map(|(e, _)| e))
+                .collect();
+            let mut need = late::needs_of(&exprs);
+            // ORDER BY may read an item through its alias (`RETURN r AS
+            // rel ORDER BY rel.id`): what it reads of the alias, the
+            // item's own variable needs (anything else, all of it).
+            let order: Vec<&Expr> = p.order.iter().map(|(e, _)| e).collect();
+            for (alias, n) in late::needs_of(&order) {
+                for (e, a) in &items {
+                    if *a != alias {
+                        continue;
+                    }
+                    match e {
+                        Expr::Var(v) if *v != alias => late::add(&mut need, v, n.clone()),
+                        Expr::Var(_) => {}
+                        other => late::needs(other, false, &mut need),
+                    }
+                }
+            }
+            self.late_needs(&mut rows, &need).await?;
+        }
         {
             let mut seen = HashSet::new();
             for c in &cols {
@@ -1723,9 +1898,8 @@ impl Exec<'_> {
                 None
             };
             // Items with a pattern predicate or subquery, for every row at
-            // once (R8 round 10: IC7's `RETURN ..., not((liker)-[:KNOWS]-
+            // once (LDBC IC7's `RETURN ..., not((liker)-[:KNOWS]-
             // (person))` ran one search per row, thousands of round trips).
-            let mut rows = rows;
             let mut pre: Vec<Option<std::vec::IntoIter<Value>>> = Vec::with_capacity(items.len());
             for (e, _) in &items {
                 pre.push(if !lazy && needed.is_none() && has_deep(e) {
@@ -1794,7 +1968,7 @@ impl Exec<'_> {
                 }
                 a.1.cmp(&b.1)
             };
-            // ORDER BY ... LIMIT n (R8 round 10, LDBC IC9): only the first
+            // ORDER BY ... LIMIT n (LDBC IC9): only the first
             // SKIP + LIMIT rows are put in order.
             let top = self
                 .const_int(p.limit.as_ref(), "LIMIT")?

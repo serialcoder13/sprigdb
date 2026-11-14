@@ -1,5 +1,5 @@
 //! Plans: what the executor runs on which shards and how it combines the
-//! answers (chapter 17's `Plan`, in the forms R1 builds so far).
+//! answers.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -18,8 +18,7 @@ pub struct Target {
     pub shard: u32,
     /// The SQL, with physical names for that shard.
     pub sql: String,
-    /// Where the shard is (chapter 18's `ShardRef`: a transaction branch's
-    /// anchor); default for reference-only statements.
+    /// Where the shard is (a transaction branch's anchor); default for reference-only statements.
     pub at: ShardAt,
 }
 
@@ -243,7 +242,7 @@ pub enum JoinCol {
     Inner(usize),
 }
 
-/// A batched lookup join between two groups (chapter 17, "Lookup joins").
+/// A batched lookup join between two groups.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LookupJoinPlan {
     /// The outer side, a read with its own order.
@@ -295,16 +294,16 @@ pub struct WritePlan {
     /// Rows the client's statement listed (multi-row `INSERT` info).
     pub rows: u64,
     /// Unique lookup values the inserted rows claim, in `lookup_id`
-    /// order, before the rows are written (chapter 19, `claim`).
+    /// order, before the rows are written (`claim`).
     pub claims: Vec<Claim>,
-    /// Lookups whose values the deleted rows release (chapter 19,
-    /// `release`), read before the delete.
+    /// Lookups whose values the deleted rows release (`release`), read
+    /// before the delete.
     pub releases: Vec<Release>,
-    /// Foreign keys across groups (chapter 19, R3): parents locked before
+    /// Foreign keys across groups: parents locked before
     /// child rows are written, children probed (or their actions applied)
     /// before parent rows change.
     pub fk: Option<Box<crate::fk::FkWork>>,
-    /// R3's limited DML (`ORDER BY … LIMIT n` over several shards): the
+    /// Limited DML (`ORDER BY … LIMIT n` over several shards): the
     /// rows are read in order and locked first, then `targets` (one per
     /// shard, with [`LIMITED_ROWS`] where the rows' condition goes) run on
     /// the shards that hold them.
@@ -368,8 +367,7 @@ pub struct LookupProbe {
 
 impl Eq for LookupProbe {}
 
-/// A plan over every shard that a lookup narrows (chapter 19, "Routing
-/// through lookups"): the executor reads the owners' routing hashes and
+/// A plan over every shard that a lookup narrows: the executor reads the owners' routing hashes and
 /// keeps the targets on their shards.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViaLookup {
@@ -418,8 +416,8 @@ impl ViaLookup {
     }
 }
 
-/// An `INSERT` into a parent member over several shards (chapter 15's
-/// `rk_for_insert`, chapter 17's "INSERT routing"): the executor finds
+/// An `INSERT` into a parent member over several shards (`rk_for_insert`):
+/// the executor finds
 /// each row's parent (through the parent's unique lookup, or by asking
 /// every shard), then [`ViaParent::finish`] sends each row to its
 /// parent's shard with the parent's routing hash in `_sprig_rk`.
@@ -484,8 +482,8 @@ impl ViaParent {
     }
 }
 
-/// An `INSERT` into a table whose `AUTO_INCREMENT` column takes chapter
-/// 19's ID blocks: the gateway takes `rows.len()` values from its block for
+/// An `INSERT` into a table whose `AUTO_INCREMENT` column takes the
+/// gateway's ID blocks: the gateway takes `rows.len()` values from its block for
 /// the sequence (and raises it past `explicit_max`), then
 /// [`IdFill::finish`] writes them into the rows and plans the statement.
 #[derive(Debug, Clone, PartialEq)]
@@ -533,14 +531,14 @@ pub enum Plan {
     /// An `INSERT` into a parent member over several shards.
     ViaParent(Box<ViaParent>),
     /// An `INSERT` that needs `AUTO_INCREMENT` values from the gateway's
-    /// ID blocks before it can be planned (chapter 19).
+    /// ID blocks before it can be planned.
     NeedIds(Box<IdFill>),
     /// `EXPLAIN FORMAT=SPRIG`: the plan of the statement.
     Explain(Box<Plan>),
-    /// A gathered read (R3): the rows copied to the session's cluster and
+    /// A gathered read: the rows copied to the session's cluster and
     /// the statement run there over the copies.
     Gather(Box<crate::gather::GatherPlan>),
-    /// A statement with `GRAPH_TABLE` (R8 round 6, chapter 43): the graph
+    /// A statement with `GRAPH_TABLE` (SQL/PGQ): the graph
     /// calls run first in the gateway, then the statement with their rows
     /// is planned again ([`crate::graph`]).
     Graph(Box<crate::graph::GraphPlan>),

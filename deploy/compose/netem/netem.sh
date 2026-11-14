@@ -1,6 +1,5 @@
 #!/bin/sh
-# Inter-DC latency for the three-DC layout (compose.3dc.yaml; chapter 27,
-# "Development setup"; chapter 46, "Integration with Docker Compose").
+# Inter-DC latency for the three-DC layout (compose.3dc.yaml).
 #
 # Runs in the Docker host's network namespace (network_mode: host) with
 # NET_ADMIN. Every container on the layout's bridge has a veth on the host

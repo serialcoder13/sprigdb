@@ -1,5 +1,4 @@
-//! Clock skew in containers with `libfaketime` (chapter 46: "clock skew
-//! with `libfaketime`").
+//! Clock skew in containers with `libfaketime`.
 //!
 //! **Why not faultd.** Containers share the Docker VM's kernel clock (on
 //! macOS, Docker Desktop's Linux VM). Linux time namespaces virtualise only

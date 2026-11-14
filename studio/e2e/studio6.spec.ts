@@ -1,5 +1,5 @@
-// Studio round 6 end to end (chapter 44 steps 26, 29–31; decisions ST54–),
-// against studio6's private deployment, on Chromium, Firefox and WebKit:
+// Studio end to end (queues, sinks, logic, inheritance), against a private
+// deployment, on Chromium, Firefox and WebKit:
 //   STUDIO_URL=http://127.0.0.1:28080 STUDIO_AMQP=127.0.0.1:28682 \
 //   STUDIO_HOOK_PORT=28881 STUDIO_CLOSED=127.0.0.1:28999 \
 //   STUDIO_SHOTS=../target/agent-studio6/screenshots pnpm e2e studio6
@@ -14,9 +14,9 @@
 //   arguments, snapshot rows and fetch mocks, and the report; a staged
 //   rollout moved, shown and promoted; DROP refused with its dependents
 //   (39875), then CASCADE;
-// - the Inheritance page (chapter 42; IG14) as a parent and a child tenant.
+// - the Inheritance page as a parent and a child tenant.
 //
-// Setup (deploy/compose/studio/e2e.sh setup does all of it; rule 15):
+// Setup (deploy/compose/studio/e2e.sh setup does all of it):
 //   sprigctl settings set sink.destination_allowlist '["127.0.0.1:<hook>", "127.0.0.1:<closed>"]' --scope tenant:acme
 //   sprigctl settings set logic.outbound_allowlist '["rates.example.com"]' --scope tenant:acme
 //   a child tenant of acme on acme's cluster with user app (STUDIO_CHILD names its login)
@@ -69,7 +69,7 @@ async function waitFor(what: string, f: () => Promise<boolean>, ms = 20_000) {
 async function typeInto(page: Page, label: string, text: string) {
   // The page's only Monaco. `label` names it for the reader; it isn't
   // matched, because which element Monaco labels differs by browser (and
-  // Chrome's EditContext element stopped matching, round 7).
+  // Chrome's EditContext element stopped matching).
   const host = page.getByTestId('sql-editor').first();
   void label; // Monaco's own label element differs by browser and version
   const lines = host.locator('.view-lines');
@@ -211,7 +211,7 @@ test.describe.serial('Studio round 6', () => {
     await shot(page, 'queue-refused');
     const r = first(await sql(request, token, DB6, `CALL sprig.mq_info('orders6_q', '${DB6}')`));
     expect(r[0]?.[0]).toBe('2');
-    // Round 7 (ST66): every queue in one call, the same counts.
+    // Every queue in one call, the same counts.
     const all = first(await sql(request, token, DB6, `CALL sprig.mq_info(NULL, '${DB6}')`));
     expect(all.find((x) => x[0] === 'orders6_q')?.slice(1)).toEqual([r[0]?.[0], r[0]?.[1], r[0]?.[2]]);
   });
@@ -245,7 +245,7 @@ test.describe.serial('Studio round 6', () => {
     await expect(page.getByTestId('conn-test-steps')).toBeVisible();
     await waitFor('the test record', async () => Promise.resolve(seen.slice(before).some((s) => s.startsWith('POST'))));
 
-    // An unsaved connection, tested with TEST CREATE CONNECTION (ST68): nothing is created.
+    // An unsaved connection, tested with TEST CREATE CONNECTION: nothing is created.
     await page.getByTestId('conn-new-open').click();
     await page.getByTestId('conn-name').fill('db6');
     await page.getByTestId('conn-kind').selectOption('mysql');
@@ -287,8 +287,8 @@ test.describe.serial('Studio round 6', () => {
     await axe(page, 'sink-dry-run');
     await shot(page, 'sink-dry-run');
 
-    // Round 7: a new sink from the form (ST70), dry-run before it exists
-    // (TEST CREATE SINK, ST69), then created.
+    // A new sink from the form, dry-run before it exists (TEST CREATE
+    // SINK), then created.
     await page.getByTestId('sink-new-open').click();
     const form = page.getByTestId('sink-new');
     await form.getByTestId('sink-new-name').fill('s6b');
@@ -404,7 +404,7 @@ test.describe.serial('Studio round 6', () => {
     await expect(page.getByTestId('logic-rollout-none')).toBeVisible();
     await expect(page.getByTestId('logic-active')).toHaveText('2');
 
-    // Drop: what uses it is shown first (SHOW DEPENDENTS, ST67), since
+    // Drop: what uses it is shown first (SHOW DEPENDENTS), since
     // RESTRICT would be refused (39875) while a schedule calls it; then CASCADE.
     await sql(request, token, DB6, `CREATE SCHEDULE quote6_nightly CRON '0 3 * * *' DO CALL quote6(7, 1)`);
     const deps = (await sql(request, token, DB6, `SHOW DEPENDENTS OF FUNCTION ${DB6}.quote6`)) as Rows;
@@ -439,7 +439,7 @@ test.describe.serial('Studio round 6', () => {
     const kid = await childToken(request);
     // A child's session finds a newly shared database only after it lists
     // its databases (SHOW DATABASES or SHOW INHERITABLE TABLES); until then
-    // its name is 1049 (reported to chapter 42's owners, round 6).
+    // its name is 1049.
     await waitFor('the child to see t1', async () => {
       try {
         await sql(request, kid, '-', 'SHOW DATABASES');
@@ -503,7 +503,7 @@ async function cleanup(request: APIRequestContext, token: string) {
   await quiet(sql(request, token, INH, 'DROP SHARE IF EXISTS inh6'));
   await quiet(sql(request, token, '-', `DROP USER IF EXISTS '${RO}'@'%'`));
   await quiet(sql(request, token, '-', `DROP DATABASE IF EXISTS ${INH}`));
-  // The child's own rows outlive the parent's database (chapter 42): the
+  // The child's own rows outlive the parent's database: the
   // child drops what is left of its instance once the parent's is gone.
   const kid = await childToken(request).catch(() => null);
   if (kid) await quiet(sql(request, kid, '-', `DROP DATABASE IF EXISTS ${INH}`));

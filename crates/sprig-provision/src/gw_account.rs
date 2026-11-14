@@ -1,5 +1,4 @@
-//! `sprig_gw`, the gateways' monitoring account (chapter 09, "System
-//! accounts"; chapter 06, "Health checks"; decision gwhard-3).
+//! `sprig_gw`, the gateways' monitoring account.
 //!
 //! Gateways check every node's health, role and replication position. As
 //! a tenant's own account those checks can't read the replication status,
@@ -38,7 +37,7 @@ pub const GW_USER: &str = "sprig_gw";
 /// What the gateway's checks read; it needs `SLAVE MONITOR`.
 const CHECK_SQL: &str = "SELECT COUNT(*) FROM information_schema.SLAVE_STATUS";
 
-fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+pub(crate) fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
     const B: usize = 64;
     let mut k = [0u8; B];
     if key.len() > B {

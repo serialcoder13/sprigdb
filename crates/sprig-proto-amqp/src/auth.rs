@@ -1,7 +1,7 @@
-//! The SASL layer both AMQP versions share (chapter 50, "AMQP 0-9-1" and
-//! "AMQP 1.0"): mechanisms `PLAIN`, `AMQPLAIN` (0-9-1 only) and
-//! `EXTERNAL`; `ANONYMOUS` is never accepted. The gateway implements
-//! [`Identity`] over chapter 14's logins.
+//! The SASL layer both AMQP versions share: mechanisms `PLAIN`,
+//! `AMQPLAIN` (0-9-1 only) and `EXTERNAL`; `ANONYMOUS` is never
+//! accepted. The gateway implements [`Identity`] over the identity
+//! layer's logins.
 
 use std::any::Any;
 use std::net::SocketAddr;
@@ -18,13 +18,13 @@ pub struct ConnInfo {
     pub peer: SocketAddr,
     /// TLS at the gateway.
     pub tls: bool,
-    /// The TLS server name: it can name the tenant (chapter 14).
+    /// The TLS server name: it can name the tenant.
     pub sni: Option<String>,
     /// The verified client certificate's login name (its common name or
     /// distinguished name, per `amqp.cert_login_field`), for `EXTERNAL`.
     pub cert_login: Option<String>,
     /// That certificate's subject and issuer in MySQL's form
-    /// (`/O=Acme/CN=alice`), for `REQUIRE SUBJECT` and `ISSUER` (authfix2);
+    /// (`/O=Acme/CN=alice`), for `REQUIRE SUBJECT` and `ISSUER`;
     /// `None` without a verified certificate.
     pub client_dn: Option<(String, String)>,
 }
@@ -40,7 +40,7 @@ pub struct Principal {
     pub user: String,
     /// The user's id in the tenant catalog.
     pub user_id: Option<u64>,
-    /// The identity layer's own principal (chapter 14's), for the engine's
+    /// The identity layer's own principal, for the engine's
     /// privilege checks.
     pub handle: Option<Arc<dyn Any + Send + Sync>>,
 }
@@ -60,7 +60,7 @@ impl std::fmt::Debug for Principal {
 #[derive(Clone, PartialEq, Eq)]
 pub enum Credentials {
     /// `PLAIN` or `AMQPLAIN`: a user name and a password (or API key or
-    /// JWT, chapter 14).
+    /// JWT).
     Password {
         /// The mechanism, for metrics and audit.
         mechanism: &'static str,
@@ -110,7 +110,7 @@ impl Credentials {
 #[error("{0}")]
 pub struct AuthFailure(pub String);
 
-/// Logins (chapter 14) for the AMQP listeners.
+/// Logins for the AMQP listeners.
 #[async_trait]
 pub trait Identity: Send + Sync + 'static {
     /// Checks credentials: the tenant from the TLS server name, a

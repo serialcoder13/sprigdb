@@ -24,8 +24,8 @@ use crate::deploy::conn_err;
 /// shards now.
 #[async_trait]
 pub trait ShardPools: Send + Sync {
-    /// The pool for `tenant`'s cluster (R1 keeps a tenant's shards on one
-    /// cluster at a time and moves them together).
+    /// The pool for `tenant`'s cluster (a tenant's shards live on one
+    /// cluster at a time and move together).
     ///
     /// # Errors
     /// Unknown tenant or unreachable cluster (retryable).
@@ -124,13 +124,12 @@ pub struct MariaApply {
     pub versions: Arc<CatalogVersions>,
     /// `logic.trigger_budget_ms`.
     pub budget: Duration,
-    /// Chapter 29 (RL37): asked before each attempt; an error (retryable)
+    /// Asked before each attempt; an error (retryable)
     /// makes the event wait, neither run nor dead-lettered.
     pub guard: Option<Arc<dyn RunGuard>>,
 }
 
-/// Whether a binding's code may run now (chapter 29, RL37: row-level
-/// security on the trigger's table mustn't bind its definer, whose code
+/// Whether a binding's code may run now (row-level security on the trigger's table mustn't bind its definer, whose code
 /// gets every changed row's images).
 #[async_trait]
 pub trait RunGuard: Send + Sync {
@@ -140,7 +139,7 @@ pub trait RunGuard: Send + Sync {
     /// Why not, retryable: the lane retries with backoff.
     async fn check(&self) -> Result<()>;
 
-    /// The definer's `@sprig_rls` context (RL42), set on the shard
+    /// The definer's `@sprig_rls` context, set on the shard
     /// connection while the code runs, so MariaDB's policy views and write
     /// triggers apply the definer's policies instead of treating the run as
     /// internal; `None` for none.
@@ -151,8 +150,7 @@ pub trait RunGuard: Send + Sync {
         Ok(None)
     }
 
-    /// The event as the definer may see it (chapter 29, RLS round 5,
-    /// RL50): its row's images checked against the table's policies for
+    /// The event as the definer may see it: its row's images checked against the table's policies for
     /// the definer; by default unchanged.
     ///
     /// # Errors
@@ -260,7 +258,7 @@ impl Apply for MariaApply {
         let (ev, ctx) = match &self.guard {
             Some(g) => {
                 g.check().await.map_err(retry)?;
-                // RL50: the definer's view of the row.
+                // The definer's view of the row.
                 let ev = match g.shown(ev).await.map_err(retry)? {
                     Shown::Unchanged => ev,
                     Shown::Hidden => return Ok(Applied::Hidden),

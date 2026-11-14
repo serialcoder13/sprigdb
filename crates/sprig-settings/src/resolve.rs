@@ -1,11 +1,10 @@
-//! Bounds, resolution and an in-memory store of setting rows (chapter 08,
-//! "Setting resolution" and "Setting a value").
+//! Bounds, resolution and an in-memory store of setting rows.
 //!
 //! [`MemSettings`] keeps every scope's rows in memory. The etcd mirror
 //! ([`LiveSettings`](crate::watch::LiveSettings): global, dc, cluster)
 //! builds one as its snapshot.
 //!
-//! Six-scope resolution (chapter 08, build step 5) layers a tenant's rows
+//! Six-scope resolution layers a tenant's rows
 //! over it: [`TenantSettings`] holds one tenant's tenant, database, object
 //! and ancestor rows at one catalog version (built by the catalog cache),
 //! and [`resolve_layered`] walks global, dc and cluster from the etcd
@@ -120,7 +119,7 @@ impl Bounds {
 
     /// `v` moved into `[min, max]`; non-numeric values are returned as is.
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)] // f64 bounds clamp i64 values (chapter 08)
+    #[allow(clippy::cast_possible_truncation)] // f64 bounds clamp i64 values
     pub fn clamp(&self, v: &Value) -> Value {
         let lo = self.min.unwrap_or(f64::NEG_INFINITY);
         let hi = self.max.unwrap_or(f64::INFINITY);
@@ -245,7 +244,7 @@ impl<'r> MemSettings<'r> {
         &self.rows
     }
 
-    /// Resolves `key` in `ctx`, following chapter 08's algorithm: walk the
+    /// Resolves `key` in `ctx`: walk the
     /// chain from the widest scope to the narrowest, so the nearest value
     /// wins and the bounds of every wider scope apply to it.
     ///
@@ -437,7 +436,7 @@ pub(crate) fn def(registry: &Registry, key: &str) -> Result<&'static dyn AnySett
         .ok_or_else(|| SprigError::new(SprigCode::SettingUnknown, format!("unknown setting {key}")))
 }
 
-/// Chapter 08's resolution of `def` in `ctx`, reading each scope's row
+/// Resolution of `def` in `ctx`, reading each scope's row
 /// through `entry`: walk the chain from the widest scope to the narrowest,
 /// so the nearest value wins and the bounds of every wider scope apply to
 /// it.
@@ -495,7 +494,7 @@ pub(crate) fn walk<'e>(
         }
     }
     // A built-in default that falls outside bounds tightened by some scope
-    // is clamped like any other value (chapter 08).
+    // is clamped like any other value.
     if r.source == ScopeKind::Default {
         let c = r.bounds.clamp(&r.value);
         r.clamped = c != r.value;

@@ -1,4 +1,4 @@
-//! `$redact`, `$documents` and `$graphLookup`'s search (M2, 12 Nov 2026).
+//! `$redact`, `$documents` and `$graphLookup`'s search.
 //!
 //! `$graphLookup` reads another collection, so the engine drives it
 //! ([`crate::engine`]); this module parses it and keeps the breadth-first
@@ -150,7 +150,7 @@ pub fn db_level_error(first: &str) -> Option<MongoError> {
 // --- $graphLookup --------------------------------------------------------------------------
 
 /// `doc.graph_lookup_max_bytes`: the documents one input document's
-/// search may hold (M5, decision S77).
+/// search may hold.
 static GRAPH_MAX: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(104_857_600);
 
 /// Sets `doc.graph_lookup_max_bytes`.
@@ -375,7 +375,7 @@ pub struct GraphSearch<'a> {
     bytes: usize,
     depth: i64,
     limit: usize,
-    /// Past the limit, with `allowDiskUse` (M7, decision S88): the
+    /// Past the limit, with `allowDiskUse`: the
     /// matches so far and later ones, on disk until `finish`.
     spilled: Option<Spilled>,
 }
@@ -436,8 +436,8 @@ impl GraphSearch<'_> {
                 continue;
             }
             if self.bytes > self.limit {
-                // M7 (S88): with `allowDiskUse` the search's matches go to
-                // disk and the search goes on; 292 without (S77).
+                // With `allowDiskUse` the search's matches go to disk and
+                // the search goes on; 292 without.
                 if !crate::spill::allowed() {
                     return Err(MongoError::new(
                         code::QUERY_EXCEEDED_MEMORY_LIMIT,

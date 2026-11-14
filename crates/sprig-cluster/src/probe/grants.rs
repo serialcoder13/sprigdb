@@ -1,5 +1,5 @@
-//! `SHOW GRANTS` parsing and the privilege facts the profile needs
-//! (chapter 09, "Probes", "System accounts").
+//! `SHOW GRANTS` parsing and the privilege facts the profile needs (the
+//! system accounts' grants).
 //!
 //! A missing privilege disables only what needs it, so every privilege is
 //! its own flag. Role grants are recorded but not expanded: the system

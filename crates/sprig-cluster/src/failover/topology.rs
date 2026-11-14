@@ -1,5 +1,4 @@
-//! Single nodes and external clusters (chapter 25, "Primary + replicas on
-//! Kubernetes, single nodes, external clusters").
+//! Single nodes and external clusters.
 //!
 //! - **Single node.** A restart is not a failover. A lost node's tenants
 //!   are promoted from standbys (the DC-level promotion, per tenant), or

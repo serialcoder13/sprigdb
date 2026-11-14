@@ -1,10 +1,9 @@
-//! MongoDB shapes (chapter 12, "MongoDB shapes and API patterns"; build
-//! step 8): `Fingerprinter::mongo`.
+//! MongoDB shapes: `Fingerprinter::mongo`.
 //!
 //! The gateway (which has the BSON and `sprig_doc::qshape`) reads the
 //! command and hands over a [`MongoInput`]: the command, the namespace,
 //! the collection's table, the shape text `$queryStats` and query settings
-//! key by (`sprig_doc::qshape`, S96), and the filter's top-level
+//! key by (`sprig_doc::qshape`), and the filter's top-level
 //! conditions with their values. [`fingerprint`] turns it into a
 //! [`Fingerprint`] of kind `mongo` whose:
 //!
@@ -16,8 +15,8 @@
 //!   `json_path` predicate per condition on the `doc` column with `func`
 //!   `mongo` (a path no document has held an array on) or `mongo_multikey`
 //!   (a path crossing an array) and `cmp` the condition (`eq`, `in`,
-//!   `range`, `is_null`, `ne`), and the sort paths as `order_by`. Chapter
-//!   13's document candidates read these (`sprig_advisor::autoindex::doc`);
+//!   `range`, `is_null`, `ne`), and the sort paths as `order_by`. Automatic
+//!   indexing's document candidates read these (`sprig_advisor::autoindex::doc`);
 //!   the SQL candidate generator ignores them (they aren't SQL columns);
 //! - **literals** fill one slot per condition, in order: one value, an
 //!   `$in` list, or nothing (`null`). A sample keeps the values as

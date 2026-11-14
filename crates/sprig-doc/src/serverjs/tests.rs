@@ -197,7 +197,7 @@ fn function_budget() {
     assert_eq!(r.unwrap_err().code, 11601);
 }
 
-/// bugfix-57 (S111's leftover): the command's `maxTimeMS` stops its code
+/// Regression: the command's `maxTimeMS` stops its code
 /// before `logic.function_budget_ms` does, with 50 `MaxTimeMSExpired` for
 /// every kind (MongoDB's answer when the time limit ends a `$where` or a
 /// `$function` stage); a call after the time is up fails at once.

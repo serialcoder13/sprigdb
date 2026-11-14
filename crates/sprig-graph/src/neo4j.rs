@@ -1,6 +1,6 @@
-//! Neo4j status codes for SprigDB errors (chapter 43, "Errors"): Neo4j's
-//! code where one fits, else `Neo.ClientError.Statement.Sprig<CamelCase>`
-//! (guide 5.9's MongoDB rule), so drivers retry by classification.
+//! Neo4j status codes for SprigDB errors: Neo4j's code where one fits, else
+//! `Neo.ClientError.Statement.Sprig<CamelCase>` (the `Sprig<CamelCase>`
+//! names SprigDB's MongoDB errors use), so drivers retry by classification.
 
 use sprig_common::{ErrorKind, SprigCode, SprigError};
 

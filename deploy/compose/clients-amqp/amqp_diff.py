@@ -1,7 +1,7 @@
-# AMQP 0-9-1 differential scenarios (r9final, 10 November 2026; committed for
-# CI by r4three): runs the same steps against one endpoint and prints one JSON
-# object, one key per scenario, with what pika observed. run.sh runs it against
-# a RabbitMQ reference and SprigDB and deploy/compose/ci/outcomes.py compares.
+# AMQP 0-9-1 differential scenarios: runs the same steps against one endpoint
+# and prints one JSON object, one key per scenario, with what pika observed.
+# run.sh runs it against a RabbitMQ reference and SprigDB and
+# deploy/compose/ci/outcomes.py compares.
 # Usage: python amqp_diff.py host port user password vhost prefix
 import glob, json, sys, time
 sys.path[:0] = glob.glob('/wheels/pika-*.whl')

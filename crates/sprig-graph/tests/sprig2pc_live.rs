@@ -1,12 +1,11 @@
-//! Sprig 2PC under graph writes (chapter 18's held branches; chapter 43,
-//! "Writes and transactions"; R8 round 5, decision G49), live.
+//! Sprig 2PC under graph writes (held branches), live.
 //!
 //! A graph over four shard schemas on two clusters that are treated as
 //! having no XA (as Galera), with synchronous mirrors, so every edge
 //! between the two clusters writes both in one transaction; policy
 //! `sprig_2pc`. The store reports each write it runs through
 //! `ShardConns::wrote` (values in the text), which the held branch
-//! records for redo. Chapter 18's crash simulations follow: a coordinator
+//! records for redo. Crash simulations follow: a coordinator
 //! that dies after prepare (the resolver aborts), after the commit point
 //! (the resolver replays the held branch), and at a random step in many
 //! concurrent transactions; after recovery every edge has its mirror and

@@ -1,5 +1,5 @@
 //! `MemStore`: a deterministic, in-memory [`MetaStore`] for tests and
-//! `sprig-testkit` (chapter 23, "Interfaces").
+//! `sprig-testkit`.
 //!
 //! It keeps etcd's semantics where SprigDB relies on them: one revision per
 //! write transaction, multi-version history for listings at a revision,

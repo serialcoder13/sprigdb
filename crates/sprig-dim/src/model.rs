@@ -1,12 +1,12 @@
-//! Model definitions (chapter 35, "Model definition"): parsing and
-//! validation. A model is the JSON document `Analytics.CreateModel` takes.
+//! Model definitions: parsing and validation. A model is the JSON
+//! document `Analytics.CreateModel` takes.
 
 use serde_json::Value;
 use sprig_common::{Result, SprigCode, SprigError};
 
 use crate::expr;
 
-/// How a fact row picks its dimension row (chapter 35, "Type 2 dimensions").
+/// How a fact row picks its dimension row (type 2 dimensions).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Attribution {
     /// The dimension's current row.
@@ -27,8 +27,7 @@ impl Attribution {
     }
 }
 
-/// A dimension's history (chapter 35, "Type 2 dimensions with system
-/// versioning").
+/// A dimension's history (type 2 dimensions with system versioning).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Versioning {
     /// No history.
@@ -218,7 +217,7 @@ fn strs(v: Option<&Value>) -> Vec<String> {
 }
 
 impl Model {
-    /// Parses a definition (chapter 35's document as JSON) for `database`.
+    /// Parses a definition (the model document as JSON) for `database`.
     ///
     /// # Errors
     /// 39752 with what is wrong.

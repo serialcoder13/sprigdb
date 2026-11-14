@@ -290,7 +290,7 @@ mod tests {
                 n.chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
             );
-            // Valid as a cluster id (chapter 03).
+            // Valid as a cluster id.
             sprig_common::ids::ClusterId::new(n.clone()).unwrap();
         }
         assert!(unique_name("--").starts_with("t-"));

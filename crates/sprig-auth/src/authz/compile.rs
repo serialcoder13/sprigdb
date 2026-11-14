@@ -1,4 +1,4 @@
-//! Compile and check (chapter 29, "Evaluation"; build step 2).
+//! Compile and check.
 //!
 //! ```text
 //! compile(user u, active roles A) at one snapshot:
@@ -87,15 +87,15 @@ pub struct CompiledPrivileges {
     pub named: HashMap<(String, String), ActionSet>,
     /// The roles the set was compiled for (active, then closed).
     pub roles: Vec<RoleId>,
-    /// Partial revokes (R4): the tenant-level actions that don't reach a
+    /// Partial revokes: the tenant-level actions that don't reach a
     /// database, by name key. An action is cut only when every grantee
     /// that holds it at `*.*` restricts it there (MySQL: a role without
     /// the restriction gives it back).
     pub restricted: HashMap<String, ActionSet>,
-    /// Graph element grants (chapter 43, R8), by (graph, relationship
+    /// Graph element grants, by (graph, relationship
     /// type?, label or type name).
     pub elements: HashMap<(ObjectId, bool, String), ActionSet>,
-    /// Row-level security (chapter 29): the protected tables that bind
+    /// Row-level security: the protected tables that bind
     /// this session and their policies (`super::rls::compile`).
     pub rls: std::sync::Arc<super::rls::SessionRls>,
 }
@@ -322,7 +322,7 @@ impl CompiledPrivileges {
     }
 
     /// Whether the user holds `SPRIG_TENANT_ADMIN` (here: on its own
-    /// tenant; ancestors' administrators arrive with build step 17).
+    /// tenant; ancestors' administrators are not covered yet).
     #[must_use]
     pub fn tenant_admin(&self) -> bool {
         self.tenant.has(Action::TenantAdmin)

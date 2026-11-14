@@ -1,4 +1,4 @@
-//! TTL indexes against MongoDB 8.0.34 (wireup, 13 Nov 2026).
+//! TTL indexes against MongoDB 8.0.34.
 //!
 //! - `ttl_matches_mongodb`: the same commands on the gateway and on the
 //!   reference, each answer compared: `createIndexes` with every

@@ -2,7 +2,7 @@
 //!
 //! Every simulated network delivery, fault, store call and model step adds
 //! a line, stamped with virtual time. Two runs of one seed must produce the
-//! same trace (chapter 46, step 5 of `simulate`); the harness compares them
+//! same trace; the harness compares them
 //! and reports the first difference as a determinism bug.
 
 use std::fmt::Write as _;

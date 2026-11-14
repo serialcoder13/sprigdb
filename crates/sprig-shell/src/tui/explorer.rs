@@ -1,4 +1,4 @@
-//! The explorer tree (chapter 53, "The TUI"): databases, then their
+//! The explorer tree: databases, then their
 //! tables, views, routines, streams and sinks, from `Catalog.ListObjects`,
 //! `Catalog.Snapshot`, `SHOW STREAMS FROM` and `SHOW SINKS FROM`, as the
 //! user may see them. Databases load when first opened.

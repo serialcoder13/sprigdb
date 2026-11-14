@@ -1,5 +1,4 @@
-// sprig.v1: logic functions as endpoints (chapter 37, "Logic functions as
-// endpoints"; chapter 41, "Calling code"). A function deployed with
+// sprig.v1: logic functions as endpoints. A function deployed with
 // `EXPOSE (http)` is callable over REST, one with `EXPOSE (grpc)` over
 // gRPC. The call runs as a SQL `CALL` of the function in the caller's
 // session: `EXECUTE` is checked, the version's tier is chosen, the budgets

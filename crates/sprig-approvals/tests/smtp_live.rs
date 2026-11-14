@@ -1,4 +1,4 @@
-//! Approval email over TLS to a real SMTP server (Mailpit), chapter 52.
+//! Approval email over TLS to a real SMTP server (Mailpit).
 //!
 //! ```sh
 //! SPRIG_SMTP_LIVE_URL=smtp+starttls://localhost:24025 \

@@ -96,14 +96,14 @@ fn only_path_columns_pass_for_type_plans() {
 }
 
 #[test]
-fn shares_of_trees_stay_inside_the_tenant_and_whole() {
+fn shares_of_trees_stay_whole() {
+    // Child tenants may receive a tree (decision T28); a filter, a column
+    // list or a TAKE would cut rows or paths out of it.
     let o = tree();
-    assert!(check_share(&o, false, false, false).is_ok());
-    assert!(check_share(&o, true, false, false).is_err());
-    assert!(check_share(&o, false, true, false).is_err());
-    assert!(check_share(&o, false, false, true).is_err());
+    assert!(check_share(&o, false).is_ok());
+    assert!(check_share(&o, true).is_err());
     let plain = fixtures::products();
-    assert!(check_share(&plain, true, true, true).is_ok());
+    assert!(check_share(&plain, true).is_ok());
 }
 
 #[test]

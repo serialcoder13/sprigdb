@@ -1,4 +1,4 @@
-// The protocol suite, shared by the engines (chapter 50 step 21).
+// The protocol suite, shared by the engines.
 //
 // Included by `sprig-proto-amqp/tests/protocol.rs` (the in-memory engine)
 // and `sprig-queues/tests/protocol.rs` (the queue engine), each of which

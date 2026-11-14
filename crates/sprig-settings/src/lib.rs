@@ -1,23 +1,21 @@
 //! `sprig-settings`: the setting registry, scopes, bounds and resolution.
 //!
-//! Layer 1 (foundations). Design: chapter 08 (Catalog, "Setting
-//! resolution") and chapter 23 (Control plane, "Settings: writes, bounds and
-//! watches") of the SprigDB low-level design; key declaration in chapter 03.
+//! Layer 1 (foundations).
 //!
 //! What exists:
 //! - [`Setting`] declarations and the [`Registry`] they are collected into
 //!   ([`register!`]);
-//! - [`MemSettings`]: rows of every scope in memory, with chapter 08's
+//! - [`MemSettings`]: rows of every scope in memory, with
 //!   resolution (nearest value wins, every wider scope's bounds apply,
 //!   clamping at read time) and its write checks (39080-39084);
 //! - [`etcd`]: the `global`, `dc` and `cluster` records in etcd and
 //!   [`SettingsWriter`], which writes them through the scope's leader with
-//!   chapter 23's checks (chapter 23 step 8);
+//!   the write checks;
 //! - [`watch`]: [`LiveSettings`], mirrors of those scopes with a snapshot
 //!   for resolution, key watches and apply callbacks, and
-//!   `SettingNotApplied` (chapter 23 step 8).
+//!   `SettingNotApplied`.
 //!
-//! - [`resolve`]: six-scope resolution (chapter 08 step 5): a tenant's
+//! - [`resolve`]: six-scope resolution: a tenant's
 //!   rows at one catalog version ([`TenantSettings`], built by the catalog
 //!   cache) layered over the etcd snapshot, with bounds and clamping,
 //!   memoized per (tenant snapshot version, etcd snapshot); [`Settings`],
@@ -27,19 +25,18 @@
 //!
 //! - [`explain`]: a resolution with its chain, one step per scope with
 //!   its row, the bounds in force there and what happened to its value
-//!   (`sprigctl settings get`, chapter 47 "Explaining settings");
+//!   (`sprigctl settings get`);
 //!   [`SettingsWriter::set_guarded`] and [`BoundsPatch`]: the Admin API's
 //!   writes under the serving leader's fencing compare, with bounds
 //!   patched inside the guarded write.
 //! - [`guard`]: [`ValueGuard`], checks of a value against the running
-//!   system before either writer stores it (chapter 29's
+//!   system before either writer stores it (such as
 //!   `auth.authorizer`).
 //!
 //! The tenant-scope side lives elsewhere: the ancestor-copy loop that
-//! fills ancestor rows is `sprig-controller::tree_settings` (chapter 08
-//! step 6) and tenant, database and object writes are
-//! `sprig-catalog::settings` (step 7), which reuses
-//! [`normalize_change`]. Not yet: privilege checks (chapter 29).
+//! fills ancestor rows is `sprig-controller::tree_settings` and
+//! tenant, database and object writes are `sprig-catalog::settings`, which reuses
+//! [`normalize_change`]. Not yet: privilege checks.
 
 pub mod etcd;
 pub mod explain;

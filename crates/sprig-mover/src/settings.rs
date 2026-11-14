@@ -1,6 +1,5 @@
-//! Chapter 10's settings, declared next to the code (chapter 03,
-//! "Declaring a key"), and a typed snapshot the engine reads at each chunk
-//! and cutover attempt.
+//! The mover's settings, declared next to the code, and a typed snapshot
+//! the engine reads at each chunk and cutover attempt.
 
 use std::borrow::Cow;
 use std::time::Duration;
@@ -252,7 +251,7 @@ impl Default for MoverSettings {
 }
 
 /// Where a worker finds a tenant's catalog setting rows (tenant, database,
-/// object and ancestors' scopes; decision RF3): `None` resolves over the
+/// object and ancestors' scopes): `None` resolves over the
 /// etcd scopes only. Implemented by `sprig-controller::tenant_scopes`.
 pub trait TenantRows: Send + Sync {
     /// The rows of `tenant` as currently cached; never waits.
@@ -284,7 +283,7 @@ impl MoverSettings {
     }
 
     /// [`Self::resolve`], with the tenant's own catalog rows layered over
-    /// the etcd scopes (decision RF3): a tenant's
+    /// the etcd scopes: a tenant's
     /// `mover.cutover_max_hold_ms` wins over its cluster's.
     #[must_use]
     pub fn resolve_with(

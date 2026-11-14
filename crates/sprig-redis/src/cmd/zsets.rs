@@ -1,4 +1,4 @@
-//! Sorted sets (chapter 40, "Sorted sets"): a score is stored as
+//! Sorted sets: a score is stored as
 //! `(c, score)`, `c` being -1, 0 or 1 for `-inf`, finite and `+inf`, so
 //! `ORDER BY c, score, m` is Redis's order.
 
@@ -988,8 +988,7 @@ async fn zalgebra(
         Agg::Min => acc.min(x),
         Agg::Max => acc.max(x),
     };
-    // Chapter 04 (decision bugfix-1): combining and sorting large sets
-    // runs off the runtime's worker threads.
+    // Combining and sorting large sets runs off the runtime's worker threads.
     let n: usize = srcs.iter().map(|s| s.as_ref().map_or(0, Vec::len)).sum();
     let out = sprig_common::cpu::heavy(n, move || {
         let mut out: Vec<(Vec<u8>, f64)> = Vec::new();

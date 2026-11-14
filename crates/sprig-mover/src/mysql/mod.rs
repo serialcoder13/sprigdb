@@ -1,15 +1,15 @@
-//! The production source, stream and target on MariaDB (chapter 10), and
-//! the factory a worker builds them with from cluster records.
+//! The production source, stream and target on MariaDB, and the factory a
+//! worker builds them with from cluster records.
 //!
 //! Every connection is `sprig_ctl` on the cluster's writer, except the
-//! binlog stream, which is `sprig_repl` on the same node: R0 reads chunks
-//! and the binlog from the writer (on Galera, the first synced node), so
-//! the snapshot a chunk reads is never older than the low watermark the
-//! stream has applied.
+//! binlog stream, which is `sprig_repl` on the same node: the mover reads
+//! chunks and the binlog from the writer (on Galera, the first synced
+//! node), so the snapshot a chunk reads is never older than the low
+//! watermark the stream has applied.
 
 pub mod source;
 pub mod sql;
-// Decision RF10 (r2last): standby copies are read-only for tenant accounts.
+// Standby copies are read-only for tenant accounts.
 pub mod standby;
 pub mod stream;
 pub mod target;
@@ -171,7 +171,7 @@ impl ClusterAccess {
             cluster: rec.cluster_id.clone(),
             topology: rec.topology,
             // The credential's TLS too: managed clusters' sprig_repl is
-            // REQUIRE SSL (r2opfix).
+            // REQUIRE SSL.
             repl: r.binlog_source().await,
             writer,
             nodes,
@@ -232,7 +232,7 @@ pub fn group_env(
     group_env_with(src, tgt, rec, route, store, server_id_base, None)
 }
 
-/// [`group_env`], with chapter 18's resolver finishing the tenant's
+/// [`group_env`], with the distributed-transaction resolver finishing the tenant's
 /// prepared branches at cutover.
 ///
 /// # Errors
@@ -284,19 +284,18 @@ pub struct MysqlEnvFactory {
     /// Node addresses replaced before discovery (`host:port` → `host:port`):
     /// fault tests route a cluster's writer through a proxy.
     addr_overrides: std::collections::HashMap<String, String>,
-    /// The one etcd, for moves between DCs (chapter 24): set by
+    /// The one etcd, for moves between DCs: set by
     /// [`Self::with_home_changes`].
     home_store: Option<Arc<dyn sprig_meta::MetaStore>>,
-    /// The DC tier holding group shard maps, for hash-range jobs (chapter
-    /// 20): set by [`Self::with_group_maps`].
+    /// The DC tier holding group shard maps, for hash-range jobs: set by [`Self::with_group_maps`].
     group_store: Option<Arc<dyn sprig_meta::MetaStore>>,
-    /// Chapter 18's resolver, for cutovers: set by [`Self::with_drain`].
+    /// The distributed-transaction resolver, for cutovers: set by [`Self::with_drain`].
     drain: Option<Arc<dyn crate::io::PreparedDrain>>,
     /// The worker's live settings and DC: set by
     /// [`Self::with_live_settings`]; without them every job gets
     /// `settings`.
     live: Option<(sprig_settings::LiveSettings, sprig_common::ids::DcId)>,
-    /// Tenants' catalog setting rows (decision RF3): set by
+    /// Tenants' catalog setting rows: set by
     /// [`Self::with_tenant_rows`].
     tenant_rows: Option<Arc<dyn crate::settings::TenantRows>>,
 }
@@ -341,8 +340,7 @@ impl MysqlEnvFactory {
     }
 
     /// Each job's settings also layer its tenant's catalog rows (tenant,
-    /// database, object and ancestors' scopes) over the etcd scopes
-    /// (decision RF3, r2last).
+    /// database, object and ancestors' scopes) over the etcd scopes.
     #[must_use]
     pub fn with_tenant_rows(mut self, rows: Arc<dyn crate::settings::TenantRows>) -> Self {
         self.tenant_rows = Some(rows);
@@ -350,7 +348,7 @@ impl MysqlEnvFactory {
     }
 
     /// Cutovers finish the tenant's prepared distributed-transaction
-    /// branches on the source through `drain` (chapter 18's resolver)
+    /// branches on the source through `drain` (the resolver)
     /// before and after the fence.
     #[must_use]
     pub fn with_drain(mut self, drain: Arc<dyn crate::io::PreparedDrain>) -> Self {
@@ -358,7 +356,7 @@ impl MysqlEnvFactory {
         self
     }
 
-    /// Runs hash-range jobs (split, merge, shard move, chapter 20) too:
+    /// Runs hash-range jobs (split, merge, shard move) too:
     /// they cut over on group shard maps in `store`, the DC tier.
     #[must_use]
     pub fn with_group_maps(mut self, store: Arc<dyn sprig_meta::MetaStore>) -> Self {
@@ -366,7 +364,7 @@ impl MysqlEnvFactory {
         self
     }
 
-    /// Runs moves between DCs too (chapter 24): a job whose source and
+    /// Runs moves between DCs too: a job whose source and
     /// target clusters are in different DCs commits with a home change
     /// ([`crate::home::HomeMapIo`]) on `store`, any tier of the one etcd
     /// (single-etcd mode).
@@ -463,7 +461,7 @@ impl EnvFactory for MysqlEnvFactory {
             Some((live, dc)) => {
                 let snap = live.snapshot();
                 // The tenant's own catalog rows over the etcd scopes
-                // (decision RF3), when this worker can read them.
+                // when this worker can read them.
                 let rows = self
                     .tenant_rows
                     .as_ref()
@@ -477,7 +475,7 @@ impl EnvFactory for MysqlEnvFactory {
             }
             None => self.settings.clone(),
         };
-        // A move between DCs brings its own budget (chapter 24).
+        // A move between DCs brings its own budget.
         if let Some(ms) = rec.spec.max_hold_ms {
             s.cutover_max_hold = std::time::Duration::from_millis(ms);
         }

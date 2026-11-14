@@ -61,7 +61,7 @@ Both have the same fingerprint, with this text:
 SELECT * FROM shop.orders WHERE customer_id = ? AND status IN (...) LIMIT ?
 ```
 
-The same statement in two databases has two fingerprints, because the database is part of the hash.
+The database in the hash is the database of the first table the statement names. So a statement that names its tables with their database, such as `SELECT * FROM shop.orders WHERE id = ?`, has one fingerprint whatever the session's default database is, or with none. A statement whose first table has no database, or that names no table, uses the session's database, so the same unqualified statement run in two databases has two fingerprints.
 
 ## See the workload
 
@@ -179,13 +179,13 @@ SprigDB has several thresholds that mean "slow". They do different things:
 
 There is no slow-query log file. To keep a record of individual slow statements, set `telemetry.otlp_endpoint` to an OpenTelemetry collector: every statement slower than `telemetry.trace_slow_ms` is exported as a trace, carrying its fingerprint and ids but never its text or values. The most recent kept traces are also served at `/debug/traces` on the telemetry port (9180). See [Monitoring](../operate/monitoring.md).
 
-`telemetry.trace_slow_ms` is set by operators only, for a tenant, a data centre or everywhere:
+`telemetry.trace_slow_ms` is set by operators only, for a data centre or everywhere:
 
 ```sh
-sprigctl settings set --scope tenant:acme telemetry.trace_slow_ms 200 --reason "investigating checkout latency"
+sprigctl settings set --scope dc:fra1 telemetry.trace_slow_ms 200 --reason "investigating checkout latency"
 ```
 
-The `workload.*` thresholds can be set per table, but see the note under [Settings](#settings) on when gateways read them.
+The `workload.*` thresholds are set by operators for a data centre or everywhere; see [Settings](#settings).
 
 ## Parameter samples
 
@@ -200,14 +200,15 @@ Samples need a key file on every gateway and worker, named by `[gateway] workloa
 
 Generate a secret with `openssl rand -hex 32`. To rotate, add a line with a higher version: new samples use it at once, and older samples still open under theirs. Remove the old version after `workload.sample_retention_days` (7), when every sample sealed under it has expired.
 
-To stop capturing samples for a table or a whole tenant:
+To stop capturing samples for a database or a whole tenant, set `workload.capture_samples` on the database (without a name, `ALTER DATABASE` means the current one):
 
 ```sql test
-CREATE TABLE customers (id BIGINT PRIMARY KEY, name VARCHAR(100) NOT NULL, email VARCHAR(200));
-ALTER TABLE customers SPRIG SET (workload.capture_samples = FALSE);
+ALTER DATABASE SPRIG SET (workload.capture_samples = FALSE);
+SHOW SPRIG SETTINGS LIKE 'workload.capture_samples';
+ALTER DATABASE SPRIG RESET (workload.capture_samples);
 ```
 
-For the whole tenant, `SPRIG SET workload.capture_samples = FALSE` (this needs `SPRIG_SETTINGS_ADMIN`).
+The gateway resolves the setting for the session's current database and tenant, so a value set on one table isn't read. For the whole tenant, `SPRIG SET workload.capture_samples = FALSE` (this needs `SPRIG_SETTINGS_ADMIN`).
 
 ## How long it is kept
 
@@ -217,26 +218,26 @@ Each gateway aggregates in memory per bucket of `workload.bucket_minutes` (60) a
 
 | Setting | Type | Default | Scopes | Meaning |
 |---|---|---|---|---|
-| `workload.bucket_minutes` | int | 60 | tenant, global | Statistics bucket size |
+| `workload.bucket_minutes` | int | 60 | dc, global | Statistics bucket size |
 | `workload.retention_days` | int | 30 | tenant, global | How long statistics are kept |
 | `workload.max_fingerprints_per_tenant` | int | 10000 | tenant, global | Fingerprints per tenant per gateway; new ones beyond it count under "other" |
-| `workload.max_text_bytes` | int | 4096 | tenant, global | Longest normalized text |
-| `workload.watch_p95_ms` | int | 50 | object to global | p95 that makes a fingerprint watched |
-| `workload.examined_sample_rate` | float | 0.02 | object to global | Share of a watched fingerprint's runs probed for rows examined |
-| `workload.full_probe_ms` | int | 100 | object to global | Mean latency from which every run is probed |
+| `workload.max_text_bytes` | int | 4096 | dc, global | Longest normalized text |
+| `workload.watch_p95_ms` | int | 50 | dc, global | p95 that makes a fingerprint watched |
+| `workload.examined_sample_rate` | float | 0.02 | dc, global | Share of a watched fingerprint's runs probed for rows examined |
+| `workload.full_probe_ms` | int | 100 | dc, global | Mean latency from which every run is probed |
 | `workload.capture_samples` | bool | true | object to global | Capture parameter samples |
-| `workload.sample_rate` | float | 0.01 | object to global | Share of a watched fingerprint's runs that offer a sample |
-| `workload.samples_per_bucket` | int | 3 | tenant, global | Samples kept per fingerprint per gateway per bucket |
-| `workload.max_samples_per_fingerprint` | int | 50 | tenant, global | Stored samples kept per fingerprint |
-| `workload.sample_retention_days` | int | 7 | tenant, global | Sample lifetime |
-| `workload.max_in_list_values` | int | 1000 | tenant, global | `IN` list values kept in a sample |
+| `workload.sample_rate` | float | 0.01 | dc, global | Share of a watched fingerprint's runs that offer a sample |
+| `workload.samples_per_bucket` | int | 3 | dc, global | Samples kept per fingerprint per gateway per bucket |
+| `workload.max_samples_per_fingerprint` | int | 50 | dc, global | Stored samples kept per fingerprint |
+| `workload.sample_retention_days` | int | 7 | dc, global | Sample lifetime |
+| `workload.max_in_list_values` | int | 1000 | dc, global | `IN` list values kept in a sample |
 | `workload.max_memory_mb` | int | 128 | dc, global | Recorder memory per gateway |
 | `workload.flush_seconds` | int | 900 | dc, global | How often gateways write partial buckets |
 | `workload.rollup_delay_minutes` | int | 10 | dc, global | Wait after a bucket closes before the rollup |
 
 "Object to global" means the object, database, tenant and global scopes.
 
-Each gateway reads the recorder's settings (`bucket_minutes`, `max_memory_mb`, `max_fingerprints_per_tenant`, `watch_p95_ms`, `examined_sample_rate`, `full_probe_ms`, `sample_rate`, `samples_per_bucket`, `max_text_bytes`, `max_in_list_values`, `sample_retention_days`) at the global and data-centre scopes, and applies a change live, without a restart. `workload.capture_samples` is resolved for the tenant before each sample, and the flush and rollup settings apply live.
+Each gateway reads the recorder's settings at the data-centre and global scopes, and applies a change live, without a restart; the flush and rollup settings apply live too. `workload.retention_days` and `workload.max_fingerprints_per_tenant` accept a tenant value, but only their global value is read, so they apply to every tenant alike. `workload.capture_samples` is resolved for the session's tenant and current database before each sample.
 
 ## Memory caps
 

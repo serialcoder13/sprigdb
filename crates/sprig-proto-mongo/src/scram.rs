@@ -1,14 +1,14 @@
-//! SCRAM-SHA-256 for `saslStart` and `saslContinue` (chapter 30,
-//! "SCRAM-SHA-256"; RFC 5802 and RFC 7677), server side.
+//! SCRAM-SHA-256 for `saslStart` and `saslContinue` (RFC 5802 and
+//! RFC 7677), server side.
 //!
 //! This is the conversation only. The account, its tenant and whether it
-//! may log in are chapter 14's: the front end passes the user name from
+//! may log in are the login service's: the front end passes the user name from
 //! the client's first message to the login service and hands back the
 //! account's stored verifier, or a decoy for unknown accounts, so the
 //! exchange looks the same and fails only at the proof.
 //!
 //! MongoDB's SCRAM-SHA-256 hashes the SASLprep-normalized password, which
-//! is exactly what chapter 14 stores for every password, so the verifiers
+//! is exactly what SprigDB stores for every password, so the verifiers
 //! work unchanged. (SCRAM-SHA-1 hashes MongoDB's MD5 digest of
 //! `user:mongo:password` instead; it needs its own verifier and isn't
 //! offered here.)
@@ -31,7 +31,7 @@ pub struct Credential {
     /// `HMAC(SaltedPassword, "Server Key")`.
     pub server_key: Vec<u8>,
     /// `(StoredKey, ServerKey)` of a retained second password with the
-    /// same salt and iterations (chapter 14's dual passwords).
+    /// same salt and iterations (dual passwords).
     pub secondary: Option<(Vec<u8>, Vec<u8>)>,
 }
 

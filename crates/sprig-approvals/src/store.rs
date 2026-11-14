@@ -1,5 +1,4 @@
-//! The store interface and the memory store (chapter 52, "Where
-//! recommendations live"). [`catalog`](crate::catalog) and
+//! The store interface and the memory store. [`catalog`](crate::catalog) and
 //! [`etcd`](crate::etcd) are the durable ones.
 
 use std::collections::BTreeMap;
@@ -116,7 +115,7 @@ impl Filter {
 /// tier.
 #[async_trait::async_trait]
 pub trait RecStore: Send + Sync {
-    /// The gate's raise, atomically (chapter 52, "The gate").
+    /// The gate's raise, atomically.
     async fn raise(
         &self,
         p: &Proposal,

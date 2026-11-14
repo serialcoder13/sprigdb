@@ -1,5 +1,5 @@
-//! systemd's readiness and watchdog protocol (chapter 27, "VM packaging":
-//! the units are `Type=notify` with `WatchdogSec`).
+//! systemd's readiness and watchdog protocol (the VM units are
+//! `Type=notify` with `WatchdogSec`).
 //!
 //! Under systemd, `NOTIFY_SOCKET` names a datagram socket. The process
 //! sends `READY=1` once the role reports ready, and `WATCHDOG=1` every half

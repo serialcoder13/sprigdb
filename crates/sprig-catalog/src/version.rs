@@ -1,5 +1,5 @@
-//! Version allocation and `change()` (chapter 08, build step 3;
-//! "Committing a change").
+//! Version allocation and `change()`, the protocol that commits a
+//! versioned change.
 //!
 //! ```text
 //! change(tenant, kind):                     // kind = Catalog or Auth
@@ -20,8 +20,8 @@
 //! - [`VersionAllocator`] allocates in the global tier. [`DirectoryAllocator`]
 //!   does it with a compare-and-swap on `/sprig/g/tenants/<id>` through any
 //!   [`MetaStore`], optionally guarded by a [`Leadership`]
-//!   (`Leadership::commit_if`), since chapter 23 makes the global leader the
-//!   directory's writer. From R2, gateways hold no global credentials and
+//!   (`Leadership::commit_if`), since the global leader is the directory's
+//!   only writer. Gateways hold no global credentials and
 //!   allocate through the leader's `Global` service instead: another
 //!   implementation of the same trait.
 //! - [`VersionBackend`] is the catalog side: begin a transaction holding the
@@ -52,7 +52,7 @@
 //!   [`Change::rollback`] settles right after rolling back, so a caller
 //!   that allocates and then finds nothing to write leaves no gap.
 //!
-//! Failure cases (chapter 08, "Failure handling"):
+//! Failure cases:
 //!
 //! | Where | Effect |
 //! |---|---|
@@ -85,7 +85,7 @@ mod tests;
 pub enum VersionKind {
     /// Objects, databases, settings and versioned extension modules.
     Catalog,
-    /// Users, verifiers and privileges (chapters 14, 29).
+    /// Users, verifiers and privileges.
     Auth,
 }
 
@@ -113,7 +113,7 @@ impl VersionKind {
 }
 
 /// The version fields of a tenant directory entry,
-/// `/sprig/g/tenants/<tenant_id>` (chapter 23). The entry's other fields
+/// `/sprig/g/tenants/<tenant_id>`. The entry's other fields
 /// (name, state, home DC, tree fields, ...) are kept as they are.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectoryVersions {
@@ -177,7 +177,7 @@ pub trait VersionAllocator: Send + Sync + 'static {
     async fn current(&self, tenant: TenantId, kind: VersionKind) -> Result<u64>;
 
     /// Whether a change may still commit: `Ok` unless the allocator acts
-    /// for a leadership that has ended (chapter 23: side effects outside
+    /// for a leadership that has ended (side effects outside
     /// etcd check the session first).
     ///
     /// # Errors
@@ -211,7 +211,7 @@ impl DirectoryAllocator {
     pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 
     /// Writes directly through `store`, which must be the global tier's
-    /// (R0 single-etcd mode; tests may pass a private tier standing in for
+    /// (single-etcd mode; tests may pass a private tier standing in for
     /// it). Keys are `tenants/<id>` under the store's tier.
     #[must_use]
     pub fn new(store: Arc<dyn MetaStore>) -> Self {
@@ -699,8 +699,7 @@ impl<B: VersionBackend> Locked<B> {
     }
 
     /// Commits the rows written in [`tx`](Self::tx) without allocating a
-    /// version: chapter 08's "intermediate states commit without a
-    /// version". The rows must carry the committed version
+    /// version: intermediate states commit unversioned. The rows must carry the committed version
     /// ([`previous`](Self::previous)), so incremental loads skip them
     /// until a versioned change touches them. The version row keeps its
     /// value. Checked against the allocator's fence first.
@@ -821,7 +820,7 @@ impl<B: VersionBackend> Change<B> {
     /// `catalog.version_wait_ms` for a version that never commits: callers
     /// that allocate, find nothing to write and roll back (the document
     /// catalog after each `dropDatabase`, for one) cost every later session
-    /// up to 2 s (decision PF1). A failed settle leaves the gap, as before.
+    /// up to 2 s. A failed settle leaves the gap, as before.
     ///
     /// # Errors
     /// The backend's error from the rollback.
@@ -1004,7 +1003,7 @@ pub type MariaCatalog = Versioner<MariaBackend>;
 /// An open versioned change on a MariaDB catalog.
 pub type CatalogTx = Change<MariaBackend>;
 
-/// The catalog store of chapter 08's interface: versioned changes and
+/// The catalog store interface: versioned changes and
 /// snapshots.
 #[async_trait::async_trait]
 pub trait CatalogStore: Send + Sync {

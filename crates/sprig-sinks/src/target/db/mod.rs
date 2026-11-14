@@ -1,4 +1,4 @@
-//! The database targets (chapter 51, "Database target"; build step 13):
+//! The database targets:
 //! MySQL and MariaDB through `mysql_async`, PostgreSQL through `sqlx`.
 //!
 //! ```text
@@ -235,8 +235,8 @@ impl std::fmt::Debug for DbTarget {
     }
 }
 
-/// `TEST CONNECTION` on a MySQL, MariaDB or PostgreSQL connection (R9,
-/// r9tests): open the checked address, log in, run `SELECT 1`; with
+/// `TEST CONNECTION` on a MySQL, MariaDB or PostgreSQL connection: open
+/// the checked address, log in, run `SELECT 1`; with
 /// `table`, also read that table's columns. Nothing is written.
 pub async fn probe(
     ctx: &TargetCtx,
@@ -294,7 +294,7 @@ pub async fn probe(
     out
 }
 
-/// `TEST CONNECTION c WRITE TO 'table'`'s write step (R9, r9last): `INSERT
+/// `TEST CONNECTION c WRITE TO 'table'`'s write step: `INSERT
 /// INTO table SELECT * FROM table WHERE 1 = 0` in a transaction rolled
 /// back, so the server checks the `INSERT` (and `SELECT`) right on the
 /// table and no row is written.
@@ -644,7 +644,7 @@ fn unit_key(t: &TaskInfo, unit: u64) -> String {
 /// Whether exactly once into this target goes by `__sprig_sink_seen`
 /// (each record's idempotency key, kept for `db.seen_retention_hours`)
 /// rather than by positions per partition: queues (no order to keep a
-/// position in), and fan-in sources (R9, r9tests), whose records carry
+/// position in), and fan-in sources, whose records carry
 /// the member in a stable idempotency key but whose positions are a
 /// task's own slots, which a destination row can't name across restarts.
 #[must_use]

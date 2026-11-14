@@ -1,5 +1,4 @@
-//! Capped collections and tailable cursors against MongoDB 8.0.34 (M7,
-//! 12 Nov 2026; decisions S81–S84).
+//! Capped collections and tailable cursors against MongoDB 8.0.34.
 //!
 //! - `capped_matches_mongodb`: the same commands on the gateway and on the
 //!   reference, each answer compared (documents in order, error codes,

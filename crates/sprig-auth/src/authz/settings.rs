@@ -1,5 +1,5 @@
-//! The `auth.*` keys chapter 29's R0 part reads (chapter 29,
-//! "Configuration"), resolved through the tenant's snapshot. Scopes
+//! The `auth.*` keys authorization reads, resolved through the tenant's
+//! snapshot. Scopes
 //! "tree" (tenant and every ancestor, dc, global), except
 //! `auth.grants_on_drop` (database, tenant, global).
 
@@ -36,7 +36,7 @@ pub static UNSAFE_PRIVILEGE_ACTION: Setting<Cow<'static, str>> = Setting {
 };
 sprig_settings::register!(UNSAFE_PRIVILEGE_ACTION);
 
-/// `auth.partial_revokes`: MySQL's `partial_revokes` (R4). On, a
+/// `auth.partial_revokes`: MySQL's `partial_revokes`. On, a
 /// database-level `REVOKE` of a privilege the grantee holds at `*.*`
 /// stores a restriction (shown as `REVOKE ... ON db.*`); off, it fails
 /// with 1141, as MySQL 8.4 does by default.
@@ -91,7 +91,7 @@ pub static GRANTS_ON_DROP: Setting<Cow<'static, str>> = Setting {
 };
 sprig_settings::register!(GRANTS_ON_DROP);
 
-/// `rls.backend_enforcement` (chapter 29, "Inside MariaDB"): what MariaDB
+/// `rls.backend_enforcement`: what MariaDB
 /// enforces of row-level security besides the gateway's rewrite. `views`:
 /// write checks (triggers) and policy views, with the accounts of bound
 /// users reading the tables only through the views; `triggers`: write
@@ -109,7 +109,7 @@ pub static RLS_BACKEND_ENFORCEMENT: Setting<Cow<'static, str>> = Setting {
 };
 sprig_settings::register!(RLS_BACKEND_ENFORCEMENT);
 
-/// `rls.inline_subtree_max` (chapter 29, "What a policy may reference"):
+/// `rls.inline_subtree_max`:
 /// the most tenant ids `SPRIG_TENANT_IN_SUBTREE` and
 /// `SPRIG_TENANT_MANAGED` inline into a statement; a larger set is
 /// refused (39366) until `__sprig_subtree` exists.
@@ -174,7 +174,7 @@ mod tests {
     }
 }
 
-/// `auth.reconcile_interval_seconds` (chapter 29, "Reconciler"): how
+/// `auth.reconcile_interval_seconds`: how
 /// often a gateway compares a tenant's backend grants on a cluster with
 /// MariaDB's even when nothing it watches changed (the drift sweep; also
 /// catches a placement change it missed).

@@ -16,19 +16,19 @@ testing = []
 [dependencies]
 arc-swap.workspace = true
 async-trait.workspace = true
-# Token signatures and refresh tokens (chapter 14 step 12) are base64url.
+# Token signatures and refresh tokens are base64url.
 base64.workspace = true
 getrandom.workspace = true
 metrics.workspace = true
 mysql_async.workspace = true
-# SCRAM verifiers (chapter 14): PBKDF2, HMAC and SHA-256/512.
+# SCRAM verifiers: PBKDF2, HMAC and SHA-256/512.
 ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha1.workspace = true
 sha2.workspace = true
-# Chapter 08: "sprig-auth depends on sprig-catalog, never the reverse" (both
-# layer 2). Not yet a workspace dependency, so by path.
+# sprig-auth depends on sprig-catalog, never the reverse (both layer 2). Not yet
+# a workspace dependency, so by path.
 sprig-catalog.workspace = true
 sprig-common.workspace = true
 sprig-meta.workspace = true
@@ -41,7 +41,7 @@ subtle.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
-# Token session ids are UUIDv7 (chapter 14, `token_sessions.session_id`).
+# Token session ids (`token_sessions.session_id`) are UUIDv7.
 uuid.workspace = true
 zeroize.workspace = true
 

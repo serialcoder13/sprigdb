@@ -1,4 +1,4 @@
-//! `sprigctl recommendations` (chapter 52): the approvals inbox for
+//! `sprigctl recommendations`: the approvals inbox for
 //! operators, over the controller's `Recommendations` service.
 //!
 //! - `list [--tenant T] [--level L] [--kind K] [--state S] [--all]`

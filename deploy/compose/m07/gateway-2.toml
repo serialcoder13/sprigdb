@@ -1,4 +1,4 @@
-# The M0.7 stack's gateway 2 (stack.sh): its own ports, through
+# The m07 stack's gateway 2 (stack.sh): its own ports, through
 # listen_override, so two gateways share dc-m7's listener settings.
 [node]
 dc = "dc-m7"

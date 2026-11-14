@@ -1,7 +1,6 @@
-//! Cypher values and their semantics (chapter 43, "Values"; build step
-//! 10): equality and comparison with `null`, the global sort order, keys
+//! Cypher values and their semantics: equality and comparison with `null`, the global sort order, keys
 //! for grouping and `DISTINCT`, and properties to and from the stored JSON
-//! with chapter 31's type map.
+//! with the document engine's `_types` map.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -30,7 +29,15 @@ pub struct Node {
     pub labels: Vec<String>,
     /// Properties.
     pub props: Props,
+    /// A late read ([`Partial`]): `Some(keys)` when only those property
+    /// keys were read; `None` when `props` is all of them.
+    pub partial: Partial,
 }
+
+/// Which properties of an element were read: `None` all of them;
+/// `Some(keys)` only those (the executor reads properties late, when a
+/// clause needs them).
+pub type Partial = Option<Arc<[String]>>;
 
 /// A relationship.
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +58,8 @@ pub struct Rel {
     pub rtype: String,
     /// Properties.
     pub props: Props,
+    /// A late read, as [`Node::partial`].
+    pub partial: Partial,
 }
 
 /// A path: `nodes.len() == rels.len() + 1`; `rels[i]` joins `nodes[i]` and
@@ -100,11 +109,11 @@ pub enum Value {
     Duration(Dur),
     /// A `POINT`.
     Point(Point),
-    /// A byte array (Neo4j's `byte[]`; Bolt's bytes; R8 round 8).
+    /// A byte array (Neo4j's `byte[]`; Bolt's bytes).
     Bytes(Vec<u8>),
 }
 
-/// About how many bytes `v` holds (R8 round 10, decision G81): the
+/// About how many bytes `v` holds: the
 /// statement memory budget counts these. A node, relationship or path is
 /// shared by the rows that hold it, so each holder counts its share
 /// (its size over its reference count).
@@ -184,6 +193,23 @@ impl Node {
     pub fn element_id(&self) -> String {
         node_element_id(self.graph, self.rk, self.id)
     }
+
+    /// Property `k`, or an internal error when it wasn't read yet (a late
+    /// read the executor missed: an error, never a wrong `null`).
+    ///
+    /// # Errors
+    /// Internal, for a key not read.
+    pub fn prop(&self, k: &str) -> Result<Value> {
+        read_prop(&self.props, self.partial.as_ref(), k)
+    }
+
+    /// Every property, or an internal error for a late read.
+    ///
+    /// # Errors
+    /// Internal, when not every property was read.
+    pub fn all_props(&self) -> Result<&Props> {
+        all_of(&self.props, self.partial.as_ref())
+    }
 }
 
 impl Rel {
@@ -192,6 +218,44 @@ impl Rel {
     pub fn element_id(&self) -> String {
         rel_element_id(self.graph, self.src_rk, self.id)
     }
+
+    /// Property `k`, as [`Node::prop`].
+    ///
+    /// # Errors
+    /// Internal, for a key not read.
+    pub fn prop(&self, k: &str) -> Result<Value> {
+        read_prop(&self.props, self.partial.as_ref(), k)
+    }
+
+    /// Every property, as [`Node::all_props`].
+    ///
+    /// # Errors
+    /// Internal, when not every property was read.
+    pub fn all_props(&self) -> Result<&Props> {
+        all_of(&self.props, self.partial.as_ref())
+    }
+}
+
+fn not_read(what: &str) -> SprigError {
+    SprigError::internal(format!(
+        "graph executor: {what} of an element read before its properties were"
+    ))
+}
+
+fn read_prop(props: &Props, partial: Option<&Arc<[String]>>, k: &str) -> Result<Value> {
+    if let Some(keys) = partial
+        && !keys.iter().any(|x| x == k)
+    {
+        return Err(not_read(&format!("property `{k}`")));
+    }
+    Ok(props.get(k).cloned().unwrap_or(Value::Null))
+}
+
+fn all_of<'p>(props: &'p Props, partial: Option<&Arc<[String]>>) -> Result<&'p Props> {
+    if partial.is_some() {
+        return Err(not_read("every property"));
+    }
+    Ok(props)
 }
 
 /// A grouping and `DISTINCT` key: values equal under Cypher's
@@ -545,7 +609,7 @@ pub fn type_error(msg: impl Into<String>) -> SprigError {
 }
 
 // ----------------------------------------------------------------------
-// Properties as stored: JSON plus chapter 31's type map.
+// Properties as stored: JSON plus the document engine's `_types` map.
 // ----------------------------------------------------------------------
 
 /// Checks that `v` may be stored as a property: Neo4j's property types

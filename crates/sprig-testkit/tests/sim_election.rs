@@ -1,6 +1,5 @@
-//! Leader election under faults, in simulation (chapter 23, "Testing":
-//! "only the token holder's writes commit"; chapter 25: lease arithmetic
-//! with rate skew).
+//! Leader election under faults, in simulation: only the token holder's
+//! writes commit, and lease arithmetic holds under clock rate skew.
 //!
 //! Three controllers run sprig-meta's real `Election` against the
 //! simulated etcd. Each, while it leads, commits a guarded counter

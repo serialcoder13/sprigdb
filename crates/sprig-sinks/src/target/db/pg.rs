@@ -1,5 +1,5 @@
-//! PostgreSQL destinations through `sqlx` (chapter 51 open question 10:
-//! `sqlx-postgres` 0.8 builds with the workspace's rustls and ring).
+//! PostgreSQL destinations through `sqlx` (`sqlx-postgres` 0.8 builds
+//! with the workspace's rustls and ring).
 
 use std::time::Duration;
 

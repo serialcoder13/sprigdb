@@ -1,6 +1,5 @@
-//! Statement history per profile (chapter 53, "Data structures and
-//! storage"): `history/<profile>` in the config directory, one JSON line per
-//! entry, redacted before it is written, mode 0600.
+//! Statement history per profile: `history/<profile>` in the config
+//! directory, one JSON line per entry, redacted before it is written, mode 0600.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};

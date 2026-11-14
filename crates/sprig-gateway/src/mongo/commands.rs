@@ -268,10 +268,13 @@ pub async fn run(c: &mut Conn, name: &str, body: &Document) -> Result<Document, 
     // Server-side JavaScript: its scope, and the first error its code met,
     // which the command answers with.
     let js = super::serverjs::scope_for(c, name, body).await;
-    let r = Box::pin(sprig_doc::serverjs::scope(
+    // The command's state is boxed once; the task-local scopes around it
+    // move only the box (S149 step 2: moving the whole state through each
+    // scope was about 9% of a point read's gateway CPU in `memmove`).
+    let r = sprig_doc::serverjs::scope(
         js.clone(),
-        sprig_doc::collation::scope(coll, run_inner(c, name, body)),
-    ))
+        sprig_doc::collation::scope(coll, Box::pin(run_inner(c, name, body))),
+    )
     .await;
     match js.and_then(|s| s.take_error()) {
         Some(e) => Err(e),
@@ -730,39 +733,42 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
     let mut tries = 0u64;
     let r = super::workload::scoped(
         wl.as_ref(),
-        sprig_doc::hint::scope(hint, async {
-            loop {
-                let r = match (&lsid, txn_number) {
-                    (Some(l), Some(n)) if super::retry::applies(name, body) => {
-                        super::retry::run(c, &mut s, name, body, &db, l, n).await
+        sprig_doc::hint::scope(
+            hint,
+            Box::pin(async {
+                loop {
+                    let r = match (&lsid, txn_number) {
+                        (Some(l), Some(n)) if super::retry::applies(name, body) => {
+                            Box::pin(super::retry::run(c, &mut s, name, body, &db, l, n)).await
+                        }
+                        _ => {
+                            // MongoDB 9.0's per-operation memory limit.
+                            let mem = c.shared.settings().max_operation_memory_bytes;
+                            sprig_doc::opmem::scope(
+                                mem,
+                                Box::pin(exec(c, &mut s, name, body, &db, lsid.as_deref())),
+                            )
+                            .await
+                        }
+                    };
+                    // Concurrent first writes to a new database: another session
+                    // created it a moment ago, and this one's names may not show it
+                    // yet (the name map follows the catalog's watch).
+                    match &r {
+                        Err(e)
+                            if e.code == code::NAMESPACE_NOT_FOUND
+                                && e.message.contains("Unknown database")
+                                && super::writes::is_write(name)
+                                && tries < 8 =>
+                        {
+                            tries += 1;
+                            tokio::time::sleep(Duration::from_millis(50 * tries)).await;
+                        }
+                        _ => break r,
                     }
-                    _ => {
-                        // MongoDB 9.0's per-operation memory limit.
-                        let mem = c.shared.settings().max_operation_memory_bytes;
-                        sprig_doc::opmem::scope(
-                            mem,
-                            Box::pin(exec(c, &mut s, name, body, &db, lsid.as_deref())),
-                        )
-                        .await
-                    }
-                };
-                // Concurrent first writes to a new database: another session
-                // created it a moment ago, and this one's names may not show it
-                // yet (the name map follows the catalog's watch).
-                match &r {
-                    Err(e)
-                        if e.code == code::NAMESPACE_NOT_FOUND
-                            && e.message.contains("Unknown database")
-                            && super::writes::is_write(name)
-                            && tries < 8 =>
-                    {
-                        tries += 1;
-                        tokio::time::sleep(Duration::from_millis(50 * tries)).await;
-                    }
-                    _ => break r,
                 }
-            }
-        }),
+            }),
+        ),
     )
     .await;
     let r = if max_time_ms.is_some() {
@@ -1814,7 +1820,7 @@ async fn exec(
                 ))
                 .await?;
                 let lim = sprig_doc::agg::AggLimits {
-                    stage_bytes: engine.cfg.agg_stage_bytes,
+                    stage_bytes: engine.agg_stage_bytes(),
                     now: bson::DateTime::now(),
                 };
                 for st in &pipeline[1..] {
@@ -1834,7 +1840,7 @@ async fn exec(
                 // `$currentOp` and `$listSessions`, then the
                 // in-gateway stages.
                 let lim = sprig_doc::agg::AggLimits {
-                    stage_bytes: engine.cfg.agg_stage_bytes,
+                    stage_bytes: engine.agg_stage_bytes(),
                     now: bson::DateTime::now(),
                 };
                 for st in &pipeline[1..] {
@@ -1860,7 +1866,7 @@ async fn exec(
                     });
                 }
                 let lim = sprig_doc::agg::AggLimits {
-                    stage_bytes: engine.cfg.agg_stage_bytes,
+                    stage_bytes: engine.agg_stage_bytes(),
                     now: bson::DateTime::now(),
                 };
                 for st in &pipeline[1..] {

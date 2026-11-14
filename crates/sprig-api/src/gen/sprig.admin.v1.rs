@@ -72,7 +72,7 @@ pub mod clusters_client {
     )]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
-    /// MariaDB clusters of this DC (chapter 09).
+    /// MariaDB clusters of this DC.
     #[derive(Debug, Clone)]
     pub struct ClustersClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -283,7 +283,7 @@ pub mod clusters_server {
             request: tonic::Request<super::NameRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
     }
-    /// MariaDB clusters of this DC (chapter 09).
+    /// MariaDB clusters of this DC.
     #[derive(Debug)]
     pub struct ClustersServer<T> {
         inner: Arc<T>,
@@ -626,7 +626,7 @@ pub mod data_centers_client {
     )]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
-    /// Data centers (chapter 23).
+    /// Data centers.
     #[derive(Debug, Clone)]
     pub struct DataCentersClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -787,7 +787,7 @@ pub mod data_centers_server {
             request: tonic::Request<super::NameRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
     }
-    /// Data centers (chapter 23).
+    /// Data centers.
     #[derive(Debug)]
     pub struct DataCentersServer<T> {
         inner: Arc<T>,
@@ -1044,7 +1044,7 @@ pub mod tenants_client {
     )]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
-    /// Tenants and the tenant tree (chapters 08 and 23).
+    /// Tenants and the tenant tree.
     #[derive(Debug, Clone)]
     pub struct TenantsClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -1198,7 +1198,7 @@ pub mod tenants_client {
                 .insert(GrpcMethod::new("sprig.admin.v1.Tenants", "DeleteTenant"));
             self.inner.unary(req, path, codec).await
         }
-        /// Chapter 14, "Suspension": logins in the subtree fail with 39303, open
+        /// Suspension: logins in the subtree fail with 39303, open
         /// sessions close, background work waits. The body is {"reason": "..."}.
         pub async fn suspend_tenant(
             &mut self,
@@ -1273,7 +1273,7 @@ pub mod tenants_server {
             &self,
             request: tonic::Request<super::NameRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
-        /// Chapter 14, "Suspension": logins in the subtree fail with 39303, open
+        /// Suspension: logins in the subtree fail with 39303, open
         /// sessions close, background work waits. The body is {"reason": "..."}.
         async fn suspend_tenant(
             &self,
@@ -1284,7 +1284,7 @@ pub mod tenants_server {
             request: tonic::Request<super::NameRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
     }
-    /// Tenants and the tenant tree (chapters 08 and 23).
+    /// Tenants and the tenant tree.
     #[derive(Debug)]
     pub struct TenantsServer<T> {
         inner: Arc<T>,
@@ -1670,7 +1670,7 @@ pub mod users_client {
     )]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
-    /// Tenant users (interim, chapter 14).
+    /// Tenant users.
     #[derive(Debug, Clone)]
     pub struct UsersClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -1781,7 +1781,7 @@ pub mod users_server {
             request: tonic::Request<super::NameRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
     }
-    /// Tenant users (interim, chapter 14).
+    /// Tenant users.
     #[derive(Debug)]
     pub struct UsersServer<T> {
         inner: Arc<T>,
@@ -1952,7 +1952,7 @@ pub mod settings_client {
     )]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
-    /// Settings at every scope (chapters 08 and 23).
+    /// Settings at every scope.
     #[derive(Debug, Clone)]
     pub struct SettingsClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -2288,7 +2288,7 @@ pub mod settings_server {
             request: tonic::Request<super::NameRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
     }
-    /// Settings at every scope (chapters 08 and 23).
+    /// Settings at every scope.
     #[derive(Debug)]
     pub struct SettingsServer<T> {
         inner: Arc<T>,
@@ -2846,7 +2846,7 @@ pub mod indexes_client {
     )]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
-    /// Automatic indexes and recommendations (chapter 13).
+    /// Automatic indexes and recommendations.
     #[derive(Debug, Clone)]
     pub struct IndexesClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -3134,7 +3134,7 @@ pub mod indexes_server {
             request: tonic::Request<super::TenantObjectRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
     }
-    /// Automatic indexes and recommendations (chapter 13).
+    /// Automatic indexes and recommendations.
     #[derive(Debug)]
     pub struct IndexesServer<T> {
         inner: Arc<T>,
@@ -3618,7 +3618,7 @@ pub mod explain_client {
     )]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
-    /// Why a query got, or didn't get, an index (chapter 13).
+    /// Why a query got, or didn't get, an index.
     #[derive(Debug, Clone)]
     pub struct ExplainClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -3729,7 +3729,7 @@ pub mod explain_server {
             request: tonic::Request<super::TenantObjectRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
     }
-    /// Why a query got, or didn't get, an index (chapter 13).
+    /// Why a query got, or didn't get, an index.
     #[derive(Debug)]
     pub struct ExplainServer<T> {
         inner: Arc<T>,
@@ -3902,7 +3902,7 @@ pub mod jobs_client {
     )]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
-    /// Jobs of the DC tier's scheduler (chapter 23).
+    /// Jobs of the DC tier's scheduler.
     #[derive(Debug, Clone)]
     pub struct JobsClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -4063,7 +4063,7 @@ pub mod jobs_server {
             request: tonic::Request<super::NameRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
     }
-    /// Jobs of the DC tier's scheduler (chapter 23).
+    /// Jobs of the DC tier's scheduler.
     #[derive(Debug)]
     pub struct JobsServer<T> {
         inner: Arc<T>,
@@ -4320,7 +4320,7 @@ pub mod gateways_client {
     )]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
-    /// Registered gateways, and draining one (chapter 04).
+    /// Registered gateways, and draining one.
     #[derive(Debug, Clone)]
     pub struct GatewaysClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -4481,7 +4481,7 @@ pub mod gateways_server {
             request: tonic::Request<super::NameRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
     }
-    /// Registered gateways, and draining one (chapter 04).
+    /// Registered gateways, and draining one.
     #[derive(Debug)]
     pub struct GatewaysServer<T> {
         inner: Arc<T>,
@@ -4738,7 +4738,7 @@ pub mod recommendations_client {
     )]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
-    /// Approvals and recommendations (chapter 52). Ids carry their store:
+    /// Approvals and recommendations. Ids carry their store:
     /// "t42.17", "dc.mum1.3", "g.5". Operators call with the admin token (or a
     /// DC operator's); tenant users call with their own login, and the gateway
     /// passes their tenant, SPRIG_TENANT_ADMIN and ALTER/INDEX grants to the
@@ -4866,7 +4866,7 @@ pub mod recommendations_client {
             self.inner.unary(req, path, codec).await
         }
         /// body_json: {"action": "approve" | "ignore" | "snooze" | "reopen" |
-        /// "comment", ...} as chapter 52's action bodies.
+        /// "comment", ...}, the recommendation action bodies.
         pub async fn act_on_recommendation(
             &mut self,
             request: impl tonic::IntoRequest<super::NameRequest>,
@@ -5040,7 +5040,7 @@ pub mod recommendations_server {
             request: tonic::Request<super::NameRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
         /// body_json: {"action": "approve" | "ignore" | "snooze" | "reopen" |
-        /// "comment", ...} as chapter 52's action bodies.
+        /// "comment", ...}, the recommendation action bodies.
         async fn act_on_recommendation(
             &self,
             request: tonic::Request<super::NameRequest>,
@@ -5066,7 +5066,7 @@ pub mod recommendations_server {
             request: tonic::Request<super::BodyRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
     }
-    /// Approvals and recommendations (chapter 52). Ids carry their store:
+    /// Approvals and recommendations. Ids carry their store:
     /// "t42.17", "dc.mum1.3", "g.5". Operators call with the admin token (or a
     /// DC operator's); tenant users call with their own login, and the gateway
     /// passes their tenant, SPRIG_TENANT_ADMIN and ALTER/INDEX grants to the
@@ -5570,10 +5570,9 @@ pub mod operators_client {
     )]
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
-    /// Named operator accounts, their sessions and their tokens (chapter 14,
-    /// "Operators"). Gateways relay these calls to the controller with the
-    /// caller's credential, as every admin call; the controller's guard decides
-    /// (decision OP12). `Login` and `Enrol` take no credential; the others take
+    /// Named operator accounts, their sessions and their tokens. Gateways relay
+    /// these calls to the controller with the caller's credential, as every
+    /// admin call; the controller's guard decides. `Login` and `Enrol` take no credential; the others take
     /// an operator's session (`Authorization: Bearer sprigop_...`), a token or
     /// the bootstrap token as the guard allows.
     #[derive(Debug, Clone)]
@@ -6055,10 +6054,9 @@ pub mod operators_server {
             request: tonic::Request<super::NameRequest>,
         ) -> std::result::Result<tonic::Response<super::JsonReply>, tonic::Status>;
     }
-    /// Named operator accounts, their sessions and their tokens (chapter 14,
-    /// "Operators"). Gateways relay these calls to the controller with the
-    /// caller's credential, as every admin call; the controller's guard decides
-    /// (decision OP12). `Login` and `Enrol` take no credential; the others take
+    /// Named operator accounts, their sessions and their tokens. Gateways relay
+    /// these calls to the controller with the caller's credential, as every
+    /// admin call; the controller's guard decides. `Login` and `Enrol` take no credential; the others take
     /// an operator's session (`Authorization: Bearer sprigop_...`), a token or
     /// the bootstrap token as the guard allows.
     #[derive(Debug)]

@@ -1,4 +1,4 @@
-//! `$setWindowFields` (M2, 12 Nov 2026): partitions, document and range
+//! `$setWindowFields`: partitions, document and range
 //! windows (with time units), the accumulators as window functions, and
 //! `$rank`, `$denseRank`, `$documentNumber`, `$shift`, `$derivative`,
 //! `$integral`, `$expMovingAvg`, `$covariancePop`, `$covarianceSamp`,
@@ -593,7 +593,7 @@ fn parse(arg: &Bson) -> Result<Spec, MongoError> {
 }
 
 /// The stage's partition key of each document and its `sortBy`, for
-/// the spilling version (M5): it sorts by these on disk, then runs
+/// the spilling version: it sorts by these on disk, then runs
 /// [`set_window_fields`] one partition at a time.
 pub(crate) struct Order {
     partition: Option<Bson>,

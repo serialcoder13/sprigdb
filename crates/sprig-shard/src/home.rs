@@ -1,10 +1,10 @@
-//! A tenant's home DC and the commit that changes it (chapter 24,
-//! "Orchestrating a move", cutover steps 6 and 7).
+//! A tenant's home DC and the commit that changes it at the end of a
+//! move between DCs.
 //!
-//! The home DC is the directory entry's `home_dc` (`/sprig/g/tenants/<id>`,
-//! chapter 23); its tier holds the tenant's map `shardmaps/<tenant>/0` with
+//! The home DC is the directory entry's `home_dc` (`/sprig/g/tenants/<id>`);
+//! its tier holds the tenant's map `shardmaps/<tenant>/0` with
 //! role `home`. A move between DCs ends in one etcd transaction, the
-//! commit point, which in R0's single-etcd mode can span both DC tiers and
+//! commit point, which in single-etcd mode can span both DC tiers and
 //! the global tier:
 //!
 //! ```text
@@ -17,8 +17,8 @@
 //!                 cleared, last_move {at_ms, from, to, job, moves_back}
 //! ```
 //!
-//! This stands in for `Global.CommitHomeChange` (R2): the global leader
-//! writes the directory there, and the DC tiers' maps are written before
+//! This stands in for `Global.CommitHomeChange`, used once the tiers have
+//! their own etcds: the global leader writes the directory there, and the DC tiers' maps are written before
 //! it. With one etcd, one transaction makes the three writes atomic, so no
 //! reader ever sees a directory that names Y without Y's map.
 //!
@@ -116,7 +116,7 @@ impl HomeEntry {
         serde_json::to_vec(&self.raw).map_err(|e| bad(&e.to_string()))
     }
 
-    /// The tenant's allowed DCs (chapter 26): the directory entry's
+    /// The tenant's allowed DCs: the directory entry's
     /// `residency.allowed_dcs`, resolved from its policy by the
     /// controllers. `None` when the tenant has no residency (it may be
     /// anywhere).
@@ -287,7 +287,7 @@ pub async fn commit(store: &Arc<dyn MetaStore>, c: &HomeChange) -> Result<HomeCo
                 dir.home_dc, c.from
             )));
         }
-        // Residency (chapter 26), checked at the commit point against the
+        // Residency, checked at the commit point against the
         // entry this transaction compares: a policy tightened during the
         // move stops it here.
         if !dir.residency_allows(&c.to) {

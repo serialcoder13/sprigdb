@@ -1,7 +1,7 @@
-//! `$text`'s `$caseSensitive` and `$diacriticSensitive` (M3, decision
-//! S101). The text index matches without case and diacritics; MongoDB then
-//! keeps a document only if its indexed text holds the search's terms with
-//! the same case (and, with `$diacriticSensitive`, the same diacritics).
+//! `$text`'s `$caseSensitive` and `$diacriticSensitive`. The text index
+//! matches without case and diacritics; MongoDB then keeps a document
+//! only if its indexed text holds the search's terms with the same case
+//! (and, with `$diacriticSensitive`, the same diacritics).
 //! Here a term holds when a word of the text starts with it under that
 //! comparison (so a stemmed form such as "Running" holds "Run"); a phrase
 //! holds when the text contains it. As in MongoDB, a document needs one of

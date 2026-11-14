@@ -1,6 +1,5 @@
 //! What the mover moves: tables, rows, keys, row changes and transactions
-//! as the copy, the stream and the applier see them (chapter 10, "The
-//! watermark copy", "The applier").
+//! as the copy, the stream and the applier see them.
 //!
 //! Values are `mysql_async` values, the binary protocol's: chunk reads
 //! return them, the applier sends them as prepared-statement parameters
@@ -165,7 +164,7 @@ pub fn encode_value(v: &Value, out: &mut Vec<u8>) {
     }
 }
 
-/// A watermark row's kind (chapter 10, `__sprig_watermark.kind`).
+/// A watermark row's kind (`__sprig_watermark.kind`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WmKind {
@@ -249,7 +248,7 @@ pub struct SourceTxn {
     pub xa: Option<XaPhase>,
 }
 
-/// Where an XA transaction is (chapter 10, "The applier", XA).
+/// Where an XA transaction is in the applier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum XaPhase {
     /// `XA PREPARE`: the group's changes, held until the outcome.
@@ -271,8 +270,8 @@ pub enum StreamItem {
     Idle,
 }
 
-/// One table's copy progress, stored with the position (chapter 10,
-/// `__sprig_mover_pos.copy_state`).
+/// One table's copy progress, stored with the position
+/// (`__sprig_mover_pos.copy_state`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TableCopy {
     /// The last copied key, as hex of its canonical bytes. The values are
@@ -373,7 +372,7 @@ impl CopyState {
     }
 }
 
-/// The target's position row (chapter 10, `__sprig_mover_pos`).
+/// The target's position row (`__sprig_mover_pos`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PosRow {
     /// The owning worker's fencing token.

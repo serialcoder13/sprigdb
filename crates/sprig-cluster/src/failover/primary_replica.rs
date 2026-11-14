@@ -1,10 +1,10 @@
-//! Primary + replicas, driven by SprigDB (chapter 25 steps 3-10).
+//! Primary + replicas, driven by SprigDB (failover steps 3-10).
 //!
 //! ```text
 //! 3. on each replica whose agent answers: apply what it received, with the
 //!    IO thread left running (the primary is fenced or down, so nothing new
 //!    arrives): START SLAVE SQL_THREAD only while the IO thread is alive,
-//!    MASTER_GTID_WAIT(received, 30) ([`drain`]; r2drain)
+//!    MASTER_GTID_WAIT(received, 30) ([`drain`])
 //! 4. best = the replica whose received position contains every other's; none,
 //!    two that diverge, or best not fully applied (both threads stopped with
 //!    relay log left, or too slow) -> stop and alert
@@ -286,7 +286,7 @@ pub async fn promote(ep: &NodeEndpoint) -> Result<String, ProbeError> {
     Ok(pos)
 }
 
-/// Step 8 where agents fence the nodes (chapter 25, decision W8): makes
+/// Step 8 where agents fence the nodes: makes
 /// `ep` a primary but leaves `read_only` to its agent, which clears it
 /// once it holds the writer lease and a DC permit and sees the node no
 /// longer replicates. `semisync`: switch the primary side of semi-sync on
@@ -367,8 +367,7 @@ pub async fn semisync_master_enabled(s: &mut ProbeSession) -> Result<bool, Probe
     }
 }
 
-/// The semi-sync guard of a node about to take writes (chapter 25; the
-/// leftover of R2's wiring): a primary with semi-sync on and no replica
+/// The semi-sync guard of a node about to take writes: a primary with semi-sync on and no replica
 /// attached would make its first commit wait out
 /// `rpl_semi_sync_master_timeout` (a returning primary whose standby was
 /// promoted, a promoted replica whose peers haven't reattached). It is
@@ -436,7 +435,7 @@ async fn change_master(
     Ok(())
 }
 
-/// The TLS part of `CHANGE MASTER` (hardening round 3): a node that serves
+/// The TLS part of `CHANGE MASTER`: a node that serves
 /// TLS with a CA file (`ssl_ca`) checks the new primary's certificate
 /// against that CA, so a former primary rejoining a cluster whose nodes
 /// require TLS (`require_secure_transport`, `REQUIRE SSL` accounts)
@@ -460,8 +459,7 @@ const SYSTEM_USERS: [&str; 6] = [
     "mariadb.sys",
 ];
 
-/// The self-fence of a writer (chapter 25, "DC leases, sub-leases and
-/// self-fencing" step 6): `read_only = ON`, then every session of a tenant
+/// The self-fence of a writer: `read_only = ON`, then every session of a tenant
 /// account is killed, so no open transaction commits afterwards. Returns
 /// how many sessions were killed.
 ///
@@ -535,7 +533,7 @@ impl DivergedRange {
     }
 }
 
-/// Chapter 25 "Diverged transactions" step 1 for a node: the GTIDs in its
+/// Step 1 of the diverged-transaction report for a node: the GTIDs in its
 /// `gtid_binlog_pos` past the position the new writer had applied when it
 /// was promoted (`applied`), in `domain`. `None` when the node logged
 /// nothing past it.
@@ -566,7 +564,7 @@ pub struct DivergedTxn {
 
 /// Reads the diverged transactions from the node's binlog with `SHOW
 /// BINLOG EVENTS` (step 3 of the extract; the row images are the
-/// `errant_extract` job's, chapter 38's reader).
+/// `errant_extract` job's, read with the change feed's reader).
 ///
 /// # Errors
 /// The node couldn't be reached or its binlogs listed.

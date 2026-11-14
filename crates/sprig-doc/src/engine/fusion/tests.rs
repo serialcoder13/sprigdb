@@ -73,7 +73,7 @@ fn coll1() -> Vec<Document> {
 }
 
 /// MongoDB 8.0.34 (`featureFlagRankFusionBasic`) on the same documents:
-/// ids 1, 3, 2, 4 with these scores (probe p7, 12 Nov).
+/// ids 1, 3, 2, 4 with these scores.
 #[test]
 fn rrf_matches_mongodb() {
     let out = fuse(
@@ -131,7 +131,7 @@ fn coll2() -> Vec<Document> {
 }
 
 /// Ties go by `_id` ascending, whatever the pipelines' names or order
-/// (probe p8: 5, "x", 1, 2, 9).
+/// (MongoDB 8.0.34 answers 5, "x", 1, 2, 9).
 #[test]
 fn ties_by_id() {
     for spec in [

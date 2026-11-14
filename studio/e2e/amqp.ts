@@ -1,11 +1,10 @@
-// A small AMQP 0-9-1 client for the end-to-end suite's setup (Studio round
-// 6): queues and exchanges can only be declared over AMQP (chapter 50 has no
-// SQL topology statements yet, decision ST45), and the queue pages need a
-// live consumer to show one. It speaks just enough of the protocol: PLAIN
-// login, one channel, exchange and queue declare, bind, qos, consume (no
-// acks: deliveries stay unacknowledged until the connection closes) and
-// close. Host and port are always given (rule 15); nothing here defaults
-// to 5672.
+// A small AMQP 0-9-1 client for the end-to-end suite's setup: queues and
+// exchanges can only be declared over AMQP (there are no SQL topology
+// statements yet), and the queue pages need a live consumer to show one. It
+// speaks just enough of the protocol: PLAIN login, one channel, exchange and
+// queue declare, bind, qos, consume (no acks: deliveries stay unacknowledged
+// until the connection closes) and close. Host and port are always given;
+// nothing here defaults to 5672.
 
 import { connect, type Socket } from 'node:net';
 

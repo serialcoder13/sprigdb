@@ -784,6 +784,17 @@ struct LimitedSession {
 
 #[async_trait]
 impl SessionExec for LimitedSession {
+    async fn point_read(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        stmt: crate::pipeline::StmtRef,
+        params: &sprig_proto_mysql::command::ExecuteParams,
+    ) -> Result<crate::pipeline::PointRead> {
+        let high = cx.session.state() == SessionState::InTransaction;
+        let _permit = self.limiter.admit(self.tenant, &self.user, high).await?;
+        self.inner.point_read(cx, stmt, params).await
+    }
+
     async fn execute(
         &mut self,
         cx: &mut ExecCtx<'_>,

@@ -1,4 +1,4 @@
-//! Gathered reads (chapter 17, "Gathered reads (R3)"): a `SELECT` the
+//! Gathered reads: a `SELECT` the
 //! router can't split exactly runs once, in MariaDB, over copies of the
 //! rows it reads.
 //!
@@ -47,7 +47,7 @@ use crate::reject::{Reason, Rejection};
 pub struct GatherPlan {
     /// The tables to copy, each once.
     pub tables: Vec<GatherTable>,
-    /// The statement's text, as chapter 07's rewrite left it (a prepared
+    /// The statement's text, as the tenant name rewrite left it (a prepared
     /// statement's parameters written in as literals).
     pub sql: String,
     /// The statement also names tables the router doesn't distribute
@@ -61,7 +61,8 @@ pub struct GatherPlan {
 /// One table to copy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GatherTable {
-    /// The schema the statement names it in (physical: chapter 07's).
+    /// The schema the statement names it in (physical, after the name
+    /// rewrite).
     pub schema: String,
     /// The table name, as the statement writes it.
     pub name: String,
@@ -305,8 +306,7 @@ fn select_expr(c: &Col) -> String {
 }
 
 /// Every column name of a `SHOW CREATE TABLE` (generated ones too), lower
-/// case: what an analytic read resolves names against (chapter 17,
-/// "Analytic reads (R3)"). Empty when the text doesn't read that way.
+/// case: what an analytic read resolves names against. Empty when the text doesn't read that way.
 pub(crate) fn column_names_of_ddl(show: &str) -> Vec<String> {
     let mut out = Vec::new();
     for l in show.lines().skip(1) {
@@ -418,7 +418,7 @@ pub struct GatherLimits {
     pub max_rows: u64,
     /// `router.gather.max_concurrent`.
     pub max_concurrent: usize,
-    /// Analytic reads in DataFusion (chapter 17, "Analytic reads (R3)").
+    /// Analytic reads in DataFusion.
     pub analytics: crate::analytics::AnalyticsLimits,
 }
 

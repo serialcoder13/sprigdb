@@ -1,5 +1,4 @@
-//! The gateway catalog cache (chapter 08, "Cache load and invalidation";
-//! build step 4).
+//! The gateway catalog cache: loads and invalidation.
 //!
 //! ```text
 //! get(tenant):
@@ -20,7 +19,7 @@
 //!
 //! The pieces: [`TenantCatalog`] (immutable snapshots), [`CatalogSource`]
 //! ([`MariaSource`]; [`mem::MemSource`] for tests), [`DirectoryFeed`]
-//! ([`DirectoryWatch`]) and [`CatalogExtension`]s for other chapters'
+//! ([`DirectoryWatch`]) and [`CatalogExtension`]s for other crates'
 //! modules. [`TenantCache`] ties them together:
 //!
 //! - **Single flight.** One load per tenant at a time, run on its own task
@@ -86,7 +85,7 @@ pub use source::{CatalogSource, MariaSource, Node};
 
 use crate::version::DirectoryVersions;
 
-/// The cache's limits and timings (chapter 08's `catalog.*` keys).
+/// The cache's limits and timings (the `catalog.*` keys).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CacheConfig {
     /// `catalog.cache_max_tenants`.
@@ -145,7 +144,7 @@ pub enum Freshness {
     },
     /// At least the directory's catalog and auth versions as this
     /// process's directory watch has delivered them (read through on first
-    /// use; the chapter's `get`): waits for a load when behind. A session's
+    /// use; `get` in the module docs): waits for a load when behind. A session's
     /// own change can be newer than the watch has delivered, so read your
     /// own DDL with `Cached { min_version }`. If the load fails, a cached
     /// snapshot is returned anyway ("cached reads continue").
@@ -242,8 +241,8 @@ struct Inner {
 }
 
 /// One published load of a tenant's catalog: what the catalog load feed
-/// ([`TenantCache::loads`]) carries. Chapter 14's auth change feed
-/// (revocation) and chapter 29's privilege cache follow it, the way
+/// ([`TenantCache::loads`]) carries. The auth change feed (revocation)
+/// and the privilege cache follow it, the way
 /// settings watches follow [`TenantNotify`].
 #[derive(Debug, Clone)]
 pub struct CatalogLoaded {
@@ -714,7 +713,7 @@ impl Inner {
         tokio::spawn(load_task(Arc::clone(self), Arc::clone(slot)));
     }
 
-    /// The chapter's `load(tenant, e, want)`: from a replica until the
+    /// The module docs' `load(tenant, e, want)`: from a replica until the
     /// version arrives or `catalog.version_wait_ms` passes, then from the
     /// writer; a version the writer doesn't have either is a gap, accepted.
     /// Returns the snapshot and whether a gap was accepted.
@@ -731,7 +730,7 @@ impl Inner {
         let mut pause = Duration::from_millis(5);
         let mut poll = Duration::from_millis(2);
         loop {
-            // Decision PF4: the directory moves before the catalog commits,
+            // The directory moves before the catalog commits,
             // so a load the watch starts usually finds the version not yet
             // committed. Until the deadline, the committed versions are
             // polled with one small query, and the full load (every

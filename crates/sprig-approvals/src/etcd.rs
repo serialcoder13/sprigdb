@@ -1,7 +1,6 @@
 //! Items in the DC tier (`/sprig/dc/<dc>/approvals/<n>`) and the global
 //! tier (`/sprig/g/approvals/<n>`): cluster and DC failovers held for
-//! approval, which must stay readable when a tenant's home DC is lost
-//! (chapter 52, "Where recommendations live").
+//! approval, which must stay readable when a tenant's home DC is lost.
 //!
 //! The tiers hold few items (failovers only), so a raise lists them all
 //! and writes with compare-and-swaps on every key it read or wrote, plus

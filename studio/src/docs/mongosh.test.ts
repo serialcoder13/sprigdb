@@ -62,7 +62,7 @@ describe('MongoDB editor: parsed, never evaluated (step 19)', () => {
     });
   });
 
-  // The property chapter 44 asks for: nothing executable gets through.
+  // The property that matters: nothing executable gets through.
   const code = [
     'db.u.find({$where: function() { return true }})',
     'db.u.find({a: (() => 1)()})',

@@ -1,4 +1,4 @@
-//! Type expressions (M1): `$convert` and its shorthands (`$toInt`,
+//! Type expressions: `$convert` and its shorthands (`$toInt`,
 //! `$toLong`, `$toDouble`, `$toDecimal`, `$toBool`, `$toString`,
 //! `$toDate`, `$toObjectId`, `$toUUID`), `$isNumber`, `$type`,
 //! `$binarySize`, `$bsonSize`, `$tsIncrement`, `$tsSecond`; and from

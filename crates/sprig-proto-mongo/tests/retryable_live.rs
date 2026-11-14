@@ -1,6 +1,6 @@
-//! Retryable writes under a lost reply (chapter 30, "Testing": "cut a
-//! connection after `COMMIT` but before the reply. The driver's retry
-//! must leave exactly one copy, with identical result counts").
+//! Retryable writes under a lost reply: cut a connection
+//! after `COMMIT` but before the reply. The driver's retry must leave
+//! exactly one copy, with identical result counts.
 //!
 //! A small proxy sits between the Rust driver (`retryWrites` on, its
 //! default) and the gateway. Armed with a command and a collection, it
@@ -304,9 +304,9 @@ fn as_user(u: &str, user: &str, pwd: &str) -> String {
     format!("{scheme}://{tenant}.{user}:{pwd}@{host}")
 }
 
-/// D12 (decisions/r5-interim.md): a user whose only grants are on single
+/// A user whose only grants are on single
 /// collections still gets exactly-once retries. The record table is
-/// reached through chapter 29's backend grants on `__sprig_doc_sessions`
+/// reached through the backend grants on `__sprig_doc_sessions`
 /// that every collection-level writer holds, not skipped.
 #[tokio::test]
 async fn collection_only_users_retry_once() {

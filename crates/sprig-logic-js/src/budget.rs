@@ -1,4 +1,4 @@
-//! Budgets of one fallback-tier invocation (chapter 41, "Budgets").
+//! Budgets of one fallback-tier invocation.
 //!
 //! The native KIRun runtime has no interpreter to interrupt, so the
 //! engine wraps every function of its repository in a shim
@@ -36,7 +36,7 @@ pub const MEMORY_SCAN_EVERY: u64 = 256;
 /// without `db` calls doesn't hold a gateway thread.
 pub const YIELD_EVERY: u64 = 64;
 
-/// The limits of one invocation (chapter 41's settings).
+/// The limits of one invocation (from the `logic.*` settings).
 #[derive(Debug, Clone)]
 pub struct Limits {
     /// `logic.function_budget_ms` (or the trigger's or job's).
@@ -53,7 +53,7 @@ pub struct Limits {
     pub max_rows_read: u64,
     /// The setting the wall time comes from, for messages
     /// (`logic.function_budget_ms`; `redis.lua_time_limit_ms` for Redis
-    /// scripts, chapter 40).
+    /// scripts).
     pub wall_setting: &'static str,
 }
 

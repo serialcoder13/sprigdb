@@ -1,6 +1,5 @@
-//! The Bolt server: handshake, framing and the connection state machine
-//! (chapter 43, "State machines" and "Bolt front end"; build steps 17
-//! and 18), over a [`BoltService`] that logs in and runs queries.
+//! The Bolt server: handshake, framing and the connection state machine,
+//! over a [`BoltService`] that logs in and runs queries.
 //!
 //! ```text
 //! Negotiation ──version──► Connected ──HELLO──► Authentication (5.1+) ──LOGON──► Ready

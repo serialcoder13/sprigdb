@@ -1,6 +1,6 @@
 // sprig.internal.v1.QueuePeer: the queue relay between gateways on 7403
-// (chapter 50, "The queue owner"), with mutual TLS from the internal CA
-// like GatewayPeer (chapter 04). Never exposed to clients.
+// (to the queue owner's gateway), with mutual TLS from the internal CA
+// like GatewayPeer. Never exposed to clients.
 syntax = "proto3";
 
 package sprig.internal.v1;
@@ -8,7 +8,7 @@ package sprig.internal.v1;
 service QueuePeer {
   // One queue's relay: a gateway that doesn't own the queue opens one
   // stream per queue to the owner's gateway. The first frame is `open`.
-  // The stream carries chapter 50's Enqueue flow (messages in, confirms
+  // The stream carries the Enqueue flow (messages in, confirms
   // out) and Attach flow (credit and settlements in, deliveries out), and
   // gets and queue operations, in one order.
   rpc Relay(stream QueueUp) returns (stream QueueDown);
@@ -27,7 +27,7 @@ message QueueOpen {
   string from_gateway = 7;
 }
 
-// A message in its stored parts (chapter 50, "Message encoding").
+// A message in its stored parts.
 message QueueMessage {
   // 0 = AMQP 0-9-1, 1 = AMQP 1.0.
   uint32 fmt = 1;

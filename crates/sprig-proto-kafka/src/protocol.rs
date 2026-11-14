@@ -150,8 +150,8 @@ macro_rules! range {
     };
 }
 
-/// The APIs the broker itself serves and advertises in ApiVersions
-/// (chapter 45, "Kafka APIs served"). Produce, Fetch, ListOffsets and
+/// The APIs the broker itself serves and advertises in ApiVersions.
+/// Produce, Fetch, ListOffsets and
 /// OffsetForLeaderEpoch are [`DATA_PLANE`]'s, advertised when the broker
 /// has a [`crate::broker::DataPlane`].
 pub const SERVED: &[ApiRange] = &[
@@ -182,7 +182,7 @@ pub const SERVED: &[ApiRange] = &[
     ),
 ];
 
-/// The data plane's APIs (chapter 45 build steps 10 and 11), served by
+/// The data plane's APIs, served by
 /// [`crate::broker::data::DataService`].
 pub const DATA_PLANE: &[ApiRange] = &[
     range!(api::PRODUCE, 3, 9, produce_request),

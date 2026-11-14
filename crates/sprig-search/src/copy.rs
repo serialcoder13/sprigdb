@@ -1,12 +1,11 @@
-//! One copy of a search index, kept current from the change feed (chapter
-//! 39, "Indexing from the feed", "Freshness"; build steps 4 and 5).
+//! One copy of a search index, kept current from the change feed.
 //!
-//! The same runtime serves a copy on a worker with the search role (R5
-//! round 6, the design's placement) and a copy inside a gateway (decision
-//! S1, kept for deployments without search workers). What differs is the
+//! The same runtime serves a copy on a worker with the search role (the
+//! default placement) and a copy inside a gateway (kept for deployments
+//! without search workers). What differs is the
 //! [`CopyHost`]: the feed's parts, the clusters to read, and where the
 //! seed's rows come from (a gateway session of the index's definer, read
-//! without row-level security: decisions S6 and RL17).
+//! without row-level security).
 //!
 //! ```text
 //! copy(index):                          one per (tenant, index, generation)
@@ -159,7 +158,7 @@ impl Payload {
     }
 }
 
-/// The change feed's parts (as chapter 30's change streams build them).
+/// The change feed's parts (as MongoDB change streams build them).
 #[derive(Clone)]
 pub struct FeedParts {
     /// Clusters by id.
@@ -960,7 +959,7 @@ impl Copy {
                     .map(|(n, v)| (n.clone(), val_from_bin(v)))
                     .collect(),
             },
-            // A key-value namespace (R5 round 6): string keys' values; a
+            // A key-value namespace: string keys' values; a
             // key of another type (or no value) indexes nothing.
             Model::Kv => Record::Doc {
                 key,

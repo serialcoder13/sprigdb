@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M0.3 schema-tool suite, CLI part (../README.md). Runs inside the connector
+# Tenant harness schema-tool suite, CLI part (../README.md). Runs inside the connector
 # matrix's CLI images (`mysql` + `mysqldump` 8.4, or `mariadb` +
 # `mariadb-dump` 11.8) for both tenants, and prints one JSON line per check:
 #
@@ -39,7 +39,7 @@ BACKEND_USERS=${M03_BACKEND_USERS:-root}
 if command -v mysql >/dev/null; then
   CLI=mysql DUMP=mysqldump
   if [[ ${M03_TLS:-disabled} == required ]]; then TLS_ARGS=(--ssl-mode=REQUIRED); else TLS_ARGS=(--ssl-mode=DISABLED --get-server-public-key); fi
-  # COLUMN_STATISTICS is the translator's (M0.5); GTIDs and tablespaces need
+  # COLUMN_STATISTICS is the translator's; GTIDs and tablespaces need
   # privileges a tenant doesn't have.
   DUMP_OPTS=(--single-transaction --routines --triggers --hex-blob --no-tablespaces --column-statistics=0 --set-gtid-purged=OFF)
 else
@@ -52,7 +52,7 @@ printf '[client]\npassword="%s"\n' "$M03_PASSWORD" >"$WORK/my.cnf"
 tag_of() { printf '%s' "$1" | tr -c 'A-Za-z0-9' '_'; }
 prefix_of() { if [[ $MODE == baseline ]]; then printf '%s_' "$(tag_of "$1")"; fi; }
 
-# The physical-name detector of chapter 07 (sprig_sql::names::physical_name_leaks):
+# The physical-name detector (sprig_sql::names::physical_name_leaks):
 # `t<digits>_` not preceded by a letter or digit, up to the end of the identifier.
 leaks() { grep -a -o -E '(^|[^A-Za-z0-9])t[0-9]+_[A-Za-z0-9_$]*' "$1" | sed -E 's/^[^t]//' | sort -u | tr '\n' ' '; }
 
@@ -223,8 +223,8 @@ check_all_dump() {
 # Everything the tenant can see: only its own databases. mysqldump 8.4
 # holds back every database until SHOW DATABASES lists `mysql`, which it
 # dumps first, and writes nothing if `mysql` never comes (MySQL 8.4 does
-# the same for a user who can't see `mysql`; decisions/mysql-persona-gaps.md
-# row 12). dump_listed checks the workaround.
+# the same for a user who can't see `mysql`). dump_listed checks the
+# workaround.
 c_dump_all() {
   dump "$U" --all-databases >"$WORK/all.sql" || { echo "$DUMP --all-databases failed: $(err)"; return 1; }
   if [[ $DUMP == mysqldump ]] && ! grep -a -q -E '^CREATE DATABASE ' "$WORK/all.sql"; then

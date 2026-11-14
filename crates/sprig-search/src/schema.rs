@@ -1,6 +1,4 @@
-//! The Tantivy schema of an index generation, keys and extraction
-//! (chapter 39, "Tantivy schema of a generation", "Extraction"; build
-//! step 3).
+//! The Tantivy schema of an index generation, keys and extraction.
 //!
 //! | Field | Tantivy | Use |
 //! |---|---|---|

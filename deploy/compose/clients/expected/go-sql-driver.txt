@@ -8,26 +8,26 @@
 # while the development clusters keep MariaDB's 16 MiB, so the backend drops
 # the connection (39032). On 9 November 2026 this load also pushed the shared
 # dc-a-single node (1 GiB cap) out of memory. Not run against shared
-# clusters; gaps row 30.
-gateway-* exclude TestLongData :: 32 MiB statements; backend limit 16 MiB (gaps row 30); OOM risk on the shared dev cluster
+# clusters.
+gateway-* exclude TestLongData :: 32 MiB statements; backend limit 16 MiB; OOM risk on the shared dev cluster
 
 # MariaDB 11.8's default max_allowed_packet is 16 MiB; upstream CI sets 48 MiB.
 # The compressed leg sends a packet just under the limit plus compression
 # framing, which the server refuses with 1153.
 baseline-mariadb fail TestLongData/compress :: max_allowed_packet 16 MiB (MariaDB's default; upstream CI uses 48 MiB): 1153 on plain MariaDB
 
-# performance_schema is off on MariaDB (connector matrix D7), and the 3306
+# performance_schema is off on MariaDB, and the 3306
 # persona has no session_connect_attrs.
 baseline-mariadb skip TestConnectionAttributes :: performance_schema off on MariaDB
-gateway-* skip TestConnectionAttributes :: performance_schema off on the MariaDB backends (connector matrix D7)
+gateway-* skip TestConnectionAttributes :: performance_schema off on the MariaDB backends
 
 # The test cancels a running INSERT ... SLEEP(1) by closing the connection,
 # and skips itself with a [WARN] when the row was not written ("TODO: need to
-# kill the query, and v should be 0"). MySQL 8.4 and the gateway (chapter 04:
-# KILL QUERY on client disconnect) stop the statement; MariaDB finishes it.
+# kill the query, and v should be 0"). MySQL 8.4 and the gateway (KILL QUERY
+# on client disconnect) stop the statement; MariaDB finishes it.
 * flaky TestContextCancelQuery/default :: timing: the SELECT SLEEP may end before the cancel lands
 baseline-mysql skip TestContextCancel*/default :: MySQL stops the statement when the client goes (upstream's TODO wants this)
-gateway-* skip TestContextCancel*/default :: the gateway kills the statement when the client goes, as MySQL does (chapter 04; gaps row 29)
+gateway-* skip TestContextCancel*/default :: the gateway kills the statement when the client goes, as MySQL does
 
 * skip FuzzFormatDSN/seed#1 :: the seed skips itself (no port)
 * skip FuzzFormatDSN/seed#2 :: the seed skips itself (no port)
@@ -37,8 +37,8 @@ gateway-* skip TestContextCancel*/default :: the gateway kills the statement whe
 # whether to try zero dates. MySQL 8.4 (NO_ZERO_DATE) fails it with 1525, so
 # the zero cases are left out. On 3306 MariaDB runs with the same mode but
 # compares the string and answers 1, then casts the zero date to NULL, and
-# the zero cases fail (gaps row 31; translator).
-gateway-mysql fail TestDateTime/* :: zero dates under NO_ZERO_DATE: MariaDB answers the probe with 1 where MySQL fails with 1525 (gaps row 31)
+# the zero cases fail (a translator gap).
+gateway-mysql fail TestDateTime/* :: zero dates under NO_ZERO_DATE: MariaDB answers the probe with 1 where MySQL fails with 1525
 
 # 151 connections opened at once (the backend's max_connections) from a
 # container through Docker Desktop's host networking: a dial timed out once

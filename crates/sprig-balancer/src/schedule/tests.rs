@@ -212,7 +212,7 @@ async fn recommend_and_dry_run_write_once_and_run_nothing() {
 }
 
 /// The live balancing run wrote the same recommendation after every
-/// shard cooldown (the R0 fix): with a short cooldown and a plan that
+/// shard cooldown: with a short cooldown and a plan that
 /// doesn't change, it is written once a day; a new target, a new reason or
 /// a net value 25% off writes it again at once.
 #[tokio::test]

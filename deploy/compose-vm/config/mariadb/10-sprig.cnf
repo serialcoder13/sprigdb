@@ -1,6 +1,6 @@
-# MariaDB 11.8 settings for a SprigDB-managed node (chapter 27, "Settings on
-# clusters SprigDB manages"), Compose-on-VM bundle. server_id, gtid_domain_id,
-# the buffer pool, redo size and max_connections come from compose.yaml (.env).
+# MariaDB 11.8 settings for a SprigDB-managed node, Compose-on-VM bundle.
+# server_id, gtid_domain_id, the buffer pool, redo size and max_connections
+# come from compose.yaml (.env).
 [mariadbd]
 log_bin                         = mariadb-bin
 binlog_format                   = ROW
@@ -22,12 +22,12 @@ skip_name_resolve               = ON
 open_files_limit                = 524288
 table_open_cache_instances      = 8
 # Memory beyond the buffer pool: no MyISAM tables, Aria only for on-disk
-# temporary tables (hardening round 1, HD2).
+# temporary tables.
 key_buffer_size                 = 16M
 aria_pagecache_buffer_size      = 64M
 tmp_table_size                  = 64M
 max_heap_table_size             = 64M
-# TLS only (chapter 27). Certificates from sprig-vm.sh init; MariaDB re-reads
+# TLS only. Certificates from sprig-vm.sh init; MariaDB re-reads
 # them on FLUSH SSL (RUNBOOK.md, "Rotating certificates").
 ssl_ca                          = /run/sprig/tls/ca.pem
 ssl_cert                        = /run/sprig/tls/mariadb.pem

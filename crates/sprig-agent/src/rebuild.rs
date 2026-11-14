@@ -1,5 +1,5 @@
-//! The agent's half of `node_rebuild` (chapter 25, "Recovery after an
-//! outage" step 3): an internal service on `[agent] internal_addr` that
+//! The agent's half of `node_rebuild` (recovery after an outage): an
+//! internal service on `[agent] internal_addr` that
 //! streams a backup of its node to another agent, and rebuilds its own
 //! node from another agent's stream.
 //!
@@ -204,7 +204,7 @@ pub struct RebuildService {
         http_body_util::Full<Bytes>,
     >,
     /// `[tls]`: the service is mutual TLS, and backups are pulled from
-    /// `https://` sources with this identity (decision RC2).
+    /// `https://` sources with this identity.
     tls: Option<InternalTls>,
 }
 

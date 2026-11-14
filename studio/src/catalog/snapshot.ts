@@ -1,8 +1,7 @@
-// The catalog snapshot (chapter 44, "Data structures and storage"): names
-// by kind and columns per logical database, from the gateway's Catalog
-// service (chapter 37), which reads them with the user's own rights and
-// answers 304 to If-None-Match while the tenant's catalog and auth versions
-// haven't moved. Refetched after DDL, on a name error and every 60 s while
+// The catalog snapshot: names by kind and columns per logical database, from
+// the gateway's Catalog service, which reads them with the user's own rights
+// and answers 304 to If-None-Match while the tenant's catalog and auth
+// versions haven't moved. Refetched after DDL, on a name error and every 60 s while
 // visible.
 
 import { useQuery, type QueryClient } from '@tanstack/react-query';
@@ -23,7 +22,7 @@ export interface ObjectInfo {
   partial?: boolean;
 }
 
-/** The database's graphs in a snapshot (chapter 43; Studio round 5). */
+/** The database's graphs in a snapshot. */
 export function graphsOf(snap: Pick<DbSnapshot, 'objects'> | undefined): ObjectInfo[] {
   return (snap?.objects ?? []).filter((o) => o.kind === 'graph');
 }

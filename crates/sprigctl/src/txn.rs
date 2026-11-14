@@ -1,5 +1,5 @@
-//! `sprigctl txn list|show|resolve` (chapter 18, "Observability"; chapter
-//! 47's command table), over the Admin API's `/admin/v1/txns`.
+//! `sprigctl txn list|show|resolve`, over the Admin API's
+//! `/admin/v1/txns`.
 //!
 //! ```text
 //! sprigctl txn list [--tenant acme]     # in-doubt transactions, oldest first

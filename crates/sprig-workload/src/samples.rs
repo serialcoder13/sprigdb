@@ -1,5 +1,4 @@
-//! Encrypted parameter samples (chapter 12, "Parameter samples for
-//! replay"; build step 6).
+//! Encrypted parameter samples for replay.
 //!
 //! For watched fingerprints the gateway captures one execution's literals
 //! by slot ([`SampledLiterals`], full `IN` lists up to
@@ -18,7 +17,7 @@
 //! [`OpenedSample`] holds values: its `Debug` prints none, and nothing in
 //! this crate logs one.
 //!
-//! **Sample ids** *(choice)*: chapter 12 says "random"; here a sample's id
+//! **Sample ids** *(choice)*: not plain random ids; a sample's id
 //! is `xxh3_64(process salt ‖ bucket ‖ reservoir slot)`, random per
 //! gateway process, so each flush can write a reservoir slot with
 //! `REPLACE` and a replaced slot overwrites its own row: a flush is
@@ -43,8 +42,8 @@ use crate::fingerprint::{FingerprintId, LiteralKind};
 use crate::keyring::{DataKey, TenantKeyring};
 use crate::window::{SampleValue, SampledLiterals, SampledSlot};
 
-/// The session context a sample was captured with, as replay sets it
-/// (chapter 13, "Replay and acceptance"). Field names match
+/// The session context a sample was captured with, as replay sets it.
+/// Field names match
 /// `sprig-advisor`'s replay `SessionContext`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SampleContext {
@@ -253,8 +252,8 @@ pub fn seal(
     })
 }
 
-/// Opens a sample of `tenant` (chapter 12: only the validation worker's
-/// replay does this, in memory).
+/// Opens a sample of `tenant` (only the validation worker's replay does
+/// this, in memory).
 ///
 /// # Errors
 /// [`SampleError::KeyUnavailable`] when its key version is gone;

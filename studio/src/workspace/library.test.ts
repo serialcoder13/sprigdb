@@ -25,7 +25,7 @@ const reset = () => {
   useLibrary.setState({ key: null, where: 'session', historyMax: 500, saved: [], history: [], error: null });
 };
 
-describe('saved queries and history (decision R4)', () => {
+describe('saved queries and history', () => {
   beforeEach(reset);
 
   it('saves, replaces by name, and deletes', () => {

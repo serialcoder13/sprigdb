@@ -1,5 +1,5 @@
 //! One probe connection to one MariaDB node, with a timeout on every round
-//! trip (chapter 03, "Concurrency").
+//! trip.
 //!
 //! Results come back as text, the way `SHOW` returns them, so the parsers in
 //! [`crate::probe::parse`] work the same on live rows and on captured
@@ -55,7 +55,7 @@ impl NodeEndpoint {
     }
 
     /// The binlog reader's view of this endpoint: the same address, account
-    /// and TLS (chapter 10). Endpoints built from a cluster's credentials
+    /// and TLS. Endpoints built from a cluster's credentials
     /// always carry TLS, so the reader verifies the server against the
     /// credential's CA (`tls = "verify"`, `ca_file`) or encrypts without
     /// verifying (`skip_verify`); an endpoint without TLS options (a

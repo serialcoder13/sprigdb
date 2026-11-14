@@ -6,10 +6,9 @@
 # fails on Neo4j too is never counted against SprigDB.
 #
 # Not run yet: the Java driver needs Maven to download its build and test
-# dependencies, which the laptop run left to CI (decisions/r8-interim.md
-# G68). The lines below are the driver-independent differences the Python
-# and Go runs found (r8testkit, 11 November 2026); CI's first run settles
-# the rest (a listed `fail` that passes there is reported as stale).
-# Round 8 (r8eight, 12 November 2026): the Python and Go runs now match
-# Neo4j 5.26 exactly (decisions/r8-interim.md G69-G75), so no
-# driver-independent difference is left to list here.
+# dependencies, which the laptop run left to CI. The lines below are the
+# driver-independent differences the Python and Go runs found (11 November
+# 2026); CI's first run settles the rest (a listed `fail` that passes there
+# is reported as stale).
+# 12 November 2026: the Python and Go runs now match Neo4j 5.26 exactly, so
+# no driver-independent difference is left to list here.

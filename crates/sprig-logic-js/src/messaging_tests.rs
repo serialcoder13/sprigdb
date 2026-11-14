@@ -1,5 +1,5 @@
 //! `db.publish`, `db.commitOffset` and `db.mq.*` in JavaScript, Lua and
-//! KIRun (R9): each is the one statement the host runs.
+//! KIRun: each is the one statement the host runs.
 
 #![allow(clippy::unwrap_used)]
 

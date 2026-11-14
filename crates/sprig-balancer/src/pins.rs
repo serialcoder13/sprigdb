@@ -1,4 +1,4 @@
-//! Operator pins (chapter 11, "Manual moves and pins"): `sprigctl tenant
+//! Operator pins: `sprigctl tenant
 //! pin <tenant> [--cluster <id>]`, `sprigctl tenant unpin <tenant>` and
 //! `sprigctl shard move <tenant> --to <cluster> --pin`.
 //!
@@ -17,7 +17,7 @@
 //! Pins live in the tenant's home DC tier next to its placement, at
 //! `/sprig/dc/<dc_id>/pins/<tenant_id>` (the shard maps are at
 //! `shardmaps/<tenant_id>/<group>`), as JSON: the cluster, who pinned it,
-//! when, and why. R0 pins a whole tenant, the unit R0 moves.
+//! when, and why. A pin covers a whole tenant, the unit a move takes.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

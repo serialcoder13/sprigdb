@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # Kafka client checks against an Apache Kafka reference and SprigDB's Kafka
-# listener (chapter 45, "Testing"; chapter 46, "Differential testing"), for
-# CI's heavy-suite jobs (.github/workflows/heavy-protocols.yml). Each check
-# creates its topic on both sides, runs on the reference, then on SprigDB,
-# and deploy/compose/ci/outcomes.py compares the two observation objects
-# against expected/<check>.txt.
+# listener, for CI's heavy-suite jobs (.github/workflows/heavy-protocols.yml).
+# Each check creates its topic on both sides, runs on the reference, then on
+# SprigDB, and deploy/compose/ci/outcomes.py compares the two observation
+# objects against expected/<check>.txt.
 #
-#   run.sh python   kafka-python 2.0.6 (kafka_suite.py, r9final's checks)
+#   run.sh python   kafka-python 2.0.6 (kafka_suite.py)
 #   run.sh jvm      the Java client, through apache/kafka 3.9.0's own tools:
 #                   kafka-verifiable-producer and -consumer (1,000 records,
 #                   acks=all, a group with commits), kafka-producer-perf-test
@@ -15,10 +14,10 @@
 #   run.sh go       franz-go v1.18.0 (go/)
 #   run.sh dotnet   Confluent.Kafka 2.5.3 (dotnet/; librdkafka inside)
 #
-# SprigDB's topics are streams named <database>.<stream> (chapter 45), so
-# every check uses topic kt.<check> in database kt on both sides; the job
-# creates database kt first. SprigDB is reached with SASL SCRAM-SHA-512 as
-# the tenant login, the reference in PLAINTEXT.
+# SprigDB's topics are streams named <database>.<stream>, so every check
+# uses topic kt.<check> in database kt on both sides; the job creates
+# database kt first. SprigDB is reached with SASL SCRAM-SHA-512 as the
+# tenant login, the reference in PLAINTEXT.
 #
 #   SPRIG_KAFKA_REF   reference bootstrap (127.0.0.1:9092; its container
 #                     ci-ref-kafka creates the topic)

@@ -1,6 +1,6 @@
-//! The real [`MoveExecutor`]: chapter 10's [`sprig_mover::Mover`].
+//! The real [`MoveExecutor`]: the mover ([`sprig_mover::Mover`]).
 //!
-//! R0 moves a tenant's whole placement unit (its catalog and every
+//! A move takes a tenant's whole placement unit (its catalog and every
 //! database's shard schema, kept on one cluster), so an order becomes
 //! [`JobSpec::move_tenant`] with the decision id. Job states map to move
 //! statuses: committed states (`post_cutover` onwards) are `Succeeded`,
@@ -16,7 +16,7 @@ use sprig_mover::{JobSpec, JobState, JobStatus, Mover};
 
 use crate::schedule::{MoveExecutor, MoveOrder, MoveStatus, MoveTicket};
 
-/// Runs moves through chapter 10's mover.
+/// Runs moves through the mover.
 pub struct MoverExecutor {
     mover: Arc<dyn Mover>,
 }

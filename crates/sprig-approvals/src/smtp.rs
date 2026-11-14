@@ -1,7 +1,7 @@
-//! A small SMTP client for approval emails (chapter 52, "Notifications").
+//! A small SMTP client for approval emails.
 //!
 //! - `smtp://host[:25]`: plain SMTP. A password is sent only to a loopback
-//!   relay (decision AP12): anywhere else, use TLS.
+//!   relay: anywhere else, use TLS.
 //! - `smtp+starttls://host[:587]`: `STARTTLS` is required. A server that
 //!   doesn't offer it is refused, never used in the clear.
 //! - `smtps://host[:465]`: implicit TLS (RFC 8314).

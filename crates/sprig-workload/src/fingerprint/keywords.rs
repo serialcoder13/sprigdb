@@ -1,5 +1,4 @@
-//! Keyword classification for the normalizer (chapter 12: "keyword →
-//! UPPER CASE").
+//! Keyword classification for the normalizer (keywords go to upper case).
 //!
 //! One sorted table holds every word the normalizer treats specially, with
 //! its flags, so each word costs one binary search:

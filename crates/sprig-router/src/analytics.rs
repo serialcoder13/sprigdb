@@ -1,7 +1,7 @@
-//! Analytic reads (chapter 17, "Analytic reads (R3)"): a `SELECT` the
+//! Analytic reads: a `SELECT` the
 //! router would gather runs in DataFusion inside the gateway instead, over
 //! streams of the shards' rows, when its guard can show the answer is the
-//! one MariaDB gives (Kiran's answer "both" to R3's decision Q1).
+//! one MariaDB gives.
 //!
 //! ```text
 //! choose(statement the planner gathers):
@@ -93,8 +93,8 @@ impl AnalyticsMode {
     }
 }
 
-/// What an analytic read runs under (chapter 17's `router.analytics.*`
-/// and chapter 35's `analytics.datafusion_memory_mb` and
+/// What an analytic read runs under (`router.analytics.*`,
+/// `analytics.datafusion_memory_mb` and
 /// `analytics.max_concurrent_per_gateway`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnalyticsLimits {
@@ -1236,8 +1236,8 @@ async fn execute_inner<'a, 'b: 'a, 'c: 'a>(
     metrics::counter!("sprig_router_analytics_rows_total")
         .increment(rows_read.load(AtomicOrdering::Relaxed));
     // 7. The answer.
-    // Rendering many rows runs off the runtime's worker (G40, decision
-    // bugfix-1). DataFusion itself stays on the runtime: its operators
+    // Rendering many rows runs off the runtime's worker.
+    // DataFusion itself stays on the runtime: its operators
     // yield per batch (`cooperative`), and `KILL QUERY` must still drop it.
     let n: usize = batches
         .iter()

@@ -1,39 +1,39 @@
 //! `sprig-worker`: the worker role, the job runtime.
 //!
-//! Layer 3 (roles). Design: [chapter 10](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/10-mover.md) (The mover) and [chapter 13](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/13-auto-indexing.md) (Automatic indexing) of the SprigDB low-level design.
+//! Layer 3 (roles).
 //!
 //! [`run`] connects to the DC and global tiers and runs the mover's job
 //! runtime (`sprig_mover::JobRuntime`): it claims runnable mover jobs in
 //! its DC, runs each to its end, and gives them up when its lease is lost.
 //! Every job resolves its settings from the worker's live mirrors of the
-//! etcd scopes when it uses them ([`settings`]). Index builds (chapter 13)
+//! etcd scopes when it uses them ([`settings`]). Automatic index builds
 //! don't run here yet.
 
-// Chapter 43 (R8): the asynchronous graph mirror applier.
-// RLS round 5 (RL52): `queue.change_exchange` forwarders.
+// The asynchronous graph mirror applier and the `queue.change_exchange`
+// forwarders.
 pub mod change_exchange;
 pub mod graph_mirror;
 pub mod inherit;
-// Chapter 33 (R6): the key-value expiry and old-generation sweeper.
+// The key-value expiry and old-generation sweeper.
 pub mod kv_sweep;
-// Chapter 31 (wireup): the TTL monitor.
+// The TTL monitor.
 pub mod doc_ttl;
 pub mod logic;
-// Chapter 41 (R9): triggers on streams and queues.
+// Triggers on streams and queues.
 pub mod msg_triggers;
 pub mod permit;
-// Chapter 50 (R9, r9fwd): the feed-driven queue outbox forwarder.
+// The feed-driven queue outbox forwarder.
 pub mod queue_forwarder;
-// Chapter 25 (R2): errant_extract and node_rebuild.
+// Recovery: errant_extract and node_rebuild.
 pub mod recovery;
 pub mod runtime;
-// Chapter 39 (R5 round 6): the search role.
+// The search role.
 pub mod search;
-// Chapters 08 and 23: live settings for every job (r2final).
+// Live settings for every job.
 pub mod settings;
-// Chapter 45 (R9): stream sequencers.
+// Stream sequencers.
 pub mod streams;
-// Chapter 51 (R9): sink tasks.
+// Sink tasks.
 pub mod sinks;
 pub mod xa_drain;
 
@@ -88,7 +88,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     };
     let errant_extract = recovery::ErrantExtract::from_config(recovery_env.clone(), &cfg.recovery)?;
     let dc_logic = dc.clone();
-    // Live settings (chapter 23): the mirrors of the global, dc and
+    // Live settings: the mirrors of the global, dc and
     // cluster scopes, read by every job when it uses a key.
     let Some(live) = settings::WorkerSettings::start(
         Arc::clone(&global),
@@ -106,8 +106,8 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             &sprig_settings::SettingCtx::process(&cfg.node.dc),
         )
     });
-    // Chapter 18's resolver finishes the tenant's prepared branches at
-    // each cutover (chapter 10, steps 2b and 3b).
+    // The XA resolver finishes the tenant's prepared branches at each
+    // cutover, once before the source is fenced and again after it.
     let drain_id = cfg
         .node
         .id
@@ -118,11 +118,11 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         registry.clone(),
         &drain_id,
     ));
-    // Moves between DCs (chapter 24) commit on the one etcd of R0's
-    // single-etcd mode: this DC's tier reaches the others.
+    // Moves between DCs commit on the one etcd of the single-etcd
+    // mode: this DC's tier reaches the others.
     let mut factory = MysqlEnvFactory::new(registry, TenantMaps::new(dc.clone()), settings.clone())
         .with_home_changes(dc.clone())
-        // Splits, merges and shard moves (chapter 20) cut over on the
+        // Splits, merges and shard moves cut over on the
         // table groups' maps in this DC's tier.
         .with_group_maps(dc.clone())
         .with_drain(drain);
@@ -130,7 +130,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     if let Some(l) = live.live() {
         factory = factory.with_live_settings(l.clone(), cfg.node.dc.clone());
     }
-    // ...and from its tenant's own catalog rows (decision RF3, r2last).
+    // ...and from its tenant's own catalog rows.
     let tenant_scopes = sprig_controller::tenant_scopes::TenantScopes::new(
         Arc::clone(&global),
         dc.clone(),
@@ -152,8 +152,8 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         .unwrap_or_else(|| format!("worker-{}", std::process::id()));
     let mut opts = WorkerOpts::new(&worker);
     opts.lease = settings.job_lease;
-    // Chapter 25: mover jobs (cutovers, moves between DCs) run only while
-    // the worker holds a valid DC permit (r2next).
+    // Mover jobs (cutovers, moves between DCs) run only while the worker
+    // holds a valid DC permit.
     let (keeper, watchdog) = permit::keep(
         &worker,
         dc_logic.clone(),
@@ -169,38 +169,47 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     });
     let gate_factory: Arc<dyn sprig_mover::EnvFactory> = factory;
     let (gate_store, gate_opts) = (store, opts);
-    // Chapter 23's job runtime with chapter 41's logic jobs: after-commit
-    // triggers and scheduled runs (R7 order 5).
+    // The job runtime with the logic jobs: after-commit triggers and
+    // scheduled runs.
     let pools: Arc<dyn sprig_controller::catalogs::ClusterPools> = Arc::new(
         sprig_controller::catalogs::RegistryPools::new(registry_logic.clone(), None)
             .budget("logic", 8),
     );
     // Shards get their own connection budget: a trigger holds a shard's
     // connection while it runs, and must never wait for a catalog one
-    // from the same budget (chapter 13's rule for catalog pools).
+    // from the same budget.
     let shard_pools: Arc<dyn sprig_controller::catalogs::ClusterPools> = Arc::new(
         sprig_controller::catalogs::RegistryPools::new(registry_logic.clone(), None)
             .budget("logic_shards", 16),
     );
+    let registry_clusters = Arc::new(logic::RegistryClusters::new(
+        registry_logic.clone(),
+        Arc::clone(&pools),
+    ));
+    // One shared binlog reader per cluster for this
+    // worker's feed consumers: stream sequencers, the queue forwarder,
+    // after-commit triggers and search copies.
+    let shared_feed = sprig_feed::shared::SharedFeed::new(
+        Arc::clone(&registry_clusters) as Arc<dyn sprig_feed::Clusters>,
+        sprig_feed::shared::SharedOpts::default(),
+    );
     let env = logic::LogicEnv {
         dc: dc_logic.clone(),
-        registry: registry_logic.clone(),
+        registry: registry_logic,
         pools: shard_pools,
         locator: Arc::new(sprig_controller::catalogs::ShardMapLocator::new(
             dc_logic.clone(),
             Arc::clone(&pools),
             sprig_controller::catalogs::default_naming(),
         )),
-        clusters: Arc::new(logic::RegistryClusters::new(
-            registry_logic,
-            Arc::clone(&pools),
-        )),
+        clusters: registry_clusters,
+        feed: shared_feed.view(sprig_feed::shared::Kept::All),
         opts: live.run_opts(),
         settings: live.clone(),
-        // Set below, once the gateways are known (RL50).
+        // Set below, once the gateways are known.
         gateways: None,
     };
-    // Chapter 42's copy worker: one job per tenant tree.
+    // The copy worker: one job per tenant tree.
     let inherit_env = Arc::new(inherit::LiveEnv::new(
         dc_logic.clone(),
         Arc::clone(&global),
@@ -208,23 +217,17 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         Arc::clone(&env.pools),
         Arc::clone(&env.clusters),
     )?);
-    // Chapter 43's mirror applier (R8 round 5): one job per tenant.
+    // The graph mirror applier: one job per tenant.
     let graph_mirror_env = graph_mirror::GraphMirrorEnv {
         dc: dc_logic.clone(),
         pools: Arc::clone(&env.pools),
         locator: Arc::clone(&env.locator),
         clusters: Arc::clone(&env.clusters) as Arc<dyn sprig_feed::Clusters>,
     };
-    // R9 (r9feed): one shared binlog reader per cluster for this worker's
-    // internal consumers: stream sequencers and the queue forwarder.
-    let shared_feed = sprig_feed::shared::SharedFeed::new(
-        Arc::clone(&env.clusters) as Arc<dyn sprig_feed::Clusters>,
-        sprig_feed::shared::SharedOpts::default(),
-    );
-    // Chapter 45's stream sequencers, on the logic jobs' pools and the
+    // Stream sequencers, on the logic jobs' pools and the
     // shared reader.
     let streams_env = streams::StreamsEnv::from_logic(&env, &shared_feed);
-    // Chapter 51's sink tasks, on the same pools, with the global tier
+    // Sink tasks, on the same pools, with the global tier
     // (platform connections) and the master key file (credentials).
     let sinks_env = sinks::SinksEnv::new(
         &env,
@@ -235,7 +238,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             .or(cfg.controller.workload_key_file.as_deref()),
         &worker,
     );
-    // Chapter 41 (R9): triggers on streams and queues, run in gateways.
+    // Triggers on streams and queues, run in gateways.
     let peer_pems = cfg
         .tls
         .as_ref()
@@ -249,19 +252,19 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
         opts: env.opts.clone(),
         settings: live.clone(),
     };
-    // R9 (r9queue): sink tasks reach the gateways too.
+    // Sink tasks reach the gateways too.
     let sinks_env = sinks_env.with_peer(Arc::clone(&msg_env.gateways) as Arc<_>);
-    // R9 (r9fwd): the feed-driven queue outbox forwarder, through the
+    // The feed-driven queue outbox forwarder, through the
     // gateways too.
     let forwarder_env = queue_forwarder::ForwarderEnv {
         dc: dc_logic.clone(),
         locator: Arc::clone(&env.locator),
-        // R9 (r9cluster, r9feed): the shared reader's view of every
+        // The shared reader's view of every
         // tenant's queue outbox rows.
         clusters: queue_forwarder::shared_view(&shared_feed),
         peer: Arc::clone(&msg_env.gateways) as Arc<dyn sprig_sinks::peer::SinkPeer>,
     };
-    // Chapter 39 (R5 round 6): the search role, when SPRIG_SEARCH_LISTEN
+    // The search role, when SPRIG_SEARCH_LISTEN
     // names this worker's search address.
     let search_role = search::SearchRole::from_env(
         search::SearchDeps {
@@ -269,7 +272,8 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
             dc_id: cfg.node.dc.clone(),
             dc: dc_logic.clone(),
             registry: registry_search,
-            clusters: Arc::clone(&env.clusters) as Arc<dyn sprig_feed::Clusters>,
+            // Search copies read through the shared reader.
+            clusters: Arc::clone(&env.feed),
             locator: Arc::clone(&env.locator),
             gateways: Arc::clone(&msg_env.gateways),
             tls: cfg
@@ -284,7 +288,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     if let Some(r) = &search_role {
         r.serve().await?;
     }
-    // Decision RC2: agents' internal services over mutual TLS with `[tls]`.
+    // Agents' internal services over mutual TLS with `[tls]`.
     let mut rebuild_handler = recovery::NodeRebuild::new(recovery_env);
     if let Some(t) = cfg.tls.as_ref() {
         rebuild_handler = rebuild_handler
@@ -292,7 +296,7 @@ pub async fn run(ctx: RoleContext) -> Result<()> {
     }
     let mut jobs = runtime::WorkerRuntime::new(dc_logic, Arc::new(SystemClock), worker.clone())
         .with_handler(Arc::new(logic::LogicTrigger(logic::LogicEnv {
-            // Chapter 29 (RL50): after-commit triggers check a bound
+            // After-commit triggers check a bound
             // definer's events on the gateways.
             gateways: Some((
                 Arc::clone(&msg_env.gateways) as Arc<dyn sprig_sinks::peer::SinkPeer>,

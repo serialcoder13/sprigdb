@@ -1,5 +1,5 @@
 # promtool test rules: replication lag, stuck data movement, the audit
-# pipeline, certificates, etcd, backups and thrashing.
+# pipeline, certificates, etcd, backups, thrashing and paused sinks.
 rule_files:
   - ../sprig-ops.rules.yaml
 evaluation_interval: 1m
@@ -222,3 +222,29 @@ tests:
       - eval_time: 5m
         alertname: SprigStreamSequencersLagging
         exp_alerts: []
+
+  # Sinks: one paused by failures, one by its owner's lost privilege
+  # (39229) on another worker; a resumed one isn't reported.
+  - interval: 1m
+    input_series:
+      - series: 'sprig_sink_paused{instance="wkr-1",reason="failures"}'
+        values: '1x20'
+      - series: 'sprig_sink_paused{instance="wkr-2",reason="owner_privilege"}'
+        values: '1x20'
+      - series: 'sprig_sink_paused{instance="wkr-3",reason="owner_privilege"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: SprigSinkPaused
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: SprigSinkPaused
+        exp_alerts:
+          - exp_labels: { severity: ticket, instance: wkr-1, reason: failures }
+            exp_annotations:
+              summary: A sink is paused (failures)
+              runbook: "SHOW SINKS (or sprigctl sink list) shows the paused sink and its reason. reason=failures (39222): the destination kept failing for sink.pause_after_minutes; fix the destination, and the sink probes and resumes on its own. reason=owner_privilege (39229): the sink's owner lost SELECT on the source, or was dropped or locked; grant it back (or ALTER SINK ... OWNER), and the sink resumes within seconds"
+          - exp_labels: { severity: ticket, instance: wkr-2, reason: owner_privilege }
+            exp_annotations:
+              summary: A sink is paused (owner_privilege)
+              runbook: "SHOW SINKS (or sprigctl sink list) shows the paused sink and its reason. reason=failures (39222): the destination kept failing for sink.pause_after_minutes; fix the destination, and the sink probes and resumes on its own. reason=owner_privilege (39229): the sink's owner lost SELECT on the source, or was dropped or locked; grant it back (or ALTER SINK ... OWNER), and the sink resumes within seconds"

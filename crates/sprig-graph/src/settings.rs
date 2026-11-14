@@ -1,4 +1,4 @@
-//! The `graph.*` settings (chapter 43, "Configuration") this build reads.
+//! The `graph.*` settings this build reads.
 //! Keys for features not built yet (partitioning, the plugin, algorithms)
 //! are not registered.
 
@@ -79,7 +79,7 @@ key!(
 );
 
 key!(
-    /// `graph.mirror` (round 5): `async` mirrors are kept by the worker's
+    /// `graph.mirror`: `async` mirrors are kept by the worker's
     /// applier once it serves the graph; until then, and under `sync` or
     /// `off` (not built: kept as `sync`), writers keep them in their own
     /// transaction.
@@ -88,7 +88,7 @@ key!(
     "Mirrors of incoming relationships: off, async or sync"
 );
 key!(
-    /// `graph.mirror_max_wait_ms` (round 5).
+    /// `graph.mirror_max_wait_ms`.
     MIRROR_MAX_WAIT_MS: u64 = "graph.mirror_max_wait_ms", 1000, Scopes::DATA, HardBounds::range(0, 60_000),
     "Wait for the mirror applier to reach the session's causal target before scattering"
 );

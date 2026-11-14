@@ -1,6 +1,6 @@
 //! `sprig-proto-kafka`: the Kafka wire protocol codec and broker front end.
 //!
-//! Layer: 1 foundations. Design: [chapter 45](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/45-event-streams.md) (Event streams) of the SprigDB low-level design, build steps 8, 9, 12 and 13.
+//! Layer: 1 foundations.
 //!
 //! - [`wire`]: primitive types, [`wire::Reader`] and [`wire::Writer`], the
 //!   [`wire::Message`] trait;
@@ -15,7 +15,7 @@
 //!   (identity, brokers, topics, offsets, coordinator leases), with the
 //!   classic consumer group coordinator ([`group`]) and topic
 //!   administration over streams ([`topics`]);
-//! - [`mem`]: in-memory implementations: tests, and the gateway's interim
+//! - [`mem`]: in-memory implementations: tests, and the gateway's temporary
 //!   topic adapter until `sprig-streams`' catalog API lands;
 //! - [`client`]: a minimal client for tests and tools.
 

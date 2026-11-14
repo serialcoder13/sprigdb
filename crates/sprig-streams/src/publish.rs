@@ -1,7 +1,7 @@
-//! Publishing (chapter 45, "Publishing inside a transaction"): the one
+//! Publishing (inside a transaction): the one
 //! interface every front end publishes through. SQL's `INSERT INTO
-//! <stream>`, `db.publish` (chapter 41), MongoDB inserts on a stream
-//! (chapter 30) and Kafka's Produce share:
+//! <stream>`, `db.publish` from logic, MongoDB inserts on a
+//! stream and Kafka's Produce share:
 //!
 //! - [`check_target`]: change topics are written only by SprigDB (39941);
 //! - [`check_record`]: keys up to 4096 bytes and records up to

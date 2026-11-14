@@ -1,5 +1,5 @@
 //! The dump probe and the derived `feed_source` / `mover_source` on a
-//! node whose `sprig_repl` requires TLS (r2opfix). Before the binlog
+//! node whose `sprig_repl` requires TLS. Before the binlog
 //! reader had TLS, such clusters (every Kubernetes cluster) reported both
 //! false.
 //!

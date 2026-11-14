@@ -101,7 +101,7 @@ Gateways pool connections to MariaDB, so thousands of client sessions share far 
 | `backend.acquire_timeout_ms` | 2000 | Wait for a backend connection |
 | `backend.pool_mode` | `transaction` | `transaction` (connections return to the pool between transactions) or `session` (each session keeps one) |
 
-`backend.pool_mode = session` gives each client session its own backend connection for its whole life, which uses many more backend connections; use it only for applications that depend on connection state the gateway can't replay.
+`backend.pool_mode = session` gives each client session its own backend connection for its whole life, which uses many more backend connections; use it only for applications that depend on connection state the gateway can't replay. The `backend.*` settings are set by operators per cluster, per data centre or globally, so `session` mode applies to every tenant on the cluster.
 
 ## Admission control
 

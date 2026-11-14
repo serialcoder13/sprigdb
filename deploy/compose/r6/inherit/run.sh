@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# R6 order 2 (chapter 42) through a gateway: what schema tools see of an
+# Inheritable tables through a gateway: what schema tools see of an
 # inheritable table.
 #
 #   run.sh <host> <mysql-port> <mariadb-port> <user> <password>

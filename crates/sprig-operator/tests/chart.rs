@@ -1,4 +1,4 @@
-//! The Helm chart's `crds/` are the generated CRDs (chapter 27 step 11).
+//! The Helm chart's `crds/` are the generated CRDs.
 //! `SPRIG_OPERATOR_REGEN=1` rewrites them. Helm isn't run here: the
 //! templates get only structural checks.
 
@@ -180,7 +180,7 @@ fn client_certificates_are_set_on_every_listener_with_the_gateways_keys() {
     assert!(job.contains("{{- fail \"gateway.clientTls.clientCert asks for client certificates"));
     // The CA path and every mode are written only inside `if $caPath`, so
     // without gateway.clientTls.clientCa an upgrade leaves values set by
-    // hand at the DC's scope alone (authfix2).
+    // hand at the DC's scope alone.
     let open = job.find("{{- if $caPath }}").expect("if $caPath");
     let close = block_end(&job, open);
     assert!(open < ca && ca < close, "client_ca_path outside if $caPath");

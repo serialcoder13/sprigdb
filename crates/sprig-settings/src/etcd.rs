@@ -1,6 +1,4 @@
-//! Settings at the `global`, `dc` and `cluster` scopes in etcd (chapter 23,
-//! "Setting records" and "Settings: writes, bounds and watches"; build step
-//! 8).
+//! Settings at the `global`, `dc` and `cluster` scopes in etcd.
 //!
 //! | Scope | Key | Written by |
 //! |---|---|---|
@@ -15,7 +13,7 @@
 //!  "set_by":"op:kiran", "set_at":"2027-02-11T09:30:00Z", "reason":"larger caches"}
 //! ```
 //!
-//! [`SettingsWriter::set`] follows chapter 23's write algorithm:
+//! [`SettingsWriter::set`] follows this write algorithm:
 //!
 //! ```text
 //! set(scope, key, value or bounds, principal):
@@ -52,7 +50,7 @@ use crate::value::Value;
 /// guarded transaction.
 const WRITE_ATTEMPTS: usize = 10;
 
-/// One stored setting row in etcd (chapter 23, "Setting records").
+/// One stored setting row in etcd.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SettingRecord {
     /// The value; absent when the record only sets bounds.
@@ -188,7 +186,7 @@ impl SettingsStores {
         )))
     }
 
-    /// Cluster ids are `<dc_id>-c<n>` (chapter 23, "Encoding rules").
+    /// Cluster ids are `<dc_id>-c<n>`.
     fn check_cluster(&self, c: &ClusterId) -> Result<()> {
         let ours = c
             .as_str()
@@ -376,9 +374,9 @@ impl SettingsWriter {
     /// applied to the bounds read inside the guarded retry loop, so two
     /// concurrent patches don't lose each other's parts.
     ///
-    /// R0 (single-etcd mode, chapter 23): `global` records may be written
-    /// under the DC leader's guard, as the DC leader writes the tenant
-    /// directory; from R2 the guard is the global leader's.
+    /// In single-etcd mode `global` records may be written under the DC
+    /// leader's guard, as the DC leader writes the tenant directory; with a
+    /// separate global tier the guard is the global leader's.
     ///
     /// # Errors
     /// As [`set`](Self::set); 39504 `ER_SPRIG_NOT_LEADER` when a compare in

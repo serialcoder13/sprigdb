@@ -1,4 +1,4 @@
-//! The `approvals.*` keys (chapter 52, "Configuration") and the three new
+//! The `approvals.*` keys and the three new
 //! mode keys whose automation has no settings module of its own here:
 //! `vector.auto_ann`, `failover.standby_mode` and `graph.auto_partition`.
 //! The existing mode keys gain `approve` where they are declared.
@@ -125,15 +125,15 @@ keys! {
     PLATFORM_TENANT: Text = "approvals.platform_tenant", Cow::Borrowed(""), Scopes::PROCESS,
         HardBounds::NONE, true, 52,
         "Tenant whose stream sprig_recommendations gets every event";
-    /// `vector.auto_ann` (chapter 34).
+    /// `vector.auto_ann`.
     VECTOR_AUTO_ANN: Text = "vector.auto_ann", Cow::Borrowed("on"), Scopes::ALL,
         HardBounds::one_of(MODES), false, 34,
         "Automatic ANN (HNSW) graphs: on, approve, recommend or off";
-    /// `failover.standby_mode` (chapter 25).
+    /// `failover.standby_mode`.
     STANDBY_MODE: Text = "failover.standby_mode", Cow::Borrowed("on"), Scopes(0b11_0100),
         HardBounds::one_of(MODES), true, 25,
         "Automatic standby creation and removal: on, approve, recommend or off";
-    /// `graph.auto_partition` (chapter 43).
+    /// `graph.auto_partition`.
     GRAPH_AUTO_PARTITION: Text = "graph.auto_partition", Cow::Borrowed("on"), Scopes::ALL,
         HardBounds::one_of(MODES), false, 43,
         "Automatic graph partitioning (when built): on, approve, recommend or off";

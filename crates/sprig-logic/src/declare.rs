@@ -1,5 +1,4 @@
-//! The declaration surface (chapter 41, "Declaring code"; build step 3,
-//! functions and procedures):
+//! The declaration surface of functions and procedures:
 //!
 //! ```text
 //! CREATE [OR REPLACE] {FUNCTION | PROCEDURE} [db.]name [(params)] [RETURNS type]
@@ -26,11 +25,11 @@ pub enum Kind {
     Function,
     /// `CREATE PROCEDURE`.
     Procedure,
-    /// `CREATE VALIDATION v ON t FOR INSERT, UPDATE` (R7 order 3).
+    /// `CREATE VALIDATION v ON t FOR INSERT, UPDATE`.
     Validation,
-    /// `CREATE TRIGGER g AFTER COMMIT ON t FOR ...` (R7 order 5).
+    /// `CREATE TRIGGER g AFTER COMMIT ON t FOR ...`.
     Trigger,
-    /// `CREATE SCHEDULE s CRON '...' DO CALL p(...)` (R7 order 5).
+    /// `CREATE SCHEDULE s CRON '...' DO CALL p(...)`.
     Schedule,
 }
 
@@ -47,8 +46,7 @@ impl Kind {
         }
     }
 
-    /// Whether code of this kind always runs with its definer's rights
-    /// (chapter 41, "Privileges and transactions").
+    /// Whether code of this kind always runs with its definer's rights.
     #[must_use]
     pub const fn definer_only(self) -> bool {
         matches!(self, Kind::Validation | Kind::Trigger | Kind::Schedule)
@@ -64,15 +62,14 @@ pub struct TableRef {
     pub name: String,
 }
 
-/// What a trigger `ON STREAM` or `ON QUEUE` reads (chapter 41, "Triggers
-/// on streams and queues"; R9).
+/// What a trigger `ON STREAM` or `ON QUEUE` reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceKind {
-    /// An event stream (chapter 45): every record, in each partition's
+    /// An event stream: every record, in each partition's
     /// order, with the trigger's own consumer group.
     Stream,
-    /// A queue (chapter 50): the trigger is one more competing consumer.
+    /// A queue: the trigger is one more competing consumer.
     Queue,
 }
 
@@ -96,7 +93,7 @@ pub struct MessageSource {
     pub db: Option<String>,
     /// The stream or queue.
     pub name: String,
-    /// `ON STREAM s FAN IN` (chapter 41, "Fan-in triggers"; R9): `s` is an
+    /// `ON STREAM s FAN IN`: `s` is an
     /// inherited stream's definition, and the trigger reads every member's
     /// instance below its tenant.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -167,7 +164,7 @@ pub struct Declaration {
     pub body: String,
     /// Validations and triggers: the table.
     pub table: Option<TableRef>,
-    /// Triggers on streams and queues (R9): what they read. `table` is then
+    /// Triggers on streams and queues: what they read. `table` is then
     /// `None`.
     pub source: Option<MessageSource>,
     /// Validations and triggers: `insert`, `update`, `delete`.
@@ -184,8 +181,8 @@ pub struct Declaration {
     /// `decimal(12,2)`).
     pub returns: Option<String>,
     /// Functions and procedures: `WITH (SPRIG_ROLLOUT = n [,
-    /// SPRIG_ROLLOUT_BY = 'user' | 'tenant'])`, a staged rollout (R7
-    /// follow-ups, [`crate::rollout`]): the new version is the candidate
+    /// SPRIG_ROLLOUT_BY = 'user' | 'tenant'])`, a staged rollout
+    /// ([`crate::rollout`]): the new version is the candidate
     /// for n% of callers.
     pub rollout: Option<crate::rollout::RolloutSpec>,
 }
@@ -335,7 +332,7 @@ pub fn is_declaration(sql: &str) -> bool {
         .collect::<String>()
         .to_ascii_lowercase();
     let t = head.trim_start();
-    // `ALTER FUNCTION f ROLLBACK [TO VERSION n]` (R7 close-out).
+    // `ALTER FUNCTION f ROLLBACK [TO VERSION n]`.
     if crate::rollback::is_rollback(t) {
         return true;
     }
@@ -666,7 +663,7 @@ pub fn parse(sql: &str) -> Result<Declaration> {
             d.events = ev;
         }
         Kind::Trigger if p.kw("on") => {
-            // `ON STREAM [db.]s` or `ON QUEUE [db.]q` (R9).
+            // `ON STREAM [db.]s` or `ON QUEUE [db.]q`.
             p.i += 1;
             let kind = if p.eat("stream") {
                 SourceKind::Stream
@@ -679,7 +676,7 @@ pub fn parse(sql: &str) -> Result<Declaration> {
             if r.name.is_empty() {
                 return Err(syntax("a trigger reads a named stream or queue"));
             }
-            // `ON STREAM s FAN IN` (R9).
+            // `ON STREAM s FAN IN`.
             let mut fan_in = false;
             if p.eat("fan") {
                 p.expect("in")?;

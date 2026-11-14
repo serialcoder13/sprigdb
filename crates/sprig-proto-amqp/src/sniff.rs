@@ -1,5 +1,4 @@
-//! The protocol sniffer on 5672 and 5671 (chapter 04, "Protocol detection
-//! on the AMQP ports"; chapter 50 step 23): the client's 8-byte protocol
+//! The protocol sniffer on 5672 and 5671: the client's 8-byte protocol
 //! header picks the front end.
 //!
 //! | Header | Front end |

@@ -1,5 +1,4 @@
-//! `SORT` and `SORT_RO` without external `BY` or `GET` patterns (chapter
-//! 40, "Command coverage").
+//! `SORT` and `SORT_RO` without external `BY` or `GET` patterns.
 
 use bytes::Bytes;
 use sprig_kv::layout::KeyType;
@@ -80,8 +79,7 @@ pub async fn sort(cx: &mut Ctx<'_>, a: &[Bytes], ro: bool) -> R<Frame> {
     let is_set = row.as_ref().is_some_and(|r| r.t == KeyType::Set);
     // Redis sorts a set even with BY nosort, so the output is stable.
     if !nosort || is_set {
-        // Chapter 04 (decision bugfix-1): a large sort runs off the
-        // runtime's worker threads.
+        // A large sort runs off the runtime's worker threads.
         let n = items.len();
         items = match sprig_common::cpu::heavy(n, || sorted(items, alpha, desc)) {
             Some(v) => v,

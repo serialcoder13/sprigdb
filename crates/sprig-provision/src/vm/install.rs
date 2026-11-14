@@ -1,5 +1,4 @@
-//! The agent's install and configure steps on a VM (chapter 27, "The agent
-//! on VMs", duties 1 and 2), as data: a list of [`Step`]s the agent's plan
+//! The agent's install and configure steps on a VM, as data: a list of [`Step`]s the agent's plan
 //! engine runs in order, and that tests (and `--dry-run`) print.
 //!
 //! ```text

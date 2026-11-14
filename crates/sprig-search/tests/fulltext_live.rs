@@ -1,4 +1,4 @@
-//! MySQL `FULLTEXT` habits on search indexes (chapter 39, R5 round 6):
+//! MySQL `FULLTEXT` habits on search indexes:
 //! `FULLTEXT KEY` inside `CREATE TABLE` becomes a search index, and
 //! `MATCH ... AGAINST (?)` works in server-side prepared statements.
 //!

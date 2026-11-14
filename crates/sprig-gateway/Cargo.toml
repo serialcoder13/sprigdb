@@ -47,6 +47,11 @@ sprig-logic-js.workspace = true
 sprig-catalog.workspace = true
 sprig-cluster.workspace = true
 sprig-common.workspace = true
+# Docs search: the pack's tables, fusion and settings; the query embedding
+# model, run on a small rayon pool of its own.
+sprig-docs.workspace = true
+sprig-embed.workspace = true
+rayon.workspace = true
 sprig-meta.workspace = true
 sprig-proto-mysql.workspace = true
 sprig-provision.workspace = true

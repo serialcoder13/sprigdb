@@ -1,5 +1,4 @@
-//! Generic key commands (chapter 40, "Expiry", "SCAN cursors",
-//! "Multi-key commands").
+//! Generic key commands: expiry, `SCAN` cursors and multi-key commands.
 
 use bytes::Bytes;
 use sprig_kv::layout::{KeyType, Namespace, live};
@@ -544,7 +543,7 @@ pub async fn flushdb(cx: &mut Ctx<'_>, a: &[Bytes]) -> R<Frame> {
 pub async fn flushall(cx: &mut Ctx<'_>, a: &[Bytes]) -> R<Frame> {
     flush_opts(a)?;
     // Only the databases that exist: a missing table's 1146 costs the
-    // gateway's fence check up to a second each (RL14).
+    // gateway's fence check up to a second each.
     // When that list can't be read, every database is flushed.
     // A quoted name (not a hex literal), which the gateway's
     // `information_schema` rewrite maps to the database's schemas.

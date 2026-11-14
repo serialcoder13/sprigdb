@@ -1,12 +1,11 @@
-//! The relay's `RemoteMaps`, client side (chapter 23, "The relay"; build
-//! step 11).
+//! The relay's `RemoteMaps`, client side.
 //!
 //! A DC's etcd is reachable only inside its DC. In two tiers, a process
 //! that needs another DC's shard maps or cluster records (a gateway
-//! following a tenant homed there, chapter 24) reads them through a
+//! following a tenant homed there) reads them through a
 //! controller of that DC, which serves them from its own tier. The
 //! controllers are found in the global key `dc-observe/<dc>` (their
-//! internal URLs, chapter 25).
+//! internal URLs).
 //!
 //! - [`RelayStore`] is a read-only [`MetaStore`] over one remote DC's tier:
 //!   `get` and `list` go to `POST /internal/v1/relay/{get,list}`; a watch
@@ -18,10 +17,9 @@
 //!   tenant maps, the gateway's locator) reach other DCs in two tiers as
 //!   they do in single-etcd mode.
 //!
-//! **Where it differs from the book.** The book's relay is one
-//! `Subscribe` stream per remote DC over mTLS gRPC on port 7400, with
-//! interests added and removed; this one is JSON over HTTP on the
-//! controllers' internal address (decision F2), and watches poll. Only
+//! **Transport.** The relay is JSON over HTTP on the controllers'
+//! internal address, and watches poll (not a streaming subscription per
+//! remote DC). Only
 //! `shardmaps/` and `clusters/` are served.
 
 use std::collections::{BTreeMap, HashMap};

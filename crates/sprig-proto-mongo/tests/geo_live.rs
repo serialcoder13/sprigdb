@@ -1,5 +1,4 @@
-//! Geospatial queries and `$vectorSearch` on documents (chapters 34 and
-//! 36, R6 round 3), through the MongoDB Rust driver.
+//! Geospatial queries and `$vectorSearch` on documents, through the MongoDB Rust driver.
 //!
 //! - `SPRIG_TEST_MONGO_URI`: a SprigDB gateway's MongoDB listener with a
 //!   tenant login.

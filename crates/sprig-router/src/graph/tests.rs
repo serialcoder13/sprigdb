@@ -85,7 +85,7 @@ fn placeholders_survive_a_rewrite_and_are_found_again() {
     let ph = with_placeholders(CHAPTER, &calls, 77);
     assert!(!ph.contains("GRAPH_TABLE"));
     assert!(ph.contains("sprig_graph_table_pending(77, 0)"), "{ph}");
-    // Chapter 07's rewrite changes text before the placeholder.
+    // The name rewrite changes text before the placeholder.
     let rewritten = ph.replace("SELECT g.name", "SELECT `g`.`name`");
     let s = slots(&rewritten, 77);
     assert_eq!(s.len(), 1);
@@ -132,7 +132,7 @@ fn rows_are_one_flat_value_list() {
     assert!(matches!(plan(&q, &cx(&t)), Plan::Read(_)));
 }
 
-/// Before round 6 a derived table joined with a multi-shard table was
+/// Previously a derived table joined with a multi-shard table was
 /// gathered (copied to the session's cluster); literal rows now join
 /// inside each shard, like a reference table.
 #[test]
@@ -285,7 +285,7 @@ fn explain_shows_the_graph_and_templates_refuse_it() {
     assert!(matches!(p, Plan::Reject(_)), "{p:?}");
 }
 
-/// R8 round 7 (G61): integer filters on a call's columns in the top
+/// Integer filters on a call's columns in the top
 /// `SELECT`'s `WHERE` and inner joins' `ON` go into its Cypher, keeping
 /// every row that isn't a number (MariaDB converts strings to compare);
 /// strings, expressions and other blocks' filters stay in SQL.
@@ -329,7 +329,7 @@ fn integer_filters_on_graph_columns_go_into_the_cypher() {
     assert_eq!(g.cypher(0), calls[0].cypher);
 }
 
-/// R8 round 7 (G63): a prepared statement's values go in as SQL literals
+/// A prepared statement's values go in as SQL literals
 /// outside the calls and as Cypher literals inside them.
 #[test]
 fn parameters_bind_as_sql_or_cypher_literals() {
@@ -361,7 +361,7 @@ fn parameters_bind_as_sql_or_cypher_literals() {
     );
 }
 
-/// R8 round 7 (G62): rows past the inline limit become a temporary
+/// Rows past the inline limit become a temporary
 /// table typed from one representative row per kind of value.
 #[test]
 fn temp_tables_take_rows_typed_like_their_derived_table() {

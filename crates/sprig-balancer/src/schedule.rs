@@ -1,9 +1,8 @@
-//! Scheduling planned moves (chapter 11, "Scheduling, guardrails and
-//! recommendations"; build step 6).
+//! Scheduling planned moves.
 //!
 //! Each planned move becomes a `shard.move` decision and, in `auto` mode, a
 //! job on a [`MoveExecutor`] carrying the decision id; the executor's
-//! status updates the outcome. The real executor wraps chapter 10's
+//! status updates the outcome. The real executor wraps the
 //! `Mover` (submit, status, cancel); the fleet simulator uses a fake one.
 //!
 //! The scheduler remembers what the view needs between runs and fills it
@@ -53,7 +52,7 @@ pub struct MoveOrder {
     pub size_bytes: f64,
 }
 
-/// An executor's handle on a move (chapter 10's job id as text).
+/// An executor's handle on a move (the mover's job id as text).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct MoveTicket(pub String);
 
@@ -76,7 +75,7 @@ pub enum MoveStatus {
     Cancelled,
 }
 
-/// Runs moves: chapter 10's mover in production, a fake in the simulator.
+/// Runs moves: the mover in production, a fake in the simulator.
 #[async_trait::async_trait]
 pub trait MoveExecutor: Send + Sync {
     /// Starts a move.
@@ -308,7 +307,7 @@ impl Scheduler {
                 continue;
             }
             if mode == BalancerMode::Approve {
-                // Held in chapter 52's approvals inbox; the item is the
+                // Held in the approvals inbox; the item is the
                 // record, so no decision is written here.
                 sch.blocked = Some("awaiting_approval".to_owned());
                 out.push(sch);

@@ -1,6 +1,5 @@
 //! The capability profile: `derive()` from probe results, profile diffs and
-//! publishing with hysteresis (chapter 09, "Capability profile", "Deriving
-//! capabilities", "Publishing"; build step 3).
+//! publishing with hysteresis.
 //!
 //! Consumers read profile fields, never topology names or versions.
 
@@ -115,7 +114,7 @@ pub enum RywMethod {
     WriterOnly,
 }
 
-/// A way to fence one shard (chapter 09, "Fencing primitives").
+/// A way to fence one shard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FenceMethod {
@@ -125,7 +124,7 @@ pub enum FenceMethod {
     Rename,
 }
 
-/// Where automatic-index validation builds run (chapter 13).
+/// Where automatic-index validation builds run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationMethod {
@@ -153,7 +152,7 @@ pub struct Derived {
     pub mover_target: bool,
     /// The change feed can read here (its level is at least `degraded`).
     pub feed_source: bool,
-    /// What the change feed can do here (chapter 38).
+    /// What the change feed can do here.
     #[serde(default)]
     pub feed_level: FeedLevel,
     /// How far back the feed can resume from the binlog, seconds; 0 when
@@ -167,7 +166,7 @@ pub struct Derived {
     pub online_index_build: bool,
     /// Validators may become `CHECK (JSON_SCHEMA_VALID(...))`.
     pub enforce_json_schema: bool,
-    /// Logic may compile to routines here (chapter 41).
+    /// Logic may compile to routines here.
     pub compiled_logic: bool,
 }
 
@@ -218,10 +217,9 @@ fn writer_index(topology: TopologyKind, probes: &[NodeProbe]) -> Option<usize> {
         .or_else(|| probes.iter().position(|p| p.facts().is_some()))
 }
 
-/// Derives a profile from one pass of probes (chapter 09, "Deriving
-/// capabilities"). The returned `version` is 0; publishing sets it.
+/// Derives a profile from one pass of probes. The returned `version` is 0; publishing sets it.
 #[must_use]
-#[allow(clippy::too_many_lines)] // one block, like the chapter's pseudo-code
+#[allow(clippy::too_many_lines)] // one block, like its pseudo-code
 pub fn derive(input: DeriveInput<'_>) -> CapabilityProfile {
     let DeriveInput {
         topology,
@@ -334,9 +332,10 @@ pub fn derive(input: DeriveInput<'_>) -> CapabilityProfile {
     //       AND NOT (binlog in InnoDB AND replicas exist)
     // With 12.3's InnoDB-stored binlog nothing is logged at XA PREPARE, so a
     // prepared branch never reaches a replica and can't survive a failover
-    // (binlog spike; chapters 09 and 18). A single node keeps XA.
+    // (binlog spike). A single node keeps XA.
     //       AND NOT Galera (MariaDB refuses XA START with wsrep on: error
-    //       1235; chapter 18 gives Galera the last-resource slot instead)
+    //       1235; distributed transactions give Galera the last-resource
+    //       slot instead)
     let xa_probe = active.map_or(prev.derived.xa, |a| a.xa);
     let prepared_survives_failover = probes.len() <= 1 || b.in_files();
     let xa = xa_probe
@@ -385,7 +384,7 @@ pub fn derive(input: DeriveInput<'_>) -> CapabilityProfile {
 
     // mover_source := a node with log_bin, ROW, FULL image, gtid_strict_mode,
     // log_slave_updates (replica) and a passing dump probe. The settings
-    // half is the feed check (chapter 38), which also asks Galera nodes for
+    // half is the feed check, which also asks Galera nodes for
     // log_slave_updates.
     // The dump probe (`ActiveProbes::binlog_dump`) runs where a `sprig_repl`
     // endpoint was given; not run, or inconclusive (a timeout or a lost
@@ -431,7 +430,7 @@ pub fn derive(input: DeriveInput<'_>) -> CapabilityProfile {
         mover_target: privileges.tenant_schemas_all && privileges.tenant_schemas_grant_option,
         feed_source: mover_source,
         feed_level,
-        // TODO(sprig-binlog): the book's value is now minus the commit time
+        // TODO(sprig-binlog): the true value is now minus the commit time
         // of the horizon's first event, which needs a binlog read; until
         // then the expiry setting is the upper bound.
         feed_retention_secs: binlog.expire_logs_seconds,
@@ -456,7 +455,7 @@ pub fn derive(input: DeriveInput<'_>) -> CapabilityProfile {
     }
 }
 
-/// Registration gates and advisories (chapter 09, "Registration").
+/// Registration gates and advisories.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Gaps {
     /// Gates that reject the cluster: version below 11.8,
@@ -794,7 +793,7 @@ pub fn deep_only(field: &str) -> bool {
 /// How much of the cluster one pass saw. A node that didn't answer (a
 /// timeout, a lost connection, a refused login) says nothing about what the
 /// server can do, so a pass that missed nodes publishes only what the nodes
-/// that answered actually showed (chapter 09, "Publishing").
+/// that answered actually showed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Coverage {

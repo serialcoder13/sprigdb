@@ -1,5 +1,5 @@
-# Golden corpus of the shape extractor (chapter 12, "Extracting predicates
-# and columns"). See tests/golden.rs. Tables known to the test resolver:
+# Golden corpus of the shape extractor (predicates and columns). See
+# tests/golden.rs. Tables known to the test resolver:
 # shop.orders, shop.customers, shop.order_items, shop.products, shop.events,
 # billing.invoices.
 

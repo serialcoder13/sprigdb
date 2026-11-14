@@ -1,4 +1,4 @@
-//! Fault injection and Elle against Docker (chapter 46, build step 3).
+//! Fault injection and Elle against Docker.
 //!
 //! Needs the `faults` profile (`docker compose --profile faults up -d
 //! toxiproxy faultd`) and, for Elle, the `sprigdb-elle:dev` image

@@ -1,8 +1,7 @@
-// Data inheritance views (chapter 42, "Foreign keys, groups and tree-wide
-// ids"; inheritance plan step 7): the statements the Inheritance page runs,
-// and how their rows are grouped for display. Every statement goes through
-// the gateway as the signed-in user, so chapter 29's privileges decide what
-// is shown (descendant tenants are named only for tenant administrators).
+// Data inheritance views: the statements the Inheritance page runs, and how
+// their rows are grouped for display. Every statement goes through the
+// gateway as the signed-in user, so the user's privileges decide what is
+// shown (descendant tenants are named only for tenant administrators).
 
 const ident = (s: string) => `\`${s.replace(/`/g, '``')}\``;
 

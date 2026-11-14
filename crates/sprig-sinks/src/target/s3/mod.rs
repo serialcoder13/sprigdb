@@ -1,4 +1,4 @@
-//! The S3 target (chapter 51, "S3 target"; build steps 11 and 12).
+//! The S3 target.
 //!
 //! ```text
 //! deliver(batch b):
@@ -202,7 +202,7 @@ pub fn render(segs: &[Seg], r: &SinkRecord, cx: &RenderCtx) -> String {
                     let h = twox_hash::XxHash3_64::oneshot(k) % cx.key_buckets.max(1);
                     out.push_str(&h.to_string());
                 }
-                // A fan-in sink's record: its member (R9, r9more).
+                // A fan-in sink's record: its member.
                 Var::Tenant => out.push_str(
                     &crate::source::record_member(r)
                         .unwrap_or(cx.tenant)
@@ -373,10 +373,9 @@ impl S3Target {
         })
     }
 
-    /// Starts the hourly orphan sweep in the background (chapter 51, "S3
-    /// target"): every hour it aborts this sink's multipart uploads older
-    /// than an hour. Only task 0 sweeps; the sweep covers every task's
-    /// uploads.
+    /// Starts the hourly orphan sweep in the background: every hour it aborts
+    /// this sink's multipart uploads older than an hour. Only task 0 sweeps;
+    /// the sweep covers every task's uploads.
     fn start_sweep(&mut self) {
         if self.task != 0 || self.sweep.is_some() {
             return;

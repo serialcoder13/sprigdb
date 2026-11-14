@@ -1,4 +1,4 @@
-# The M0.7 stack's controller (stack.sh). Development only: plain etcd.
+# The m07 stack's controller (stack.sh). Development only: plain etcd.
 [node]
 dc = "dc-m7"
 id = "m7-ctl"

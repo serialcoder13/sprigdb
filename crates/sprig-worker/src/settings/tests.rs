@@ -1,5 +1,5 @@
 //! The worker's settings follow etcd: a dc-scope change reaches what jobs
-//! resolve within chapter 23's 2 s.
+//! resolve within 2 s.
 
 #![allow(clippy::unwrap_used)]
 
@@ -15,7 +15,7 @@ use sprig_settings::{SettingCtx, Value};
 
 use super::WorkerSettings;
 
-/// Chapter 23: "a change reaches every gateway within 2 s"; workers too.
+/// A settings change reaches every gateway within 2 s; workers too.
 const DELAY: Duration = Duration::from_secs(2);
 
 async fn put(store: &dyn MetaStore, rel: &str, v: i64) {
@@ -111,7 +111,7 @@ async fn defaults_without_mirrors() {
     assert_eq!(s.run_opts().lanes, 8);
 }
 
-/// Decision RF3 (r2last): a tenant's own catalog rows win over the etcd
+/// A tenant's own catalog rows win over the etcd
 /// scopes for its jobs: trigger options and the mover's cutover hold.
 #[tokio::test]
 async fn tenant_rows_win_for_that_tenants_jobs() {
@@ -163,12 +163,16 @@ async fn tenant_rows_win_for_that_tenants_jobs() {
             vec![
                 row("logic.trigger_max_attempts", serde_json::json!(7)),
                 row("mover.cutover_max_hold_ms", serde_json::json!(900)),
+                row("logic.job_budget_ms", serde_json::json!(1500)),
             ],
         ),
     );
     // The tenant's trigger: its own value; any other tenant: the global.
     assert_eq!(s.run_opts_for(t).max_attempts, 7);
     assert_eq!(s.run_opts_for(TenantId(78)).max_attempts, 3);
+    // A scheduled run's budget (smallfix: read per tenant, as declared).
+    assert_eq!(s.job_budget_for(t), Duration::from_millis(1500));
+    assert_eq!(s.job_budget_for(TenantId(78)), Duration::from_secs(300));
     // The mover: the tenant's value over the dc's.
     let snap = s.snapshot();
     let rows = scopes.cached(t);

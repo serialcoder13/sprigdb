@@ -1,13 +1,12 @@
-//! Setting writes at tenant, database and object scope (chapter 08,
-//! "Setting a value"; build step 7).
+//! Setting writes at tenant, database and object scope.
 //!
 //! ```text
 //! set(scope, key, change, principal):           // SQL, MongoDB, admin API, sprigctl
 //!   1. def = registry[key]; unknown or 'sprig.' → 39081
 //!   2. scope not in def.scopes → 39082; operator_only key and a tenant principal →
-//!      access denied (chapter 29)
+//!      access denied
 //!   3. privileges: object → ALTER on it; database → ALTER on it; tenant scope or any
-//!      bounds → SPRIG_SETTINGS_ADMIN, or SPRIG_TENANT_ADMIN on an ancestor (chapter 29);
+//!      bounds → SPRIG_SETTINGS_ADMIN, or SPRIG_TENANT_ADMIN on an ancestor;
 //!      ancestor rows → never
 //!   4. parse with def.type → 39084
 //!   5. bounds of every wider scope for the setter's context: locked → 39083,
@@ -19,9 +18,9 @@
 //! [`TenantSettingsWriter::set`] runs these steps for the three catalog
 //! scopes; the etcd scopes are `sprig_settings::SettingsWriter`'s.
 //!
-//! - **Privileges** are chapter 29's (M0.5): the writer asks a
-//!   [`SettingAuthorizer`] the caller passes, with the [`Privilege`] the
-//!   chapter names. [`AllowAll`] allows everything until then. The
+//! - **Privileges.** The writer asks a [`SettingAuthorizer`] the caller
+//!   passes, with the [`Privilege`] the write needs; [`AllowAll`] allows
+//!   everything. The
 //!   `operator_only` check needs no privilege tables and is made here.
 //! - **Bounds.** Step 5 reads, under the catalog version row's lock, the
 //!   rows of every wider scope: hard bounds, `global` and `dc` from the
@@ -39,11 +38,10 @@
 //!   (`ChangeOpts { tenant_settings: true }`), which descendants copy.
 //! - **Warnings and decisions.** After a bounds change, stored values at
 //!   narrower scopes of this tenant that resolution will clamp or ignore
-//!   come back as [`Warning`]s with chapter 08's summary
+//!   come back as [`Warning`]s with a summary
 //!   ([`clamp_summary`]), and the write is recorded as a decision through
-//!   a [`DecisionSink`] (chapter 11's `decisions` table doesn't exist yet;
-//!   [`LogDecisions`] logs it). Values in descendants are clamped once the
-//!   tree loop copies the bound; their reconcilers count them (step 11).
+//!   a [`DecisionSink`] ([`LogDecisions`] logs it). Values in descendants are clamped once the
+//!   tree loop copies the bound; their reconcilers count them.
 //!   Every change is audited as a `settings.set` event with key, scope, old
 //!   and new value, who and why.
 //!
@@ -67,13 +65,13 @@ use crate::rows::{SettingsBackend, SettingsTx};
 use crate::store::{SettingRow, SettingScope};
 use crate::version::{ChangeOpts, VersionKind, Versioner};
 
-// ---- keys (chapter 08, "Configuration") ----
+// ---- keys ----
 
 /// Tenant (the top of a subtree) and global.
 const TENANT_GLOBAL: Scopes = Scopes(0b10_0100);
 
 /// `tenant.ancestry_mode`: how descendants hold ancestors' settings. Only
-/// `copy` is implemented; `auto` behaves as `copy` (chapter 08 step 18).
+/// `copy` is implemented; `auto` behaves as `copy`.
 pub static ANCESTRY_MODE: Setting<Cow<'static, str>> = Setting {
     key: "tenant.ancestry_mode",
     default: Cow::Borrowed("auto"),
@@ -213,8 +211,8 @@ impl std::fmt::Display for Target {
     }
 }
 
-/// The privilege a write needs (chapter 08 step 3; chapter 29 decides
-/// how a principal holds it).
+/// The privilege a write needs (step 3 of a write; the
+/// [`SettingAuthorizer`] decides how a principal holds it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Privilege {
     /// `ALTER` on the object.
@@ -226,13 +224,13 @@ pub enum Privilege {
     SettingsAdmin,
 }
 
-/// Chapter 29's privilege check, passed in by the caller.
+/// The privilege check, passed in by the caller.
 #[async_trait::async_trait]
 pub trait SettingAuthorizer: Send + Sync {
     /// `Ok` if `principal` holds `need` in `tenant`.
     ///
     /// # Errors
-    /// Access denied (1227 or chapter 29's code).
+    /// Access denied (1227 or the authorizer's own code).
     async fn authorize(
         &self,
         tenant: TenantId,
@@ -241,7 +239,7 @@ pub trait SettingAuthorizer: Send + Sync {
     ) -> Result<()>;
 }
 
-/// Allows every write: the privilege tables arrive with chapter 29 (M0.5).
+/// Allows every write (no privilege check).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AllowAll;
 
@@ -287,8 +285,7 @@ impl EtcdView for FixedEtcd {
     }
 }
 
-/// A decision a setting write records (chapter 08 step 7; chapter 11's
-/// decision log).
+/// A decision a setting write records (step 7 of a write).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SettingDecision {
     /// The tenant.
@@ -313,8 +310,7 @@ pub struct SettingDecision {
     pub version: u64,
 }
 
-/// Where setting decisions go: chapter 11's `decisions` table once
-/// `sprig-balancer` has it.
+/// Where setting decisions go.
 #[async_trait::async_trait]
 pub trait DecisionSink: Send + Sync {
     /// Records `d`.
@@ -383,7 +379,7 @@ pub struct SetOutcome {
     pub current: Option<Entry>,
     /// Stored values at narrower scopes that new bounds clamp or ignore.
     pub warnings: Vec<Warning>,
-    /// Chapter 08's summary of the warnings ("2 values will be clamped").
+    /// A summary of the warnings ("2 values will be clamped").
     pub summary: Option<String>,
 }
 
@@ -463,7 +459,7 @@ where
     }
 
     /// Checks every `Set` with `guard` before writing it
-    /// (`sprig_settings::guard`; chapter 29's `auth.authorizer`).
+    /// (`sprig_settings::guard`; for example the `auth.authorizer` check).
     #[must_use]
     pub fn with_guard(mut self, guard: Arc<dyn sprig_settings::ValueGuard>) -> Self {
         self.guard = Some(guard);

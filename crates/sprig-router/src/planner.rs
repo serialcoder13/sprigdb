@@ -1,5 +1,5 @@
-//! The planner (chapter 17, "Routing analysis" to "UPDATE and DELETE"):
-//! statement text, as chapter 07's rewrite left it, to a [`Plan`].
+//! The planner: statement text, as the tenant name rewrite left it, to a
+//! [`Plan`].
 //!
 //! ```text
 //! plan(sql):
@@ -58,8 +58,8 @@ pub struct PlanCtx<'a> {
     pub ids: IdMode,
 }
 
-/// How `INSERT`s treat an `AUTO_INCREMENT` column that takes chapter 19's
-/// ID blocks.
+/// How `INSERT`s treat an `AUTO_INCREMENT` column that takes the
+/// gateway's ID blocks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IdMode {
     /// The session's `sql_mode` holds `NO_AUTO_VALUE_ON_ZERO`: `0` is a
@@ -119,7 +119,7 @@ pub fn plan(sql: &str, cx: &PlanCtx<'_>) -> Plan {
     }
 }
 
-/// R3: `sql` as a gathered read, after the executor refused its plan at
+/// `sql` as a gathered read, after the executor refused its plan at
 /// run time (39420 `why`: a lookup join of a string with a number, a group
 /// key or sort key of a type the gateway can't compare, a sum beyond 38
 /// digits). A gathered read the guard refuses, or a statement that isn't
@@ -136,10 +136,9 @@ pub fn plan_gathered(sql: &str, cx: &PlanCtx<'_>, why: &Rejection) -> Plan {
     }
 }
 
-/// A prepared statement's template, parsed once (chapter 17, "Prepared
-/// statements"): the gateway caches it per statement text and plans each
-/// execution from it with the parameters' values, so an execution never
-/// parses SQL.
+/// A prepared statement's template, parsed once: the gateway caches it per
+/// statement text and plans each execution from it with the parameters' values,
+/// so an execution never parses SQL.
 #[derive(Debug, Clone)]
 pub struct Template {
     stmt: Statement,
@@ -200,7 +199,7 @@ pub struct PreparedPlan {
 /// The rejection (reason `parse`) for text the router's parser doesn't
 /// read.
 pub fn parse_template(sql: &str, topo: &dyn Topology) -> R<Option<Template>> {
-    // R8 round 6: a statement with `GRAPH_TABLE` has no template; its plan
+    // A statement with `GRAPH_TABLE` has no template; its plan
     // depends on the graph's rows (the gateway runs it as text).
     if crate::graph::mentions(sql) && crate::graph::find(sql).is_ok_and(|v| !v.is_empty()) {
         return reject(
@@ -272,8 +271,8 @@ impl ParamLit {
 
 /// `sql` with its `?` placeholders (outside quotes, backticks and
 /// comments) replaced by `params` in order: the text a prepared
-/// statement's execution amounts to (chapter 18 records it for a held
-/// branch's redo). `None` when the counts differ.
+/// statement's execution amounts to (the 2PC coordinator records it for
+/// a held branch's redo). `None` when the counts differ.
 #[must_use]
 pub fn render_params(sql: &str, params: &[ParamLit]) -> Option<String> {
     let b = sql.as_bytes();
@@ -399,7 +398,7 @@ pub fn plan_prepared(t: &Template, params: &[ParamLit], cx: &PlanCtx<'_>) -> Pre
         kept: Cell::new(false),
     };
     let mut plan = plan_stmt(&stmt, &src, cx).unwrap_or_else(Plan::Reject);
-    // R3: a gathered read runs the template's text with the values written
+    // A gathered read runs the template's text with the values written
     // in where its placeholders were.
     if let Plan::Reject(r) = &plan
         && matches!(stmt, Statement::Query(_))
@@ -558,7 +557,7 @@ fn plan_stmt(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> {
     match stmt {
         Statement::Query(q) => match plan_query(stmt, q, src, cx) {
             Ok(p) => Ok(lookups::via_lookup(stmt, p, cx)),
-            // R3: what the gateway's operators can't split runs once over
+            // What the gateway's operators can't split runs once over
             // copies (a prepared statement's text is filled in by
             // `plan_prepared`).
             Err(r) if !src.template && gather::lifts(&r) => {
@@ -571,7 +570,7 @@ fn plan_stmt(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> {
             plan_update_delete(stmt, src, cx).map(|p| lookups::via_lookup(stmt, p, cx))
         }
         Statement::Explain { statement, .. } => {
-            // Plain EXPLAIN: one shard's plan (chapter 17, "EXPLAIN"),
+            // Plain EXPLAIN: one shard's plan,
             // reached from a prepared statement's template; the head as
             // the template wrote it.
             let inner = statement.to_string();
@@ -753,7 +752,7 @@ fn is_read(sql: &str) -> bool {
         .any(|w| t[..end].eq_ignore_ascii_case(w))
 }
 
-/// Chapter 17 ("Prepared statements", H9): the text a `COM_STMT_PREPARE`
+/// The text a `COM_STMT_PREPARE`
 /// of `sql` is prepared as for its metadata (parameter and column
 /// definitions), with the cluster to prepare it on. Every table of the
 /// topology `sql` names moves to one shard's schema: its group's lowest
@@ -762,8 +761,8 @@ fn is_read(sql: &str) -> bool {
 /// database's first schema, where the unchanged text would be prepared
 /// (1146). The cluster holds a shard of every table: `cx.session_cluster`
 /// when it does, else the lowest such cluster (tables on two clusters with
-/// no cluster in common were prepared on one that lacked a table, 1146,
-/// R8 round 7). `None` when `sql` names no table of the topology, no
+/// no cluster in common were prepared on one that lacked a table,
+/// 1146). `None` when `sql` names no table of the topology, no
 /// cluster holds them all, or the parser can't read it; executions still
 /// plan from the unchanged text.
 #[must_use]
@@ -774,7 +773,7 @@ pub fn metadata_sql(sql: &str, cx: &PlanCtx<'_>) -> Option<(String, String)> {
     let (body, lock) = split_share_lock(sql);
     let stmt = parse(body).ok()?;
     // One cluster must hold a shard of every table the statement names
-    // (its tables may sit on different clusters, R8 round 7): the session's
+    // (its tables may sit on different clusters): the session's
     // when it does, else the lowest such one; none at all and the text is
     // prepared unchanged.
     let mut common: Option<BTreeSet<String>> = None;
@@ -944,7 +943,7 @@ fn quoted(schema: &str) -> String {
 
 /// `text` with each listed table occurrence moved to its schema by editing
 /// the text at the parser's spans: what [`render`] does, without printing
-/// the statement again (chapter 17's `splice_names`). `None` when a span
+/// the statement again (`splice_names`). `None` when a span
 /// is missing or doesn't hold the name, so the caller renders instead.
 fn splice(
     text: &str,
@@ -1041,7 +1040,7 @@ struct Rel<'a> {
     /// The FROM item of the block it sits in (comma-joined items).
     item: usize,
     /// A derived table of literal rows: no table, the same rows on every
-    /// shard (R8 round 6, [`graph::constant_relation`]).
+    /// shard ([`graph::constant_relation`]).
     constant: bool,
     /// A `GRAPH_TABLE` call's placeholder: the call.
     graph: Option<usize>,
@@ -1149,7 +1148,7 @@ fn relation<'a>(tf: &TableFactor, cx: &PlanCtx<'a>, item: usize) -> Option<Rel<'
     })
 }
 
-#[allow(clippy::unnecessary_wraps)] // rejections from analysis come with R3's forms
+#[allow(clippy::unnecessary_wraps)] // kept fallible for rejections from analysis
 fn analyse<'a, 'q>(select: &'q Select, cx: &PlanCtx<'a>) -> R<Block<'a, 'q>> {
     let mut b = Block {
         rels: Vec::new(),
@@ -1314,8 +1313,8 @@ fn col_rel(rels: &[Rel<'_>], e: &Expr) -> Option<(usize, String)> {
 
 /// A parent member joined to its own parent on its one-column foreign key
 /// (`l.iid = i.iid`, the parent's referenced column unique): each child row
-/// pairs only with its parent, which shares its shard (chapter 15's
-/// `colocation_safe` through a parent chain). The two relations, child
+/// pairs only with its parent, which shares its shard (`colocation_safe`
+/// through a parent chain). The two relations, child
 /// first.
 fn parent_edge(rels: &[Rel<'_>], x: &Expr, y: &Expr) -> Option<(usize, usize)> {
     let one = |c: &(usize, String), p: &(usize, String)| -> bool {
@@ -1439,8 +1438,7 @@ fn or_equalities<'q>(rels: &[Rel<'_>], i: usize, e: &'q Expr, out: &mut Vec<&'q 
 }
 
 /// The key value a literal stands for under MySQL's comparison rules, when
-/// equality with it implies equality of the normalized key (chapter 17's
-/// three rules).
+/// equality with it implies equality of the normalized key.
 pub(crate) fn key_literal(e: &Expr, class: KeyClass) -> Option<KeyValue> {
     match e {
         Expr::Nested(x) => key_literal(x, class),
@@ -1782,7 +1780,7 @@ fn plan_query(stmt: &Statement, q: &Query, src: &Src<'_>, cx: &PlanCtx<'_>) -> R
                             top,
                         },
                     )),
-                    // Literal rows are on every shard (R8 round 6).
+                    // Literal rows are on every shard.
                     None if r.constant => {}
                     None => unsharded = true,
                 }
@@ -3148,8 +3146,8 @@ fn plan_insert(stmt: &Statement, src_in: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> 
                     "REPLACE, INSERT IGNORE or an upsert on a reference table with foreign keys",
                 );
             }
-            // Copies follow the primary through the change feed (chapter
-            // 15's ref_follow, not built yet): a write is exact only where
+            // Copies follow the primary through the change feed (`ref_follow`,
+            // not built yet): a write is exact only where
             // one copy exists.
             let [only] = entry.group.shards.as_slice() else {
                 return reject(
@@ -3178,7 +3176,7 @@ fn plan_insert(stmt: &Statement, src_in: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> 
             upsert_safe,
         } => (key.clone(), *key_ordinal, *upsert_safe),
     };
-    // Chapter 19: the AUTO_INCREMENT column's values come from the
+    // The AUTO_INCREMENT column's values come from the
     // gateway's ID blocks, never from a shard's own counter.
     if !cx.ids.filled
         && let Some(ai) = &entry.auto_inc
@@ -3188,7 +3186,7 @@ fn plan_insert(stmt: &Statement, src_in: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> 
     if key.is_empty()
         && let Some(link) = &entry.parent
     {
-        // Chapter 15: a parent member's rows go where their parent is.
+        // A parent member's rows go where their parent is.
         if fk::graph_for(cx, &default_schema, &entry.name)
             .is_some_and(|(g, t)| g.as_child(t).next().is_some())
         {
@@ -3223,7 +3221,7 @@ fn plan_insert(stmt: &Statement, src_in: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> 
             .auto_inc
             .as_ref()
             .is_some_and(|a| a.column.eq_ignore_ascii_case(&key));
-    // Chapter 15: every row carries its routing hash in `_sprig_rk`. The
+    // Every row carries its routing hash in `_sprig_rk`. The
     // statement is re-rendered with the column added (no splicing).
     let filled = fill_rk(ins, entry, &key, key_ordinal, class);
     let (stmt, text_src): (&Statement, Option<&Src<'_>>) = match &filled {
@@ -3319,10 +3317,10 @@ fn plan_insert(stmt: &Statement, src_in: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> 
             None => by_shard.push((shard, vec![ri])),
         }
     }
-    // Chapter 19: the rows' unique lookup values, claimed before the rows
+    // The rows' unique lookup values, claimed before the rows
     // are written, in the write's transaction.
     let claims = lookups::insert_claims(ins, entry, pos, &values.rows)?;
-    // Chapter 19 (R3): the parents its rows need, locked before they are
+    // The parents its rows need, locked before they are
     // written.
     let near = by_shard
         .first()
@@ -3349,7 +3347,7 @@ fn plan_insert(stmt: &Statement, src_in: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> 
     if ins.returning.is_some() {
         return reject(Reason::Unsupported, "INSERT … RETURNING across shards");
     }
-    // Shards on several clusters commit through chapter 18's coordinator
+    // Shards on several clusters commit through the 2PC coordinator
     // (the gateway's `ShardBackend::begin_write`).
     let mut targets = Vec::new();
     for (shard, rows) in &by_shard {
@@ -3484,7 +3482,7 @@ fn route_value(v: &Expr, entry: &TableEntry, class: KeyClass, zero_generates: bo
         .ok_or_else(|| Rejection::new(Reason::InsertKey, format!("key value {v}")))?;
     // 0 asks for a generated value only in an `AUTO_INCREMENT` key column
     // without `NO_AUTO_VALUE_ON_ZERO`; elsewhere it is a key like any
-    // other (bugfix3: r2harden's tenant G wrote id 0 and got 39420).
+    // other (writing id 0 to such a column used to fail with 39420).
     if matches!(kv, KeyValue::Int(0)) && zero_generates {
         return reject(Reason::AutoIncrement, "a zero key (AUTO_INCREMENT)");
     }
@@ -3541,7 +3539,7 @@ fn shard_insert(
 }
 
 fn plan_update_delete(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Plan> {
-    // Chapter 19 (R3): a write the planner doesn't split over a table
+    // A write the planner doesn't split over a table
     // whose foreign keys the gateway keeps would skip them.
     let check_single_or = |stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>, reason: Reason| {
         if fk::touches(stmt, cx) {
@@ -3608,8 +3606,8 @@ fn plan_update_delete(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Pl
     if assignments.iter().any(|a| assigns_key(&a.target, &key)) {
         return reject(Reason::KeyChange, "an UPDATE of the distribution key");
     }
-    // A parent member's foreign key decides its shard and `_sprig_rk`
-    // (chapter 15): changing it is a key change, unless the group has one
+    // A parent member's foreign key decides its shard and `_sprig_rk`:
+    // changing it is a key change, unless the group has one
     // shard and no `_sprig_rk` yet (nothing depends on it).
     if let Some(link) = &entry.parent
         && (entry.fill_rk || entry.group.shards.len() > 1)
@@ -3707,7 +3705,7 @@ fn plan_update_delete(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Pl
             at: entry.group.at(s),
         }
     };
-    // Chapter 19: a DELETE reads what its rows hold in unique lookups,
+    // A DELETE reads what its rows hold in unique lookups,
     // and releases it once the transaction commits.
     let shard_list: Vec<usize> = if shards.is_empty() {
         vec![0]
@@ -3719,7 +3717,7 @@ fn plan_update_delete(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Pl
     } else {
         Vec::new()
     };
-    // Chapter 19 (R3): parents of new child values, and the children of
+    // Parents of new child values, and the children of
     // the parent rows it changes.
     let near = entry
         .group
@@ -3750,7 +3748,7 @@ fn plan_update_delete(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Pl
         return reject(Reason::Variables, "a variable assignment across shards");
     }
     if order_by || limit {
-        // R3: a locked two-step (chapter 17's step 17).
+        // A locked two-step.
         let lw = limited_write(
             stmt,
             entry,
@@ -3786,7 +3784,7 @@ fn plan_update_delete(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Pl
     }))
 }
 
-/// R3's limited DML over several shards (`UPDATE` or `DELETE … ORDER BY
+/// Limited DML over several shards (`UPDATE` or `DELETE … ORDER BY
 /// … LIMIT n`): the per-shard statements without the order and limit, each
 /// with [`crate::plan::LIMITED_ROWS`] in its `WHERE`, and the read that
 /// finds the rows. Exact only when the order is total (it names every

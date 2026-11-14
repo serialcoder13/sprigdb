@@ -1,4 +1,4 @@
-//! The tenant catalog's tables (chapter 52, "Catalog tables"): the
+//! The tenant catalog's tables: the
 //! `approvals` migration module and [`CatalogRecStore`].
 //!
 //! Like the decision log, these tables are not versioned catalog state:
@@ -28,7 +28,7 @@ use crate::store::{DUE_APPLYING_TIMEOUT, Filter, Raised, RecStore};
 /// The module name in the catalog's format records.
 pub const MODULE: &str = "approvals";
 
-/// `recommendations` (chapter 52).
+/// `recommendations`.
 pub const DDL_RECOMMENDATIONS: &str = "CREATE TABLE IF NOT EXISTS recommendations (
   rec_id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   kind           VARCHAR(32)     NOT NULL,
@@ -57,7 +57,7 @@ pub const DDL_RECOMMENDATIONS: &str = "CREATE TABLE IF NOT EXISTS recommendation
   KEY by_object (db_id, object_id, state)
 ) ENGINE=InnoDB";
 
-/// `approval_subscriptions` (chapter 52): email preferences.
+/// `approval_subscriptions`: email preferences.
 pub const DDL_SUBSCRIPTIONS: &str = "CREATE TABLE IF NOT EXISTS approval_subscriptions (
   user_name    VARCHAR(128)    NOT NULL,
   email        VARCHAR(254)    NOT NULL,
@@ -76,7 +76,7 @@ pub static APPROVALS_MIGRATIONS: &[Migration] = &[Migration {
     statements: &[DDL_RECOMMENDATIONS, DDL_SUBSCRIPTIONS],
 }];
 
-/// The module, for [`Migrator::new`] and chapter 08's bootstrap hooks.
+/// The module, for [`Migrator::new`] and the catalog bootstrap hooks.
 pub const APPROVALS_MODULE: Module = Module {
     name: MODULE,
     migrations: APPROVALS_MIGRATIONS,
@@ -307,7 +307,7 @@ impl SqlRecs {
         Ok(n)
     }
 
-    /// The raise, in one transaction on `conn` (chapter 52, "The gate").
+    /// The raise, in one transaction on `conn`.
     ///
     /// # Errors
     /// MariaDB's; 1062 or 1213 when another raise of the same advice won

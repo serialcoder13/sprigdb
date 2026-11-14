@@ -1,6 +1,5 @@
-// sprig.internal.v1: full-text search between SprigDB's own processes
-// (chapter 39, "Interfaces"; R5 round 6), with mutual TLS from the
-// internal CA (chapter 04). Never exposed to clients.
+// sprig.internal.v1: full-text search between SprigDB's own processes,
+// with mutual TLS from the internal CA. Never exposed to clients.
 //
 // - SearchPartition: a worker with the search role (its own port,
 //   SPRIG_SEARCH_LISTEN; 7401 in the design) serving the copies it holds.
@@ -44,7 +43,8 @@ message SegmentChunk {
 
 service SearchSeed {
   // One page of the index's object, read by the index's definer without
-  // row-level security (decisions S6 and RL17): request_json and
+  // row-level security (hits are filtered when re-read through the
+  // caller's session): request_json and
   // reply_json are sprig_search::copy::{SeedRequest, SeedReply}.
   rpc SeedPage(SeedPageRequest) returns (SeedPageReply);
 }

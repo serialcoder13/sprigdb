@@ -1,9 +1,8 @@
-//! The mover under deterministic simulation (chapter 10, "Testing";
-//! chapter 46; chapter 10 build step 9).
+//! The mover under deterministic simulation.
 //!
 //! The real mover runs here: the job store and claims ([`MetaMover`],
 //! [`JobRuntime`]) on the simulated etcd, the engine, and the production
-//! map commit ([`TenantMapIo`]) on chapter 15's tenant map. Only MariaDB is
+//! map commit ([`TenantMapIo`]) on the tenant map. Only MariaDB is
 //! a model: one source cluster and one target cluster whose tables are
 //! `(k BIGINT PRIMARY KEY, v VARCHAR)`, a GTID binlog of row images,
 //! watermarks and DDL, a rename fence, position rows with fencing tokens,
@@ -16,7 +15,8 @@
 //! leases, ambiguous commits), dropped streams, failing and ambiguous
 //! target commits, failing and slow fences, and purged binlogs.
 //!
-//! The invariants checked (chapter 10's list, as they apply to R0):
+//! The invariants checked (the mover's invariants, as they apply to
+//! single-shard tenants):
 //!
 //! 1. No write acknowledged to a client is lost: the final owner's rows
 //!    equal the acknowledged writes.
@@ -67,11 +67,11 @@ use super::{SimClock, SimRng, World};
 use crate::faults::Node;
 
 mod feed;
-// Chapter 41's after-commit triggers on the same feed (R7 order 5).
+// After-commit triggers on the same feed.
 mod logic;
-// Chapter 45's stream sequencer on the same feed (R9).
+// The stream sequencer on the same feed.
 mod streams;
-// Prepared distributed-transaction branches at cutover (chapter 18).
+// Prepared distributed-transaction branches at cutover.
 pub mod xa;
 
 /// The tenant moved.
@@ -1115,7 +1115,7 @@ pub async fn run_move(world: World) -> std::result::Result<(), String> {
 /// Runs one seed of an idle tenant (no client writes): another job holds
 /// the target's copy slots for a while in some seeds, and in most seeds an
 /// operator cancels the job in a state drawn from every state before the
-/// commit (decision R0-fix 2). A cancel accepted before `ready` must end
+/// commit. A cancel accepted before `ready` must end
 /// `rolled_back`; every job must end (invariant 7).
 ///
 /// # Errors
@@ -1141,20 +1141,21 @@ pub struct Variant {
     /// Hog the target's copy slots for a while, and cancel the job in a
     /// drawn state.
     pub cancel: bool,
-    /// Run an after-commit trigger's worker on the tenant's feed too
-    /// (chapter 41), killed at random (invariant 9).
+    /// Run an after-commit trigger's worker on the tenant's feed too,
+    /// killed at random (invariant 9).
     pub triggers: bool,
     /// A coordinator prepares distributed-transaction branches on the
-    /// source ([`xa`]); the cutover drains them (chapter 10, steps 2b
-    /// and 3b) unless `xa_no_drain`.
+    /// source ([`xa`]); the cutover drains them (cutover steps 2b and
+    /// 3b) unless `xa_no_drain`.
     pub xa: bool,
     /// The XA variant without the drain: the behaviour before it.
     pub xa_no_drain: bool,
-    /// Run a change topic's sequencer on the tenant's feed too (chapter
-    /// 45), killed and overlapped at random (the stream invariant).
+    /// Run a change topic's sequencer on the tenant's feed too, killed
+    /// and overlapped at random (the stream invariant).
     pub streams: bool,
-    /// The sequencer reads through the shared per-cluster reader
-    /// (`sprig_feed::shared`, R9 r9feed) with tiny buffers and ring, so
+    /// The sequencer (and the trigger) reads through the shared
+    /// per-cluster reader (`sprig_feed::shared`) with tiny buffers and
+    /// ring, so
     /// its subscription is detached, comes back through the ring, and
     /// falls back to catch-up dumps (the same stream invariant).
     pub shared_feed: bool,
@@ -1177,8 +1178,28 @@ pub async fn run_move_triggers(world: World) -> std::result::Result<(), String> 
     .await
 }
 
+/// [`run_move_triggers`] with the trigger's feed reading through the
+/// shared per-cluster reader, with tiny buffers and ring:
+/// its subscription is detached, comes back through the ring, a replay or
+/// a catch-up dump, and follows the move. Every change must still run
+/// exactly once.
+///
+/// # Errors
+/// The first broken invariant.
+pub async fn run_move_triggers_shared(world: World) -> std::result::Result<(), String> {
+    run_move_with(
+        world,
+        Variant {
+            triggers: true,
+            shared_feed: true,
+            ..Variant::default()
+        },
+    )
+    .await
+}
+
 /// Runs one seed of [`run_move`] with a change topic's sequencer on the
-/// tenant's feed (chapter 45), killed, overlapped by a second sequencer
+/// tenant's feed, killed, overlapped by a second sequencer
 /// (a lost lease) and failing its appends at random: every change of the
 /// topic's table is in the log once, in commit order per partition.
 ///
@@ -1196,7 +1217,7 @@ pub async fn run_move_streams(world: World) -> std::result::Result<(), String> {
 }
 
 /// [`run_move_streams`] with the sequencer reading through the shared
-/// per-cluster reader (R9, r9feed): its tail subscribes to one hub per
+/// per-cluster reader: its tail subscribes to one hub per
 /// cluster, whose tiny buffers and ring make it detach, return through the
 /// ring and fall back to catch-up dumps while the tenant moves, streams
 /// drop and the sequencer is killed. The stream invariant must hold.
@@ -1218,7 +1239,7 @@ pub async fn run_move_streams_shared(world: World) -> std::result::Result<(), St
 /// Runs one seed of [`run_move`] with a coordinator preparing
 /// distributed-transaction branches on the source ([`xa`]): crashed and
 /// stalled coordinators leave branches prepared at cutover, which the
-/// cutover drains (chapter 10, steps 2b and 3b). Nothing may be lost: a
+/// cutover drains (cutover steps 2b and 3b). Nothing may be lost: a
 /// branch committed after `G` would be missing on the target.
 ///
 /// # Errors
@@ -1408,6 +1429,7 @@ async fn run_move_with(world: World, variant: Variant) -> std::result::Result<()
         tokio::spawn(logic::trigger_worker(
             world.clone(),
             feed_clusters.clone(),
+            variant.shared_feed,
             tier.clone(),
             sc.faults,
             feed_goal.clone(),

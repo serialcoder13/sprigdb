@@ -1,5 +1,4 @@
-//! Server tuning (chapter 09, "Server tuning"; build steps 10 and 11):
-//! sizing `table_definition_cache`, `table_open_cache`,
+//! Server tuning: sizing `table_definition_cache`, `table_open_cache`,
 //! `innodb_open_files`, `open_files_limit` and `stored_program_cache` from
 //! what a cluster holds, within a memory budget, with hysteresis.
 //!
@@ -19,7 +18,7 @@
 //! ```
 //!
 //! [`want`] is steps 1 to 7, pure. [`Tuner`] keeps the per-cluster memory
-//! for steps 8 and 9 and the rules of "Applying": `table_open_cache` closes
+//! for steps 8 and 9 and the rules for applying: `table_open_cache` closes
 //! every open table when set, so it changes only on growth of at least
 //! `tuning.min_change_pct` (or after 24 h of wanting less) and never more
 //! often than every `tuning.interval_minutes`; `innodb_open_files` and
@@ -218,7 +217,7 @@ pub enum ApplyMode {
     RecommendOnly,
 }
 
-/// What a cluster holds and does (chapter 09, "Inputs").
+/// What a cluster holds and does.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TuningInputs {
     /// `T`: tables on the cluster.
@@ -389,7 +388,7 @@ pub struct Change {
     pub mode: ApplyMode,
 }
 
-/// A tuning plan (chapter 09's `TuningPlan`).
+/// A tuning plan.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TuningPlan {
     /// The changes worth making now.
@@ -582,7 +581,7 @@ impl Tuner {
     }
 }
 
-/// Chapter 09's interface.
+/// The tuning interface.
 #[async_trait::async_trait]
 pub trait ServerTuner: Send + Sync {
     /// Plans a pass for `cluster`.
@@ -590,7 +589,7 @@ pub trait ServerTuner: Send + Sync {
     /// # Errors
     /// Probe or input errors.
     async fn plan(&self, cluster: &ClusterId) -> Result<TuningPlan>;
-    /// Applies a plan (managed clusters only, R2).
+    /// Applies a plan (managed clusters only).
     ///
     /// # Errors
     /// The server's.

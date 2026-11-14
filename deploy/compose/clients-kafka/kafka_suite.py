@@ -1,8 +1,8 @@
-# Kafka client checks with kafka-python (r9final, 10 November 2026; committed
-# for CI by r4three): produce, groups, commits, seeks, timestamps, headers,
-# gzip. Prints one JSON object of observations; run.sh runs it against an
-# Apache Kafka reference and SprigDB and deploy/compose/ci/outcomes.py
-# compares (keys ending in _seconds are timings, not compared).
+# Kafka client checks with kafka-python: produce, groups, commits, seeks,
+# timestamps, headers, gzip. Prints one JSON object of observations; run.sh
+# runs it against an Apache Kafka reference and SprigDB and
+# deploy/compose/ci/outcomes.py compares (keys ending in _seconds are
+# timings, not compared).
 # Usage: python kafka_suite.py bootstrap user password topic group
 # (user "-": PLAINTEXT, no SASL, for the reference).
 import json, sys, time

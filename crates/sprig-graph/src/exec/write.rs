@@ -1,4 +1,4 @@
-//! Writes (chapter 43, "Writes and transactions"; build step 13):
+//! Writes:
 //! `CREATE`, `MERGE`, `SET`, `REMOVE`, `[DETACH] DELETE`, inside the
 //! caller's transaction.
 //!
@@ -112,6 +112,7 @@ impl Exec<'_> {
             rk,
             labels: uniq,
             props,
+            partial: None,
         }))
     }
 
@@ -242,6 +243,7 @@ impl Exec<'_> {
                 dst_rk: dst.rk,
                 rtype: t.clone(),
                 props,
+                partial: None,
             });
             if let Some(v) = &rp.var {
                 row.insert(v.clone(), Value::Rel(rel.clone()));
@@ -419,6 +421,7 @@ impl Exec<'_> {
                         rk: p.rk,
                         labels: p.labels,
                         props: p.props,
+                        partial: None,
                     }),
                 );
             } else if let Some(mut e) = p.edge {
@@ -427,6 +430,7 @@ impl Exec<'_> {
                 self.store.update_edge(&e).await?;
                 let mut r = (*self.rel_val(&e)).clone();
                 r.props = p.props;
+                r.partial = None;
                 rels.insert(id, Arc::new(r));
             }
         }
@@ -724,10 +728,12 @@ fn refreshed(v: &Value, p: &Pending) -> Value {
         Value::Node(n) => Value::Node(Arc::new(Node {
             labels: p.labels.clone(),
             props: p.props.clone(),
+            partial: None,
             ..(**n).clone()
         })),
         Value::Rel(r) => Value::Rel(Arc::new(Rel {
             props: p.props.clone(),
+            partial: None,
             ..(**r).clone()
         })),
         other => other.clone(),

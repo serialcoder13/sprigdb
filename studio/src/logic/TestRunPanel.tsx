@@ -1,7 +1,6 @@
-// The test-run form and its report (chapter 44 step 26, Studio round 6;
-// decisions RC13–RC17). Inputs: arguments by parameter, a trigger's or
-// validation's row (old row and operation), a stream record or queue
-// message, snapshot rows (the code sees exactly these rows of each table
+// The test-run form and its report. Inputs: arguments by parameter, a
+// trigger's or validation's row (old row and operation), a stream record or
+// queue message, snapshot rows (the code sees exactly these rows of each table
 // named) and answers for `fetch` (never sent). The report shows the event or
 // the error, each statement with its kind, rows and time, the writes
 // (always rolled back), logs, outbound calls, the snapshot tables after the

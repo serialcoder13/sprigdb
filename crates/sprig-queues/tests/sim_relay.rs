@@ -1,6 +1,5 @@
-//! A randomized simulation of queues across gateways (chapter 50,
-//! "Testing": crash owners and consumer gateways at every step; chapter
-//! 46): three engines share the in-memory catalog, leases, registry and
+//! A randomized simulation of queues across gateways: crash owners
+//! and consumer gateways at every step. Three engines share the in-memory catalog, leases, registry and
 //! store, and reach each other through the relay. At random steps clients
 //! publish (with confirms) through any gateway, consumers on any gateway
 //! take, acknowledge, requeue or hold deliveries, a gateway is killed

@@ -1,5 +1,5 @@
-// The aggregation-stage differential corpus (M2, 12 Nov 2026): window
-// functions, accumulators and stages.
+// The aggregation-stage differential corpus: window functions,
+// accumulators and stages.
 //
 // Run with mongosh against a reference MongoDB 8.0 on a private port:
 //

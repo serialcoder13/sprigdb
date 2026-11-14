@@ -1,4 +1,4 @@
-# M0.3 Hibernate schema validation (../README.md): Spring Data JPA with
+# Tenant harness: Hibernate schema validation (../README.md): Spring Data JPA with
 # ddl-auto=validate against the schema Flyway created, over MySQL
 # Connector/J 9.7.0 or MariaDB Connector/J 3.5.11.
 #

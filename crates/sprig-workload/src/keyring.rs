@@ -1,11 +1,11 @@
-//! Tenant data keys for sealed parameter samples (chapter 12, "Parameter
-//! samples for replay": "the tenant's workload data key").
+//! Tenant data keys for sealed parameter samples (the tenant's workload
+//! data key).
 //!
-//! Chapter 12 names `sprig_common::crypto::TenantKeyring`, and chapter 14
-//! defines no keyring yet (only `auth.factor_key_ref` for TOTP seeds), so
-//! M0.4 builds the smallest one samples need, here *(choice: in the crate
-//! that seals, until chapter 14 grows a KMS-backed keyring that other
-//! chapters share; the trait is the seam)*:
+//! There is no shared tenant keyring yet (authentication has only
+//! `auth.factor_key_ref` for TOTP seeds), so this builds the smallest one
+//! samples need, here *(choice: in the crate that seals, until a
+//! KMS-backed keyring that other subsystems share exists; the trait is the
+//! seam)*:
 //!
 //! - [`TenantKeyring`]: the key new samples are sealed with, and any key
 //!   by version, to open older ones;
@@ -58,11 +58,11 @@ impl std::fmt::Debug for DataKey {
     }
 }
 
-/// Where sample keys come from (chapter 12's `TenantKeyring`).
+/// Where sample keys come from.
 pub trait TenantKeyring: Send + Sync {
     /// The key new samples of `tenant` are sealed with, with its version.
     /// `None` when no key is available: samples are then not captured,
-    /// and statistics continue (chapter 12, "Failure handling").
+    /// and statistics continue.
     fn current(&self, tenant: TenantId) -> Option<(u32, DataKey)>;
 
     /// The key of `version`, to open a sample sealed under it. `None` when
@@ -190,9 +190,9 @@ impl MasterKeyring {
     }
 
     /// The key of `tenant` for `purpose` under the newest master secret,
-    /// with its version: chapter 14's keyring with a purpose label
+    /// with its version: the keyring with a purpose label
     /// (`info = purpose ‖ tenant id`), so a key for one purpose (`sink`,
-    /// chapter 51) opens nothing sealed for another. The workload key's
+    /// for sink credentials) opens nothing sealed for another. The workload key's
     /// derivation is unchanged (`purpose = "workload"`).
     #[must_use]
     pub fn current_for(&self, purpose: &[u8], tenant: TenantId) -> Option<(u32, DataKey)> {

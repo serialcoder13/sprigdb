@@ -69,9 +69,9 @@ use sprig_common::{Result, SprigCode, SprigError};
 use sprig_meta::Cmp;
 use sprig_meta::bootstrap::rfc3339;
 use sprig_settings::{
-    AnySetting, BoundsPatch, Explanation, Ignored, LiveSettings, RecordOutcome, Registry,
-    Scope, ScopeKind, SettingChange, SettingCtx, SettingEdit, SettingRecord, SettingsWriter,
-    StepOutcome, Value, ValueKind, Warning, explain_layered,
+    AnySetting, BoundsPatch, Explanation, Ignored, LiveSettings, RecordOutcome, Registry, Scope,
+    ScopeKind, SettingChange, SettingCtx, SettingEdit, SettingRecord, SettingsWriter, StepOutcome,
+    Value, ValueKind, Warning, explain_layered,
 };
 
 use crate::admin::invalid;
@@ -185,7 +185,7 @@ pub fn key_view(def: &dyn AnySetting) -> SettingKeyView {
             .map(|(_, n)| (*n).to_owned())
             .collect(),
         hard_bounds: def.hard().into(),
-        // `restart` for a key read only at start (bugfix-89).
+        // `restart` for a key read only at start.
         apply: sprig_settings::registry::apply_name(def).to_owned(),
         operator_only: def.operator_only(),
         tenant_settable: tenant_settable(def),

@@ -1,6 +1,6 @@
 //! Window statistics: one fingerprint's counters merged over a time window,
-//! as the workload store returns them (chapter 12, `WorkloadStore::window`)
-//! and automatic indexing reads them (chapter 13, "Cost model").
+//! as the workload store returns them (`WorkloadStore::window`) and
+//! automatic indexing's cost model reads them.
 //!
 //! [`FpWindowStats`] carries the merged [`Stats`] plus decrypted parameter
 //! samples ([`SampledLiterals`]); its accessors give what `sprig-advisor`'s
@@ -132,7 +132,7 @@ fn value_of(stmt: &[u8], l: &Literal, params: &[SampleValue]) -> SampleValue {
     }
 }
 
-/// One fingerprint over a window (chapter 12, `FpWindowStats`): merged
+/// One fingerprint over a window: merged
 /// buckets with their percentiles, and its decrypted samples.
 #[derive(Debug, Clone)]
 pub struct FpWindowStats {
@@ -230,8 +230,8 @@ impl FpWindowStats {
         per_run(self.stats.rows_affected, self.stats.exec_count)
     }
 
-    /// Rows examined per row returned over the probed runs (chapter 13's
-    /// `top_total_time` trigger): `rows_examined / max(1, returned_sampled)`.
+    /// Rows examined per row returned over the probed runs (automatic
+    /// indexing's `top_total_time` trigger): `rows_examined / max(1, returned_sampled)`.
     #[must_use]
     pub fn examined_per_returned(&self) -> Option<f64> {
         (self.stats.examined_samples > 0)

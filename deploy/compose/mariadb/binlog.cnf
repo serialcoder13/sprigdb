@@ -1,6 +1,5 @@
-# Binlog and durability settings every SprigDB-managed node starts with
-# (chapter 27, "Settings on clusters SprigDB manages"), plus the annotate
-# settings the change feed needs (chapter 38, "Binlog requirements").
+# Binlog and durability settings every SprigDB-managed node starts with,
+# plus the annotate settings the change feed needs.
 # server_id and gtid_domain_id are per node: see compose.yaml.
 [mariadbd]
 log_bin                        = mariadb-bin
@@ -15,11 +14,11 @@ innodb_flush_log_at_trx_commit = 1
 gtid_strict_mode               = ON
 log_slave_updates              = ON
 skip_name_resolve              = ON
-# Development only: chapter 27 also sets read_only = ON (fenced boot, the
+# Development only: production also sets read_only = ON (fenced boot, the
 # agent unfences) and require_secure_transport = ON. Neither the agent nor
 # TLS exists yet, so this environment leaves both off.
 
-# --- Dev sizing (hardening round 1, HD2) -----------------------------------
+# --- Dev sizing ------------------------------------------------------------
 # Kept in this file because every dev node mounts it, so a plain
 # `docker start` after an OOM keeps these (SET GLOBAL values were lost).
 # Budget per node at mem_limit 1.5 GB: about 300 MB fixed (buffer pool 128M,

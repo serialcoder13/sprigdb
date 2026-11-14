@@ -187,7 +187,7 @@ fn galera_without_a_state_uuid_is_degraded() {
     assert_eq!(r.health, ClusterHealth::Healthy);
     assert!(r.nodes.iter().all(|n| n.reason.is_none()));
 
-    // All zeros (HD1): every node still writes, the cluster is degraded,
+    // All zeros: every node still writes, the cluster is degraded,
     // and each node says why.
     for p in &mut probes {
         facts_mut(p).galera.as_mut().unwrap().state_uuid =

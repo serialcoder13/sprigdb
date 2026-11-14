@@ -30,7 +30,7 @@ no sprig-dc-fra1 /sprig/g/dc-leases/ams1
 no sprig-dc-fra1 /sprig/g/tenants/42
 ok sprig-controller /sprig/g/tenants/42
 docker exec "$name" etcdctl --user sprig-agent:pw get /sprig/dc/fra1/clusters/fra1-c1 >/dev/null || { echo "FAIL: agent can't read clusters/"; fail=1; }
-# Chapter 23 open question 6: endpoint discovery needs MemberList.
+# Endpoint discovery needs MemberList.
 docker exec "$name" etcdctl --user sprig-gateway:pw member list >/dev/null || { echo "FAIL: a prefix-limited user can't list members"; fail=1; }
 [ $fail -eq 0 ] && echo "etcd roles: every check passed"
 exit $fail

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Chapter 24's move test bed (milestone M0.7): two simulated data centers,
+# Cross-DC move test bed: two simulated data centers,
 # mum1 and fra1, from the three-DC layout (compose.3dc.yaml with
 # dc/compose.yaml), and on the host one controller, one worker and one
 # gateway per DC, in single-etcd mode (one etcd serves the global tier and

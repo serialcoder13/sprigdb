@@ -1,4 +1,4 @@
-//! The probe suite (chapter 09, "Probes"; build steps 2 and 8).
+//! The probe suite.
 //!
 //! Probes run as `sprig_ctl` with `SHOW GLOBAL VARIABLES|STATUS WHERE
 //! Variable_name IN (...)`, so a missing variable gives no row, not an
@@ -103,7 +103,7 @@ pub const STATUS: &[&str] = &[
 /// for their node (a reused address: on kind, a freed node port went to
 /// another cluster's node), turning them into [`ProbeError::wrong_node`]
 /// failures, which make the node `broken`; returns the pins to record for
-/// nodes that answered without one (r2opfix).
+/// nodes that answered without one.
 pub fn check_identity(
     pinned: &std::collections::BTreeMap<NodeId, String>,
     probes: &mut [NodeProbe],

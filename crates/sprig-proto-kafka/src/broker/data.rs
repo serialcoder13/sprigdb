@@ -1,4 +1,4 @@
-//! The data plane (chapter 45 build steps 10 and 11): Produce, Fetch,
+//! The data plane: Produce, Fetch,
 //! ListOffsets and OffsetForLeaderEpoch, over the [`StreamData`] trait the
 //! gateway implements on `sprig-streams` (and [`crate::mem::MemData`] in
 //! memory, for tests).
@@ -75,7 +75,7 @@ pub struct DataTopic {
     pub max_message_bytes: usize,
 }
 
-/// What a request does to a topic (chapter 29: `INSERT` to produce,
+/// What a request does to a topic, as a privilege (`INSERT` to produce,
 /// `SELECT` to read).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
@@ -153,7 +153,7 @@ pub struct StoredRecord {
     pub headers: Vec<Header>,
     /// The epoch that appended it.
     pub leader_epoch: i32,
-    /// Left out by the reader's row-level security (chapter 29, RL44): its
+    /// Left out by the reader's row-level security: its
     /// offset still counts (a batch spans it, so the consumer moves past
     /// it), its key, value and headers aren't sent.
     pub filtered: bool,
@@ -434,7 +434,7 @@ pub fn encode_batches(records: &[StoredRecord]) -> Result<Vec<u8>, CodecError> {
         }
         let run = &records[i..j];
         let base = run[0].offset;
-        // Filtered records (RL44) leave offset gaps inside the batch, and
+        // Filtered records leave offset gaps inside the batch, and
         // a batch of only filtered records is sent empty: either way its
         // last offset delta covers them, so the consumer goes past them.
         let kept = || run.iter().filter(|r| !r.filtered);
@@ -1076,7 +1076,7 @@ mod tests {
         assert_eq!(back[1].base_offset, 5);
         assert_eq!(back[1].partition_leader_epoch, 6);
         assert!(encode_batches(&[]).unwrap().is_empty());
-        // RL44: filtered records leave gaps, and a batch of only filtered
+        // Filtered records leave gaps, and a batch of only filtered
         // records goes empty, its last delta still covering them.
         let mut recs = vec![rec(10, 4), rec(11, 4), rec(12, 4), rec(13, 4)];
         recs[1].filtered = true;

@@ -1,4 +1,4 @@
-// Errors from the API (chapter 37, "Errors"): SprigDB's JSON body
+// Errors from the API: SprigDB's JSON body
 // {code, name, message, sqlstate, trace_id} with the HTTP status.
 
 export interface ErrorBody {
@@ -45,5 +45,5 @@ export function errorText(e: unknown): string {
   return String(e);
 }
 
-/** Session-ending refusals (chapter 44, "Failure handling"). */
+/** Session-ending refusals. */
 export const SESSION_ENDED_CODES = new Set([1045, 39924, 39925]);

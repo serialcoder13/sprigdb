@@ -1,4 +1,4 @@
-//! The MariaDB model (chapter 46, "The MariaDB model").
+//! The MariaDB model.
 //!
 //! Nothing simulates MariaDB, so the testkit models what SprigDB relies on:
 //!
@@ -13,8 +13,8 @@
 //! - a binlog of event groups with MariaDB GTIDs (`domain-server-seq`),
 //!   `@@last_gtid`, `@@gtid_binlog_pos` and `MASTER_GTID_WAIT`;
 //! - grants per schema with the current-database cache that makes a
-//!   `REVOKE` miss connections already in the schema (chapter 09 fences
-//!   with grants *and* `KILL` for that reason), `KILL QUERY`,
+//!   `REVOKE` miss connections already in the schema (cluster fencing
+//!   uses grants *and* `KILL` for that reason), `KILL QUERY`,
 //!   `KILL CONNECTION` and `read_only`;
 //! - replicas that receive events after a network delay, acknowledge them
 //!   for semi-sync `AFTER_SYNC` (commits wait for one acknowledgement up to
@@ -25,8 +25,8 @@
 //!   brute-force abort of conflicting local transactions on other nodes,
 //!   and non-primary nodes that refuse queries;
 //! - crashes that keep committed and prepared transactions only (with
-//!   `sync_binlog = 1` and `innodb_flush_log_at_trx_commit = 1`, as chapter
-//!   27 configures every node); a transaction waiting for its semi-sync
+//!   `sync_binlog = 1` and `innodb_flush_log_at_trx_commit = 1`, as
+//!   provisioning configures every node); a transaction waiting for its semi-sync
 //!   acknowledgement is in the binlog, so recovery commits it.
 //!
 //! The core, [`Model`], is synchronous and takes virtual time as an

@@ -1,5 +1,5 @@
 //! The drivers for a single node, a primary with replicas, and an external
-//! (managed) cluster (chapter 09, build step 5). They differ only in which
+//! (managed) cluster. They differ only in which
 //! nodes they expect, so one type serves all three.
 
 use std::sync::Arc;
@@ -283,7 +283,7 @@ impl TopologyDriver for BasicDriver {
     }
 
     fn failover(&self) -> Option<&dyn FailoverHooks> {
-        // Chapter 25, build step 13.
+        // Failover runs as plain functions in `crate::failover`.
         None
     }
 }

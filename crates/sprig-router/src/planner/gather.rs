@@ -1,5 +1,5 @@
-//! Planning gathered reads (chapter 17, "Gathered reads (R3)"): a `SELECT`
-//! the planner rejected for a reason R3 lifts becomes a
+//! Planning gathered reads: a `SELECT` the planner rejected for a reason
+//! gathering lifts becomes a
 //! [`GatherPlan`](crate::gather::GatherPlan) when every function it calls
 //! is a MariaDB built-in that answers the same on another connection.
 //!

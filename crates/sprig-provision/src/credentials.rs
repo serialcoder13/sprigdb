@@ -1,5 +1,4 @@
-//! System-account credentials: secret references and how they resolve
-//! (chapter 09, "System accounts"; chapter 27, "External registration").
+//! System-account credentials: secret references and how they resolve.
 //!
 //! etcd holds no secrets: a cluster record names its `sprig_ctl` and
 //! `sprig_repl` credentials by reference, and only controllers and workers
@@ -10,7 +9,7 @@
 //! - `env:SPRIG_CTL` reads a TOML document from an environment variable.
 //!
 //! With `#section`, the credential is the TOML table of that name, so one
-//! file can hold both accounts. Chapter 27's `credentials_ref` names such a
+//! file can hold both accounts. A cluster's `credentials_ref` names such a
 //! file; [`refs_for`] turns it into the two references.
 //!
 //! ```toml
@@ -45,7 +44,7 @@ pub const CTL_USER: &str = "sprig_ctl";
 pub const REPL_USER: &str = "sprig_repl";
 
 /// How a connection checks the server's certificate. There is no plain
-/// text mode: SprigDB refuses connections without TLS (chapter 27).
+/// text mode: SprigDB refuses connections without TLS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TlsMode {
@@ -95,7 +94,7 @@ impl Credential {
     }
 
     /// The password, for clients that log in themselves (the gateway's
-    /// backend client, chapter 06). Never log it.
+    /// backend client). Never log it.
     #[must_use]
     pub fn password(&self) -> &str {
         &self.password
@@ -164,7 +163,7 @@ pub enum SecretSource {
     /// An environment variable.
     Env(String),
     /// A credential already in memory: the per-user backend accounts'
-    /// derived passwords (chapter 29). Never printed.
+    /// derived passwords. Never printed.
     Resolved(ResolvedSecret),
 }
 
@@ -296,7 +295,7 @@ pub fn resolve(reference: &str, default_user: &str) -> Result<Credential> {
     reference.parse::<SecretRef>()?.resolve(default_user)
 }
 
-/// The two references for chapter 27's `credentials_ref`: the file's
+/// The two references for a cluster's `credentials_ref`: the file's
 /// `[sprig_ctl]` and `[sprig_repl]` tables.
 ///
 /// # Errors
@@ -315,8 +314,7 @@ pub fn refs_for(credentials_ref: &str) -> Result<SecretRefs> {
 }
 
 /// A [`NodeConnector`] over one secret reference, resolved on every call
-/// so a rotated secret is picked up at the next probe (chapter 09: "secret
-/// re-read").
+/// so a rotated secret is picked up at the next probe.
 #[derive(Debug, Clone)]
 pub struct CredentialConnector {
     reference: String,

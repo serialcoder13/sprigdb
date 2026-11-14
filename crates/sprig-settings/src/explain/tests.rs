@@ -1,4 +1,5 @@
-//! Explanations: chapter 08's worked example step by step, locks, allowed
+//! Explanations: the layered example (global, tenant, table) step by
+//! step, locks, allowed
 //! lists, scopes not accepted, a clamped default, and a property: the
 //! steps always agree with resolution.
 
@@ -65,7 +66,7 @@ fn kinds(e: &Explanation) -> Vec<(ScopeKind, StepOutcome)> {
     e.steps.iter().map(|s| (s.kind, s.outcome)).collect()
 }
 
-/// Chapter 08's example: global bounds max 8; tenant 6 with bounds max
+/// The layered example: global bounds max 8; tenant 6 with bounds max
 /// 5; table `orders` 7 → 5, clamped, source object.
 #[test]
 fn the_chapter_example_step_by_step() {

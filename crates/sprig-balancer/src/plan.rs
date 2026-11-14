@@ -1,5 +1,4 @@
-//! `place()` and the rebalance planner with hysteresis (chapter 11,
-//! "Placing new shards" and "Rebalancing with hysteresis"; build step 5).
+//! `place()` and the rebalance planner with hysteresis.
 //!
 //! The planner is pure: it reads a [`FleetView`] and returns a
 //! [`PlanReport`] (moves, plus the reasoning `sprigctl explain placement`
@@ -11,8 +10,7 @@
 //! the band (`high_pct` to start, `target_pct` as the ceiling for targets),
 //! sustain windows, shard and cluster cooldowns, the simulation that
 //! rejects a move whose target would end up more than `spread_pct` fuller
-//! than its source, concurrency limits, and (a SprigDB choice on top of
-//! the book) no rebalancing move back to a cluster the shard left within
+//! than its source, concurrency limits, and no rebalancing move back to a cluster the shard left within
 //! [`MOVE_BACK_WINDOW_SECS`].
 
 use std::collections::BTreeMap;
@@ -30,7 +28,7 @@ use crate::model::{ClusterState, FleetView, Fullness, LoadVector, ShardKey, Time
 use crate::settings::{BalancerMode, BalancerSettings, GB};
 
 /// A move back to a cluster left within this window counts as reverted
-/// (chapter 11's thrash table: 7 days).
+/// (7 days, the window ping-pong detection uses).
 pub const MOVE_BACK_WINDOW_SECS: u64 = 7 * 86_400;
 
 /// Why a new shard is being placed.
@@ -304,7 +302,7 @@ struct Sustain {
     spread_since: Option<Timestamp>,
 }
 
-/// Chapter 11's interface: feasibility, placement and rebalancing.
+/// The placement interface: feasibility, placement and rebalancing.
 pub trait PlacementPolicy: Send + Sync {
     /// Clusters that can take `unit`, with their fit.
     fn feasible(&self, view: &FleetView, unit: &Unit, now: Timestamp) -> Vec<(ClusterId, Fit)>;

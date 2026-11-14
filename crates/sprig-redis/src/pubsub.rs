@@ -1,5 +1,4 @@
-//! The gateway's pub/sub hub and wait table (chapter 40, "Pub/sub and
-//! keyspace notifications", "Blocking commands").
+//! The gateway's pub/sub hub and wait table.
 //!
 //! These are one gateway's subscribers and waiters. Across gateways,
 //! [`crate::fabric`]'s hubs carry publishes and wake-ups between them;
@@ -141,9 +140,8 @@ impl Hub {
     }
 
     /// Whether tenant `scope` has a subscription here a keyspace
-    /// notification could reach: a pattern, or a `__key...` channel (RL51:
-    /// the gateway's notifications from the change feed run while one
-    /// does).
+    /// notification could reach: a pattern, or a `__key...` channel (the
+    /// gateway's notifications from the change feed run while one does).
     #[must_use]
     pub fn keyspace_interest(&self, scope: &str) -> bool {
         self.with(|h| {

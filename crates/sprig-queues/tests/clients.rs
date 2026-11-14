@@ -1,5 +1,5 @@
-//! Independent clients against the queue engine (chapter 50, "Testing";
-//! rule 14's test-only crates): `lapin` speaks AMQP 0-9-1, `fe2o3-amqp`
+//! Independent clients against the queue engine (test-only
+//! crates): `lapin` speaks AMQP 0-9-1, `fe2o3-amqp`
 //! AMQP 1.0. Neither shares code with `sprig-proto-amqp`, so a misreading
 //! of the specs on both sides of the in-house client can't hide here.
 //!

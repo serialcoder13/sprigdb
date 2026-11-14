@@ -1,9 +1,9 @@
-//! SASL for the Kafka listener (chapter 45, "Authentication"): PLAIN
+//! SASL for the Kafka listener: PLAIN
 //! (RFC 4616) and SCRAM-SHA-256 and SCRAM-SHA-512 (RFC 5802, RFC 7677),
 //! server side.
 //!
 //! These are the conversations only. Who the user is, which tenant, and
-//! whether the account may log in is chapter 14's: the broker passes the
+//! whether the account may log in is the identity layer's: the broker passes the
 //! PLAIN credentials, or the SCRAM user name, to its
 //! [`Identity`](crate::broker::Identity), which answers with a principal
 //! or with the account's SCRAM verifier (a decoy for unknown accounts, so
@@ -79,7 +79,7 @@ impl ScramMechanism {
     }
 }
 
-/// A stored SCRAM verifier (chapter 14's `verifiers` row): what the server
+/// A stored SCRAM verifier (a `verifiers` row): what the server
 /// needs, never the password.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ScramCredential {
@@ -94,8 +94,8 @@ pub struct ScramCredential {
     /// `HMAC(SaltedPassword, "Server Key")`.
     pub server_key: Vec<u8>,
     /// `(StoredKey, ServerKey)` of a retained second password with the same
-    /// salt and iterations (chapter 14's dual passwords, `RETAIN CURRENT
-    /// PASSWORD`): the proof may match either.
+    /// salt and iterations (dual passwords, `RETAIN CURRENT PASSWORD`): the
+    /// proof may match either.
     pub secondary: Option<(Vec<u8>, Vec<u8>)>,
 }
 
@@ -110,7 +110,7 @@ impl std::fmt::Debug for ScramCredential {
 
 impl ScramCredential {
     /// Derives the verifier of `password` (already SASLprep-normalized by
-    /// the caller, as chapter 14 stores it).
+    /// the caller, as SprigDB stores it).
     #[must_use]
     pub fn derive(
         mechanism: ScramMechanism,
@@ -642,7 +642,7 @@ mod tests {
         assert!(s.client_final(&m).is_err());
     }
 
-    /// Chapter 14's dual passwords: the new password's verifier shares the
+    /// Dual passwords: the new password's verifier shares the
     /// retained one's salt, so one exchange accepts either password.
     #[test]
     fn a_retained_password_with_the_same_salt_also_logs_in() {

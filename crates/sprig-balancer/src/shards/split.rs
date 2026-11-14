@@ -1,4 +1,4 @@
-//! Hash histograms and split points (chapter 20, "Choosing split points").
+//! Hash histograms and split points.
 //!
 //! A histogram covers one shard's range `[lo, hi)` with buckets of bytes
 //! (from index dives) or writes (from gateway sketches), and names heavy
@@ -161,7 +161,7 @@ impl HashHistogram {
     }
 }
 
-/// Chapter 20's `choose_split`: up to `ways` children by `weight`.
+/// `choose_split`: up to `ways` children by `weight`.
 ///
 /// # Errors
 /// [`NoSplit`] when the range is a single hash or a child would hold under
@@ -309,7 +309,7 @@ mod tests {
             p.shares.iter().all(|s| (s - 1.0 / 3.0).abs() < 0.02),
             "{p:?}"
         );
-        // The worked example: a shard [0x8000.., 0xc000..) in thirds.
+        // A shard [0x8000.., 0xc000..) in thirds.
         let h = flat(0x8000_0000_0000_0000, Some(0xc000_0000_0000_0000), 64, 1.0);
         let p = choose_split(&h, Weight::Bytes, 3).unwrap();
         partitions(&h, &p);

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Runs a controller, a worker and a gateway on the host against the Compose stack
-# (milestones M0.2 and M0.3), so real MySQL and MariaDB clients can log in to
-# the gateway and run statements on a registered cluster.
+# Runs a controller, a worker and a gateway on the host against the Compose
+# stack, so real MySQL and MariaDB clients can log in to the gateway and run
+# statements on a registered cluster.
 #
 # Two login modes (SPRIG_GATEWAY_LOGIN_MODE):
 #
-# - catalog (the default, M0.3): tenants with their own logical databases.
+# - catalog (the default): tenants with their own logical databases.
 #   up creates the tenants acme and globex on dc-a-single (dc-a-c1), each
 #   with the user app (password sprig-dev-app, also a mysql_native_password
 #   verifier, with auth.mysql_native_password on for both tenants): log in as
 #   acme.app or globex.app. Their sessions run as per-user backend accounts
-#   (t<tenant>_u<user>, chapter 29, [per_user] in gateway-backends.dev.toml),
+#   (t<tenant>_u<user>, [per_user] in gateway-backends.dev.toml),
 #   granted only on the tenant's own schemas; DDL creating
 #   databases and stored programs runs as the cluster's sprig_ctl account.
 #   down drops the two tenants' databases through the gateway (when it runs
@@ -19,7 +19,7 @@
 #   bootstrapped, also the tenants tests made in its id range) and waits
 #   until each is gone from the tenant list (SPRIG_GATEWAY_DELETE_WAIT
 #   seconds at most, 300) before it stops the controller.
-# - accounts_file (M0.2): the logins app, app_repl and app_galera of
+# - accounts_file: the logins app, app_repl and app_galera of
 #   gateway-accounts.dev.toml on the three raw clusters, names unchanged.
 #   The connector matrix runs against this mode.
 #
@@ -36,7 +36,7 @@
 # Re-running up leaves running processes alone, so after a code change run
 # down and up again.
 #
-# Listeners (decision D6): MySQL persona 127.0.0.1:13306, MariaDB persona
+# Listeners: MySQL persona 127.0.0.1:13306, MariaDB persona
 # 127.0.0.1:13307. They're live settings in etcd, not config, so up writes
 # them at dc scope. TLS is `optional` unless SPRIG_GATEWAY_TLS says otherwise:
 # the connector matrix runs every connector with TLS required and then
@@ -146,7 +146,7 @@ settings=(
     failover.self_fence
 )
 
-# DC self-fencing (chapter 25) is off for this shared development stack: a
+# DC self-fencing is off for this shared development stack: a
 # gateway armed by its controller fences writes with 39501 when that
 # controller goes away, and `restart` stops the controller, which would break
 # every agent's live tests on 13306/13307. Production stacks (and the 72-hour
@@ -201,7 +201,7 @@ etcd_range() {
         '{key: $k, range_end: $e}')"
 }
 
-# A setting record at dc scope (chapter 23, "Setting records"); $2 is the
+# A setting record at dc scope; $2 is the
 # value as JSON.
 set_setting() {
     etcd_put "/sprig/dc/$dc/settings/$1" "$(jq -cn --argjson v "$2" \
@@ -463,9 +463,9 @@ adopt_tenants() {
     mv -f "$state/tenants.new" "$state/tenants"
 }
 
-# Deletes the tenants (sprigctl tenant delete drops their databases itself,
-# bugfix-27); with the gateway up and a mysql client, their databases are
-# dropped through the gateway first, as a client would.
+# Deletes the tenants (sprigctl tenant delete drops their databases itself);
+# with the gateway up and a mysql client, their databases are dropped
+# through the gateway first, as a client would.
 remove_tenants() {
     adopt_tenants
     [[ -s $state/tenants ]] || return 0
@@ -581,7 +581,7 @@ up() {
     register_clusters
 
     # The worker runs the mover's jobs: tenant moves from sprigctl shard
-    # move and from the balancer in auto mode (chapters 10 and 11).
+    # move and from the balancer in auto mode.
     start worker deploy/compose/sprigdb.dev.toml worker
     wait_ready worker "$wk_ready"
 
@@ -597,7 +597,7 @@ up() {
     set_setting listener.http.enabled false
     set_setting listener.https.enabled false
     # Workload statistics reach the tenants' catalogs within seconds, not
-    # 15 minutes (chapter 12, workload.flush_seconds).
+    # 15 minutes (workload.flush_seconds).
     set_setting workload.flush_seconds 10
     dev_self_fence
     set_id_range
@@ -625,7 +625,7 @@ Each tenant sees only its own databases; CREATE DATABASE makes one.
   mysql -h 127.0.0.1 -P $mysql_port -u globex.app -p$tenant_password --ssl-mode=DISABLED --default-auth=mysql_native_password
 
 Logs: $state/controller.log, $state/gateway.log. Stop with: $0 down
-M0.2's logins (app, app_repl, app_galera): SPRIG_GATEWAY_LOGIN_MODE=accounts_file $0 up
+The raw clusters' logins (app, app_repl, app_galera): SPRIG_GATEWAY_LOGIN_MODE=accounts_file $0 up
 EOF
         return
     fi
@@ -685,8 +685,7 @@ down() {
     fi
     if [[ $created == bootstrap ]]; then
         # The controller bootstrapped the deployment for this run: remove the
-        # DC tier, dc-a's cluster ids and the bootstrap records too, as the
-        # M0.1 check does.
+        # DC tier, dc-a's cluster ids and the bootstrap records too.
         n=$((n + $(etcd_del_prefix "/sprig/dc/$dc/")))
         while read -r key; do
             [[ -n $key ]] && n=$((n + $(etcd_del "$key")))
@@ -742,8 +741,8 @@ status() {
 
 # Stops and starts the controller and the gateway with the binaries up
 # recorded (rebuild them first), keeping tenants, clusters and settings: a
-# code change, or process settings the gateway reads only at start (chapter
-# 12's recorder settings), take effect. The controller inherits the
+# code change, or process settings the gateway reads only at start (the
+# workload recorder's settings), take effect. The controller inherits the
 # environment, so SPRIGDB_CONTROLLER_* overrides apply.
 restart() {
     [[ -d $state ]] || die "not up (no $state/)"

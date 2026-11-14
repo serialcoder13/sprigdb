@@ -1,5 +1,4 @@
-//! Collation weights in Rust (chapter 15, "Strings: weight strings in
-//! Rust, not from MariaDB").
+//! Collation weights computed in Rust, not read from MariaDB.
 //!
 //! A string key is hashed by its weight string under the group's
 //! collation, so values MariaDB calls equal land on one shard. The weights
@@ -18,7 +17,7 @@
 //! Levels are joined by a
 //! zero weight, which no level contains, so the encoding stays injective.
 //!
-//! The supported set is chapter 15's: `binary`; the `_bin` collations of
+//! The supported set: `binary`; the `_bin` collations of
 //! `utf8mb4`, `utf8mb3`, `latin1` and `ascii`; `utf8mb4_general_ci`,
 //! `utf8mb3_general_ci`, `latin1_swedish_ci`, `utf8mb4_unicode_ci`,
 //! `utf8mb4_unicode_520_ci`; the `utf8mb4_uca1400_*` and
@@ -141,7 +140,7 @@ macro_rules! coll {
 use Kind::{Byte, CodePoint, Table};
 use TableId::{General, Latin1Swedish, Uca1400, Unicode, Unicode520};
 
-/// The supported set (chapter 15).
+/// The supported set.
 static COLLATIONS: &[Collation] = &[
     coll!(
         8,

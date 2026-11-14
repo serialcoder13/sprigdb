@@ -1,5 +1,4 @@
-//! Bootstrapping the first DC (chapter 23, "Bootstrapping the first DC and
-//! adding later ones"; build step 7, the `sprig-meta` part).
+//! Bootstrapping the first DC (the `sprig-meta` part).
 //!
 //! A controller with `[controller] bootstrap = true` that finds
 //! `settings/system.deployment_id` missing writes the deployment id,
@@ -23,7 +22,7 @@ use crate::{Cmp, Consistency, Key, MetaStore, Op, OpResult, Record, Tier, Txn, V
 /// The global setting holding the deployment id.
 pub const DEPLOYMENT_ID_SETTING: &str = "system.deployment_id";
 
-/// A setting record (chapter 23, "Setting records"). `sprig-settings` owns
+/// A setting record. `sprig-settings` owns
 /// resolution; bootstrap only writes locked internal keys.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SettingRecord {
@@ -46,15 +45,14 @@ impl Versioned for SettingRecord {
     const V: u32 = 1;
 }
 
-/// The fields of a DC record that bootstrap writes (chapter 23, "Global
-/// tier"); later builds add endpoints and health, which are kept.
+/// The fields of a DC record that bootstrap writes; later builds add endpoints and health, which are kept.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DcRecord {
     /// The DC.
     pub dc_id: DcId,
     /// `full` or `witness`.
     pub kind: String,
-    /// `joining`, `active`, `draining`, `retired`, or chapter 25's states.
+    /// `joining`, `active`, `draining`, `retired`, or a failover state.
     pub state: String,
     /// Raised each time the DC takes a new DC lease.
     pub dc_epoch: u64,
@@ -210,7 +208,7 @@ fn check_id(stored: &[u8], expected: &str) -> Result<()> {
 }
 
 /// Formats a time as RFC 3339 UTC with second precision, as records store
-/// wall-clock times (`set_at`, chapter 23 "Encoding rules").
+/// wall-clock times (`set_at`).
 #[must_use]
 #[allow(clippy::many_single_char_names)] // the algorithm's usual names
 pub fn rfc3339(t: SystemTime) -> String {

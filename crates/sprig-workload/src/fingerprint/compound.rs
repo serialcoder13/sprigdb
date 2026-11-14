@@ -1,10 +1,10 @@
-//! The writes inside a compound statement (R6 round 6, decision A4).
+//! The writes inside a compound statement.
 //!
 //! The Redis front end and the key-value API send their hottest writes as
-//! one `BEGIN NOT ATOMIC ... END` per command (chapter 40's guarded
-//! batches). Such a text has no shape, so its writes reached no table's
-//! write load, and chapter 13's cost model undercounted the write cost of
-//! indexes on key and element tables (decision A2). [`writes`] finds the
+//! one `BEGIN NOT ATOMIC ... END` per command (guarded batches). Such a
+//! text has no shape, so its writes reached no table's write load, and
+//! automatic indexing's cost model undercounted the write cost of indexes
+//! on key and element tables. [`writes`] finds the
 //! `INSERT`, `REPLACE`, `UPDATE` and `DELETE` statements in the body, at
 //! any depth of `IF ... THEN ... END IF` or `BEGIN ... END`, so the gateway
 //! can fingerprint and count each one as if it had been sent alone.
@@ -161,7 +161,7 @@ pub fn writes(sql: &[u8], opts: &LexOptions) -> Vec<InnerWrite> {
 mod tests {
     use super::*;
 
-    /// A guarded `HSET` batch as chapter 40 sends it (shortened).
+    /// A guarded `HSET` batch as the Redis front end sends it (shortened).
     const HSET: &str = "BEGIN NOT ATOMIC DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN ROLLBACK; \
         RESIGNAL; END; START TRANSACTION; SELECT 1 INTO @now FROM (SELECT 1 AS one) AS d \
         LEFT JOIN `redis`.`db0` AS t ON t.k = X'61' AND t._sprig_dk = X'61' FOR UPDATE; \

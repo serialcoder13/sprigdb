@@ -227,8 +227,8 @@ impl PersonaVars {
     }
 }
 
-/// The collation variables whose values 3306 shows in MySQL's names (gaps
-/// row 60): MariaDB's UCA 14.0 defaults become MySQL's `*_0900_*`.
+/// The collation variables whose values 3306 shows in MySQL's names:
+/// MariaDB's UCA 14.0 defaults become MySQL's `*_0900_*`.
 const MYSQL_NAMED_COLLATIONS: &[&str] = &[
     "collation_connection",
     "collation_database",

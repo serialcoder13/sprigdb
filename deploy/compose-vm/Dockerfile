@@ -9,7 +9,7 @@
 # on a builder that allows it, or build on the CI runner. protoc comes from
 # Debian's protobuf-compiler and libprotobuf-dev (BSD-3-Clause; the latter
 # for the well-known .proto files); etcd-client's build script needs
-# it (decision R12 used a stand-in; this replaces it).
+# it.
 ARG RUST_IMAGE=rust:1.94.0-slim-bookworm
 ARG RUNTIME_IMAGE=debian:bookworm-slim
 

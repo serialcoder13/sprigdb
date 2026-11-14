@@ -1,8 +1,7 @@
 //! A kind's policy at one subject: its mode, the level a new item goes to,
-//! and the timers (chapter 52, "The modes", "The level of a
-//! recommendation", "Escalation and auto-apply").
+//! and the timers (escalation and auto-apply).
 //!
-//! Resolution goes through chapter 08's six scopes like any setting; the
+//! Resolution goes through the six settings scopes like any setting; the
 //! caller supplies a [`Lookup`] that resolves a key in the subject's
 //! context (object, database, tenant, ancestors, cluster, DC, global).
 
@@ -87,8 +86,8 @@ impl Policy {
     ) -> Self {
         let mut warnings = Vec::new();
         let mut mode = Mode::from_setting(mode_text);
-        // Failover is held only when the platform says so (chapter 52,
-        // "Safety rules"): anywhere else `approve` reads as automatic.
+        // Failover is held only when the platform says so (a safety
+        // rule): anywhere else `approve` reads as automatic.
         if matches!(kind, Kind::FailoverCluster | Kind::FailoverDc)
             && mode == Mode::Approve
             && source != ScopeKind::Global

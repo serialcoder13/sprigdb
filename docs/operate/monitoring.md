@@ -141,6 +141,7 @@ Two objectives per data centre, with recording rules (`sprig:availability_errors
 | `SprigClusterNoWriter` | page | A cluster has had no writer for 1 minute |
 | `SprigMoverStuck` | page | A move, split, merge, rekey or tenant migration has catch-up lag over 10 minutes, or copied and applied no rows for an hour, for 15 minutes |
 | `SprigMetaPropagationSlow` | ticket | Metadata caches are more than 2 s stale for 5 minutes |
+| `SprigSinkPaused` | ticket | A worker has had a paused sink for 5 minutes. The `reason` label is `failures` (39222: the destination kept failing) or `owner_privilege` (39229: the sink's owner lost `SELECT` on its source, or `SPRIG_FAN_IN` for a fan-in sink, or was locked or dropped). `SHOW SINKS` shows which sink and why; see [Sinks](../data-models/sinks.md#retries-dead-letters-and-pausing) |
 | `AuditSpoolFilling` | ticket | An audit spool is over half full for 10 minutes |
 | `AuditUnavailable` | page | An audit spool is full: admin and account changes fail with 39970 |
 | `AuditEventsDropped` | page | Audit events were dropped |
@@ -153,7 +154,8 @@ Two objectives per data centre, with recording rules (`sprig:availability_errors
 | `EtcdDbGrowing` | ticket | Live etcd data grew more than 16 MiB in 6 hours (compaction off, or keys leak) |
 | `BackupMissed` | page | A cluster has no full backup younger than 26 hours |
 | `SprigTracesDropped` | ticket | More than 1,000 spans dropped in 15 minutes |
-| `SprigThrashing` | ticket | The balancer reverted a move, or a DC move or split and merge flapped |
+| `SprigStreamSequencersLagging` | ticket | A worker's stream sequencers have stayed further behind than `stream.sequencer_lag_alert_seconds` (60) for 10 minutes |
+| `SprigThrashing` | ticket | The balancer reverted one of its own moves in the last 6 hours |
 
 `BackupMissed` reads `sprig_backup_last_success_timestamp_seconds{cluster, kind}`, the time of each cluster's newest successful backup. SprigDB exports it in two places:
 
@@ -228,7 +230,7 @@ Spans carry ids and query fingerprints, never SQL text or values.
 
 ```sh
 sprigctl settings set telemetry.otlp_endpoint http://otel-collector.monitoring:4318 --scope dc:fra1
-sprigctl settings set telemetry.trace_slow_ms 200 --scope tenant:acme
+sprigctl settings set telemetry.trace_slow_ms 200 --scope dc:fra1
 ```
 
 ## Telemetry settings
@@ -238,8 +240,8 @@ These are live settings: a change applies within seconds, without a restart.
 | Setting | Type | Default | Scopes | Meaning |
 |---|---|---|---|---|
 | `telemetry.otlp_endpoint` | text | empty | dc, global (operator only) | OTLP/HTTP collector for traces, such as `http://host:4318`; empty sends nothing |
-| `telemetry.trace_sample_ratio` | float, 0 to 1 | `0.01` | tenant, dc, global (operator only) | Head sampling of requests |
-| `telemetry.trace_slow_ms` | int, 0 to 3,600,000 | `500` | tenant, dc, global (operator only) | Keep every slower request |
+| `telemetry.trace_sample_ratio` | float, 0 to 1 | `0.01` | dc, global (operator only) | Head sampling of requests |
+| `telemetry.trace_slow_ms` | int, 0 to 3,600,000 | `500` | dc, global (operator only) | Keep every slower request |
 | `telemetry.tenant_series_min_rps` | int, 0 to 1,000,000 | `10` | dc, global (operator only) | Statements per second a tenant needs for its own metric series |
 
 The telemetry address, log format and log filter are process settings in `[telemetry]`; see [Configuration](configuration.md).

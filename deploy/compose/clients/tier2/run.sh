@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Tier 2 clients (chapter 28, "Testing"; R4 round 4): frameworks run their
-# migrations, drift checks and, where the package ships them, their own
-# database tests against one endpoint, a MySQL 8.4 server or a gateway's
-# 3306, so the two runs can be compared.
+# Tier 2 clients: frameworks run their migrations, drift checks and, where
+# the package ships them, their own database tests against one endpoint, a
+# MySQL 8.4 server or a gateway's 3306, so the two runs can be compared.
 #
 #   run.sh <framework> <host> <port> <user> <password> <label>
 #
@@ -11,8 +10,8 @@
 #              (Prisma 6: schema from the data model, drift check,
 #              introspection, a second migration), migrations (Flyway 11
 #              and Liquibase 4: migrate, validate, clean, update, status,
-#              rollback), and since R4 round 5 gorm, sequelize and rails
-#              (official golang, node and ruby images). In CI only:
+#              rollback), gorm, sequelize and rails (official golang,
+#              node and ruby images). In CI only:
 #              typeorm (its compile needs more than 768 MB), laravel, and
 #              django in full (SPRIG_TIER2_DJANGO_MODULES set empty).
 #              expected/<framework>.txt lists the tests allowed to pass on
@@ -76,9 +75,9 @@ PY
     ;;
   # The frameworks' own suites below need more than the laptop holds or
   # images it doesn't keep: CI runs them (.github/workflows/heavy-sql.yml,
-  # job tier2). Defined in R4 round 4, not run yet: expect fixes on the
-  # first run. Each prints `STEP <test> pass|fail|skip` lines through a
-  # small reporter, or its runner's own summary is parsed.
+  # job tier2). Defined, not run yet: expect fixes on the first run. Each
+  # prints `STEP <test> pass|fail|skip` lines through a small reporter, or
+  # its runner's own summary is parsed.
   gorm)
     # GORM v1.31.0's tests module (gorm.io/gorm/tests) with its MySQL driver.
     docker run --rm --name "$NAME" --memory "$MEM" golang:1.25-bookworm sh -c "
@@ -91,10 +90,10 @@ PY
     ;;
   sequelize)
     # Sequelize v6.37.7's integration tests for the mysql dialect, all of
-    # them. Its "supports schemas" tests were left out in R4 round 5 (a DDL
-    # job left pending on `work.Users`, 39071 for 15 minutes, decision X22);
-    # since bugfix-38 an abandoned DDL job is resolved within seconds, and
-    # they pass (12 Nov 2026: 1,803 of 1,808, the rest listed or flaky).
+    # them. Its "supports schemas" tests were left out for a while (a DDL
+    # job left pending on `work.Users`, 39071 for 15 minutes); now an
+    # abandoned DDL job is resolved within seconds, and they pass (12 Nov
+    # 2026: 1,803 of 1,808, the rest listed or flaky).
     docker run --rm --name "$NAME" --memory "$MEM" -e DIALECT=mysql -e SEQ_MYSQL_DB=tiertwo_sequelize \
       -e SEQ_MYSQL_USER="$USER" -e SEQ_MYSQL_PW="$PASS" -e SEQ_MYSQL_HOST="$HOST" -e SEQ_MYSQL_PORT="$PORT" \
       node:22-bookworm-slim sh -c "

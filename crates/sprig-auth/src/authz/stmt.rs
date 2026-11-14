@@ -88,7 +88,7 @@ pub struct UserOptions {
     pub default_roles: Vec<AccountRef>,
     /// `DISCARD OLD PASSWORD`.
     pub discard_old: bool,
-    /// Chapter 14's account-level policy clauses (`FAILED_LOGIN_ATTEMPTS`,
+    /// The account-level policy clauses (`FAILED_LOGIN_ATTEMPTS`,
     /// `PASSWORD_LOCK_TIME`, `PASSWORD EXPIRE INTERVAL | NEVER | DEFAULT`,
     /// `PASSWORD HISTORY`, `PASSWORD REUSE INTERVAL`, `PASSWORD REQUIRE
     /// CURRENT`).
@@ -96,12 +96,12 @@ pub struct UserOptions {
     /// The statement was `SET PASSWORD FOR acct = '...'`: MySQL 8.4 and
     /// MariaDB let it change another account's password with `UPDATE` on
     /// the `mysql` schema (a tenant-wide `UPDATE` here) instead of
-    /// `CREATE USER` (bugfix-26).
+    /// `CREATE USER`.
     pub set_password: bool,
     /// `ATTRIBUTE '{json}'` (an object merged into the user's attributes,
     /// a `null` value removing its key, as MySQL 8.4) or `COMMENT 'text'`
-    /// (`{"comment": text}`): what `SPRIG_USER_ATTR()` reads (chapter 29;
-    /// decision bugfix-interim). JSON text of an object.
+    /// (`{"comment": text}`): what `SPRIG_USER_ATTR()` reads.
+    /// JSON text of an object.
     pub attribute: Option<String>,
 }
 
@@ -121,8 +121,8 @@ pub enum GrantOn {
         /// What it is.
         kind: ObjectType,
     },
-    /// `GRAPH [db.]g NODES L` or `GRAPH [db.]g RELATIONSHIPS T` (chapter
-    /// 43, R8): one label or relationship type.
+    /// `GRAPH [db.]g NODES L` or `GRAPH [db.]g RELATIONSHIPS T`:
+    /// one label or relationship type.
     GraphElement {
         /// The database; `None` for the current one.
         db: Option<String>,
@@ -259,7 +259,7 @@ pub enum AccountStmt {
         /// `USING`.
         using: Vec<AccountRef>,
     },
-    /// `SHOW CREATE USER account` (authfix2): the account's `CREATE USER`
+    /// `SHOW CREATE USER account`: the account's `CREATE USER`
     /// as MySQL 8.4 or MariaDB prints it, never with a password hash.
     ShowCreateUser {
         /// The account.

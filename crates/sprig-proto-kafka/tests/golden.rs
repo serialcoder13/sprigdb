@@ -1,5 +1,4 @@
-//! Golden bytes for every served API at every served version (chapter 45
-//! build step 8).
+//! Golden bytes for every served API at every served version.
 //!
 //! Each case builds a message with a non-default value in every field that
 //! exists at that version, and writes the bytes the protocol guide and

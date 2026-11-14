@@ -1,5 +1,4 @@
-//! Full and lazy caches over a [`MetaStore`] (chapter 23, "Caches" and
-//! "Watches, caching and epochs in gateways"; build step 4).
+//! Full and lazy caches over a [`MetaStore`].
 //!
 //! The data path never waits for etcd: gateways and controllers read from
 //! these caches, fed by watches. Every entry keeps its `mod_revision`, and an
@@ -25,7 +24,7 @@
 //! (`tier`, `reason`).
 //!
 //! **Staleness.** Each cache reports `sprig_meta_cache_staleness_seconds`
-//! (`source`: `g` or the dc id, as chapter 23's `MetaEvent`; `prefix`: the
+//! (`source`: `g` or the dc id, as in `MetaEvent`; `prefix`: the
 //! cached prefix under the tier root), once a second and on every change of
 //! state: how long ago the cache was last known to reflect the store. While
 //! its watch runs, events arrive in revision order as they commit, so the
@@ -85,7 +84,7 @@ fn tier_label(t: &Tier) -> &'static str {
     }
 }
 
-/// The `source` label of chapter 23: `g` for the global tier, else the dc
+/// The `source` label: `g` for the global tier, else the dc
 /// id.
 fn source_label(t: &Tier) -> String {
     match t {

@@ -1,4 +1,4 @@
-//! Trigger evaluation (chapter 20, "Triggers"): when a shard splits, when
+//! Trigger evaluation: when a shard splits, when
 //! neighbours merge, when a group pre-splits.
 //!
 //! Pure: the controller gathers a [`GroupStat`] (sizes, write shares, ages)
@@ -14,7 +14,7 @@ use sprig_common::ids::{ClusterId, TenantId};
 
 use super::settings::{ShardingMode, ShardingSettings};
 
-/// What to do to a group's shards (chapter 20, `ShardJob`).
+/// What to do to a group's shards.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ShardJob {
@@ -62,7 +62,7 @@ impl ShardJob {
     }
 }
 
-/// Why (chapter 20, `Reason`), in scheduling priority order.
+/// Why, in scheduling priority order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reason {
@@ -158,7 +158,7 @@ fn width(s: &ShardStat) -> u128 {
     s.hi.map_or(1u128 << 64, u128::from) - u128::from(s.lo)
 }
 
-/// Chapter 20's `evaluate` for one group at `now_ms`.
+/// `evaluate` for one group at `now_ms`.
 #[must_use]
 pub fn evaluate(g: &GroupStat, s: &ShardingSettings, now_ms: u64) -> Vec<Proposal> {
     if s.mode == ShardingMode::Off {
@@ -250,7 +250,7 @@ pub fn evaluate(g: &GroupStat, s: &ShardingSettings, now_ms: u64) -> Vec<Proposa
                 continue;
             }
             if l.hi != Some(r.lo) || l.cluster != r.cluster {
-                continue; // R1 merges neighbours on one cluster
+                continue; // only neighbours on one cluster merge
             }
             if l.size_bytes < s.merge_bytes
                 && r.size_bytes < s.merge_bytes

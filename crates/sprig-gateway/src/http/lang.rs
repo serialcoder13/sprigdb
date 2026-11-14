@@ -21,7 +21,7 @@
 //!   A cursor's documents are drained with `getMore`, one row each in a
 //!   single `document` column (relaxed Extended JSON, or canonical with
 //!   `output = canonical_ejson`, which keeps int32, int64 and double
-//!   apart; [`with_output`]); any other reply is
+//!   apart; `with_output`); any other reply is
 //!   one row (without `ok`, `$clusterTime` and `operationTime`).
 //!   Authentication and fail-point commands are refused (39794).
 //!

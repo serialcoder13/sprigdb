@@ -78,7 +78,7 @@ fn an_outage_and_recovery_cause_no_move_back() {
     assert_eq!(r.reverted, 0);
 }
 
-/// The M0.6 evidence: many seeds, 30 days each. Slow in debug builds; run
+/// The placement evidence: many seeds, 30 days each. Slow in debug builds; run
 /// with `cargo test -p sprig-testkit --release fleet_report -- --ignored
 /// --nocapture`. `SPRIG_FLEET_SEEDS` (default 200) and
 /// `SPRIG_FLEET_AVOID_MOVE_BACK=0` to turn off the move-back rule.

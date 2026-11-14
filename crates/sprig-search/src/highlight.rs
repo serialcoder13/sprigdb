@@ -1,4 +1,4 @@
-//! Highlights (chapter 39, "Highlights and facets"; build step 8).
+//! Highlights.
 //!
 //! Text is never stored in the index: the gateway highlights the text the
 //! lookup fetched from MariaDB. The field's analyzer runs over it, tokens

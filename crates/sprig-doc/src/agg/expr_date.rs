@@ -1,4 +1,4 @@
-//! Date expressions (M1): `$dateAdd`, `$dateSubtract`, `$dateDiff`,
+//! Date expressions: `$dateAdd`, `$dateSubtract`, `$dateDiff`,
 //! `$dateTrunc`, `$dateFromParts`, `$dateFromString`, `$dateToParts`,
 //! `$dateToString`, `$week`, `$isoWeek`, `$isoWeekYear`,
 //! `$isoDayOfWeek`, `$toDate`, and the older part extractors (`$year` …

@@ -1,5 +1,5 @@
 # Development only: the master secret the dev tenants' workload data keys
-# derive from (chapter 12, sealed parameter samples; format in
+# derive from (sealed parameter samples; format in
 # sprig_workload::keyring). Never use it anywhere else: anyone with this
 # repository can open the dev samples. Rotate by adding "2 <64 hex digits>".
 1 8523f3a354bc66e22279fe6be3f20d21e53fdd7600929beca28e80f2a3ec9cf4

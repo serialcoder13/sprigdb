@@ -1,4 +1,4 @@
-// The JSON tree (chapter 44 step 20): each document of a MongoDB result with
+// The JSON tree: each document of a MongoDB result with
 // a type badge on every value, collapsible, editable with its type kept
 // unless the user changes the badge, saved as a replaceOne by `_id` that
 // also requires every top-level field read to be unchanged (optimistic, as

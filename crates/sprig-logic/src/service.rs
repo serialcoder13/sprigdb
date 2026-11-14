@@ -1,5 +1,4 @@
-//! A deploy, end to end (chapter 41, "Versions, rollout and rollback",
-//! first step): migrate the catalog module, find or create the module,
+//! A deploy, end to end: migrate the catalog module, find or create the module,
 //! compile against the shard schema's columns, place, record the version,
 //! deploy it, activate it.
 //!
@@ -61,7 +60,7 @@ pub struct Outcome {
     /// [`deploy::select_function`]), for the gateway to create through
     /// `sprig_ctl` with the deploying user as `DEFINER`.
     pub select_fn: Option<String>,
-    /// The version is a staged rollout's candidate (R7 follow-ups): the
+    /// The version is a staged rollout's candidate: the
     /// active version keeps its `SELECT` function.
     pub staged: Option<crate::rollout::RolloutSpec>,
     /// Notes about the rollout, for the client.
@@ -108,8 +107,8 @@ pub async fn columns(session: &mut dyn Session, schema: &str) -> Result<StaticCo
 }
 
 /// What the engine tier must be able to run before a KIRun version is
-/// placed there (chapter 41, "Placement": a definition calling a function
-/// the `kirun` crate lacks is refused).
+/// placed there (a definition calling a function the `kirun` crate
+/// lacks is refused).
 ///
 /// # Errors
 /// 39861 when KIRun can't read the definition; 39862 for functions the
@@ -277,7 +276,7 @@ pub fn compile_version(
     }
 }
 
-/// A computed column's generation expression (R7 order 3; the gateway
+/// A computed column's generation expression (the gateway
 /// puts it in place of the call with [`enforce::rewrite_computed`]): the active
 /// version of function `name` (its `runtime` text, `source` and recorded
 /// `signature`) compiled, then written as one expression over the call's
@@ -335,7 +334,7 @@ pub fn computed_column(
 /// Compiles a validation's or after-commit trigger's body against `table`
 /// (JavaScript binds the row by name, see
 /// [`sprig_logic_compile::js::compile_with`]; KIRun's parameters bind by
-/// name too, decision V2).
+/// name too).
 ///
 /// # Errors
 /// As [`compile`].
@@ -420,7 +419,7 @@ pub async fn deploy(
     deploy_at(d, t, session, creator, At::default()).await
 }
 
-/// Computed columns made from function `prev` (R7 order 3) hold a copy of
+/// Computed columns made from function `prev` hold a copy of
 /// its body as their generation expression, made for its signature. A new
 /// version `f` that takes other parameter types, or returns another type,
 /// would no longer fit the calls in those columns: 39875 naming them. With
@@ -496,23 +495,23 @@ async fn computed_dependents(
         .collect())
 }
 
-/// Where and as what [`deploy_at`] deploys (R7 close-out).
+/// Where and as what [`deploy_at`] deploys.
 #[derive(Default)]
 pub struct At<'a> {
     /// Re-deploy this existing version (a rollback) instead of adding
     /// version n+1.
     pub version: Option<u64>,
     /// Every shard of a sharded database: the routines go on each, all or
-    /// nothing (chapter 21's rule), with the creator's definer.
+    /// nothing, with the creator's definer.
     pub shards: Option<&'a mut dyn ShardSessions>,
     /// The tenant, for a staged rollout `BY TENANT` (decided at deploy).
     pub tenant: u64,
 }
 
-/// [`deploy`] at a fixed version and on several shards.
+/// [`deploy()`] at a fixed version and on several shards.
 ///
 /// # Errors
-/// As [`deploy`].
+/// As [`deploy()`].
 #[allow(clippy::too_many_lines)]
 pub async fn deploy_at(
     d: &Declaration,
@@ -581,7 +580,7 @@ pub async fn deploy_at(
         definer_security: d.definer_security,
     };
     let mut compiled = if d.runtime == sprig_logic_compile::Runtime::Javascript {
-        // The JavaScript front end (R7 close-out): the declaration gives
+        // The JavaScript front end: the declaration gives
         // the parameters' types and `RETURNS`.
         sprig_logic_compile::js::compile_with(&d.name, &d.body, &js_signature(d), &cols, &opts)?
     } else {
@@ -614,7 +613,7 @@ pub async fn deploy_at(
         }
         _ => Vec::new(),
     };
-    // A staged rollout (R7 follow-ups): the active version stays for most
+    // A staged rollout: the active version stays for most
     // callers; it must take the same parameters, in the same language,
     // with the same rights, so one wrapper can hold both.
     let mut rollout_notes = computed_notes;
@@ -696,8 +695,8 @@ pub async fn deploy_at(
             signature["returns"] = serde_json::Value::String(r.clone());
         }
     }
-    // R9 (r9fwd): `DETERMINISTIC` is recorded with the version, so a sink
-    // with `EXACTLY ONCE` can check its `TRANSFORM` (chapter 51).
+    // `DETERMINISTIC` is recorded with the version, so a sink
+    // with `EXACTLY ONCE` can check its `TRANSFORM`.
     if d.deterministic {
         if !signature.is_object() {
             signature = serde_json::json!({});
@@ -918,7 +917,7 @@ pub async fn deploy_at(
     })
 }
 
-// ---- validations, after-commit triggers and schedules (R7 orders 3, 5) ----
+// ---- validations, after-commit triggers and schedules ---------------------
 
 use crate::catalog::{BindingRow, ScheduleRow};
 use crate::declare::Kind;
@@ -940,7 +939,7 @@ pub struct Bind<'a> {
 }
 
 /// A bound deploy whose routines are on every shard, waiting for the
-/// gateway to run [`Pending::alter`] through chapter 21's `ALTER TABLE`
+/// gateway to run [`Pending::alter`] through the `ALTER TABLE`
 /// path, then [`finish`] (or [`abort`]).
 #[derive(Debug, Clone)]
 pub struct Pending {
@@ -1041,7 +1040,7 @@ async fn module_for(
 /// record the version, deploy all or nothing (see [`Pending`]).
 ///
 /// # Errors
-/// As [`deploy`]; 39862 for code placed in the engine tier; 39874 for
+/// As [`deploy()`]; 39862 for code placed in the engine tier; 39874 for
 /// parameters that name no column; 39873 for a bad schedule; 39860 for a
 /// schedule's unknown procedure.
 #[allow(clippy::too_many_lines)]
@@ -1597,7 +1596,7 @@ mod tests {
             expr.contains("(price)") && expr.contains("(stock)"),
             "{expr}"
         );
-        // Before (jsbind) every JavaScript function was 39862 here.
+        // Every JavaScript function used to be 39862 here.
         let wrong = call("ALTER TABLE products ADD COLUMN c DOUBLE AS (net(price)) VIRTUAL");
         let e = computed_column("net", "javascript", body, &net_sig(), &wrong).unwrap_err();
         assert_eq!(e.code(), Some(SprigCode::LogicSignatureMismatch));
@@ -1626,7 +1625,7 @@ mod tests {
                 assert!(e.message.contains("js.nondeterministic"), "{}", e.message);
             }
         }
-        // Lua has no compiler front end (RC24).
+        // Lua has no compiler front end.
         let c = call("ALTER TABLE p ADD COLUMN c DOUBLE AS (net(price, stock))");
         let e = computed_column("net", "lua", "return price * stock", &net_sig(), &c).unwrap_err();
         assert!(e.message.contains("lua.front_end"), "{}", e.message);

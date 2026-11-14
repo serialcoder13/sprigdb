@@ -1,4 +1,4 @@
-//! The Kafka target against a real broker (chapter 51, "Testing"):
+//! The Kafka target against a real broker:
 //! `r9sinks-kafka`, Apache Kafka 3.9.0 in `KRaft` mode, PLAINTEXT on
 //! 127.0.0.1:29092 and SASL (SCRAM-SHA-256/512, PLAIN) on 127.0.0.1:29093.
 //!

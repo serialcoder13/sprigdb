@@ -1,17 +1,15 @@
 //! `sprig-graph`: property graphs: catalog, Cypher front end, pattern
 //! planning and traversal.
 //!
-//! Layer: 2 data layer. Design: [chapter 43](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/43-graphs.md) (Graphs) of the SprigDB low-level design.
+//! Layer: 2 data layer.
 //!
-//! - [`parser`] and [`ast`]: Cypher into the syntax tree the executor runs
-//!   (build steps 5 and 6).
-//! - [`value`] and [`eval`]: Cypher values and the gateway evaluator
-//!   (step 10).
+//! - [`parser`] and [`ast`]: Cypher into the syntax tree the executor runs.
+//! - [`value`] and [`eval`]: Cypher values and the gateway evaluator.
 //! - [`store`]: what the executor needs from storage; [`mem`] in memory
-//!   with any number of shards, [`maria`] over MariaDB (step 3).
+//!   with any number of shards, [`maria`] over MariaDB.
 //! - [`exec`]: matching, variable-length and shortest paths, projections and
-//!   writes under the budgets (steps 9, 11, 12, 13).
-//! - [`catalog`]: the `graph` catalog module and graph DDL (step 2).
+//!   writes under the budgets.
+//! - [`catalog`]: the `graph` catalog module and graph DDL.
 //! - [`settings`]: the `graph.*` keys.
 //! - [`neo4j`]: Neo4j status codes for errors.
 //! - [`bookmark`]: signed Bolt bookmarks.

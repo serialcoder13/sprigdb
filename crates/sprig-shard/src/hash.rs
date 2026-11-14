@@ -1,4 +1,4 @@
-//! Hashing (chapter 15, "Hashing and routing").
+//! Hashing for routing.
 //!
 //! `xxh3_64` with seed 0 over the normalized bytes. Its output has been
 //! frozen since xxHash 0.8.0; `tests/vectors.txt` pins golden vectors.

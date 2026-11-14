@@ -1,6 +1,5 @@
-//! The native KIRun runtime of the fallback tier (chapter 41, "The
-//! fallback runtime"; build step 14): KIRun definitions run on `kirun`,
-//! Modlix's open-source KIRun runtime for Rust, in-process.
+//! The native KIRun runtime of the fallback tier: KIRun definitions run on
+//! `kirun`, Modlix's open-source KIRun runtime for Rust, in-process.
 //!
 //! ```text
 //! prepare(source)        definition JSON → kirun FunctionDefinition, once per version
@@ -65,7 +64,7 @@ pub const SPRIG_FUNCTIONS: &[&str] = &[
     "Sprig.Db.Query",
     "Sprig.Db.Exec",
     "Sprig.Http.Fetch",
-    // R9: publishing and consuming (`crate::messaging`).
+    // Publishing and consuming (`crate::messaging`).
     "Sprig.Db.Publish",
     "Sprig.Db.CommitOffset",
     "Sprig.Mq.Publish",
@@ -569,7 +568,7 @@ fn sprig_functions(run: &Arc<Run>) -> HashMap<String, Arc<dyn Function>> {
 /// `Sprig.Db.CommitOffset(group, stream, partition, offset)`,
 /// `Sprig.Mq.Publish(exchange, routingKey, body, properties)` → `output
 /// {routed}`, `Sprig.Mq.Get(queue, max, leaseMs)` → `output {messages}`,
-/// `Sprig.Mq.Ack(token)`, `Sprig.Mq.Nack(token, requeue)` (R9).
+/// `Sprig.Mq.Ack(token)`, `Sprig.Mq.Nack(token, requeue)`.
 struct SprigMsg {
     sig: FunctionSignature,
     op: MsgOp,

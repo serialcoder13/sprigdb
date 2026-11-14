@@ -1,4 +1,4 @@
-//! `CALL sprig.mq_info(NULL [, vhost])` (ST66): every durable queue of a
+//! `CALL sprig.mq_info(NULL [, vhost])`: every durable queue of a
 //! vhost the user may read, in name order, with ready, unacknowledged and
 //! consumers, in one call, as the single-queue form counts them.
 
@@ -95,7 +95,7 @@ async fn every_queue_in_one_call() {
     conn.close(200, "bye".into()).await.unwrap();
 }
 
-/// bugfix-66 (R9 item 123): when the queue's owner can't answer (here
+/// Regression: when the queue's owner can't answer (here
 /// another gateway holds its lease and there's no relay between them),
 /// `mq_info` reported "0 ready, 1 unacknowledged, 0 consumers" for a
 /// message nobody had taken. Now it asks again, then counts the stored

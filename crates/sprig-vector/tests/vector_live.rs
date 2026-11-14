@@ -1,4 +1,4 @@
-//! Vector search over MariaDB against brute force (chapter 34, "Testing"):
+//! Vector search over MariaDB against brute force:
 //! exact plans must equal brute force; HNSW plans are measured for recall;
 //! filters, geo filters, automatic graphs and errors.
 //!

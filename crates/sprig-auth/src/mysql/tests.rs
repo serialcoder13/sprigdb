@@ -1,5 +1,5 @@
-//! The login flow end to end: chapter 05's real `authenticate()` over a
-//! duplex stream with a scripted client, against [`LoginService`] with a
+//! The login flow end to end: the wire protocol's real `authenticate()`
+//! over a duplex stream with a scripted client, against [`LoginService`] with a
 //! catalog source (static tenants, prebuilt tenant snapshots).
 
 #![allow(clippy::unwrap_used, clippy::too_many_lines)]
@@ -128,7 +128,7 @@ pub(crate) struct World {
     pub(crate) clock: Arc<ManualClock>,
     pub(crate) state: Arc<crate::policy::MemLoginState>,
     pub(crate) audit: Arc<crate::audit::MemoryAudit>,
-    /// The directory, for residency (chapter 26).
+    /// The directory, for residency.
     pub(crate) tenants: Arc<StaticTenants>,
 }
 
@@ -150,8 +150,7 @@ pub(crate) fn world(policy: FixedPolicy) -> World {
     world_at(policy, None)
 }
 
-/// [`world`] for a gateway handing logins off through `handoff`
-/// (chapter 26).
+/// [`world`] for a gateway handing logins off through `handoff`.
 pub(crate) fn world_at(
     mut policy: FixedPolicy,
     handoff: Option<Arc<crate::handoff::HandoffConfig>>,
@@ -617,7 +616,7 @@ async fn tls_requirements() {
         ..req("acme.x509")
     };
     assert_eq!(run(&w.svc, cert, b"pw").await.verdict, AuthVerdict::Accept);
-    // REQUIRE SUBJECT and ISSUER (wireup) compare the verified names.
+    // REQUIRE SUBJECT and ISSUER compare the verified names.
     let dn = |s: &str, i: &str| LoginRequest {
         client_cert: true,
         client_dn: Some(crate::mysql::ClientDn {
@@ -639,7 +638,7 @@ async fn tls_requirements() {
         ..req("acme.subj")
     };
     assert_eq!(err(&run(&w.svc, no_names, b"pw").await.verdict).code, 1045);
-    // Without TLS the full path needs RSA (decision D4): 1045 with a hint.
+    // Without TLS the full path needs RSA: 1045 with a hint.
     let r = run(
         &w.svc,
         LoginRequest {
@@ -1000,7 +999,7 @@ async fn backfills(w: &World, n: usize) -> Vec<(TenantId, UserId, u64)> {
     w.state.backfills()
 }
 
-/// Chapter 14's upgrade on login: a successful login that saw the clear
+/// The upgrade on login: a successful login that saw the clear
 /// password of a generation without SCRAM verifiers stores them, once per
 /// verifier; the fast path (no clear password), a failed login, an account
 /// that has them, and `auth.backfill_verifiers = off` don't.
@@ -1124,7 +1123,7 @@ async fn scram_credentials_from_the_cache() {
     }
 }
 
-/// authfix2: one certificate check for every protocol's login.
+/// One certificate check for every protocol's login.
 #[test]
 fn certificate_clauses_are_checked_alike() {
     let mut r = UserRow::new(

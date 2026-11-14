@@ -1,5 +1,4 @@
-//! Catalog extensions: other chapters' modules in the catalog (chapter 08,
-//! "Tables owned by other chapters").
+//! Catalog extensions: other crates' modules in the catalog.
 //!
 //! Each owning crate (`sprig-auth`, search, logic, graphs, ...) registers a
 //! [`CatalogExtension`]: its migrations, whether it is versioned, and how
@@ -92,7 +91,7 @@ impl<'a> SnapshotTx<'a> {
     }
 }
 
-/// A module owning catalog tables (chapter 08's interface).
+/// A module owning catalog tables.
 #[async_trait::async_trait]
 pub trait CatalogExtension: Send + Sync + 'static {
     /// Module name: `auth`, `search`, `logic`, ... (`[a-z0-9_]+`).

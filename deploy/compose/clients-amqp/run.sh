@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # AMQP 0-9-1 client checks against a RabbitMQ reference and SprigDB's AMQP
-# listener (chapter 50, "Testing"; chapter 46, "Differential testing"), for
-# CI's heavy-suite jobs (.github/workflows/heavy-protocols.yml). Every check
-# runs on the reference first, then on SprigDB, and
+# listener, for CI's heavy-suite jobs (.github/workflows/heavy-protocols.yml).
+# Every check runs on the reference first, then on SprigDB, and
 # deploy/compose/ci/outcomes.py compares the two against expected/<check>.txt.
 #
-#   run.sh diff       pika 1.3.2 scenarios (amqp_diff.py, r9final's 21)
+#   run.sh diff       pika 1.3.2 scenarios (amqp_diff.py, 21 of them)
 #   run.sh go         amqp091-go v1.10.0's own integration tests (AMQP_URL)
 #   run.sh java       RabbitMQ Java client 5.22.0 scenarios (java/)
 #   run.sh dotnet     RabbitMQ.Client 6.8.1 scenarios (dotnet/)

@@ -1,15 +1,15 @@
-//! Typed tables and record hierarchies in a tenant session (chapter 32,
-//! R6 order 1, single-shard tenants).
+//! Typed tables and record hierarchies in a tenant session (single-shard
+//! tenants).
 //!
-//! Before chapter 07's name plan, each statement of a tenant text goes to
+//! Before the logical-name rewrite, each statement of a tenant text goes to
 //! [`sprig_types::handle`] with the tenant's `types` state from the
 //! session's catalog snapshot. A statement that isn't the type layer's
 //! goes on unchanged. Otherwise the plan's statements run through this
-//! same session ([`PassSession::tenant_text`], as chapter 41's logic does):
-//! logical names, chapter 29's checks, the session's backend connection
-//! and transaction, and chapter 17's router once the tenant has shards.
+//! same session ([`PassSession::tenant_text`], as stored logic does):
+//! logical names, the privilege checks, the session's backend connection
+//! and transaction, and the router once the tenant has shards.
 //! They run in *internal* mode (the type layer's own `_sprig_` columns and
-//! index names pass chapter 07's reserved-name check, and the type layer
+//! index names pass the reserved-name check, and the type layer
 //! doesn't see them again); a client's text naming a reserved name never
 //! reaches the type layer.
 //!
@@ -49,8 +49,8 @@ pub struct TypesSession {
     /// A plan's own statement is running: no type planning, reserved
     /// names allowed.
     pub internal: bool,
-    /// The running internal statement is chapter 32's own: chapter 42's
-    /// layer still applies to it (typed tables in inheritance groups).
+    /// The running internal statement is the type layer's own: data
+    /// inheritance still applies to it (typed tables in inheritance groups).
     pub typed_plan: bool,
     /// `SET @sprig_inheritance = 'only'`.
     pub inheritance_only: bool,
@@ -104,7 +104,7 @@ pub(super) fn prepare_refusal(
 }
 
 impl PassSession {
-    /// Chapter 32's step of [`PassSession::tenant_text`]: `None` when the
+    /// The type layer's step of [`PassSession::tenant_text`]: `None` when the
     /// statement isn't the type layer's.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub(super) async fn tenant_types(
@@ -296,15 +296,15 @@ pub(super) struct GwRunner<'s, 'c, 'x> {
     pub(super) cx: &'c mut ExecCtx<'x>,
     pub(super) wire: Wire,
     pub(super) migrated: bool,
-    /// Statements of chapter 32's plans ([`TypesSession::typed_plan`]),
-    /// not chapter 42's.
+    /// Statements of the type layer's plans ([`TypesSession::typed_plan`]),
+    /// not data inheritance's.
     pub(super) typed: bool,
 }
 
 impl GwRunner<'_, '_, '_> {
     /// A record hierarchy's path statements see every row: the paths of
-    /// rows a user's row-level security hides must follow too (decision
-    /// T22). Only when the tenant protects a table at all.
+    /// rows a user's row-level security hides must follow too. Only
+    /// when the tenant protects a table at all.
     fn paths_exempt(&self, object: &str) -> Option<crate::tenant::rls::ExemptGuard> {
         let ts = self.sess.tenant.as_deref()?;
         let cat = ts.catalog()?;
@@ -385,8 +385,8 @@ impl Runner for GwRunner<'_, '_, '_> {
     }
 
     async fn snapshot_isolation(&mut self) -> Result<bool> {
-        // The session's own value when it (or its persona, D9) set one;
-        // else the server's (bugfix-54).
+        // The session's own value when it (or its persona) set one; else
+        // the server's.
         let known = self.sess.bs.as_ref().and_then(|b| {
             b.vars()
                 .vars
@@ -454,7 +454,7 @@ impl Runner for GwRunner<'_, '_, '_> {
     }
 
     fn set_physical(&mut self, on: bool) {
-        // Not a type plan's statement: chapter 42 doesn't plan it.
+        // Not a type plan's statement: data inheritance doesn't plan it.
         self.typed = !on;
     }
 
@@ -472,8 +472,8 @@ impl Runner for GwRunner<'_, '_, '_> {
             ),
             None => sprig_common::names::quote(table),
         };
-        // Through chapter 42 (a type plan's statement): the spaces below
-        // reconcile their paths (decision T22), seeing every row.
+        // Through data inheritance (a type plan's statement): the spaces
+        // below reconcile their paths, seeing every row.
         let _exempt = self.paths_exempt(table);
         self.exec(&format!(
             "ALTER TABLE {t} SPRIG RECONCILE HIERARCHY {}",
@@ -506,7 +506,7 @@ impl Runner for GwRunner<'_, '_, '_> {
             None => sprig_common::names::quote(root),
         };
         let keys: Vec<String> = key.iter().map(|k| sprig_common::names::quote(k)).collect();
-        // Through chapter 42 (a type plan's statement): the tree's new
+        // Through data inheritance (a type plan's statement): the tree's new
         // tables become inheritable and new columns get field slots.
         self.exec(&format!(
             "ALTER TABLE {table} SPRIG INHERITABLE KEY ({})",
@@ -639,7 +639,7 @@ impl ResultSink for Collect {
 }
 
 /// The client's sink, with the rewrite's table aliases renamed in column
-/// metadata (chapter 32, "Polymorphic SELECT", step 7).
+/// metadata (for a polymorphic `SELECT`).
 struct MetaSink<'a> {
     inner: &'a mut dyn ResultSink,
     meta: Vec<MetaRename>,

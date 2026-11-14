@@ -1,8 +1,7 @@
-//! Studio's REST routes in the data API's `OpenAPI` document (chapter 37,
-//! "APIs for Studio", R0 part).
+//! Studio's REST routes in the data API's `OpenAPI` document.
 //!
 //! The gateway answers these ahead of the proto route table (they are REST
-//! only in R0); [`merge_into`] adds them to `/v1/openapi.json`, which the
+//! only for now); [`merge_into`] adds them to `/v1/openapi.json`, which the
 //! Studio client's types are generated from (`pnpm gen:api`).
 
 use serde_json::{Value, json};
@@ -41,10 +40,23 @@ pub fn paths() -> Value {
     if let (Value::Object(m), Value::Object(r)) = (&mut v, round4_paths()) {
         m.extend(r);
     }
+    if let (Value::Object(m), Value::Object(r)) = (&mut v, docs_paths()) {
+        m.extend(r);
+    }
     v
 }
 
-/// Studio round 4 (chapter 44 steps 18, 26, 28–31): the logic editors'
+/// Docs search over the release's documentation.
+fn docs_paths() -> Value {
+    json!({
+        "/v1/docs:search": {"post": op("Docs.Search", "sprig.v1.Docs",
+            "Searches the product documentation of this release (any signed-in user): full-text and \
+             embedding hits fused, at most two per page ({query, audience, limit, version})",
+            Some("DocsSearchRequest"), "DocsSearchReply")},
+    })
+}
+
+/// The logic editors'
 /// `Logic` routes, the stream, queue and sink views' routes, and
 /// `Policies.TestAs`.
 fn round4_paths() -> Value {
@@ -104,7 +116,7 @@ fn round4_paths() -> Value {
     })
 }
 
-/// Chapter 52's approvals inbox.
+/// The approvals inbox.
 fn recommendation_paths() -> Value {
     let p = |name: &str| json!({"name": name, "in": "path", "required": true, "schema": {"type": "string"}});
     json!({
@@ -320,6 +332,18 @@ pub fn schemas() -> Value {
             "refresh_transport": {"type": "string", "enum": ["cookie", "body"]}}), &[]),
         "ImpersonateRequest": s(json!({"tenant": string, "user": string, "host": string,
             "reason": string, "minutes": int}), &["user", "reason"]),
+        "DocsSearchRequest": s(json!({"query": string,
+            "audience": {"type": "string", "enum": ["user", "dba", "operator"]},
+            "limit": int, "version": string}), &["query"]),
+        "DocsSearchHit": s(json!({"chunk_id": string, "page": string, "title": string,
+            "heading_path": string, "audience": {"type": "array", "items": string}, "text": string,
+            "score": {"type": "number"}, "bm25_rank": {"type": "integer", "nullable": true},
+            "vector_rank": {"type": "integer", "nullable": true}}),
+            &["chunk_id", "page", "title", "heading_path", "audience", "text", "score"]),
+        "DocsSearchReply": s(json!({"version": string,
+            "mode": {"type": "string", "enum": ["hybrid", "keyword"]},
+            "hits": {"type": "array", "items": {"$ref": "#/components/schemas/DocsSearchHit"}}}),
+            &["version", "mode", "hits"]),
     })
 }
 

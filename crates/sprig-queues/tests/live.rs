@@ -1,4 +1,4 @@
-//! Live tests through a gateway (chapter 50, build steps 5, 9 and 10):
+//! Live tests through a gateway:
 //! messages in MariaDB, SQL in the same gateway.
 //!
 //! ```text

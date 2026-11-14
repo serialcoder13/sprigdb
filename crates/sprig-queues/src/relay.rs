@@ -1,5 +1,5 @@
-//! The queue relay between gateways (chapter 50, "The queue owner":
-//! `sprig.internal.v1.QueuePeer` on 7403).
+//! The queue relay between gateways:
+//! `sprig.internal.v1.QueuePeer` on 7403.
 //!
 //! A gateway that doesn't own a queue runs a **remote slot** for it: the
 //! same command channel as a local owner, whose commands go over one
@@ -8,7 +8,7 @@
 //! The owner's gateway **serves** the stream ([`QueueEngine::serve_relay`])
 //! by feeding the frames to its local owner, with the stream as the
 //! consumers' delivery sink. One stream per queue and gateway carries
-//! both of the chapter's flows, `Enqueue` (messages in, confirms out) and
+//! both flows, `Enqueue` (messages in, confirms out) and
 //! `Attach` (credit and settlements in, deliveries out), plus gets and the
 //! queue operations, so one channel's order holds across all of them (a
 //! `basic.get` sees the channel's earlier publish).
@@ -61,8 +61,7 @@ pub struct QueueRef {
     pub from: String,
 }
 
-/// A message on the wire: its stored parts (chapter 50, "Message
-/// encoding"); the receiver parses what the engine reads again.
+/// A message on the wire: its stored parts; the receiver parses what the engine reads again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireMsg {
     /// 0 = AMQP 0-9-1, 1 = AMQP 1.0.
@@ -349,7 +348,7 @@ pub trait PeerTransport: Send + Sync + 'static {
     async fn open(&self, to: &str, q: QueueRef) -> Result<Link, MqError>;
 }
 
-/// Who may own a tenant's queues (chapter 50: rendezvous hashing over the
+/// Who may own a tenant's queues (rendezvous hashing over the
 /// home data center's gateways; moves toward consumers).
 #[async_trait]
 pub trait Placement: Send + Sync + 'static {
@@ -580,7 +579,7 @@ impl Remote {
                     }));
                 }
                 Some(Pending::Info(r)) => {
-                    // bugfix-66: no answer is no answer (dropping the
+                    // No answer is no answer (dropping the
                     // sender), never a made-up "0 ready, 0 consumers".
                     if let Ok(Answer::Info(m, c)) = result {
                         let _ = r.send((m, c));
@@ -643,7 +642,7 @@ impl Remote {
                 Pending::Count(r) => {
                     let _ = r.send(Err(err.clone()));
                 }
-                // bugfix-66: dropped, unanswered.
+                // Dropped, unanswered.
                 Pending::Info(r) => drop(r),
             }
         }
@@ -888,7 +887,7 @@ impl QueueEngine {
                         Up::Info { req } => {
                             let (tx, rx) = oneshot::channel();
                             waits.push(Box::pin(async move {
-                                // bugfix-66: an owner that didn't answer
+                                // An owner that didn't answer
                                 // is an error, not "0 ready".
                                 let result = match rx.await {
                                     Ok((m, c)) => Ok(Answer::Info(m, c)),

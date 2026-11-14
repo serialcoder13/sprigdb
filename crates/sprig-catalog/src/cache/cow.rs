@@ -3,7 +3,7 @@
 //! An incremental load derives a new snapshot from the previous one. With
 //! plain maps that copies every row; [`CowMap`] splits a large map into
 //! [`SHARDS`] shards behind `Arc`s, so a change copies only the shards it
-//! touches (chapter 08's scale target: one incremental change on a
+//! touches (the scale target: one incremental change on a
 //! 100,000-object catalog in under 20 ms). Small maps, the common case
 //! across 20,000 cached tenants, use one shard and cost one allocation.
 

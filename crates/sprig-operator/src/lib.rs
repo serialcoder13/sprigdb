@@ -1,9 +1,9 @@
 //! `sprig-operator`: the operator role, the Kubernetes operator.
 //!
-//! Layer 3 (roles). Design: [chapter 27](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/27-provisioning.md) (Provisioning) of the SprigDB low-level design.
+//! Layer 3 (roles).
 //!
 //! `sprigdb operator` turns `SprigCluster` objects into mariadb-operator
-//! `MariaDB` resources, one Kubernetes cluster per DC (chapter 27 step 10):
+//! `MariaDB` resources, one Kubernetes cluster per DC:
 //!
 //! - [`crd`]: `SprigCluster` and `SprigClusterPool` (`sprigdb.io/v1alpha1`)
 //!   and their CRDs; [`yaml`] writes them for the Helm chart;
@@ -94,8 +94,8 @@ pub struct OperatorConfig {
     /// How long a `MariaDB` may take to be Ready.
     pub ready_timeout: Duration,
     /// How long the primary must not answer, with its pod not Ready, before
-    /// the failover watch promotes a replica (chapter 25's
-    /// `failover.cluster_detect_seconds`).
+    /// the failover watch promotes a replica
+    /// (`failover.cluster_detect_seconds`).
     pub failover_detect: Duration,
 }
 

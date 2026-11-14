@@ -32,7 +32,7 @@ pub struct State {
     /// (method, path) of every request.
     pub log: Vec<(String, String)>,
     /// Collections whose creates an admission webhook refuses, with its
-    /// message (r2close).
+    /// message.
     pub refuse_create: BTreeMap<String, String>,
 }
 

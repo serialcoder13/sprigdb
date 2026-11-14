@@ -1,6 +1,6 @@
 # elle-cli (https://github.com/ligurio/elle-cli, EPL-2.0) for checking
-# operation histories with Elle and Knossos (chapter 46, "Workloads and
-# checkers"). A test tool run as a separate process; nothing of it ships.
+# operation histories with Elle and Knossos. A test tool run as a separate
+# process; nothing of it ships.
 #
 #   docker build -t sprigdb-elle:dev deploy/compose/elle
 #   docker run --rm -v "$PWD:/work:ro" sprigdb-elle:dev --model list-append /work/history.edn

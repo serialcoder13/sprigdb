@@ -1,5 +1,5 @@
-//! `sprigctl check no-restart`: the live-change check runner (chapter 47,
-//! "No restarts"; build step 6).
+//! `sprigctl check no-restart`: the live-change check runner (no
+//! restarts).
 //!
 //! Under light load (a few MySQL connections running `SELECT 1` through
 //! the gateway), it applies each change the operator names, waits, checks
@@ -17,7 +17,7 @@
 //! (the protocol's way of moving a session off a retired listener) is
 //! counted as a reconnect, not a failure. It also reports `sprigdb.toml`
 //! drift from `/readyz?verbose`. The 72-hour soak is
-//! `deploy/compose/m07/soak.sh` (chapter 04 step 11); this runner is the
+//! `deploy/compose/m07/soak.sh`; this runner is the
 //! quick check an operator can run against any gateway.
 
 use std::fmt::Write as _;

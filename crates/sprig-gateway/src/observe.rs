@@ -235,6 +235,43 @@ fn traceparent(req: &Request) -> Option<String> {
 
 #[async_trait]
 impl SessionExec for ObservedSession {
+    /// A point read is always an engine's statement inside its traced
+    /// command: its SLIs, no span of its own.
+    async fn point_read(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        stmt: crate::pipeline::StmtRef,
+        params: &sprig_proto_mysql::command::ExecuteParams,
+    ) -> Result<crate::pipeline::PointRead> {
+        let protocol = cx.session.protocol.as_str();
+        let waited = Arc::new(AtomicU64::new(0));
+        let started = Instant::now();
+        let run = Box::pin(self.inner.point_read(cx, stmt, params));
+        let r = BACKEND_NANOS.scope(Arc::clone(&waited), run).await;
+        // A fallback is counted by the execute that follows it.
+        if matches!(r, Ok(crate::pipeline::PointRead::Fallback)) {
+            return r;
+        }
+        let total = started.elapsed();
+        let result = match &r {
+            Ok(_) => "ok",
+            Err(e) => classify(e),
+        };
+        let backend = Duration::from_nanos(waited.load(Ordering::Relaxed));
+        let busy = self
+            .tenant
+            .is_some_and(|t| TenantRates::get().busy(t, Instant::now()));
+        self.sli.record(
+            protocol,
+            self.tenant,
+            busy,
+            result,
+            total,
+            total.saturating_sub(backend),
+        );
+        r
+    }
+
     async fn execute(
         &mut self,
         cx: &mut ExecCtx<'_>,

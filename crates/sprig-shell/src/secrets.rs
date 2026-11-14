@@ -1,4 +1,4 @@
-//! Secrets per profile (chapter 53, "Profiles" and "Signing in").
+//! Secrets per profile.
 //!
 //! The OS keychain (service `sprig`, account = the profile), or
 //! `secrets.toml` with mode 0600 where there is none. A [`RefreshLock`]
@@ -298,8 +298,7 @@ pub fn store_for(kind: crate::profile::SecretsKind, dir: &Path) -> Box<dyn Secre
     }
 }
 
-/// Held while a profile's refresh token is rotated (chapter 53, "Signing
-/// in"): `dir/<profile>.lock`, created exclusively, removed on drop.
+/// Held while a profile's refresh token is rotated: `dir/<profile>.lock`, created exclusively, removed on drop.
 #[derive(Debug)]
 pub struct RefreshLock {
     path: PathBuf,

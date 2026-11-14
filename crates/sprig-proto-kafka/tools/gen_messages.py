@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generates src/messages/*.rs from Apache Kafka's message definitions.
 
-SprigDB's Kafka codec (chapter 45 build step 8) is written in-house; the
+SprigDB's Kafka codec is written in-house; the
 message bodies are generated from the JSON definitions Kafka publishes under
 clients/src/main/resources/common/message/ (Apache-2.0, the same licence as
 SprigDB), at tag 3.9.0, which still carries every old version. The JSON files
@@ -57,7 +57,7 @@ MESSAGES = [
     "DescribeConfigsRequest", "DescribeConfigsResponse",
     "IncrementalAlterConfigsRequest", "IncrementalAlterConfigsResponse",
     "ConsumerProtocolSubscription", "ConsumerProtocolAssignment",
-    # The data plane (chapter 45 build steps 10 and 11). Their definitions
+    # The data plane. Their definitions
     # are kept in tools/defs/ (fetched from apache/kafka at tag 3.9.0).
     "ProduceRequest", "ProduceResponse",
     "FetchRequest", "FetchResponse",

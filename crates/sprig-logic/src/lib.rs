@@ -1,8 +1,8 @@
 //! `sprig-logic`: the logic layer: catalog of code, invocation, budgets and the `db` interface.
 //!
-//! Layer: 2 logic. Design: [chapter 41](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/41-logic.md) (Logic) of the SprigDB low-level design.
+//! Layer: 2 logic.
 //!
-//! What exists (R7 order 1 and 2):
+//! What exists:
 //!
 //! - [`catalog`]: the `logic` migration module (`logic_modules`,
 //!   `logic_versions`, `logic_bindings`, `logic_schedules`,
@@ -18,14 +18,14 @@
 //! - [`invoke`]: calling an engine-tier version through its wrapper's
 //!   marker row, on the fallback runtime ([`engine`]);
 //! - [`settings`]: the fallback tier's budgets and outbound allowlist;
-//! - [`messages`]: triggers on streams and queues (R9);
-//! - [`testrun`]: `Logic.TestRun`, a run that never writes (R7 follow-ups);
-//! - [`rollout`]: staged rollout by percentage (RC10, R7 follow-ups);
-//! - [`drop`]: `DROP FUNCTION | PROCEDURE` and their dependents.
+//! - [`messages`]: triggers on streams and queues;
+//! - [`testrun`]: `Logic.TestRun`, a run that never writes;
+//! - [`rollout`]: staged rollout by percentage;
+//! - [`drop`](mod@drop): `DROP FUNCTION | PROCEDURE` and their dependents.
 //!
 //! Not yet: validations, triggers, schedules, computed fields, QuickJS
 //! for JavaScript, invocation from other protocols, rollout and rollback,
-//! deploys through chapter 21.
+//! deploys through the schema-change engine.
 
 // Hand-written lexers and parsers read best with short names.
 #![allow(

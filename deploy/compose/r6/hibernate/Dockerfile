@@ -1,7 +1,7 @@
-# R6 (chapter 32) Hibernate check: Spring Data JPA with ddl-auto=validate
+# Typed-tables Hibernate check: Spring Data JPA with ddl-auto=validate
 # against typed tables, then writes and reads through them. Built like the
-# M0.3 check (../../m03/hibernate): the connector matrix's pom.xml from the
-# `conn` build context, so the dependency layer is shared.
+# tenant harness's check (../../m03/hibernate): the connector matrix's
+# pom.xml from the `conn` build context, so the dependency layer is shared.
 ARG JDK=eclipse-temurin:21.0.8_9-jdk
 ARG JRE=eclipse-temurin:21.0.8_9-jre
 FROM ${JDK} AS build

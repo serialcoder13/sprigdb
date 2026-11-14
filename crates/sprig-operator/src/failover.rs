@@ -1,6 +1,6 @@
 //! SprigDB chooses the replica mariadb-operator promotes, and repairs the
-//! replicas a failover leaves broken (chapter 25, "Primary + replicas on
-//! Kubernetes"; r2opfix).
+//! replicas a failover leaves broken (primary and replicas
+//! on Kubernetes).
 //!
 //! **Why.** mariadb-operator 26.10's own failover promotes the replica with
 //! the highest *applied* position, skips every replica that still has relay
@@ -463,7 +463,7 @@ impl ReplicationOps for MysqlReplication {
             None => BinlogTls::skip_verify(),
         };
         let src = BinlogSource::new(host, port, "root", root).with_tls(tls);
-        // A dump id in the dump probe's range (chapter 09), so it can't
+        // A dump id in the dump probe's range, so it can't
         // end a mover's or the feed's stream.
         let mut o = StreamOptions::new(sprig_cluster::probe::dump::PROBE_SERVER_ID_BASE + 7);
         o.non_blocking = true;

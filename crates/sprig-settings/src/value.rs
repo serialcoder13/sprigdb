@@ -21,7 +21,7 @@ pub enum Value {
 impl Value {
     /// The number, for bounds checks and clamping.
     #[must_use]
-    #[allow(clippy::cast_precision_loss)] // bounds are f64 by design (chapter 08)
+    #[allow(clippy::cast_precision_loss)] // bounds are f64 by design
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             Value::Int(i) => Some(*i as f64),

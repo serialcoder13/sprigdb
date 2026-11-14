@@ -1,6 +1,5 @@
 //! The external provisioner: registers MariaDB that already exists, after
-//! prechecks (chapter 27, "External registration" and "Registering an
-//! external cluster"; build step 1).
+//! prechecks.
 //!
 //! ```text
 //! register(req):
@@ -9,7 +8,7 @@
 //! 3. read the required variables; compare with the settings table
 //! 4. create and drop user sprig_probe_<8 hex> and schema t0_sprig_probe_<8 hex>
 //! 5. as sprig_repl, open a binlog dump at the current position and read one event
-//! 6. chapter 09's probes build the capability profile; record declared values
+//! 6. the cluster probes build the capability profile; record declared values
 //! 7. any failure -> 39511 ER_SPRIG_CLUSTER_PRECHECK_FAILED, listing every missing item;
 //!    success -> clusters/<id> with provisioner = external, then active
 //! 8. as sprig_ctl on the writer, make sure the gateways' monitoring account
@@ -17,17 +16,16 @@
 //!    advisory says what to run
 //! ```
 //!
-//! The settings in step 3 are chapter 27's table; the binlog half is the
+//! The settings in step 3 are checked in [`classify`]; the binlog half is the
 //! change feed's check ([`sprig_cluster::probe::feed`]), reused as is.
-//! Differences from the book: step 4's schema is `t0_sprig_probe_<hex>`,
-//! because `sprig_ctl`'s grants cover only `t%` (the book's
-//! `sprig_probe_<hex>` schema would always fail); and missing privileges
-//! other than those on `t%` and `__sprig_sys` are advisories, as chapter 09
-//! has it ("a missing privilege disables only what needs it"), not
-//! failures. `require_secure_transport = OFF` is an advisory: SprigDB's own
+//! Step 4's schema is `t0_sprig_probe_<hex>` because `sprig_ctl`'s grants
+//! cover only `t%` (a `sprig_probe_<hex>` schema would always fail).
+//! Missing privileges other than those on `t%` and `__sprig_sys` are
+//! advisories, not failures: a missing privilege disables only what needs
+//! it. `require_secure_transport = OFF` is an advisory: SprigDB's own
 //! sessions are refused unless encrypted either way.
 //!
-//! Step 5 is chapter 09's binlog dump probe ([`sprig_cluster::probe::dump`]),
+//! Step 5 is the binlog dump probe ([`sprig_cluster::probe::dump`]),
 //! run once as `sprig_repl` on the node the active probes ran on, as part
 //! of the deep probe, so the profile's feed level reflects it. By the same
 //! rule, a dump that fails because of `sprig_repl`'s privileges or the
@@ -64,7 +62,7 @@ use sprig_common::{Result, SprigError};
 use crate::credentials::CredentialConnector;
 use crate::{NodeReport, PrecheckReport, ProvisionOp, Provisioner, RegisterCluster};
 
-/// The shortest binlog retention chapter 27 accepts, seconds.
+/// The shortest binlog retention registration accepts, seconds.
 pub const MIN_BINLOG_EXPIRE_SECONDS: u64 = 86_400;
 
 /// What one `sprig_ctl` session showed about its transport.
@@ -114,7 +112,7 @@ impl ExternalProvisioner {
 
     /// Records registered clusters with `provisioner = kind`: the
     /// Kubernetes operator registers the clusters it built through the same
-    /// prechecks (chapter 27, "The Kubernetes operator", step 5), and the
+    /// prechecks, and the
     /// record says who manages them.
     #[must_use]
     pub fn recorded_as(mut self, kind: ProvisionerKind) -> Self {
@@ -144,7 +142,7 @@ impl ExternalProvisioner {
 
     /// Runs every precheck; never writes to etcd. On MariaDB it creates and
     /// drops one locked account and one schema, and `__sprig_sys`'s probe
-    /// tables (chapter 09's active probes).
+    /// tables (the active probes').
     pub async fn precheck_report(&self, req: &RegisterCluster) -> PrecheckReport {
         let mut report = PrecheckReport {
             blocking: validate(req, self.registry.dc()),
@@ -321,7 +319,7 @@ impl ExternalProvisioner {
         if !report.passed() {
             return Err(report.error(&req.name));
         }
-        // The gateways' monitoring account (chapter 09): created now, or
+        // The gateways' monitoring account: created now, or
         // an advisory naming what the operator runs.
         if let Some(i) = active_target(req.topology, &report.probes)
             && let Some(node) = req.nodes.get(i)
@@ -459,7 +457,7 @@ pub struct Classify<'a> {
 /// Sorts probe findings into blocking items and advisories (steps 1-3 and
 /// 6). Pure, so the rules are tested without servers.
 #[must_use]
-#[allow(clippy::too_many_lines)] // one block per precheck, as chapter 27's table
+#[allow(clippy::too_many_lines)] // one block per precheck
 pub fn classify(c: &Classify<'_>) -> (Vec<String>, Vec<String>) {
     let gates = registration_gaps(c.probes, c.profile, c.fleet_lower_case_table_names);
     // A probe refused for a privilege (1227, 1142, 1044) logged in fine.
@@ -585,7 +583,7 @@ pub fn classify(c: &Classify<'_>) -> (Vec<String>, Vec<String>) {
         }
     }
 
-    // Compiled logic needs triggers (chapter 09, "PL/SQL routines").
+    // Compiled logic needs triggers.
     if c.profile.features.oracle_routines && !c.profile.features.trigger_create {
         advisories.push(
             "sprig_ctl can't create triggers (1419 with the binary log on), so compiled \
@@ -660,7 +658,7 @@ fn repl_endpoints(req: &RegisterCluster) -> Option<Vec<NodeEndpoint>> {
         .collect()
 }
 
-/// Step 5: `sprig_repl` logs in and reads the binlog: chapter 09's dump
+/// Step 5: `sprig_repl` logs in and reads the binlog: the dump
 /// probe, reusing the deep probe's run on this node (`probe`) when there
 /// is one, else running it here from the node's `@@gtid_binlog_pos`. Its
 /// grants are checked too, for a clearer message. Returns (blocking,
@@ -742,7 +740,7 @@ async fn repl_check(
 mod tests;
 
 /// Tenant tables with old-format (MariaDB 5.3) fractional temporal columns.
-/// Their rows can't be decoded from the binlog (binlog spike; chapter 10),
+/// Their rows can't be decoded from the binlog,
 /// so they can't move or feed until rebuilt with `ALTER TABLE ... FORCE`.
 /// An advisory: only the shards holding them are affected. Run once at
 /// registration, not in the periodic probe, because it scans

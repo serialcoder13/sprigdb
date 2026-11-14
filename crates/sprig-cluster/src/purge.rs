@@ -1,15 +1,14 @@
-//! What a deleted tenant leaves on one cluster, and removing it (chapter
-//! 08, "Deleting a tenant").
+//! What a deleted tenant leaves on one cluster, and removing it.
 //!
 //! A tenant's objects on a cluster all carry its id in their names:
 //!
 //! | Object | Name |
 //! |---|---|
-//! | per-user backend accounts (chapter 29) | `t<id>_u<user>@'%'` |
-//! | MariaDB roles (chapter 29, later) | `t<id>_r<role>`, `t<id>_rc<hash>` |
-//! | the offsets role (chapter 45, `sprig.commit_offset`) | `t<id>_sprig_offsets` |
+//! | per-user backend accounts | `t<id>_u<user>@'%'` |
+//! | MariaDB roles (later) | `t<id>_r<role>`, `t<id>_rc<hash>` |
+//! | the offsets role (`sprig.commit_offset`) | `t<id>_sprig_offsets` |
 //! | schemas | `t<id>_sprig`, `t<id>_d<db>_g<g>_s<s>`, `t<id>_d<db>_ref` |
-//! | `__sprig_sys.__sprig_names` rows (chapter 07) | an account's or a schema's name |
+//! | `__sprig_sys.__sprig_names` rows | an account's or a schema's name |
 //!
 //! [`read`] finds candidates with `LIKE 't<id>\_%'` (the `_` escaped, so
 //! `t3\_%` can't match `t30_u1`), and [`plan`] keeps only names that parse
@@ -54,7 +53,7 @@ pub fn owns_account(tenant: TenantId, user: &str) -> bool {
 }
 
 /// The roles SprigDB itself makes per tenant, by suffix: `t<id>_<suffix>`
-/// (chapter 45's offsets role, granted to accounts that commit offsets in
+/// (the stream offsets role, granted to accounts that commit offsets in
 /// a transaction).
 pub const INTERNAL_ROLES: &[&str] = &["sprig_offsets"];
 
@@ -137,7 +136,7 @@ pub struct Plan {
     pub left: Vec<(String, &'static str)>,
 }
 
-/// The mover's tables in `__sprig_sys` keyed by job (chapter 10).
+/// The mover's tables in `__sprig_sys` keyed by job.
 const JOB_TABLES: [&str; 3] = ["mover_pos", "watermark", "mover_xa"];
 
 fn sys_table(name: &str) -> String {

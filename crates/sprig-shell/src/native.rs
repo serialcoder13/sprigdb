@@ -1,4 +1,4 @@
-//! Native protocols (chapter 53, "--protocol"): what drivers see.
+//! Native protocols (`--protocol`): what drivers see.
 //!
 //! - **mysql**: `mysql_async`, text protocol, multi-statements; cancel by
 //!   `KILL QUERY` on a second connection.

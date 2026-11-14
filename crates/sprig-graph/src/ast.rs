@@ -1,4 +1,4 @@
-//! The Cypher syntax tree (chapter 43, "Language surface"; build step 6).
+//! The Cypher syntax tree.
 //! The executor runs it after [`crate::bind`] checks names and marks what
 //! the planner needs, so it doubles as the graph IR of this build.
 
@@ -87,7 +87,7 @@ pub enum Clause {
         /// The subquery.
         query: Box<Query>,
         /// `IN TRANSACTIONS ...`: the incoming rows in batches, each batch's
-        /// subquery committed on its own (R8 round 8).
+        /// subquery committed on its own.
         batch: Option<Box<TxBatch>>,
     },
     /// `FOREACH (var IN list | updates)`.
@@ -132,8 +132,7 @@ pub enum IndexKind {
     Text,
 }
 
-/// Index and constraint commands (chapter 43, "Indexes and
-/// constraints").
+/// Index and constraint commands.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Schema {
     /// `CREATE INDEX` or `CREATE CONSTRAINT ... IS UNIQUE`.

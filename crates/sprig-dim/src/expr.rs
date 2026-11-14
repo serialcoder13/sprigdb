@@ -1,4 +1,4 @@
-//! Measure expressions and filters (chapter 35: "SQL over the fact row").
+//! Measure expressions and filters: SQL over the fact row.
 //!
 //! A model's expressions reach MariaDB inside the compiled SQL, so they
 //! are restricted to a small, safe grammar: column names, numbers, quoted

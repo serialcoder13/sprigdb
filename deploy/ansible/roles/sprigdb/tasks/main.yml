@@ -1,7 +1,7 @@
 ---
 # Install the package, etcd where needed, certificates and the small
 # sprigdb.toml; start the agent on database hosts so they join the free
-# pool (chapter 27).
+# pool.
 - name: Install the sprigdb package (deb)
   ansible.builtin.apt:
     deb: "{{ sprigdb_package_dir }}/sprigdb_{{ sprigdb_version }}_{{ 'arm64' if ansible_architecture == 'aarch64' else 'amd64' }}.deb"
@@ -26,10 +26,10 @@
         extra_opts: [--strip-components=1, --wildcards, "*/etcd", "*/etcdctl", "*/etcdutl"]
         creates: /usr/local/bin/etcd
 
-# bugfix-53: etcd keeps every revision unless told otherwise, and its
-# database grows (about 0.7 MB/h in the M0.7 soak). etcd ignores
-# command-line flags when it has a config file, so the keys go into the
-# operator's /etc/sprigdb/etcd-<tier>.yaml.
+# etcd keeps every revision unless told otherwise, and its database grows
+# (about 0.7 MB/h in the soak). etcd ignores command-line flags when it has
+# a config file, so the keys go into the operator's
+# /etc/sprigdb/etcd-<tier>.yaml.
 - name: etcd keeps one hour of revisions (auto-compaction)
   when: "'etcd' in sprigdb_roles"
   block:
@@ -53,7 +53,7 @@
       loop:
         - name: sprigdb-etcd-defrag.service
           content: |
-            # bugfix-53: returns the space auto-compaction frees to the disk.
+            # Returns the space auto-compaction frees to the disk.
             [Unit]
             Description=SprigDB etcd defragmentation (this host's member)
             After=sprigdb-etcd-dc.service

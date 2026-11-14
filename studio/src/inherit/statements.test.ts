@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { checkIds, checkReferences, origin, sharesByName, showCreateShare, tableName } from './statements';
 
-describe('inheritance statements (chapter 42, plan step 7)', () => {
+describe('inheritance statements', () => {
   it('builds the statements', () => {
     expect(tableName('shop.t2')).toBe('`shop`.`t2`');
     expect(() => tableName(' ')).toThrow();

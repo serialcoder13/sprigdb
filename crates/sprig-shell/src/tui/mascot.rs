@@ -49,7 +49,7 @@ pub enum ColourMode {
     TrueColor,
 }
 
-/// The coral-gold colour for a mask key (decision R5), or `None` for the
+/// The coral-gold colour for a mask key, or `None` for the
 /// terminal's default. `sprout` is true on the rows above the body, where the
 /// leaves stay green; elsewhere the lime strokes are gills and turn coral.
 #[must_use]

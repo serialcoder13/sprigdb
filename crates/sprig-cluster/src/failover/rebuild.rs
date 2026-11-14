@@ -1,4 +1,4 @@
-//! `node_rebuild` (chapter 25, "Recovery after an outage", step 3): what
+//! `node_rebuild` (recovery after an outage): what
 //! the worker that runs the job and the agents that do the work share.
 //!
 //! ```text
@@ -298,7 +298,7 @@ pub struct NodeRebuildSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     /// Refuse to discard a diverged node's data before its errant extract
-    /// is verified (chapter 25 step 2.5). `false` (`--no-extract`) keeps the
+    /// is verified. `false` (`--no-extract`) keeps the
     /// old data directory instead.
     #[serde(default = "yes")]
     pub require_extract: bool,

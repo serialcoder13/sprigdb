@@ -1,5 +1,5 @@
-// Studio round 3 end to end (chapter 44 steps 9, 15–17): cursors past the
-// row cap, the shards view, second factors and impersonation, operator mode.
+// Studio end to end: cursors past the row cap, the shards view, second
+// factors and impersonation, operator mode.
 // STUDIO_URL=... STUDIO_METRICS=http://127.0.0.1:<telemetry>/metrics pnpm e2e
 // STUDIO_BACKEND=<host>:<port>:<user>:<password>:<backend account> also counts
 // the tenant's backend connections with the mysql client.
@@ -150,7 +150,7 @@ test.describe.serial('Studio round 3', () => {
       // One locator for "done or ready for the next page": the last page
       // replaces the button with "all fetched" in one render, and asking
       // the two apart raced it (isEnabled then waited for a button that
-      // had gone; WebKit's flake, ST72).
+      // had gone; a WebKit flake).
       await expect(page.getByTestId('all-fetched').or(page.locator('[data-testid="fetch-more"]:enabled'))).toBeVisible({ timeout: 30_000 });
     }
     await expect(page.getByTestId('all-fetched')).toBeVisible();
@@ -159,8 +159,7 @@ test.describe.serial('Studio round 3', () => {
   });
 
   test('shards view: groups, keys, maps and advisor runs', async ({ page, playwright, baseURL }) => {
-    // studio2_shop was sharded by the advisor on studio2's stack (run in
-    // target/agent-studio2/tests/shards-setup.sh).
+    // studio2_shop was sharded by the advisor on the test stack beforehand.
     await signIn(page);
     await openPage(page, 'Shards');
     const g = page.getByTestId('group-customers');
@@ -289,7 +288,7 @@ test.describe.serial('Studio round 3', () => {
   });
 
   test('operator mode: clusters, placement, moves; refused to others', async ({ page, playwright, baseURL }) => {
-    // acme.app is in studio.operator_logins on studio2's stack (global scope).
+    // acme.app is in studio.operator_logins on the test stack (global scope).
     await signIn(page);
     await page.getByTestId('nav-operator').click();
     await expect(page.getByTestId('ops-clusters')).toContainText('dc-a-c1');

@@ -343,7 +343,7 @@ A definition reaches every member at once, because members read their ancestors'
 - for exchanges and queues, the member's first AMQP connection to the database's virtual host, or a publish aimed at it;
 - for triggers and sinks, their source instance becoming active.
 
-Reads never create an instance: a stream instance that doesn't exist yet reads as empty. With `inherit.instance_precreate = 'on'` on a definition, instances are created in the background for every member, at `inherit.precreate_rate` (50) per second. A publish waits up to `inherit.instance_create_wait_ms` (5,000 ms) for an instance being created, then fails with the retryable `ER_SPRIG_INHERIT_INSTANCE_UNAVAILABLE` (39899). A member may hold `inherit.max_instances_per_tenant` (1,000) instances (39240).
+Reads never create an instance: a stream instance that doesn't exist yet reads as empty. Instances aren't created in advance. A publish waits up to `inherit.instance_create_wait_ms` (5,000 ms) for an instance being created, then fails with the retryable `ER_SPRIG_INHERIT_INSTANCE_UNAVAILABLE` (39899). A member may hold `inherit.max_instances_per_tenant` (1,000) instances (39240).
 
 ### Publishing by target tenant
 
@@ -476,9 +476,7 @@ Every record read by fan-in carries `x-sprig-tenant`. Order is kept per member i
 | `inherit.merge` | `auto` | `auto`, `read_through`, `materialized` or `federated` (refused) |
 | `inherit.read_through_max_depth` | 4 | Read-through levels before a share must be materialized |
 | `inherit.max_depth` | 16 | Longest share chain of one table |
-| `inherit.sync_orphan_max_rows` | 1000 | Rows per key orphaned in the deleting transaction |
 | `inherit.member_publish` | `on` | Whether a member may publish into its own instance |
-| `inherit.instance_precreate` | `off` | Create instances in the background instead of on first use |
 | `inherit.instance_create_wait_ms` | 5000 | How long a publish waits for an instance being created |
 | `inherit.max_definitions_per_tenant` | 200 | `FOR EACH TENANT` definitions per declaring tenant |
 | `inherit.max_instances_per_tenant` | 1000 | Instances per member |
@@ -538,6 +536,7 @@ See [Errors](../reference/errors.md).
 - **Record hierarchies** on inheritable tables.
 - **Prepared statements, views, routines and `INSERT ... SELECT`** naming inheritable tables (39891).
 - **Moving a tenant to another parent**, with or without shares.
+- **Creating instances in advance.** A member's instance of a `FOR EACH TENANT` definition is created on first use only.
 
 ## Related
 

@@ -29,8 +29,8 @@
 //! one_way_ms = 30
 //! ```
 //!
-//! Chapter 46's `Env` trait (gateway URLs per protocol, metrics, faults,
-//! test tenants) grows on top of this once the gateway serves clients.
+//! An `Env` trait (gateway URLs per protocol, metrics, faults, test
+//! tenants) grows on top of this once the gateway serves clients.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -45,7 +45,7 @@ use crate::skip;
 /// `SPRIG_TEST_DC` names another.
 pub const DEFAULT_DC: &str = "dc-a";
 
-/// A MariaDB cluster's topology (chapter 46, "Interfaces").
+/// A MariaDB cluster's topology.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Topology {
@@ -55,13 +55,13 @@ pub enum Topology {
     PrimaryReplicas {
         /// Number of replicas.
         replicas: u8,
-        /// Semi-synchronous, waiting `AFTER_SYNC` (chapter 27).
+        /// Semi-synchronous, waiting `AFTER_SYNC`.
         #[serde(default)]
         semisync: bool,
     },
     /// One node.
     Single,
-    /// Registered, not managed: its shape is the operator's (chapter 27).
+    /// Registered, not managed: its shape is the operator's.
     External,
 }
 

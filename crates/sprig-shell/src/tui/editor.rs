@@ -1,4 +1,4 @@
-//! The multi-line editor (chapter 53, "Completion and highlighting").
+//! The multi-line editor, with completion and highlighting.
 //!
 //! Text is kept as lines of `char`s, so the cursor moves by characters.
 //! Highlighting comes from the shell's own lexer.

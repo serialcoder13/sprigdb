@@ -1,4 +1,4 @@
-//! PackStream version 1 (chapter 43, "Bolt front end"; build step 16): the
+//! PackStream version 1: the
 //! value encoding inside Bolt messages.
 //!
 //! | Marker | Value |

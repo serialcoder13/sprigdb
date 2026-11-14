@@ -298,7 +298,7 @@ fn forget_tenant_closes_its_entries() {
 
 #[test]
 fn digests_outlive_buckets_and_reset_per_tenant() {
-    // R4 round 5: the totals `performance_schema`'s digest summary shows.
+    // The totals `performance_schema`'s digest summary shows.
     let (r, c, f) = setup(RecorderConfig::default());
     let a = fp(&f, 1, "SELECT * FROM t WHERE id = 1");
     let b = fp(&f, 2, "SELECT * FROM t WHERE id = 1");

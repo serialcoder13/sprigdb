@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Studio's end-to-end suite (chapter 44 step 14 onward) against a gateway
+# Studio's end-to-end suite against a gateway
 # that deploy/compose/gateway-dev.sh brought up in catalog mode.
 #
 #   deploy/compose/studio/e2e.sh setup     # everything the suite needs, once (rerunnable)
@@ -25,9 +25,9 @@
 #     table and 60 slow lookups; about 2 minutes the first time, after the
 #     restart of step 6);
 #  6. restarts the processes with an Admin API token and the gateways'
-#     narrow credential (decisions ST21 and ST34), made under the state
+#     narrow credential, made under the state
 #     directory;
-#  7. named operators (chapter 14; ST65): studio-e2e, a platform operator
+#  7. named operators: studio-e2e, a platform operator
 #     for this script, signs in (enrolling TOTP; its secret is kept under
 #     the state directory) and issues a token, which the gateway then uses
 #     for Studio's operator mode instead of the bootstrap token (refused

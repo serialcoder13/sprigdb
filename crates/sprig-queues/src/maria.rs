@@ -1,9 +1,9 @@
-//! The MariaDB message store (chapter 50, "Shard tables"; build step 4):
+//! The MariaDB message store:
 //! `__sprig_qm` (messages), `__sprig_qs` (owner state per lane),
 //! `__sprig_qd` (delayed messages), `__sprig_qo` (the queue outbox) and
-//! `__sprig_qf` (the forward ledger, R9 r9fwd) in one shard schema.
+//! `__sprig_qf` (the forward ledger) in one shard schema.
 //!
-//! **As built, against the book:**
+//! **As built:**
 //! - The tables live in the vhost database's default shard (its first
 //!   shard), as a stream's log does: no separate queue group is created.
 //! - Times are epoch milliseconds in `BIGINT` columns (`expires_at_ms`,
@@ -86,7 +86,7 @@ pub const DDL: [&str; 5] = [
   deaths         BLOB NULL,
   PRIMARY KEY (out_id)
 ) ENGINE=InnoDB",
-    // The forward ledger (R9, r9fwd): one row per message an outbox
+    // The forward ledger: one row per message an outbox
     // forward enqueued, written in the owner's batch with the message, so
     // a forward replayed after the message was consumed stays a no-op.
     // Rows go once their outbox row is gone and they are old enough
@@ -155,8 +155,8 @@ pub struct MariaStore {
     confirm_replica: Arc<std::sync::atomic::AtomicBool>,
     schema: String,
     q: String,
-    /// The schema moved away (a mover renamed its tables, chapter 10's
-    /// fence) or is fenced: the gateway opens the store again where the
+    /// The schema moved away (a mover renamed its tables at
+    /// its fence) or is fenced: the gateway opens the store again where the
     /// tenant's map points now.
     stale: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -212,7 +212,7 @@ impl MariaStore {
                 .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// `queue.confirm_mode = replica` (chapter 50, "Confirms"): after a
+    /// `queue.confirm_mode = replica`: after a
     /// commit on `c`, waits until one replica has applied it
     /// (`MASTER_GTID_WAIT` on the session's `@@last_gtid`). A replica that
     /// doesn't within 10 s fails the write: the owner stops and the

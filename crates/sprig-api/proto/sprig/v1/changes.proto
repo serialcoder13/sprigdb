@@ -1,8 +1,8 @@
-// sprig.v1: change streams (chapter 37, "Change streams"; chapter 38). A
+// sprig.v1: change streams. A
 // subscription to a database's row changes, over gRPC streaming, and over
 // REST as Server-Sent Events, WebSocket or NDJSON. Each event is checked
 // against the subscriber's privileges and row-level security before it is
-// sent (chapter 29, RLS round 5, decision RL45).
+// sent.
 syntax = "proto3";
 
 package sprig.v1;
@@ -26,7 +26,7 @@ message WatchRequest {
   string database = 1;
   // Tables (or collections); empty: every table the caller may read.
   repeated string objects = 2;
-  // A resume token (chapter 38), or empty for "now".
+  // A resume token, or empty for "now".
   string start_after = 3;
   // An alternative start point; 0 if unused (not supported yet: 39787).
   uint64 start_at_hlc = 4;

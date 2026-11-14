@@ -25,8 +25,7 @@ hyper-util = { workspace = true, features = ["tokio", "http2"] }
 httpdate = "1"
 metrics.workspace = true
 mysql_async.workspace = true
-# Parquet objects (chapter 51 open question 3, approved by Kiran on 9
-# November 2026): Apache Arrow's `parquet` crate (Apache-2.0) without its
+# Parquet objects: Apache Arrow's `parquet` crate (Apache-2.0) without its
 # Arrow feature, through the low-level serialized writer, zstd pages.
 parquet = { version = "=60.1.0", default-features = false, features = ["zstd"] }
 # AES-256-GCM sealing, HKDF, HMAC-SHA256 (webhook signatures, SigV4) and
@@ -38,16 +37,16 @@ serde_json.workspace = true
 sprig-catalog.workspace = true
 sprig-common.workspace = true
 sprig-logic-js.workspace = true
-# TRANSFORM: deployed logic functions' versions and call results (R9, r9more).
+# TRANSFORM: deployed logic functions' versions and call results.
 sprig-logic = { path = "../sprig-logic" }
 sprig-meta.workspace = true
 sprig-proto-kafka = { path = "../sprig-proto-kafka" }
 sprig-settings.workspace = true
-# Residency policies (chapter 26), shared (R9, r9more).
+# Residency policies.
 sprig-residency.workspace = true
 sprig-streams = { path = "../sprig-streams" }
 sprig-workload.workspace = true
-# The PostgreSQL database target (chapter 51 open question 10): sqlx's
+# The PostgreSQL database target: sqlx's
 # PostgreSQL driver (MIT/Apache-2.0) on tokio with rustls and ring.
 sqlx = { version = "=0.8.6", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-ring-webpki"] }
 # WHERE conditions of sinks are parsed with sqlparser and evaluated here.

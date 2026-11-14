@@ -1,27 +1,27 @@
-//! Joins across data models, the SQL part (chapter 22, "The type mapping",
-//! "Comparison rules per query language", "When a join is co-located").
+//! Joins across data models, the SQL part: the type mapping, the
+//! comparison rules per query language, and when a join is co-located.
 //!
-//! - [`SqlType`] and [`SqlFamily`]: a SQL column type as chapter 22's type
-//!   map sees it, read from `information_schema.COLUMNS.DATA_TYPE` (or a
+//! - [`SqlType`] and [`SqlFamily`]: a SQL column type as the type map sees
+//!   it, read from `information_schema.COLUMNS.DATA_TYPE` (or a
 //!   `COLUMN_TYPE` such as `tinyint(1) unsigned`) and the column's
 //!   collation;
-//! - [`SqlType::key_class`]: the map's last column, chapter 15's key class
+//! - [`SqlType::key_class`]: the map's last column, the key class
 //!   (`None`: not a key);
 //! - [`cmp_type`]: the comparison MySQL's rules pick for `a = b`;
 //! - [`CompareRules`], [`MemberFlags`] and [`colocated`]: whether an
 //!   equality between two members' key parts holds only for rows on one
 //!   shard, under SQL's or MongoDB's rules;
-//! - [`edge_colocated`]: the check the advisor (chapter 16) applies to a
+//! - [`edge_colocated`]: the check the advisor applies to a
 //!   recorded join edge between two members of one group.
 //!
-//! The book puts these in `sprig-router::colocate`; they live here, beside
-//! chapter 15's `colocation_safe` and the collation tables they read, so
+//! These live here, beside `colocation_safe` and the collation tables they
+//! read, so
 //! the advisor and the router share one copy without the advisor
 //! depending on the router.
 //!
-//! R1 builds the SQL side. The BSON, stored-JSON and protobuf columns of
-//! the type map (`sprig-doc::typemap`), field columns and the
-//! `double_inexact_seen` catalog flag come with documents in R5:
+//! Only the SQL side is built here. The BSON, stored-JSON and protobuf
+//! columns of the type map (`sprig-doc::typemap`), field columns and the
+//! `double_inexact_seen` catalog flag belong to documents:
 //! [`MemberFlags::double_inexact_seen`] exists in memory and is `false`
 //! for every table.
 
@@ -29,7 +29,7 @@ use crate::collation::{self, CollationId};
 use crate::groups::{CmpType, finer_or_equal};
 use crate::key::KeyClass;
 
-/// A SQL type family, as chapter 22's type map groups types.
+/// A SQL type family, as the type map groups types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqlFamily {
     /// `TINYINT(1)`, `BOOLEAN`.
@@ -149,12 +149,12 @@ impl SqlType {
         Some(Self { family, collation })
     }
 
-    /// Chapter 22's key class for the type (the type map's last column);
+    /// The key class for the type (the type map's last column);
     /// `None` for types that are not a key (`FLOAT`, `TIME`, `BIT`, `SET`,
     /// `JSON`, `VECTOR`, geometry) and for character types whose
     /// collation is unknown.
     ///
-    /// This is the full map. What the R1 advisor and router accept as a
+    /// This is the full map. What the advisor and router accept as a
     /// distribution key is narrower (`sprig_shard::pins::column_class`:
     /// no `TEXT`, `ENUM` or `BLOB` keys yet).
     #[must_use]
@@ -186,8 +186,8 @@ impl SqlType {
 /// The collation MySQL's coercibility rules give two column operands of
 /// the same coercibility: the same collation, or the `_bin` one when both
 /// are of one character set. `None` where MariaDB reports an illegal mix
-/// (or the superset conversion between character sets, which R1 doesn't
-/// follow).
+/// (or the superset conversion between character sets, which this
+/// doesn't follow).
 fn string_collation(a: CollationId, b: CollationId) -> Option<CollationId> {
     if a == b {
         return Some(a);
@@ -252,8 +252,7 @@ pub fn cmp_type(a: &SqlType, b: &SqlType) -> Option<CmpType> {
     }
 }
 
-/// Which query language's equality a join uses (chapter 22, "Comparison
-/// rules per query language").
+/// Which query language's equality a join uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompareRules {
     /// SQL: MySQL's rules, evaluated by MariaDB, with the comparison type
@@ -261,7 +260,7 @@ pub enum CompareRules {
     MySql(CmpType),
     /// `$lookup`: MongoDB's rules (numbers by value across types, strings
     /// under the aggregation's collation, a string never equals a number).
-    /// R5 records such joins; the advisor already counts them.
+    /// The advisor counts such joins too.
     Mongo {
         /// The aggregation's collation, if any.
         collation: Option<CollationId>,
@@ -271,23 +270,23 @@ pub enum CompareRules {
 /// A member's one-way flags, as joins read them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MemberFlags {
-    /// Chapter 15's `group_members.off_class_seen`.
+    /// `group_members.off_class_seen`.
     pub off_class_seen: bool,
-    /// Chapter 22's proposed `double_inexact_seen`: a key value that is
-    /// not an integer within ±2^53 was stored. Always `false` for tables
-    /// (only documents compared in double precision can set it; R5 adds the
-    /// catalog column and its writer).
+    /// The proposed `double_inexact_seen`: a key value that is not an
+    /// integer within ±2^53 was stored. Always `false` for tables (only
+    /// documents compared in double precision can set it; the catalog
+    /// column and its writer don't exist yet).
     pub double_inexact_seen: bool,
 }
 
 /// Whether an equality under `rules` between two members' key parts of
 /// class `key` (each side being that part for its member, directly or
-/// through a parent chain: chapter 15's first condition, which the caller
-/// checks) holds only for rows on the same shard (chapter 22's table).
+/// through a parent chain: the first co-location condition, which the
+/// caller checks) holds only for rows on the same shard.
 #[must_use]
 pub fn colocated(rules: &CompareRules, key: KeyClass, a: MemberFlags, b: MemberFlags) -> bool {
     let cmp = match rules {
-        // Chapter 15's normalization hashes every value of a key the same
+        // Key normalization hashes every value of a key the same
         // way whatever its BSON type; MongoDB's equality implies equal
         // normalized bytes.
         CompareRules::Mongo { .. } => return true,

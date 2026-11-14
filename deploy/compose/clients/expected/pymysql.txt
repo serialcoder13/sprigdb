@@ -4,10 +4,9 @@
 
 # Through the gateway the test sends a 16 MiB SELECT: @@max_allowed_packet
 # reads 64 MiB (gateway.max_allowed_packet_bytes) while the development
-# clusters keep 16 MiB (gaps row 30). On a debug gateway, lexing it also held
-# a runtime worker long enough for the chapter 25 watchdog to abort the
-# process (9 November 2026). Plain servers answer 16 MiB and the test returns.
-gateway-* exclude *.test_largedata :: 16 MiB statement; backend limit 16 MiB (gaps row 30); watchdog abort on a debug gateway
+# clusters keep 16 MiB. On a debug gateway, lexing it also held a runtime
+# worker long enough for the runtime watchdog to abort the process (9 November 2026). Plain servers answer 16 MiB and the test returns.
+gateway-* exclude *.test_largedata :: 16 MiB statement; backend limit 16 MiB; watchdog abort on a debug gateway
 
 # Upstream CI's own skips: plugins and setups the suite needs but run.sh
 # doesn't install (ed25519, sha256 over a socket, dialog, PAM, unix socket).
@@ -20,10 +19,10 @@ gateway-* exclude *.test_largedata :: 16 MiB statement; backend limit 16 MiB (ga
 * skip *.TestOldIssues.test_issue_17 :: upstream: requires a legacy MySQL configuration
 * skip *.TestNextset.test_multi_cursor :: upstream: skipped unconditionally
 
-# A tenant has no `mysql` schema (chapter 29; decisions/r4-interim.md A5).
+# A tenant has no `mysql` schema.
 gateway-* fail *.TestAuthentication.test_plugin :: reads mysql.user: a tenant has no mysql schema (1142)
 gateway-* fail *.TestOldIssues.test_issue_6 :: connects to database mysql: a tenant has no mysql schema (1044)
 # COM_PROCESS_KILL of the second login's session by the first: the tenant
 # admin holds ALL (CONNECTION_ADMIN), but the gateway's KILL still allows
 # only the user's own sessions (1095). Gaps row 33.
-gateway-* fail *.TestNewIssues.test_issue_36 :: KILL of another user's session in the tenant: CONNECTION_ADMIN not applied yet (1095; gaps row 33)
+gateway-* fail *.TestNewIssues.test_issue_36 :: KILL of another user's session in the tenant: CONNECTION_ADMIN not applied yet (1095)

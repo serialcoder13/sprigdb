@@ -1,4 +1,4 @@
-//! Keys and partitions (chapter 45, "Keys and partitions").
+//! Keys and partitions.
 //!
 //! ```text
 //! key present: (murmur2(key) & 0x7fffffff) mod partitions
@@ -11,7 +11,7 @@
 //! **As built:** keyless records are spread by their event id, not round
 //! robin per producer session. The partition is then fixed by the outbox
 //! row itself, so a sequencer that re-reads a row after a crash gives it
-//! the same partition (chapter 45 allows Kafka's sticky behaviour; this
+//! the same partition (Kafka's sticky behaviour would be allowed; this
 //! is the same spread without session state).
 
 use crate::model::PartitionNo;

@@ -1,10 +1,9 @@
-//! The broker front end (chapter 45, "The Kafka front end", build steps 9,
-//! 12 and 13): one connection's loop of size-prefixed requests, SASL, and
-//! the API handlers.
+//! The broker front end: one connection's loop of size-prefixed requests,
+//! SASL, and the API handlers.
 //!
 //! The broker is protocol code over traits the gateway implements:
 //!
-//! - [`Identity`]: SASL PLAIN and SCRAM onto chapter 14's logins;
+//! - [`Identity`]: SASL PLAIN and SCRAM onto SprigDB's logins;
 //! - [`Cluster`]: this broker's id and the DC's gateways (the brokers
 //!   Metadata lists);
 //! - [`Topics`]: topic administration over streams;
@@ -12,7 +11,7 @@
 //!   [`Leases`](crate::group::Leases), through the group
 //!   [`Coordinator`];
 //! - [`DataPlane`]: Produce, Fetch, ListOffsets and OffsetForLeaderEpoch
-//!   (build steps 10 and 11; [`data::DataService`]). Without one, those
+//!   ([`data::DataService`]). Without one, those
 //!   APIs are not advertised and a request for them closes the connection,
 //!   as Kafka does for an API it doesn't serve.
 //!
@@ -65,12 +64,12 @@ pub struct ConnInfo {
     pub peer: SocketAddr,
     /// TLS at the gateway.
     pub tls: bool,
-    /// The TLS server name, which can name the tenant (chapter 14).
+    /// The TLS server name, which can name the tenant.
     pub sni: Option<String>,
     /// A verified client certificate.
     pub client_cert: bool,
     /// Its subject and issuer in MySQL's form (`/O=Acme/CN=alice`), for
-    /// `REQUIRE SUBJECT` and `ISSUER` (authfix2).
+    /// `REQUIRE SUBJECT` and `ISSUER`.
     pub client_dn: Option<(String, String)>,
 }
 
@@ -79,7 +78,7 @@ pub struct ConnInfo {
 #[error("{0}")]
 pub struct AuthFailure(pub String);
 
-/// The end of a SCRAM login, once the proof is checked: chapter 14's
+/// The end of a SCRAM login, once the proof is checked: the login
 /// policy checks, counters and audit.
 #[async_trait]
 pub trait ScramFinish: Send {
@@ -101,7 +100,7 @@ impl std::fmt::Debug for ScramLookup {
     }
 }
 
-/// Logins (chapter 14) for the Kafka listener.
+/// Logins for the Kafka listener.
 #[async_trait]
 pub trait Identity: Send + Sync + 'static {
     /// A PLAIN login.
@@ -168,9 +167,8 @@ impl std::fmt::Debug for DataReply {
     }
 }
 
-/// Produce, Fetch, ListOffsets and OffsetForLeaderEpoch: chapter 45 build
-/// steps 10 and 11. The broker advertises [`DataPlane::apis`] and hands
-/// their requests over whole.
+/// Produce, Fetch, ListOffsets and OffsetForLeaderEpoch. The broker
+/// advertises [`DataPlane::apis`] and hands their requests over whole.
 #[async_trait]
 pub trait DataPlane: Send + Sync + 'static {
     /// The APIs and versions it serves.

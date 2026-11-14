@@ -1,5 +1,5 @@
-# Gateway logins for the Compose development stack (M0.2 interim decision D1;
-# format in crates/sprig-auth/src/accounts.rs). Development only.
+# Gateway logins for the Compose development stack (format in
+# crates/sprig-auth/src/accounts.rs). Development only.
 #
 # sprigdb.gateway.dev.toml points the gateway at it:
 #
@@ -10,7 +10,7 @@
 # a second of a change; without it every login fails with 1045.
 #
 # Every account below logs in with the password "sprig-dev-app", on the MySQL
-# persona's 13306 or the MariaDB persona's 13307 (decision D6):
+# persona's 13306 or the MariaDB persona's 13307:
 #
 #   deploy/compose/gateway-dev.sh up
 #   mysql -h 127.0.0.1 -P 13306 -u app -psprig-dev-app --ssl-mode=REQUIRED
@@ -19,7 +19,7 @@
 # order: dc-a-single (dc-a-c1), dc-a-repl (dc-a-c2), dc-a-galera (dc-a-c3).
 # gateway-dev.sh registers them in that order and stops if the ids differ.
 #
-# The verifiers are chapter 14's formats. To make one for another password:
+# The verifiers use the gateway's verifier formats. To make one for another password:
 # sprig_auth::verifier::caching_sha2_string("<password>") (sprigctl will wrap
 # it), or take a MySQL 8.4 hash as "0x" || HEX(authentication_string).
 

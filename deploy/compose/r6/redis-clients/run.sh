@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Chapter 40's client suites (R6 done-when): redis-py 5.2.1 (RESP2 and RESP3),
+# Redis client suites: redis-py 5.2.1 (RESP2 and RESP3),
 # ioredis 5.4.2, go-redis v9.7.0 (RESP3), Jedis 5.2.0 and Lettuce 6.5.1 (RESP3)
 # each run one scenario (strings, hashes, lists, sets, sorted sets, expiry,
 # SCAN, pipelines, MULTI/EXEC, WATCH, EVAL/EVALSHA, geo, pub/sub, a blocked

@@ -1,5 +1,4 @@
-//! The tier 1 connector matrix and the latency gate (chapter 46, step 5;
-//! chapter 05, step 13; milestone M0.2's "done when" in chapter 48).
+//! The tier 1 connector matrix and the latency gate.
 //!
 //! The matrix itself lives in `deploy/compose/connectors/`: one small
 //! program per client (MySQL and MariaDB `Connector/J`, `go-sql-driver`,
@@ -21,7 +20,7 @@
 //! | [`LATENCY_TARGET`] | the endpoint under test | `mysql://root:sprig-dev-root@127.0.0.1:3307` |
 //! | [`LATENCY_BASELINE`] | direct MariaDB; defaults to `SPRIG_TEST_MARIADB_SINGLE` | `mysql://root:sprig-dev-root@127.0.0.1:13301` |
 //! | [`LATENCY_SAMPLES`] | samples per workload and endpoint (2000) | `5000` |
-//! | [`LATENCY_MAX_P50_DELTA_MS`] | the gate (0.5, M0.2) | `0.3` |
+//! | [`LATENCY_MAX_P50_DELTA_MS`] | the gate (0.5) | `0.3` |
 //! | [`LATENCY_MAX_P99_DELTA_MS`] | an optional p99 gate (unset: report only) | `1` |
 
 use std::path::PathBuf;

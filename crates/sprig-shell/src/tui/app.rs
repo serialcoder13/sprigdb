@@ -1,4 +1,4 @@
-//! The TUI's state, keys and drawing (chapter 53, "The TUI").
+//! The TUI's state, keys and drawing.
 //!
 //! [`App`] is pure: keys change state and return [`Effect`]s, which the
 //! runtime in [`crate::tui`] carries out, sending [`Msg`]s back. That keeps

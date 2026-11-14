@@ -242,7 +242,7 @@ fn error_fields(e: &SprigError) -> (u16, String) {
 }
 
 /// `Sql.Check`.
-#[allow(clippy::similar_names)] // start, end and stmt are the chapter's words
+#[allow(clippy::similar_names)] // start, end and stmt are the API's field names
 pub(super) async fn check(
     core: &Arc<Core>,
     caller: &Caller,

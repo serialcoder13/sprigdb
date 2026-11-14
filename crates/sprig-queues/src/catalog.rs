@@ -1,14 +1,14 @@
-//! The `mq` catalog module (chapter 50, "Catalog tables"; build step 2):
+//! The `mq` catalog module:
 //! `mq_vhosts`, `mq_exchanges`, `mq_queues`, `mq_bindings`, `mq_policies`,
 //! `mq_permissions` and `mq_keys` in `t<tenant>_sprig`, their migration,
 //! the snapshot loader ([`MqExtension`]) and the writes declares make.
 //!
 //! Every declare, delete, bind and unbind of a durable object is one
 //! versioned catalog change, so every gateway's routing follows it.
-//! Temporary queues are not here (the lead's choice): see
+//! Temporary queues are not here: see
 //! [`crate::topology::TempSet`].
 //!
-//! **As built, against the book:**
+//! **As built:**
 //! - Exchanges and queues have no `objects` row (the `objects.kind` enum
 //!   has no `exchange` or `queue` yet, as streams have none): their ids
 //!   come from the object counter.

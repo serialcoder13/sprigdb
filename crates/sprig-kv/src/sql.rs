@@ -1,8 +1,8 @@
 //! The SQL a key-value front end runs, and literals for it.
 //!
 //! Front ends run their statements through a [`SqlRunner`]: in the gateway
-//! that is the user's own executor session (name virtualization, chapter
-//! 29's privileges, the router), in tests a plain MariaDB connection.
+//! that is the user's own executor session (name virtualization,
+//! privileges, the router), in tests a plain MariaDB connection.
 //! Every value is sent as a hex literal, so statements stay ASCII (the
 //! gateway's parser works on UTF-8 text) and binary-safe.
 
@@ -46,11 +46,11 @@ pub trait SqlRunner: Send {
     async fn exec(&mut self, sql: &str) -> Result<u64, SqlError>;
     /// Marks the writes that follow, until called with `false`, as a Redis
     /// command's whose keyspace notifications the command sends itself, so
-    /// the notifications from the change feed pass over them (chapter 40;
-    /// RLS round 5, RL51). The gateway's runner prefixes each write
-    /// statement with chapter 38's comment `o=k`; by default nothing.
+    /// the notifications from the change feed pass over them. The gateway's
+    /// runner prefixes each write statement with the comment `o=k`; by
+    /// default nothing.
     fn notified(&mut self, _on: bool) {}
-    /// The client's data center hint (chapter 24: the text after the last
+    /// The client's data center hint (the text after the last
     /// `~` of a Redis `CLIENT SETNAME` name; `None` clears it). The
     /// gateway's runner counts the session's statements as traffic from
     /// that DC; by default nothing.

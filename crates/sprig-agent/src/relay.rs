@@ -1,5 +1,4 @@
-//! Sprig 2PC's relay (chapter 18, "The relay fence"; decisions Q28 and
-//! Q36): the writer node's agent relays every gateway connection of a
+//! Sprig 2PC's relay: the writer node's agent relays every gateway connection of a
 //! `sprig_2pc` tenant to the local MariaDB, and runs
 //! [`sprig_txn::fence::RelayFence`] over them.
 //!

@@ -1,5 +1,4 @@
-//! JSON rendering and the type map (chapter 31, "JSON rendering and the
-//! type map"; build step 2): [`to_stored`] renders a BSON document as JSON
+//! JSON rendering and the type map: [`to_stored`] renders a BSON document as JSON
 //! text in field order, `_id` first, collecting `_types`; [`to_bson`]
 //! walks the JSON text and its type map back to BSON, so MongoDB clients
 //! get exactly the types they wrote.
@@ -33,7 +32,7 @@ use sprig_proto_mongo::errors::{MongoError, code};
 
 use crate::keyenc;
 
-/// MariaDB's JSON nesting limit as the chapter assumes it (MongoDB's is 100).
+/// MariaDB's JSON nesting limit as the engine assumes it (MongoDB's is 100).
 pub const MAX_DEPTH: usize = 32;
 
 /// A document as it is stored.
@@ -503,7 +502,7 @@ pub fn render(d: &Document, opts: &RenderOpts) -> Result<(String, Option<String>
 /// an encoded `_id` over 1024 bytes; the errors of [`render`].
 pub fn to_stored(d: &Document, opts: &RenderOpts) -> Result<Stored, MongoError> {
     let id = d.get("_id").ok_or_else(|| invalid("document has no _id"))?;
-    // MongoDB stores no `$`-prefixed field inside `_id` (R5 round 4).
+    // MongoDB stores no `$`-prefixed field inside `_id`.
     if let Bson::Document(sub) = id
         && let Some(k) = sub.keys().find(|k| k.starts_with('$'))
     {
@@ -560,8 +559,8 @@ pub fn id_key(id: &Bson) -> Result<Vec<u8>, MongoError> {
 
 /// Parses a type map.
 fn parse_types(t: &str) -> Result<HashMap<String, String>, MongoError> {
-    // The engine writes a flat object of strings: read that directly (R5
-    // round 8; serde_json's tree was a few percent of a point read), and
+    // The engine writes a flat object of strings: read that directly
+    // (serde_json's tree was a few percent of a point read), and
     // anything else as before.
     if let Some(m) = parse_flat_types(t) {
         return Ok(m);
@@ -656,7 +655,7 @@ impl Parser<'_> {
 
     fn string(&mut self) -> Result<String, MongoError> {
         self.expect(b'"')?;
-        // Most strings have no escapes: one copy of the slice (R5 round 8).
+        // Most strings have no escapes: one copy of the slice.
         let rest = &self.s[self.at..];
         if let Some(end) = rest.iter().position(|&c| c == b'"' || c == b'\\')
             && rest[end] == b'"'
@@ -980,8 +979,7 @@ pub fn to_bson(doc: &str, types: Option<&str>) -> Result<Document, MongoError> {
 
 /// The BSON bytes of the document stored as `doc` with type map `types`:
 /// the bytes `bson::to_vec(&to_bson(doc, types)?)` gives, written straight
-/// from the JSON text without building the document first (R5 round 8,
-/// the third part of decision D35). A document with a field name twice at
+/// from the JSON text without building the document first. A document with a field name twice at
 /// one level (only SQL can store one) goes the long way, so the result is
 /// the same as [`to_bson`]'s, which keeps the first position and the last
 /// value.
@@ -1399,8 +1397,8 @@ pub fn check_raw(d: &bson::RawDocument) -> Result<(), MongoError> {
 
 fn check_raw_doc(d: &bson::RawDocument, depth: usize) -> Result<(), MongoError> {
     // Names compared one by one while there are few, through a hash set
-    // past `RAW_DUP_LINEAR` (R5 round 8: a set per document level was most
-    // of this check's cost).
+    // past `RAW_DUP_LINEAR` (a set per document level was most of this
+    // check's cost).
     let mut few: Vec<&str> = Vec::new();
     let mut seen: Option<std::collections::HashSet<&str>> = None;
     for e in d {

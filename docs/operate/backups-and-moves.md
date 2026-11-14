@@ -150,7 +150,6 @@ The copy slows down or pauses so it doesn't hurt live traffic:
 | `mover.max_copies_per_cluster` | 2 | Copies reading or writing one cluster at once |
 | `mover.throttle_replica_lag_ms` | 2000 | Replica lag that slows the copy |
 | `mover.throttle_threads_running` | 64 | Source `Threads_running` that slows it |
-| `mover.throttle_p99_increase_pct` | 20 | Pause copying when a cluster's live p99 rises this much over its baseline |
 | `mover.throttle_flow_control_pct` | 5 | Galera flow-control threshold |
 | `mover.throttle_apply_lag_ms` | 5000 | Stop copying when catch-up lags this much |
 
@@ -159,7 +158,7 @@ The copy slows down or pauses so it doesn't hurt live traffic:
 | Error | Meaning | What to do |
 |---|---|---|
 | 39134 `ER_SPRIG_MOVE_SOURCE_DIVERGED` | The source's binlog no longer has the position the move needs | Nothing: the job restarts from a fresh snapshot. Keep binlogs for at least `cluster.min_binlog_retention_hours`. |
-| 39136 `ER_SPRIG_MOVE_VERIFY_FAILED` | Verification still differs after `mover.verify_max_repairs` (3) repairs | Look for writes reaching the source outside SprigDB, stop them, cancel and restart the move |
+| 39136 `ER_SPRIG_MOVE_VERIFY_FAILED` | Verification still differs after `mover.verify_max_repairs` (3) repairs | The job rolls back by itself. Look for writes reaching the source outside SprigDB, stop them, and start the move again |
 | 39137 `ER_SPRIG_MOVE_UNSUPPORTED` | Statement-based binlog events, a table without a primary key, or DDL during a cutover | Fix the cause and start the move again |
 | 39111 `ER_SPRIG_MOVE_TARGET_INCOMPATIBLE` | The target already has a schema with the same name, or lacks a capability the shard uses | Drop a leftover schema from an old failed move, or choose another target |
 

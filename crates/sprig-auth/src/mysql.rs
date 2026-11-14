@@ -1,5 +1,5 @@
-//! MySQL login flows (chapter 14, "MySQL logins"; build step 4): the
-//! [`LoginFlow`] chapter 05's auth plugins drive, over the tenant catalog.
+//! MySQL login flows: the [`LoginFlow`] the wire protocol's auth plugins
+//! drive, over the tenant catalog.
 //!
 //! ```text
 //! 1. resolve the tenant; match the account for (user, client_ip). If there is none,
@@ -31,22 +31,22 @@
 //! **Login sources** ([`LoginSource`]): `Catalog` resolves the tenant
 //! ([`crate::account`]) and reads the account from the cached tenant
 //! catalog ([`TenantAuth`] through [`AuthCatalogs`], normally the
-//! gateway's `TenantCache`). `File` is the interim accounts file (decision
-//! D1), kept behind the switch until the gateway is rewired; it has no
+//! gateway's `TenantCache`). `File` is the TOML accounts file
+//! ([`crate::accounts`]), kept behind the switch until the gateway is rewired; it has no
 //! tenants and no policy columns.
 //!
-//! **Backend targets** (interim until chapter 29, M0.5): per-tenant backend
-//! accounts `t<tenant>_u<user_id>` don't exist yet, so a catalog login is
-//! mapped by a [`BackendResolver`] to a cluster and one configured backend
-//! account per tenant ([`StaticBackends`]).
+//! **Backend targets** (a stopgap from before per-user backend accounts):
+//! per-tenant backend accounts `t<tenant>_u<user_id>` don't exist yet, so
+//! a catalog login is mapped by a [`BackendResolver`] to a cluster and one
+//! configured backend account per tenant ([`StaticBackends`]).
 //!
-//! **Decisions** where the chapter is open: suspension is reported (39303)
+//! **Choices made here:** suspension is reported (39303)
 //! only after the credentials verified, so it doesn't reveal the tenant; a
 //! catalog or directory that can't be read gives 39301 after the exchange;
 //! `REQUIRE X509` needs a client certificate the gateway verified
 //! ([`LoginRequest::client_cert`]); a waiting hashing slot gives 39301
-//! after 2 s (chapter 14, "Rate limits"). Lockout counting and automatic
-//! unlock writes are step 5: a temporary lock whose time has passed lets
+//! after 2 s. Lockout counting and automatic unlock writes are in
+//! [`crate::policy`]: a temporary lock whose time has passed lets
 //! the login through without clearing the row.
 
 use std::collections::HashMap;
@@ -94,8 +94,8 @@ pub const HASH_SLOT_WAIT: Duration = Duration::from_secs(2);
 static DECOY_STAGE2: LazyLock<FastCacheValue> =
     LazyLock::new(|| FastCacheValue::from_password(b"sprig-decoy"));
 
-/// What the handshake tells the login (chapter 14's `LoginRequest`, MySQL
-/// fields).
+/// What the handshake tells the login (the MySQL fields of a login
+/// request).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginRequest {
     /// The listener's persona.
@@ -119,10 +119,10 @@ pub struct LoginRequest {
     pub can_handle_expired_password: bool,
 }
 
-/// Whether a login meets `row`'s certificate clauses (chapter 14's step
-/// 3d): `REQUIRE X509` needs a verified client certificate, and `REQUIRE
+/// Whether a login meets `row`'s certificate clauses:
+/// `REQUIRE X509` needs a verified client certificate, and `REQUIRE
 /// SUBJECT` and `ISSUER` compare its names exactly, as MySQL does. Every
-/// protocol's login uses it (authfix2).
+/// protocol's login uses it.
 #[must_use]
 pub fn certificate_ok(
     row: &crate::store::UserRow,
@@ -147,10 +147,10 @@ pub struct ClientDn {
     pub issuer: String,
 }
 
-/// Who logged in (the MySQL subset of chapter 14's `Principal`).
+/// Who logged in (the MySQL subset of a principal).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Principal {
-    /// The tenant; `None` for the interim accounts file.
+    /// The tenant; `None` for the accounts file.
     pub tenant: Option<TenantId>,
     /// The tenant's name.
     pub tenant_name: Option<String>,
@@ -203,7 +203,7 @@ pub trait BackendResolver: Send + Sync + 'static {
     fn backend(&self, tenant: &TenantInfo, user: &AuthUser) -> Result<BackendTarget>;
 
     /// The backend target of user `user_id` of `tenant`, whose login
-    /// another DC decided (chapter 26's hand-off): this gateway's own
+    /// another DC decided (a residency hand-off): this gateway's own
     /// account and credential on `cluster`, never the deciding gateway's.
     /// `None` when this resolver needs the catalog row.
     fn backend_for(
@@ -217,8 +217,8 @@ pub trait BackendResolver: Send + Sync + 'static {
     }
 }
 
-/// One backend account per tenant, from configuration: the interim mapping
-/// until chapter 29's per-user backend accounts (M0.5).
+/// One backend account per tenant, from configuration: the stopgap
+/// mapping from before per-user backend accounts.
 #[derive(Debug, Clone, Default)]
 pub struct StaticBackends {
     default: Option<BackendTarget>,
@@ -326,7 +326,7 @@ pub trait PolicySettings: Send + Sync + 'static {
 
     /// The bounds in force on `key` for `catalog`'s tenant (its ancestors'
     /// and the operator's); `None` when there are none. Account clauses
-    /// must lie within them (chapter 14, "Policies as settings").
+    /// must lie within them.
     fn bounds(&self, _key: &'static str, _catalog: &TenantCatalog) -> Option<Bounds> {
         None
     }
@@ -363,7 +363,7 @@ impl PolicySettings for FixedPolicy {
 }
 
 /// Resolution through the process's [`Settings`] in this DC: global, dc,
-/// every ancestor, then the tenant (chapter 08).
+/// every ancestor, then the tenant.
 #[derive(Debug, Clone)]
 pub struct SettingsPolicy {
     settings: Settings,
@@ -494,16 +494,16 @@ impl CatalogLogins {
     }
 
     /// The current `listener.tenant_sni_suffixes`: front ends that bind a
-    /// listener to a tenant (AMQP's `listener.amqp.tenant`, chapter 50)
+    /// listener to a tenant (AMQP's `listener.amqp.tenant`)
     /// check whether the server name already names one.
     #[must_use]
     pub fn sni_suffixes(&self) -> Arc<Vec<String>> {
         self.sni_suffixes.load_full()
     }
 
-    /// Steps 1 and the account match: the target of a login whose user
+    /// Tenant resolution and the account match: the target of a login whose user
     /// part may be `max_user` characters long.
-    /// The residency of the tenant `req` names (chapter 26), read before
+    /// The residency of the tenant `req` names, read before
     /// anything of its credentials is loaded; `None` when the login names
     /// no tenant or the tenant has none.
     ///
@@ -574,7 +574,7 @@ impl CatalogLogins {
 }
 
 tokio::task_local! {
-    /// Milliseconds of failure delay (chapter 14, "Rate limits") the logins
+    /// Milliseconds of failure delay the logins
     /// run in this scope have waited or are waiting. A front end whose
     /// connection phase has a deadline (the gateway's
     /// `gateway.handshake_timeout_ms`) runs the login in this scope and
@@ -584,12 +584,12 @@ tokio::task_local! {
 }
 
 /// Where accounts come from: the switch between the tenant catalog and the
-/// interim accounts file.
+/// TOML accounts file.
 #[derive(Clone)]
 pub enum LoginSource {
-    /// Chapter 14: tenants, the tenant catalog, policies.
+    /// Tenants, the tenant catalog, policies.
     Catalog(Arc<CatalogLogins>),
-    /// Decision D1's accounts file (`FileAccounts`), until the gateway is
+    /// The TOML accounts file (`FileAccounts`), until the gateway is
     /// rewired.
     File(Arc<dyn AccountStore>),
 }
@@ -607,7 +607,7 @@ impl std::fmt::Debug for LoginSource {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoginMode {
-    /// The interim accounts file (the default until the gateway is
+    /// The TOML accounts file (the default until the gateway is
     /// rewired).
     #[default]
     AccountsFile,
@@ -627,7 +627,7 @@ pub struct LoginService {
     audit: Arc<dyn AuditSink>,
     ips: Arc<IpLimiter>,
     delays: Arc<FailureDelays>,
-    /// Chapter 26's login hand-off: this gateway's DC and its peers.
+    /// The residency login hand-off: this gateway's DC and its peers.
     handoff: Option<Arc<crate::handoff::HandoffConfig>>,
     /// Users whose SCRAM verifiers are being backfilled here.
     backfilling: Arc<std::sync::Mutex<std::collections::HashSet<(TenantId, UserId)>>>,
@@ -665,8 +665,7 @@ impl LoginService {
     }
 
     /// The same service handing logins of tenants pinned elsewhere to an
-    /// allowed DC (chapter 14, "Credential residency"; see
-    /// [`crate::handoff`]).
+    /// allowed DC (see [`crate::handoff`]).
     #[must_use]
     pub fn with_handoff(mut self, handoff: Arc<crate::handoff::HandoffConfig>) -> Self {
         self.handoff = Some(handoff);
@@ -680,7 +679,7 @@ impl LoginService {
     }
 
     /// The same service counting failures and locking accounts in `state`
-    /// (chapter 14, "Lockout and password policies").
+    /// (lockout and password policies).
     #[must_use]
     pub fn with_login_state(mut self, state: Arc<dyn LoginStateStore>) -> Self {
         self.state = Some(state);
@@ -939,7 +938,7 @@ impl LoginService {
         self.start_as(req, Front::Mysql).await
     }
 
-    /// Starts an HTTP login (chapter 14, "HTTP on 8080 and 8443"): the same
+    /// Starts an HTTP login: the same
     /// tenant resolution, policy order, counters, limits and audit as a
     /// MySQL login, with user names up to 255 characters and the protocol
     /// `http` in metrics and events. `req.sni` carries the TLS SNI, or the
@@ -948,7 +947,7 @@ impl LoginService {
         self.start_as(req, Front::Http).await
     }
 
-    /// Starts a Kafka login (chapter 45, "Authentication"): as
+    /// Starts a Kafka login: as
     /// [`Self::start_http`], with the protocol `kafka` in metrics and
     /// events. PLAIN runs [`MysqlLogin::check_clear_fast`] and
     /// [`LoginFlow::check_password`]; SCRAM reads
@@ -958,7 +957,7 @@ impl LoginService {
         self.start_as(req, Front::Kafka).await
     }
 
-    /// Starts a MongoDB login (chapter 30, "SCRAM-SHA-256"): as
+    /// Starts a MongoDB login (SCRAM-SHA-256): as
     /// [`Self::start_kafka`], with the protocol `mongo` in metrics and
     /// events. SCRAM reads [`MysqlLogin::scram_credential`] and passes the
     /// proof's result to [`LoginFlow::decide`].
@@ -1002,16 +1001,16 @@ impl LoginService {
 enum Front {
     /// MySQL or MariaDB (by persona).
     Mysql,
-    /// HTTP Basic (chapter 14, "HTTP on 8080 and 8443").
+    /// HTTP Basic on 8080 and 8443.
     Http,
-    /// Kafka SASL (chapter 45).
+    /// Kafka SASL.
     Kafka,
-    /// MongoDB SCRAM (chapter 30).
+    /// MongoDB SCRAM.
     Mongo,
 }
 
 /// A verified clear-text password whose generation lacks SCRAM verifiers:
-/// stored after the login succeeds (chapter 14, "SCRAM verifiers").
+/// stored after the login succeeds.
 struct Backfill {
     /// The `caching_sha2_password` or native verifier it matched.
     verifier_id: u64,
@@ -1026,7 +1025,7 @@ fn lacks_scram(user: &AuthUser, slot: Slot, password: &[u8]) -> bool {
         .any(|k| !user.has_scram(k, slot) && k.prepare(password).is_some())
 }
 
-/// The longest user name a persona accepts (chapter 14).
+/// The longest user name a persona accepts.
 #[must_use]
 pub fn max_user_len(persona: Persona) -> usize {
     match persona {
@@ -1053,7 +1052,7 @@ enum Target {
     DecoyIn(Arc<TenantCatalog>),
     /// The tenant's credentials can't be read: 39301 after the exchange.
     Unavailable(SprigError),
-    /// An interim file account.
+    /// An account of the TOML accounts file.
     File(Arc<Account>),
     /// A catalog account.
     Catalog(Box<CatalogTarget>),
@@ -1116,7 +1115,7 @@ impl MysqlLogin {
 
     /// The catalog account this login resolved to (tenant and user id),
     /// before any check: for protocols whose verifiers this crate doesn't
-    /// load, such as Kafka's SCRAM (chapter 45), which read the account's
+    /// load, such as Kafka's SCRAM, which read the account's
     /// `verifiers` rows themselves and then call [`LoginFlow::decide`].
     /// `None` for the decoy, file accounts and unreadable catalogs.
     #[must_use]
@@ -1129,8 +1128,8 @@ impl MysqlLogin {
 
     /// Whether the account this login resolved to asks for a client
     /// certificate (`REQUIRE X509`, `SUBJECT` or `ISSUER`): the only
-    /// accounts a certificate alone may log in to (AMQP's SASL `EXTERNAL`,
-    /// authfix2). `false` for the decoy and file accounts.
+    /// accounts a certificate alone may log in to (AMQP's SASL
+    /// `EXTERNAL`). `false` for the decoy and file accounts.
     #[must_use]
     pub fn certificate_account(&self) -> bool {
         match &self.target {
@@ -1186,7 +1185,7 @@ impl MysqlLogin {
         }
     }
 
-    /// A SCRAM client proof was presented (chapter 45's Kafka SASL): a
+    /// A SCRAM client proof was presented (Kafka SASL): a
     /// refusal then says `(using password: YES)`, as for any login that
     /// sent a password.
     pub fn proof_presented(&mut self) {
@@ -1194,7 +1193,7 @@ impl MysqlLogin {
     }
 
     /// The account's SCRAM verifier of `kind` for a SCRAM exchange
-    /// (chapter 45's Kafka SASL; chapter 30's MongoDB later): the primary
+    /// (Kafka SASL, MongoDB): the primary
     /// password's, and the secondary's when it shares the primary's salt
     /// and iterations (set with `RETAIN CURRENT PASSWORD`), so the exchange
     /// accepts either password. A password with a verifier only in the
@@ -1219,7 +1218,7 @@ impl MysqlLogin {
         }
     }
 
-    /// The interim file account, once accepted (the gateway's M0.2 code
+    /// The file account, once accepted (the gateway's file-mode code
     /// keeps it for its backend).
     #[must_use]
     pub fn file_account(&self) -> Option<&Arc<Account>> {
@@ -1559,7 +1558,7 @@ impl MysqlLogin {
     }
 
     /// Stores the SCRAM verifiers the accepted login's password lacks, in
-    /// the background (chapter 14, "SCRAM verifiers": upgrade on login),
+    /// the background (upgrade on login),
     /// unless `auth.backfill_verifiers` is off, there is no catalog writer
     /// (`LoginStateStore`), or this gateway is already at it for the user.
     fn spawn_backfill(&mut self) {
@@ -1644,8 +1643,7 @@ impl MysqlLogin {
         }
     }
 
-    /// Counters, locks, rate limits, delays and audit after the decision
-    /// (chapter 14 steps 5, 7 and 10).
+    /// Counters, locks, rate limits, delays and audit after the decision.
     async fn after(&mut self, verdict: &AuthVerdict, path: AuthPath) {
         let svc = Arc::clone(&self.svc);
         let protocol = self.protocol();

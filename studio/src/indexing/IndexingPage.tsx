@@ -10,7 +10,7 @@ import type { Privileges } from '../api/types';
 /** A frozen index (the backend's `frozen`; older builds said `pinned`). */
 const frozen = (state: string) => state === 'frozen' || state === 'pinned';
 
-/** chapter 13's IndexView, as the controller returns it. */
+/** An index's view, as the controller returns it. */
 interface IndexView {
   index_id: number;
   db: string;
@@ -56,7 +56,7 @@ function q(params: Record<string, string>): string {
 
 const fmt = (n: number) => (Number.isFinite(n) ? n.toFixed(1) : '');
 
-/** Automatic indexing (chapter 44 step 12; chapter 13): indexes by origin
+/** Automatic indexing: indexes by origin
  * and state, the evidence behind each, recommendations to approve, and the
  * explanation of a query fingerprint. Approving needs the privilege to run
  * the CREATE INDEX. */

@@ -1,6 +1,5 @@
-//! SCRAM verifiers (chapter 14, "Verifier formats"; build step 2's other
-//! half): SCRAM-SHA-256 (RFC 7677) and SCRAM-SHA-512, stored with every
-//! password so Kafka (chapter 45) and later MongoDB (chapter 30) logins can
+//! SCRAM verifiers: SCRAM-SHA-256 (RFC 7677) and SCRAM-SHA-512, stored with every
+//! password so Kafka and MongoDB logins can
 //! run SCRAM without the password.
 //!
 //! ```text
@@ -59,7 +58,7 @@ pub const MAX_SCRAM_SALT_LEN: usize = 64;
 /// A SCRAM mechanism SprigDB stores verifiers for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ScramKind {
-    /// SCRAM-SHA-256 (RFC 7677): Kafka, and MongoDB from R5.
+    /// SCRAM-SHA-256 (RFC 7677): Kafka and MongoDB.
     Sha256,
     /// SCRAM-SHA-512: Kafka.
     Sha512,
@@ -129,7 +128,7 @@ impl fmt::Display for ScramKind {
 }
 
 /// The hash of a SCRAM computation. SHA-1 is only for RFC 5802's own test
-/// vector (MongoDB's SCRAM-SHA-1 arrives with chapter 30).
+/// vector (MongoDB's SCRAM-SHA-1 is not stored yet).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Alg {
     #[cfg(test)]

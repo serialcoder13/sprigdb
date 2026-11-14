@@ -1,4 +1,4 @@
-//! `inherit_copy` (chapter 42, "Materialized copies"; build step 8): one
+//! `inherit_copy` (materialized copies of inherited data): one
 //! long-running job per tenant tree, named by its root tenant
 //! (`spec: {"root": <tenant id>}`), keeping the tree's materialized copies
 //! and orphaning overrides across its tenants
@@ -264,7 +264,7 @@ fn spawn_tail(
         };
         // Read in a task of its own; the only race is with the stop, which
         // drops the tail for good: the next run resumes from the last
-        // acknowledged token (cancel-safe as it is; decision r9-131).
+        // acknowledged token (cancel-safe as it is).
         loop {
             let item = tokio::select! {
                 () = stop.cancelled() => return,
@@ -567,7 +567,7 @@ impl LiveEnv {
         pools: Arc<dyn ClusterPools>,
         clusters: Arc<RegistryClusters>,
     ) -> Result<Self> {
-        // The types too: child tenants' record hierarchies (decision T28).
+        // The types too: child tenants' record hierarchies.
         let ext: Vec<Arc<dyn CatalogExtension>> = vec![
             Arc::new(sprig_inherit::InheritExtension),
             Arc::new(sprig_inherit::TypesExtension),

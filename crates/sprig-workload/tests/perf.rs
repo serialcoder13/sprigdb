@@ -1,6 +1,6 @@
-//! Overhead measurements (chapter 12, "Caps and the overhead budget": 2 µs
-//! per statement to normalize and hash, texts up to 4 KB; 0.5 µs to
-//! record). Run in release:
+//! Overhead measurements against the overhead budget: 2 µs per statement
+//! to normalize and hash, texts up to 4 KB; 0.5 µs to record. Run in
+//! release:
 //!
 //! ```text
 //! cargo test --release -p sprig-workload --test perf -- --ignored --nocapture
@@ -22,7 +22,7 @@ const STATEMENTS: &[(&str, &str)] = &[
         "SELECT c FROM sbtest1 WHERE id=5012",
     ),
     (
-        "chapter 12 example (183 B)",
+        "orders example (183 B)",
         "SELECT /* web:42 */ o.id, o.Total FROM `orders` o WHERE o.customer_id = 42 AND o.status IN ('open','hold') ORDER BY o.created_at DESC LIMIT 20",
     ),
     (

@@ -1,8 +1,8 @@
-// The Redis console's language (chapter 44 step 22): one command per line,
+// The Redis console's language: one command per line,
 // split as redis-cli splits it (spaces; double quotes with escapes; single
 // quotes literal), a command table with arity for completion and a
 // pre-check, and redis-cli's reply formatting. The gateway decides every
-// right (chapter 40's ACL mapping); the table only helps typing.
+// right; the table only helps typing.
 
 export class CommandError extends Error {
   constructor(
@@ -83,7 +83,7 @@ export interface CommandInfo {
   arity: number;
   write: boolean;
   args: string;
-  /** Destructive enough to ask first whatever studio.confirm_writes says (tui T10). */
+  /** Destructive enough to ask first whatever studio.confirm_writes says. */
   danger?: boolean;
 }
 
@@ -248,7 +248,7 @@ export function isErrorReply(r: Reply): boolean {
   return typeof r === 'object' && r !== null && !Array.isArray(r) && 'error' in r && Object.keys(r).length === 1;
 }
 
-/** Namespaces of a database: chapter 33 makes `<ns>__hash` views for each. */
+/** Namespaces of a database: the key-value store makes `<ns>__hash` views for each. */
 export function namespacesOf(objects: { name: string; kind: string }[]): string[] {
   const out = new Set<string>();
   for (const o of objects) {

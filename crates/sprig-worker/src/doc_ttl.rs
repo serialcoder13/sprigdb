@@ -1,5 +1,4 @@
-//! `doc_ttl` (chapter 31, "Index kinds, origins and TTL"; wireup, 13 Nov
-//! 2026): MongoDB's TTL monitor. One job per DC (the controller's
+//! `doc_ttl`: MongoDB's TTL monitor. One job per DC (the controller's
 //! `doc_ttl` loop), so each collection is expired by one task whatever the
 //! number of gateways.
 //!
@@ -12,7 +11,7 @@
 //!   for each such collection, its shard schemas t<tenant>_d<db>_g<g>_s<s>
 //!     holding its table on any cluster, kept only where the group's shard
 //!     map (role home) has shard s on that cluster, serving; a group without
-//!     a map of its own (a database's default group, R0) where the
+//!     a map of its own (a database's default group) where the
 //!     catalog's map puts the catalog
 //!   round robin over the (collection, shard) items: one batch each turn,
 //!     doc.multi_write_batch documents (the tenant's value), deleted where
@@ -399,7 +398,7 @@ impl DocTtl {
                             .flatten(),
                     );
                 }
-                // A group with its own map (R1's sharded groups) by its
+                // A group with its own map (sharded groups) by its
                 // ranges; a database's default group lives with the
                 // catalog, so the catalog's map (group 0) places it.
                 let own = maps.get(&group.0).and_then(Option::as_ref);

@@ -1,5 +1,4 @@
-//! MongoDB's `explain` of searches (chapter 39, build step 14; decision
-//! S25), through a running gateway's MongoDB listener.
+//! MongoDB's `explain` of searches, through a running gateway's MongoDB listener.
 //!
 //! ```sh
 //! export SPRIG_TEST_MONGO_URI='mongodb://acme.app:sprig-dev-app@127.0.0.1:26737/?authSource=admin&directConnection=true'
@@ -18,7 +17,7 @@
 //! - `explain` of `findAndModify`: refused (code 39662, unsupported in
 //!   this release), and a bad verbosity (9).
 //!
-//! `explain_of_reads_and_writes` (R5 round 8) checks the other commands on
+//! `explain_of_reads_and_writes` checks the other commands on
 //! database `r5eight_explain`: a point read is `EXPRESS_IXSCAN`, a filter
 //! on an indexed field `IXSCAN` under `FETCH`, an unindexed one `COLLSCAN`;
 //! `count`, `distinct`, `aggregate` (in the `stages` form), `update` and
@@ -162,7 +161,7 @@ async fn explain_of_searches() {
         1
     );
 
-    // A command explain doesn't cover (R5 round 8 covers find, aggregate,
+    // A command explain doesn't cover (explain covers find, aggregate,
     // count, distinct, update and delete); a bad verbosity.
     let e = db
         .run_command(

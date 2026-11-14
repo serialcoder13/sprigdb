@@ -1,4 +1,4 @@
-# The mover's live tests' gateway (milestone M0.6): a second gateway in
+# The mover's live tests' gateway: a second gateway in
 # dc-a, next to gateway-dev.sh's, on its own ports through listen_override
 # (MySQL persona 17306, MariaDB persona 17307). run.sh starts it.
 [node]

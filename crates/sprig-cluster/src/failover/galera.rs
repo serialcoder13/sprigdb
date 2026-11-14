@@ -1,4 +1,4 @@
-//! Galera: writer nodes and lost quorum (chapter 25).
+//! Galera: writer nodes and lost quorum.
 //!
 //! ```text
 //! galera_watch(c), every second on the DC leader:
@@ -6,7 +6,7 @@
 //!    wsrep_last_committed; remember the highest last_committed seen in a Primary component
 //! 2. P = nodes that are Primary, Synced and ready
 //! 3. P not empty: each shard whose writer node is not in P gets a node of P
-//!    (chapter 09's writer set and rendezvous choice). No fence is needed: nodes
+//!    (the writer set and rendezvous choice). No fence is needed: nodes
 //!    outside the primary component refuse queries (error 1047)
 //! 4. P empty for failover.galera_quorum_wait_seconds (quorum lost):
 //!    a. failover.mode is manual -> alert only
@@ -16,7 +16,7 @@
 //!    d. on b: SET GLOBAL wsrep_provider_options = 'pc.bootstrap=YES'
 //! ```
 //!
-//! Step 3 is chapter 09's `WriterSetTracker` (the controller's `registry`
+//! Step 3 is the Galera driver's `WriterSetTracker` (the controller's `registry`
 //! loop publishes the writer set; gateways pick each shard's writer from
 //! it by rendezvous hashing). [`GaleraQuorum`] is steps 1, 2 and 4.
 

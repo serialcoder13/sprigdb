@@ -618,6 +618,13 @@ impl PassSession {
             .collect();
         let mut element_hidden: Vec<(String, Vec<String>)> = Vec::new();
         let mut hidden: Vec<String> = Vec::new();
+        // An inheritable table's views must let the layers of merged views
+        // through (the context's "m"): views from before that term are
+        // stale.
+        let inheritable = cat
+            .ext
+            .get::<sprig_inherit::InheritState>(sprig_inherit::MODULE)
+            .is_some_and(|st| st.object(object).is_some());
         let mut shards = super::logic_bound::CtlShards {
             list: list.clone(),
             conns: HashMap::new(),
@@ -654,6 +661,18 @@ impl PassSession {
                     extra.push_str(&c);
                 }
             }
+            // Last: whether the visible-columns view has the merged-layer
+            // term.
+            extra.push_str(&format!(
+                ", (SELECT COUNT(*) FROM information_schema.VIEWS WHERE TABLE_SCHEMA = {s} AND \
+                 TABLE_NAME = {} AND VIEW_DEFINITION LIKE {})",
+                q(&view),
+                q(&format!(
+                    "%'$.{}'%",
+                    sprig_sql::rls::triggers::MERGED_LAYERS_KEY
+                )),
+                s = q(schema),
+            ));
             let rows = s
                 .rows(&format!(
                     "SELECT (SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = {s} \
@@ -733,7 +752,10 @@ impl PassSession {
                     }
                 }
             }
-            let views_ok = views_ok && elements_ok;
+            let merged_term = cell(6 + element_tables.len() * 5)
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
+            let views_ok = views_ok && elements_ok && (!views || !inheritable || merged_term > 0);
             if !triggers_ok || !views_ok {
                 complete = false;
                 break;
@@ -797,6 +819,53 @@ impl PassSession {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(key);
         Ok(())
+    }
+
+    /// The session's policy predicate on table `db.table` for `cmds`, its
+    /// columns qualified with `qual` and the session's values bound: the
+    /// filter on an inheritable table's merged records. `None` when the table's policies
+    /// don't bind the session (or an internal exempt session).
+    ///
+    /// # Errors
+    /// The policy's (39364), the subtree binding's.
+    pub(super) async fn rls_predicate(
+        &mut self,
+        session: sprig_common::ids::ConnId,
+        db: &str,
+        table: &str,
+        qual: &str,
+        cmds: &[sprig_sql::rls::Cmd],
+    ) -> Result<Option<String>> {
+        if crate::tenant::rls::is_exempt(session) {
+            return Ok(None);
+        }
+        let (lex, _) = self.lex_opts();
+        let Some(ts) = self.tenant.as_deref() else {
+            return Ok(None);
+        };
+        let Some(cat) = ts.catalog().cloned() else {
+            return Ok(None);
+        };
+        if !RlsState::of(&cat).is_some_and(|s| s.any_enabled()) {
+            return Ok(None);
+        }
+        let p = crate::tenant::authz::privileges(ts, &cat);
+        let Some(rls) = p.row_policies() else {
+            return Ok(None);
+        };
+        if rls.is_empty() {
+            return Ok(None);
+        }
+        let mut values = SessionValues::of(ts, &cat);
+        crate::tenant::rls::bind_tree(ts, &cat, &rls, &mut values).await?;
+        let lctn = ts.lower_case_table_names();
+        let none = std::collections::HashSet::new();
+        let temp = |_: Option<&str>, _: &str| false;
+        let r = Resolve::new(&cat, &rls, None, lctn, &temp, &values, lex, &none);
+        let Some(k) = sprig_sql::rls::Resolver::protected(&r, Some(db), table) else {
+            return Ok(None);
+        };
+        sprig_sql::rls::Resolver::predicate(&r, k, cmds, qual).map(Some)
     }
 
     /// The rewrite before planning (see the module docs): the text to plan
@@ -1079,8 +1148,12 @@ impl PassSession {
         }
         let src = std::str::from_utf8(text)
             .map_err(|_| unsupported("a statement over a protected table that isn't UTF-8"))?;
+        // A statement the inheritance layer generated reads inheritable
+        // tables as the layers of merged views it filtered on the merged
+        // records.
+        let internal = ts.types.internal && ts.inherit.generated;
         // The resolver isn't `Send`: everything it touches ends here.
-        let (inj, covered, stale, needs_checks) = {
+        let (inj, covered, stale, needs_checks, merged) = {
             let temp = |d: Option<&str>, n: &str| ts.is_temp(d, n);
             let r = Resolve::new(
                 &cat,
@@ -1091,7 +1164,8 @@ impl PassSession {
                 &values,
                 *lex_opts,
                 &tainted,
-            );
+            )
+            .with_merged_layers(internal);
             let inj = match inject(src, lex_opts, &r) {
                 Ok(i) => i,
                 // Say why stored code over a protected table is refused when
@@ -1107,6 +1181,7 @@ impl PassSession {
             };
             let filtered = pick(&inj.filtered);
             let written = pick(&inj.written);
+            let merged = pick(&inj.merged);
             let stale: Vec<ObjectId> = written
                 .iter()
                 .chain(filtered.iter())
@@ -1119,8 +1194,48 @@ impl PassSession {
                 });
             let mut covered = filtered.clone();
             covered.extend(written.iter().copied());
+            covered.extend(merged.iter().copied());
             covered.extend(crate::tenant::rls::policy_reads(&cat, &filtered, lex_opts));
-            (inj, covered, stale, needs_checks)
+            (inj, covered, stale, needs_checks, merged)
+        };
+        if !merged.is_empty() {
+            // Stored code pointed at the policy views would read the merged
+            // tables' rows unfiltered while the context lets their layers
+            // through.
+            let calls = fixable.iter().any(|c| {
+                let n = c.name.to_lowercase();
+                w.iter().any(|(k, v)| {
+                    matches!(k, TokenKind::Word | TokenKind::QuotedIdent) && v.to_lowercase() == n
+                })
+            });
+            if calls {
+                return Err(unsupported(
+                    "stored code reading a protected table, in a statement reading an \
+                     inheritable table, for a session bound by row-level security",
+                ));
+            }
+            // MariaDB's policy views let these tables' rows through for this
+            // statement only (the context's "m"; the triggers never read it).
+            if let Some(bs) = self.bs.as_mut()
+                && let Some(VarValue::Text(t)) = bs.vars().user_vars.get(CONTEXT_VAR).cloned()
+            {
+                let mut v: serde_json::Value =
+                    serde_json::from_slice(&t).unwrap_or(serde_json::Value::Null);
+                if let Some(o) = v.as_object_mut() {
+                    o.insert(
+                        sprig_sql::rls::triggers::MERGED_LAYERS_KEY.to_owned(),
+                        serde_json::Value::from(merged.iter().map(|x| x.0).collect::<Vec<_>>()),
+                    );
+                    bs.vars_mut().user_vars.insert(
+                        CONTEXT_VAR.to_owned(),
+                        VarValue::Text(v.to_string().into_bytes()),
+                    );
+                }
+            }
+            metrics::counter!("sprig_rls_merged_reads_total").increment(1);
+        }
+        let Some(ts) = self.tenant.as_deref_mut() else {
+            return Ok(None);
         };
         ts.rls.covered = covered.clone();
         // Reads through policy views: each view must be on every shard

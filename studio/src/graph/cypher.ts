@@ -1,4 +1,4 @@
-// Cypher and GQL text in the editor (chapter 44 step 27): splitting on `;`
+// Cypher and GQL text in the editor: splitting on `;`
 // outside strings, quoted names and comments (`//`, `/* */`), and a class
 // for studio.confirm_writes. The gateway decides every right; the class only
 // chooses whether to ask first.

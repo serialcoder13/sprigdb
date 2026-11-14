@@ -1,21 +1,21 @@
-//! Automatic split, merge and move (chapter 20): when a group's shards
+//! Automatic split, merge and move: when a group's shards
 //! split or merge, where the split points go, and which proposals become
 //! mover jobs now.
 //!
-//! | Build step | Module |
+//! | Part | Module |
 //! |---|---|
-//! | 1. Shard sizes; gateway write sketches | [`stats`], [`sketch`] |
-//! | 2. Size histograms by index dives, refinement, heavy hashes | [`stats`] |
-//! | 3. `choose_split` with hot-key isolation | [`split`] |
-//! | 4. Triggers, sustain windows, cooldowns | [`triggers`] |
-//! | 5. Merge rules | [`triggers`] |
-//! | 6. Scheduler: priorities, limits, lock sets, exclusion | [`schedule`] |
+//! | Shard sizes; gateway write sketches | [`stats`], [`sketch`] |
+//! | Size histograms by index dives, refinement, heavy hashes | [`stats`] |
+//! | `choose_split` with hot-key isolation | [`split`] |
+//! | Triggers, sustain windows, cooldowns | [`triggers`] |
+//! | Merge rules | [`triggers`] |
+//! | Scheduler: priorities, limits, lock sets, exclusion | [`schedule`] |
 //!
 //! The controller's sharding loop (`sprig-controller::sharding`) gathers
 //! the inputs, runs these, submits jobs to the mover and records each
 //! decision in the tenant's decision log.
 
-// Short names (a, b, c, h, p, s) follow the book's pseudocode.
+// Short names (a, b, c, h, p, s) read best in the split arithmetic.
 #![allow(
     clippy::many_single_char_names,
     clippy::similar_names,

@@ -1,13 +1,12 @@
-//! The `graph` catalog module (chapter 43, "Catalog tables"; build step
-//! 2): `graphs`, `graph_node_sources` and `graph_edge_sources` in
+//! The `graph` catalog module: `graphs`, `graph_node_sources` and `graph_edge_sources` in
 //! `t<tenant>_sprig`, the snapshot state ([`GraphExtension`]), graph DDL
-//! text, and the physical tables of a native graph (step 3).
+//! text, and the physical tables of a native graph.
 //!
 //! **As built:**
-//! - `CREATE PROPERTY GRAPH` makes a mapped graph (round 3, see
+//! - `CREATE PROPERTY GRAPH` makes a mapped graph (see
 //!   [`crate::mapped`]); `ALTER GRAPH ... PARTITION BY` answers 39901.
-//! - Since round 3 a native graph is a sharded table group (`group_id`,
-//!   mirrors `ready`); graphs from rounds 1 and 2 keep their tables in the
+//! - A native graph is a sharded table group (`group_id`, mirrors
+//!   `ready`); graphs made before grouped graphs keep their tables in the
 //!   database's first shard schema.
 //! - `node_seq` and `edge_seq` are NULL: ids come from a counter table
 //!   `__sprig_gq_<graph>` in the same schema, handed out in blocks.
@@ -130,7 +129,7 @@ pub static GRAPH_MIGRATIONS: &[Migration] = &[
     },
 ];
 
-/// Who keeps a grouped graph's mirrors (round 5): `sync`, the writers;
+/// Who keeps a grouped graph's mirrors: `sync`, the writers;
 /// `starting`, still the writers while the worker's applier starts on the
 /// graph; `async`, the applier (`graph.mirror = async`).
 const DDL_MIRROR_MODE: &str = "ALTER TABLE graphs ADD COLUMN IF NOT EXISTS \
@@ -171,14 +170,14 @@ pub struct GraphDef {
     pub kind: String,
     /// `creating`, `active`, ...
     pub state: String,
-    /// The graph's sharded table group (round 3); `None`: its tables are
-    /// in the database's first shard schema (graphs from rounds 1 and 2).
+    /// The graph's sharded table group; `None`: its tables are in the
+    /// database's first shard schema (graphs made before grouped graphs).
     pub group_id: Option<u32>,
     /// Mirror rows are kept for every edge (`ready`).
     pub mirrors: bool,
-    /// The worker's applier keeps them (`mirror_mode = async`, round 5).
+    /// The worker's applier keeps them (`mirror_mode = async`).
     pub mirror_async: bool,
-    /// `mirror_mode`: `sync`, `starting` or `async` (round 5).
+    /// `mirror_mode`: `sync`, `starting` or `async`.
     pub mirror_mode: String,
     /// A mapped graph's definition ([`crate::mapped::MappedDef`] as JSON).
     pub definition: Option<String>,
@@ -629,7 +628,7 @@ impl GraphCatalog {
         Ok(())
     }
 
-    /// Sets who keeps a graph's mirrors and their state (round 5):
+    /// Sets who keeps a graph's mirrors and their state:
     /// `mode` `sync`, `starting` or `async`, `state` `building` or
     /// `ready`.
     ///
@@ -781,7 +780,7 @@ pub struct Tables {
     pub mirrors: String,
     /// Id counters.
     pub seq: String,
-    /// Uniqueness claims (decision G41), on the shard of each claim's hash.
+    /// Uniqueness claims, on the shard of each claim's hash.
     pub claims: String,
 }
 
@@ -882,9 +881,9 @@ impl Tables {
         ]
     }
 
-    /// `CREATE TABLE IF NOT EXISTS` for the uniqueness claims of one shard
-    /// (decision G41): a row per constraint and key, routed by the claim's
-    /// hash (`schema::claim_rk`), naming the element that holds the key.
+    /// `CREATE TABLE IF NOT EXISTS` for the uniqueness claims of one shard:
+    /// a row per constraint and key, routed by the claim's hash
+    /// (`schema::claim_rk`), naming the element that holds the key.
     #[must_use]
     pub fn claims_ddl(&self) -> String {
         format!(
@@ -905,7 +904,7 @@ impl Tables {
     }
 
     /// The virtual column holding property `p`'s typed text, shared by
-    /// the indexes on `p` (R8 round 10): `_sprig_p` and 16 hex digits of
+    /// the indexes on `p`: `_sprig_p` and 16 hex digits of
     /// the name's SHA-256.
     #[must_use]
     pub fn property_column(p: &str) -> String {
@@ -922,10 +921,10 @@ impl Tables {
     /// was checked for quotes.
     fn typed_text(p: &str) -> String {
         let v = format!("JSON_VALUE(props, '$.\"{p}\"')");
-        // G77 (R8 round 9): a value `_types` names (bytes, a temporal
+        // A value `_types` names (bytes, a temporal
         // value) is `t<type>:<text>`, as `schema::prop_index_value` says,
         // so it never equals a plain string's `s<text>`.
-        // G19: an integral float inside the 64-bit range is its integer,
+        // An integral float inside the 64-bit range is its integer,
         // as `schema::numeric_key` says. Plain digits stay as they are
         // (no detour through a double); MariaDB calls `1e16` an INTEGER,
         // so both types take the same path. `JSON_VALUE` answers `1` for
@@ -972,7 +971,8 @@ impl Tables {
                     ),
                 ));
             }
-            // R8 round 10 (LDBC, MariaDB 1117 at the 20th index): the
+            // MariaDB refused an LDBC run's 20th index (1117, table
+            // definition too large), so the
             // typed text of a property is one virtual column per property
             // (`_sprig_p<hash>`), shared by every index on it; each
             // index's own column only picks it for its label or type. The

@@ -19,11 +19,11 @@ serde_json.workspace = true
 sprig-binlog.workspace = true
 sprig-catalog.workspace = true
 sprig-common.workspace = true
-# The sequencer reads the tenant's feed (chapter 38).
+# The sequencer reads the tenant's feed.
 sprig-feed.workspace = true
 sprig-meta.workspace = true
 sprig-settings.workspace = true
-# The lexer (chapter 07) for the stream statements; sqlparser-rs for the
+# The SQL lexer for the stream statements; sqlparser-rs for the
 # reads the gateway rewrites.
 sprig-sql.workspace = true
 sqlparser.workspace = true

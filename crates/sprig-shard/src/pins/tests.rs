@@ -2,7 +2,7 @@
 
 use super::*;
 
-// The shop of chapter 16: 1 customers, 2 orders, 3 order_items, 4 events,
+// An example shop: 1 customers, 2 orders, 3 order_items, 4 events,
 // 5 countries, 6 audit_log.
 const CUSTOMERS: ObjectId = ObjectId(1);
 const ORDERS: ObjectId = ObjectId(2);
@@ -255,7 +255,7 @@ fn split_groups_take_only_pins_that_match() {
     let one = customers_group(1);
     check(&[], &one, &pin(ORDERS, key(&["id"]))).unwrap();
     check(&[], &one, &pin(ORDERS, PinKind::Unsharded)).unwrap();
-    // A table outside the split group may join it later (adoption, R3).
+    // A table outside the split group may join it later (adoption).
     check(&[], &split, &pin(EVENTS, colo(CUSTOMERS, &["customer_id"]))).unwrap();
 }
 

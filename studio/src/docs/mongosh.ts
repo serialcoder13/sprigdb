@@ -1,4 +1,4 @@
-// The MongoDB editor's language (chapter 44 step 19): a mongosh subset that
+// The MongoDB editor's language: a mongosh subset that
 // is parsed, never evaluated. acorn (MIT) produces an AST; Studio accepts
 // only a call chain rooted at `db` (find, aggregate, insertOne, updateMany
 // and similar), literals, and the helpers ObjectId, ISODate, NumberLong,
@@ -6,7 +6,7 @@
 // which become Extended JSON v2. Variables, functions, loops, operators and
 // anything else are errors with their position, so pasted text can't run
 // code. The result is one command document for Sql.Query with
-// `language: mongo` (chapter 37, "Languages").
+// `language: mongo`.
 
 import { parse, type Node } from 'acorn';
 import type { StatementClass } from '../lib/sql';

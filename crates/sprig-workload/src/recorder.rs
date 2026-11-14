@@ -1,5 +1,4 @@
-//! The recorder: in-memory aggregation per (tenant, fingerprint)
-//! (chapter 12, "In-memory aggregation and flushing"; build step 3).
+//! The recorder: in-memory aggregation per (tenant, fingerprint).
 //!
 //! The gateway calls [`Recorder::plan`] before sending a statement and
 //! [`Recorder::record`] after its result completes. `record` costs one hash,
@@ -9,7 +8,7 @@
 //! Each entry holds the counters of one `workload_stats` row for the
 //! current bucket (`workload.bucket_minutes`). When a record arrives for a
 //! later bucket, the entry's finished bucket moves to the **closed outbox**
-//! and the entry starts again. The flusher (build step 4) writes
+//! and the entry starts again. The flusher ([`crate::flush`]) writes
 //! [`Recorder::snapshot`] (cumulative values of open buckets, written with
 //! `REPLACE`) and drains [`Recorder::drain_closed`] and
 //! [`Recorder::drain_new`] (first sightings for `INSERT IGNORE INTO
@@ -43,7 +42,7 @@ use crate::fingerprint::{Caller, Fingerprint, FingerprintId, FpFlags, FpKind, Fr
 use crate::histogram::Histogram;
 use crate::shape::Shape;
 
-/// The recorder's settings: a snapshot of chapter 12's keys, resolved by
+/// The recorder's settings: a snapshot of the `workload.*` keys, resolved by
 /// the gateway.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecorderConfig {
@@ -98,7 +97,7 @@ impl Default for RecorderConfig {
     }
 }
 
-/// What one execution did (chapter 12, `ExecSummary`).
+/// What one execution did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct ExecSummary {
@@ -128,9 +127,9 @@ pub struct ExecSummary {
 /// What [`Recorder::plan`] asks the gateway to do around one execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ProbePlan {
-    /// Read `Handler_read_*` before and after (build step 5).
+    /// Read `Handler_read_*` before and after.
     pub examined: bool,
-    /// Capture the parameter values (build step 6).
+    /// Capture the parameter values.
     pub capture_params: bool,
 }
 
@@ -354,8 +353,8 @@ pub struct FlushRow {
 
 /// One fingerprint's totals on this gateway since it was first counted or
 /// since the tenant's last reset: what `performance_schema`'s
-/// `events_statements_summary_by_digest` shows on port 3306 (chapter 28
-/// step 13, R4 round 5). Unlike [`Stats`], it doesn't start again with
+/// `events_statements_summary_by_digest` shows on port 3306 (the MySQL
+/// 8.4 port). Unlike [`Stats`], it doesn't start again with
 /// each bucket; it goes when the entry is evicted.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Digest {
@@ -418,7 +417,7 @@ pub struct DigestRow {
     pub digest: Digest,
 }
 
-/// Counters for the metrics of chapter 12 ("Observability").
+/// Counters for the workload metrics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RecorderMetrics {
     /// `sprig_workload_fingerprints_active`.
@@ -452,7 +451,7 @@ struct Entry {
     stats: Stats,
     /// p95 of the previous bucket, for watching.
     prev_p95_us: u64,
-    /// Chapter 13 or the top-N asked for it.
+    /// Automatic indexing or the top-N asked for it.
     watched: bool,
     last_seen_secs: u64,
     /// Bytes this entry was counted for.
@@ -481,7 +480,7 @@ impl Entry {
 struct TenantState {
     /// Fingerprint ids this gateway has counted for the tenant.
     known: HashSet<u64>,
-    /// Watched by request (chapter 13, top-N).
+    /// Watched by request (automatic indexing, top-N).
     watched: HashSet<u64>,
     /// Bytes of the tenant's entries.
     bytes: usize,
@@ -506,7 +505,7 @@ impl std::ops::Deref for Padded {
 /// Number of entry shards (a power of two).
 const SHARDS: usize = 64;
 
-/// Per-gateway workload recorder (chapter 12, `Recorder`).
+/// Per-gateway workload recorder.
 pub struct Recorder {
     /// The settings; replaced whole when a `workload.*` key changes
     /// ([`Recorder::set_config`]).
@@ -634,11 +633,11 @@ impl Recorder {
             * usize::from(self.cfg.load().max_tenant_memory_pct.min(100))
     }
 
-    /// Asks for probes and parameter capture around one execution (chapter
-    /// 12, "Sampling rows examined"). Only watched fingerprints are probed:
-    /// p95 above `workload.watch_p95_ms` in this or the previous bucket, or
-    /// watched by request ([`Recorder::watch`]). The caller must not probe
-    /// statements of client multi-statement packets.
+    /// Asks for probes and parameter capture around one execution. Only
+    /// watched fingerprints are probed: p95 above `workload.watch_p95_ms`
+    /// in this or the previous bucket, or watched by request
+    /// ([`Recorder::watch`]). The caller must not probe statements of
+    /// client multi-statement packets.
     pub fn plan(&self, tenant: TenantId, fp: &Fingerprint) -> ProbePlan {
         let key = (tenant, fp.id.0);
         let (bucket, ..) = self.now();
@@ -686,8 +685,8 @@ impl Recorder {
         }
     }
 
-    /// Marks a fingerprint as watched (chapter 13 asked, or it is among the
-    /// tenant's top `auto_index.top_n` by total time), or unmarks it.
+    /// Marks a fingerprint as watched (automatic indexing asked, or it is
+    /// among the tenant's top `auto_index.top_n` by total time), or unmarks it.
     pub fn watch(&self, tenant: TenantId, id: FingerprintId, on: bool) {
         {
             let mut t = lock(&self.tenants);
@@ -704,7 +703,7 @@ impl Recorder {
         }
     }
 
-    /// Counts one execution (chapter 12, `Recorder::record`).
+    /// Counts one execution.
     pub fn record(&self, tenant: TenantId, fp: &Fingerprint, ex: &ExecSummary) {
         let (bucket, secs, wall) = self.now();
         let key = (tenant, fp.id.0);

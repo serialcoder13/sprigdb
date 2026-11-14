@@ -1,13 +1,13 @@
-//! Running a search (chapter 34, "Per-shard SQL", "Merge").
+//! Running a search: the per-shard SQL and the merge.
 //!
 //! ```text
 //! search(spec):
-//!   pushed, exact = the filter as SQL (chapter 31's translator; a superset unless exact)
+//!   pushed, exact = the filter as SQL (the document store's translator; a superset unless exact)
 //!   plan (crate::plan)
 //!   Ann*: SET SESSION mhnsw_ef_search = ef
 //!   SELECT id, <distance>(v, q) AS _d, doc, _types FROM t [IGNORE INDEX (ann)]
 //!     WHERE pushed [AND geo cells] ORDER BY <distance>(v, q) LIMIT limit
-//!       -- one shard: MariaDB; a sharded table: each shard, merged by _d (chapter 17)
+//!       -- one shard: MariaDB; a sharded table: each shard, merged by _d
 //!   drop rows failing the residual filter (MongoDB's semantics) or the exact geo test
 //!   fewer than k left and the query returned `limit` rows: limit and ef doubled,
 //!     up to k x vector.max_overfetch; then accept what remains
@@ -35,7 +35,7 @@ const SAMPLE_ROWS: u64 = 1000;
 /// MariaDB's largest `mhnsw_ef_search`.
 const MAX_EF: u32 = 10_000;
 
-/// A location filter (chapter 36): the rows inside, tested exactly.
+/// A location filter: the rows inside, tested exactly.
 pub trait GeoFilter: Send + Sync {
     /// S2 cell-id ranges covering the region, `[min, max]` inclusive, for
     /// the `_sprig_s2` index.
@@ -86,7 +86,7 @@ pub struct Hit {
     pub id: Vec<u8>,
     /// MariaDB's distance.
     pub distance: f64,
-    /// The score (chapter 34's formula).
+    /// The score.
     pub score: f64,
     /// Its metadata, as relaxed Extended JSON.
     pub metadata: Option<Value>,
@@ -109,7 +109,7 @@ fn invalid(code: SprigCode, m: String) -> SprigError {
     SprigError::new(code, m)
 }
 
-/// The metadata a filter reads, for chapter 31's translator: every path
+/// The metadata a filter reads, for the document store's translator: every path
 /// may hold arrays (so pushed conditions are supersets, rechecked here).
 fn meta_for(def: &IndexDef) -> CollMeta {
     CollMeta {
@@ -306,7 +306,7 @@ pub async fn search(
             .await
             .map_err(backend)?;
         let returned = rows.len();
-        // Chapter 04 (decision bugfix-1): an exact search with a residual
+        // An exact search with a residual
         // filter reads every row the pushed filter passes; decoding and
         // testing them runs off the runtime's worker threads.
         let mut kept = sprig_common::cpu::heavy(returned, || {
@@ -406,7 +406,7 @@ fn decode_vectors(rows: Vec<sprig_kv::Row>) -> Vec<(Vec<u8>, Vec<f32>)> {
 
 /// About `n` items' ids and vectors, spread evenly over the index by id:
 /// MariaDB picks every `step`-th row, so only the sample travels and is
-/// decoded (chapter 34's recall check).
+/// decoded (the recall check).
 ///
 /// # Errors
 /// The backend's.
@@ -445,7 +445,7 @@ pub async fn all_vectors(
     Ok(decode_vectors(rows))
 }
 
-/// Chapter 34's automatic graph for an `ann_mode = auto` index: once it
+/// The automatic graph for an `ann_mode = auto` index: once it
 /// holds `vector.ann_min_rows` rows, build the graph, replay `samples`
 /// queries (items' own vectors) with and without it, and keep it when the
 /// mean recall at `k` reaches `vector.min_recall`; else drop it. Returns
@@ -578,8 +578,7 @@ mod tests {
     }
 
     /// Two exact searches whose geo test reads 100,000 rows each, at once
-    /// on a two-worker runtime, leave a ticker running (chapter 04,
-    /// decision bugfix-1): the residual loop runs off the workers.
+    /// on a two-worker runtime, leave a ticker running: the residual loop runs off the workers.
     #[test]
     fn residual_loops_leave_the_workers_free() {
         let rt = tokio::runtime::Builder::new_multi_thread()

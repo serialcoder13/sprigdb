@@ -1,5 +1,5 @@
-//! The Kubernetes provisioner (chapter 27, the `Provisioner` trait's
-//! second implementation). It lives here, beside its client, rather than in
+//! The Kubernetes provisioner (the `Provisioner` trait's second
+//! implementation). It lives here, beside its client, rather than in
 //! `sprig-provision::kubernetes`: `sprig-provision` would otherwise depend
 //! on the operator's REST client.
 //!
@@ -10,7 +10,7 @@
 //! deletes what owner references don't reach: the volume claims,
 //! mariadb-operator's generated password Secrets and the cluster's entry
 //! in the credentials Secret. A cluster
-//! is retired only after the controller drained it (chapter 11).
+//! is retired only after the controller drained it.
 
 use std::sync::Arc;
 
@@ -176,7 +176,7 @@ impl Provisioner for KubernetesProvisioner {
             ));
         };
         let name = v["metadata"]["name"].as_str().unwrap_or_default();
-        // The record first (r2opfix): only a drained cluster retires, and
+        // The record first: only a drained cluster retires, and
         // nothing is deleted while the controller refuses.
         self.rec.registrar().retire(c.as_str()).await?;
         self.rec

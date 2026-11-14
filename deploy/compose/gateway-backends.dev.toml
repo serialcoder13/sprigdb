@@ -1,15 +1,15 @@
-# The backend account tenant sessions use, interim (chapter 14, "Backend
-# target, interim"; format in crates/sprig-gateway/src/tenant/backends.rs).
+# The backend account tenant sessions use (format in
+# crates/sprig-gateway/src/tenant/backends.rs).
 # Development only.
 #
 # Catalog logins (`[gateway] login_mode = "catalog"`, gateway-dev.sh's
 # default) run each user's statements as its own backend account
-# ([per_user]); [default] serves only binaries from before M0.5. The cluster is each
-# tenant's catalog cluster, from its shard map. Clients never see this
-# account: names in output (DEFINER, grantees, messages) show the session's
-# own user.
+# ([per_user]); [default] serves only older binaries without per-user
+# accounts. The cluster is each tenant's catalog cluster, from its shard
+# map. Clients never see this account: names in output (DEFINER, grantees,
+# messages) show the session's own user.
 
-# Chapter 29 (M0.5): per-user backend accounts. Every tenant without its
+# Per-user backend accounts. Every tenant without its
 # own [tenants.<name>] entry runs each user's statements as that user's own
 # MariaDB account t<tenant>_u<user>, created and granted by the gateway
 # only on the tenant's own schemas; passwords derive from this secret.

@@ -1,6 +1,6 @@
-//! `sprig-kv`: the key-value engine (chapter 33).
+//! `sprig-kv`: the key-value engine.
 //!
-//! Layer: 2 data layer. Design: [chapter 33](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/33-kv.md) (Key-value) of the SprigDB low-level design.
+//! Layer: 2 data layer.
 //!
 //! - [`sql`]: the SQL a front end runs ([`SqlRunner`]), and binary-safe
 //!   literals.
@@ -10,9 +10,9 @@
 //!   MariaDB's clock counts.
 //! - [`api`]: the `KeyValue` operations (get, put with preconditions,
 //!   delete, scan, transactions) over string keys.
-//! - [`geo`]: keys' locations and `GeoSearch` (chapter 36, R6 round 3).
+//! - [`geo`]: keys' locations and `GeoSearch`.
 //!
-//! Redis command semantics live in `sprig-redis` (chapter 40), over the
+//! Redis command semantics live in `sprig-redis`, over the
 //! same tables.
 
 // Redis's number rules are casts by design: lengths and counts become RESP

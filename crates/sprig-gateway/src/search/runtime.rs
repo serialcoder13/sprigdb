@@ -4,7 +4,7 @@
 //! A gateway holds copies itself only when `search.copies` is 0 or the DC
 //! has no worker with the search role (see [`super`]); otherwise copies
 //! run on workers and this gateway serves their seeds
-//! ([`definer_page`], through `sprig.internal.v1.SearchSeed`).
+//! (`definer_page`, through `sprig.internal.v1.SearchSeed`).
 
 use std::net::SocketAddr;
 use std::sync::Arc;

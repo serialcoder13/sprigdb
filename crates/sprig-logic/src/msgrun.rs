@@ -1,5 +1,4 @@
-//! The runners of triggers on streams and queues (chapter 41, "Triggers on
-//! streams and queues"; R9), as a worker's job runs them. Every run itself
+//! The runners of triggers on streams and queues, as a worker's job runs them. Every run itself
 //! happens in a gateway ([`crate::messages`]); these loops decide what to
 //! run, in what order, and what to do with failures.
 //!

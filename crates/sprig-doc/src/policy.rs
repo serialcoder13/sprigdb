@@ -1,5 +1,5 @@
 //! Row-level security policies on collections in MongoDB's filter form
-//! (chapter 29, "Policies", R5; `sprigCreatePolicy`, decision RL33).
+//! (`sprigCreatePolicy`).
 //!
 //! A policy written as a MongoDB filter becomes an SQL expression over the
 //! collection's table (`doc`, `_types`), stored as an ordinary policy

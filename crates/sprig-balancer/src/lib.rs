@@ -1,22 +1,22 @@
 //! `sprig-balancer`: placement, rebalancing, and split and merge scheduling.
 //!
-//! Layer: 2 operations. Design: [chapter 11](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/11-placement.md) (Placement) and [chapter 20](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/20-split-merge.md) (Split and merge) of the SprigDB low-level design.
+//! Layer: 2 operations.
 //!
-//! Chapter 11's R0 build steps (milestone M0.6):
+//! Placement and rebalancing:
 //!
-//! | Step | Module |
+//! | Part | Module |
 //! |---|---|
-//! | 1. The decision log | [`decisions`] |
-//! | 2. Load collection | [`load`] |
-//! | 3. Capacity, utilization and pressure | [`model`] |
-//! | 4. Constraints and `feasible()` | [`constraints`] |
-//! | 5. `place()` and the rebalance planner | [`plan`] |
-//! | 6. Scheduling, guardrails, Galera writer weights | [`schedule`], [`writers`] |
-//! | 7. Recommendations and `explain placement` | [`recommend`], [`explain`] |
-//! | 8. Fleet simulator | `sprig-testkit::fleet` |
-//! | 9. Schema caps and the creation rate limit | [`model`], [`constraints`], [`ratelimit`] |
+//! | The decision log | [`decisions`] |
+//! | Load collection | [`load`] |
+//! | Capacity, utilization and pressure | [`model`] |
+//! | Constraints and `feasible()` | [`constraints`] |
+//! | `place()` and the rebalance planner | [`plan`] |
+//! | Scheduling, guardrails, Galera writer weights | [`schedule`], [`writers`] |
+//! | Recommendations and `explain placement` | [`recommend`], [`explain`] |
+//! | Fleet simulator | `sprig-testkit::fleet` |
+//! | Schema caps and the creation rate limit | [`model`], [`constraints`], [`ratelimit`] |
 //!
-//! Chapter 20 (R1): automatic split, merge and move, in [`shards`].
+//! Automatic split, merge and move are in [`shards`].
 //!
 //! The planner is pure and deterministic over a [`model::FleetView`]; the
 //! controller builds the view from etcd, probes, storage scans and gateway

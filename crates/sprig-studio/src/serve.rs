@@ -1,4 +1,4 @@
-//! Serving one request under `studio.path` (chapter 44, "Serving assets").
+//! Serving one request under `studio.path`.
 //!
 //! ```text
 //! serve(request, listener):

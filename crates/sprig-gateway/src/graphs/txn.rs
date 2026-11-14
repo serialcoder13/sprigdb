@@ -502,6 +502,10 @@ pub(crate) struct ReadConns {
     /// An auto-commit read: `CALL { } IN TRANSACTIONS` may run (its
     /// batches have nothing to commit).
     pub(crate) implicit: bool,
+    /// The connections run auto-commit statements, with no transaction
+    /// to end (an auto-commit read at `READ COMMITTED`, whose statements
+    /// each see the latest commits either way).
+    pub(crate) autocommit: bool,
 }
 
 impl std::fmt::Debug for ReadConns {
@@ -509,6 +513,7 @@ impl std::fmt::Debug for ReadConns {
         f.debug_struct("ReadConns")
             .field("clusters", &self.conns.keys().collect::<Vec<_>>())
             .field("implicit", &self.implicit)
+            .field("autocommit", &self.autocommit)
             .finish()
     }
 }
@@ -517,6 +522,9 @@ impl ReadConns {
     /// Ends every transaction (`COMMIT` of a read-only transaction); the
     /// connections go back to their pools.
     pub(crate) async fn end(self) {
+        if self.autocommit {
+            return;
+        }
         for (_, mut c) in self.conns {
             let _ = c.query_drop("COMMIT").await;
         }

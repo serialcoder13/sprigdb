@@ -1,8 +1,8 @@
-//! Geo commands on sorted sets (chapter 40, "Command coverage": a sorted
-//! set scored by Redis's 52-bit geohash, with Redis's haversine rather
-//! than chapter 36's geodesics, so results match Redis).
+//! Geo commands on sorted sets: a sorted set scored by Redis's
+//! 52-bit geohash, with Redis's haversine rather than the geo layer's
+//! geodesics, so results match Redis.
 //!
-//! As built in R6, searches read every member of the key and keep those
+//! Searches read every member of the key and keep those
 //! inside the shape, the same set Redis returns after its own exact
 //! filter; reading only the covering geohash ranges is a later
 //! optimization.
@@ -402,8 +402,7 @@ async fn run_search(cx: &mut Ctx<'_>, src: &[u8], mut s: Search) -> R<Frame> {
     if s.count.is_some_and(|(_, any)| !any) && s.sort.is_none() {
         s.sort = Some(true);
     }
-    // Chapter 04 (decision bugfix-1): testing and sorting a large set's
-    // members runs off the runtime's worker threads.
+    // Testing and sorting a large set's members runs off the runtime's worker threads.
     let n = all.len();
     let (conv, sort) = (s.conv, s.sort);
     let mut hits = sprig_common::cpu::heavy(n, move || {

@@ -1,6 +1,5 @@
-//! [`MapIo`] on chapter 15's R0 tenant map (`shardmaps/<tenant>/0`),
-//! through `sprig-shard`'s compare-and-put (chapter 10, "Cutover";
-//! chapter 15, "Epochs").
+//! [`MapIo`] on the whole-tenant map (`shardmaps/<tenant>/0`), through
+//! `sprig-shard`'s compare-and-put.
 //!
 //! A hold's `job_id` field is `<job uuid>#<owner token>`, so a worker that
 //! lost the job (its token is older) can neither commit nor clear its
@@ -140,7 +139,7 @@ impl MapIo for TenantMapIo {
 
     /// The flip and the feed's handoff record in one etcd transaction, so
     /// no reader sees the new owner without knowing where the source's
-    /// changes end and the target's begin (chapter 38, "Ownership").
+    /// changes end and the target's begin.
     async fn commit_handoff(
         &self,
         job: JobId,

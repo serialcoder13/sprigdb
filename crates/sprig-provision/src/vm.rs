@@ -1,5 +1,4 @@
-//! The VM provisioner (chapter 27, "VM packaging", "The agent on VMs";
-//! build steps 8 and 9): the free-host pool, cluster plans, systemd units
+//! The VM provisioner: the free-host pool, cluster plans, systemd units
 //! and install steps.
 //!
 //! ```text
@@ -15,7 +14,7 @@
 //! 7. write the cluster record (provisioner = vm, failover_driver = sprig)
 //! ```
 //!
-//! **As built (R2, r2prov).** Steps 1 and 2 run here: [`VmProvisioner::create`]
+//! **As built.** Steps 1 and 2 run here: [`VmProvisioner::create`]
 //! claims hosts from `vm-hosts/` in the DC tier with one compare-and-set
 //! transaction, reserves the cluster number, renders every node's settings
 //! and steps, and stores the whole plan as `provision-jobs/<job>` (state

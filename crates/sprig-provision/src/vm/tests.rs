@@ -256,6 +256,8 @@ fn units_follow_the_book() {
     assert!(!agent.contains("User="), "the agent runs as root");
     let gw = units::unit(units::Unit::Gateway);
     assert!(gw.contains("User=sprigdb") && gw.contains("AmbientCapabilities=CAP_NET_BIND_SERVICE"));
+    // mimalloc ignores glibc's arena cap, which doubled a point read's CPU.
+    assert!(!gw.contains("MALLOC_ARENA_MAX"));
     assert!(units::unit(units::Unit::EtcdGlobal).contains("/etc/sprigdb/etcd-global.yaml"));
     assert_eq!(units::units().len(), 6);
     for (_, u) in units::units() {

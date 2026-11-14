@@ -1,4 +1,4 @@
-//! A hand-made two-shard tenant, routed live (chapter 15): the shard maps
+//! A hand-made two-shard tenant, routed live: the shard maps
 //! live in etcd and reach the code through `ShardMapCache`; shard 1 is on
 //! the single node, shard 2 on the replication primary.
 //!
@@ -35,7 +35,7 @@ use sprig_shard::{
     KeyClass, KeySpec, KeyValue, ShardMap, ShardMapCache, ShardMapStore, routing_hash, shard_schema,
 };
 
-const TENANT: TenantId = TenantId(7_310_001); // r1shard's tenant id
+const TENANT: TenantId = TenantId(7_310_001); // the test's tenant id
 const DB: DbId = DbId(1);
 
 fn env(n: &str) -> Option<String> {
@@ -303,7 +303,7 @@ async fn live_catalog_module() {
         eprintln!("skipped: SPRIG_TEST_MARIADB_SINGLE not set");
         return;
     };
-    let schema = "t7310005_sprig"; // r1shard's catalog, dropped by name below
+    let schema = "t7310005_sprig"; // the test's catalog, dropped by name below
     let pool = mysql_async::Pool::new(single.as_str());
     let mut c = pool.get_conn().await.unwrap();
     c.query_drop(format!("DROP DATABASE IF EXISTS `{schema}`"))

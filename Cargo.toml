@@ -7,7 +7,7 @@ version = "0.0.1"
 edition = "2024"
 rust-version = "1.94"
 license = "Apache-2.0"
-repository = "https://github.com/serialcoder13/sprigdb"
+repository = "https://github.com/modlix-india/sprigdb"
 publish = false
 
 [workspace.dependencies]
@@ -79,8 +79,9 @@ twox-hash = { version = "2.1", default-features = false, features = ["std", "xxh
 # xxhash32 above). Approved by Kiran, 9 November 2026.
 snap = "=1.1.2"
 lz4_flex = { version = "=0.14.0", default-features = false, features = ["std", "safe-encode", "safe-decode", "frame", "checked-decode"] }
-# The server binary's allocator, opt-in (`sprigdb --features mimalloc`;
-# perf1, S143): mimalloc and libmimalloc-sys are MIT.
+# The server binary's allocator, the default since S152/S155 (perf1 S143;
+# `sprigdb --features system-alloc` for the platform's): mimalloc and
+# libmimalloc-sys are MIT.
 mimalloc = { version = "=0.1.52", default-features = false }
 
 # The Admin API's HTTP client in sprigctl (chapter 47); the server side is
@@ -168,6 +169,27 @@ kirun = "2.2"
 # Unicode, or offer one of them (listed in decisions/r5-interim.md, S-items).
 sprig-search = { path = "crates/sprig-search" }
 tantivy = { version = "=0.27.0", default-features = false, features = ["mmap", "stopwords", "stemmer", "lz4-compression"] }
+
+# The docs pack and docs search. sprig-docs reads and writes packs (CBOR chunks
+# with ciborium, Apache-2.0; f16 embeddings with half, already in the tree;
+# English stems with frostem, BSD-3-Clause, already in the tree through
+# Tantivy). sprig-embed runs the local embedding model, BAAI/bge-small-en-v1.5
+# (MIT weights), on the CPU with candle (MIT OR Apache-2.0) and Hugging Face
+# tokenizers (Apache-2.0) without Oniguruma: the pure-Rust fancy-regex backend
+# (MIT), the same version candle itself uses. Pinned, because the pack's bytes
+# depend on the maths.
+sprig-docs = { path = "crates/sprig-docs" }
+sprig-embed = { path = "crates/sprig-embed" }
+ciborium = "=0.2.2"
+half = "2.7"
+# The docs query embedding's thread pool (sprig-gateway); already in the
+# tree through candle.
+rayon = "1.11"
+frostem = { version = "1.20260821", default-features = false, features = ["english"] }
+candle-core = "=0.11.1"
+candle-nn = "=0.11.1"
+candle-transformers = "=0.11.1"
+tokenizers = { version = "=0.23.2", default-features = false, features = ["fancy-regex"] }
 
 [workspace.lints.rust]
 # `deny`, not `forbid`, so vetted spots can opt out with a `SAFETY:` comment

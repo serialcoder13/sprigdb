@@ -1,4 +1,4 @@
-//! The fleet simulator (chapter 11, build step 8; chapter 46): months of
+//! The fleet simulator: months of
 //! synthetic growth and noise on a deliberately skewed fleet, with the
 //! real planner ([`sprig_balancer::Planner`]) and scheduler
 //! ([`sprig_balancer::Scheduler`]) and a fake mover.

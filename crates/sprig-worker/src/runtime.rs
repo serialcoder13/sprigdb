@@ -1,5 +1,5 @@
-//! The job runtime (chapter 23 step 6, the worker's half of "One job
-//! scheduler for every loop").
+//! The job runtime: the worker's half of the one job scheduler that runs
+//! every loop.
 //!
 //! ```text
 //! run():
@@ -62,7 +62,7 @@ impl std::fmt::Debug for JobCtx {
 impl JobCtx {
     /// The job's attempt (its owner's `attempt`, 0 if unassigned): it
     /// rises with every reassignment, so it fences a worker that lost the
-    /// job but still runs (chapter 42's copy worker uses it as its epoch).
+    /// job but still runs (the inherit copy worker uses it as its epoch).
     pub async fn attempt(&self) -> u32 {
         self.claimed
             .lock()

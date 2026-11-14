@@ -1,4 +1,4 @@
-// Studio's R0 views end to end (chapter 44 step 14): login, explorer, SQL
+// Studio's core views end to end: login, explorer, SQL
 // editor with confirmation and caps, results, export, browse with an edit
 // conflict, settings, automatic indexing, users and API keys, accessibility
 // (axe-core) and screenshots of every route in light and dark.
@@ -189,7 +189,7 @@ test.describe.serial('Studio R0', () => {
     await page.getByRole('button', { name: 'Keep mine (save against current)' }).click();
     await page.getByRole('button', { name: 'Run them' }).click();
     await expect(grid).toContainText('100.00');
-    // The filter bar (decision R2): a condition, then a raw WHERE clause.
+    // The filter bar: a condition, then a raw WHERE clause.
     await page.getByLabel('Column', { exact: true }).selectOption('status');
     await page.getByLabel('Value', { exact: true }).fill('paid');
     await page.getByTestId('filter-apply').click();

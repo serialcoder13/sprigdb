@@ -1,6 +1,5 @@
-//! The mover's public API (chapter 10, "Interfaces"): what callers such as
-//! the balancer (chapter 11), `sprigctl shard move` and copy-and-swap
-//! submit, observe and cancel.
+//! The mover's public API: what callers such as the balancer,
+//! `sprigctl shard move` and copy-and-swap submit, observe and cancel.
 //!
 //! ```no_run
 //! # async fn demo(mover: &dyn sprig_mover::Mover) -> sprig_common::Result<()> {
@@ -24,24 +23,25 @@ use serde::{Deserialize, Serialize};
 use sprig_common::Result;
 use sprig_common::ids::{ClusterId, JobId, TenantId};
 
-/// What a job does (chapter 10, "Job kinds"). R0 runs `MoveShard` and
-/// `CopySwapDdl`; the others are accepted only by later releases.
+/// What a job does. Whole-shard jobs run `MoveShard` and `CopySwapDdl`;
+/// hash-range jobs run `SplitShard`, `MergeShards`, `MoveShard` and
+/// `Rekey`; the others are refused for now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
-    /// One shard (R0: one tenant's placement unit) to another cluster.
+    /// One shard (or a tenant's whole placement unit) to another cluster.
     MoveShard,
-    /// One range into two (R1).
+    /// One range into two.
     SplitShard,
-    /// Two adjacent ranges into one (R1).
+    /// Two adjacent ranges into one.
     MergeShards,
-    /// A table group to a new key (R3).
+    /// A table group to a new key.
     Rekey,
-    /// All of a tenant's schemas to another data center (R2).
+    /// All of a tenant's schemas to another data center.
     TenantMigration,
     /// A table copied to a shadow with new DDL and swapped in by rename.
     CopySwapDdl,
-    /// A reference schema kept streaming to another cluster (R1).
+    /// A reference schema kept streaming to another cluster.
     ReferenceCopy,
 }
 
@@ -66,7 +66,7 @@ impl JobKind {
 pub struct SourceSpec {
     /// The source cluster.
     pub cluster: ClusterId,
-    /// The shard id; 0 for an R0 tenant move (the catalog's group 0 map).
+    /// The shard id; 0 for a whole-tenant move (the catalog's group 0 map).
     #[serde(default)]
     pub shard: u32,
     /// Physical schemas; empty means every schema of the tenant on the
@@ -79,7 +79,7 @@ pub struct SourceSpec {
     #[serde(default)]
     pub tables: Option<Vec<String>>,
     /// The source shard's hash range (hash-range jobs: split, merge and
-    /// shard moves, chapter 20).
+    /// shard moves).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<HashRange>,
 }
@@ -98,7 +98,7 @@ pub struct HashRange {
 pub struct TargetSpec {
     /// The target cluster.
     pub cluster: ClusterId,
-    /// The new shard id; 0 for an R0 tenant move, which keeps the schema
+    /// The new shard id; 0 for a whole-tenant move, which keeps the schema
     /// names (the target is another cluster, so they can't collide).
     #[serde(default)]
     pub shard: u32,
@@ -106,7 +106,7 @@ pub struct TargetSpec {
     /// source's names.
     #[serde(default)]
     pub schemas: Vec<String>,
-    /// The hash range the target owns (R1 splits); `None` for all.
+    /// The hash range the target owns (splits); `None` for all.
     #[serde(default)]
     pub range: Option<HashRange>,
     /// The DDL a copy-and-swap applies to the shadow.
@@ -114,7 +114,7 @@ pub struct TargetSpec {
     pub ddl: Option<DdlTransform>,
 }
 
-/// A copy-and-swap's change (chapter 10, "Job kinds", `copy_swap_ddl`).
+/// A copy-and-swap's change (`copy_swap_ddl`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DdlTransform {
     /// The table's schema.
@@ -131,12 +131,12 @@ pub struct DdlTransform {
 pub enum Routing {
     /// Every row to the one target.
     Whole,
-    /// By `_sprig_rk` into the targets' ranges (R1).
+    /// By `_sprig_rk` into the targets' ranges.
     HashRange {
         /// The table group.
         group: u32,
     },
-    /// By a new key's hash (R3, chapter 16's online re-key): every row of
+    /// By a new key's hash (the online re-key): every row of
     /// the group's members is hashed again under `key` from its own
     /// `columns`, and goes to the target whose range holds the new hash.
     Rekey {
@@ -158,7 +158,7 @@ pub enum CutoverMode {
     Auto,
     /// Wait in `ready` until [`Mover::cut_over`] (operator-driven moves).
     Manual,
-    /// Together with the parent job's other children (R1).
+    /// Together with the parent job's other children.
     Group {
         /// The parent job.
         parent: JobId,
@@ -166,7 +166,7 @@ pub enum CutoverMode {
     /// Never: copy, then keep the target streaming (`streaming`) until the
     /// job is cancelled (targets dropped) or stopped with
     /// [`Mover::cut_over`] (targets kept as they are, sources untouched):
-    /// chapter 25's standbys (r2close).
+    /// standby copies.
     Continuous,
 }
 
@@ -192,9 +192,9 @@ pub struct JobSpec {
     pub kind: JobKind,
     /// The tenant whose data moves.
     pub tenant: TenantId,
-    /// Sources (R0: one).
+    /// Sources (one for a whole-shard job).
     pub sources: Vec<SourceSpec>,
-    /// Targets (R0: one).
+    /// Targets (one for a whole-shard job).
     pub targets: Vec<TargetSpec>,
     /// Row routing.
     pub routing: Routing,
@@ -202,7 +202,7 @@ pub struct JobSpec {
     pub cutover: CutoverMode,
     /// Verification.
     pub verify: VerifyMode,
-    /// Chapter 11's decision row, when the balancer planned the job.
+    /// The balancer's decision row, when the balancer planned the job.
     #[serde(default)]
     pub decision_id: Option<u64>,
     /// Who asked (operator, `balancer`), for the decision log.
@@ -215,14 +215,15 @@ pub struct JobSpec {
     pub max_hold_ms: Option<u64>,
     /// How long a committed job keeps its sources fenced before dropping
     /// them, in ms; `None` is `mover.source_retain_hours`. Split and merge
-    /// jobs pass `sharding.retire_hours` (chapter 20).
+    /// jobs pass `sharding.retire_hours`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retain_ms: Option<u64>,
 }
 
 impl JobSpec {
-    /// Moves a tenant's whole R0 placement unit (its catalog and every
-    /// database's shard schema, which R0 keeps on one cluster) from `from`
+    /// Moves a tenant's whole placement unit (its catalog and every
+    /// database's shard schema, on one cluster while the tenant isn't
+    /// sharded) from `from`
     /// to `to`, cutting over automatically, with full verification.
     #[must_use]
     pub fn move_tenant(tenant: TenantId, from: ClusterId, to: ClusterId) -> Self {
@@ -294,7 +295,7 @@ impl JobSpec {
         }
     }
 
-    /// The same spec carrying chapter 11's decision id.
+    /// The same spec carrying the balancer's decision id.
     #[must_use]
     pub fn with_decision(mut self, decision_id: u64) -> Self {
         self.decision_id = Some(decision_id);
@@ -334,7 +335,7 @@ impl JobSpec {
         self.targets.first().map(|t| &t.cluster)
     }
 
-    /// A hash-range job of table group `group` (chapter 20): `sources` are
+    /// A hash-range job of table group `group`: `sources` are
     /// shards on one cluster, each `(shard, its schemas, its range)`;
     /// `targets` are new shards `(shard, range)` on `to`. The kind follows
     /// from the counts: one source to several targets is a split, several
@@ -396,7 +397,7 @@ impl JobSpec {
         }
     }
 
-    /// A re-key of table group `group` (chapter 16, "Online re-key"):
+    /// A re-key of table group `group`:
     /// `sources` are all of the group's shards, on one cluster, each
     /// `(shard, its schemas, its range)`; `targets` are new shards
     /// `(shard, range)` on `to` covering the whole hash space. Rows route
@@ -424,7 +425,7 @@ impl JobSpec {
     }
 }
 
-/// A job's state (chapter 10, "State machines").
+/// A job's state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobState {
@@ -456,7 +457,7 @@ pub enum JobState {
     RolledBack,
     /// Stopped by an operator or a guardrail; resumes into the same state.
     Paused,
-    /// Reference copies after their seed (R1).
+    /// Reference copies after their seed.
     Streaming,
 }
 
@@ -535,11 +536,11 @@ pub struct Progress {
     /// Copies restarted from scratch (purged binlog, diverged source).
     pub restarts: u32,
     /// A `Continuous` job: the source position the target has applied
-    /// through (chapter 25's `applied_source_gtid`), saved with the record.
+    /// through (`applied_source_gtid`), saved with the record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied_source_gtid: Option<String>,
     /// A `Continuous` job: when the stream last brought the source's tick
-    /// or a change (Unix ms; chapter 25's `source_seen_at`). With
+    /// or a change (Unix ms; `source_seen_at`). With
     /// `lag_ms`, a standby's lag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_seen_ms: Option<u64>,
@@ -566,7 +567,7 @@ pub struct JobStatus {
     pub error: Option<String>,
     /// Cancellation was requested (applied at the next step).
     pub cancel_requested: bool,
-    /// Chapter 11's decision row.
+    /// The balancer's decision row.
     pub decision_id: Option<u64>,
     /// The new epoch, once the cutover committed.
     pub epoch: Option<u64>,
@@ -591,7 +592,7 @@ pub struct JobFilter {
 pub trait Mover: Send + Sync {
     /// Creates a job and takes its shard locks. Fails with 39131 if
     /// another job holds the tenant (or shard), with `Internal` for a spec
-    /// R0 can't run.
+    /// the mover can't run.
     async fn submit(&self, spec: JobSpec) -> Result<JobId>;
     /// The job's state and progress. 39130 if there is no such job.
     async fn status(&self, id: &JobId) -> Result<JobStatus>;

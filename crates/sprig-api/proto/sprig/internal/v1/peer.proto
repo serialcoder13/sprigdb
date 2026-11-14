@@ -1,25 +1,24 @@
 // sprig.internal.v1.GatewayPeer: gateways calling each other on 7403
-// (`listener.peer.bind`), with mutual TLS from the internal CA (chapter
-// 04, "Interfaces"). Never exposed to clients.
+// (`listener.peer.bind`), with mutual TLS from the internal CA. Never
+// exposed to clients.
 syntax = "proto3";
 
 package sprig.internal.v1;
 
 service GatewayPeer {
   // KILL [QUERY] for a session whose id names this gateway's slot. The
-  // caller has already checked that its user may kill the session's user
-  // (chapter 29); this gateway checks the tenant.
+  // caller has already checked that its user may kill the session's user;
+  // this gateway checks the tenant.
   rpc Kill(KillRequest) returns (KillReply);
   // The sessions of this gateway, for SHOW PROCESSLIST across gateways.
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsReply);
   // Starts this gateway's drain (sprigctl gateway drain).
   rpc Drain(DrainRequest) returns (DrainReply);
-  // A transaction-handle call that landed on another gateway (chapter 37,
-  // "Transactions"), forwarded with the caller's credentials.
+  // A transaction-handle call that landed on another gateway, forwarded with the caller's credentials.
   rpc Forward(ForwardRequest) returns (ForwardReply);
-  // A login of a tenant whose residency (chapter 26) doesn't allow the
-  // calling gateway's DC: this gateway, in an allowed DC, decides it
-  // (chapter 14, "Credential residency") and returns the principal only.
+  // A login of a tenant whose residency doesn't allow the calling
+  // gateway's DC: this gateway, in an allowed DC, decides it (credentials
+  // stay in allowed DCs) and returns the principal only.
   rpc HandoffLogin(HandoffLoginRequest) returns (HandoffLoginReply);
 }
 
@@ -28,8 +27,8 @@ message KillRequest {
   bool query_only = 2;
   // The tenant of the caller; 0 for an operator.
   uint64 tenant_id = 3;
-  // The caller's user: until chapter 29's privileges, a session may kill
-  // only sessions of its own user.
+  // The caller's user: without wider privileges, a session may kill only
+  // sessions of its own user.
   string user = 4;
 }
 

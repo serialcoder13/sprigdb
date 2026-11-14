@@ -1,8 +1,7 @@
 //! `sprig-logic-compile`: the JavaScript and KIRun to MariaDB PL/SQL
 //! compiler: parser front ends, shared IR, checks and code generation.
 //!
-//! Layer: 2 logic. Design: [chapter 41](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/41-logic.md)
-//! (Logic) of the SprigDB low-level design.
+//! Layer: 2 logic.
 //!
 //! ```text
 //!  source ─► front end ─► IR ─► checks ─► PL/SQL text
@@ -12,7 +11,7 @@
 //!                            and the differential suite
 //! ```
 //!
-//! What exists (chapter 41, build steps 4, 6, 7 and 8 in part):
+//! What exists:
 //!
 //! - [`ir`]: the typed IR;
 //! - [`kirun`]: the KIRun front end (model, expressions, step graph);
@@ -24,7 +23,7 @@
 //!   procedure) under `sql_mode = ORACLE`;
 //! - [`interp`]: a reference interpreter of the IR;
 //! - [`pure`]: bodies as plain SQL expressions, for `CHECK` constraints
-//!   and generated columns (R7 order 3);
+//!   and generated columns;
 //! - [`js`]: the JavaScript front end's place, which for now sends every
 //!   function to the engine tier.
 //!
@@ -70,7 +69,7 @@ pub use sql::{Columns, StaticColumns};
 /// (`logic_versions.compiler_version`).
 pub const COMPILER_VERSION: &str = "sprig-logic-compile/0.1";
 
-/// Why code can't run in MariaDB (chapter 41, "Placement"): a code such
+/// Why code can't run in MariaDB (a placement reason): a code such
 /// as `kirun.function`, where in the source, and what.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Reason {
@@ -110,7 +109,7 @@ pub enum Runtime {
     Javascript,
     /// Plain SQL bodies.
     Sql,
-    /// Redis Lua (chapter 40).
+    /// Redis Lua.
     Lua,
 }
 
@@ -139,7 +138,7 @@ impl Runtime {
     }
 }
 
-/// Compile-time limits and names (chapter 41's settings).
+/// Compile-time limits and names (the logic settings).
 #[derive(Debug, Clone)]
 pub struct Options {
     /// The module's id, for routine names.

@@ -24,7 +24,7 @@
 //! passed. CI sets [`STRICT`] in stages that provide the services: there a
 //! missing variable fails the test instead, so a typo can't hide a suite.
 
-/// etcd client URLs (single-etcd mode, chapter 23).
+/// etcd client URLs (single-etcd mode).
 pub const ETCD: &str = "SPRIG_TEST_ETCD";
 /// One single-node MariaDB.
 pub const MARIADB_SINGLE: &str = "SPRIG_TEST_MARIADB_SINGLE";
@@ -36,7 +36,7 @@ pub const MARIADB_GALERA: &str = "SPRIG_TEST_MARIADB_GALERA";
 pub const DOCKER: &str = "SPRIG_TEST_DOCKER";
 /// Path of a TOML file describing the whole environment ([`crate::Env::load`]).
 pub const ENV_FILE: &str = "SPRIG_TEST_ENV_FILE";
-/// toxiproxy's API URL (chapter 46, "Fault injection").
+/// toxiproxy's API URL.
 pub const TOXIPROXY: &str = "SPRIG_TEST_TOXIPROXY";
 /// The single MariaDB node's address as toxiproxy sees it, inside its
 /// Docker network; `single:3306` when unset.

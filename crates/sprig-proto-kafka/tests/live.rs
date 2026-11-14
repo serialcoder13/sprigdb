@@ -1,6 +1,6 @@
-//! Live test against a running gateway's `kafka` listener (chapter 45
-//! steps 9, 12 and 13), with this crate's own client: no Kafka client
-//! library is installed on the build machines.
+//! Live test against a running gateway's `kafka` listener, with this
+//! crate's own client: no Kafka client library is installed on the build
+//! machines.
 //!
 //! Ignored by default. Run with
 //!
@@ -12,10 +12,10 @@
 //!
 //! The listener must have `listener.kafka.tls = optional` (the test uses
 //! both plaintext and TLS). With `SPRIG_KAFKA_SCRAM=1` the user's password
-//! was set by a build that stores SCRAM verifiers (chapter 14), and
+//! was set by a build that stores SCRAM verifiers, and
 //! SCRAM-SHA-256 and SCRAM-SHA-512 must both succeed.
 //!
-//! `live_scram_upgrade_on_login` checks chapter 14's upgrade on login: with
+//! `live_scram_upgrade_on_login` checks the verifier upgrade on login: with
 //! `SPRIG_KAFKA_LEGACY_USER` and `SPRIG_KAFKA_LEGACY_PASSWORD` naming an
 //! account whose SCRAM verifiers were deleted, SCRAM fails, a PLAIN login
 //! over TLS succeeds, and SCRAM then succeeds with both mechanisms.
@@ -643,7 +643,7 @@ async fn live_scram_upgrade_on_login() {
     ));
 }
 
-/// Chapter 14's dual passwords over SCRAM: with `SPRIG_KAFKA_DUAL_USER` and
+/// Dual passwords over SCRAM: with `SPRIG_KAFKA_DUAL_USER` and
 /// `SPRIG_KAFKA_DUAL_PASSWORDS` (`new,old`) naming an account changed with
 /// `RETAIN CURRENT PASSWORD`, both passwords log in with both mechanisms.
 #[tokio::test]
@@ -668,7 +668,7 @@ async fn live_scram_dual_passwords() {
     ));
 }
 
-// ---- The data plane (chapter 45 build steps 10 and 11) ----
+// ---- The data plane ----
 
 use sprig_proto_kafka::compression::Compression;
 use sprig_proto_kafka::records::{Header, Record, RecordBatch};

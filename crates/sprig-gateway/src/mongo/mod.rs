@@ -27,7 +27,7 @@ pub mod changes;
 pub mod commands;
 pub mod conn;
 pub mod cursors;
-/// `$currentOp` and `$listSessions` (M2).
+/// `$currentOp` and `$listSessions`.
 pub mod diag;
 pub mod explain;
 pub mod failpoint;
@@ -37,13 +37,13 @@ pub mod qsettings;
 pub mod retry;
 pub mod rls;
 pub mod search;
-/// Server-side JavaScript (M4).
+/// Server-side JavaScript.
 pub mod serverjs;
 pub mod snapshot;
-/// Spilling's settings and `allowDiskUse` (M5).
+/// Spilling's settings and `allowDiskUse`.
 pub mod spill;
 pub mod sql;
-/// `serverStatus`, `connectionStatus` and change-stream reporting (M4).
+/// `serverStatus`, `connectionStatus` and change-stream reporting.
 pub mod status;
 pub mod txn;
 pub mod users;
@@ -136,7 +136,7 @@ key!(
 key!(
     /// `mongo.max_open_transactions`: open multi-document transactions per
     /// gateway (MongoDB 9.0's `maxConcurrentMultiDocumentTransactions`);
-    /// past it, `startTransaction` gets 509 `TooManyOpenTransactions` (M3).
+    /// past it, `startTransaction` gets 509 `TooManyOpenTransactions`.
     MAX_OPEN_TRANSACTIONS: u64 = "mongo.max_open_transactions", 10_000, HardBounds::range(1, 1_000_000),
     "Open multi-document transactions per gateway"
 );
@@ -411,7 +411,7 @@ impl MongoFrontend {
             }
             _ => None,
         };
-        // M5: this gateway's spill directory; stale ones are removed.
+        // This gateway's spill directory; stale ones are removed.
         spill::start(d.live.as_ref(), &d.gateway_id);
         let mut decoy_secret = [0u8; 32];
         let _ = getrandom::fill(&mut decoy_secret);

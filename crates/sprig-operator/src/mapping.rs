@@ -1,7 +1,7 @@
-//! `SprigCluster` to mariadb-operator resources (chapter 27, the mapping
-//! table), in `k8s.mariadb.com/v1alpha1`. mariadb-operator is MIT; only the
-//! fields used here are written, from its API reference (chapter 27, open
-//! question 1: verify against the pinned release).
+//! `SprigCluster` to mariadb-operator resources (the mapping table), in
+//! `k8s.mariadb.com/v1alpha1`. mariadb-operator is MIT; only the fields
+//! used here are written, from its API reference (to be verified against
+//! the pinned release).
 //!
 //! | `SprigCluster` | `MariaDB` |
 //! |---|---|
@@ -127,7 +127,7 @@ pub fn memory_of(spec: &SprigClusterSpec) -> u64 {
 /// left out too: the reconciler sets it live ([`crate::accounts`]) and
 /// writes it into the domain `ConfigMap` ([`domain_config_map`]), which the
 /// last line includes, so a restarted pod boots in the cluster's domain
-/// (r2opfix: a pod booting in domain 0 logged mariadb-operator's
+/// (a pod booting in domain 0 once logged mariadb-operator's
 /// replication-user DDL there).
 #[must_use]
 pub fn my_cnf(spec: &SprigClusterSpec) -> String {
@@ -267,7 +267,7 @@ pub fn mariadb(sc: &SprigCluster, cfg: &OperatorConfig) -> Value {
         Topology::Single => {}
     }
     if let Some(img) = &cfg.agent_image {
-        // The fence-only agent (chapter 25): DC permit and read_only. Its
+        // The fence-only agent: DC permit and read_only. Its
         // `[agent] cluster` is the record's id, known only after
         // registration, so the sidecar starts without it (and fences
         // nothing) until the agent can find its cluster by address.
@@ -345,8 +345,8 @@ fn s3(cluster: &str, b: &crate::crd::BackupSpec) -> Value {
 
 /// The `PhysicalBackup` and `PointInTimeRecovery` for `sc.spec.backup`
 /// (empty without one). Backups go under `clusters/<cluster>/backups/`
-/// and archived binlogs under `clusters/<cluster>/binlog/` (chapter 27,
-/// "Object storage").
+/// and archived binlogs under `clusters/<cluster>/binlog/` in object
+/// storage.
 #[must_use]
 pub fn backups(sc: &SprigCluster) -> Vec<(ApiResource, Value)> {
     let Some(b) = &sc.spec.backup else {

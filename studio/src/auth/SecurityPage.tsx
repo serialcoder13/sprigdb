@@ -12,7 +12,7 @@ interface FactorsReply {
   required: boolean;
 }
 
-/** One's own second factors (chapter 44 step 16; chapter 14 step 13). */
+/** One's own second factors. */
 export function SecurityPage() {
   const qc = useQueryClient();
   const me = useSession((s) => s.me);

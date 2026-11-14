@@ -1,7 +1,6 @@
-//! Where models live, and running a query (chapter 35, "Catalog tables",
-//! "Type 2 dimensions with system versioning").
+//! Where models live, and running a query.
 //!
-//! As built in R6 a model is one row of `<db>.__sprig_dim_models` in its
+//! For now a model is one row of `<db>.__sprig_dim_models` in its
 //! own logical database (the definition as submitted, a version, a state),
 //! made on first use like the key-value engine's tables, instead of the
 //! tenant catalog's `dim_models`, `dimensions`, `dim_levels`, `facts` and
@@ -62,7 +61,7 @@ async fn ensure(sql: &mut dyn SqlRunner, db: &str) -> Result<()> {
 
 /// Checks a model against the database: every table and column exists,
 /// and type 2 dimensions are versioned (system versioning is added to a
-/// table that lacks it, as chapter 35 says). The problems, empty when
+/// table that lacks it). The problems, empty when
 /// none.
 ///
 /// # Errors
@@ -350,8 +349,7 @@ pub async fn query(
     for s in &c.levels {
         level_rows.push(sql.query(s).await.map_err(backend)?);
     }
-    // Chapter 04 (decision bugfix-1): a large merge runs off the
-    // runtime's worker threads.
+    // A large merge runs off the runtime's worker threads.
     let n = detail.len() + level_rows.iter().map(Vec::len).sum::<usize>();
     let rows = sprig_common::cpu::heavy(n, || {
         let levels = level_rows
@@ -375,7 +373,7 @@ pub async fn query(
     Ok(Answer { rows, compiled: c })
 }
 
-/// Chapter 35's drill: the next query down (`up = false`: replace the
+/// The drill: the next query down (`up = false`: replace the
 /// dimension's level `l` by `l + 1` and filter `l = member`) or up
 /// (replace `l` by `l − 1` and drop filters on finer levels).
 ///
@@ -484,7 +482,7 @@ mod tests {
     }
 
     /// Two large subtotal merges at once on a two-worker runtime leave a
-    /// ticker on it running (chapter 04, decision bugfix-1). Before they
+    /// ticker on it running. Before they
     /// were offloaded, each held a worker for the whole merge.
     #[test]
     fn large_merges_leave_the_workers_free() {

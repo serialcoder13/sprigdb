@@ -1,5 +1,5 @@
-//! `sprigctl search list|show|rebuild` (chapter 39 build step 14; R5
-//! rounds 6 and 8), over the Admin API's `/admin/v1/tenants/{name}/search`:
+//! `sprigctl search list|show|rebuild`, over the Admin API's
+//! `/admin/v1/tenants/{name}/search`:
 //! the indexes placed on search workers and where their copies are, and a
 //! new generation of an index, built from MariaDB (as `ALTER SEARCH INDEX
 //! ... REBUILD`).

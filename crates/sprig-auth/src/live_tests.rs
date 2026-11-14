@@ -543,7 +543,7 @@ async fn live_logins_follow_auth_changes() {
                 AuthVerdict::Accept
             );
 
-            // A temporary lock (step 5 writes it; here by hand, with an
+            // A temporary lock (the lockout policy writes it; here by hand, with an
             // empty auth change as the lock transition's version bump).
             let mut c = cat.change(t, VersionKind::Auth).await.unwrap();
             let v = c.version();
@@ -586,7 +586,7 @@ async fn live_logins_follow_auth_changes() {
     .await;
 }
 
-/// Chapter 14's SCRAM verifiers in a real catalog: format 3's migration
+/// SCRAM verifiers in a real catalog: format 3's migration
 /// on a format-2 catalog, the backfill of a password without them (and of
 /// a retained one, with the primary's salt), and the upgrade on login
 /// through the login service with the catalog's writer.
@@ -849,7 +849,7 @@ async fn live_scram_verifiers_migration_and_backfill() {
     .await;
 }
 
-/// Decision bugfix-interim (P1 of 13 Nov): `CREATE USER` on a catalog
+/// Regression: `CREATE USER` on a catalog
 /// left at `auth` format 2 failed with 1265 (its `verifiers.mechanism`
 /// lacks `scram_sha_512`, which every new password stores). The gateway
 /// now runs [`crate::authz::migrate`] once per process and tenant; after

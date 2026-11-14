@@ -1,4 +1,4 @@
-//! The analytic guard (chapter 17, "Analytic reads (R3)"): which gathered
+//! The analytic guard: which gathered
 //! `SELECT`s DataFusion may answer, as a plan over shard scans.
 //!
 //! ```text

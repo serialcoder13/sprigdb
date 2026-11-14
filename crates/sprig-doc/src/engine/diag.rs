@@ -1,8 +1,7 @@
-//! The diagnostic stages that read the catalog and the collection's table
-//! (M2, 12 Nov 2026): `$collStats`, `$indexStats`, `$planCacheStats` and
-//! (MongoDB 8.1) `$listClusterCatalog`. Their output has MongoDB's shape;
-//! fields with no meaning in SprigDB are zero or absent, as chapter 30
-//! lists. `$currentOp` and `$listSessions` read the gateway's sessions and
+//! The diagnostic stages that read the catalog and the collection's
+//! table: `$collStats`, `$indexStats`, `$planCacheStats` and (MongoDB
+//! 8.1) `$listClusterCatalog`. Their output has MongoDB's shape;
+//! fields with no meaning in SprigDB are zero or absent. `$currentOp` and `$listSessions` read the gateway's sessions and
 //! run there.
 
 use bson::{Bson, DateTime, Document, doc};
@@ -149,8 +148,7 @@ impl Engine {
             "localTime": DateTime::now(),
         };
         if let Ok(l) = spec.get_document("latencyStats") {
-            // M5 (S79): the gateway's per-collection latencies since its
-            // start.
+            // The gateway's per-collection latencies since its start.
             out.insert(
                 "latencyStats",
                 crate::usage::latency_stats(
@@ -223,7 +221,7 @@ impl Engine {
         let Some(list) = self.list_indexes(sql, ns).await? else {
             return Ok(Vec::new());
         };
-        // M5 (S80): the uses the engine planned for each index since the
+        // The uses the engine planned for each index since the
         // gateway's start (MongoDB counts from mongod's start too).
         let tenant = sql.tenant();
         Ok(list

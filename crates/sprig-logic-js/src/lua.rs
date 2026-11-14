@@ -1,14 +1,13 @@
-//! SprigDB's one Lua runtime (chapter 41, "The fallback runtime";
-//! chapter 40, "Lua scripting"; chapter 51's script sinks): Lua 5.1,
-//! Redis's dialect, from `mlua` with vendored sources.
+//! SprigDB's one Lua runtime (logic functions, Redis scripting and
+//! script sinks): Lua 5.1, Redis's dialect, from `mlua` with vendored sources.
 //!
 //! Two layers, kept apart so each user adds only its own library:
 //!
 //! - [`Sandbox`]: a fresh, sandboxed Lua state with budgets. Every user
 //!   of Lua in SprigDB starts here: logic functions ([`LuaProgram`],
 //!   with the `db` / `sprig` / `ctx` library below), Redis `EVAL` and
-//!   `FUNCTION` (chapter 40 adds `redis.*` with [`Sandbox::lua`]), and
-//!   script sinks (chapter 51 adds its `sprig.*` with a read-only `db`).
+//!   `FUNCTION` (`sprig-redis` adds `redis.*` with [`Sandbox::lua`]), and
+//!   script sinks (the sinks add their `sprig.*` with a read-only `db`).
 //! - The logic library: `db.sql(text, ...)`, `db.sqlOne`, `db.exec`,
 //!   `db.call(name, ...)`, `fetch(url, init)`, `sprig.reject(message)`,
 //!   `sprig.event(name, fields)`, `sprig.null`, `ctx` and `log` / `print`,
@@ -27,7 +26,7 @@
 //! makes creating a global an error, as Redis 7 does.
 //!
 //! **Budgets.** A count hook every [`Config::hook_every`] VM instructions
-//! (10,000, chapter 40's figure) checks the wall time, the cancel flag and
+//! (10,000) checks the wall time, the cancel flag and
 //! trips; the state's allocator refuses memory past the budget. Lua's
 //! `pcall`, `xpcall` and `coroutine.resume` are wrapped so that a budget
 //! error, once raised, can't be caught: each re-raises it while the run
@@ -567,7 +566,7 @@ fn install_logic(lua: &Lua, sync: &Arc<SyncHost>) -> mlua::Result<()> {
             lua.to_value(&v)
         })?,
     )?;
-    // R9: publishing and consuming (chapter 41, "The `db` interface").
+    // Publishing and consuming (`crate::messaging`).
     for (name, op) in [
         ("publish", MsgOp::Publish),
         ("commitOffset", MsgOp::CommitOffset),

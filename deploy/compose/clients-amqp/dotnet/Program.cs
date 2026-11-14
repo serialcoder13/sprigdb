@@ -1,7 +1,7 @@
 // AMQP 0-9-1 scenarios with RabbitMQ.Client (pinned in Scenarios.csproj).
 // Usage: dotnet run -- <host> <port> <user> <password> <vhost> <prefix>.
 // Prints one JSON object, one key per scenario; deploy/compose/ci/outcomes.py
-// compares the reference's object with SprigDB's (chapter 50, "Testing").
+// compares the reference's object with SprigDB's.
 using System.Text;
 using System.Text.Json;
 using RabbitMQ.Client;

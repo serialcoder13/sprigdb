@@ -1,4 +1,4 @@
-# sprigdb .deb and .rpm for amd64 and arm64 (chapter 27, "VM packaging").
+# sprigdb .deb and .rpm for amd64 and arm64.
 # Untested: nfpm isn't installed where this was written. Build with
 #   ARCH=amd64 VERSION=0.0.1 nfpm package -p deb -f deploy/packaging/nfpm.yaml
 name: sprigdb
@@ -10,7 +10,7 @@ priority: optional
 maintainer: SprigDB <dev@sprigdb.invalid>
 description: SprigDB, a gateway layer over MariaDB (gateway, controller, worker, agent).
 license: Apache-2.0
-homepage: https://github.com/serialcoder13/sprigdb
+homepage: https://github.com/modlix-india/sprigdb
 contents:
   - src: target/release/sprigdb
     dst: /usr/bin/sprigdb

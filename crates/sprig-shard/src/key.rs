@@ -1,5 +1,4 @@
-//! Key specifications and key values (chapter 15, "Table groups",
-//! "Normalization").
+//! Key specifications and key values.
 
 use std::borrow::Cow;
 use std::fmt;
@@ -27,7 +26,7 @@ pub enum GroupKind {
     Default,
     /// One key spec for all members, 1 to many shards.
     Sharded,
-    /// Lookup tables (chapter 19), one spec per member; one per tenant.
+    /// Lookup tables, one spec per member; one per tenant.
     Lookup,
     /// Small, rarely written tables with a copy per cluster.
     Reference,
@@ -188,7 +187,7 @@ pub enum MemberRouting {
         /// The constraint that reaches it.
         fk: String,
     },
-    /// A lookup table: routed by the hash of its own value (chapter 19).
+    /// A lookup table: routed by the hash of its own value.
     Lookup,
     /// No key (default and reference groups).
     None,

@@ -1548,7 +1548,7 @@ fn tally(history: &[OpRecord], errors: &BTreeMap<String, u64>) -> (usize, u64) {
 }
 
 /// A slow but reachable etcd must not fence the DC; a cut-off one must,
-/// on time (the lead's priority after the 72-hour soak). Every process
+/// on time. Every process
 /// reaches a private etcd through toxiproxy; 6 clients write through the
 /// gateway. 60 s with 300-1,500 ms of added round trip (downstream
 /// 900 +- 600 ms): no 39501. Then 25 s cut off: 39501 within the permits'

@@ -1,12 +1,13 @@
-//! Chapter 47's `telemetry.*` and `audit.*` keys, and [`apply_live`],
+//! The `telemetry.*` and `audit.*` keys, and [`apply_live`],
 //! which keeps the process's tracer, OTLP exporter and audit pipeline on
 //! their current values (every role calls it once its settings mirror is
 //! ready). They live here, not in `sprig-common`, because declaring a key
 //! needs this crate.
 //!
-//! R0 resolves them at dc scope for the process: a tenant-scope
-//! `telemetry.trace_sample_ratio` or `telemetry.trace_slow_ms` is stored
-//! and explained but not yet applied per statement.
+//! They are resolved at dc scope for the process, and declared so (dc and
+//! global): the tracer and the audit pipeline are per process, so a tenant
+//! value would do nothing (`trace_sample_ratio`, `trace_slow_ms` and
+//! `audit.retention_days` are not tenant-scoped for that reason).
 
 use std::borrow::Cow;
 
@@ -88,7 +89,7 @@ ops_key!(
     "Audit retention"
 );
 
-/// Applies the chapter 47 keys to the process's tracer, OTLP exporter and
+/// Applies the `telemetry.*` and `audit.*` keys to the process's tracer, OTLP exporter and
 /// audit pipeline (those installed) now and after every change. Keep the
 /// returned registration for as long as the role runs.
 pub fn apply_live(live: &LiveSettings, dc: &DcId) -> Registration {

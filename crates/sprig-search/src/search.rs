@@ -1,5 +1,4 @@
-//! A search index's partitions, and searching them with global BM25
-//! (chapter 39, "Scatter-gather with global BM25"; build step 7).
+//! A search index's partitions, and searching them with global BM25.
 //!
 //! ```text
 //! search(query, k):
@@ -13,9 +12,8 @@
 //! Each document is in exactly one partition, so the sums are the
 //! statistics one unsharded index would have, and a document scores the
 //! same in any partition. **Partitions here are key-hash buckets**, not
-//! the object's shards: every copy holds all partitions of its index
-//! (decision S2 of `decisions/r5-interim.md`), so a split or a move of a
-//! shard changes nothing in the index; the feed carries the rows.
+//! the object's shards: every copy holds all partitions of its index,
+//! so a split or a move of a shard changes nothing in the index; the feed carries the rows.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -433,8 +431,7 @@ impl SearchIndex {
         if n > max as u64 {
             return Err(SprigError::new(
                 SprigCode::SearchWindowExceeded,
-                // No count: it would include rows the caller may not see
-                // (decision S24).
+                // No count: it would include rows the caller may not see.
                 format!("the search matched more than search.max_window ({max}) rows"),
             ));
         }

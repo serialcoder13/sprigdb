@@ -12,7 +12,8 @@ publish.workspace = true
 bson = "=2.15.0"
 serde_json.workspace = true
 sprig-common.workspace = true
-# Metadata filters: chapter 31's parser, SQL translation and recheck.
+# Metadata filters: the document store's parser, SQL translation and
+# recheck.
 sprig-doc = { path = "../sprig-doc" }
 sprig-geo = { path = "../sprig-geo" }
 sprig-kv = { path = "../sprig-kv" }

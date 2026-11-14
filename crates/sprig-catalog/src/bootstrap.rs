@@ -1,12 +1,11 @@
-//! The catalog side of tenant bootstrap (chapter 08, "Bootstrap, DDL and
-//! migrations"; build step 9).
+//! The catalog side of tenant bootstrap.
 //!
 //! ```text
 //! home DC controller, job tenant_bootstrap (idempotent, progress in sprig.bootstrap):
-//!   pick a cluster (chapter 11, least busy without a hint); create shardmaps/<id>/0;
+//!   pick a cluster (least busy without a hint); create shardmaps/<id>/0;
 //!   CREATE DATABASE t<id>_sprig; run all migrations; insert internal keys;
 //!   copy the ancestry and ancestors' settings (tree_settings reconcile);
-//!   create the admin user (14) with backend grants (29); state creating → active
+//!   create the admin user with backend grants; state creating → active
 //! ```
 //!
 //! The directory, placement and job sides live in `sprig-controller`
@@ -42,7 +41,7 @@ pub enum BootstrapStep {
     Migrated,
     /// The ancestry and ancestors' settings are copied.
     Ancestry,
-    /// Other chapters' hooks ran (admin user, backend accounts).
+    /// Other crates' hooks ran (admin user, backend accounts).
     Hooks,
     /// Done; the directory entry becomes `active`.
     Done,
@@ -55,8 +54,8 @@ pub struct BootstrapProgress {
     pub step: BootstrapStep,
     /// The cluster placement chose.
     pub cluster: ClusterId,
-    /// Why: `requested` (`--cluster`) or `fewest_tenants` (interim
-    /// placement until chapter 11's, M0.6).
+    /// Why: `requested` (`--cluster`) or `fewest_tenants` (the cluster
+    /// with the fewest tenants).
     pub placement: String,
     /// The clusters considered, with their tenant counts.
     #[serde(default)]

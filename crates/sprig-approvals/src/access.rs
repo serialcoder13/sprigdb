@@ -1,4 +1,4 @@
-//! Who may act on a recommendation (chapter 52, "Who may act").
+//! Who may act on a recommendation.
 //!
 //! Pure, so the gateway (which knows a session's privileges) and the
 //! controller (which checks the gateway's claim) give the same answer.

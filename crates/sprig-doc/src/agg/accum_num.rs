@@ -1,4 +1,4 @@
-//! MongoDB's numeric accumulation (M2, 12 Nov 2026): sums with MongoDB's
+//! MongoDB's numeric accumulation: sums with MongoDB's
 //! type promotion (int, then long, then double), compensated double sums
 //! (a double-double, as MongoDB keeps them), and exact Decimal128
 //! arithmetic rounded to 34 digits, half to even, as IEEE 754-2008 asks.

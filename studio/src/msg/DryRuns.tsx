@@ -1,5 +1,4 @@
-// Dry runs for connections and sinks (chapter 44 step 30; chapter 51,
-// "Testing connections and sinks"; Studio rounds 6 and 7, R9 items 104–105):
+// Dry runs for connections and sinks:
 //
 // - a saved connection's test is `Connections.Test` (`POST .../connections/
 //   {name}:test`, TEST CONNECTION as the caller): one row per step
@@ -8,13 +7,13 @@
 // - with `write`, it also writes one marked test record, so it is shown
 //   first, like any change;
 // - a new connection is tested before it is saved with `TEST CREATE
-//   CONNECTION ...` (ST68): the same steps, nothing created; shown first,
+//   CONNECTION ...`: the same steps, nothing created; shown first,
 //   credentials masked;
 // - a saved sink's dry run is `Sinks.Test` (`POST .../sinks/{name}:test`,
 //   TEST SINK WITH SAMPLE n): the sink's WHERE, columns and TRANSFORM over
 //   the source's latest records, each record's outcome, delivering nothing
 //   and moving no position; a new sink's is `TEST CREATE SINK ... WITH
-//   SAMPLE n` (ST69).
+//   SAMPLE n`.
 
 import { useEffect, useRef, useState } from 'react';
 import { json } from '../api/client';
@@ -154,7 +153,7 @@ function Outcomes({ out, tid }: Readonly<{ out: Table; tid: string }>) {
 
 /**
  * A dry run: a saved sink's (`Sinks.Test`), or with `create`, the `CREATE
- * SINK` statement of a sink not saved yet (`TEST CREATE SINK`, ST69).
+ * SINK` statement of a sink not saved yet (`TEST CREATE SINK`).
  */
 export function SinkDryRun({ db, name, create }: Readonly<{ db: string; name: string; create?: () => string }>) {
   const [sample, setSample] = useState('10');

@@ -1,4 +1,4 @@
-# Chapter 24's move tests (milestone M0.7): two simulated data centers of
+# Cross-DC move tests: two simulated data centers of
 # the three-DC layout, an override of ../compose.3dc.yaml. run.sh starts
 # only what the tests need:
 #

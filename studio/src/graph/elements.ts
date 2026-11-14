@@ -1,8 +1,7 @@
-// Graph elements in a Cypher or GQL result (chapter 44 step 27). The gateway
-// sends nodes, relationships and paths as JSON cells tagged `$node`, `$rel`
-// and `$path` (chapter 37, "Languages"); scalars are text. This collects the
-// distinct elements of every cell, nested lists and maps included, up to
-// studio.graph_max_elements.
+// Graph elements in a Cypher or GQL result. The gateway sends nodes,
+// relationships and paths as JSON cells tagged `$node`, `$rel` and `$path`;
+// scalars are text. This collects the distinct elements of every cell, nested
+// lists and maps included, up to studio.graph_max_elements.
 
 export type Props = Record<string, unknown>;
 

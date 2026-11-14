@@ -1,5 +1,5 @@
 //! Schema validation, `$jsonSchema`, `$bits*`, query settings, query
-//! statistics and the 9.0 limits (M3, 12 Nov 2026) through a SprigDB
+//! statistics and the 9.0 limits through a SprigDB
 //! gateway's MongoDB listener and the MongoDB Rust driver.
 //!
 //! - `validation_corpus_through_the_gateway`: the corpus of
@@ -695,7 +695,7 @@ async fn query_settings_and_stats() {
                 .get_document("queryShape")
                 .unwrap();
             // This database's update: other tests' updates on the same
-            // gateway are listed too (M7).
+            // gateway are listed too.
             q.get_str("command").ok() == Some("update")
                 && q.get_document("cmdNs").unwrap().get_str("db").ok() == Some("m3_qs")
         })

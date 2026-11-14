@@ -76,7 +76,7 @@ sprigctl cluster extract-open --key-file /etc/sprigdb/keys/extract.keys n1-t42.e
 sprigctl cluster rebuild fra1-c1 n1 [--from n3]
 ```
 
-- `extract` reads the node's binlog for the diverged GTIDs and writes, per tenant, the schema, table, kind, before and after images and equivalent SQL of every row change. Each tenant's file is sealed (AES-256-GCM) under a key derived for that tenant from the workers' `[recovery] extract_key_file`, and stored under `[recovery] extract_dir`. Extracts are kept for `failover.quarantine_days` (30).
+- `extract` reads the node's binlog for the diverged GTIDs and writes, per tenant, the schema, table, kind, before and after images and equivalent SQL of every row change. Each tenant's file is sealed (AES-256-GCM) under a key derived for that tenant from the workers' `[recovery] extract_key_file`, and stored under `[recovery] extract_dir`. Extracts aren't deleted automatically; remove them from that directory when you no longer need them.
 - `extract-open` decrypts one file with the key file and prints it.
 - `rebuild` streams a `mariadb-backup` of a healthy replica (never the writer; the healthiest by default, or `--from`) to the node's agent, restores it, and attaches the node to the writer as a replica. The rate is capped by `recovery.rebuild_max_mb_per_second` (200), one rebuild per cluster at a time (`recovery.max_rebuilds_per_cluster`). Both agents need `[agent] internal_addr`. A diverged node is rebuilt only after a verified extract; `--no-extract` rebuilds anyway and keeps its old data directory.
 
@@ -178,8 +178,8 @@ fenced ──► checking ──┬─► catching_up ──┐
 
 - Its copies of moved tenants are fenced (write privileges revoked, sessions killed) before it grants permits again. A write that reaches one gets 39530 `ER_SPRIG_RECOVERY_FENCED`.
 - Diverged transactions are reported in the failover record (`--errant`), never merged.
-- Nodes that are too far behind (more binlog to replay than `recovery.rebuild_threshold_gb`, 50) are rebuilt; the rest catch up.
-- Traffic returns in steps of `recovery.traffic_steps_pct` (`10,25,50,100`), each lasting `recovery.step_minutes` (5), paused when p99 latency rises by more than `recovery.max_latency_increase_pct` (20%). New connections are admitted at `recovery.admission_connects_per_second` (200) per gateway at first; refused ones get 39531 `ER_SPRIG_ADMISSION_BACKOFF` with a 1–5 s delay.
+- A node isn't rebuilt for being far behind; there is no size threshold. Only a node holding diverged transactions is rebuilt, after its extract; see [A former writer that diverged](#a-former-writer-that-diverged).
+- Traffic returns in steps of `recovery.traffic_steps_pct` (`10,25,50,100`), each lasting `recovery.step_minutes` (5). The steps advance on time alone; replica lag and latency don't pause them. New connections are admitted at `recovery.admission_connects_per_second` (200) per gateway at the first step, a rate raised in proportion at each later step and lifted at the last; refused ones get 39531 `ER_SPRIG_ADMISSION_BACKOFF` with a 1–5 s delay.
 - A recovered cluster receives shards from the balancer again only after `recovery.stability_minutes` (60).
 
 Tenants don't move back on their own because their old home returned. Automatic DC moves may later bring them back if their traffic says so; see [Data centres](data-centres.md).
@@ -230,7 +230,6 @@ The metrics and alerts for leases, failovers and fencing are listed in [Monitori
 | `failover.observe_settle_ms` | `2000` | cluster, dc, global | How long an observed writer change must hold |
 | `failover.standby_dcs` | `1` | tenant, dc, global | Standby DCs per tenant; `0` disables DC failover |
 | `failover.standby_mode` | `on` | tenant, dc, global | Automatic standbys: `on`, `approve`, `recommend` or `off` |
-| `failover.quarantine_days` | `30` | tenant, global | How long diverged-transaction extracts are kept |
 
 All are operator-only and apply live. The full list, with bounds, is in the [settings reference](../reference/settings.md).
 

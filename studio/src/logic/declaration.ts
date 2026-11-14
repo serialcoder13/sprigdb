@@ -1,6 +1,6 @@
-// Logic declarations as the statements a SQL client would run (chapter 41,
-// "Declaring code"): Studio builds them from the form and the editor, shows
-// them, and runs them with Sql.Execute, so there is no second path.
+// Logic declarations as the statements a SQL client would run: Studio builds
+// them from the form and the editor, shows them, and runs them with
+// Sql.Execute, so there is no second path.
 
 import type { Reason, Signature } from './api';
 
@@ -18,7 +18,7 @@ export interface DeclForm {
   security: 'invoker' | 'definer';
   tier: 'auto' | 'mariadb' | 'engine';
   body: string;
-  /** Deploy as a staged rollout (round 6, RC18): the candidate's share and key. */
+  /** Deploy as a staged rollout: the candidate's share and key. */
   rollout?: { pct: number; by: RolloutBy } | null;
 }
 
@@ -145,7 +145,7 @@ export function template(runtime: Runtime, kind: LogicKind, name: string): Pick<
 
 export type RolloutAction = { to: number; by?: RolloutBy } | 'promote' | 'abort';
 
-/** `ALTER FUNCTION | PROCEDURE db.f ROLLOUT TO n [BY USER | TENANT] | PROMOTE | ABORT` (RC19). */
+/** `ALTER FUNCTION | PROCEDURE db.f ROLLOUT TO n [BY USER | TENANT] | PROMOTE | ABORT`. */
 export function rolloutStatement(db: string, kind: LogicKind, name: string, a: RolloutAction): string {
   const head = `ALTER ${kind.toUpperCase()} ${ident(db)}.${ident(name)} ROLLOUT`;
   if (a === 'promote') return `${head} PROMOTE`;
@@ -157,7 +157,7 @@ export function rolloutStatement(db: string, kind: LogicKind, name: string, a: R
 /** The kinds `DROP` takes for a logic module. */
 export const DROP_KINDS = ['function', 'procedure', 'validation', 'trigger', 'schedule'] as const;
 
-/** `DROP {FUNCTION | ...} db.name RESTRICT | CASCADE` (RC22). */
+/** `DROP {FUNCTION | ...} db.name RESTRICT | CASCADE`. */
 export function dropStatement(db: string, kind: string, name: string, cascade: boolean): string {
   const k = kind.toLowerCase();
   if (!(DROP_KINDS as readonly string[]).includes(k)) throw new Error(`a ${kind} isn't dropped with DROP`);
@@ -171,7 +171,7 @@ export interface Dependents {
   callers: string[];
 }
 
-/** `SHOW DEPENDENTS OF FUNCTION | PROCEDURE db.name` (ST67): what `DROP ... RESTRICT` would refuse, as rows. */
+/** `SHOW DEPENDENTS OF FUNCTION | PROCEDURE db.name`: what `DROP ... RESTRICT` would refuse, as rows. */
 export function showDependents(db: string, kind: string, name: string): string | null {
   const k = kind.toLowerCase();
   if (k !== 'function' && k !== 'procedure') return null;

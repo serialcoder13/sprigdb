@@ -1,11 +1,10 @@
-//! The single-shard DDL write path (chapter 08, "Bootstrap, DDL and
-//! migrations"; build step 10) and the repairs the reconciler makes with
-//! it (build step 11).
+//! The single-shard DDL write path and the repairs the reconciler makes
+//! with it.
 //!
 //! ```text
 //! CREATE TABLE billing.orders (...):
 //!   1. commit without a version: objects row (creating, pending_job_id)
-//!   2. rewritten DDL on the group's shard schemas (chapter 21 from R1)
+//!   2. rewritten DDL on the group's shard schemas
 //!   3. SHOW CREATE TABLE, normalized to logical names
 //!   4. change(Catalog): schema_versions row; state = active
 //! ```
@@ -35,10 +34,10 @@
 //!
 //! What readers see: only phase 3 is versioned. A full load during phase 1
 //! or 2 sees `creating` rows (readers treat them as absent) and
-//! `pending_job_id` on existing objects (readers ignore it). R0 never
-//! writes `altering` or `dropping`: an existing object stays `active`
+//! `pending_job_id` on existing objects (readers ignore it). This path
+//! never writes `altering` or `dropping`: an existing object stays `active`
 //! until its versioned change, so no cache ever holds a transient state it
-//! can't see leave (chapter 21's multi-shard jobs, where the visible state
+//! can't see leave (multi-shard jobs, where the visible state
 //! really passes through them, will use them).
 //!
 //! For the gateway: build a [`DdlRequest`] from the statement (its kind,
@@ -61,8 +60,7 @@
 //! | After the statement ran, before phase 3 commits | Marks and intent; physical changed | Finish: publish what `SHOW CREATE` shows |
 //! | After phase 3 commits | Nothing | None needed |
 //!
-//! Drops roll forward because chapter 21 has removing steps "only roll
-//! forward": the client asked for the drop, and a half-dropped database is
+//! Drops roll forward, as every removing step does: the client asked for the drop, and a half-dropped database is
 //! worse than a dropped one.
 
 pub mod backend;
@@ -112,7 +110,7 @@ use crate::store::{
 };
 use crate::version::{ChangeOpts, Locked, VersionKind, Versioner};
 
-// ---- keys (chapter 08 and chapter 07, "Configuration") ----
+// ---- keys ----
 
 /// `catalog.ddl_wait_ms`: how long a DDL waits for another DDL holding
 /// one of its targets before failing with 39071.
@@ -130,7 +128,7 @@ sprig_settings::register!(DDL_WAIT_MS);
 
 /// `ddl.mover_wait_minutes`: how long a schema change on a table group's
 /// shards waits for a split, merge or shard move holding one of them
-/// before failing with 39470 (chapter 21, "DDL during moves").
+/// before failing with 39470.
 pub static MOVER_WAIT_MINUTES: Setting<u64> = Setting {
     key: "ddl.mover_wait_minutes",
     default: 120,
@@ -195,7 +193,7 @@ pub static TOMBSTONE_RETENTION_HOURS: Setting<u64> = Setting {
 };
 sprig_settings::register!(TOMBSTONE_RETENTION_HOURS);
 
-/// `names.lower_case_table_names` (chapter 07): 1 compares database and
+/// `names.lower_case_table_names`: 1 compares database and
 /// relation names in lower case. Fixed at tenant creation.
 pub static LOWER_CASE_TABLE_NAMES: Setting<u32> = Setting {
     key: "names.lower_case_table_names",
@@ -211,7 +209,7 @@ sprig_settings::register!(LOWER_CASE_TABLE_NAMES);
 
 // ---- names ----
 
-/// The lookup form of a database name (chapter 08, "Name keys").
+/// The lookup form of a database name.
 #[must_use]
 pub fn database_key(name: &str, lower_case_table_names: bool) -> String {
     if lower_case_table_names {
@@ -235,13 +233,13 @@ pub fn object_key(kind: ObjectKind, name: &str, lower_case_table_names: bool) ->
     }
 }
 
-/// Chapter 18's decision table, in every schema a distributed
+/// The distributed-transaction decision table, in every schema a distributed
 /// transaction's decision can be anchored in (each shard schema, the
 /// database's own schema).
 pub const DTX_TABLE: &str = "__sprig_dtx";
 
-/// `CREATE TABLE IF NOT EXISTS` of [`DTX_TABLE`] in `schema` (chapter 18,
-/// "Decision table"; `sprig_txn::decision::create_table_sql` is this).
+/// `CREATE TABLE IF NOT EXISTS` of [`DTX_TABLE`] in `schema`
+/// (`sprig_txn::decision::create_table_sql` is this).
 #[must_use]
 pub fn dtx_table_sql(schema: &str) -> String {
     format!(
@@ -272,7 +270,7 @@ pub fn dtx_table_ddl(schema: SchemaName) -> PhysicalDdl {
 }
 
 /// The `databases.options` key listing a database's shard ids in its
-/// default group (R0: one).
+/// default group.
 pub const SHARDS_OPTION: &str = "shards";
 
 /// The physical schemas of a database: one per shard of its default group
@@ -294,8 +292,8 @@ pub fn shard_schemas(tenant: TenantId, db: &DatabaseRow) -> Vec<SchemaName> {
 }
 
 /// The template schema of a database: the first shard of its default
-/// group, the schema chapter 07's rewrite names. A statement that changes
-/// several shards is written for it and rewritten per shard (chapter 21).
+/// group, the schema the statement rewrite names. A statement that changes
+/// several shards is written for it and rewritten per shard.
 fn single_schema(tenant: TenantId, db: &DatabaseRow) -> Result<SchemaName> {
     shard_schemas(tenant, db).first().copied().ok_or_else(|| {
         SprigError::internal(format!("database {} has no physical placement", db.name))
@@ -532,7 +530,7 @@ pub struct DdlOutcome {
     /// nothing (an `IF [NOT] EXISTS` that found its answer). The session
     /// reads at least this version next, as it does `version`, so a
     /// statement that found another session's new database or table sees
-    /// it in its next statement too (decision PF6).
+    /// it in its next statement too.
     pub seen: Option<u64>,
 }
 
@@ -612,13 +610,13 @@ pub struct DdlIntent {
     /// The user who ran it.
     #[serde(default)]
     pub user: Option<UserId>,
-    /// The shards a multi-shard job changes (chapter 21); `None` for R0's
-    /// one schema.
+    /// The shards a multi-shard job changes; `None` for a single-schema
+    /// job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shards: Option<ShardSet>,
     /// The engine running the job ([`DdlEngine::owner_id`]): another DDL
     /// that finds the job abandoned by it resolves it at once instead of
-    /// waiting for the reconciler (bugfix-38). `None` in rows written
+    /// waiting for the reconciler. `None` in rows written
     /// before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
@@ -737,7 +735,9 @@ pub struct DdlOpts {
 impl Default for DdlOpts {
     fn default() -> Self {
         Self {
-            ddl_wait: Duration::from_millis(DDL_WAIT_MS.default),
+            // `catalog.ddl_wait_ms`'s default: the key is registered ahead
+            // of a per-tenant read (marked unbuilt).
+            ddl_wait: Duration::from_millis(10_000),
             poll: Duration::from_millis(50),
             // Four reads over 3.5 s (waits of 0.5, 1 and 2 s): a dropped
             // connection or a writer switch heals in that time, and the job
@@ -802,7 +802,7 @@ where
     owner: Arc<Owner>,
 }
 
-// ---- abandoned jobs (bugfix-38) ----
+// ---- abandoned jobs ----
 
 /// How often a DDL waiting for a held target looks for abandoned jobs.
 const ABANDONED_SWEEP_EVERY: Duration = Duration::from_secs(1);
@@ -925,8 +925,8 @@ impl Drop for Running {
 }
 
 /// A check another module runs in the prepare phase, under the catalog
-/// lock, before anything reaches MariaDB (chapter 21; chapter 42's
-/// "Schema changes while an object is shared" is one). An error refuses
+/// lock, before anything reaches MariaDB (the check on schema changes to
+/// an object shared with descendants is one). An error refuses
 /// the statement.
 #[async_trait::async_trait]
 pub trait PrepareCheck: Send + Sync {
@@ -1003,7 +1003,7 @@ fn missing(kind: ObjectKind, db: &str, name: &str, dropping: bool) -> (u16, [u8;
 /// A missing object's note as the error a statement without `IF EXISTS`
 /// gets: `DROP EVENT` notes 1305 (`Event e does not exist`) but fails with
 /// 1539 (`Unknown event 'e'`), in MySQL 8.4 and MariaDB 11.8 alike
-/// (measured, chapter 28 R4).
+/// (measured).
 fn missing_as_error(e: SprigError) -> SprigError {
     if errno(&e) == Some(1305)
         && let Some(name) = e
@@ -1103,16 +1103,15 @@ where
         }
     }
 
-    /// The same engine under a new owner id `<label>@<process>.<n>`
-    /// (bugfix-38), with `check` telling whether other owners' processes
-    /// are gone. A gateway passes `gateway:<dc>:<gateway id>`.
+    /// The same engine under a new owner id `<label>@<process>.<n>`, with
+    /// `check` telling whether other owners' processes are gone. A gateway passes `gateway:<dc>:<gateway id>`.
     #[must_use]
     pub fn with_owner(mut self, label: &str, check: Option<Arc<dyn OwnerCheck>>) -> Self {
         self.owner = Arc::new(Owner::new(label, check));
         self
     }
 
-    /// The same engine with a janitor (bugfix-38): a job this engine
+    /// The same engine with a janitor: a job this engine
     /// abandons (the statement's future dropped, or failed with its outcome
     /// unknown) is resolved within seconds through `executors`, as the
     /// reconciler would, once no DDL runs in its schemas; not only when
@@ -1213,7 +1212,7 @@ where
     ) -> Result<DdlOutcome> {
         let tenant = req.tenant;
         let job = self.new_job();
-        // Until this returns or its future is dropped (bugfix-38).
+        // Until this returns or its future is dropped.
         let mut running = self.owner.start(tenant, job);
         let plan = match self.prepare(req, job, exec).await? {
             Planned::Busy(what) => return Err(conflict(&what)),
@@ -1249,9 +1248,9 @@ where
                     return Err(map_names(e, tenant, &plan.names));
                 }
                 // A schema this statement's plan created a moment ago goes
-                // too (r2close; r2kind's leftover: a `CREATE DATABASE`
-                // refused at its second statement left its backend schema
-                // behind with no catalog entry).
+                // too (otherwise a `CREATE DATABASE` refused at its second
+                // statement leaves its backend schema behind with no catalog
+                // entry).
                 for schema in &created {
                     drop_if_ours(exec, tenant, job, schema).await;
                 }
@@ -1346,7 +1345,7 @@ where
                 }
                 Ok(Planned::Busy(what)) => {
                     locked.release().await?;
-                    // bugfix-38: a job its engine abandoned is resolved
+                    // A job its engine abandoned is resolved
                     // here, not after `catalog.stuck_state_minutes`.
                     if self.clock.now() >= next_sweep {
                         next_sweep = self.clock.now() + ABANDONED_SWEEP_EVERY;
@@ -1487,7 +1486,7 @@ where
                             ),
                             effect: Effect::CreateSchema,
                         },
-                        // Chapter 18: the database's schema anchors the
+                        // The database's schema anchors the
                         // decisions of transactions that start on its
                         // unsharded tables.
                         dtx_table_ddl(schema),
@@ -1577,17 +1576,17 @@ where
                 parent,
             } => {
                 sql_kind(*kind)?;
-                // Chapter 31's document engine keeps its own hidden tables
+                // The document engine keeps its own hidden tables
                 // (`__sprig_doc_*`) in each logical database. Clients can't
-                // name `__sprig_` objects at all (chapter 07's rewrite
+                // name `__sprig_` objects at all (the statement rewrite
                 // refuses them), so these arrive only from the engine's
                 // internal-mode statements.
                 let doc_engine = name.name.len() > 12
                     && name.name.as_bytes()[..12].eq_ignore_ascii_case(b"__sprig_doc_");
-                // Chapter 33's element tables (`__sprig_ke_`, `__sprig_kz_`)
-                // and chapter 40's scripts table, from the key-value
-                // engine's internal-mode statements likewise; chapter 35's
-                // model table (`__sprig_dim_models`, R6) too.
+                // The key-value element tables (`__sprig_ke_`, `__sprig_kz_`)
+                // and the Redis scripts table, from the key-value engine's
+                // internal-mode statements likewise; the model table
+                // (`__sprig_dim_models`) too.
                 let kv_engine = [
                     "__sprig_ke_",
                     "__sprig_kz_",

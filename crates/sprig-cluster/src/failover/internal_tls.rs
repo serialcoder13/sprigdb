@@ -1,9 +1,8 @@
-//! Mutual TLS for the agents' internal service (chapter 25, "As built in
-//! R2 (r2final)"; decision RC2): the `node_rebuild` backup stream and the
-//! worker's rebuild calls.
+//! Mutual TLS for the agents' internal service: the `node_rebuild` backup
+//! stream and the worker's rebuild calls.
 //!
 //! Every process with a `[tls]` section (the internal CA, its own chain
-//! and key, chapter 27's certificates) serves and calls the agents'
+//! and key) serves and calls the agents'
 //! internal service over TLS 1.2+ with client certificates: the server
 //! requires a certificate the internal CA signed, and the client checks
 //! the server's against the same CA and the address it dialled (an IP SAN

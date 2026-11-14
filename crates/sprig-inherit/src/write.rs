@@ -29,7 +29,7 @@ use crate::model::{ALL_BITS, InheritableObject, SpaceId};
 use crate::plan::{Ctx, Resolved};
 use crate::rewrite::{as_name, expr_text, parse_one, replace_refs};
 use crate::view::{Chain, ViewSql, q};
-use crate::{Handled, Runner, upstream};
+use crate::{Handled, RowCmd, Runner, upstream};
 
 fn tr(r: &mut dyn Runner) -> &mut dyn sprig_types::Runner {
     r
@@ -116,6 +116,26 @@ fn view(r: &Resolved, chain: &Chain, keys: Option<Vec<String>>) -> String {
         derived: r.derived.clone(),
     }
     .view(chain)
+}
+
+/// [`view`] (every record), filtered by the session's policies for `cmd`
+/// ([`crate::rewrite::filtered`]).
+async fn filtered_view(
+    ctx: &Ctx<'_>,
+    r: &mut dyn Runner,
+    res: &Resolved,
+    chain: &Chain,
+    cmd: RowCmd,
+) -> Result<String> {
+    let vs = ViewSql {
+        o: &res.obj,
+        layer: res.layer.clone(),
+        keys: None,
+        origin: false,
+        derived: res.derived.clone(),
+    };
+    let v = vs.view(chain);
+    crate::rewrite::filtered(ctx, r, res, v, &vs.output_columns(), cmd).await
 }
 
 fn unknown_column(c: &str) -> SprigError {
@@ -335,10 +355,12 @@ pub async fn update(sql: &str, ctx: &Ctx<'_>, r: &mut dyn Runner) -> Result<Hand
             .collect::<Vec<_>>()
             .join(" AND ")
     };
+    // Only records the session may update (chapter 29: `UPDATE` applies the
+    // `SELECT` and `UPDATE` policies, on the merged records here).
     let find = format!(
         "SELECT {}, ({same}) FROM ({}) AS {a}{}{order}{limit}",
         key_list(o, Some(&a)),
-        view(&res, &chain, None),
+        filtered_view(ctx, r, &res, &chain, RowCmd::Update).await?,
         selection
             .as_deref()
             .map(|w| format!(" WHERE {w}"))
@@ -533,10 +555,12 @@ async fn delete_where(
         layer_op("delete");
         return r.exec(&text).await.map(Handled::Ok);
     }
+    // Only records the session may delete (chapter 29: `DELETE` applies
+    // the `SELECT` and `DELETE` policies, on the merged records here).
     let find = format!(
         "SELECT {} FROM ({}) AS {a}{where_sql}{tail}",
         key_list(o, Some(a)),
-        view(res, &chain, None)
+        filtered_view(ctx, r, res, &chain, RowCmd::Delete).await?
     );
     let tx = Txn::begin(tr(r)).await?;
     let result = async {

@@ -193,7 +193,7 @@ fn the_statement_paths_shapes_go_to_one_shard() {
             // Every table goes to the key's shard.
             assert!(!p.sql.contains(DEF), "{sql}: {}", p.sql);
         }
-        // R6 round 3's key read (a derived table joined to the key row) is
+        // The earlier key read (a derived table joined to the key row) is
         // refused on a sharded database, hence the single-table forms.
         let old = format!(
             "SELECT 1, t.type FROM (SELECT 1 AS one) AS d LEFT JOIN `t1_d2_g1_s1`.`db0` AS t \

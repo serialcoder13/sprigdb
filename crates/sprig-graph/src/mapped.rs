@@ -1,5 +1,4 @@
-//! Mapped graphs (chapter 43, "Language surface", SQL/PGQ's `CREATE
-//! PROPERTY GRAPH`; build step 4): a graph declared over existing tables,
+//! Mapped graphs (SQL/PGQ's `CREATE PROPERTY GRAPH`): a graph declared over existing tables,
 //! without copying, and a read-only [`GraphStore`] over them.
 //!
 //! - **Definition.** [`parse_create`] reads
@@ -494,7 +493,7 @@ pub fn parse_create(sql: &str) -> Result<Option<CreatePropertyGraph>> {
 }
 
 /// Runs SQL for a mapped store (the gateway's connection, as `sprig_ctl`
-/// after chapter 29's checks on each source table).
+/// after the privilege checks on each source table).
 #[async_trait]
 pub trait SqlRunner: Send {
     /// The rows of `sql`.

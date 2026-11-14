@@ -1,5 +1,4 @@
-//! Topology drivers: one per topology, each knowing how to operate it
-//! (chapter 09, "Interfaces"; build steps 5 and 6).
+//! Topology drivers: one per topology, each knowing how to operate it.
 //!
 //! A driver answers, from the latest probes and the published record:
 //! which node writes a shard, which nodes may serve its reads and how they
@@ -61,7 +60,7 @@ pub struct ReadEndpoint {
 }
 
 /// Which node the change feed or the mover prefers to read binlogs from
-/// (`feed.source`, chapter 38).
+/// (`feed.source`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourcePref {
@@ -74,7 +73,7 @@ pub enum SourcePref {
     Auto,
 }
 
-/// A node whose binlog can be read (chapter 10).
+/// A node whose binlog can be read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BinlogSource {
     /// The node.
@@ -90,7 +89,7 @@ pub struct BinlogSource {
     pub feed_level: FeedLevel,
 }
 
-/// The node automatic-index validation runs on (chapter 13).
+/// The node automatic-index validation runs on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationNode {
     /// The node.
@@ -139,14 +138,14 @@ pub struct TableTraits {
 pub enum DdlMethod {
     /// `ALGORITHM=INPLACE, LOCK=NONE` (or `INSTANT`).
     Online,
-    /// The mover's copy-and-swap (chapter 10).
+    /// The mover's copy-and-swap.
     CopySwap,
     /// Galera total order isolation, for metadata-only changes.
     Toi,
 }
 
-/// Failover operations of one topology (chapter 25, build step 13).
-/// Chapter 25 adds the methods; no driver returns hooks yet.
+/// Failover operations of one topology. Empty: failover runs as plain
+/// functions in [`crate::failover`], and no driver returns hooks.
 pub trait FailoverHooks: Send + Sync {}
 
 /// Turns a node of the record into a connectable endpoint, resolving the
@@ -184,7 +183,7 @@ impl NodeConnector for StaticConnector {
     }
 }
 
-/// The topology driver (chapter 09, "Interfaces").
+/// The topology driver.
 #[async_trait::async_trait]
 pub trait TopologyDriver: Send + Sync {
     /// The topology this driver operates.
@@ -205,12 +204,12 @@ pub trait TopologyDriver: Send + Sync {
     fn writer(&self, shard: ShardId) -> Result<Endpoint>;
     /// Nodes that may serve the shard's reads, best first.
     fn readers(&self, shard: ShardId) -> Vec<ReadEndpoint>;
-    /// Where to read binlogs from (chapters 10 and 38).
+    /// Where to read binlogs from (for the mover and the change feed).
     ///
     /// # Errors
     /// 39102 if no node qualifies.
     fn binlog_source(&self, pref: SourcePref) -> Result<BinlogSource>;
-    /// Where index validation runs (chapter 13).
+    /// Where index validation runs.
     fn validation_node(&self) -> Option<ValidationNode>;
     /// How a schema change on `table` runs here.
     fn ddl_method(&self, ddl: DdlKind, table: &TableTraits) -> DdlMethod;
@@ -225,12 +224,12 @@ pub trait TopologyDriver: Send + Sync {
     /// # Errors
     /// A statement failed; what could be restored was.
     async fn unfence_shard(&self, receipt: &FenceReceipt) -> Result<()>;
-    /// Fences the whole cluster with `read_only` (managed clusters, R2).
+    /// Fences the whole cluster with `read_only` (managed clusters).
     ///
     /// # Errors
-    /// 39102 until R2.
+    /// 39102 from these drivers: self-fencing needs a managed cluster.
     async fn fence_cluster(&self, reason: FenceReason) -> Result<()>;
-    /// Failover hooks (chapter 25), where the topology has them.
+    /// Failover hooks, where the topology has them.
     fn failover(&self) -> Option<&dyn FailoverHooks>;
 }
 
@@ -256,7 +255,7 @@ pub(crate) struct State {
     pub(crate) profile: Option<CapabilityProfile>,
     /// The chosen writer (primary + replicas, external, single node).
     pub(crate) writer: Option<NodeId>,
-    /// The last deep probe's active results (chapter 09: XA, features,
+    /// The last deep probe's active results (XA, features,
     /// privileges only a deep probe tests), carried into the passes in
     /// between so a held upgrade can sustain.
     pub(crate) deep: Option<crate::probe::ActiveProbes>,

@@ -1,5 +1,5 @@
-//! `sprigctl explain placement` and `sprigctl explain decision` (chapter
-//! 11, "Flows"; build step 7): the tenant's shards with cluster, size and
+//! `sprigctl explain placement` and `sprigctl explain decision`:
+//! the tenant's shards with cluster, size and
 //! load, each cluster's `full` with its bottleneck, and the last run's
 //! reasoning, for example "cluster 7 above `balancer.high_pct` for 41 min:
 //! hot; best move s3 to cluster 9, gain 0.28; blocked by shard cooldown

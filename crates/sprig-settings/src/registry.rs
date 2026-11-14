@@ -1,5 +1,5 @@
 //! The setting registry: every key declared once, next to the code that uses
-//! it (chapter 03, "Declaring a key").
+//! it.
 //!
 //! ```
 //! use sprig_settings::{Apply, HardBounds, Scopes, Setting};
@@ -32,7 +32,7 @@ pub enum Apply {
     Live,
     /// Read once at login: a session never sees a change mid-transaction.
     NewSessions,
-    /// A listener re-binds (chapter 04).
+    /// A listener re-binds.
     Rebind,
 }
 
@@ -129,7 +129,7 @@ pub struct Setting<T: SettingValue> {
     pub operator_only: bool,
     /// The chapter that owns the key.
     pub owner: u8,
-    /// One line for Appendix B and `sprigctl config explain`. Required.
+    /// One line for the settings reference and `sprigctl config explain`. Required.
     pub doc: &'static str,
 }
 
@@ -230,25 +230,24 @@ pub enum Mark {
     Restart,
 }
 
-/// The marked keys, with why (bugfix-89's settings round, smallfix, 14 Nov
-/// 2026). Remove a key's line when it is built or made live; the
+/// The marked keys, with why. Remove a key's line when it is built or made live; the
 /// `settings_honoured` test fails on a marked key something reads, and on
 /// an unread key that isn't marked.
 pub const MARKED: &[(&str, Mark, &str)] = &[
     (
         "auto_index.field_column_class_pct",
         Mark::Unbuilt,
-        "chapter 13's field-column class rule",
+        "auto-indexing's field-column class rule",
     ),
     (
         "auto_index.lookup_scatter_pct",
         Mark::Unbuilt,
-        "chapter 13's lookup-scatter rule",
+        "auto-indexing's lookup-scatter rule",
     ),
     (
         "auto_index.wildcard_recommend_paths",
         Mark::Unbuilt,
-        "chapter 13's wildcard advice",
+        "auto-indexing's wildcard advice",
     ),
     (
         "catalog.ddl_wait_ms",
@@ -268,7 +267,7 @@ pub const MARKED: &[(&str, Mark, &str)] = &[
     (
         "graph.traversal_tier",
         Mark::Unbuilt,
-        "chapter 43's traversal tiers",
+        "the graph traversal tiers",
     ),
     (
         "inherit.instance_precreate",
@@ -334,7 +333,7 @@ pub const MARKED: &[(&str, Mark, &str)] = &[
     (
         "search.max_lag_ms",
         Mark::Unbuilt,
-        "chapter 39's copy states (stale after lag)",
+        "the search copy states (stale after lag)",
     ),
     (
         "stream.sequencer_batch_ms",

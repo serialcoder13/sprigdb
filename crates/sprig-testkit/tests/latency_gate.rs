@@ -1,6 +1,5 @@
-//! The latency gate of milestone M0.2 (chapter 48): "the gateway adds no
-//! more than 0.5 ms at p50 inside a data center", against direct MariaDB
-//! (chapter 46, "Performance").
+//! The latency gate: the gateway adds no more than 0.5 ms at p50 inside a
+//! data center, against direct MariaDB.
 //!
 //! Measures three workloads on one connection per endpoint, sequentially,
 //! interleaving target and baseline in batches so drift hits both alike:

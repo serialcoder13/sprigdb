@@ -1,4 +1,4 @@
-//! The planner (chapter 34, "Planning").
+//! The planner.
 //!
 //! ```text
 //! plan(spec, index, stats):
@@ -10,11 +10,11 @@
 //!     else:             Ann, limit = k
 //! ```
 //!
-//! As built in R6 the rows passing `pushed` are counted (up to the limit,
+//! For now the rows passing `pushed` are counted (up to the limit,
 //! one bounded query) instead of estimated from histograms, and the
 //! residual's selectivity is measured on a sample of up to 1,000 rows.
 
-/// The search settings (chapter 34, "Configuration").
+/// The search settings.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Settings {
     /// `vector.default_ef_search`.

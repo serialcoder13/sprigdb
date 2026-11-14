@@ -1,5 +1,4 @@
-//! Capacity recommendations (chapter 11, "Scheduling, guardrails and
-//! recommendations"; build step 7).
+//! Capacity recommendations.
 //!
 //! Recommendations that belong to no single tenant live in the DC tier at
 //! `/sprig/dc/<dc_id>/recommendations/<rec_id>` as JSON. At most one is
@@ -14,8 +13,8 @@
 //! - `grow_storage`: as `add_cluster`, when storage is the bottleneck;
 //! - `approve_move`: the best move off a hot cluster is a shard above
 //!   `migration.auto_size_limit_gb`;
-//! - `add_replica` exists for the provisioner hand-off (R2) and is not
-//!   opened by R0's planner, which has no read/write split of busy time.
+//! - `add_replica` exists for the provisioner hand-off and is not
+//!   opened by the planner yet, which has no read/write split of busy time.
 //!
 //! `need` is the load to absorb plus 30%.
 

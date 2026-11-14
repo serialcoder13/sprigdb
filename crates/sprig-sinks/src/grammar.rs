@@ -1,5 +1,5 @@
-//! The sink and connection statements (chapter 51, "Connections",
-//! "Sinks", build step 2), recognized before the gateway's name plan:
+//! The sink and connection statements, recognized before the gateway's
+//! name plan:
 //!
 //! ```text
 //! CREATE CONNECTION [IF NOT EXISTS] [db.]c TYPE webhook|kafka|s3|mysql|postgresql
@@ -27,12 +27,12 @@
 //! DROP SINK [IF EXISTS] s [WITH DEAD LETTERS]
 //! SHOW SINKS [FROM db] | SHOW CREATE SINK s | SHOW SINK STATUS s
 //! TEST [PLATFORM] CONNECTION c [WRITE [TO 't']] | TEST SINK s [WITH SAMPLE n]
-//! TEST CREATE CONNECTION ...            (ST68: an unsaved definition's checks)
-//! TEST CREATE SINK ... [WITH SAMPLE n]  (ST69: an unsaved definition's dry run)
+//! TEST CREATE CONNECTION ...            (an unsaved definition's checks)
+//! TEST CREATE SINK ... [WITH SAMPLE n]  (an unsaved definition's dry run)
 //! ```
 //!
 //! The tokenizer is this module's own: it knows `$$` bodies, which
-//! chapter 07's lexer doesn't, and keeps every token's bytes, so
+//! the SQL lexer doesn't, and keeps every token's bytes, so
 //! [`redact`] can replace credential values in the text.
 
 use std::collections::BTreeMap;
@@ -291,7 +291,7 @@ pub struct CreateConnection {
     /// `CREDENTIALS (...)`, in order.
     pub credentials: Vec<(String, String)>,
     /// `CREDENTIALS (name = REQUIRED, ...)`: credentials each member of a
-    /// `FOR EACH TENANT` connection sets (R9, r9more).
+    /// `FOR EACH TENANT` connection sets.
     pub required_credentials: Vec<String>,
 }
 
@@ -331,7 +331,7 @@ pub enum SourceAst {
         /// `UNDER t`.
         under: Option<String>,
     },
-    /// `FROM QUEUE q FAN IN [UNDER t]` (R9, r9queue).
+    /// `FROM QUEUE q FAN IN [UNDER t]`.
     FanInQueue {
         /// The inherited queue's name.
         queue: QName,
@@ -493,10 +493,10 @@ pub enum Stmt {
     ShowCreateSink(QName),
     /// `SHOW SINK STATUS`.
     ShowSinkStatus(QName),
-    /// `TEST [PLATFORM] CONNECTION c` (R9, r9tests): open and check the
+    /// `TEST [PLATFORM] CONNECTION c`: open and check the
     /// destination, write nothing.
     TestConnection(ConnName, Option<String>),
-    /// `TEST [PLATFORM] CONNECTION c WRITE [TO 'target']` (R9, r9last):
+    /// `TEST [PLATFORM] CONNECTION c WRITE [TO 'target']`:
     /// the checks, then one marked test record written (a webhook's
     /// request, a Kafka record into topic `target`, an S3 object deleted
     /// again; a database table's `INSERT` right, checked without a row).
@@ -508,7 +508,7 @@ pub enum Stmt {
         /// `TO 'target'`: a topic, an object key prefix, a table.
         to: Option<String>,
     },
-    /// `TEST SINK s [WITH SAMPLE n]` (R9, r9tests): the sink's last `n`
+    /// `TEST SINK s [WITH SAMPLE n]`: the sink's last `n`
     /// source records (10 by default, at most 1,000) as they would be
     /// delivered, delivering nothing.
     TestSink {
@@ -517,11 +517,11 @@ pub enum Stmt {
         /// Records sampled.
         sample: u32,
     },
-    /// `TEST CREATE CONNECTION ...` (ST68): `TEST CONNECTION`'s checks of
+    /// `TEST CREATE CONNECTION ...`: `TEST CONNECTION`'s checks of
     /// a definition that isn't saved (the whole `CREATE CONNECTION`
     /// after `TEST`); nothing is created.
     TestNewConnection(CreateConnection),
-    /// `TEST CREATE SINK ... [WITH SAMPLE n]` (ST69): `TEST SINK`'s dry run
+    /// `TEST CREATE SINK ... [WITH SAMPLE n]`: `TEST SINK`'s dry run
     /// of a definition that isn't saved; nothing is created or delivered.
     TestNewSink {
         /// The definition.
@@ -802,7 +802,7 @@ pub enum InheritedOp {
 }
 
 /// `ALTER INHERITED CONNECTION | SINK [db.]name [FOR TENANT t | FOR
-/// SUBTREE [t]] ...` (chapter 51, "Inherited sinks and connections").
+/// SUBTREE [t]] ...`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InheritedAlter {
     /// A sink (else a connection).
@@ -993,7 +993,8 @@ pub fn parse(sql: &str) -> Result<Option<Stmt>> {
         && p.peek_kw_at(1, "CREATE")
         && (p.peek_kw_at(2, "CONNECTION") || p.peek_kw_at(2, "SINK"))
     {
-        // ST68, ST69: the checks of a definition that isn't saved.
+        // TEST CREATE CONNECTION | SINK: the checks of a definition that
+        // isn't saved.
         p.need_kw("TEST")?;
         p.need_kw("CREATE")?;
         if p.kw("CONNECTION") {
@@ -1355,7 +1356,7 @@ fn create_sink(p: &mut P<'_>) -> Result<Stmt> {
         } else if p.kws(&["START", "AT"]) {
             start_at = p.start_at()?;
         } else if p.peek_kw("WITH") && !p.peek_kw_at(1, "SAMPLE") {
-            // (`WITH SAMPLE n` ends `TEST CREATE SINK`, ST69.)
+            // (`WITH SAMPLE n` ends `TEST CREATE SINK`.)
             p.need_kw("WITH")?;
             options = p.options()?;
         } else {
@@ -1638,7 +1639,7 @@ mod tests {
             panic!("not a sink");
         };
         assert!(matches!(c.source, SourceAst::FanIn { under: None, .. }));
-        // R9 (r9queue): QUEUE q FAN IN.
+        // QUEUE q FAN IN.
         let Some(Stmt::CreateSink(c)) =
             parse("CREATE SINK a FROM QUEUE jobs.work FAN IN UNDER x TO WEBHOOK CONNECTION h")
                 .unwrap()
@@ -1678,7 +1679,7 @@ mod tests {
 
     #[test]
     fn test_statements_parse() {
-        // R9 (r9tests): TEST CONNECTION and TEST SINK.
+        // TEST CONNECTION and TEST SINK.
         assert_eq!(
             parse("TEST CONNECTION shop.k").unwrap(),
             Some(Stmt::TestConnection(
@@ -1717,7 +1718,7 @@ mod tests {
         assert!(parse("TEST SINK s WITH SAMPLE 1001").is_err());
         assert!(parse("TEST SINK s WITH SAMPLE x").is_err());
         assert!(parse("TEST CONNECTION").is_err());
-        // R9 (r9last): WRITE [TO 'target'].
+        // WRITE [TO 'target'].
         assert_eq!(
             parse("TEST CONNECTION shop.k WRITE TO 'audit'").unwrap(),
             Some(Stmt::TestConnectionWrite {
@@ -1740,7 +1741,7 @@ mod tests {
 
     #[test]
     fn tests_of_unsaved_definitions() {
-        // ST68: TEST CREATE CONNECTION, credentials and all; redacted as
+        // TEST CREATE CONNECTION, credentials and all; redacted as
         // CREATE CONNECTION is.
         let sql = "TEST CREATE CONNECTION crm TYPE webhook WITH (url = 'https://h.example.com/in', auth = 'bearer') CREDENTIALS (token = 'very-secret')";
         let Some(Stmt::TestNewConnection(c)) = parse(sql).unwrap() else {
@@ -1751,7 +1752,7 @@ mod tests {
         let (shown, values) = redact(sql).unwrap();
         assert!(!shown.contains("very-secret") && shown.contains("token = '***'"));
         assert_eq!(values.len(), 1);
-        // ST69: TEST CREATE SINK, its own WITH (...) options and then WITH
+        // TEST CREATE SINK, its own WITH (...) options and then WITH
         // SAMPLE n.
         let Some(Stmt::TestNewSink { def, sample }) = parse(
             "TEST CREATE SINK out FROM STREAM shop.orders WHERE amount > 10 TO WEBHOOK CONNECTION crm WITH (batch_max_records = 5) WITH SAMPLE 25",

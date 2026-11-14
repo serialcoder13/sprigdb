@@ -5,10 +5,10 @@
 //!
 //! The tables are small (a tenant has users and roles, not rows), so every
 //! load reads them whole; the cache reloads a tenant when its auth version
-//! moves, which every gateway learns from the directory watch (chapter 08,
-//! the same path settings changes take). A catalog whose module isn't
+//! moves, which every gateway learns from the directory watch (the same
+//! path settings changes take). A catalog whose module isn't
 //! migrated yet loads as [`AuthzState::unmigrated`]: every user then holds
-//! everything, as before M0.5, until the gateway migrates it (see
+//! everything, as before authorization existed, until the gateway migrates it (see
 //! [`super::migrate`]).
 
 use std::any::Any;
@@ -195,7 +195,7 @@ impl AuthzState {
     }
 }
 
-/// `sprig-auth`'s chapter 29 catalog module: the tables' migrations, and
+/// `sprig-auth`'s authorization catalog module: the tables' migrations, and
 /// [`AuthzState`] in every snapshot.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AuthzExtension;

@@ -1,7 +1,7 @@
 #!/bin/sh
-# etcd users and roles of chapter 23 ("Security notes"): one user per role,
-# named as the role's certificate common name, each limited to its key
-# prefixes. Run once per etcd, as etcd's root user, before `auth enable`.
+# etcd users and roles: one user per role, named as the role's certificate
+# common name, each limited to its key prefixes. Run once per etcd, as
+# etcd's root user, before `auth enable`.
 #
 #   roles.sh dc <dc_id>            # a DC tier's etcd
 #   roles.sh global <dc_id>...     # the global tier's etcd, every DC named
@@ -13,8 +13,8 @@
 # without certificates).
 #
 # Until every global write goes through the global leader's `Global`
-# service (chapter 23 step 10: R2 has PromotionDone only), DC leaders still
-# write the directory, global settings and dc records themselves, and
+# service (it has only PromotionDone so far), DC leaders still write the
+# directory, global settings and dc records themselves, and
 # gateways and workers read the global tier: `sprig-controller` therefore
 # also gets the `sprig-global` role and `sprig-gateway`, `sprig-worker` the
 # `sprig-global-read` role in the global etcd. Drop those grants once the

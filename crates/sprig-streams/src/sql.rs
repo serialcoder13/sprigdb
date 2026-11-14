@@ -1,11 +1,10 @@
-//! Streams in a tenant session (chapter 45, "SQL"; build steps 2 and 3):
-//! the gateway calls [`handle`] for each statement before chapter 07's name
-//! plan, with a [`Host`] that gives it the catalog snapshot, privileges,
+//! Streams in a tenant session: the gateway calls [`handle`] for each
+//! statement before the name plan, with a [`Host`] that gives it the catalog snapshot, privileges,
 //! shard schemas and `sprig_ctl` connections.
 //!
 //! ```text
 //! CREATE STREAM s ...:
-//!   chapter 29: CREATE on the database
+//!   privilege: CREATE on the database
 //!   outbox:  the attached table's shard (ATTACHED TO GROUP OF t; its group
 //!            must have one shard: 39945 otherwise), or the database's
 //!            default group; log: the database's default group (one log shard)
@@ -46,7 +45,7 @@ use crate::model::{
 use crate::read;
 use crate::sequencer::Start;
 
-/// A privilege the stream layer checks (chapter 29's names).
+/// A privilege the stream layer checks (the authorization model's names).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Privilege {
     /// Read.
@@ -134,10 +133,10 @@ pub trait Host: Send {
     fn allowed(&self, p: Privilege, db_name: &str, object: Option<ObjectId>, name: &str) -> bool;
     /// Whether the authorization engine filters `object`'s rows for reads.
     fn row_filtered(&self, db_name: &str, object: ObjectId) -> bool;
-    /// Chapter 29 (RLS round 5, RL47): makes change topic `def`'s filter
+    /// Makes change topic `def`'s filter
     /// view (`__sprig_scf_<id>`, in its log schema) current, for a view or
     /// stored code that reads the topic. By default 39366: such
-    /// definitions are refused (RL38).
+    /// definitions are refused.
     ///
     /// # Errors
     /// 39366; the backend's.
@@ -151,7 +150,7 @@ pub trait Host: Send {
             ),
         ))
     }
-    /// Chapter 29 (RLS round 5, RL44): how change topic `def`'s records are
+    /// How change topic `def`'s records are
     /// filtered for this session when [`Host::row_filtered`] says its
     /// table's rows are: `None` when the session may read them all after
     /// all. By default 39366: a host that can't render the session's
@@ -214,6 +213,12 @@ pub trait Host: Send {
     /// # Errors
     /// The DC tier's.
     async fn unsubscribe(&mut self, def: &StreamDef) -> Result<()>;
+    /// The tenant's running sequencers' lag in ms, by stream (`SHOW
+    /// STREAMS`' `Lag_ms`). By default none: the column is
+    /// `NULL`.
+    async fn lags(&mut self) -> std::collections::HashMap<StreamId, u64> {
+        std::collections::HashMap::new()
+    }
 }
 
 /// The statement's context.
@@ -315,7 +320,7 @@ fn stream_of(
 /// Handles one statement of a tenant session.
 ///
 /// # Errors
-/// The chapter's errors, 1064 for a malformed stream statement, and the
+/// The stream errors of the module docs, 1064 for a malformed stream statement, and the
 /// host's.
 pub async fn handle(sql: &str, cx: &Ctx<'_>, host: &mut dyn Host) -> Result<Handled> {
     if !grammar::maybe_stream(sql.as_bytes(), !cx.state.is_empty()) {
@@ -325,7 +330,7 @@ pub async fn handle(sql: &str, cx: &Ctx<'_>, host: &mut dyn Host) -> Result<Hand
         Stmt::Create(c) => create(&c, cx, host).await,
         Stmt::Alter(a) => alter(&a, cx, host).await,
         Stmt::Drop { if_exists, name } => drop_stream(&name, if_exists, cx, host).await,
-        Stmt::Show { db } => show(db.as_deref(), cx, host),
+        Stmt::Show { db } => show(db.as_deref(), cx, host).await,
         Stmt::Insert(i) => match stream_of(cx, host, &i.target) {
             Some((db, s)) => publish(sql, &i, &db, &s, cx, host),
             None => Ok(Handled::NotStream),
@@ -622,14 +627,25 @@ async fn drop_stream(
     Ok(Handled::Ok { affected: 0 })
 }
 
-fn show(db: Option<&str>, cx: &Ctx<'_>, host: &mut dyn Host) -> Result<Handled> {
+/// `SHOW STREAMS`: one row per stream the session may read. `Lag_ms` is
+/// its sequencer's lag, `NULL` while no
+/// sequencer runs it.
+async fn show(db: Option<&str>, cx: &Ctx<'_>, host: &mut dyn Host) -> Result<Handled> {
     let db_name = db.or(cx.current).ok_or_else(no_db)?;
     let id = host.db_id(db_name).ok_or_else(|| unknown_db(db_name))?;
-    let rows = cx
+    let shown: Vec<&std::sync::Arc<StreamDef>> = cx
         .state
         .of_db(id)
         .filter(|s| s.state == StreamState::Active)
         .filter(|s| host.allowed(Privilege::Select, db_name, None, &s.name))
+        .collect();
+    let lags = if shown.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        host.lags().await
+    };
+    let rows = shown
+        .into_iter()
         .map(|s| {
             vec![
                 Some(s.name.clone()),
@@ -638,14 +654,23 @@ fn show(db: Option<&str>, cx: &Ctx<'_>, host: &mut dyn Host) -> Result<Handled> 
                 Some(s.cleanup.as_str().to_owned()),
                 s.source_name.clone(),
                 Some(s.key_spec.join(",")),
+                lags.get(&s.id).map(u64::to_string),
             ]
         })
         .collect();
     Ok(Handled::Rows {
-        columns: ["Stream", "Kind", "Partitions", "Cleanup", "Source", "Key"]
-            .iter()
-            .map(|c| (*c).to_owned())
-            .collect(),
+        columns: [
+            "Stream",
+            "Kind",
+            "Partitions",
+            "Cleanup",
+            "Source",
+            "Key",
+            "Lag_ms",
+        ]
+        .iter()
+        .map(|c| (*c).to_owned())
+        .collect(),
         rows,
     })
 }
@@ -781,7 +806,7 @@ async fn select(sql: &str, cx: &Ctx<'_>, host: &mut dyn Host) -> Result<Handled>
         }
         r
     };
-    // Chapter 29 (RL38, RL47): a view, routine, trigger or event over a
+    // A view, routine, trigger or event over a
     // change topic would read the log with its definer's rights, so its
     // readers would get the table's rows without the table's policies: it
     // reads the topic's filter view instead, which applies each reader's
@@ -789,7 +814,7 @@ async fn select(sql: &str, cx: &Ctx<'_>, host: &mut dyn Host) -> Result<Handled>
     let defines = ids
         .first()
         .is_some_and(|w| w.eq_ignore_ascii_case("CREATE") || w.eq_ignore_ascii_case("ALTER"));
-    // Privileges, and the row-level filter for change topics (RL44: a
+    // Privileges, and the row-level filter for change topics (a
     // session the table's policies bind reads the records whose images
     // they show).
     let mut filters = std::collections::HashMap::new();

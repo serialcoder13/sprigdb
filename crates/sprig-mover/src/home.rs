@@ -1,9 +1,9 @@
-//! [`MapIo`] for a move between data centers (chapter 24, "Orchestrating a
-//! move"): the hold and release are the source DC's tenant map, as for a
-//! move inside one DC (every gateway routing to the tenant follows that
-//! map, whatever its own DC); the commit is the home change of
-//! [`sprig_shard::home::commit`], which flips the source map, writes the
-//! target DC's map and moves the directory's `home_dc` in one transaction.
+//! [`MapIo`] for a move between data centers: the hold and release are the
+//! source DC's tenant map, as for a move inside one DC (every gateway
+//! routing to the tenant follows that map, whatever its own DC); the commit
+//! is the home change of [`sprig_shard::home::commit`], which flips the
+//! source map, writes the target DC's map and moves the directory's
+//! `home_dc` in one transaction.
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};

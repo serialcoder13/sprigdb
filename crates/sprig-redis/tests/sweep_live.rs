@@ -1,4 +1,4 @@
-//! The key-value sweeper (`sprig_kv::sweep`, chapters 33 and 40) over
+//! The key-value sweeper (`sprig_kv::sweep`) over
 //! MariaDB, with keys written by SprigDB's Redis front end in process.
 //!
 //! - `SPRIG_TEST_KV_MYSQL`: a MariaDB as root (`mysql://root:pw@127.0.0.1:13301`).

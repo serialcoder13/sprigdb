@@ -422,7 +422,7 @@ fn golden_precheck_and_dc_output() {
     );
 }
 
-// --- HTTPS (chapter 37, "Admin API over TLS") --------------------------------
+// --- HTTPS (Admin API over TLS) ---------------------------------------------
 
 #[tokio::test]
 async fn the_client_over_https_with_the_deployment_ca() {
@@ -608,7 +608,7 @@ async fn the_client_against_the_admin_api() {
     ));
 }
 
-// --- Tenants (chapter 08 step 9) --------------------------------------------
+// --- Tenants ---------------------------------------------------------------
 
 #[test]
 fn tenant_commands_parse() {
@@ -649,8 +649,7 @@ fn tenant_commands_parse() {
         full.extend_from_slice(bad);
         assert!(cli().try_get_matches_from(full).is_err(), "{bad:?}");
     }
-    // Chapter 24's `tenant move` and chapter 25's `tenant failover` are
-    // implemented.
+    // `tenant move` and `tenant failover` are implemented.
     assert!(!TENANT_LATER.contains(&"move"));
     assert!(!TENANT_LATER.contains(&"failover"));
     for good in [
@@ -893,7 +892,7 @@ async fn tenant_calls_over_the_admin_api() {
     stop.cancel();
 }
 
-// --- Settings (chapter 08 steps 7-8, chapter 23 step 8, chapter 47) --------
+// --- Settings --------------------------------------------------------------
 
 mod index_cli;
 mod settings_cli;

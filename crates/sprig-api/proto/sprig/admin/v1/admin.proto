@@ -1,8 +1,8 @@
-// sprig.admin.v1: the Admin API (chapter 37), one service per sprigctl
+// sprig.admin.v1: the Admin API, one service per sprigctl
 // command group. Every RPC has a REST route under /admin/v1/ (its
 // google.api.http rule) and the same JSON body either way.
 //
-// R0 shape: requests carry the route's path parameters, the REST query
+// Current shape: requests carry the route's path parameters, the REST query
 // string and the JSON body; replies carry the REST reply's JSON text. The
 // REST face is the reference (sprigctl uses it); gRPC calls reach the same
 // implementation, so typed messages can replace the JSON fields later
@@ -55,7 +55,7 @@ message JsonReply {
   string json = 1;
 }
 
-// MariaDB clusters of this DC (chapter 09).
+// MariaDB clusters of this DC.
 service Clusters {
   rpc RegisterCluster(BodyRequest) returns (JsonReply) {
     option (google.api.http) = {
@@ -87,7 +87,7 @@ service Clusters {
   }
 }
 
-// Data centers (chapter 23).
+// Data centers.
 service DataCenters {
   rpc RegisterDc(BodyRequest) returns (JsonReply) {
     option (google.api.http) = {
@@ -107,7 +107,7 @@ service DataCenters {
   }
 }
 
-// Tenants and the tenant tree (chapters 08 and 23).
+// Tenants and the tenant tree.
 service Tenants {
   rpc CreateTenant(BodyRequest) returns (JsonReply) {
     option (google.api.http) = {
@@ -130,7 +130,7 @@ service Tenants {
       delete: "/admin/v1/tenants/{name}"
     };
   }
-  // Chapter 14, "Suspension": logins in the subtree fail with 39303, open
+  // Suspension: logins in the subtree fail with 39303, open
   // sessions close, background work waits. The body is {"reason": "..."}.
   rpc SuspendTenant(NameRequest) returns (JsonReply) {
     option (google.api.http) = {
@@ -146,7 +146,7 @@ service Tenants {
   }
 }
 
-// Tenant users (interim, chapter 14).
+// Tenant users.
 service Users {
   rpc CreateUser(NameRequest) returns (JsonReply) {
     option (google.api.http) = {
@@ -156,7 +156,7 @@ service Users {
   }
 }
 
-// Settings at every scope (chapters 08 and 23).
+// Settings at every scope.
 service Settings {
   rpc ListSettingKeys(ListRequest) returns (JsonReply) {
     option (google.api.http) = {
@@ -215,7 +215,7 @@ service Settings {
   }
 }
 
-// Automatic indexes and recommendations (chapter 13).
+// Automatic indexes and recommendations.
 service Indexes {
   rpc ListIndexes(TenantRequest) returns (JsonReply) {
     option (google.api.http) = {
@@ -264,7 +264,7 @@ service Indexes {
   }
 }
 
-// Why a query got, or didn't get, an index (chapter 13).
+// Why a query got, or didn't get, an index.
 service Explain {
   rpc ExplainQuery(TenantObjectRequest) returns (JsonReply) {
     option (google.api.http) = {
@@ -273,7 +273,7 @@ service Explain {
   }
 }
 
-// Jobs of the DC tier's scheduler (chapter 23).
+// Jobs of the DC tier's scheduler.
 service Jobs {
   rpc ListJobs(ListRequest) returns (JsonReply) {
     option (google.api.http) = {
@@ -293,7 +293,7 @@ service Jobs {
   }
 }
 
-// Registered gateways, and draining one (chapter 04).
+// Registered gateways, and draining one.
 service Gateways {
   rpc ListGateways(ListRequest) returns (JsonReply) {
     option (google.api.http) = {
@@ -313,7 +313,7 @@ service Gateways {
   }
 }
 
-// Approvals and recommendations (chapter 52). Ids carry their store:
+// Approvals and recommendations. Ids carry their store:
 // "t42.17", "dc.mum1.3", "g.5". Operators call with the admin token (or a
 // DC operator's); tenant users call with their own login, and the gateway
 // passes their tenant, SPRIG_TENANT_ADMIN and ALTER/INDEX grants to the
@@ -331,7 +331,7 @@ service Recommendations {
     };
   }
   // body_json: {"action": "approve" | "ignore" | "snooze" | "reopen" |
-  // "comment", ...} as chapter 52's action bodies.
+  // "comment", ...}, the recommendation action bodies.
   rpc ActOnRecommendation(NameRequest) returns (JsonReply) {
     option (google.api.http) = {
       post: "/admin/v1/recommendations/{name}:act"
@@ -368,10 +368,9 @@ service Recommendations {
   }
 }
 
-// Named operator accounts, their sessions and their tokens (chapter 14,
-// "Operators"). Gateways relay these calls to the controller with the
-// caller's credential, as every admin call; the controller's guard decides
-// (decision OP12). `Login` and `Enrol` take no credential; the others take
+// Named operator accounts, their sessions and their tokens. Gateways relay
+// these calls to the controller with the caller's credential, as every
+// admin call; the controller's guard decides. `Login` and `Enrol` take no credential; the others take
 // an operator's session (`Authorization: Bearer sprigop_...`), a token or
 // the bootstrap token as the guard allows.
 service Operators {

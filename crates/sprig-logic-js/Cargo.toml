@@ -10,14 +10,14 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-# MongoDB's server-side JavaScript (`mongo`, decision S110): documents
+# MongoDB's server-side JavaScript (`mongo`): documents
 # cross as BSON; `BinData` as base64; `hex_md5` (all MIT or Apache-2.0,
 # already in the lockfile through sprig-doc).
 base64.workspace = true
 bson = "=2.15.0"
 md-5 = "0.10.6"
 futures.workspace = true
-# Chapter 41's native KIRun runtime: Modlix's open-source `kirun` crate (MIT).
+# The native KIRun runtime: Modlix's open-source `kirun` crate (MIT).
 kirun.workspace = true
 serde_json.workspace = true
 sprig-common.workspace = true
@@ -33,13 +33,13 @@ hyper-util = { workspace = true, features = ["tokio"] }
 rustls.workspace = true
 tokio-rustls.workspace = true
 webpki-roots = "1"
-# JavaScript functions (chapter 41, "The fallback runtime"): QuickJS-ng
+# JavaScript functions (the fallback runtime): QuickJS-ng
 # through rquickjs (MIT). `loader` resolves `sprig:db` and nothing else;
 # `allocator` lets the runtime count its own heap.
 rquickjs = { version = "=0.14.0", default-features = false, features = ["std", "loader", "allocator"] }
-# Lua functions, and SprigDB's one Lua runtime (chapters 40 and 51 reuse
-# it): mlua (MIT) with a vendored Lua 5.1, Redis's dialect. `serialize`
-# converts values to and from JSON.
+# Lua functions, and SprigDB's one Lua runtime (Redis scripts and
+# script sinks reuse it): mlua (MIT) with a vendored Lua 5.1, Redis's
+# dialect. `serialize` converts values to and from JSON.
 mlua = { version = "=0.12.2", features = ["lua51", "vendored", "serialize"] }
 
 [dev-dependencies]

@@ -1,4 +1,4 @@
-//! Tiers and keys (chapter 23, "Data structures and storage"; Appendix D).
+//! Tiers and keys: the etcd key layout.
 //!
 //! Global keys live under `/sprig/g/`, a data center's under
 //! `/sprig/dc/<dc_id>/`. Only this crate builds etcd keys.

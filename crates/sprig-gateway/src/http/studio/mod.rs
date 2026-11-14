@@ -5,7 +5,7 @@
 //!
 //! | Request | Does |
 //! |---|---|
-//! | `GET`/`HEAD` under `studio.path`, `POST <path>/_/errors` | Studio's files ([`sprig_studio::serve`]) |
+//! | `GET`/`HEAD` under `studio.path`, `POST <path>/_/errors` | Studio's files ([`sprig_studio::serve()`]) |
 //! | `POST /v1/auth/login` | Password login: an access token, and the refresh token as an `HttpOnly` cookie |
 //! | `POST /v1/auth/refresh`, `/v1/auth/logout` | Rotate or end the session (cookie, `X-Sprig-CSRF`, same origin) |
 //! | `POST /v1/auth/mfa`, `/v1/auth/factors...`, `POST /v1/auth/impersonate` | Second factors and impersonation ([`mfa`]) |
@@ -886,6 +886,9 @@ pub async fn handle(
         (_, p) if messaging::is_messaging_path(p) => messaging::route(core, info, req).await,
         (_, p) if library::is_library_path(p) => library::route(core, info, req).await,
         ("POST", "/v1/policies:testAs") => policies::test_as(core, info, req).await,
+        ("POST", crate::docs::http::PATH) => {
+            return Ok(crate::docs::http::search(core, info, req).await);
+        }
         ("GET", p) if p == "/v1/shards" || p.starts_with("/v1/shards/") => {
             match core
                 .caller(info, hdr(&req, "authorization"), None, hdr(&req, "host"))

@@ -7,6 +7,13 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # paste (MIT OR Apache-2.0) is a compile-time macro crate whose author
+    # archived it; it is unmaintained, not vulnerable. It comes in through
+    # gemm, candle's matrix multiplication (sprig-embed), and no gemm release
+    # drops it yet.
+    { id = "RUSTSEC-2024-0436", reason = "paste: unmaintained build-time macro used by gemm (candle)" },
+]
 
 [licenses]
 version = 2

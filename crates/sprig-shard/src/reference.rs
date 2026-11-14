@@ -1,9 +1,8 @@
-//! Reference tables: copy states, freshness and where reads go (chapter
-//! 15, "Reference tables").
+//! Reference tables: copy states, freshness and where reads go.
 //!
 //! The primary copy lives on the tenant's catalog cluster and takes every
 //! write; a `ref_follow` mover job per other cluster seeds a copy and
-//! applies the primary's changes from the change feed (chapter 38),
+//! applies the primary's changes from the change feed,
 //! recording each applied source GTID in `__sprig_ref_pos`. This module
 //! holds the parts the router and the controller share: the states, the
 //! freshness rule and the read decision.

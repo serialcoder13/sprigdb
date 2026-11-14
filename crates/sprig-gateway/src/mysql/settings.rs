@@ -19,7 +19,6 @@ use sprig_settings::{Apply, HardBounds, LiveSettings, Scopes, Setting, SettingCt
 
 type Text = Cow<'static, str>;
 
-
 /// `gateway.mysql_server_version`.
 pub static MYSQL_SERVER_VERSION: Setting<Text> = Setting {
     key: "gateway.mysql_server_version",

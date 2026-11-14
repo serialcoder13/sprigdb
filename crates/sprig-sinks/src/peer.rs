@@ -1,4 +1,4 @@
-//! Sink tasks reaching a gateway (chapter 51, R9, r9queue): the
+//! Sink tasks reaching a gateway: the
 //! `LogicPeer` request `SinkSql`, which runs a sink's statements in a
 //! session of the sink's **owner** on a gateway of the DC, so the owner's
 //! privileges, column privileges and row-level security apply as for any
@@ -65,14 +65,14 @@ pub enum SqlOp {
         max: u32,
         /// How long each is held unless settled.
         lease_ms: u64,
-        /// The task's lease tag (R9, r9last), so a later task can give
+        /// The task's lease tag, so a later task can give
         /// the messages back with [`SqlOp::FanInRelease`]; absent from
         /// older workers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tag: Option<String>,
     },
     /// Gives back what a dead fan-in queue sink task held in member
-    /// `member`'s instance under lease tag `tag` (R9, r9last; as
+    /// `member`'s instance under lease tag `tag` (as
     /// `mq_release` for a sink's own queue): an empty result once the
     /// queue's owner has them.
     FanInRelease {
@@ -97,10 +97,10 @@ pub enum SqlOp {
         /// Acknowledge (else reject).
         ack: bool,
     },
-    /// R9 (r9fwd): a step of the tenant's feed-driven outbox forwarder
-    /// (chapter 50, "Publishing inside a database transaction"): forward
-    /// the rows `ids` (out ids in hex, in commit order) of outbox `table`
-    /// (`__sprig_qo` or `__sprig_xo`) in shard schema `schema` of the
+    /// A step of the tenant's feed-driven outbox forwarder (messages
+    /// published inside a database transaction): forward the rows `ids`
+    /// (out ids in hex, in commit order) of outbox `table` (`__sprig_qo`
+    /// or `__sprig_xo`) in shard schema `schema` of the
     /// request's tenant, in that order, and delete them. Internal: no
     /// session is opened (`user_id` and `database` are ignored). The
     /// result is one row: `forwarded`, `gone` (already forwarded), `left`
@@ -113,7 +113,7 @@ pub enum SqlOp {
         /// Out ids, hex, in commit order.
         ids: Vec<String>,
     },
-    /// Chapter 29 (RLS round 5, RL50): which row images the session's
+    /// Which row images the session's
     /// user may see, each checked as the gateway checks change events for
     /// a subscriber (`SELECT` on the table, and its row policies with the
     /// user's session values, evaluated by MariaDB over the image): one
@@ -122,7 +122,7 @@ pub enum SqlOp {
         /// The tables and their images.
         tables: Vec<ImageTable>,
     },
-    /// Chapter 50 (RLS round 5, RL52): a change exchange's publishes, each
+    /// A change exchange's publishes, each
     /// a `CALL sprig.mq_publish(...)` (39235 otherwise), autocommit, in
     /// order, in one session of the setting's user; each statement's error
     /// is its own result's.
@@ -541,9 +541,9 @@ pub fn check_queue_calls(statements: &[String]) -> Result<()> {
             "call sprig.mq_get(",
             "call sprig.mq_ack(",
             "call sprig.mq_nack(",
-            // `ordering = queue` waits out earlier leases (r9fanin).
+            // `ordering = queue` waits out earlier leases.
             "call sprig.mq_info(",
-            // A dead task's leased messages back (r9tests).
+            // A dead task's leased messages back.
             "call sprig.mq_release(",
         ]
         .iter()
@@ -644,7 +644,7 @@ mod tests {
             let j = serde_json::to_string(&req).unwrap();
             assert_eq!(serde_json::from_str::<SqlRequest>(&j).unwrap(), req);
         }
-        // R9 (r9last): a FanInGet from a worker before lease tags reads
+        // A FanInGet from a worker before lease tags reads
         // as untagged.
         let old = r#"{"tenant":1,"tenant_name":"acme","user_id":3,"database":"shop","op":"fan_in_get","def_tenant":1,"def_object":2,"member":3,"db":"shop","queue":"jobs","max":10,"lease_ms":60000}"#;
         let req = serde_json::from_str::<SqlRequest>(old).unwrap();

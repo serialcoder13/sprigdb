@@ -1,5 +1,5 @@
-//! `CutoverMode::Continuous` (chapter 10; chapter 25's standbys; r2close)
-//! on two throwaway single-node clusters.
+//! `CutoverMode::Continuous` (standby copies) on two throwaway single-node
+//! clusters.
 //!
 //! ```sh
 //! SPRIG_TEST_DOCKER=1 cargo test -p sprig-mover --test live_continuous -- --nocapture

@@ -1,4 +1,4 @@
-//! The planner's side of chapter 19's foreign keys across groups (R3):
+//! The planner's side of foreign keys across groups:
 //! which values a write's child rows must find parents for, and which
 //! parent rows a write changes ([`crate::fk`] runs both).
 

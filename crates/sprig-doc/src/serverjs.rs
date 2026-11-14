@@ -1,5 +1,4 @@
-//! Server-side JavaScript in the document engine (chapter 30,
-//! "Server-side JavaScript"; decisions S110–S113): the `$where` query
+//! Server-side JavaScript in the document engine: the `$where` query
 //! operator, the `$function` expression and the `$accumulator` group
 //! accumulator, as MongoDB 8.0 runs them (deprecated there, re-enabled in
 //! 9.0; the answers are the same).
@@ -91,8 +90,7 @@ pub struct Scope {
     memory_bytes: usize,
     used: Mutex<Duration>,
     error: Mutex<Option<MongoError>>,
-    /// The command's `maxTimeMS`: when its time ends, and the value
-    /// (bugfix-57).
+    /// The command's `maxTimeMS`: when its time ends, and the value.
     max_time: Option<(Instant, u64)>,
 }
 
@@ -133,7 +131,7 @@ impl Scope {
 
     /// A scope as [`Self::new`] for a command with `maxTimeMS` (from now):
     /// its code also stops when the command's time ends, with MongoDB's 50
-    /// `MaxTimeMSExpired` (bugfix-57; MongoDB checks its time limit
+    /// `MaxTimeMSExpired` (MongoDB checks its time limit
     /// between documents, SprigDB also inside a call).
     #[must_use]
     pub fn with_max_time(
@@ -201,7 +199,7 @@ impl Scope {
         let used = *self.used.lock().unwrap_or_else(PoisonError::into_inner);
         let start = Instant::now();
         let mut deadline = start + self.wall.saturating_sub(used);
-        // The command's maxTimeMS, when it ends first (bugfix-57).
+        // The command's maxTimeMS, when it ends first.
         let by_max_time = self.max_time.is_some_and(|(t, _)| t < deadline);
         if let Some((t, _)) = self.max_time.filter(|_| by_max_time) {
             if t <= start {

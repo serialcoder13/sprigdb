@@ -2,7 +2,7 @@ import { useNavigate, useParams } from 'react-router';
 import { useIntl } from 'react-intl';
 import { useSession } from '../auth/session';
 
-/** The tenant tree from WhoAmI (chapter 44, "Tenant switcher"): the home
+/** The tenant tree from WhoAmI: the home
  * tenant and, for SPRIG_TENANT_ADMIN, its descendants, with paths. */
 export function TenantSwitcher() {
   const intl = useIntl();

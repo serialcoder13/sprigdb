@@ -1,4 +1,4 @@
-# Three-node Galera cluster (chapter 27). wsrep_node_address,
+# Three-node Galera cluster. wsrep_node_address,
 # wsrep_gtid_domain_id and the SST credentials are per node: see compose.yaml.
 [mariadbd]
 wsrep_on                 = ON
@@ -8,14 +8,14 @@ wsrep_cluster_address    = gcomm://galera-1,galera-2,galera-3
 wsrep_sst_method         = mariabackup
 wsrep_gtid_mode          = ON
 innodb_autoinc_lock_mode = 2
-# Provider options (hardening round 1, HD1). The laptop runs at load 60-300
+# Provider options. The laptop runs at load 60-300
 # when several agents test at once, so the defaults' 5 s suspect timeout made
 # nodes drop each other during an SST and the cluster lose its primary
 # component (the donor's BACKUP STAGE START then failed with "WSREP has not
 # yet prepared node for application use" and the joiner aborted).
 #  - evs.*: tolerate a starved scheduler for up to 30-60 s.
 #  - gcache 512M + recover: a node that was down for a while rejoins by IST,
-#    which costs far less than an SST (chapter 27 uses 2G in production).
+#    which costs far less than an SST (production uses 2G).
 #  - gcs.recv_q_hard_limit 256M: a joiner queues write-sets in memory during
 #    SST; from 64M (the soft limit, 25%) replication is throttled instead of
 #    the joiner growing until it is OOM-killed.

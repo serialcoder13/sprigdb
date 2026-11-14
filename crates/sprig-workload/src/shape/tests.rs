@@ -106,7 +106,7 @@ fn scratch_shapes() {
     }
 }
 
-/// R6 round 6 (decision K3): a JSON path predicate records its function
+/// A JSON path predicate records its function
 /// and the condition as it would be on a column, also in an `IN` list, so
 /// the advisor can propose a field column for `JSON_VALUE`.
 #[test]

@@ -1,7 +1,6 @@
-//! Accounts as a tenant export carries them (chapter 47, "Logical export";
-//! build step 8): each live user with its policy columns and its verifier
-//! strings (hashes, never passwords), and the SQL roles, with no ids, so
-//! they load into any tenant on any cluster.
+//! Accounts as a tenant's logical export carries them: each live user with its
+//! policy columns and its verifier strings (hashes, never passwords), and the
+//! SQL roles, with no ids, so they load into any tenant on any cluster.
 //!
 //! Privileges and role grants travel as `SHOW GRANTS` text, replayed
 //! through the gateway after the databases exist, so they bind to the
@@ -26,7 +25,7 @@ use crate::store::{
 
 /// One verifier: the stored string of `caching_sha2_password` or
 /// `mysql_native_password`, hex-encoded. SCRAM verifiers are never
-/// exported (chapter 14): an imported account gets them at its first login
+/// exported: an imported account gets them at its first login
 /// that sees the clear password.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortableVerifier {

@@ -1,6 +1,4 @@
-//! The sink runtime (chapter 51, "Record pipeline", "Retries,
-//! classification and dead letters", "Pausing, probing and resuming";
-//! build steps 5 and 7): one task reads its source, prepares records,
+//! The sink runtime: one task reads its source, prepares records,
 //! spreads them over ordered lanes by key, cuts batches, delivers each
 //! lane's batches in order with retries, splits out poison records,
 //! dead-letters them, pauses and probes a failing destination, and settles
@@ -89,7 +87,7 @@ pub mod tokio_util_cancel {
 
 pub use tokio_util_cancel::CancelFlag as Cancel;
 
-/// What a task reads (chapter 51's `SourceReader`).
+/// What a task reads.
 #[async_trait]
 pub trait SourceReader: Send {
     /// Up to `max_records` records or `max_bytes` bytes (at least one
@@ -153,7 +151,7 @@ impl TaskInfo {
     }
 }
 
-/// A destination (chapter 51's `Target`). `deliver` takes `&self`, so
+/// A destination. `deliver` takes `&self`, so
 /// lanes deliver in parallel; a target keeps its connections inside.
 #[async_trait]
 pub trait Target: Send + Sync {
@@ -267,7 +265,7 @@ pub trait Prepare: Send + Sync {
     /// The reason the record fails permanently.
     fn prepare(&self, rec: SinkRecord) -> std::result::Result<Vec<SinkRecord>, String>;
 
-    /// `TRANSFORM`, after [`Prepare::prepare`] kept the record (R9).
+    /// `TRANSFORM`, after [`Prepare::prepare`] kept the record.
     ///
     /// # Errors
     /// The reason the record fails permanently.
@@ -289,7 +287,7 @@ impl Prepare for PassAll {
     }
 }
 
-/// The settings one task runs with (chapter 51, "Configuration").
+/// The settings one task runs with.
 #[derive(Debug, Clone)]
 pub struct RunSettings {
     /// `sink.lanes`.
@@ -390,7 +388,7 @@ impl Rng {
     }
 }
 
-/// Chapter 51's backoff: `base = min(retry_max, retry_initial · 2^(n−1))`,
+/// The backoff: `base = min(retry_max, retry_initial · 2^(n−1))`,
 /// `wait = random(0, base)` (full jitter), and a destination's hint raises
 /// it to `max(wait, min(hint, retry_max))`. `n` counts from 1.
 #[must_use]
@@ -544,8 +542,8 @@ impl Shared {
 
 /// A per-tenant delivery quota: a token bucket in bytes. `per_sec` is the
 /// tenant's budget across every worker (`sink.tenant_bytes_per_sec`); the
-/// bucket fills at this worker's share of it, which [`share_quotas`] sets
-/// from what each worker asked for in the last window (R9, r9more).
+/// bucket fills at this worker's share of it, which `share_quotas` sets
+/// from what each worker asked for in the last window.
 #[derive(Debug)]
 pub struct Quota {
     per_sec: u64,
@@ -663,7 +661,7 @@ fn now_ms() -> u64 {
 }
 
 /// Shares every tenant's `sink.tenant_bytes_per_sec` among the workers
-/// delivering for it (chapter 51, "Configuration"; R9, r9more): every
+/// delivering for it: every
 /// [`QUOTA_WINDOW`] each worker writes what it asked for into
 /// `/sprig/dc/<dc>/sink-quota/<tenant>/<worker>`, reads the others'
 /// fresh reports, and fills its bucket at its [`split`] of the budget. A
@@ -1202,7 +1200,7 @@ pub async fn run_task(parts: TaskParts, cancel: Cancel) -> Result<TaskEnd> {
     let mut settler = Settler::default();
     let mut inflight: u64 = 0;
     let mut last_settle = Instant::now();
-    // The first iteration polls before it reads (chapter 29, RL36): the
+    // The first iteration polls before it reads: the
     // controller restarts the tasks of a sink paused by row-level security
     // every few seconds, and such a task must stop before it delivers
     // anything, not after its first second.
@@ -1499,7 +1497,7 @@ mod settler_tests {
 
     #[test]
     fn fan_in_members_settle_apart() {
-        // R9 (r9tests): two member instances of a fan-in task (slots 0 and
+        // Two member instances of a fan-in task (slots 0 and
         // 1) with records at the same partition and offset. Member B's
         // record done must not settle member A's, still in flight.
         let (a, b) = (

@@ -1,5 +1,5 @@
-//! Operation histories (chapter 46, "Data structures and storage":
-//! "JSON lines of `OpRecord`, converted to EDN for `elle-cli`").
+//! Operation histories: JSON lines of `OpRecord`, converted to EDN for
+//! `elle-cli`.
 //!
 //! A workload records an `invoke` before each operation and an `ok`,
 //! `fail` or `info` (outcome unknown, such as a timeout) after it. For
@@ -43,7 +43,7 @@ impl OpKind {
     }
 }
 
-/// One history entry (chapter 46, "Interfaces").
+/// One history entry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpRecord {
     /// The logical client.
@@ -70,7 +70,7 @@ pub struct Verdict {
     pub detail: String,
 }
 
-/// A history checker (chapter 46, "Interfaces").
+/// A history checker.
 pub trait Checker {
     /// Checks a whole history.
     fn check(&self, history: &[OpRecord]) -> Verdict;

@@ -1,5 +1,4 @@
-//! Throughput of the hottest commands (chapter 40, "Latency budget"; R6
-//! round 3, decision R23): `GET`, `SET`, `INCR`, `HSET`, `LPUSH`, `LPOP`
+//! Throughput of the hottest commands: `GET`, `SET`, `INCR`, `HSET`, `LPUSH`, `LPOP`
 //! and `ZADD`, each from N clients sending one command at a time, against
 //! a SprigDB gateway and a reference Redis.
 //!

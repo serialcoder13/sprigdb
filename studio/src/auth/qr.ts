@@ -1,4 +1,4 @@
-// QR codes for TOTP enrolment (decision ST33, round 4): the `otpauth://` link
+// QR codes for TOTP enrolment: the `otpauth://` link
 // as a symbol an authenticator app can scan. The `qrcode` package only builds
 // the modules; Studio draws them as one SVG path, so nothing is rendered from
 // a markup string and the CSP needs nothing new.

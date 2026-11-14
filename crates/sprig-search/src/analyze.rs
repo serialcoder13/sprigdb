@@ -1,4 +1,4 @@
-//! Analyzers (chapter 39, "Analyzers"; build step 2).
+//! Analyzers.
 //!
 //! An analyzer is a Tantivy [`TextAnalyzer`] chain, registered in each
 //! partition's tokenizer manager under a versioned name, and run again at

@@ -1,5 +1,4 @@
-//! A tenant moves between the Compose clusters under write load (chapter
-//! 10, "Testing"; milestone M0.6, done-when 1 and 3).
+//! A tenant moves between the Compose clusters under write load.
 //!
 //! Needs the Compose stack with its three clusters registered in etcd
 //! (`deploy/compose/gateway-dev.sh up` registers `dc-a-c1` single,
@@ -694,8 +693,8 @@ async fn a_tenant_moves_around_every_topology_pair_under_load() {
     assert_eq!(end.epoch, 1 + pairs.min(route.len() - 1) as u64);
 }
 
-/// A table-scope copy-and-swap under the same load (chapter 10, "Job
-/// kinds", `copy_swap_ddl`): `sbtest1` gets a column and an index through
+/// A table-scope copy-and-swap under the same load (`copy_swap_ddl`):
+/// `sbtest1` gets a column and an index through
 /// a shadow copy, swapped in by rename inside the hold.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_table_is_altered_by_copy_and_swap_under_load() {

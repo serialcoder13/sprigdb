@@ -1,6 +1,5 @@
--- Translator rules of R4 round 3 (chapter 28): NOT NULL on generated
--- columns (gaps row 49), MySQL's default collations (rows 58, 60),
--- LATERAL (step 9) and functional key parts (step 10).
+-- Translator rules: NOT NULL on generated columns, MySQL's default
+-- collations, LATERAL and functional key parts.
 DROP TABLE IF EXISTS c_md_g, c_md_g0, c_md_u, c_md_c, c_md_o, c_md_f;
 CREATE TABLE c_md_g (a INT, b INT AS (a+1) NOT NULL, c INT GENERATED ALWAYS AS (a*2) STORED NOT NULL, d INT AS (a) VIRTUAL NULL);
 SHOW CREATE TABLE c_md_g;

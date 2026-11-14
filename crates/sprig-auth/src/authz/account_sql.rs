@@ -1,5 +1,4 @@
-//! MySQL account statements for tenant users (chapter 29, "MySQL account
-//! statements"; build step 3): `CREATE`, `ALTER` and `DROP USER`, `CREATE`
+//! MySQL account statements for tenant users: `CREATE`, `ALTER` and `DROP USER`, `CREATE`
 //! and `DROP ROLE`, `GRANT` and `REVOKE` of privileges and roles, `SET
 //! [DEFAULT] ROLE`, `SHOW GRANTS` and `FLUSH PRIVILEGES`.
 //!
@@ -7,7 +6,7 @@
 //! planned against the snapshot (names to ids, levels, the privileges
 //! each level accepts), then applied in one auth change, so every gateway
 //! sees it at the next auth version. `CREATE`, `ALTER` and `DROP USER`
-//! go through [`crate::admin`] (chapter 14 owns users and passwords);
+//! go through [`crate::admin`] (which owns users and passwords);
 //! dropping a user also deletes its privilege rows in a second change.
 //!
 //! Who may run what (`SPRIG_TENANT_ADMIN` may run everything):
@@ -115,16 +114,16 @@ pub struct AccountCtx<'a> {
     pub active_roles: &'a [RoleId],
     /// The tenant's name, for audit events.
     pub tenant_name: Option<&'a str>,
-    /// Resolution of the `auth.*` keys (chapter 14's password rules).
+    /// Resolution of the `auth.*` keys (the password rules).
     pub policy: &'a dyn PolicySettings,
-    /// Where chapter 14's audit events go.
+    /// Where the account audit events go.
     pub audit: &'a dyn AuditSink,
     /// Password hashing for new passwords.
     pub hashing: Hashing,
     /// `auth.unsafe_privilege_action = error`: refuse server-wide
     /// privileges with 1227 instead of dropping them with 39350.
     pub unsafe_error: bool,
-    /// `auth.partial_revokes` (MySQL's `partial_revokes`, R4): a
+    /// `auth.partial_revokes` (MySQL's `partial_revokes`): a
     /// database-level `REVOKE` of what `*.*` gives stores a restriction
     /// instead of failing with 1141.
     pub partial_revokes: bool,
@@ -322,7 +321,7 @@ fn role_not_granted(persona: Persona, role: &AccountRef, user: &AccountRef) -> S
             ),
         ),
         // MariaDB 11.8's wording for a role that exists but isn't granted
-        // (measured, R4).
+        // (measured).
         Persona::MariaDb => SprigError::standard(
             1959,
             *b"OP000",
@@ -464,7 +463,7 @@ impl AccountCtx<'_> {
     /// `SET PASSWORD FOR` another account: MySQL 8.4 and MariaDB 11.8
     /// both ask for `UPDATE` on the `mysql` schema (`check_change_password`),
     /// which a tenant-wide `UPDATE` (`GRANT UPDATE ON *.*`, `ALL`) gives
-    /// here; refused like theirs, 1044 on database `mysql` (bugfix-26).
+    /// here; refused like theirs, 1044 on database `mysql`.
     fn require_set_password(&self) -> Result<()> {
         if self.has_tenant(Action::Update) {
             Ok(())
@@ -648,7 +647,7 @@ impl AccountCtx<'_> {
         if level == Level::GraphElement {
             // Neo4j's graph privileges: READ (and MATCH, TRAVERSE) read
             // the label or type; SELECT and ALL are accepted as their SQL
-            // names (decision G42). Round 5: CREATE, DELETE and SET
+            // names. CREATE, DELETE and SET
             // PROPERTY (all properties, `{*}`) write elements of the label
             // or type; MERGE is MATCH, CREATE and SET PROPERTY; WRITE all
             // three writes; INSERT and UPDATE are accepted as their SQL
@@ -822,7 +821,7 @@ impl AccountCtx<'_> {
 /// spool is full.
 #[allow(clippy::too_many_lines)] // one arm per statement
 pub async fn execute(cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome> {
-    // Chapter 47: account changes fail closed while the audit spool is
+    // Account changes fail closed while the audit spool is
     // full (39970); reads and SET ROLE don't.
     if !matches!(
         stmt,
@@ -1182,8 +1181,8 @@ pub async fn execute(cx: &AccountCtx<'_>, stmt: &AccountStmt) -> Result<Outcome>
         }
         AccountStmt::ShowCreateUser { account } => return show_create_user(cx, account),
     }
-    // Chapter 29: every grant and role change is an audit event (users'
-    // own events come from chapter 14's `AccountOps` above). Only changes
+    // Every grant and role change is an audit event (users' own events
+    // come from `AccountOps` above). Only changes
     // that committed are recorded.
     if version.is_some()
         && let Some(event) = grant_event(stmt)
@@ -1271,7 +1270,7 @@ fn attribute_patch(options: &UserOptions) -> Result<Option<serde_json::Value>> {
 }
 
 /// The audit event of a grant or role statement; `None` for the others
-/// (users are audited by chapter 14's `AccountOps`).
+/// (users are audited by `AccountOps`).
 fn grant_event(stmt: &AccountStmt) -> Option<&'static str> {
     use crate::audit::events;
     Some(match stmt {
@@ -1287,7 +1286,7 @@ fn grant_event(stmt: &AccountStmt) -> Option<&'static str> {
 }
 
 impl AccountCtx<'_> {
-    /// Chapter 14's account operations, as this session's user (audited).
+    /// The account operations, as this session's user (audited).
     fn ops(&self) -> AccountOps<'_> {
         AccountOps {
             cat: self.catalog,
@@ -1359,7 +1358,7 @@ async fn create_users(
             .as_ref()
             .map(|i| i.password.to_vec())
             .unwrap_or_default();
-        // Chapter 14's strength rules (`auth.password_policy`).
+        // The strength rules (`auth.password_policy`).
         let probe = UserRow::new(
             UserId(0),
             acc.name.clone(),
@@ -1477,7 +1476,7 @@ async fn alter_users(
     let keep = |c: admin::Changed| Some(c.auth_version);
     for (id, acc, u) in targets {
         if let Some(i) = &u.identified {
-            // Chapter 14's rules: strength, history, reuse; REQUIRE
+            // The password rules: strength, history, reuse; REQUIRE
             // CURRENT only for the user's own change.
             let pctx = PasswordCtx {
                 tenant_name: cx.tenant_name,
@@ -1570,7 +1569,7 @@ async fn drop_users(
     for (g, acc) in todo {
         match g {
             Grantee::User(u) => {
-                // Chapter 14 closes the user's sessions (39306) from the
+                // The user's sessions are closed (39306) from the
                 // auth change feed.
                 version = Some(ops.drop_user(u, &acc.name, &acc.host).await?.auth_version);
                 version = apply(cx, vec![Op::Forget(g)]).await?.or(version);
@@ -1713,10 +1712,10 @@ fn show_grants(
 }
 
 /// `SHOW CREATE USER`: the account as MySQL 8.4 (3306) or MariaDB (3307)
-/// prints it, never with a password hash or verifier (chapter 14, "Never
-/// shown"). The session's own account always; another needs `CREATE USER`
-/// (MySQL also accepts `SELECT` on `mysql.user`, which tenants never
-/// hold), as `SHOW GRANTS` does. An unknown account fails with 1396.
+/// prints it, never with a password hash or verifier. The session's own account
+/// always; another needs `CREATE USER` (MySQL also accepts `SELECT` on
+/// `mysql.user`, which tenants never hold), as `SHOW GRANTS` does. An unknown
+/// account fails with 1396.
 fn show_create_user(cx: &AccountCtx<'_>, account: &UserSpec) -> Result<Outcome> {
     let acc = cx.spec(account);
     let own = acc.name == cx.user_name && acc.host.eq_ignore_ascii_case(cx.user_host);
@@ -1749,7 +1748,7 @@ fn show_create_user(cx: &AccountCtx<'_>, account: &UserSpec) -> Result<Outcome> 
 }
 
 /// The privileges a user created through the Admin API or `sprigctl`
-/// gets: everything in its tenant, as the bootstrap admin of chapter 29
+/// gets: everything in its tenant, as the bootstrap admin
 /// (`ALL` and `SPRIG_TENANT_ADMIN` on `*.*` `WITH GRANT OPTION`).
 ///
 /// # Errors

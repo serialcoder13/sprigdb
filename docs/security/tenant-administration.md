@@ -83,7 +83,7 @@ ALTER TENANT SPRIG SET BOUNDS (auth.impersonation LOCKED, auth.impersonation_max
 
 A value outside a bound fails with `ER_SPRIG_SETTING_OUT_OF_BOUNDS` (39080); changing a locked setting fails with `ER_SPRIG_SETTING_LOCKED` (39083). Tightening a bound never fails: values already set below it are clamped or ignored, and the statement answers with one warning (39080) per affected value, shown by `SHOW WARNINGS`. Account clauses, such as `FAILED_LOGIN_ATTEMPTS`, must also lie within the bounds. Setting bounds needs `SPRIG_SETTINGS_ADMIN` (or `SPRIG_TENANT_ADMIN`). See [Settings and scopes](../concepts/settings-and-scopes.md).
 
-How descendants hold their ancestors' settings is an operator setting, `tenant.ancestry_mode` (`auto`, `copy` or `shared`; `auto` copies until a subtree passes `tenant.copy_max_descendants`, 10,000, then shares).
+Each descendant holds a copy of its ancestors' settings, refreshed when an ancestor changes them. The operator setting `tenant.ancestry_mode` chooses how; only copying is built, so use `auto` (the default) or `copy`, which behave the same at any subtree size.
 
 ## Impersonation
 
@@ -200,7 +200,6 @@ Refusals use `ER_SPRIG_STUDIO_OPERATOR_MFA_REQUIRED` (39926), `ER_SPRIG_STUDIO_O
 | `auth.mfa_required` | text | `off` | tenant, dc, global | `off`, `admins` or `all` |
 | `tenant.max_depth` | int | 64 | global (operator only) | Deepest tenant tree |
 | `tenant.ancestry_mode` | text | `auto` | tenant, global (operator only) | How descendants hold their ancestors' settings |
-| `tenant.copy_max_descendants` | int | 10000 | tenant, global (operator only) | Subtree size at which `auto` switches from copying to sharing |
 | `operators.mfa_required` | bool | true | global (operator only) | Operators log in with a second factor |
 | `operators.session_hours` | int | 12 | global (operator only) | Operator login session |
 | `operators.lockout_failures` | int | 5 | global (operator only) | Failures before an operator is locked; 0 never |
@@ -212,7 +211,7 @@ Refusals use `ER_SPRIG_STUDIO_OPERATOR_MFA_REQUIRED` (39926), `ER_SPRIG_STUDIO_O
 - `USE TENANT` or any other way for an administrator to open a SQL session in a descendant tenant without impersonating a user.
 - Suspending or resuming a tenant through SQL or Studio; use `sprigctl tenant suspend` and `resume`, or the Admin API.
 - Moving a subtree to another parent.
-- `tenant.ancestry_mode = reference`.
+- `tenant.ancestry_mode = shared` or `reference`. With either, descendants' copies of their ancestors' settings stop being refreshed.
 
 ## Related
 

@@ -1,5 +1,5 @@
-//! Whose DDL jobs are abandoned, from the gateways' process keys
-//! (bugfix-38; the reconciler since bugfix-45).
+//! Whose DDL jobs are abandoned, from the gateways' process keys (used by
+//! DDL engines and the catalog reconciler).
 //!
 //! Every DDL job's intent row names the engine running it,
 //! `gateway:<dc>@<process token>.<n>` for a gateway's
@@ -15,7 +15,7 @@
 //! [`OWNER_MIN_AGE`] covers a live gateway whose lease lapsed for a moment
 //! (its key comes back when it registers again): a job that young is never
 //! taken from its owner. Owners of another form (the controller's engine,
-//! rows written before bugfix-38) are never gone here.
+//! rows written before owners were recorded) are never gone here.
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -1,5 +1,5 @@
-//! Delivery tokens (chapter 50, "Acknowledging inside a database
-//! transaction"): every delivery carries `x-sprig-delivery`, which a
+//! Delivery tokens, for acknowledging inside a database transaction:
+//! every delivery carries `x-sprig-delivery`, which a
 //! consumer passes to `sprig.mq_ack` inside its own transaction.
 //!
 //! A token is `q1.` and base64url of `(tenant, database, queue, lane,

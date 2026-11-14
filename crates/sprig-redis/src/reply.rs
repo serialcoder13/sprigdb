@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use sprig_common::SprigCode;
 use sprig_proto_redis::Frame;
 
-/// `WRONGTYPE` (chapter 33's 39730).
+/// `WRONGTYPE` (the key-value engine's 39730).
 pub const WRONGTYPE: &str = "WRONGTYPE Operation against a key holding the wrong kind of value";
 
 /// `-WRONGTYPE ...`.

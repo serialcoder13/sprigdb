@@ -1,7 +1,6 @@
-//! `sprig-proto-redis`: the RESP2 and RESP3 codec (chapter 40, "Interfaces"
-//! and build step 1).
+//! `sprig-proto-redis`: the RESP2 and RESP3 codec.
 //!
-//! Layer: 1 protocols. Design: [chapter 40](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/40-redis.md) (Redis) of the SprigDB low-level design.
+//! Layer: 1 protocols.
 //!
 //! - [`codec`]: request decoding (multibulk and inline, with Redis's
 //!   limits and protocol errors) and reply encoding ([`Frame`], RESP3

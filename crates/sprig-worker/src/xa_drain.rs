@@ -1,5 +1,4 @@
-//! Chapter 18's resolver for the mover's cutovers (chapter 10, "Cutover",
-//! steps 2b and 3b): before and after the fence, the cutover finishes every
+//! The XA resolver for the mover's cutovers: before and after the fence, the cutover finishes every
 //! prepared distributed-transaction branch of the moving tenant on the
 //! source cluster, each by its recorded decision (or abort, through the
 //! insert race), instead of waiting for the controller's resolver.

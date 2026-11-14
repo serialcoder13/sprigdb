@@ -42,8 +42,8 @@ export async function typeSql(page: Page, text: string): Promise<void> {
   await page.keyboard.insertText(text);
 }
 
-/** Pages that live in a section's side panel since the workspace redesign
- * (decision R1): the section to open first. Activity-bar pages need no entry. */
+/** Pages that live in a section's side panel since the workspace redesign:
+ * the section to open first. Activity-bar pages need no entry. */
 const SECTION_OF: Record<string, string> = {
   'Automatic indexing': 'Performance',
   Approvals: 'Performance',

@@ -18,7 +18,7 @@ pub struct QueryRequest {
     pub multi_statements: bool,
     /// Rows kept per result; 0: no limit asked. A result that reaches it ends
     /// with `truncated` and the statement is killed. Studio sessions are
-    /// clamped to `studio.max_result_rows` whatever is asked (chapter 44).
+    /// clamped to `studio.max_result_rows` whatever is asked.
     #[prost(uint64, tag = "5")]
     pub max_rows: u64,
     /// Cell bytes kept per result, as `max_rows`; Studio sessions are clamped
@@ -30,20 +30,20 @@ pub struct QueryRequest {
     /// `studio.statement_timeout_ms`.
     #[prost(uint64, tag = "7")]
     pub timeout_ms: u64,
-    /// The language of `sql`: "sql" (or empty), "cypher", "gql" or "mongo"
-    /// (chapter 37, "Languages"). Cypher and GQL run on the graph executor
-    /// (chapter 43) with `database` as Bolt's `db` ("<database>.<graph>", or a
-    /// graph of `bolt.logical_database`; empty for `bolt.default_graph`).
-    /// "mongo" takes one MongoDB command document as JSON (Extended JSON v2)
-    /// and runs it through the document engine's command path (chapters 30
-    /// and 31) in `database`; a cursor's documents are drained, one row each.
+    /// The language of `sql`: "sql" (or empty), "cypher", "gql" or "mongo".
+    /// Cypher and GQL run on the graph executor with `database` as Bolt's
+    /// `db` ("<database>.<graph>", or a graph of `bolt.logical_database`;
+    /// empty for `bolt.default_graph`). "mongo" takes one MongoDB command
+    /// document as JSON (Extended JSON v2) and runs it through the document
+    /// engine's command path in `database`; a cursor's documents are
+    /// drained, one row each.
     /// Privileges are the native protocols'. Other languages than SQL take no
     /// `transaction` and no `multi_statements` (39794).
     #[prost(string, tag = "8")]
     pub language: ::prost::alloc::string::String,
     /// How "mongo" writes documents: "relaxed_ejson" (or empty) or
-    /// "canonical_ejson", which keeps int32, int64 and double apart (chapter
-    /// 37's `Documents` option, for Studio's JSON tree). Other languages take
+    /// "canonical_ejson", which keeps int32, int64 and double apart (for
+    /// Studio's JSON tree). Other languages take
     /// no output (39794).
     #[prost(string, tag = "9")]
     pub output: ::prost::alloc::string::String,
@@ -1349,7 +1349,7 @@ pub struct CreateVectorIndexRequest {
     /// auto (default), on or off.
     #[prost(string, tag = "6")]
     pub ann_mode: ::prost::alloc::string::String,
-    /// Items carry locations (chapter 36).
+    /// Items carry locations.
     #[prost(bool, tag = "7")]
     pub geo: bool,
 }
@@ -1447,7 +1447,7 @@ pub struct DeleteVectorsResponse {
     #[prost(uint64, tag = "1")]
     pub deleted: u64,
 }
-/// A location filter (chapter 36): a circle (center and radius_m), a box
+/// A location filter: a circle (center and radius_m), a box
 /// (south_west and north_east), or a polygon (three or more vertices).
 #[allow(clippy::all)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1463,7 +1463,7 @@ pub struct GeoFilter {
     #[prost(message, repeated, tag = "5")]
     pub polygon: ::prost::alloc::vec::Vec<LatLng>,
 }
-/// Fusion with a full-text search (chapter 39); not offered in this release.
+/// Fusion with a full-text search; not offered in this release.
 #[allow(clippy::all)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct HybridText {
@@ -1494,7 +1494,7 @@ pub struct SearchVectorsRequest {
     /// A MongoDB query on the metadata, Extended JSON.
     #[prost(string, tag = "6")]
     pub filter: ::prost::alloc::string::String,
-    /// A type and its subtypes (chapter 32); not offered in this release.
+    /// A type and its subtypes; not offered in this release.
     #[prost(string, tag = "7")]
     pub r#type: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "8")]
@@ -2250,7 +2250,7 @@ pub struct KvPutRequest {
     /// Expire after this many ms; 0 for none.
     #[prost(int64, tag = "9")]
     pub ttl_ms: i64,
-    /// The key's location (chapter 36); unset keeps none.
+    /// The key's location; unset keeps none.
     #[prost(message, optional, tag = "10")]
     pub location: ::core::option::Option<LatLng>,
 }
@@ -2542,7 +2542,7 @@ pub mod key_value_client {
             self.inner.unary(req, path, codec).await
         }
         /// Keys whose location is inside a circle, box or polygon, or the
-        /// nearest ones to a point (chapter 36; R6 round 3).
+        /// nearest ones to a point.
         pub async fn geo_search(
             &mut self,
             request: impl tonic::IntoRequest<super::KvGeoSearchRequest>,
@@ -2611,7 +2611,7 @@ pub mod key_value_server {
             request: tonic::Request<super::KvExecRequest>,
         ) -> std::result::Result<tonic::Response<super::KvExecResponse>, tonic::Status>;
         /// Keys whose location is inside a circle, box or polygon, or the
-        /// nearest ones to a point (chapter 36; R6 round 3).
+        /// nearest ones to a point.
         async fn geo_search(
             &self,
             request: tonic::Request<super::KvGeoSearchRequest>,
@@ -3005,7 +3005,7 @@ pub struct ModelRequest {
     /// The model's name; taken from the definition when empty.
     #[prost(string, tag = "2")]
     pub model: ::prost::alloc::string::String,
-    /// The definition, JSON (chapter 35, "Model definition").
+    /// The definition, JSON.
     #[prost(message, optional, tag = "3")]
     pub definition: ::core::option::Option<::prost_types::Struct>,
 }
@@ -3236,7 +3236,7 @@ pub mod analytics_client {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
         }
-        /// Creates a model (chapter 35's document as JSON).
+        /// Creates a model (its definition document as JSON).
         pub async fn create_model(
             &mut self,
             request: impl tonic::IntoRequest<super::ModelRequest>,
@@ -3354,7 +3354,7 @@ pub mod analytics_client {
         }
         /// Runs a query: detail rows, subtotals after their groups, the grand
         /// total last. A stream of results of at most 1,000 rows each; the first
-        /// carries the plan (R6 round 4). REST returns one JSON reply, or NDJSON
+        /// carries the plan. REST returns one JSON reply, or NDJSON
         /// lines with `Accept: application/x-ndjson`.
         pub async fn query(
             &mut self,
@@ -3436,7 +3436,7 @@ pub mod analytics_server {
     /// Generated trait containing gRPC methods that should be implemented for use with AnalyticsServer.
     #[async_trait]
     pub trait Analytics: std::marker::Send + std::marker::Sync + 'static {
-        /// Creates a model (chapter 35's document as JSON).
+        /// Creates a model (its definition document as JSON).
         async fn create_model(
             &self,
             request: tonic::Request<super::ModelRequest>,
@@ -3475,7 +3475,7 @@ pub mod analytics_server {
             + 'static;
         /// Runs a query: detail rows, subtotals after their groups, the grand
         /// total last. A stream of results of at most 1,000 rows each; the first
-        /// carries the plan (R6 round 4). REST returns one JSON reply, or NDJSON
+        /// carries the plan. REST returns one JSON reply, or NDJSON
         /// lines with `Accept: application/x-ndjson`.
         async fn query(
             &self,
@@ -4002,7 +4002,7 @@ pub struct SearchQueryRequest {
     /// latest.
     #[prost(string, tag = "10")]
     pub consistency: ::prost::alloc::string::String,
-    /// A commit token from a write (own_writes); served as latest (S5).
+    /// A commit token from a write (own_writes); served as latest.
     #[prost(string, tag = "11")]
     pub commit_token: ::prost::alloc::string::String,
     /// Each hit's row: a table's columns as a JSON object, a collection's
@@ -4682,7 +4682,7 @@ pub struct WatchRequest {
     /// Tables (or collections); empty: every table the caller may read.
     #[prost(string, repeated, tag = "2")]
     pub objects: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    /// A resume token (chapter 38), or empty for "now".
+    /// A resume token, or empty for "now".
     #[prost(string, tag = "3")]
     pub start_after: ::prost::alloc::string::String,
     /// An alternative start point; 0 if unused (not supported yet: 39787).

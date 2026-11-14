@@ -60,16 +60,16 @@ In Studio's operator mode, the **Moves** and **Jobs** pages show the same, with 
 | Symptom | Cause | Fix |
 |---|---|---|
 | Stays `planned` | No worker picked it up | Check that `sprigdb worker` processes run in the data centre and reach etcd |
-| `copying` slowly, throttled | A guardrail paused the copy: source threads running above `mover.throttle_threads_running` (64), replica lag above `mover.throttle_replica_lag_ms` (2,000 ms), Galera flow control above `mover.throttle_flow_control_pct` (5%), the cluster's p99 up more than `mover.throttle_p99_increase_pct` (20%), or catch-up lag above `mover.throttle_apply_lag_ms` (5,000 ms) | Usually right: the job protects live traffic. Run moves at quieter times, or raise the threshold that trips |
+| `copying` slowly, throttled | A guardrail paused the copy: source threads running above `mover.throttle_threads_running` (64), replica lag above `mover.throttle_replica_lag_ms` (2,000 ms), Galera flow control above `mover.throttle_flow_control_pct` (5%), or catch-up lag above `mover.throttle_apply_lag_ms` (5,000 ms) | Usually right: the job protects live traffic. Run moves at quieter times, or raise the threshold that trips |
 | `copying` slowly, not throttled | The copy caps: `mover.copy_max_rows_per_sec` (50,000) and `mover.copy_max_mb_per_sec` (64) per job | Raise the caps for the cluster if it has headroom |
 | Never leaves `catching_up` | The job must stay within `mover.ready_max_lag_ms` (1,000 ms) for `mover.ready_sustain_seconds` (60) | Reduce the write rate on the shard for a minute, or move at a quieter time |
 | Back to `copying` | `ER_SPRIG_MOVE_SOURCE_DIVERGED` (39134): the source's binlog no longer holds the job's position, because it was purged or a failover lost transactions | Keep binlogs at least `cluster.min_binlog_retention_hours`; let the job restart |
-| `paused` with `ER_SPRIG_MOVE_VERIFY_FAILED` (39136) | The target still differed after `mover.verify_max_repairs` repairs | Find writes that bypass SprigDB (direct MariaDB connections), stop them, then cancel and start again |
+| `rolling_back` or `rolled_back` with `ER_SPRIG_MOVE_VERIFY_FAILED` (39136) | The target still differed after `mover.verify_max_repairs` repairs, so the job rolled back | Find writes that bypass SprigDB (direct MariaDB connections), stop them, then start the move again |
 | Error `ER_SPRIG_MOVE_UNSUPPORTED` (39137) | The source logs statements instead of rows, a table has no primary key, or DDL ran during the cutover | Set `binlog_format = ROW`, add primary keys, avoid DDL during moves |
 | Error `ER_SPRIG_BINLOG_UNSUPPORTED` (39114) | The replication account's plugin, TLS, binlog checksum or encryption isn't readable | `sprigctl cluster probe <id> --full` shows the fix |
 | Error `ER_SPRIG_MOVE_TARGET_INCOMPATIBLE` (39111) | The target already has a schema of that name, or lacks a capability | Drop the leftover schema, or choose another target |
 | `paused` after cutover attempts | `mover.max_cutover_attempts` (5) cutovers aborted | See [Write pauses at cutover](#write-pauses-at-cutover) |
-| Paused, target unreachable | The target was unreachable; the job waits up to `mover.max_pause_minutes` (60) | Restore the target cluster, or cancel |
+| `rolling_back` or `rolled_back` with `gave up after 200 failures` | A step failed 200 times in a row before the cutover, for example because the target cluster was unreachable. Failed steps are retried with a backoff of up to 2 seconds; after the cutover has committed, the job keeps retrying instead | Restore the target cluster, then start the move again |
 
 To give up on a move before its cutover commits:
 

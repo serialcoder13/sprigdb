@@ -169,7 +169,7 @@ The full command list, with every option, is in [Key-value](../data-models/key-v
 | `redis.lua_kill_after_ms` | `1000` | `SCRIPT KILL` stops only runs older than this |
 | `redis.lua_undeclared_keys` | `refuse` | `refuse`, or `same_shard` to allow keys that route with a declared key |
 | `redis.notify_keyspace_events` | empty | Keyspace notification classes |
-| `redis.sharded_pubsub_hubs` | `8` | Hubs for sharded channels |
+| `redis.sharded_pubsub_hubs` | `8` | Hubs for sharded channels. Read when a gateway starts: a change applies after you restart the gateways, and every gateway in the data centre must use the same count |
 | `redis.scan_small_key_elements` | `128` | `HSCAN`, `SSCAN` and `ZSCAN` return keys this small whole |
 
 ## Client examples

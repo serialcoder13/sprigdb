@@ -1,7 +1,7 @@
 //! SHA-256 crypt (Ulrich Drepper's "Unix crypt using SHA-256 and SHA-512",
 //! the `$5$` scheme), with any salt length.
 //!
-//! Chapter 14, "Verifier formats": MySQL's `caching_sha2_password` runs this
+//! MySQL's `caching_sha2_password` runs this
 //! algorithm over all 20 salt bytes, where the reference implementation and
 //! common libraries cut the salt at 16, so SprigDB has its own. Only the
 //! digest is computed here; [`crate::verifier`] owns the stored format.

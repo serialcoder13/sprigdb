@@ -148,7 +148,7 @@ SETTING_NAME	VALUE	SOURCE_SCOPE
 auto_index.mode	approve	object
 ```
 
-Some indexes stop at `recommended` whatever the mode: a large-scan candidate on a table above `auto_index.scan_recommend_above_gb` (100 GB), an index that can't be built safely (a large table on Galera), and advice such as wildcard document or search indexes. Approximate-nearest-neighbour vector indexes have their own mode, `auto_index.vector_ann` (`recommend` by default).
+Some indexes stop at `recommended` whatever the mode: a large-scan candidate on a table above `auto_index.scan_recommend_above_gb` (100 GB), and an index that can't be built safely (a large table on Galera). Approximate-nearest-neighbour vector indexes have their own mode, `auto_index.vector_ann` (`recommend` by default).
 
 See [Approvals](approvals.md) for how modes work across every automatic decision, and [Settings and scopes](settings-and-scopes.md) for how a table's value overrides its database's.
 

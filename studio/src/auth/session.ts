@@ -1,4 +1,4 @@
-// The browser session (chapter 44, "Login and the session").
+// The browser session.
 //
 //   boot():   version.json; refresh(); ok → WhoAmI → active; 401 → signed_out
 //   login():  refused on plain HTTP from another host before sending the
@@ -11,7 +11,7 @@
 //   idle: a warning two minutes before studio.session_idle_minutes, then
 //   logout (WCAG 2.2.1)
 //
-// The lock matters: chapter 14 treats a reused refresh token as theft and
+// The lock matters: the gateway treats a reused refresh token as theft and
 // revokes the session, so two tabs refreshing at once would sign out.
 
 import { create } from 'zustand';
@@ -233,7 +233,7 @@ export async function login(loginName: string, password: string): Promise<LoginS
       headers: { 'x-sprig-csrf': '1' },
       auth: false,
     });
-    // A second factor (chapter 14): a challenge, or an enrolment first.
+    // A second factor: a challenge, or an enrolment first.
     if (reply.challenge) {
       useSession.setState({ status: 'signed_out' });
       return { kind: 'challenge', challenge: reply.challenge, expiresIn: reply.expires_in };
@@ -300,7 +300,7 @@ export async function confirmEnrolment(
   return { codes: r.recovery_codes, finish: () => signedIn(r) };
 }
 
-/** Starts an impersonation in this tab (chapter 14 step 14): the tab's
+/** Starts an impersonation in this tab: the tab's
  * token becomes the user's until it expires or "Stop impersonating". The
  * administrator's own session stays in its cookie. */
 export async function impersonate(p: {

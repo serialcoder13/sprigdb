@@ -1,4 +1,4 @@
-//! The embedded files (chapter 44, "Serving: `sprig-studio`").
+//! The embedded files.
 //!
 //! `build.rs` writes the table from `studio/dist`: each file's identity
 //! bytes, its pre-compressed brotli and gzip forms when the build made them

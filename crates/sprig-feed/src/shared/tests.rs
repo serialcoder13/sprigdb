@@ -394,8 +394,8 @@ async fn a_whole_tenant_view_gets_its_tables_and_ddl_and_widens_the_dump() {
         }
     }
     assert_eq!(seen, vec![(1, 2, false), (2, 0, true)]);
-    // The hub reopens with tenant 1 kept whole; the catch-up dump hands
-    // over to it.
+    // The hub reopens with tenant 1 kept whole, from where `w` started
+    // (r9feed2: a replay, not a catch-up dump).
     assert!(quiet(&mut w, 500).await);
     let scopes = fake.opens();
     assert!(
@@ -438,4 +438,55 @@ fn no_idle_position_while_a_move_back_is_pending() {
     st.idle_fanout(&at(0));
     assert!(rx_b.try_recv().is_ok(), "B is at 0: position 0 is fine");
     assert!(rx_a.try_recv().is_err(), "A is at 5: nothing before it");
+}
+
+/// r9feed2: a new whole-tenant subscription a little behind the hub (it
+/// read the cluster's position, or its checkpoint, just before the hub
+/// read on) makes the hub read those groups again with the wider scope,
+/// instead of opening a catch-up dump. Nobody gets a group twice, and the
+/// ring keeps each group once.
+#[tokio::test]
+async fn a_new_whole_tenant_just_behind_the_hub_is_replayed_without_a_catch_up_dump() {
+    let groups: Vec<RawTxn> = (1..=10)
+        .map(|s| {
+            let mut t = txn(s, &["t1_d1_g1_s1", "t3_d1_g1_s1"]);
+            t.rows.push(row_in("t2_d1_g1_s1", "orders"));
+            t
+        })
+        .collect();
+    let fake = Fake::with(groups);
+    let opts = SharedOpts {
+        gather: Duration::ZERO,
+        ..SharedOpts::default()
+    };
+    let feed = SharedFeed::new(Arc::new(fake.clone()), opts);
+    let outbox = feed.view(Kept::Tables(vec!["__sprig_qo".to_owned()].into()));
+    let all = feed.view(Kept::All);
+    let c = cluster();
+    let mut q = outbox.open(&c, TenantId(1), &at(0)).await.unwrap();
+    assert_eq!(take(&mut q, 10).await.len(), 10);
+    // Tenant 2's rows were never kept; it starts at 5, behind the hub.
+    let mut w = all.open(&c, TenantId(2), &at(5)).await.unwrap();
+    let seqs: Vec<u64> = take(&mut w, 5).await.iter().map(|x| x.0).collect();
+    assert_eq!(seqs, (6..=10).collect::<Vec<_>>());
+    assert!(quiet(&mut w, 300).await, "tenant 2 got a group twice");
+    assert!(quiet(&mut q, 300).await, "tenant 1 got a group twice");
+    assert_eq!(fake.catchup_opens(), 0, "no catch-up dump");
+    let last = fake.opens().last().cloned().unwrap();
+    assert!(last.only.is_none() && last.tenants.contains(&TenantId(2)));
+    assert_eq!(fake.live.load(Ordering::SeqCst), 1, "one dump");
+    // The ring kept each group once: tenant 3 from 2 reads 3..10 once.
+    let mut r = outbox.open(&c, TenantId(3), &at(2)).await.unwrap();
+    let seqs: Vec<u64> = take(&mut r, 8).await.iter().map(|x| x.0).collect();
+    assert_eq!(seqs, (3..=10).collect::<Vec<_>>());
+    assert!(quiet(&mut r, 300).await);
+    assert_eq!(fake.catchup_opens(), 0);
+    // New groups reach every view once.
+    let mut g11 = txn(11, &["t1_d1_g1_s1", "t3_d1_g1_s1"]);
+    g11.rows.push(row_in("t2_d1_g1_s1", "orders"));
+    fake.push(g11);
+    assert_eq!(take(&mut w, 1).await, vec![(11, 1)]);
+    assert_eq!(take(&mut q, 1).await, vec![(11, 1)]);
+    assert_eq!(take(&mut r, 1).await, vec![(11, 1)]);
+    assert_eq!(feed.stats(&c).unwrap().catchups, 0);
 }

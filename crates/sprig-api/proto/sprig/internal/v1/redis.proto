@@ -1,5 +1,5 @@
-// sprig.internal.v1.RedisPeer: chapter 40's pub/sub hubs between gateways,
-// on the peer service (7403, mutual TLS; chapter 04). Never exposed to
+// sprig.internal.v1.RedisPeer: the Redis pub/sub hubs between gateways,
+// on the peer service (7403, mutual TLS). Never exposed to
 // clients. The hub of a tenant's channels is chosen by rendezvous hashing
 // over the DC's ready gateways (`sprig_redis::fabric`).
 syntax = "proto3";

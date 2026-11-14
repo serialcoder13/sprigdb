@@ -1,4 +1,4 @@
-//! The catalog side of the ancestry copy (chapter 08 step 6), over the
+//! The catalog side of the ancestry copy, over the
 //! in-memory catalog: what [`apply`] writes, clears and leaves alone, and
 //! that caches load the result incrementally exactly as in full.
 

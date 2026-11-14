@@ -1,20 +1,20 @@
-//! Authorization (chapter 29, build steps 1 to 6, the R0 part).
+//! Authorization: privileges, roles, the checks and backend grants.
 //!
 //! - [`authorizer`]: the interface the gateway calls for every decision
 //!   ([`Authorizer`], [`SessionGrants`]), chosen per tenant by
 //!   `auth.authorizer`, and the default engine, [`MysqlGrants`], which is
 //!   the rest of this list;
 //! - [`privilege`]: actions as stable bits, levels, the MySQL and MariaDB
-//!   privilege names (step 1);
+//!   privilege names;
 //! - [`store`]: the `authz` catalog module (`roles`, `role_edges`,
-//!   `privileges`) with typed rows and writes (step 1);
+//!   `privileges`) with typed rows and writes;
 //! - [`state`]: [`AuthzExtension`], loading [`AuthzState`] into every
-//!   catalog snapshot at each auth version (step 2);
-//! - [`compile`]: [`CompiledPrivileges`] and the checks (step 2);
+//!   catalog snapshot at each auth version;
+//! - [`compile`]: [`CompiledPrivileges`] and the checks;
 //! - [`stmt`], [`account_sql`] and [`show`]: the account statements and
-//!   `SHOW GRANTS` (steps 3 and 7's basic roles);
+//!   `SHOW GRANTS` (with basic roles);
 //! - [`backend`]: per-user MariaDB accounts granted only on the tenant's
-//!   own shard schemas, and their reconciler (step 5);
+//!   own shard schemas, and their reconciler;
 //! - [`definers`]: stored code runs as a tenant account, never as
 //!   `sprig_ctl`, and code created before that is moved;
 //! - [`migrate`]: bringing an existing tenant's catalog to the module.
@@ -32,7 +32,7 @@ pub mod definers;
 pub mod engine_guard;
 pub mod owner;
 pub mod privilege;
-// Chapter 29: row-level security (R4).
+// Row-level security.
 pub mod rls;
 pub mod settings;
 pub mod show;

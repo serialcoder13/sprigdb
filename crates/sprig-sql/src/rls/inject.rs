@@ -88,6 +88,16 @@ pub trait Resolver {
         let _ = name;
         false
     }
+
+    /// Whether the reference to protected table `key` under `alias` is a
+    /// layer read inside a merged view of an inheritable object,
+    /// whose rows the gateway filtered once, on the merged records. Such a reference gets no predicate:
+    /// a filter on each layer row would drop overrides and hide markers and
+    /// show the parent's values instead.
+    fn merged_layer(&self, key: usize, alias: &str) -> bool {
+        let _ = (key, alias);
+        false
+    }
 }
 
 /// A rewritten statement.
@@ -100,6 +110,10 @@ pub struct Injected {
     /// Protected tables the statement writes (MariaDB's triggers check the
     /// new rows).
     pub written: Vec<usize>,
+    /// Protected tables read only as layers of merged views
+    /// ([`Resolver::merged_layer`]): MariaDB's policy views must let their
+    /// rows through for this statement.
+    pub merged: Vec<usize>,
 }
 
 type R<T> = Result<T, SprigError>;
@@ -151,6 +165,7 @@ pub fn inject(sql: &str, lex_opts: &LexOptions, r: &dyn Resolver) -> R<Option<In
         edits: Vec::new(),
         filtered: Vec::new(),
         written: Vec::new(),
+        merged: Vec::new(),
     };
     // Stored functions reading protected tables run unfiltered in MariaDB.
     let mut calls = Calls(Vec::new());
@@ -161,7 +176,18 @@ pub fn inject(sql: &str, lex_opts: &LexOptions, r: &dyn Resolver) -> R<Option<In
         ));
     }
     cx.statement(&mut stmt)?;
+    let mut merged = std::mem::take(&mut cx.merged);
+    merged.sort_unstable();
+    merged.dedup();
     if cx.edits.is_empty() && cx.written.is_empty() {
+        if !merged.is_empty() {
+            return Ok(Some(Injected {
+                sql: sql.to_owned(),
+                filtered: cx.filtered,
+                written: Vec::new(),
+                merged,
+            }));
+        }
         // The name was a column, an alias or a CTE.
         return Ok(None);
     }
@@ -191,6 +217,7 @@ pub fn inject(sql: &str, lex_opts: &LexOptions, r: &dyn Resolver) -> R<Option<In
         sql: out,
         filtered,
         written,
+        merged,
     }))
 }
 
@@ -240,6 +267,7 @@ struct Cx<'a> {
     edits: Vec<Edit>,
     filtered: Vec<usize>,
     written: Vec<usize>,
+    merged: Vec<usize>,
 }
 
 /// Processes the first-level subqueries of a node (each fully, after the
@@ -799,6 +827,14 @@ impl Cx<'_> {
                     return Err(unsupported("a protected table with this table clause"));
                 }
                 let exposed = alias.as_ref().map_or(&t.value, |a| &a.name.value).clone();
+                if !derive
+                    && role.write.is_none()
+                    && alias.is_some()
+                    && self.r.merged_layer(key, &exposed)
+                {
+                    self.merged.push(key);
+                    return Ok(Vec::new());
+                }
                 let cmds = role.cmds(&exposed);
                 if derive {
                     if !with_hints.is_empty() || !partitions.is_empty() || !index_hints.is_empty() {

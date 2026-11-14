@@ -2,7 +2,7 @@
 // pom.xml), run as a single-file program: java -cp 'libs/*' Scenarios.java
 // <host> <port> <user> <password> <vhost> <prefix>. Prints one JSON object,
 // one key per scenario; deploy/compose/ci/outcomes.py compares the reference's
-// object with SprigDB's (chapter 50, "Testing").
+// object with SprigDB's.
 import com.rabbitmq.client.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;

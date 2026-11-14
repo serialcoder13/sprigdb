@@ -1,4 +1,4 @@
-//! Write sketches (chapter 20, "Write sketches" and "Load histogram").
+//! Write sketches and the load histogram.
 //!
 //! Each gateway keeps, per shard it writes to and per minute, the shard's
 //! write count, 64 equal-width hash buckets of the writes whose routing
@@ -300,7 +300,7 @@ impl WriteSketch {
         }
     }
 
-    /// The load histogram (chapter 20's `write_histogram`): buckets of
+    /// The load histogram (`write_histogram`): buckets of
     /// writes over the range, heavy hashes with the writes they certainly
     /// had. `None` without hashed writes.
     #[must_use]

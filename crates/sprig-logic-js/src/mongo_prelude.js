@@ -1,6 +1,6 @@
-// MongoDB's server-side JavaScript globals (chapter 30, "Server-side
-// JavaScript"; decision S110): the shell types documents cross as, and
-// the helpers `$where`, `$function` and `$accumulator` code may call.
+// MongoDB's server-side JavaScript globals: the shell types documents
+// cross as, and the helpers `$where`, `$function` and `$accumulator` code
+// may call.
 // Runs once per runtime, before any user code. `__bt` (non-enumerable)
 // names the BSON type a value goes back as.
 (() => {

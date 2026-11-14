@@ -1,4 +1,4 @@
-//! Server and cluster commands (chapter 40, "Server and cluster commands").
+//! Server and cluster commands.
 
 use std::fmt::Write as _;
 
@@ -290,7 +290,7 @@ pub fn cluster(a: &[Bytes], addr: &str, id: &str) -> Frame {
     }
 }
 
-/// `ACL WHOAMI|CAT|LIST|USERS|GETUSER` (read-only, chapter 40 "Security").
+/// `ACL WHOAMI|CAT|LIST|USERS|GETUSER` (read-only).
 pub fn acl(a: &[Bytes], user: &str) -> Frame {
     match upper(&a[1]).as_str() {
         "WHOAMI" => Frame::bulk(user.to_owned()),
