@@ -75,19 +75,36 @@ pub(crate) fn statement(req: &ProbeRequest) -> String {
     )
 }
 
-/// The request in `text`, when it is this process's marked statement.
-/// `Some(None)`: marked, but not by this process (refused).
+/// What a statement is to the probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Parsed {
+    /// Not a probe.
+    No,
+    /// Marked, but not by this process (refused).
+    Forged,
+    /// This process's probe.
+    Probe(ProbeRequest),
+}
+
+impl Parsed {
+    /// Whether the statement carries the probe's mark.
+    #[must_use]
+    pub(crate) fn marked(&self) -> bool {
+        !matches!(self, Self::No)
+    }
+}
+
+/// What `text` is ([`Parsed`]).
 #[must_use]
-pub(crate) fn parse(text: &Bytes) -> Option<Option<ProbeRequest>> {
+pub(crate) fn parse(text: &Bytes) -> Parsed {
     if !text.starts_with(MARK.as_bytes()) {
-        return None;
+        return Parsed::No;
     }
     let s = String::from_utf8_lossy(&text[MARK.len()..]).into_owned();
-    Some(
-        s.split_once(" */ ")
-            .filter(|(n, _)| *n == nonce())
-            .and_then(|(_, j)| serde_json::from_str::<ProbeRequest>(j).ok()),
-    )
+    s.split_once(" */ ")
+        .filter(|(n, _)| *n == nonce())
+        .and_then(|(_, j)| serde_json::from_str::<ProbeRequest>(j).ok())
+        .map_or(Parsed::Forged, Parsed::Probe)
 }
 
 /// The answer per probe (`None`: the view doesn't read the changed row),
@@ -175,10 +192,10 @@ mod tests {
             }],
         };
         let s = Bytes::from(statement(&req));
-        assert_eq!(parse(&s), Some(Some(req.clone())));
+        assert_eq!(parse(&s), Parsed::Probe(req.clone()));
         let forged = Bytes::from(format!("{MARK}0000 */ {{\"db\":\"x\",\"probes\":[]}}"));
-        assert_eq!(parse(&forged), Some(None));
-        assert_eq!(parse(&Bytes::from_static(b"SELECT 1")), None);
+        assert_eq!(parse(&forged), Parsed::Forged);
+        assert_eq!(parse(&Bytes::from_static(b"SELECT 1")), Parsed::No);
         let rows = vec![vec![Some("0".into()), Some("1".into())]];
         assert_eq!(answer(&req, &rows), vec![Some(true)]);
         let rows = vec![vec![Some("0".into()), Some("2".into())]];

@@ -537,7 +537,11 @@ pub fn build_with_fks(
             let lookup = p
                 .lookups
                 .iter()
-                .find(|x| x.routes() && l.parent_columns.as_slice() == [x.column.clone()])
+                .find(|x| {
+                    x.routes()
+                        && x.index.unique
+                        && l.parent_columns.as_slice() == [x.column.clone()]
+                })
                 .cloned();
             let unique = uniques[at]
                 .iter()
@@ -693,8 +697,9 @@ fn parent_link(fk: &str, shape: &TableShape) -> Option<ParentLink> {
 }
 
 /// The router's view of lookup `l` of table `t` (named `name`): one value
-/// column, unique, maintained, with every column's class known; `None`
-/// otherwise.
+/// column, maintained, with every column's class known; `None`
+/// otherwise. Unique lookups (a unique key) and non-unique ones (automatic
+/// indexing's) are both followed.
 fn lookup_ref(
     tenant: u64,
     t: &CatalogTable,
@@ -708,7 +713,7 @@ fn lookup_ref(
     let [col] = l.columns.as_slice() else {
         return None;
     };
-    if !l.unique || !l.state.maintained() || shape.primary.is_empty() {
+    if !l.state.maintained() || shape.primary.is_empty() {
         return None;
     }
     let column = |c: &str| -> Option<LookupColumn> {
@@ -749,7 +754,7 @@ fn lookup_ref(
             index_name: l.index_name.clone(),
             columns: vec![value],
             owner_pk,
-            unique: true,
+            unique: l.unique,
             origin: l.origin,
             group: GroupId(lookup_map.group.0),
             state: l.state,

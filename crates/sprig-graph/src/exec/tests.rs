@@ -1595,3 +1595,27 @@ async fn top_rows_keep_values_the_bound_cannot_judge() {
         }
     }
 }
+
+/// `WHERE v.k = e` (or `IN`) with `e` from the incoming rows restricts
+/// far node `v` through an index on its label; answers as whole reads.
+#[tokio::test]
+async fn indexed_far_conjuncts_answer_as_whole_reads() {
+    for shards in [1, 4] {
+        let mut whole = social(shards).await;
+        let mut late = social(shards).await.with_late_reads();
+        for s in [&mut whole, &mut late] {
+            q(s, "CREATE INDEX FOR (n:Product) ON (n.name)").await;
+        }
+        for c in [
+            "UNWIND ['Pen', 'Desk'] AS nm MATCH (a:Person)-[:BOUGHT]->(p:Product) WHERE p.name = nm
+             RETURN nm, a.name ORDER BY nm, a.name",
+            "MATCH (x:Product) WITH x ORDER BY x.name WITH collect(x.name) AS names
+             MATCH (a:Person)-[:BOUGHT]->(p:Product) WHERE p.name IN names[0..2] OR p.name IN names[1..3]
+             RETURN a.name, p.name ORDER BY a.name, p.name",
+        ] {
+            let a = q(&mut whole, c).await;
+            let b = q(&mut late, c).await;
+            assert_eq!(show(&a), show(&b), "{c} on {shards} shard(s)");
+        }
+    }
+}

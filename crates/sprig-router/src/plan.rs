@@ -344,17 +344,35 @@ pub struct Claim {
 // Key values hold no NaN: literals only.
 impl Eq for Claim {}
 
-/// A lookup whose values a `DELETE` releases.
+/// A lookup whose values a `DELETE` releases, or whose column an
+/// `UPDATE` sets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Release {
     /// The lookup.
     pub lookup: Arc<LookupRef>,
     /// Per target shard, `SELECT <value>, <primary key> ... FOR UPDATE`
-    /// of the rows the delete removes; strings and binary values come
+    /// of the rows the delete removes (an update also reads the key
+    /// column last); strings and binary values come
     /// hex-encoded (`HEX(CONVERT(c USING utf8mb4))`), so the session's
     /// character set doesn't matter.
     pub reads: Vec<Target>,
+    /// An `UPDATE`'s new value: each row read claims it (unless it holds
+    /// it already) and releases its old one.
+    pub set: Option<LookupSet>,
 }
+
+/// The value an `UPDATE` gives a lookup's column.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LookupSet {
+    /// The new value, one part per value column (`NULL` claims nothing).
+    pub value: Vec<KeyValueOwned>,
+    /// The table's group: each row's key column, read last, hashes to its
+    /// routing hash here.
+    pub group: Arc<Group>,
+}
+
+// Key values hold no NaN: literals only.
+impl Eq for LookupSet {}
 
 /// The values a statement's equality on a lookup column names.
 #[derive(Debug, Clone, PartialEq)]

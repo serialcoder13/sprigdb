@@ -3715,7 +3715,9 @@ fn plan_update_delete(stmt: &Statement, src: &Src<'_>, cx: &PlanCtx<'_>) -> R<Pl
     let releases = if kind == WriteKind::Delete {
         lookups::delete_releases(stmt, &rel, entry, &shard_list, order_by || limit)?
     } else {
-        Vec::new()
+        // An UPDATE of a lookup's column claims the new value
+        // and releases the old one, row by row.
+        lookups::update_releases(stmt, &rel, entry, &shard_list, order_by || limit)?
     };
     // Parents of new child values, and the children of
     // the parent rows it changes.
@@ -4023,7 +4025,7 @@ mod ids;
 mod lookups;
 mod parents;
 
-pub(crate) use lookups::decode_read;
+pub(crate) use lookups::{decode_key, decode_read};
 
 #[cfg(test)]
 mod tests;

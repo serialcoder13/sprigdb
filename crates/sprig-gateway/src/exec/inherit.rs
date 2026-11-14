@@ -300,7 +300,7 @@ impl PassSession {
         let state = cat.ext.get::<InheritState>(sprig_inherit::MODULE);
         // A change stream's visibility probe (RL64; `inherit_probe`).
         let probe = super::inherit_probe::parse(text);
-        if let Some(None) = probe {
+        if probe == super::inherit_probe::Parsed::Forged {
             let e = SprigError::standard(
                 1064,
                 *b"42000",
@@ -308,7 +308,10 @@ impl PassSession {
             );
             return Ok(Some(self.fail(out, &e).await?));
         }
-        let probe = probe.flatten();
+        let probe = match probe {
+            super::inherit_probe::Parsed::Probe(req) => Some(req),
+            _ => None,
+        };
         if probe.is_none() && !sprig_inherit::maybe_inherit(text, state) {
             return Ok(None);
         }

@@ -33,6 +33,7 @@ use crate::names::shard_schema;
 use crate::normalize::{Normalizer, StdNormalizer};
 use crate::shardmap::ShardMap;
 
+pub mod admin;
 pub mod direct;
 
 /// `lookup_indexes`, in `t<tenant>_sprig`.
@@ -113,6 +114,20 @@ impl LookupState {
     pub fn maintained(self) -> bool {
         matches!(self, Self::WriteOnly | Self::Backfilling | Self::Public)
     }
+
+    /// The state the catalog spells `s`.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        [
+            Self::Building,
+            Self::WriteOnly,
+            Self::Backfilling,
+            Self::Public,
+            Self::Dropping,
+        ]
+        .into_iter()
+        .find(|x| x.as_str() == s)
+    }
 }
 
 /// Why a lookup exists.
@@ -138,6 +153,14 @@ impl LookupOrigin {
             Self::Auto => "auto",
             Self::FkChild => "fk_child",
         }
+    }
+
+    /// The origin the catalog spells `s`.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        [Self::UniqueKey, Self::PrimaryKey, Self::Auto, Self::FkChild]
+            .into_iter()
+            .find(|x| x.as_str() == s)
     }
 }
 
@@ -572,6 +595,25 @@ pub async fn claim(
     if mine == Some(1) && rk0 == owner.rk.0 {
         return Ok(ClaimResult::Own);
     }
+    if mine == Some(1) {
+        // Our own row under an old routing hash (a rebuild after a
+        // re-key): it names us, so it only needs the new hash. An owner
+        // check at the old hash could find this very row.
+        let mut upd = vec![Value::UInt(owner.rk.0)];
+        upd.extend(values(v)?);
+        t.pre(
+            &s,
+            &format!(
+                "UPDATE {} SET owner_rk = ?, prev_rk = NULL WHERE {}",
+                fq(&s, &l.physical()),
+                l.value_where()
+            ),
+            params(upd),
+        )
+        .await
+        .map_err(lookup_unavailable)?;
+        return Ok(ClaimResult::Reclaimed);
+    }
     // The owner check: a locking read in Main on the holder's shard waits
     // for an in-flight insert or delete of it.
     let o = p.owner_target(RoutingHash(rk0))?;
@@ -771,6 +813,76 @@ impl LookupCatalog {
         Ok(c.affected_rows() == 1)
     }
 
+    /// Records that a job is still working on `l` (`updated_at`): a job
+    /// that stops touching it for [`admin::BUILD_LEASE`] is taken over.
+    ///
+    /// # Errors
+    /// MariaDB's errors.
+    pub async fn touch(&self, c: &mut mysql_async::Conn, l: LookupId) -> Result<()> {
+        use mysql_async::prelude::Queryable;
+        c.exec_drop(
+            "UPDATE lookup_indexes SET updated_at = UTC_TIMESTAMP(6) WHERE lookup_id = ?",
+            (l.0,),
+        )
+        .await
+        .map_err(crate::groups::db_err)
+    }
+
+    /// Takes `l` over from a job that stopped: moves `updated_at` to now
+    /// if it is older than `lease_secs`. Returns whether this caller now
+    /// owns the job (two takers can't both win).
+    ///
+    /// # Errors
+    /// MariaDB's errors.
+    pub async fn take_over(
+        &self,
+        c: &mut mysql_async::Conn,
+        l: LookupId,
+        lease_secs: u64,
+    ) -> Result<bool> {
+        use mysql_async::prelude::Queryable;
+        c.exec_drop(
+            "UPDATE lookup_indexes SET updated_at = UTC_TIMESTAMP(6)
+             WHERE lookup_id = ? AND updated_at < UTC_TIMESTAMP(6) - INTERVAL ? SECOND",
+            (l.0, lease_secs),
+        )
+        .await
+        .map_err(crate::groups::db_err)?;
+        Ok(c.affected_rows() == 1)
+    }
+
+    /// The next free `lookup_id`.
+    ///
+    /// # Errors
+    /// MariaDB's errors.
+    pub async fn next_id(&self, c: &mut mysql_async::Conn) -> Result<LookupId> {
+        use mysql_async::prelude::Queryable;
+        let n: Option<u64> = c
+            .query_first("SELECT COALESCE(MAX(lookup_id), 0) + 1 FROM lookup_indexes")
+            .await
+            .map_err(crate::groups::db_err)?;
+        Ok(LookupId(n.unwrap_or(1)))
+    }
+
+    /// Every row, in `lookup_id` order.
+    ///
+    /// # Errors
+    /// MariaDB's errors.
+    pub async fn rows(&self, c: &mut mysql_async::Conn) -> Result<Vec<LookupRecord>> {
+        use mysql_async::prelude::Queryable;
+        let rows: Vec<Row> = c
+            .query(
+                "SELECT lookup_id, object_id, index_name, CAST(columns AS CHAR), is_unique,
+                        origin, physical_name, group_id, state, auto_index_id, conflicts,
+                        TIMESTAMPDIFF(SECOND, updated_at, UTC_TIMESTAMP(6)),
+                        CAST(updated_at AS CHAR)
+                 FROM lookup_indexes ORDER BY lookup_id",
+            )
+            .await
+            .map_err(crate::groups::db_err)?;
+        Ok(rows.into_iter().filter_map(LookupRecord::from_row).collect())
+    }
+
     /// Adds `n` to `conflicts`.
     ///
     /// # Errors
@@ -791,6 +903,80 @@ impl LookupCatalog {
     }
 }
 
+/// One `lookup_indexes` row as stored: what the catalog knows of a lookup
+/// without its owner's column types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LookupRecord {
+    /// `lookup_id`.
+    pub id: LookupId,
+    /// The owner table.
+    pub owner: ObjectId,
+    /// The key name (or `sprig_auto_<8 hex>`).
+    pub index_name: String,
+    /// The owner's value columns.
+    pub columns: Vec<String>,
+    /// Unique values or not.
+    pub unique: bool,
+    /// Why it exists.
+    pub origin: LookupOrigin,
+    /// The physical table name.
+    pub physical_name: String,
+    /// The tenant's lookup group.
+    pub group: GroupId,
+    /// Its state.
+    pub state: LookupState,
+    /// The automatic index behind an `auto` lookup.
+    pub auto_index_id: Option<u64>,
+    /// Conflicts counted while it wasn't public.
+    pub conflicts: u64,
+    /// Seconds since a job last touched it.
+    pub idle_secs: u64,
+    /// `updated_at`, as text (UTC).
+    pub updated_at: String,
+}
+
+impl LookupRecord {
+    fn from_row(mut r: Row) -> Option<Self> {
+        let cols: Option<String> = r.take(3)?;
+        let origin: String = r.take(5)?;
+        let state: String = r.take(8)?;
+        let idle: Option<i64> = r.take(11)?;
+        Some(Self {
+            id: LookupId(r.take(0)?),
+            owner: ObjectId(r.take(1)?),
+            index_name: r.take(2)?,
+            columns: cols
+                .and_then(|c| serde_json::from_str(&c).ok())
+                .unwrap_or_default(),
+            unique: r.take(4)?,
+            origin: LookupOrigin::parse(&origin)?,
+            physical_name: r.take(6)?,
+            group: GroupId(r.take(7)?),
+            state: LookupState::parse(&state)?,
+            auto_index_id: r.take(9)?,
+            conflicts: r.take(10)?,
+            idle_secs: u64::try_from(idle.unwrap_or(0)).unwrap_or(0),
+            updated_at: r.take::<Option<String>, _>(12)?.unwrap_or_default(),
+        })
+    }
+}
+
+impl LookupIndex {
+    /// The lookup bound to the owner's declared unique key `key`: unique,
+    /// origin `unique_key`, named after the key. Automatic indexing's
+    /// proposal becomes this when the column it would look up already
+    /// carries a single-column `UNIQUE` key, so the lookup also makes that
+    /// key unique across shards.
+    #[must_use]
+    pub fn bound_to_key(mut self, key: &str) -> Self {
+        key.clone_into(&mut self.index_name);
+        self.unique = true;
+        self.origin = LookupOrigin::UniqueKey;
+        self.auto_index_id = None;
+        self
+    }
+}
+
 /// The hook automatic indexing calls when it proposes a global
 /// lookup for a scatter query: an `auto`, non-unique lookup named
 /// `sprig_auto_<8 hex>`, in state `building`. The build itself
@@ -805,7 +991,7 @@ pub fn propose_auto_lookup(
     columns: Vec<LookupColumn>,
     owner_pk: Vec<LookupColumn>,
     lookup_group: GroupId,
-    auto_index_id: u64,
+    auto_index_id: Option<u64>,
 ) -> LookupIndex {
     let names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
     LookupIndex {
@@ -819,7 +1005,7 @@ pub fn propose_auto_lookup(
         origin: LookupOrigin::Auto,
         group: lookup_group,
         state: LookupState::Building,
-        auto_index_id: Some(auto_index_id),
+        auto_index_id,
     }
 }
 

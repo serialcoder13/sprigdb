@@ -1181,7 +1181,7 @@ impl PassSession {
         }
         // Data inheritance: a change stream's visibility probe (from this
         // process only), answered before other layers read its JSON.
-        if super::inherit_probe::parse(text).is_some() {
+        if super::inherit_probe::parse(text).marked() {
             let mut deferred = false;
             if let Some(step) = self
                 .tenant_inherit(

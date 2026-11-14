@@ -1793,6 +1793,8 @@ async fn lookups_before(
     be: &mut dyn ShardBackend,
     budget: &mut Budget,
 ) -> Result<()> {
+    // An UPDATE's claims of its new values, after its releases are read.
+    let mut set_claims: Vec<Claim> = Vec::new();
     for rel in &w.releases {
         let l = &rel.lookup;
         let mut parts: Vec<sprig_shard::KeyClass> =
@@ -1810,7 +1812,37 @@ async fn lookups_before(
                         SprigError::internal("a lookup value the release read can't decode")
                     })?);
                 }
-                let value = vals.drain(..l.index.columns.len()).collect();
+                let value: Vec<KeyValueOwned> = vals.drain(..l.index.columns.len()).collect();
+                let Some(set) = &rel.set else {
+                    be.lookup_release(l, value, vals).await?;
+                    continue;
+                };
+                // The row keeps its value (equal under the column's
+                // collation, `'A'` for `'a'`): its lookup row stays as it
+                // is. Releasing it would delete the row the claim keeps.
+                let null = |v: &[KeyValueOwned]| v.iter().any(|x| matches!(x, KeyValueOwned::Null));
+                if null(&value) && null(&set.value) {
+                    continue;
+                }
+                if !null(&value)
+                    && !null(&set.value)
+                    && sprig_shard::lookup::value_hash(&l.index, &value)?
+                        == sprig_shard::lookup::value_hash(&l.index, &set.value)?
+                {
+                    continue;
+                }
+                let key = row.get(parts.len()).and_then(|v| v.as_deref());
+                let rk = crate::planner::decode_key(key, set.group.key_class)
+                    .and_then(|k| set.group.hash_of(&k))
+                    .ok_or_else(|| {
+                        SprigError::internal("a key value the lookup update read can't decode")
+                    })?;
+                set_claims.push(Claim {
+                    lookup: Arc::clone(l),
+                    value: set.value.clone(),
+                    owner_pk: vals.clone(),
+                    owner_rk: rk,
+                });
                 be.lookup_release(l, value, vals).await?;
             }
         }
@@ -1820,8 +1852,9 @@ async fn lookups_before(
     // orphan, since neither row is written yet. MariaDB refuses the
     // statement; so does the router.
     let mut seen = std::collections::HashSet::new();
-    for c in &w.claims {
-        if c.value.iter().any(|v| matches!(v, KeyValueOwned::Null)) {
+    let claims: Vec<&Claim> = w.claims.iter().chain(&set_claims).collect();
+    for c in &claims {
+        if !c.lookup.index.unique || c.value.iter().any(|v| matches!(v, KeyValueOwned::Null)) {
             continue;
         }
         let h = sprig_shard::lookup::value_hash(&c.lookup.index, &c.value)?;
@@ -1848,14 +1881,15 @@ async fn lookups_before(
             ));
         }
     }
-    for c in &w.claims {
+    for c in &claims {
         be.lookup_claim(c).await?;
     }
-    if !w.claims.is_empty() {
-        metrics::counter!("sprig_router_lookup_claims_total").increment(w.claims.len() as u64);
+    if !claims.is_empty() {
+        metrics::counter!("sprig_router_lookup_claims_total").increment(claims.len() as u64);
     }
     Ok(())
 }
+
 
 /// A statement a foreign-key action planned, run inside
 /// the write that caused it: no transaction or savepoint of its own.

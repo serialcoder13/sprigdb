@@ -193,6 +193,7 @@ impl Exec<'_> {
             && let Some(w) = where_
         {
             self.only = self.only_ids(w, &mut rows).await?;
+            self.only_by_conj(patterns, &conj, &mut rows).await?;
         }
         for (pi, p) in patterns.iter().enumerate() {
             // Types of the other relationship patterns of the clause, for
@@ -1110,6 +1111,114 @@ impl Exec<'_> {
         ids.sort_unstable();
         ids.dedup();
         self.only.insert(v.clone(), ids);
+        Ok(())
+    }
+
+    /// For each node `(v:L)` of `patterns` the rows don't bind, with an
+    /// index on `L.k` and a conjunct `v.k = e` or `v.k IN e` whose `e` the
+    /// rows give (LDBC IC14's `b.id IN [startNode(r).id, endNode(r).id]`,
+    /// which its disjunction implies): the nodes the index finds for every
+    /// row's values restrict `v` ([`Exec::only`]), so hops that reach it
+    /// read only links to them.
+    async fn only_by_conj(
+        &mut self,
+        patterns: &[PathPattern],
+        conj: &[Expr],
+        rows: &mut [Row],
+    ) -> Result<()> {
+        const MAX: usize = 10_000;
+        if rows.is_empty() || rows.len() > MAX {
+            return Ok(());
+        }
+        let nodes: Vec<NodePat> = patterns
+            .iter()
+            .flat_map(|p| {
+                std::iter::once(p.start.clone()).chain(p.steps.iter().map(|(_, n)| n.clone()))
+            })
+            .collect();
+        for np in nodes {
+            let (Some(v), Some(label)) = (&np.var, np.labels.as_ref().and_then(|l| l.required()))
+            else {
+                continue;
+            };
+            if self.only.contains_key(v) || rows[0].contains_key(v) {
+                continue;
+            }
+            let label = label.to_owned();
+            let indexed: Vec<String> = self
+                .store
+                .indexes()
+                .iter()
+                .filter(|d| {
+                    d.entity == crate::ast::Entity::Node
+                        && d.token == label
+                        && d.props.len() == 1
+                        && d.state == "online"
+                })
+                .map(|d| d.props[0].clone())
+                .collect();
+            let found = conj.iter().find_map(|c| {
+                let Expr::Binary(op @ (BinOp::Eq | BinOp::In), a, e) = c else {
+                    return None;
+                };
+                let Expr::Prop(t, k) = &**a else { return None };
+                (matches!(&**t, Expr::Var(x) if x == v)
+                    && indexed.contains(k)
+                    && !is_const(e)
+                    && row_bound(e, rows))
+                .then(|| (k.clone(), (**e).clone(), *op == BinOp::In))
+            });
+            let Some((k, e, list)) = found else { continue };
+            let per_row = self.eval_rows(&e, rows).await?;
+            let mut vals: Vec<Json> = Vec::new();
+            let mut ok = true;
+            for x in per_row {
+                let xs = match (list, x) {
+                    (_, Value::Null) => vec![],
+                    (true, Value::List(l)) => l,
+                    (true, _) => {
+                        ok = false;
+                        break;
+                    }
+                    (false, x) => vec![x],
+                };
+                for x in xs {
+                    if x.is_null() {
+                        continue;
+                    }
+                    match scan_json(&x) {
+                        Some(j) if !vals.contains(&j) => vals.push(j),
+                        Some(_) => {}
+                        None => ok = false,
+                    }
+                }
+                if !ok || vals.len() > MAX {
+                    ok = false;
+                    break;
+                }
+            }
+            if !ok {
+                continue;
+            }
+            let Some(lid) = self.store.label_id(&label, false).await? else {
+                continue;
+            };
+            let scan = Scan {
+                label: Some(lid),
+                props_eq: vec![(k, vals)],
+                limit: Some(MAX + 1),
+                keys: Some(Vec::new()),
+                ..Scan::default()
+            };
+            let found = self.store.scan(&scan).await?;
+            if found.len() > MAX {
+                continue;
+            }
+            let mut ids: Vec<u64> = found.iter().map(|n| n.id).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            self.only.insert(v.clone(), ids);
+        }
         Ok(())
     }
 
