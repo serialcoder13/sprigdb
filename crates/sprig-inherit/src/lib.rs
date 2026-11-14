@@ -207,6 +207,37 @@ pub trait Runner: sprig_types::Runner {
             "no system connection for the hierarchy lock in this runner",
         ))
     }
+
+    /// The session's row-level security condition on the merged records of
+    /// `db.table` (chapter 29, "Data inheritance": the reader's own
+    /// policies filter its merged view, inherited rows included; decision
+    /// rlsinherit), columns qualified with `qual` and session values bound;
+    /// `None` when the table's policies don't bind the session. `cmd`
+    /// adds the write's policies to the `SELECT` ones, as for any table.
+    ///
+    /// # Errors
+    /// The policy's (39364), 39366.
+    async fn row_filter(
+        &mut self,
+        db: &str,
+        table: &str,
+        qual: &str,
+        cmd: RowCmd,
+    ) -> Result<Option<String>> {
+        let _ = (db, table, qual, cmd);
+        Ok(None)
+    }
+}
+
+/// Which policies [`Runner::row_filter`] applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowCmd {
+    /// `SELECT`'s.
+    Select,
+    /// `SELECT`'s and `UPDATE`'s (the records an `UPDATE` may touch).
+    Update,
+    /// `SELECT`'s and `DELETE`'s.
+    Delete,
 }
 
 /// Rows as text, as [`Runner::ctl_query`] returns them.

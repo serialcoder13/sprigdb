@@ -1,5 +1,5 @@
-//! `faultd`, the privileged fault sidecar (chapter 46: "partitions by
-//! `iptables` from a privileged `faultd` sidecar").
+//! `faultd`, the privileged fault sidecar: network partitions by
+//! `iptables`.
 //!
 //! The Compose service `faultd` (profile `faults`, image built from
 //! `deploy/compose/faultd`) shares the host's PID namespace, so it can

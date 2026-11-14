@@ -21,6 +21,8 @@
 //! row changes it. Embeddings are stored as `f32` (the pack's `f16` values
 //! widened, which is exact), so the bytes read back are the bytes written.
 
+use std::fmt::Write as _;
+
 use sha2::{Digest, Sha256};
 
 use crate::pack::{Chunk, DIM};
@@ -179,7 +181,7 @@ pub fn vector_text(v: &[f32]) -> String {
             s.push(',');
         }
         // `{:?}` prints the shortest text that reads back as the same f32.
-        s.push_str(&format!("{x:?}"));
+        let _ = write!(s, "{x:?}");
     }
     s.push(']');
     s

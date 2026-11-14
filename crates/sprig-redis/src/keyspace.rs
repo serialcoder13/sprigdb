@@ -1,5 +1,5 @@
-//! Keyspace notifications (chapter 40, "Pub/sub and keyspace
-//! notifications"; build step 15; RLS round 5, decision RL46).
+//! Keyspace notifications, filtered by the subscriber's row-level
+//! security.
 //!
 //! ```text
 //! a write command that changed something, once its transaction committed
@@ -16,12 +16,12 @@
 //!
 //! **As built.** A write command this module knows ([`covered`]) sends its
 //! events from the gateway that ran it, under Redis's names, and marks its
-//! writes in the binlog (chapter 38's comment `o=k`). Everything else
+//! writes in the binlog (the statement comment `o=k`). Everything else
 //! reaches the change feed unmarked: SQL, the key-value API, scripts,
 //! commands this module doesn't know, and keys expiring. Each gateway with
 //! a subscriber who could receive a notification tails the tenant's feed
-//! and publishes those changes' events to its own subscribers (RLS round
-//! 5, RL51; the gateway's `redis_keyspace`), with names read from the rows
+//! and publishes those changes' events to its own subscribers (the
+//! gateway's `redis_keyspace`), with names read from the rows
 //! (a key row deleted after its expiry is `expired`, a new key also `new`).
 //! Whether a command changed anything is read from its reply (an integer
 //! above 0, `OK`, a value), so a multi-key `DEL` that deleted some of its
@@ -40,7 +40,7 @@ pub trait KeyFilter: Send + Sync + std::fmt::Debug {
     fn visible(&self, rows: &[sprig_kv::sql::Row], keys: usize) -> Vec<bool>;
 }
 
-/// The gateway's notifications from the change feed (RL51): started for a
+/// The gateway's notifications from the change feed: started for a
 /// tenant when one of its connections here subscribes to a channel or
 /// pattern a notification could reach; they run while
 /// [`crate::pubsub::Hub::keyspace_interest`] holds.
@@ -205,7 +205,7 @@ pub fn events(a: &[Bytes], reply: &Frame) -> Vec<(&'static str, u16, Bytes)> {
 }
 
 /// Whether write command `name` sends its own notifications ([`events`]
-/// knows it); the change feed sends the others' (RL51).
+/// knows it); the change feed sends the others'.
 #[must_use]
 pub fn covered(name: &str) -> bool {
     let k = Bytes::from_static(b"k");

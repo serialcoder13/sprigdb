@@ -132,6 +132,19 @@ pub struct ViewSql<'a> {
 
 const ORIGIN: &str = "`_sprig_o`";
 
+/// The alias of every layer-table reference inside a merged view that
+/// merges (an overlay, or the top level of one). The gateway's row-level
+/// security rewrite leaves references under it alone and filters the merged
+/// records instead (chapter 29, "Data inheritance"): a filter on each layer
+/// row would drop an override or a hide marker and show the parent's values.
+/// Clients can't write it: a statement naming a `__sprig_` name never
+/// reaches the inheritance layer, so a reference under this alias in a
+/// statement the layer generated is always its own.
+pub const LAYER_ALIAS: &str = "__sprig_lyr";
+
+/// [`LAYER_ALIAS`], quoted.
+const C: &str = "`__sprig_lyr`";
+
 impl ViewSql<'_> {
     fn key_pred(&self, alias: Option<&str>) -> String {
         let Some(keys) = &self.keys else {
@@ -204,41 +217,41 @@ impl ViewSql<'_> {
                 first.push(format!("p.{}", q(c)));
             } else {
                 first.push(format!(
-                    "IF(c.`_sprig_ovr` & {bit}, c.{col}, p.{col}) AS {col}",
+                    "IF({C}.`_sprig_ovr` & {bit}, {C}.{col}, p.{col}) AS {col}",
                     bit = self.o.bit(c),
                     col = q(c)
                 ));
             }
         }
-        let mut second = self.cols("c");
+        let mut second = self.cols(C);
         if self.origin {
             let parts: Vec<String> = self
                 .o
                 .values()
                 .map(|c| {
                     format!(
-                        "{}, IF(c.`_sprig_ovr` & {}, {}, JSON_VALUE(p.{ORIGIN}, {}))",
+                        "{}, IF({C}.`_sprig_ovr` & {}, {}, JSON_VALUE(p.{ORIGIN}, {}))",
                         lit(c),
                         self.o.bit(c),
-                        Self::label(name, "c"),
+                        Self::label(name, C),
                         lit(&format!("$.\"{c}\""))
                     )
                 })
                 .collect();
             first.push(format!("JSON_OBJECT({}) AS {ORIGIN}", parts.join(", ")));
-            let _ = write!(second, ", {}", self.origin_all(&Self::label(name, "c")));
+            let _ = write!(second, ", {}", self.origin_all(&Self::label(name, C)));
         }
         format!(
-            "SELECT {first} FROM {p} p LEFT JOIN {layer} c ON {join} AND c.`_sprig_space` = {s} \
-             WHERE c.`_sprig_state` IS NULL OR c.`_sprig_state` <> 'hide' \
-             UNION ALL SELECT {second} FROM {layer} c WHERE c.`_sprig_space` = {s} \
-             AND c.`_sprig_state` IN ('own', 'orphan'){kp} \
+            "SELECT {first} FROM {p} p LEFT JOIN {layer} {C} ON {join} AND {C}.`_sprig_space` = \
+             {s} WHERE {C}.`_sprig_state` IS NULL OR {C}.`_sprig_state` <> 'hide' \
+             UNION ALL SELECT {second} FROM {layer} {C} WHERE {C}.`_sprig_space` = {s} \
+             AND {C}.`_sprig_state` IN ('own', 'orphan'){kp} \
              AND NOT EXISTS (SELECT 1 FROM {p} p WHERE {join})",
             first = first.join(", "),
             layer = self.layer,
-            join = self.key_join("c", "p"),
+            join = self.key_join(C, "p"),
             s = space.0,
-            kp = self.key_pred(Some("c")),
+            kp = self.key_pred(Some(C)),
         )
     }
 
@@ -299,7 +312,7 @@ impl ViewSql<'_> {
                             ));
                         }
                         out.push(format!(
-                            "{l} AS (SELECT {} FROM {} WHERE `_sprig_space` = {} AND \
+                            "{l} AS (SELECT {} FROM {} {C} WHERE `_sprig_space` = {} AND \
                              `_sprig_state` IN ('own', 'orphan'){})",
                             cols.join(", "),
                             self.layer,
@@ -365,6 +378,14 @@ impl ViewSql<'_> {
             cols.push(format!("{e} AS {}", q(c)));
         }
         cols.join(", ")
+    }
+
+    /// Whether [`ViewSql::view`] merges levels (its layer references are
+    /// under [`LAYER_ALIAS`]); `false` when it is the space's own rows read
+    /// as they are.
+    #[must_use]
+    pub fn merges(&self, chain: &Chain) -> bool {
+        !(chain.is_base() && !self.origin)
     }
 
     /// The merged view of `chain`'s last space, as a query.
@@ -461,9 +482,18 @@ mod tests {
             derived: Vec::new(),
         };
         let sql = v.view(&chain());
+        // Every layer reference is under LAYER_ALIAS (the chapter's `c`).
+        let golden = |s: &str| {
+            s.replace("c.`", "`__sprig_lyr`.`")
+                .replace("`products` c ", "`products` `__sprig_lyr` ")
+                .replace(
+                    "FROM `products` WHERE `_sprig_space` = 1",
+                    "FROM `products` `__sprig_lyr` WHERE `_sprig_space` = 1",
+                )
+        };
         assert_eq!(
             sql,
-            "WITH `__sprig_l0` AS (SELECT `id`, `name`, `colour`, `price`, `region` FROM \
+            golden("WITH `__sprig_l0` AS (SELECT `id`, `name`, `colour`, `price`, `region` FROM \
              `products` WHERE `_sprig_space` = 1 AND `_sprig_state` IN ('own', 'orphan')), \
              `__sprig_p1` AS (SELECT `id`, `name`, `colour`, `price`, `region` FROM \
              `__sprig_l0` WHERE TRUE AND (region = 'IN')), `__sprig_l1` AS (SELECT p.`id`, \
@@ -485,8 +515,9 @@ mod tests {
              c.`name`, c.`colour`, c.`price`, c.`region` FROM `products` c WHERE \
              c.`_sprig_space` = 12 AND c.`_sprig_state` IN ('own', 'orphan') AND NOT EXISTS \
              (SELECT 1 FROM `__sprig_p2` p WHERE c.`id` = p.`id`)) SELECT `id`, `name`, \
-             `colour`, `price`, `region` FROM `__sprig_l2`"
+             `colour`, `price`, `region` FROM `__sprig_l2`")
         );
+        assert!(v.merges(&chain()) && !v.merges(&chain().upto(1)));
     }
 
     #[test]

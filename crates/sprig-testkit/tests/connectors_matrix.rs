@@ -1,6 +1,5 @@
-//! The tier 1 connector matrix and sysbench (chapter 46, step 5; chapter
-//! 05, step 13), half of milestone M0.2's "done when": every connector
-//! passes through the gateway on both ports.
+//! The tier 1 connector matrix and sysbench: every connector passes
+//! through the gateway on both ports.
 //!
 //! Runs `deploy/compose/connectors/run.sh` once per endpoint of
 //! `SPRIG_TEST_CONNECTORS` (`host:port:persona`, comma-separated) and fails

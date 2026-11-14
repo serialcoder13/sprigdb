@@ -1,5 +1,4 @@
-//! The cluster registry over [`MetaStore`] (chapter 09, "Cluster record";
-//! build step 1).
+//! The cluster registry over [`MetaStore`].
 //!
 //! Ids come from the global tier by create-if-absent on
 //! `/sprig/g/cluster-ids/<number>`, so any gateway can find a cluster's data
@@ -204,8 +203,7 @@ pub enum RegistryChange {
 /// A stream of [`RegistryChange`]s.
 pub type RegistryStream = Pin<Box<dyn Stream<Item = Result<RegistryChange>> + Send>>;
 
-/// The data center of a cluster id, `<dc_id>-c<number>` (chapter 23,
-/// "Encoding rules"); `None` for an id of another form.
+/// The data center of a cluster id, `<dc_id>-c<number>`; `None` for an id of another form.
 #[must_use]
 pub fn dc_of(id: &ClusterId) -> Option<DcId> {
     let (dc, n) = id.as_str().rsplit_once("-c")?;
@@ -289,7 +287,7 @@ impl ClusterRegistry {
     }
 
     /// The DC tier's store (where the failover loop publishes each
-    /// cluster's writer, chapter 25).
+    /// cluster's writer).
     #[must_use]
     pub fn dc_store(&self) -> &Arc<dyn MetaStore> {
         &self.dc
@@ -426,7 +424,7 @@ impl ClusterRegistry {
     }
 
     /// Registers `reg` under a number [`Self::allocate_id`] reserved
-    /// earlier: the VM provisioner (chapter 27) needs the number for the
+    /// earlier: the VM provisioner needs the number for the
     /// nodes' `server_id` and `gtid_domain_id` before the cluster exists.
     ///
     /// # Errors
@@ -507,9 +505,9 @@ impl ClusterRegistry {
     /// 39500 if etcd is unreachable; `Internal` for an undecodable record.
     pub async fn get(&self, id: &ClusterId) -> Result<Option<StoredCluster>> {
         // Another DC's cluster (a tenant homed there, or the source of a
-        // move between DCs, chapter 24): read from that DC's tier, which
-        // single-etcd mode serves from the same etcd; the relay's
-        // `RemoteMaps` replaces this in R2.
+        // move between DCs): read from that DC's tier, which single-etcd
+        // mode serves from the same etcd; with separate etcds the relay's
+        // `RemoteMaps` replaces this.
         if let Some(other) = dc_of(id).filter(|d| *d != self.dc_id) {
             let tier = Tier::Dc(other);
             let key = tier.key(&format!("clusters/{id}"))?;

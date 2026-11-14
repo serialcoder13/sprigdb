@@ -1,6 +1,5 @@
 //! Explaining a resolution: every scope of the chain with its row, the
-//! bounds in force when the walk reached it, and what happened to its value
-//! (chapter 47, "Explaining settings"; chapter 08, "Setting resolution").
+//! bounds in force when the walk reached it, and what happened to its value.
 //!
 //! [`explain_layered`] walks the same chain as
 //! [`resolve_layered`](crate::resolve_layered), one step per scope of the

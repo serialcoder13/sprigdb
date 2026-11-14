@@ -1,5 +1,4 @@
-//! Graph values as PackStream structures, Bolt 5.x layouts (chapter 43,
-//! "Bolt front end"; build step 19).
+//! Graph values as PackStream structures, Bolt 5.x layouts.
 //!
 //! | Tag | Structure | Fields (5.x) |
 //! |---|---|---|

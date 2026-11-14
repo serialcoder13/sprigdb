@@ -1,5 +1,4 @@
-//! DC leases (chapter 25, "DC leases, sub-leases and self-fencing";
-//! chapter 23's `dc-leases/<dc_id>`).
+//! DC leases (`dc-leases/<dc_id>`).
 //!
 //! Every controller of DC X runs one [`DcLease`]:
 //!
@@ -7,23 +6,21 @@
 //! 1. the leader creates the etcd lease (TTL failover.dc_lease_seconds) and puts
 //!    dc-leases/X = {lease_id, dc_epoch + 1}; dcs/X.dc_epoch + 1 in the same txn
 //! 2. every controller sends keep-alives every TTL/4 and keeps its own deadline D,
-//!    using chapter 23's rule with margin = failover.fence_lead_ms
+//!    using the session deadline rule with margin = failover.fence_lead_ms
 //! 3. Permits.Renew: a controller with a valid D replies valid_ms = min(TTL/2, D - now)
 //! ```
 //!
 //! `D - now` above is measured to `D - margin`, as for every session: a
 //! holder's permit ends `fence_lead` before etcd could expire the lease.
 //!
-//! **Where it differs from the book.** The book lets X take a new DC lease
-//! only while `dcs/X.state` is `active` or `joining`, and a returning DC
-//! only after it fenced its moved tenants. Here a DC may take its lease in
+//! **States gate permits, not the lease.** A DC may take its lease in
 //! any state but `retired` (a DC that lost its lease takes it back as soon
 //! as it can, which is how the global leader learns it returned), and
 //! **permits** are what the states gate: only `active` and `joining` get
 //! valid permits (and `draining`, which still serves its tenants until
-//! migration empties it). Permits are the only write authority, so the safety is
-//! the same, and the global leader sees a returning DC without a separate
-//! signal.
+//! migration empties it). Permits are the only write authority, so gating
+//! them is as safe as gating the lease, and the global leader sees a
+//! returning DC without a separate signal.
 //!
 //! Time is the injected [`Clock`]; waits use tokio's timer, so the
 //! simulation drives it with paused time. [`DcLease::run`] is a plain
@@ -139,8 +136,8 @@ pub struct DcLease {
     opts: DcLeaseOpts,
     state: Mutex<Inner>,
     ticks: AtomicU64,
-    /// A round has finished without an error since this keeper started
-    /// (hardening round 2): until then the controller's permit answer would
+    /// A round has finished without an error since this keeper started:
+    /// until then the controller's permit answer would
     /// be a refusal it hasn't checked.
     settled: std::sync::atomic::AtomicBool,
 }
@@ -203,8 +200,7 @@ impl DcLease {
     /// started. Until then [`Self::permit`] would refuse only because this
     /// controller hasn't read the lease yet, so the permit service answers
     /// "unavailable" instead and holders ask another controller (a
-    /// restarted controller used to fence its DC's gateways for a moment;
-    /// hardening round 2).
+    /// restarted controller used to fence its DC's gateways for a moment).
     #[must_use]
     pub fn settled(&self) -> bool {
         self.settled.load(Ordering::SeqCst)
@@ -238,7 +234,7 @@ impl DcLease {
         self.lock().record_state.clone()
     }
 
-    /// The permit this controller grants now (chapter 25 step 3).
+    /// The permit this controller grants now.
     #[must_use]
     pub fn permit(&self) -> Permit {
         let now = self.clock.now();

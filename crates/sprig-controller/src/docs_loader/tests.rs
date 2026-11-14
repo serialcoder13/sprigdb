@@ -76,8 +76,7 @@ impl DocsDb for Fake {
         st.inserts.push(rows.len());
         let lose = st.lose;
         for r in rows.iter().skip(lose) {
-            st.rows
-                .insert((r.version.clone(), r.chunk_id), r.clone());
+            st.rows.insert((r.version.clone(), r.chunk_id), r.clone());
         }
         Ok(())
     }
@@ -173,7 +172,10 @@ fn batches_cap_rows_and_bytes() {
     assert_eq!(batches(&huge, 500, 1000), vec![0..1, 1..2, 2..3]);
     assert!(batches(&[], 500, 1000).is_empty());
     // Every row is in exactly one batch, in order.
-    let n: usize = batches(&rows, 7, 50_000).iter().map(ExactSizeIterator::len).sum();
+    let n: usize = batches(&rows, 7, 50_000)
+        .iter()
+        .map(ExactSizeIterator::len)
+        .sum();
     assert_eq!(n, rows.len());
 }
 

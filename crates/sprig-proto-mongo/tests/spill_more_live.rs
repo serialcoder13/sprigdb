@@ -1,5 +1,5 @@
-//! Spilling's leftovers through a live gateway (M7, 12 Nov 2026;
-//! decisions S85–S89), in `spill_live.rs`'s style.
+//! Spilling's leftovers through a live gateway, in
+//! `spill_live.rs`'s style.
 //!
 //! - `spill_leftovers_match_mongodb`: generated documents (about 3.6 MB)
 //!   with the gateway's stage, sort and `$graphLookup` limits and MongoDB

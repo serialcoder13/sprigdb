@@ -1,5 +1,5 @@
-//! The publication wait across two gateways (chapter 31, `check_flags`;
-//! `decisions/r5-interim.md` D13): once a write holding a new array path
+//! The publication wait across two gateways (`check_flags`):
+//! once a write holding a new array path
 //! is acknowledged, a query on that path through *another* gateway finds
 //! the document. Without the wait, that gateway may still plan with the
 //! old path registry (the path scalar-safe, an exact SQL translation that

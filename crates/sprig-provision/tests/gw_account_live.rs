@@ -1,5 +1,5 @@
-//! `sprig_gw`, the gateways' monitoring account, on a live cluster
-//! (chapter 09, "System accounts"): created as `sprig_ctl` on the writer,
+//! `sprig_gw`, the gateways' monitoring account, on a live cluster:
+//! created as `sprig_ctl` on the writer,
 //! replicated to every node, able to read the replication status and
 //! nothing else.
 //!

@@ -1,5 +1,4 @@
-//! etcd endpoint discovery (chapter 23, "Live reconfiguration: no
-//! restarts"; build step 9).
+//! etcd endpoint discovery, so endpoints change without restarts.
 //!
 //! ```text
 //! discover_members(tier), every control.etcd_member_refresh_seconds and on any

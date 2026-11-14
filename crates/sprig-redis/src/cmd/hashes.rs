@@ -1,4 +1,4 @@
-//! Hashes and sets (chapter 40, "Hashes and sets"): one element row per
+//! Hashes and sets: one element row per
 //! field or member, `o = CRC32(e)`.
 
 use std::collections::{HashMap, HashSet};

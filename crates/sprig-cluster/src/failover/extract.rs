@@ -1,7 +1,6 @@
-//! `errant_extract` (chapter 25, "Diverged transactions are extracted and
-//! reported, never merged", steps 3-5): the row images of a diverged
-//! node's transactions, read with `sprig-binlog`, sealed per tenant, and
-//! written to an extract store.
+//! `errant_extract`: diverged transactions are extracted and reported,
+//! never merged. The row images of a diverged node's transactions, read
+//! with `sprig-binlog`, sealed per tenant, and written to an extract store.
 //!
 //! ```text
 //! read(node, range):
@@ -22,13 +21,13 @@
 //!
 //! Each tenant's events go to its own file under its own key
 //! (`t<id>_...` schemas; everything else, `__sprig_sys` included, is tenant
-//! 0, the platform's). Keys are the worker's master keyring's (chapter 12's
-//! file format) for the purpose `errant extract`, so a tenant's extract
+//! 0, the platform's). Keys are the worker's master keyring's (the workload
+//! keyring's file format) for the purpose `errant extract`, so a tenant's extract
 //! key opens nothing else.
 //!
 //! **Stores.** [`ExtractStore`] is the seam: [`LocalDirStore`] writes under
 //! a directory (`[worker] extract_dir`); an object-storage store
-//! (chapter 27's buckets, kept in the tenant's allowed DCs) implements the
+//! (buckets kept in the tenant's allowed DCs) implements the
 //! same three calls later.
 
 use std::collections::BTreeMap;

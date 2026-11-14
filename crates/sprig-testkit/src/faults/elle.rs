@@ -1,4 +1,4 @@
-//! Elle tooling (chapter 46, "Workloads and checkers"): run `elle-cli` on
+//! Elle tooling: run `elle-cli` on
 //! a recorded history, and a list-append workload over MariaDB that
 //! produces one.
 //!

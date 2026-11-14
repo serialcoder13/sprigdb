@@ -1,6 +1,5 @@
-//! A stream sequencer under simulation (chapter 45, "Testing": crash the
-//! sequencer at every step; no record lost, duplicated in the log, or out
-//! of order per key; R9).
+//! A stream sequencer under simulation: crash the sequencer at every step;
+//! no record lost, duplicated in the log, or out of order per key.
 //!
 //! The real sequencer (`sprig_streams::Sequencer`) keeps a change topic of
 //! table `a` with four partitions, reading the real tenant feed over the two
@@ -336,7 +335,7 @@ fn key_of(what: &str) -> Option<i64> {
     what[i..].split(',').next()?.trim().parse().ok()
 }
 
-/// Chapter 45's invariant: per partition, the records are the verified
+/// The stream invariant: per partition, the records are the verified
 /// changes of `a` with that partition's keys, in commit order, at offsets
 /// from 0 without gaps or duplicates, with epochs that never go down.
 pub(super) fn check_stream(

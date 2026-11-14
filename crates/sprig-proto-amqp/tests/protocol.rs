@@ -4,8 +4,7 @@
 //! By default each test starts the server in process on 127.0.0.1 with
 //! the in-memory engine (`sprig-queues` runs the same suite, in
 //! `protocol/suite.rs`, against the queue engine). With `SPRIG_AMQP_ADDR` set, the same tests run
-//! against a gateway's `amqp` listener instead (the live test, chapter
-//! 50 step 12):
+//! against a gateway's `amqp` listener instead (the live test):
 //!
 //! ```text
 //! SPRIG_AMQP_ADDR=127.0.0.1:35672 SPRIG_AMQP_USER=acme.app SPRIG_AMQP_PASSWORD=... \

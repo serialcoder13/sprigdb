@@ -15,7 +15,7 @@ chrono = "0.4"
 chrono-tz = "0.10"
 mysql_async.workspace = true
 base64.workspace = true
-# Staged rollout: the same pick as MariaDB's CRC32 (R7 follow-ups).
+# Staged rollout: the same pick as MariaDB's CRC32.
 crc32fast.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -23,13 +23,13 @@ sha2.workspace = true
 sprig-binlog.workspace = true
 sprig-catalog.workspace = true
 sprig-common.workspace = true
-# After-commit triggers read the change feed (chapter 38).
+# After-commit triggers read the change feed.
 sprig-feed.workspace = true
 sprig-logic-compile = { path = "../sprig-logic-compile" }
 # `SELECT f(constants)` of engine-tier functions: the calls are found in
-# the client's text (R7 order 6).
+# the client's text.
 sqlparser.workspace = true
-# The fallback tier (R7 order 4): the native KIRun runtime.
+# The fallback tier: the native KIRun runtime.
 sprig-logic-js.workspace = true
 sprig-meta.workspace = true
 sprig-settings.workspace = true

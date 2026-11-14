@@ -1,5 +1,4 @@
-//! One-packet guarded batches (chapter 40, "Guarded batches"; R6 round 3,
-//! decision R23).
+//! One-packet guarded batches.
 //!
 //! The hottest write commands run as one compound statement
 //! (`BEGIN NOT ATOMIC ... END`): one round trip to MariaDB that starts a
@@ -344,7 +343,7 @@ fn prologue(ns: &Namespace, key: &[u8], sv: bool) -> String {
     let keys = ns.keys();
     let k = lit(key);
     // `_sprig_dk` names the key's shard on a sharded database: the gateway
-    // routes the whole compound statement by it (R6 round 4).
+    // routes the whole compound statement by it.
     let dk = lit(ns.dist_key(key));
     format!(
         "START TRANSACTION; \
@@ -421,7 +420,7 @@ impl Plan {
         let mut s = String::with_capacity(1024);
         // An error rolls the transaction back inside the statement, so no
         // connection is left with it open (the shard's connection may not
-        // be the session's own, R6 round 4); RESIGNAL keeps the error.
+        // be the session's own); RESIGNAL keeps the error.
         s.push_str(
             "BEGIN NOT ATOMIC DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN ROLLBACK; RESIGNAL; END; ",
         );

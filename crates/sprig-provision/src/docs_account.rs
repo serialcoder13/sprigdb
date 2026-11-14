@@ -15,8 +15,7 @@
 //! **Creating it** ([`account_sql`]): the controller's docs loader, as
 //! `sprig_ctl`, once per cluster after it starts and before it loads a
 //! pack. `sprig_ctl` needs `CREATE USER` (which it has) and `GRANT OPTION`
-//! on `__sprig_docs` (`GRANT ALL PRIVILEGES ON `__sprig_docs`.* TO
-//! 'sprig_ctl'@'%' WITH GRANT OPTION`).
+//! on `__sprig_docs` ([`CTL_GRANT`]).
 
 use sprig_cluster::sql::literal;
 use sprig_common::Result;
@@ -126,7 +125,11 @@ mod tests {
     fn the_statements_grant_only_select_on_the_docs() {
         let sql = account_sql("p'w");
         assert_eq!(sql.len(), 3);
-        assert!(sql[0].contains("IDENTIFIED BY 'p''w' REQUIRE SSL"), "{}", sql[0]);
+        assert!(
+            sql[0].contains("IDENTIFIED BY 'p''w' REQUIRE SSL"),
+            "{}",
+            sql[0]
+        );
         assert_eq!(
             sql[2],
             "GRANT SELECT ON `__sprig_docs`.* TO 'sprig_docs_r'@'%'"

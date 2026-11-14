@@ -1,4 +1,4 @@
-//! The cluster record (chapter 09, "Cluster record"), stored at
+//! The cluster record, stored at
 //! `/sprig/dc/<dc_id>/clusters/<cluster_id>`.
 
 use std::collections::BTreeMap;
@@ -45,7 +45,7 @@ impl fmt::Display for TopologyKind {
     }
 }
 
-/// Who created the nodes (chapter 27).
+/// Who created the nodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProvisionerKind {
@@ -57,7 +57,7 @@ pub enum ProvisionerKind {
     Vm,
 }
 
-/// The registration state machine (chapter 09, "State machines").
+/// The registration state machine.
 ///
 /// ```text
 ///  register ─► probing ─gates pass─► active ─drain─► draining ─empty─► drained ─► retired
@@ -166,7 +166,7 @@ pub struct WriterWeight {
     pub weight: f64,
 }
 
-/// The Galera writer set (chapter 09, "Galera writer choice").
+/// The Galera writer set.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GaleraWriters {
     /// Raised on every change of the set.
@@ -233,7 +233,7 @@ pub struct HealthSummary {
     pub since: String,
 }
 
-/// Server tuning state (chapter 09, "Server tuning"; step 10).
+/// Server tuning state.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TuningState {
     /// Variables applied, by name.
@@ -246,9 +246,8 @@ pub struct TuningState {
 
 /// The cluster record.
 ///
-/// `cluster_id` is the textual id of chapter 03 (`<dc>-c<number>`); the
-/// number is allocated globally and is what chapter 09's JSON calls
-/// `cluster_id`.
+/// `cluster_id` is the textual id (`<dc>-c<number>`); the number is
+/// allocated globally and is what the record's JSON calls `cluster_id`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClusterRecord {
     /// The id, such as `mum1-c7`.
@@ -296,7 +295,7 @@ pub struct ClusterRecord {
     /// Each node's identity (`<hostname>#<server_id>`), pinned by the first probe that reached
     /// it at its recorded address; a probe that finds another server there
     /// refuses the node ([`crate::probe::check_identity`]). Changing a
-    /// node's address forgets its pin (r2opfix).
+    /// node's address forgets its pin.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub node_identities: BTreeMap<NodeId, String>,
 }

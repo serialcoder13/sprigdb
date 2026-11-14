@@ -1,5 +1,4 @@
-//! The feed handoff under simulation (chapter 10's invariant 8; chapter 38
-//! build step 10).
+//! The feed handoff under simulation (the mover's invariant 8).
 //!
 //! The real tenant feed ([`sprig_feed::TenantTail`]) reads the two
 //! clusters' binlog models while the real mover moves the tenant. The
@@ -112,7 +111,7 @@ struct SimTxns {
     drop: f64,
     src: bool,
     next: u64,
-    /// A cluster-wide dump's scope (the shared reader's, R9 r9feed).
+    /// A cluster-wide dump's scope (the shared reader's).
     scope: Option<Arc<DumpScope>>,
 }
 

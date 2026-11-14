@@ -1,5 +1,4 @@
-//! Bolt framing, handshake and messages (chapter 43, "Bolt front end";
-//! build step 17).
+//! Bolt framing, handshake and messages.
 //!
 //! - **Handshake.** The client sends the magic `60 60 B0 17` and four
 //!   4-byte proposals `00 range minor major`; each covers `major.minor`
@@ -55,9 +54,9 @@ impl std::fmt::Display for BoltVersion {
     }
 }
 
-/// The versions this build speaks, highest first: 5.0 to 5.8 (5.5 to 5.8
-/// since R8 round 8: GQL status objects in summaries from 5.5, GQL errors
-/// from 5.7, the database echoed on `RUN` from 5.8).
+/// The versions this build speaks, highest first: 5.0 to 5.8 (GQL status
+/// objects in summaries from 5.5, GQL errors from 5.7, the database
+/// echoed on `RUN` from 5.8).
 pub const SUPPORTED: [BoltVersion; 9] = [
     BoltVersion::new(5, 8),
     BoltVersion::new(5, 7),
@@ -456,7 +455,7 @@ mod tests {
         // Java driver 5.x: 5.4..5.0 as one range, then 4.4..4.2.
         let p = [[0, 4, 4, 5], [0, 2, 4, 4], [0, 0, 0, 0], [0, 0, 0, 0]];
         assert_eq!(negotiate(&p, ours), Some(BoltVersion::new(5, 4)));
-        // A newer client: 5.8 down to 5.0 (R8 round 8: 5.8 itself).
+        // A newer client: 5.8 down to 5.0 (5.8 itself).
         let p = [[0, 8, 8, 5], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
         assert_eq!(negotiate(&p, ours), Some(BoltVersion::new(5, 8)));
         // Only 5.8..5.6: 5.8.

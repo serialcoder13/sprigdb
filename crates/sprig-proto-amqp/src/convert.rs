@@ -1,5 +1,5 @@
-//! Messages in and out of both protocols, and conversion between them
-//! (chapter 50, "Message encoding"), following RabbitMQ 4's documented
+//! Messages in and out of both protocols, and conversion between them,
+//! following RabbitMQ 4's documented
 //! mapping (rabbitmq.com/docs/conversions).
 //!
 //! A message keeps the encoding it was published in. Conversion happens

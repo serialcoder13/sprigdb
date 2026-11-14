@@ -83,7 +83,17 @@ impl RoleCommand {
 /// `sprigdb docs-settings`: the settings registry as this binary links it.
 fn docs_settings() -> ExitCode {
     let docs = match sprig_settings::Registry::global() {
-        Ok(reg) => sprig_docs::reference::settings_from_registry(reg),
+        Ok(reg) => {
+            let mut docs = sprig_docs::reference::settings_from_registry(reg);
+            // When a change applies, as every listing names it: `restart`
+            // for a key read only at start, whatever its declaration says.
+            for d in &mut docs {
+                if let Some(def) = reg.get(&d.key) {
+                    d.apply = sprig_settings::registry::apply_name(def).replace('_', " ");
+                }
+            }
+            docs
+        }
         Err(e) => {
             eprintln!("sprigdb docs-settings: {e}");
             return ExitCode::FAILURE;

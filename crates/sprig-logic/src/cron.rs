@@ -1,4 +1,4 @@
-//! Cron schedules (chapter 41, "Scheduled jobs").
+//! Cron schedules for scheduled jobs.
 //!
 //! Five fields, `minute hour day-of-month month day-of-week`, each `*`, a
 //! number, a range `a-b`, a list `a,b`, or a step `*/n`, `a-b/n`; months

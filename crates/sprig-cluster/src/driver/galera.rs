@@ -1,5 +1,4 @@
-//! The Galera driver and the writer choice (chapter 09, "Galera writer
-//! choice"; build step 6).
+//! The Galera driver and the writer choice.
 //!
 //! One writer node per shard avoids certification conflicts. The
 //! controller publishes the writer set and `writer_epoch`
@@ -377,7 +376,7 @@ impl TopologyDriver for GaleraDriver {
     }
 
     fn failover(&self) -> Option<&dyn FailoverHooks> {
-        // Chapter 25, build step 13.
+        // Failover runs as plain functions in `crate::failover`.
         None
     }
 }

@@ -1,6 +1,6 @@
-//! The writer lease and the agent's registration (chapter 25, "Primary +
-//! replicas, driven by SprigDB" step 7; chapter 23's DC-tier keys
-//! `leases/writer/<cluster_id>` and `agents/<id>`), shared by the agent
+//! The writer lease and the agent's registration (step 7 of the primary +
+//! replicas failover; the DC-tier keys `leases/writer/<cluster_id>` and
+//! `agents/<id>`), shared by the agent
 //! that holds them and the controller's `cluster_failover` loop that reads
 //! them.
 //!

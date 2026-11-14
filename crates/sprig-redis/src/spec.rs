@@ -1,4 +1,4 @@
-//! The command table (chapter 40, "Command coverage"): arity, flags and
+//! The command table: arity, flags and
 //! key positions, as Redis 7.2's `COMMAND INFO` gives them.
 
 use std::collections::HashMap;

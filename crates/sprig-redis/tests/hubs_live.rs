@@ -1,5 +1,4 @@
-//! Pub/sub and blocked-client wake-ups across two gateways (chapter 40,
-//! "Pub/sub and keyspace notifications", "Blocking commands"): the hubs
+//! Pub/sub and blocked-client wake-ups across two gateways: the hubs
 //! over the peer service.
 //!
 //! - `SPRIG_TEST_REDIS_SPRIG`, `SPRIG_TEST_REDIS_SPRIG_B`: the same

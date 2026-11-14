@@ -1,13 +1,11 @@
-//! Placement (chapter 41, "Placement"; build step 9 in part): the tier a
-//! version runs in, and why.
+//! Placement: the tier a version runs in, and why.
 //!
-//! As built: steps 1 to 3 (language, effects, bounds and cost) come from
-//! the compiler's analysis. Step 4, locality, is answered only for groups
-//! that are always one shard (every tenant until R1's sharding): the route
-//! is the whole group. Code with data access in a sharded group goes to
-//! the engine tier with `db.unrouted`. Steps 5 to 7 (gateway-only writes,
-//! kinds other than functions, cluster capabilities) have nothing to
-//! check yet.
+//! As built: language, effects, bounds and cost come from the compiler's
+//! analysis. Locality is answered only for groups that are always one
+//! shard (every unsharded tenant): the route is the whole group. Code
+//! with data access in a sharded group goes to the engine tier with
+//! `db.unrouted`. Gateway-only writes, kinds other than functions and
+//! cluster capabilities have nothing to check yet.
 
 use serde::Serialize;
 use sprig_common::{Result, SprigCode, SprigError};
@@ -113,8 +111,7 @@ pub fn place(c: &Compiled, pref: TierPref, single_shard: bool) -> Result<Placeme
     })
 }
 
-/// `EXPLAIN FUNCTION | PROCEDURE [db.]name [FORMAT = SQL]` (chapter 41,
-/// "Placement"): the stored versions' placements.
+/// `EXPLAIN FUNCTION | PROCEDURE [db.]name [FORMAT = SQL]`: the stored versions' placements.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExplainFunction {
     /// `function` or `procedure`.

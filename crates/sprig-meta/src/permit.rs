@@ -1,5 +1,4 @@
-//! Permits: the DC lease's sub-leases (chapter 25, "DC leases, sub-leases
-//! and self-fencing", steps 3-9).
+//! Permits: the DC lease's sub-leases, and self-fencing.
 //!
 //! Every gateway, agent and worker of a DC holds a [`PermitHolder`] and
 //! renews it every second from its DC's controllers (`Permits.Renew`). A
@@ -49,8 +48,8 @@ pub struct Permit {
     /// The DC is fenced: no permit.
     pub fenced: bool,
     /// New client connections each gateway may admit per second while the
-    /// DC returns from an outage; 0 means no limit (chapter 25, "Traffic
-    /// returns in steps").
+    /// DC returns from an outage, so traffic returns in steps; 0 means no
+    /// limit.
     #[serde(default)]
     pub admit_per_second: u32,
 }
@@ -338,8 +337,7 @@ impl Drop for Watchdog {
 
 /// A gateway's admission of new connections while its DC returns: a token
 /// bucket refilled at the permit's `admit_per_second` (0: no limit);
-/// refused clients get 39531 with a retry delay of 1-5 s, fully jittered
-/// (chapter 25, "Traffic returns in steps").
+/// refused clients get 39531 with a retry delay of 1-5 s, fully jittered.
 #[derive(Debug, Clone)]
 pub struct Admission {
     tokens: f64,

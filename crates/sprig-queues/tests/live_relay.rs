@@ -1,5 +1,5 @@
-//! Live tests through two gateways of one DC (chapter 50, "The queue
-//! owner": the `QueuePeer` relay on 7403), messages in MariaDB.
+//! Live tests through two gateways of one DC (the queue owner's
+//! `QueuePeer` relay on 7403), messages in MariaDB.
 //!
 //! ```text
 //! SPRIG_AMQP_ADDR=127.0.0.1:43672 SPRIG_AMQP_ADDR2=127.0.0.1:43682 \

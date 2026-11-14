@@ -1,8 +1,7 @@
-//! After-commit triggers (chapter 41, "After-commit triggers"; R7 order
-//! 5), and the gateway's mapping of validation `CHECK` failures.
+//! After-commit triggers, and the gateway's mapping of validation `CHECK` failures.
 //!
-//! Each binding owns a feed subscription (`logic:b<binding>`, chapter 38)
-//! and one long-running worker job (`logic_trigger`, chapter 23) that
+//! Each binding owns a feed subscription (`logic:b<binding>`)
+//! and one long-running worker job (`logic_trigger`) that
 //! reads the tenant's feed from the subscription's checkpoint:
 //!
 //! ```text
@@ -28,7 +27,7 @@
 //! **Exactly once.** The marker commits with the procedure's writes, so a
 //! re-delivered event (a worker died before acknowledging it; a resume
 //! token from before a move) finds the marker and does nothing. The feed
-//! itself loses and duplicates nothing across moves (chapter 38), and the
+//! itself loses and duplicates nothing across moves, and the
 //! mover copies `__sprig_ldone` with the shard, so the marker follows
 //! the row. Events whose first attempt fails and that later go to dead
 //! letters have no marker; a replay runs them once.
@@ -248,8 +247,7 @@ pub struct TriggerEvent {
     /// Resume after this event.
     pub token: Option<ResumeToken>,
     /// The feed's event it came from (its images as the feed has them),
-    /// for the row-level security check of a bound definer (chapter 29,
-    /// RLS round 5, RL50); `None` for a dead letter's.
+    /// for the row-level security check of a bound definer; `None` for a dead letter's.
     pub feed: Option<Arc<ChangeEvent>>,
 }
 
@@ -302,7 +300,7 @@ impl TriggerEvent {
     }
 
     /// The event as a definer whose row policies changed its row's
-    /// visibility sees it (chapter 29, RL50): an update whose row became
+    /// visibility sees it: an update whose row became
     /// visible as an insert (`op` "insert", no before image), one whose
     /// row became hidden as a delete ("delete", no after image).
     #[must_use]
@@ -470,8 +468,8 @@ pub enum Applied {
     Ran(u64),
     /// The marker was there: an earlier delivery ran it.
     AlreadyDone,
-    /// Row-level security hides the event's row from the binding's definer
-    /// (chapter 29, RL50): passed over, nothing run.
+    /// Row-level security hides the event's row from the binding's definer:
+    /// passed over, nothing run.
     Hidden,
 }
 
@@ -527,7 +525,7 @@ impl Feed for TenantTail {
     }
 }
 
-/// The runner's settings (chapter 41's `logic.trigger_*`).
+/// The runner's settings (`logic.trigger_*`).
 #[derive(Debug, Clone)]
 pub struct RunOpts {
     /// `logic.trigger_lanes`.
@@ -592,7 +590,7 @@ pub struct Stats {
     pub ran: AtomicU64,
     /// Deliveries a marker stopped.
     pub already: AtomicU64,
-    /// Events passed over: their rows are hidden from the definer (RL50).
+    /// Events passed over: their rows are hidden from the definer.
     pub hidden: AtomicU64,
     /// Failed attempts.
     pub retries: AtomicU64,

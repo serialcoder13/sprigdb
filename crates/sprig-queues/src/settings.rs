@@ -1,4 +1,4 @@
-//! The engine's settings (chapter 50, "Configuration"), registered here,
+//! The engine's settings, registered here,
 //! and [`QueueSettings`], the values one vhost runs with.
 
 use std::borrow::Cow;
@@ -92,7 +92,7 @@ key!(
 
 key!(
     /// `queue.forwarder`: who forwards transactional publishes from the
-    /// queue outbox (R9, r9fwd). `feed`: the tenant's feed-driven
+    /// queue outbox. `feed`: the tenant's feed-driven
     /// forwarder (a worker job), in commit order; the gateways' polling
     /// forwarder takes only rows older than `queue.forward_fallback_ms`.
     /// `poll`: the gateways' polling forwarder at once, in insert order.
@@ -112,8 +112,7 @@ key!(
     /// `queue.change_exchange`: publish the object's committed changes to
     /// this exchange of the object's database (vhost), as the user who set
     /// it, filtered per change by that user's privileges and row-level
-    /// security (chapter 50, "Change feed to an exchange"; chapter 29,
-    /// RL52). Empty: none.
+    /// security. Empty: none.
     CHANGE_EXCHANGE: Text = "queue.change_exchange", Cow::Borrowed(""), Scopes(0b00_0001),
     HardBounds::NONE, "Publish the object's changes to this exchange"
 );

@@ -278,7 +278,8 @@ impl MariaDocs {
 
 fn db_err(what: &str, e: mysql_async::Error) -> SprigError {
     // 1044, 1142: sprig_ctl has no grant on __sprig_docs.
-    let denied = matches!(&e, mysql_async::Error::Server(s) if matches!(s.code, 1044 | 1142 | 1227));
+    let denied =
+        matches!(&e, mysql_async::Error::Server(s) if matches!(s.code, 1044 | 1142 | 1227));
     if denied {
         return SprigError::new(
             SprigCode::ClusterPrecheckFailed,

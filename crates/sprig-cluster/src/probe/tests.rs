@@ -100,7 +100,7 @@ fn mariadb_12_3() {
     // 12.3 has binlog_storage_engine, empty: the binlog is in files.
     assert_eq!(f.binlog.storage_engine, None);
     assert!(f.binlog.in_files());
-    // Semi-sync variables keep their names on 12.3 (open question 1).
+    // Semi-sync variables keep their names on 12.3.
     assert!(f.semi_sync.master_enabled && f.semi_sync.master_active);
     assert_eq!(f.semi_sync.wait_point, Some(WaitPoint::AfterCommit));
     // Galera is off: no wsrep facts even though wsrep_* status rows exist.
@@ -173,7 +173,7 @@ fn fixtures_hold_no_password_hashes() {
     }
 }
 
-/// r2opfix: a probe that reaches another server than the pinned one is
+/// A probe that reaches another server than the pinned one is
 /// refused (the node becomes `broken`); a node without a pin gets one.
 #[test]
 fn identity_is_pinned_and_checked() {

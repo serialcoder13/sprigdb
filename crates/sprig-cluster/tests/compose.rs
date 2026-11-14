@@ -353,7 +353,7 @@ async fn capture_fixtures() {
     }
 }
 
-/// Chapter 09's XA flag on the real topologies, the way the controller's
+/// The profile's XA flag on the real topologies, the way the controller's
 /// registry loop publishes it: a deep pass finds XA, the publisher holds
 /// the upgrade, and light passes (no active probes) must keep proposing
 /// it until the sustain period ends. Single node and primary + replicas

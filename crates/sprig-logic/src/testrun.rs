@@ -1,5 +1,4 @@
-//! `Logic.TestRun` (chapter 41, "Test runs"; chapter 44's logic editors;
-//! R7 follow-ups): runs a function, procedure or trigger body against
+//! `Logic.TestRun`, as the studio's logic editors call it: runs a function, procedure or trigger body against
 //! given inputs, in a sandbox that never writes.
 //!
 //! ```text
@@ -667,7 +666,7 @@ pub fn js_row_sig(source: &str) -> sprig_logic_js::ScriptSig {
 /// - Triggers on streams and queues: as the trigger's job gives them
 ///   ([`crate::messages::args_for`]): `ctx` with `record` or `message`.
 /// - Validations and after-commit triggers written in KIRun: parameters
-///   bound by name (chapter 41, decision V2): a column gets `row`'s
+///   bound by name: a column gets `row`'s
 ///   value, `old_<column>` `old`'s, `op` the operation.
 /// - The same in Lua: one argument, `ctx`, with `trigger {op, before,
 ///   after}`, `row` and `old`.
@@ -966,7 +965,7 @@ impl Loaded {
     /// engine tier lacks.
     pub fn program(&self) -> Result<sprig_logic_js::Program> {
         // A JavaScript validation or after-commit trigger is compiled
-        // (jsbind): its recorded parameters are the columns it reads, but
+        // by name: its recorded parameters are the columns it reads, but
         // its code takes the row by name (`row`, `old`, `ctx`, ...).
         let sig = if self.runtime == "javascript"
             && matches!(self.kind.as_str(), "validation" | "trigger")
@@ -1232,7 +1231,7 @@ mod tests {
         let (args, _) = trigger_args(&req, "javascript", &[], &json!({}));
         assert_eq!(args.len(), 1);
         assert_eq!(args[0]["trigger"]["after"]["status"], "paid");
-        // JavaScript by name (jsbind): the book's (row, old), and a body.
+        // JavaScript by name: `(row, old)`, and a body.
         let names = |src: &str| -> Vec<String> {
             js_row_sig(src).params.into_iter().map(|(n, _)| n).collect()
         };

@@ -1,4 +1,4 @@
-//! Strings (chapter 40, "Strings").
+//! Strings.
 
 use bytes::Bytes;
 use sprig_kv::layout::{KeyType, live};

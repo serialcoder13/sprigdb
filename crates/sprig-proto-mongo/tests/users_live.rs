@@ -1,5 +1,4 @@
-//! MongoDB user and role commands (chapter 29, "MongoDB user and role
-//! commands (R5)") through the Rust driver: users made over MongoDB log in
+//! MongoDB user and role commands through the Rust driver: users made over MongoDB log in
 //! with SCRAM, and their roles decide what they may do.
 //!
 //! - `SPRIG_TEST_MONGO_URI`: the gateway, logged in as a tenant user who

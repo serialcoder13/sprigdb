@@ -1,28 +1,25 @@
 //! The boundary between the AMQP front ends and the queue engine
-//! (chapter 50's `sprig-queues`): [`QueueBackend`] and [`Vhost`].
+//! (`sprig-queues`): [`QueueBackend`] and [`Vhost`].
 //!
-//! The traits follow chapter 50's algorithms so the MariaDB-backed engine
+//! The traits follow the queue engine's algorithms so the MariaDB-backed engine
 //! (queue owners, writers, the outbox) plugs in without changing the front
 //! ends:
 //!
 //! - **Routing is synchronous** ([`Vhost::publish`]): the route cache is
 //!   in memory, so `mandatory` returns and per-channel ordering are
 //!   decided at the call, in publish order. The publisher confirm is a
-//!   future that resolves after the owner's commit (chapter 50,
-//!   "Publishing", steps 5–7), so a channel pipelines publishes and
+//!   future that resolves after the owner's commit, so a channel pipelines publishes and
 //!   confirms arrive as commits finish.
 //! - **Consumers are credit-based** ([`Vhost::credit`]): 0-9-1 prefetch
-//!   and AMQP 1.0 link credit are both credit at the owner (chapter 50,
-//!   "Dispatch, credit and consumers"). Deliveries come back as
+//!   and AMQP 1.0 link credit are both credit at the owner. Deliveries come back as
 //!   [`Event`]s on the connection's [`EventSender`].
 //! - **Settlements are batched and fire-and-forget** ([`Vhost::settle`]):
 //!   the owner applies them in its next write batch.
 //! - **Transactions** ([`Vhost::commit_tx`]): a 0-9-1 `tx.commit` hands
 //!   its buffered publishes and settlements over in one call, which the
-//!   engine makes one MariaDB transaction (chapter 50, "Publishing inside
-//!   a database transaction").
+//!   engine makes one MariaDB transaction.
 //!
-//! Permissions (chapter 50, "Security notes") are the engine's to check:
+//! Permissions are the engine's to check:
 //! it knows the catalog and the grants.
 
 use std::sync::Arc;
@@ -87,7 +84,7 @@ pub enum Event {
         delivery: Delivery,
     },
     /// The consumer ended on the engine's side: its queue was deleted, or
-    /// it timed out (chapter 50, "Cancel notifications").
+    /// it timed out.
     Cancelled {
         /// The consumer.
         consumer: ConsumerId,
@@ -254,7 +251,7 @@ impl DeadLetterReason {
     }
 }
 
-/// How a delivery ends (chapter 50, "Acknowledgements").
+/// How a delivery ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Settlement {
     /// `basic.ack`, 1.0 `accepted`: delete.

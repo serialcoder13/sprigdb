@@ -37,7 +37,7 @@ pub struct MemCatalog {
     next_id: Mutex<u64>,
     settings: Mutex<QueueSettings>,
     key: Arc<TokenKey>,
-    /// What [`MqCatalog::feed_forwarder_runs`] answers (bugfix-42).
+    /// What [`MqCatalog::feed_forwarder_runs`] answers.
     feed_runs: std::sync::atomic::AtomicBool,
 }
 
@@ -62,7 +62,7 @@ impl MemCatalog {
         }
     }
 
-    /// Says whether the feed-driven forwarder runs (bugfix-42).
+    /// Says whether the feed-driven forwarder runs.
     pub fn set_feed_forwarder_runs(&self, runs: bool) {
         self.feed_runs
             .store(runs, std::sync::atomic::Ordering::SeqCst);

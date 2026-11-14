@@ -1,5 +1,4 @@
-//! The health model, light-probe assessment and the heartbeat writer
-//! (chapter 09, "Health model"; build step 4).
+//! The health model, light-probe assessment and the heartbeat writer.
 //!
 //! Writers' heartbeats, read on replicas, measure lag without
 //! `Seconds_Behind_Master`. A prober that can't reach the writer reports
@@ -45,7 +44,7 @@ pub enum ClusterHealth {
     Healthy,
     /// A writer, but something is wrong: no new placements.
     Degraded,
-    /// Positively no writer: writes fail with 39100; chapter 25 decides.
+    /// Positively no writer: writes fail with 39100; failover decides.
     NoWriter,
     /// No probe of the writer succeeds from this controller: nothing
     /// automatic acts.
@@ -194,8 +193,7 @@ fn role(facts: &NodeFacts) -> ObservedRole {
     }
 }
 
-/// The reason a Galera node whose cluster state UUID is all zeros carries
-/// (decision HD1).
+/// The reason a Galera node whose cluster state UUID is all zeros carries.
 pub const LOST_IDENTITY: &str = "Galera cluster has lost its state UUID \
      (wsrep_cluster_state_uuid is all zeros): a node that leaves can't rejoin; \
      see RUNBOOK.md, \"Galera: a node that can't rejoin\"";
@@ -324,7 +322,7 @@ pub fn assess_cluster(
         return (ClusterHealth::Unknown, Vec::new());
     }
     // A Galera cluster that lost its state UUID still writes, but is
-    // degraded: no node can join it until it is bootstrapped again (HD1).
+    // degraded: no node can join it until it is bootstrapped again.
     let lost_identity = probes.iter().any(|p| {
         p.facts()
             .and_then(|f| f.galera.as_ref())
@@ -394,7 +392,7 @@ impl HeartbeatWriter {
     /// The write failed or timed out; the sequence number is not consumed.
     pub async fn beat(&mut self, session: &mut ProbeSession) -> Result<u64, ProbeError> {
         let seq = self.seq + 1;
-        // Only while the node is writable (r2opfix): sprig_ctl bypasses
+        // Only while the node is writable: sprig_ctl bypasses
         // read_only, and a beat sent to a writer that a provider just
         // demoted (from facts a probe read moments before) logged an errant
         // transaction there. A node that turned read-only writes nothing,

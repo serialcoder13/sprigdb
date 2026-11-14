@@ -1,5 +1,4 @@
-//! Model conformance against real MariaDB (chapter 46, "Model
-//! conformance tests"): every scenario of
+//! Model conformance against real MariaDB: every scenario of
 //! `sprig_testkit::sim::mariadb::conformance` runs on the model and on the
 //! Compose servers, and the observed outcomes must be equal.
 //!

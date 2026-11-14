@@ -1,4 +1,4 @@
-//! Lists (chapter 40, "Lists: positions"): items fill `[lh, lt)` without
+//! Lists: items fill `[lh, lt)` without
 //! gaps, so pushes and pops at either end are O(1) and never renumber.
 
 use bytes::Bytes;

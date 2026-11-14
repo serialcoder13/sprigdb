@@ -1,4 +1,4 @@
-//! Lua scripts and functions (chapter 40, "Lua scripting") on SprigDB's
+//! Lua scripts and functions on SprigDB's
 //! one Lua runtime, `sprig_logic_js::lua::Sandbox`.
 //!
 //! A run gets a fresh sandbox on a blocking thread, with Redis's options

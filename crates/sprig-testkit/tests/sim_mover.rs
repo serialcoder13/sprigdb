@@ -1,5 +1,4 @@
-//! The mover under deterministic simulation (chapter 10, "Testing"; build
-//! step 9): a tenant moves under load while workers crash at every job
+//! The mover under deterministic simulation: a tenant moves under load while workers crash at every job
 //! state, etcd partitions, streams drop, target commits fail or lose their
 //! reply, fences fail or stall, binlogs are purged and clients run DDL;
 //! the seven invariants of `sprig_testkit::sim::mover` hold on every seed.
@@ -25,7 +24,7 @@ fn a_tenant_moves_under_load_and_faults() {
 
 /// An idle tenant (no client writes) moves, sometimes behind another
 /// job's copy slots, and an operator's cancel in any state before the
-/// commit rolls it back (the R0 fixes before the 72-hour soak).
+/// commit rolls it back.
 #[test]
 fn an_idle_tenant_moves_and_cancels_in_every_state() {
     Sim::new("mover-idle")
@@ -36,7 +35,7 @@ fn an_idle_tenant_moves_and_cancels_in_every_state() {
 
 /// An after-commit trigger runs on the tenant's feed while the tenant
 /// moves and the trigger's worker is killed at random: every client
-/// change runs exactly once (chapter 41, R7 order 5).
+/// change runs exactly once.
 #[test]
 fn a_trigger_runs_each_change_once_across_moves_and_worker_kills() {
     Sim::new("mover-triggers")
@@ -49,7 +48,7 @@ fn a_trigger_runs_each_change_once_across_moves_and_worker_kills() {
 /// moves; sequencers are killed, overlapped by a second one (a lost
 /// lease) and lose append answers at random: each partition's log holds
 /// every change of the table once, in commit order, at offsets without
-/// gaps (chapter 45, R9).
+/// gaps.
 #[test]
 fn a_stream_sequencer_keeps_every_change_once_in_order_across_moves() {
     Sim::new("mover-streams")
@@ -59,7 +58,7 @@ fn a_stream_sequencer_keeps_every_change_once_in_order_across_moves() {
 }
 
 /// The same, with the sequencer reading through the shared per-cluster
-/// reader (R9, r9feed): its subscription is detached when its tiny buffer
+/// reader: its subscription is detached when its tiny buffer
 /// fills, comes back through the ring or a catch-up dump, and follows the
 /// move to the target's hub. Nothing lost, duplicated or reordered.
 #[test]
@@ -73,7 +72,7 @@ fn a_stream_sequencer_on_the_shared_reader_keeps_every_change_once_in_order() {
 /// A coordinator prepares distributed-transaction branches on the source
 /// while the tenant moves; some coordinators crash (branches in doubt) or
 /// stall (a live connection owns the branch). The cutover finishes them
-/// through the resolver before and after the fence (chapter 10, steps 2b
+/// through the resolver before and after the fence (cutover steps 2b
 /// and 3b); a drain that runs out of time aborts the attempt, which is
 /// retried. Under both the rename fence and a kill fence, nothing is lost
 /// or committed on the source after `G`.

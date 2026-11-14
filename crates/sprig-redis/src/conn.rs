@@ -1,4 +1,4 @@
-//! The connection loop (chapter 40, "Pipelining"): decode every command
+//! The connection loop, pipelined: decode every command
 //! the client sent, answer them in order, flush once per batch, and
 //! deliver pub/sub messages between batches.
 //!

@@ -86,7 +86,7 @@ impl SimClock {
         self.skew().wall_offset_ms = ms;
     }
 
-    /// Sets the rate error in parts per million (chapter 25: lease
+    /// Sets the rate error in parts per million (to test lease
     /// arithmetic under rate skew).
     pub fn set_rate_ppm(&self, ppm: i64) {
         let now = self.true_elapsed();

@@ -103,10 +103,37 @@ fn unsupported(m: impl Into<String>) -> SprigError {
 
 /// Keywords that can follow a table reference and aren't its alias.
 const NOT_ALIAS: &[&str] = &[
-    "WHERE", "JOIN", "LEFT", "RIGHT", "INNER", "CROSS", "ON", "GROUP", "ORDER", "LIMIT", "UNION",
-    "HAVING", "NATURAL", "STRAIGHT_JOIN", "USING", "WINDOW", "FOR", "LOCK", "INTO", "EXCEPT",
-    "INTERSECT", "PROCEDURE", "FULL", "OUTER", "OFFSET", "FETCH", "USE", "IGNORE", "FORCE",
-    "PARTITION", "RETURNING",
+    "WHERE",
+    "JOIN",
+    "LEFT",
+    "RIGHT",
+    "INNER",
+    "CROSS",
+    "ON",
+    "GROUP",
+    "ORDER",
+    "LIMIT",
+    "UNION",
+    "HAVING",
+    "NATURAL",
+    "STRAIGHT_JOIN",
+    "USING",
+    "WINDOW",
+    "FOR",
+    "LOCK",
+    "INTO",
+    "EXCEPT",
+    "INTERSECT",
+    "PROCEDURE",
+    "FULL",
+    "OUTER",
+    "OFFSET",
+    "FETCH",
+    "USE",
+    "IGNORE",
+    "FORCE",
+    "PARTITION",
+    "RETURNING",
 ];
 
 /// Looks at a statement: `None` when it doesn't name `sprig_docs` (it goes
@@ -157,12 +184,17 @@ pub fn analyze(text: &[u8], opts: &LexOptions) -> Option<Result<Analysis, Refusa
             "sprig_docs can't be the current database: name its table, sprig_docs.chunks",
         ))));
     }
-    let next = sig.get(fi + 1).and_then(|t| word(t)).map(|w| w.to_ascii_uppercase());
+    let next = sig
+        .get(fi + 1)
+        .and_then(|t| word(t))
+        .map(|w| w.to_ascii_uppercase());
     let kind = match first.as_str() {
         "SELECT" | "WITH" | "VALUES" => Kind::Read,
         "EXPLAIN" | "DESCRIBE" | "DESC"
-            if matches!(next.as_deref(), Some("SELECT" | "WITH" | "FORMAT" | "EXTENDED" | "PARTITIONS"))
-                || punct(sig.get(fi + 1), b"(") =>
+            if matches!(
+                next.as_deref(),
+                Some("SELECT" | "WITH" | "FORMAT" | "EXTENDED" | "PARTITIONS")
+            ) || punct(sig.get(fi + 1), b"(") =>
         {
             Kind::Read
         }
@@ -186,9 +218,10 @@ pub fn analyze(text: &[u8], opts: &LexOptions) -> Option<Result<Analysis, Refusa
         return Some(Err(Refusal::Write));
     }
     // System names can't be reached through the docs either.
-    if let Some(t) = sig.iter().find(|t| {
-        word(t).is_some_and(|w| sprig_common::names::is_internal_object(&w))
-    }) {
+    if let Some(t) = sig
+        .iter()
+        .find(|t| word(t).is_some_and(|w| sprig_common::names::is_internal_object(&w)))
+    {
         let name = word(t).unwrap_or_default();
         return Some(Err(Refusal::Error(SprigError::new(
             SprigCode::ReservedName,
@@ -210,8 +243,7 @@ pub fn analyze(text: &[u8], opts: &LexOptions) -> Option<Result<Analysis, Refusa
                 edits.push(Edit::Qualifier(start..end));
             } else {
                 let aliased = sig.get(i + 3).is_some_and(|t| {
-                    is(t, "AS")
-                        || (t.kind.is_ident_like() && !NOT_ALIAS.iter().any(|w| is(t, w)))
+                    is(t, "AS") || (t.kind.is_ident_like() && !NOT_ALIAS.iter().any(|w| is(t, w)))
                 });
                 edits.push(Edit::Chunks {
                     range: start..end,
@@ -277,7 +309,10 @@ pub fn render(text: &[u8], analysis: &Analysis, version: &str, embeds: &[Vec<f32
             }
             (Edit::Qualifier(_), _) => out.push_str("`chunks`"),
             (Edit::Embed(..), _) => {
-                let v = embeds.next().map(|v| table::vector_text(v)).unwrap_or_default();
+                let v = embeds
+                    .next()
+                    .map(|v| table::vector_text(v))
+                    .unwrap_or_default();
                 out.push_str(&format!("VEC_FromText('{v}')"));
             }
         }
@@ -304,7 +339,13 @@ pub fn embed_texts(analysis: &Analysis) -> Vec<&str> {
 /// it: system names in their logical form, the reader account's refusals
 /// of other schemas explained.
 #[must_use]
-pub fn client_error(code: u16, state: [u8; 5], message: &str, user: &str, host: &str) -> SprigError {
+pub fn client_error(
+    code: u16,
+    state: [u8; 5],
+    message: &str,
+    user: &str,
+    host: &str,
+) -> SprigError {
     if matches!(code, 1142 | 1143 | 1044 | 1045 | 1227) {
         return SprigError::standard(
             1142,
@@ -349,7 +390,9 @@ mod tests {
     #[test]
     fn reads_become_the_current_release() {
         assert_eq!(
-            run("SELECT page FROM sprig_docs.chunks WHERE MATCH(text) AGAINST ('replica lag') LIMIT 5"),
+            run(
+                "SELECT page FROM sprig_docs.chunks WHERE MATCH(text) AGAINST ('replica lag') LIMIT 5"
+            ),
             "SET STATEMENT max_statement_time = 30 FOR SELECT page FROM (SELECT * FROM \
              `__sprig_docs`.`chunks` WHERE version = '0.9.0') AS `chunks` WHERE MATCH(text) \
              AGAINST ('replica lag') LIMIT 5"
@@ -366,20 +409,24 @@ mod tests {
         // WITH and parentheses.
         assert!(matches!(
             a("WITH x AS (SELECT * FROM sprig_docs.chunks) SELECT * FROM x"),
-            Some(Ok(Analysis { kind: Kind::Read, .. }))
+            Some(Ok(Analysis {
+                kind: Kind::Read,
+                ..
+            }))
         ));
         assert!(matches!(
             a("(SELECT page FROM sprig_docs.chunks) UNION (SELECT 'x')"),
-            Some(Ok(Analysis { kind: Kind::Read, .. }))
+            Some(Ok(Analysis {
+                kind: Kind::Read,
+                ..
+            }))
         ));
     }
 
     #[test]
     fn embed_becomes_a_vector() {
-        let s = run(
-            "SELECT page FROM sprig_docs.chunks ORDER BY \
-             VEC_DISTANCE_COSINE(embedding, sprig_docs.embed('why is it slow')) LIMIT 5",
-        );
+        let s = run("SELECT page FROM sprig_docs.chunks ORDER BY \
+             VEC_DISTANCE_COSINE(embedding, sprig_docs.embed('why is it slow')) LIMIT 5");
         assert!(
             s.contains("VEC_DISTANCE_COSINE(embedding, VEC_FromText('[0.5,-1.0]')) LIMIT 5"),
             "{s}"
@@ -427,7 +474,10 @@ mod tests {
             Some(Err(Refusal::Write | Refusal::Error(_))) | None
         ));
         let e = write_denied("app", "%");
-        assert_eq!(e.message, "Access denied for user 'app'@'%' to database 'sprig_docs'");
+        assert_eq!(
+            e.message,
+            "Access denied for user 'app'@'%' to database 'sprig_docs'"
+        );
     }
 
     #[test]
@@ -448,7 +498,13 @@ mod tests {
 
     #[test]
     fn backend_errors_are_shown_logically() {
-        let e = client_error(1142, *b"42000", "SELECT command denied to user 'sprig_docs_r'", "app", "%");
+        let e = client_error(
+            1142,
+            *b"42000",
+            "SELECT command denied to user 'sprig_docs_r'",
+            "app",
+            "%",
+        );
         assert!(e.message.contains("can only read sprig_docs.chunks"), "{e}");
         let e = client_error(
             1054,

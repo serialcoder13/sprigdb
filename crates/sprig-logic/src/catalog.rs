@@ -1,4 +1,4 @@
-//! The logic catalog (chapter 41, "Catalog tables"; build step 2): the
+//! The logic catalog: the
 //! `logic` migration module's five tables in `t<tenant>_sprig`, and
 //! [`LogicStore`], the reads and writes the deploy path and `sprigctl
 //! logic` use.
@@ -118,7 +118,7 @@ pub const DDL_DEAD_LETTERS: &str = "CREATE TABLE IF NOT EXISTS logic_dead_letter
   KEY by_state (state, last_failed_at)
 ) ENGINE=InnoDB";
 
-/// `logic_log` (R7 order 5, not in the book's five tables): what
+/// `logic_log` (beside the five main tables): what
 /// after-commit triggers and scheduled jobs did, for `sprigctl logic
 /// logs`, until the tenant log stream exists.
 pub const DDL_LOG: &str = "CREATE TABLE IF NOT EXISTS logic_log (
@@ -154,7 +154,7 @@ pub static LOGIC_MIGRATIONS: &[Migration] = &[
         name: "logic_log",
         statements: &[DDL_LOG],
     },
-    // R9 (r9triggers): triggers on streams and queues.
+    // Triggers on streams and queues.
     Migration {
         format: 3,
         phase: Phase::Expand,
@@ -164,7 +164,7 @@ pub static LOGIC_MIGRATIONS: &[Migration] = &[
             crate::messages::DDL_MESSAGE_SOURCES,
         ],
     },
-    // R9 (r9queue): fan-in triggers' declarers of any 64-bit id.
+    // Fan-in triggers' declarers of any 64-bit id.
     Migration {
         format: 4,
         phase: Phase::Expand,
@@ -175,7 +175,7 @@ pub static LOGIC_MIGRATIONS: &[Migration] = &[
             crate::messages::DML_SOURCES_FANIN_UNPACK,
         ],
     },
-    // R7 follow-ups: staged rollout and per-version numbers.
+    // Staged rollout and per-version numbers.
     Migration {
         format: 5,
         phase: Phase::Expand,
@@ -413,8 +413,8 @@ fn module_row(r: Row) -> Result<ModuleRow> {
     })
 }
 
-/// A function or procedure as a caller outside SQL finds it (chapter 37,
-/// "Logic functions as endpoints").
+/// A function or procedure as a caller outside SQL finds it (logic
+/// functions as endpoints).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Callable {
     /// The module.
@@ -1161,7 +1161,7 @@ impl LogicStore {
         ))
     }
 
-    /// The fire's compare-and-set (chapter 41, "Scheduled jobs"): only if
+    /// The fire's compare-and-set: only if
     /// the schedule is still due at `seen_next_ms` and no run is live,
     /// record `job` as the live run and move `next_fire_at` on. `false`
     /// when another fire (or a live run) got there first.
@@ -1437,8 +1437,8 @@ impl LogicStore {
 
     /// `sprigctl logic dead-letters replay`: marks dead letters of
     /// after-commit triggers and of triggers on streams and queues
-    /// `replaying` (their jobs run them, in order, with the active version;
-    /// RC11, R9), and counts those of other kinds, which stay `dead`.
+    /// `replaying` (their jobs run them, in order, with the active version),
+    /// and counts those of other kinds, which stay `dead`.
     /// Returns (queued, left dead).
     ///
     /// # Errors

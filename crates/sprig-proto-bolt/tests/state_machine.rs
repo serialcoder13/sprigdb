@@ -1,4 +1,4 @@
-//! Bolt state-machine tests (chapter 43, "Testing"): the server over an
+//! Bolt state-machine tests: the server over an
 //! in-memory service, driven by the crate's own client through a duplex
 //! pipe.
 
@@ -95,7 +95,7 @@ impl BoltSession for Sess {
             ));
         }
         if query == "PLAN" {
-            // Summary entries reach the final SUCCESS (R8 testkit run).
+            // Summary entries reach the final SUCCESS.
             return Ok(QueryResult {
                 fields: vec!["x".into()],
                 records: VecDeque::from([vec![PackValue::Int(7)]]),
@@ -431,7 +431,7 @@ async fn summary_entries_end_the_result() {
     assert_eq!(r.summary.get("type").and_then(PackValue::as_str), Some("r"));
 }
 
-/// R8 round 8: Bolt 5.5 to 5.8. A 5.8 client gets 5.8; summaries carry
+/// Bolt 5.5 to 5.8. A 5.8 client gets 5.8; summaries carry
 /// GQL status objects instead of notifications (a completion status first:
 /// `00000` with rows, `02000` without); failures name the Neo4j code as
 /// `neo4j_code`; `RUN` echoes the database. A 5.4 client sees none of it.

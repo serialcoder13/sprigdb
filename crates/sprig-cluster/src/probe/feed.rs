@@ -1,5 +1,4 @@
-//! The binlog settings the change feed and the mover need (chapter 09,
-//! "Binlog for the change feed"; chapter 38, "Binlog requirements").
+//! The binlog settings the change feed and the mover need.
 //!
 //! [`check`] reads only server variables. Whether a dump actually streams
 //! valid events is the binlog dump probe's job ([`super::dump`], kept in
@@ -14,11 +13,11 @@ use super::NodeProbe;
 use super::dump::DumpProbe;
 use super::parse::{BinlogFormat, NodeFacts, RowImage, RowMetadata};
 
-/// The default of `feed.retention_hours` (chapter 38, which owns the key):
+/// The default of `feed.retention_hours` (the change feed owns the key):
 /// how long binlogs should stay on the server.
 pub const DEFAULT_RETENTION_HOURS: u64 = 168;
 
-/// What the change feed can do with a node's binlog (chapter 38).
+/// What the change feed can do with a node's binlog.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
 )]
@@ -98,7 +97,7 @@ fn text<T: Serialize>(v: Option<T>) -> String {
 /// `binlog_expire_logs_seconds` is advisory, because older history comes
 /// from the archive.
 #[must_use]
-#[allow(clippy::too_many_lines)] // one block per requirement, like the chapter's table
+#[allow(clippy::too_many_lines)] // one block per requirement
 pub fn check(facts: &NodeFacts, retention_hours: u64) -> FeedCheck {
     let b = &facts.binlog;
     let applies_others = facts.is_replica() || facts.galera.is_some();

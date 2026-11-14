@@ -1,8 +1,7 @@
-//! `ALTER FUNCTION | PROCEDURE [db.]f ROLLBACK [TO VERSION n]` (chapter 41,
-//! "Versions, rollout and rollback"; R7 close-out).
+//! `ALTER FUNCTION | PROCEDURE [db.]f ROLLBACK [TO VERSION n]`.
 //!
-//! A rollback makes an earlier version the active one again, at once. As
-//! the chapter says, "older versions are recompiled and redeployed": the
+//! A rollback makes an earlier version the active one again, at once. Older
+//! versions are recompiled and redeployed: the
 //! version's own source is compiled again against today's tables, placed,
 //! and its routines (entry, wrapper, `SELECT` function) re-created under
 //! the same version number on every shard of the database, then that
@@ -32,8 +31,8 @@ pub struct Rollback {
     pub name: String,
     /// `TO VERSION n`.
     pub to: Option<u64>,
-    /// `ALTER ... ROLLOUT ...` instead of `ROLLBACK` (R7 follow-ups,
-    /// [`crate::rollout`]): the candidate's next stage, its promotion, or
+    /// `ALTER ... ROLLOUT ...` instead of `ROLLBACK`
+    /// ([`crate::rollout`]): the candidate's next stage, its promotion, or
     /// the end of the rollout.
     pub rollout: Option<RolloutOp>,
 }

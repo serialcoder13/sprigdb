@@ -1,11 +1,9 @@
-//! The messaging model of one virtual host and routing (chapter 50,
-//! "The model, mapped" and "Routing"; build steps 2 and 3).
+//! The messaging model of one virtual host and routing.
 //!
 //! A [`Topology`] is the durable part, read from the catalog snapshot
 //! (`mq_exchanges`, `mq_queues`, `mq_bindings`, `mq_policies`,
 //! `mq_permissions`). Temporary queues (exclusive, auto-delete and
-//! server-named) and their bindings are not in the catalog (the lead's
-//! choice, 9 November 2026): they are a [`TempSet`] kept by the gateway
+//! server-named) and their bindings are not in the catalog: they are a [`TempSet`] kept by the gateway
 //! that declared them and shared with the other gateways through etcd.
 //! Routing reads both, in memory, so `basic.publish` never waits.
 
@@ -122,7 +120,7 @@ pub enum QType {
     Classic,
     /// `quorum`.
     Quorum,
-    /// `stream` (chapter 45; not served by this engine yet).
+    /// `stream` (not served by this engine yet).
     Stream,
 }
 
@@ -375,7 +373,7 @@ impl<'a> View<'a> {
         self.topo.bindings.iter().chain(self.temp.bindings.iter())
     }
 
-    /// Routes a message (chapter 50, "Routing"): the queues reached, each
+    /// Routes a message: the queues reached, each
     /// once. `kind_override` routes `exchange` as another type (a delayed
     /// exchange when its message is due).
     #[must_use]
@@ -726,7 +724,7 @@ mod tests {
 }
 
 /// [`TempSet`] as other gateways read it (the temporary-queue registry,
-/// chapter 50's lead choice: not in the catalog): JSON, with arguments as
+/// not in the catalog): JSON, with arguments as
 /// base64 of AMQP table entries.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct TempWire {

@@ -466,7 +466,7 @@ A dry run: reads `n` records from the source, applies the filter, columns and tr
 
 ## FOR EACH TENANT
 
-A parent tenant can define messaging objects once for all its member (child) tenants. Each member gets its own **instance**, created on first use (or in advance with `inherit.instance_precreate = on`), holding only that member's data. See [Inheritance](inheritance.md) for the tenant tree.
+A parent tenant can define messaging objects once for all its member (child) tenants. Each member gets its own **instance**, created on first use, holding only that member's data. See [Inheritance](inheritance.md) for the tenant tree.
 
 ### Definitions
 

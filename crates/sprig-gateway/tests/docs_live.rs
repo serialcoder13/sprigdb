@@ -76,9 +76,7 @@ async fn post(addr: &str, auth: Option<&str>, path: &str, body: &Value) -> (u16,
     if let Some(a) = auth {
         req = req.header("authorization", a);
     }
-    let req = req
-        .body(Full::new(Bytes::from(body.to_string())))
-        .unwrap();
+    let req = req.body(Full::new(Bytes::from(body.to_string()))).unwrap();
     let (mut tx, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tcp))
         .await
         .unwrap();
@@ -152,7 +150,9 @@ async fn http_search_finds_the_docs() {
         assert!(h["text"].as_str().is_some_and(|t| !t.is_empty()));
         assert!(h["score"].as_f64().unwrap() > 0.0);
         assert!(h["bm25_rank"].is_number() || h["vector_rank"].is_number());
-        *per_page.entry(h["page"].as_str().unwrap().to_owned()).or_insert(0) += 1;
+        *per_page
+            .entry(h["page"].as_str().unwrap().to_owned())
+            .or_insert(0) += 1;
     }
     assert!(per_page.values().all(|n| *n <= 2), "{per_page:?}");
     if mode == "hybrid" {
@@ -170,7 +170,10 @@ async fn http_search_finds_the_docs() {
     assert_eq!(s, 200, "{v}");
     let top = &v["hits"][0];
     assert!(
-        top["text"].as_str().unwrap().contains("ER_SPRIG_CLUSTER_UNAVAILABLE")
+        top["text"]
+            .as_str()
+            .unwrap()
+            .contains("ER_SPRIG_CLUSTER_UNAVAILABLE")
             || top["text"].as_str().unwrap().contains("39100"),
         "{top}"
     );
@@ -263,7 +266,12 @@ async fn sql_reads_and_refuses_writes() {
         .await
         .unwrap();
     assert!(!rows.is_empty());
-    eprintln!("MATCH: {} rows, first {} > {}", rows.len(), rows[0].0, rows[0].1);
+    eprintln!(
+        "MATCH: {} rows, first {} > {}",
+        rows.len(),
+        rows[0].0,
+        rows[0].1
+    );
     let n: u64 = c
         .query_first("SELECT COUNT(*) FROM sprig_docs.chunks")
         .await

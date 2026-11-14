@@ -1,6 +1,5 @@
-//! A dropped database's logic (chapter 41, "Dropping a database";
-//! bugfix-34): `DROP DATABASE` takes every logic module of the database
-//! with it, as chapter 08 says it takes every object.
+//! A dropped database's logic: `DROP DATABASE` takes every logic module
+//! of the database with it, as it takes every other object.
 //!
 //! ```text
 //! each live module of the database (state <> 'dropped'):

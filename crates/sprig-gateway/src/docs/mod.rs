@@ -77,8 +77,12 @@ pub struct DocsService {
     tenants: Arc<TenantServices>,
     registry: ClusterRegistry,
     live: Option<(LiveSettings, DcId)>,
-    pools: Mutex<HashMap<ClusterId, (String, Pool)>>,
+    /// Reader pools by cluster: the writer and credential they were made
+    /// for, and when that was last checked.
+    pools: Mutex<HashMap<ClusterId, (String, Pool, Instant)>>,
     ready: Mutex<HashMap<ClusterId, (Instant, Vec<String>)>>,
+    /// The DC's clusters, by number, and when they were listed.
+    clusters: Mutex<Option<(Instant, Vec<ClusterId>)>>,
     /// The query embedding model.
     pub model: embed::Model,
     /// Searches are keyword-only for want of the model (for the event on
@@ -126,6 +130,7 @@ impl DocsService {
             live,
             pools: Mutex::new(HashMap::new()),
             ready: Mutex::new(HashMap::new()),
+            clusters: Mutex::new(None),
             model: embed::Model::default(),
             degraded: AtomicBool::new(false),
         })
@@ -188,8 +193,11 @@ impl DocsService {
         {
             Ok(v) => {
                 if self.degraded.swap(false, Ordering::Relaxed) {
-                    tracing::info!(event = "docs.search.degraded", degraded = false,
-                        "docs search embeds queries again");
+                    tracing::info!(
+                        event = "docs.search.degraded",
+                        degraded = false,
+                        "docs search embeds queries again"
+                    );
                 }
                 Some(v)
             }
@@ -204,21 +212,32 @@ impl DocsService {
         }
     }
 
-    /// The `sprig_docs_r` pool of `cluster`'s writer.
+    /// The `sprig_docs_r` pool of `cluster`'s writer; the writer and the
+    /// credential are looked up again at most every [`READY_TTL`].
     async fn pool(&self, cluster: &ClusterId) -> Result<Pool> {
+        if let Some((_, p, at)) = self
+            .pools
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(cluster)
+            && at.elapsed() < READY_TTL
+        {
+            return Ok(p.clone());
+        }
         let stored = self.registry.get(cluster).await?.ok_or_else(|| {
             SprigError::new(SprigCode::ClusterNotFound, format!("no cluster {cluster}"))
         })?;
         let ctl_ref = stored.body().secrets.ctl.clone();
         let opts = self.tenants.locator.ctl_opts(cluster).await?;
         let fingerprint = format!("{}|{}|{ctl_ref}", opts.ip_or_hostname(), opts.tcp_port());
-        if let Some((f, p)) = self
+        if let Some((f, p, at)) = self
             .pools
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(cluster)
+            .get_mut(cluster)
             && *f == fingerprint
         {
+            *at = Instant::now();
             return Ok(p.clone());
         }
         let cred = sprig_provision::docs_account::docs_credential(&ctl_ref)?;
@@ -238,8 +257,8 @@ impl DocsService {
             .pools
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(cluster.clone(), (fingerprint, pool.clone()));
-        if let Some((_, old)) = old {
+            .insert(cluster.clone(), (fingerprint, pool.clone(), Instant::now()));
+        if let Some((_, old, _)) = old {
             tokio::spawn(async move {
                 let _ = old.disconnect().await;
             });
@@ -284,11 +303,26 @@ impl DocsService {
             };
             out.extend(home);
         }
-        let mut all: Vec<(u32, ClusterId)> = self
-            .registry
-            .list()
-            .await
-            .unwrap_or_default()
+        for c in self.clusters().await {
+            if !out.contains(&c) {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    /// The DC's clusters that may hold data, by number (listed again at
+    /// most every [`READY_TTL`]).
+    async fn clusters(&self) -> Vec<ClusterId> {
+        if let Some((at, v)) = &*self.clusters.lock().unwrap_or_else(PoisonError::into_inner)
+            && at.elapsed() < READY_TTL
+        {
+            return v.clone();
+        }
+        let Ok(list) = self.registry.list().await else {
+            return Vec::new();
+        };
+        let mut all: Vec<(u32, ClusterId)> = list
             .into_iter()
             .filter(|c| {
                 !matches!(
@@ -299,12 +333,10 @@ impl DocsService {
             .map(|c| (c.body().cluster_number, c.body().cluster_id.clone()))
             .collect();
         all.sort();
-        for (_, c) in all {
-            if !out.contains(&c) {
-                out.push(c);
-            }
-        }
-        out
+        let v: Vec<ClusterId> = all.into_iter().map(|(_, c)| c).collect();
+        *self.clusters.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some((Instant::now(), v.clone()));
+        v
     }
 
     /// A reader connection and the version to read for `tenant`: the

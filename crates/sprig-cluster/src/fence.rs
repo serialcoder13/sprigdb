@@ -1,6 +1,5 @@
 //! Shard fences: blocking writes to one shard inside MariaDB, so a gateway
-//! with a stale shard map can't write (chapter 09, "Fencing primitives";
-//! build step 7).
+//! with a stale shard map can't write.
 //!
 //! Two methods:
 //!
@@ -16,8 +15,7 @@
 //! error, so the caller never holds half a fence.
 //!
 //! Only names that parse as the tenant's own schemas and accounts are
-//! touched: `sprig_ctl` never revokes from or kills anything else
-//! (chapter 09, "Security notes").
+//! touched: `sprig_ctl` never revokes from or kills anything else.
 
 use std::collections::{BTreeSet, HashSet};
 use std::fmt;
@@ -38,7 +36,7 @@ use crate::sql::{NodeEndpoint, ProbeError, ProbeSession, TextRow, literal};
 /// as `0-1-42,2-201-17`.
 ///
 /// Until `sprig-binlog` exposes its own position type this is the text
-/// form; chapter 10 compares positions per domain.
+/// form; the mover compares positions per domain.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct GtidPos(pub String);
@@ -59,13 +57,13 @@ pub enum FenceScope {
     All,
 }
 
-/// Why a whole cluster fences itself (managed clusters, R2).
+/// Why a whole cluster fences itself (managed clusters).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FenceReason {
-    /// The writer lease was lost (chapter 25).
+    /// The writer lease was lost.
     LeaseLost,
-    /// The data center is fenced (chapter 25).
+    /// The data center is fenced.
     DcFenced,
     /// An operator asked.
     Operator,
@@ -681,7 +679,7 @@ async fn regrant(s: &mut ProbeSession, revoked: &[RevokedGrant]) -> Result<()> {
 
 /// `information_schema.TABLES` rows of `schemas`, one `TABLE_SCHEMA =` branch
 /// per schema joined by `UNION ALL`. An `IN` list or `LIKE` makes MariaDB
-/// open every schema on the server (schemas-per-cluster spike, chapter 07);
+/// open every schema on the server (measured in the schemas-per-cluster spike);
 /// equality opens only the one named. `schemas` must not be empty.
 fn tables_query(schemas: &[String], extra: &str) -> String {
     schemas
@@ -843,7 +841,7 @@ async fn rename_on(
 /// Undoes a fence exactly as its receipt says: grants are restored and
 /// tables renamed back. Idempotent: a table already back under its name and
 /// an account dropped meanwhile are skipped. The caller then asks the grant
-/// reconciler (chapter 29) to recheck the tenant.
+/// reconciler to recheck the tenant.
 ///
 /// # Errors
 /// A statement failed; what could be restored was.
@@ -924,7 +922,7 @@ async fn unfence_on(
 
 /// Both a renamed table and a table under its old name exist: something
 /// recreated the table while the fence held (catalog migrations did, on a
-/// fenced catalog: chapter 10, "Cutover"). The recreation is dropped only
+/// fenced catalog during a cutover). The recreation is dropped only
 /// if it is provably a stray: created at or after the fence
 /// (`fenced_at`, the writer's clock) and empty, checked under a write lock
 /// so nothing can fill it in between. Otherwise nothing is dropped and the

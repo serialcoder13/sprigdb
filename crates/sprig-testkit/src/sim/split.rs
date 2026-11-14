@@ -1,5 +1,5 @@
-//! Split and merge under deterministic simulation (chapter 20, "Testing":
-//! "Controller crash at every job step"; chapter 10).
+//! Split and merge under deterministic simulation, with a controller crash
+//! at every job step.
 //!
 //! The production pieces run: the job store and claims ([`MetaMover`],
 //! [`JobRuntime`]) on the simulated etcd, the engine, the hash-range

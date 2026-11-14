@@ -1,6 +1,5 @@
 //! A queue's tenant moves between clusters under publish and consume load
-//! (chapter 50, "Failure handling": shard move or split; chapter 10's
-//! cutover). The mover renames the source tables at its fence, so the
+//! (a shard move and the mover's cutover). The mover renames the source tables at its fence, so the
 //! queue owner's next write fails, its store is marked stale, and the
 //! next owner opens the store where the tenant's map points once the
 //! hold is released.

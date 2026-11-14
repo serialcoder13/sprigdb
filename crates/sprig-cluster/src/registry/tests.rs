@@ -487,7 +487,7 @@ async fn guarded_writes_fail_once_the_guard_breaks() {
 
 #[tokio::test]
 async fn reads_reach_another_dcs_records() {
-    // Single-etcd mode: both DC tiers in one store (chapter 24).
+    // Single-etcd mode: both DC tiers in one store.
     let global = MemStore::new(Tier::Global);
     let a = MemStore::new(Tier::Dc(DcId::new("dc-a").unwrap()));
     let b = a.with_tier(Tier::Dc(DcId::new("dc-b").unwrap()));

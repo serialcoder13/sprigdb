@@ -1,6 +1,5 @@
-//! After-commit triggers under simulation (chapter 41, "Testing": killed
-//! workers and duplicate deliveries still give exactly-once compiled
-//! triggers; R7 order 5).
+//! After-commit triggers under simulation: killed workers and duplicate
+//! deliveries still give exactly-once compiled triggers.
 //!
 //! The real trigger runner (`sprig_logic::triggers::run`) reads the real
 //! tenant feed over the two clusters' binlog models while the real mover

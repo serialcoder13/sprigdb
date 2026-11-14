@@ -1,5 +1,5 @@
 //! Sessions: a lease kept alive in the background, with a conservative
-//! local deadline (chapter 23, "Leases with a conservative deadline").
+//! local deadline.
 //!
 //! ```text
 //! keep(lease, ttl, period):          # period = ttl/3

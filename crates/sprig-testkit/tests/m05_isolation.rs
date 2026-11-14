@@ -1,6 +1,5 @@
-//! The SQL isolation suite of milestone M0.5 (chapter 48: "the isolation
-//! suite passes; a revoked privilege is refused within seconds on every
-//! gateway"; chapter 29 build step 6, chapter 46 step 4).
+//! The SQL isolation suite: tenants stay isolated, and a revoked privilege
+//! is refused within seconds on every gateway.
 //!
 //! Two tenants on one cluster get the same databases (`m05_shop`,
 //! `m05_crm`) with a marker value each, and users with different grants:
@@ -26,7 +25,7 @@
 //! `WHERE`, `information_schema.SCHEMATA`) and sees only `m05_shop`, and a
 //! statement prepared before a `REVOKE` is refused (1142) at its next
 //! execute. With the backend, tenant A's administrator also tries to break
-//! out through stored code (chapter 29, "Definers of stored code"): a
+//! out through stored code: a
 //! `SQL SECURITY DEFINER` procedure running dynamic SQL against B's shard
 //! schema, B's catalog and `mysql.user`, a trigger and a function called
 //! from a view reading `mysql.user`, and an event (created, then altered)
@@ -44,7 +43,7 @@
 //! at the tenant without a database value) the `CREATE TABLE`, and any
 //! access to a table the administrator re-creates, get 1142.
 //!
-//! **Renamed tables** (chapter 29, P6): in tenant A, on both personas,
+//! **Renamed tables**: in tenant A, on both personas,
 //! `m05_rn` holds `SELECT, INSERT` and `UPDATE (note)` on
 //! `m05_shop.rn_live`. After a `pt-online-schema-change` swap (`RENAME
 //! TABLE rn_live TO rn_old, rn_new TO rn_live`) it reaches the new
@@ -603,8 +602,7 @@ async fn m05_isolation_suite() {
         // Stored code must not run with more than its creator's rights:
         // the gateway never sees dynamic SQL in a body, nor what a
         // trigger, event or a function called from a view reads, so
-        // MariaDB must refuse it through the definer, a tenant account
-        // (chapter 29, "Definers of stored code").
+        // MariaDB must refuse it through the definer, a tenant account.
         let b_tid = b_schema
             .strip_prefix('t')
             .and_then(|s| s.split('_').next())
@@ -990,7 +988,7 @@ async fn m05_isolation_suite() {
     }
 
     // RENAME TABLE leaves grants with the old name, as MySQL 8.4 and
-    // MariaDB 11.8 do (chapter 29, P6): a pt-online-schema-change / gh-ost
+    // MariaDB 11.8 do: a pt-online-schema-change / gh-ost
     // swap, a three-way swap, and ALTER TABLE ... RENAME (tenant A, both
     // personas), with MariaDB's grant tables checked when the backend is
     // given.
@@ -1157,8 +1155,8 @@ async fn m05_isolation_suite() {
             // 1146 to a user holding a grant on it. SprigDB gives a backend
             // account a grant on a name without a table only with CREATE
             // (MariaDB can't create others), so the reconciler removes the
-            // one MariaDB kept and MariaDB answers 1142 (chapter 29,
-            // "Renamed tables": a known gap, as for dropped tables).
+            // one MariaDB kept and MariaDB answers 1142 (a known
+            // gap, as for dropped tables).
             for (sql, want) in [
                 ("SELECT COUNT(*) FROM m05_shop.rn_b", Some(1142)),
                 ("SELECT COUNT(*) FROM m05_shop.rn_live", Some(1142)),

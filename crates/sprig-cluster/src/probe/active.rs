@@ -1,5 +1,5 @@
-//! Active probes: statements whose success is the fact (chapter 09, "XA
-//! round trip", "Features", "PL/SQL routines", "Privileges"). They run on
+//! Active probes: statements whose success is the fact (the XA round trip,
+//! features, PL/SQL routines, privileges). They run on
 //! one writable node, at registration, after a version change, daily and on
 //! `sprigctl cluster probe --full`.
 
@@ -11,7 +11,7 @@ use sprig_common::ids::JobId;
 use crate::sql::{NodeEndpoint, ProbeError, ProbeSession, literal};
 use crate::sys;
 
-/// Feature flags (chapter 09, "Capability profile"). Each is set by one
+/// Feature flags for the capability profile. Each is set by one
 /// statement's success, except `alter_two_phase` and `performance_schema`,
 /// which come from variables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -39,8 +39,7 @@ pub struct FeatureFlags {
     pub vcol_index_online: bool,
     /// A package compiled under `sql_mode=ORACLE` returns the right value.
     pub oracle_routines: bool,
-    /// ... and is callable from a session not in `ORACLE` mode
-    /// (chapter 09, open question 5).
+    /// ... and is callable from a session not in `ORACLE` mode.
     pub oracle_routines_any_mode: bool,
     /// The probing account can create a trigger that fires. With the binary
     /// log on, MariaDB refuses `CREATE TRIGGER` without `SUPER` unless
@@ -254,14 +253,14 @@ async fn oracle_routines(
         let v = ok_val(s.scalar(&format!("SELECT {pkg}.f(4)")).await)?.flatten();
         any_mode = v.as_deref() == Some("10");
     }
-    // Probe routines are dropped after the probe (chapter 09, Security).
+    // Probe routines are dropped after the probe.
     ok(s.exec("SET SESSION sql_mode = 'ORACLE'").await)?;
     ok(s.exec(&format!("DROP PACKAGE IF EXISTS {pkg}")).await)?;
     s.close().await;
     Ok((works, any_mode))
 }
 
-/// The trigger probe (chapter 09, "PL/SQL routines"): an `ORACLE`-mode
+/// The trigger probe: an `ORACLE`-mode
 /// `BEFORE INSERT` trigger must be accepted and fill its column.
 async fn trigger_create(
     ep: &NodeEndpoint,
@@ -286,7 +285,7 @@ async fn trigger_create(
         let v = ok_val(s.scalar(&format!("SELECT a FROM {t} WHERE id = 5")).await)?.flatten();
         works = v.as_deref() == Some("10");
     }
-    // Dropping the table drops its trigger (chapter 09, Security).
+    // Dropping the table drops its trigger.
     ok(s.exec(&format!("DROP TABLE IF EXISTS {t}")).await)?;
     s.close().await;
     Ok(works)

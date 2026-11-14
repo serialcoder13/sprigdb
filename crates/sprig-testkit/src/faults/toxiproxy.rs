@@ -1,5 +1,5 @@
-//! A client for toxiproxy's HTTP API (chapter 46: "toxiproxy on every
-//! gateway-to-MariaDB, gateway-to-etcd and inter-DC link").
+//! A client for toxiproxy's HTTP API. Toxiproxy sits on every
+//! gateway-to-MariaDB, gateway-to-etcd and inter-DC link.
 //!
 //! In the single-DC Compose file toxiproxy runs under the `faults`
 //! profile, its API on `127.0.0.1:18474` and proxy listeners on

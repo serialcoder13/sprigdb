@@ -1,18 +1,16 @@
-//! Permits over JSON/HTTP, and the renew loop every holder runs (chapter
-//! 25, "DC leases, sub-leases and self-fencing" step 3; chapter 23,
-//! "Internal services").
+//! Permits over JSON/HTTP, and the renew loop every holder runs.
 //!
-//! **Where it differs from the book.** `Permits.Renew` is
-//! `POST /internal/v1/permits/renew` with the book's messages as JSON on
+//! **Transport.** `Permits.Renew` is
+//! `POST /internal/v1/permits/renew` with its messages as JSON on
 //! each controller's `[controller] internal_addr`, until the mTLS gRPC
 //! port 7400 exists. Holders find the controllers of their DC in the DC
 //! tier's `controllers/<node>` registrations (`internal_addr`).
 //!
 //! **Arming.** A [`PermitKeeper`] enforces permits only once it has seen a
 //! controller of its DC that serves them. Until then (a deployment whose
-//! controllers predate R2) writes flow as before. Once armed it stays
+//! controllers predate permits) writes flow as before. Once armed it stays
 //! armed for the life of the process: losing every controller then fences
-//! the holder, as the book says.
+//! the holder.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -37,7 +35,7 @@ pub const DISCOVERY_PERIOD: Duration = Duration::from_secs(5);
 
 /// JSON over HTTP/1.1, with pooled keep-alive connections: plain to
 /// `http://` addresses, mutual TLS with this process's `[tls]` identity
-/// to `https://` ones (`[controller] internal_tls`; hardening round 3).
+/// to `https://` ones (`[controller] internal_tls`).
 #[derive(Debug, Clone)]
 pub struct JsonHttp {
     http: Client<InternalConnector, Full<Bytes>>,
@@ -359,7 +357,7 @@ mod tests {
         let mem: Arc<dyn MetaStore> = Arc::new(MemStore::new(Tier::Dc(DcId::new("fra1").unwrap())));
         let holder = Arc::new(PermitHolder::new("gw-1", "gateway", Arc::new(SystemClock)));
         let k = Arc::new(PermitKeeper::new(Arc::clone(&holder)));
-        assert!(k.may_write(), "not armed: writes flow as before R2");
+        assert!(k.may_write(), "not armed: writes flow as before");
         // A controller registers an address nobody answers on.
         let key = mem.tier().key("controllers/c1").unwrap();
         let v = br#"{"v":1,"admin_addr":"x","internal_addr":"127.0.0.1:9"}"#.to_vec();

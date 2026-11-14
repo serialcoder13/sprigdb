@@ -252,7 +252,7 @@ async fn diagnostic_stages_have_mongodb_shapes() {
         eprintln!("{who}: {s:?}");
         shapes.push(s);
     }
-    // The fields SprigDB promises (chapter 30) are present.
+    // The fields SprigDB promises are present.
     let sprig = &shapes[0];
     let has = |name: &str, fields: &[&str]| {
         let keys = sprig

@@ -20,8 +20,15 @@ pub const RETRY: Duration = Duration::from_secs(60);
 
 enum State {
     Unloaded,
-    Loaded { dir: PathBuf, model: Arc<Embedder> },
-    Failed { dir: PathBuf, at: Instant, why: String },
+    Loaded {
+        dir: PathBuf,
+        model: Arc<Embedder>,
+    },
+    Failed {
+        dir: PathBuf,
+        at: Instant,
+        why: String,
+    },
 }
 
 /// The model and its thread pool.

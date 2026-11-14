@@ -88,20 +88,29 @@ fn invalid(m: impl Into<String>) -> SprigError {
 }
 
 fn db(what: &str, e: mysql_async::Error) -> SprigError {
-    SprigError::new(SprigCode::BackendUnavailable, format!("docs search: {what}")).with_source(e)
+    SprigError::new(
+        SprigCode::BackendUnavailable,
+        format!("docs search: {what}"),
+    )
+    .with_source(e)
 }
 
 /// Checks a request: a query, a known audience, a limit in range.
 ///
 /// # Errors
 /// 39790-style request errors naming the field.
-pub fn validate(req: &SearchRequest, default_limit: usize) -> Result<(String, Option<String>, usize)> {
+pub fn validate(
+    req: &SearchRequest,
+    default_limit: usize,
+) -> Result<(String, Option<String>, usize)> {
     let q = req.query.trim();
     if q.is_empty() {
         return Err(invalid("query is required"));
     }
     if q.chars().count() > MAX_QUERY {
-        return Err(invalid(format!("query is longer than {MAX_QUERY} characters")));
+        return Err(invalid(format!(
+            "query is longer than {MAX_QUERY} characters"
+        )));
     }
     let audience = match req.audience.as_deref().map(str::trim) {
         None | Some("") => None,
@@ -177,9 +186,7 @@ async fn vector_ids(
         params.push(a.into());
     }
     params.push(table::vector_text(q).into());
-    conn.exec(sql, params)
-        .await
-        .map_err(|e| db("vector", e))
+    conn.exec(sql, params).await.map_err(|e| db("vector", e))
 }
 
 struct Meta {
@@ -269,7 +276,11 @@ impl DocsService {
     ///
     /// # Errors
     /// Request errors; 39825 when docs are unavailable; the backend's.
-    pub async fn search(&self, tenant: Option<TenantId>, req: &SearchRequest) -> Result<SearchReply> {
+    pub async fn search(
+        &self,
+        tenant: Option<TenantId>,
+        req: &SearchRequest,
+    ) -> Result<SearchReply> {
         let started = Instant::now();
         let r = self.search_inner(tenant, req).await;
         let (mode, result) = match &r {
@@ -361,7 +372,10 @@ mod tests {
         let mut x = r("lag");
         x.audience = Some("DBA".into());
         x.limit = Some(500);
-        assert_eq!(validate(&x, 8).unwrap(), ("lag".into(), Some("dba".into()), MAX_LIMIT));
+        assert_eq!(
+            validate(&x, 8).unwrap(),
+            ("lag".into(), Some("dba".into()), MAX_LIMIT)
+        );
         x.audience = Some("root".into());
         assert!(validate(&x, 8).is_err());
         x.audience = None;

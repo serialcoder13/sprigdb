@@ -1,6 +1,6 @@
 //! Checks of a value against the running system before it is written:
 //! for keys whose valid values depend on more than their declaration.
-//! Chapter 29's `auth.authorizer` is the first: a new engine is accepted
+//! `auth.authorizer` is the first: a new engine is accepted
 //! only when every live gateway knows it
 //! (`sprig_auth::authz::engine_guard`).
 //!
@@ -32,8 +32,8 @@ pub trait ValueGuard: Send + Sync + std::fmt::Debug {
 }
 
 /// Several guards: a value passes when every one passes; the first
-/// refusal is the answer (bugfix-62: `auth.authorizer`'s engine guard and
-/// chapter 18's resolve-window guard on one writer).
+/// refusal is the answer (such as `auth.authorizer`'s engine guard and
+/// the transactions' resolve-window guard on one writer).
 #[derive(Debug, Clone, Default)]
 pub struct AllGuards(pub Vec<std::sync::Arc<dyn ValueGuard>>);
 

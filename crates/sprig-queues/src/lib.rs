@@ -1,8 +1,7 @@
-//! `sprig-queues`: the queue engine behind AMQP (chapter 50, build steps
-//! 2–10): exchanges, queues and bindings in the tenant catalog, messages
+//! `sprig-queues`: the queue engine behind AMQP: exchanges, queues and bindings in the tenant catalog, messages
 //! in MariaDB, one owner per queue.
 //!
-//! Layer: 2 data layer. Design: [chapter 50](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/50-queues.md) (Message queues and AMQP) of the SprigDB low-level design.
+//! Layer: 2 data layer.
 //!
 //! - [`topology`]: the model and routing (every exchange type,
 //!   exchange-to-exchange bindings, alternate exchanges, policies);

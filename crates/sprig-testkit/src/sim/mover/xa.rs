@@ -1,6 +1,5 @@
 //! Prepared distributed-transaction branches on the source while the
-//! tenant moves (chapter 18, "Interplay with mover cutovers"; chapter 10,
-//! "Cutover", steps 2b and 3b).
+//! tenant moves (the cutover drains them at steps 2b and 3b).
 //!
 //! A coordinator client prepares single-row branches on the source (only
 //! while the map points there, and never on a fenced source), then
@@ -141,7 +140,7 @@ fn finish(d: &mut Db, id: u64, at: Duration) -> Option<bool> {
     Some(commit)
 }
 
-/// The resolver's drain (chapter 18's `drain_prepared`): every branch
+/// The resolver's drain (`drain_prepared`): every branch
 /// not owned by a live connection is finished now; owned ones are retried
 /// until `within` passes, then reported as remaining.
 pub(super) async fn drain(

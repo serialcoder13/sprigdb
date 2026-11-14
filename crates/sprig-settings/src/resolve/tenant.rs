@@ -1,5 +1,4 @@
-//! One tenant's setting rows at one catalog version (chapter 08, "Setting
-//! resolution"; build step 5).
+//! One tenant's setting rows at one catalog version.
 //!
 //! The catalog cache builds a [`TenantSettings`] with every snapshot of a
 //! tenant's catalog: the tenant, database, object and ancestor rows of the
@@ -18,7 +17,7 @@
 //! **Ancestors (step 6 hook).** Ancestor rows (`scope_kind = 'ancestor'`)
 //! load like any other, and [`ancestry`](TenantSettings::ancestry) (root
 //! first, from `sprig.ancestry`, set by the catalog cache) puts them in the
-//! chain. Chapter 08 step 6's `tree_settings` loop
+//! chain. The `tree_settings` loop
 //! (`sprig-controller::tree_settings`) writes both; a catalog it hasn't
 //! reached has neither, and the chain is tenant, database, object.
 
@@ -299,8 +298,8 @@ impl TenantSettings {
 
     /// Stored values that resolution clamps or ignores, at the scope they
     /// are stored at: what the reconciler counts and `SPRIG_SETTINGS`
-    /// flags, and what a write that tightens bounds warns about (chapter
-    /// 08: "bounds tightened: warn 'N values will be clamped'"). Ancestor
+    /// flags, and what a write that tightens bounds warns about ("N
+    /// values will be clamped"). Ancestor
     /// rows are skipped: they are the ancestors' values, not the tenant's.
     /// `object_db` names an object's database, so its rows apply.
     #[must_use]
@@ -584,7 +583,7 @@ impl ClampedValue {
     }
 }
 
-/// Chapter 08's warning for a write that tightens bounds: "N values will be
+/// The warning for a write that tightens bounds: "N values will be
 /// clamped" (with the ignored ones counted apart), or `None` if no value is
 /// affected.
 #[must_use]

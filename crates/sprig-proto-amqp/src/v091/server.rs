@@ -1,4 +1,4 @@
-//! The AMQP 0-9-1 server front end (chapter 50 step 12): the connection
+//! The AMQP 0-9-1 server front end: the connection
 //! handshake (`start`, SASL, `tune`, `open`), channels, every method of
 //! `exchange`, `queue`, `basic`, `confirm` and `tx`, content assembly,
 //! heartbeats, and RabbitMQ's reply codes and extensions.

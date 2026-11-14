@@ -238,7 +238,7 @@ pub struct PlannedFault {
     pub fault: FaultKind,
 }
 
-/// A schedule of faults (chapter 46, `simulate` step 2).
+/// A schedule of faults.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct FaultPlan {
     /// The faults, in time order.

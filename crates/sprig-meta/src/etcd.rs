@@ -1,5 +1,4 @@
-//! `EtcdStore`, the [`MetaStore`] over the `etcd-client` crate (chapter 23,
-//! build step 2).
+//! `EtcdStore`, the [`MetaStore`] over the `etcd-client` crate.
 //!
 //! It maps the trait onto etcd's v3 API one to one:
 //! - [`MetaStore::list`] is a range read pinned to one revision, paged with
@@ -16,7 +15,7 @@
 //! `ER_SPRIG_META_UNAVAILABLE` (retryable); bad requests are internal
 //! errors, as they are in `MemStore`.
 //!
-//! **Single-etcd mode** (R0): one etcd serves both tiers. [`EtcdStore::
+//! **Single-etcd mode**: one etcd serves both tiers. [`EtcdStore::
 //! with_tier`] gives a second view over the same connection, and
 //! [`connect_tiers`] does this when the DC and global seeds are the same.
 
@@ -78,7 +77,7 @@ impl EtcdConfig {
 
 /// Mutual TLS material: the CA that signed etcd's certificates, and this
 /// process's certificate and key. etcd maps the certificate's common name to
-/// its user (chapter 23, "Security notes").
+/// its user.
 #[derive(Clone)]
 pub struct EtcdTls {
     /// The CA bundle, PEM.
@@ -277,7 +276,7 @@ impl EtcdStore {
         // three members stopped, or a member of another cluster right after
         // a restore), and that call fails instead of trying the next seed:
         // retry until one answers (up to `connect_timeout` per seed), so one dead
-        // seed doesn't stop a process from starting (hardening round 2).
+        // seed doesn't stop a process from starting.
         let root = store.tier.root();
         let seeds = u32::try_from(cfg.endpoints.len()).unwrap_or(1).max(1);
         let deadline = tokio::time::Instant::now() + cfg.connect_timeout * seeds;
@@ -383,8 +382,7 @@ impl EtcdStore {
     }
 
     /// Runs one request with the store's deadline, sending it again when
-    /// the channel couldn't connect to the endpoint it picked (hardening
-    /// round 3). The balanced channel may pick a member that is down; such
+    /// the channel couldn't connect to the endpoint it picked. The balanced channel may pick a member that is down; such
     /// a call never reached etcd, so sending it again is safe even for a
     /// transaction, and the next pick is usually a live member. Without
     /// this, every control-plane call failed with probability 1/3 while

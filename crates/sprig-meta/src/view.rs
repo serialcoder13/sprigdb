@@ -1,13 +1,13 @@
-//! Another data center's tier over the same store (chapter 24, single-etcd
-//! mode).
+//! Another data center's tier over the same store
+//! (single-etcd mode).
 //!
-//! In R0 one etcd serves the global tier and every DC tier
+//! In single-etcd mode one etcd serves the global tier and every DC tier
 //! (`/sprig/g/`, `/sprig/dc/<dc_id>/`), so a process can read another
 //! DC's shard maps and cluster records with its own connection. Code that
 //! takes a store and builds keys from [`MetaStore::tier`] (the cluster
 //! registry, tenant maps, the mover's job store) then works on DC `x`
-//! through [`TierView`]`::over(store, Tier::Dc(x))`. From R2 the relay's
-//! `RemoteMaps` replaces these reads (chapter 23, "The relay").
+//! through [`TierView`]`::over(store, Tier::Dc(x))`. With separate DC
+//! tiers the relay's `RemoteMaps` ([`crate::relay`]) replaces these reads.
 
 use std::sync::Arc;
 use std::time::Duration;

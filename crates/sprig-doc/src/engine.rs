@@ -167,6 +167,12 @@ pub trait SqlRunner: Send {
     async fn exec_bound(&mut self, sql: &str, params: &[Param]) -> Result<Done, SqlError> {
         self.exec(&inline(sql, params)).await
     }
+    /// [`Self::query_bound`] for a read of one row by its key (a find by
+    /// `_id`): the gateway's sessions take their executor's point-read
+    /// path, with the same privilege, policy and placement checks.
+    async fn query_point(&mut self, sql: &str, params: &[Param]) -> Result<Rows, SqlError> {
+        self.query_bound(sql, params).await
+    }
     /// Whether row-level security policies on object `object` bind the
     /// session (search counts and facets then
     /// cover only the rows it may see). `None`: unknown, taken as bound.
@@ -1163,7 +1169,7 @@ impl Engine {
             ident(&ns.db),
             ident(&m.table),
         );
-        let rows = match sql.query_bound(&q, &[Param::Bin(key)]).await {
+        let rows = match sql.query_point(&q, &[Param::Bin(key)]).await {
             Ok(r) => r,
             Err(e) if e.is(1146) => return Ok(Some(None)),
             Err(e) => return Err(mongo_error(&e)),

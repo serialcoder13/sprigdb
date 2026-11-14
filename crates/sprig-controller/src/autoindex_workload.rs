@@ -7,7 +7,7 @@
 //! **Watching.** Trigger evaluation asks the workload recorder to watch
 //! every qualifying fingerprint (probe rows examined, capture samples). The
 //! recorder lives in each gateway and the controller has no channel to it
-//! yet, so [`StoreSource::watch`] only logs. Gateways watch on their own every
+//! yet, so `StoreSource::watch` only logs. Gateways watch on their own every
 //! fingerprint whose p95 is above `workload.watch_p95_ms` (50 ms), which
 //! covers the slow trigger (p95 above `auto_index.p95_threshold_ms`, 100
 //! ms); a fingerprint qualifying only through the top-N or fast trigger

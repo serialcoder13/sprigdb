@@ -1,4 +1,4 @@
-//! Scopes and the context a setting is resolved in (chapter 08).
+//! Scopes and the context a setting is resolved in.
 //!
 //! Six scopes in two chains: the data chain object > database > tenant
 //! (> parent tenant > ... > root tenant), and the operational chain

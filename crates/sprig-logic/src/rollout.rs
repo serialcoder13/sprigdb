@@ -1,5 +1,4 @@
-//! Staged rollout of functions and procedures (chapter 41, "Versions,
-//! rollout and rollback"; decision RC10; R7 follow-ups).
+//! Staged rollout of functions and procedures.
 //!
 //! ```text
 //! CREATE OR REPLACE FUNCTION f ... WITH (SPRIG_ROLLOUT = 10 [, SPRIG_ROLLOUT_BY = 'user' | 'tenant']) AS ...
@@ -25,7 +24,7 @@
 //! version that ran (engine-tier calls name their version anyway).
 //!
 //! **Numbers and the automatic rollback.** Gateways count calls, errors
-//! and a latency histogram per version ([`Stats`]) and add them to
+//! and a latency histogram per version (`Stats`) and add them to
 //! `logic_version_stats` every few seconds. After adding, a gateway
 //! compares the candidate with the active version ([`verdict`]): with at
 //! least [`MIN_CALLS`] candidate calls, an error rate above twice the
@@ -308,7 +307,7 @@ fn q(schema: &str) -> String {
 }
 
 /// Records a rollout's stage (a new candidate resets both versions'
-/// numbers), and the book's `candidate_version` and `candidate_pct`.
+/// numbers), and its `candidate_version` and `candidate_pct`.
 ///
 /// # Errors
 /// 39070 or a backend error.

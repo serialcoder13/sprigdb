@@ -1,5 +1,4 @@
-//! Spilling to disk through a live gateway (M5, 12 Nov 2026; decisions
-//! S72–S77).
+//! Spilling to disk through a live gateway.
 //!
 //! - `spill_matches_mongodb`: a generated collection of about 12 MB, with
 //!   the gateway's `doc.agg_stage_memory_bytes` and MongoDB 8.0.34's stage
@@ -161,8 +160,7 @@ fn pipelines() -> Vec<(&'static str, Vec<Document>, bool)> {
         (
             "window",
             // (A running `$sum` of doubles differs in the last bit even in
-            // memory: MongoDB's growing windows don't sum as `$group` does,
-            // an M2 difference, S61.)
+            // memory: MongoDB's growing windows don't sum as `$group` does.)
             vec![
                 doc! {"$setWindowFields": {"partitionBy": "$h", "sortBy": {"f": 1}, "output": {"r": {"$rank": {}}, "run": {"$sum": "$v", "window": {"documents": ["unbounded", "current"]}}, "mov": {"$avg": "$v", "window": {"documents": [-2, 2]}}}}},
                 doc! {"$project": {"s": 0}},

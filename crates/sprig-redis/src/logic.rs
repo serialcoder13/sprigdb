@@ -1,11 +1,9 @@
-//! `FCALL` and `FCALL_RO` of logic-layer functions (chapter 40 step 19;
-//! chapter 41, "Calling code").
+//! `FCALL` and `FCALL_RO` of logic-layer functions.
 //!
 //! A name `FCALL` doesn't find among the tenant's Lua library functions
-//! goes to the logic layer: Lua functions are found first (chapter 40,
-//! "Scripts and functions"). The gateway installs the [`LogicCalls`] hook
-//! on the [`crate::Env`]; it turns the call into chapter 41's function
-//! call statement on the login's own SQL session, so `EXECUTE`, the
+//! goes to the logic layer: Lua functions are found first. The gateway installs the [`LogicCalls`] hook
+//! on the [`crate::Env`]; it turns the call into the logic layer's
+//! function call statement on the login's own SQL session, so `EXECUTE`, the
 //! function's `EXPOSE (redis)`, its tier, budgets and transaction are
 //! those of every other caller. Without a hook the name is simply not
 //! found, as in Redis.

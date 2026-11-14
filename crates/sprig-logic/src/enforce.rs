@@ -1,5 +1,4 @@
-//! Validations, after-commit triggers' row binding, and computed fields
-//! (chapter 41, "Validations and computed fields"; R7 order 3).
+//! Validations, after-commit triggers' row binding, and computed fields.
 //!
 //! **Binding a row to a body.** A validation's or trigger's parameters are
 //! bound by name: a parameter named after a column of the table gets the
@@ -14,7 +13,7 @@
 //! FOR INSERT, UPDATE, no old_ or op parameter, and the body is one
 //! expression whose only failure is `reject` with one constant message
 //!     → CHECK (NOT (<reject condition>)) named sprig_lc<binding>_v<version>,
-//!       added through chapter 21's ALTER TABLE path; the gateway maps 4025
+//!       added through the ALTER TABLE path; the gateway maps 4025
 //!       on that name to 39863 with the message
 //! otherwise
 //!     → BEFORE INSERT / UPDATE triggers __sprig_lt<binding>_v<version>_b<i|u>
@@ -22,13 +21,13 @@
 //!       event) becomes SIGNAL 39863 with its `message`
 //! ```
 //!
-//! Triggers carry the version in their names (the book's are
-//! `__sprig_lt<b>_b<i|u>`), so a new version's triggers are created next
+//! Triggers carry the version in their names
+//! (`__sprig_lt<b>_v<v>_b<i|u>`), so a new version's triggers are created next
 //! to the old ones and the old ones dropped once every shard has the new
 //! ones: for a moment both run, which is stricter, never weaker.
 //!
 //! A validation placed in the engine tier would need the transaction's
-//! pre-commit hook (chapter 18), which isn't built: it is refused with
+//! pre-commit hook, which isn't built: it is refused with
 //! 39862.
 
 use sprig_common::{Result, SprigCode, SprigError};
@@ -160,7 +159,7 @@ pub fn plan_validation(
     }
 }
 
-/// `ALTER TABLE` text (logical names, for chapter 21's path) that adds
+/// `ALTER TABLE` text (logical names, for the schema-change path) that adds
 /// version `new`'s `CHECK` and drops `old` ones, in one statement.
 #[must_use]
 pub fn check_alter(db: &str, table: &str, add: Option<(&str, &str)>, drop: &[String]) -> String {
@@ -231,8 +230,7 @@ pub fn validation_trigger(
     )
 }
 
-/// The exactly-once markers of compiled after-commit triggers (chapter
-/// 41, "Objects in shard schemas"); the mover copies it with the shard.
+/// The exactly-once markers of compiled after-commit triggers; the mover copies it with the shard.
 #[must_use]
 pub fn done_table(schema: &str) -> String {
     format!(
@@ -243,7 +241,7 @@ pub fn done_table(schema: &str) -> String {
     )
 }
 
-/// A computed field (chapter 41): `ALTER TABLE t ADD [COLUMN] c TYPE AS
+/// A computed field: `ALTER TABLE t ADD [COLUMN] c TYPE AS
 /// (f(a, b)) [VIRTUAL | STORED | PERSISTENT] ...` where `f` is a logic
 /// function: the call's place in the text and its arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]

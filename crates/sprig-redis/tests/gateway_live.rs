@@ -1,4 +1,4 @@
-//! Live checks through a SprigDB gateway (chapters 33, 37, 40): logins and
+//! Live checks through a SprigDB gateway: logins and
 //! tenant isolation on the Redis listener, the key-value API over REST,
 //! and SQL reads of the same data.
 //!
@@ -292,7 +292,7 @@ async fn logins_isolation_api_and_sql() {
         eprintln!("REST key-value checks passed");
     }
 
-    // SQL reads the same rows (chapter 33, "Values and the SQL view").
+    // SQL reads the same rows through the SQL view.
     if let Some(sql) = var("SPRIG_TEST_KV_SQL") {
         let mut c = mysql_async::Conn::new(mysql_async::Opts::from_url(&sql).unwrap())
             .await
@@ -425,8 +425,7 @@ async fn throughput_sample() {
     }
 }
 
-/// Key locations and `KeyValue.GeoSearch` over REST (chapters 33 and 36,
-/// R6 round 3): 400 keys with locations (and 20 without), then circles,
+/// Key locations and `KeyValue.GeoSearch` over REST: 400 keys with locations (and 20 without), then circles,
 /// boxes, polygons and nearest-k searches, each against brute force with
 /// WGS 84 distances (Karney). Uses database `r6three_kvgeo`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

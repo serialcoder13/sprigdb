@@ -1,5 +1,4 @@
-//! Versioned records: how values are encoded in etcd (chapter 23,
-//! "Encoding rules").
+//! Versioned records: how values are encoded in etcd.
 //!
 //! Every value is a UTF-8 JSON object under 64 KiB with a schema version
 //! `"v"`. Unknown fields are kept and written back, and a build never

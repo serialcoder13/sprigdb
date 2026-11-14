@@ -1,5 +1,5 @@
-//! Live: the feed-driven outbox forwarder (chapter 50, "Publishing inside
-//! a database transaction"; R9, r9fwd) against a running deployment
+//! Live: the feed-driven outbox forwarder (publishing inside a
+//! database transaction) against a running deployment
 //! (gateway with AMQP on, a worker, the controller).
 //!
 //! ```text
@@ -148,7 +148,7 @@ async fn transactional_publishes_arrive_once_in_commit_order() {
     run(&url, &amqp, &q, true, &publish, &label).await;
 }
 
-/// Cross-tenant (chapter 42): an ancestor's transactions publish into a
+/// Cross-tenant: an ancestor's transactions publish into a
 /// member's inherited queue through the ancestor's `__sprig_xo`, whose rows
 /// the ancestor's forwarder moves into the member's `__sprig_qo`, whose
 /// rows the member's forwarder enqueues. `SPRIG_FWD_XO_MYSQL` (the

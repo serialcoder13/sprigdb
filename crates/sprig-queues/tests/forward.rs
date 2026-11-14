@@ -1,5 +1,5 @@
-//! The feed-driven forwarder's engine side (chapter 50, "Publishing inside
-//! a database transaction"; R9, r9fwd), in process:
+//! The feed-driven forwarder's engine side (publishing inside a
+//! database transaction), in process:
 //!
 //! - `SqlVhost::forward_outbox` enqueues outbox rows in the order it is
 //!   given (the feed's commit order), not the table's (insert order);
@@ -201,7 +201,7 @@ async fn the_poller_leaves_young_publishes_to_the_feed() {
     conn.close(0, "done".into()).await.unwrap();
 }
 
-/// bugfix-42 (`live_forward`'s commit-order inversions): the fallback read
+/// Regression (`live_forward`'s commit-order inversions): the fallback read
 /// late transactional publishes in insert order while the feed was still
 /// forwarding them in commit order, and the two raced into the queue. Now,
 /// while the feed-driven forwarder runs, the fallback leaves a publish to

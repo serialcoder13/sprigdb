@@ -418,7 +418,7 @@ AMQP clients receive the AMQP reply code (0-9-1) or condition (1.0), with SprigD
 - **Atomic `tx.commit` across queues.** Use SQL transactions for atomic publish and acknowledge.
 - **AMQP 1.0 transactions**, link recovery and the `second` receiver settle mode, and the 1.0 delivery-time annotations (`x-opt-delivery-time`, `x-opt-delivery-delay`).
 - **Lanes** (`x-sprig-lanes`): accepted and stored, but every queue is served as one lane.
-- **Publishing up the tenant tree.** A descendant's own sessions can't publish into an ancestor's exchange, although `queue.descendant_publish` and `queue.descendant_key` are registered settings.
+- **Publishing up the tenant tree.** A descendant's own sessions can't publish into an ancestor's exchange.
 - **Publishing from MongoDB** clients.
 
 ## Related

@@ -1,5 +1,4 @@
-//! Dropping logic modules (chapter 41, "Deployment and removal"; error
-//! 39875; R7 follow-ups):
+//! Dropping logic modules (error 39875):
 //!
 //! ```text
 //! DROP {FUNCTION | PROCEDURE | VALIDATION | TRIGGER | SCHEDULE} [IF EXISTS] [db.]name
@@ -135,7 +134,7 @@ pub fn parse(sql: &str) -> Option<Result<DropStmt>> {
     }))
 }
 
-/// `SHOW DEPENDENTS OF {FUNCTION | PROCEDURE} [db.]name` (ST67): what
+/// `SHOW DEPENDENTS OF {FUNCTION | PROCEDURE} [db.]name`: what
 /// [`dependents`] finds, one row each, as `DROP ... RESTRICT` would refuse
 /// it and what `CASCADE` would do.
 #[derive(Debug, Clone, PartialEq, Eq)]

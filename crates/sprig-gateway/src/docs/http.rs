@@ -117,8 +117,8 @@ async fn search_inner(
     // Signed in first: nothing about the docs is answered anonymously.
     let caller = core.caller(info, auth, tenant, host).await?;
     let request = parse(&body)?;
-    let svc = super::service()
-        .ok_or_else(|| super::unavailable("this gateway has no tenant logins"))?;
+    let svc =
+        super::service().ok_or_else(|| super::unavailable("this gateway has no tenant logins"))?;
     let reply = svc.search(caller.principal.tenant, &request).await?;
     Ok(json(
         200,

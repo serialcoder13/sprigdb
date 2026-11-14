@@ -216,6 +216,15 @@ fn bound(p: &Param) -> sprig_proto_mysql::command::BoundParam {
     }
 }
 
+/// Whether point reads take the executor's point-read path: on unless the
+/// process has `SPRIGDB_MONGO_POINT_READS=off`, read once.
+fn point_reads_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("SPRIGDB_MONGO_POINT_READS").map_or(true, |v| v != "off")
+    })
+}
+
 /// Statements a session keeps prepared; past this many the
 /// oldest are closed.
 const MAX_PREPARED: usize = 64;
@@ -438,6 +447,39 @@ impl SqlSession {
         }
     }
 
+    /// [`Self::run_bound`] through the executor's point-read path
+    /// ([`SessionExec::point_read`]); the general path when it falls
+    /// back.
+    async fn run_point(
+        &mut self,
+        sql: &str,
+        params: &[Param],
+    ) -> std::result::Result<Rows, SqlError> {
+        let stmt = self.statement(sql).await?;
+        let ep = sprig_proto_mysql::command::ExecuteParams {
+            new_params_bound: true,
+            params: params.iter().map(bound).collect(),
+        };
+        self.session.begin_command("Execute", None);
+        let r = {
+            let mut cx = ExecCtx {
+                session: &mut self.session,
+                proto: &self.proto,
+                db: None,
+            };
+            self.exec.point_read(&mut cx, stmt, &ep).await
+        };
+        self.session.end_command();
+        match r {
+            Ok(crate::pipeline::PointRead::Row(row)) => {
+                Ok(row.map_or_else(Vec::new, |v| vec![v.iter().map(value_text).collect()]))
+            }
+            Ok(crate::pipeline::PointRead::Fallback) | Err(_) => {
+                Ok(self.run_bound(sql, params).await?.rows)
+            }
+        }
+    }
+
     async fn run(&mut self, sql: &str) -> std::result::Result<Collect, SqlError> {
         let mut sink = Collect::default();
         self.session
@@ -531,5 +573,19 @@ impl SqlRunner for SqlSession {
         params: &[Param],
     ) -> std::result::Result<Done, SqlError> {
         Ok(self.run_bound(sql, params).await?.ok.unwrap_or_default())
+    }
+
+    async fn query_point(
+        &mut self,
+        sql: &str,
+        params: &[Param],
+    ) -> std::result::Result<Rows, SqlError> {
+        // Inside a transaction every read takes the general path, and
+        // so does every read with `SPRIGDB_MONGO_POINT_READS=off` (for
+        // comparisons).
+        if self.in_txn || !point_reads_on() {
+            return self.query_bound(sql, params).await;
+        }
+        self.run_point(sql, params).await
     }
 }

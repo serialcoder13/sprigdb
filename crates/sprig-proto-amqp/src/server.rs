@@ -1,5 +1,4 @@
-//! One AMQP connection on 5672 or 5671, from the protocol header on
-//! (chapter 04, "Protocol detection on the AMQP ports").
+//! One AMQP connection on 5672 or 5671, from the protocol header on.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,7 +12,7 @@ use crate::error::{MqCode, MqError};
 use crate::reply_to::DirectReplyTo;
 use crate::sniff::Detected;
 
-/// Settings read when a connection starts (chapter 50, "Configuration").
+/// Settings read when a connection starts.
 #[derive(Debug, Clone)]
 pub struct Config {
     /// `product` in server properties.

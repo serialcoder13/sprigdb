@@ -11,19 +11,19 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 futures.workspace = true
-# node_rebuild's stream tokens (chapter 25).
+# node_rebuild's stream tokens.
 getrandom.workspace = true
 metrics.workspace = true
 mysql_async.workspace = true
-# errant_extract's sealed files (chapter 25): AES-256-GCM.
+# errant_extract's sealed files: AES-256-GCM.
 ring.workspace = true
-# Mutual TLS for the agents' internal service (chapter 25, RC2), already
+# Mutual TLS for the agents' internal service, already
 # in the tree (Apache-2.0 / ISC / MIT).
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-# The binlog dump probe (chapter 09).
+# The binlog dump probe.
 sprig-binlog.workspace = true
 sprig-common.workspace = true
 sprig-meta.workspace = true

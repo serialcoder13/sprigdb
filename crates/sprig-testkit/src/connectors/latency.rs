@@ -1,6 +1,5 @@
-//! Latency percentiles for the M0.2 gate: "the gateway adds no more than
-//! 0.5 ms at p50 inside a data center" (chapter 48), measured against
-//! direct MariaDB (chapter 46, "Performance").
+//! Latency percentiles for the latency gate: the gateway adds no more than
+//! 0.5 ms at p50 inside a data center, measured against direct MariaDB.
 
 use std::fmt;
 use std::time::Duration;

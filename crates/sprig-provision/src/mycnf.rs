@@ -1,5 +1,4 @@
-//! The baseline server settings of clusters SprigDB manages (chapter 27,
-//! "Settings on clusters SprigDB manages"): one renderer for VMs (the
+//! The baseline server settings of clusters SprigDB manages: one renderer for VMs (the
 //! agent writes the file) and Kubernetes (`MariaDB.spec.myCnf`).
 //!
 //! ```text
@@ -7,7 +6,7 @@
 //! gtid_domain_id   = cluster_number
 //! buffer pool      = 70% of memory less tuning.memory_budget_pct
 //! redo             = max(1G, 25% of the buffer pool)
-//! read_only        = ON: the node boots fenced; its agent unfences (chapter 25)
+//! read_only        = ON: the node boots fenced; its agent unfences
 //! semi-sync        = master side ON on the primary only, slave side on replicas
 //! max_allowed_packet = the gateway's limit (64 MiB) + 1 MiB for its rewrites
 //! Galera           = wsrep_* with mariabackup SST and wsrep_gtid_mode
@@ -28,9 +27,9 @@ pub const BINLOG_EXPIRE_SECONDS: u64 = 604_800;
 pub const OPEN_FILES_LIMIT: u32 = 524_288;
 /// The smallest redo log, bytes.
 pub const MIN_REDO_BYTES: u64 = 1 << 30;
-/// `tuning.memory_budget_pct`'s default (chapter 09).
+/// `tuning.memory_budget_pct`'s default.
 pub const DEFAULT_TUNING_BUDGET_PCT: u8 = 10;
-/// `gateway.max_allowed_packet_bytes`' default (chapter 05).
+/// `gateway.max_allowed_packet_bytes`' default.
 pub const GATEWAY_MAX_ALLOWED_PACKET: u64 = 64 * MIB;
 /// What the gateway may add to a statement on its way to MariaDB
 /// (rewritten names, the session's sync prefix); the gateway tells clients
@@ -38,7 +37,7 @@ pub const GATEWAY_MAX_ALLOWED_PACKET: u64 = 64 * MIB;
 pub const PACKET_HEADROOM: u64 = MIB;
 /// `max_allowed_packet` on clusters SprigDB provisions: the gateway's
 /// default limit plus the headroom, so the gateway's own limit is the one
-/// clients get (chapter 05, "Packet limit").
+/// clients get.
 pub const MAX_ALLOWED_PACKET: u64 = GATEWAY_MAX_ALLOWED_PACKET + PACKET_HEADROOM;
 
 const MIB: u64 = 1 << 20;
@@ -110,8 +109,7 @@ pub struct NodeSettings {
     pub binlog_expire_seconds: u64,
     /// `open_files_limit` (start-up only).
     pub open_files_limit: u32,
-    /// `report_host`: the address replicas reach a promoted node at
-    /// (chapter 25, N4).
+    /// `report_host`: the address replicas reach a promoted node at.
     pub report_host: Option<String>,
     /// The data directory.
     pub datadir: String,
@@ -185,7 +183,7 @@ fn size(bytes: u64) -> String {
 
 /// The node's `[mariadbd]` file.
 #[must_use]
-#[allow(clippy::too_many_lines)] // one line per setting, as in the book
+#[allow(clippy::too_many_lines)] // one line per setting
 pub fn render(n: &NodeSettings) -> String {
     let vm = n.platform == Platform::Vm;
     let mut s = String::new();

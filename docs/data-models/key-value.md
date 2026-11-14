@@ -179,7 +179,7 @@ Scripts loaded with `EVAL` or `SCRIPT LOAD`, and libraries loaded with `FUNCTION
 
 ## Pub/sub and keyspace notifications
 
-`PUBLISH` reaches every subscriber of the channel on every gateway in the data centre, and its reply counts them. Channels belong to the tenant: another tenant's `PUBLISH` to a channel of the same name reaches none of your subscribers. Sharded channels (`SSUBSCRIBE`, `SPUBLISH`) are spread over `redis.sharded_pubsub_hubs` hubs (default 8). If no hub can be reached, `PUBLISH` fails with `SPRIG REDIS_PUBSUB_UNAVAILABLE 39848`.
+`PUBLISH` reaches every subscriber of the channel on every gateway in the data centre, and its reply counts them. Channels belong to the tenant: another tenant's `PUBLISH` to a channel of the same name reaches none of your subscribers. Sharded channels (`SSUBSCRIBE`, `SPUBLISH`) are spread over `redis.sharded_pubsub_hubs` hubs (default 8). The gateways read that count when they start, so a change applies only after you restart them, and every gateway in the data centre must use the same count. If no hub can be reached, `PUBLISH` fails with `SPRIG REDIS_PUBSUB_UNAVAILABLE 39848`.
 
 Blocking commands such as `BLPOP` wake as soon as another client, on any gateway, pushes to the key. A safety poll rereads the key every `redis.block_poll_ms` (default 1000). At most `redis.max_blocked_per_tenant` clients (default 10,000) may block per tenant on each gateway; one more fails with `SPRIG REDIS_TOO_MANY_BLOCKED 39845`.
 

@@ -120,9 +120,7 @@ async fn loads_verifies_reloads_and_reads_only() {
     let r = again.sync(c1, &p).await.unwrap();
     assert!(r.tampered && r.loaded, "{r:?}");
     let edited: u64 = admin
-        .query_first(
-            "SELECT COUNT(*) FROM `__sprig_docs`.`chunks` WHERE text LIKE '% (edited)'",
-        )
+        .query_first("SELECT COUNT(*) FROM `__sprig_docs`.`chunks` WHERE text LIKE '% (edited)'")
         .await
         .unwrap()
         .unwrap();
@@ -182,10 +180,7 @@ async fn loads_verifies_reloads_and_reads_only() {
         "CREATE TABLE `__sprig_docs`.`x` (a INT)",
     ] {
         let e = r.query_drop(sql).await.expect_err(sql);
-        assert!(
-            matches!(server_code(&e), Some(1142 | 1044)),
-            "{sql}: {e}"
-        );
+        assert!(matches!(server_code(&e), Some(1142 | 1044)), "{sql}: {e}");
     }
     // Nothing else: no tenant schema, no system table.
     let e = r

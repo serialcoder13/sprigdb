@@ -1,6 +1,5 @@
-//! The queue owner (chapter 50, "The queue owner", "Dispatch, credit and
-//! consumers", "Acknowledgements", "Expiry and length limits",
-//! "Dead-lettering"; build steps 5–7).
+//! The queue owner: dispatch, credit and consumers, acknowledgements,
+//! expiry and length limits, and dead-lettering.
 //!
 //! One task per queue on the gateway holding the queue's lease. It keeps
 //! the head of the queue in memory, decides every delivery there, and
@@ -251,7 +250,7 @@ pub enum OwnerEvent {
     },
     /// The queue went from empty to holding ready messages, or back
     /// (reported once when the owner starts, then on each change): the
-    /// ready index of fan-in consumers (chapter 42, "Fan-in").
+    /// ready index of fan-in consumers.
     Ready {
         /// The queue.
         queue: u64,
@@ -615,7 +614,7 @@ pub fn fail(c: Cmd, err: &MqError) {
         Cmd::Purge(r) | Cmd::Delete { reply: r, .. } => {
             let _ = r.send(Err(err.clone()));
         }
-        // bugfix-66: unanswered (the sender dropped): the caller knows the
+        // Unanswered (the sender dropped): the caller knows the
         // owner couldn't say, instead of reading "0 ready, 0 consumers".
         Cmd::Info(r) => drop(r),
         Cmd::Credit { .. }
@@ -1376,7 +1375,7 @@ impl Core {
             .filter(|c| c.spec.holder == h)
             .map(|c| c.spec.id)
             .collect();
-        // A lease tag's key (R9, r9tests) means the same over every link:
+        // A lease tag's key means the same over every link:
         // its messages go back whichever gateway they were taken through.
         let tag = h.conn.0 & crate::sql::LEASE_TAG_BIT != 0;
         let seqs: Vec<u64> = self
@@ -1514,7 +1513,7 @@ impl Core {
         });
     }
 
-    /// The owner follows its consumers (chapter 50, "The queue owner"):
+    /// The owner follows its consumers:
     /// when more than half of them have been on one other gateway for
     /// `move_after_ms`, and the last move is older than the cooldown, ask
     /// the engine to hand the queue there. Damped: the picture must hold

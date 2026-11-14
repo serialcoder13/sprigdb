@@ -1,6 +1,6 @@
-//! Six-scope resolution over a tenant snapshot and the etcd snapshot
-//! (chapter 08 step 5): precedence, bounds and clamping tables, the
-//! chapter's worked example, layering equivalence, memoization, the
+//! Six-scope resolution over a tenant snapshot and the etcd snapshot:
+//! precedence, bounds and clamping tables, the layered example (global,
+//! tenant, table), layering equivalence, memoization, the
 //! incremental builder, clamp reports and watches.
 
 #![allow(
@@ -183,7 +183,7 @@ fn resolve(key: &str, rows: &[(At, Entry)], depth: u8) -> Resolved {
 #[test]
 fn chapter_08_worked_example() {
     // Global bounds max 8; tenant acme sets 6 with bounds max 5; table
-    // orders sets 7. Each row of the book's table, as (rows so far, ctx
+    // orders sets 7. Each step of the walk, as (rows so far, ctx
     // depth, value, bounds max, source, clamped).
     let key = MAX_PER_TABLE.key;
     let global = (At::Global, bounds(Bounds::max(8.0)));
@@ -407,7 +407,7 @@ fn keys_resolve_only_at_accepted_scopes() {
 
 #[test]
 fn ancestors_sit_between_the_tenant_and_the_cluster() {
-    // Chapter 14's a → b → c, from c's catalog: a (root) and b (parent)
+    // The tenant tree a → b → c, from c's catalog: a (root) and b (parent)
     // rows are ancestor copies. Nearest level wins; every ancestor's bounds
     // apply.
     let key = LOCK_MINUTES.key;

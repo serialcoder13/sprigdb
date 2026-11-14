@@ -1,13 +1,12 @@
 //! The queue engine of one gateway: [`QueueEngine`] implements
-//! `sprig-proto-amqp`'s [`QueueBackend`] (chapter 50, build steps 2–10).
+//! `sprig-proto-amqp`'s [`QueueBackend`].
 //!
 //! What it stands on is behind three traits the gateway implements over
 //! MariaDB and etcd (and tests over memory):
 //!
 //! - [`MqCatalog`]: vhosts, the durable model (catalog snapshots), message
 //!   stores, privileges, settings and the tenant's token key;
-//! - [`Leases`]: one owner per queue (the etcd lease of chapter 50's
-//!   "The queue owner");
+//! - [`Leases`]: one owner per queue (an etcd lease);
 //! - [`TempRegistry`]: temporary queues of other gateways.
 //!
 //! **Owner slots.** Every queue the gateway uses has a slot: a command
@@ -120,8 +119,8 @@ pub trait MqCatalog: Send + Sync + 'static {
     fn settings(&self, v: &VhostRef) -> QueueSettings;
 
     /// Whether the feed-driven forwarder that serves the vhost's tenant
-    /// runs now (its cluster's `queue-forwarder-beats/` beat is fresh; chapter
-    /// 50, bugfix-42). The fallback then leaves transactional publishes to
+    /// runs now (its cluster's `queue-forwarder-beats/` beat is fresh). The
+    /// fallback then leaves transactional publishes to
     /// it for [`FALLBACK_WHILE_FEED_RUNS_MS`]. `false` (the default) when
     /// unknown: the fallback takes them after `queue.forward_fallback_ms`.
     async fn feed_forwarder_runs(&self, _v: &VhostRef) -> bool {
@@ -131,7 +130,7 @@ pub trait MqCatalog: Send + Sync + 'static {
 
 /// With `queue.forwarder = feed`, while the feed-driven forwarder runs
 /// ([`MqCatalog::feed_forwarder_runs`]), the polling fallback takes only
-/// transactional publishes older than this (bugfix-42). The fallback reads
+/// transactional publishes older than this. The fallback reads
 /// rows in insert order, which isn't their commit order: before, it took
 /// rows older than `queue.forward_fallback_ms` (2 s) whenever the feed was
 /// slow to forward them (a tenant's first forwards, a loaded machine), and
@@ -142,7 +141,7 @@ pub const FALLBACK_WHILE_FEED_RUNS_MS: u64 = 30_000;
 pub const POLL_MS: u64 = 200;
 
 /// The longest a vhost's forwarder sleeps when its stores had nothing to
-/// forward (R9, r9scale): `queue.forward_fallback_ms`'s default, so the
+/// forward: `queue.forward_fallback_ms`'s default, so the
 /// polling fallback is no later than it was.
 pub const IDLE_POLL_MAX_MS: u64 = 2_000;
 
@@ -180,7 +179,7 @@ pub trait TempRegistry: Send + Sync + 'static {
 
 /// Told when a queue's owner on this gateway finds the queue went from
 /// empty to holding ready messages, or back, and once when the owner
-/// starts: the ready index of fan-in consumers (chapter 42, "Fan-in").
+/// starts: the ready index of fan-in consumers.
 /// Must not block.
 pub trait ReadyHook: Send + Sync + 'static {
     /// Queue `queue` (`id`) of vhost `v` has ready messages, or none.
@@ -880,7 +879,7 @@ impl VShared {
                 return 0;
             }
         };
-        // bugfix-42: late transactional publishes are the feed's while it
+        // Late transactional publishes are the feed's while it
         // runs (it forwards them in commit order); only those past the
         // longer delay are taken, in case the feed gave up on them.
         if let Some(b) = publish_before
@@ -954,7 +953,7 @@ impl VShared {
         let mut next_try = 0i64;
         let mut next_purge = 0i64;
         let mut durable: Option<Arc<dyn MsgStore>> = None;
-        // R9 (r9scale): how long the loop sleeps. A vhost stays open on a
+        // How long the loop sleeps. A vhost stays open on a
         // gateway once used, and every lease holder read its outbox and its
         // delayed messages five times a second: at 10,000 members, tens of
         // thousands of statements a second for nothing. With nothing to do

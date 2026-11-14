@@ -1,4 +1,4 @@
-//! The binlog dump probe (chapter 09, "Binlog dump") against the Compose
+//! The binlog dump probe against the Compose
 //! topologies: every node of each, as root standing in for `sprig_repl`;
 //! an account without `REPLICATION SLAVE` on the single node (the feed is
 //! `unsupported`, with the grant to run); and, on a throwaway server named

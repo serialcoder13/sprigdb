@@ -1,10 +1,9 @@
 //! `sprig-provision`: the `Provisioner` trait, with external, Kubernetes and
 //! VM implementations.
 //!
-//! Layer: 3 roles. Design: [chapter 27](https://github.com/serialcoder13/sprigdb-plan/blob/main/lld/chapters/27-provisioning.md)
-//! (Provisioning) of the SprigDB low-level design.
+//! Layer: 3 roles.
 //!
-//! What exists (chapter 27, build step 1):
+//! What exists:
 //! - [`Provisioner`], the operations a provisioner may support, and the
 //!   specs they take;
 //! - [`credentials`]: secret references for the system accounts and how
@@ -12,14 +11,14 @@
 //! - [`external`]: the external provisioner, which registers MariaDB that
 //!   already exists after prechecking its TLS, grants, settings (the change
 //!   feed's binlog settings included), accounts, a binlog read as
-//!   `sprig_repl` (chapter 09's dump probe) and capability profile.
+//!   `sprig_repl` (the binlog dump probe) and capability profile.
 //!
 //! - [`mycnf`]: the baseline server settings of managed clusters, for VMs
-//!   and for Kubernetes' `spec.myCnf` (R2);
+//!   and for Kubernetes' `spec.myCnf`;
 //! - [`vm`]: the VM provisioner's free-host pool, cluster plans, systemd
-//!   units and install steps (R2, chapter 27 steps 8 and 9).
+//!   units and install steps.
 //!
-//! Not yet: the object-store check (step 3). The Kubernetes provisioner
+//! Not yet: the object-store check. The Kubernetes provisioner
 //! lives in `sprig-operator`, next to its client.
 
 pub mod credentials;
@@ -43,7 +42,7 @@ use sprig_common::{Result, SprigCode, SprigError};
 pub use external::ExternalProvisioner;
 pub use sprig_cluster::record::ProvisionerKind;
 
-/// An operation a provisioner may support (chapter 27, "Interfaces").
+/// An operation a provisioner may support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProvisionOp {
@@ -119,7 +118,7 @@ pub struct Resources {
     pub storage_gb: u64,
 }
 
-/// A cluster to create (Kubernetes and VMs, R2).
+/// A cluster to create (Kubernetes and VMs).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClusterSpec {
     /// The data center.
@@ -140,7 +139,7 @@ pub struct ClusterSpec {
     pub pool: Option<String>,
 }
 
-/// A restore (chapter 47).
+/// A restore.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestoreSpec {
     /// The cluster to restore into.
@@ -151,8 +150,7 @@ pub struct RestoreSpec {
     pub point_in_time: Option<String>,
 }
 
-/// What `sprigctl cluster register` asks for (chapter 09, "Interfaces";
-/// chapter 27, "External registration").
+/// What `sprigctl cluster register` asks for.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RegisterCluster {
     /// The data center; it must be the registering controller's.
@@ -194,7 +192,7 @@ pub struct NodeReport {
     pub error: Option<String>,
 }
 
-/// The prechecks' findings (chapter 27, "Registering an external cluster").
+/// The prechecks' findings.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PrecheckReport {
     /// Items that refuse the registration, each with its fix where there
@@ -252,13 +250,11 @@ pub fn unsupported(kind: ProvisionerKind, op: ProvisionOp) -> SprigError {
     )
 }
 
-/// Creates, changes and retires the clusters SprigDB uses (chapter 27,
-/// "Interfaces"). Every operation a provisioner doesn't support fails with
+/// Creates, changes and retires the clusters SprigDB uses. Every operation a provisioner doesn't support fails with
 /// 39510; the defaults below say so. Long operations return the id of a
-/// `cluster_provision` job (chapter 23).
+/// `cluster_provision` job.
 ///
-/// `precheck` is an addition to the book's trait: `sprigctl cluster
-/// register --dry-run` (chapter 09) runs the prechecks without writing.
+/// `precheck` backs `sprigctl cluster register --dry-run`: it runs the prechecks without writing.
 #[async_trait::async_trait]
 pub trait Provisioner: Send + Sync {
     /// Which provisioner this is.

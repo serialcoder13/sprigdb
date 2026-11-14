@@ -1089,7 +1089,7 @@ what_to_do = "Retry with backoff. If it lasts, check the workers holding the ind
 
 [ER_SPRIG_SEARCH_WAIT_TIMEOUT]
 meaning = "The search asked for read-your-writes consistency, and the index didn't reach the clusters' positions within `search.wait_timeout_ms`."
-what_to_do = "Retry, or use the default consistency for searches that can accept a short lag (`search.max_lag_ms`)."
+what_to_do = "Retry, or use the default consistency for searches that can accept a short lag."
 
 [ER_SPRIG_SEARCH_WINDOW_EXCEEDED]
 meaning = "The search would have to read more hits than `search.max_window`, for example deep paging, or counts and facets for a user bound by row-level security."

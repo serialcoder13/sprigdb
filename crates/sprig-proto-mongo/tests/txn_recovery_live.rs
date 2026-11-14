@@ -1,5 +1,4 @@
-//! Transaction outcomes across gateways (chapter 30, "Sessions and
-//! transactions"; `decisions/r5-interim.md` D17): commit records and
+//! Transaction outcomes across gateways: commit records and
 //! recovery tokens.
 //!
 //! A proxy sits between the Rust driver and gateway 1. Armed with a

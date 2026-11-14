@@ -1,5 +1,4 @@
-//! MongoDB error codes and their `codeName`s (chapter 30, "Error codes
-//! and labels"; appendix E), and the error reply document.
+//! MongoDB error codes and their `codeName`s, and the error reply document.
 //!
 //! SprigDB's own errors (39000-39999) keep their number and get the
 //! `codeName` `Sprig<Name>`.

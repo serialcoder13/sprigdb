@@ -1,5 +1,5 @@
-//! Memoized resolution results (chapter 08: "resolved values are memoized
-//! per `(key, ctx)` until a version changes").
+//! Memoized resolution results: resolved values are memoized per
+//! `(key, ctx)` until a version changes.
 //!
 //! A [`Memo`] lives next to immutable rows: inside a [`TenantSettings`]
 //! (one tenant at one catalog version) or a [`Settings`] (process-level

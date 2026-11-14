@@ -1,5 +1,5 @@
-//! A deterministic simulation of the queue owner (chapter 50, "Testing":
-//! crash owners at every step; chapter 46).
+//! A deterministic simulation of the queue owner: crash owners at
+//! every step.
 //!
 //! One queue on an in-memory store. A publisher sends numbered messages
 //! with confirms; a consumer takes them with credit and acknowledges most;

@@ -106,6 +106,8 @@ mod definer;
 pub(crate) mod status;
 // Search DDL, MATCH ... AGAINST, sprig_search().
 pub(crate) mod search;
+// Protocol engines' point reads (MongoDB `_id` finds).
+mod point;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -195,6 +197,7 @@ impl Executor for PassThrough {
             router: router::RouterState::default(),
             packet_limit: None,
             placement_memo: follow::PlacementMemo::default(),
+            point_memo: point::PointMemo::default(),
             status: status::SessionStatus::default(),
             globals_applied: false,
         })
@@ -229,6 +232,8 @@ pub struct PassSession {
     status: status::SessionStatus,
     /// Placement checks kept per map generation.
     placement_memo: follow::PlacementMemo,
+    /// Point reads: the tenant's statements found unrouted (`point`).
+    point_memo: point::PointMemo,
     /// The tenant's `compat.global.*` defaults were given to the session:
     /// at its first request, and again after a reset.
     globals_applied: bool,
@@ -1166,6 +1171,16 @@ impl SessionExec for PassSession {
         // Tenant sessions: no error the gateway returns carries a physical
         // name (the relay maps the ones it sends itself).
         r.map_err(|e| self.map_error(e))
+    }
+
+    async fn point_read(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        stmt: StmtRef,
+        params: &sprig_proto_mysql::command::ExecuteParams,
+    ) -> Result<crate::pipeline::PointRead> {
+        self.packet_limit = u64::try_from(cx.proto.max_packet).ok();
+        Box::pin(PassSession::point_read(self, cx, stmt, params)).await
     }
 
     async fn init_db(&mut self, cx: &mut ExecCtx<'_>, schema: &str) -> Result<()> {

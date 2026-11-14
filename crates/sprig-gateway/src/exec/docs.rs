@@ -70,7 +70,10 @@ impl PassSession {
             Some(Ok(a)) => a,
             Some(Err(Refusal::Write)) => {
                 metrics::counter!("sprig_docs_search_total", "result" => "refused").increment(1);
-                return self.fail(out, &sql::write_denied(&user, &host)).await.map(Some);
+                return self
+                    .fail(out, &sql::write_denied(&user, &host))
+                    .await
+                    .map(Some);
             }
             Some(Err(Refusal::Error(e))) => {
                 metrics::counter!("sprig_docs_search_total", "result" => "invalid").increment(1);

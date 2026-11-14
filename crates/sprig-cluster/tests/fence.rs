@@ -469,7 +469,7 @@ async fn rename_waits_for_lock_holders_then_fences_and_unfences() {
     .await;
 }
 
-/// Chapter 10, "Cutover": something recreated tables under their old names
+/// During a cutover something recreated tables under their old names
 /// while a rename fence held (catalog migrations did, on a fenced
 /// catalog). The unfence drops a recreation only if it is empty and was
 /// created after the fence; otherwise it fails and drops nothing.

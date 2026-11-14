@@ -127,9 +127,9 @@ sprigctl job list --tenant acme                # mover jobs, newest first
 
 Splits, merges, moves and re-keys are all **mover jobs**, run by workers:
 
-1. **Copy.** The rows are copied in chunks (`mover.copy_chunk_rows`, 5,000), throttled when the source gets busy, its replicas lag or its p99 latency rises.
+1. **Copy.** The rows are copied in chunks (`mover.copy_chunk_rows`, 5,000), throttled when the source gets busy or its replicas lag.
 2. **Catch up.** Changes made since the copy started are read from the source's binlog and applied in order. Every applied transaction also records its source position, so a restart resumes exactly.
-3. **Verify.** Per-row digests of source and target are compared, and differing ranges are repaired (`mover.verify_mode`, `full` by default).
+3. **Verify.** Per-row digests of source and target are compared, and differing ranges are repaired. Every row is checked by default; `sprigctl shard move --verify` can check a sample of chunks instead, or skip the step.
 4. **Cut over.** When the target has stayed within `mover.ready_max_lag_ms` (1 s) for `mover.ready_sustain_seconds` (60 s), the mover holds the shard's range in the map, fences the source, applies the last changes, raises the epoch, points the map at the target and releases the hold.
 5. **Clean up.** The fenced source is kept for `mover.source_retain_hours` (24) and then dropped.
 

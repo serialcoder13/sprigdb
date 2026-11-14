@@ -1,5 +1,5 @@
 //! Messages as the queue engine stores them: in the encoding they were
-//! published in (chapter 50, "Message encoding"), with the few fields the
+//! published in, with the few fields the
 //! engine reads (headers for headers exchanges, priority, TTL) parsed once
 //! at publish.
 
@@ -60,7 +60,7 @@ pub struct Message {
     pub info: MessageInfo,
 }
 
-/// Where a delivered message sits in its queue: chapter 50's `MsgKey`.
+/// Where a delivered message sits in its queue: the engine's `MsgKey`.
 /// The engine settles by it; front ends keep it opaque.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
 pub struct DeliveryId {

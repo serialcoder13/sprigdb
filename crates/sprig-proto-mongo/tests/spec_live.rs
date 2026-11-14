@@ -1,6 +1,5 @@
-//! MongoDB driver specification tests in the unified format (chapter 30,
-//! "Testing"; chapter 48's R5 done-when: "The MongoDB driver specification
-//! tests pass at 95% or more, with every failure documented").
+//! MongoDB driver specification tests in the unified format. The
+//! target is 95% or more passing, with every failure documented.
 //!
 //! A unified-format runner over the Rust driver: it reads the JSON test
 //! files of the `mongodb/specifications` repository (pinned by the caller),

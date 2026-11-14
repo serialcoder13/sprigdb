@@ -1,5 +1,4 @@
-//! Leader election with a fencing token (chapter 23, "Leader election with
-//! a fencing token").
+//! Leader election with a fencing token.
 //!
 //! ```text
 //! campaign(key, me):

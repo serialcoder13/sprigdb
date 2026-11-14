@@ -1,4 +1,4 @@
-//! Scheduled jobs (chapter 41, "Scheduled jobs"; R7 order 5).
+//! Scheduled jobs.
 //!
 //! ```text
 //! deploy: logic_schedules row (next_fire_at from the cron text in its zone)

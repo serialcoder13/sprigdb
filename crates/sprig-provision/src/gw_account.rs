@@ -1,5 +1,4 @@
-//! `sprig_gw`, the gateways' monitoring account (chapter 09, "System
-//! accounts"; chapter 06, "Health checks"; decision gwhard-3).
+//! `sprig_gw`, the gateways' monitoring account.
 //!
 //! Gateways check every node's health, role and replication position. As
 //! a tenant's own account those checks can't read the replication status,

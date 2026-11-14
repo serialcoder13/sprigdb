@@ -1,7 +1,7 @@
-//! An in-memory queue engine behind [`QueueBackend`]: enough of chapter
-//! 50's semantics to test both front ends end to end, and to serve the
+//! An in-memory queue engine behind [`QueueBackend`]: enough of the
+//! queue semantics to test both front ends end to end, and to serve the
 //! gateway's AMQP listeners until `sprig-queues` (the MariaDB-backed
-//! engine, build steps 2–10) replaces it. Nothing survives a restart.
+//! engine) replaces it. Nothing survives a restart.
 //!
 //! Served: the built-in exchanges and the four exchange types (topic
 //! patterns with `*` and `#`, headers with `x-match` `all`, `any`,
@@ -35,7 +35,7 @@ use crate::error::{MqCode, MqError, reply};
 use crate::message::{Delivery, DeliveryId, Message};
 use crate::v091::codec::{FieldTable, FieldValue};
 
-/// A RabbitMQ permission kind (chapter 50, "Security notes").
+/// A RabbitMQ permission kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Perm {
     /// Declare and delete.
@@ -75,7 +75,7 @@ impl Default for MemBackend {
     }
 }
 
-/// Chapter 50's vhost mapping without `mq_vhosts`: `/` is
+/// The vhost mapping without `mq_vhosts`: `/` is
 /// `default_db` (`amqp.default_vhost_database`), any other vhost the
 /// database of the same name.
 #[must_use]
@@ -298,7 +298,7 @@ impl State {
         Ok(q)
     }
 
-    /// Routes a message (chapter 50, "Routing"): the queues reached.
+    /// Routes a message: the queues reached.
     fn route(&self, exchange: &str, key: &str, headers: &FieldTable) -> Vec<String> {
         let mut out = Vec::new();
         let mut seen_q = HashSet::new();
@@ -459,7 +459,7 @@ impl State {
         Ok(())
     }
 
-    /// Dead-letters an entry (chapter 50, "Dead-lettering").
+    /// Dead-letters an entry.
     fn dead_letter(&mut self, qname: &str, e: Entry, reason: DeadLetterReason) {
         let Some(q) = self.queues.get(qname) else {
             return;
@@ -573,8 +573,7 @@ impl State {
         }
     }
 
-    /// Hands ready messages to consumers with credit (chapter 50,
-    /// "Dispatch, credit and consumers").
+    /// Hands ready messages to consumers with credit.
     fn dispatch(&mut self, qname: &str) {
         loop {
             let Some(q) = self.queues.get(qname) else {

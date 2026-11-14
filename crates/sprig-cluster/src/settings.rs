@@ -1,11 +1,11 @@
-//! Chapter 09's settings that steps 1-8 use, declared next to the code
-//! (chapter 03, "Declaring a key"), and a typed snapshot of them.
+//! The cluster settings this crate uses, declared next to the code, and a
+//! typed snapshot of them.
 
 use std::time::Duration;
 
 use sprig_settings::{Apply, HardBounds, MemSettings, Scopes, Setting, SettingCtx};
 
-/// "Ops": cluster, dc and global (chapter 09, "Configuration").
+/// "Ops": cluster, dc and global.
 const OPS: Scopes = Scopes::OPERATIONAL;
 /// Global only.
 const GLOBAL: Scopes = Scopes(0b10_0000);

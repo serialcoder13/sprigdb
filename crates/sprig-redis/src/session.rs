@@ -1,5 +1,5 @@
-//! One Redis connection (chapter 40, "Connections", "Dispatch and
-//! routing", "MULTI, EXEC, WATCH", "Blocking commands", "Pub/sub").
+//! One Redis connection: login, dispatch and routing, `MULTI`, `EXEC`
+//! and `WATCH`, blocking commands and pub/sub.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -44,7 +44,7 @@ impl std::fmt::Debug for Login {
     }
 }
 
-/// Logins (chapter 14 in the gateway; a plain connection in tests).
+/// Logins (the gateway's authentication; a plain connection in tests).
 #[async_trait]
 pub trait Auth: Send + Sync {
     /// Logs `user` in (`None`: one-argument `AUTH`). `Err` holds the
@@ -90,7 +90,7 @@ pub struct Session {
     /// The data center named by `CLIENT SETNAME` (`app~fra1`).
     pub dc_hint: Option<String>,
     /// A fixed namespace in place of the Redis databases (the API's
-    /// `Exec`, chapter 33).
+    /// `Exec`).
     ns_override: Option<sprig_kv::Namespace>,
 }
 
@@ -280,7 +280,7 @@ impl Session {
             .then(|| self.multi.clone())
             .flatten()
             .filter(|_| !self.multi_err);
-        // RL51: a write command whose events crate::keyspace knows sends
+        // A write command whose events crate::keyspace knows sends
         // them itself, and its writes are marked so the gateways'
         // notifications from the change feed pass over them; the feed
         // sends the others' (scripts, commands it doesn't know, and an
@@ -355,8 +355,8 @@ impl Session {
         }
     }
 
-    /// A pub/sub message as this connection may see it (chapter 29,
-    /// RL46): a keyspace notification goes out only when the session may
+    /// A pub/sub message as this connection may see it (row-level
+    /// security): a keyspace notification goes out only when the session may
     /// read its key (the gateway's [`crate::keyspace::KeyFilter`]).
     pub async fn deliver(&mut self, m: Msg) -> Option<Frame> {
         let (channel, data) = match &m {
@@ -608,7 +608,7 @@ impl Session {
                 }
             }
         }
-        // R6 round 3 (R23): the hottest writes as one guarded batch.
+        // The hottest writes as one guarded batch.
         if !in_txn
             && cfg.guarded_batches
             && let Some(f) = self.batched(name, a).await
@@ -828,7 +828,7 @@ impl Session {
         {
             tracing::debug!(error = %e, "redis session isolation not set");
         }
-        // Chapter 24: a name set before AUTH names the DC too.
+        // A name set before AUTH names the DC too.
         l.sql.client_dc(self.dc_hint.as_deref());
         self.login = Some(l);
     }
@@ -854,7 +854,7 @@ impl Session {
                 "Client names cannot contain spaces, newlines or special characters.",
             ));
         }
-        // Text after the last `~` is the DC hint (chapter 24).
+        // Text after the last `~` is the DC hint.
         self.dc_hint = n
             .iter()
             .rposition(|b| *b == b'~')
@@ -1174,7 +1174,7 @@ impl Session {
                 // Registered with the hub before the reply, so a later
                 // PUBLISH on any gateway is delivered.
                 self.env.hold(&scope, interest(kind, c)).await;
-                // RL51: the notifications from the change feed.
+                // The notifications from the change feed.
                 if (kind == Kind::Pattern || c.starts_with(b"__key"))
                     && let Some(f) = self.env.keyspace_feed()
                 {
@@ -1705,7 +1705,7 @@ impl Session {
                 if let Err(e) = self.sql_exec("START TRANSACTION").await {
                     return Ok(reply::backend(&e));
                 }
-                // Lock the declared keys first, in order (chapter 40).
+                // Lock the declared keys first, in order.
                 if !read_only && !keys.is_empty() {
                     let mut ks: Vec<&Bytes> = keys.iter().filter(|k| k.len() <= 1024).collect();
                     ks.sort();
@@ -1825,7 +1825,7 @@ impl Session {
                 "Write commands are not allowed from read-only scripts.",
             ));
         }
-        // Every key must be declared (chapter 40, "Keys and shards").
+        // Every key must be declared.
         let cfg = self.env.config();
         for i in spec.key_indexes(a.len()) {
             let k = &a[i];
@@ -1942,7 +1942,7 @@ impl Session {
         let (lib, flags) = match self.script_get("function", fname.as_bytes()).await {
             Ok(Some(x)) => x,
             // Not a Lua library function: a logic-layer function exposed
-            // to Redis, if there is one (chapter 41; Lua functions first).
+            // to Redis, if there is one (Lua functions first).
             Ok(None) => return Ok(vec![self.logic_fcall(name, &a[1], &keys, &args).await]),
             Err(e) => return Ok(vec![reply::backend(&e)]),
         };

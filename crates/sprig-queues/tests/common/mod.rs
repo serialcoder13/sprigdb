@@ -112,7 +112,7 @@ pub async fn server_with(settings: QueueSettings) -> Server {
 
 /// An in-process server over `catalog` with `leases` (one gateway's view
 /// of a shared lease table), no relay: two such servers over one catalog
-/// are two gateways whose owners can't reach each other (bugfix-66).
+/// are two gateways whose owners can't reach each other.
 pub async fn server_on(
     catalog: Arc<MemCatalog>,
     leases: Arc<dyn sprig_queues::engine::Leases>,

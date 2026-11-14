@@ -1,5 +1,4 @@
-//! Docker Compose fixtures (chapter 46, "Integration with Docker Compose";
-//! chapter 27, "Development setup").
+//! Docker Compose fixtures for the development setup.
 //!
 //! [`ComposeProject`] describes what to start: Compose files, a project
 //! name, profiles and variables. [`ComposeProject::up`] starts it, waits

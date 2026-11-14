@@ -1,6 +1,5 @@
-//! Change streams through the Rust driver (chapter 30 step 9, chapter 38
-//! step 14; chapter 48's R5 done-when: "change streams resume correctly
-//! across shard moves").
+//! Change streams through the Rust driver, including resuming correctly
+//! across shard moves.
 //!
 //! - `SPRIG_TEST_MONGO_URI`: the gateway, as in `driver_live.rs`.
 //! - `SPRIG_TEST_MOVE_CMDS`: commands separated by `;;` that each move the
@@ -203,7 +202,7 @@ async fn change_stream_events_and_resume() {
     db.drop().await.unwrap();
 }
 
-/// D14 (decisions/r5-interim.md): replacements are `replace` events,
+/// Replacements are `replace` events,
 /// with the new document and no update description, as MongoDB sends
 /// them; operator updates stay `update`, and an upserting replacement
 /// that inserts is an `insert`.

@@ -219,7 +219,7 @@ async fn writes_are_checked_and_recorded(env: Env) {
     assert_eq!(rec.body.reason, "larger caches");
     assert!(rec.body.set_at.ends_with('Z'));
 
-    // The stored JSON follows chapter 23's record layout.
+    // The stored JSON follows the setting record layout.
     let key = env.stores.record_key(&dc, "test.cache_mb").unwrap();
     assert!(key.as_str().ends_with("/settings/test.cache_mb"));
     let raw = env

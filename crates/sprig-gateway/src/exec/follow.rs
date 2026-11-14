@@ -58,6 +58,20 @@ pub(super) struct PlacementMemo {
 }
 
 impl PlacementMemo {
+    /// Whether `follow_tenant` would return at once: its last check found
+    /// nothing to wait for at this (home, generation) and routed to
+    /// `cluster` (MongoDB's point reads, `exec::point`).
+    pub(super) fn followed_at(
+        &self,
+        home: &sprig_common::ids::DcId,
+        generation: u64,
+        cluster: &sprig_common::ids::ClusterId,
+    ) -> bool {
+        self.followed
+            .as_ref()
+            .is_some_and(|(d, g, c)| d == home && *g == generation && c == cluster)
+    }
+
     /// [`GatewayLocator::maps_token`](crate::tenant::locator::GatewayLocator::maps_token)
     /// for `tenant`, kept per generation.
     pub(super) fn maps_token(

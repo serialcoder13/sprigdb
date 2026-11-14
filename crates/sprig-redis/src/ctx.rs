@@ -1,7 +1,6 @@
-//! A command's view of one Redis database (chapter 40, "Guarded batches";
-//! chapter 33, "Type checks").
+//! A command's view of one Redis database.
 //!
-//! As built in R6, a write command runs in one MariaDB transaction:
+//! A write command runs in one MariaDB transaction:
 //!
 //! 1. lock the key row (`SELECT ... FOR UPDATE`, which also reads MariaDB's
 //!    clock); an expired row is deleted with its elements, so the key is
@@ -219,7 +218,7 @@ impl<'a> Ctx<'a> {
         for s in ns.ddl() {
             self.x(&s).await?;
         }
-        // SQL's read-only relations over the structures (chapter 33).
+        // SQL's read-only relations over the structures.
         for s in sprig_kv::api::view_ddl(ns) {
             if let Err(e) = self.x(&s).await {
                 tracing::debug!(error = %e, "a key-value view was not created");
@@ -264,7 +263,7 @@ impl<'a> Ctx<'a> {
 
     /// The key row's read: one table, the key and its distribution key in
     /// the condition, so a sharded database's router sends it to the key's
-    /// shard (R6 round 4). An absent key returns no row.
+    /// shard. An absent key returns no row.
     fn select_sql(ns: &Namespace, k: &[u8], lock: bool) -> String {
         let and_live = if lock {
             String::new()
@@ -542,7 +541,7 @@ impl<'a> Ctx<'a> {
 
     /// `k = <key> AND _sprig_dk = <its distribution key>` on alias `p`
     /// (`t.` or empty): on a sharded database the router sends the
-    /// statement to the key's shard (R6 round 4).
+    /// statement to the key's shard.
     #[must_use]
     pub fn kp(&self, k: &[u8], p: &str) -> String {
         sprig_kv::api::key_pred(&self.ns, k, p)

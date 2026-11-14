@@ -371,6 +371,33 @@ pub trait SessionExec: Send {
     fn set_claims(&mut self, claims: Option<std::sync::Arc<serde_json::Value>>) {
         let _ = claims;
     }
+
+    /// A prepared single-row read for a protocol engine (MongoDB's `_id`
+    /// finds, S154): statement `stmt` executed with `params` on the
+    /// session's backend connection, without a [`ResultSink`]. The
+    /// statement's privileges, row-level security and placement are checked
+    /// as [`Self::execute`] checks them; [`PointRead::Fallback`] whenever
+    /// the short way doesn't apply or meets anything but a row (an error, a
+    /// fence, a transaction): the caller then runs the statement with
+    /// [`Self::execute`]. Executors without it always fall back.
+    async fn point_read(
+        &mut self,
+        _cx: &mut ExecCtx<'_>,
+        _stmt: StmtRef,
+        _params: &ExecuteParams,
+    ) -> Result<PointRead> {
+        Ok(PointRead::Fallback)
+    }
+}
+
+/// What [`SessionExec::point_read`] found.
+#[derive(Debug, Clone)]
+pub enum PointRead {
+    /// Not answered: run the statement with [`SessionExec::execute`].
+    Fallback,
+    /// The statement's first row (binary protocol values, by column), or
+    /// `None` when it returned none.
+    Row(Option<Vec<Value>>),
 }
 
 /// The client side of a response, as an executor sees it.
@@ -582,6 +609,18 @@ struct HookedSession {
 
 #[async_trait]
 impl SessionExec for HookedSession {
+    // The hooks' `begin` and `end` see requests; a point read
+    // is a statement inside one (MongoDB's command), recorded by
+    // the session's capture as every statement is.
+    async fn point_read(
+        &mut self,
+        cx: &mut ExecCtx<'_>,
+        stmt: StmtRef,
+        params: &ExecuteParams,
+    ) -> Result<PointRead> {
+        self.inner.point_read(cx, stmt, params).await
+    }
+
     async fn execute(
         &mut self,
         cx: &mut ExecCtx<'_>,

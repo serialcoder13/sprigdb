@@ -20,7 +20,7 @@ Each version runs in one of two **tiers**:
 
 SprigDB picks the tier (`SPRIG_TIER = 'auto'`): code that can't compile to SQL, such as code with outbound `fetch` calls or loops it can't bound, runs in the engine tier. After a declaration, `SHOW WARNINGS` lists one note per line of the placement: the module, the version, the tier and each reason for the engine tier.
 
-Budgets are settings, per object, database or tenant: `logic.function_budget_ms` (5000 ms per synchronous call), `logic.trigger_budget_ms`, `logic.job_budget_ms`, `logic.kirun_max_steps`, `logic.max_data_ops` (1000 `db` calls per invocation), `logic.max_rows_read`, `logic.max_loop_iterations` and `logic.memory_limit_mb`. Outbound `fetch` reaches only the hosts in `logic.outbound_allowlist`. See the [settings reference](../reference/settings.md#logic).
+Budgets are settings, per object, database or tenant: `logic.function_budget_ms` (5000 ms per synchronous call), `logic.trigger_budget_ms`, `logic.job_budget_ms`, `logic.kirun_max_steps`, `logic.max_data_ops` (1000 `db` calls per invocation), `logic.max_rows_read`, `logic.max_loop_iterations` and `logic.memory_limit_mb`. Workers read `logic.trigger_budget_ms` and `logic.job_budget_ms` per tenant, so set those on the tenant or globally. Outbound `fetch` reaches only the hosts in `logic.outbound_allowlist`. See the [settings reference](../reference/settings.md#logic).
 
 ## Statements
 

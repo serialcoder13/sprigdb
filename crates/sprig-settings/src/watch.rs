@@ -1,6 +1,4 @@
-//! Live settings: mirrors of the etcd scopes, watches and apply callbacks
-//! (chapter 23, "Settings: writes, bounds and watches"; chapter 08, "Live
-//! application"; build step 8).
+//! Live settings: mirrors of the etcd scopes, watches and apply callbacks.
 //!
 //! Every process mirrors its DC's `settings/` and `cluster-settings/`, and
 //! the global `settings/`, so a change arrives within one watch round trip
@@ -19,8 +17,8 @@
 //! `sprig_settings_apply_failures_total` (`component`). Each changed row
 //! counts in `sprig_settings_changes_total` (`scope`).
 //!
-//! Until the relay exists (chapter 23 step 11), the global `settings/` is
-//! mirrored straight from the global tier; in single-etcd mode (R0) that is
+//! Until the relay exists, the global `settings/` is
+//! mirrored straight from the global tier; in single-etcd mode that is
 //! the same etcd as the DC tier.
 
 use std::collections::BTreeSet;
@@ -288,7 +286,7 @@ impl Drop for Registration {
 }
 
 /// Raises `SettingNotApplied`: a component could not apply a changed value
-/// and keeps the old one (chapter 23, "Failure handling").
+/// and keeps the old one.
 pub fn not_applied(component: &'static str, reason: &str) {
     metrics::counter!("sprig_settings_apply_failures_total", "component" => component).increment(1);
     tracing::error!(

@@ -1,4 +1,4 @@
-//! The tuning scale test (chapter 09, build step 11; milestone M0.6): a
+//! The tuning scale test: a
 //! single-node cluster holding many shard schemas, read on uniformly
 //! random tables with the default caches, then with the caches
 //! [`sprig_cluster::tuning`] plans, reporting table-cache misses per

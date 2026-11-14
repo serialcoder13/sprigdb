@@ -1,4 +1,4 @@
-//! Differential tests against a reference Redis (chapter 40, "Testing"),
+//! Differential tests against a reference Redis,
 //! through a real client (`redis`, BSD-3-Clause).
 //!
 //! - `SPRIG_TEST_REDIS_REF`: a reference Redis, such as `127.0.0.1:26380`.
@@ -1425,7 +1425,7 @@ async fn wire_bytes_pubsub_and_blocking_match_redis() {
     assert_eq!(bad, 0);
 }
 
-/// A random command of the guarded-batch set (R6 round 3, R23), with the
+/// A random command of the guarded-batch set, with the
 /// options and values that reach every branch of the batches.
 #[allow(clippy::many_single_char_names)]
 fn random_batched(g: &mut Rng) -> Vec<String> {
@@ -1523,7 +1523,7 @@ fn random_batched(g: &mut Rng) -> Vec<String> {
     }
 }
 
-/// The guarded batches (R6 round 3) against Redis: random commands of
+/// The guarded batches against Redis: random commands of
 /// the batched set with every option, wrong types, expired keys and
 /// integer edge cases, then the final state; then 8 clients incrementing
 /// one counter and pushing to one list at once.

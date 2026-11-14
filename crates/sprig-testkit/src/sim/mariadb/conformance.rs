@@ -1,4 +1,4 @@
-//! Model conformance (chapter 46, "Model conformance tests"): the same
+//! Model conformance: the same
 //! scripted scenarios run against the [`Model`] and against real MariaDB,
 //! and every observed outcome must match. A divergence is a bug in the
 //! model (or a MariaDB behaviour SprigDB must learn about).
@@ -147,7 +147,7 @@ impl std::fmt::Display for Observed {
 /// Identities of the target's nodes: `(server_id, gtid domain)`.
 pub type NodeIds = Vec<(u32, u32)>;
 
-/// The Compose defaults (chapter 27): single 101/1; primary and replicas
+/// The Compose defaults: single 101/1; primary and replicas
 /// 201-203/2; Galera 301-303 in domain 3; throwaway 901/9.
 #[must_use]
 pub fn default_ids(target: Target) -> NodeIds {
