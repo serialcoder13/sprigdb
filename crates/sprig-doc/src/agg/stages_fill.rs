@@ -1,4 +1,4 @@
-//! `$densify` and `$fill` (M2, 12 Nov 2026), with MongoDB 8.0's errors.
+//! `$densify` and `$fill`, with MongoDB 8.0's errors.
 //!
 //! `$densify` follows MongoDB's streaming order: `bounds: "full"` sorts by
 //! the field alone and each partition's sequence starts at the global

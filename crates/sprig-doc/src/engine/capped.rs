@@ -510,7 +510,7 @@ pub async fn wait_insert(tenant: u64, ns: &Ns, d: Duration) {
 }
 
 impl CursorPlan {
-    /// Makes a `find` plan tailable (M7): reaching the end of the
+    /// Makes a `find` plan tailable: reaching the end of the
     /// collection leaves it open. Only a plan in a capped collection's
     /// insertion order can be.
     pub fn make_tailable(&mut self) -> bool {

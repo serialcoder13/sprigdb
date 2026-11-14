@@ -1,4 +1,4 @@
-// The aggregation-expression differential corpus (M1, 12 Nov 2026).
+// The aggregation-expression differential corpus.
 //
 // Run with mongosh against a reference MongoDB 8.0 on a private port:
 //

@@ -1,4 +1,4 @@
-//! The schema-validation differential test (M3, 12 Nov 2026).
+//! The schema-validation differential test.
 //!
 //! `tests/validate_diff/cases.json` holds validators with a document, and
 //! filters with documents, and the answers MongoDB 8.0.34 gave for them

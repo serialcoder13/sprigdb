@@ -1,7 +1,5 @@
-# Chapter 40's Java and Go Redis client suites (R6 done-when: "Redis client
-# suites pass (redis-py, Jedis, Lettuce, ioredis, go-redis)"), which need
-# downloads the laptop doesn't allow (decisions/r6-interim.md, R34 and the
-# lead's choices on round 5): they run here, on CI runners.
+# The Java and Go Redis client suites, which need downloads the laptop
+# doesn't allow: they run here, on CI runners.
 #
 #   java      Jedis 5.2.0 and Lettuce 6.5.1.RELEASE (RESP3), from Maven
 #             Central at the versions in deploy/compose/r6/redis-clients/java/pom.xml
@@ -12,8 +10,8 @@
 # MariaDB 11.8 node, a release controller, worker and gateway in catalog
 # mode, tenant acme) with the Redis listener on 127.0.0.1:26379, plain user
 # names bound to tenant acme (deploy/compose/ci/listeners.sh), and a
-# reference Redis 7.4.11 (the version the laptop's differential suites use,
-# decision R12) on 127.0.0.1:6379. deploy/compose/r6/redis-clients/run.sh
+# reference Redis 7.4.11 (the version the laptop's differential suites use)
+# on 127.0.0.1:6379. deploy/compose/r6/redis-clients/run.sh
 # then runs the suite's one scenario (strings, hashes, lists, sets, sorted
 # sets, expiry, SCAN, pipelines, MULTI/EXEC, WATCH, EVAL/EVALSHA, geo,
 # pub/sub, a blocked pop woken by another connection) on both and fails on
@@ -21,7 +19,7 @@
 # run.sh (the clients MIT and BSD-2-Clause, test-only dependencies Apache-2.0,
 # MIT, MIT-0 and Public Domain).
 #
-# Defined, not yet run (R6 round 6). Nightly and on demand; the `jobs` input
+# Defined, not yet run. Nightly and on demand; the `jobs` input
 # picks java, go-redis or all.
 name: heavy-redis
 

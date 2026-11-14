@@ -1,4 +1,4 @@
-//! Arithmetic, trigonometric and bitwise expressions (M1): `$exp`,
+//! Arithmetic, trigonometric and bitwise expressions: `$exp`,
 //! `$ln`, `$log`, `$log10`, `$pow`, `$sqrt`, the trigonometric family,
 //! `$degreesToRadians`, `$radiansToDegrees` and the `$bit*` operators.
 //!

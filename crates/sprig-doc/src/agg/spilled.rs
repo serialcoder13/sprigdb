@@ -462,7 +462,7 @@ fn window_seq(
     out.finish()
 }
 
-/// Index of a document in its partition, in the slim copies (M7).
+/// Index of a document in its partition, in the slim copies.
 const SLIM_INDEX: &str = "__sprig_window_i";
 
 /// One `$setWindowFields` partition being collected.

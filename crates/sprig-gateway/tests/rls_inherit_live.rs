@@ -751,7 +751,7 @@ async fn no_read_path_returns_an_inherited_row_a_policy_hides() {
     let mut s_bob_b = open_stream(&e, &e.t[1], "bob", &db).await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     for w in [
-        // Shown to alice at c (her own), and to bob at b? no (alice's).
+        // alice's: shown to alice at c, not to bob at b.
         "INSERT INTO docs (id, parent_id, owner, visible, tier) VALUES (50, 1, 'alice', 1, 1)",
         // bob's, visible at b: bob at b sees it; alice at c doesn't.
         "INSERT INTO docs (id, parent_id, owner, visible, tier) VALUES (51, 1, 'bob', 1, 1)",
@@ -762,7 +762,9 @@ async fn no_read_path_returns_an_inherited_row_a_policy_hides() {
         "UPDATE docs SET body = 'changed' WHERE id = 3",
         // carol's record 6: nobody's.
         "UPDATE docs SET body = 'changed' WHERE id = 6",
-        // alice's record 1, invisible at b and so hidden at c (b's override).
+        // alice's record 1: b's override made it invisible, which b's
+        // policies hide; c's policies don't read `visible` (a parent's
+        // policies don't bind a child's readers), so alice at c sees it.
         "UPDATE docs SET body = 'changed' WHERE id = 1",
     ] {
         must(&mut app[0], w).await;
@@ -774,7 +776,7 @@ async fn no_read_path_returns_an_inherited_row_a_policy_hides() {
     let keys = |v: &[(String, i64)]| -> BTreeSet<i64> { v.iter().map(|(_, k)| *k).collect() };
     let leak_a: Vec<i64> = keys(&ka)
         .into_iter()
-        .filter(|k| ![50, 3].contains(k))
+        .filter(|k| ![50, 3, 1].contains(k))
         .collect();
     assert!(leak_a.is_empty(), "alice@c got hidden records' events: {leak_a:?}");
     assert!(keys(&ka).contains(&50), "alice@c missed her record's insert: {ka:?}");

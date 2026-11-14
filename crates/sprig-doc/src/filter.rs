@@ -227,7 +227,7 @@ pub fn parse(filter: &Document) -> Result<Pred, MongoError> {
                 }
                 "comment" => {}
                 // MongoDB rewrites `$sampleRate: r` as `$expr: {$lt: [{$rand:
-                // {}}, r]}` (M3, for M1's list); always rechecked.
+                // {}}, r]}`; always rechecked.
                 "sampleRate" => {
                     let r = match v {
                         Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_) | Bson::Decimal128(_) => {

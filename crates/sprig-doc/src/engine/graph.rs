@@ -1,8 +1,8 @@
-//! `$graphLookup` against the database (M2, 12 Nov 2026): each level of
+//! `$graphLookup` against the database: each level of
 //! the breadth-first search is one read of the `from` collection through
 //! the caller's session (privileges and row policies apply), with
 //! `connectToField` among the level's values and `restrictSearchWithMatch`.
-//! Since M5 the searches of a batch of input documents share each level's
+//! The searches of a batch of input documents share each level's
 //! read.
 
 use std::collections::HashSet;

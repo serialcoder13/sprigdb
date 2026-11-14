@@ -1,6 +1,5 @@
-//! Shared pieces of the aggregation expressions added in M1 (12 Nov
-//! 2026): argument handling, MongoDB's type names, number formatting and
-//! conversions, and the dispatch from [`super::op_eval`].
+//! Shared pieces of the aggregation expressions: argument handling,
+//! MongoDB's type names, number formatting and conversions, and the dispatch from [`super::op_eval`].
 
 use bson::{Bson, Decimal128};
 use sprig_proto_mongo::errors::MongoError;

@@ -1,6 +1,6 @@
-//! The diagnostic stages that read the catalog and the collection's table
-//! (M2, 12 Nov 2026): `$collStats`, `$indexStats`, `$planCacheStats` and
-//! (MongoDB 8.1) `$listClusterCatalog`. Their output has MongoDB's shape;
+//! The diagnostic stages that read the catalog and the collection's
+//! table: `$collStats`, `$indexStats`, `$planCacheStats` and (MongoDB
+//! 8.1) `$listClusterCatalog`. Their output has MongoDB's shape;
 //! fields with no meaning in SprigDB are zero or absent. `$currentOp` and `$listSessions` read the gateway's sessions and
 //! run there.
 

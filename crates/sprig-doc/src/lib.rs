@@ -28,27 +28,27 @@ pub mod filter;
 /// MongoDB's geospatial operators.
 pub mod geo;
 pub mod heavy;
-/// Index hints as MariaDB `FORCE INDEX` (M6).
+/// Index hints as MariaDB `FORCE INDEX`.
 pub mod hint;
 pub mod json;
 pub mod keyenc;
 pub mod meta;
-/// MongoDB 9.0's per-operation memory limit (M3).
+/// MongoDB 9.0's per-operation memory limit.
 pub mod opmem;
 pub mod policy;
-/// MongoDB query shapes for query settings and `$queryStats` (M3).
+/// MongoDB query shapes for query settings and `$queryStats`.
 pub mod qshape;
-/// Server-side JavaScript: `$where`, `$function`, `$accumulator` (M4).
+/// Server-side JavaScript: `$where`, `$function`, `$accumulator`.
 pub mod serverjs;
 pub mod sessions;
-/// Spilling to disk: `allowDiskUse` (M5).
+/// Spilling to disk: `allowDiskUse`.
 pub mod spill;
 pub mod sql;
 /// `$text`, `$search` and `$searchMeta`.
 pub mod text;
 pub mod translate;
 pub mod update;
-/// Per-collection latencies and per-index use (M5).
+/// Per-collection latencies and per-index use.
 pub mod usage;
-/// Schema validation, `$jsonSchema` and the `$bits*` operators (M3).
+/// Schema validation, `$jsonSchema` and the `$bits*` operators.
 pub mod validate;

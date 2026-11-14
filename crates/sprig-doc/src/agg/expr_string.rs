@@ -1,4 +1,4 @@
-//! String expressions (M1): `$trim`, `$ltrim`, `$rtrim`, `$regexFind`,
+//! String expressions: `$trim`, `$ltrim`, `$rtrim`, `$regexFind`,
 //! `$regexFindAll`, `$regexMatch`, `$replaceOne`, `$replaceAll`,
 //! `$indexOfBytes`, `$indexOfCP` and `$strcasecmp`, with MongoDB's error
 //! codes and null handling.

@@ -1,4 +1,4 @@
-//! `$redact`, `$documents` and `$graphLookup`'s search (M2, 12 Nov 2026).
+//! `$redact`, `$documents` and `$graphLookup`'s search.
 //!
 //! `$graphLookup` reads another collection, so the engine drives it
 //! ([`crate::engine`]); this module parses it and keeps the breadth-first

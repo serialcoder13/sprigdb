@@ -1,4 +1,4 @@
-//! The MongoDB 8.1–8.3 expressions SprigDB enables (M1, 12 Nov 2026),
+//! The MongoDB 8.1–8.3 expressions SprigDB enables,
 //! checked against the examples in MongoDB's documentation: the reference
 //! server of the differential test (`expr_diff.rs`) is 8.0 and refuses
 //! them.

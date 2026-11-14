@@ -296,7 +296,11 @@ async fn point_reads_fall_back_when_something_changes() {
 
     drop((carol, dave, dave2, admin));
     teardown(admin_sql).await;
-    assert!(failed.is_empty(), "{} checks failed: {failed:#?}", failed.len());
+    assert!(
+        failed.is_empty(),
+        "{} checks failed: {failed:#?}",
+        failed.len()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -338,17 +342,14 @@ async fn point_reads_follow_a_move() {
     tokio::time::sleep(Duration::from_secs(2)).await;
     for cmd in cmds.split(";;") {
         let started = Instant::now();
-        let out = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .output()
-            .await
-            .unwrap();
-        eprintln!(
-            "{cmd}: {} in {:?}",
-            out.status,
-            started.elapsed()
-        );
+        let c = cmd.to_owned();
+        let out = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("sh").arg("-c").arg(c).output()
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        eprintln!("{cmd}: {} in {:?}", out.status, started.elapsed());
         assert!(
             out.status.success(),
             "{cmd}: {}",

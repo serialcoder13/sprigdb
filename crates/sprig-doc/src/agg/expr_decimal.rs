@@ -1,4 +1,4 @@
-//! Decimal128 arithmetic for the transcendental expressions (M1): `$exp`,
+//! Decimal128 arithmetic for the transcendental expressions: `$exp`,
 //! `$ln`, `$log`, `$log10`, `$pow`, `$sqrt`, the trigonometric family and
 //! the degree/radian conversions on decimals, to MongoDB's 34 significant
 //! digits.

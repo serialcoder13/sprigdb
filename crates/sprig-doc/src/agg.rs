@@ -19,8 +19,8 @@ use crate::filter::{self, ExprEval, as_i64, truthy};
 use crate::keyenc::{compare, equal};
 use crate::update::{arith, get_path, type_name};
 
-// The expressions added in M1 (12 Nov 2026): dates, strings, arrays and
-// sets, arithmetic, types, and 8.1–8.3's additions.
+// Aggregation expressions: dates, strings, arrays and sets, arithmetic,
+// types, and 8.1–8.3's additions.
 mod expr_array;
 mod expr_common;
 mod expr_date;
@@ -29,14 +29,14 @@ mod expr_math;
 mod expr_string;
 mod expr_type;
 
-// M2 (12 Nov 2026): accumulators, window functions and stages.
+// Accumulators, window functions and stages.
 mod accum;
 mod accum_num;
 mod stages_bucket;
 mod stages_fill;
 mod stages_misc;
 mod window;
-// M5 (12 Nov 2026): the stages over sequences that may be on disk.
+// The stages over sequences that may be on disk.
 mod spilled;
 pub use spilled::{run_stage_seq, run_stages_seq};
 pub use stages_misc::{
@@ -1583,7 +1583,7 @@ fn over(lim: &AggLimits, docs: &[Document], stage: &str) -> Result<(), MongoErro
             ),
         ));
     }
-    // MongoDB 9.0's per-operation limit (M3).
+    // MongoDB 9.0's per-operation limit.
     crate::opmem::check(n, stage)
 }
 

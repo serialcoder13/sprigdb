@@ -179,7 +179,7 @@ pub fn parse(u: &Bson) -> Result<UpdateSpec, MongoError> {
             }
             // MongoDB 5.0+ applies an update's fields in field-name order,
             // whatever the operator (numeric names numerically), so new
-            // fields are appended in that order (M7, found by the `$merge`
+            // fields are appended in that order (found by the `$merge`
             // differential).
             out.sort_by(|a, b| field_order(&a.1, &b.1));
             Ok(UpdateSpec::Ops(out))

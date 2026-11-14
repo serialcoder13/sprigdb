@@ -1,7 +1,6 @@
-# R4's heavy SQL suites (chapter 46, release gate R4: "Tier 1 and 2 SQL
-# suites; differential against MySQL 8.4; mysql-test-run subsets"), which
-# are too big for a laptop and run on CI runners (Kiran, 11 November 2026:
-# "CI is the place"; decisions/r4-interim.md):
+# Heavy SQL suites (tier 1 and 2 SQL suites, differential against MySQL
+# 8.4, mysql-test-run subsets), which are too big for a laptop and run on CI
+# runners:
 #
 #   clients          the tier 1 drivers' own suites (deploy/compose/clients):
 #                    MySQL Connector/J in its five chunks plus DateTimeTest,
@@ -60,8 +59,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # MySQL Connector/J 9.7.0, the chunks r4close used on the laptop
-          # (decisions/r4-interim.md X6), here without the 30-minute hold.
+          # MySQL Connector/J 9.7.0, the chunks used on the laptop, here
+          # without the 30-minute hold.
           - { label: mysql-connector-j 1 unit and simple, suite: mysql-connector-j, persona: mysql, minutes: 120,
               filter: "com/mysql/cj/**/*Test,testsuite/simple/*Test,!testsuite/simple/BlobTest,!testsuite/simple/DateTimeTest" }
           - { label: mysql-connector-j 2 statements, suite: mysql-connector-j, persona: mysql, minutes: 120,
@@ -79,7 +78,7 @@ jobs:
           - { label: php-pdo-mysql mysql, suite: php-pdo-mysql, persona: mysql, minutes: 60 }
           - { label: php-pdo-mysql mariadb, suite: php-pdo-mysql, persona: mariadb, minutes: 60 }
           # SQLAlchemy 2.0.36 in full: test/orm is the part the laptop's
-          # 30-minute hold couldn't finish (decisions/r4-interim.md Y8).
+          # 30-minute hold couldn't finish.
           - { label: sqlalchemy dialect, suite: sqlalchemy, persona: mysql, minutes: 120, paths: test/dialect }
           - { label: sqlalchemy sql engine base, suite: sqlalchemy, persona: mysql, minutes: 120, paths: "test/sql test/engine test/base" }
           - { label: sqlalchemy orm, suite: sqlalchemy, persona: mysql, minutes: 330, paths: test/orm }
@@ -192,7 +191,7 @@ jobs:
         if: always()
         run: deploy/compose/ci/stack-down.sh
 
-  # R4 round 4: tier 2 frameworks (deploy/compose/clients/tier2/run.sh),
+  # Tier 2 frameworks (deploy/compose/clients/tier2/run.sh),
   # each against MySQL 8.4.11 and then through 3306; a test that passes on
   # MySQL and not through the gateway fails the job (deploy/compose/ci/
   # tier2.sh). django, prisma and migrations also run on a laptop; the

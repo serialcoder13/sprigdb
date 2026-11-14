@@ -70,7 +70,7 @@ struct Global {
     /// Totals since start (`serverStatus`).
     total_spills: AtomicU64,
     total_bytes: AtomicU64,
-    /// By kind (M7: `serverStatus`'s `metrics.query`): spills, bytes,
+    /// By kind (`serverStatus`'s `metrics.query`): spills, bytes,
     /// records.
     by_kind: [[AtomicU64; 3]; KINDS],
     /// Documents and bytes sorted (`metrics.query.sort`).
@@ -80,7 +80,7 @@ struct Global {
     disallowed: AtomicU64,
 }
 
-/// What spilled, for `serverStatus` (M7): MongoDB 8.0's `metrics.query`
+/// What spilled, for `serverStatus`: MongoDB 8.0's `metrics.query`
 /// groups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -283,7 +283,7 @@ pub fn note_disallowed() {
     global().disallowed.fetch_add(1, AO::Relaxed);
 }
 
-/// `serverStatus`'s spill counters (M7), in MongoDB 8.0's
+/// `serverStatus`'s spill counters, in MongoDB 8.0's
 /// `metrics.query` shape: `allowDiskUseFalse`, `group`,
 /// `setWindowFields` and `sort`, plus SprigDB's `graphLookup` and
 /// `sprigSpills` (every spill, including the collection's read).
@@ -388,7 +388,7 @@ pub struct SpillCtx {
     pub tenant: u64,
     stage: Arc<AtomicUsize>,
     stats: Arc<Mutex<Vec<StageSpill>>>,
-    /// What the running stage is, for the counters by kind (M7).
+    /// What the running stage is, for the counters by kind.
     kind: Arc<AtomicUsize>,
 }
 
@@ -438,7 +438,7 @@ pub fn set_stage(i: usize) {
     let _ = CTX.try_with(|c| c.stage.store(i, AO::Relaxed));
 }
 
-/// Marks the kind of stage now running (M7: `serverStatus`'s counters).
+/// Marks the kind of stage now running (for `serverStatus`'s counters).
 pub fn set_kind(k: Kind) {
     let _ = CTX.try_with(|c| c.kind.store(k.index(), AO::Relaxed));
 }
@@ -478,8 +478,8 @@ fn record(bytes: u64, records: u64, storage: u64) {
     });
 }
 
-/// Counts a finished spill file written outside a builder or a sort (M7:
-/// a window partition's documents).
+/// Counts a finished spill file written outside a builder or a sort
+/// (a window partition's documents).
 pub fn record_file(f: &SpillFile) {
     record(f.bytes, f.count, f.bytes);
 }

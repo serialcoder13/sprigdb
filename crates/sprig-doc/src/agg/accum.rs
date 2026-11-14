@@ -1,5 +1,5 @@
 //! Accumulators of `$group`, `$bucket`, `$bucketAuto` and
-//! `$setWindowFields` (M2, 12 Nov 2026): `$sum`, `$avg`, `$min`, `$max`,
+//! `$setWindowFields`: `$sum`, `$avg`, `$min`, `$max`,
 //! `$first`, `$last`, `$push`, `$addToSet`, `$count`, `$mergeObjects`,
 //! `$stdDevPop`, `$stdDevSamp`, `$top`, `$bottom`, `$topN`, `$bottomN`,
 //! `$firstN`, `$lastN`, `$maxN`, `$minN`, `$median`, `$percentile`, and
@@ -747,7 +747,7 @@ pub(crate) fn parse_fields(
                 format!("The field '{k}' must be an accumulator object"),
             ));
         };
-        // Server-side JavaScript (M4): `crate::serverjs::GroupJs`.
+        // Server-side JavaScript: `crate::serverjs::GroupJs`.
         if op == "$accumulator" {
             continue;
         }
@@ -838,7 +838,7 @@ impl<'a, 'j> Grouper<'a, 'j> {
                 over_error(self.stage, self.lim.stage_bytes)
             });
         }
-        // MongoDB 9.0's per-operation limit (M3).
+        // MongoDB 9.0's per-operation limit.
         crate::opmem::check(self.bytes, self.stage)
     }
 

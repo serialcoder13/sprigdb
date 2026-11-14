@@ -1,5 +1,5 @@
-// The server-side JavaScript differential corpus (M4, 12 Nov 2026):
-// `$where`, `$function` and `$accumulator`.
+// The server-side JavaScript differential corpus: `$where`, `$function`
+// and `$accumulator`.
 //
 // Run with mongosh against a reference MongoDB 8.0 on a private port:
 //

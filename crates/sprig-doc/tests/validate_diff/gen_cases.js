@@ -1,4 +1,4 @@
-// The schema-validation and query-operator differential corpus (M3, 12 Nov 2026).
+// The schema-validation and query-operator differential corpus.
 //
 // Run with mongosh against a reference MongoDB 8.0 on a private port:
 //
