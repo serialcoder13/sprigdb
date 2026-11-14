@@ -1,4 +1,4 @@
-//! Results views (chapter 53, "Results"): a grid, a JSON tree and a graph
+//! Results views: a grid, a JSON tree and a graph
 //! path view, over the results of the last run in a tab.
 
 use crate::tui::theme;
@@ -651,7 +651,7 @@ pub fn graph_lines(set: &ResultSet) -> Vec<Line<'static>> {
 }
 
 /// The empty results pane before anything has run: the mascot waving and
-/// the keys to start with (decision R6). Nothing when the pane is too small.
+/// the keys to start with. Nothing when the pane is too small.
 fn welcome(f: &mut Frame<'_>, area: Rect) {
     use crate::tui::mascot::{self, ColourMode};
     let mode = match theme::depth() {

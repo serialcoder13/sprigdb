@@ -1,5 +1,5 @@
-//! The checks behind placement that the compiler answers (chapter 41,
-//! "Placement", steps 1 to 3): the language subset (the front ends report
+//! The checks behind placement that the compiler answers (the first
+//! three placement steps): the language subset (the front ends report
 //! those), loop bounds and the static cost, plus the objects the code
 //! reads and writes. Locality, kinds and cluster capabilities are decided
 //! by `sprig-logic`'s placement, which knows the layout.

@@ -1,5 +1,5 @@
 //! The worker's settings follow etcd: a dc-scope change reaches what jobs
-//! resolve within chapter 23's 2 s.
+//! resolve within 2 s.
 
 #![allow(clippy::unwrap_used)]
 
@@ -15,7 +15,7 @@ use sprig_settings::{SettingCtx, Value};
 
 use super::WorkerSettings;
 
-/// Chapter 23: "a change reaches every gateway within 2 s"; workers too.
+/// A settings change reaches every gateway within 2 s; workers too.
 const DELAY: Duration = Duration::from_secs(2);
 
 async fn put(store: &dyn MetaStore, rel: &str, v: i64) {
@@ -111,7 +111,7 @@ async fn defaults_without_mirrors() {
     assert_eq!(s.run_opts().lanes, 8);
 }
 
-/// Decision RF3 (r2last): a tenant's own catalog rows win over the etcd
+/// A tenant's own catalog rows win over the etcd
 /// scopes for its jobs: trigger options and the mover's cutover hold.
 #[tokio::test]
 async fn tenant_rows_win_for_that_tenants_jobs() {

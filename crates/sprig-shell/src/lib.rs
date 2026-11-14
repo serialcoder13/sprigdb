@@ -1,8 +1,8 @@
 //! `sprig`: SprigDB's terminal shell, a full-screen TUI and a scriptable
-//! CLI for tenant users and operators (chapter 53 of the low-level design).
+//! CLI for tenant users and operators.
 //!
 //! Layer 4 (binaries). It calls only the public APIs with the user's own
-//! credential (chapter 37), as Studio does (chapter 44), and runs
+//! credential, as Studio does, and runs
 //! `sprigctl` for operator commands.
 
 pub mod admin;

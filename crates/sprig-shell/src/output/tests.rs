@@ -1,4 +1,4 @@
-//! Golden outputs per format (chapter 53, "Testing"). Set
+//! Golden outputs per format. Set
 //! `SPRIG_UPDATE_GOLDEN=1` to rewrite them after a deliberate change.
 
 use super::*;

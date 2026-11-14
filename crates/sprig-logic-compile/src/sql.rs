@@ -1,4 +1,4 @@
-//! Embedded SQL (chapter 41, "Embedded data access"): literal statement
+//! Embedded SQL: literal statement
 //! text bound against the compile-time catalog and re-rendered from its
 //! AST, so it keeps its meaning inside a routine created under
 //! `sql_mode=ORACLE` (where `||` concatenates and `"x"` is a name).
@@ -85,8 +85,8 @@ impl Columns for StaticColumns {
     }
 }
 
-/// MariaDB's `DATA_TYPE` to an IR type (chapter 41: `DECIMAL` is
-/// `Float` in both tiers). Dates and times read as text.
+/// MariaDB's `DATA_TYPE` to an IR type (`DECIMAL` is `Float` in both
+/// tiers). Dates and times read as text.
 #[must_use]
 pub fn ty_of_column(data_type: &str, column_type: &str) -> Option<Ty> {
     let dt = data_type.to_ascii_lowercase();

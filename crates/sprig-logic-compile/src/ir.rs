@@ -1,4 +1,4 @@
-//! The shared IR (chapter 41, "The IR"): what every front end lowers to,
+//! The shared IR: what every front end lowers to,
 //! what the checks and placement read, what the PL/SQL generator emits
 //! from, and what the reference interpreter ([`crate::interp`]) runs.
 //!
@@ -13,8 +13,8 @@
 //!   typed locals (scalarized rows), never an expression.
 //!
 //! The semantics every consumer must agree on are written on each
-//! variant. Where they differ from JavaScript or KIRun, chapter 41's
-//! "Known differences" list says so.
+//! variant. Where they differ from JavaScript or KIRun, `EXPLAIN
+//! FUNCTION` lists the difference.
 
 use std::fmt;
 
@@ -395,7 +395,7 @@ impl Expr {
     }
 }
 
-/// How a loop is bounded (chapter 41, "Budgets").
+/// How a loop is bounded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bound {
     /// At most this many iterations, known at compile time.
@@ -500,7 +500,7 @@ pub enum Stmt {
     Break,
     /// Goes on with the innermost loop's next iteration (its condition
     /// is checked again). Front ends put a counted loop's update before
-    /// it (R7 follow-ups).
+    /// it.
     Continue,
     /// Raises an event: the first event raised is the call's result
     /// (later ones are ignored), and raising `output` ends the call.

@@ -1,9 +1,7 @@
 //! `sprig-approvals`: approvals and recommendations for every automatic
 //! decision.
 //!
-//! Layer 2. Design: chapter 52 (Approvals and recommendations) of the
-//! SprigDB low-level design, approved by Kiran on 10 November 2026
-//! (`decisions/approvals-design.md`).
+//! Layer 2.
 //!
 //! - [`model`]: the recommendation, kinds, levels, states, ids;
 //! - [`policy`]: a kind's mode, level and timers at one subject;

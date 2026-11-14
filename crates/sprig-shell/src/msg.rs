@@ -1,6 +1,6 @@
-//! Stream and queue operations (chapter 53, "Data mode"): publish, tail a
-//! stream, take and browse queue messages. Each is the SQL of chapters 45
-//! and 50, run like any statement, so privileges and transactions are the
+//! Stream and queue operations: publish, tail a stream, take and browse
+//! queue messages. Each is the streams' or queues' own SQL, run like any
+//! statement, so privileges and transactions are the
 //! gateway's.
 
 use std::process::ExitCode;

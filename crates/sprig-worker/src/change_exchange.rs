@@ -1,5 +1,5 @@
-//! Change exchanges (chapter 50, "Change feed to an exchange"; chapter 29,
-//! RLS round 5, decision RL52): the `change_exchange` job, one per table
+//! Change exchanges (a table's change feed published to an exchange):
+//! the `change_exchange` job, one per table
 //! with `queue.change_exchange` set, submitted by the controller's
 //! `change_exchange` loop for the gateway's feed subscription `cx:o<object>`.
 //!
@@ -13,7 +13,7 @@
 //!       (SinkSql Images): an insert goes out when its new row shows, a
 //!       delete when its old row does; an update as an update (both), a
 //!       delete (only the old row) or an insert (only the new row)
-//!   body: chapter 45's change envelope (as the change topic's record), its
+//!   body: the change envelope (as the change topic's record), its
 //!     op and images as the user sees them; routing key <db>.<table>.<op>
 //!     (c, u, d, ddl, t)
 //!   published as the user on a gateway (SinkSql Publish: CALL
@@ -23,7 +23,7 @@
 //! the checkpoint moves after what was published, at most every second:
 //! at least once, in commit order
 //! the tail is read by a task of its own (sprig_feed::pump), so the loop's
-//!   1 s housekeeping wait never cancels a read half-way (decision r9-131)
+//!   1 s housekeeping wait never cancels a read half-way
 //! the job ends when the subscription is dropped (checked every 5 s)
 //! ```
 
@@ -52,7 +52,7 @@ pub const JOB_KIND: &str = "change_exchange";
 
 /// `[before, after]` of feed event `e` visible to user `user` of `tenant`:
 /// each image checked on a gateway in a session of the user (`SinkSql`
-/// `Images`; chapter 29, RL50, RL52). An absent image is `false`; for DDL
+/// `Images`). An absent image is `false`; for DDL
 /// and truncate, `(SELECT on the table, false)`.
 ///
 /// # Errors
@@ -131,7 +131,7 @@ pub fn shown_op(e: &Op, before: bool, after: bool) -> Option<&'static str> {
     })
 }
 
-/// The envelope `body` (chapter 45's change record) as op `op`: an insert
+/// The envelope `body` (the change topic's record) as op `op`: an insert
 /// without its before image, a delete without its after image.
 #[must_use]
 pub fn reshaped(mut body: Value, op: &str) -> Value {
@@ -233,7 +233,7 @@ enum Next {
     Stop,
 }
 
-/// The tail as the loop reads it: in a task of its own (decision r9-131).
+/// The tail as the loop reads it: in a task of its own.
 /// `TenantTail::next` isn't cancel-safe, and the loop's 1 s wait would
 /// otherwise drop a transaction whose catalog lookup outlasts it (a new
 /// table's first row while a move holds the catalog, say).
@@ -474,7 +474,7 @@ async fn serve(env: &LogicEnv, cx: &JobCtx, tenant: TenantId, name: &str) -> Res
 mod tests {
     use super::*;
 
-    /// Decision r9-131: the 1 s housekeeping wait fires while the tail
+    /// Regression: the 1 s housekeeping wait fires while the tail
     /// waits on a new table's catalog lookup (1.5 s here). Every change
     /// must still come once, in order, and a restart from the last token
     /// taken must repeat none.

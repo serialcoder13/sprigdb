@@ -220,9 +220,7 @@ fn bound(p: &Param) -> sprig_proto_mysql::command::BoundParam {
 /// process has `SPRIGDB_MONGO_POINT_READS=off`, read once.
 fn point_reads_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("SPRIGDB_MONGO_POINT_READS").map_or(true, |v| v != "off")
-    })
+    *ON.get_or_init(|| std::env::var("SPRIGDB_MONGO_POINT_READS").map_or(true, |v| v != "off"))
 }
 
 /// Statements a session keeps prepared; past this many the

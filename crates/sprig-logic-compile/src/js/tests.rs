@@ -382,7 +382,7 @@ fn param_names(c: &Compiled) -> Vec<String> {
 
 #[test]
 fn the_books_javascript_validation_compiles() {
-    // Chapter 41, worked example 1, word for word.
+    // A row validation in the `(row, old)` form, as users write it.
     let c = bound(
         r#"export default function (row, old) {
   if (row.discount_pct > 0) {
@@ -489,7 +489,7 @@ fn the_three_ways_of_seeing_the_row_agree() {
            if (ctx.trigger.before !== null && ctx.trigger.before.qty > ctx.trigger.after.qty)
              sprig.reject('qty only grows');
          }",
-        // KIRun's names (decision V2).
+        // KIRun's names.
         "export default function (qty, old_qty, op) {
            if (op === 'update' && old_qty > qty) sprig.reject('qty only grows');
          }",

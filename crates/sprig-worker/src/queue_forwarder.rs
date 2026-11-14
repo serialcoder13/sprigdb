@@ -1,6 +1,5 @@
-//! `queue_forwarder` (chapter 50, "Publishing inside a database
-//! transaction", steps 7–8; chapter 42, "Inside a database transaction";
-//! R9, r9fwd; per cluster since r9cluster): one long-running job per
+//! `queue_forwarder` (publishing inside a database transaction): one
+//! long-running job per
 //! cluster (`spec: {"cluster": "<id>"}`) that forwards the transactional
 //! publishes of every tenant on the cluster from the change feed, in
 //! commit order across each tenant's transactions.
@@ -8,7 +7,7 @@
 //! ```text
 //! serve(cluster):
 //!   every 5 s, and at once when a forwarder subscription is written (a
-//!   watch; r9fanin): the tenants with an active queue_forwarder subscription
+//!   watch): the tenants with an active queue_forwarder subscription
 //!     whose map points at this cluster (a running tenant's placement is
 //!     read again each minute) → start a tenant task for each new one,
 //!     stop the tasks of tenants gone or moved away
@@ -18,12 +17,11 @@
 //!   report progress every 2 s (tenants, rows); losing the job stops all
 //!   write queue-forwarder-beats/<cluster> every 2 s, removed when stopping:
 //!     the gateways' fallback leaves rows to the feed while it is fresh
-//!     (bugfix-42)
 //!
 //! tenant task(tenant):
 //!   start after the subscription's checkpoint (feed/checkpoints/<tenant>/
 //!     queue_forwarder), or at the tenant's position now
-//!   tail the tenant's feed (chapter 38) keeping __sprig_qo and __sprig_xo
+//!   tail the tenant's feed keeping __sprig_qo and __sprig_xo
 //!   per committed transaction, in commit order: its outbox inserts
 //!     (__sprig_qo rows of kind 'publish'; every __sprig_xo row)
 //!   take what the feed has (at most 1,000 rows), then per run of rows of
@@ -48,7 +46,7 @@
 //! older than 6 s): rows still go, in insert order. While the job runs,
 //! the fallback takes only rows older than 30 s
 //! (`sprig_queues::engine::FALLBACK_WHILE_FEED_RUNS_MS`): before
-//! bugfix-42 it raced the feed for rows the feed was slow to forward (a
+//! that limit it raced the feed for rows the feed was slow to forward (a
 //! tenant's first forwards, a loaded machine) and, taking them in insert
 //! order, put some after rows committed later. A run that keeps failing is
 //! given up after [`RUN_GIVE_UP`] and left to the fallback, so one
@@ -150,7 +148,7 @@ pub fn shared_reader(clusters: Arc<dyn Clusters>) -> Arc<SharedClusters> {
     Arc::new(SharedClusters::new(clusters, &[QO, XO]))
 }
 
-/// The forwarder's view of the worker's shared reader (R9, r9feed): the
+/// The forwarder's view of the worker's shared reader: the
 /// same dump as the stream sequencers', rows of the two outboxes.
 #[must_use]
 pub fn shared_view(feed: &Arc<SharedFeed>) -> Arc<SharedClusters> {
@@ -319,7 +317,7 @@ impl ClusterForwarder {
         tracing::info!(cluster = %self.cluster, "queue forwarder for the cluster starts");
         // A new subscription is picked up at once, not at the next 5 s
         // refresh: its first publishes then go from the feed, in commit
-        // order, before the 2 s fallback takes them (decision 88; r9fanin).
+        // order, before the 2 s fallback takes them.
         let (wake_tx, mut wake_rx) = mpsc::channel::<()>(1);
         let watcher = watch_subscriptions(Arc::clone(&self.env.dc), wake_tx, cx.cancel.clone());
         loop {
@@ -332,7 +330,7 @@ impl ClusterForwarder {
                 break;
             }
             // The gateways' fallback leaves the feed's rows alone while
-            // this beat is fresh (bugfix-42).
+            // this beat is fresh.
             let beat = sprig_feed::beat::Beat {
                 at_ms: now_ms(),
                 tenants: self.running.len() as u64,
@@ -347,7 +345,7 @@ impl ClusterForwarder {
             }
         }
         watcher.abort();
-        // The fallback takes over at once (bugfix-42).
+        // The fallback takes over at once.
         let _ = sprig_feed::beat::clear(&self.env.dc, &self.cluster).await;
         // Stop every tenant task and let it acknowledge its position.
         let tasks: Vec<Running> = self.running.drain().map(|(_, r)| r).collect();
@@ -930,10 +928,9 @@ mod tests {
         assert_eq!(counts(Some(&res)), (5, 2, 0));
     }
 
-    /// r9fanin (decision 88): a new forwarder subscription wakes the
-    /// cluster job at once (before, it waited for the next 5 s refresh and
-    /// the 2 s fallback took the tenant's first publishes); other
-    /// subscriptions don't.
+    /// A new forwarder subscription wakes the cluster job at once (before,
+    /// it waited for the next 5 s refresh and the 2 s fallback took the
+    /// tenant's first publishes); other subscriptions don't.
     #[tokio::test]
     async fn a_new_forwarder_subscription_wakes_the_job() {
         use sprig_feed::subs::{Subscription, Subscriptions};

@@ -10,7 +10,7 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-# Chapter 52's sprig_approvals_* metrics.
+# The sprig_approvals_* metrics.
 metrics.workspace = true
 mysql_async.workspace = true
 serde.workspace = true

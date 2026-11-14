@@ -1,6 +1,6 @@
 //! [`Approvals`]: the gate components call before acting, people's
 //! actions, the timers, and the events every transition produces
-//! (chapter 52, "The gate", "Escalation and auto-apply").
+//! (escalation and auto-apply).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -288,7 +288,7 @@ impl Approvals {
         }
     }
 
-    /// The gate (chapter 52, "The gate"): records or refreshes `p` and
+    /// The gate: records or refreshes `p` and
     /// says whether to act. `ancestry` is the tenant's, root first.
     ///
     /// # Errors
@@ -385,7 +385,7 @@ impl Approvals {
             .ok_or_else(|| not_found(id))
     }
 
-    /// A person's action, after `may_act` (chapter 52, "Who may act").
+    /// A person's action, after `may_act`.
     ///
     /// # Errors
     /// 39972, 39973, 39974, 39976, 39977; the store's.
@@ -429,8 +429,8 @@ impl Approvals {
         Ok(rec)
     }
 
-    /// Runs the timers of every due item in `store` (chapter 52,
-    /// "Escalation and auto-apply"). Returns the changes made.
+    /// Runs the timers of every due item in `store`
+    /// (escalation and auto-apply). Returns the changes made.
     ///
     /// # Errors
     /// The store's.

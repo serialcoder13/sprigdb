@@ -1,4 +1,4 @@
-//! Signing in (chapter 53, "Signing in"): the credential for a profile,
+//! Signing in: the credential for a profile,
 //! refreshing a password login's session under the refresh lock.
 
 use std::path::PathBuf;

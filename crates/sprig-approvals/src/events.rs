@@ -1,5 +1,4 @@
-//! The one JSON shape webhooks, streams and emails carry (chapter 52,
-//! "Events").
+//! The one JSON shape webhooks, streams and emails carry.
 
 use serde::{Deserialize, Serialize};
 

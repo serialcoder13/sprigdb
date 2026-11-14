@@ -1,5 +1,4 @@
-//! The recommendation and its parts (chapter 52, "Data structures and
-//! storage").
+//! The recommendation and its parts.
 
 use std::fmt;
 use std::time::Duration;
@@ -123,7 +122,7 @@ impl State {
 }
 
 text_enum! {
-    /// A mode, as the gate sees it (chapter 52, "The modes").
+    /// A mode, as the gate sees it.
     Mode {
         /// Act automatically.
         On = "on",
@@ -582,7 +581,7 @@ impl TryFrom<String> for RecId {
     }
 }
 
-/// What a deciding component proposes (chapter 52, "The gate").
+/// What a deciding component proposes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Proposal {
     /// The kind.

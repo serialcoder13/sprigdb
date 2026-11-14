@@ -1,5 +1,5 @@
-//! Chapter 25's recovery jobs (class `recovery`): `errant_extract` and
-//! `node_rebuild` ("Recovery after an outage", steps 2 and 3).
+//! The recovery jobs (class `recovery`): `errant_extract` and
+//! `node_rebuild`, the two jobs of recovery after an outage.
 //!
 //! ```text
 //! errant_extract {cluster, node, range, failover_at_unix_ms}:
@@ -251,7 +251,7 @@ impl JobHandler for ErrantExtract {
             .unwrap_or_default();
         let start = extract::start_position(&spec.range, &applied);
         let t0 = Instant::now();
-        // A dump id of its own, in the probes' unallocated range (chapter 10).
+        // A dump id of its own, in the probes' unallocated range.
         let server_id = 4_200_000_000
             + u32::try_from(
                 cx.job_id
@@ -387,8 +387,7 @@ pub struct NodeRebuild {
         hyper_util::client::legacy::connect::HttpConnector,
         Full<Bytes>,
     >,
-    /// `[tls]`: agents' `https://` services are called over mutual TLS
-    /// (decision RC2).
+    /// `[tls]`: agents' `https://` services are called over mutual TLS.
     tls: Option<sprig_cluster::failover::internal_tls::InternalTls>,
 }
 

@@ -17,9 +17,10 @@
 
 mod sdnotify;
 
-/// mimalloc as the process allocator, with `--features mimalloc` (perf1,
-/// S143): per-thread heaps instead of the platform allocator's.
-#[cfg(feature = "mimalloc")]
+/// mimalloc as the process allocator, the default (S152, S155): per-thread
+/// heaps instead of the platform allocator's. `--features system-alloc`
+/// builds with the platform allocator (glibc on Linux) instead.
+#[cfg(all(feature = "mimalloc", not(feature = "system-alloc")))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 

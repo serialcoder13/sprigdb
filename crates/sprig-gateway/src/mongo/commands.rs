@@ -733,39 +733,42 @@ async fn run_inner(c: &mut Conn, name: &str, body: &Document) -> Result<Document
     let mut tries = 0u64;
     let r = super::workload::scoped(
         wl.as_ref(),
-        sprig_doc::hint::scope(hint, Box::pin(async {
-            loop {
-                let r = match (&lsid, txn_number) {
-                    (Some(l), Some(n)) if super::retry::applies(name, body) => {
-                        Box::pin(super::retry::run(c, &mut s, name, body, &db, l, n)).await
+        sprig_doc::hint::scope(
+            hint,
+            Box::pin(async {
+                loop {
+                    let r = match (&lsid, txn_number) {
+                        (Some(l), Some(n)) if super::retry::applies(name, body) => {
+                            Box::pin(super::retry::run(c, &mut s, name, body, &db, l, n)).await
+                        }
+                        _ => {
+                            // MongoDB 9.0's per-operation memory limit.
+                            let mem = c.shared.settings().max_operation_memory_bytes;
+                            sprig_doc::opmem::scope(
+                                mem,
+                                Box::pin(exec(c, &mut s, name, body, &db, lsid.as_deref())),
+                            )
+                            .await
+                        }
+                    };
+                    // Concurrent first writes to a new database: another session
+                    // created it a moment ago, and this one's names may not show it
+                    // yet (the name map follows the catalog's watch).
+                    match &r {
+                        Err(e)
+                            if e.code == code::NAMESPACE_NOT_FOUND
+                                && e.message.contains("Unknown database")
+                                && super::writes::is_write(name)
+                                && tries < 8 =>
+                        {
+                            tries += 1;
+                            tokio::time::sleep(Duration::from_millis(50 * tries)).await;
+                        }
+                        _ => break r,
                     }
-                    _ => {
-                        // MongoDB 9.0's per-operation memory limit.
-                        let mem = c.shared.settings().max_operation_memory_bytes;
-                        sprig_doc::opmem::scope(
-                            mem,
-                            Box::pin(exec(c, &mut s, name, body, &db, lsid.as_deref())),
-                        )
-                        .await
-                    }
-                };
-                // Concurrent first writes to a new database: another session
-                // created it a moment ago, and this one's names may not show it
-                // yet (the name map follows the catalog's watch).
-                match &r {
-                    Err(e)
-                        if e.code == code::NAMESPACE_NOT_FOUND
-                            && e.message.contains("Unknown database")
-                            && super::writes::is_write(name)
-                            && tries < 8 =>
-                    {
-                        tries += 1;
-                        tokio::time::sleep(Duration::from_millis(50 * tries)).await;
-                    }
-                    _ => break r,
                 }
-            }
-        })),
+            }),
+        ),
     )
     .await;
     let r = if max_time_ms.is_some() {

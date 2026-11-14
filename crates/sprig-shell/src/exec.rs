@@ -1,6 +1,5 @@
-//! Running statements (chapter 53, "Running statements"): one connection
-//! state per tab or CLI run, over the gateway's REST API or a native
-//! protocol.
+//! Running statements: one connection state per tab or CLI run, over the
+//! gateway's REST API or a native protocol.
 
 use std::fmt::Write as _;
 
@@ -13,7 +12,7 @@ use crate::model::{EndInfo, ResultEvent, Sink};
 use crate::native::Native;
 
 /// The Redis front end's default home of auto-created namespaces
-/// (`redis.logical_database`, chapter 40).
+/// (`redis.logical_database`).
 pub const REDIS_DATABASE: &str = "redis";
 
 /// A connection's state.

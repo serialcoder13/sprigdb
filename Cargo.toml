@@ -79,8 +79,9 @@ twox-hash = { version = "2.1", default-features = false, features = ["std", "xxh
 # xxhash32 above). Approved by Kiran, 9 November 2026.
 snap = "=1.1.2"
 lz4_flex = { version = "=0.14.0", default-features = false, features = ["std", "safe-encode", "safe-decode", "frame", "checked-decode"] }
-# The server binary's allocator, opt-in (`sprigdb --features mimalloc`;
-# perf1, S143): mimalloc and libmimalloc-sys are MIT.
+# The server binary's allocator, the default since S152/S155 (perf1 S143;
+# `sprigdb --features system-alloc` for the platform's): mimalloc and
+# libmimalloc-sys are MIT.
 mimalloc = { version = "=0.1.52", default-features = false }
 
 # The Admin API's HTTP client in sprigctl (chapter 47); the server side is

@@ -11,7 +11,7 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 gethostname.workspace = true
-# Chapter 25's node_rebuild calls the nodes' agents.
+# node_rebuild calls the nodes' agents.
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
@@ -19,30 +19,30 @@ metrics.workspace = true
 mysql_async.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-# Chapter 41 (R9): runs of triggers on streams and queues go to gateways
+# Runs of triggers on streams and queues go to gateways
 # over the peer service.
 sprig-api.workspace = true
-# Chapter 29 (RL31): sink owners' row-level security, checked by the worker.
+# Sink owners' row-level security, checked by the worker.
 sprig-auth.workspace = true
 sprig-binlog.workspace = true
 sprig-catalog.workspace = true
 sprig-cluster.workspace = true
 sprig-common.workspace = true
-# Chapter 23's job runtime and the logic jobs (chapter 41, R7 order 5).
+# The job runtime and the logic jobs.
 sprig-controller = { path = "../sprig-controller" }
 sprig-feed.workspace = true
-# Chapter 42's copy worker (inherit_copy jobs).
+# The copy worker (inherit_copy jobs).
 sprig-inherit = { path = "../sprig-inherit" }
-# Chapter 43 (R8 round 5): the graph mirror applier.
+# The graph mirror applier.
 sprig-graph = { path = "../sprig-graph" }
 sprig-logic = { path = "../sprig-logic" }
-# Chapter 45: stream sequencers (R9).
+# Stream sequencers.
 sprig-streams = { path = "../sprig-streams" }
-# Chapter 51 (R9): sink tasks.
+# Sink tasks.
 sprig-sinks = { path = "../sprig-sinks" }
-# Chapter 33 (R6): the key-value sweeper.
+# The key-value sweeper.
 sprig-kv = { path = "../sprig-kv" }
-# Chapter 31 (wireup): the TTL monitor's deletes.
+# The TTL monitor's deletes.
 sprig-doc = { path = "../sprig-doc" }
 bson = "=2.15.0"
 sprig-workload.workspace = true
@@ -50,11 +50,11 @@ sprig-meta.workspace = true
 sprig-mover.workspace = true
 sprig-settings.workspace = true
 sprig-shard.workspace = true
-# Chapter 18's resolver drains prepared branches at mover cutovers.
+# The XA resolver drains prepared branches at mover cutovers.
 sprig-txn.workspace = true
 tokio.workspace = true
 tonic = { workspace = true, features = ["codegen", "channel", "tls-ring", "server"] }
-# Chapter 39 (R5 round 6): the search role's copies and service.
+# The search role's copies and service.
 sprig-search.workspace = true
 tokio-stream = { workspace = true, features = ["net"] }
 tracing.workspace = true

@@ -1,11 +1,11 @@
-//! Stream sequencers (chapter 45, R9) on chapter 23's job runtime:
+//! Stream sequencers on the job runtime:
 //! `stream_sequencer`, one per stream, long-running, submitted by the
 //! controller's `streams` loop. The job body is
 //! [`sprig_streams::runtime::run_job`]; this module gives it the worker's
 //! catalogs, shard pools (as `sprig_ctl`, on the tenant's cluster now) and
 //! the tenant's feed.
 //!
-//! **One dump per cluster (R9, r9feed).** Every sequencer's feed reads
+//! **One dump per cluster.** Every sequencer's feed reads
 //! through the worker's shared reader ([`sprig_feed::shared`]): an event
 //! stream's tail through the view of the stream outboxes
 //! (`__sprig_eo_*`), a change topic's through the view that keeps its

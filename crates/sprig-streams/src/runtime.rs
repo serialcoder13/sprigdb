@@ -705,14 +705,13 @@ pub mod instance_lag {
             .as_ref()
             .filter(|(at, _)| at.elapsed() < FRESH)
             .map(|(_, l)| Arc::clone(l));
-        let lags = match hit {
-            Some(l) => l,
-            None => {
-                let l = list(dc).await?;
-                *cache().lock().unwrap_or_else(PoisonError::into_inner) =
-                    Some((Instant::now(), Arc::clone(&l)));
-                l
-            }
+        let lags = if let Some(l) = hit {
+            l
+        } else {
+            let l = list(dc).await?;
+            *cache().lock().unwrap_or_else(PoisonError::into_inner) =
+                Some((Instant::now(), Arc::clone(&l)));
+            l
         };
         Ok(lags
             .iter()

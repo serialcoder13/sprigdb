@@ -1,12 +1,12 @@
-//! The worker's DC permit (chapter 25, "DC leases, sub-leases and
-//! self-fencing" step 7: "worker: stops cutovers and promotions").
+//! The worker's DC permit: a worker without one stops cutovers and
+//! promotions.
 //!
 //! The worker renews a permit from its DC's controllers like a gateway
 //! (`sprig_meta::permit::http::PermitKeeper`, armed once a controller
 //! serving permits is seen) and runs the mover's job runtime only while it
 //! may write: when the permit lapses, the runtime is stopped, which aborts
-//! every running job (a cutover cut short is undone by its hold deadline,
-//! chapter 10), and it starts again once the permit is valid. A watchdog
+//! every running job (a cutover cut short is undone by its hold
+//! deadline), and it starts again once the permit is valid. A watchdog
 //! thread fences the permit when the runtime stalls and aborts the process
 //! when it stays stuck, as in the other roles.
 

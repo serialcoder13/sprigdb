@@ -476,7 +476,9 @@ impl Hub {
     }
 
     /// Starts listening at `from` if the hub can serve it (see the module
-    /// docs); `first` allows moving a gathering hub's start back.
+    /// docs); `first` allows moving a gathering hub's start back, or a
+    /// replay.
+    #[allow(clippy::too_many_lines)] // the cases of the module docs, in order
     fn attach(
         self: &Arc<Self>,
         tenant: TenantId,

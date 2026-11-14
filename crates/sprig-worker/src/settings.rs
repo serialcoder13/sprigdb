@@ -1,5 +1,4 @@
-//! The worker's live settings (chapter 08, "Live application"; chapter 23,
-//! "Settings: writes, bounds and watches").
+//! The worker's live settings.
 //!
 //! A worker mirrors its DC's `settings/` and `cluster-settings/` and the
 //! global `settings/` ([`LiveSettings`]), as gateways and controllers do,
@@ -16,10 +15,10 @@
 //!   catalog's rows over the global value (no longer the default).
 //!
 //! A change therefore reaches running jobs within the mirror's watch round
-//! trip plus one second; chapter 23's target is 2 s.
+//! trip plus one second, inside the 2 s target for settings changes.
 //!
 //! Before this, the worker resolved nothing: every job ran on the
-//! registry's defaults (decision M14), so a `mover.source_retain_hours`
+//! registry's defaults, so a `mover.source_retain_hours`
 //! set at dc scope never reached a move, even after a restart.
 
 use std::sync::Arc;
@@ -41,7 +40,7 @@ pub struct WorkerSettings {
     live: Option<LiveSettings>,
     dc: DcId,
     defaults: Snapshot,
-    /// Tenants' own catalog rows (decision RF3, r2last).
+    /// Tenants' own catalog rows.
     scopes: Option<Arc<sprig_controller::tenant_scopes::TenantScopes>>,
 }
 
@@ -108,7 +107,7 @@ impl WorkerSettings {
     }
 
     /// Jobs of one tenant also read its own catalog rows (tenant,
-    /// database, object and ancestors' scopes; decision RF3).
+    /// database, object and ancestors' scopes).
     #[must_use]
     pub fn with_tenant_scopes(
         mut self,
@@ -150,7 +149,7 @@ impl WorkerSettings {
         self.snapshot().get(setting, &SettingCtx::process(&self.dc))
     }
 
-    /// Chapter 41's runner settings at the global scope (tenant values in
+    /// The trigger runner's settings at the global scope (tenant values in
     /// catalogs aren't read by workers), each read again at every failure
     /// through [`RunOpts::live`]. `SPRIG_LOGIC_TRIGGER_MAX_ATTEMPTS`,
     /// `SPRIG_LOGIC_TRIGGER_RETRY_INITIAL_MS` and
@@ -164,7 +163,7 @@ impl WorkerSettings {
     }
 
     /// [`Self::run_opts`] for one tenant's trigger: its own catalog rows
-    /// (tenant, ancestors) over the global scope (decision RF3), read again
+    /// (tenant, ancestors) over the global scope, read again
     /// at every failure.
     #[must_use]
     pub fn run_opts_for(&self, tenant: TenantId) -> RunOpts {
@@ -218,7 +217,7 @@ impl WorkerSettings {
         Duration::from_millis(self.get(&sprig_logic::settings::TRIGGER_BUDGET_MS))
     }
 
-    /// `logic.trigger_budget_ms` for `tenant` (its own rows too; RF3).
+    /// `logic.trigger_budget_ms` for `tenant` (its own rows too).
     #[must_use]
     pub fn trigger_budget_for(&self, tenant: TenantId) -> Duration {
         Duration::from_millis(self.tenant_get(tenant, &sprig_logic::settings::TRIGGER_BUDGET_MS))

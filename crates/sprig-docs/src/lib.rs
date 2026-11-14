@@ -1,6 +1,6 @@
 //! `sprig-docs`: SprigDB's product documentation as data.
 //!
-//! - [`reference`]: the generated reference pages (`docs/reference/*.md`),
+//! - [`reference`](mod@reference): the generated reference pages (`docs/reference/*.md`),
 //!   rendered from plain data so this crate depends on nothing in the
 //!   workspace; `sprig-docs-gen` collects the data from the code (the
 //!   settings registry, `SprigCode::ALL`, the `OpenAPI` document, the source

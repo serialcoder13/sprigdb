@@ -1,5 +1,4 @@
-//! `lower_kirun` (chapter 41, "KIRun front end"): the step graph to
-//! structured IR.
+//! `lower_kirun`: the KIRun step graph to structured IR.
 //!
 //! ```text
 //! lower(def):

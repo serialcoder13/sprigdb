@@ -1,4 +1,4 @@
-//! Connection profiles (chapter 53, "Profiles").
+//! Connection profiles.
 //!
 //! `profiles.toml` in the config directory holds named profiles and the
 //! default's name. It never holds a secret: those are in [`crate::secrets`].
@@ -51,7 +51,7 @@ pub struct Profile {
     /// The default database.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub database: Option<String>,
-    /// The tenant to act in (`x-sprig-tenant`, chapter 29's `USE TENANT`).
+    /// The tenant to act in (`x-sprig-tenant`, as `USE TENANT` does).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tenant: Option<String>,
     /// Allow password logins over plain HTTP to another host.

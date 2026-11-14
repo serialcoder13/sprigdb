@@ -1,5 +1,4 @@
-//! Screen snapshots with ratatui's `TestBackend` (chapter 53, "Testing"),
-//! and key behaviour. Set `SPRIG_UPDATE_GOLDEN=1` to rewrite the screens
+//! Screen snapshots with ratatui's `TestBackend`, and key behaviour. Set `SPRIG_UPDATE_GOLDEN=1` to rewrite the screens
 //! after a deliberate change; they live in `src/tui/golden/`.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

@@ -1,5 +1,4 @@
-//! Completion from the catalog (chapter 53, "Completion and
-//! highlighting").
+//! Completion from the catalog.
 
 use std::collections::BTreeMap;
 

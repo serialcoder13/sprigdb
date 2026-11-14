@@ -1,4 +1,4 @@
-# CI stages of chapter 46 ("Flows"):
+# CI stages:
 #
 #   S0  every push to main            rustfmt, clippy, unit tests, cargo deny,
 #                                     Compose files validated
@@ -18,7 +18,7 @@
 # suites they run.
 name: ci
 
-# Runs (Kiran, 12 Nov 2026: "run ci only in main not in all branches"):
+# Runs:
 # - pushes to main only; branches and pull requests don't run CI;
 # - docs, the website, brand assets and Markdown don't run it either;
 # - by hand (Actions → ci → Run workflow), for any branch;
@@ -94,7 +94,7 @@ jobs:
       - run: cargo test --workspace --locked --doc
 
   studio:
-    # Chapter 44 step 1: Studio's type check, lint, unit tests, licence and
+    # Studio's type check, lint, unit tests, licence and
     # package allowlists and generated-client check (`pnpm check`), the
     # production build with its first-screen budget, then sprig-studio's
     # tests against that build (headers, CSP, OpenAPI drift).
@@ -130,7 +130,7 @@ jobs:
           path: studio/dist
           if-no-files-found: error
 
-  # Studio end to end (chapter 44 step 14 onward): the Playwright suite with
+  # Studio end to end: the Playwright suite with
   # the runner's installed Google Chrome (no browser download) against a
   # gateway built with Studio, on one MariaDB node. Harness:
   # deploy/compose/studio/e2e.sh (setup: HTTP listener, operator login,
@@ -222,15 +222,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Chapter 47: promtool unit tests of every alert rule, and dashboards
+      # Promtool unit tests of every alert rule, and dashboards
       # that match their generator and name only emitted metrics.
       - run: deploy/alerts/test.sh
       - run: python3 deploy/dashboards/gen.py --check
 
   # ---------------------------------------------------------------- S1 ----
-  # A short libFuzzer run of every cargo-fuzz target (chapter 46 step 4):
+  # A short libFuzzer run of every cargo-fuzz target:
   # the wire codec (sprig-proto-mysql/fuzz) and the SQL layer (sprig-sql/fuzz:
-  # lexer, name rewriter, translator R0 rewrites). The committed corpora also
+  # lexer, name rewriter, translator rewrites). The committed corpora also
   # replay on stable in S0's unit tests. Nightly runs longer (S3, later).
   fuzz-smoke:
     name: S1 fuzz smoke
@@ -291,7 +291,7 @@ jobs:
       SPRIG_TEST_MARIADB_SINGLE: mysql://root:sprig-dev-root@127.0.0.1:13301
       SPRIG_TEST_MARIADB_REPLICATION: mysql://root:sprig-dev-root@127.0.0.1:13311,mysql://root:sprig-dev-root@127.0.0.1:13312,mysql://root:sprig-dev-root@127.0.0.1:13313
       SPRIG_TEST_MARIADB_GALERA: mysql://root:sprig-dev-root@127.0.0.1:13321,mysql://root:sprig-dev-root@127.0.0.1:13322,mysql://root:sprig-dev-root@127.0.0.1:13323
-      # Fault injection and Elle (chapter 46, step 3).
+      # Fault injection and Elle.
       SPRIG_TEST_TOXIPROXY: http://127.0.0.1:18474
       SPRIG_TEST_FAULTD: sprigdb-dev-faultd-1
       SPRIG_TEST_ELLE: "1"
@@ -466,18 +466,17 @@ jobs:
           docker compose -f deploy/compose/compose.yaml --profile faults down --timeout 10 || true
           deploy/compose/3dc.sh down -v --timeout 10
 
-  # ------------------------------------------------------- M0.2 gate ----
-  # Milestone M0.2's "done when" (chapter 48): the tier 1 connectors and
-  # sysbench pass through the gateway on 3306 (persona mysql) and 3307
-  # (persona mariadb), and the gateway adds at most 0.5 ms at p50 over
-  # direct MariaDB. The harness is deploy/compose/connectors (README there);
+  # -------------------------------------------------- connector gate ----
+  # The connector gate: the tier 1 connectors and sysbench pass through the
+  # gateway on 3306 (persona mysql) and 3307 (persona mariadb), and the
+  # gateway adds at most 0.5 ms at p50 over direct MariaDB. The harness is deploy/compose/connectors (README there);
   # it already passes against MariaDB 11.8 and MySQL 8.4 directly.
   #
-  # Disabled until the gateway serves the MySQL protocol (chapter 05, build
-  # step 13). To enable: drop `if: false` (or narrow it, e.g. to
-  # workflow_dispatch and schedule), and replace the "Start the gateway"
-  # step with however the gateway is configured then; per-target outcomes go
-  # in an overlay file named by SPRIG_CONN_EXPECTED_OVERLAY.
+  # Disabled until the gateway serves the MySQL protocol. To enable: drop
+  # `if: false` (or narrow it, e.g. to workflow_dispatch and schedule), and
+  # replace the "Start the gateway" step with however the gateway is
+  # configured then; per-target outcomes go in an overlay file named by
+  # SPRIG_CONN_EXPECTED_OVERLAY.
   connectors:
     name: M0.2 connector matrix and latency gate (gateway)
     needs: [integration]
@@ -508,7 +507,7 @@ jobs:
       - run: cargo build --release --locked -p sprigdb
       - name: Start the gateway
         run: |
-          # Placeholder until chapter 04/05 settle the gateway's settings:
+          # Placeholder until the gateway's settings settle:
           # listeners on 3306 (mysql) and 3307 (mariadb), backed by the
           # Compose single node.
           SPRIGDB_NODE_DC=dc-a target/release/sprigdb --config deploy/compose/sprigdb.dev.toml gateway \
@@ -533,10 +532,9 @@ jobs:
         working-directory: deploy/compose
         run: docker compose --profile single down -v --timeout 10
 
-  # M0.3 "done when" (chapter 48): two tenants on one cluster run the same
-  # schema-tool suite (Flyway, Hibernate validation, mysqldump and
-  # mariadb-dump) and see only their own objects; no physical name reaches a
-  # client in the leak suite; an object-scope setting is live within seconds
+  # Two tenants on one cluster run the same schema-tool suite (Flyway,
+  # Hibernate validation, mysqldump and mariadb-dump) and see only their own
+  # objects; no physical name reaches a client in the leak suite; an object-scope setting is live within seconds
   # and an out-of-bounds value is refused with 39080. The harness is
   # deploy/compose/m03 (README there); its baseline mode already passes
   # against MariaDB 11.8 directly.
@@ -544,12 +542,11 @@ jobs:
   # gateway-dev.sh up provisions the tenants itself (acme and globex on
   # dc-a-single, users acme.app and globex.app with password sprig-dev-app).
   #
-  # M0.5 (chapter 29 step 6, chapter 46 step 4): the SQL isolation suite runs
-  # here too, next to the leak suite: users with different grants in both
-  # tenants, every crossing refused with the persona's error number, MariaDB's
-  # grant tables audited, and a REVOKE timed on a second gateway
-  # (deploy/compose/m05, README there). Both suites are security controls
-  # (chapter 46): they run on pull requests and on main.
+  # The SQL isolation suite runs here too, next to the leak suite: users with
+  # different grants in both tenants, every crossing refused with the
+  # persona's error number, MariaDB's grant tables audited, and a REVOKE
+  # timed on a second gateway (deploy/compose/m05, README there). Both suites
+  # are security controls: they run on pull requests and on main.
   m03:
     name: M0.3 and M0.5 tenants, names, settings and isolation (gateway)
     needs: [integration]
@@ -610,12 +607,12 @@ jobs:
           deploy/compose/gateway-dev.sh down || true
           docker compose --project-directory deploy/compose --profile single down -v --timeout 10
 
-  # Milestone M0.4's "done when" (chapter 48): chapter 13's scenario suite on
-  # the three reference topologies (an index proposed, validated and built
-  # for each worked example; the ORDER BY ... LIMIT trap rejected and its
-  # covering retry built; a user index retiring ours; an unused automatic
-  # index dropped while user and migrated indexes stay) and the drift suite
-  # (Flyway, Hibernate and the dumps see no sprig_auto_). The harness is
+  # The automatic-indexing scenario suite on the three reference topologies
+  # (an index proposed, validated and built for each example scenario; the
+  # ORDER BY ... LIMIT trap rejected and its covering retry built; a user
+  # index retiring ours; an unused automatic index dropped while user and
+  # migrated indexes stay) and the drift suite (Flyway, Hibernate and the
+  # dumps see no sprig_auto_). The harness is
   # deploy/compose/m04 (README there).
   #
   # Disabled: it needs all three topologies (about 7 GB with the Compose

@@ -1,5 +1,4 @@
-//! The JavaScript front end (chapter 41, "JavaScript front end", "The
-//! JavaScript subset"; build step 5).
+//! The JavaScript front end and the JavaScript subset it compiles.
 //!
 //! `oxc_parser` reads the source; this module lowers the compilable subset
 //! into the shared IR, which the checks and the PL/SQL generator then
@@ -49,7 +48,7 @@
 //! already tested it (`if (p === null) return ...`, `p !== null && ...`).
 //! A read that is conditional on something else is a reason.
 //!
-//! Known differences (listed by `EXPLAIN FUNCTION`, chapter 41's table):
+//! Known differences (listed by `EXPLAIN FUNCTION`):
 //! whole numbers past 2^63 overflow (39866) where JavaScript loses
 //! precision; `length` and `indexOf` count code points; number-to-text is
 //! exact for integers and up to 15 significant digits; `ctx.log` and
@@ -164,8 +163,8 @@ fn refused(r: Reason) -> Compiled {
 /// gives reasons (the engine tier), not an error.
 ///
 /// **Validations and after-commit triggers** (`sig.row` names the table)
-/// see the written row as chapter 41's worked example 1 writes it, or as a
-/// test run gives it, or as KIRun's parameters do (decision V2):
+/// see the written row as `row` and `old`, or as a test run's `ctx` gives
+/// it, or by column name as KIRun's parameters do:
 ///
 /// ```text
 /// export default function (row, old) { ... }       row.c, old.c
@@ -321,7 +320,7 @@ struct L<'s, 'c> {
     cond: u32,
     loops: u32,
     /// Per enclosing loop, what `continue` runs first: a counted loop's
-    /// update (R7 follow-ups).
+    /// update.
     conts: Vec<Block>,
     /// Declaration offset → wider type for the next pass.
     widen: BTreeMap<u32, Ty>,
@@ -1066,7 +1065,7 @@ impl<'s, 'c> L<'s, 'c> {
         }
     }
 
-    /// `switch` without fall-through (R7 follow-ups): the discriminant
+    /// `switch` without fall-through: the discriminant
     /// once, then `if ... else if ...` on `===`, `default` last. Cases
     /// with no statements share the next case's body; any other case
     /// ends with `break`, `return`, `throw` or `continue`, and has no

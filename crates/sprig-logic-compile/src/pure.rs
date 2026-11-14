@@ -1,5 +1,5 @@
-//! Functions as plain SQL expressions (chapter 41, "Validations and
-//! computed fields"; R7 order 3).
+//! Functions as plain SQL expressions, for validations and computed
+//! fields.
 //!
 //! MariaDB forbids stored routines in `CHECK` constraints and generated
 //! columns, so a validation becomes a `CHECK` and a computed field a
@@ -589,7 +589,7 @@ pub fn reject_check(
                     .find(|(n, _)| n == "message")
                     .map_or_else(|| str_lit("rejected"), |(_, v)| v.text.clone()),
             ),
-            // JavaScript's `sprig.reject(message)` (R7, jsbind).
+            // JavaScript's `sprig.reject(message)`.
             End::Throw(39863, m) => Some(m.text.clone()),
             _ => None,
         };

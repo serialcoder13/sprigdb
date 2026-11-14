@@ -1,5 +1,4 @@
-//! Triggers on streams and queues (chapter 41, "Triggers on streams and
-//! queues"; R9, r9triggers) on chapter 23's job runtime:
+//! Triggers on streams and queues, on the job runtime:
 //!
 //! - `logic_stream_trigger`: one per binding, long-running, in the
 //!   `consumer` job class. It reads the stream's log and its consumer
@@ -176,7 +175,7 @@ impl Gateways {
         self.channel(g).map(LogicPeerClient::new)
     }
 
-    /// One `SearchSeed.SeedPage` (chapter 39, R5 round 6) on the first
+    /// One `SearchSeed.SeedPage` on the first
     /// gateway, in rendezvous order for `seed`, that answers; the reply's
     /// JSON.
     ///
@@ -297,7 +296,7 @@ impl Gateways {
     }
 }
 
-// R9 (r9queue): sink tasks' statements as their owners (queue sources,
+// Sink tasks' statements as their owners (queue sources,
 // the script `db` handle), through the same gateways.
 #[async_trait]
 impl sprig_sinks::peer::SinkPeer for Gateways {
@@ -485,7 +484,7 @@ impl MsgEnv {
         if db_state.as_deref() != Some("active") {
             return Ok(None);
         }
-        // The source itself (a fan-in trigger's: its definition, R9).
+        // The source itself (a fan-in trigger's: its definition).
         let alive = match source.kind {
             SourceKind::Stream if source.fanin_definition().is_some() => {
                 let (dt, dobj) = source.fanin_definition().unwrap_or((0, 0));
@@ -521,7 +520,7 @@ impl MsgEnv {
     }
 
     /// Whether definition `(declarer, object)` is active (a fan-in
-    /// trigger's source, R9).
+    /// trigger's source).
     async fn definition_active(&self, declarer: TenantId, object: u64) -> Result<bool> {
         let ep = self.locator.writer(declarer).await?;
         let mut c = ep.pool.get_conn().await.map_err(|e| {
@@ -540,8 +539,8 @@ impl MsgEnv {
         Ok(matches!(r, Ok(Some(s)) if s == "active"))
     }
 
-    /// RL3 (r2harden): the tenant's own `logic.trigger_*` rows over the
-    /// etcd scopes, as after-commit triggers read them (decision RF3); the
+    /// The tenant's own `logic.trigger_*` rows over the etcd scopes, as
+    /// after-commit triggers read them; the
     /// worker-wide options when the worker reads no tenant rows (tests).
     fn opts_for(&self, tenant: TenantId) -> RunOpts {
         if self.settings.tenant_scopes().is_some() {
@@ -625,7 +624,7 @@ impl MsgEnv {
                         if old != l.version {
                             tracing::info!(%tenant, binding, version = l.version, "trigger: new version");
                         }
-                        // RC11: dead letters marked for replay.
+                        // Dead letters marked for replay.
                         if let Err(e) = replay_due(&l, t, gw.as_ref()).await {
                             tracing::warn!(%tenant, binding, error = %e, "trigger: dead-letter replay stopped; retried");
                         }
@@ -643,7 +642,7 @@ impl MsgEnv {
     }
 }
 
-/// RC11 (R9): runs the binding's dead letters marked `replaying`, oldest
+/// Runs the binding's dead letters marked `replaying`, oldest
 /// first, with the active version, each once (its marker in
 /// [`messages::replay_group`]); `replayed` when it ran (or had); when one
 /// fails, it (one more attempt) and every later one go back to `dead`, so
@@ -769,7 +768,7 @@ struct MariaSide {
     shard: ShardPool,
     log_schema: String,
     group: String,
-    /// A fan-in trigger's member (R9); 0 for the tenant's own stream.
+    /// A fan-in trigger's member; 0 for the tenant's own stream.
     instance: u64,
     stream: StreamId,
     source: SourceRow,
@@ -1027,7 +1026,7 @@ impl JobHandler for StreamTrigger {
     }
 }
 
-/// A fan-in trigger's job (R9; `sprig_logic::messages`' fan-in notes):
+/// A fan-in trigger's job (see `sprig_logic::messages`' fan-in notes):
 /// one runner per listed member instance, all sharing the binding's
 /// version, stats and supervision; the list is read again every 5 s, and
 /// a runner that fails starts again at the next read.

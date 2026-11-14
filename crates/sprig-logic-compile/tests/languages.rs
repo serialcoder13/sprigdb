@@ -1,11 +1,11 @@
-//! The same functions in three languages (chapter 41, "Testing": the
-//! differential corpus "emitted as JavaScript, KIRun and Lua"): each case
+//! The same functions in three languages (the differential
+//! corpus emitted as JavaScript, KIRun and Lua): each case
 //! runs the KIRun definition compiled into MariaDB (the reference), the
 //! JavaScript version on QuickJS and the Lua version on the shared Lua
 //! runtime (`sprig_logic_js::Program`), each on its own copy of the same
 //! tables, and compares the event, its fields (doubles to 1e-9), the error
 //! class and every table's rows afterwards. The JavaScript version is also
-//! compiled into MariaDB by the JavaScript front end (R7 close-out) and
+//! compiled into MariaDB by the JavaScript front end and
 //! must agree too; further JavaScript-only cases compare the compiled
 //! JavaScript with QuickJS.
 //!
@@ -535,7 +535,7 @@ export default function (x) {
   return { half: x / 2, kind: x === null ? 'none' : 'some' };
 }";
 
-// R7 follow-ups: `continue` in each kind of loop, and `switch`.
+// `continue` in each kind of loop, and `switch`.
 const FLOW_JS: &str = r"
 let sum = 0;
 for (let i = 0; i < n; i++) {

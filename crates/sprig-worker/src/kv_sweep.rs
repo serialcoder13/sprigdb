@@ -1,5 +1,5 @@
-//! `kv_sweep` (chapter 33, "Expiry and garbage"; chapter 40, "Expiry: lazy
-//! and active"; R6): removes expired key rows and their elements, and old
+//! `kv_sweep` (key-value expiry, the active half of lazy and active
+//! expiry): removes expired key rows and their elements, and old
 //! generations' elements, on every cluster of the DC as `sprig_ctl`.
 //!
 //! ```text

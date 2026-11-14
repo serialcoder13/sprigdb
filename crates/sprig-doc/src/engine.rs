@@ -389,8 +389,7 @@ pub fn array_paths(d: &Document) -> BTreeSet<String> {
     out
 }
 
-/// Documents per chunk when `$out` or `$merge` write a spilled input
-/// (M7).
+/// Documents per chunk when `$out` or `$merge` write a spilled input.
 const OUT_CHUNK: usize = 1000;
 
 /// A document rendered for insert, or why it couldn't be.
@@ -420,13 +419,13 @@ enum PlanKind {
         to_skip: u64,
         done: bool,
         /// The key the plan walks: `_id`, or a capped collection's
-        /// insertion order (M7).
+        /// insertion order.
         order: capped::KeyOrder,
-        /// A tailable cursor (M7): reaching the end doesn't exhaust it.
+        /// A tailable cursor: reaching the end doesn't exhaust it.
         tail: bool,
     },
     Buffer(VecDeque<Document>),
-    /// An aggregation's result on disk (M5): read as the cursor goes, its
+    /// An aggregation's result on disk: read as the cursor goes, its
     /// spill files deleted when the plan is dropped.
     Spilled(SpilledDocs),
 }
@@ -481,7 +480,7 @@ impl CursorPlan {
         }
     }
 
-    /// A plan over an aggregation's result, in memory or spilled (M5).
+    /// A plan over an aggregation's result, in memory or spilled.
     ///
     /// # Errors
     /// The first read of a spilled result.
@@ -634,7 +633,7 @@ impl Engine {
         explicit: bool,
     ) -> Result<CollMeta, MongoError> {
         check_coll_name(&ns.coll)?;
-        // M7: `capped`, `size` and `max` checked and stored as MongoDB 8.0
+        // `capped`, `size` and `max` checked and stored as MongoDB 8.0
         // stores them.
         let options = capped::normalize_create(options)?;
         if let Some(m) = self.meta(sql, ns).await? {
@@ -731,7 +730,7 @@ impl Engine {
         .map_err(|e| mongo_error(&e))?;
         // The vector indexes' side tables.
         self.drop_vector_sides(sql, ns, &m.table, None).await;
-        // M7: a capped collection's totals row.
+        // A capped collection's totals row.
         if capped::Cap::of(&m.options).is_some() {
             capped::forget(sql, &ns.db, &m.uuid).await;
         }
@@ -886,7 +885,7 @@ impl Engine {
         // Schema validation.
         let rules = crate::validate::Rules::of(&m.options)?;
         let ns_text = ns.to_string();
-        // M7: a capped collection's documents, with their BSON sizes.
+        // A capped collection's documents, with their BSON sizes.
         let cap = capped::Cap::of(&m.options);
         let mut sizes: Vec<u64> = Vec::new();
         for (i, mut d) in docs.into_iter().enumerate() {
@@ -1033,7 +1032,7 @@ impl Engine {
             .filter(|p| !p.is_empty())
             .map(Projection::parse)
             .transpose()?;
-        // M7: `{$natural: 1}` or `{$natural: -1}`, the collection's own
+        // `{$natural: 1}` or `{$natural: -1}`, the collection's own
         // order (a capped collection's insertion order).
         let natural = capped::natural_of(spec.sort.as_ref())?;
         let sort = if natural.is_some() {
@@ -1090,7 +1089,7 @@ impl Engine {
                 collation: crate::collation::active(),
             });
         }
-        // M7: with `allowDiskUse`, a sort past `doc.max_sort_bytes`
+        // With `allowDiskUse`, a sort past `doc.max_sort_bytes`
         // spills; `skip` + `limit` keeps only the top documents (also
         // without it, as MongoDB's top-k sort).
         if crate::spill::allowed() || (crate::spill::in_scope() && spec.limit > 0) {
@@ -1282,7 +1281,7 @@ impl Engine {
         // A point read by `_id` runs prepared, with the key
         // bound.
         let point = after.is_none().then(|| sqlp.point_key()).flatten();
-        // The key column: `_id`, or a capped collection's `_seq` (M7),
+        // The key column: `_id`, or a capped collection's `_seq`,
         // whose position is its decimal text.
         let col = order.column();
         let q = match after {
@@ -1878,7 +1877,7 @@ impl Engine {
                 Ok(old_v) if hint.is_empty() => Some(old_v),
                 _ => None,
             };
-            // M7: a capped collection's row keeps its document's BSON size.
+            // A capped collection's row keeps its document's BSON size.
             let sizes = capped::Cap::of(&m.options)
                 .map(|_| (crate::spill::doc_bytes(&old), crate::spill::doc_bytes(&new)));
             let done = if let Some(old_v) = bound {
@@ -2087,7 +2086,7 @@ impl Engine {
                 }
                 pattern.push((p.clone(), dir));
             }
-            // TTL (wireup): MongoDB 8.0's checks of expireAfterSeconds.
+            // TTL: MongoDB 8.0's checks of expireAfterSeconds.
             let expire = ttl::create_expire(s, &pattern)?;
             let name = s
                 .get_str("name")
@@ -2422,7 +2421,7 @@ impl Engine {
         crate::heavy::run(crate::heavy::HEAVY_DOCS, || seq.into_vec())
     }
 
-    /// [`Self::aggregate`], with a result that may be on disk (M5): with
+    /// [`Self::aggregate`], with a result that may be on disk: with
     /// `allowDiskUse` ([`crate::spill::scope`]) the collection's read and
     /// the stages spill past `doc.agg_stage_memory_bytes`.
     ///
@@ -2448,7 +2447,7 @@ impl Engine {
         } else {
             Box::pin(self.first_stage(sql, ns, pipeline)).await?
         };
-        // M2: `aggregate: 1` starts with `$documents`; other stages need a
+        // `aggregate: 1` starts with `$documents`; other stages need a
         // collection (73).
         let first = match (first, pipeline.first()) {
             (None, Some(s0)) if ns.coll.is_empty() => {
@@ -2466,13 +2465,13 @@ impl Engine {
             }
             (f, _) => f,
         };
-        // M2: `$collStats`, `$indexStats`, `$planCacheStats`,
+        // `$collStats`, `$indexStats`, `$planCacheStats`,
         // `$listClusterCatalog` (engine/diag.rs).
         let first = match first {
             Some(f) => Some(f),
             None => Box::pin(self.diag_stage(sql, ns, pipeline)).await?,
         };
-        // M4: `$rankFusion` and `$scoreFusion` (engine/fusion.rs).
+        // `$rankFusion` and `$scoreFusion` (engine/fusion.rs).
         let first = match first {
             Some(f) => Some(f),
             None if !ns.coll.is_empty() => {
@@ -2558,7 +2557,7 @@ impl Engine {
             spill::set_stage(base + j);
             let name = s.keys().next().map_or("", String::as_str);
             spill::set_kind(spill::Kind::of_stage(name));
-            // M5: `$lookup` and `$graphLookup` over a spilled input, or
+            // `$lookup` and `$graphLookup` over a spilled input, or
             // with `allowDiskUse`, run a batch of input documents at a
             // time into a builder that spills.
             if matches!(name, "$lookup" | "$graphLookup") && (spill::in_scope() || !seq.is_mem()) {
@@ -2643,7 +2642,7 @@ impl Engine {
                 ));
                 continue;
             }
-            // M7: `$out` and `$merge` over a spilled input write it a
+            // `$out` and `$merge` over a spilled input write it a
             // chunk at a time, never all of it in memory.
             if matches!(name, "$out" | "$merge") && !seq.is_mem() {
                 let mut it = seq.into_iter_docs()?;
@@ -2745,7 +2744,7 @@ impl Engine {
     }
 
     /// [`Self::scan`] into a builder that spills past
-    /// `doc.agg_stage_memory_bytes` (M5).
+    /// `doc.agg_stage_memory_bytes`.
     async fn scan_seq(
         &self,
         sql: &mut dyn SqlRunner,
@@ -2884,12 +2883,12 @@ impl Engine {
             coll: target,
         };
         if name == "$out" {
-            // An existing target keeps its options (its validator, M3)
+            // An existing target keeps its options (its validator)
             // and the documents are checked against them, as in MongoDB.
-            // Later chunks of a spilled input (M7) only add documents.
+            // Later chunks of a spilled input only add documents.
             if first {
                 let kept = self.meta(sql, &tns).await?.map(|m| m.options);
-                // M7: as MongoDB, `$out` never replaces a capped
+                // As MongoDB, `$out` never replaces a capped
                 // collection.
                 if kept.as_ref().is_some_and(|o| capped::Cap::of(o).is_some()) {
                     return Err(MongoError::new(
@@ -2978,7 +2977,7 @@ impl Engine {
                 }
                 // MongoDB runs `whenMatched: "merge"` as an upsert with
                 // `$set`, so a new document's fields come in `$set`'s
-                // order (M7).
+                // order.
                 (false, "merge", _) if d.keys().any(|k| k != "_id") => {
                     let mut set = d.clone();
                     set.remove("_id");
@@ -3214,21 +3213,20 @@ fn dup_error(e: &SqlError, id: &Bson) -> MongoError {
 #[cfg(test)]
 mod tests;
 
-/// `$graphLookup` (M2).
+/// `$graphLookup`.
 mod graph;
 
-/// Capped collections and tailable cursors (M7).
+/// Capped collections and tailable cursors.
 pub mod capped;
-// TTL indexes: their checks and the monitor's deletes (wireup).
+// TTL indexes: their checks and the monitor's deletes.
 pub mod ttl;
 
-/// `find` with `allowDiskUse` (M7).
+/// `find` with `allowDiskUse`.
 mod find_spill;
 
-/// `$collStats`, `$indexStats`, `$planCacheStats`, `$listClusterCatalog`
-/// (M2).
+/// `$collStats`, `$indexStats`, `$planCacheStats`, `$listClusterCatalog`.
 mod diag;
-/// `$rankFusion` and `$scoreFusion` (M4).
+/// `$rankFusion` and `$scoreFusion`.
 pub mod fusion;
 
 /// `$near`, `$geoNear`, `2dsphere` columns, search indexes and
